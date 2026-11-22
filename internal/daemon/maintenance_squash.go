@@ -384,6 +384,13 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			if err := d.maintenance().squashLedger(d.config.TownRoot).append(newSquashRecoveryEntry(db, recovery)); err != nil {
 				d.logger.Printf("squash: %s: WARNING: cannot write the ledger line to %s: %v", db, squashLedgerFile, err)
 			}
+			// A recovery that left a branch beside main, because a commit lives
+			// only there, needs a person or the retention check: raise the item a
+			// failed run raises. A complete recovery is settled, and one that only
+			// dropped branches proved them safe, so neither raises one.
+			if len(recovery.Kept) > 0 && !recovery.Complete() {
+				d.maintenance().escalate(d, squashAlertSource, squashRecoveryItem(db, recovery, squashLedgerPath(d.config.TownRoot)))
+			}
 		}
 		readings := d.readSquashInputs(ctx, db, now)
 		if names := readings.unreadable(); len(names) > 0 {
@@ -950,6 +957,15 @@ func squashRunItem(e squashLedgerEntry, res doltsquash.RunResult, ledgerPath str
 	return fmt.Sprintf("%s: %s\nThe run started %s and finished %s; one line per run is in %s.\n%s",
 		e.DB, what, e.Started.UTC().Format(time.RFC3339), e.Finished.UTC().Format(time.RFC3339),
 		ledgerPath, squashRunState(res))
+}
+
+// squashRecoveryItem is the item a recovery that kept a branch raises. Like
+// squashRunItem its first line opens at the database, and the state the
+// recovery found follows it; the body names the branches it kept and dropped,
+// its reason, and where its ledger line is.
+func squashRecoveryItem(db string, r *doltsquash.Recovery, ledgerPath string) string {
+	return fmt.Sprintf("%s: the recovery kept a branch: %s\nThe recovery kept %s and dropped %s; its line is in %s.\n%s",
+		db, r.State, squashBranchList(r.Kept), squashBranchList(r.Dropped), ledgerPath, r.Reason)
 }
 
 // squashRunState renders, in the design's recovery-table terms ("Recovery by

@@ -2684,6 +2684,91 @@ func TestSquashCheckRecoveryIsRecordedInTheLedger(t *testing.T) {
 	})
 }
 
+// TestSquashCheckKeptBranchRaisesTheItem: a recovery that left a branch beside
+// main raises one item, as a failed run does, naming the database and the state
+// the recovery found; a complete recovery, and one that only dropped branches,
+// raise none (gt-jkiolb).
+func TestSquashCheckKeptBranchRaisesTheItem(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		rec   *doltsquash.Recovery
+		raise bool
+	}{
+		{
+			name: "a recovery that kept a branch raises the item",
+			rec: &doltsquash.Recovery{
+				State:   doltsquash.RecoveryFirstRename,
+				Dropped: []string{"compact-work"},
+				Kept:    []string{"main-pre-squash"},
+				Reason:  "recovered a run that died between the swap's two renames",
+			},
+			raise: true,
+		},
+		{
+			name: "a swap with commits the new main lacks raises the item",
+			rec: &doltsquash.Recovery{
+				State:      doltsquash.RecoverySwappedKept,
+				Kept:       []string{"main-pre-squash", "compact-base"},
+				Unreplayed: []string{"2026-11-15 fix: a commit only the old main holds"},
+				Reason:     "the swap stands, and the old main holds a commit the new main does not",
+			},
+			raise: true,
+		},
+		{
+			name: "a complete swap raises none",
+			rec: &doltsquash.Recovery{
+				State:   doltsquash.RecoverySwappedKept,
+				Dropped: []string{"compact-work"},
+				Kept:    []string{"main-pre-squash"},
+				Reason:  "the swap stands, and the new main holds every commit the old main has",
+			},
+			raise: false,
+		},
+		{
+			name: "a recovery that only dropped branches raises none",
+			rec: &doltsquash.Recovery{
+				State:   doltsquash.RecoveryBeforeSwap,
+				Dropped: []string{"compact-work"},
+				Reason:  "recovered a run that died before the swap",
+			},
+			raise: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, escalations, _ := squashTickDaemon(t, squashEnabled())
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+				return tc.rec, nil
+			}
+
+			d.runScheduledMaintenance()
+
+			if !tc.raise {
+				if len(*escalations) != 0 {
+					t.Errorf("the recovery raised %d items, want none: %q", len(*escalations), *escalations)
+				}
+				return
+			}
+			if len(*escalations) != 1 {
+				t.Fatalf("the recovery raised %d items, want one: %q", len(*escalations), *escalations)
+			}
+			source, message, _ := strings.Cut((*escalations)[0], "|")
+			if source != squashAlertSource {
+				t.Errorf("the item's source is %q, want %q", source, squashAlertSource)
+			}
+			wantFirst := "gt: the recovery kept a branch: " + string(tc.rec.State)
+			if first, _, _ := strings.Cut(message, "\n"); first != wantFirst {
+				t.Errorf("the item's first line is %q, want %q", first, wantFirst)
+			}
+			if !strings.Contains(message, squashLedgerPath(d.config.TownRoot)) {
+				t.Errorf("the item does not name the ledger %s: %q", squashLedgerPath(d.config.TownRoot), message)
+			}
+		})
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
