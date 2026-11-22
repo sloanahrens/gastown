@@ -25,13 +25,23 @@ const (
 // directory with the caller's whole environment and acts on the caller's town
 // (gt-aea89k). town runner roll and town runner resize change the gate runner on
 // the control cluster from the Mac, whose kubeconfig reaches it, rather than from
-// the daemon pod, which would use the pod's own kubeconfig (gt-3xtvjx).
+// the daemon pod, which would use the pod's own kubeconfig (gt-3xtvjx). The
+// reboot-recovery commands run where the Mac's VMs, colima and launchctl are:
+// town vms start brings the VMs up with colima, docker and kubectl and reads the
+// Mac user's Lima state (gt-czoguq); town vms plist renders the launchd job that
+// runs it at load, naming the Mac's gt binary, home and log for the overseer to
+// load with launchctl (gt-6111kv); and town reboot-check reads the Mac's VMs,
+// processes, Docker, cluster and registry without changing anything (gt-9lciim).
+// town vms start and town reboot-check also refuse inside a pod by themselves.
 var gtHostCommands = []string{
 	"town forward plist",
 	"maint plan",
 	"maint apply",
 	"town runner roll",
 	"town runner resize",
+	"town vms start",
+	"town vms plist",
+	"town reboot-check",
 }
 
 // Native is a tool the config runs on the Mac instead of in the daemon image. The
