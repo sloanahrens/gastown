@@ -463,38 +463,41 @@ func TestAdoptAutoRules(t *testing.T) {
 	}
 }
 
-// TestAdoptByErrorRefusesNonFinite: a NaN compares false against everything, so a
-// first-round rmse or bias that is NaN must be refused by name, never adopted through
-// a comparison that fails to reject it. Each row is built from a holdout whose values
-// make the quantity it names NaN or infinite.
-func TestAdoptByErrorRefusesNonFinite(t *testing.T) {
+// TestAdoptByErrorNonFinite: a non-finite or non-positive value is refused, by bead.
+func TestAdoptByErrorNonFinite(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
 		holdout []Holdout
 		want    []string
 	}{
-		{"NaN proposed estimate: proposed rmse and bias are NaN",
+		{"NaN proposed estimate",
 			nonFiniteHoldout(func(h *Holdout) { h.Proposed = math.NaN() }),
-			[]string{"rejected", "not a finite number", "proposed first-round rmse NaN", "proposed first-round bias NaN"}},
-		{"zero proposed estimate: proposed rmse and bias are +Inf",
+			[]string{"rejected", "holdout bead 0", "proposed", "positive finite"}},
+		{"zero proposed estimate is not a zero error",
 			nonFiniteHoldout(func(h *Holdout) { h.Proposed = 0 }),
-			[]string{"rejected", "not a finite number", "proposed first-round rmse +Inf", "proposed first-round bias +Inf"}},
-		{"NaN current estimate: the current weights' rmse and bias are NaN",
-			nonFiniteHoldout(func(h *Holdout) { h.Checked = math.NaN() }),
-			[]string{"rejected", "not a finite number", "current weights' first-round rmse NaN", "current weights' first-round bias NaN"}},
-		{"zero current estimate: the current weights' rmse and bias are +Inf",
+			[]string{"rejected", "holdout bead 0", "proposed", "positive finite"}},
+		{"zero current estimate",
 			nonFiniteHoldout(func(h *Holdout) { h.Checked = 0 }),
-			[]string{"rejected", "not a finite number", "current weights' first-round rmse +Inf", "current weights' first-round bias +Inf"}},
-		// One bead at +Inf and one at -Inf: the squares sum to +Inf but the sum of
-		// ratios is +Inf plus -Inf, which is NaN, so the bias is NaN.
-		{"opposite infinities: proposed bias is NaN",
-			func() []Holdout {
-				h := nonFiniteHoldout(func(h *Holdout) { h.Proposed = 0 })
-				h[1].Proposed = math.Inf(1)
-				return h
-			}(),
-			[]string{"rejected", "not a finite number", "proposed first-round bias NaN"}},
+			[]string{"rejected", "holdout bead 0", "current", "positive finite"}},
+		{"zero measured minutes",
+			nonFiniteHoldout(func(h *Holdout) { h.Actual = 0 }),
+			[]string{"rejected", "holdout bead 0", "measured", "positive finite"}},
+		{"infinite measured minutes",
+			nonFiniteHoldout(func(h *Holdout) { h.Actual = math.Inf(1) }),
+			[]string{"rejected", "holdout bead 0", "measured", "+Inf"}},
+		{"negative values on one bead",
+			nonFiniteHoldout(func(h *Holdout) { h.Actual, h.Proposed, h.Checked = -h.Actual, -h.Proposed, -h.Checked }),
+			[]string{"rejected", "holdout bead 0", "measured", "-10"}},
+		{"overflowing ratio: proposed rmse is +Inf",
+			nonFiniteHoldout(func(h *Holdout) { h.Actual, h.Proposed = 1e308, 1e-308 }),
+			[]string{"rejected", "not a finite number", "proposed first-round rmse +Inf"}},
+		{"all-equal proposed blend",
+			errorHoldout(true, pairs(-0.1, -0.1, 10), pairs(-0.2, 0.2, 10)),
+			[]string{"rejected", "proposed blend is one value", "not measurable"}},
+		{"all-equal current blend",
+			errorHoldout(true, pairs(-0.1, 0.1, 10), pairs(-0.2, -0.2, 10)),
+			[]string{"rejected", "current weights' blend is one value", "not measurable"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

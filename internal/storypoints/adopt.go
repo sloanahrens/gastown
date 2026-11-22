@@ -115,18 +115,38 @@ func Adopt(holdout []Holdout) Adoption {
 // must fall, and its absolute mean log ratio (the bias) must not exceed the
 // checked-in blend's by more than AdoptBiasMargin. Fewer than MinAdoptHoldout
 // first-round beads is a rejection, not an error: the caller reports the reason and
-// leaves the weights in use unchanged.
+// leaves the weights in use unchanged. So is a first-round value that is not a positive
+// finite number, which names its bead, and a blend that is one value on every bead.
 func AdoptByError(holdout []Holdout) Adoption {
 	var firstRound []Holdout
-	for _, h := range holdout {
-		if h.FirstRound {
-			firstRound = append(firstRound, h)
+	for i, h := range holdout {
+		if !h.FirstRound {
+			continue
 		}
+		// Two negatives have a finite log ratio, so refuse a non-positive value by bead.
+		for k, v := range []float64{h.Actual, h.Proposed, h.Checked} {
+			if !(v > 0) || math.IsInf(v, 0) {
+				return Adoption{Reason: fmt.Sprintf(
+					"rejected: holdout bead %d has %s minutes %v, want a positive finite number, so the first-round holdout is not measurable",
+					i, []string{"measured", "proposed", "current"}[k], v)}
+			}
+		}
+		firstRound = append(firstRound, h)
 	}
 	if len(firstRound) < MinAdoptHoldout {
 		return Adoption{Reason: fmt.Sprintf(
 			"rejected: the first-round holdout has %d beads, fewer than the %d a first-round error is measured from, so the first-round holdout is not measurable",
 			len(firstRound), MinAdoptHoldout)}
+	}
+	proposed, checked := make([]float64, len(firstRound)), make([]float64, len(firstRound))
+	for i, h := range firstRound {
+		proposed[i], checked[i] = h.Proposed, h.Checked
+	}
+	if !hasSpread(proposed) {
+		return Adoption{Reason: "rejected: the proposed blend is one value on every first-round bead, so its first-round error is not measurable"}
+	}
+	if !hasSpread(checked) {
+		return Adoption{Reason: "rejected: the current weights' blend is one value on every first-round bead, so their first-round error is not measurable"}
 	}
 	var proposedSquares, proposedSum, checkedSquares, checkedSum float64
 	for _, h := range firstRound {
