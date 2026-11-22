@@ -167,11 +167,18 @@ func (d *Daemon) ciCacheDueVolumes(now time.Time, every time.Duration) []ciCache
 	return due
 }
 
-// ciCacheRetryDue asks each volume in due to be tried again in a retry interval,
-// for a pass that reached none of them.
-func (d *Daemon) ciCacheRetryDue(due []ciCacheVolume, concluded time.Time) {
+// ciCacheTrimNoReason is the why a failed trim puts in each volume's attention
+// item: it names the patrol's disk_maintenance log line for the failure, which
+// the later beads put into the item itself (gt-76cz9d, gt-u6garf).
+const ciCacheTrimNoReason = "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time"
+
+// ciCacheFailDue concludes each volume in due as a failed run: the volume's next
+// attempt is its normal cadence, a full interval after concluded, and its failure
+// raises one attention item keyed to that volume (gt-76cz9d). A pass that fails
+// before it tries any volume concludes every due volume the same way.
+func (d *Daemon) ciCacheFailDue(ctx context.Context, due []ciCacheVolume, concluded time.Time, every time.Duration) {
 	for _, v := range due {
-		d.diskMaintSchedule.recordRetry(ciCacheVolumeSchedule(v), concluded.Add(cacheTrimRetryInterval))
+		d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, false, concluded, every, ciCacheTrimNoReason)
 	}
 }
 
@@ -657,11 +664,12 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 // every one of them reached a verdict. The runner's pod is listed once; each due
 // volume then gets its own exec, in table order, so a failure on one volume is
 // logged under that volume and does not stop the next. A volume's verdict is
-// kept under its own schedule key, so a failed volume is retried in its own
-// fifteen minutes and the others keep their cadence. A run that removed files,
-// or found nothing to remove, is a verdict. A volume whose exec or reply failed
-// is a failed run that says why and removes nothing: a missing path or a stopped
-// container is never read as a volume with nothing to trim.
+// kept under its own schedule key, so a failed volume's next attempt is its own
+// full interval and its failure raises one item under that volume's key. A run
+// that removed files, or found nothing to remove, is a verdict. A volume whose
+// exec or reply failed is a failed run that says why and removes nothing: a
+// missing path or a stopped container is never read as a volume with nothing to
+// trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -677,7 +685,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheRetryDue(due, s.now())
+		d.ciCacheFailDue(ctx, due, s.now(), every)
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
@@ -688,7 +696,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 			kind = "pod not running"
 		}
 		d.ciCacheTrimLogf(kind, "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheRetryDue(due, s.now())
+		d.ciCacheFailDue(ctx, due, s.now(), every)
 		return false
 	}
 
@@ -700,14 +708,15 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		if v.lru {
 			v.capKiB = gocacheCap / 1024
 		}
-		// A run that could not reach a verdict is tried again soon, not after the
-		// full interval, as the cache trim's failed run is (gt-gg9hv.24.6).
+		// A run that could not reach a verdict is a failed run: the volume's next
+		// attempt is the full interval, and the failure raises one item under the
+		// volume's key (gt-76cz9d).
 		if d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
-			d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), s.now())
+			d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, true, s.now(), every, "")
 			continue
 		}
 		verdict = false
-		d.ciCacheRetryDue([]ciCacheVolume{v}, s.now())
+		d.ciCacheFailDue(ctx, []ciCacheVolume{v}, s.now(), every)
 	}
 	return verdict
 }
