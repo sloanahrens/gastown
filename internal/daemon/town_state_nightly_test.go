@@ -101,37 +101,53 @@ func TestTownStateNightlyWritesVerifiedNight(t *testing.T) {
 }
 
 // TestTownStateNightlyArchiveMode is the acceptance box: the archive reads 0600
-// whether the run creates it or narrows one a dead run left wider. The umask
+// whether the run creates it or narrows one a dead run left wider, and a mode
+// the run cannot set refuses the export before anything is written. The umask
 // cannot be set per test (it is process-global), so the stale row chmods the
-// archive to 0666 itself, which a create mode alone never narrows.
+// archive to 0666 itself; a temp file cannot be made unchmodable on every host,
+// so the refused row passes a chmod that refuses, as tightenArchiveDir's test
+// does. The mode is checked off Windows, which has no permission bits.
 func TestTownStateNightlyArchiveMode(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name string
-		// stale is the mode of an archive already in tonight's partial, or zero.
-		stale os.FileMode
+		name  string
+		stale os.FileMode // the mode of an archive already in the partial, or zero
+		// refuse makes the mode setter fail, as a host without the permission would.
+		refuse bool
 	}{
-		{"created fresh", 0},
-		{"stale archive narrowed", 0o666},
+		{name: "created fresh"},
+		{name: "stale archive narrowed", stale: 0o666},
+		{name: "refused mode writes nothing", refuse: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town, root, now := nightlyTestTown(t), t.TempDir(), nightlyTestNow()
+			partial := townbackup.PartialDir(root, now)
+			if err := os.MkdirAll(partial, 0o755); err != nil {
+				t.Fatalf("creating the partial %s: %v", partial, err)
+			}
+			archive := filepath.Join(partial, townbackup.ArchiveName)
 			if tt.stale != 0 {
-				partial := townbackup.PartialDir(root, now)
-				if err := os.MkdirAll(partial, 0o755); err != nil {
-					t.Fatalf("creating the stale partial %s: %v", partial, err)
+				// The umask masks the create mode, so the chmod sets the stale mode.
+				if err := os.WriteFile(archive, nil, tt.stale); err != nil {
+					t.Fatalf("writing the stale archive: %v", err)
 				}
-				archive := filepath.Join(partial, townbackup.ArchiveName)
-				if err := os.WriteFile(archive, []byte("a dead run's archive"), tt.stale); err != nil {
-					t.Fatalf("writing the stale archive %s: %v", archive, err)
-				}
-				// The umask masks the create mode, so the chmod sets 0666.
 				if err := os.Chmod(archive, tt.stale); err != nil {
-					t.Fatalf("widening the stale archive %s: %v", archive, err)
+					t.Fatalf("widening the stale archive: %v", err)
 				}
 			}
 			d := nightlyTestDaemon(town, new(strings.Builder))
+			if tt.refuse {
+				refused := errors.New("operation not permitted")
+				_, _, err := d.exportTownStateArchive(archive, func(string, fs.FileMode) error { return refused })
+				if !errors.Is(err, refused) {
+					t.Fatalf("exportTownStateArchive = %v, want the refused mode", err)
+				}
+				if _, err := os.Stat(archive); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the refused export wrote %s", archive)
+				}
+				return
+			}
 			if err := d.maintenanceTownStateBackup(root, now); err != nil {
 				t.Fatalf("maintenanceTownStateBackup: %v", err)
 			}
@@ -140,10 +156,8 @@ func TestTownStateNightlyArchiveMode(t *testing.T) {
 				t.Fatalf("stat the committed archive: %v", err)
 			}
 			// Windows has no permission bits; Go reports a writable file 0666.
-			if runtime.GOOS != "windows" {
-				if got := info.Mode().Perm(); got != 0o600 {
-					t.Errorf("archive mode = %04o, want 0600", got)
-				}
+			if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+				t.Errorf("archive mode = %04o, want 0600", got)
 			}
 		})
 	}

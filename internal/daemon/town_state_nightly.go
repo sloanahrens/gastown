@@ -3,8 +3,10 @@ package daemon
 import (
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -55,7 +57,7 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 	archive := filepath.Join(partial, townbackup.ArchiveName)
 	d.logger.Printf("scheduled_maintenance: town-state backup to %s", partial)
 
-	sum, digest, err := d.exportTownStateArchive(archive)
+	sum, digest, err := d.exportTownStateArchive(archive, os.Chmod)
 	if err != nil {
 		return failedTownStateNight(partial, err)
 	}
@@ -115,21 +117,20 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 }
 
 // exportTownStateArchive writes the town root's backup set into a gzip tar at
-// archive, and returns the export's counts and the archive's hex sha256. A
+// archive, and returns the export's counts and the archive's hex sha256. chmod
+// is the mode setter (os.Chmod in production, a refusing one in a test). A
 // caller removes archive's directory when it reports an error.
-func (d *Daemon) exportTownStateArchive(archive string) (townstate.ExportSummary, string, error) {
-	// The archive holds the town's state, so it is 0600 under any umask. The
-	// create mode alone misses a file that already exists, so the chmod narrows
-	// a partial a dead run left wider, which the umask never widens.
+func (d *Daemon) exportTownStateArchive(archive string, chmod func(string, fs.FileMode) error) (townstate.ExportSummary, string, error) {
+	// The archive holds the town's state, so it is 0600 under any umask. A chmod
+	// narrows a stale archive a dead run left wider, which the create mode below
+	// never does, and runs before the first byte reaches the file. A missing
+	// archive is not a refusal: the open below creates it at 0600.
+	if cerr := chmod(archive, 0o600); cerr != nil && !errors.Is(cerr, fs.ErrNotExist) {
+		return townstate.ExportSummary{}, "", fmt.Errorf("setting the mode of %s: %w", archive, cerr)
+	}
 	f, err := os.OpenFile(archive, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return townstate.ExportSummary{}, "", err
-	}
-	if err := os.Chmod(archive, 0o600); err != nil {
-		if cerr := f.Close(); cerr != nil {
-			return townstate.ExportSummary{}, "", fmt.Errorf("setting the mode of %s: %w (and closing it: %v)", archive, err, cerr)
-		}
-		return townstate.ExportSummary{}, "", fmt.Errorf("setting the mode of %s: %w", archive, err)
 	}
 	digest := sha256.New()
 	gz := gzip.NewWriter(io.MultiWriter(f, digest))
