@@ -49,7 +49,7 @@ func archiveCopiedTranscriptsWith(copyDir, archiveDir string, move func(root *os
 	if err != nil {
 		return fmt.Errorf("opening the transcript copy %s: %w", copyDir, err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	var found []string
 	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -103,14 +103,14 @@ func moveConfined(root *os.Root, rel, dest string) error {
 	}
 	defer func() {
 		if src != nil {
-			src.Close()
+			_ = src.Close()
 		}
 	}()
 	for _, step := range steps {
 		if err := step(); err != nil {
 			if out != nil && !errors.Is(err, fs.ErrExist) {
-				out.Close()
-				os.Remove(dest)
+				_ = out.Close()
+				_ = os.Remove(dest)
 			}
 			return fmt.Errorf("moving %s into the transcript archive: %w", rel, err)
 		}
