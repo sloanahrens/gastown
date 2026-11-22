@@ -485,9 +485,9 @@ func TestStoryPointsDriftAttentionRefusesAMeasurableBoundWithNoNumber(t *testing
 		want string
 	}{
 		{"a NaN Hi", driftReadingWithInterval(0.25, 0.10, math.NaN(), "v1"), "Hi is not a number"},
-		{"a NaN LongHi", driftReadingWithAUC(0.25, 0.10, 0.40, 0.44, math.NaN()), "the measurable reading bound NaN is not a number"},
-		{"a +Inf LongHi", driftReadingWithAUC(0.25, 0.10, 0.40, 0.44, math.Inf(1)), "the measurable reading bound +Inf is not a number"},
-		{"a NaN LongLo", driftReadingWithAUC(0.25, 0.10, 0.40, math.NaN(), 0.63), "the measurable reading bound NaN is not a number"},
+		{"a NaN LongHi", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, 0.44, math.NaN()), "the measurable reading bound NaN is not a number"},
+		{"a +Inf LongHi", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, 0.44, math.Inf(1)), "the measurable reading bound +Inf is not a number"},
+		{"a NaN LongLo", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, math.NaN(), 0.63), "the measurable reading bound NaN is not a number"},
 		{"a NaN LongAUC", driftReadingWithAUCPoint(0.25, 0.10, 0.40, math.NaN(), 0.44, 0.63), "the measurable reading bound NaN is not a number"},
 	} {
 		for _, held := range []bool{false, true} {
