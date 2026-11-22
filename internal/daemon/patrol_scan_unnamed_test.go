@@ -24,6 +24,8 @@ func unnamedHost(t *testing.T) (*patrolScanHost, *notifyfake.Recorder) {
 		config:   &Config{TownRoot: t.TempDir()},
 		notifier: rec,
 		clock:    noSleepClock{clockwork.NewFakeClockAt(time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC))},
+		// The notes read answers a bead with no notes unless a test sets another reader.
+		openWorkBeads: func([]string, time.Duration) workBeadReader { return &notesReader{} },
 	}}, rec
 }
 
