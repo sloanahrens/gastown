@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -20,6 +21,10 @@ type Process interface {
 	// Wait returns the exit status, or -1 for a process that ended on a signal.
 	// A nonzero status is bd's answer, not an error; err is the wait failing.
 	Wait() (int, error)
+	// CPUTime is the CPU time the process used, user plus system, once Wait
+	// has returned: it is what tells a call that waited for CPU from one that
+	// worked. ok is false when there is no reading to report.
+	CPUTime() (time.Duration, bool)
 	// Kill terminates the process group, so a bd that started a child leaves no
 	// orphan when the call ends early.
 	Kill() error
@@ -133,6 +138,15 @@ func (p *realProcess) Wait() (int, error) {
 		return exit.ExitCode(), nil
 	}
 	return -1, err
+}
+
+// CPUTime reads the time bd used from its process state, which Wait fills in
+// before it returns; a process whose wait returned no state has no reading.
+func (p *realProcess) CPUTime() (time.Duration, bool) {
+	if p.cmd.ProcessState == nil {
+		return 0, false
+	}
+	return p.cmd.ProcessState.UserTime() + p.cmd.ProcessState.SystemTime(), true
 }
 
 func (p *realProcess) Kill() error {

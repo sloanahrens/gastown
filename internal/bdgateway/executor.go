@@ -279,6 +279,13 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	if e == nil || e.slots == nil || frames == nil {
 		return ErrUnconfigured
 	}
+	// cpuMS is this call's CPU reading: the bd child's user plus system time,
+	// set once its wait returns. A sink gets the result on every ending,
+	// including a refusal that started no child, where it stays nil.
+	var cpuMS *int64
+	if sink, ok := frames.(ExecResultSink); ok {
+		defer func() { sink.SetExecResult(ExecResult{CPUMS: cpuMS}) }()
+	}
 	body, err := readStdin(stdin)
 	if err != nil {
 		return err
@@ -467,11 +474,17 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	waitCh := make(chan waitResult, 1)
 	go func() {
 		status, err := proc.Wait()
-		waitCh <- waitResult{status: status, err: err}
+		w := waitResult{status: status, err: err}
+		if cpu, ok := proc.CPUTime(); ok {
+			ms := cpu.Milliseconds()
+			w.cpuMS = &ms
+		}
+		waitCh <- w
 	}()
 	select {
 	case w := <-waitCh:
 		out.waitedAs(w.status, w.err)
+		cpuMS = w.cpuMS
 	case <-runCtx.Done():
 		// The call's end fired while the wait was running. Both pumps have
 		// ended by here, so what is left to bound is bd's own end.
@@ -480,6 +493,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		select {
 		case w := <-waitCh:
 			out.waitedAs(w.status, w.err)
+			cpuMS = w.cpuMS
 		case <-grace.C:
 			// bd is still running: the wait goroutine reaps it when it ends.
 		}
@@ -533,6 +547,26 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 type waitResult struct {
 	status int
 	err    error
+	// cpuMS is the CPU time the child used, in milliseconds, read after Wait
+	// returned; nil when the process state had no reading.
+	cpuMS *int64
+}
+
+// ExecResult is what Exec reports about the bd child one call started.
+type ExecResult struct {
+	// CPUMS is the CPU time bd's child used, user plus system in milliseconds,
+	// read from its process state after Wait; nil when the call started no
+	// child or its wait ended with no reading.
+	CPUMS *int64
+}
+
+// ExecResultSink is a frames writer that keeps the executor's result for the
+// call, so the call log can tell a slow call from a starved one (gt-w7alwy).
+// A runner that is not an Executor never calls SetExecResult, so its call
+// records no result.
+type ExecResultSink interface {
+	// SetExecResult takes the call's result, once, when the call ends.
+	SetExecResult(ExecResult)
 }
 
 // callEnding is how the gateway ended a call before bd did.
