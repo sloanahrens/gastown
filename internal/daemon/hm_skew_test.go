@@ -379,6 +379,42 @@ func TestHMSkewLagFailureRaisesNoEscalation(t *testing.T) {
 	}
 }
 
+// TestSkewLagFailureAndMissingCommitEscalates: a commit the clone lacks is a skew
+// by itself, judged before any lag, so it escalates even at a one-commit,
+// one-hour lag that is under the planner's thresholds (gt-g7tfxp).
+func TestSkewLagFailureAndMissingCommitEscalates(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.lacksInstall = true
+	a.lagCount = "1\n"
+	a.lagTimes = map[string]string{hmSkewTestInstalled: "100\n", hmSkewTestRemote: "3700\n"} // one hour apart
+	d, rec, _ := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Errorf("escalations = %+v, want one for a commit the clone lacks under the thresholds", esc)
+	}
+}
+
+// TestSkewLagFailureAndMissingCommitLogsFailure: a lag reading that fails is one
+// log line, not a skew: one check logs once and escalates nothing.
+func TestSkewLagFailureAndMissingCommitLogsFailure(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.lagErr = "rev-list"
+	d, rec, logs := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	if n := strings.Count(logs.String(), "hm_skew:"); n != 1 {
+		t.Errorf("log lines = %d, want one for a failed lag reading: %q", n, logs.String())
+	}
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none for a failed lag reading", esc)
+	}
+}
+
 // TestHMSkewEmbedDirectivesKeepATestPathASkew: a test file or testdata path is out of
 // the binary by its shape, so it is a skew only when a //go:embed directive of the hm
 // source at origin's main names it; a clone that cannot answer is a log line, not a
