@@ -1442,11 +1442,15 @@ func doltLogContainer(config *doltserver.Config) string {
 	return container
 }
 
-// doltLogReads is what the dolt log commands take from outside the process: the
-// clock that dates the stale-log notice, and the tail that prints the lines.
+// doltLogReads is what the dolt log commands and the dump take from outside the
+// process: the clock that dates the stale-log notice, the tail that prints the
+// lines, and the container dump's session reader.
 type doltLogReads struct {
 	now  func() time.Time
 	tail func(args []string, out, errw io.Writer) error
+	// sessions lists a container town's live sessions. A nil reader makes the
+	// dump say it cannot list them, never that there are none (gt-f4uyom).
+	sessions func() ([]string, error)
 }
 
 func liveDoltLogReads() doltLogReads {
@@ -1489,20 +1493,66 @@ func runDoltDump(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	return dumpDoltDiagnostics(townRoot, cmd.OutOrStdout(), cmd.ErrOrStderr(), doltserver.IsRunning, liveDoltLogReads())
+	reads := liveDoltLogReads()
+	reads.sessions = func() ([]string, error) { return doltDumpSessions(townRoot) }
+	return dumpDoltDiagnostics(townRoot, cmd.OutOrStdout(), cmd.ErrOrStderr(), doltserver.IsRunning, reads)
 }
 
 // writeDoltDumpContainerSection writes the dump's account of a town whose Dolt
-// runs in a Docker container: the log is read from the container, and the host
-// files a local server writes are not there to read (gt-h0v2nw).
-func writeDoltDumpContainerSection(w io.Writer, container string) {
+// runs in a Docker container: the log is read from the container, the host
+// files a local server writes are not there to read (gt-h0v2nw), and the
+// server's sessions come from it over SQL (gt-f4uyom).
+func writeDoltDumpContainerSection(w io.Writer, container string, sessions func() ([]string, error)) {
 	fmt.Fprintf(w, "  Container mode (%s): the server's log is read on the host with the command docker logs %s --since <time>; the host files a local server writes (pid, sql-server.info, dolt.log) do not exist for it\n", container, container)
+	fmt.Fprintln(w, "  Sessions:")
+	lines, err := sessions()
+	if err != nil {
+		fmt.Fprintf(w, "  (session list unavailable: %v)\n", err)
+		return
+	}
+	for _, line := range lines {
+		fmt.Fprintf(w, "    %s\n", line)
+	}
+}
+
+// doltDumpSessionsQuery reads the server's own connection table: it names no
+// database and writes nothing, and the dump drops its statement column so no
+// query text is printed.
+const doltDumpSessionsQuery = "SHOW FULL PROCESSLIST"
+
+// doltDumpSessions lists the server's sessions over the SQL connection the
+// container status ping uses, one line per row: <id> <user> <host> <db>
+// <command> <time>s <state> (gt-f4uyom).
+func doltDumpSessions(townRoot string) ([]string, error) {
+	config := doltserver.DefaultConfig(townRoot)
+	dsn := formatDoltDSN(config.UserDSN(), "tcp", config.HostPort(), "", dsnOpts{Timeout: "2s", ReadTimeout: "2s", WriteTimeout: "2s"})
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(doltDumpSessionsQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var id, user, host, dbName, command, secs, state, info sql.NullString
+		if err := rows.Scan(&id, &user, &host, &dbName, &command, &secs, &state, &info); err != nil {
+			return nil, err
+		}
+		lines = append(lines, fmt.Sprintf("%s %s %s %s %s %ss %s", id.String, user.String, host.String, dbName.String, command.String, secs.String, state.String))
+	}
+	return lines, rows.Err()
 }
 
 // dumpDoltDiagnostics is the body of gt dolt dump: running reports the live
 // server, and reads dates the stale-log notice and prints the log tail. A town
 // whose Dolt runs in a container is shown the container's log command in place
-// of the host pid, metadata and log tail it cannot read.
+// of the host pid, metadata and log tail it cannot read, and its sessions come
+// from reads.sessions (gt-f4uyom).
 func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(string) (bool, int, error), reads doltLogReads) error {
 	isRunning, pid, err := running(townRoot)
 	if err != nil {
@@ -1532,7 +1582,11 @@ func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(stri
 	fmt.Fprintf(out, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
 
 	if container != "" {
-		writeDoltDumpContainerSection(out, container)
+		sessions := reads.sessions
+		if sessions == nil {
+			sessions = func() ([]string, error) { return nil, errors.New("no session reader configured") }
+		}
+		writeDoltDumpContainerSection(out, container, sessions)
 	} else {
 		if info, err := doltserver.ReadSQLServerInfo(townRoot); err == nil {
 			fmt.Fprintf(out, "  SQL metadata: %s\n", info.Path)
