@@ -424,6 +424,52 @@ func TestStoryPointsDriftFailingRank(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftFailingRankStraddle: the rule holds off while the 95%
+// interval straddles the bar or ends exactly at it, which is the noise the
+// whole-interval rule exists to filter (gt-i2ikz2). Each row here passes under a
+// wrong rule too, so together they pin the reading of Hi and the strict
+// comparison; TestStoryPointsDriftFailingRank holds the failing half.
+func TestStoryPointsDriftFailingRankStraddle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		reading metrics.StoryPointsDriftReading
+		want    bool
+	}{
+		{
+			// Rho is under the bar, so a rule comparing the point reading fails here.
+			name:    "a measurable interval straddling the bar",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.42, Lo: 0.27, Hi: 0.58, Measurable: true},
+			want:    false,
+		},
+		{
+			// Hi ends on the bar: a bound at the bar is not under it.
+			name:    "a measurable interval whose Hi ends at the bar",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.49, Lo: 0.30, Hi: 0.50, Measurable: true},
+			want:    false,
+		},
+		{
+			// No comparison with NaN is under, so the rule must read Hi, not Lo.
+			name:    "a measurable reading whose Hi is not a number",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.42, Lo: 0.30, Hi: math.NaN(), Measurable: true},
+			want:    false,
+		},
+		{
+			name:    "a measurable interval whose Lo is above the bar",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.76, Lo: 0.72, Hi: 0.81, Measurable: true},
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := storyPointsDriftFailing(tc.reading); got != tc.want {
+				t.Errorf("storyPointsDriftFailing(%+v) = %v, want %v", tc.reading, got, tc.want)
+			}
+		})
+	}
+}
+
 // countKind is the items of one kind.
 func countKind(items []attention.Item, kind attention.Kind) int {
 	n := 0
