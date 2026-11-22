@@ -22,7 +22,8 @@ const commentTimeout = 10 * time.Second
 //
 // The write is fail-soft: it never returns an error and never changes the
 // verdict, and everything it logs is logged here rather than in the goroutine
-// the timeout needs.
+// the timeout needs. A write that gives up, or outlasts the budget, is queued
+// for a later pass (gt-bqnv54).
 func (l *Lander) commentVerdict(w Work, v Verdict, start, end time.Time) {
 	text := verdictCommentText(v, w.CandidateHead, start, end)
 	head, prefix := verdictCommentHead(w.CandidateHead), "om "+verdictCommentWord(v)+" "
@@ -36,6 +37,7 @@ func (l *Lander) commentVerdict(w Work, v Verdict, start, end time.Time) {
 		switch {
 		case out.writeErr != nil:
 			l.logf("%s: could not comment the om verdict on the bead (%v); the landing is unaffected", w.BeadID, out.writeErr)
+			l.queueVerdictComment(w.BeadID, text, w.CandidateHead)
 		case !out.wrote:
 			l.logf("%s: this landing attempt's om verdict is already on the bead; no second comment", w.BeadID)
 		case out.readErr != nil:
@@ -43,6 +45,7 @@ func (l *Lander) commentVerdict(w Work, v Verdict, start, end time.Time) {
 		}
 	case <-ctx.Done():
 		l.logf("%s: commenting the om verdict on the bead did not finish in %s; the landing is unaffected", w.BeadID, budget)
+		l.queueVerdictComment(w.BeadID, text, w.CandidateHead)
 	}
 }
 
