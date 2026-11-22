@@ -886,7 +886,8 @@ func redactLedgerError(msg string) string {
 
 // squashRunItem is the item a failed or escalated run raises. Its first line
 // names the database and what happened, because that line becomes the
-// escalation's title; the body carries what stopped the run (its error or its
+// escalation's title, whose source is already "squash" (so the line does not
+// say it again); the body carries what stopped the run (its error or its
 // swap conflict), the run's times, where its ledger line is, and the state the
 // recovery table leaves the database in.
 func squashRunItem(e squashLedgerEntry, res doltsquash.RunResult, ledgerPath string) string {
@@ -894,7 +895,7 @@ func squashRunItem(e squashLedgerEntry, res doltsquash.RunResult, ledgerPath str
 	if e.Outcome == squashOutcomeConflict {
 		what = "the run was escalated: " + e.Conflict
 	}
-	return fmt.Sprintf("squash: %s: %s\nThe run started %s and finished %s; one line per run is in %s.\n%s",
+	return fmt.Sprintf("%s: %s\nThe run started %s and finished %s; one line per run is in %s.\n%s",
 		e.DB, what, e.Started.UTC().Format(time.RFC3339), e.Finished.UTC().Format(time.RFC3339),
 		ledgerPath, squashRunState(res))
 }

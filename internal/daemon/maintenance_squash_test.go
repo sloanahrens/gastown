@@ -2056,7 +2056,7 @@ func TestSquashItemFailedRunNamesTheFailureAndTheState(t *testing.T) {
 		}
 		item := (*escalations)[0]
 		for _, want := range []string{
-			"squash|squash: gt: the run failed: doltsquash: the database lists no branch at all, which no row of the recovery table names",
+			"squash|gt: the run failed: doltsquash: the database lists no branch at all, which no row of the recovery table names",
 			"The run started 2026-11-16T12:00:00Z and finished 2026-11-16T12:00:00Z",
 			squashLedgerPath(d.config.TownRoot),
 			"no recovery row was applied and no step ran, so the database is as the check found it.",
@@ -2816,6 +2816,22 @@ func TestSquashCheckRunsNothingOnAFutureRecord(t *testing.T) {
 	for _, want := range []string{"squash: WARNING: gt: doltsquash: the last run is in the future", "the check did not decide"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("the check's log lacks %q: %q", want, logs.String())
+		}
+	}
+}
+
+// TestSquashRunItemTitleNamesTheSourceOnce: the escalation's title is the
+// source, a colon and the message's first line, so a message that opens with
+// the source again reads "squash: squash: gt: ..." (gt-i28gdi).
+func TestSquashRunItemTitleNamesTheSourceOnce(t *testing.T) {
+	t.Parallel()
+	for _, e := range []squashLedgerEntry{
+		{DB: "gt", Outcome: squashOutcomeFailed, Error: "the connection failed"},
+		{DB: "gt", Outcome: squashOutcomeConflict, Conflict: "a table differs"},
+	} {
+		title := escalationTitle(squashAlertSource, squashRunItem(e, doltsquash.RunResult{}, "/ledger"))
+		if !strings.HasPrefix(title, "squash: gt: the run ") || strings.Contains(title, "squash: squash:") {
+			t.Errorf("the title for the %s outcome is %q, want one leading \"squash: gt: the run ...\"", e.Outcome, title)
 		}
 	}
 }
