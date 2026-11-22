@@ -604,6 +604,7 @@ type ForgejoPulls interface {
 	OpenPulls(ctx context.Context, owner, repo string) ([]forgejo.PullRequest, error)
 	CreatePull(ctx context.Context, owner, repo string, opt forgejo.CreatePullRequestOption) (*forgejo.PullRequest, error)
 	MergePull(ctx context.Context, owner, repo string, index int64, opt forgejo.MergePullRequestOption) error
+	GetBranch(ctx context.Context, owner, repo, branch string) (*forgejo.Branch, error)
 	DeleteBranch(ctx context.Context, owner, repo, branch string) error
 }
 
@@ -684,6 +685,7 @@ func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 	}
 	m.logf("%s: merged %s on %s through pull request #%d", w.BeadID, shortSHA(head), w.Target, pr.Number)
 	m.deleteCandidate(parent, w)
+	m.deleteSource(parent, w)
 	return nil
 }
 
@@ -724,6 +726,7 @@ func (m *ForgejoMerger) mergeAfterTimeout(parent context.Context, req MergeReque
 	}
 	m.logf("%s: the merge call timed out, but %s carries %s; the merge took", req.Work.BeadID, req.Work.Target, shortSHA(req.Head))
 	m.deleteCandidate(parent, req.Work)
+	m.deleteSource(parent, req.Work)
 	return nil
 }
 
@@ -746,6 +749,48 @@ func (m *ForgejoMerger) deleteCandidate(parent context.Context, w Work) {
 		return
 	}
 	m.logf("%s: deleted %s after the merge", w.BeadID, branch)
+}
+
+// deleteSource removes the polecat/ or crew/ branch the landing's work came
+// from, once the merge is confirmed: the API merge leaves it on origin, and no
+// other step deletes it (gt-v37xc1). It is deleted only while its tip is still
+// w.Head, the merged commit: a crew bird may push a rework after submitting,
+// and a landing of an earlier head must never delete commits that did not
+// merge. A push between the read and the delete is lost with the branch, and
+// the log names the read tip and the head so the loss can be traced.
+//
+// A read or delete failure is logged and ignored, as deleteCandidate's is. A
+// branch outside the two prefixes, or the candidate, is not read.
+func (m *ForgejoMerger) deleteSource(parent context.Context, w Work) {
+	if !strings.HasPrefix(w.Branch, authorkind.PolecatPrefix) &&
+		!strings.HasPrefix(w.Branch, authorkind.CrewPrefix) {
+		return
+	}
+	if w.Branch == w.Candidate() {
+		return
+	}
+	ctx, cancel := m.callCtx(parent)
+	tip, err := m.Client.GetBranch(ctx, m.Owner, m.RepoName, w.Branch)
+	cancel()
+	if err == nil && tip == nil {
+		err = errors.New("the answer carried no branch")
+	}
+	if err != nil {
+		m.logf("%s: left %s: could not read the branch tip: %v", w.BeadID, w.Branch, err)
+		return
+	}
+	if tip.Commit.ID != w.Head {
+		m.logf("%s: left %s: tip %s is not the merged head %s; the branch moved past the merged head",
+			w.BeadID, w.Branch, shortSHA(tip.Commit.ID), shortSHA(w.Head))
+		return
+	}
+	ctx, cancel = m.callCtx(parent)
+	defer cancel()
+	if err := m.Client.DeleteBranch(ctx, m.Owner, m.RepoName, w.Branch); err != nil {
+		m.logf("%s: could not delete %s after the merge: %v", w.BeadID, w.Branch, err)
+		return
+	}
+	m.logf("%s: deleted %s after the merge", w.BeadID, w.Branch)
 }
 
 // postVerdict posts om's verdict as the required om / review status on the
