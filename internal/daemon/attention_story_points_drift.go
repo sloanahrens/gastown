@@ -72,6 +72,12 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 	if !reading.Measurable {
 		return s.keepHeldDrift(), nil
 	}
+	// An interval end that is not a number reads as "not failing" in the rule
+	// below and would clear a live item: keep the held item and raise nothing,
+	// until the unreadable item (gt-jo1lnr) takes this case.
+	if math.IsNaN(reading.Lo) || math.IsInf(reading.Lo, 0) || math.IsNaN(reading.Hi) || math.IsInf(reading.Hi, 0) {
+		return s.keepHeldDrift(), nil
+	}
 	if !storyPointsDriftFailing(reading) {
 		return nil, nil
 	}
@@ -81,7 +87,7 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 		Severity: attention.SeverityMedium,
 		Summary: fmt.Sprintf(
 			"story points estimate drift: the 95%% interval %.2f to %.2f of the rank correlation %.2f over the last %d landings of the %s extract lies wholly under %.2f; weights %s",
-			reading.Lo, reading.Hi, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
+			reading.Lo, math.Floor(reading.Hi*100)/100, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
 	}}, nil
 }
 

@@ -148,6 +148,20 @@ func TestStoryPointsDriftAttentionSummaryNamesTheInterval(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftAttentionSummaryRoundsHiDown: Hi prints rounded down, so
+// an interval that ends at 0.4996 reads 0.49 and never 0.50 under the wording
+// "wholly under 0.50".
+func TestStoryPointsDriftAttentionSummaryRoundsHiDown(t *testing.T) {
+	t.Parallel()
+	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+		return driftReadingWithInterval(0.42, 0.35, 0.4996, "v1"), nil
+	})
+	items := f.collect(t, f.src.collectStoryPointsDrift)
+	if len(items) != 1 || !strings.Contains(items[0].Summary, "interval 0.35 to 0.49 ") {
+		t.Errorf("items = %+v, want one naming the interval 0.35 to 0.49", items)
+	}
+}
+
 // TestStoryPointsDriftAttentionIntervalDecidesTheItem: the item is raised by
 // the whole interval: a straddling one raises nothing, one wholly under the bar
 // raises the item, and a straddling reading clears the item a failing one raised.
@@ -155,6 +169,8 @@ func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
 	t.Parallel()
 	under := driftReadingWithInterval(0.41, 0.35, 0.47, "v1")
 	straddle := driftReadingWithInterval(0.45, 0.38, 0.55, "v1")
+	nanHi := driftReadingWithInterval(0.41, 0.35, math.NaN(), "v1")
+	nanLo := driftReadingWithInterval(0.41, math.NaN(), 0.47, "v1")
 	tests := []struct {
 		name    string
 		reads   []metrics.StoryPointsDriftRead
@@ -164,6 +180,9 @@ func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
 		{"an interval wholly under the bar raises one", []metrics.StoryPointsDriftRead{under}, 1, false},
 		{"a straddling interval raises nothing", []metrics.StoryPointsDriftRead{straddle}, 0, false},
 		{"a straddling interval clears the held item", []metrics.StoryPointsDriftRead{under, straddle}, 0, true},
+		{"a NaN Hi keeps the held item", []metrics.StoryPointsDriftRead{under, nanHi}, 1, false},
+		{"a NaN Lo keeps the held item", []metrics.StoryPointsDriftRead{under, nanLo}, 1, false},
+		{"a NaN Lo raises nothing when none is held", []metrics.StoryPointsDriftRead{nanLo}, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
