@@ -34,6 +34,9 @@ the Mac it is `~/gt-backups/town-state`; the pod sees it at its mount,
 `~/gt-backups/town-state/<date>/`, holding `state.tar.gz` (the exported town
 state) and `backup.json` (the manifest, written last, so a directory without
 one never finished). Rotation keeps the newest 14 nights (`townbackup.Keep`).
+Set the directory with `gt config set maintenance.town_state_backup_root
+/abs/path`; `gt config set maintenance.town_state_backup_root ""` writes the
+off state.
 
 To restore a night:
 
