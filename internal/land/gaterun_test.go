@@ -3,6 +3,7 @@ package land
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -121,7 +122,7 @@ func TestParseGateRunLogTierwall(t *testing.T) {
 
 	want := GateRun{
 		TierS: 29.3, TierBarS: 90,
-		PolePkg: "example.test/a", PoleS: 12.5,
+		PolePkg: "example.test/a", PoleS: 12.5, PackageCount: 3,
 		Packages: []GateRunPackage{
 			{Pkg: "example.test/a", S: 12.5},
 			{Pkg: "example.test/b", S: 9.5},
@@ -246,5 +247,47 @@ func TestParseGateRunLogOverAndCached(t *testing.T) {
 				t.Errorf("ParseGateRunLog() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseGateRunLogKeepsTheSlowestPackages: a row stores the gateRunPackagesKept slowest
+// packages, slowest first with equal seconds in stream order, and the count of all of them. The
+// pole is read from the full list before the cut, so the 25th package in stream order, outside
+// the first 20, is still the pole and heads the kept list (gt-pfltie).
+func TestParseGateRunLogKeepsTheSlowestPackages(t *testing.T) {
+	t.Parallel()
+	var log strings.Builder
+	line := func(i int, s string) {
+		log.WriteString("2026-11-19T10:02:00Z tierwall: example.test/p" + strconv.Itoa(i) + " " + s + "s\n")
+	}
+	for i := 1; i <= 30; i++ {
+		switch {
+		case i == 25:
+			line(i, "50")
+		case i <= 14:
+			line(i, strconv.Itoa(40-i)) // 39 down to 26: distinct, all slower than the ties
+		default:
+			line(i, "0.5") // 16 packages tied at 0.5s: the first five in stream order are kept
+		}
+	}
+	got := ParseGateRunLog(log.String())
+	if got.PackageCount != 30 {
+		t.Errorf("PackageCount = %d, want 30", got.PackageCount)
+	}
+	if got.PolePkg != "example.test/p25" || got.PoleS != 50 {
+		t.Errorf("pole = %s %v, want example.test/p25 50: it is read before the cut", got.PolePkg, got.PoleS)
+	}
+	var names []string
+	for _, p := range got.Packages {
+		names = append(names, strings.TrimPrefix(p.Pkg, "example.test/"))
+	}
+	want := []string{"p25", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12", "p13", "p14", "p15", "p16", "p17", "p18", "p19"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("kept packages = %v, want the 20 slowest, ties in stream order: %v", names, want)
+	}
+
+	small := ParseGateRunLog("2026-11-19T10:02:00Z tierwall: example.test/a 1s\n2026-11-19T10:02:00Z tierwall: example.test/b 2s\n")
+	if small.PackageCount != 2 || len(small.Packages) != 2 || small.Packages[0].Pkg != "example.test/b" {
+		t.Errorf("a tier of 2 = count %d, packages %+v, want both kept slowest first", small.PackageCount, small.Packages)
 	}
 }

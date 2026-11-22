@@ -1,7 +1,9 @@
 package land
 
 import (
+	"cmp"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +30,7 @@ type GateRun struct {
 	PolePkg             string           `json:"pole_pkg"`
 	PoleS               float64          `json:"pole_s"`
 	Packages            []GateRunPackage `json:"packages"`
+	PackageCount        int              `json:"package_count"`
 	SlowTests           []GateRunTest    `json:"slow_tests"`
 	NumCPU              int              `json:"num_cpu"`
 	GOMAXPROCS          int              `json:"gomaxprocs"`
@@ -39,6 +42,11 @@ type GateRun struct {
 	RunnerThrottled     int64            `json:"runner_throttled"`
 	RunnerThrottledUsec int64            `json:"runner_throttled_usec"`
 }
+
+// gateRunPackagesKept is how many packages a row stores: the slowest. The tier lists every
+// package (366 on 2026-11-22, 64 bytes each, 96% of a 24 KB row) and nothing reads the list back;
+// the pole is read from the full list before the cut, and PackageCount says how many there were.
+const gateRunPackagesKept = 20
 
 // GateRunPackage is one package's wall time; GateRunTest is one slow test's.
 type GateRunPackage struct {
@@ -113,6 +121,8 @@ func ParseGateRunLog(log string) GateRun {
 	run.LintS = stageSeconds(lint, build)
 	run.BuildS = stageSeconds(build, unit)
 	run.PolePkg, run.PoleS = gatePole(run.Packages)
+	run.PackageCount = len(run.Packages)
+	run.Packages = slowestPackages(run.Packages)
 	return run
 }
 
@@ -172,6 +182,17 @@ func (w *gateTierwall) parse(run *GateRun, msg string) {
 func gateSecs(field string) (float64, bool) {
 	v, err := strconv.ParseFloat(strings.TrimSuffix(field, "s"), 64)
 	return v, err == nil
+}
+
+// slowestPackages is the gateRunPackagesKept slowest of pkgs, slowest first, equal seconds in
+// the order given. A list at or under the limit is kept whole in that order of seconds too.
+func slowestPackages(pkgs []GateRunPackage) []GateRunPackage {
+	if len(pkgs) == 0 {
+		return pkgs
+	}
+	sorted := slices.Clone(pkgs)
+	slices.SortStableFunc(sorted, func(a, b GateRunPackage) int { return cmp.Compare(b.S, a.S) })
+	return sorted[:min(len(sorted), gateRunPackagesKept)]
 }
 
 // gatePole is the longest package, the first of equals; empty when the report listed none.
