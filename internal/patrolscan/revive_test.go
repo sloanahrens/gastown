@@ -530,6 +530,103 @@ func TestReviveAnsweredInsideTheCooldownIsReportedNotRestarted(t *testing.T) {
 	}
 }
 
+// cutFake is the shared fake with the optional StreamCutter extension: cut
+// answers StreamCut per seat, and cutErr makes the read fail.
+type cutFake struct {
+	*fakeEnv
+	cut    map[string]bool
+	cutErr map[string]error
+}
+
+func (f *cutFake) StreamCut(_, p string) (bool, error) { return f.cut[p], f.cutErr[p] }
+
+// gt-ze3t74: a live seat whose model stream was cut before it pushed matches
+// neither revival rule and idles at its prompt. reviveCut restarts it onto its
+// preserved worktree with the bead still hooked, once per bead per cooldown.
+func TestReviveCutFuncRestartsTheSeat(t *testing.T) {
+	t.Parallel()
+	base := newFake()
+	liveQuiet(base, "ruby", reviveQuiet)
+	base.work["ruby"].Status = "hooked"
+	env := &cutFake{fakeEnv: base, cut: map[string]bool{"ruby": true}, cutErr: map[string]error{}}
+	at := now
+	s := scanner(base, nil)
+	s.o.Now = func() time.Time { return at }
+	s.env = env
+
+	f, ok := s.reviveCut("gastown", "ruby", base.verdicts["ruby"])
+	if !ok || f.Outcome != OutcomeRevived || !strings.Contains(f.Detail, "gt-ruby after 5m0s quiet: its model stream was cut") {
+		t.Fatalf("reviveCut = %q ok=%v detail %q, want revived on a cut stream", f.Outcome, ok, f.Detail)
+	}
+	if got := strings.Join(base.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby", got)
+	}
+
+	// Ten minutes on, the revived seat is quiet again and its transcript still
+	// ends cut: the cooldown holds it, not a second restart.
+	at = now.Add(10 * time.Minute)
+	f, ok = s.reviveCut("gastown", "ruby", liveness.Result{Verdict: liveness.Alive, QuietFor: 15 * time.Minute})
+	if !ok || f.Outcome != OutcomeSkipped || len(base.restarts) != 1 {
+		t.Fatalf("second call = %q ok=%v restarts=%v, want the cooldown to skip it", f.Outcome, ok, base.restarts)
+	}
+}
+
+// reviveCut acts on nothing for every other quiet seat: a host without the
+// StreamCutter extension, a quiet under five minutes, a transcript that does
+// not end cut, a stuck heartbeat, submitted or held work, and a read that
+// cannot answer.
+func TestReviveCutFuncLeavesTheOtherSeatsAlone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		noCutter bool
+		labels   []string
+		setup    func(*cutFake)
+		want     Outcome // "" = no finding
+		detail   string
+	}{
+		{"env without StreamCutter", true, nil, nil, "", ""},
+		{"quiet under five minutes", false, nil, func(env *cutFake) {
+			env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Alive, QuietFor: 4 * time.Minute}
+		}, "", ""},
+		{"stream not cut", false, nil, func(env *cutFake) { env.cut["ruby"] = false }, "", ""},
+		{"heartbeat says stuck", false, nil, func(env *cutFake) { env.heartbeats["ruby"] = &Heartbeat{State: "stuck"} }, OutcomeSkipped, "heartbeat says stuck"},
+		{"work submitted", false, []string{ReadyToLandLabel}, nil, "", ""},
+		{"work held from dispatch", false, []string{"needs-human"}, nil, "", ""},
+		{"work read fails", false, nil, func(env *cutFake) { env.workErr["ruby"] = errors.New("bd list: connection refused") }, OutcomeUnknown, "work unreadable"},
+		{"StreamCut read fails", false, nil, func(env *cutFake) { env.cutErr["ruby"] = errors.New("transcript: sandbox unreachable") }, OutcomeUnknown, "model stream unreadable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := newFake()
+			liveQuiet(base, "ruby", 6*time.Minute)
+			env := &cutFake{fakeEnv: base, cut: map[string]bool{"ruby": true}, cutErr: map[string]error{}}
+			base.work["ruby"].Labels = tc.labels
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			s := scanner(base, nil)
+			s.env = env
+			if tc.noCutter {
+				s.env = base
+			}
+
+			f, ok := s.reviveCut("gastown", "ruby", base.verdicts["ruby"])
+
+			if wantOK := tc.want != ""; ok != wantOK {
+				t.Fatalf("reviveCut ok=%v (%q %q), want ok=%v", ok, f.Outcome, f.Detail, wantOK)
+			}
+			if ok && (f.Outcome != tc.want || !strings.Contains(f.Detail, tc.detail)) {
+				t.Fatalf("finding = %q %q, want %q with %q", f.Outcome, f.Detail, tc.want, tc.detail)
+			}
+			if len(base.restarts) != 0 || len(base.revived) != 0 {
+				t.Fatalf("restarts = %v, stamps = %v; want none", base.restarts, base.revived)
+			}
+		})
+	}
+}
+
 // A stall after an answered escalation is the same waiting seat, only quieter,
 // so the rule fires before the stall is reported.
 func TestReviveAnsweredStalledSeatIsRestarted(t *testing.T) {
