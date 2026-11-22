@@ -149,6 +149,34 @@ func TestTownVMsStartOK(t *testing.T) {
 	}
 }
 
+// TestTownVMsStartDryRun: --dry-run prints the step order in one line per
+// step, runs no command and exits 0, and a print that fails is an error.
+func TestTownVMsStartDryRun(t *testing.T) {
+	t.Parallel()
+	t.Run("prints the order and runs nothing", func(t *testing.T) {
+		t.Parallel()
+		host := newTownVMsStartHost()
+		stdout, _, err := execTownVMsStart(townVMsStartFakeEnv(host), nil, []string{"--dry-run"})
+		if err != nil {
+			t.Fatalf("start --dry-run = %v, want exits 0", err)
+		}
+		if want := "gt-sbx\ngt-control\ncontainers\nDNS\nregistry\n"; stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+		if len(host.calls) != 0 {
+			t.Errorf("start --dry-run ran %d commands, want none: %v", len(host.calls), host.calls)
+		}
+	})
+	t.Run("a failed print is an error", func(t *testing.T) {
+		t.Parallel()
+		host := newTownVMsStartHost()
+		_, _, err := execTownVMsStart(townVMsStartFakeEnv(host), errorWriter{}, []string{"--dry-run"})
+		if err == nil || !strings.Contains(err.Error(), "printing the start step order") {
+			t.Fatalf("start --dry-run with a failing writer = %v, want the print error", err)
+		}
+	})
+}
+
 // TestTownVMsStartError: a failed step makes the command exit 1 after the
 // report lines, so the output says which step failed.
 func TestTownVMsStartError(t *testing.T) {
