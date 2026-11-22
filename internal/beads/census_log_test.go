@@ -273,6 +273,8 @@ func TestParseCensusLineRejectsWhatItCannotTrust(t *testing.T) {
 		"2026/10/30 12:36:00 bd census: total=2 window=3601s top: list@x=1",
 		"2026/10/30 12:36:00 bd census: total=1 window=60s top: list@x=2",
 		"2026/10/30 12:36:00 bd census: total=2 window=60s top: list@x=-1",
+		"2026/10/30 12:36:00 bd census: total=2 window=60s top: list@x=1/12",
+		"2026/10/30 12:36:00 bd census: total=2 window=60s top: list@x=1/-1ms",
 	} {
 		if _, ok := ParseCensusLine(line); ok {
 			t.Errorf("parsed %q, want a rejection", line)
@@ -455,5 +457,29 @@ func TestCensusTopRowsCapsItsRows(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "top: v0@cmd.a=") {
 		t.Errorf("CensusTopRows = %q, want the busiest row first", got)
+	}
+}
+
+// TestTickEffCensusTopRowsMs: a timed row prints its count then its
+// milliseconds, an untimed row its count alone, and the count stays first (gt-j8xjex).
+func TestTickEffCensusTopRowsMs(t *testing.T) {
+	t.Parallel()
+	rows := []CensusRow{
+		{Verb: "show", Caller: "cmd.specBoard", Count: 485, Ms: 9120},
+		{Verb: "create", Caller: "cmd.specRoster", Count: 12},
+		{Verb: "list", Caller: "cmd.specTick", Count: 3, Ms: 41},
+	}
+	got := CensusTopRows(rows)
+	want := "top: show@cmd.specBoard=485/9120ms create@cmd.specRoster=12 list@cmd.specTick=3/41ms"
+	if got != want {
+		t.Fatalf("CensusTopRows = %q, want %q", got, want)
+	}
+
+	window, ok := ParseCensusLine("2026/10/30 12:36:00 bd census: total=500 window=60s " + got)
+	if !ok {
+		t.Fatalf("the parser rejected the line its renderer wrote: %q", got)
+	}
+	if r := window.Rows; r[0].Count != 485 || r[0].Ms != 9120 || r[1].Ms != 0 {
+		t.Errorf("rows read back = %+v, want 485 calls with 9120 ms, then no time", r)
 	}
 }
