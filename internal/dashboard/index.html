@@ -2458,9 +2458,10 @@ function renderCloud(s) {
 }
 
 // The Birds panel draws the birds' daily reports, one row each: the bird's name
-// and the pages it wrote, the age of the summary it left, the summary itself,
-// and the bird's own ask for the operator as a badge. What a row shows is the
-// sidecar the reader read, so a summary holding markup goes through el() and
+// and the pages it wrote, the age of the summary it left and, when the reader
+// knows it, when the bird was last active, the summary itself, and the bird's
+// own ask for the operator as a badge. What a row shows is the sidecar the
+// reader read, so a summary holding markup goes through el() and
 // reads as that text; the name is itself the link to the bird's report, and the
 // "report" and "previous" links beside it open the two pages in a new tab. The
 // previous link carries when that page was written, so its label never has to
@@ -2540,7 +2541,14 @@ function drawBirds(box, s) {
     }
     if (isStale(b)) head.append(el("span", "badge warnc", "STALE"));
     else if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));
-    if (b.written) head.append(el("span", "bage", "written " + age(b.written) + " ago"));
+    // The report's age is when the bird last wrote, which is not whether it is
+    // still working: a bird writes a daily report only when asked, so its age
+    // says nothing on its own. The row also gives when the bird was last
+    // active, when the reader has that, in the same muted age (gt-j1e6s9).
+    const ages = [];
+    if (b.written) ages.push("written " + age(b.written) + " ago");
+    if (b.last_active) ages.push("last active " + age(b.last_active) + " ago");
+    if (ages.length) head.append(el("span", "bage", ages.join(" · ")));
     row.append(head);
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
     else if (b.summary) row.append(el("div", "bsum", b.summary));
