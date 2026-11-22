@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1713,10 +1714,12 @@ func pushFailureReason(err error) string {
 // oneLineReason is an error's text as one bounded line, for a log line, an
 // escalation or a saved note. A git error carries the command's captured
 // output, which can run to many lines, so the text is collapsed to one line and
-// cut at a length a reader can take in.
+// cut at a length a reader can take in. A git error can also quote a remote
+// URL or a credential, so the text is scrubbed before the cut: a token that
+// straddles the cut is then redacted whole, not left as a prefix (gt-qn4xpp).
 func oneLineReason(err error) string {
 	const maxLen = 300
-	msg := strings.Join(strings.Fields(err.Error()), " ")
+	msg := land.ScrubText(tierSweepRedactURLs(err.Error()))
 	if len(msg) > maxLen {
 		msg = msg[:maxLen] + "..."
 	}

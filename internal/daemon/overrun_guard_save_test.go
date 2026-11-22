@@ -1428,3 +1428,55 @@ func TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown(t *testing.T) {
 		})
 	}
 }
+
+// TestOverrunFailureReason_ScrubsBeforeCut pins the one-line reason a failed
+// save writes into the hand-back note (pushFailureReason): a token in the
+// error is redacted before the 300-byte cut, so none of it reaches the note.
+// The token is built from parts, so no literal credential sits in the source.
+func TestOverrunFailureReason_ScrubsBeforeCut(t *testing.T) {
+	t.Parallel()
+	tok := "gh" + "p_" + strings.Repeat("Q7", 18)
+	// The token starts at byte 296, so the 300-byte cut keeps only its first four
+	// bytes ("ghp_"). A cut taken before the scrub leaves that prefix, too short
+	// for the rule to call a token, so it reaches the note.
+	straddleHead := "fatal: " + strings.Repeat("x", 288) + " "
+	cases := []struct {
+		name string
+		err  string
+		want string
+	}{
+		{
+			name: "token in URL userinfo",
+			err:  "fatal: could not read Username for https://x-access-token:" + tok + "@forge/org/repo.git",
+			want: "fatal: could not read Username for https://forge/org/repo.git",
+		},
+		{
+			name: "token in a URL query",
+			err:  "fatal: unable to access https://forge/org/repo.git?token=" + tok,
+			want: "fatal: unable to access https://forge/org/repo.git?token=<redacted>",
+		},
+		{
+			name: "token straddling the cut",
+			err:  straddleHead + tok,
+			want: straddleHead + "<red...",
+		},
+		{
+			name: "plain error passes unchanged",
+			err:  "permission denied (publickey)",
+			want: "permission denied (publickey)",
+		},
+		{
+			name: "error with no secret keeps 300 bytes and the ellipsis",
+			err:  strings.Repeat("abc ", 100),
+			want: strings.Repeat("abc ", 75) + "...",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pushFailureReason(errors.New(tc.err)); got != tc.want {
+				t.Errorf("pushFailureReason() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
