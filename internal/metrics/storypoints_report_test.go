@@ -820,3 +820,93 @@ func TestStoryPointsDriftInterval(t *testing.T) {
 		}
 	})
 }
+
+// TestStoryPointsDriftLongAUC: the reading carries the AUC of the estimate for
+// the landings measured over 20 minutes with its 95% interval, beside the rank
+// reading and independent of it. A window with landings on both sides carries an
+// AUC whose interval brackets it and the previous-weights reading carries the
+// same AUC over the same window; a window whose landings all ran under 20
+// minutes keeps its rank reading and carries no AUC.
+func TestStoryPointsDriftLongAUC(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	scorer := func(row Row) (float64, bool) {
+		minutes, err := strconv.ParseFloat(row["sp_minutes"], 64)
+		if err != nil {
+			t.Fatalf("scorer: sp_minutes %q: %v", row["sp_minutes"], err)
+		}
+		return minutes, true
+	}
+
+	t.Run("landings on both sides of 20 minutes carry the AUC and its interval", func(t *testing.T) {
+		t.Parallel()
+		// 30 landings, the i-th estimated i+1 minutes. All but two are measured in
+		// the rank their estimate gives them; the shortest estimate ran longest and
+		// the longest ran shortest, so ten ran over 20 minutes. Nine of the long
+		// ones are estimated over all 19 short landings measured 2..20 minutes, the
+		// tenth (estimated 1 minute) beats none, and the long estimate of 30
+		// belongs to a short landing: 9*19 wins of 10*20 pairs, an AUC of 171/200.
+		swapEnds := func(i int) float64 {
+			switch i {
+			case 0:
+				return 30
+			case 29:
+				return 1
+			}
+			return float64(i + 1)
+		}
+		rows := driftLandings(30, base, swapEnds)
+		got, err := StoryPointsDriftOver(rows, scorer)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver: %v", err)
+		}
+		cur := got.Current
+		if !cur.Measurable {
+			t.Fatalf("Current is not measurable: %s", cur.Why)
+		}
+		if !cur.LongMeasurable {
+			t.Fatalf("Current carries no AUC over a window with ten landings over 20 minutes")
+		}
+		if want := 171.0 / 200.0; math.Abs(cur.LongAUC-want) > 1e-12 {
+			t.Errorf("LongAUC = %v, want %v", cur.LongAUC, want)
+		}
+		if !(cur.LongLo <= cur.LongAUC && cur.LongAUC <= cur.LongHi) {
+			t.Errorf("interval [%v, %v] does not bracket LongAUC %v", cur.LongLo, cur.LongHi, cur.LongAUC)
+		}
+		if cur.LongLo < 0 || cur.LongHi > 1 {
+			t.Errorf("interval [%v, %v] is outside [0, 1]", cur.LongLo, cur.LongHi)
+		}
+		prev := got.Previous
+		if !prev.LongMeasurable {
+			t.Fatalf("Previous carries no AUC over the same window")
+		}
+		if prev.LongAUC != cur.LongAUC || prev.LongLo != cur.LongLo || prev.LongHi != cur.LongHi {
+			t.Errorf("Previous AUC [%v, %v, %v] differs from Current [%v, %v, %v] over the same window",
+				prev.LongAUC, prev.LongLo, prev.LongHi, cur.LongAUC, cur.LongLo, cur.LongHi)
+		}
+	})
+
+	t.Run("a window with no landing over 20 minutes keeps its rank reading", func(t *testing.T) {
+		t.Parallel()
+		// Measured 0.5..15 minutes: nothing ran over 20, so there is no AUC. The
+		// measures still rank with the estimates, so the rank reading stands.
+		rows := driftLandings(30, base, func(i int) float64 { return float64(i+1) / 2 })
+		got, err := StoryPointsDriftOver(rows, scorer)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver: %v", err)
+		}
+		cur := got.Current
+		if !cur.Measurable || math.Abs(cur.Rho-1) > 1e-12 {
+			t.Errorf("Current = %+v, want the rank reading of the 30 landings measured 0.5..15 minutes", cur)
+		}
+		if cur.Why != "" {
+			t.Errorf("Why = %q, want empty: an absent AUC does not make the rank reading unmeasurable", cur.Why)
+		}
+		if cur.LongMeasurable {
+			t.Errorf("LongMeasurable = true, want false without a landing over 20 minutes")
+		}
+		if !math.IsNaN(cur.LongAUC) || !math.IsNaN(cur.LongLo) || !math.IsNaN(cur.LongHi) {
+			t.Errorf("AUC = [%v, %v, %v], want NaN, NaN and NaN", cur.LongAUC, cur.LongLo, cur.LongHi)
+		}
+	})
+}
