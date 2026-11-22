@@ -563,6 +563,64 @@ func TestStoryPointsDriftFailingRankStraddle(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftFailingBothSignals: the rank rule holds the failing decision
+// only when the AUC for beads over 20 minutes is low too. A measured AUC whose
+// interval ends over storyPointsLongAUCBar keeps the reading not failing, and one
+// that ends under it does not; a reading with no such AUC is decided by the rank
+// rule alone. The bar itself is pinned by gt-awp6uk, not here.
+func TestStoryPointsDriftFailingBothSignals(t *testing.T) {
+	t.Parallel()
+	rank := func(lo, hi float64) metrics.StoryPointsDriftReading {
+		return metrics.StoryPointsDriftReading{N: 100, Rho: (lo + hi) / 2, Lo: lo, Hi: hi, Measurable: true}
+	}
+	withAUC := func(r metrics.StoryPointsDriftReading, lo, hi float64) metrics.StoryPointsDriftReading {
+		r.LongMeasurable, r.LongLo, r.LongHi = true, lo, hi
+		return r
+	}
+	tests := []struct {
+		name    string
+		reading metrics.StoryPointsDriftReading
+		want    bool
+	}{
+		{
+			name:    "a rank interval ending on the bar with an AUC interval 0.60 to 0.82 is not failing",
+			reading: withAUC(rank(0.16, 0.50), 0.60, 0.82),
+			want:    false,
+		},
+		{
+			// The rank rule holds here, so only the AUC condition keeps it from failing.
+			name:    "a rank interval under the bar with an AUC interval 0.60 to 0.82 is not failing",
+			reading: withAUC(rank(0.10, 0.40), 0.60, 0.82),
+			want:    false,
+		},
+		{
+			name:    "a rank interval under the bar with an AUC interval 0.44 to 0.63 is failing",
+			reading: withAUC(rank(0.10, 0.40), 0.44, 0.63),
+			want:    true,
+		},
+		{
+			// The missing AUC does not silence the rank rule.
+			name:    "a rank interval under the bar with no AUC measured is failing",
+			reading: rank(0.10, 0.40),
+			want:    true,
+		},
+		{
+			// The AUC cannot rescue a reading whose rank interval is over the bar.
+			name:    "a rank interval over the bar with an AUC interval 0.44 to 0.63 is not failing",
+			reading: withAUC(rank(0.54, 0.66), 0.44, 0.63),
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := storyPointsDriftFailing(tc.reading); got != tc.want {
+				t.Errorf("storyPointsDriftFailing(%+v) = %v, want %v", tc.reading, got, tc.want)
+			}
+		})
+	}
+}
+
 // countKind is the items of one kind.
 func countKind(items []attention.Item, kind attention.Kind) int {
 	n := 0
