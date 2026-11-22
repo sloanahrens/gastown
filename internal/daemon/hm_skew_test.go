@@ -44,6 +44,8 @@ type hmSkewAnswers struct {
 	cloneErr     bool      // the clone fails, leaving a partial directory behind
 	fetchErr     bool      // the fetch of origin's main into the clone fails
 	cloneIsFile  bool      // the clone's path is a regular file, not a directory
+	embedGrep    string    // stdout of the clone's git grep for //go:embed directives
+	grepErr      bool      // that grep fails
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -131,6 +133,11 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 			for _, p := range a.changed {
 				out += p + "\x00"
 			}
+		case strings.Contains(joined, " grep -n -F -e //go:embed "):
+			if a.grepErr {
+				err = errors.New("fatal: bad revision")
+			}
+			out = a.embedGrep
 		case strings.Contains(joined, " rev-parse --verify -q "):
 			switch {
 			case a.probeErr:
@@ -244,6 +251,106 @@ func TestHMSkewMessageNamesThePinRefresh(t *testing.T) {
 			t.Errorf("message %q names %q, which does not clear a pod's hm", msg, gone)
 		}
 	}
+}
+
+// TestHMSkewBinaryPathTable: a test file, a testdata path and markdown cannot reach
+// the hm binary and are not binary paths; every other path is, including the
+// migrations and the compose file the hm rig embeds (gt-pcixw3).
+func TestHMSkewBinaryPathTable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"internal/foo/bar_test.go", false},
+		{"internal/foo/testdata/x.json", false},
+		{"internal/foo/testdata/deep/dir/y.go", false},
+		{"README.md", false},
+		{"docs/x.go", false},
+		{"internal/foo/bar.go", true},
+		{"internal/store/migrations/0001.sql", true},
+		{"internal/compose/compose.go", true},
+		{"internal/foo/testdata.go", true},
+		{"internal/foo/mytestdata/x.go", true},
+		{"internal/foo/bar_test.go.orig", true},
+		{"internal/x/testdata", true}, // a file named testdata is no testdata directory
+	} {
+		if got := hmSkewBinaryPath(tc.path); got != tc.want {
+			t.Errorf("hmSkewBinaryPath(%q) = %t, want %t", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestHMSkewBinaryPathTestOnlyDiffIsNotASkew: a reading whose only changed files
+// are a test file and a testdata file is not a skew, through hmSkewBehind and the
+// git fake: nothing escalates (gt-pcixw3).
+func TestHMSkewBinaryPathTestOnlyDiffIsNotASkew(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.changed = []string{"internal/foo/bar_test.go", "internal/foo/testdata/x.json"}
+	d, rec, _ := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none for a diff over a test file and a testdata file", esc)
+	}
+}
+
+// TestHMSkewEmbedDirectivesKeepATestPathASkew: a test file or testdata path is out of
+// the binary by its shape, so it is a skew only when a //go:embed directive of the hm
+// source at origin's main names it; a clone that cannot answer is a log line, not a
+// skew; and a diff with no such path asks the clone nothing about directives
+// (gt-pcixw3, om finding 0a2026384627).
+func TestHMSkewEmbedDirectivesKeepATestPathASkew(t *testing.T) {
+	t.Parallel()
+	embed := func(file, directive string) string { return hmSkewTestRemote + ":" + file + ":7:" + directive + "\n" }
+	for _, tc := range []struct {
+		name    string
+		changed []string
+		grep    string
+		grepErr bool
+		skew    bool
+		logged  bool
+	}{
+		{"a directive naming the changed testdata file", []string{"internal/foo/testdata/x.json"}, embed("internal/foo/embed.go", "//go:embed testdata/x.json"), false, true, false},
+		{"a directive naming a changed test file", []string{"internal/foo/bar_test.go"}, embed("internal/foo/embed.go", "//go:embed bar_test.go"), false, true, false},
+		{"a directive naming a directory above the changed testdata file", []string{"internal/foo/testdata/x.json"}, embed("internal/foo/embed.go", "//go:embed testdata"), false, true, false},
+		{"a directive naming other files", []string{"internal/foo/testdata/x.json"}, embed("internal/compose/embed.go", "//go:embed docker-compose.yml"), false, false, false},
+		{"no directive at all", []string{"internal/foo/bar_test.go", "internal/foo/testdata/x.json"}, "", false, false, false},
+		{"a clone that cannot answer the directive search", []string{"internal/foo/bar_test.go"}, "", true, false, true},
+		{"output the directive parse cannot read", []string{"internal/foo/bar_test.go"}, "not the shape git grep prints\n", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := hmSkewBehindAnswers()
+			a.changed, a.embedGrep, a.grepErr = tc.changed, tc.grep, tc.grepErr
+			d, rec, logs := hmSkewDaemon(t, a)
+
+			d.hmSkewOnce()
+
+			if got := len(rec.Escalations()) == 1; got != tc.skew {
+				t.Errorf("escalated = %t, want %t (escalations %+v)", got, tc.skew, rec.Escalations())
+			}
+			if got := strings.Contains(logs.String(), "embed directives"); got != tc.logged {
+				t.Errorf("log names the embed directives = %t, want %t: %q", got, tc.logged, logs.String())
+			}
+		})
+	}
+
+	t.Run("a diff with only docs and markdown asks the clone nothing about directives", func(t *testing.T) {
+		t.Parallel()
+		a := hmSkewBehindAnswers()
+		a.changed = []string{"docs/x.md", "README.md"}
+		a.grepErr = true // an ask would be an error and a log line
+		d, rec, logs := hmSkewDaemon(t, a)
+
+		d.hmSkewOnce()
+
+		if len(rec.Escalations()) != 0 || strings.Contains(logs.String(), "embed directives") {
+			t.Errorf("escalations %+v, log %q: want none and no directive search", rec.Escalations(), logs.String())
+		}
+	})
 }
 
 // TestHMSkewIgnoresDocsOnlyAndEqual: a diff over markdown and docs alone is not a

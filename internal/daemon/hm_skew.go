@@ -25,7 +25,7 @@ import (
 // is a log line, not an alarm. Its one write is the job-owned clone under
 // .runtime. It shares om_skew's reads of the remote and its
 // escalation key convention, but not om's rule for what counts as a skew: a
-// diff that touches only markdown or docs is not one.
+// diff that touches only markdown, docs, test files or testdata is not one.
 const (
 	// hmSkewAlertKey is the stable identity of the one condition this check
 	// owns. Each skewed reading goes out under it, so gt escalate records a
@@ -189,12 +189,12 @@ func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string) (bool, er
 		return false, fmt.Errorf("cannot list the files between %s and %s: %w",
 			shortOMSHA(installed), shortOMSHA(remote), err)
 	}
-	for _, p := range strings.Split(out, "\x00") {
-		if p != "" && hmSkewBinaryPath(p) {
-			return true, nil
-		}
-	}
-	return false, nil
+	// A binary path can change the hm binary. A test file or a testdata path only
+	// can when a //go:embed directive of the hm source at remote names it, which the
+	// clone is asked, as the sibling om check asks its own (gt-8n9hj): an exclusion
+	// resting on a one-time look at the embed targets would go quiet on the day a
+	// directive carried one in. A clone that cannot answer is an error, not a skew.
+	return d.hmSkewReachesBinary(src, remote, strings.Split(out, "\x00"))
 }
 
 // hmSkewCloneLacks reports whether the clone has no commit for sha. A rev-parse
@@ -211,10 +211,10 @@ func (d *Daemon) hmSkewCloneLacks(src, sha string) (bool, error) {
 	return out == "", nil
 }
 
-// hmSkewBinaryPath reports whether a changed path can change the hm binary. A
-// markdown file or anything under docs/ cannot: every other path can.
+// hmSkewBinaryPath reports whether a changed path can, by its shape, change the hm binary:
+// markdown, docs/, _test.go and testdata/ paths cannot, every other can (gt-pcixw3).
 func hmSkewBinaryPath(p string) bool {
-	return !strings.HasSuffix(p, ".md") && !strings.HasPrefix(p, "docs/")
+	return !strings.HasSuffix(p, ".md") && !strings.HasPrefix(p, "docs/") && !strings.HasSuffix(p, "_test.go") && !strings.Contains("/"+p, "/testdata/")
 }
 
 // hmSkewRefreshClone makes the job-owned clone current with origin's main. The
