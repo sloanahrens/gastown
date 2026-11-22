@@ -694,7 +694,9 @@ var errStateCopyStands = errors.New("the first copy stands")
 // is only read. Every other error names the copy's path and never the bytes.
 func keepStateCopy(path string) (string, error) {
 	return keepStateCopyWith(path, func(name string) (io.WriteCloser, error) {
-		return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		// 0600: the copy is evidence for the operator, and it must not be readable by
+		// others beside a state file that was not (gt-wr0yww).
+		return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	})
 }
 
