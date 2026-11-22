@@ -220,9 +220,28 @@ func TestHMSkewEscalatesWhenBehindOnACodePath(t *testing.T) {
 	if got.Severity != "MEDIUM" {
 		t.Errorf("severity = %q, want MEDIUM as the om-skew alert", got.Severity)
 	}
-	for _, want := range []string{hmSkewTestInstalled[:8], hmSkewTestRemote[:8], "make install", hmSkewSource} {
+	for _, want := range []string{hmSkewTestInstalled[:8], hmSkewTestRemote[:8], "image-pins-refresh", hmSkewSource} {
 		if !strings.Contains(got.Reason+" "+got.Description, want) {
 			t.Errorf("alert %q / %q does not name %q", got.Description, got.Reason, want)
+		}
+	}
+}
+
+// TestHMSkewMessageNamesThePinRefresh: the skew message names the image pin and
+// the planner's refresh bead, not `make install`, which does nothing for a pod's
+// hm (gt-uweo7r). Both short shas stay in it.
+func TestHMSkewMessageNamesThePinRefresh(t *testing.T) {
+	t.Parallel()
+	msg := hmSkewMessage(hmSkewTestInstalled, hmSkewTestRemote)
+
+	for _, want := range []string{hmSkewTestInstalled[:8], hmSkewTestRemote[:8], "image pin", "deploy/daemon/image-pins", "image-pins-refresh"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not name %q", msg, want)
+		}
+	}
+	for _, gone := range []string{"make install", "mayor/rig"} {
+		if strings.Contains(msg, gone) {
+			t.Errorf("message %q names %q, which does not clear a pod's hm", msg, gone)
 		}
 	}
 }

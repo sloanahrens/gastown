@@ -33,6 +33,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"internal/daemon/pair_ready.go":               "reader: the skew guard parses the green commit's image-pins through parseImagePins, which expands",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
+	"internal/daemon/hm_skew.go":                  "message text only: names the image pin file and its refresh label; it reads no data file",
 	"internal/daemon/image_pins_bead.go":          "the refresh bead's label and command name the pins files; it reads no data file",
 	"internal/daemon/image_pins_plan.go":          "attention key name only (image-pins-refresh-stuck); it reads no data file",
 	"internal/daemon/image_pin_layers.go":         "attention key name only (image-pins-dead-layer); it reads no data file",
