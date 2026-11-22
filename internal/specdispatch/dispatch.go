@@ -450,18 +450,18 @@ func HeldSeatList(seats []HeldSeat) string {
 }
 
 // DeadHookedCount names the seats inside a count that no tmux session holds:
-// "2 with no session", or "3 with no session (2 starting, 1 unread)" with
+// "2 with no session", or "3 with no session (2 working, 1 unread)" with
 // classes. It is empty for none; negative or non-summing classes name none
-// (gt-4h6z5c). A seat is not called dead while it may be starting: a class
-// "working" prints as "starting", because a seat slung a bead a moment before
-// its session exists reads as working and has only not started yet; every other
-// class prints as it is (gt-oyne3v).
+// (gt-4h6z5c). Each class prints as the state reads: a seat whose agent state
+// says working prints as working, because a polecat that crashed mid-work
+// leaves the same state, so the word claims only what the reading shows
+// (gt-gzaica).
 func DeadHookedCount(n int, classes map[string]int) string {
 	if n == 0 {
 		return ""
 	}
 	word := fmt.Sprintf("%d with no session", n)
-	shown := make(map[string]int, len(classes))
+	names := make([]string, 0, len(classes))
 	sum := 0
 	for name, k := range classes {
 		if k < 0 {
@@ -469,37 +469,23 @@ func DeadHookedCount(n int, classes map[string]int) string {
 		}
 		sum += k
 		if k > 0 {
-			shown[noSessionClass(name)] += k
+			names = append(names, name)
 		}
 	}
 	if sum != n {
 		return word
 	}
-	names := make([]string, 0, len(shown))
-	for name := range shown {
-		names = append(names, name)
-	}
 	sort.Slice(names, func(i, j int) bool {
-		if a, b := shown[names[i]], shown[names[j]]; a != b {
+		if a, b := classes[names[i]], classes[names[j]]; a != b {
 			return a > b
 		}
 		return names[i] < names[j]
 	})
 	parts := make([]string, len(names))
 	for i, name := range names {
-		parts[i] = fmt.Sprintf("%d %s", shown[name], name)
+		parts[i] = fmt.Sprintf("%d %s", classes[name], name)
 	}
 	return word + " (" + strings.Join(parts, ", ") + ")"
-}
-
-// noSessionClass is the word a disposition class prints as in a no-session
-// count: the class working is a seat starting its bead, and prints as starting
-// (gt-oyne3v).
-func noSessionClass(name string) string {
-	if name == "working" {
-		return "starting"
-	}
-	return name
 }
 
 // SplitLiveDead names a seat's count as its parts: its live sessions, the

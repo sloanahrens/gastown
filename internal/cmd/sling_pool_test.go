@@ -195,8 +195,8 @@ func TestChoosePoolAgentNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 
 // TestPoolCountSourcesSaysNoSessionNotDeadHooked is gt-lroj0r's refusal half:
 // a seat with no session is called what the count calls it, "with no session",
-// in the held list under the count too, and the class working prints as
-// starting. dead-hooked names the read, never a line the operator reads.
+// in the held list under the count too, and the class working prints as working
+// (gt-gzaica). dead-hooked names the read, never a line the operator reads.
 func TestPoolCountSourcesSaysNoSessionNotDeadHooked(t *testing.T) {
 	t.Parallel()
 	sessions := []poolSession{
@@ -204,7 +204,7 @@ func TestPoolCountSourcesSaysNoSessionNotDeadHooked(t *testing.T) {
 		{name: "dead/gastown/hotel", agent: "a", rig: "gastown", polecat: "hotel", deadHooked: true, deadClass: "working"},
 	}
 	got := poolCountSources("a", sessions, 2, 1)
-	want := ": 1 session, 1 with no session (1 starting); held: gastown/hotel:with no session, gt-a:session"
+	want := ": 1 session, 1 with no session (1 working); held: gastown/hotel:with no session, gt-a:session"
 	if got != want {
 		t.Fatalf("poolCountSources = %q, want %q", got, want)
 	}

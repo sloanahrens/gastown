@@ -837,8 +837,8 @@ func TestPoolShowNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 // TestPoolShowSaysNoSessionNotDeadHooked is gt-lroj0r's show half: the page
 // prints a seat with no session with the count's own word, "with no session",
 // in the seat line's split and in the held list under it, and the class working
-// prints as starting. dead-hooked names the read, never a line the operator
-// reads.
+// prints as working (gt-gzaica). dead-hooked names the read, never a line the
+// operator reads.
 func TestPoolShowSaysNoSessionNotDeadHooked(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"a":{"command":"claude"}},`+
@@ -859,7 +859,7 @@ func TestPoolShowSaysNoSessionNotDeadHooked(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := out.String()
-	if got, want := poolTestShowLine(page, "a"), "a 2/1 (1 live + 1 with no session (1 starting)) open"; got != want {
+	if got, want := poolTestShowLine(page, "a"), "a 2/1 (1 live + 1 with no session (1 working)) open"; got != want {
 		t.Fatalf("seat line = %q, want %q:\n%s", got, want, page)
 	}
 	if got, want := poolTestShowLine(page, "held:"), "held: gastown/hotel:with no session, gt-a:session"; got != want {

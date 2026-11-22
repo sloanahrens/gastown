@@ -755,14 +755,27 @@ func TestNoSessionCountSaysNoSessionNotDeadHooked(t *testing.T) {
 	}
 }
 
-// TestNoSessionCountPrintsWorkingAsStarting names the class a seat slung a fresh
-// bead carries: its disposition reads working, and the count says starting,
-// because its session does not exist yet (gt-oyne3v).
-func TestNoSessionCountPrintsWorkingAsStarting(t *testing.T) {
+// TestNoSessionCountPrintsWorkingAsWorking keeps the class the data reads: a
+// seat whose agent state says working prints as working, because a polecat that
+// crashed mid-work leaves the same state and the count carries no measurement
+// that tells a young seat apart (gt-gzaica).
+func TestNoSessionCountPrintsWorkingAsWorking(t *testing.T) {
 	t.Parallel()
-	got := DeadHookedCount(4, map[string]int{"working": 3, "idle-submitted": 1})
-	if want := "4 with no session (3 starting, 1 idle-submitted)"; got != want {
-		t.Errorf("DeadHookedCount(4, classes) = %q, want %q", got, want)
+	for _, tc := range []struct {
+		name    string
+		n       int
+		classes map[string]int
+		want    string
+	}{
+		{"working keeps its own word", 3, map[string]int{"working": 2, "unread": 1}, "3 with no session (2 working, 1 unread)"},
+		{"a working class that does not sum keeps the plain word", 2, map[string]int{"working": 3}, "2 with no session"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DeadHookedCount(tc.n, tc.classes); got != tc.want {
+				t.Errorf("DeadHookedCount(%d, %v) = %q, want %q", tc.n, tc.classes, got, tc.want)
+			}
+		})
 	}
 }
 
