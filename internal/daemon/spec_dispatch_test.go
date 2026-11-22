@@ -1369,3 +1369,33 @@ func TestParseSpecDispatchReportRequiresTheAlwaysWrittenKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestTickEffCensusFileMsLogged: the milliseconds in the tick's census file and
+// in a background sling's file reach the daemon's census line, so the sling rows
+// carry them too (gt-mru4en).
+func TestTickEffCensusFileMsLogged(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		rows := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 30, Ms: 9120}}
+		if err := beads.WriteCensusSink(dispatch.SpecCensusPath(c.dir), rows); err != nil {
+			t.Errorf("writing the tick's census: %v", err)
+		}
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, "test")
+	if err := beads.WriteCensusSink(slingPath, []beads.CensusRow{
+		{Verb: "show", Caller: "cmd.specSlingDuplicateCheck", Count: 7, Ms: 640},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: bd census (spec dispatch): total=37 top: show@cmd.specRoster=30/9120ms sling: show@cmd.specSlingDuplicateCheck=7/640ms"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("census lines = %d, want one %q: %v", n, want, lines())
+	}
+}

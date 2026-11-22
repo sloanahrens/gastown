@@ -483,3 +483,63 @@ func TestTickEffCensusTopRowsMs(t *testing.T) {
 		t.Errorf("rows read back = %+v, want 485 calls with 9120 ms, then no time", r)
 	}
 }
+
+// TestTickEffCensusFileMs: the sink line carries a row's milliseconds as
+// "count/<ms>ms" after the count, a row with none stays "count", a file an
+// older tick wrote (no milliseconds) reads as Ms 0, and a milliseconds field
+// that is not a whole non-negative number fails the read (gt-mru4en).
+func TestTickEffCensusFileMs(t *testing.T) {
+	t.Parallel()
+	t.Run("rows with milliseconds are written and read back", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "spec_census.txt")
+		want := []CensusRow{
+			{Verb: "show", Caller: "cmd.specBoard", Count: 7, Ms: 9120},
+			{Verb: "mol wisp", Caller: "cmd.specRoster", Count: 30},
+		}
+		if err := WriteCensusSink(path, want); err != nil {
+			t.Fatalf("WriteCensusSink: %v", err)
+		}
+		text, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wantText := "show@cmd.specBoard=7/9120ms\nmol wisp@cmd.specRoster=30\n"; string(text) != wantText {
+			t.Errorf("sink text = %q, want %q", text, wantText)
+		}
+		got, err := ReadCensusSink(path)
+		if err != nil {
+			t.Fatalf("ReadCensusSink: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("rows read back = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("a file with no milliseconds reads as Ms 0", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "spec_census.txt")
+		if err := os.WriteFile(path, []byte("show@cmd.a=2\nlist@cmd.b=5\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadCensusSink(path)
+		if err != nil {
+			t.Fatalf("ReadCensusSink: %v", err)
+		}
+		want := []CensusRow{{Verb: "show", Caller: "cmd.a", Count: 2}, {Verb: "list", Caller: "cmd.b", Count: 5}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("rows read back = %+v, want %+v", got, want)
+		}
+	})
+	for _, line := range []string{"show@cmd.a=2/x", "show@cmd.a=2/-5ms", "show@cmd.a=2/12", "show@cmd.a=2/ms", "show@cmd.a=2/3.5ms"} {
+		t.Run("unreadable milliseconds "+line, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "spec_census.txt")
+			if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if rows, err := ReadCensusSink(path); err == nil {
+				t.Fatalf("rows = %+v, want an error for %q", rows, line)
+			}
+		})
+	}
+}
