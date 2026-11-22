@@ -125,6 +125,8 @@ func (d *Daemon) patrolScanRunOptions(env *patrolScanHost) patrolscan.Options {
 	// The crash detector's own read of a seat's last done, so the tick and the
 	// detector agree on a turn whose bead has not closed yet (gt-iwgbd).
 	opts.DoneAge = env.doneAge
+	// The stand-in for an unreadable ledger file outlives the tick: it is the daemon's.
+	opts.MemoryLedger = d.patrolScanMemoryLedger()
 	return opts
 }
 
@@ -1443,4 +1445,11 @@ func (d *Daemon) bdPathOrDefault() string {
 		return d.bdPath
 	}
 	return "bd"
+}
+
+// patrolScanMemoryLedger is the in-process ledger the patrol scan marks in when its ledger file
+// cannot be read, made once per daemon.
+func (d *Daemon) patrolScanMemoryLedger() *patrolscan.MemoryLedger {
+	d.patrolScanMemoryOnce.Do(func() { d.patrolScanMemory = patrolscan.NewMemoryLedger() })
+	return d.patrolScanMemory
 }

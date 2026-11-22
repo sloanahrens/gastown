@@ -80,3 +80,26 @@ func TestPatrolScanUnnamedDeliveryError(t *testing.T) {
 		t.Fatalf("err = %v, want the delivery error wrapped with the seat and the bead", err)
 	}
 }
+
+// TestPatrolScanMemoryLedgerOutlivesTheTick: the scanner is rebuilt every tick, so the in-memory
+// stand-in for an unreadable ledger file must be the daemon's, the same one in every tick's
+// options: a mark made in one tick is read in the next, and the unnamed-escalation filing is
+// made once per exit per daemon run instead of once per tick (gt-5wmwv4).
+func TestPatrolScanMemoryLedgerOutlivesTheTick(t *testing.T) {
+	t.Parallel()
+	h, _ := unnamedHost(t)
+	first := h.d.patrolScanRunOptions(h).MemoryLedger
+	if first == nil {
+		t.Fatal("the tick's options carry no MemoryLedger")
+	}
+	at := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	if err := first.MarkReported("unnamed-escalation:gastown/capable/gt-x", at); err != nil {
+		t.Fatal(err)
+	}
+
+	second := h.d.patrolScanRunOptions(h).MemoryLedger
+
+	if got, ok := second.LastReported("unnamed-escalation:gastown/capable/gt-x"); !ok || !got.Equal(at) {
+		t.Errorf("next tick's MemoryLedger = %v, %v; want the mark of the first tick", got, ok)
+	}
+}

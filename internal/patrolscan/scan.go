@@ -804,6 +804,11 @@ type Options struct {
 	// HoldReason returns why a work bead is held from dispatch ("" when it
 	// is not): the dispatchers' hold rule. Nil means no hold rule.
 	HoldReason func(Work) string
+	// MemoryLedger stands in for the ledger file when it cannot be read, for the rules that must
+	// not read an unreadable ledger as "already done" (the unnamed-escalation filing). It must
+	// outlive a tick to do its job, so a caller that rebuilds the Scanner each tick passes one it
+	// keeps (the daemon does); New gives a nil one a private ledger, which lasts one Scanner.
+	MemoryLedger *MemoryLedger
 	// IsRefusal reports whether a Restart or Kill error is the supervisor
 	// refusing (parked, frozen, e-stop, budget) rather than failing.
 	IsRefusal func(error) bool
@@ -842,6 +847,9 @@ type Scanner struct {
 
 // New returns a Scanner with defaults filled in.
 func New(env Env, ledger Ledger, o Options) *Scanner {
+	if o.MemoryLedger == nil {
+		o.MemoryLedger = NewMemoryLedger()
+	}
 	if o.DeadSamples <= 0 {
 		o.DeadSamples = DefaultDeadSamples
 	}
@@ -1639,8 +1647,30 @@ func (s *Scanner) fileUnnamed(rig, name, bead string, agent AgentRecord, now tim
 		return "", false
 	}
 	why = "agent_state stuck: exit ESCALATED and no escalation names " + bead
+	// An unreadable ledger file answers every key as just reported, which would skip the filer
+	// and say it was filed when nothing was: the rule marks in memory instead, once per exit per
+	// daemon run, and says so on every tick.
+	ledger := s.ledger
+	if le, ok := s.ledger.(LoadErrorer); ok {
+		if err := le.LoadError(); err != nil {
+			ledger = s.o.MemoryLedger
+			why += "; the ledger is unreadable (" + err.Error() + "): marked in memory only, a daemon restart files again"
+		}
+	}
+	// The escalation the host files is raised by the daemon, not the seat, so the verdict stays
+	// unnamed after it: the ledger holds the moment it was filed, and a later ESCALATED exit has
+	// a record written after that moment and files again. Marked at the time of the filing, so no
+	// seat's write time can prune another's key, and a seat still stuck past the ledger's keep
+	// is reminded once.
+	key := "unnamed-escalation:" + rig + "/" + name + "/" + bead
+	if at, done := ledger.LastReported(key); done && !at.Before(agent.UpdatedAt) {
+		return why + "; the escalation for the overseer was filed already", true
+	}
 	if err := filer.FileUnnamedEscalation(rig, name, bead); err != nil {
 		return why + "; filing one failed: " + err.Error(), true
+	}
+	if err := ledger.MarkReported(key, now); err != nil {
+		return why + "; filed one for the overseer but remembering it failed: " + err.Error(), true
 	}
 	return why + "; filed one for the overseer", true
 }

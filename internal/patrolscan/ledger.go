@@ -69,6 +69,51 @@ func (l *FileLedger) LastReported(key string) (time.Time, bool) {
 	return t, ok
 }
 
+// LoadErrorer is a Ledger that can say its store is unreadable. A rule that must not read the
+// unreadable-ledger answer of LastReported ("just reported") as "already done" asks it first
+// (the unnamed-escalation filing). A ledger that wraps FileLedger must implement it too, or the
+// rule reads the wrapped ledger as readable: the assertion below makes FileLedger's part of it
+// compile-visible.
+type LoadErrorer interface{ LoadError() error }
+
+var _ LoadErrorer = (*FileLedger)(nil)
+
+// LoadError is why the ledger file could not be read, nil when it was read or does not exist.
+// LastReported answers every key as just reported while it is set; a rule that must not read
+// that answer as "already done" asks here first.
+func (l *FileLedger) LoadError() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.load()
+	return l.loadErr
+}
+
+// MemoryLedger is a Ledger kept in the process only: the stand-in for a file ledger that cannot
+// be read, so a rule can still mark what it has done until the daemon restarts.
+type MemoryLedger struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+// NewMemoryLedger returns an empty MemoryLedger.
+func NewMemoryLedger() *MemoryLedger { return &MemoryLedger{entries: map[string]time.Time{}} }
+
+// LastReported returns when key was last marked.
+func (m *MemoryLedger) LastReported(key string) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.entries[key]
+	return t, ok
+}
+
+// MarkReported records key at at; it cannot fail.
+func (m *MemoryLedger) MarkReported(key string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[key] = at
+	return nil
+}
+
 // MarkReported records a report of key at at and writes the ledger.
 func (l *FileLedger) MarkReported(key string, at time.Time) error {
 	l.mu.Lock()
