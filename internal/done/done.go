@@ -1011,8 +1011,11 @@ type doneRun struct {
 	// the deletes-by-spec waiver through its client.
 	sourceIssue *beads.Issue
 	sourceBD    beads.Client
-	opts        doneOptions
-	deps        doneSubmitDeps
+	// rigCfg is the rig's config.json the run loaded, or nil: the follow-up
+	// budget's two limits are read from it (gt-c9cp26).
+	rigCfg *rig.RigConfig
+	opts   doneOptions
+	deps   doneSubmitDeps
 	// out is where a submission prints its outcome; nil means os.Stdout.
 	out io.Writer
 	// openSource opens the bead store a DEFERRED exit releases its bead in;
@@ -1232,6 +1235,7 @@ func Run(opts Options) error {
 	if cfgErr != nil {
 		rig.WarnRigConfigOnce(rigPath, cfgErr)
 	}
+	r.rigCfg = rigCfg
 	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		r.defaultBranch = rigCfg.DefaultBranch
 	}
@@ -1522,9 +1526,10 @@ func submitForLanding(r *doneRun) error {
 }
 
 // checkBranchForSubmit refuses a rebased branch that reverts work already
-// merged to the target (gt-63sz), adds throwaway files (gt-ozo4), adds more
-// lines than the bead's declared limit allows a polecat (gt-r160a1), or is
-// byte-identical to a rejected attempt (gt-0jzd5).
+// merged to the target (gt-63sz), adds throwaway files (gt-ozo4), puts a
+// follow-up bead's diff past its budget (gt-c9cp26), adds more lines than the
+// bead's declared limit allows a polecat (gt-r160a1), or is byte-identical to
+// a rejected attempt (gt-0jzd5).
 func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error {
 	if r.opts.allowReverts {
 		style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", baseRef)
@@ -1534,6 +1539,12 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 	if r.opts.allowThrowawayPaths {
 		style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", baseRef)
 	} else if err := reportThrowawayPaths(r.g, baseRef); err != nil {
+		return err
+	}
+	// A follow-up bead fixes one finding from a passing review, so a branch
+	// past the rig's diff budget is a rework the finding did not ask for
+	// (gt-eyum7q, gt-3der6d, gt-c9cp26). Any other bead never reads the diff.
+	if err := followupBudgetCheck(r.g, sub.sourceIssue, baseRef, r.rigCfg); err != nil {
 		return err
 	}
 	var sourceNotes, description string
