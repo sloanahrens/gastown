@@ -288,7 +288,8 @@ type idlePolecatReuse interface {
 // reuseOrRefuseAtDirCap is the seat decision of a sling that has passed the
 // respawn breaker: reuse an idle polecat's sandbox, else refuse when the rig is
 // already at its directory cap. A nil info with a nil error means the caller
-// allocates a fresh polecat.
+// allocates a fresh polecat; the scan that found no seat is marked reuse-miss
+// there, so its time is not billed to the allocation.
 //
 // The cap is checked only after reuse was tried, so a reusable preserved polecat
 // is not blocked by a full rig. A refusal is a sling that never started a
@@ -335,6 +336,7 @@ func reuseOrRefuseAtDirCap(
 			"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
 			rigName, seatCount, dirCap, rigName)
 	}
+	env.step("reuse-miss")
 	return nil, nil
 }
 
