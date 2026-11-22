@@ -163,6 +163,66 @@ func TestTownStateNightlyArchiveMode(t *testing.T) {
 	}
 }
 
+// TestTownStateNightlyDirMode is the acceptance box: the night directory reads
+// 0700 whether the run makes the partial or reuses one a dead run left wider.
+// The umask cannot be set per test (it is process-global), so the stale row
+// widens the partial with a chmod itself. The mode is checked off Windows, which
+// has no permission bits.
+func TestTownStateNightlyDirMode(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		// stale is the mode of a partial a dead run left, or zero for none.
+		stale os.FileMode
+	}{
+		{name: "created fresh"},
+		{name: "stale partial narrowed", stale: 0o777},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, root, now := nightlyTestTown(t), t.TempDir(), nightlyTestNow()
+			if tt.stale != 0 {
+				partial := townbackup.PartialDir(root, now)
+				if err := os.MkdirAll(partial, tt.stale); err != nil {
+					t.Fatalf("creating the stale partial %s: %v", partial, err)
+				}
+				// The umask masks the create mode, so the chmod sets the stale mode.
+				if err := os.Chmod(partial, tt.stale); err != nil {
+					t.Fatalf("widening the stale partial: %v", err)
+				}
+			}
+			d := nightlyTestDaemon(town, new(strings.Builder))
+			if err := d.maintenanceTownStateBackup(root, now); err != nil {
+				t.Fatalf("maintenanceTownStateBackup: %v", err)
+			}
+			info, err := os.Stat(townbackup.Dir(root, now))
+			if err != nil {
+				t.Fatalf("stat the committed night: %v", err)
+			}
+			// Windows has no permission bits; Go reports a writable directory 0777.
+			if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o700 {
+				t.Errorf("night directory mode = %04o, want 0700", got)
+			}
+		})
+	}
+}
+
+// TestTownStateNightlyDirModeRefused drives the refusal branch: a mode the run
+// cannot set fails the night before anything is written, and the partial it
+// cannot use is removed. A temp directory cannot be made unchmodable on every
+// host, so the test passes a chmod that refuses, as the archive-mode test does.
+func TestTownStateNightlyDirModeRefused(t *testing.T) {
+	t.Parallel()
+	refused := errors.New("operation not permitted")
+	partial := filepath.Join(t.TempDir(), "night.partial")
+	if err := preparePartialNightDir(partial, func(string, fs.FileMode) error { return refused }); !errors.Is(err, refused) {
+		t.Fatalf("preparePartialNightDir = %v, want the refused mode", err)
+	}
+	if _, err := os.Stat(partial); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the refused partial %s is still there: %v", partial, err)
+	}
+}
+
 // TestTownStateNightlyLeavesOutSecretFiles is the second acceptance box's
 // first half: a secret-shaped file under settings/ never reaches the archive.
 func TestTownStateNightlyLeavesOutSecretFiles(t *testing.T) {

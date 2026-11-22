@@ -51,8 +51,8 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 	// A partial left by a daemon that died is reused: the archive is created
 	// empty and the manifest is written last, so neither a stale archive nor a
 	// stale manifest can make the reused directory look complete.
-	if err := os.MkdirAll(partial, 0o755); err != nil {
-		return fmt.Errorf("town-state backup: creating %s: %w", partial, err)
+	if err := preparePartialNightDir(partial, os.Chmod); err != nil {
+		return err
 	}
 	archive := filepath.Join(partial, townbackup.ArchiveName)
 	d.logger.Printf("scheduled_maintenance: town-state backup to %s", partial)
@@ -114,6 +114,20 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 		d.logger.Printf("scheduled_maintenance: WARNING: town-state backup rotation: %v", err)
 	}
 	return alertErr
+}
+
+// preparePartialNightDir makes partial and sets its mode to 0700, which the
+// create mode cannot do under the daemon's umask, nor over a partial a dead run
+// left wider; the commit's rename carries the mode onto the committed night.
+// chmod is the mode setter (os.Chmod in production, a refusing one in a test).
+func preparePartialNightDir(partial string, chmod func(string, fs.FileMode) error) error {
+	if err := os.MkdirAll(partial, 0o700); err != nil {
+		return fmt.Errorf("town-state backup: creating %s: %w", partial, err)
+	}
+	if err := chmod(partial, 0o700); err != nil {
+		return failedTownStateNight(partial, fmt.Errorf("setting the mode of %s: %w", partial, err))
+	}
+	return nil
 }
 
 // exportTownStateArchive writes the town root's backup set into a gzip tar at
