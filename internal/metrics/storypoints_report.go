@@ -692,8 +692,8 @@ func measuredMinutesCell(secs, lowerBound string) (float64, bool, error) {
 // NaN and both Measurable flags false.
 func newDriftReading(n int) StoryPointsDriftReading {
 	return StoryPointsDriftReading{
-		N:       n,
-		Rho:     math.NaN(), Lo: math.NaN(), Hi: math.NaN(),
+		N:   n,
+		Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN(),
 		LongAUC: math.NaN(), LongLo: math.NaN(), LongHi: math.NaN(),
 	}
 }
