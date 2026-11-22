@@ -164,6 +164,33 @@ func TestScanningTestsFindsGitFileListings(t *testing.T) {
 	}
 }
 
+// TestScanningTestsFollowsSameFileHelpers checks that a same-file helper chain
+// is followed but a helper in another file is not.
+func TestScanningTestsFollowsSameFileHelpers(t *testing.T) {
+	t.Parallel()
+	files := func(srcs ...string) fstest.MapFS {
+		fsys := fstest.MapFS{}
+		for i, src := range srcs {
+			fsys[string(rune('a'+i))+"_test.go"] = &fstest.MapFile{Data: []byte("package p\n\n" + src)}
+		}
+		return fsys
+	}
+	for name, tc := range map[string]struct {
+		fsys fstest.MapFS
+		want []ScanningTest
+	}{
+		"one helper":            {files(`func TestA(t *testing.T) { helper() }; func helper() { os.ReadDir("..") }`), []ScanningTest{{".", "TestA"}}},
+		"two helpers":           {files(`func TestA(t *testing.T) { one() }; func one() { two() }; func two() { filepath.WalkDir("../..", f) }`), []ScanningTest{{".", "TestA"}}},
+		"helper lists files":    {files(`func TestA(t *testing.T) { list() }; func list() { exec.Command("git", "ls-files") }`), []ScanningTest{{".", "TestA"}}},
+		"recursive helper pair": {files(`func TestA(t *testing.T) { ping() }; func ping() { pong() }; func pong() { ping() }`), nil},
+		"another file's helper": {files(`func TestA(t *testing.T) { helper() }`, `func helper() { os.ReadDir("..") }`), nil},
+	} {
+		if got, err := ScanningTests(tc.fsys); err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("%s: ScanningTests = %v, %v; want %v", name, got, err, tc.want)
+		}
+	}
+}
+
 func TestScanningTestsReturnsTheFirstError(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
