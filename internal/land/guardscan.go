@@ -62,6 +62,24 @@ func bodyWalksParent(body *ast.BlockStmt) bool {
 	return found
 }
 
+// scanFile returns, in source order, the names of the top-level test functions
+// in src whose own body walks the tree from a parent. A root reached through a
+// helper is not seen here: a helper in the same file is followed by a later
+// bead, and a helper in another file is never seen.
+func scanFile(name string, src []byte) ([]string, error) {
+	f, err := parseGoFile(name, src)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && isRunTest(fn) && bodyWalksParent(fn.Body) {
+			names = append(names, fn.Name.Name)
+		}
+	}
+	return names, nil
+}
+
 func parseGoFile(name string, src []byte) (*ast.File, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
 	if err != nil {
