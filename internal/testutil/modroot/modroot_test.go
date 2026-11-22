@@ -50,7 +50,6 @@ func TestRootFromReturnsStatErrors(t *testing.T) {
 	}
 }
 
-// TestRootFindsThisModule: Root resolves the checkout the test runs in.
 func TestRootFindsThisModule(t *testing.T) {
 	t.Parallel()
 	if _, err := os.Stat(filepath.Join(Root(t), "go.mod")); err != nil {

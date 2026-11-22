@@ -12,19 +12,20 @@ import (
 // Root returns the module root of the test's working directory, or fails t.
 func Root(t testing.TB) string {
 	t.Helper()
-	root, err := rootFrom(".")
+	wd, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("modroot: %v", err)
+	}
+	root, err := rootFrom(wd)
 	if err != nil {
 		t.Fatalf("modroot: %v", err)
 	}
 	return root
 }
 
-// rootFrom returns the first directory at or above start holding a go.mod file, or an error naming start.
+// rootFrom returns the first directory at or above the absolute start holding a go.mod file, or an error naming start.
 func rootFrom(start string) (string, error) {
-	dir, err := filepath.Abs(start)
-	if err != nil {
-		return "", err
-	}
+	dir := start
 	for {
 		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
 			return dir, nil
