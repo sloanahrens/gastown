@@ -661,8 +661,9 @@ func (p *PostLandRunner) timedOut(e PendingPostLand, now time.Time, timeout time
 // the entry when it did. It asks only about the read that found the status
 // pending: any other state this pass is not evidence the run is silent. A zero
 // now is no clock to mark by and asks nothing, and a marked entry is not asked
-// about again, so the run is named once. It returns the line to log once the mark is
-// saved, or "" when it marked nothing.
+// about again, so the run is named once. An ask the pass budget ended is logged
+// as the budget ending, not as a seam failure: the next pass asks again. It
+// returns the line to log once the mark is saved, or "" when it marked nothing.
 func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, res PostLandStatusResult, now time.Time) string {
 	if p.RunEnded == nil || res.Verdict != PostLandStatusUnknown || res.State != string(forgejo.StatePending) {
 		return ""
@@ -678,6 +679,12 @@ func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, re
 	defer cancel()
 	end, err := p.RunEnded(askCtx, e.Land)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The pass budget ended the ask, not the seam: nothing is marked, so
+			// the next pass asks again rather than warning about a failure.
+			p.logf("the pass budget ended while asking whether the run behind %s ended; asked again on a later pass", short(e.Land.Commit))
+			return ""
+		}
 		p.logf("WARNING asking whether the run behind %s (%s) ended: %v; the entry keeps waiting", short(e.Land.Commit), e.Land.by(), sanitizeStatusText(err.Error()))
 		return ""
 	}

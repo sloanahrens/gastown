@@ -303,6 +303,51 @@ func TestPostLandOrphanLogFollowsTheSave(t *testing.T) {
 	}
 }
 
+// TestPostLandOrphanBudget: an ask the pass budget ended is not a seam failure.
+// A seam that blocks until its context ends under a short pass budget logs the
+// budget ending and not the WARNING line; a seam that returns another error
+// keeps the WARNING line (gt-2r4okg).
+func TestPostLandOrphanBudget(t *testing.T) {
+	t.Parallel()
+	const budgetLine = "the pass budget ended while asking whether the run behind abc12345 ended; asked again on a later pass"
+	const warningLine = "WARNING asking whether the run behind abc12345 (landed by gt-abc) ended: seam down; the entry keeps waiting"
+	tests := []struct {
+		name    string
+		seam    *orphanSeam
+		budget  time.Duration
+		want    string
+		notWant string
+	}{
+		{"a budget that ends the ask is not a seam failure", &orphanSeam{block: true}, 50 * time.Millisecond, budgetLine, "WARNING asking"},
+		{"another error keeps the WARNING", &orphanSeam{err: errors.New("seam down")}, time.Minute, warningLine, "the pass budget ended"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			v := &statusVerdicts{}
+			store := &MemoryMainState{}
+			clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+			reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+			r := v.runner(reads.read, store, clk, time.Hour)
+			r.passBudgetOverride = tt.budget
+			r.RunEnded = tt.seam.ask
+			r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+			clk.Advance(PostLandOrphanAfter)
+
+			pollWithin(t, r, ctx)
+
+			logs := v.logText()
+			if !strings.Contains(logs, tt.want) {
+				t.Fatalf("logs do not carry %q:\n%s", tt.want, logs)
+			}
+			if strings.Contains(logs, tt.notWant) {
+				t.Fatalf("logs carry %q, want it absent:\n%s", tt.notWant, logs)
+			}
+		})
+	}
+}
+
 // TestPostLandOrphanLogSanitizesTheStatus: the run status comes from Forgejo, so a
 // control character in it never reaches the orphaned line: the line formats the
 // status through sanitizeStatusText like the WARNING path does.
