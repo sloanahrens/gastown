@@ -369,9 +369,11 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			// A recovery that failed may have left the dead run's branches in
 			// place or only partly dropped, so the database's state is unknown:
 			// Decide could start a run over an unrecovered catalog. The check is
-			// due again after the retry delay rather than held for a day.
+			// due again after the retry delay rather than held for a day. The
+			// failure raises the item a failed run raises, so an operator sees it.
 			undecided = true
 			d.logger.Printf("squash: WARNING: %s: the recovery failed: %v — the check did not decide", db, err)
+			d.maintenance().escalate(d, squashAlertSource, squashRecoverErrorItem(db, err, squashLedgerPath(d.config.TownRoot)))
 			continue
 		}
 		if recovery != nil {
@@ -966,6 +968,16 @@ func squashRunItem(e squashLedgerEntry, res doltsquash.RunResult, ledgerPath str
 func squashRecoveryItem(db string, r *doltsquash.Recovery, ledgerPath string) string {
 	return fmt.Sprintf("%s: the recovery kept a branch: %s\nThe recovery kept %s and dropped %s; its line is in %s.\n%s",
 		db, r.State, squashBranchList(r.Kept), squashBranchList(r.Dropped), ledgerPath, r.Reason)
+}
+
+// squashRecoverErrorItem is the item a recovery that failed raises. Like the
+// other squash items its first line opens at the database, because the
+// escalation's title already names the source. The body carries the error,
+// redacted as the ledger's errors are, and where the ledger is: the check did
+// not decide this database, so the next check decides it again.
+func squashRecoverErrorItem(db string, err error, ledgerPath string) string {
+	return fmt.Sprintf("%s: the recovery failed: %s\nThe check did not decide; its ledger is in %s.",
+		db, redactLedgerError(err.Error()), ledgerPath)
 }
 
 // squashRunState renders, in the design's recovery-table terms ("Recovery by

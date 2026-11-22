@@ -2769,6 +2769,63 @@ func TestSquashCheckKeptBranchRaisesTheItem(t *testing.T) {
 	}
 }
 
+// TestSquashCheckRecoverErrorRaisesTheItem: a recovery that errors raises one
+// item, as a failed run does, naming the database and the error and where the
+// ledger is; a clean catalog and a held marker raise none (gt-p6b9cw).
+func TestSquashCheckRecoverErrorRaisesTheItem(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		err   error
+		raise bool
+	}{
+		{
+			name:  "a recovery error raises the item",
+			err:   errors.New("the recovery could not drop compact-work"),
+			raise: true,
+		},
+		{
+			name: "a clean catalog raises none",
+		},
+		{
+			name: "a held marker raises none",
+			err:  doltsquash.ErrRunMarkerHeld,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, escalations, _ := squashTickDaemon(t, squashEnabled())
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+				return nil, tc.err
+			}
+
+			d.runScheduledMaintenance()
+
+			if !tc.raise {
+				if len(*escalations) != 0 {
+					t.Errorf("the check raised %d items, want none: %q", len(*escalations), *escalations)
+				}
+				return
+			}
+			if len(*escalations) != 1 {
+				t.Fatalf("the check raised %d items, want one: %q", len(*escalations), *escalations)
+			}
+			source, message, _ := strings.Cut((*escalations)[0], "|")
+			if source != squashAlertSource {
+				t.Errorf("the item's source is %q, want %q", source, squashAlertSource)
+			}
+			wantFirst := "gt: the recovery failed: the recovery could not drop compact-work"
+			if first, _, _ := strings.Cut(message, "\n"); first != wantFirst {
+				t.Errorf("the item's first line is %q, want %q", first, wantFirst)
+			}
+			if !strings.Contains(message, squashLedgerPath(d.config.TownRoot)) {
+				t.Errorf("the item does not name the ledger %s: %q", squashLedgerPath(d.config.TownRoot), message)
+			}
+		})
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
