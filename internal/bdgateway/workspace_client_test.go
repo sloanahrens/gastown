@@ -1849,6 +1849,99 @@ func TestGatewayPusherStatsReadsTheCounters(t *testing.T) {
 	}
 }
 
+// TestStatsClientRefusalsDecode is acceptance box 1: the stats read carries the
+// per-reason refusal counts, and a previous gateway's answer without the
+// refusals key sets the absent flag instead of reading as no refusals.
+func TestStatsClientRefusalsDecode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		answer      string
+		want        map[string]uint64
+		wantPresent bool
+	}{
+		{
+			name:        "a gateway that counts refusals decodes the reasons",
+			answer:      `{"calls":3,"refusals":{"forbidden":2,"conflict":1}}`,
+			want:        map[string]uint64{"forbidden": 2, "conflict": 1},
+			wantPresent: true,
+		},
+		{
+			name:        "an explicit empty object is present with no counts",
+			answer:      `{"calls":3,"refusals":{}}`,
+			want:        map[string]uint64{},
+			wantPresent: true,
+		},
+		{
+			name:        "a previous gateway's answer without the key is absent",
+			answer:      `{"calls":3,"errors":1}`,
+			wantPresent: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pusher := GatewayPusher{
+				URL:       statsTestURL,
+				TokenFile: clientToken(t, "s3cret\n"),
+				HTTP: inProcessGateway(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != statsPath {
+						t.Errorf("request = %s, want GET %s", r.URL.Path, statsPath)
+					}
+					_, _ = io.WriteString(w, tt.answer)
+				})),
+			}
+			stats, err := pusher.Stats(context.Background())
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if stats.RefusalsPresent != tt.wantPresent {
+				t.Errorf("RefusalsPresent = %v for %s, want %v", stats.RefusalsPresent, tt.answer, tt.wantPresent)
+			}
+			if !reflect.DeepEqual(stats.Refusals, tt.want) {
+				t.Errorf("Refusals = %v for %s, want %v", stats.Refusals, tt.answer, tt.want)
+			}
+		})
+	}
+}
+
+// TestStatsClientRefusalsBad is acceptance box 2: a refusals field of the wrong
+// type is an error with no counters, never an empty map.
+func TestStatsClientRefusalsBad(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		answer string
+	}{
+		{"a number", `{"calls":3,"refusals":5}`},
+		{"a string", `{"calls":3,"refusals":"many"}`},
+		{"an array", `{"calls":3,"refusals":["forbidden"]}`},
+		{"a map of strings", `{"calls":3,"refusals":{"forbidden":"two"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pusher := GatewayPusher{
+				URL:       statsTestURL,
+				TokenFile: clientToken(t, "s3cret\n"),
+				HTTP: inProcessGateway(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = io.WriteString(w, tt.answer)
+				})),
+			}
+			stats, err := pusher.Stats(context.Background())
+			if err == nil {
+				t.Fatalf("Stats = %+v, nil error for refusals as %s; want an error", stats, tt.name)
+			}
+			if !strings.Contains(err.Error(), "not the stats body") {
+				t.Errorf("error = %q for refusals as %s, want it to name the stats body", err, tt.name)
+			}
+			if !reflect.DeepEqual(stats, GatewayStats{}) {
+				t.Errorf("Stats = %+v with refusals as %s, want no counters", stats, tt.name)
+			}
+		})
+	}
+}
+
 // TestGatewayPusherStatsRefusalHidesTheToken is acceptance box 2: a 401 answer
 // returns the gateway's refusal error, no token text, and no counters.
 func TestGatewayPusherStatsRefusalHidesTheToken(t *testing.T) {
