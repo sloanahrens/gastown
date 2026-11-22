@@ -215,7 +215,8 @@ type SubmissionRecorder struct {
 // fetches the work's branch once, because a submission can land in the pass
 // that first sees it, before the landing's own fetch (gt-d87ubg); a record
 // without commits stays the fallback when the fetch or the second read fails,
-// and the battery then reads them from its own clone instead.
+// its warning naming the step that failed, and the battery then reads them from
+// its own clone instead (gt-mttq2m).
 func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 	if !r.loaded {
 		recs, err := ReadSubmissionRecords(r.Path)
@@ -247,11 +248,12 @@ func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 	if err != nil && fetchableBranch(w.Branch) {
 		// The submission can land in the pass that first sees it, before the
 		// landing's own fetch, so fetch the work's branch once and read
-		// again; a failed fetch is what the warning below reports.
+		// again. The error the warning reports names the step that failed, so
+		// the daemon log says which one lost the commits (gt-mttq2m).
 		if ferr := r.Git.FetchBranch(r.remote(), w.Branch); ferr != nil {
-			err = ferr
-		} else {
-			msgs, err = r.Git.CommitMessages(base, w.Head)
+			err = fmt.Errorf("the fetch of %s failed: %w", w.Branch, ferr)
+		} else if msgs, err = r.Git.CommitMessages(base, w.Head); err != nil {
+			err = fmt.Errorf("the commits still cannot be read after the fetch: %w", err)
 		}
 	}
 	if err != nil {

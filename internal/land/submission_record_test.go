@@ -294,6 +294,98 @@ func TestSubmissionRecordFallsBackWhenTheFetchFails(t *testing.T) {
 	}
 }
 
+// TestSubmissionRecordFetchFailureWarnsAndWritesWithoutCommits: when the fetch
+// or the read that follows it fails, the record is still written without its
+// commits and the one warning names the step that failed, so the daemon log
+// says why the battery will read its own clone. A submission already on file
+// makes no read, no fetch and no warning (gt-mttq2m).
+func TestSubmissionRecordFetchFailureWarnsAndWritesWithoutCommits(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a failed fetch", func(t *testing.T) {
+		t.Parallel()
+		w := recordWork("gt-a", "h1")
+		g := &fakeSubmissionGit{
+			err:      errors.New("bad revision 'h1'"),
+			fetchErr: errors.New("could not resolve host"),
+		}
+		rec, path := newRecorder(t, g)
+		var warned []string
+		rec.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+		if wrote, err := rec.Record(w); err != nil || !wrote {
+			t.Fatalf("Record = %v, %v; want a record written despite the failed fetch", wrote, err)
+		}
+		if len(g.fetches) != 1 {
+			t.Errorf("fetches = %v, want the one attempt that failed", g.fetches)
+		}
+		if len(g.logged) != 1 {
+			t.Errorf("clone reads = %v, want no read after the fetch failed", g.logged)
+		}
+		want := "the fetch of " + w.Branch + " failed"
+		if len(warned) != 1 || !strings.Contains(warned[0], want) || !strings.Contains(warned[0], "could not resolve host") {
+			t.Errorf("warnings = %q, want one naming the fetch %q and its error", warned, w.Branch)
+		}
+		if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 || recs[0].Numstat != "" {
+			t.Errorf("records = %+v, want one record with no subjects or stat", recs)
+		}
+	})
+
+	t.Run("a read that still fails after the fetch", func(t *testing.T) {
+		t.Parallel()
+		w := recordWork("gt-a", "h1")
+		// The fetch succeeds and the second read of the same head still fails.
+		g := &fakeSubmissionGit{err: errors.New("bad revision 'h1'")}
+		rec, path := newRecorder(t, g)
+		var warned []string
+		rec.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+		if wrote, err := rec.Record(w); err != nil || !wrote {
+			t.Fatalf("Record = %v, %v; want a record written despite the failed read", wrote, err)
+		}
+		if len(g.fetches) != 1 {
+			t.Errorf("fetches = %v, want the one fetch before the second read", g.fetches)
+		}
+		if len(g.logged) != 2 || !strings.HasPrefix(g.logged[1], "messages ") {
+			t.Errorf("clone reads = %v, want a second read of the commits after the fetch", g.logged)
+		}
+		want := "the commits still cannot be read after the fetch"
+		if len(warned) != 1 || !strings.Contains(warned[0], want) || !strings.Contains(warned[0], "bad revision") {
+			t.Errorf("warnings = %q, want one naming the read after the fetch and its error", warned)
+		}
+		if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 || recs[0].Numstat != "" {
+			t.Errorf("records = %+v, want one record with no subjects or stat", recs)
+		}
+	})
+
+	t.Run("a record already on file", func(t *testing.T) {
+		t.Parallel()
+		w := recordWork("gt-a", "h1")
+		g := &fakeSubmissionGit{messages: map[string][]git.CommitMessage{"h1": {{Message: "fix: a"}}}}
+		first, path := newRecorder(t, g)
+		if _, err := first.Record(w); err != nil {
+			t.Fatal(err)
+		}
+
+		g.fetches, g.logged = nil, nil
+		again := &SubmissionRecorder{Path: path, Git: g}
+		var warned []string
+		again.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+		if wrote, err := again.Record(w); err != nil || wrote {
+			t.Fatalf("second sight = %v, %v; want no record for one already on file", wrote, err)
+		}
+		if len(g.fetches) != 0 {
+			t.Errorf("fetches = %v, want none for a record already on file", g.fetches)
+		}
+		if len(g.logged) != 0 {
+			t.Errorf("clone reads = %v, want none for a record already on file", g.logged)
+		}
+		if len(warned) != 0 {
+			t.Errorf("warnings = %q, want none for a record already on file", warned)
+		}
+	})
+}
+
 // A record holds at most 20 subjects and 80 numstat lines, the same caps the
 // battery puts on its state.
 func TestSubmissionRecorderCapsSubjectsAndNumstat(t *testing.T) {
