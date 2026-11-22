@@ -57,6 +57,11 @@ const PostLandLateReadInterval = 10 * time.Minute
 // slow (gt-c2es4c).
 const PostLandOrphanAfter = 10 * time.Minute
 
+// PostLandOrphanAskEvery is the least time between two asks of the run seam about
+// one pending entry: each ask is a Forgejo run list, and a pass every 30 s over a
+// long pending list would otherwise make one per entry per pass.
+const PostLandOrphanAskEvery = 5 * time.Minute
+
 // postLandPendingLimit is how many pending entries a rig keeps. An entry past it
 // is dropped oldest first, and the drop is recorded in the same state
 // (MainState.PostLandDropped), so the attention queue says entries were lost
@@ -287,6 +292,9 @@ type PendingPostLand struct {
 	OrphanedAt time.Time `json:"orphaned_at,omitzero"`
 	// OrphanRun is that run: its id and status, such as "11205 failure".
 	OrphanRun string `json:"orphan_run,omitempty"`
+	// OrphanAsked is when the run seam was last asked about this entry, whatever it
+	// answered; zero before the first ask.
+	OrphanAsked time.Time `json:"orphan_asked,omitzero"`
 }
 
 // markOrphan records that the run behind e's verdict ended without one, and
@@ -662,6 +670,10 @@ func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, re
 	if now.IsZero() || now.Sub(e.Since) < PostLandOrphanAfter || !e.OrphanedAt.IsZero() {
 		return ""
 	}
+	if !e.OrphanAsked.IsZero() && now.Sub(e.OrphanAsked) < PostLandOrphanAskEvery {
+		return ""
+	}
+	e.OrphanAsked = now
 	askCtx, cancel := context.WithTimeout(ctx, p.readTimeout())
 	defer cancel()
 	end, err := p.RunEnded(askCtx, e.Land)

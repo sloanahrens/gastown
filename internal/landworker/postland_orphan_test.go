@@ -330,3 +330,61 @@ func TestPostLandOrphanLogSanitizesTheStatus(t *testing.T) {
 		t.Fatalf("a control character reached the log: %q", logs)
 	}
 }
+
+// TestPostLandOrphanAskBackoffIsPerEntry: a seam that answers not-ended, or fails, is
+// asked about an entry at most once per PostLandOrphanAskEvery, so a long pending list
+// does not cost one Forgejo run list per entry on every 30 s pass (gt-1rmtiy).
+func TestPostLandOrphanAskBackoffIsPerEntry(t *testing.T) {
+	t.Parallel()
+	answers := []struct {
+		name string
+		end  RunEnd
+		err  error
+	}{
+		{"a not-ended answer", RunEnd{Run: 11205, Status: "running"}, nil},
+		{"an error", RunEnd{}, errors.New("forgejo answered 500")},
+	}
+	for _, tt := range answers {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+			v := &statusVerdicts{}
+			clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+			seam := &orphanSeam{end: tt.end, err: tt.err}
+			reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+			r := v.runner(reads.read, &MemoryMainState{}, clk, 0)
+			r.RunEnded = seam.ask
+			r.Trigger(ctx, pl)
+			clk.Advance(PostLandOrphanAfter)
+
+			pollWithin(t, r, ctx)
+			clk.Advance(PostLandStatusPollInterval)
+			pollWithin(t, r, ctx)
+			if got := seam.count(); got != 1 {
+				t.Fatalf("%s: the seam was asked %d times inside the ask interval, want 1", tt.name, got)
+			}
+			clk.Advance(PostLandOrphanAskEvery)
+			pollWithin(t, r, ctx)
+			if got := seam.count(); got != 2 {
+				t.Fatalf("%s: the seam was asked %d times after the ask interval, want 2", tt.name, got)
+			}
+		})
+	}
+}
+
+func TestPostLandOrphanAskBackoffSurvivesJSON(t *testing.T) {
+	t.Parallel()
+	e := PendingPostLand{Land: PostLand{Commit: "abc1234"}, OrphanAsked: time.Date(2026, 11, 21, 12, 10, 0, 0, time.UTC)}
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got PendingPostLand
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.OrphanAsked.Equal(e.OrphanAsked) {
+		t.Errorf("after a round trip OrphanAsked = %v, want %v", got.OrphanAsked, e.OrphanAsked)
+	}
+}
