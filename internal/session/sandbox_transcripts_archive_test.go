@@ -15,6 +15,7 @@ func TestSaveSeatTranscriptsArchivesThePreviousCopy(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.now = func() time.Time { return seatBase.Add(2 * time.Hour) } // the archive is pruned against this clock; the transcripts date from seatBase
 	var warnings []string
 	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
 	first, second := seatRemote("ses-1.jsonl"), seatRemote("ses-2.jsonl")
@@ -50,6 +51,7 @@ func TestSaveSeatTranscriptsArchivesThePreviousCopyOnlyWhenThereIsOne(t *testing
 	t.Parallel()
 	fake := &sandbox.Fake{}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.now = func() time.Time { return seatBase.Add(2 * time.Hour) } // the archive is pruned against this clock; the transcripts date from seatBase
 	var warnings []string
 	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
 	remote := seatRemote("ses-1.jsonl")
@@ -74,6 +76,7 @@ func TestSaveSeatTranscriptsArchiveFailureWarnsAndStillCopies(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.now = func() time.Time { return seatBase.Add(2 * time.Hour) } // the archive is pruned against this clock; the transcripts date from seatBase
 	var warnings []string
 	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
 	first, second := seatRemote("ses-1.jsonl"), seatRemote("ses-2.jsonl")

@@ -19,7 +19,7 @@ const sandboxTranscriptArchiveCap int64 = 512 << 20
 // directory left empty. A missing root holds none; an entry that is not a
 // directory where a rig or seat belongs is an error naming it, not skipped.
 func pruneTranscriptArchive(root string, now time.Time, keep time.Duration, capBytes int64) error {
-	return pruneTranscriptArchiveWith(archiveFS{os.ReadDir, os.Remove, fs.DirEntry.Info}, root, now, keep, capBytes)
+	return pruneTranscriptArchiveWith(osArchiveFS, root, now, keep, capBytes)
 }
 
 // archiveFS is the filesystem the prune reads and removes through, so a test
@@ -29,6 +29,9 @@ type archiveFS struct {
 	remove  func(name string) error
 	info    func(e fs.DirEntry) (fs.FileInfo, error)
 }
+
+// osArchiveFS is the real filesystem.
+var osArchiveFS = archiveFS{os.ReadDir, os.Remove, fs.DirEntry.Info}
 
 // pruneTranscriptArchiveWith is pruneTranscriptArchive over fsys. A file whose
 // removal fails still exists, so it stays in the total the cap is held to.
