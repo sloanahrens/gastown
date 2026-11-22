@@ -7,9 +7,10 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestNoTestLoggerWritesToTheProcessFD is the gt-uqjn structural guard: a
@@ -27,11 +28,7 @@ import (
 // happens to name the local `logger`.
 func TestNoTestLoggerWritesToTheProcessFD(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(thisFile)
+	dir := filepath.Join(modroot.Root(t), "internal", "daemon")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)
