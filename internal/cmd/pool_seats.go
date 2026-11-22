@@ -405,6 +405,9 @@ func (b *poolSeatBatch) seatReads(rigName string) poolSeatReads {
 // disposition is the polecatDispositionFunc the batch answers. A seat whose
 // cheap hook-held read this batch already made continues from those beads, so
 // the dead-hooked walk's second read costs no bd call of its own.
+//
+// Both branches hold the seat's bead read in hand, so a comparison of the
+// seat's hook needs no second read of the beads.
 func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
 	rb := b.rig(rigName)
 	reads := b.seatReads(rigName)
@@ -414,7 +417,11 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	if ok {
 		return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, rb.store, seat)
 	}
-	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
+	seat, bd, err := poolReadSeatBeads(b.townRoot, rigName, polecatName, reads)
+	if err != nil {
+		return poolSeatState{}, err
+	}
+	return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
 }
 
 // hookHeld is the polecatHookHeldFunc the batch answers: the bead half of
