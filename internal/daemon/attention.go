@@ -415,6 +415,9 @@ type attentionSources struct {
 	// storyPointsDrift reads the story point estimator's drift measure over the
 	// newest extract at a tick's time (attention_story_points_drift.go).
 	storyPointsDrift func(now time.Time) (metrics.StoryPointsDriftRead, error)
+	// storyPointsAdoptions reads the weekly story-points adoptions log
+	// (gt-g2dgme); nil raises nothing.
+	storyPointsAdoptions func() ([]storyPointsAdoptionLine, error)
 	// metricsExtract reads the town's daily metrics extract at a tick's time:
 	// the newest day directory and its footer's gaps
 	// (metrics_extract_attention.go).
@@ -787,6 +790,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
+		// The weekly story-points step's adoptions and reverts in the last week,
+		// and the adoptions log that could not be read (gt-g2dgme).
+		{kind: attention.KindStoryPoints, collect: s.collectStoryPointsAdoptions},
 		// A maintenance job past its cadence (gt-k63z2s). The owns predicate
 		// keeps only this kind's items when the job list cannot be read.
 		{kind: attention.KindJobOverdue, collect: s.collectJobOverdue, owns: jobOverdueItem},
@@ -1023,6 +1029,9 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	// file the metrics step writes, through the metrics package's file seams.
 	s.storyPointsDrift = func(now time.Time) (metrics.StoryPointsDriftRead, error) {
 		return metrics.ReadStoryPointsDrift(metrics.OSEnv(d.config.TownRoot), now)
+	}
+	s.storyPointsAdoptions = func() ([]storyPointsAdoptionLine, error) {
+		return readStoryPointsAdoptionLog(storyPointsAdoptionLogPath(d.config.TownRoot))
 	}
 	// The extract read walks the town's .runtime/metrics, where the daily run
 	// writes one directory per day (internal/metrics/extract.go).
