@@ -221,6 +221,9 @@ const (
 	// no claim, since the archives are the host's, not the volume seed's
 	// (gt-a5u9ts).
 	TownStateBackupVolume = "town-state-backup"
+	// CloudReportsVolume and CloudReleasesVolume carry the host's cloud ledger directories (gt-9gcfj3).
+	CloudReportsVolume  = "cloud-reports"
+	CloudReleasesVolume = "cloud-releases"
 	// TempVolume is the pod's scratch volume: an emptyDir at TempPath carrying
 	// GOTMPDIR and TMPDIR.
 	TempVolume = "gotmp"
@@ -706,6 +709,11 @@ type Values struct {
 	// the path must be clean, absolute and no other mount's path; empty, the pod
 	// mounts nothing and the Deployment is the one before the volume.
 	TownStateBackupHostPath string
+	// CloudReportsHostPath is the host directory the cloud patrol writes its
+	// reports to, and CloudReleasesHostPath the release bot's ledger directory,
+	// each mounted read-only at the same path. Empty mounts nothing (gt-9gcfj3).
+	CloudReportsHostPath  string
+	CloudReleasesHostPath string
 	// StorageClass is the claims' storage class; DefaultStorageClass when
 	// empty.
 	StorageClass string
@@ -2013,6 +2021,14 @@ func volumes(v Values) ([]Volume, error) {
 	if v.TownStateBackupHostPath != "" {
 		vols = append(vols, townStateBackupVolume(v))
 	}
+	// The type is Directory, so a directory the operator has not created fails
+	// the pod rather than being created on the host (gt-9gcfj3).
+	if v.CloudReportsHostPath != "" {
+		vols = append(vols, Volume{Name: CloudReportsVolume, HostPath: &HostPathVolumeSource{Path: v.CloudReportsHostPath, Type: hostPathDirectory}})
+	}
+	if v.CloudReleasesHostPath != "" {
+		vols = append(vols, Volume{Name: CloudReleasesVolume, HostPath: &HostPathVolumeSource{Path: v.CloudReleasesHostPath, Type: hostPathDirectory}})
+	}
 	for i, file := range v.Secrets {
 		vol, err := secretVolume(file)
 		if err != nil {
@@ -2155,6 +2171,13 @@ func mounts(v Values) []VolumeMount {
 	// them, as its dolt-backup claim is read-only (gt-a5u9ts).
 	if v.TownStateBackupHostPath != "" {
 		m = append(m, VolumeMount{Name: TownStateBackupVolume, MountPath: v.TownStateBackupHostPath, ReadOnly: v.Rehearsal})
+	}
+	// The mount path is the host path itself, read-only in every render (gt-9gcfj3).
+	if v.CloudReportsHostPath != "" {
+		m = append(m, VolumeMount{Name: CloudReportsVolume, MountPath: v.CloudReportsHostPath, ReadOnly: true})
+	}
+	if v.CloudReleasesHostPath != "" {
+		m = append(m, VolumeMount{Name: CloudReleasesVolume, MountPath: v.CloudReleasesHostPath, ReadOnly: true})
 	}
 	for _, file := range v.Secrets {
 		m = append(m, VolumeMount{
@@ -2353,6 +2376,9 @@ func (v Values) validate() error {
 	if err := v.validateTownStateBackupHostPath(); err != nil {
 		return err
 	}
+	if err := v.validateCloudInputHostPaths(); err != nil {
+		return err
+	}
 	if err := v.validateSecrets(); err != nil {
 		return err
 	}
@@ -2496,6 +2522,34 @@ func (v Values) validateTownStateBackupHostPath() error {
 	for _, m := range mounts(v) {
 		if m.Name != TownStateBackupVolume && m.MountPath == path {
 			return fmt.Errorf("Values.TownStateBackupHostPath %q is the %s mount's path: name a host directory no other mount uses", path, m.Name)
+		}
+	}
+	return nil
+}
+
+// validateCloudInputHostPaths holds the two cloud directories to the rules
+// validateTownStateBackupHostPath states, each refusal naming its own field
+// (gt-9gcfj3).
+func (v Values) validateCloudInputHostPaths() error {
+	for _, c := range []struct {
+		field, path, volume string
+	}{
+		{"Values.CloudReportsHostPath", v.CloudReportsHostPath, CloudReportsVolume},
+		{"Values.CloudReleasesHostPath", v.CloudReleasesHostPath, CloudReleasesVolume},
+	} {
+		if c.path == "" {
+			continue
+		}
+		if !filepath.IsAbs(c.path) {
+			return fmt.Errorf("%s %q: want an absolute path, since the pod mounts the host directory", c.field, c.path)
+		}
+		if cleaned := filepath.Clean(c.path); cleaned != c.path {
+			return fmt.Errorf("%s %q: want the clean path %q, since the pod mounts the directory at that exact path", c.field, c.path, cleaned)
+		}
+		for _, m := range mounts(v) {
+			if m.Name != c.volume && m.MountPath == c.path {
+				return fmt.Errorf("%s %q is the %s mount's path: name a host directory no other mount uses", c.field, c.path, m.Name)
+			}
 		}
 	}
 	return nil
