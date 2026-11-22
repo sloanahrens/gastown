@@ -433,13 +433,11 @@ type RefLister interface {
 }
 
 // ReadGreenRefs returns the sha12 of every green/<sha12> ref of owner/repo from
-// one refs listing under green/. That call is the whole listing: Forgejo's refs
-// route takes no page or limit, and the client decodes the whole answer, so a
-// body cut short fails to read or decode and is an error, never a shorter list.
-// A ref named any other way is not a green ref and is not in the set. A listing
-// that fails is an error with no set returned, a 404 included: a wrong
-// repository name answers 404 too, and a set missing its refs would let the
-// planner delete a green image.
+// one refs listing under green/, and that call is the whole listing: Forgejo's
+// refs route takes no page or limit and the client decodes the whole answer, so
+// a body cut short is an error, never a shorter list. A ref named another way is
+// not in the set. A failed listing is an error with no set, a 404 included: a
+// wrong repository name answers 404 too, and a short set would delete a green image.
 func ReadGreenRefs(ctx context.Context, refs RefLister, owner, repo string) (map[string]bool, error) {
 	if refs == nil {
 		return nil, errors.New("no ref listing is wired for the green refs")

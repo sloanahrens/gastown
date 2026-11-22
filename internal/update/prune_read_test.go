@@ -704,24 +704,19 @@ func TestPruneReadGreenRefsReadsOnePrefixedCall(t *testing.T) {
 
 // TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer holds that the one answer is
 // read whole: 303 green refs, the count the pair check read in seven pages,
-// come back from a single GET with no page or limit and none is dropped at a
-// page boundary.
+// come back from one GET with no page or limit and none dropped at a boundary.
 func TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer(t *testing.T) {
 	t.Parallel()
 	const count = 303
-	var answer strings.Builder
-	answer.WriteString("[")
+	var parts []string
 	for i := 0; i < count; i++ {
-		if i > 0 {
-			answer.WriteString(",")
-		}
-		fmt.Fprintf(&answer, `{"ref":"refs/heads/green/%012x","object":{"sha":%q,"type":"commit"}}`, i, strings.Repeat("a", 40))
+		parts = append(parts, fmt.Sprintf(`{"ref":"refs/heads/green/%012x","object":{"sha":%q,"type":"commit"}}`, i, strings.Repeat("a", 40)))
 	}
-	answer.WriteString("]")
+	answer := "[" + strings.Join(parts, ",") + "]"
 	var sent []*http.Request
 	client := pruneForgejoClient(t, func(req *http.Request) (*http.Response, error) {
 		sent = append(sent, req)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(answer.String()))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(answer))}, nil
 	})
 	got, err := ReadGreenRefs(context.Background(), client, "gastown", "gastown")
 	if err != nil {
