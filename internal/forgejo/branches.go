@@ -39,3 +39,18 @@ func (c *Client) DeleteBranch(ctx context.Context, owner, repo, branch string) e
 	path := repoPath(owner, repo, "/branches/"+url.PathEscape(branch))
 	return c.call(ctx, http.MethodDelete, path, nil, nil, nil)
 }
+
+// GetBranch reads one branch's name and the commit it currently points at.
+//
+// The name travels as one escaped path segment, like DeleteBranch's. A branch
+// that is not on the repository answers as the package's *APIError with
+// StatusCode http.StatusNotFound, and a nil branch: the caller decides what a
+// missing branch means.
+func (c *Client) GetBranch(ctx context.Context, owner, repo, branch string) (*Branch, error) {
+	var out Branch
+	path := repoPath(owner, repo, "/branches/"+url.PathEscape(branch))
+	if err := c.call(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
