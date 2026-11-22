@@ -35,6 +35,7 @@ type gateRunFS interface {
 	Size(path string) (int64, error)
 	ReadFile(path string) ([]byte, error)
 	Remove(path string) error
+	Rename(from, to string) error
 }
 type osGateRunFS struct{}
 
@@ -50,6 +51,7 @@ func (osGateRunFS) Size(path string) (int64, error) {
 }
 func (osGateRunFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) } //nolint:gosec // G304: the path is under the town root
 func (osGateRunFS) Remove(path string) error             { return os.Remove(path) }
+func (osGateRunFS) Rename(from, to string) error         { return os.Rename(from, to) }
 
 func (osGateRunFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 func (osGateRunFS) OpenAppend(path string) (io.WriteCloser, error) {
@@ -64,23 +66,23 @@ func gateRunKey(r GateRun) string {
 	return r.TS.UTC().Format(time.RFC3339Nano) + "\x00" + r.Bead + "\x00" + r.SHA + "\x00" + r.RunID
 }
 
-// archivedGateRunKeys reads every gzip member of a month file and returns the
-// identities of its rows; a month file that does not exist has none.
-func archivedGateRunKeys(fsys gateRunFS, month string) (map[string]bool, error) {
+// readMonthFile returns the decoded rows of every gzip member of a month file,
+// and the identities of those rows; a month file that does not exist is empty.
+func readMonthFile(fsys gateRunFS, month string) ([]byte, map[string]bool, error) {
 	data, err := fsys.ReadFile(month)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("land: reading %s: %w", month, err)
+		return nil, nil, fmt.Errorf("land: reading %s: %w", month, err)
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("land: decoding %s: %w", month, err)
+		return nil, nil, fmt.Errorf("land: decoding %s: %w", month, err)
 	}
 	plain, err := io.ReadAll(zr)
 	if err != nil {
-		return nil, fmt.Errorf("land: decoding %s: %w", month, err)
+		return nil, nil, fmt.Errorf("land: decoding %s: %w", month, err)
 	}
 	keys := map[string]bool{}
 	for _, line := range bytes.Split(plain, []byte{'\n'}) {
@@ -89,7 +91,46 @@ func archivedGateRunKeys(fsys gateRunFS, month string) (map[string]bool, error) 
 			keys[gateRunKey(*r)] = true
 		}
 	}
-	return keys, nil
+	return plain, keys, nil
+}
+
+// writeMonthFile replaces month with a single gzip member holding plain. The
+// member is written to a temp file beside month and renamed over it, so a failed
+// write leaves the month file as it was.
+func writeMonthFile(fsys gateRunFS, month string, plain []byte) error {
+	tmp := month + ".tmp"
+	// OpenAppend adds to a file, so a partial temp file a failed write left
+	// behind goes first.
+	size, err := fsys.Size(tmp)
+	if err != nil {
+		return fmt.Errorf("land: sizing %s: %w", tmp, err)
+	}
+	if size > 0 {
+		if err := fsys.Remove(tmp); err != nil {
+			return fmt.Errorf("land: removing the partial %s: %w", tmp, err)
+		}
+	}
+	f, err := fsys.OpenAppend(tmp)
+	if err != nil {
+		return fmt.Errorf("land: opening %s: %w", tmp, err)
+	}
+	zw := gzip.NewWriter(f)
+	_, werr := zw.Write(plain)
+	werr = errors.Join(werr, zw.Close())
+	if werr == nil {
+		// Only an *os.File can be synced; a writer without Sync has nothing to flush.
+		if s, ok := f.(interface{ Sync() error }); ok {
+			werr = s.Sync()
+		}
+	}
+	werr = errors.Join(werr, f.Close())
+	if werr != nil {
+		return fmt.Errorf("land: writing %s: %w", tmp, werr)
+	}
+	if err := fsys.Rename(tmp, month); err != nil {
+		return fmt.Errorf("land: renaming %s over %s: %w", tmp, month, err)
+	}
+	return nil
 }
 
 // gateRunRejectsFile holds the lines of the gate-run log that did not decode.
@@ -109,9 +150,9 @@ func appendGateRunRejects(fsys gateRunFS, path string, lines []byte) error {
 }
 
 // rotateGateRuns moves the rows of the current log into one gzipped file per
-// month beside it, a month file that exists gaining a further gzip member, and
-// removes the current log only once every month file is written, so a failure
-// leaves the rows where they were. It assumes one writer, the daemon's recorder.
+// month beside it, a month file that exists being rewritten whole with its rows
+// kept, and removes the current log only once every month file is written, so a
+// failure leaves the rows where they were. It assumes one writer, the daemon's recorder.
 // A line that does not parse is not carried over: ReadGateRuns skips it already.
 func rotateGateRuns(fsys gateRunFS, path string) error {
 	data, err := fsys.ReadFile(path)
@@ -133,7 +174,7 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		month := filepath.Join(filepath.Dir(path), group.File)
 		// A rotation retried after a failed removal meets rows it already
 		// archived: only the rows the month file lacks are written.
-		have, err := archivedGateRunKeys(fsys, month)
+		archived, have, err := readMonthFile(fsys, month)
 		if err != nil {
 			return err
 		}
@@ -148,15 +189,10 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		if batch.Len() == 0 {
 			continue
 		}
-		f, err := fsys.OpenAppend(month)
-		if err != nil {
-			return fmt.Errorf("land: opening %s: %w", month, err)
-		}
-		zw := gzip.NewWriter(f)
-		_, werr := zw.Write(batch.Bytes())
-		werr = errors.Join(werr, zw.Close(), f.Close())
-		if werr != nil {
-			return fmt.Errorf("land: writing %s: %w", month, werr)
+		// The month file is rewritten whole, never appended to: a member that a
+		// failed write left half-written would make the whole file unreadable.
+		if err := writeMonthFile(fsys, month, append(archived, batch.Bytes()...)); err != nil {
+			return err
 		}
 	}
 	if len(rejects) > 0 {

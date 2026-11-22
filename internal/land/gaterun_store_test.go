@@ -218,14 +218,17 @@ func (f *fakeGateRunFS) Close() error                    { return f.closeErr }
 func (f *fakeGateRunFS) Size(string) (int64, error)      { return 0, nil }
 func (f *fakeGateRunFS) ReadFile(string) ([]byte, error) { return nil, nil }
 func (f *fakeGateRunFS) Remove(string) error             { return nil }
+func (f *fakeGateRunFS) Rename(string, string) error     { return nil }
 
 // memGateRunFS is an in-memory gateRunFS whose failures a row names by path part
 // (gt-t3upsa); a write or close that fails does so for the month file only.
 type memGateRunFS struct {
 	files                          map[string][]byte
 	sizeErr, readErr, removeErr    error
+	renameErr                      error
 	openFailOn, writeFailOn, clsOn string
 	opened                         []string // every path OpenAppend was asked for
+	halfWriteOn                    string   // a write to paths holding this stores half its bytes, then fails
 	readFailOn                     string   // a read error applies to paths holding this ("" = all)
 	err                            error
 }
@@ -250,6 +253,18 @@ func (m *memGateRunFS) Remove(p string) error {
 	}
 	return m.removeErr
 }
+func (m *memGateRunFS) Rename(from, to string) error {
+	if m.renameErr != nil {
+		return m.renameErr
+	}
+	data, ok := m.files[from]
+	if !ok {
+		return fs.ErrNotExist
+	}
+	m.files[to] = data
+	delete(m.files, from)
+	return nil
+}
 func (m *memGateRunFS) OpenAppend(p string) (io.WriteCloser, error) {
 	m.opened = append(m.opened, p)
 	if m.openFailOn != "" && strings.Contains(p, m.openFailOn) {
@@ -264,6 +279,11 @@ type memGateFile struct {
 }
 
 func (f *memGateFile) Write(b []byte) (int, error) {
+	if f.m.halfWriteOn != "" && strings.Contains(f.path, f.m.halfWriteOn) {
+		half := len(b) / 2
+		f.m.files[f.path] = append(f.m.files[f.path], b[:half]...)
+		return half, f.m.err
+	}
 	if f.m.writeFailOn != "" && strings.Contains(f.path, f.m.writeFailOn) {
 		return 0, f.m.err
 	}
@@ -350,6 +370,7 @@ func TestGateRunStoreRotationFailure(t *testing.T) {
 		{"opening the month file", func(m *memGateRunFS) { m.openFailOn, m.err = "2026-10", boom }},
 		{"flushing the gzip into the month file", func(m *memGateRunFS) { m.writeFailOn, m.err = "2026-10", boom }},
 		{"closing the month file", func(m *memGateRunFS) { m.clsOn, m.err = "2026-10", boom }},
+		{"renaming the month file over its old copy", func(m *memGateRunFS) { m.renameErr = boom }},
 		{"removing the rotated log", func(m *memGateRunFS) { m.removeErr = boom }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -767,5 +788,98 @@ func TestGateRunStoreACleanLogMakesNoRejectsFile(t *testing.T) {
 	}
 	if got := beadsIn(t, fsys.files[filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")], true); !slices.Equal(got, []string{"gt-clean"}) {
 		t.Errorf("month file = %v, want the clean row archived", got)
+	}
+}
+
+// TestGateRunStoreFailedMonthWriteIsRetried: a month write that fails halfway
+// leaves the month file byte-identical and the rows in the log; the retry writes
+// the rest, and every row reads back exactly once (gt-gdtzyb).
+func TestGateRunStoreFailedMonthWriteIsRetried(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	row := func(bead string) GateRun {
+		r := sampleGateRun(bead)
+		r.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+		return r
+	}
+	cur := gateRunsPath("/town")
+	month := filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")
+	fsys := newMemGateRunFS()
+	fsys.files[month] = gzipRows(t, row("gt-o1"))
+	fsys.files[cur] = []byte(mustLine(t, row("gt-o2")) + "\n")
+	before := slices.Clone(fsys.files[month])
+
+	fsys.halfWriteOn, fsys.err = "2026-10", boom
+	if err := appendGateRunLimit(fsys, "/town", row("gt-n1"), 1); !errors.Is(err, boom) {
+		t.Fatalf("append over a failed month write: error = %v, want it to wrap %v", err, boom)
+	}
+	if !bytes.Equal(fsys.files[month], before) {
+		t.Errorf("a failed month write changed the month file")
+	}
+	if got := beadsIn(t, fsys.files[cur], false); !slices.Equal(got, []string{"gt-o2", "gt-n1"}) {
+		t.Errorf("log after the failed month write = %v, want [gt-o2 gt-n1]", got)
+	}
+
+	fsys.halfWriteOn, fsys.err = "", nil
+	if err := appendGateRunLimit(fsys, "/town", row("gt-n2"), 1); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	got := beadsIn(t, fsys.files[month], true)
+	slices.Sort(got)
+	if want := []string{"gt-n1", "gt-o1", "gt-o2"}; !slices.Equal(got, want) {
+		t.Errorf("month file after the retry = %v, want each row once %v", got, want)
+	}
+	if got := beadsIn(t, fsys.files[cur], false); !slices.Equal(got, []string{"gt-n2"}) {
+		t.Errorf("log after the retry = %v, want only [gt-n2]", got)
+	}
+}
+
+// TestGateRunStoreWriteMonthFile: each step of writing a month file whole fails
+// into an error that names the step and leaves the month file as it was, and a
+// partial temp file a failed write left behind is replaced, not appended to
+// (gt-gdtzyb).
+func TestGateRunStoreWriteMonthFile(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	month := filepath.Join(filepath.Dir(gateRunsPath("/town")), "gate-runs-2026-10.jsonl.gz")
+	tmp := month + ".tmp"
+	row := sampleGateRun("gt-new")
+	row.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	plain := []byte(mustLine(t, row) + "\n")
+	for _, tc := range []struct {
+		name    string
+		setup   func(*memGateRunFS)
+		wantErr error
+		want    string // part of the error text: the step that failed
+	}{
+		{"sizing the temp file", func(m *memGateRunFS) { m.sizeErr = boom }, boom, "sizing"},
+		{"removing a partial temp file", func(m *memGateRunFS) { m.files[tmp], m.removeErr = []byte("half"), boom }, boom, "removing the partial"},
+		{"opening the temp file", func(m *memGateRunFS) { m.openFailOn, m.err = ".tmp", boom }, boom, "opening"},
+		{"renaming over the month file", func(m *memGateRunFS) { m.renameErr = boom }, boom, "renaming"},
+		{"a partial temp file is replaced, not appended to", func(m *memGateRunFS) { m.files[tmp] = []byte("half a member") }, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			fsys.files[month] = gzipRows(t, sampleGateRun("gt-old"))
+			before := slices.Clone(fsys.files[month])
+			tc.setup(fsys)
+			err := writeMonthFile(fsys, month, plain)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("writeMonthFile: %v", err)
+				}
+				if got := beadsIn(t, fsys.files[month], true); !slices.Equal(got, []string{"gt-new"}) {
+					t.Errorf("month file = %v, want the single new member [gt-new]", got)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to wrap %v and name %q", err, tc.wantErr, tc.want)
+			}
+			if !bytes.Equal(fsys.files[month], before) {
+				t.Errorf("a failed step changed the month file")
+			}
+		})
 	}
 }
