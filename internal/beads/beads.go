@@ -2069,6 +2069,17 @@ func callParent(callCtx, wrapperCtx context.Context) (context.Context, context.C
 // (gt-aibxst).
 var callNow = time.Now
 
+// bdSubprocessStarted reports whether the call got as far as launching bd: a
+// binary the OS could not find, or could not fork, ran no process.
+func bdSubprocessStarted(err error) bool {
+	var lookupErr *exec.Error
+	if errors.As(err, &lookupErr) {
+		return false
+	}
+	var startErr *os.PathError
+	return !(errors.As(err, &startErr) && startErr.Op == "fork/exec")
+}
+
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
 // attempt here keeps the --flat handling per invocation.
@@ -2102,12 +2113,18 @@ func (b *Beads) runBdOnce(callCtx context.Context, stdinData []byte, runEnv []st
 		stderr.Reset()
 		// Every routed call passes here, so counting here counts each started
 		// subprocess once and a --flat retry as the second one it is (gt-y3bzk).
-		censusRecord(argv)
+		censusRow := censusRecord(argv)
 		// The reading brackets the subprocess alone, so the call-time total is
 		// what bd cost and not the census or the buffers around it (gt-aibxst).
 		started := callNow()
 		out, errOut, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: b.withActor(runEnv), stdin: stdinData, args: argv})
-		CallTimeRecord(callNow().Sub(started))
+		elapsed := callNow().Sub(started)
+		CallTimeRecord(elapsed)
+		// A call the OS never launched spent no time in bd; the count above
+		// still records that bd was asked for.
+		if bdSubprocessStarted(err) {
+			censusRecordEnd(censusRow, elapsed)
+		}
 		stdout.Write(out)
 		stderr.Write(errOut)
 		return err
