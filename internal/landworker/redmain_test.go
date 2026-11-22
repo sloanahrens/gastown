@@ -391,3 +391,94 @@ func TestRedMainRerunThatCouldNotRunStillFilesTheOneThatFailed(t *testing.T) {
 		t.Fatalf("state %+v; want the red verdict recorded", st)
 	}
 }
+
+// gt-tghszi: a red run the daemon's stop cut short neither counts toward nor
+// resets the UNKNOWN streak, and a main state that cannot be read or saved is
+// logged and changes no verdict.
+func TestRedMainSupersededAndUnreadableState(t *testing.T) {
+	t.Parallel()
+	res := PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})}
+	t.Run("a superseded run between two UNKNOWNs neither counts nor resets", func(t *testing.T) {
+		t.Parallel()
+		h := newRedMainHarness(t)
+		store := &MemoryMainState{}
+		h.r.State = store
+		h.rerunErr[pkgA] = errors.New("slot wait timed out")
+		h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1"}, res)
+		// The daemon stops during the rerun: the context is cancelled and the
+		// killed rerun returns a non-zero exit with no error.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rerun := h.r.Rerun
+		h.r.Rerun = func(ctx context.Context, cmd, pkg string, pl PostLand) PostLandResult {
+			rerun(ctx, cmd, pkg, pl)
+			cancel()
+			return PostLandResult{ExitCode: -1}
+		}
+		h.r.Red(ctx, "make test-slow", PostLand{BeadID: "gt-l2", Commit: "c2"}, res)
+		h.r.Rerun = rerun
+		h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l3", Commit: "c3"}, res)
+		st, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.UnknownRuns != 2 || st.UnknownCommit != "c3" {
+			t.Fatalf("state %+v after UNKNOWN, superseded, UNKNOWN; want UnknownRuns 2 at c3", st)
+		}
+		if st.LastRun != "" || st.LastGreen != "" {
+			t.Fatalf("state %+v; want no verdict recorded for the superseded run", st)
+		}
+	})
+	t.Run("an unreadable or unsavable state changes no verdict", func(t *testing.T) {
+		t.Parallel()
+		readErr := errors.New("read main state: unexpected end of JSON input")
+		saveErr := errors.New("write main state: disk full")
+		for _, tc := range []struct {
+			name       string
+			store      MainStateStore
+			rerunErr   bool // the rerun could not run: UNKNOWN; otherwise it failed: RED
+			green      bool // a green verdict, which has no rerun
+			wantStatus string
+			wantLog    string
+			wantOpen   int
+		}{
+			{name: "unreadable on UNKNOWN", store: failingMainState{loadErr: readErr}, rerunErr: true,
+				wantStatus: "main UNKNOWN at c1 ", wantLog: "reading the main state"},
+			{name: "unsavable on UNKNOWN", store: failingMainState{saveErr: saveErr}, rerunErr: true,
+				wantStatus: "main UNKNOWN at c1 ", wantLog: "saving the main state"},
+			{name: "unreadable on RED", store: failingMainState{loadErr: readErr},
+				wantStatus: "main RED at c1 ", wantLog: "reading the main state", wantOpen: 1},
+			{name: "unsavable on GREEN", store: failingMainState{saveErr: saveErr}, green: true,
+				wantStatus: "main GREEN at c1 ", wantLog: "saving the main state"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				h := newRedMainHarness(t)
+				var logs []string
+				h.r.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+				h.r.State = tc.store
+				pl := PostLand{BeadID: "gt-l1", Commit: "c1"}
+				ctx := context.Background()
+				switch {
+				case tc.green:
+					h.r.Green(ctx, "make post-land", pl, PostLandResult{})
+				case tc.rerunErr:
+					h.rerunErr[pkgA] = errors.New("slot wait timed out")
+					h.r.Red(ctx, "make test-slow", pl, res)
+				default:
+					h.rerunExit[pkgA] = 1
+					h.r.Red(ctx, "make test-slow", pl, res)
+				}
+				if s := h.lastStatus(); !strings.HasPrefix(s, tc.wantStatus) {
+					t.Fatalf("status %q; want prefix %q", s, tc.wantStatus)
+				}
+				if all := strings.Join(logs, "\n"); !strings.Contains(all, tc.wantLog) {
+					t.Fatalf("log does not record the state error %q:\n%s", tc.wantLog, all)
+				}
+				if got := len(h.open(t)); got != tc.wantOpen {
+					t.Fatalf("open red-main beads %d; want %d", got, tc.wantOpen)
+				}
+			})
+		}
+	})
+}
