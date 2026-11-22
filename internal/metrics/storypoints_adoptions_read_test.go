@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -71,4 +73,67 @@ func TestReadStoryPointsAdoptions(t *testing.T) {
 			t.Errorf("err = %v, want an error naming %s", err, p)
 		}
 	})
+}
+
+// TestStoryPointsAutoRevertUnreadable: an adoptions log the weekly run cannot read, or whose
+// newest line does not parse, fails the run and names the file in the receipt. No revert runs,
+// the runtime weights and their version stay as they were, nothing is recorded as checked, and
+// no retrain runs after it (gt-xrhl7d).
+func TestStoryPointsAutoRevertUnreadable(t *testing.T) {
+	t.Parallel()
+	good := adoptTestWeights{boxes: 0.25, intercept: 3.5}.JSON()
+	worse := adoptTestWeights{boxes: 0.25, intercept: 2.9}.JSON()
+	adopted := fmt.Sprintf(`{"event":"adopted","at":%q,"version":"v1","previous":"weights.v1.json"}`+"\n",
+		autoRevertCheckAdoptedAt.Format(time.RFC3339))
+
+	for _, tc := range []struct {
+		name       string
+		unreadable bool // the log is a directory, so reading it fails
+		log        string
+	}{
+		{"an unreadable log", true, ""},
+		{"a newest line that does not parse", false, adopted + "{not json\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+			writeAt(t, adoptVersionPath(fix.town, 1), good)
+			writeAt(t, adoptRuntimePath(fix.town), worse)
+			logPath := storyPointsAdoptionsPath(fix.town)
+			if tc.unreadable {
+				if err := os.MkdirAll(logPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeAt(t, logPath, tc.log)
+			}
+			writeWeeklyLastRun(t, fix.town, weeklyNow.Add(-8*24*time.Hour))
+			var out strings.Builder
+			c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+
+			err := c.RunStoryPointsWeekly(context.Background())
+
+			if err == nil || !strings.Contains(err.Error(), logPath) {
+				t.Fatalf("err = %v, want the adoptions log %s named", err, logPath)
+			}
+			if !strings.Contains(out.String(), logPath) {
+				t.Errorf("receipt = %q, want the adoptions log named in it", out.String())
+			}
+			if got := readAt(t, adoptRuntimePath(fix.town)); got != worse {
+				t.Errorf("runtime weights = %q, want the adopted weights left in place", got)
+			}
+			if got := readAt(t, adoptVersionPath(fix.town, 1)); got != good {
+				t.Errorf("version 1 = %q, want it left in place", got)
+			}
+			if _, serr := os.Stat(adoptVersionPath(fix.town, 2)); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("version 2 stat = %v, want no version kept by a revert", serr)
+			}
+			if !tc.unreadable && readAt(t, logPath) != tc.log {
+				t.Errorf("log = %q, want it unchanged: no check recorded", readAt(t, logPath))
+			}
+			if _, serr := os.Stat(filepath.Join(fix.outDir, storyPointsProposedName)); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("proposal stat = %v, want no retrain after a failed check", serr)
+			}
+		})
+	}
 }
