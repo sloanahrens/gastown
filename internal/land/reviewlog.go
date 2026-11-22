@@ -439,6 +439,11 @@ type ReviewsFile struct {
 	// provoke.
 	replace func(path string, data []byte, mode os.FileMode) error
 
+	// beforeReplace, when set, runs once between the scrub's last read and the
+	// check that the log has not changed: a test appends to the log there, the
+	// window a second process's append would fall in.
+	beforeReplace func()
+
 	// lineLimit overrides maxCompactLineBytes; a test sets a small bound here
 	// rather than write a 16 MiB line to drive the oversize path. Zero means
 	// maxCompactLineBytes.

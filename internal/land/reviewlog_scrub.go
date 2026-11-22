@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -131,6 +132,20 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 	var buf bytes.Buffer
 	for _, line := range kept {
 		buf.Write(line)
+	}
+	if f.beforeReplace != nil {
+		f.beforeReplace()
+	}
+	// The mutex above serializes this process only: a landing worker in another
+	// process may have appended since the read, and the replace would drop that
+	// line. A log whose size or mtime moved is left as its writer left it.
+	now, serr := os.Stat(f.Path)
+	if serr != nil {
+		return ScrubResult{}, fmt.Errorf("reviews file %s: checking it before the replace: %w", f.Path, serr)
+	}
+	if now.Size() != info.Size() || !now.ModTime().Equal(info.ModTime()) {
+		return ScrubResult{}, fmt.Errorf("reviews file %s changed while the scrub ran (read %d bytes at %s, now %d bytes at %s); nothing was replaced, run the scrub again",
+			f.Path, info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano), now.Size(), now.ModTime().UTC().Format(time.RFC3339Nano))
 	}
 	replace := f.replace
 	if replace == nil {
