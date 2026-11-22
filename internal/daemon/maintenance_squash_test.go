@@ -968,6 +968,34 @@ func TestSquashRunInFlightRefusesAGCCycle(t *testing.T) {
 	}
 }
 
+// TestSquashRunWaitsForADoltTask: a Dolt task holds doltMaintMu's read side, so
+// no run starts, the gc flag is released and the check retries; without the take
+// the run starts and the run count fails.
+func TestSquashRunWaitsForADoltTask(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var calls int
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+	defer d.doltMaintMu.RUnlock()
+
+	d.runScheduledMaintenance()
+
+	if !strings.Contains(logs.String(), "squash: gt: a daemon Dolt task or the gc holds the Dolt maintenance mutex — the run waits for the next check") {
+		t.Errorf("the held mutex was not named as the reason the run waits: %q", logs.String())
+	}
+	if calls != 0 {
+		t.Errorf("the check started %d run(s) while a Dolt task held the mutex", calls)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a run deferred by a Dolt task was not due again after the retry delay")
+	}
+	if d.maintenanceGCRunning.Load() {
+		t.Error("the check left the maintenance gc flag it took held")
+	}
+}
+
 // TestSquashArchiveThroughDateIsTheArchivesRecord is the bead's fourth box: the
 // through-date is read from the archive's own record, not taken from the cut or
 // the clock. The pass writes three commits, and the check's line and the state
