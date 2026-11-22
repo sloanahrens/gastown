@@ -580,6 +580,43 @@ func storyPointsReadWeights(env Env, path string) (storypoints.Weights, error) {
 	return w, nil
 }
 
+// firstAdoptionRevertedUnrecorded reports whether the missing runtime file of a first
+// adoption is its revert's doing: the revert keeps the adopted weights as the next
+// numbered version and removes the runtime file, so the newest version file must be
+// there and its parsed version label must match the log's (the label is all that is
+// compared: not the weights' bytes, which the log does not hold).
+// Anything else is the missing file it is: false, and the caller's error stands. A
+// version file that is there and does not load is an error naming it.
+func (c Commands) firstAdoptionRevertedUnrecorded(env Env, runtimePath string, adopted *storyPointsAdoption) (bool, error) {
+	dir := filepath.Dir(runtimePath)
+	stem := strings.TrimSuffix(filepath.Base(runtimePath), ".json")
+	numbers, err := storyPointsVersions(c.storyPointsStore.withHost(), dir, stem)
+	if err != nil {
+		return false, fmt.Errorf("%s is missing and the version files cannot be listed, so the revert it may have left cannot be recognized: %w", runtimePath, err)
+	}
+	if len(numbers) == 0 {
+		return false, nil
+	}
+	kept, err := storyPointsReadWeights(env, filepath.Join(dir, storyPointsVersionName(stem, numbers[0])))
+	if err != nil {
+		return false, fmt.Errorf("%s is missing and the newest version file does not load, so the revert it may have left cannot be recognized: %w", runtimePath, err)
+	}
+	return kept.Version() == adopted.Version, nil
+}
+
+// recordRevertFound records the check of an adoption whose revert happened and whose
+// check line did not get written, as reverted, and says so: the next weekly run then
+// finds the adoption checked and goes on to the retrain (gt-skeyaw).
+func (c Commands) recordRevertFound(env Env, logPath string, adopted *storyPointsAdoption, now time.Time, inferred string) error {
+	at := adopted.At
+	check := storyPointsAdoption{Event: "checked", At: now, Adopted: &at, Outcome: "reverted",
+		Reason: "recorded after the revert: the revert had happened and its check line had not been written (" + inferred + ")"}
+	if err := c.appendStoryPointsAdoption(env, logPath, check); err != nil {
+		return fmt.Errorf("the adoption of %s was found reverted, but the check was not recorded: %w", adopted.Version, err)
+	}
+	return c.receipt("story points weekly: the adoption of %s was found reverted, its check line never written: recorded as reverted", adopted.Version)
+}
+
 // checkStoryPointsAdoption is the week-after check of the newest adoption. Once that
 // adoption is storyPointsCheckAge old and has no check, it judges the weights it
 // adopted against the ones they replaced on the landings since
@@ -626,6 +663,16 @@ func (c Commands) checkStoryPointsAdoption(ctx context.Context, real RealTown, e
 	runtimePath := storypoints.RuntimeWeightsPath(real.Town)
 	adoptedWeights, err := storyPointsReadWeights(env, runtimePath)
 	if err != nil {
+		// A first adoption's revert removes the runtime file: when that is the file
+		// missing and the revert's own version file is there, the revert happened
+		// and its check line was not written (gt-skeyaw).
+		if adopted.Previous == "" && errors.Is(err, fs.ErrNotExist) {
+			if reverted, rerr := c.firstAdoptionRevertedUnrecorded(env, runtimePath, adopted); rerr != nil {
+				return rerr
+			} else if reverted {
+				return c.recordRevertFound(env, logPath, adopted, now, "inferred: the runtime weights file is missing and the newest version file carries the adopted version")
+			}
+		}
 		return err
 	}
 	previous, previousName := storypoints.Default(), "the checked-in weights"
@@ -638,6 +685,12 @@ func (c Commands) checkStoryPointsAdoption(ctx context.Context, real RealTown, e
 		}
 		previousName = adopted.Previous
 		if previous, err = storyPointsReadWeights(env, filepath.Join(filepath.Dir(runtimePath), adopted.Previous)); err != nil {
+			// A later adoption's revert renames the version file it replaced over the
+			// runtime file, so the version file the log names is gone and the runtime
+			// file, which loaded, holds the restored weights (gt-skeyaw).
+			if errors.Is(err, fs.ErrNotExist) {
+				return c.recordRevertFound(env, logPath, adopted, now, "inferred: the version file "+adopted.Previous+" is missing and the runtime weights file loads")
+			}
 			return err
 		}
 	}
