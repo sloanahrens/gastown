@@ -86,6 +86,68 @@ func TestBeadsConfigDriftCheckSkipsNestedKeys(t *testing.T) {
 	}
 }
 
+// TestBeadsConfigDriftCheckSkipsPerTownKeys: issue-prefix, prefix, sync.remote
+// and dolt.* are each store's own setting, so a tracked value that differs from
+// the live store is not drift.
+func TestBeadsConfigDriftCheckSkipsPerTownKeys(t *testing.T) {
+	t.Parallel()
+	town, gf, bd, beadsDir := trackedConfigRig(t,
+		"issue-prefix: ap\nprefix: ap\nsync.remote: origin\ndolt.port: \"3307\"\ndolt.host: 127.0.0.1\n")
+	db := bd.db(filepath.Dir(beadsDir))
+	for key, value := range map[string]string{
+		"issue-prefix": "zz", "prefix": "zz", "sync.remote": "upstream", "dolt.port": "3308", "dolt.host": "10.0.0.1",
+	} {
+		if err := db.ConfigSet(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := NewBeadsConfigDriftCheck().Run(withGit(bd.ctx(town), gf))
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, want ok: %+v", res.Status, res)
+	}
+}
+
+// TestBeadsConfigDriftCheckDoesNotReadPerTownKeys: a per-town key is not read
+// from the live store at all, so a read that would fail is not an error.
+func TestBeadsConfigDriftCheckDoesNotReadPerTownKeys(t *testing.T) {
+	t.Parallel()
+	town, gf, bd, beadsDir := trackedConfigRig(t, "issue-prefix: ap\nsync.remote: origin\ndolt.port: \"3307\"\n")
+	db := bd.db(filepath.Dir(beadsDir))
+	for _, key := range []string{"issue-prefix", "sync.remote", "dolt.port"} {
+		db.FailWith("config get "+key, errors.New("must not be read"))
+	}
+
+	res := NewBeadsConfigDriftCheck().Run(withGit(bd.ctx(town), gf))
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, want ok: %+v", res.Status, res)
+	}
+}
+
+// TestBeadsConfigDriftCheckComparesNearMissKeys: a key only similar to a
+// per-town key is an ordinary setting and still warns when it differs.
+func TestBeadsConfigDriftCheckComparesNearMissKeys(t *testing.T) {
+	t.Parallel()
+	town, gf, bd, beadsDir := trackedConfigRig(t, "dolt-mode: strict\nprefixes: ap\n")
+	db := bd.db(filepath.Dir(beadsDir))
+	for key, value := range map[string]string{"dolt-mode": "lax", "prefixes": "zz"} {
+		if err := db.ConfigSet(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := NewBeadsConfigDriftCheck().Run(withGit(bd.ctx(town), gf))
+	if res.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning: %+v", res.Status, res)
+	}
+	joined := strings.Join(res.Details, "\n")
+	for _, want := range []string{"dolt-mode", "prefixes"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("details = %q, want %q named", joined, want)
+		}
+	}
+}
+
 // TestBeadsConfigDriftCheckRegistryUnreadable: no rigs registry is an error,
 // never a town with no rigs to compare.
 func TestBeadsConfigDriftCheckRegistryUnreadable(t *testing.T) {
