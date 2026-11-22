@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The census counts the bd subprocesses this package starts, by verb and by
@@ -26,11 +27,13 @@ const (
 )
 
 // CensusRow is how often one verb was started from one calling function since
-// the last reset.
+// the last reset, and the wall time those calls spent in bd.
 type CensusRow struct {
 	Verb   string
 	Caller string
 	Count  int
+	// Ms is the wall milliseconds the counted subprocesses took, summed.
+	Ms int64
 }
 
 // censusKey is a struct rather than a joined string so a count lookup
@@ -39,18 +42,47 @@ type censusKey struct {
 	verb, caller string
 }
 
+// censusStat is a row's count and time while it accumulates: the count is
+// taken as the subprocess starts, the time as it ends.
+type censusStat struct {
+	count int
+	ms    int64
+}
+
 var (
 	censusMu     sync.Mutex
-	censusCounts = make(map[censusKey]int)
+	censusCounts = make(map[censusKey]censusStat)
 	censusTotal  int
 )
 
-// censusRecord counts one bd subprocess about to start with args.
-func censusRecord(args []string) {
+// censusRecord counts one bd subprocess about to start with args and returns
+// the row key censusRecordEnd adds its time under.
+func censusRecord(args []string) censusKey {
 	verb, caller := censusVerb(args), censusCaller()
+	key := censusKey{verb: verb, caller: caller}
 	censusMu.Lock()
-	censusCounts[censusKey{verb: verb, caller: caller}]++
+	stat := censusCounts[key]
+	stat.count++
+	censusCounts[key] = stat
 	censusTotal++
+	censusMu.Unlock()
+	return key
+}
+
+// censusRecordEnd adds d, the wall time the counted subprocess spent, to the
+// row censusRecord returned. A snapshot taken in between already reported the
+// call's count and cleared its row, so the time is dropped rather than carried
+// into a row that would name time for no calls.
+func censusRecordEnd(key censusKey, d time.Duration) {
+	ms := d.Milliseconds()
+	if ms <= 0 {
+		return
+	}
+	censusMu.Lock()
+	if stat, ok := censusCounts[key]; ok {
+		stat.ms += ms
+		censusCounts[key] = stat
+	}
 	censusMu.Unlock()
 }
 
@@ -59,8 +91,8 @@ func censusRecord(args []string) {
 func CensusSnapshotAndReset() []CensusRow {
 	censusMu.Lock()
 	rows := make([]CensusRow, 0, len(censusCounts))
-	for key, count := range censusCounts {
-		rows = append(rows, CensusRow{Verb: key.verb, Caller: key.caller, Count: count})
+	for key, stat := range censusCounts {
+		rows = append(rows, CensusRow{Verb: key.verb, Caller: key.caller, Count: stat.count, Ms: stat.ms})
 	}
 	clear(censusCounts)
 	censusTotal = 0
