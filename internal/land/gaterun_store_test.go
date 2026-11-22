@@ -1266,3 +1266,82 @@ func TestGateRunStoreRetentionClockBound(t *testing.T) {
 		})
 	}
 }
+
+// TestGateRunStoreRetentionClockEdges: the edges of the retention clock bound
+// (gt-eixoz3): a clock 399 days ahead of the newest row still prunes; a log with no
+// decodable row has no newest ts and prunes; in the refusing case the append still
+// writes its row, the old rows reach their month file and the old log is gone; and a
+// gate that was merely quiet is refused once: the next rotation at the same clock
+// prunes, since its newest row is the one the refused append wrote.
+func TestGateRunStoreRetentionClockEdges(t *testing.T) {
+	t.Parallel()
+	cur := gateRunsPath("/town")
+	dir := filepath.Dir(cur)
+	newest := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	file := func(month string) string { return filepath.Join(dir, "gate-runs-"+month+".jsonl.gz") }
+	seed := func(t *testing.T, log string) *memGateRunFS {
+		fsys := newMemGateRunFS()
+		for _, m := range []string{"2026-05", "2026-06"} {
+			r := sampleGateRun("gt-" + m)
+			r.TS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			fsys.files[file(m)] = gzipRows(t, r)
+		}
+		fsys.files[cur] = []byte(log)
+		return fsys
+	}
+	oldRow := func(t *testing.T) string {
+		r := sampleGateRun("gt-log")
+		r.TS = newest
+		return mustLine(t, r) + "\n"
+	}
+	newRow := func(now time.Time) GateRun {
+		r := sampleGateRun("gt-new")
+		r.TS = now
+		return r
+	}
+	expiredGone := func(t *testing.T, fsys *memGateRunFS) {
+		t.Helper()
+		for _, m := range []string{"2026-05", "2026-06"} {
+			if _, ok := fsys.files[file(m)]; ok {
+				t.Errorf("gate-runs-%s was not deleted", m)
+			}
+		}
+	}
+
+	t.Run("a clock 399 days ahead still prunes", func(t *testing.T) {
+		t.Parallel()
+		fsys, now := seed(t, oldRow(t)), newest.Add(399*24*time.Hour)
+		if err := appendGateRunAt(fsys, "/town", newRow(now), 1, now, io.Discard); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		expiredGone(t, fsys)
+	})
+
+	t.Run("a log with no decodable row has no newest ts and prunes", func(t *testing.T) {
+		t.Parallel()
+		fsys, now := seed(t, "not json\ntorn {\n"), newest.AddDate(5, 0, 0)
+		if err := appendGateRunAt(fsys, "/town", newRow(now), 1, now, io.Discard); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		expiredGone(t, fsys)
+	})
+
+	t.Run("a refusal still appends the row, archives the old rows and removes the old log; a second rotation prunes", func(t *testing.T) {
+		t.Parallel()
+		fsys, now := seed(t, oldRow(t)), newest.AddDate(3, 0, 0)
+		if err := appendGateRunAt(fsys, "/town", newRow(now), 1, now, io.Discard); err == nil {
+			t.Fatal("append at a clock three years ahead returned no error")
+		}
+		if got := beadsIn(t, fsys.files[cur], false); !slices.Equal(got, []string{"gt-new"}) {
+			t.Errorf("log after the refusal = %v, want only the new row (the old log is gone)", got)
+		}
+		if got := beadsIn(t, fsys.files[file("2026-11")], true); !slices.Equal(got, []string{"gt-log"}) {
+			t.Errorf("month file of the old rows = %v, want [gt-log]", got)
+		}
+		later := now.Add(time.Hour)
+		if err := appendGateRunAt(fsys, "/town", newRow(later), 1, later, io.Discard); err != nil {
+			t.Fatalf("the quiet gate's second rotation: %v", err)
+		}
+		expiredGone(t, fsys)
+	})
+}
