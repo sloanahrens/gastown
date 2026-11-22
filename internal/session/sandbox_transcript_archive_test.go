@@ -410,3 +410,31 @@ func TestTranscriptArchiveAPartialItCannotClearFailsTheMove(t *testing.T) {
 		t.Errorf("the source left the copy: %v", serr)
 	}
 }
+
+// TestTranscriptArchiveANameCreatedBeforeTheLinkIsAlreadyArchived: a final name
+// that appears between the exists check and the link is not overwritten; the move
+// reports it as already archived, leaves no partial and keeps the source
+// (gt-1xoiib).
+func TestTranscriptArchiveANameCreatedBeforeTheLinkIsAlreadyArchived(t *testing.T) {
+	t.Parallel()
+	root, own, dest, _, archiveDir := archiveFixture(t)
+	err := moveConfinedWith(root, "ses-1.jsonl", dest, func(step string, _ *os.File) error {
+		if step == "link" {
+			return os.WriteFile(dest, []byte("raced"), 0o600)
+		}
+		return nil
+	})
+	if !errors.Is(err, errAlreadyArchived) {
+		t.Fatalf("err = %v, want errAlreadyArchived", err)
+	}
+	if got, rerr := os.ReadFile(dest); rerr != nil || string(got) != "raced" {
+		t.Errorf("the archived file = %q, %v; want the one that appeared first", got, rerr)
+	}
+	if _, serr := os.Stat(dest + ".partial"); !errors.Is(serr, fs.ErrNotExist) {
+		t.Errorf("a partial is left: %v", serr)
+	}
+	if _, serr := os.Stat(own); serr != nil {
+		t.Errorf("the source left the copy: %v", serr)
+	}
+	_ = archiveDir
+}

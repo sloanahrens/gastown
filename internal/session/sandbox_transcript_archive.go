@@ -24,6 +24,11 @@ func SandboxTranscriptArchiveDir(townRoot, rig, polecat string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "usage", "transcript-archive", rig, polecat)
 }
 
+// errAlreadyArchived is what a move returns for a name the archive already
+// holds. It is its own value because fs.ErrExist also matches ENOTEMPTY, which a
+// failed removal of a partial returns and must not read as "already archived".
+var errAlreadyArchived = errors.New("already archived")
+
 // archiveCopiedTranscripts moves every regular .jsonl file under copyDir, a
 // subagent folder's included, into archiveDir, flat under its own base name and
 // keeping its modification time. The copy comes from an untrusted sandbox, so
@@ -64,7 +69,7 @@ func archiveCopiedTranscriptsWith(copyDir, archiveDir string, move func(root *os
 		switch {
 		case err == nil:
 			moved[name] = rel
-		case !errors.Is(err, fs.ErrExist):
+		case !errors.Is(err, errAlreadyArchived):
 			errs = append(errs, err)
 		}
 	}
@@ -86,7 +91,7 @@ func moveConfined(root *os.Root, rel, dest string) error {
 // nothing. The leaf is opened non-blocking and the opened handle is checked to
 // be a regular file and to be the file the name still is, so a leaf swapped for a FIFO after the Lstat cannot hang
 // the seat end. The bytes are written to dest+".partial" (a name nothing lists),
-// the mtime is set, and the file is linked to dest, which fails with fs.ErrExist
+// the mtime is set, and the file is linked to dest, which fails with errAlreadyArchived
 // when dest exists: a name already archived reads as "already archived", and a
 // crash mid-copy leaves a .partial the next run clears, never a truncated dest.
 // Whatever fails, the source stays in the copy and the partial is removed; a
@@ -112,7 +117,7 @@ func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string, sr
 		}},
 		{"exists", func() error {
 			if _, err := os.Lstat(dest); err == nil {
-				return fs.ErrExist
+				return errAlreadyArchived
 			}
 			return nil
 		}},
@@ -151,7 +156,13 @@ func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string, sr
 		{"copy", func() error { _, err := io.Copy(out, src); return err }},
 		{"close", func() error { err := out.Close(); out = nil; return err }},
 		{"chtimes", func() error { return os.Chtimes(partial, mod, mod) }},
-		{"link", func() error { return os.Link(partial, dest) }},
+		{"link", func() error {
+			err := os.Link(partial, dest)
+			if errors.Is(err, syscall.EEXIST) {
+				return errAlreadyArchived
+			}
+			return err
+		}},
 		{"unpartial", func() error { return os.Remove(partial) }},
 		{"remove", func() error { return root.Remove(rel) }},
 	}
@@ -173,7 +184,7 @@ func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string, sr
 		}
 		if err != nil {
 			_ = os.Remove(partial)
-			if errors.Is(err, fs.ErrExist) {
+			if errors.Is(err, errAlreadyArchived) {
 				return err
 			}
 			return fmt.Errorf("moving %s into the transcript archive (%s): %w", rel, st.name, err)
