@@ -119,6 +119,36 @@ func TestSpecLintEvidenceFence(t *testing.T) {
 	}
 }
 
+// A bead created before EvidenceRequiredFrom is grandfathered: the rule did not
+// exist when it was filed, so it is not refused. A bead created at or after the
+// cutoff is checked, and so is a bead whose CreatedAt is empty or unparseable
+// (both parse to the zero time, which is not before the cutoff) (gt-qhrsa4).
+func TestSpecLintEvidenceGrandfather(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		createdAt string
+		blocked   bool
+	}{
+		{"before cutoff", "2026-11-19T23:59:59Z", false},
+		{"at cutoff", "2026-11-20T00:00:00Z", true},
+		{"after cutoff", "2026-11-20T00:00:01Z", true},
+		{"empty CreatedAt", "", true},
+		{"unparseable CreatedAt", "not a time", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := evidenceBoxSpec("zero findings on internal/specdispatch/testdata/ok.yaml")
+			s.CreatedAt = tc.createdAt
+			r, blocked := evidenceRefusal(s, Sections(s.Description))
+			if blocked != tc.blocked {
+				t.Fatalf("evidenceRefusal(CreatedAt %q) blocked = %v (%q), want %v", tc.createdAt, blocked, r.Reason, tc.blocked)
+			}
+		})
+	}
+}
+
 // A usable Evidence section suppresses the refusal; a section that shows no
 // command does not.
 func TestSpecLintEvidenceSection(t *testing.T) {
