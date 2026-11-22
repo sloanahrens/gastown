@@ -14,19 +14,29 @@ import (
 // reads as "not approved yet" rather than as a refused approval.
 var ErrNoApproval = errors.New("clusterapproval: there is no approval record")
 
+// recordDirMode and recordFileMode are the exact modes the reader accepts. An
+// exact 0640 also refuses a symlink or device, which carry type bits.
+const (
+	recordDirMode  = fs.ModeDir | 0o750
+	recordFileMode = fs.FileMode(0o640)
+)
+
 // OpenRecord opens the approval record <dir>/<id>.json through a directory
-// handle it opens and a file it opens inside that handle, so the caller reads
-// the bytes the descriptor returns rather than the ones a path named a moment
-// earlier. The caller closes the returned file. It checks only that id names one
-// file; the owner, group, mode and symlink refusals on the opened handles are
-// gt-0grfdc's, so until that lands it trusts the directory it opened. A refusal
-// names the path and never a byte of a record. A missing directory or record is
-// ErrNoApproval; any other open failure is not.
-func OpenRecord(fsys deployercred.ReadFS, dir, id string) (deployercred.ReadFile, error) {
+// handle and a file opened inside it, so the caller reads the bytes the
+// descriptor returns. Before any read it refuses, naming the path and the check
+// and never a byte of the record: a symlink on dir or a parent; an opened
+// directory or record whose mode is not exactly recordDirMode or recordFileMode,
+// or whose owner or group is not ownerUID or groupGID. The checks are on the
+// handles read, so a swap after the Lstat cannot change the bytes. A missing
+// directory or record is ErrNoApproval; any other open failure is not.
+func OpenRecord(fsys deployercred.ReadFS, ownerUID, groupGID int, dir, id string) (deployercred.ReadFile, error) {
 	if !isRecordID(id) {
 		return nil, fmt.Errorf("the approval id %q is not twelve lower-case hex characters", id)
 	}
 	target := filepath.Join(dir, id+".json")
+	if err := refuseSymlinkChain(fsys, dir); err != nil {
+		return nil, err
+	}
 	root, err := fsys.OpenDir(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -35,6 +45,13 @@ func OpenRecord(fsys deployercred.ReadFS, dir, id string) (deployercred.ReadFile
 		return nil, fmt.Errorf("could not open the approval directory %s: %w", dir, err)
 	}
 	defer func() { _ = root.Close() }() // read-only: a close error cannot change the record
+	dirInfo, err := root.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("could not read the approval directory %s: %w", dir, err)
+	}
+	if err := checkOpened("the approval directory "+dir, dirInfo, recordDirMode, ownerUID, groupGID); err != nil {
+		return nil, err
+	}
 	f, err := root.Open(id + ".json")
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -42,7 +59,56 @@ func OpenRecord(fsys deployercred.ReadFS, dir, id string) (deployercred.ReadFile
 	case err != nil:
 		return nil, fmt.Errorf("could not open the approval record %s: %w", target, err)
 	}
+	fileInfo, err := f.Stat()
+	if err == nil {
+		err = checkOpened("the approval record "+target, fileInfo, recordFileMode, ownerUID, groupGID)
+	}
+	if err != nil {
+		_ = f.Close() // refused before any read: a close error changes nothing
+		return nil, err
+	}
 	return f, nil
+}
+
+// refuseSymlinkChain refuses a symlink at dir or at any parent above it: a
+// symlink anywhere on the way would move the read to a place nobody verified. A
+// missing component is not refused here, since OpenDir reports a missing
+// directory as ErrNoApproval. A component that cannot be read is an error, never
+// read as absent.
+func refuseSymlinkChain(fsys deployercred.ReadFS, dir string) error {
+	for p := dir; ; p = filepath.Dir(p) {
+		info, err := fsys.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// Keep climbing: the parents of a missing component still need the check.
+		case err != nil:
+			return fmt.Errorf("could not read %s on the way to the approval directory %s: %w", p, dir, err)
+		case info.Mode&fs.ModeSymlink != 0:
+			return fmt.Errorf("%s is a symlink, and the approval record is read only through real directories", p)
+		}
+		if parent := filepath.Dir(p); parent == p {
+			return nil
+		}
+	}
+}
+
+// checkOpened refuses an opened handle whose mode is not want exactly, or whose
+// owner or group is not ownerUID or groupGID. An owner or group the platform does
+// not report (-1) is refused, never matched as uid 0 or gid 0.
+func checkOpened(what string, info deployercred.Info, want fs.FileMode, ownerUID, groupGID int) error {
+	switch {
+	case info.Mode != want:
+		return fmt.Errorf("%s has mode %v, not %v", what, info.Mode, want)
+	case info.Owner < 0:
+		return fmt.Errorf("the owner of %s is not reported on this platform", what)
+	case info.Owner != ownerUID:
+		return fmt.Errorf("%s is owned by uid %d, not %d", what, info.Owner, ownerUID)
+	case info.Group < 0:
+		return fmt.Errorf("the group of %s is not reported on this platform", what)
+	case info.Group != groupGID:
+		return fmt.Errorf("%s is in group %d, not %d", what, info.Group, groupGID)
+	}
+	return nil
 }
 
 // isRecordID reports whether id is twelve lower-case hex characters, the
@@ -66,12 +132,12 @@ func isRecordID(id string) bool {
 const maxRecordBytes = 4096
 
 // ReadRecord reads and parses the approval record OpenRecord opens. ownerUID
-// and groupGID are the ids bead gt-0grfdc compares the opened handles against;
-// this reader does not use them yet. A refusal names the path and the check and
-// never a byte of the record: a record that does not parse is reported without
-// ParseRecord's error, which can carry a key or a value from it.
+// and groupGID are the owner and group the opened directory and record must
+// both hold. A refusal names the path and the check and never a byte of the
+// record: a record that does not parse is reported without ParseRecord's error,
+// which can carry a key or a value from it.
 func ReadRecord(fsys deployercred.ReadFS, ownerUID, groupGID int, dir, id string) (Record, error) {
-	f, err := OpenRecord(fsys, dir, id)
+	f, err := OpenRecord(fsys, ownerUID, groupGID, dir, id)
 	if err != nil {
 		return Record{}, err
 	}
