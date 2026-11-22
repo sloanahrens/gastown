@@ -261,6 +261,20 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	// abandons on its timeout cannot interleave with the next landing's log
 	// (gt-g97vlb).
 	defer func() {
+		// The pass's skipped findings are written once, here, after both the
+		// landing's own and the queue's were asked. A failed append is a line and is
+		// never retried: a later chunk can fail after earlier ones are on disk
+		// (gt-vl0bl6).
+		// A nil Reviews is a Lander with no reviews log: the daemon always sets it
+		// (landing_worker.go, landings.go), and every other use of it in the feed
+		// is nil-guarded the same way (queuedForRig, the queue writes), so there is
+		// nowhere to record and no line to log.
+		if got := skips.skipped(); len(got) > 0 && l.Reviews != nil {
+			rec := FollowupSkipsRecord{BeadID: w.BeadID, Rig: w.Rig, At: l.now().UTC(), Findings: got}
+			if err := l.Reviews.AppendSkipsChunked(rec); err != nil {
+				lines = append(lines, fmt.Sprintf("could not record %s for %s in the reviews log (%v); the landing is unaffected and the write is not retried", findingsPhrase(len(got)), w.BeadID, err))
+			}
+		}
 		if skips.failure != "" {
 			lines = append(lines, skips.failure)
 		}
