@@ -1,7 +1,10 @@
 package land
 
 import (
+	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -34,6 +37,14 @@ func callWalksParent(call *ast.CallExpr) bool {
 		return false
 	}
 	return strings.HasPrefix(lit.Value[1:], "..")
+}
+
+func parseGoFile(name string, src []byte) (*ast.File, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	return f, nil
 }
 
 // isRunTest reports whether go test runs fn as a test: a top-level function
