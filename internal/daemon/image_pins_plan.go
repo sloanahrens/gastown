@@ -7,12 +7,12 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/townhealth"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -49,10 +49,10 @@ const (
 	// planner raises. Each names its pin in ImagePinItem.Pin.
 	imagePinsStaleKey      = "image-pins-stale"
 	imagePinsUnreadableKey = "image-pins-unreadable"
-	// imagePinsErrLineMax is how many characters of a failed read's first line
-	// the unreadable item carries: the command and git's first stderr line fit,
-	// and a long line cannot push the item past one line (gt-r8v4wu).
-	imagePinsErrLineMax = 160
+	// imagePinsErrMax is how many characters of a failed read's error the
+	// unreadable item carries, so a long error a command prints cannot push the
+	// item past one line (gt-s0x1bk).
+	imagePinsErrMax = 300
 )
 
 // ImagePinState is one image pin as the planner sees it: the pin file's name
@@ -127,7 +127,7 @@ type ImagePinPlan struct {
 // also files once its commit is imagePinsFileAge older than the tip, whatever
 // its count, and a pin whose own commit lacks the samples build files at once.
 // A pin whose read failed never files and is named in Unreadable,
-// and raises image-pins-unreadable naming the first line of its read error:
+// and raises image-pins-unreadable carrying its read error:
 // its distance is unknown, so it is never treated as fresh. A pin whose age read failed keeps its count rules and
 // raises image-pins-unreadable naming its unreadable age. A pin
 // imagePinsStaleBehind commits behind or more raises image-pins-stale. These
@@ -209,19 +209,21 @@ func pinBehindPhrase(pin ImagePinState) string {
 }
 
 // unreadableSummary is the image-pins-unreadable item for a pin whose read
-// failed: the sentence that says the pin is not counted as fresh, then the first
-// line of the read error, cut to imagePinsErrLineMax characters, so the item
-// says why the read failed. An error with no text adds nothing.
+// failed: the read error's text, its line breaks turned to spaces and cut to
+// imagePinsErrMax characters, inside the sentence that says the pin is not
+// counted as fresh and no refresh bead is filed for it. The item is one line
+// because a multi-line bd floor guard's error is the case it exists for; an
+// error whose text is empty keeps the sentence alone (gt-s0x1bk).
 func unreadableSummary(pin ImagePinState) string {
-	summary := fmt.Sprintf("image pin %s cannot be read: it is not counted as fresh, and no refresh bead is filed for it", pin.Name)
-	line := util.FirstLine(pin.Err.Error())
-	if line == "" {
-		return summary
+	const notFresh = "; it is not counted as fresh, and no refresh bead is filed for it"
+	errText := strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(pin.Err.Error()))
+	if runes := []rune(errText); len(runes) > imagePinsErrMax {
+		errText = string(runes[:imagePinsErrMax])
 	}
-	if runes := []rune(line); len(runes) > imagePinsErrLineMax {
-		line = string(runes[:imagePinsErrLineMax])
+	if errText == "" {
+		return fmt.Sprintf("image pin %s cannot be read: it is not counted as fresh, and no refresh bead is filed for it", pin.Name)
 	}
-	return summary + ": " + line
+	return fmt.Sprintf("image pin %s cannot be read: %s%s", pin.Name, errText, notFresh)
 }
 
 // refreshStuckItem is the image-pins-refresh-stuck item for an open refresh
