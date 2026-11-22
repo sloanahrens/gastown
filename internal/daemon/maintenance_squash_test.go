@@ -2584,6 +2584,106 @@ func TestSquashCheckRecoveryErrorMarksUndecided(t *testing.T) {
 	}
 }
 
+// TestSquashCheckRecoveryIsRecordedInTheLedger is the bead's boxes: a recovery
+// that did something writes one ledger line with outcome recovered, naming the
+// database, the state it found and what it did; a clean catalog and a held
+// marker write no line; and a recovery writes no run record, so the database's
+// 24-hour gate is still its last run's.
+func TestSquashCheckRecoveryIsRecordedInTheLedger(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a recovery that dropped branches writes one line", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := squashTickDaemon(t, squashEnabled())
+		writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+		rec := &doltsquash.Recovery{
+			State:   doltsquash.RecoveryFirstRename,
+			Dropped: []string{"compact-work"},
+			Kept:    []string{"main-pre-squash"},
+			Reason:  "recovered a run that died between the swap's two renames: main-pre-squash is main again at 0123456, 1 work branch was dropped; kept main-pre-squash, which holds abcdef0, newer than the cut and not on main",
+		}
+		d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+			return rec, nil
+		}
+
+		d.runScheduledMaintenance()
+
+		entries := readSquashLedger(t, d.config.TownRoot)
+		if len(entries) != 1 {
+			t.Fatalf("the ledger holds %d lines, want one recovery line: %+v", len(entries), entries)
+		}
+		e := entries[0]
+		if e.DB != "gt" || e.Outcome != "recovered" {
+			t.Errorf("the ledger line names %q with outcome %q, want gt recovered", e.DB, e.Outcome)
+		}
+		if e.Recovered != string(doltsquash.RecoveryFirstRename) {
+			t.Errorf("the ledger line holds state %q, want %q", e.Recovered, doltsquash.RecoveryFirstRename)
+		}
+		if !slices.Equal(e.Dropped, rec.Dropped) || !slices.Equal(e.Kept, rec.Kept) {
+			t.Errorf("the ledger line holds dropped %q and kept %q, want the recovery's %q and %q", e.Dropped, e.Kept, rec.Dropped, rec.Kept)
+		}
+		if e.Reason != rec.Reason {
+			t.Errorf("the ledger line holds reason %q, want the recovery's %q", e.Reason, rec.Reason)
+		}
+		if !e.Started.IsZero() || !e.Finished.IsZero() {
+			t.Errorf("a recovery line carries run times %v to %v, want none", e.Started, e.Finished)
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("reading the state: %v", err)
+		}
+		if got, ok := st.Squash["gt"]; ok {
+			t.Errorf("the recovery wrote the run record %+v, so the 24-hour gate moved", got)
+		}
+	})
+
+	t.Run("a clean catalog writes no line", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := squashTickDaemon(t, squashEnabled())
+		writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+		// The daemon's seam returns no recovery, as it does for a clean catalog.
+		d.runScheduledMaintenance()
+
+		if entries := readSquashLedger(t, d.config.TownRoot); len(entries) != 0 {
+			t.Errorf("a clean catalog wrote %d ledger lines, want none: %+v", len(entries), entries)
+		}
+	})
+
+	t.Run("a held marker writes no line", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := squashTickDaemon(t, squashEnabled())
+		d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+			return nil, fmt.Errorf("doltsquash: the recovery's run marker: %w", doltsquash.ErrRunMarkerHeld)
+		}
+
+		d.runScheduledMaintenance()
+
+		if entries := readSquashLedger(t, d.config.TownRoot); len(entries) != 0 {
+			t.Errorf("a held marker wrote %d ledger lines, want none: %+v", len(entries), entries)
+		}
+	})
+
+	t.Run("a recovery line that cannot be written is a WARNING", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, logs := squashTickDaemon(t, squashEnabled())
+		writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+		d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+			return &doltsquash.Recovery{State: doltsquash.RecoveryBeforeSwap, Dropped: []string{"compact-work"}}, nil
+		}
+		d.maint.squashLedger = func(townRoot string) squashLedger {
+			l := newSquashLedger(townRoot)
+			l.write = func(*os.File, []byte) (int, error) { return 0, errors.New("no space left") }
+			return l
+		}
+
+		d.runScheduledMaintenance()
+
+		if got := logs.String(); !strings.Contains(got, "cannot write the ledger line to "+squashLedgerFile) {
+			t.Errorf("the failed recovery write logged no WARNING: %q", got)
+		}
+	})
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).

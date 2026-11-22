@@ -122,13 +122,15 @@ func squashMarkerPath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", squashRunMarkerFile)
 }
 
-// How a run ended, in its state record and its ledger line. A conflict is not
-// an error — the swap kept both branches — so it is told apart from a failed
-// run rather than read as one.
+// How a run ended, in its state record and its ledger line, and the outcome of
+// the check's own recovery line. A conflict is not an error — the swap kept both
+// branches — so it is told apart from a failed run rather than read as one. A
+// recovery is not a run: it writes no state record.
 const (
 	squashOutcomeCompleted = "completed"
 	squashOutcomeFailed    = "failed"
 	squashOutcomeConflict  = "conflict"
+	squashOutcomeRecovered = "recovered"
 )
 
 // errSquashMarkerUnavailable reports that the run marker could not be taken for
@@ -375,6 +377,13 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 		if recovery != nil {
 			d.logger.Printf("squash: %s: recovered a dead run (%s): dropped %s, kept %s: %s",
 				db, recovery.State, squashBranchList(recovery.Dropped), squashBranchList(recovery.Kept), recovery.Reason)
+			// A recovery is visible the way a failed run is: one ledger line says
+			// what it found and did. It is not a run: the line carries no time and
+			// writes no run record, so the database's 24-hour gate stays its last
+			// run's.
+			if err := d.maintenance().squashLedger(d.config.TownRoot).append(newSquashRecoveryEntry(db, recovery)); err != nil {
+				d.logger.Printf("squash: %s: WARNING: cannot write the ledger line to %s: %v", db, squashLedgerFile, err)
+			}
 		}
 		readings := d.readSquashInputs(ctx, db, now)
 		if names := readings.unreadable(); len(names) > 0 {
@@ -783,11 +792,13 @@ func keepStateCopyWith(path string, create func(name string) (io.WriteCloser, er
 	return copyPath, nil
 }
 
-// squashLedgerEntry is one run's line in daemon/squash_ledger.jsonl: commits
-// before and after, the three step durations, the tail and the retries, and how
-// the run ended.
+// squashLedgerEntry is one line in daemon/squash_ledger.jsonl: a run's record,
+// or the check's own recovery line (Outcome squashOutcomeRecovered), which is
+// not a run and so carries no time.
 type squashLedgerEntry struct {
-	DB       string    `json:"db"`
+	DB string `json:"db"`
+	// Started and Finished are the run's bounds. Both are zero on a recovery
+	// line, which timed no run.
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
 	// Outcome is one of the squashOutcome constants.
@@ -802,9 +813,16 @@ type squashLedgerEntry struct {
 	SwapMs       int64  `json:"swap_ms"`
 	Tail         int    `json:"tail"`
 	Retries      int    `json:"retries"`
-	// Recovered is the recovery table's row when the run settled a dead run's
-	// branches before its own first step.
+	// Recovered is the recovery table's row: the one a run's start found when it
+	// settled a dead run's branches before its first step, or the one the check's
+	// own recovery line found.
 	Recovered string `json:"recovered,omitempty"`
+	// Dropped names the branches a recovery dropped, on a recovery line.
+	Dropped []string `json:"dropped,omitempty"`
+	// Kept names the branches a recovery left beside main, on a recovery line.
+	Kept []string `json:"kept,omitempty"`
+	// Reason is a recovery's log line: what it found and did, on a recovery line.
+	Reason string `json:"reason,omitempty"`
 	// Error is why a failed run stopped, with each credential-shaped word
 	// replaced and the message cut to ledgerErrorLimit runes.
 	Error string `json:"error,omitempty"`
@@ -814,6 +832,20 @@ type squashLedgerEntry struct {
 	ErrorClass string `json:"error_class,omitempty"`
 	// Conflict is the swap conflict a conflicted run left, naming its commits.
 	Conflict string `json:"conflict,omitempty"`
+}
+
+// newSquashRecoveryEntry is the ledger line a recovery writes: the database, the
+// row of the recovery table it found, and the branches it dropped or kept. A
+// recovery is not a run, so the line carries no time and writes no run record.
+func newSquashRecoveryEntry(db string, r *doltsquash.Recovery) squashLedgerEntry {
+	return squashLedgerEntry{
+		DB:        db,
+		Outcome:   squashOutcomeRecovered,
+		Recovered: string(r.State),
+		Dropped:   r.Dropped,
+		Kept:      r.Kept,
+		Reason:    r.Reason,
+	}
 }
 
 // newSquashLedgerEntry is what one run's record holds. The run's error is kept
