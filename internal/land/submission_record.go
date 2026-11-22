@@ -179,6 +179,10 @@ func SubmissionKey(bead, head string) string {
 type SubmissionGit interface {
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	DiffNumstat(base, head string) (string, error)
+	// FetchBranch brings a branch's objects into the clone, bounded by git's
+	// remote-query timeout, so a first-sight read can see a head the clone
+	// lacks (gt-d87ubg).
+	FetchBranch(remote, branch string) error
 }
 
 var _ SubmissionGit = (*git.Git)(nil)
@@ -207,9 +211,11 @@ type SubmissionRecorder struct {
 
 // Record writes w's first-sight record unless one already exists for its bead
 // and head, and reports whether it wrote one. The keys already written are read
-// from the log once, so a recorded submission reads no commits. The clone is
-// not fetched, so a clone that lacks the commits writes a record without
-// subjects, and the battery reads them from its own clone instead.
+// from the log once, so a recorded submission reads no commits. A failed read
+// fetches the work's branch once, because a submission can land in the pass
+// that first sees it, before the landing's own fetch (gt-d87ubg); a record
+// without commits stays the fallback when the fetch or the second read fails,
+// and the battery then reads them from its own clone instead.
 func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 	if !r.loaded {
 		recs, err := ReadSubmissionRecords(r.Path)
@@ -238,6 +244,16 @@ func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 	}
 	base := r.remote() + "/" + w.Target
 	msgs, err := r.Git.CommitMessages(base, w.Head)
+	if err != nil && fetchableBranch(w.Branch) {
+		// The submission can land in the pass that first sees it, before the
+		// landing's own fetch, so fetch the work's branch once and read
+		// again; a failed fetch is what the warning below reports.
+		if ferr := r.Git.FetchBranch(r.remote(), w.Branch); ferr != nil {
+			err = ferr
+		} else {
+			msgs, err = r.Git.CommitMessages(base, w.Head)
+		}
+	}
 	if err != nil {
 		r.warnf("%s: first-sight record written without commits, the battery reads its own clone: %v", w.BeadID, err)
 	} else if subjects := commitSubjects(msgs); len(subjects) > 0 {
@@ -256,6 +272,26 @@ func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 	}
 	r.keys[key] = true
 	return true, nil
+}
+
+// fetchableBranch reports whether branch can be handed to git fetch as a plain
+// branch name rather than read as a refspec or an option. The branch is
+// agent-written in the bead's READY TO LAND note, and a colon is a refspec
+// destination that writes a ref in the landing clone while a leading dash is
+// an option (gt-d87ubg).
+func fetchableBranch(branch string) bool {
+	if branch == "" || branch == "@" || strings.HasPrefix(branch, "-") ||
+		strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") ||
+		strings.HasSuffix(branch, ".") || strings.Contains(branch, "..") ||
+		strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
+		return false
+	}
+	for _, r := range branch {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune(`~^:?*[\`, r) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *SubmissionRecorder) remote() string {
