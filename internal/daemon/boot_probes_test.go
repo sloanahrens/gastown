@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -298,23 +299,14 @@ func TestBootProbesDoltDialsTheResolvedEndpoint(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	listening := listener.Addr().(*net.TCPAddr).Port
 
-	//testpolicy:allow no-network — a loopback port this test binds and frees, so the dial to it is refused at once and the probe must not answer
-	closedListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	closed := closedListener.Addr().(*net.TCPAddr).Port
-	if err := closedListener.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	tests := []struct {
 		name       string
 		port       int
+		refused    bool
 		wantAnswer bool
 	}{
 		{name: "listener the town names answers", port: listening, wantAnswer: true},
-		{name: "closed port does not answer", port: closed, wantAnswer: false},
+		{name: "closed port does not answer", port: 3307, refused: true, wantAnswer: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,9 +318,23 @@ func TestBootProbesDoltDialsTheResolvedEndpoint(t *testing.T) {
 			if ep, ok := config.ResolveDoltEndpointFor(townRoot, false); !ok || ep.Port != tt.port {
 				t.Fatalf("resolver reads port %d (ok %v); want %d", ep.Port, ok, tt.port)
 			}
+			// The dialer under test is the production one on the held-open listener,
+			// or a fake that refuses the connect without touching the network. The
+			// wrapper records each address the probe dials, so a row can prove the
+			// resolved endpoint was dialed exactly once.
+			dial := productionBootProbeDeps().dial
+			if tt.refused {
+				dial = func(context.Context, string) error {
+					return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				}
+			}
+			var dialed []string
 			var seams bootSeams
 			deps := seams.deps()
-			deps.dial = productionBootProbeDeps().dial
+			deps.dial = func(ctx context.Context, addr string) error {
+				dialed = append(dialed, addr)
+				return dial(ctx, addr)
+			}
 			probes := newBootProbes(townRoot, bootMode(""), bootOrigin, deps)
 			p, ok := bootProbeByName(probes, "dolt")
 			if !ok {
@@ -336,6 +342,9 @@ func TestBootProbesDoltDialsTheResolvedEndpoint(t *testing.T) {
 			}
 			if got := bootAnswers(p); got != tt.wantAnswer {
 				t.Errorf("dolt answers = %v; want %v", got, tt.wantAnswer)
+			}
+			if want := []string{fmt.Sprintf("127.0.0.1:%d", tt.port)}; !slices.Equal(dialed, want) {
+				t.Errorf("dialed %v; want %v", dialed, want)
 			}
 		})
 	}
