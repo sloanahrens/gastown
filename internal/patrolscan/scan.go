@@ -1563,9 +1563,8 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 
 // reviveCut restarts a LIVE seat whose model stream was cut before it pushed:
 // its transcript's last complete user-or-assistant record is a cut stream, so
-// it matches neither
-// revivePushed (no pushed branch) nor reviveAnswered (no escalation), and the
-// pane idles at its prompt until the overrun guard stops it at 20 minutes. It
+// it matches neither revivePushed (no pushed branch) nor reviveAnswered (no
+// escalation), and the pane idles at its prompt until the overrun guard stops it at 20 minutes. It
 // asks the optional StreamCutter extension; a host without it has no such rule.
 //
 // It shares the revival rule's guards and cooldown: a quiet under reviveQuiet,
