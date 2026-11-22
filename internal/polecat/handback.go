@@ -76,8 +76,22 @@ func HandBackRework(ctx context.Context, w BeadWriter, beadID, assignee, branch,
 	return handBackLabelled(ctx, w, beadID, assignee, ReworkLabel, text)
 }
 
+// HandBackNoWork is HandBackNoted for a stopped polecat that made no commit of its own: the bead
+// goes back open and unassigned with no label, and the comment says the stop is not a size
+// finding, so the dispatcher hands it to the next polecat fresh and nobody splits a bead whose
+// seat never worked on it (an idle seat after a cut model stream, gt-efj3xs). The writes, their
+// order and the checks before them are HandBack's, without the label step.
+func HandBackNoWork(ctx context.Context, w BeadWriter, beadID, assignee string, elapsed time.Duration, note string) error {
+	text := fmt.Sprintf("polecat stopped after %s with no commit on its branch: this is not a size finding, so do not split the bead; the next polecat starts it fresh.",
+		elapsed.Round(time.Second))
+	if note != "" {
+		text += " " + note
+	}
+	return handBackLabelled(ctx, w, beadID, assignee, "", text)
+}
+
 // handBackLabelled is the hand-back HandBackNoted and HandBackRework share: it
-// releases the bead, puts label on it and adds text as the comment.
+// releases the bead, puts label on it (none when label is empty) and adds text as the comment.
 func handBackLabelled(ctx context.Context, w BeadWriter, beadID, assignee, label, text string) error {
 	status, current, err := w.State(ctx, beadID)
 	if err != nil {
@@ -95,8 +109,10 @@ func handBackLabelled(ctx context.Context, w BeadWriter, beadID, assignee, label
 	if err := w.ClearAssignee(ctx, beadID); err != nil {
 		return fmt.Errorf("hand back %s: clear assignee: %w", beadID, err)
 	}
-	if err := w.AddLabel(ctx, beadID, label); err != nil {
-		return fmt.Errorf("hand back %s: add label: %w", beadID, err)
+	if label != "" {
+		if err := w.AddLabel(ctx, beadID, label); err != nil {
+			return fmt.Errorf("hand back %s: add label: %w", beadID, err)
+		}
 	}
 	if err := w.Comment(ctx, beadID, text); err != nil {
 		return fmt.Errorf("hand back %s: comment: %w", beadID, err)
