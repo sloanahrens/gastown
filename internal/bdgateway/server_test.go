@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gatewayPolicy is the policy the handler tests drive: a read verb, the two
@@ -248,6 +249,77 @@ func TestBdgwServeEndToEnd(t *testing.T) {
 	}
 	if code := postExec(t, g, "", Request{Argv: []string{"show"}}); code != http.StatusUnauthorized {
 		t.Errorf("no token status = %d, want 401", code)
+	}
+}
+
+// TestTickEffCallRecordCPU: a served call's log line carries cpu_ms from the
+// executor's result, equal to the bd child's user plus system time, and a
+// refused call's line carries none.
+func TestTickEffCallRecordCPU(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceStore: %v", err)
+	}
+	doc := WorkspaceDocument{Files: map[string]string{
+		"gastown/.beads/metadata.json": "{}",
+		".beads/routes.jsonl":          `{"prefix":"gt","path":"gastown/.beads"}`,
+	}}
+	doc.ManifestSHA = WorkspaceManifest(doc.Files)
+	if _, err := store.Put(doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	proc := newExitedFake(0, "", "")
+	proc.cpuUser, proc.cpuSys, proc.cpuKnown = 30*time.Millisecond, 20*time.Millisecond, true
+	runner := &fakeRunner{queue: []Process{proc}, bound: waitCtx(t)}
+	exec := newTestExecutor(t, root, runner)
+	logDir := t.TempDir()
+	log := newTestCallLogWithDir(t, logDir)
+	g := newTestGateway(t, store, log, exec)
+
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown"}, ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("served call status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+
+	if status := postExec(t, g, testReadToken, Request{Argv: []string{"sql"}}); status != http.StatusForbidden {
+		t.Fatalf("refused call status = %d, want 403", status)
+	}
+
+	if err := log.Close(); err != nil {
+		t.Fatalf("log.Close: %v", err)
+	}
+	lines := readLines(t, filepath.Join(logDir, DefaultCallLogName))
+	if len(lines) != 2 {
+		t.Fatalf("call log lines = %d, want 2", len(lines))
+	}
+	var served, refused struct {
+		Refusal string `json:"refusal"`
+		CPUMS   *int64 `json:"cpu_ms"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &served); err != nil {
+		t.Fatalf("decode served call line: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &refused); err != nil {
+		t.Fatalf("decode refused call line: %v", err)
+	}
+	if served.Refusal != "" {
+		t.Fatalf("first line is a refusal (%q), want the served call", served.Refusal)
+	}
+	if served.CPUMS == nil {
+		t.Fatal("served call line carries no cpu_ms")
+	}
+	if got := *served.CPUMS; got != 50 {
+		t.Errorf("served call cpu_ms = %d, want 50 (30 user + 20 system)", got)
+	}
+	if refused.Refusal == "" {
+		t.Fatal("second line is not a refusal, want the refused call")
+	}
+	if refused.CPUMS != nil {
+		t.Errorf("refused call cpu_ms = %d, want none", *refused.CPUMS)
 	}
 }
 

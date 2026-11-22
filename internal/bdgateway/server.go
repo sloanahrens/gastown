@@ -349,6 +349,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 			Write:    write,
 			ExitCode: ExitRefused,
 			Duration: time.Since(start),
+			CPUMS:    frames.Result().CPUMS,
 			Error:    internalDetail(err),
 		}
 		switch status {
@@ -387,6 +388,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		Write:    write,
 		ExitCode: status,
 		Duration: time.Since(start),
+		CPUMS:    frames.Result().CPUMS,
 		Conflict: frames.Conflict(),
 	}
 	rec.SetStderrError(frames.StderrHead())
@@ -675,6 +677,11 @@ type httpFrames struct {
 	// it when the call ends.
 	headMu     sync.Mutex
 	stderrHead string
+
+	// resultMu guards result apart from mu for the same reason as headMu: the
+	// executor sets it after a pump may hold mu on a client that stopped reading.
+	resultMu sync.Mutex
+	result   ExecResult
 }
 
 // Write forwards one frame. A frame it cannot read is returned as a write
@@ -779,6 +786,22 @@ func (f *httpFrames) StderrHead() string {
 	f.headMu.Lock()
 	defer f.headMu.Unlock()
 	return f.stderrHead
+}
+
+// SetExecResult takes the executor's result for this call. It implements
+// ExecResultSink.
+func (f *httpFrames) SetExecResult(res ExecResult) {
+	f.resultMu.Lock()
+	defer f.resultMu.Unlock()
+	f.result = res
+}
+
+// Result returns the executor's result for this call, for the log line's CPU
+// figure. A runner that is not an Executor leaves it empty.
+func (f *httpFrames) Result() ExecResult {
+	f.resultMu.Lock()
+	defer f.resultMu.Unlock()
+	return f.result
 }
 
 // Conflict reports whether bd's stderr carried a Dolt commit conflict during

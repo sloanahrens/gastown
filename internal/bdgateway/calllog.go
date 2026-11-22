@@ -122,6 +122,10 @@ type CallRecord struct {
 	ExitCode int
 	// Duration is how long the call took.
 	Duration time.Duration
+	// CPUMS is the CPU time bd's child used, user plus system in milliseconds,
+	// as the executor reported it. Nil when the call started no child, and the
+	// line omits it then.
+	CPUMS *int64
 	// Error is the cause the gateway recorded for a refused call, or bd's own
 	// first stderr line for a call bd failed. For a failure inside the gateway
 	// the caller reads a fixed message and the text stays in the log; a call
@@ -359,6 +363,7 @@ func (l *CallLog) log(rec CallRecord, counted, write bool) {
 		Beads:       parsed.beads,
 		ExitCode:    rec.ExitCode,
 		DurationMS:  rec.Duration.Milliseconds(),
+		CPUMS:       rec.CPUMS,
 		Error:       boundTextTo(rec.Error, maxErrorBytes),
 		Refusal:     boundText(rec.Refusal),
 		RefusedFlag: parsed.refusedFlag,
