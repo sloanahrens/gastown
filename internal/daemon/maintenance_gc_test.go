@@ -359,42 +359,37 @@ func TestMaintenanceGCStateReplacementEdges(t *testing.T) {
 
 // TestMaintenanceGCStateUpdateLeavesAFileItCannotRead is gt-tv0919's box: a
 // write over a state file it cannot READ returns the read's error and leaves
-// the file byte for byte, keeping no copy and stamping nothing, because a
+// the path as it was, keeping no copy and stamping nothing, because a
 // transient EACCES must not wipe the squash records and archive cursors; a file
 // it can read but not parse is still replaced, with one copy kept and the stamp.
 func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
 	t.Parallel()
-	t.Run("a file it cannot read", func(t *testing.T) {
+	t.Run("a path it cannot read", func(t *testing.T) {
 		t.Parallel()
+		// A symlink to itself fails os.ReadFile with ELOOP for every uid, root
+		// included (a mode-000 file is readable by root), and an update that
+		// replaced it would succeed, so the row tells a refusal from a replacement.
 		town := t.TempDir()
 		path := maintenanceGCStatePath(town)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		original := []byte(`{"post_gc_bytes":{"hq":1048576},"squash":{"gt":{"last_run":"2026-10-01T03:10:00Z","outcome":"completed"}}}`)
-		if err := os.WriteFile(path, original, 0o644); err != nil {
+		if err := os.Symlink(path, path); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(path, 0o000); err != nil {
-			t.Fatalf("chmod: %v", err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
 
 		err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow)
 		if err == nil {
-			t.Fatal("recordMaintenanceGCRun wrote over a state file it cannot read")
+			t.Fatal("recordMaintenanceGCRun wrote over a state path it cannot read")
 		}
-		if !errors.Is(err, fs.ErrPermission) {
-			t.Errorf("error = %v, want the read's permission error", err)
+		if errors.Is(err, errMaintenanceGCStateUnparseable) {
+			t.Errorf("error = %v, a read failure must not carry the unparseable sentinel", err)
 		}
-		if _, statErr := os.Stat(path + squashStateCorruptSuffix); !os.IsNotExist(statErr) {
-			t.Errorf("a copy exists at %s, want none when the file was never read", path+squashStateCorruptSuffix)
+		if _, statErr := os.Lstat(path + squashStateCorruptSuffix); !os.IsNotExist(statErr) {
+			t.Errorf("a copy exists at %s, want none when the path was never read", path+squashStateCorruptSuffix)
 		}
-		if err := os.Chmod(path, 0o644); err != nil {
-			t.Fatalf("chmod back: %v", err)
-		}
-		if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, original) {
-			t.Errorf("the state file changed: %q, err %v, want it as it was, %q", got, readErr, original)
+		if target, linkErr := os.Readlink(path); linkErr != nil || target != path {
+			t.Errorf("the state path changed: link %q, err %v, want the self-link as it was", target, linkErr)
 		}
 	})
 	t.Run("a file it cannot parse", func(t *testing.T) {
@@ -425,7 +420,7 @@ func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
 	})
 	// The reader refuses these as it does an unparseable file (gt-u43s2r), so the
 	// write replaces them too: one definition of unparseable, or {} wedges forever.
-	for _, body := range []string{`{}`, `null`, `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`} {
+	for _, body := range []string{`{}`, `null`, `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`, `{"last_gc":{},"squash":{"gt":{"last_run":"0001-01-01T00:00:00Z","outcome":"completed"}}}`} {
 		t.Run("a file the reader refuses as unparseable: "+body, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()

@@ -234,16 +234,17 @@ func maintenanceGCStatePath(townRoot string) string {
 // maintenance state.
 var errMaintenanceGCStateAbsent = errors.New("no maintenance state file")
 
-// errMaintenanceGCStateUnparseable reports a state file that was read but holds
-// bytes that are not JSON. It is the one read error a write replaces the file
-// for: its contents are known to be lost, where a file that could not be read
-// may still hold the squash records and archive cursors (gt-tv0919).
+// errMaintenanceGCStateUnparseable reports a state file that was read but is not a
+// valid maintenance state: bytes that are not JSON, or JSON holding nothing the
+// daemon writes. It is the one read error a write replaces the file for: its
+// contents are known to be unusable, where a file that could not be read may still
+// hold the squash records and archive cursors (gt-tv0919).
 var errMaintenanceGCStateUnparseable = errors.New("unparseable")
 
 // loadMaintenanceGCState reads the baselines. A missing file is empty state; a
 // corrupt one is an error the caller logs before treating it as empty (gc is
 // non-destructive, so "no baseline" is a safe reading). A file whose bytes do
-// not parse wraps errMaintenanceGCStateUnparseable.
+// not parse, or is not a valid state, wraps errMaintenanceGCStateUnparseable.
 func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st, err := readMaintenanceGCState(townRoot)
 	if errors.Is(err, errMaintenanceGCStateAbsent) {
@@ -282,7 +283,7 @@ var squashRecordFloor = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 // readMaintenanceGCState reads the state file. A missing file reports
 // errMaintenanceGCStateAbsent, so a caller can tell no state from an unreadable
 // one; a file that exists but cannot be read is its error, never empty state,
-// and a file that was read but does not parse wraps
+// and a file that was read but is not a valid state wraps
 // errMaintenanceGCStateUnparseable.
 func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st := maintenanceGCState{
@@ -329,7 +330,7 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	// not enough (gt-53x4vs).
 	for db, rec := range parsed.Squash {
 		if rec.LastRun.Before(squashRecordFloor) {
-			return st, fmt.Errorf("parse %s: the squash record of %s has no plausible last run", maintenanceGCStateFileName, db)
+			return st, fmt.Errorf("parse %s: %w: the squash record of %s has no plausible last run", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable, db)
 		}
 	}
 	for k, v := range parsed.PostGCBytes {
