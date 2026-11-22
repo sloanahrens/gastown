@@ -156,19 +156,6 @@ func TestReworkLandings(t *testing.T) {
 	}
 }
 
-// openRigLandings is the closure the production caller passes (gt-ntel2p):
-// land.RigLandingsFile returns a *LandingsFile, not a reworkLandingReader, and
-// function types are invariant, so it is wrapped. On error it returns a nil
-// interface and not a nil *LandingsFile inside one, which a caller testing the
-// reader for nil would take for a reader.
-func openRigLandings(townRoot, rig string) (reworkLandingReader, error) {
-	f, err := land.RigLandingsFile(townRoot, rig)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
 // TestReworkLandingsOpensThroughRigLandingsFile: the closure compiles as the
 // seam, and an invalid rig comes back a nil reader and an error naming the rig.
 func TestReworkLandingsOpensThroughRigLandingsFile(t *testing.T) {
