@@ -4,30 +4,16 @@ package daemon
 
 import (
 	"context"
-	"flag"
-	"os"
 	"path/filepath"
-	"strconv"
-	"syscall"
 	"testing"
+	"time"
 )
 
 // The tests in this file start real children, so they are in the integration
-// tier: the unit tier uses fakes (cluster_drift_child_test.go).
-
-// TestIntegrationDriftChildStandIn is the child TestIntegrationStartDriftChildRealProcess runs. It
-// does nothing in an ordinary run; when startDriftChild starts this test binary
-// with a mode after "--", it acts on it: "exit N" exits with status N and
-// "kill" kills itself with SIGKILL.
-func TestIntegrationDriftChildStandIn(t *testing.T) {
-	switch flag.Arg(0) {
-	case "exit":
-		code, _ := strconv.Atoi(flag.Arg(1))
-		syscall.Exit(code)
-	case "kill":
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
-	}
-}
+// tier: the unit tier uses fakes (cluster_drift_child_test.go). The children are
+// /bin/sh one-liners, not this test binary re-executed: a re-executed test
+// binary would run the package TestMain first, which starts a Dolt container
+// before the stand-in body runs (om finding on gt-e8ol9r).
 
 // TestIntegrationStartDriftChildRealProcess: what startDriftChild returns for a real
 // child. A non-zero exit, including 255, is the child's answer with no error; a
@@ -35,13 +21,6 @@ func TestIntegrationDriftChildStandIn(t *testing.T) {
 // that does not exist is -1 and the start error.
 func TestIntegrationStartDriftChildRealProcess(t *testing.T) {
 	t.Parallel()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mode := func(args ...string) []string {
-		return append([]string{"-test.run=^TestIntegrationDriftChildStandIn$", "--"}, args...)
-	}
 	tests := []struct {
 		name    string
 		exe     string
@@ -49,15 +28,19 @@ func TestIntegrationStartDriftChildRealProcess(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{"exit 3", self, mode("exit", "3"), 3, false},
-		{"exit 255", self, mode("exit", "255"), 255, false},
-		{"killed by a signal", self, mode("kill"), -1, true},
+		{"exit 3", "/bin/sh", []string{"-c", "exit 3"}, 3, false},
+		{"exit 255", "/bin/sh", []string{"-c", "exit 255"}, 255, false},
+		{"killed by a signal", "/bin/sh", []string{"-c", "kill -9 $$"}, -1, true},
 		{"missing binary", filepath.Join(t.TempDir(), "no-such-binary"), nil, -1, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, exit, err := startDriftChild(context.Background(), tt.exe, tt.args, 64)
+			// A generous bound so a child that never exits fails the run instead of
+			// hanging it; the deadline is the context's, never read as the child's exit.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, _, exit, err := startDriftChild(ctx, tt.exe, tt.args, 64)
 			if exit != tt.want || (err != nil) != tt.wantErr {
 				t.Errorf("startDriftChild = exit %d, err %v; want exit %d, error %v", exit, err, tt.want, tt.wantErr)
 			}
