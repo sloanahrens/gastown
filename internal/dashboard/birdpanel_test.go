@@ -841,6 +841,57 @@ func TestBirdsPreviousLinkCarriesItsAge(t *testing.T) {
 	}
 }
 
+// A row whose reader has the bird's last active time says when the bird was
+// last active beside the age of its report, in the same muted age cell: the
+// report's age is the last write, which is not the last work (gt-j1e6s9). A row
+// with no last active says the report's age alone, and a row with neither age
+// draws no age line. The page's age helper keeps the minutes, so two hours old
+// reads 2h00m.
+func TestBirdsPanelLastActive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	written := now.Add(-2 * time.Minute).Format(time.RFC3339)
+	active := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "dunlin", "state": "fresh", "written": written, "last_active": active},
+			map[string]any{"bird": "heron", "state": "fresh", "written": written},
+			map[string]any{"bird": "curlew", "state": "fresh", "last_active": active},
+			map[string]any{"bird": "egret", "state": "fresh"},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": written, "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 4 {
+		t.Fatalf("the panel drew %d rows, want the reader's four: %+v", len(rows), rows)
+	}
+	want := [][]birdDrawnCell{
+		{
+			{Tag: "SPAN", Text: "dunlin", Class: "bname"},
+			{Tag: "SPAN", Text: "written 2m ago · last active 2h00m ago", Class: "bage"},
+		},
+		{
+			{Tag: "SPAN", Text: "heron", Class: "bname"},
+			{Tag: "SPAN", Text: "written 2m ago", Class: "bage"},
+		},
+		{
+			{Tag: "SPAN", Text: "curlew", Class: "bname"},
+			{Tag: "SPAN", Text: "last active 2h00m ago", Class: "bage"},
+		},
+		{
+			{Tag: "SPAN", Text: "egret", Class: "bname"},
+		},
+	}
+	for i, r := range rows {
+		if !slices.Equal(r.Head, want[i]) {
+			t.Errorf("row %d reads %+v, want %+v", i, r.Head, want[i])
+		}
+	}
+}
+
 // The report the reader marks as the town's headline leads the panel even when
 // it is stale, and the other reporters keep the fresh-before-stale order. A
 // reporter's name earns no place of its own: the row named overseer below is
