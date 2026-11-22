@@ -24,8 +24,13 @@ import (
 // inside the wait window, so a hung instance takes the infra retry instead of
 // stalling the landing worker (slice 1 review note, gt-fn9e6.5).
 const (
-	// DefaultCandidatePollInterval is the wait between status reads.
-	DefaultCandidatePollInterval = 15 * time.Second
+	// DefaultCandidatePollInterval is the wait after a status read with no
+	// verdict yet.
+	DefaultCandidatePollInterval = 3 * time.Second
+	// DefaultCandidateErrorPollInterval is the wait after a failed status read:
+	// 15 s keeps three consecutive errors riding out about 45 s of a Forgejo
+	// hiccup, where the poll interval would ride out 9 s (gt-ecez9b).
+	DefaultCandidateErrorPollInterval = 15 * time.Second
 	// DefaultCandidateCallTimeout bounds one Forgejo API call.
 	DefaultCandidateCallTimeout = 30 * time.Second
 	// DefaultCandidateWaitTimeout bounds the whole wait for a verdict: the CI
@@ -260,8 +265,11 @@ type CandidateGate struct {
 	// (gt-fn9e6.9), so a cut-over rig's candidate reaches the CI that gates it.
 	Remote string
 	// PollInterval, CallTimeout and WaitTimeout bound the poll; a zero means
-	// the DefaultCandidate* constant.
+	// the DefaultCandidate* constant; a set PollInterval covers both waits.
 	PollInterval, CallTimeout, WaitTimeout time.Duration
+	// waitTimer is the timer the poll waits on; nil means time.After. Tests
+	// inject one that returns at once and records each wait (gt-ecez9b).
+	waitTimer func(time.Duration) <-chan time.Time
 	// GateLogDir is where a rejected gate's job log is kept, the rig's
 	// GateLogDir(townRoot, rig). Empty keeps no log.
 	GateLogDir string
@@ -432,6 +440,7 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 	// written on the first and every fifth of them (gt-72qo4k).
 	unreported := 0
 	for {
+		interval := g.pollInterval()
 		state, err := g.state(ctx, wf, &res)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -445,8 +454,9 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 				res.Err = fmt.Errorf("%d consecutive status reads failed: %w", blips, err)
 				return res
 			}
+			interval = g.errorPollInterval()
 			g.logf("%s: reading %s on %s failed (%d of %d tolerated); %v; checking again in %s",
-				res.Branch, wf.Context(), shortSHA(res.SHA), blips, candidateStatusErrorTolerance, err, g.pollInterval())
+				res.Branch, wf.Context(), shortSHA(res.SHA), blips, candidateStatusErrorTolerance, err, interval)
 		} else {
 			blips = 0
 			switch state {
@@ -461,14 +471,12 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 			}
 			unreported++
 			if unreported%5 == 1 {
-				g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
+				g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), interval)
 			}
 		}
-		timer := time.NewTimer(g.pollInterval())
 		select {
-		case <-timer.C:
+		case <-g.pollTimer(interval):
 		case <-ctx.Done():
-			timer.Stop()
 			return g.waitedOut(parent, wf, res)
 		}
 	}
@@ -892,6 +900,19 @@ func (g *CandidateGate) now() time.Time {
 
 func (g *CandidateGate) pollInterval() time.Duration {
 	return nonZero(g.PollInterval, DefaultCandidatePollInterval)
+}
+
+// errorPollInterval is the wait after a failed status read (gt-ecez9b).
+func (g *CandidateGate) errorPollInterval() time.Duration {
+	return nonZero(g.PollInterval, DefaultCandidateErrorPollInterval)
+}
+
+// pollTimer is the timer the poll waits on; a nil waitTimer is a real one.
+func (g *CandidateGate) pollTimer(d time.Duration) <-chan time.Time {
+	if g.waitTimer != nil {
+		return g.waitTimer(d)
+	}
+	return time.After(d)
 }
 
 func (g *CandidateGate) callTimeout() time.Duration {

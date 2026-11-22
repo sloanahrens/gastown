@@ -1172,6 +1172,46 @@ func TestCandidateGatePollLogsResetOnError(t *testing.T) {
 	}
 }
 
+// TestCandidateGatePollIntervals: a read with no verdict is followed by the 3 s
+// poll interval, a read error by the 15 s error interval, and a set
+// PollInterval overrides both (gt-ecez9b).
+func TestCandidateGatePollIntervals(t *testing.T) {
+	t.Parallel()
+	if DefaultCandidatePollInterval != 3*time.Second || DefaultCandidateErrorPollInterval != 15*time.Second {
+		t.Fatalf("defaults = %s and %s, want 3s and 15s", DefaultCandidatePollInterval, DefaultCandidateErrorPollInterval)
+	}
+	pending := status(forgejo.StatePending, "ci / gate (push)")
+	passed := status(forgejo.StateSuccess, "ci / gate (push)")
+	for _, tt := range []struct {
+		poll time.Duration
+		blip bool
+		want time.Duration
+	}{
+		{0, false, 3 * time.Second},
+		{0, true, 15 * time.Second},
+		{time.Millisecond, false, time.Millisecond},
+		{time.Millisecond, true, time.Millisecond},
+	} {
+		client := &fakeForgejo{statuses: []forgejo.CommitStatus{pending, passed}}
+		if tt.blip {
+			client.statusErrs = []error{errors.New("connection reset by peer")}
+		}
+		gate := fastGate(client)
+		gate.PollInterval = tt.poll
+		var waits []time.Duration
+		gate.waitTimer = func(d time.Duration) <-chan time.Time {
+			waits = append(waits, d)
+			fired := make(chan time.Time)
+			close(fired)
+			return fired
+		}
+		res := gate.wait(context.Background(), GateWorkflow{Name: "ci", Job: "gate"}, CandidateResult{Branch: "land/gt-abc"})
+		if res.State != CandidatePassed || len(waits) != 1 || waits[0] != tt.want {
+			t.Fatalf("poll=%s blip=%v: state = %v, waits = %v; want passed and [%s]", tt.poll, tt.blip, res.State, waits, tt.want)
+		}
+	}
+}
+
 // TestCandidateGateGivesUpAfterTheTolerance: errors past the tolerance are not
 // a wait that never ends; the landing takes the infra path with the last
 // error.
