@@ -879,6 +879,37 @@ func TestCICacheTrimHoldsEachFaultKindApart(t *testing.T) {
 	}
 }
 
+// TestCICacheTrimPassFailureItemCarriesTheReason pins gt-x7hl2a: a pass that fails
+// before it tries any volume puts the error's first line, not the fixed sentence,
+// into each due volume's item.
+func TestCICacheTrimPassFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(f *ciCacheFixture)
+		want  string
+	}{
+		{"a pod listing failure", func(f *ciCacheFixture) { f.pods = cliReply{stderr: "error: the server is unavailable\n", code: 1} }, "the runner's pods could not be read: exit status 1: error: the server is unavailable"},
+		{"a context refusal", func(f *ciCacheFixture) { f.d.patrolConfig.Patrols.TierSweep.Runner.Context = "" }, errCICacheTrimNoContext.Error()},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			due := f.d.ciCacheDueVolumes(f.now, ciCacheTestEvery)
+			tt.setup(f)
+			f.tick()
+			f.drain()
+			for _, v := range due {
+				open := f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(v)))
+				if len(open) != 1 || !strings.Contains(open[0].Reason, tt.want) || strings.Contains(open[0].Reason, ciCacheTrimNoReason) {
+					t.Fatalf("%s's item = %+v, want one carrying %q and not the fixed sentence", v.name, open, tt.want)
+				}
+			}
+		})
+	}
+}
+
 // TestCICacheTrimRefusesASettingItCannotActOn: a setting the patrol cannot act
 // on, or a runner that names no control cluster, runs nothing and says why.
 func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
