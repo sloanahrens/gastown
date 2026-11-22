@@ -1,1 +1,7 @@
 # Tree-scanning tests that are not registered guards, one per line, sorted: <pkg> <TestName> # <reason>
+cmd/tier-sweep TestMainOutputStreams # walks a temp log dir; a stubbed Exec answers the git ls-files listing, not git
+internal/affected TestAffectedAsksForTheDiffTheTreeAndTheGraph # a fake git answers the captured go list graph fixture; it walks no real tree
+internal/affected TestAffectedWorkingTreeOutsideHeadIsAll # a fake git answers the captured go list graph fixture; it walks no real tree
+internal/cmd TestRepoGuardCommandFlagsDriveTheRun # a fake git answers every call against an allowlist written in a temp dir
+internal/cmd TestRepoGuardRunClean # a fake git answers the five calls of a clean run against an allowlist in a temp dir
+internal/cmd TestRepoGuardRunGitRefusals # a fake git refuses each call against an allowlist in a temp dir
