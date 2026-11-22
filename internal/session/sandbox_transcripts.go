@@ -137,6 +137,10 @@ func (b *openshellBackend) saveSeatTranscripts(rec SandboxRecord) error {
 		return nil
 	}
 	dest := SandboxTranscriptCopyDir(b.townRoot, rec.Rig, rec.Polecat)
+	// The previous copy is archived before the prune, which would otherwise delete it unarchived.
+	if err := archiveCopiedTranscripts(dest, SandboxTranscriptArchiveDir(b.townRoot, rec.Rig, rec.Polecat)); err != nil {
+		b.warn("sandbox %s: archiving the previous transcript copy failed, so the transcripts it did not archive are cleared with it: %v", rec.Session, err)
+	}
 	if err := pruneTranscriptCopies(filepath.Dir(filepath.Dir(dest)), b.clock()); err != nil {
 		b.warn("sandbox %s: pruning old transcript copies failed: %v", rec.Session, err)
 	}
