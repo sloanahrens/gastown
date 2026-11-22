@@ -38,8 +38,8 @@ const nodeImagePruneStepPrefix = "node-prune: "
 // ok row of job nodeImagePruneJob with the summary's figures, the mode it ran in and
 // now as its start;
 // an applied run logs its summary line and records its row the same way. A run that
-// returns an error before its log gave a report records the failed row of
-// nodeImagePruneFailed instead. Every runner error is handed to the caller.
+// reached its log keeps its report in both modes; one that failed earlier records the
+// failed row of nodeImagePruneFailed instead. Every runner error reaches the caller.
 func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error {
 	name, err := nodePruneJobName(runID)
 	if err != nil {
@@ -57,33 +57,15 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 			return err
 		}
 	}
-	if apply {
-		return d.nodeImagePruneApply(rep, err, now)
-	}
-	if err != nil {
-		return err
-	}
-	lines, stats := nodeImagePruneSummary(rep, false)
-	for _, line := range lines {
-		d.logger.Printf("%s", line)
-	}
-	d.nodeImagePruneRecord(jobledger.Run{
-		Job:       nodeImagePruneJob,
-		StartedAt: now,
-		EndedAt:   d.clk().Now(),
-		Outcome:   nodeImagePruneOutcomeOK,
-		Stats:     stats,
-	}, false)
-	return nil
+	return d.nodeImagePruneReport(rep, err, now, apply)
 }
 
-// nodeImagePruneApply logs an applied run's summary line and records its ledger row,
-// both from the report the runner returned, and returns the runner's error. The caller
-// hands it a run that reached its log, with no error or with the nodePruneLogReadError
-// a failed Job delete leaves, so a zero-removal apply still records the zeros its log
-// gave (bead gt-i8zplo).
-func (d *Daemon) nodeImagePruneApply(rep nodePruneReport, runErr error, started time.Time) error {
-	lines, stats := nodeImagePruneSummary(rep, true)
+// nodeImagePruneReport logs a run's summary lines and records its ok ledger row from
+// the report the runner returned, in the mode it ran in, and returns its error. A run
+// that reached its log keeps its figures in both modes, even when its Job delete
+// failed (beads gt-i8zplo, gt-ri2ax4).
+func (d *Daemon) nodeImagePruneReport(rep nodePruneReport, runErr error, started time.Time, apply bool) error {
+	lines, stats := nodeImagePruneSummary(rep, apply)
 	for _, line := range lines {
 		d.logger.Printf("%s", line)
 	}
@@ -96,7 +78,7 @@ func (d *Daemon) nodeImagePruneApply(rep nodePruneReport, runErr error, started 
 		EndedAt:   d.clk().Now(),
 		Outcome:   nodeImagePruneOutcomeOK,
 		Stats:     stats,
-	}, true)
+	}, apply)
 	return runErr
 }
 
