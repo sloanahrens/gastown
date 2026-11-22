@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -837,6 +838,171 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		}
 		if root := pc.Patrols.ScheduledMaintenance.TownStateBackupRoot; root == nil || *root != "" {
 			t.Errorf("town_state_backup_root = %v, want explicitly empty", root)
+		}
+	})
+
+	// gt-vn7ffl: a town whose scheduled_maintenance section already exists
+	// without the root (the live shape) had no gt config way to set or turn
+	// off the nightly backup. These rows write that shape directly.
+	const backupRootKey = "maintenance.town_state_backup_root"
+	writeLiveSection := func(t *testing.T, townRoot, section string) string {
+		t.Helper()
+		path := config.TownSettingsPath(townRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir settings: %v", err)
+		}
+		doc := `{"type":"town-settings","version":1,"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":` + section + `}}}`
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatalf("write settings: %v", err)
+		}
+		return path
+	}
+	readSection := func(t *testing.T, townRoot string) *daemon.ScheduledMaintenanceConfig {
+		t.Helper()
+		pc, err := daemon.ReadPatrolConfig(townRoot)
+		if err != nil {
+			t.Fatalf("ReadPatrolConfig: %v", err)
+		}
+		if pc == nil || pc.Patrols == nil || pc.Patrols.ScheduledMaintenance == nil {
+			t.Fatalf("ReadPatrolConfig = %+v, want the scheduled_maintenance section", pc)
+		}
+		return pc.Patrols.ScheduledMaintenance
+	}
+	getRoot := func(t *testing.T, townRoot string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := configGet(townConfigCmdEnv(townRoot, &out), []string{backupRootKey}); err != nil {
+			t.Fatalf("configGet: %v", err)
+		}
+		return strings.TrimSpace(out.String())
+	}
+
+	t.Run("set on a section that lacks the key leaves window and enabled alone", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		writeLiveSection(t, townRoot, `{"enabled":true,"window":"02:00"}`)
+
+		if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{backupRootKey, "/srv/gt-backups"}); err != nil {
+			t.Fatalf("config set %s: %v", backupRootKey, err)
+		}
+
+		mc := readSection(t, townRoot)
+		if mc.TownStateBackupRoot == nil || *mc.TownStateBackupRoot != "/srv/gt-backups" {
+			t.Errorf("town_state_backup_root = %v, want /srv/gt-backups", mc.TownStateBackupRoot)
+		}
+		if !mc.Enabled || mc.Window != "02:00" {
+			t.Errorf("enabled, window = %v, %q; want true, 02:00 (the root is independent of the window)", mc.Enabled, mc.Window)
+		}
+	})
+
+	t.Run("the empty string is the explicit off state and leaves a disabled patrol disabled", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		writeLiveSection(t, townRoot, `{"enabled":false,"window":"02:00"}`)
+
+		if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{backupRootKey, ""}); err != nil {
+			t.Fatalf("config set %s \"\": %v", backupRootKey, err)
+		}
+		mc := readSection(t, townRoot)
+		if mc.TownStateBackupRoot == nil || *mc.TownStateBackupRoot != "" || mc.Enabled {
+			t.Errorf("town_state_backup_root, enabled = %v, %v; want set and empty (off), false", mc.TownStateBackupRoot, mc.Enabled)
+		}
+	})
+
+	t.Run("a relative path is refused and the file is unchanged", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		path := writeLiveSection(t, townRoot, `{"enabled":true,"window":"02:00"}`)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+
+		err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{backupRootKey, "gt-backups/town-state"})
+		if err == nil || !strings.Contains(err.Error(), "want an absolute path") {
+			t.Fatalf("config set %s with a relative path = %v, want the daemon's want-an-absolute-path refusal", backupRootKey, err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Errorf("settings file changed by a refused set:\nbefore: %s\nafter:  %s", before, after)
+		}
+	})
+
+	t.Run("an absolute path is stored cleaned", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		writeLiveSection(t, townRoot, `{"enabled":true,"window":"02:00"}`)
+
+		if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{backupRootKey, "/srv//gt-backups/../town-state/"}); err != nil {
+			t.Fatalf("config set %s: %v", backupRootKey, err)
+		}
+		if root := readSection(t, townRoot).TownStateBackupRoot; root == nil || *root != "/srv/town-state" {
+			t.Errorf("town_state_backup_root = %v, want /srv/town-state", root)
+		}
+	})
+
+	t.Run("get tells not set, off and a path apart", func(t *testing.T) {
+		absent := setupTestTownForConfig(t)
+		if got := getRoot(t, absent); got != "(not set)" {
+			t.Errorf("get with no settings file = %q, want (not set)", got)
+		}
+
+		noKey := setupTestTownForConfig(t)
+		writeLiveSection(t, noKey, `{"enabled":true,"window":"02:00"}`)
+		if got := getRoot(t, noKey); got != "(not set)" {
+			t.Errorf("get with the key absent = %q, want (not set)", got)
+		}
+
+		off := setupTestTownForConfig(t)
+		writeLiveSection(t, off, `{"enabled":true,"window":"02:00"}`)
+		if err := configSet(townConfigCmdEnv(off, io.Discard), []string{backupRootKey, ""}); err != nil {
+			t.Fatalf("config set %s \"\": %v", backupRootKey, err)
+		}
+		if got := getRoot(t, off); got != "(off)" {
+			t.Errorf("get with the explicit empty string = %q, want (off)", got)
+		}
+
+		on := setupTestTownForConfig(t)
+		writeLiveSection(t, on, `{"enabled":true,"window":"02:00"}`)
+		if err := configSet(townConfigCmdEnv(on, io.Discard), []string{backupRootKey, "/srv/gt-backups"}); err != nil {
+			t.Fatalf("config set %s: %v", backupRootKey, err)
+		}
+		if got := getRoot(t, on); got != "/srv/gt-backups" {
+			t.Errorf("get with a directory set = %q, want /srv/gt-backups", got)
+		}
+	})
+
+	t.Run("the host file's other section and its mode survive the set", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		path := config.TownSettingsPath(townRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir settings: %v", err)
+		}
+		doc := `{"type":"town-settings","version":1,"cli_theme":"dark","daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"02:00"}}}}`
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatalf("write settings: %v", err)
+		}
+
+		if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{backupRootKey, "/srv/gt-backups"}); err != nil {
+			t.Fatalf("config set %s: %v", backupRootKey, err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+		var top map[string]interface{}
+		if err := json.Unmarshal(data, &top); err != nil {
+			t.Fatalf("settings file does not parse after the set: %v\n%s", err, data)
+		}
+		if top["cli_theme"] != "dark" {
+			t.Errorf("cli_theme = %v, want dark unchanged", top["cli_theme"])
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat settings: %v", err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Errorf("settings mode = %o, want 600", got)
 		}
 	})
 

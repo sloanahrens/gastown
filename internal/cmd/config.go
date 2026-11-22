@@ -694,6 +694,10 @@ Supported keys:
                               the daemon runs CALL dolt_gc('--full') on each
                               database due for it (weekly, or old-gen grew >20%
                               since its last gc), only while the town is quiet
+  maintenance.town_state_backup_root
+                              Directory the nightly town-state backup writes
+                              into. An absolute path, or "" to turn the backup
+                              off. Unset alerts every night
   secrets.refuse_literals     Refuse to load a settings/config.json whose agent
                               env holds a literal token (true/false, default:
                               false = warn). Run 'gt config secrets migrate'
@@ -744,6 +748,8 @@ Supported keys:
   polecat.target_clean_policy When to delete <polecat>/target/ on reuse
                               (per_bead, every_n_beads:<N>, never)
   maintenance.window          Maintenance window start time (HH:MM)
+  maintenance.town_state_backup_root
+                              Nightly town-state backup directory, or (off)
   secrets.refuse_literals     Literal tokens refused instead of warned (true/false)
 
   Spec dispatch (the polecat pool's dispatch policy, in settings/config.json):
@@ -975,7 +981,7 @@ func configSet(e configCmdEnv, args []string) error {
 		}
 		townSettings.Polecat.TargetCleanPolicy = parsed.String()
 
-	case "maintenance.window":
+	case "maintenance.window", "maintenance.town_state_backup_root":
 		return setMaintenanceConfig(townRoot, key, value)
 
 	case "secrets.refuse_literals":
@@ -1037,7 +1043,7 @@ func configSet(e configCmdEnv, args []string) error {
 		}
 		err := setPolecatPoolValue(townSettings, key, value)
 		if errors.Is(err, errNotAPolecatPoolKey) {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.town_state_backup_root\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		if err != nil {
 			return err
@@ -1112,7 +1118,7 @@ func configGet(e configCmdEnv, args []string) error {
 			value = polecat.DefaultTargetCleanPolicy().String()
 		}
 
-	case "maintenance.window":
+	case "maintenance.window", "maintenance.town_state_backup_root":
 		return getMaintenanceConfig(e.out, townRoot, key)
 
 	case "secrets.refuse_literals":
@@ -1144,7 +1150,7 @@ func configGet(e configCmdEnv, args []string) error {
 		}
 		poolValue, handled := polecatPoolValue(townSettings.PolecatPool, key)
 		if !handled {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.town_state_backup_root\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		value = poolValue
 	}
@@ -1194,6 +1200,18 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 		mc.Window = fmt.Sprintf("%02d:%02d", hour, minute)
 		mc.Enabled = true // Setting window enables the patrol
 
+	case "maintenance.town_state_backup_root":
+		// Leaving Enabled alone: the root is independent of the window. The
+		// empty string is the off state, and a relative root is refused with
+		// townStateNightlyRoot's wording (gt-vn7ffl).
+		root := strings.TrimSpace(value)
+		if root != "" {
+			if !filepath.IsAbs(root) {
+				return fmt.Errorf("%s = %q: want an absolute path", config.MaintenanceTownStateBackupRootKey, root)
+			}
+			root = filepath.Clean(root)
+		}
+		mc.TownStateBackupRoot = &root
 	}
 
 	if err := daemon.SavePatrolConfig(townRoot, patrolConfig); err != nil {
@@ -1224,6 +1242,21 @@ func getMaintenanceConfig(out io.Writer, townRoot, key string) error {
 			value = "(not set)"
 		}
 
+	case "maintenance.town_state_backup_root":
+		// Three states, not two: an absent key alerts every night and an
+		// explicit empty string is the operator's off (gt-l9qnva).
+		var root *string
+		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.ScheduledMaintenance != nil {
+			root = patrolConfig.Patrols.ScheduledMaintenance.TownStateBackupRoot
+		}
+		switch {
+		case root == nil:
+			value = "(not set)"
+		case strings.TrimSpace(*root) == "":
+			value = "(off)"
+		default:
+			value = strings.TrimSpace(*root)
+		}
 	}
 
 	fmt.Fprintln(out, value)
