@@ -9,7 +9,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -219,16 +218,16 @@ func dryRunAlarms(calls []dryRunTargetCall) []string {
 	return alarms
 }
 
-// packageTestDir is the directory holding this file, read from the compiled
-// path so the guard checks the package it was built in rather than the working
-// directory.
+// packageTestDir is the directory of the package under test. go test runs the
+// test binary in its package directory, so the working directory names the
+// package the guard checks, under go test -trimpath too (gt-fb04i3).
 func packageTestDir(t *testing.T) string {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
 	}
-	return filepath.Dir(here)
+	return dir
 }
 
 // TestIntegrationDryRunCallers fails any test in this package that dry-runs
