@@ -58,6 +58,72 @@ func TestTownStateNightlyWireCountsTheStepThroughTheSeam(t *testing.T) {
 	}
 }
 
+// TestTownStateNightlyWireEmptyRootSkipsTheStep is the first acceptance box's
+// seam-observed half: an empty root is the operator's off state, so the step is
+// not called at all, the off reason is logged, and no alert is raised. The
+// clear of an earlier alert on the off branch belongs to gt-5dgbcy, so this
+// test starts with none to clear and does not assert on clears.
+func TestTownStateNightlyWireEmptyRootSkipsTheStep(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{},
+	}}, &logs)
+	var calls int
+	d.townStateNightlyStep = func(string, time.Time) error {
+		calls++
+		return nil
+	}
+
+	if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyOff {
+		t.Fatalf("outcome = %v, want off", got)
+	}
+	if calls != 0 {
+		t.Errorf("seam calls = %d, want 0: an empty root must not reach the step", calls)
+	}
+	if got := logs.String(); !strings.Contains(got, "town-state backup is off") ||
+		!strings.Contains(got, config.MaintenanceTownStateBackupRootKey) {
+		t.Errorf("log missing the off reason naming %s:\n%s", config.MaintenanceTownStateBackupRootKey, got)
+	}
+	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 0 {
+		t.Errorf("an empty root escalated: %+v", open)
+	}
+}
+
+// TestTownStateNightlyWireAbsentConfigSkipsTheStep is the second acceptance
+// box observed at the seam: a config that is nil, or holds no
+// scheduled_maintenance section, is not the off state, so the step is never
+// called and the absent-config alert is raised instead.
+func TestTownStateNightlyWireAbsentConfigSkipsTheStep(t *testing.T) {
+	t.Parallel()
+	cases := map[string]*DaemonPatrolConfig{
+		"no patrol config":                 nil,
+		"no scheduled_maintenance section": {Patrols: &PatrolsConfig{}},
+	}
+	for name, patrol := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d, rec := wireTestDaemon(t, patrol, &logs)
+			var calls int
+			d.townStateNightlyStep = func(string, time.Time) error {
+				calls++
+				return nil
+			}
+
+			if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyFailed {
+				t.Fatalf("outcome = %v, want failed", got)
+			}
+			if calls != 0 {
+				t.Errorf("seam calls = %d, want 0: an absent config must not reach the step", calls)
+			}
+			if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 1 {
+				t.Errorf("open escalations under %s = %+v, want one", alertKeyTownStateNightly, open)
+			}
+		})
+	}
+}
+
 // TestTownStateNightlyWireAbsentConfigAlerts is the first acceptance box's
 // absent-config half: a config that is nil, or holds no scheduled_maintenance
 // section, is an error that alerts under town_state_backup:nightly and names
