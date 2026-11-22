@@ -12,6 +12,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -186,11 +187,11 @@ func TestTownStateBackupRedactLogsOnACleanTick(t *testing.T) {
 }
 
 // TestTownStateBackupRedactCleanFailureKeepsTheError: a failing tick whose
-// snapshot carried no credential returns the tick's own error, with no note
-// appended to the alert text.
+// snapshot carried no credential returns the push's own typed error, with no
+// note appended to the alert text.
 func TestTownStateBackupRedactCleanFailureKeepsTheError(t *testing.T) {
 	t.Parallel()
-	d, _, town := townStateDaemon(t)
+	d, f, town := townStateDaemon(t)
 	rec := notifyfake.New()
 	d.notifier = rec
 	tree := townStateRedactTree()
@@ -198,10 +199,14 @@ func TestTownStateBackupRedactCleanFailureKeepsTheError(t *testing.T) {
 	delete(tree, "settings/themes/notes.txt")
 	d.townStateFS = func(string) fs.FS { return tree }
 	gitRepo := filepath.Join(town, ".dolt-archive", "git")
-	if err := os.MkdirAll(gitRepo, 0o755); err != nil {
-		t.Fatal(err)
+	seedTownStateOrigin(t, f, town, gitRepo)
+	f.SetPushFileLimit(1)
+
+	_, err := d.runTownStateBackup(gitRepo)
+	var pushErr *gtgit.GitError
+	if !errors.As(err, &pushErr) {
+		t.Fatalf("runTownStateBackup error = %v, want the push's *git.GitError", err)
 	}
-	initEmptyGitRepo(t, d, gitRepo)
 
 	d.syncTownStateBackup()
 
@@ -212,9 +217,6 @@ func TestTownStateBackupRedactCleanFailureKeepsTheError(t *testing.T) {
 	reason := escalations[0].Escalation.Reason
 	if strings.Contains(reason, "redacted") || strings.Contains(reason, "refused") {
 		t.Errorf("alert text = %q, want no credential note on a clean snapshot", reason)
-	}
-	if !strings.Contains(reason, "origin") {
-		t.Errorf("alert text = %q, want the push failure itself", reason)
 	}
 }
 
