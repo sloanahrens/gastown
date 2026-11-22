@@ -8,6 +8,8 @@ import (
 	"text/template"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // townVMsPlistTemplate is the com.gastown.colima-vms job: a thin wrapper that
@@ -87,7 +89,7 @@ func writeTownVMsPlist(w io.Writer, gt, home string) error {
 // touches ~/Library/LaunchAgents. Both flags are required; the refusals of a
 // relative, empty or newline value are gt-i6d00y's (gt-097npg).
 func newTownVMsPlistCmd() *cobra.Command {
-	var gt, home string
+	var gt, home, out string
 	cmd := &cobra.Command{
 		Use:   "plist --gt <path> --home <dir>",
 		Short: "Print the launchd job that runs gt town vms start at load",
@@ -95,11 +97,22 @@ func newTownVMsPlistCmd() *cobra.Command {
 		// A refusal prints no usage: stdout carries the plist and nothing else.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return writeTownVMsPlist(cmd.OutOrStdout(), gt, home)
+			if out == "" {
+				return writeTownVMsPlist(cmd.OutOrStdout(), gt, home)
+			}
+			// With --out the same bytes go to the file, mode 0644, replacing any
+			// file there, and nothing to stdout: config.ReplaceFile writes beside
+			// and renames, so a failed write leaves no partial job (gt-9tan46).
+			data, err := renderTownVMsPlist(gt, home)
+			if err == nil {
+				err = config.ReplaceFile(out, data, 0o644)
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&gt, "gt", "", "the absolute path of the Mac gt binary the job runs")
 	cmd.Flags().StringVar(&home, "home", "", "the home directory of the user the job runs as")
+	cmd.Flags().StringVar(&out, "out", "", "write the job to this file (mode 0644) instead of stdout")
 	_ = cmd.MarkFlagRequired("gt")
 	_ = cmd.MarkFlagRequired("home")
 	return cmd
