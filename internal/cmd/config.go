@@ -1169,7 +1169,10 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 		patrolConfig.Patrols = &daemon.PatrolsConfig{}
 	}
 	if patrolConfig.Patrols.ScheduledMaintenance == nil {
-		patrolConfig.Patrols.ScheduledMaintenance = &daemon.ScheduledMaintenanceConfig{}
+		// A section this writer creates names the town-state backup root as
+		// explicitly empty (off): an unset key alerts every night (gt-l9qnva).
+		noBackupRoot := ""
+		patrolConfig.Patrols.ScheduledMaintenance = &daemon.ScheduledMaintenanceConfig{TownStateBackupRoot: &noBackupRoot}
 	}
 	mc := patrolConfig.Patrols.ScheduledMaintenance
 

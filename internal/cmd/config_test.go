@@ -824,6 +824,22 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		}
 	})
 
+	// A section this writer creates names the town-state backup root as
+	// explicitly empty: an unset key alerts every night (gt-l9qnva).
+	t.Run("a section the writer creates names the backup root explicitly empty", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		if err := setMaintenanceConfig(townRoot, "maintenance.window", "03:00"); err != nil {
+			t.Fatalf("setMaintenanceConfig failed: %v", err)
+		}
+		pc, err := daemon.ReadPatrolConfig(townRoot)
+		if err != nil || pc == nil || pc.Patrols == nil || pc.Patrols.ScheduledMaintenance == nil {
+			t.Fatalf("ReadPatrolConfig = %+v, %v; want the section the writer created", pc, err)
+		}
+		if root := pc.Patrols.ScheduledMaintenance.TownStateBackupRoot; root == nil || *root != "" {
+			t.Errorf("town_state_backup_root = %v, want explicitly empty", root)
+		}
+	})
+
 	t.Run("set maintenance.window validates format", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 

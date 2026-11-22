@@ -27,8 +27,9 @@ town, so a claim is not restored from it.
 
 The scheduled-maintenance step (`internal/daemon/town_state_nightly.go`), when
 `patrols.scheduled_maintenance.town_state_backup_root` names a directory, writes
-one verified night per day under it. An absent key alerts (`town_state_backup:nightly`) and an explicit empty string is the off state. On the Mac it is
-`~/gt-backups/town-state`; the pod sees it at its mount,
+one verified night per day under it. An absent key alerts
+(`town_state_backup:nightly`) and an explicit empty string is the off state. On
+the Mac it is `~/gt-backups/town-state`; the pod sees it at its mount,
 `/Users/Shared/gt-backups/town-state`. A night is the dated directory
 `~/gt-backups/town-state/<date>/`, holding `state.tar.gz` (the exported town
 state) and `backup.json` (the manifest, written last, so a directory without

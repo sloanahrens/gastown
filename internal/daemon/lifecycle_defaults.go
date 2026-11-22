@@ -23,6 +23,10 @@ import (
 //   - Dolt Remotes: every 15m, pushes databases that have a configured remote
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	scrub := true
+	// The town-state backup root is written explicitly empty: an unset key alerts
+	// every night, and an install that has chosen no backup directory has chosen
+	// "off", so the default says so (gt-l9qnva).
+	noBackupRoot := ""
 	return &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
@@ -57,8 +61,9 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Scrub:       &scrub,
 			},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled: true,
-				Window:  "03:00",
+				Enabled:             true,
+				Window:              "03:00",
+				TownStateBackupRoot: &noBackupRoot,
 			},
 			// Declared but switched off: the patrol prunes the town's registry,
 			// which an install must not start doing on its own. The key is here
