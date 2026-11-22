@@ -13,7 +13,7 @@ func TestFollowupSkipsLineRoundTrips(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
 	findings := []FollowupSkipped{{Class: "comment-claim", File: "note.go", Reason: "doc nit", Fingerprint: Fingerprint("note.go", "name the error")}}
-	f := &ReviewsFile{Path: privateLandingsPath(t)}
+	f := reviewsFileIn(t)
 	must(t, f.AppendSkips(FollowupSkipsRecord{BeadID: "gt-plcst6", Rig: "gastown", At: at, Findings: findings}))
 	want, err := json.Marshal(ReviewRecord{BeadID: "gt-plcst6", Rig: "gastown", At: at, Skips: &FollowupSkips{Findings: findings}})
 	must(t, err)
@@ -31,11 +31,16 @@ func TestFollowupSkipsLineRoundTrips(t *testing.T) {
 func TestFollowupSkipsLineIsNotAVerdict(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
-	f := &ReviewsFile{Path: privateLandingsPath(t)}
+	f := reviewsFileIn(t)
 	must(t, f.Append(ReviewRecord{BeadID: "gt-v", Rig: "gastown", Verdict: VerdictApprove, Findings: 2, At: at}))
 	before, err := f.Since(time.Time{})
 	must(t, err)
 	must(t, f.AppendSkips(FollowupSkipsRecord{BeadID: "gt-s", Rig: "gastown", At: at, Findings: []FollowupSkipped{{Class: "doc-nit"}}}))
+	raw, err := os.ReadFile(f.Path)
+	must(t, err)
+	if n := strings.Count(string(raw), `"followup_skips"`); n != 1 {
+		t.Fatalf("the log holds %d followup_skips lines, want the one AppendSkips wrote (else the readers were never shown one): %q", n, raw)
+	}
 	after, err := f.Since(time.Time{})
 	must(t, err)
 	queued, err := f.Queued()
