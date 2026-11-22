@@ -691,6 +691,9 @@ func TestGateRunStoreRotationIsIdempotent(t *testing.T) {
 			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("%s: error = %v, want %v", tc.name, err, tc.wantErr)
 			}
+			if tc.wantErr != nil && tc.wantMonth == nil && !strings.Contains(err.Error(), month) { // the rows about the month file
+				t.Errorf("%s: error text %q does not name the month file %s", tc.name, err, month)
+			}
 			if tc.wantMonth == nil {
 				if !bytes.Equal(fsys.files[month], before) {
 					t.Errorf("%s: the month file changed", tc.name)
