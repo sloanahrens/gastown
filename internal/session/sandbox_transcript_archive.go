@@ -50,20 +50,7 @@ func archiveCopiedTranscriptsWith(copyDir, archiveDir string, move func(root *os
 		return fmt.Errorf("opening the transcript copy %s: %w", copyDir, err)
 	}
 	defer func() { _ = root.Close() }()
-	var found []string
-	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return fmt.Errorf("reading the transcript copy %s: %w", p, err)
-		}
-		if d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".jsonl") {
-			found = append(found, p)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	var errs []error
+	found, errs := listTranscripts(root.FS())
 	for _, rel := range found {
 		if err := move(root, rel, filepath.Join(archiveDir, path.Base(rel))); err != nil && !errors.Is(err, fs.ErrExist) {
 			errs = append(errs, err)
@@ -116,4 +103,25 @@ func moveConfined(root *os.Root, rel, dest string) error {
 		}
 	}
 	return nil
+}
+
+// listTranscripts lists the regular .jsonl files of fsys, slash-separated. A
+// directory it cannot read is reported, naming it, and skipped: the transcripts
+// beside it are still listed, and a vanished subdirectory is an error, not the
+// "missing copy" that archives nothing and lets the caller clear the copy.
+func listTranscripts(fsys fs.FS) (found []string, errs []error) {
+	walkErr := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reading the transcript copy %s: %w", p, err))
+			return fs.SkipDir
+		}
+		if d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".jsonl") {
+			found = append(found, p)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		errs = append(errs, walkErr)
+	}
+	return found, errs
 }

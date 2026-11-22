@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -180,4 +181,33 @@ func mustRoot(t *testing.T, dir string) *os.Root {
 	}
 	t.Cleanup(func() { r.Close() })
 	return r
+}
+
+// brokenDirFS is an fs.FS whose directory "bad" cannot be read.
+type brokenDirFS struct{ fs.FS }
+
+func (b brokenDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == "bad" {
+		return nil, errors.New("directory vanished")
+	}
+	return fs.ReadDir(b.FS, name)
+}
+
+// TestTranscriptArchiveListReportsAnUnreadableDirectory: a subdirectory that
+// cannot be read is reported naming it, and the transcripts beside it are still
+// listed (gt-1xoiib).
+func TestTranscriptArchiveListReportsAnUnreadableDirectory(t *testing.T) {
+	t.Parallel()
+	fsys := brokenDirFS{fstest.MapFS{
+		"ses-1.jsonl":       {Data: []byte("x")},
+		"bad/agent-1.jsonl": {Data: []byte("x")},
+		"note.txt":          {Data: []byte("x")},
+	}}
+	found, errs := listTranscripts(fsys)
+	if len(found) != 1 || found[0] != "ses-1.jsonl" {
+		t.Errorf("listed %v, want only ses-1.jsonl", found)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "reading the transcript copy bad") {
+		t.Errorf("errors = %v, want one naming the directory bad", errs)
+	}
 }
