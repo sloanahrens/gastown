@@ -147,8 +147,8 @@ func TestFollowupSkipAPanickingHookKeepsTheFinding(t *testing.T) {
 	t.Run("a held queue line's finding", func(t *testing.T) {
 		t.Parallel()
 		f := newFollowupFixture(t, 0.9, nil) // nothing of its own to file
-		// The feed asks the hook for a queue line more than once, so the call
-		// number in the panic tells the one reported line from one per call.
+		// The call number in the panic tells the one reported line from one per
+		// call; the hook is asked once per finding in a pass (gt-r66hk7).
 		calls := 0
 		f.lander.FollowupSkip = func(Work, FollowupCandidate) string {
 			calls++
@@ -174,8 +174,8 @@ func TestFollowupSkipAPanickingHookKeepsTheFinding(t *testing.T) {
 		if len(queued) != 0 {
 			t.Errorf("queue = %+v, want the filed line consumed", queued)
 		}
-		if calls < 2 {
-			t.Errorf("the hook was asked %d time(s), want the feed's repeat calls, which the one line must absorb", calls)
+		if calls != 1 {
+			t.Errorf("the hook was asked %d time(s), want once: the pass keeps the answer, a panic's included", calls)
 		}
 		logged(t, log, "cannot read the finding 1")
 	})
