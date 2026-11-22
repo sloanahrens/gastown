@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -224,6 +225,7 @@ type memGateRunFS struct {
 	files                          map[string][]byte
 	sizeErr, readErr, removeErr    error
 	openFailOn, writeFailOn, clsOn string
+	readFailOn                     string // a read error applies to paths holding this ("" = all)
 	err                            error
 }
 
@@ -231,7 +233,16 @@ func newMemGateRunFS() *memGateRunFS { return &memGateRunFS{files: map[string][]
 
 func (m *memGateRunFS) MkdirAll(string, os.FileMode) error { return nil }
 func (m *memGateRunFS) Size(p string) (int64, error)       { return int64(len(m.files[p])), m.sizeErr }
-func (m *memGateRunFS) ReadFile(p string) ([]byte, error)  { return m.files[p], m.readErr }
+func (m *memGateRunFS) ReadFile(p string) ([]byte, error) {
+	if m.readErr != nil && strings.Contains(p, m.readFailOn) {
+		return nil, m.readErr
+	}
+	data, ok := m.files[p]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return data, nil
+}
 func (m *memGateRunFS) Remove(p string) error {
 	if m.removeErr == nil {
 		delete(m.files, p)
@@ -582,5 +593,95 @@ func TestGateRunStoreTwoAppendsAtTheLimitRotateOnce(t *testing.T) {
 	month := filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")
 	if got := beadsIn(t, h.files[month], true); !slices.Equal(got, []string{"gt-o1", "gt-o2"}) {
 		t.Errorf("month file = %v, want each old row once [gt-o1 gt-o2]", got)
+	}
+}
+
+// gzipRows gzips rows as one member, the way a month file's members are written.
+func gzipRows(t *testing.T, rows ...GateRun) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	for _, r := range rows {
+		if _, err := zw.Write([]byte(mustLine(t, r) + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestGateRunStoreRotationIsIdempotent: a rotation that runs again over rows it
+// already archived leaves each row once in the month file, tells two runs of one
+// bead apart, and a month file it cannot read or decode is an error that keeps the
+// log (gt-5acjcn).
+func TestGateRunStoreRotationIsIdempotent(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	row := func(bead, run string, sec int) GateRun {
+		r := sampleGateRun(bead)
+		r.RunID, r.TS = run, time.Date(2026, 10, 1, 12, 0, sec, 0, time.UTC)
+		return r
+	}
+	o1, o2 := row("gt-o1", "r1", 1), row("gt-o2", "r2", 2)
+	cur := gateRunsPath("/town")
+	month := filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")
+	for _, tc := range []struct {
+		name      string
+		setup     func(*memGateRunFS)
+		appends   []string
+		wantMonth []string // nil: the month file is left as it was
+		wantErr   error
+	}{
+		{"removal fails twice, three appends: each row once", func(m *memGateRunFS) { m.removeErr = boom },
+			[]string{"gt-n1", "gt-n2", "gt-n3"}, []string{"gt-n1", "gt-n2", "gt-o1", "gt-o2"}, boom},
+		{"a month file already holding part of the group gets the rest", func(m *memGateRunFS) { m.files[month] = gzipRows(t, o1) },
+			[]string{"gt-n1"}, []string{"gt-o1", "gt-o2"}, nil},
+		{"two runs of one bead stay two rows", func(m *memGateRunFS) {
+			m.files[month] = gzipRows(t, o1) // the first run is archived; the second, of the same bead, is not
+			m.files[cur] = []byte(mustLine(t, o1) + "\n" + mustLine(t, row("gt-o1", "r9", 3)) + "\n")
+		}, []string{"gt-n1"}, []string{"gt-o1", "gt-o1"}, nil},
+		{"a month file that cannot be read is an error and the log is kept", func(m *memGateRunFS) {
+			m.files[month] = gzipRows(t, o1)
+			m.readErr, m.readFailOn = boom, "2026-10"
+		}, []string{"gt-n1"}, nil, boom},
+		{"a month file that is not gzip is an error and the log is kept", func(m *memGateRunFS) { m.files[month] = []byte("plain text") },
+			[]string{"gt-n1"}, nil, gzip.ErrHeader},
+		{"a month file cut short is an error and the log is kept", func(m *memGateRunFS) {
+			whole := gzipRows(t, o1)
+			m.files[month] = whole[:len(whole)-9]
+		}, []string{"gt-n1"}, nil, io.ErrUnexpectedEOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			fsys.files[cur] = []byte(mustLine(t, o1) + "\n" + mustLine(t, o2) + "\n")
+			tc.setup(fsys)
+			before := slices.Clone(fsys.files[month])
+			var err error
+			for _, bead := range tc.appends {
+				r := sampleGateRun(bead)
+				r.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+				err = errors.Join(err, appendGateRunLimit(fsys, "/town", r, 1))
+			}
+			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("%s: error = %v, want %v", tc.name, err, tc.wantErr)
+			}
+			if tc.wantMonth == nil {
+				if !bytes.Equal(fsys.files[month], before) {
+					t.Errorf("%s: the month file changed", tc.name)
+				}
+				if got := beadsIn(t, fsys.files[cur], false); !slices.Contains(got, "gt-o1") || !slices.Contains(got, "gt-o2") {
+					t.Errorf("%s: log = %v, want the unarchived rows kept", tc.name, got)
+				}
+				return
+			}
+			got := beadsIn(t, fsys.files[month], true)
+			slices.Sort(got)
+			if !slices.Equal(got, tc.wantMonth) {
+				t.Errorf("%s: month file = %v, want %v", tc.name, got, tc.wantMonth)
+			}
+		})
 	}
 }
