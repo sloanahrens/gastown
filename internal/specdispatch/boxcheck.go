@@ -21,15 +21,54 @@ type boxPhrase struct {
 	// re is the matcher when a plain substring is too loose; nil means text
 	// is matched case-insensitively as a substring.
 	re *regexp.Regexp
+	// command reads re as a command invocation: a match a negation introduces
+	// states the seat does not run it, so it is not a match (gt-o9jb9a).
+	command bool
 	// hint is the fix sentence the refusal ends with; empty keeps it out (gt-n9p12q).
 	hint string
+}
+
+// makeTargetHint is the fix sentence for a make target that runs the whole
+// lint, test or gate (gt-o9jb9a).
+const makeTargetHint = "name the narrow go test -run or go vet command; the landing gate runs lint, test and gate after the seat submits, so they are not boxes"
+
+// makeTargetEnd ends a make command: whitespace, the end of text, or punctuation.
+// A hyphen or a letter continues the target, so make lint-tools is another target.
+const makeTargetEnd = `(?:$|[\s.,;:!?()\[\]{}'"])`
+
+// makeNegations end a phrase that says the seat does not run the target; an
+// occurrence one introduces is a statement, not a command (gt-o9jb9a).
+var makeNegations = []string{"not run", "never run", "not to run"}
+
+// makeTargetRe matches one make target, with any whitespace between it and the
+// command. A negation before it is checked in makeCommandMatch (gt-o9jb9a).
+func makeTargetRe(target string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)\bmake\s+` + regexp.QuoteMeta(target) + makeTargetEnd)
+}
+
+// makeCommandMatch reports whether subject runs the target: one occurrence of
+// re that the text before it does not negate.
+func makeCommandMatch(re *regexp.Regexp, subject string) bool {
+	for _, loc := range re.FindAllStringIndex(subject, -1) {
+		before := strings.ToLower(strings.TrimRight(subject[:loc[0]], " \t"))
+		negated := false
+		for _, neg := range makeNegations {
+			negated = negated || strings.HasSuffix(before, neg)
+		}
+		if !negated {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptanceBoxPhrases are read in order, so an item naming two steps is
 // refused for the first one listed. The list is closed: a phrase outside it is
 // not this check's (gt-hgt9j.3).
 var acceptanceBoxPhrases = []boxPhrase{
-	{text: "make gate"},
+	{text: "make gate", re: makeTargetRe("gate"), command: true, hint: makeTargetHint},
+	{text: "make lint", re: makeTargetRe("lint"), command: true, hint: makeTargetHint},
+	{text: "make test", re: makeTargetRe("test"), command: true, hint: makeTargetHint},
 	// The boundary keeps a repository file named for the tool out: a
 	// dockerfile is a file to change, not a container to run.
 	{text: "docker", re: regexp.MustCompile(`(?i)\bdocker\b`)},
@@ -90,10 +129,13 @@ func boxSubject(item string) string {
 
 // matches reports whether subject names the phrase.
 func (p boxPhrase) matches(subject string) bool {
-	if p.re != nil {
-		return p.re.MatchString(subject)
+	if p.re == nil {
+		return strings.Contains(strings.ToLower(subject), p.text)
 	}
-	return strings.Contains(strings.ToLower(subject), p.text)
+	if p.command {
+		return makeCommandMatch(p.re, subject)
+	}
+	return p.re.MatchString(subject)
 }
 
 // acceptanceBoxPhrase returns the first phrase in the item's subject (see
