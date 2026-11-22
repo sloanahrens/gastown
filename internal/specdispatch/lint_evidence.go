@@ -47,9 +47,12 @@ func evidenceRefusal(s Spec, sections map[string]string) (Refusal, bool) {
 }
 
 // usableEvidence reports whether an Evidence section shows a command: a line
-// starting "$ ", or an opening fence and its closer.
+// starting "$ ", or a fence pair with at least one non-blank line between the
+// markers. A lone fence marker and an empty pair show no command, so neither is
+// evidence.
 func usableEvidence(section string) bool {
 	var fence byte
+	var held bool // a non-blank line seen between the opening fence and its closer
 	for _, line := range strings.Split(section, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "$ ") {
@@ -57,14 +60,21 @@ func usableEvidence(section string) bool {
 		}
 		marker := beads.FenceMarker(trimmed)
 		if marker == "" {
+			if fence != 0 && trimmed != "" {
+				held = true
+			}
 			continue
 		}
 		if fence == 0 {
 			fence = marker[0]
+			held = false
 			continue
 		}
 		if marker[0] == fence {
-			return true
+			if held {
+				return true
+			}
+			fence = 0
 		}
 	}
 	return false
