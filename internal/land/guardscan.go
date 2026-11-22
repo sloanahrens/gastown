@@ -3,6 +3,8 @@ package land
 import (
 	"go/ast"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // walkerRoots gives each tree walk's root argument index; fs.WalkDir takes the
@@ -32,4 +34,19 @@ func callWalksParent(call *ast.CallExpr) bool {
 		return false
 	}
 	return strings.HasPrefix(lit.Value[1:], "..")
+}
+
+// isRunTest reports whether go test runs fn as a test: a top-level function
+// whose name is "Test", or "Test" followed by a rune unicode.IsLower reports
+// false for, as in cmd/go's isTest. A method is not a test.
+func isRunTest(fn *ast.FuncDecl) bool {
+	if fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+		return false
+	}
+	rest := fn.Name.Name[len("Test"):]
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return !unicode.IsLower(r)
 }
