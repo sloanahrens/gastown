@@ -149,6 +149,16 @@ func fastGate(client CandidateStatus) *CandidateGate {
 	}
 }
 
+// passGate is fastGate with a window a passing run can use. A fake that reports
+// success ends the wait at once, so the long window costs no time on a pass,
+// while a 200 ms window lets a loaded host time out a gate still reporting
+// (gt-7vnq97). A test that expects the timed-out state keeps fastGate.
+func passGate(client CandidateStatus) *CandidateGate {
+	gate := fastGate(client)
+	gate.WaitTimeout = 30 * time.Second
+	return gate
+}
+
 func TestWorkCandidate(t *testing.T) {
 	t.Parallel()
 	if got := (Work{BeadID: "gt-abc"}).Candidate(); got != "land/gt-abc" {
@@ -330,7 +340,7 @@ func TestCandidateGatePushesTheCandidateAndTakesTheVerdict(t *testing.T) {
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")}}
-	gate := fastGate(client)
+	gate := passGate(client)
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.Err != nil {
@@ -1056,7 +1066,7 @@ func TestCandidateGateAbsorbsTransientStatusErrors(t *testing.T) {
 		statusErrs: []error{errors.New("forgejo: GET statuses returned 502"), errors.New("context deadline exceeded")},
 		statuses:   []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
 	}
-	gate := fastGate(client)
+	gate := passGate(client)
 	var log strings.Builder
 	gate.Out = &log
 
@@ -1096,7 +1106,7 @@ func TestCandidateGateNonConsecutiveBlipsDoNotAddUp(t *testing.T) {
 		status(forgejo.StatePending, "ci / gate (push)"),
 		status(forgejo.StateSuccess, "ci / gate (push)"),
 	}}
-	gate := fastGate(&blipAfterReads{CandidateStatus: client, blipAt: map[int]error{
+	gate := passGate(&blipAfterReads{CandidateStatus: client, blipAt: map[int]error{
 		2: errors.New("forgejo: GET statuses returned 502"),
 		4: errors.New("connection reset by peer"),
 		6: errors.New("context deadline exceeded"),
@@ -1105,8 +1115,6 @@ func TestCandidateGateNonConsecutiveBlipsDoNotAddUp(t *testing.T) {
 	// Four blips separated by four pending reads take nine polls to play out;
 	// the window is wide enough that the interleaving, not the silence window,
 	// decides the outcome.
-	gate.WaitTimeout = 2 * time.Second
-
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.Err != nil {
 		t.Fatalf("Run: %v; non-consecutive blips must not add up", res.Err)
@@ -1139,7 +1147,7 @@ func pollLines(t *testing.T, client CandidateStatus) int {
 	t.Helper()
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
-	gate := fastGate(client)
+	gate := passGate(client)
 	var log strings.Builder
 	gate.Out = &log
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
@@ -1196,7 +1204,7 @@ func TestCandidateGatePollIntervals(t *testing.T) {
 		if tt.blip {
 			client.statusErrs = []error{errors.New("connection reset by peer")}
 		}
-		gate := fastGate(client)
+		gate := passGate(client)
 		gate.PollInterval = tt.poll
 		var waits []time.Duration
 		gate.waitTimer = func(d time.Duration) <-chan time.Time {
@@ -1256,8 +1264,7 @@ func TestCandidateGatePollErrorToleranceUnchanged(t *testing.T) {
 	passed := status(forgejo.StateSuccess, "ci / gate (push)")
 	// waitOnce drives the production wait on an instant poll timer.
 	waitOnce := func(client CandidateStatus) CandidateResult {
-		gate := fastGate(client)
-		gate.WaitTimeout = 2 * time.Second
+		gate := passGate(client)
 		gate.waitTimer = func(time.Duration) <-chan time.Time {
 			fired := make(chan time.Time)
 			close(fired)
@@ -1563,7 +1570,7 @@ func TestCandidateGateRecordsAPass(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
 	var recs []GateRun
-	gate := fastGate(client)
+	gate := passGate(client)
 	gate.Now = func() time.Time { return at }
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
@@ -1592,7 +1599,7 @@ func TestCandidateGateRecordsAPassWithFailedLogRead(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
 	var recs []GateRun
-	gate := fastGate(client)
+	gate := passGate(client)
 	gate.Now = func() time.Time { return at }
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
@@ -1691,7 +1698,7 @@ func TestCandidateGateRecordsRunningRuns(t *testing.T) {
 		log:      recordLogPass,
 	}
 	var recs []GateRun
-	gate := fastGate(client)
+	gate := passGate(client)
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
@@ -1719,7 +1726,7 @@ func TestCandidateGateRecordsRunningRunsFails(t *testing.T) {
 	}
 	var recs []GateRun
 	var out strings.Builder
-	gate := fastGate(client)
+	gate := passGate(client)
 	gate.Out = &out
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
