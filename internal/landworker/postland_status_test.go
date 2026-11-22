@@ -1509,14 +1509,23 @@ func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
 	// pass budget (it counts its reads), commit01 answers green.
 	stalledFirst := func(first func(context.Context) (*forgejo.CombinedStatus, error)) (*PostLandRunner, *statusVerdicts, *manualClock, *atomic.Int32) {
 		v, clk, reads := &statusVerdicts{}, &manualClock{now: statusT0}, &atomic.Int32{}
+		// cancelBudget ends the running pass: the stalled read calls it once it has
+		// counted itself, so the pass ends exactly when its first read starts, on any host.
+		cancelBudget := context.CancelFunc(func() {})
 		r := v.runner(func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error) {
 			if pl.Commit != "commit00" {
 				return combinedFor(statusContext, forgejo.StateSuccess), nil
 			}
 			reads.Add(1)
+			cancelBudget()
 			return first(ctx)
 		}, &MemoryMainState{}, clk, time.Hour)
-		r.readTimeoutOverride, r.passBudgetOverride = 500*time.Millisecond, 50*time.Millisecond
+		r.readTimeoutOverride = 500 * time.Millisecond
+		r.passContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(parent)
+			cancelBudget = cancel
+			return ctx, cancel
+		}
 		for _, c := range []string{"commit00", "commit01"} {
 			r.Trigger(context.Background(), PostLand{Commit: c, Target: "main"})
 		}
@@ -1527,6 +1536,9 @@ func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
 		t.Parallel()
 		r, v, _, reads := stalledFirst(stall)
 		r.PollPending(context.Background())
+		if greens, _, _ := v.counts(); greens != 0 {
+			t.Fatalf("the pass the budget ended read the entry behind the stalled one: %d greens after one poll, want 0", greens)
+		}
 		r.PollPending(context.Background())
 		if greens, _, _ := v.counts(); greens != 1 || reads.Load() != 1 {
 			t.Fatalf("after two polls green %d, stalled entry read %d times, want 1 and 1: the stalled entry rests", greens, reads.Load())
@@ -1534,8 +1546,11 @@ func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
 	})
 	t.Run("the stalled entry is read again after the interval", func(t *testing.T) {
 		t.Parallel()
-		r, _, clk, reads := stalledFirst(stall)
+		r, v, clk, reads := stalledFirst(stall)
 		r.PollPending(context.Background())
+		if greens, _, _ := v.counts(); greens != 0 {
+			t.Fatalf("the pass the budget ended read the entry behind the stalled one: %d greens after one poll, want 0", greens)
+		}
 		clk.Advance(PostLandStatusPollInterval)
 		r.PollPending(context.Background())
 		if reads.Load() != 2 {
@@ -1544,15 +1559,46 @@ func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
 	})
 	t.Run("an entry whose read finishes unknown still rests for the interval", func(t *testing.T) {
 		t.Parallel()
-		r, _, _, reads := stalledFirst(func(context.Context) (*forgejo.CombinedStatus, error) {
+		r, v, _, reads := stalledFirst(func(context.Context) (*forgejo.CombinedStatus, error) {
 			return combinedFor(statusContext, forgejo.StatePending), nil
 		})
 		r.PollPending(context.Background())
+		if greens, _, _ := v.counts(); greens != 0 {
+			t.Fatalf("the pass the budget ended read the entry behind the stalled one: %d greens after one poll, want 0", greens)
+		}
 		r.PollPending(context.Background())
 		if reads.Load() != 1 {
 			t.Fatalf("an unknown entry was read %d times inside its interval, want 1", reads.Load())
 		}
 	})
+}
+
+// TestPostLandStatusPassContextNilEndsThePassAtTheBudget: without a passContext a
+// pass still ends at passBudget, so a stalled read is cut off and the entry behind
+// it waits for the next pass. The read timeout is long, so only the budget can
+// end the pass in time.
+func TestPostLandStatusPassContextNilEndsThePassAtTheBudget(t *testing.T) {
+	t.Parallel()
+	v, clk, reads := &statusVerdicts{}, &manualClock{now: statusT0}, &atomic.Int32{}
+	r := v.runner(func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error) {
+		if pl.Commit != "commit00" {
+			return combinedFor(statusContext, forgejo.StateSuccess), nil
+		}
+		reads.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}, &MemoryMainState{}, clk, time.Hour)
+	r.readTimeoutOverride, r.passBudgetOverride = 5*time.Second, 50*time.Millisecond
+	for _, c := range []string{"commit00", "commit01"} {
+		r.Trigger(context.Background(), PostLand{Commit: c, Target: "main"})
+	}
+	r.PollPending(context.Background())
+	if reads.Load() != 1 {
+		t.Fatalf("the stalled entry was read %d times in one pass, want 1", reads.Load())
+	}
+	if greens, _, _ := v.counts(); greens != 0 {
+		t.Fatalf("the pass the budget ended read the entry behind the stalled one: %d greens, want 0", greens)
+	}
 }
 
 // TestPostLandStatusStopDuringReadDoesNotStamp: a stop of the daemon that cuts a
