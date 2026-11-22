@@ -60,10 +60,38 @@ func TestGateRunMonthExpired(t *testing.T) {
 		{"the rejects file", "gate-runs-rejects.jsonl", utc(2030, time.January, 1), false},
 		{"a month that does not exist", "gate-runs-2026-13.jsonl.gz", utc(2030, time.January, 1), false},
 		{"a month file without the gz suffix", "gate-runs-2026-10.jsonl", utc(2030, time.January, 1), false},
+		{"a month before the retained years is quarantined, not expired", "gate-runs-2019-12.jsonl.gz", utc(2030, time.January, 1), false},
+		{"the zero month is quarantined, not expired", "gate-runs-0001-01.jsonl.gz", utc(2030, time.January, 1), false},
+		{"a far-future month is quarantined, not expired", "gate-runs-9999-12.jsonl.gz", utc(2030, time.January, 1), false},
+		{"the first retained year follows the rule", "gate-runs-2020-01.jsonl.gz", utc(2030, time.January, 1), true},
 		{"a now in another zone is read as the instant it is", "gate-runs-2026-12.jsonl.gz", cutoff.In(time.FixedZone("x", 5*3600)), false},
 	} {
 		if got := gateRunMonthExpired(tc.file, tc.now, 90); got != tc.want {
 			t.Errorf("%s: gateRunMonthExpired(%q, %s, 90) = %t, want %t", tc.name, tc.file, tc.now.Format(time.RFC3339Nano), got, tc.want)
+		}
+	}
+}
+
+// TestGateRunMonthQuarantined: a month file whose year is outside [2020, the year
+// of now plus one] is quarantined, and nothing else is (gt-jir41w).
+func TestGateRunMonthQuarantined(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2030, time.June, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		file string
+		want bool
+	}{
+		{"gate-runs-2019-12.jsonl.gz", true},
+		{"gate-runs-2020-01.jsonl.gz", false},
+		{"gate-runs-2031-12.jsonl.gz", false}, // the year after now's
+		{"gate-runs-2032-01.jsonl.gz", true},
+		{"gate-runs-0001-01.jsonl.gz", true},
+		{"gate-runs-9999-12.jsonl.gz", true},
+		{"gate-runs.jsonl", false},
+		{"gate-runs-rejects.jsonl", false},
+	} {
+		if got := gateRunMonthQuarantined(tc.file, now); got != tc.want {
+			t.Errorf("gateRunMonthQuarantined(%q) = %t, want %t", tc.file, got, tc.want)
 		}
 	}
 }

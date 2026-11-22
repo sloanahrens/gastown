@@ -42,8 +42,24 @@ func groupGateRunsByMonth(rows []GateRun) []gateRunMonthGroup {
 // rejects file included, is never expired.
 func gateRunMonthExpired(name string, now time.Time, keepDays int) bool {
 	month, err := time.Parse("gate-runs-2006-01.jsonl.gz", name)
-	if err != nil {
+	if err != nil || gateRunMonthQuarantined(name, now) {
 		return false
 	}
 	return now.Sub(month.AddDate(0, 1, 0)) > time.Duration(keepDays)*24*time.Hour
+}
+
+// gateRunFirstYear is the earliest year a month file may carry and still be
+// retained or aged out; an earlier or far-future year comes from a row whose ts
+// was missing or wrong, and is kept for an operator, not deleted (gt-jir41w).
+const gateRunFirstYear = 2020
+
+// gateRunMonthQuarantined reports whether name is a month file whose year is
+// outside [gateRunFirstYear, the year of now plus one]. Such a file is neither
+// expired nor kept by age: the rotation leaves it and names it.
+func gateRunMonthQuarantined(name string, now time.Time) bool {
+	month, err := time.Parse("gate-runs-2006-01.jsonl.gz", name)
+	if err != nil {
+		return false
+	}
+	return month.Year() < gateRunFirstYear || month.Year() > now.UTC().Year()+1
 }

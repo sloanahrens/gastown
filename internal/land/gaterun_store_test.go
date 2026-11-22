@@ -1064,3 +1064,49 @@ func TestOSGateRunFSReadDir(t *testing.T) {
 		t.Error("ReadDir of a missing directory = nil error, want one")
 	}
 }
+
+// TestGateRunStoreRetentionQuarantine: a month file whose year is outside the
+// retained years is never deleted however old the clock says it is, and each is
+// named once in the rotation's error; the months inside the years follow the
+// retention rule as before (gt-jir41w).
+func TestGateRunStoreRetentionQuarantine(t *testing.T) {
+	t.Parallel()
+	cur := gateRunsPath("/town")
+	dir := filepath.Dir(cur)
+	now := time.Date(2027, 3, 15, 12, 0, 0, 0, time.UTC)
+	file := func(name string) string { return filepath.Join(dir, "gate-runs-"+name+".jsonl.gz") }
+	fsys := newMemGateRunFS()
+	for _, name := range []string{"0001-01", "9999-12", "2019-12", "2020-01", "2026-09", "2027-02"} {
+		r := sampleGateRun("gt-" + name)
+		r.TS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		fsys.files[file(name)] = gzipRows(t, r)
+	}
+	old := sampleGateRun("gt-log")
+	old.TS = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	fsys.files[cur] = []byte(mustLine(t, old) + "\n")
+	row := sampleGateRun("gt-new")
+	row.TS = now
+	err := appendGateRunAt(fsys, "/town", row, 1, now)
+	if err == nil {
+		t.Fatal("a rotation with quarantined month files returned no error")
+	}
+	for _, name := range []string{"0001-01", "9999-12", "2019-12"} {
+		if _, ok := fsys.files[file(name)]; !ok {
+			t.Errorf("the quarantined %s was deleted", name)
+		}
+		if n := strings.Count(err.Error(), "gate-runs-"+name+".jsonl.gz: month outside the retained years, kept for an operator"); n != 1 {
+			t.Errorf("the error names %s %d times, want once:\n%v", name, n, err)
+		}
+	}
+	for _, name := range []string{"2020-01", "2026-09"} {
+		if _, ok := fsys.files[file(name)]; ok {
+			t.Errorf("the expired %s was not deleted", name)
+		}
+		if strings.Contains(err.Error(), name) {
+			t.Errorf("the error names the ordinary month %s:\n%v", name, err)
+		}
+	}
+	if _, ok := fsys.files[file("2027-02")]; !ok {
+		t.Error("the newer month 2027-02 was deleted")
+	}
+}
