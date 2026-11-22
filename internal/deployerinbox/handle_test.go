@@ -74,6 +74,8 @@ type fakeSteps struct {
 	recordID    string
 	appliedPlan clusterapproval.Plan
 	appliedLive map[string]string
+	// rolledBackPlan is the plan value Handle handed Rollback.
+	rolledBackPlan clusterapproval.Plan
 }
 
 func (f *fakeSteps) Plan(_ context.Context, name string) (clusterapproval.Plan, error) {
@@ -120,8 +122,9 @@ func (f *fakeSteps) ReadRecord(_ context.Context, id string) (clusterapproval.Re
 	return f.record, f.recordErr
 }
 
-func (f *fakeSteps) Rollback(_ context.Context, name string) error {
+func (f *fakeSteps) Rollback(_ context.Context, name string, verified clusterapproval.Plan) error {
 	f.calls = append(f.calls, "Rollback "+name)
+	f.rolledBackPlan = verified
 	return f.rollbackErr
 }
 
@@ -635,6 +638,9 @@ func TestDeployerInboxRollbackRuns(t *testing.T) {
 	if !slices.Equal(steps.calls, wantCalls) {
 		t.Errorf("calls = %v, want %v: the rollback checks the same record as apply, then undoes once and applies nothing", steps.calls, wantCalls)
 	}
+	if !reflect.DeepEqual(steps.rolledBackPlan, plan) {
+		t.Errorf("Rollback was handed the plan %+v, want the verified plan %+v: what is approved is what is undone", steps.rolledBackPlan, plan)
+	}
 }
 
 // TestDeployerInboxRollbackRefuses: a missing, mismatched or expired record, or a live version that moved, leaves Rollback uncalled and answers refused with the reason.
@@ -703,6 +709,9 @@ func TestDeployerInboxRollbackRefuses(t *testing.T) {
 			}
 			if answer.PlanSHA256 != "" {
 				t.Errorf("plan_sha256 = %q, want none for a refused rollback", answer.PlanSHA256)
+			}
+			if tc.steps.rolledBackPlan.SHA256 != "" {
+				t.Errorf("Rollback was handed %+v, want nothing undone for a refused rollback", tc.steps.rolledBackPlan)
 			}
 		})
 	}

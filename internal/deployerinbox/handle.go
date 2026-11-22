@@ -36,10 +36,12 @@ type Steps interface {
 	// ReadRecord returns the broker's approval record for proposalID, and
 	// ErrNoApproval when it has written none.
 	ReadRecord(ctx context.Context, proposalID string) (clusterapproval.Record, error)
-	// Rollback undoes the applied plan named name to its recorded revisions. Handle
-	// calls it only for a rollback request whose approval record verified
-	// (gt-iiccy3).
-	Rollback(ctx context.Context, name string) error
+	// Rollback undoes the applied plan named name to its recorded revisions, and
+	// undoes exactly verified, the plan whose approval record Verify checked: an
+	// implementation that finds another plan under name (a different digest) acts
+	// on nothing. Handle calls it only for a rollback request whose approval
+	// record verified, with the same plan value it hands Apply (gt-iiccy3).
+	Rollback(ctx context.Context, name string, verified clusterapproval.Plan) error
 }
 
 // Handle runs one inbox request through steps and returns the answer it earns
@@ -101,7 +103,7 @@ func handleRollback(ctx context.Context, steps Steps, req Request, answer Answer
 	if !ok {
 		return answer
 	}
-	if err := steps.Rollback(ctx, req.Plan); err != nil {
+	if err := steps.Rollback(ctx, req.Plan, plan); err != nil {
 		return answerFailed(answer, detailRollbackFailed)
 	}
 	answer.Status = StatusRolledBack
