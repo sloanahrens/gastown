@@ -707,3 +707,116 @@ func TestStoryPointsDriftPreviousReading(t *testing.T) {
 		})
 	}
 }
+
+// TestStoryPointsDriftInterval: a measurable reading carries the 95% bootstrap
+// interval of its rank correlation. The interval brackets the point value inside
+// [-1, 1]; the fixed seed makes two reads of one window give one interval; a
+// window under the minimum has no number and no interval beside its Why; and a
+// series the bootstrap refuses is unmeasurable with the refusal in Why, never a
+// number without an interval.
+func TestStoryPointsDriftInterval(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	// The newest and the oldest estimate swap measured places: a noisy series
+	// whose rank correlation is hand-computable.
+	swappedEnds := func(i int) float64 {
+		switch i {
+		case 0:
+			return 100
+		case 99:
+			return 1
+		}
+		return float64(i + 1)
+	}
+	rows := driftLandings(100, base, swappedEnds)
+	scorer := func(row Row) (float64, bool) {
+		minutes, err := strconv.ParseFloat(row["sp_minutes"], 64)
+		if err != nil {
+			t.Fatalf("scorer: sp_minutes %q: %v", row["sp_minutes"], err)
+		}
+		return minutes, true
+	}
+
+	t.Run("a hundred landings bracket their rho", func(t *testing.T) {
+		t.Parallel()
+		got, err := StoryPointsDriftOver(rows, nil)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver: %v", err)
+		}
+		cur := got.Current
+		if !cur.Measurable || got.N != 100 {
+			t.Fatalf("Current = %+v, want a measurable reading over 100 landings", cur)
+		}
+		// Two ranks move 99 places each: rho = 1 - 6*sum(d^2)/(n*(n^2-1)).
+		want := 1 - 6*2*99*99/float64(100*(100*100-1))
+		if math.Abs(cur.Rho-want) > 1e-9 {
+			t.Errorf("Rho = %v, want %v", cur.Rho, want)
+		}
+		if !(cur.Lo < cur.Rho && cur.Rho < cur.Hi) {
+			t.Errorf("interval [%v, %v] does not bracket Rho %v", cur.Lo, cur.Hi, cur.Rho)
+		}
+		if cur.Lo < -1 || cur.Hi > 1 {
+			t.Errorf("interval [%v, %v] is outside [-1, 1]", cur.Lo, cur.Hi)
+		}
+	})
+
+	t.Run("two reads of one window give one interval", func(t *testing.T) {
+		t.Parallel()
+		first, err := StoryPointsDriftOver(rows, scorer)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver first read: %v", err)
+		}
+		second, err := StoryPointsDriftOver(rows, scorer)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver second read: %v", err)
+		}
+		for _, tc := range []struct {
+			name       string
+			first, two StoryPointsDriftReading
+		}{
+			{name: "Current", first: first.Current, two: second.Current},
+			{name: "Previous", first: first.Previous, two: second.Previous},
+		} {
+			if !tc.first.Measurable {
+				t.Fatalf("%s is not measurable: %s", tc.name, tc.first.Why)
+			}
+			if tc.first.Lo != tc.two.Lo || tc.first.Hi != tc.two.Hi {
+				t.Errorf("%s intervals differ: [%v, %v] then [%v, %v]",
+					tc.name, tc.first.Lo, tc.first.Hi, tc.two.Lo, tc.two.Hi)
+			}
+		}
+	})
+
+	t.Run("a window under the minimum has no interval", func(t *testing.T) {
+		t.Parallel()
+		got, err := StoryPointsDriftOver(driftLandings(29, base, swappedEnds), nil)
+		if err != nil {
+			t.Fatalf("StoryPointsDriftOver: %v", err)
+		}
+		cur := got.Current
+		if cur.Measurable {
+			t.Errorf("Current = %+v, want unmeasurable", cur)
+		}
+		if !math.IsNaN(cur.Rho) || !math.IsNaN(cur.Lo) || !math.IsNaN(cur.Hi) {
+			t.Errorf("Current = %+v, want NaN Rho, Lo and Hi", cur)
+		}
+		if want := "29 landings with both an estimate and a measured time, need 30"; cur.Why != want {
+			t.Errorf("Why = %q, want %q", cur.Why, want)
+		}
+	})
+
+	// A real landing table cannot reach the bootstrap refusal: every resample of
+	// a series with spread has spread, and any window short enough to refuse is
+	// under the minimum first. So the refusal is driven through intervalReading,
+	// the production function that takes the interval.
+	t.Run("a series the bootstrap refuses is a why", func(t *testing.T) {
+		t.Parallel()
+		got := intervalReading([]float64{4}, []float64{1})
+		if got.Measurable || !math.IsNaN(got.Rho) || !math.IsNaN(got.Lo) || !math.IsNaN(got.Hi) {
+			t.Errorf("reading = %+v, want unmeasurable with no number and no interval", got)
+		}
+		if want := "bootstrap needs at least 2 pairs"; !strings.Contains(got.Why, want) {
+			t.Errorf("Why = %q, want it to name %q", got.Why, want)
+		}
+	})
+}

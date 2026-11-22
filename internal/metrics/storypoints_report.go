@@ -504,8 +504,12 @@ type StoryPointsDriftReading struct {
 	// Rho is the rank correlation, NaN when Measurable is false, so a caller that
 	// ignores Measurable cannot print a zero as a result.
 	Rho float64
-	// Measurable is false when the window is under storyPointsDriftMin or a
-	// series has no spread.
+	// Lo and Hi are the 95% percentile interval of Rho, NaN when Measurable is
+	// false. The bootstrap's seed is fixed, so two runs over one window give one
+	// interval.
+	Lo, Hi float64
+	// Measurable is false when the window is under storyPointsDriftMin, a series
+	// has no spread, or the interval cannot be taken.
 	Measurable bool
 	// Why says why the reading is unmeasurable, empty when it is measurable.
 	Why string
@@ -668,13 +672,26 @@ func measuredMinutesCell(secs, lowerBound string) (float64, bool, error) {
 	return seconds / 60, true, nil
 }
 
-// rankReading is the rank correlation of the estimate and measured series: a
-// window under storyPointsDriftMin, or a series with no spread, is unmeasurable
-// rather than a number.
+// rankReading is the rank correlation of the estimate and measured series with
+// its bootstrap interval: a window under storyPointsDriftMin, or a series with
+// no spread, is unmeasurable rather than a number.
 func rankReading(est, measured []float64) StoryPointsDriftReading {
-	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN()}
+	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
 	if r.N < storyPointsDriftMin {
 		r.Why = driftTooFew(r.N)
+		return r
+	}
+	return intervalReading(est, measured)
+}
+
+// intervalReading is the reading of two series: the rank correlation and the 95%
+// bootstrap interval under it. The interval is taken first, so a series that has
+// no interval is refused by its error rather than carrying a number with none.
+func intervalReading(est, measured []float64) StoryPointsDriftReading {
+	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
+	lo, hi, err := BootstrapSpearman(est, measured, bootstrapResamples, bootstrapSeed)
+	if err != nil {
+		r.Why = err.Error()
 		return r
 	}
 	rho, err := Spearman(est, measured)
@@ -682,7 +699,7 @@ func rankReading(est, measured []float64) StoryPointsDriftReading {
 		r.Why = err.Error()
 		return r
 	}
-	r.Rho, r.Measurable = rho, true
+	r.Rho, r.Lo, r.Hi, r.Measurable = rho, lo, hi, true
 	return r
 }
 
@@ -697,7 +714,7 @@ func driftTooFew(n int) string {
 // reading unmeasurable, and a score that is not a finite positive number is an
 // error.
 func previousReading(window []driftLanding, measured []float64, previous StoryPointsDriftPrevious) (StoryPointsDriftReading, error) {
-	r := StoryPointsDriftReading{N: len(window), Rho: math.NaN()}
+	r := StoryPointsDriftReading{N: len(window), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
 	if r.N < storyPointsDriftMin {
 		r.Why = driftTooFew(r.N)
 		return r, nil
