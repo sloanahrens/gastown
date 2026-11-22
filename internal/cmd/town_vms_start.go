@@ -29,6 +29,7 @@ var townVmsCmd = &cobra.Command{
 
 func init() {
 	townVmsCmd.AddCommand(newTownVMsStartCmd(hostTownVMsStartEnv()))
+	townVmsCmd.AddCommand(newTownVMsPlistCmd())
 	townCmd.AddCommand(townVmsCmd)
 }
 

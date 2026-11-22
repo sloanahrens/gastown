@@ -11,7 +11,7 @@ import (
 // environment rather than the VMs the town runs on.
 func TestTownVMsSitsWithHostTools(t *testing.T) {
 	t.Parallel()
-	for _, path := range []string{"town vms", "town vms start"} {
+	for _, path := range []string{"town vms", "town vms start", "town vms plist"} {
 		e, ok := Lookup(path)
 		if !ok {
 			t.Fatalf("Lookup(%q) found no entry", path)
