@@ -32,15 +32,17 @@ func recordPath() string { return filepath.Join(recordDir, goodID+".json") }
 type fakeReadFS struct {
 	modes                        map[string]fs.FileMode
 	data                         map[string][]byte
+	ids                          map[string][2]int
 	errPath                      string
 	openDirErr, openErr, readErr error
-	dirs, files                  int
+	lstatErr, dirStatErr         error
+	dirs, files, reads           int
 }
 
 var _ deployercred.ReadFS = (*fakeReadFS)(nil)
 
 func newFakeReadFS() *fakeReadFS {
-	return &fakeReadFS{modes: map[string]fs.FileMode{}, data: map[string][]byte{}}
+	return &fakeReadFS{modes: map[string]fs.FileMode{}, data: map[string][]byte{}, ids: map[string][2]int{}}
 }
 
 func (f *fakeReadFS) putDir(name string, mode fs.FileMode) {
@@ -53,12 +55,32 @@ func (f *fakeReadFS) putFile(name string, mode fs.FileMode, data string) {
 	f.data[name] = []byte(data)
 }
 
+// putLink makes name a symlink, which every reader must refuse.
+func (f *fakeReadFS) putLink(name string) {
+	f.modes[filepath.Clean(name)] = fs.ModeSymlink | 0o777
+}
+
+// setIDs overrides the owner and group name reports, so a test can name a path
+// held by another uid or gid, or one whose owner or group the platform does not
+// report (-1).
+func (f *fakeReadFS) setIDs(name string, owner, group int) {
+	f.ids[filepath.Clean(name)] = [2]int{owner, group}
+}
+
 func (f *fakeReadFS) Lstat(name string) (deployercred.Info, error) {
-	mode, ok := f.modes[filepath.Clean(name)]
+	name = filepath.Clean(name)
+	if name == f.errPath && f.lstatErr != nil {
+		return deployercred.Info{}, f.lstatErr
+	}
+	mode, ok := f.modes[name]
 	if !ok {
 		return deployercred.Info{}, fs.ErrNotExist
 	}
-	return deployercred.Info{Mode: mode, Owner: brokerUID, Group: deployerGID}, nil
+	info := deployercred.Info{Mode: mode, Owner: brokerUID, Group: deployerGID}
+	if id, ok := f.ids[name]; ok {
+		info.Owner, info.Group = id[0], id[1]
+	}
+	return info, nil
 }
 
 func (f *fakeReadFS) OpenDir(name string) (deployercred.Dir, error) {
@@ -78,7 +100,12 @@ type fakeDir struct {
 	path string
 }
 
-func (d fakeDir) Stat() (deployercred.Info, error) { return d.fs.Lstat(d.path) }
+func (d fakeDir) Stat() (deployercred.Info, error) {
+	if d.path == d.fs.errPath && d.fs.dirStatErr != nil {
+		return deployercred.Info{}, d.fs.dirStatErr
+	}
+	return d.fs.Lstat(d.path)
+}
 
 func (d fakeDir) Close() error { return nil }
 
@@ -105,6 +132,7 @@ func (f *fakeFile) Stat() (deployercred.Info, error) { return f.fs.Lstat(f.name)
 func (f *fakeFile) Close() error { return nil }
 
 func (f *fakeFile) Read(p []byte) (int, error) {
+	f.fs.reads++
 	if f.name == f.fs.errPath && f.fs.readErr != nil {
 		return 0, f.fs.readErr
 	}
@@ -139,7 +167,7 @@ func TestClusterApprovalStoreReads(t *testing.T) {
 			t.Parallel()
 			fsys := newFakeReadFS()
 			tt.settle(fsys)
-			f, err := OpenRecord(fsys, recordDir, goodID)
+			f, err := OpenRecord(fsys, brokerUID, deployerGID, recordDir, goodID)
 			switch {
 			case tt.wantNo:
 				if !errors.Is(err, ErrNoApproval) {
@@ -185,7 +213,7 @@ func TestClusterApprovalStoreID(t *testing.T) {
 			fsys := newFakeReadFS()
 			fsys.putDir(recordDir, 0o750)
 			fsys.putFile(recordPath(), 0o640, recordText(goodRecord()))
-			got, err := OpenRecord(fsys, recordDir, tt.id)
+			got, err := OpenRecord(fsys, brokerUID, deployerGID, recordDir, tt.id)
 			if err == nil {
 				t.Fatalf("OpenRecord accepted the id %q and returned %v", tt.id, got)
 			}
@@ -243,6 +271,68 @@ func TestClusterApprovalStoreReadsRecord(t *testing.T) {
 				if err != nil || got != want {
 					t.Fatalf("ReadRecord read %+v, %v, want %+v", got, err, want)
 				}
+			}
+		})
+	}
+}
+
+// TestClusterApprovalStoreRefuses drives every refusal through ReadRecord, the
+// production call site. Each row changes one thing about a good directory and
+// record: it is refused before any byte is read, and the refusal names the path
+// and the failing check, never the record.
+func TestClusterApprovalStoreRefuses(t *testing.T) {
+	t.Parallel()
+	text := recordText(goodRecord())
+	tests := []struct {
+		name   string
+		settle func(*fakeReadFS)
+		path   string
+		want   string
+	}{
+		{"a symlink at the directory", func(f *fakeReadFS) { f.putLink(recordDir) }, recordDir, "is a symlink"},
+		{"a symlink on an ancestor", func(f *fakeReadFS) { f.putLink("/srv") }, "/srv", "is a symlink"},
+		{"a 0755 directory", func(f *fakeReadFS) { f.putDir(recordDir, 0o755) }, recordDir, "has mode drwxr-xr-x, not drwxr-x---"},
+		{"a 0700 directory", func(f *fakeReadFS) { f.putDir(recordDir, 0o700) }, recordDir, "has mode drwx------, not drwxr-x---"},
+		{"a directory owned by another uid", func(f *fakeReadFS) { f.setIDs(recordDir, brokerUID+1, deployerGID) }, recordDir, "is owned by uid"},
+		{"a directory in another group", func(f *fakeReadFS) { f.setIDs(recordDir, brokerUID, deployerGID+1) }, recordDir, "is in group"},
+		{"a directory whose owner is not reported", func(f *fakeReadFS) { f.setIDs(recordDir, -1, deployerGID) }, recordDir, "owner of the approval directory"},
+		{"a directory whose group is not reported", func(f *fakeReadFS) { f.setIDs(recordDir, brokerUID, -1) }, recordDir, "group of the approval directory"},
+		{"a record owned by another uid", func(f *fakeReadFS) { f.setIDs(recordPath(), brokerUID+1, deployerGID) }, recordPath(), "is owned by uid"},
+		{"a record in another group", func(f *fakeReadFS) { f.setIDs(recordPath(), brokerUID, deployerGID+1) }, recordPath(), "is in group"},
+		{"a record whose owner is not reported", func(f *fakeReadFS) { f.setIDs(recordPath(), -1, deployerGID) }, recordPath(), "owner of the approval record"},
+		{"a record whose group is not reported", func(f *fakeReadFS) { f.setIDs(recordPath(), brokerUID, -1) }, recordPath(), "group of the approval record"},
+		{"an ancestor that cannot be read", func(f *fakeReadFS) { f.errPath, f.lstatErr = "/srv", fs.ErrPermission }, "/srv", "could not read /srv"},
+		{"a directory handle that cannot be read", func(f *fakeReadFS) { f.errPath, f.dirStatErr = recordDir, fs.ErrPermission }, recordDir, "could not read the approval directory"},
+		{"a 0644 record", func(f *fakeReadFS) { f.putFile(recordPath(), 0o644, text) }, recordPath(), "has mode -rw-r--r--, not -rw-r-----"},
+		{"a 0600 record", func(f *fakeReadFS) { f.putFile(recordPath(), 0o600, text) }, recordPath(), "has mode -rw-------, not -rw-r-----"},
+		{"a record that is a symlink", func(f *fakeReadFS) { f.putLink(recordPath()) }, recordPath(), "has mode Lrwxrwxrwx, not -rw-r-----"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newFakeReadFS()
+			fsys.putDir(recordDir, 0o750)
+			fsys.putFile(recordPath(), 0o640, text)
+			tt.settle(fsys)
+			got, err := ReadRecord(fsys, brokerUID, deployerGID, recordDir, goodID)
+			if err == nil {
+				t.Fatalf("ReadRecord accepted the record and returned %+v", got)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.want) || !strings.Contains(msg, tt.path) {
+				t.Fatalf("the refusal %q does not name the path %s and the check %q", msg, tt.path, tt.want)
+			}
+			if errors.Is(err, ErrNoApproval) {
+				t.Fatalf("the refusal %q reads as a missing record", msg)
+			}
+			if got != (Record{}) {
+				t.Fatalf("a refused read returned a record: %+v", got)
+			}
+			if fsys.reads != 0 {
+				t.Fatalf("a refused record was read %d times, want no read", fsys.reads)
+			}
+			if strings.Contains(msg, goodSHA) {
+				t.Fatalf("the refusal %q carries record content", msg)
 			}
 		})
 	}
