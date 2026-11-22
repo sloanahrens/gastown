@@ -28,6 +28,15 @@ func driftReading(rho float64, measurable bool, weights string) metrics.StoryPoi
 	}
 }
 
+// driftReadingWithInterval is a measurable read of the measure with one rank
+// correlation, the interval it was taken with and one weights name.
+func driftReadingWithInterval(rho, lo, hi float64, weights string) metrics.StoryPointsDriftRead {
+	read := driftReading(rho, true, weights)
+	read.Drift.Current.Lo = lo
+	read.Drift.Current.Hi = hi
+	return read
+}
+
 // driftRig is the fixture with the measure answering read.
 func driftRig(t *testing.T, read func(time.Time) (metrics.StoryPointsDriftRead, error)) *attentionFixture {
 	t.Helper()
@@ -87,6 +96,26 @@ func TestStoryPointsDriftAttentionRaisesOneItemNamingTheValueAndWeights(t *testi
 	}
 	if raised[0].Handled != attention.HandledOperatorAction || raised[0].Wake {
 		t.Errorf("flags = %+v, want operator_action and no wake", raised[0])
+	}
+}
+
+// TestStoryPointsDriftAttentionSummaryNamesTheInterval: the item a reading under
+// the bar raises names the 95% interval of the rank correlation beside the point
+// reading, since the point alone reads as a firmer fall than the interval bears
+// out.
+func TestStoryPointsDriftAttentionSummaryNamesTheInterval(t *testing.T) {
+	t.Parallel()
+	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+		return driftReadingWithInterval(0.31, 0.17, 0.47, "v1"), nil
+	})
+
+	items := f.collect(t, f.src.collectStoryPointsDrift)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one", items)
+	}
+	const want = "story points estimate drift: rank correlation 0.31 (95% interval 0.17 to 0.47) over the last 100 landings of the 2026-11-14 extract is below 0.50; weights v1"
+	if got := items[0].Summary; got != want {
+		t.Errorf("summary = %q, want %q", got, want)
 	}
 }
 
