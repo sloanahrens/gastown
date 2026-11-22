@@ -3,10 +3,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/townreboot"
@@ -181,5 +184,168 @@ func TestTownRebootCheckPassesTheRegistryBase(t *testing.T) {
 	}
 	if !sawRunner {
 		t.Error("the check lists were built with no runner")
+	}
+}
+
+// rebootOKCheck is a check whose row is OK.
+func rebootOKCheck(name string) townreboot.Check {
+	return townreboot.Check{Name: name, Run: func(context.Context) townreboot.Result { return townreboot.Result{OK: true, Detail: "fine"} }}
+}
+
+// rebootFailingCheck is a check whose row is not OK, with the repair the row carries (gt-ukmp5e).
+func rebootFailingCheck(name string) townreboot.Check {
+	return townreboot.Check{Name: name, Run: func(context.Context) townreboot.Result {
+		return townreboot.Result{Detail: "colima is stopped", Fix: "gt town vms start"}
+	}}
+}
+
+// rebootJSONRows decodes the --json output as the array of rows a script reads.
+func rebootJSONRows(t *testing.T, out string) []townreboot.Row {
+	t.Helper()
+	var rows []townreboot.Row
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("output %q is not a JSON array of rows: %v", out, err)
+	}
+	return rows
+}
+
+// rebootTextOK reads the status column of the text output: true for "ok  ", false for "FAIL".
+func rebootTextOK(t *testing.T, text string) []bool {
+	t.Helper()
+	var oks []bool
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		switch {
+		case strings.HasPrefix(line, "note:"):
+		case strings.HasPrefix(line, "ok   "):
+			oks = append(oks, true)
+		case strings.HasPrefix(line, "FAIL "):
+			oks = append(oks, false)
+		default:
+			t.Fatalf("text line %q has no status column", line)
+		}
+	}
+	return oks
+}
+
+// TestTownRebootCheckJSONRows: --json prints one array with a row per check, named as the text
+// run names them, and the same ok values as the text run (gt-ukmp5e).
+func TestTownRebootCheckJSONRows(t *testing.T) {
+	t.Parallel()
+	checks := func() []townreboot.Check {
+		return []townreboot.Check{rebootOKCheck("1 docker"), rebootFailingCheck("2 cluster")}
+	}
+	var textOut, jsonOut bytes.Buffer
+	if err := runTownRebootCheck(context.Background(), fakeRebootEnv(t, &textOut, checks())); err != nil {
+		t.Fatalf("text run = %v, want nil", err)
+	}
+	jsonEnv := fakeRebootEnv(t, &jsonOut, checks())
+	jsonEnv.asJSON = true
+
+	err := runTownRebootCheck(context.Background(), jsonEnv)
+
+	var exit *ExitCodeError
+	if !errors.As(err, &exit) {
+		t.Fatalf("json run = %v, want the exit-1 error for the failing row", err)
+	}
+	rows := rebootJSONRows(t, jsonOut.String())
+	var gotNames []string
+	var gotOK []bool
+	for _, r := range rows {
+		gotNames = append(gotNames, r.Name)
+		gotOK = append(gotOK, r.OK)
+	}
+	if want := []string{"1 docker", "2 cluster"}; !slices.Equal(gotNames, want) {
+		t.Errorf("row names = %v, want %v", gotNames, want)
+	}
+	if want := rebootTextOK(t, textOut.String()); !slices.Equal(gotOK, want) {
+		t.Errorf("row ok values = %v, want the text run's %v", gotOK, want)
+	}
+}
+
+// TestTownRebootCheckJSONFails: one failing row makes --json exit 1, the array is still printed,
+// and the row carries its fix (gt-ukmp5e).
+func TestTownRebootCheckJSONFails(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	env := fakeRebootEnv(t, &out, []townreboot.Check{rebootFailingCheck("3 vms")})
+	env.asJSON = true
+
+	err := runTownRebootCheck(context.Background(), env)
+
+	var exit *ExitCodeError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("runTownRebootCheck = %v, want an exit-1 error", err)
+	}
+	rows := rebootJSONRows(t, out.String())
+	if len(rows) != 1 || rows[0].OK || rows[0].Fix != "gt town vms start" {
+		t.Errorf("rows = %+v, want one not-OK row carrying its fix", rows)
+	}
+}
+
+// TestTownRebootCheckJSONEmptyIsArray: with no checks --json prints an empty array and exits 0,
+// so a reader can range the output without a null check (gt-ukmp5e).
+func TestTownRebootCheckJSONEmptyIsArray(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	env := fakeRebootEnv(t, &out, nil)
+	env.asJSON = true
+
+	if err := runTownRebootCheck(context.Background(), env); err != nil {
+		t.Fatalf("runTownRebootCheck = %v, want nil", err)
+	}
+	if out.String() != "[]\n" {
+		t.Errorf("output = %q, want an empty array", out.String())
+	}
+}
+
+// TestTownRebootCheckJSONWriteError: a JSON output that cannot be written is an error naming its
+// cause (gt-ukmp5e).
+func TestTownRebootCheckJSONWriteError(t *testing.T) {
+	t.Parallel()
+	env := fakeRebootEnv(t, &bytes.Buffer{}, []townreboot.Check{rebootOKCheck("1 docker")})
+	env.out = rebootFailingWriter{}
+	env.asJSON = true
+
+	err := runTownRebootCheck(context.Background(), env)
+
+	if err == nil || !strings.Contains(err.Error(), "pipe closed") {
+		t.Errorf("runTownRebootCheck = %v, want an error containing %q", err, "pipe closed")
+	}
+}
+
+// TestTownRebootCheckJSONFlagReadsTheFlag: the registered --json flag reads as false by default
+// and as true once set (gt-ukmp5e).
+func TestTownRebootCheckJSONFlagReadsTheFlag(t *testing.T) {
+	t.Parallel()
+	set := &cobra.Command{}
+	set.Flags().Bool("json", true, "")
+
+	if got, err := townRebootCheckJSONFlag(townRebootCheckCmd); err != nil || got {
+		t.Errorf("default --json = %v, %v; want false, nil", got, err)
+	}
+	if got, err := townRebootCheckJSONFlag(set); err != nil || !got {
+		t.Errorf("set --json = %v, %v; want true, nil", got, err)
+	}
+}
+
+// TestTownRebootCheckJSONFlagMissingIsError: a command without the flag is an error naming the
+// flag, not a silent text run (gt-ukmp5e).
+func TestTownRebootCheckJSONFlagMissingIsError(t *testing.T) {
+	t.Parallel()
+	_, err := townRebootCheckJSONFlag(&cobra.Command{})
+
+	if err == nil || !strings.Contains(err.Error(), "--json") {
+		t.Errorf("townRebootCheckJSONFlag = %v, want an error naming --json", err)
+	}
+}
+
+// TestTownRebootCheckCmdNeedsTheFlag: the command run without its --json flag is an error that
+// names the flag, before any host check runs (gt-ukmp5e).
+func TestTownRebootCheckCmdNeedsTheFlag(t *testing.T) {
+	t.Parallel()
+	err := runTownRebootCheckCmd(&cobra.Command{})
+
+	if err == nil || !strings.Contains(err.Error(), "--json") {
+		t.Errorf("runTownRebootCheckCmd = %v, want an error naming --json", err)
 	}
 }
