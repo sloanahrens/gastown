@@ -158,3 +158,29 @@ func TestTickEffCensusMsStraddlesReset(t *testing.T) {
 		t.Fatalf("window 2 rows = %+v, want one row of count 1 and 40 ms (call B alone)", rows)
 	}
 }
+
+// TestCensusMsIgnoresAnElapsedTimeThatIsNotPositive: an elapsed time that is
+// negative (a clock stepped backwards between the two readings), zero or under a
+// millisecond adds nothing to a row's milliseconds, and the call stays counted;
+// a negative one after a real 10 ms leaves the 10 (gt-72x71m).
+func TestCensusMsIgnoresAnElapsedTimeThatIsNotPositive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ends  []time.Duration
+		wantM int64
+	}{
+		{"a negative time", []time.Duration{-5 * time.Millisecond}, 0},
+		{"a zero time", []time.Duration{0}, 0},
+		{"under a millisecond", []time.Duration{900 * time.Microsecond}, 0},
+		{"a negative time after a real one", []time.Duration{10 * time.Millisecond, -5 * time.Millisecond}, 10},
+	} {
+		resetCensus(t)
+		for _, d := range tc.ends {
+			censusRecordEnd(censusRecord([]string{"list", "--json"}), d)
+		}
+		rows := CensusSnapshotAndReset()
+		if len(rows) != 1 || rows[0].Count != len(tc.ends) || rows[0].Ms != tc.wantM {
+			t.Errorf("%s: rows = %+v, want one row counted %d times with %d ms", tc.name, rows, len(tc.ends), tc.wantM)
+		}
+	}
+}
