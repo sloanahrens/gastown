@@ -311,6 +311,11 @@ type Daemon struct {
 	// session.SandboxGitRunner. Tests hand it a scripted runner.
 	sandboxGitRunnerFn func(townRoot string, rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error)
 
+	// sandboxStreamCutFn answers whether a sandbox seat's newest transcript ends
+	// in a cut stream (see sandboxStreamCutFor); nil asks the sandbox backend.
+	// Tests answer from a fake.
+	sandboxStreamCutFn func(townRoot string, rec session.SandboxRecord) (bool, error)
+
 	// sandboxExists asks a gateway whether it has a sandbox of that name (see
 	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
 	// answer from a stub.
