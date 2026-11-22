@@ -26,6 +26,12 @@ func SandboxTranscriptArchiveDir(townRoot, rig, polecat string) string {
 // copy, since a session id names one transcript; a missing copy archives
 // nothing, and a path it cannot read or make is an error.
 func archiveCopiedTranscripts(copyDir, archiveDir string) error {
+	return archiveCopiedTranscriptsWith(copyDir, archiveDir, os.Rename)
+}
+
+// archiveCopiedTranscriptsWith is archiveCopiedTranscripts over rename, so a
+// test can fail the move itself, which no fixture does as root.
+func archiveCopiedTranscriptsWith(copyDir, archiveDir string, rename func(oldpath, newpath string) error) error {
 	// The walk only lists: a rename inside its callback would act on a path the
 	// sandbox could swap for a link between the listing and the move (gosec G122).
 	var found []string
@@ -57,7 +63,7 @@ func archiveCopiedTranscripts(copyDir, archiveDir string) error {
 		if info, err := os.Lstat(p); err != nil || !info.Mode().IsRegular() {
 			continue // gone, or swapped for a link since the listing
 		}
-		if err := os.Rename(p, dest); err != nil {
+		if err := rename(p, dest); err != nil {
 			return fmt.Errorf("moving %s into the transcript archive: %w", p, err)
 		}
 	}

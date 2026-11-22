@@ -107,3 +107,21 @@ func TestTranscriptArchiveMovesTheCopy(t *testing.T) {
 		}
 	}
 }
+
+// TestTranscriptArchiveRenameFailureNamesTheFile: a move that fails is an error
+// naming the file, and the failed file stays in the copy (gt-1xoiib).
+func TestTranscriptArchiveRenameFailureNamesTheFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	copyDir, archiveDir := filepath.Join(root, "copy"), filepath.Join(root, "archive")
+	own := filepath.Join(copyDir, "ses-1.jsonl")
+	writeTranscript(t, own)
+	failed := errors.New("rename refused")
+	err := archiveCopiedTranscriptsWith(copyDir, archiveDir, func(string, string) error { return failed })
+	if !errors.Is(err, failed) || !strings.Contains(err.Error(), own) {
+		t.Fatalf("a failed move = %v, want the rename error naming %s", err, own)
+	}
+	if _, err := os.Stat(own); err != nil {
+		t.Errorf("the file whose move failed left the copy: %v", err)
+	}
+}
