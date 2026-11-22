@@ -153,6 +153,55 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 	}
 }
 
+// TestSpecSplitDryRunRefusal: a planner refusal is reported by its reason and
+// exits 1. Nothing is printed, and the fake's journal shows no bead created or
+// updated. The two rows are the planner's stages, Plan and Group.
+func TestSpecSplitDryRunRefusal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		description string
+		reason      string
+	}{
+		{
+			name:        "plan refuses a group with a bullet and no box",
+			description: splitUnboxedPackageDescription,
+			reason:      "file group internal/beta has no acceptance boxes, so its piece would have no tests",
+		},
+		{
+			name:        "group refuses a one-package bead",
+			description: splitOnePackageDescription,
+			reason:      "spec has only the one file group internal/alpha, so it cannot be split",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: tc.description})
+			before := splitJournalLen(t, db)
+
+			var out bytes.Buffer
+			err := runSpecSplitOn(&out, "gt-split", true, db.Show, func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck())
+			if err == nil {
+				t.Fatalf("runSpecSplitOn() error = nil, want a planner refusal")
+			}
+			if code := exitCodeForError(err); code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("error = %q, want the planner's reason %q", err, tc.reason)
+			}
+			if out.Len() != 0 {
+				t.Errorf("output on refusal = %q, want none", out.String())
+			}
+			if after := splitJournalLen(t, db); after != before {
+				t.Errorf("journal records = %d after the refusal, want %d", after, before)
+			}
+		})
+	}
+}
+
 // TestSpecSplitIsRegisteredUnderSpec: gt spec split is reachable from the root
 // command, so the dry run is what a user runs.
 func TestSpecSplitIsRegisteredUnderSpec(t *testing.T) {
