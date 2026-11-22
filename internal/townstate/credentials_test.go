@@ -32,7 +32,16 @@ func TestFindCredentials(t *testing.T) {
 		{"duplicate key, secret first", `{"api_key":"real","api_key":"x"}`, []string{"json:api_key", "json:api_key"}},
 		{"duplicate key, secret last", `{"api_key":"","api_key":"real"}`, []string{"json:api_key"}},
 		{"value shape never exempts", `{"api_key":"12345","token":"on"}`, []string{"json:api_key", "json:token"}},
-		{"nested object; strings in an array are not members", `{"a":[{"password":"p"}],"tokens":["s1","s2"]}`, []string{"json:password"}},
+		{"nested object; a tokens array is not exempt by shape", `{"a":[{"password":"p"}],"tokens":["s1","s2"]}`, []string{"json:password", "json:tokens", "json:tokens"}},
+		{"an array of strings under a credential key", `{"api_keys":["one","two"]}`, []string{"json:api_keys", "json:api_keys"}},
+		{"an escaped quote inside an array element", `{"api_keys":["a\"b"]}`, []string{"json:api_keys"}},
+		{"a duplicate key reports both arrays", `{"api_keys":["one"],"api_keys":["two"]}`, []string{"json:api_keys", "json:api_keys"}},
+		{"a nested array under a credential key", `{"api_keys":[["one"],"two"]}`, []string{"json:api_keys", "json:api_keys"}},
+		{"array elements that are references or empty are not credentials", `{"api_keys":["$GT_X",""]}`, nil},
+		{"a keys array of plain names is exempt", `{"keys":["a","b"]}`, nil},
+		{"a keys array holding a token-shaped name is found", `{"keys":["` + token + `"]}`, []string{"json:keys"}},
+		{"strings in an array under another name are not members", `{"list":["a","b"]}`, nil},
+		{"a document with no credential key", `{"models":["a","b"],"n":[1,2]}`, nil},
 		{"tokens exemption needs no other credential word", `{"api_key_tokens":"123","secret_tokens":"on","password_tokens":"1"}`, []string{"json:api_key_tokens", "json:secret_tokens", "json:password_tokens"}},
 		{"already redacted", `{"api_key":"` + redactedMarker + `"}`, nil},
 		{"placeholder is not a secret", `{"ANTHROPIC_AUTH_TOKEN":"REDACTED"}`, nil},
@@ -106,6 +115,9 @@ func TestFindCredentialsExemptPaths(t *testing.T) {
 		{"an om_token_meta under another parent is found", `{"x":{"om_token_meta":"abc"}}`, []string{"json:om_token_meta"}},
 		{"an om_token_meta below daemon at another depth is found", `{"x":{"daemon":{"om_token_meta":"abc"}}}`, []string{"json:om_token_meta"}},
 		{"api_keys is not exempt", `{"api_keys":"abc"}`, []string{"json:api_keys"}},
+		{"a toleration key holding an array is exempt", `{"tolerations":[{"key":["abc"]}]}`, nil},
+		{"the daemon's om_token_meta holding an array is exempt", `{"daemon":{"om_token_meta":["abc"]}}`, nil},
+		{"a toleration key array holding a token is still found", `{"tolerations":[{"key":["` + token + `"]}]}`, []string{"value:shape"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -176,7 +188,7 @@ func TestRedactJSON(t *testing.T) {
 			"{ \"a\": 1,  \"api_key\": \"<redacted>\" , \"b\":[\"x\"], \"token\":\"<redacted>\"}", 2},
 		{"duplicate keys", `{"api_key":"one","api_key":"two"}`, `{"api_key":"<redacted>","api_key":"<redacted>"}`, 2},
 		{"escaped quote and backslash in the value", `{"password":"p\"q\\","k":"v"}`, `{"password":"<redacted>","k":"v"}`, 1},
-		{"strings in an array are not members", `{"tokens":["a","b"]}`, `{"tokens":["a","b"]}`, 0},
+		{"a credential-named array redacts each element", `{"tokens":["a","b"]}`, `{"tokens":["<redacted>","<redacted>"]}`, 2},
 		{"nothing to redact", `{"api_key_file":"/x","n":1}`, `{"api_key_file":"/x","n":1}`, 0},
 		{"a reference and a plain keys field are left alone",
 			`{"ANTHROPIC_AUTH_TOKEN":"${GT_X}","api_key":"$GT_X","keys":"abc-def-123"}`,
@@ -193,6 +205,47 @@ func TestRedactJSON(t *testing.T) {
 			}
 			if !json.Valid(out) || len(FindCredentials(out)) != 0 {
 				t.Fatalf("output %q is not valid JSON or still holds a credential", out)
+			}
+		})
+	}
+}
+
+// A credential-named key owns its array: every string element is a json:key
+// finding and its whole literal is replaced, so the document stays valid JSON and
+// no element survives in it (gt-ourmlj).
+func TestRedactJSONRedactsEveryStringInAnArrayUnderACredentialKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		in    string
+		want  string
+		wantN int
+	}{
+		{"an array of strings under api_keys", `{"api_keys":["sk-live-abc","sk-live-def"]}`,
+			`{"api_keys":["<redacted>","<redacted>"]}`, 2},
+		{"an escaped quote in an element is redacted whole", `{"api_keys":["a\"b","c"],"n":1}`,
+			`{"api_keys":["<redacted>","<redacted>"],"n":1}`, 2},
+		{"a duplicate key redacts both arrays", `{"api_keys":["one"],"api_keys":["two","three"]}`,
+			`{"api_keys":["<redacted>"],"api_keys":["<redacted>","<redacted>"]}`, 3},
+		{"a reference, an empty string and a plain keys array stay", `{"api_keys":["$GT_X",""],"keys":["a","b"]}`,
+			`{"api_keys":["$GT_X",""],"keys":["a","b"]}`, 0},
+		{"a document with no credential key is unchanged", `{"models":["a","b"],"n":[1,2]}`,
+			`{"models":["a","b"],"n":[1,2]}`, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, n, err := RedactJSON([]byte(c.in))
+			if err != nil {
+				t.Fatalf("RedactJSON(%q): %v", c.in, err)
+			}
+			if string(out) != c.want || n != c.wantN {
+				t.Fatalf("RedactJSON(%q) = %q, %d; want %q, %d", c.in, out, n, c.want, c.wantN)
+			}
+			if !json.Valid(out) {
+				t.Fatalf("output %q is not valid JSON", out)
+			}
+			if got := FindCredentials(out); len(got) != 0 {
+				t.Fatalf("output %q still holds credentials: %q", out, got)
 			}
 		})
 	}
