@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -691,5 +692,121 @@ func TestQueueKeepsTheClass(t *testing.T) {
 		if got := queuedFindings(texts); len(got) != 1 || got[0].Class != tc.want {
 			t.Errorf("%s: read back %+v, want one finding of class %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// queuedFeed runs the feed over a landing with nothing of its own to file and
+// one queue line of findings that an earlier landing held back, against the
+// follow-ups already open in existing (gt-bsyzhk).
+func queuedFeed(t *testing.T, existing []ExistingFollowup, findings ...ReviewFindingText) (*followupFixture, string) {
+	t.Helper()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, findings...)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	f.fake.existing = existing
+	return f, f.run()
+}
+
+// queuedTexts is n queue-line findings of one package, titled "queued 1" to "queued n",
+// of class behaviour set explicitly: a row that needs the class-less default says so
+// itself (TestQueueReplayOldLineIsBehaviour).
+func queuedTexts(n int) []ReviewFindingText {
+	var out []ReviewFindingText
+	for i := 1; i <= n; i++ {
+		out = append(out, ReviewFindingText{ID: fmt.Sprintf("q-%d", i), Severity: "minor", File: "internal/land/note.go", Line: i, Title: fmt.Sprintf("queued %d", i), Claim: queuedClaim, Class: FindingClassBehaviour})
+	}
+	return out
+}
+
+// TestQueueReplayHoldsAtTheBound: with the open count at the bound and no open
+// bundle to append to, a held finding stays in the review log and nothing is
+// filed or appended; the next landing that has room replays it (gt-bsyzhk).
+func TestQueueReplayHoldsAtTheBound(t *testing.T) {
+	t.Parallel()
+	f, log := queuedFeed(t, openFollowupBeads(DefaultFollowupBackpressure), queuedTexts(1)...)
+	if len(f.fake.created) != 0 || len(f.fake.appended) != 0 {
+		t.Errorf("created %d, appended %d at the bound, want neither:\n%s", len(f.fake.created), len(f.fake.appended), log)
+	}
+	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 1 {
+		t.Errorf("queue = %+v (%v), want the line kept for a landing with room", queued, err)
+	}
+}
+
+// TestQueueReplayFilesIntoTheBundle: a queued finding replayed when the bound has
+// room goes into the day's bundle, and the consumed line is dropped: filed as a
+// new bundle when none is open, appended to the open one when there is, and, past
+// the room of one bundle, as bundles of at most MaxAcceptance findings (gt-ntkwh0).
+func TestQueueReplayFilesIntoTheBundle(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		existing     []ExistingFollowup
+		n            int
+		wantAppended int
+		wantCreated  []int
+	}{
+		{"a new bundle", openFollowupBeads(1), 1, 0, []int{1}},
+		{"the open bundle", append(openFollowupBeads(1), bundleWithRoom(3)), 2, 2, nil},
+		{"eight findings, no open bundle", openFollowupBeads(1), 8, 0, []int{6, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, log := queuedFeed(t, tc.existing, queuedTexts(tc.n)...)
+			appended := 0
+			for _, a := range f.fake.appended {
+				appended += len(a.Add.Labels)
+			}
+			var created []int
+			for _, spec := range f.fake.created {
+				created = append(created, fingerprints(spec.Labels))
+			}
+			if appended != tc.wantAppended || !slices.Equal(created, tc.wantCreated) {
+				t.Errorf("appended %d, created bundles of %v, want %d and %v:\n%s", appended, created, tc.wantAppended, tc.wantCreated, log)
+			}
+			if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
+				t.Errorf("queue = %+v (%v), want the consumed line dropped", queued, err)
+			}
+		})
+	}
+}
+
+// TestQueueReplayOldLineIsBehaviour: a queue line written before om gave a class
+// carries findings with none, and replays as behaviour: it files a bead, where a
+// line whose findings are class comment is noted and files none (gt-bsyzhk).
+func TestQueueReplayOldLineIsBehaviour(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		class       string
+		wantCreated int
+	}{
+		{"an old line with no class", "", 1},
+		{"a line of class comment", "comment", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text := queuedTexts(1)
+			text[0].Class = tc.class
+			f, log := queuedFeed(t, openFollowupBeads(1), text...)
+			if len(f.fake.created) != tc.wantCreated {
+				t.Errorf("created %d beads, want %d:\n%s", len(f.fake.created), tc.wantCreated, log)
+			}
+			// A queued comment-class line is a leftover: replay consumes it and
+			// writes no note, the note was written at the landing that raised the
+			// finding (followup.go: splitNoted at line 204 splits it off before it
+			// can be queued, AddComment at line 271 writes the note on that
+			// landing's own bead, and queuedCandidates at line 596 discards the
+			// noted ones). Asserting a note at replay would pin a double write.
+			if tc.class == "comment" {
+				if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
+					t.Errorf("queue = %+v (%v), want the leftover comment line consumed", queued, err)
+				}
+				if comments, err := f.bd.Comments("gt-held"); err != nil || len(comments) != 0 {
+					t.Errorf("comments on gt-held = %v (%v), want none written at replay", commentTexts(comments), err)
+				}
+			}
+		})
 	}
 }
