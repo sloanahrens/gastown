@@ -298,9 +298,10 @@ func TestPostLandOrphanLogFollowsTheSave(t *testing.T) {
 }
 
 // TestPostLandOrphanBudget: an ask the pass budget ended is not a seam failure.
-// A seam that blocks until its context ends under a short pass budget logs the
-// budget ending and not the WARNING line; a seam that returns another error
-// keeps the WARNING line (gt-2r4okg).
+// A pass whose context ends as the ask starts logs the budget ending and not the
+// WARNING line; a seam that returns another error keeps the WARNING line
+// (gt-2r4okg). The budget row ends its pass through an injected passContext, not
+// a real clock, so the ask starts on any host (gt-jpmyud).
 func TestPostLandOrphanBudget(t *testing.T) {
 	t.Parallel()
 	const budgetLine = "the pass budget ended while asking whether the run behind abc12345 ended; asked again on a later pass"
@@ -308,12 +309,13 @@ func TestPostLandOrphanBudget(t *testing.T) {
 	tests := []struct {
 		name    string
 		seam    *orphanSeam
+		endsAsk bool
 		budget  time.Duration
 		want    string
 		notWant string
 	}{
-		{"a budget that ends the ask is not a seam failure", &orphanSeam{block: true}, 50 * time.Millisecond, budgetLine, "WARNING asking"},
-		{"another error keeps the WARNING", &orphanSeam{err: errors.New("seam down")}, time.Minute, warningLine, "the pass budget ended"},
+		{"a budget that ends the ask is not a seam failure", &orphanSeam{block: true}, true, 0, budgetLine, "WARNING asking"},
+		{"another error keeps the WARNING", &orphanSeam{err: errors.New("seam down")}, false, time.Minute, warningLine, "the pass budget ended"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -324,8 +326,23 @@ func TestPostLandOrphanBudget(t *testing.T) {
 			clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
 			reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
 			r := v.runner(reads.read, store, clk, time.Hour)
-			r.passBudgetOverride = tt.budget
-			r.RunEnded = tt.seam.ask
+			if tt.endsAsk {
+				// The ask cancels the pass context as it starts, so the seam's wait ends
+				// at once and the budget, not a clock, ends the ask on any host.
+				var endPass context.CancelFunc
+				r.passContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+					pass, cancel := context.WithCancel(parent)
+					endPass = cancel
+					return pass, cancel
+				}
+				r.RunEnded = func(ctx context.Context, pl PostLand) (RunEnd, error) {
+					endPass()
+					return tt.seam.ask(ctx, pl)
+				}
+			} else {
+				r.passBudgetOverride = tt.budget
+				r.RunEnded = tt.seam.ask
+			}
 			r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
 			clk.Advance(PostLandOrphanAfter)
 
