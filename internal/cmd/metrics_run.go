@@ -94,14 +94,21 @@ func hostMetricsHourSteps() metricsHourSteps {
 			// The key is read when the week is due, by the reader the metrics package
 			// calls after its week guard: a patrol block that does not parse fails that
 			// due run, and an hour whose week is not due never reads it.
-			return metrics.Commands{
-				Today:           time.Now().Format(time.DateOnly),
-				Town:            town,
-				Out:             out,
-				BdGateway:       hostBdGateway(),
-				AutoAdoptReader: weeklyAutoAdoptReader(town),
-			}.RunStoryPointsWeekly(ctx)
+			return hostWeeklyCommands(town, out).RunStoryPointsWeekly(ctx)
 		},
+	}
+}
+
+// hostWeeklyCommands is the weekly story-points step the host runs for town: the commands the
+// closure of hostMetricsHourSteps runs, so a test can change a seam (the clock, the wiring)
+// and still run what the host runs.
+func hostWeeklyCommands(town string, out io.Writer) metrics.Commands {
+	return metrics.Commands{
+		Today:           time.Now().Format(time.DateOnly),
+		Town:            town,
+		Out:             out,
+		BdGateway:       hostBdGateway(),
+		AutoAdoptReader: weeklyAutoAdoptReader(town),
 	}
 }
 
