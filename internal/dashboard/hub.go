@@ -1366,12 +1366,14 @@ func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
 }
 
 // pollJobs reads the maintenance job list and keeps the last good one across a
-// failed read, like the Jev spend row beside it.
+// failed read, marked so the pane can say the rows are old rather than current
+// (gt-16wpss).
 func (h *Hub) pollJobs() {
 	j := h.cfg.Jobs()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if j == nil {
+		h.state.Jobs = jobsFailedRead(h.state.Jobs)
 		h.readFailedLocked(SourceJobs, h.cfg.JobsEvery)
 		h.publishLocked()
 		return
@@ -1379,6 +1381,20 @@ func (h *Hub) pollJobs() {
 	h.state.Jobs = j
 	h.readOKLocked(SourceJobs, h.cfg.JobsEvery)
 	h.publishLocked()
+}
+
+// jobsFailedRead is the list the hub keeps after a failed read: the last good
+// one marked, or an empty marked list when no read has succeeded, so a wired
+// reader that fails leaves a marked section rather than none. The last good
+// value is copied, not marked in place, since a snapshot already handed out
+// still points at it.
+func jobsFailedRead(last *Jobs) *Jobs {
+	marked := Jobs{Rows: []JobRow{}}
+	if last != nil {
+		marked = *last
+	}
+	marked.ReadFailed, marked.Stale = true, true
+	return &marked
 }
 
 // pollDolt reads the Dolt panel and keeps the last good one across a failed
