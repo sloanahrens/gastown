@@ -1437,17 +1437,18 @@ func (b *Beads) safeWorkDirForBeadsDir(beadsDir string) string {
 // directory, preserving isolation/port settings.
 func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 	return newBeads(beadsFields{
-		workDir:    b.safeWorkDirForBeadsDir(beadsDir),
-		beadsDir:   beadsDir,
-		isolated:   b.isolated,
-		serverPort: b.serverPort,
-		townRoot:   b.getTownRoot(),
-		noRoute:    true,
-		exec:       b.exec,
-		bin:        b.bin,
-		baseEnv:    b.baseEnv,
-		actor:      b.actor,
-		observe:    b.observe,
+		workDir:      b.safeWorkDirForBeadsDir(beadsDir),
+		beadsDir:     beadsDir,
+		isolated:     b.isolated,
+		serverPort:   b.serverPort,
+		townRoot:     b.getTownRoot(),
+		noRoute:      true,
+		exec:         b.exec,
+		bin:          b.bin,
+		baseEnv:      b.baseEnv,
+		actor:        b.actor,
+		observe:      b.observe,
+		bondRootOnly: b.bondRootOnly,
 	})
 }
 
@@ -1620,17 +1621,18 @@ func (b *Beads) forIssueID(id string) *Beads {
 		return b
 	}
 	return newBeads(beadsFields{
-		workDir:    b.safeWorkDirForBeadsDir(resolved),
-		beadsDir:   resolved,
-		isolated:   b.isolated,
-		serverPort: b.serverPort,
-		townRoot:   b.getTownRoot(),
-		noRoute:    true,
-		exec:       b.exec,
-		bin:        b.bin,
-		baseEnv:    b.baseEnv,
-		actor:      b.actor,
-		observe:    b.observe,
+		workDir:      b.safeWorkDirForBeadsDir(resolved),
+		beadsDir:     resolved,
+		isolated:     b.isolated,
+		serverPort:   b.serverPort,
+		townRoot:     b.getTownRoot(),
+		noRoute:      true,
+		exec:         b.exec,
+		bin:          b.bin,
+		baseEnv:      b.baseEnv,
+		actor:        b.actor,
+		observe:      b.observe,
+		bondRootOnly: b.bondRootOnly,
 	})
 }
 
