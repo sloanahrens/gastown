@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -838,6 +839,132 @@ func TestSquashArchiveFreesTheFlagWhenThePassEnds(t *testing.T) {
 	}
 	if d.maintenanceGCRunning.Load() {
 		t.Error("the squash path left the maintenance gc flag held after the pass ended")
+	}
+}
+
+// TestSquashRunWaitsForTheGCCycle is the bead's first box: a cycle holds the
+// flag the run takes, so no run starts, the check says why and is due again
+// after squashCheckRetryAfter, and the cycle's flag is not released by a check
+// that never took it.
+func TestSquashRunWaitsForTheGCCycle(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var calls int
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		t.Fatal("the maintenance gc flag was already held")
+	}
+	defer d.maintenanceGCRunning.Store(false)
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: the maintenance gc flag is held — the run waits for the next check") {
+		t.Errorf("the held flag was not named as the reason the run waits: %q", got)
+	}
+	if calls != 0 {
+		t.Errorf("the check started %d run(s) while a cycle held the flag", calls)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a deferred run recorded a run: %+v", st.Squash["gt"])
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a run deferred by the gc flag did not make the check due again after the retry delay")
+	}
+	if !d.maintenanceGCRunning.Load() {
+		t.Error("the check released a flag it did not take")
+	}
+}
+
+// TestSquashRunHoldsTheFlagForItsLength is the bead's second box for a free
+// flag: the run starts and holds it for its own length, and it is free
+// afterwards on every path — a completed run and a failed one alike.
+func TestSquashRunHoldsTheFlagForItsLength(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct{ runErr error }{
+		"a completed run": {},
+		"a failed run":    {runErr: errors.New("doltsquash: the catch-up: read failed")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls, heldDuringRun := 0, false
+			d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+				calls++
+				heldDuringRun = d.maintenanceGCRunning.Load()
+				return doltsquash.RunResult{}, tc.runErr
+			}
+
+			d.runScheduledMaintenance()
+
+			if calls != 1 {
+				t.Fatalf("the check started %d runs, want 1", calls)
+			}
+			if !heldDuringRun {
+				t.Errorf("the run did not hold the maintenance gc flag while it ran: %q", logs.String())
+			}
+			if d.maintenanceGCRunning.Load() {
+				t.Errorf("the check left the maintenance gc flag held after the run ended: %q", logs.String())
+			}
+		})
+	}
+}
+
+// TestSquashRunInFlightRefusesAGCCycle is the bead's second box for the other
+// direction: a gc cycle started while a squash run is in flight is refused by
+// its own CompareAndSwap, so nothing is dispatched beside the run and the run
+// releases the flag when it ends.
+func TestSquashRunInFlightRefusesAGCCycle(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	started, release := make(chan struct{}), make(chan struct{})
+	// The stub waits on release inside the check's goroutine: closing it on cleanup
+	// frees that goroutine when an assertion below fails before the test releases it.
+	var releaseOnce sync.Once
+	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseRun)
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		close(started)
+		<-release
+		return doltsquash.RunResult{}, nil
+	}
+	dispatched := 0
+	d.maint.dispatch = func(func()) { dispatched++ }
+	step, err := d.squashStep()
+	if err != nil || step == nil {
+		t.Fatalf("the squash step did not build: step=%v err=%v", step, err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.runSquashCheck(step, squashTestNow)
+	}()
+	waitClosed(t, started, "the squash run to start")
+	if !d.maintenanceGCRunning.Load() {
+		t.Fatal("the run did not hold the maintenance gc flag")
+	}
+
+	d.startMaintenanceGC([]string{"gt"}, time.Time{}, nil, true)
+
+	if dispatched != 0 {
+		t.Errorf("a gc cycle was dispatched %d time(s) while a squash run was in flight", dispatched)
+	}
+	if !strings.Contains(logs.String(), "scheduled_maintenance: previous gc cycle still running — skipping this tick") {
+		t.Errorf("the gc cycle did not name the squash run as the reason it was refused: %q", logs.String())
+	}
+
+	releaseRun()
+	waitClosed(t, done, "the squash check to end after the run was released")
+	if d.maintenanceGCRunning.Load() {
+		t.Error("the squash run left the maintenance gc flag held after it ended")
 	}
 }
 
