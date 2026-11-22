@@ -23,6 +23,14 @@ type failNotes struct {
 
 func (f failNotes) AppendNotes(string, string) error { return f.err }
 
+// failComments is the beads fake whose comment writes all fail.
+type failComments struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (f failComments) AddComment(string, string) error { return f.err }
+
 // removeFails is a record queue whose removals are refused (gt-qa5ge8).
 type removeFails struct{ *land.RecordQueue }
 
@@ -66,19 +74,23 @@ func TestDrainRecordQueue(t *testing.T) {
 	noteRec := drainNoteRecord()
 	newer := land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Kind: "rebase", Reason: "rebase conflicted", Branch: branch, Target: "main", MR: "gt-abc", Head: noteHead})
 	commentRec := land.PendingRecord{Bead: "gt-abc", Kind: land.RecordKindComment, Key: "[head 99999999]", Text: "om approve 0.90 (om v1.0.0, 2026-11-19T00:00:00Z–2026-11-19T00:01:00Z) [head 99999999]"}
+	annotationRec := land.PendingRecord{Bead: "gt-abc", Kind: land.RecordKindAnnotation, Key: "annotate:" + noteHead, Text: "could not post the annotation"}
 	cases := []struct {
-		name                  string
-		rec                   land.PendingRecord
-		notes                 string
-		comment, fail, queued bool
+		name                               string
+		rec                                land.PendingRecord
+		notes                              string
+		comment, fail, failComment, queued bool
 	}{
-		{"note written", noteRec, "", false, false, false},
-		{"note already present", noteRec, noteRec.Text, false, false, false},
-		{"note followed by a newer block is not written twice", noteRec, noteRec.Text + "\n" + newer, false, false, false},
-		{"note write fails", noteRec, "", false, true, true},
-		{"comment written", commentRec, "", false, false, false},
-		{"comment already present", commentRec, "", true, false, false},
-		{"unknown kind stays queued", land.PendingRecord{Bead: "gt-abc", Kind: "other", Key: "k", Text: "t"}, "", false, false, true},
+		{"note written", noteRec, "", false, false, false, false},
+		{"note already present", noteRec, noteRec.Text, false, false, false, false},
+		{"note followed by a newer block is not written twice", noteRec, noteRec.Text + "\n" + newer, false, false, false, false},
+		{"note write fails", noteRec, "", false, true, false, true},
+		{"comment written", commentRec, "", false, false, false, false},
+		{"comment already present", commentRec, "", true, false, false, false},
+		{"annotation written", annotationRec, "", false, false, false, false},
+		{"annotation already present", annotationRec, "", true, false, false, false},
+		{"annotation write fails", annotationRec, "", false, false, true, true},
+		{"unknown kind stays queued", land.PendingRecord{Bead: "gt-abc", Kind: "other", Key: "k", Text: "t"}, "", false, false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +104,9 @@ func TestDrainRecordQueue(t *testing.T) {
 			}
 			if tc.fail {
 				h.w.Beads = failNotes{Fake: h.bd, err: errors.New("bd down")}
+			}
+			if tc.failComment {
+				h.w.Beads = failComments{Fake: h.bd, err: errors.New("bd down")}
 			}
 			var logs []string
 			h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
@@ -119,7 +134,7 @@ func TestDrainRecordQueue(t *testing.T) {
 			if tc.rec.Kind == land.RecordKindNotes && strings.Count(issue.Notes, tc.rec.Text) != 1 {
 				t.Errorf("notes %q; want the queued note exactly once", issue.Notes)
 			}
-			if tc.rec.Kind == land.RecordKindComment && len(h.comments(t, "gt-abc")) != 1 {
+			if (tc.rec.Kind == land.RecordKindComment || tc.rec.Kind == land.RecordKindAnnotation) && len(h.comments(t, "gt-abc")) != 1 {
 				t.Errorf("comments %v; want exactly the one the record names", h.comments(t, "gt-abc"))
 			}
 		})

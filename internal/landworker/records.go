@@ -58,6 +58,11 @@ func (w *Worker) writeQueuedRecord(rec land.PendingRecord) bool {
 		if comments, err = w.Beads.Comments(rec.Bead); err == nil && !land.VerdictCommentQueued(comments, rec) {
 			err = w.Beads.AddComment(rec.Bead, rec.Text)
 		}
+	case land.RecordKindAnnotation:
+		var comments []beads.Comment
+		if comments, err = w.Beads.Comments(rec.Bead); err == nil && !land.AnnotationQueued(comments, rec) {
+			err = w.Beads.AddComment(rec.Bead, rec.Text)
+		}
 	default:
 		return false
 	}
