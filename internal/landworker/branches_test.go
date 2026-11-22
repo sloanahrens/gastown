@@ -655,28 +655,42 @@ func TestSweepLeavesBranchesItCannotPlace(t *testing.T) {
 	}
 }
 
+// beadForBranchCases holds the branch shapes beadForBranch accepts and
+// refuses, read by the parser's test and the export's parity test.
+var beadForBranchCases = []struct {
+	branch string
+	want   string
+}{
+	{"polecat/opal/gt-abc+x1", "gt-abc"},
+	{"polecat/agate/gt-abc.10+x0", "gt-abc.10"},
+	{"polecat/opal/gt-abc", ""},               // no mutation suffix
+	{"polecat/opal/gt-abc+", ""},              // no mutation
+	{"polecat//gt-abc+x1", ""},                // no author
+	{"polecat/gt-abc+x1", ""},                 // no bead segment
+	{"polecat", ""},                           // the prefix alone
+	{"owner/gt-abc+x1", ""},                   // not a polecat branch
+	{"refs/heads/polecat/opal/gt-abc+x1", ""}, // a full ref, not the name
+	{"polecat/opal/-x+y", ""},                 // a flag is not an id
+	{"polecat/opal/--read-only+y", ""},        // neither is a long one
+	{"", ""},
+}
+
 func TestBeadForBranch(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		branch string
-		want   string
-	}{
-		{"polecat/opal/gt-abc+x1", "gt-abc"},
-		{"polecat/agate/gt-abc.10+x0", "gt-abc.10"},
-		{"polecat/opal/gt-abc", ""},               // no mutation suffix
-		{"polecat/opal/gt-abc+", ""},              // no mutation
-		{"polecat//gt-abc+x1", ""},                // no author
-		{"polecat/gt-abc+x1", ""},                 // no bead segment
-		{"polecat", ""},                           // the prefix alone
-		{"owner/gt-abc+x1", ""},                   // not a polecat branch
-		{"refs/heads/polecat/opal/gt-abc+x1", ""}, // a full ref, not the name
-		{"polecat/opal/-x+y", ""},                 // a flag is not an id
-		{"polecat/opal/--read-only+y", ""},        // neither is a long one
-		{"", ""},
-	}
-	for _, c := range cases {
+	for _, c := range beadForBranchCases {
 		if got := beadForBranch(c.branch); got != c.want {
 			t.Errorf("beadForBranch(%q) = %q; want %q", c.branch, got, c.want)
+		}
+	}
+}
+
+// TestBeadForBranchExportMatches fails where the exported wrapper and
+// beadForBranch disagree, so it cannot become a second parser (gt-iy9apl).
+func TestBeadForBranchExportMatches(t *testing.T) {
+	t.Parallel()
+	for _, c := range beadForBranchCases {
+		if got, want := BeadForBranch(c.branch), beadForBranch(c.branch); got != want {
+			t.Errorf("BeadForBranch(%q) = %q; beadForBranch = %q", c.branch, got, want)
 		}
 	}
 }
