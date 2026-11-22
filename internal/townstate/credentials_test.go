@@ -111,10 +111,10 @@ func TestFindCredentialsReadsYAMLLines(t *testing.T) {
 		{"a _file name is not a finding", "api_key_file: /run/key\n", nil},
 		{"a value that is only a comment is not a finding", "password: # none\n", nil},
 		{"a config with no credential key", "prefix: gt\nport: 3307\n", nil},
-		{"a block scalar header is not a value", "password: |\n  hunter2\n", nil},
-		{"a folded block header with a chomping sign is not a value", "password: >-\n  hunter2\n", nil},
-		{"a block header with a comment is not a value", "token: | # rotate quarterly\n  abc123\n", nil},
-		{"a mapping entry inside a block scalar is a finding", "password: |\n  token: abc123\n", []string{"yaml:token"}},
+		{"a block scalar header under a credential name is a finding (its body is the secret)", "password: |\n  hunter2\n", []string{"yaml:password"}},
+		{"a folded block header with a chomping sign is a finding", "password: >-\n  hunter2\n", []string{"yaml:password"}},
+		{"a block header with a comment is a finding", "token: | # rotate quarterly\n  abc123\n", []string{"yaml:token"}},
+		{"a mapping entry inside a block scalar is a finding too", "password: |\n  token: abc123\n", []string{"yaml:password", "yaml:token"}},
 		{"a quoted bar is a value", "password: \"|\"\n", []string{"yaml:password"}},
 	}
 	for _, c := range cases {
@@ -163,7 +163,6 @@ func TestFlaggedContentRefusesYAMLCredential(t *testing.T) {
 	}{
 		{"a commented-out line", "prefix: gt\n# password: hunter2\n"},
 		{"an environment reference", "password: ${DOLT_PASSWORD}\n"},
-		{"a block scalar header", "password: |\n  hunter2\n"},
 	}
 	for _, c := range clean {
 		t.Run(c.name, func(t *testing.T) {

@@ -33,10 +33,6 @@ var (
 	// line as the value. The key starts with a letter or underscore, so a JSON
 	// member, whose key is quoted, is left to jsonMember.
 	yamlLine = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:[ \t]+(.*)$`)
-	// blockScalarHeader is a mapping value that opens a block scalar: | or > with
-	// an optional indentation digit and chomping sign, in either order. The header
-	// states how the lines below are read, so it is not a value.
-	blockScalarHeader = regexp.MustCompile(`^[|>](?:[1-9][+-]?|[+-][1-9]?)?$`)
 	// tokensSegment: the plural word as a whole name segment; countOrFlag: a number or a switch.
 	tokensSegment = regexp.MustCompile(`(?i)(^|[^a-z0-9])tokens([^a-z0-9]|$)`)
 	countOrFlag   = regexp.MustCompile(`(?i)^(\d+|on|off|true|false)$`)
@@ -312,12 +308,10 @@ func FindCredentials(data []byte) []string {
 	}
 	for _, m := range yamlLine.FindAllSubmatch(data, -1) {
 		name := lastSegment(string(m[1]))
-		value, quoted := yamlValue(string(m[2]))
-		// An unquoted | or > opens a block scalar, so it says nothing about a
-		// secret; the block's own lines go through this loop as ordinary lines.
-		if !quoted && blockScalarHeader.MatchString(value) {
-			continue
-		}
+		value, _ := yamlValue(string(m[2]))
+		// A block scalar header (| or >) is a non-empty value under a credential
+		// name, so it is a finding: the secret sits in the lines below it, which
+		// this loop cannot read as the value, and refusing the header fails closed.
 		if credentialName(name) && isSecret(name, value) {
 			found = append(found, "yaml:"+string(m[1]))
 		}
