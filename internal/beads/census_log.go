@@ -92,13 +92,18 @@ func CensusTopLabeled(label string, rows []CensusRow) string {
 	return b.String()
 }
 
-// WriteCensusSink writes rows to path as one "verb@caller=count" line each, for
-// the process that started this one to log (gt-139dp). The rows are written to
+// WriteCensusSink writes rows to path as one "verb@caller=count" line each, with
+// "/<ms>ms" after the count for a row the census timed, for the process that
+// started this one to log (gt-139dp, gt-mru4en). The rows are written to
 // a temp file beside path and renamed over it, so a reader racing the writer
 // reads one whole snapshot or the other, never a line torn in half.
 func WriteCensusSink(path string, rows []CensusRow) error {
 	var b strings.Builder
 	for _, row := range rows {
+		if row.Ms > 0 {
+			fmt.Fprintf(&b, "%s@%s=%d/%dms\n", row.Verb, row.Caller, row.Count, row.Ms)
+			continue
+		}
 		fmt.Fprintf(&b, "%s@%s=%d\n", row.Verb, row.Caller, row.Count)
 	}
 	dir := filepath.Dir(path)
@@ -128,7 +133,8 @@ func WriteCensusSink(path string, rows []CensusRow) error {
 }
 
 // ReadCensusSink returns the rows WriteCensusSink wrote to path, failing on a
-// line it cannot read rather than dropping that line's calls.
+// line it cannot read rather than dropping that line's calls. A line without
+// milliseconds, as an older tick wrote, reads as Ms 0.
 func ReadCensusSink(path string) ([]CensusRow, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -143,14 +149,14 @@ func ReadCensusSink(path string) ([]CensusRow, error) {
 		if !ok {
 			// The row is a verb, a caller and a count, never captured output:
 			// naming its position is enough to find it.
-			return nil, fmt.Errorf("census sink %s: row %d is not verb@caller=count", path, i+1)
+			return nil, fmt.Errorf("census sink %s: row %d is not verb@caller=count[/<ms>ms]", path, i+1)
 		}
 		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
-// parseCensusSinkRow reads one "verb@caller=count" line. The split takes the
+// parseCensusSinkRow reads one "verb@caller=count[/<ms>ms]" line. The split takes the
 // last @ and the last =, so a verb or caller that holds either character still
 // parses, and the verb may hold a space ("mol wisp").
 func parseCensusSinkRow(line string) (CensusRow, bool) {
@@ -159,11 +165,19 @@ func parseCensusSinkRow(line string) (CensusRow, bool) {
 	if at < 1 || eq < at+2 {
 		return CensusRow{}, false
 	}
-	count, err := strconv.Atoi(line[eq+1:])
+	countText, msText, timed := strings.Cut(line[eq+1:], "/")
+	count, err := strconv.Atoi(countText)
 	if err != nil || count < 0 {
 		return CensusRow{}, false
 	}
-	return CensusRow{Verb: line[:at], Caller: line[at+1 : eq], Count: count}, true
+	var ms uint64
+	if timed {
+		digits, found := strings.CutSuffix(msText, "ms")
+		if ms, err = strconv.ParseUint(digits, 10, 63); !found || err != nil {
+			return CensusRow{}, false
+		}
+	}
+	return CensusRow{Verb: line[:at], Caller: line[at+1 : eq], Count: count, Ms: int64(ms)}, true
 }
 
 // censusMaxWindowSeconds is the longest window a census record may claim: the
