@@ -159,7 +159,8 @@ const estimateCommentPrefix = "SP ESTIMATE v1"
 // comment. It is also "" when the comments cannot be read or a comment's time
 // does not parse, and both are named in dropped: a time that cannot be read is
 // unknown, so the report does not read the estimate as written before dispatch.
-func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) string {
+// The bool reports that the read and the parse both succeeded, "" included.
+func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) (string, bool) {
 	var comments []struct {
 		Text      string `json:"text"`
 		CreatedAt string `json:"created_at"`
@@ -177,7 +178,7 @@ func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) string {
 			reason += ": " + cause
 		}
 		dropped.Add("bd:"+bead, reason+": estimate time not read")
-		return ""
+		return "", false
 	}
 	var latest time.Time
 	for _, c := range comments {
@@ -187,16 +188,16 @@ func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) string {
 		at, err := ParseTS(c.CreatedAt)
 		if err != nil {
 			dropped.Add("labels:"+bead, "SP ESTIMATE comment with no readable time")
-			return ""
+			return "", false
 		}
 		if at.After(latest) {
 			latest = at
 		}
 	}
 	if latest.IsZero() {
-		return ""
+		return "", true
 	}
-	return latest.UTC().Format(time.RFC3339Nano)
+	return latest.UTC().Format(time.RFC3339Nano), true
 }
 
 // hasEstimateLabel reports whether a bead carries an sp: label, the label an
@@ -226,6 +227,16 @@ type bdListBead struct {
 // the first directory that lists it. A directory whose listing fails is a
 // failed source. So is a listing that is not a JSON array of beads.
 func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
+	return LoadBeadsCached(run, dirs, dropped, nil)
+}
+
+// LoadBeadsCached is LoadBeads with a map of estimate times. A closed bead's SP
+// ESTIMATE comment no longer changes, so a bead with a status of closed and a
+// closed time that estimated holds takes its EstimatedAt from the map and makes
+// no bd comments call. One it does not hold is read as LoadBeads reads it and,
+// when the read and the parse both succeeded, stored. A bead that is not closed
+// is read every run and never stored. A nil estimated map caches nothing.
+func LoadBeadsCached(run BdRun, dirs []string, dropped *Dropped, estimated map[string]string) []BeadRow {
 	if dropped == nil {
 		dropped = &Dropped{}
 	}
@@ -276,7 +287,19 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				SubmittedAt:     submittedAt,
 			}
 			if hasEstimateLabel(labels) {
-				row.EstimatedAt = estimatedAt(run, d, b.ID, dropped)
+				closed := b.Status == "closed" && b.ClosedAt != nil && *b.ClosedAt != ""
+				at, cached := "", false
+				if estimated != nil && closed {
+					at, cached = estimated[b.ID]
+				}
+				if !cached {
+					read := false
+					at, read = estimatedAt(run, d, b.ID, dropped)
+					if estimated != nil && closed && read {
+						estimated[b.ID] = at
+					}
+				}
+				row.EstimatedAt = at
 			}
 			rows = append(rows, row)
 		}

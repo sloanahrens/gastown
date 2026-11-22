@@ -439,6 +439,72 @@ func TestEstimatedAtComments(t *testing.T) {
 	}
 }
 
+// commentsReads counts the bd comments calls made per bead id.
+func commentsReads(calls []bdCall) map[string]int {
+	reads := map[string]int{}
+	for _, c := range calls {
+		if c.args[0] == "comments" {
+			reads[c.args[len(c.args)-1]]++
+		}
+	}
+	return reads
+}
+
+// TestEstimateCacheClosedBeadReadOnce: a closed bead's estimate time is read on
+// the first LoadBeadsCached and taken from the map on the second, with no
+// comments call and the same EstimatedAt. A bead with no estimate comment, an
+// answered read, caches the empty time too.
+func TestEstimateCacheClosedBeadReadOnce(t *testing.T) {
+	t.Parallel()
+	const listing = `[{"id": "gt-1", "closed_at": "2026-10-20T12:00:00Z", "status": "closed", "labels": ["sp:8"]},
+	 {"id": "gt-2", "closed_at": "2026-10-20T12:00:00Z", "status": "closed", "labels": ["sp:5"]}]`
+	var calls []bdCall
+	estimated := map[string]string{}
+	run := routedBd(listing, map[string]string{
+		"gt-1": `[{"text": "SP ESTIMATE v1 sp:8", "created_at": "2026-10-19T10:00:00Z"}]`, "gt-2": `[]`,
+	}, &calls)
+	first := LoadBeadsCached(run, []string{"/g"}, &Dropped{}, estimated)
+	if want := map[string]string{"gt-1": "2026-10-19T10:00:00Z", "gt-2": ""}; !reflect.DeepEqual(estimated, want) {
+		t.Fatalf("cache = %v, want %v", estimated, want)
+	}
+	before, callsBefore := commentsReads(calls), len(calls)
+	second := LoadBeadsCached(run, []string{"/g"}, &Dropped{}, estimated)
+	if got := commentsReads(calls); !reflect.DeepEqual(got, before) || len(calls)-callsBefore != 1 {
+		t.Errorf("comments reads = %v after %d calls, want %v and only the list call", got, len(calls)-callsBefore, before)
+	}
+	if !reflect.DeepEqual(second, first) {
+		t.Errorf("second rows = %+v, want the first call's %+v", second, first)
+	}
+}
+
+// TestEstimateCacheOpenAndFailedAreNotStored: an open bead is read on every
+// call even when the map holds a stale entry, and a closed bead whose comments
+// read fails is not stored and is read again on the next call.
+func TestEstimateCacheOpenAndFailedAreNotStored(t *testing.T) {
+	t.Parallel()
+	const listing = `[{"id": "gt-open", "closed_at": null, "status": "open", "labels": ["sp:8"]},
+	 {"id": "gt-nil", "closed_at": null, "status": "closed", "labels": ["sp:3"]},
+	 {"id": "gt-closed", "closed_at": "2026-10-20T12:00:00Z", "status": "closed", "labels": ["sp:5"]}]`
+	var calls []bdCall
+	// Both stale: gt-open reopened, and gt-nil is closed with no closed time.
+	estimated := map[string]string{"gt-open": "2020-01-01T00:00:00Z", "gt-nil": "2020-01-01T00:00:00Z"}
+	run := routedBd(listing, map[string]string{
+		"gt-open": `[{"text": "SP ESTIMATE v1 sp:8", "created_at": "2026-10-19T10:00:00Z"}]`,
+		"gt-nil":  `[{"text": "SP ESTIMATE v1 sp:3", "created_at": "2026-10-19T10:00:00Z"}]`, // gt-closed fails
+	}, &calls)
+	rows := LoadBeadsCached(run, []string{"/g"}, &Dropped{}, estimated)
+	LoadBeadsCached(run, []string{"/g"}, &Dropped{}, estimated)
+	if want := map[string]string{"gt-open": "2020-01-01T00:00:00Z", "gt-nil": "2020-01-01T00:00:00Z"}; !reflect.DeepEqual(estimated, want) {
+		t.Errorf("cache = %v, want the stale entries untouched and the failed bead absent", estimated)
+	}
+	if got := rows[0].EstimatedAt; got != "2026-10-19T10:00:00Z" {
+		t.Errorf("gt-open EstimatedAt = %q, want the fresh read, not the stale entry", got)
+	}
+	if want := map[string]int{"gt-open": 2, "gt-nil": 2, "gt-closed": 4}; !reflect.DeepEqual(commentsReads(calls), want) {
+		t.Errorf("comments reads = %v, want %v", commentsReads(calls), want)
+	}
+}
+
 // TestEstimatedAtGaps: a bd comments call that fails leaves the time empty and
 // records a gap naming the bead and the first stderr line, and an estimate
 // comment whose time does not parse leaves it empty under the labels gap. An
