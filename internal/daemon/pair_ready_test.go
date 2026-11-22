@@ -1796,6 +1796,45 @@ func TestImagesFailedQuotesTheLogLineAsData(t *testing.T) {
 	}
 }
 
+// failedImagesItems runs the check on a failed images run for pairGreen whose
+// job log is log, and returns the items it raised.
+func failedImagesItems(t *testing.T, log string) []attention.Item {
+	t.Helper()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.api.logs[pairImagesJob] = log
+	fx.run(pairT0)
+	return fx.check.observed()
+}
+
+// TestImagesErrorLineMatchesBothSpellings: buildkit prints its failure as
+// "ERROR:" and the guards print theirs as "Error:", so either spelling names
+// the line the item quotes, still first in log order.
+func TestImagesErrorLineMatchesBothSpellings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, log, want string }{
+		{"buildkit's ERROR line", "#3 ERROR: data.forgejo.org/oci/docker@sha256:7bf70dcb: not found", `log: "#3 ERROR: data.forgejo.org/oci/docker@sha256:7bf70dcb: not found"`},
+		{"a guard's Error line before a later ERROR line", pairImagesLine + "\nERROR: failed to solve: process failed", `log: "` + pairImagesLine + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			items := failedImagesItems(t, tc.log)
+			require.Len(t, items, 1)
+			assert.Contains(t, items[0].Summary, tc.want)
+		})
+	}
+}
+
+// TestImagesErrorLineNeitherSpellingIsEmpty: a log with neither spelling (a
+// lowercase "error:" is neither) names no reason, so the item still says so.
+func TestImagesErrorLineNeitherSpellingIsEmpty(t *testing.T) {
+	t.Parallel()
+	items := failedImagesItems(t, "error: lowercase is neither spelling\nstep failed")
+	require.Len(t, items, 1)
+	assert.Contains(t, items[0].Summary, "the job log names no Error: line")
+}
+
 // TestImagesFailedHasItsOwnCollector: a failed build is a third kind from the
 // pair check's one read, so it needs a collector of its own to reach the queue
 // and to survive a failed collector beside it.

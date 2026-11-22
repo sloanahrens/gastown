@@ -1403,12 +1403,14 @@ func pairReadyFailedJob(jobs []forgejo.ActionRunJob) (int64, bool) {
 	return 0, false
 }
 
-// imagesErrorLine is the first line of a job log matching "Error:", trimmed.
-// The build's guards print their reason that way. "" is a log with no such
-// line.
+// imagesErrorLine is the first line of a job log matching "Error:" or "ERROR:",
+// trimmed. The build's guards print their reason as "Error:"; the build tool
+// (buildkit) and the steps it runs print theirs as "ERROR:", as in
+// "#3 ERROR: ...: not found" when a base-image pin is dead, so both spellings
+// name the reason. "" is a log with neither line.
 func imagesErrorLine(log string) string {
 	for _, line := range strings.Split(log, "\n") {
-		if strings.Contains(line, "Error:") {
+		if strings.Contains(line, "Error:") || strings.Contains(line, "ERROR:") {
 			return strings.TrimSpace(line)
 		}
 	}
