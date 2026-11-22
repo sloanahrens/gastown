@@ -857,6 +857,10 @@ func specDispatchFake(t *testing.T, fake *fakeCLI, logger *log.Logger) *Daemon {
 		gtPath:       "gt",
 		execCmd:      fake.run,
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
+		// The pressure the tick line names is read through a seam, and a test
+		// that does not set it must not read the host's /proc: the default is a
+		// missing file, which the line reports as n/a (gt-ck5k7l).
+		readCPUPSI: func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 	}
 }
 
@@ -923,9 +927,9 @@ func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
 	}
 }
 
-// The 'tick took' line ends with the bd calls each phase made, after the times
+// The 'tick took' line carries the bd calls each phase made, after the times
 // it already named, so a phase that is slow is also read by what it cost
-// (gt-139dp).
+// (gt-139dp). The CPU pressure is appended after them (gt-ck5k7l).
 func TestSpecDispatchTickTookLineNamesItsPhaseCalls(t *testing.T) {
 	t.Parallel()
 	const report = `{"candidates": 3, "roster_ns": 1000000000, "board_ns": 2000000000,
@@ -935,13 +939,83 @@ func TestSpecDispatchTickTookLineNamesItsPhaseCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	got := specDispatchTookLine(r, 40*time.Second)
-	const want = "tick took 40s (roster 1s, board 2s, candidates 3 30s, sling 5s); roster 41 calls, board 20 calls, candidates 15 calls"
+	got := specDispatchTookLine(r, 40*time.Second, "33.29/37.74")
+	const want = "tick took 40s (roster 1s, board 2s, candidates 3 30s, sling 5s); roster 41 calls, board 20 calls, candidates 15 calls, cpu_psi=33.29/37.74"
 	if got != want {
 		t.Fatalf("tick took line = %q, want %q", got, want)
 	}
-	if !strings.HasSuffix(got, "roster 41 calls, board 20 calls, candidates 15 calls") {
-		t.Errorf("tick took line %q does not end with the phase calls", got)
+	if !strings.Contains(got, "roster 41 calls, board 20 calls, candidates 15 calls") {
+		t.Errorf("tick took line %q does not name the phase calls", got)
+	}
+}
+
+// The 'tick took' line ends with the control VM's CPU pressure the tick ran
+// under, read from the file's "some" line, or n/a when the file cannot be read
+// or parsed: load1 did not explain the tick's length, so the pressure lets the
+// next study join the two (gt-ck5k7l).
+func TestSpecDispatchTickLogsTheControlVMCPUPSI(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		text string
+		err  error
+		want string
+	}{
+		{
+			name: "a readable some line",
+			text: "some avg10=33.29 avg60=37.74 avg300=35.26 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+			want: "cpu_psi=33.29/37.74",
+		},
+		{
+			name: "a missing file",
+			err:  fs.ErrNotExist,
+			want: "cpu_psi=n/a",
+		},
+		{
+			name: "a file with no some line",
+			text: "full avg10=1.00 avg60=0.50 avg300=0.10 total=9\n",
+			want: "cpu_psi=n/a",
+		},
+		{
+			name: "a some line with no avg60",
+			text: "some avg10=33.29 avg300=35.26 total=1\n",
+			want: "cpu_psi=n/a",
+		},
+		{
+			name: "a some line whose avg10 is not a number",
+			text: "some avg10=many avg60=37.74 avg300=35.26 total=1\n",
+			want: "cpu_psi=n/a",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(wireOut(`{"candidates": 0}`))} })
+			logger, lines := lineLogger()
+			d := specDispatchFake(t, fake, logger)
+			readPath := ""
+			d.readCPUPSI = func(path string) ([]byte, error) {
+				readPath = path
+				return []byte(c.text), c.err
+			}
+
+			d.runSpecDispatch()
+
+			if readPath != specDispatchPressurePath {
+				t.Errorf("pressure read path = %q, want %q", readPath, specDispatchPressurePath)
+			}
+			var took []string
+			for _, line := range lines() {
+				if strings.Contains(line, "tick took") {
+					took = append(took, line)
+				}
+			}
+			if len(took) != 1 {
+				t.Fatalf("tick took lines = %d, want one: %v", len(took), took)
+			}
+			if !strings.HasSuffix(took[0], c.want) {
+				t.Errorf("tick took line %q does not end with %q", took[0], c.want)
+			}
+		})
 	}
 }
 

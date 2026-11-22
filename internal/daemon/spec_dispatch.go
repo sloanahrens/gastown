@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -364,7 +365,7 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 			r.seq = d.dispatchTickSeq.Add(1)
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
-			took = specDispatchTookLine(r, now.Sub(start))
+			took = specDispatchTookLine(r, now.Sub(start), d.specDispatchCPUPSI())
 			// The worktree probes the roster paid for: beside the tick's
 			// timing, so a tick whose roster stopped probing seats no hook
 			// holds reads as the saving it is (gt-gg9hv.73).
@@ -396,12 +397,74 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 // about its own length: the whole tick as the daemon timed it, then the
 // phases the tick reported, so a slow tick is attributed to a phase (gt-bqch0).
 // The calls each phase made trail the times, after the fields that were there
-// first so a monitor parsing them reads the same text (gt-139dp).
-func specDispatchTookLine(r specDispatchTickReport, took time.Duration) string {
-	return fmt.Sprintf("tick took %s (roster %s, board %s, candidates %d %s, sling %s); roster %d calls, board %d calls, candidates %d calls",
+// first so a monitor parsing them reads the same text (gt-139dp). The control
+// VM's CPU pressure is appended last: load1 did not explain the tick's length,
+// and the pressure the tick ran under lets the two be joined (gt-ck5k7l).
+func specDispatchTookLine(r specDispatchTickReport, took time.Duration, cpuPSI string) string {
+	return fmt.Sprintf("tick took %s (roster %s, board %s, candidates %d %s, sling %s); roster %d calls, board %d calls, candidates %d calls, cpu_psi=%s",
 		took.Round(time.Millisecond), r.RosterNs.Round(time.Millisecond), r.BoardNs.Round(time.Millisecond),
 		r.Candidates, r.CandidatesNs.Round(time.Millisecond), r.SlingNs.Round(time.Millisecond),
-		r.RosterCalls, r.BoardCalls, r.CandidatesCalls)
+		r.RosterCalls, r.BoardCalls, r.CandidatesCalls, cpuPSI)
+}
+
+// specDispatchPressurePath is the kernel's CPU pressure file, in PSI format:
+// a "some" line carrying avg10, avg60, avg300 and total (gt-ck5k7l).
+const specDispatchPressurePath = "/proc/pressure/cpu"
+
+// specDispatchCPUPSI names the control VM's CPU pressure for the tick took
+// line as the file's "some" avg10/avg60, or "n/a" when the file cannot be read
+// or parsed: a pressure that cannot be read is not a tick failure, and the
+// tick logs no second line for it (gt-ck5k7l).
+func (d *Daemon) specDispatchCPUPSI() string {
+	read := d.readCPUPSI
+	if read == nil {
+		read = os.ReadFile
+	}
+	text, err := read(specDispatchPressurePath)
+	if err != nil {
+		return "n/a"
+	}
+	avg10, avg60, err := parseCPUPressureSome(string(text))
+	if err != nil {
+		return "n/a"
+	}
+	return avg10 + "/" + avg60
+}
+
+// parseCPUPressureSome reads a PSI file's "some" line and returns its avg10
+// and avg60 as the file writes them. A file with no "some" line, a line
+// missing either average, or an average that is not a non-negative finite
+// number is an error (gt-ck5k7l).
+func parseCPUPressureSome(text string) (avg10, avg60 string, err error) {
+	for _, raw := range strings.Split(text, "\n") {
+		fields := strings.Fields(raw)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			name, value, ok := strings.Cut(field, "=")
+			if !ok {
+				continue
+			}
+			switch name {
+			case "avg10":
+				avg10 = value
+			case "avg60":
+				avg60 = value
+			}
+		}
+		if avg10 == "" || avg60 == "" {
+			return "", "", errors.New("cpu pressure some line has no avg10 and avg60")
+		}
+		for _, value := range []string{avg10, avg60} {
+			pct, perr := strconv.ParseFloat(value, 64)
+			if perr != nil || pct < 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
+				return "", "", errors.New("cpu pressure some line's average is not a percentage")
+			}
+		}
+		return avg10, avg60, nil
+	}
+	return "", "", errors.New("cpu pressure has no some line")
 }
 
 // recordedDispatchTick is one tick as townhealth reads it, tagged with the

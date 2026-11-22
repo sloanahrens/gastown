@@ -1049,6 +1049,11 @@ type Daemon struct {
 	// error (spec_dispatch.go, gt-zeqqg).
 	specPatrolHold dispatch.HoldLatch
 
+	// readCPUPSI reads the control VM's CPU pressure file for the tick took
+	// line (specDispatchCPUPSI); nil reads /proc/pressure/cpu. Tests feed the
+	// text so no test reads the host's file (gt-ck5k7l).
+	readCPUPSI func(string) ([]byte, error)
+
 	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
 	// oldest first, which townhealth's dispatch field judges to tell a
 	// dispatcher that is off from one that is stalled (gt-xiw7o). The tick's
