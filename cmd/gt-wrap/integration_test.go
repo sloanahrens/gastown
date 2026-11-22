@@ -6,9 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestIntegrationWrapperRunsGTInTheDaemon builds the wrapper as gt and runs
@@ -72,13 +73,10 @@ func buildWrapper(t *testing.T) string {
 // in the pod resolves the town this test runs in.
 func wrapperEnv(t *testing.T) []string {
 	t.Helper()
-	// The town is the one this checkout sits in, found from this source file:
-	// the hermetic harness moves the working directory into a sandbox town.
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("find this source file")
-	}
-	dir := filepath.Dir(file)
+	// The town is the one this checkout sits in: the module root, found from the
+	// working directory go test sets to this package's directory, and the walk
+	// up from it to the directory holding the town marker.
+	dir := modroot.Root(t)
 	town := ""
 	for {
 		if _, err := os.Stat(filepath.Join(dir, townMarker)); err == nil {

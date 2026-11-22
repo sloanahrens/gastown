@@ -6,23 +6,21 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
-// packageDir is the directory of this package's source, found from this file
-// rather than from the working directory a test may be run in.
+// packageDir is the directory of this package's source: the module root, found
+// from the working directory go test sets to this package's directory, and this
+// package's path beneath it. Neither moves under go test -trimpath.
 func packageDir(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller cannot locate this test file")
-	}
-	return filepath.Dir(file)
+	return filepath.Join(modroot.Root(t), "deploy", "k8s", "dolt")
 }
 
 // goFiles lists the package's non-test Go files, the ones the import check
