@@ -39,6 +39,21 @@ func callWalksParent(call *ast.CallExpr) bool {
 	return strings.HasPrefix(lit.Value[1:], "..")
 }
 
+// bodyWalksParent reports whether any call in body, at any depth including
+// inside a function literal, walks the tree from a parent. A nil body is false.
+func bodyWalksParent(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		found = found || ok && callWalksParent(call)
+		return !found
+	})
+	return found
+}
+
 func parseGoFile(name string, src []byte) (*ast.File, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
 	if err != nil {

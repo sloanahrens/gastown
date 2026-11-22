@@ -26,6 +26,24 @@ func TestCallWalksParent(t *testing.T) {
 	}
 }
 
+func TestBodyWalksParent(t *testing.T) {
+	t.Parallel()
+	for decl, want := range map[string]bool{
+		`func F()`: false, // no body
+		`func F() { filepath.WalkDir("../..", f) }`:        true,
+		`func F() { defer func() { os.ReadDir("..") }() }`: true,
+		`func F() { filepath.WalkDir(t.TempDir(), f) }`:    false,
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "", "package p\n"+decl, 0)
+		if err != nil {
+			t.Fatalf("parse %q: %v", decl, err)
+		}
+		if got := bodyWalksParent(f.Decls[0].(*ast.FuncDecl).Body); got != want {
+			t.Errorf("bodyWalksParent(%s) = %v, want %v", decl, got, want)
+		}
+	}
+}
+
 func TestParseGoFile(t *testing.T) {
 	t.Parallel()
 	for src, wantErr := range map[string]bool{
