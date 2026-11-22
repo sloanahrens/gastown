@@ -2,10 +2,18 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+// diskMaintWantMessage is the item text a failure concluding at diskMaintNow
+// files, byte for byte, so a reason test pins the whole string.
+func diskMaintWantMessage(label, why string, every time.Duration) string {
+	return fmt.Sprintf("disk maintenance %s did not reach a verdict at %s: %s; the next attempt is at its normal cadence, in %s",
+		label, diskMaintNow.Format(time.RFC3339), why, every)
+}
 
 // TestDiskMaintConcludeFailureRaisesOnceAndSchedulesTheFullInterval pins
 // gt-q9gvmy: a failed conclusion records the full interval, leaves no retry
@@ -93,5 +101,82 @@ func TestDiskMaintConcludeFailedSendIsNotMarkedOpen(t *testing.T) {
 	d.diskMaintConclude(context.Background(), "vol", "the trim", false, diskMaintNow, time.Hour, "why")
 	if open := f.notify.OpenEscalations(key); len(open) != 1 {
 		t.Errorf("the next conclusion did not raise the item: %+v", open)
+	}
+}
+
+// TestDiskMaintConcludeReasonFirstLineAndCut pins gt-u6garf: the failure item
+// carries the patrol's own reason, its first line with carriage returns and
+// tabs as single spaces and trimmed, and a reason longer than 300 runes is cut
+// to 300 with "..." as the last three.
+func TestDiskMaintConcludeReasonFirstLineAndCut(t *testing.T) {
+	t.Parallel()
+	const name, label = "ci-cache-trim/vol", "the CI cache volume trim of vol"
+	every := 2 * time.Hour
+
+	cases := []struct {
+		name string
+		why  string
+		want string
+	}{
+		{
+			name: "a multi-line reason keeps only its first line",
+			why:  "kubectl exited 1\nthe pod refused the volume",
+			want: "kubectl exited 1",
+		},
+		{
+			name: "carriage return and tab become single spaces",
+			why:  "kubectl\texited\t1\r\nsecond line",
+			want: "kubectl exited 1",
+		},
+		{
+			name: "a reason longer than 300 runes is cut to 300 with ... last",
+			why:  strings.Repeat("x", 301),
+			want: strings.Repeat("x", 297) + "...",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, f := diskMaintTestDaemon(t)
+			d.diskMaintConclude(context.Background(), name, label, false, diskMaintNow, every, tt.why)
+			open := f.notify.OpenEscalations(diskMaintFailedKey(name))
+			if len(open) != 1 {
+				t.Fatalf("open items = %+v, want one", open)
+			}
+			if want := diskMaintWantMessage(label, tt.want, every); open[0].Reason != want {
+				t.Errorf("item text = %q, want %q", open[0].Reason, want)
+			}
+		})
+	}
+}
+
+// TestDiskMaintConcludeReasonEmptyKeepsTheFixedSentence pins the other half of
+// gt-u6garf: an empty reason and a white-space-only reason raise an item whose
+// text holds the fixed sentence, byte for byte.
+func TestDiskMaintConcludeReasonEmptyKeepsTheFixedSentence(t *testing.T) {
+	t.Parallel()
+	const name, label = "ci-cache-trim/vol", "the CI cache volume trim of vol"
+	every := 2 * time.Hour
+
+	cases := []struct {
+		name string
+		why  string
+	}{
+		{"an empty reason", ""},
+		{"a white-space-only reason", " \t\n\r  "},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, f := diskMaintTestDaemon(t)
+			d.diskMaintConclude(context.Background(), name, label, false, diskMaintNow, every, tt.why)
+			open := f.notify.OpenEscalations(diskMaintFailedKey(name))
+			if len(open) != 1 {
+				t.Fatalf("open items = %+v, want one", open)
+			}
+			if want := diskMaintWantMessage(label, diskMaintNoReason, every); open[0].Reason != want {
+				t.Errorf("item text = %q, want %q", open[0].Reason, want)
+			}
+		})
 	}
 }
