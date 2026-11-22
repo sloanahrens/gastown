@@ -207,6 +207,34 @@ func TestReapStaleSandboxHookKeepsAHookThisSeatStillHolds(t *testing.T) {
 	}
 }
 
+// An unassigned work bead is handed back only while it is open. One in progress
+// or hooked belongs to a seat in the middle of a sling, so the reap keeps the
+// hook even with the sandbox gone.
+func TestReapStaleSandboxHookKeepsAnUnassignedBeadThatIsNotOpen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		workStatus string
+	}{
+		{"in_progress", "in_progress"},
+		{"hooked", "hooked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newStaleHook(t, staleHookOpts{
+				agent: "deepseek-flash-sandbox", hook: staleHookWork, workStatus: tt.workStatus,
+			})
+			if s.reap() {
+				t.Fatalf("reapStaleSandboxHook = true for an unassigned %s bead, want the hook kept", tt.workStatus)
+			}
+			if got := s.hook(); got != staleHookWork {
+				t.Errorf("agent bead hook = %q, want %q untouched", got, staleHookWork)
+			}
+		})
+	}
+}
+
 // A dead seat whose work bead went to another seat keeps its hook while the
 // gateway still has the sandbox: the reap waits for the sandbox to be gone.
 func TestReapStaleSandboxHookKeepsAHookWhileTheSandboxExists(t *testing.T) {
