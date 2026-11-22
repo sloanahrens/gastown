@@ -202,6 +202,24 @@ func TestReadRefusesAFileItCannotOpen(t *testing.T) {
 	}
 }
 
+// TestReadFollowsASymlinkToA0600File reads through a 0777 link: the open
+// follows it, so the checked mode is the 0600 target's, not the link's.
+func TestReadFollowsASymlinkToA0600File(t *testing.T) {
+	t.Parallel()
+	target := writeCredential(t, "user=gt\npassword=secret\n")
+	link := filepath.Join(t.TempDir(), "dolt-credential")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := Read(link)
+	if err != nil {
+		t.Fatalf("Read of a symlink to a 0600 file: %v", err)
+	}
+	if got.User != "gt" || got.Password.Reveal() != "secret" {
+		t.Fatalf("Read = %+v, want the credential behind the link", got)
+	}
+}
+
 func TestReadRefusesADirectory(t *testing.T) {
 	t.Parallel()
 	// The directory is 0700, so only the regular-file rule can refuse it.
@@ -218,9 +236,9 @@ func TestReadRefusesADirectory(t *testing.T) {
 	}
 }
 
-func TestReadRefusesAPathItCannotStat(t *testing.T) {
+func TestReadRefusesAPathItCannotOpen(t *testing.T) {
 	t.Parallel()
-	// A path below a regular file stats with ENOTDIR, which is an error and not
+	// A path below a regular file opens with ENOTDIR, which is an error and not
 	// the "no such file" that means no credential.
 	file := writeCredential(t, "user=gt\npassword=secret\n")
 	path := filepath.Join(file, "dolt-credential")
