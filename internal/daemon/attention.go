@@ -56,6 +56,10 @@ const (
 	// refusal older than this has either been acted on or outlived its
 	// branch; keeping it forever would turn the queue into a history file.
 	attentionRefusalWindow = 48 * time.Hour
+	// attentionMainUnknownRuns is how many consecutive post-landing runs must
+	// judge a rig's main UNKNOWN before it is an item. One UNKNOWN is a rerun
+	// that could not run; three in a row is main going unjudged (gt-8ceklp).
+	attentionMainUnknownRuns = 3
 )
 
 // The landing-pipeline thresholds (gt-vsct7.3), compiled in like the queue's
@@ -695,6 +699,9 @@ func overrunParkedSeatItem(it attention.Item) bool {
 func (s *attentionSources) collectors() []attentionCollector {
 	return append([]attentionCollector{
 		{kind: attention.KindRedMain, collect: s.collectRedMain},
+		// Reads the same rig main state the red-main owner writes, for the
+		// streak of UNKNOWN runs rather than a red verdict (gt-8ceklp).
+		{kind: attention.KindMainUnknown, collect: s.collectMainUnknown},
 		{kind: attention.KindEscalation, collect: s.collectEscalations},
 		{kind: attention.KindRejectedTwice, collect: s.collectRejectedTwice},
 		{kind: attention.KindReviewRejected, collect: s.collectReviewRejected},
@@ -1290,6 +1297,45 @@ func (s *attentionSources) collectRedMain(ctx context.Context) ([]attention.Item
 		}
 	}
 	return out, nil
+}
+
+// collectMainUnknown raises one item per landing rig whose red-main check has
+// judged main UNKNOWN for attentionMainUnknownRuns runs in a row, whatever the
+// cause (gt-8ceklp). The streak is the landing worker's record (gt-4nz0bj). A
+// rig whose streak is short or back at zero raises nothing, so its item clears.
+// An unreadable state fails the collector, which keeps the previous items.
+func (s *attentionSources) collectMainUnknown(_ context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.landingRigs() {
+		st, err := fileMainState{path: RedMainStatePath(s.d.config.TownRoot, rig)}.Load()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		if st.UnknownRuns < attentionMainUnknownRuns {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "main-unknown:" + rig,
+			Kind:     attention.KindMainUnknown,
+			Severity: attention.SeverityHigh,
+			Rig:      rig,
+			SHA:      st.UnknownCommit,
+			Summary:  mainUnknownSummary(st),
+		})
+	}
+	return out, nil
+}
+
+// mainUnknownSummary says how many runs main has gone unjudged, why, and at
+// which commit. A streak with no recorded cause says so rather than printing
+// an empty cause between the colons.
+func mainUnknownSummary(st landworker.MainState) string {
+	cause := st.UnknownCause
+	if cause == "" {
+		cause = "no cause recorded"
+	}
+	return fmt.Sprintf("main UNKNOWN for %d runs at %s: %s; the rerun could not run",
+		st.UnknownRuns, shortSHA(st.UnknownCommit), cause)
 }
 
 // collectEscalations raises one item per open escalation record, read through
