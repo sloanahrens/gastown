@@ -109,6 +109,7 @@ These runners are in the daemon's closure. Each runs the program its caller pass
 - `internal/binaryinstall/sign.go` `runStdinWith`
 - `internal/config/overseer.go` `runDetectionCommand`
 - `internal/crewfresh/gitexec.go` `realGit`
+- `internal/daemon/cluster_drift_child.go` `startDriftChild` — runs the program its caller passes (the daemon's own binary, for the drift compare); no docker call
 - `internal/daemon/disk_maintenance.go` `Daemon.diskMaintRunner` — its callers pass `kubectl` (`internal/daemon/disk_maintenance_disks.go:154` and `:209`); the registry garbage collect's `"docker"` literal is a row of its own (`internal/diskmaint/registry/gc.go:93`)
 - `internal/daemon/health_notify.go` `Daemon.runNotifyCommand`
 - `internal/daemon/hm_sync.go` `Daemon.hmSyncRun`
