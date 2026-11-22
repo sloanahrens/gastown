@@ -1976,6 +1976,38 @@ func TestImagePinsReadLogsAGoodReadWithItsDuration(t *testing.T) {
 	}
 }
 
+// TestImagePinsReadLogsATrailingPinWithItsCount: a pin that trails its tip logs
+// its path count, never the compare total or zero, and the pins at their tips log zero (gt-6jwchb).
+func TestImagePinsReadLogsATrailingPinWithItsCount(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, clk := newImagePinsForgejo(t), clockwork.NewFakeClockAt(time.Unix(0, 0))
+	d.logger, d.clock = log.New(&logs, "", 0), clk
+	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsTip}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			clk.Advance(525 * time.Millisecond) // four calls make one tick read in 2.1s
+			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return []byte("3\n"), nil, nil
+		}
+		return []byte("100\n518500\n"), nil, nil // devops's age read: its pin's and tip's committer times
+	}
+	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	want := "image_pins: read bd pin 11111111 tip 11111111 behind 0 in 2.1s\n" +
+		"image_pins: read om pin 22222222 tip 22222222 behind 0 in 2.1s\n" +
+		"image_pins: read hm pin 33333333 tip 33333333 behind 0 in 2.1s\n" +
+		"image_pins: read devops pin 44444444 tip dddddddd behind 3 in 2.1s\n"
+	if got := logs.String(); got != want {
+		t.Fatalf("daemon.log = %q, want devops's path count 3 and the three pins at their tips behind 0, %q", got, want)
+	}
+}
+
 // TestImagePinsReadLogsAFailedReadWithItsFirstErrorLine: a pin whose read fails
 // is logged with its name, the tick's duration and the first line of its error,
 // so every failure is in daemon.log, one line each (gt-t0qdx4).
