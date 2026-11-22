@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestRecordQueueOps(t *testing.T) {
@@ -28,6 +30,64 @@ func TestRecordQueueOps(t *testing.T) {
 	}
 	if got, err = q.Pending(); err != nil || len(got) != 1 || got[0].Key != "k2" {
 		t.Errorf("after Remove Pending = %+v, %v; want only k2", got, err)
+	}
+}
+
+func TestRecordKindAnnotation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the queue reach its file
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	q := RecordQueue{Path: filepath.Join(dir, "q.jsonl")}
+	rec := PendingRecord{Bead: "gt-a", Kind: RecordKindAnnotation, Key: "k", Text: "could not post", At: time.Unix(1, 0).UTC()}
+	cases := []struct {
+		rec     PendingRecord
+		wantErr bool
+		want    int
+	}{
+		{rec, false, 1},
+		{rec, false, 1},
+		{PendingRecord{Bead: "gt-b", Kind: RecordKindAnnotation, Key: "k", Text: "could not post"}, false, 2},
+		{PendingRecord{Bead: "gt-c", Kind: "annotation+", Key: "k"}, true, 2},
+	}
+	for _, c := range cases {
+		if err := q.Enqueue(c.rec); (err != nil) != c.wantErr {
+			t.Errorf("Enqueue(%+v) error = %v, wantErr %v", c.rec, err, c.wantErr)
+		}
+		if got, err := q.Pending(); err != nil || len(got) != c.want {
+			t.Errorf("after Enqueue(%+v): %d records, %v; want %d", c.rec, len(got), err, c.want)
+		}
+	}
+}
+
+func TestAnnotationQueued(t *testing.T) {
+	t.Parallel()
+	rec := PendingRecord{Bead: "gt-a", Kind: RecordKindAnnotation, Key: "k", Text: "  could not post the note\n"}
+	cases := []struct {
+		comments []beads.Comment
+		want     bool
+	}{
+		{[]beads.Comment{{Text: "could not post the note"}}, true},
+		{[]beads.Comment{{Text: "om approve"}, {Text: "  could not post the note  "}}, true},
+		{[]beads.Comment{{Text: "could not post the"}}, false},
+		{[]beads.Comment{{Text: "could not post the note twice"}}, false},
+		{[]beads.Comment{{Text: "a different annotation"}}, false},
+		{nil, false},
+	}
+	for _, c := range cases {
+		if got := AnnotationQueued(c.comments, rec); got != c.want {
+			t.Errorf("AnnotationQueued(%+v) = %v, want %v", c.comments, got, c.want)
+		}
+	}
+}
+
+func TestAnnotationQueuedBlankTextMatchesNothing(t *testing.T) {
+	t.Parallel()
+	rec := PendingRecord{Bead: "gt-a", Kind: RecordKindAnnotation, Key: "k", Text: " \n"}
+	if AnnotationQueued([]beads.Comment{{Text: ""}, {Text: "  "}}, rec) {
+		t.Error("a blank annotation matched a blank comment")
 	}
 }
 
