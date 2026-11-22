@@ -7,14 +7,13 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/gosrc"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // hardenedPackages route their bd subprocesses through the policy constructors
@@ -197,13 +196,13 @@ func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
 	}
 }
 
+// repoRootFromCaller is the module root. Its name predates gt-ficqom, when
+// this package's tests located the checkout from the compiled test binary's
+// own source path, which go test -trimpath rewrites to a module path; other
+// test files still call it.
 func repoRootFromCaller(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	return modroot.Root(t)
 }
 
 // scanBDSubprocesses reports every call in path that flag returns true for.
@@ -211,7 +210,7 @@ func repoRootFromCaller(t *testing.T) string {
 // file do not be mistaken for each other.
 func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.CallExpr, map[string]bool) bool) []string {
 	t.Helper()
-	file, fset, err := parseSource(repoRoot, path)
+	file, fset, err := parseSource(t, repoRoot, path)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
@@ -371,17 +370,11 @@ func unquoteString(lit string) string {
 	return value
 }
 
-// checkoutRoot is the repository this package is checked out in.
-var checkoutRoot = sync.OnceValue(func() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-})
-
 // parseSource parses path. A file of the checkout comes from the shared read
 // (gosrc), so the scans of one run parse it once; a file under a test's own
 // fixture root is parsed fresh, since a test may rewrite it.
-func parseSource(root, path string) (*ast.File, *token.FileSet, error) {
-	if filepath.Clean(root) == checkoutRoot() {
+func parseSource(t *testing.T, root, path string) (*ast.File, *token.FileSet, error) {
+	if filepath.Clean(root) == modroot.Root(t) {
 		tree := gosrc.For(root)
 		file, err := tree.Parse(path, 0)
 		return file, tree.FileSet(), err

@@ -5,12 +5,12 @@ import (
 	"go/parser"
 	"io/fs"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/gosrc"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // beadsModulePath is the in-process beads library gastown no longer links.
@@ -91,13 +91,5 @@ func walkSkipsDir(name string) bool {
 // moduleRoot is the directory holding this module's go.mod.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
+	return modroot.Root(t)
 }

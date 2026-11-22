@@ -6,10 +6,11 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestNoBeadsLiteralsOutsideConstructor is the gt-9i6z structural regression
@@ -30,11 +31,7 @@ import (
 // its own — the same guard pattern applied here.
 func TestNoBeadsLiteralsOutsideConstructor(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(thisFile)
+	dir := filepath.Join(modroot.Root(t), "internal", "beads")
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
