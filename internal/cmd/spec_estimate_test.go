@@ -1379,6 +1379,73 @@ func TestSpecEstimateNeighborMinutesReadOnce(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateNeighborMinutesNoTime: a neighbor whose newest landing record
+// has a bound flag, no polecat_secs, or no record in the rig's ledger shows "no
+// time recorded" in the note, never a time. An older timed record does not stand
+// in for a newer bound one.
+func TestSpecEstimateNeighborMinutesNoTime(t *testing.T) {
+	t.Parallel()
+	const neighbor = `{"bead":"gt-neighbor","rig":"gastown","landed_at":"2026-11-02T10:00:00Z"`
+	tests := []struct {
+		name   string
+		ledger string
+	}{
+		{
+			name:   "lower bound on the newest record",
+			ledger: neighbor + `,"polecat_secs":870,"polecat_lower_bound":true}`,
+		},
+		{
+			name:   "upper bound on the newest record",
+			ledger: neighbor + `,"polecat_secs":870,"polecat_upper_bound":true}`,
+		},
+		{
+			name: "newest bound, an older record timed",
+			ledger: `{"bead":"gt-neighbor","rig":"gastown","landed_at":"2026-11-01T10:00:00Z","polecat_secs":1800}` + "\n" +
+				neighbor + `,"polecat_secs":870,"polecat_upper_bound":true}`,
+		},
+		{
+			name:   "newest record with no polecat_secs",
+			ledger: neighbor + `}`,
+		},
+		{
+			name:   "no record for the neighbor",
+			ledger: `{"bead":"gt-other","rig":"gastown","landed_at":"2026-11-02T10:00:00Z","polecat_secs":600}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path, err := landings.Path(town, "gastown")
+			if err != nil {
+				t.Fatalf("landings.Path: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("making the landings directory: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(tc.ledger+"\n"), 0o644); err != nil {
+				t.Fatalf("writing the ledger: %v", err)
+			}
+
+			deps, err := specEstimateDeps(town, "gastown", io.Discard)
+			if err != nil {
+				t.Fatalf("specEstimateDeps: %v", err)
+			}
+			deps.HMRunner = func(context.Context, []string) ([]byte, error) {
+				return []byte(`[{"rank":1,"score":0.9,"kind":"bead","rig":"gastown","id":"gt-neighbor","title":"the neighbor"}]`), nil
+			}
+			got, err := estimate.Estimate(context.Background(), deps, &beads.Issue{ID: "gt-est", Title: "estimate me", Status: "open", Description: specEstimateBody})
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			want := "gt-neighbor (gastown) the neighbor (no time recorded)"
+			if !strings.Contains(estimate.Note(got), want) {
+				t.Fatalf("note %q does not carry %q", estimate.Note(got), want)
+			}
+		})
+	}
+}
+
 // writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.
 func writeSpecEstimateRuntimeWeights(t *testing.T, town string, f map[string]any) {
 	t.Helper()
