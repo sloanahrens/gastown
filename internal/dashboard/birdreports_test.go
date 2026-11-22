@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -202,6 +203,56 @@ func TestBirdReportsMarksTheHeadlineReporter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A row carries WithActivity's instant as its bird's last activity, zero when
+// the source has no answer, and drops an answer ahead of the reader's clock;
+// the report's own age still decides State and Stale (gt-1v8ex4).
+func TestBirdReportsLastActive(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+	for _, name := range []string{"activebird", "silentbird", "futurebird"} {
+		writeBird(t, root, name, birdWrites{
+			json: birdSidecarJSON(t, birdSidecarFor(name, now.Add(-48*time.Hour), "title", "summary")),
+		})
+	}
+	activeAt := now.Add(-2 * time.Hour)
+	// silentbird gets an instant but ok=false; futurebird's answer is an hour ahead.
+	source := func(bird string) (time.Time, bool) {
+		switch bird {
+		case "activebird":
+			return activeAt, true
+		case "silentbird":
+			return activeAt, false
+		}
+		return now.Add(time.Hour), true
+	}
+	rows := birdByName(NewBirdReportsReader(root).WithActivity(source).Read(now))
+	if got := rows["activebird"].LastActive; !got.Equal(activeAt) {
+		t.Errorf("activebird last active %v, want the source's answer %v", got, activeAt)
+	}
+	for _, bird := range []string{"silentbird", "futurebird"} {
+		if got := rows[bird].LastActive; !got.IsZero() {
+			t.Errorf("%s last active %v, want zero: no answer is shown and a future one is dropped", bird, got)
+		}
+	}
+	if r := rows["activebird"]; r.State != BirdReportStale || !r.Stale {
+		t.Errorf("activebird state %q stale %v, want %q and true: its report is two days old", r.State, r.Stale, BirdReportStale)
+	}
+
+	plain := NewBirdReportsReader(root).Read(now)
+	withSource := NewBirdReportsReader(root).WithActivity(source).Read(now)
+	if len(withSource) != len(plain) {
+		t.Fatalf("reader with a source returned %d rows, reader without %d", len(withSource), len(plain))
+	}
+	for i := range plain {
+		withSource[i].LastActive = time.Time{}
+		if !plain[i].LastActive.IsZero() || !reflect.DeepEqual(withSource[i], plain[i]) {
+			t.Errorf("%s: a source changed the row from %+v to %+v", plain[i].Bird, plain[i], withSource[i])
+		}
 	}
 }
 
