@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// TestRootFromFindsGoModAbove: a start nested below the module root resolves
-// up to the directory holding go.mod, and a directory named go.mod is not one.
+// TestRootFromFindsGoModAbove: a nested start resolves up to the go.mod file,
+// and a directory named go.mod is not one.
 func TestRootFromFindsGoModAbove(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -31,8 +31,7 @@ func TestRootFromFindsGoModAbove(t *testing.T) {
 func TestRootFromErrorsWithNoGoMod(t *testing.T) {
 	t.Parallel()
 	start := t.TempDir()
-	_, err := rootFrom(start)
-	if err == nil || errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), start) {
+	if _, err := rootFrom(start); err == nil || errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), start) {
 		t.Fatalf("rootFrom(%s) = _, %v; want an error naming the start", start, err)
 	}
 }

@@ -1,6 +1,5 @@
-// Package modroot finds the module root from the working directory, so tests
-// that read the checkout work under go test -trimpath, where runtime.Caller
-// reports a module path instead of a disk path (gt-sb5rhu).
+// Package modroot finds the module root from the working directory, so a test
+// reading the checkout works under go test -trimpath (gt-sb5rhu).
 package modroot
 
 import (
@@ -10,8 +9,7 @@ import (
 	"testing"
 )
 
-// Root returns the module root of the test's working directory, failing t when
-// there is none.
+// Root returns the module root of the test's working directory, or fails t.
 func Root(t testing.TB) string {
 	t.Helper()
 	root, err := rootFrom(".")
@@ -21,8 +19,7 @@ func Root(t testing.TB) string {
 	return root
 }
 
-// rootFrom returns the first directory at or above start that holds a go.mod
-// file, or an error naming start when there is none.
+// rootFrom returns the first directory at or above start holding a go.mod file, or an error naming start.
 func rootFrom(start string) (string, error) {
 	dir, err := filepath.Abs(start)
 	if err != nil {
