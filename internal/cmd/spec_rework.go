@@ -39,8 +39,10 @@ type reworkLandingReader interface {
 // reworkLandings returns the rig's landings of the window the advisory names:
 // the records landed at or after now minus reworkAdviceDays, oldest first.
 //
-// open is the read seam (the caller's land.RigLandingsFile in production) so a
-// test supplies a fake with no file and no clock. A read that fails returns the
+// open is the read seam so a test supplies a fake with no file and no clock. The
+// production caller passes a closure wrapping land.RigLandingsFile, which returns
+// a *LandingsFile and not this interface (function types are invariant); see
+// gt-ntel2p, and openRigLandings in the test for the shape. A read that fails returns the
 // error with the rig named and the underlying record's path text kept, never an
 // empty list the advisory would count as no landings (gt-wihqmh).
 func reworkLandings(open func(townRoot, rig string) (reworkLandingReader, error), townRoot, rig string, now time.Time) ([]land.LandingRecord, error) {

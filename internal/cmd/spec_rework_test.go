@@ -82,16 +82,16 @@ func TestReworkLandings(t *testing.T) {
 	edge := land.LandingRecord{BeadID: "gt-edge", LandedAt: windowStart}
 	old := land.LandingRecord{BeadID: "gt-old", LandedAt: now.Add(-20 * day)}
 
-	const path = "/town/.runtime/landings/gastown.jsonl"
+	errBoom := errors.New("boom")
 
 	for _, tc := range []struct {
 		name      string
 		recs      []land.LandingRecord
 		readErr   error
 		openErr   error
+		wantIs    error // the cause the returned error must wrap; nil means no error
 		wantIDs   []string
 		wantSince time.Time
-		wantParts []string // substrings the error must hold; empty means no error
 	}{
 		{
 			name:      "the window keeps a recent landing and drops an old one",
@@ -110,14 +110,14 @@ func TestReworkLandings(t *testing.T) {
 			wantSince: windowStart,
 		},
 		{
-			name:      "a failed read names the rig and keeps the path",
-			readErr:   errors.New("reading landings file " + path + ": boom"),
-			wantParts: []string{"gastown", path},
+			name:    "a failed read names the rig and wraps its cause",
+			readErr: errBoom,
+			wantIs:  errBoom,
 		},
 		{
-			name:      "a failed open names the rig",
-			openErr:   errors.New("opening the landings file: boom"),
-			wantParts: []string{"gastown", "opening the landings file"},
+			name:    "a failed open names the rig and wraps its cause",
+			openErr: errBoom,
+			wantIs:  errBoom,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,14 +130,9 @@ func TestReworkLandings(t *testing.T) {
 				return fake, nil
 			}
 			recs, err := reworkLandings(open, "/town", "gastown", now)
-			if len(tc.wantParts) > 0 {
-				if err == nil {
-					t.Fatalf("reworkLandings() error = nil; want an error holding %q", tc.wantParts)
-				}
-				for _, part := range tc.wantParts {
-					if !strings.Contains(err.Error(), part) {
-						t.Errorf("reworkLandings() error = %q; want it to hold %q", err, part)
-					}
+			if tc.wantIs != nil {
+				if !errors.Is(err, tc.wantIs) || err == nil || !strings.Contains(err.Error(), "gastown") {
+					t.Fatalf("reworkLandings() error = %v; want one wrapping %v and naming the rig", err, tc.wantIs)
 				}
 				if recs != nil {
 					t.Errorf("reworkLandings() recs = %v; want nil on error", recs)
@@ -158,5 +153,30 @@ func TestReworkLandings(t *testing.T) {
 				t.Errorf("Since() cutoff = %v; want %v", fake.since, tc.wantSince)
 			}
 		})
+	}
+}
+
+// openRigLandings is the closure the production caller passes (gt-ntel2p):
+// land.RigLandingsFile returns a *LandingsFile, not a reworkLandingReader, and
+// function types are invariant, so it is wrapped. On error it returns a nil
+// interface and not a nil *LandingsFile inside one, which a caller testing the
+// reader for nil would take for a reader.
+func openRigLandings(townRoot, rig string) (reworkLandingReader, error) {
+	f, err := land.RigLandingsFile(townRoot, rig)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// TestReworkLandingsOpensThroughRigLandingsFile: the closure compiles as the
+// seam, and an invalid rig comes back a nil reader and an error naming the rig.
+func TestReworkLandingsOpensThroughRigLandingsFile(t *testing.T) {
+	t.Parallel()
+	if reader, err := openRigLandings("/town", "a/b"); err == nil || reader != nil {
+		t.Fatalf("openRigLandings(invalid rig) = %v, %v; want a nil reader and an error", reader, err)
+	}
+	if recs, err := reworkLandings(openRigLandings, "/town", "a/b", time.Time{}); err == nil || recs != nil || !strings.Contains(err.Error(), "a/b") {
+		t.Errorf("reworkLandings(invalid rig) = %v, %v; want nil records and an error naming the rig", recs, err)
 	}
 }
