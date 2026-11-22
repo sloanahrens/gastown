@@ -236,45 +236,51 @@ func TestStoryPointsDriftAttentionKeepsOneItemWhileItStaysUnderTheBar(t *testing
 	}
 }
 
-// TestStoryPointsDriftAttentionBarIsTheBoundary: a reading at or over the bar is
-// not drift, and one just under it is, so the comparison is read at the bar
-// itself and not somewhere nearby.
+// TestStoryPointsDriftAttentionBarIsTheBoundary: the item is raised only when
+// the whole interval lies under the bar, so the upper end is read at the bar
+// itself: just under raises, exactly at it or over it does not, and a point
+// reading under the bar with an interval over it does not.
 func TestStoryPointsDriftAttentionBarIsTheBoundary(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		rho    float64
-		raised int
+		name        string
+		rho, lo, hi float64
+		raised      int
 	}{
-		{rho: 0.49, raised: 1},
-		{rho: 0.5, raised: 0},
-		{rho: 0.55, raised: 0},
-		{rho: 1, raised: 0},
+		{name: "Hi just under the bar", rho: 0.40, lo: 0.30, hi: 0.4999, raised: 1},
+		{name: "Hi exactly at the bar", rho: 0.40, lo: 0.30, hi: 0.5, raised: 0},
+		{name: "Hi over the bar", rho: 0.50, lo: 0.45, hi: 0.55, raised: 0},
+		{name: "a point under the bar with Hi over it", rho: 0.42, lo: 0.30, hi: 0.55, raised: 0},
 	}
 	for _, tc := range tests {
-		f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
-			return driftReading(tc.rho, true, "v1"), nil
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+				return driftReadingWithInterval(tc.rho, tc.lo, tc.hi, "v1"), nil
+			})
+			if items := f.collect(t, f.src.collectStoryPointsDrift); len(items) != tc.raised {
+				t.Errorf("reading %v (%v to %v) raised %+v, want %d", tc.rho, tc.lo, tc.hi, items, tc.raised)
+			}
 		})
-		if items := f.collect(t, f.src.collectStoryPointsDrift); len(items) != tc.raised {
-			t.Errorf("reading %v raised %+v, want %d", tc.rho, items, tc.raised)
-		}
 	}
 }
 
 // TestStoryPointsDriftAttentionClearsAtTheBar: the item raised under the bar is
-// dropped by the tick whose reading is back at it.
+// dropped by the tick whose interval reaches the bar, though its point reading
+// stays under it.
 func TestStoryPointsDriftAttentionClearsAtTheBar(t *testing.T) {
 	t.Parallel()
-	rho := 0.42
+	read := driftReadingWithInterval(0.42, 0.35, 0.47, "v1")
 	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
-		return driftReading(rho, true, "v1"), nil
+		return read, nil
 	})
 	first := f.tick(t, driftTick)
 	itemByKey(t, first, storyPointsDriftKey)
 
-	rho = 0.55
+	read = driftReadingWithInterval(0.42, 0.35, 0.5, "v1")
 	second := f.tickFrom(t, first, driftTick.Add(time.Minute))
 	if _, ok := attention.Find(second, storyPointsDriftKey); ok {
-		t.Errorf("the item is still queued after a reading at the bar: %+v", second.Items)
+		t.Errorf("the item is still queued after an interval that reaches the bar: %+v", second.Items)
 	}
 	events := storyPointEvents(t, f, storyPointsDriftKey)
 	if len(events) != 2 || events[1].State != attention.EventCleared {
