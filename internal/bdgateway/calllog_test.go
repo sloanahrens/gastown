@@ -431,9 +431,13 @@ func TestCallLogReopenKeeps(t *testing.T) {
 	t.Run("existing log whose size cannot be read", func(t *testing.T) {
 		t.Parallel()
 		w := newLogWriter(filepath.Join(t.TempDir(), DefaultCallLogName), 100, DefaultCallLogFiles)
-		w.openFile = func(string) (logFile, error) { return &fakeFile{statErr: errors.New("stat boom")}, nil }
+		f := &fakeFile{statErr: errors.New("stat boom")}
+		w.openFile = func(string) (logFile, error) { return f, nil }
 		if err := w.open(); err == nil {
 			t.Fatal("open succeeded without the existing file's size, want an error")
+		}
+		if !f.closed {
+			t.Error("the handle was not closed after its size could not be read")
 		}
 	})
 
@@ -1035,6 +1039,7 @@ type fakeFile struct {
 	writeErr error
 	statErr  error
 	closeErr error
+	closed   bool
 }
 
 func (f *fakeFile) Write(p []byte) (int, error) {
@@ -1052,7 +1057,10 @@ func (f *fakeFile) Stat() (os.FileInfo, error) {
 	return fakeInfo{size: f.size}, nil
 }
 
-func (f *fakeFile) Close() error { return f.closeErr }
+func (f *fakeFile) Close() error {
+	f.closed = true
+	return f.closeErr
+}
 
 type fakeInfo struct{ size int64 }
 
