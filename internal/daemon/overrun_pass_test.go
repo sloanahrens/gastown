@@ -438,6 +438,53 @@ func TestOverrunPassSeatLoopReads(t *testing.T) {
 	}
 }
 
+// TestOverrunPassSeatLoopUnreadableStateKeepsTheEscalationLog: a seat skipped
+// for an unreadable overrun state makes no per-seat read, so it cannot use up
+// the pass's one escalation-read log line. The unreadable seat comes first and
+// a later judged seat's escalation read fails: the pass still logs that
+// failure, naming the judged seat's bead (gt-tkoixy).
+func TestOverrunPassSeatLoopUnreadableStateKeepsTheEscalationLog(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	skipped := overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-bad22"}
+	judged := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-ok111"}
+	f := newOverrunFake(5*time.Minute, skipped, judged)
+
+	// A state file that cannot be parsed: the seat is skipped before any read.
+	path, err := overrunStatePath(d.config.TownRoot, skipped.Bead)
+	if err != nil {
+		t.Fatalf("overrunStatePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	var calls []string
+	record := func(read string, seat overrunSeat) { calls = append(calls, read+" "+seat.Bead) }
+	f.escalationAnsweredAt = func(seat overrunSeat) (time.Time, error) { record("answered", seat); return time.Time{}, nil }
+	f.gateRunning = func(seat overrunSeat) (bool, error) { record("gate", seat); return false, nil }
+	f.escalationWaiting = func(seat overrunSeat) (bool, error) {
+		record("waiting", seat)
+		return false, errors.New("escalation store unreadable")
+	}
+
+	// The fake clock is shared and calls is appended to, so read one seat at a time.
+	s := f.seams()
+	s.readPoolSize = 1
+	d.runOverrunGuard(s)
+
+	wantCalls := "answered " + judged.Bead + ", gate " + judged.Bead + ", waiting " + judged.Bead
+	if got := strings.Join(calls, ", "); got != wantCalls {
+		t.Errorf("per-seat reads = %q, want %q (none for the unreadable-state seat)", got, wantCalls)
+	}
+	if want := "cannot read the escalation state for " + judged.Bead; strings.Count(buf.String(), want) != 1 {
+		t.Errorf("log has %d %q lines, want 1 (the skipped seat used none):\n%s", strings.Count(buf.String(), want), want, buf.String())
+	}
+}
+
 // TestOverrunPassStats: a pass times each seat's three reads on its own clock
 // and, when it ends, tells passDone how many seats it read, the wall time it
 // took, the seat whose reads took longest with each read's time, and how many
