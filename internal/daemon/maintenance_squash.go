@@ -349,9 +349,19 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 		// record then holds the 24-hour gate shut, so recovery runs first, before
 		// the readings and Decide, whatever either says (gt-ngculo). What the
 		// call returns: a Recovery is logged here (gt-oym2v2); the sibling beads
-		// handle the held marker, an error and a clean catalog, and the error is
-		// dropped until they land.
-		recovery, _ := d.maintenance().squashRecover(ctx, d, db, now, step.settings)
+		// handle an error and a clean catalog, and the error is dropped until
+		// they land.
+		recovery, err := d.maintenance().squashRecover(ctx, d, db, now, step.settings)
+		if errors.Is(err, doltsquash.ErrRunMarkerHeld) {
+			// A live run holds the town's marker, so the database's branches
+			// belong to it: the recovery is skipped, and so is the rest of this
+			// database's check, because the readings and Decide would only end
+			// at the same marker. The check decided nothing, so it is due again
+			// after the retry delay rather than held for a day.
+			undecided = true
+			d.logger.Printf("squash: %s: another daemon holds the run marker — skipping the recovery and this check", db)
+			continue
+		}
 		if recovery != nil {
 			d.logger.Printf("squash: %s: recovered a dead run (%s): dropped %s, kept %s: %s",
 				db, recovery.State, squashBranchList(recovery.Dropped), squashBranchList(recovery.Kept), recovery.Reason)
