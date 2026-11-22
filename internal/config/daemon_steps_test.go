@@ -32,3 +32,33 @@ func TestEveryPatrolKeyIsClassified(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonStepsHMSync is the audit's hm-sync plugin row (gt-emcaqo): the pod
+// runs the plugin, so the row is runs-in-container and names the programs the
+// plugin execs, each of which the daemon image carries.
+func TestDaemonStepsHMSync(t *testing.T) {
+	t.Parallel()
+	var row *DaemonStep
+	for _, s := range DaemonSteps() {
+		if s.Name == "hm-sync" && s.Kind == DaemonStepPlugin {
+			s := s
+			row = &s
+		}
+	}
+	if row == nil {
+		t.Fatal("daemonSteps has no hm-sync plugin row")
+	}
+	tests := []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"class", row.Class, DaemonStepRuns},
+		{"needs", row.Needs, []string{"hm", "git", "bd"}},
+	}
+	for _, tt := range tests {
+		if !reflect.DeepEqual(tt.got, tt.want) {
+			t.Errorf("hm-sync %s = %v, want %v", tt.field, tt.got, tt.want)
+		}
+	}
+}
