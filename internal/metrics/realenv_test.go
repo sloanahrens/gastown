@@ -1167,6 +1167,68 @@ func TestRealEnvReadsCachesThatSaveCachesWrote(t *testing.T) {
 	}
 }
 
+// estimateBdList is the estimate wiring's `bd list`: gt-a is closed and carries
+// an sp: label, so its estimate is read; gt-b is closed and carries none.
+const estimateBdList = `[{"id":"gt-a","created_at":"2026-10-12T00:00:00Z","closed_at":"2026-10-14T00:00:00Z","status":"closed","issue_type":"task","labels":["sp:3"]},
+{"id":"gt-b","created_at":"2026-10-12T00:00:00Z","closed_at":"2026-10-14T00:00:00Z","status":"closed","issue_type":"task"}]`
+
+// estimateBdComments is gt-a's `bd comments`: the SP ESTIMATE whose created
+// time is its estimate time.
+const estimateBdComments = `[{"text":"SP ESTIMATE v1 sp:3","created_at":"2026-10-13T00:00:00Z"}]`
+
+// TestEstimateCacheWiringRoundTrip: the estimate time the extract read for a
+// closed bead is in estimated_at.json, and the next RealEnv loads it back.
+func TestEstimateCacheWiringRoundTrip(t *testing.T) {
+	t.Parallel()
+	town, home := realFixture(t)
+	const want = "2026-10-13T00:00:00Z"
+	answer := func(dir string, argv []string) ([]byte, error) {
+		if len(argv) > 4 && argv[3] == "bd" && argv[4] == "list" {
+			return []byte(estimateBdList), nil
+		}
+		if len(argv) > 4 && argv[3] == "bd" && argv[4] == "comments" {
+			return []byte(estimateBdComments), nil
+		}
+		return realGit(town)(dir, argv)
+	}
+	runner := &realRunner{answer: answer}
+	wired := func() RealTown {
+		real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
+		if err != nil {
+			t.Fatalf("RealEnv: %v", err)
+		}
+		return real
+	}
+	real := wired()
+	extractRun(t, real.Extract)
+	if got := real.Extract.EstimateCache["gt-a"]; got != want {
+		t.Fatalf("EstimateCache = %v, want gt-a's estimate %s", got, want)
+	}
+	if err := SaveCaches(real.Extract, town); err != nil {
+		t.Fatalf("SaveCaches: %v", err)
+	}
+	if got := wired().Extract.EstimateCache["gt-a"]; got != want {
+		t.Errorf("EstimateCache after the round trip = %q, want %s", got, want)
+	}
+}
+
+// TestEstimateCacheWiringCorruptAndMissing: no estimated_at.json reads as an
+// empty cache; one that does not decode is an error naming the file.
+func TestEstimateCacheWiringCorruptAndMissing(t *testing.T) {
+	t.Parallel()
+	real, err := seamWired(t, seamFiles{})
+	if err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	if real.Extract.EstimateCache == nil || len(real.Extract.EstimateCache) != 0 {
+		t.Errorf("EstimateCache = %v, want an empty map for a town with no cache yet", real.Extract.EstimateCache)
+	}
+	path := filepath.Join(townOfSeam, ".runtime", "metrics", "cache", estimateCacheName)
+	if _, err := seamWired(t, seamFiles{files: map[string]string{path: `{"gt-a":`}}); err == nil || !strings.Contains(err.Error(), estimateCacheName) {
+		t.Errorf("RealEnv error = %v, want %s named", err, estimateCacheName)
+	}
+}
+
 func TestSaveCachesRefusesAnEmptyTown(t *testing.T) {
 	t.Parallel()
 	if err := SaveCaches(realCacheEnv(), ""); err == nil {

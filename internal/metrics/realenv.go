@@ -45,6 +45,7 @@ const (
 const (
 	handoffCacheName   = "handoff_bytes.json"
 	diffstatsCacheName = "diffstats.json"
+	estimateCacheName  = "estimated_at.json"
 )
 
 // The command budgets _run has: the ported default, and the shorter one every
@@ -237,14 +238,21 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		},
 		Cache: diffCacheFromDocs(diffDocs),
 	}
-	// Both caches stay live: the extract fills the handoff map and the diff
-	// source fills its own, so SaveCaches writes the sizes this run fetched.
+	// Every cache stays live: the extract fills the handoff and estimate maps
+	// and the diff source its own, so SaveCaches writes what this run fetched.
 	handoff, err := readCache[map[string]int](files, filepath.Join(cacheDir, handoffCacheName))
 	if err != nil {
 		return real, fmt.Errorf("real env: handoff cache: %w", err)
 	}
 	if handoff == nil {
 		handoff = map[string]int{}
+	}
+	estimates, err := readCache[map[string]string](files, filepath.Join(cacheDir, estimateCacheName))
+	if err != nil {
+		return real, fmt.Errorf("real env: estimate cache: %w", err)
+	}
+	if estimates == nil {
+		estimates = map[string]string{}
 	}
 	beadDirs := make([]string, 0, len(Rigs)+2)
 	for _, rig := range Rigs {
@@ -293,6 +301,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		Today:         opts.Today,
 		Unreadable:    unreadable,
 		HandoffCache:  handoff,
+		EstimateCache: estimates,
 		BdShowCap:     defaultBdShowCap,
 		JevLog:        dispatch.LogPath(town),
 		TownRoot:      town,
@@ -675,11 +684,11 @@ func diffDocsFromCache(cache DiffCache) map[string]diffStatDoc {
 	return docs
 }
 
-// SaveCaches is save_caches: it writes the handoff and diff caches into the
-// town's runtime so the next run reads each bead and commit once, making the
-// cache directory RealEnv now only reads from. town is the root RealEnv
-// resolved; an empty one is an error, because a cache written under the wrong
-// town is invisible to every later run.
+// SaveCaches is save_caches: it writes the handoff, diff and estimate caches
+// into the town's runtime so the next run reads each bead, commit and closed
+// bead's estimate once, making the cache directory RealEnv now only reads from.
+// town is the root RealEnv resolved; an empty one is an error, because a cache
+// written under the wrong town is invisible to every later run.
 func SaveCaches(env ExtractEnv, town string) error {
 	if town == "" {
 		return errors.New("save caches: town is unset")
@@ -692,6 +701,10 @@ func SaveCaches(env ExtractEnv, town string) error {
 	if handoff == nil {
 		handoff = map[string]int{}
 	}
+	estimates := env.EstimateCache
+	if estimates == nil {
+		estimates = map[string]string{}
+	}
 	cacheDir := filepath.Join(town, ".runtime", "metrics", "cache")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("save caches: %w", err)
@@ -702,6 +715,7 @@ func SaveCaches(env ExtractEnv, town string) error {
 	}{
 		{handoffCacheName, handoff},
 		{diffstatsCacheName, diffDocsFromCache(diffs.Cache)},
+		{estimateCacheName, estimates},
 	} {
 		if err := saveCacheFile(cacheDir, file.name, file.value); err != nil {
 			return err
