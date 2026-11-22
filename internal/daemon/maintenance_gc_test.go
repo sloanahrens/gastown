@@ -357,6 +357,90 @@ func TestMaintenanceGCStateReplacementEdges(t *testing.T) {
 	})
 }
 
+// TestMaintenanceGCStateUpdateLeavesAFileItCannotRead is gt-tv0919's box: a
+// write over a state file it cannot READ returns the read's error and leaves
+// the path as it was, keeping no copy and stamping nothing, because a
+// transient EACCES must not wipe the squash records and archive cursors; a file
+// it can read but not parse is still replaced, with one copy kept and the stamp.
+func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	t.Run("a path it cannot read", func(t *testing.T) {
+		t.Parallel()
+		// A symlink to itself fails os.ReadFile with ELOOP for every uid, root
+		// included (a mode-000 file is readable by root), and an update that
+		// replaced it would succeed, so the row tells a refusal from a replacement.
+		town := t.TempDir()
+		path := maintenanceGCStatePath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, path); err != nil {
+			t.Fatal(err)
+		}
+
+		err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow)
+		if err == nil {
+			t.Fatal("recordMaintenanceGCRun wrote over a state path it cannot read")
+		}
+		if errors.Is(err, errMaintenanceGCStateUnparseable) {
+			t.Errorf("error = %v, a read failure must not carry the unparseable sentinel", err)
+		}
+		if _, statErr := os.Lstat(path + squashStateCorruptSuffix); !os.IsNotExist(statErr) {
+			t.Errorf("a copy exists at %s, want none when the path was never read", path+squashStateCorruptSuffix)
+		}
+		if target, linkErr := os.Readlink(path); linkErr != nil || target != path {
+			t.Errorf("the state path changed: link %q, err %v, want the self-link as it was", target, linkErr)
+		}
+	})
+	t.Run("a file it cannot parse", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := maintenanceGCStatePath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		corrupt := []byte(`{"post_gc_bytes":`)
+		if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before := time.Now().UTC()
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+			t.Fatalf("record over an unparseable file: %v", err)
+		}
+		st, err := loadMaintenanceGCState(town)
+		if err != nil || st.PostGCBytes["hq"] != mib {
+			t.Fatalf("after the replacement: state=%v err=%v", st, err)
+		}
+		if st.StateResetAt.Before(before) || st.StateResetCopy != path+squashStateCorruptSuffix {
+			t.Errorf("the stamp = %v and copy %q, want a time at or after %v and %q", st.StateResetAt, st.StateResetCopy, before, path+squashStateCorruptSuffix)
+		}
+		if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, corrupt) {
+			t.Errorf("the kept copy = %q, %v, want the unparseable bytes", got, err)
+		}
+	})
+	// The reader refuses these as it does an unparseable file (gt-u43s2r), so the
+	// write replaces them too: one definition of unparseable, or {} wedges forever.
+	for _, body := range []string{`{}`, `null`, `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`, `{"last_gc":{},"squash":{"gt":{"last_run":"0001-01-01T00:00:00Z","outcome":"completed"}}}`} {
+		t.Run("a file the reader refuses as unparseable: "+body, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := maintenanceGCStatePath(town)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+				t.Fatalf("record over %s: %v", body, err)
+			}
+			if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || string(got) != body {
+				t.Errorf("the kept copy = %q, %v, want %q", got, err, body)
+			}
+		})
+	}
+}
+
 // stateCopyFault is a copy file whose write or close fails.
 type stateCopyFault struct{ writeErr, closeErr error }
 

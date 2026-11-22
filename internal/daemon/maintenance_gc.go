@@ -234,9 +234,17 @@ func maintenanceGCStatePath(townRoot string) string {
 // maintenance state.
 var errMaintenanceGCStateAbsent = errors.New("no maintenance state file")
 
+// errMaintenanceGCStateUnparseable reports a state file that was read but is not a
+// valid maintenance state: bytes that are not JSON, or JSON holding nothing the
+// daemon writes. It is the one read error a write replaces the file for: its
+// contents are known to be unusable, where a file that could not be read may still
+// hold the squash records and archive cursors (gt-tv0919).
+var errMaintenanceGCStateUnparseable = errors.New("unparseable")
+
 // loadMaintenanceGCState reads the baselines. A missing file is empty state; a
 // corrupt one is an error the caller logs before treating it as empty (gc is
-// non-destructive, so "no baseline" is a safe reading).
+// non-destructive, so "no baseline" is a safe reading). A file whose bytes do
+// not parse, or is not a valid state, wraps errMaintenanceGCStateUnparseable.
 func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st, err := readMaintenanceGCState(townRoot)
 	if errors.Is(err, errMaintenanceGCStateAbsent) {
@@ -274,8 +282,9 @@ var squashRecordFloor = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // readMaintenanceGCState reads the state file. A missing file reports
 // errMaintenanceGCStateAbsent, so a caller can tell no state from an unreadable
-// one; a file that exists but cannot be read or parsed is its error, never
-// empty state.
+// one; a file that exists but cannot be read is its error, never empty state,
+// and a file that was read but is not a valid state wraps
+// errMaintenanceGCStateUnparseable.
 func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st := maintenanceGCState{
 		PostGCBytes:             map[string]int64{},
@@ -296,7 +305,7 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	}
 	var parsed maintenanceGCState
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return st, fmt.Errorf("parse %s: %w", maintenanceGCStateFileName, err)
+		return st, fmt.Errorf("parse %s: %w: %v", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable, err)
 	}
 	// A file that parses but holds nothing the daemon writes ({} or null) is as
 	// unreadable as one that does not parse: the daemon always writes last_gc as
@@ -304,12 +313,12 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	// below zero (gt-u43s2r).
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil || len(keys["last_gc"]) == 0 || string(keys["last_gc"]) == "null" {
-		return st, fmt.Errorf("parse %s: not the state object the daemon writes (last_gc is missing)", maintenanceGCStateFileName)
+		return st, fmt.Errorf("parse %s: %w: not the state object the daemon writes (last_gc is missing)", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable)
 	}
 	for _, sizes := range []map[string]int64{parsed.PostGCBytes, parsed.PostGCOldGenBytes} {
 		for db, n := range sizes {
 			if n < 0 {
-				return st, fmt.Errorf("parse %s: the size recorded for %s is below zero", maintenanceGCStateFileName, db)
+				return st, fmt.Errorf("parse %s: %w: the size recorded for %s is below zero", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable, db)
 			}
 		}
 	}
@@ -321,7 +330,7 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	// not enough (gt-53x4vs).
 	for db, rec := range parsed.Squash {
 		if rec.LastRun.Before(squashRecordFloor) {
-			return st, fmt.Errorf("parse %s: the squash record of %s has no plausible last run", maintenanceGCStateFileName, db)
+			return st, fmt.Errorf("parse %s: %w: the squash record of %s has no plausible last run", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable, db)
 		}
 	}
 	for k, v := range parsed.PostGCBytes {
@@ -359,16 +368,20 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 }
 
 // updateMaintenanceGCState applies fn to the state under the write lock and
-// writes it back atomically. A corrupt file is replaced rather than failing
-// forever. fn's view is the state fn writes; the returned copy is what landed.
+// writes it back atomically. A file that was read and does not parse is
+// replaced rather than failing forever; a file that could not be read is not
+// replaced, and its error is returned with nothing written, because it may
+// still hold records a later read will find (gt-tv0919). fn's view is the state
+// fn writes; the returned copy is what landed.
 func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (maintenanceGCState, error) {
 	maintenanceGCStateMu.Lock()
 	defer maintenanceGCStateMu.Unlock()
 
 	path := maintenanceGCStatePath(townRoot)
 	st, err := loadMaintenanceGCState(townRoot)
-	if err != nil {
-		// An unreadable file is still replaced, so no writer wedges on it, but
+	switch {
+	case errors.Is(err, errMaintenanceGCStateUnparseable):
+		// An unparseable file is still replaced, so no writer wedges on it, but
 		// its bytes are kept once and the replacement is stamped: the squash
 		// records it held are gone (gt-yvh1vv).
 		copyPath, copyErr := keepStateCopy(path)
@@ -376,6 +389,8 @@ func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (ma
 			copyPath = "not kept: " + copyErr.Error()
 		}
 		st.StateResetAt, st.StateResetCopy = time.Now().UTC(), copyPath
+	case err != nil:
+		return st, fmt.Errorf("update maintenance state: %w", err)
 	}
 	fn(&st)
 
