@@ -1088,7 +1088,10 @@ type Daemon struct {
 	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
-	patrolScanCycles  sync.WaitGroup
+	// patrolScanMemory is the patrol scan's in-process ledger (patrolScanMemoryLedger).
+	patrolScanMemory     *patrolscan.MemoryLedger
+	patrolScanMemoryOnce sync.Once
+	patrolScanCycles     sync.WaitGroup
 
 	// findingsFilerRunning is the findings_filer tick's single-flight guard
 	// (gt-rws9m, findings_filer.go): a pass files beads, so a slow one must

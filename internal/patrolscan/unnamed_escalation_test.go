@@ -2,6 +2,8 @@ package patrolscan
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,9 +140,9 @@ func TestUnnamedEscalationIsFiledOncePerExit(t *testing.T) {
 	}
 
 	rec := env.agents["ruby"]
-	rec.UpdatedAt = now.Add(-unnamedEscalationGrace - time.Second) // a later exit than the one filed for
+	rec.UpdatedAt = now.Add(time.Minute) // a later exit: written after the filing, past the grace by the tick below
 	env.agents["ruby"] = rec
-	unnamedTick(env, ledger)
+	New(env, ledger, Options{Now: func() time.Time { return now.Add(unnamedEscalationGrace + 2*time.Minute) }}).Tick("gastown")
 	if len(env.filed) != 2 {
 		t.Errorf("filed = %v after a later exit, want a second call", env.filed)
 	}
@@ -180,4 +182,90 @@ func TestUnnamedEscalationFailuresAreNotMarked(t *testing.T) {
 			t.Errorf("detail = %q, want the failed mark named", f.Detail)
 		}
 	})
+}
+
+// TestUnnamedEscalationOnAnUnreadableLedger: a ledger that cannot be read answers every key as
+// just reported, which for this rule would skip the filer and say it was filed when nothing was.
+// On a corrupt ledger file the filer is called ONCE per exit (the rule marks in memory, shared
+// across ticks through Options.MemoryLedger), every tick's detail names the ledger error, and a
+// later exit files again; a corrupt ledger never turns the per-tick refiling back on (gt-5wmwv4).
+func TestUnnamedEscalationOnAnUnreadableLedger(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "ledger.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := &filerEnv{fakeEnv: unnamedStop(unnamedEscalationGrace + time.Minute)}
+	ledger := NewFileLedger(path, 7*24*time.Hour)
+	memory := NewMemoryLedger()
+	tick := func() Finding {
+		r := New(env, ledger, Options{Now: func() time.Time { return now }, MemoryLedger: memory}).Tick("gastown")
+		return seatFinding(t, r, "ruby")
+	}
+
+	var details []string
+	for range 3 {
+		details = append(details, tick().Detail)
+	}
+
+	if len(env.filed) != 1 {
+		t.Errorf("filed = %v after three ticks, want the filer called once", env.filed)
+	}
+	for i, d := range details {
+		if !strings.Contains(d, "the ledger is unreadable (") || !strings.Contains(d, "marked in memory only, a daemon restart files again") || !strings.Contains(d, "invalid character") {
+			t.Errorf("tick %d detail = %q, want the ledger's error and the in-memory note", i+1, d)
+		}
+	}
+	if !strings.Contains(details[0], "filed one for the overseer") || !strings.Contains(details[2], "filed already") {
+		t.Errorf("details = %q, want the first to file and the third to say filed already", details)
+	}
+
+	rec := env.agents["ruby"]
+	rec.UpdatedAt = now.Add(time.Minute) // a later exit: written after the filing
+	env.agents["ruby"] = rec
+	later := New(env, ledger, Options{Now: func() time.Time { return now.Add(unnamedEscalationGrace + 2*time.Minute) }, MemoryLedger: memory})
+	later.Tick("gastown")
+	if len(env.filed) != 2 {
+		t.Errorf("filed = %v after a later exit, want a second call in memory", env.filed)
+	}
+}
+
+// TestUnnamedEscalationMarkIsNotPrunedByAnotherSeat: the filing is marked at the time it was
+// reported, so another key marked a few days later does not prune it; past the ledger's keep
+// (7 days) a seat still stuck is reminded once and marked again (gt-5wmwv4).
+func TestUnnamedEscalationMarkIsNotPrunedByAnotherSeat(t *testing.T) {
+	t.Parallel()
+	// The record was written 20 days ago: marked at that write time instead of the filing's, the
+	// key would be older than the ledger's keep the moment another key is marked.
+	env := &filerEnv{fakeEnv: unnamedStop(20 * 24 * time.Hour)}
+	ledger := NewFileLedger(filepath.Join(t.TempDir(), "ledger.json"), 7*24*time.Hour)
+	at := now
+	tick := func() {
+		New(env, ledger, Options{Now: func() time.Time { return at }}).Tick("gastown")
+	}
+
+	tick()
+	if len(env.filed) != 1 {
+		t.Fatalf("filed = %v, want one call", env.filed)
+	}
+	at = now.Add(6 * 24 * time.Hour)
+	if err := ledger.MarkReported("other-seat", at); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if len(env.filed) != 1 {
+		t.Errorf("filed = %v after another key was marked on day 6, want the first key kept", env.filed)
+	}
+	at = now.Add(8 * 24 * time.Hour)
+	if err := ledger.MarkReported("another-seat", at); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if len(env.filed) != 2 {
+		t.Errorf("filed = %v on day 8, want the seat still stuck reminded once", env.filed)
+	}
+	tick()
+	if len(env.filed) != 2 {
+		t.Errorf("filed = %v, want the reminder marked again", env.filed)
+	}
 }
