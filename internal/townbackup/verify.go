@@ -23,19 +23,11 @@ const identityFile = "mayor/town.json"
 // keeps the last two blocks to tell a closed archive from a truncated one.
 const blockSize = 512
 
-// maxScanBytes bounds the content Verify scans for credentials: a regular file
-// larger than this, or a gzip member whose content is, is refused rather than
-// scanned in full, since that could take longer than the night is worth.
+// maxScanBytes bounds the content Verify has the content rule judge: a regular
+// file larger than this is refused rather than read in full, since that could
+// take longer than the night is worth. It is the bound the backup export's rule
+// reads under (townstate.FlaggedContent), so a file it refuses is refused here.
 const maxScanBytes = 64 << 20
-
-// errTooLarge reports a gzip member whose decompressed content passes
-// maxScanBytes. Verify names the entry and the rule when it sees it.
-var errTooLarge = errors.New("content is larger than the scan bound")
-
-// errNestedGzip reports a gzip member whose decompressed content is another gzip
-// stream: a second layer is how a credential would be hidden from the scan, and
-// no real export nests one (townstate.FlaggedContent refuses it too, gt-o6dpg6).
-var errNestedGzip = errors.New("content is a gzip stream inside a gzip stream")
 
 // maxTrailing bounds what Verify reads past the tar stream's end blocks while
 // reaching the gzip trailer, so a decompression bomb cannot run unbounded. An
@@ -50,8 +42,10 @@ type Result struct {
 
 // Verify reads the gzip tar archive at archive and reports the regular files
 // it holds, refusing one it cannot read in full, one with no regular file or
-// no mayor/town.json, and one carrying a secret-shaped name, a credential, or
-// a regular file too large to scan.
+// no mayor/town.json, and one carrying a secret-shaped name, content the
+// backup export's rule flags, or a regular file too large to read. A file's
+// content is judged by townstate.FlaggedContent, the one rule the backup export
+// leaves a file out by, so an archive the export wrote is one Verify accepts.
 func Verify(archive string) (res Result, err error) {
 	f, err := os.Open(archive)
 	if err != nil {
@@ -89,9 +83,9 @@ func Verify(archive string) (res Result, err error) {
 		}
 		// An import accepts regular files, directories and symlinks. A
 		// directory holds no content and a symlink's content is its target's
-		// name, so both are checked by name; a regular file is scanned; every
-		// other type can carry content no scan would see, so it is refused
-		// rather than skipped (gt-2rj9jc).
+		// name, so both are checked by name; a regular file's content is judged
+		// below; every other type can carry content no check would see, so it is
+		// refused rather than skipped (gt-2rj9jc).
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			continue
@@ -118,18 +112,12 @@ func Verify(archive string) (res Result, err error) {
 		if err != nil {
 			return Result{}, fmt.Errorf("%s: reading entry %s: %w", archive, name, err)
 		}
-		content, err := scanBody(data)
-		if errors.Is(err, errTooLarge) {
-			return Result{}, fmt.Errorf("%s: entry %s is a gzip member whose content is too large to scan (over %d bytes)", archive, name, maxScanBytes)
-		}
-		if errors.Is(err, errNestedGzip) {
-			return Result{}, fmt.Errorf("%s: entry %s is a gzip member inside a gzip member, which hides its content from the scan", archive, name)
-		}
-		if err != nil {
-			return Result{}, fmt.Errorf("%s: entry %s: %w", archive, name, err)
-		}
-		if findings := townstate.FindCredentials(content); len(findings) > 0 {
-			return Result{}, fmt.Errorf("%s: entry %s carries a credential (%s)", archive, name, strings.Join(findings, ", "))
+		// Only a Pass is clean: FlaggedContent fails content it cannot show to be
+		// clean too (a member that does not decompress, a nested member, content
+		// over the bound), so a file the export would leave out is refused here.
+		// The reason is the shared rule's and never holds a value.
+		if verdict := townstate.FlaggedContent(bytes.NewReader(data)); !verdict.IsPass() {
+			return Result{}, fmt.Errorf("%s: entry %s: %w", archive, name, verdict.Err())
 		}
 	}
 	// The tar reader stops at the end blocks, before the gzip trailer, so
@@ -152,34 +140,6 @@ func Verify(archive string) (res Result, err error) {
 		return Result{}, fmt.Errorf("%s: has no %s", archive, identityFile)
 	}
 	return res, nil
-}
-
-// scanBody returns the bytes to scan for an entry's data: data itself, or, for
-// a gzip member (first bytes 1f 8b), its decompressed content, read through a
-// reader bounded to maxScanBytes+1 so one byte past the bound is detected. It
-// returns errTooLarge for content over that bound and another error for a
-// member that does not decompress.
-func scanBody(data []byte) ([]byte, error) {
-	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
-		return data, nil
-	}
-	zr, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("gzip member does not decompress: %w", err)
-	}
-	// Reading to the end is what verifies the member's checksum, so a corrupt
-	// one is refused here; the reader is over memory and has nothing to close.
-	content, err := io.ReadAll(io.LimitReader(zr, maxScanBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("gzip member does not decompress: %w", err)
-	}
-	if len(content) > maxScanBytes {
-		return nil, errTooLarge
-	}
-	if len(content) >= 2 && content[0] == 0x1f && content[1] == 0x8b {
-		return nil, errNestedGzip
-	}
-	return content, nil
 }
 
 // tailBuffer keeps the last len(b) bytes written through it, so Verify can

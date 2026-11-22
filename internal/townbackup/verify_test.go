@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/townstate"
 )
 
 // arcEntry is one entry of an archive a test builds in memory.
@@ -286,13 +288,13 @@ func TestVerifyRefuses(t *testing.T) {
 		{
 			name:    "credential in a JSON body",
 			data:    gzipTar(t, identity, arcEntry{name: "settings/x.json", data: `{"api_key":"abc"}`}),
-			wantErr: "settings/x.json carries a credential (json:api_key)",
+			wantErr: "entry settings/x.json: the content holds a credential",
 			notIn:   "abc",
 		},
 		{
 			name:    "credential in an env body",
 			data:    gzipTar(t, identity, arcEntry{name: "settings/x.conf", data: "API_TOKEN=abc\n"}),
-			wantErr: "settings/x.conf carries a credential (env:API_TOKEN)",
+			wantErr: "entry settings/x.conf: the content holds a credential",
 			notIn:   "abc",
 		},
 	}
@@ -392,7 +394,7 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 	t.Run("credential near its end is refused", func(t *testing.T) {
 		t.Parallel()
 		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "settings/x.json", data: paddedCredential(largeBody)}),
-			"settings/x.json carries a credential", "abc")
+			"entry settings/x.json: the content holds a credential", "abc")
 	})
 	t.Run("over the scan bound is refused", func(t *testing.T) {
 		t.Parallel()
@@ -408,7 +410,7 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 			t.Fatal("fixture: the compressed member holds the credential text, so this test would not prove decompression")
 		}
 		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(member)}),
-			"logs/export.json.gz carries a credential", "abc")
+			"entry logs/export.json.gz: the content holds a credential", "abc")
 	})
 	t.Run("gzip member that does not decompress is refused", func(t *testing.T) {
 		t.Parallel()
@@ -440,7 +442,7 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 				body = string(gzipped(t, body))
 			}
 			verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: body}),
-				"entry logs/export.json.gz is a gzip member inside a gzip member", "abcdefghijkl")
+				"entry logs/export.json.gz: the gzip stream holds another gzip stream", "abcdefghijkl")
 		})
 	}
 	t.Run("a clean single gzip member passes", func(t *testing.T) {
@@ -453,8 +455,82 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 	t.Run("gzip member whose content is over the bound is refused", func(t *testing.T) {
 		t.Parallel()
 		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(gzipZeros(t, maxScanBytes+1))}),
-			"entry logs/export.json.gz is a gzip member whose content is too large to scan", "")
+			"entry logs/export.json.gz: the decompressed content is over the bound", "")
 	})
+}
+
+// backupExportToken is token-shaped and built from parts, so no credential
+// literal sits in this file.
+const backupExportToken = "sk-" + "abcdefghijklmnop1234"
+
+// backupTown writes a town whose one Backup row holds the identity file, a
+// clean file and a file the backup export's rule flags, and returns its root
+// and the manifest walking that row.
+func backupTown(t *testing.T) (string, *townstate.Manifest) {
+	t.Helper()
+	town := t.TempDir()
+	writeTownFile(t, town, identityFile, identity.data)
+	writeTownFile(t, town, "mayor/clean.json", `{"theme":"dark"}`)
+	writeTownFile(t, town, "mayor/roster.json", `{"note":"`+backupExportToken+`"}`)
+	m := &townstate.Manifest{Entries: []townstate.Entry{
+		{Path: "mayor", Owner: townstate.OwnerDaemon, Backup: true, Why: "test: a row the daemon export and the backup both walk"},
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("the test manifest: %v", err)
+	}
+	return town, m
+}
+
+// writeTownFile writes content at a town-root-relative path, making its parents.
+func writeTownFile(t *testing.T, town, rel, content string) {
+	t.Helper()
+	p := filepath.Join(town, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// exportGzipped runs a townstate.Export of town and returns its tar stream in a
+// gzip stream, the shape a backup night reaches Verify in.
+func exportGzipped(t *testing.T, town string, m *townstate.Manifest, opts townstate.ExportOptions) []byte {
+	t.Helper()
+	var tarBytes bytes.Buffer
+	if _, err := townstate.Export(&tarBytes, town, m, opts); err != nil {
+		t.Fatalf("exporting the town: %v", err)
+	}
+	var archive bytes.Buffer
+	zw := gzip.NewWriter(&archive)
+	if _, err := zw.Write(tarBytes.Bytes()); err != nil {
+		t.Fatalf("compressing the export: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing the gzip stream: %v", err)
+	}
+	return archive.Bytes()
+}
+
+// TestVerifyAcceptsWhatABackupExportWrites pins that Verify judges content by
+// the one rule the backup export leaves a file out by: the archive a backup
+// export of a town holding a flagged file wrote passes, and the same town
+// exported without the backup option, which writes the flagged file, is refused.
+func TestVerifyAcceptsWhatABackupExportWrites(t *testing.T) {
+	t.Parallel()
+	town, m := backupTown(t)
+
+	got, err := Verify(writeArchive(t, exportGzipped(t, town, m, townstate.ExportOptions{Backup: true})))
+	if err != nil {
+		t.Fatalf("Verify refused what a backup export wrote: %v", err)
+	}
+	want := Result{Files: 2, Bytes: int64(len(identity.data) + len(`{"theme":"dark"}`))}
+	if got != want {
+		t.Errorf("Result = %+v, want %+v", got, want)
+	}
+
+	verifyRefused(t, exportGzipped(t, town, m, townstate.ExportOptions{}),
+		"entry mayor/roster.json: the content holds a credential", backupExportToken)
 }
 
 // TestVerifyRefusesAMissingArchive pins that an archive that cannot be read is
