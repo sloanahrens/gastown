@@ -187,6 +187,44 @@ func TestTownRebootCheckPassesTheRegistryBase(t *testing.T) {
 	}
 }
 
+// TestTownRebootCheckInPod: in a pod the command refuses before it builds the runner, names the
+// reason and starts no check (gt-9v9y1s).
+func TestTownRebootCheckInPod(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	ran := false
+	env := fakeRebootEnv(t, &out, []townreboot.Check{{Name: "x", Run: func(context.Context) townreboot.Result {
+		ran = true
+		return townreboot.Result{OK: true}
+	}}})
+	built := false
+	env.checks = func(townreboot.Runner, string) []townreboot.Check {
+		built = true
+		return nil
+	}
+	env.getenv = func(key string) string {
+		if key == podEnv {
+			return "10.0.0.1"
+		}
+		return ""
+	}
+
+	err := runTownRebootCheck(context.Background(), env)
+
+	if err == nil || !strings.Contains(err.Error(), podEnv) {
+		t.Fatalf("reboot-check in a pod = %v, want a refusal naming %s", err, podEnv)
+	}
+	if built {
+		t.Error("the check lists were built in a pod, want no runner")
+	}
+	if ran {
+		t.Error("a check ran in a pod, want none")
+	}
+	if out.Len() != 0 {
+		t.Errorf("output = %q, want none from a run that never started", out.String())
+	}
+}
+
 // rebootOKCheck is a check whose row is OK.
 func rebootOKCheck(name string) townreboot.Check {
 	return townreboot.Check{Name: name, Run: func(context.Context) townreboot.Result { return townreboot.Result{OK: true, Detail: "fine"} }}
