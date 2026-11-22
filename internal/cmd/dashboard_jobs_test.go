@@ -36,7 +36,7 @@ func TestDashboardJobsCommand(t *testing.T) {
 	// A command that fails or prints anything but the list reads as nil, the
 	// failed read the hub keeps the last good list over (gt-16wpss).
 	for name, run := range map[string]func(context.Context, []string) ([]byte, error){
-		"exits non-zero": fakeJevRun("", errors.New("exit status 3"), nil),
+		"exits non-zero": fakeJevRun(`[{"name":"dolt_gc","state":"ok","outcome":"ok"}]`, errors.New("exit status 3"), nil), // a good list with a failed exit is still a failed read
 		"prints text":    fakeJevRun("gt: unknown command", nil, nil),
 	} {
 		if got := dashboardJobs(jobsArgv(), run)(); got != nil {
