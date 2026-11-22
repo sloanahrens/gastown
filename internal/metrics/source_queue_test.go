@@ -247,7 +247,7 @@ func TestSourceQueueParsesDaemonLogColumns(t *testing.T) {
 			name: "the last hour's ticks and the newest roster",
 			log: "2026/10/24 11:59:59 spec_dispatch: tick: 9 candidate(s), roster deepseek-flash 0/3, 9 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n" +
 				"2026/10/24 12:30:00 spec_dispatch: tick: 7 candidate(s), roster deepseek-flash 2/3, claude-sonnet 1/2, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label\n" +
-				"2026/10/24 12:31:00 spec_dispatch: tick took 4.512s (roster 1.2ms, board 900.5ms, candidates 7 2.1ms, sling 3.4s)\n" +
+				"2026/10/24 12:31:00 spec_dispatch: tick took 4.512s (roster 1.2ms, board 900.5ms, candidates 7 2.1ms, sling 3.4s); roster 3 calls, board 2 calls, candidates 1 calls, cpu_psi=33.29/37.74\n" +
 				"2026/10/24 12:45:00 spec_dispatch: tick: 5 candidate(s), roster deepseek-flash 2/3, claude-sonnet 2/2, 2 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label\n",
 			want: map[string]any{
 				"dispatch_ticks_1h": 2, "dispatched_1h": 3, "last_tick_secs": 4.512,
