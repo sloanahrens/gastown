@@ -141,8 +141,11 @@ func (d *Daemon) runSweepRunsPruneTick() {
 
 // runSweepRunsPrunePass is the pass the tick dispatches. The due check is read
 // again here, so a run that concluded after the tick's decision does not run
-// twice. A run that reaches no verdict is tried again on the retry interval.
+// twice. A run that reaches no verdict raises one attention item and is next
+// tried at its normal cadence.
 func (d *Daemon) runSweepRunsPrunePass(mode string) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
 	s := d.diskMaintenanceSeams()
 	every, keep, minAge, err := sweepRunsPruneSettings(d.patrol())
 	if err != nil {
@@ -154,11 +157,7 @@ func (d *Daemon) runSweepRunsPrunePass(mode string) {
 	}
 	verdict := d.sweepRunsPrune(mode, keep, minAge)
 	concluded := s.now()
-	if verdict {
-		d.diskMaintSchedule.record(sweepRunsPruneName, concluded)
-		return
-	}
-	d.diskMaintSchedule.recordRetry(sweepRunsPruneName, concluded.Add(cacheTrimRetryInterval))
+	d.diskMaintConclude(ctx, sweepRunsPruneName, "sweep-run prune", verdict, concluded, every, "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time")
 }
 
 // sweepRunsDirectory is one directory the plan lists, with the rig it is in, the
@@ -305,7 +304,7 @@ func sweepRunsLabels(removals []sweepRunsDirectory) string {
 
 // sweepRunsPruneLogf says a refusal of the prune once per refusal window, as the
 // engine prune's refusals are: a listing that keeps failing is one line an hour,
-// not one per retry.
+// not one per run.
 func (d *Daemon) sweepRunsPruneLogf(kind, format string, args ...any) {
 	if d.diskMaintSchedule.allowLog("sweep-runs-prune "+kind, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
 		d.logger.Printf("%s", fmt.Sprintf(format, args...))
