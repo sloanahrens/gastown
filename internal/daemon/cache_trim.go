@@ -1414,6 +1414,10 @@ type cacheTrimSource struct {
 // a sandbox that has not started still holds the cache; only a running pod can
 // answer an exec, so only a running pod is a source.
 //
+// A pod that is being deleted still holds the claim until the kubelet removes
+// it, so it still counts, but it is not a source: an exec in it is killed with
+// the pod (exit 137), and a listing read through it dies.
+//
 // A reply that cannot be decoded, names no item list, or names a pod of another
 // namespace refuses: an unreadable reply would read as no sandbox running, which
 // is a claim of idle again.
@@ -1445,7 +1449,7 @@ func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, namespace, claim
 			continue
 		}
 		sandboxes++
-		if pod.Status.Phase != "Running" {
+		if pod.Status.Phase != "Running" || pod.Metadata.DeletionTimestamp != nil {
 			continue
 		}
 		if source, ok := cacheTrimPodSource(pod, volume); ok {
@@ -1477,6 +1481,9 @@ type cacheTrimPod struct {
 type cacheTrimPodMeta struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	// DeletionTimestamp is set once the cluster has asked the pod to go: from
+	// then on the pod is on its way out and an exec in it dies with it.
+	DeletionTimestamp *string `json:"deletionTimestamp"`
 }
 
 type cacheTrimPodSpec struct {
