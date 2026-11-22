@@ -891,6 +891,50 @@ func TestCIEnginePruneFailureRaisesOnce(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneFailureItemCarriesTheReason pins gt-mfc72u: the failure item
+// carries what failed, not the fixed sentence that sends the operator to the log.
+// A run that fails with an error carries its first line; a run whose removal left
+// an object behind carries the sentence naming what was left.
+func TestCIEnginePruneFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		remove engineRemoveAnswers
+		list   string // replaces the list program's reply when set
+		want   string
+	}{
+		"the failure's own error": {
+			list: "not the list program's JSON\n",
+			want: "the engine listing does not decode as the list program's JSON",
+		},
+		"a failure with no error names what refused": {
+			remove: engineRemoveAnswers{short: true},
+			want:   "docker left 1 of 1 planned container(s) in the " + ciCacheContainer + " container",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), tc.remove)
+			if tc.list != "" {
+				replaceEngineReply(f, "ci-engine-list", cliReply{stdout: tc.list})
+			}
+			f.tick()
+			f.drain()
+
+			items := enginePruneItems(f)
+			if len(items) != 1 {
+				t.Fatalf("the failure raised %d item(s), want one:\n%s", len(items), f.logs.String())
+			}
+			text := items[0].Escalation.Description
+			if !strings.Contains(text, tc.want) {
+				t.Errorf("the item does not carry %q: %s", tc.want, text)
+			}
+			if strings.Contains(text, diskMaintNoReason) {
+				t.Errorf("the item carries the fixed sentence, not the failure's reason: %s", text)
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneScriptsHoldNoKeepLogic: the two shell programs hold no keep, age
 // or repository rule. The keep set is decided in Go; the programs only list the
 // engine, or remove the ids and names the planner named, and the build cache
@@ -2042,7 +2086,7 @@ func TestCIEnginePruneRecordsNoNextDueWhenSettingsRefused(t *testing.T) {
 	t.Parallel()
 	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
 	f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineUnusedAge = "30m"
-	if f.d.ciEnginePrune(context.Background(), agentconfig.DiskMaintenanceModeApply) {
+	if verdict, _ := f.d.ciEnginePrune(context.Background(), agentconfig.DiskMaintenanceModeApply); verdict {
 		t.Fatalf("a run whose settings cannot be read reported a verdict:\n%s", f.logs.String())
 	}
 

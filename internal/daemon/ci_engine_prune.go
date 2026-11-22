@@ -731,20 +731,26 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	if !d.diskMaintSchedule.trimDue(ciEnginePruneName, s.now(), every) {
 		return
 	}
-	verdict := d.ciEnginePrune(ctx, mode)
+	verdict, reason := d.ciEnginePrune(ctx, mode)
 	concluded := s.now()
-	d.diskMaintConclude(ctx, ciEnginePruneName, "CI engine prune", verdict, concluded, every, "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time")
+	d.diskMaintConclude(ctx, ciEnginePruneName, "CI engine prune", verdict, concluded, every, reason)
 }
 
+// ciEngineReasonLine is the failure reason the attention item carries: the first
+// line of the error or sentence the run logs.
+func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] }
+
 // ciEnginePrune runs the engine prune once and reports whether it reached a
-// verdict. Every run, whatever path it takes, is appended to the job ledger: the
-// plan's counts, the bytes the build cache step reclaimed and how the run ended,
-// with the next due at one interval from its end. A run that cannot list the
-// engine or plan from the listing removes nothing and says why. Once it removes,
-// every kind and the build cache prune run whatever an earlier one did; a kind
-// docker left in place, or that could not be checked, fails the run after the rest
-// have run, and the next run plans again from what is left.
-func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
+// verdict, and why when it did not: the first line of the error or the refusal
+// sentence the run logs, which the attention item carries. Every run, whatever
+// path it takes, is appended to the job ledger: the plan's counts, the bytes the
+// build cache step reclaimed and how the run ended, with the next due at one
+// interval from its end. A run that cannot list the engine or plan from the
+// listing removes nothing and says why. Once it removes, every kind and the build
+// cache prune run whatever an earlier one did; a kind docker left in place, or
+// that could not be checked, fails the run after the rest have run, and the next
+// run plans again from what is left.
+func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	started := s.now()
@@ -772,24 +778,24 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	}()
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
-		return false
+		return false, ciEngineReasonLine(err.Error())
 	}
 	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("context", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
-		return false
+		return false, ciEngineReasonLine(err.Error())
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
 	pod, err := d.ciCacheTrimPod(ctx, kubeconfig, kubeContext)
 	if err != nil {
 		// The lookup's error can carry kubectl's stderr, so only the sentinel's text
-		// or the exit status is logged.
+		// or the exit status is logged and carried.
 		if errors.Is(err, errCICacheTrimNotRunning) {
 			d.ciEnginePruneLogf("pod not running", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
-		} else {
-			d.ciEnginePruneLogf("pod lookup", "disk_maintenance: ci engine prune: the runner's pod lookup failed (%s); nothing pruned", ciEngineExitStatus(err))
+			return false, ciEngineReasonLine(err.Error())
 		}
-		return false
+		d.ciEnginePruneLogf("pod lookup", "disk_maintenance: ci engine prune: the runner's pod lookup failed (%s); nothing pruned", ciEngineExitStatus(err))
+		return false, fmt.Sprintf("the runner's pod lookup failed (%s)", ciEngineExitStatus(err))
 	}
 
 	// A failed exec's log line names its exit status and the first line of its
@@ -800,18 +806,18 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	if err != nil {
 		d.ciEnginePruneLogf("list failed", "disk_maintenance: ci engine prune: the listing exec into the %s container failed (%s); nothing pruned",
 			ciCacheContainer, ciEngineFailure(err, stderr))
-		return false
+		return false, fmt.Sprintf("the listing exec into the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
 	}
 	listing, err := parseCIEngineListing(stdout)
 	if err != nil {
 		d.ciEnginePruneLogf("listing unreadable", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
-		return false
+		return false, ciEngineReasonLine(err.Error())
 	}
 	now := s.now()
 	plan, err := planCIEnginePrune(listing, now, imageAge, unusedAge, keepRepos)
 	if err != nil {
 		d.ciEnginePruneLogf("plan refused", "disk_maintenance: ci engine prune: the listing could not be planned: %v; nothing pruned", err)
-		return false
+		return false, ciEngineReasonLine(fmt.Sprintf("the listing could not be planned: %v", err))
 	}
 
 	before := polecatimage.Human(*listing.DataRootKiB * 1024)
@@ -833,15 +839,20 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 			counts, before)
 		// The build cache step did not run, so no build_cache_bytes is recorded.
 		outcome = ciEngineOutcomeOK
-		return true
+		return true, ""
 	}
 
 	// Every kind and the build cache prune run whatever an earlier one did; each
-	// failure is logged on its own line and the run fails once they have all run.
+	// failure is logged on its own line and the run fails once they have all run,
+	// on the first failure's sentence.
 	failed := false
 	for _, r := range ciEngineRemovals(plan) {
-		if !d.ciEngineRemoveKind(ctx, kubeconfig, kubeContext, pod, r) {
+		ok, why := d.ciEngineRemoveKind(ctx, kubeconfig, kubeContext, pod, r)
+		if !ok {
 			failed = true
+			if reason == "" {
+				reason = why
+			}
 		}
 	}
 	// The build cache is sized once, before its prune, through the same exec: the
@@ -857,6 +868,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
+		if reason == "" {
+			reason = fmt.Sprintf("the build cache prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
+		}
 	} else {
 		reclaimed, known, verdict, warn := ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge, keepBytes)
 		cache = verdict
@@ -871,11 +885,11 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
 	if err != nil {
 		d.ciEnginePruneLogf("size unreadable", "disk_maintenance: ci engine prune: the data root's size after could not be read: %v; the run is retried", err)
-		return false
+		return false, ciEngineReasonLine(fmt.Sprintf("the data root's size after could not be read: %v", err))
 	}
 	if failed {
 		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; %s; the run is retried", polecatimage.Human(afterKiB*1024), before, cache)
-		return false
+		return false, reason
 	}
 	outcome = ciEngineOutcomeOK
 	if zeroReclaim {
@@ -885,7 +899,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	}
 	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s",
 		counts, before, polecatimage.Human(afterKiB*1024), cache)
-	return true
+	return true, ""
 }
 
 // recordCIEnginePruneRun appends one run to the town's job ledger. A ledger that
@@ -907,19 +921,19 @@ func (d *Daemon) recordCIEnginePruneRun(run jobledger.Run) {
 // answer: docker rmi -f exits 1 over an id an earlier argument already freed. The
 // answer is docker's own report, then one presence inspect over the ids it did
 // not print. A failure is logged here, naming the kind, the exit status and the
-// first line of docker's stderr.
-func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) bool {
+// first line of docker's stderr, and is returned as the item's reason.
+func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) (bool, string) {
 	stdout, stderr, runErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
 	missing := ciEngineMissing(r, stdout)
 	if len(missing) == 0 {
-		return true
+		return true, ""
 	}
 	// The inspect exits 1 whenever one of the ids is gone, so only a failure to run
 	// it at all, not a status, stops the answer.
 	seen, seenErr, inspectErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.presenceArgv(missing)...)
 	if !ciEngineRan(inspectErr) {
 		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineFailure(inspectErr, seenErr))
-		return false
+		return false, fmt.Sprintf("the %s presence check could not run (%s)", r.kind, ciEngineFailure(inspectErr, seenErr))
 	}
 	present := ciEnginePresent(r.kind, seen)
 	left := 0
@@ -929,11 +943,12 @@ func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext
 		}
 	}
 	if left == 0 {
-		return true
+		return true, ""
 	}
 	d.ciEnginePruneLogf("not removed "+r.kind, "disk_maintenance: ci engine prune: docker left %d of %d planned %s(s) in the %s container (the removal ended: %s); the run is retried",
 		left, len(r.ids), r.kind, ciCacheContainer, ciEngineFailure(runErr, stderr))
-	return false
+	return false, fmt.Sprintf("docker left %d of %d planned %s(s) in the %s container (the removal ended: %s)",
+		left, len(r.ids), r.kind, ciCacheContainer, ciEngineFailure(runErr, stderr))
 }
 
 // ciEngineRan reports whether an exec reached its program: it succeeded or the
