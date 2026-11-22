@@ -174,6 +174,10 @@ type Stats struct {
 	// log was closed, the line could not be marshaled, or the writer could not
 	// store it.
 	Dropped uint64 `json:"dropped"`
+	// CPUMSTotal is the sum of the counted calls' CPUMS, the CPU time bd's
+	// children used since the log started, in milliseconds. A call with no
+	// reading adds nothing.
+	CPUMSTotal uint64 `json:"cpu_ms_total"`
 	// Verbs counts calls by their verb, the first command word of argv. An argv
 	// the scanner cannot place is counted under unparsedVerb. The key set is
 	// bounded: past maxVerbKeys distinct verbs, calls fall under otherVerb.
@@ -215,13 +219,14 @@ type CallLog struct {
 	sendMu sync.RWMutex
 	// mu guards the counters, err and closed; the writer takes it only to record
 	// a write error.
-	mu      sync.Mutex
-	closed  bool
-	err     error
-	calls   uint64
-	errors  uint64
-	dropped uint64
-	verbs   map[string]uint64
+	mu         sync.Mutex
+	closed     bool
+	err        error
+	calls      uint64
+	errors     uint64
+	dropped    uint64
+	cpuMSTotal uint64
+	verbs      map[string]uint64
 
 	conflicts     uint64
 	conflictVerbs map[string]uint64
@@ -348,8 +353,8 @@ func (l *CallLog) CountOnly(rec CallRecord) {
 	l.log(rec, true, false)
 }
 
-// log writes rec's line and, when counted, moves the call, error and verb
-// counters with it.
+// log writes rec's line and, when counted, moves the call, error, CPU-time and
+// verb counters with it.
 func (l *CallLog) log(rec CallRecord, counted, write bool) {
 	parsed := l.parseArgv(rec.Argv)
 	e := entry{
@@ -375,6 +380,9 @@ func (l *CallLog) log(rec CallRecord, counted, write bool) {
 	l.mu.Lock()
 	if counted {
 		l.calls++
+		if rec.CPUMS != nil {
+			l.cpuMSTotal += uint64(*rec.CPUMS)
+		}
 		if rec.ExitCode != 0 {
 			l.errors++
 		}
@@ -481,6 +489,7 @@ func (l *CallLog) Stats() Stats {
 		Calls:         l.calls,
 		Errors:        l.errors,
 		Dropped:       l.dropped,
+		CPUMSTotal:    l.cpuMSTotal,
 		Verbs:         verbs,
 		Conflicts:     l.conflicts,
 		ConflictVerbs: copyConflictVerbs(l.conflictVerbs),

@@ -531,6 +531,39 @@ func TestCallLogStats(t *testing.T) {
 	}
 }
 
+// TestCallLogStatsCPUMS: Stats sums the CPU time the counted calls reported, a
+// call with no reading adds nothing, a call LogUncounted records adds nothing,
+// and the counters Stats served before keep their values.
+func TestCallLogStatsCPUMS(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	ten, twenty := int64(10), int64(20)
+	l.Log(CallRecord{Class: "daemon", Caller: "a", Argv: []string{"show", "gt-itjuwu"}, CPUMS: &ten})
+	l.Log(CallRecord{Class: "daemon", Caller: "b", Argv: []string{"list", "--json"}, CPUMS: &twenty})
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"show", "gt-other"}})
+	l.LogUncounted(CallRecord{Class: "daemon", Caller: "d", Argv: []string{"list"}, CPUMS: &twenty})
+
+	got := l.Stats()
+	want := Stats{
+		Calls:      3,
+		Errors:     0,
+		Dropped:    0,
+		Verbs:      map[string]uint64{"show": 2, "list": 1},
+		CPUMSTotal: 30,
+		Actors:     map[string]ActorStats{"(none)": {Reads: 3}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Stats = %+v, want %+v", got, want)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 // TestCallConflictLogLine: a line carries conflict true only for a call whose
 // bd stderr held a Dolt commit conflict, and omits the key for every other call.
 func TestCallConflictLogLine(t *testing.T) {

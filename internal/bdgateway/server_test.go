@@ -971,6 +971,58 @@ func TestBdgwStatsCapFields(t *testing.T) {
 	}
 }
 
+// TestBdgwStatsCPUMS: GET /v1/stats serves cpu_ms_total, the sum of the counted
+// calls' CPU time, beside the call, error, drop and verb counters it served
+// before, which keep their values.
+func TestBdgwStatsCPUMS(t *testing.T) {
+	t.Parallel()
+	g := newTestGateway(t, mustStore(t), newTestCallLog(t), &stubRunner{exit: 0})
+	ten, twenty := int64(10), int64(20)
+	g.log.Log(CallRecord{Class: "daemon", Caller: "a", Argv: []string{"show", "gt-a"}, CPUMS: &ten})
+	g.log.Log(CallRecord{Class: "daemon", Caller: "b", Argv: []string{"list"}, CPUMS: &twenty})
+	g.log.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"show", "gt-b"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, statsPath, nil)
+	req.Header.Set("Authorization", "Bearer "+testReadToken)
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	// The counters are pointers, so a field the body dropped is nil rather than
+	// the zero a reader could not tell from a real value.
+	var got struct {
+		CPUMSTotal *uint64           `json:"cpu_ms_total"`
+		Calls      *uint64           `json:"calls"`
+		Errors     *uint64           `json:"errors"`
+		Dropped    *uint64           `json:"dropped"`
+		Verbs      map[string]uint64 `json:"verbs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		got  *uint64
+		want uint64
+	}{
+		{"cpu_ms_total", got.CPUMSTotal, 30},
+		{"calls", got.Calls, 3},
+		{"errors", got.Errors, 0},
+		{"dropped", got.Dropped, 0},
+	} {
+		switch {
+		case f.got == nil:
+			t.Errorf("stats carries no %s", f.name)
+		case *f.got != f.want:
+			t.Errorf("%s = %d, want %d", f.name, *f.got, f.want)
+		}
+	}
+	if got.Verbs["show"] != 2 || got.Verbs["list"] != 1 {
+		t.Errorf("verbs = %v, want show twice and list once", got.Verbs)
+	}
+}
+
 // brokenResponse is a client that stops reading after the first frame.
 type brokenResponse struct {
 	header  http.Header
