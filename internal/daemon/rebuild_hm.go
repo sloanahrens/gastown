@@ -140,7 +140,7 @@ func (d *Daemon) runRebuildHM() bool {
 }
 
 func (d *Daemon) rebuildHMCycle(ctx context.Context, cycle *dogCycle) bool {
-	r := d.hmSkewRead(d.config.TownRoot)
+	r := d.hmSkewRead(d.config.TownRoot, 0, 0)
 	if r.err != nil {
 		cycle.skipStep("reading", r.err.Error())
 		d.logger.Printf("rebuild_hm: cannot read the installed hm against its origin: %v; deferring", r.err)

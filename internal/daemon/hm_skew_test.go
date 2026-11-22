@@ -753,7 +753,7 @@ func TestHMSkewRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
 	d, _, _ := hmSkewDaemon(t, hmSkewBehindAnswers())
 
 	for _, bad := range []string{"--output=/x", "1111111;rm"} {
-		if _, err := d.hmSkewBehind(d.config.TownRoot, hmSkewTestURL, bad, hmSkewTestRemote); err == nil {
+		if _, err := d.hmSkewBehind(d.config.TownRoot, hmSkewTestURL, bad, hmSkewTestRemote, 0, 0); err == nil {
 			t.Errorf("hmSkewBehind(%q, ...) = nil error, want a refusal before git runs", bad)
 		}
 	}

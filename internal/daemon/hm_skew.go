@@ -109,7 +109,7 @@ func (d *Daemon) hmSkewOnce() {
 	if d.config == nil {
 		return
 	}
-	d.hmSkewJudge(d.hmSkewRead(d.config.TownRoot))
+	d.hmSkewJudge(d.hmSkewRead(d.config.TownRoot, imagePinsFileBehind, imagePinsFileAge))
 }
 
 // hmSkewReading is one comparison: whether the installed hm is behind origin's
@@ -129,7 +129,7 @@ type hmSkewReading struct {
 // hmSkewRead takes the readings, the installed side first: an hm that cannot
 // describe itself is a local condition, and a network read for a comparison
 // that cannot happen is a wasted timeout.
-func (d *Daemon) hmSkewRead(townRoot string) hmSkewReading {
+func (d *Daemon) hmSkewRead(townRoot string, minCommits int, minAge time.Duration) hmSkewReading {
 	installed, err := d.hmSkewInstalledSHA()
 	if err != nil {
 		return hmSkewReading{err: fmt.Errorf("the installed hm: %w", err)}
@@ -142,7 +142,7 @@ func (d *Daemon) hmSkewRead(townRoot string) hmSkewReading {
 	if hmSameCommit(installed, remote) {
 		return r
 	}
-	behind, err := d.hmSkewBehind(townRoot, url, installed, remote)
+	behind, err := d.hmSkewBehind(townRoot, url, installed, remote, minCommits, minAge)
 	if err != nil {
 		return hmSkewReading{installed: installed, remote: remote, err: err}
 	}
@@ -164,7 +164,7 @@ func hmSameCommit(installed, remote string) bool {
 // markdown and docs alone is not one). A clone that cannot be brought up to
 // main, or cannot answer, is an error, not a skew: a stale clone could name the
 // wrong files.
-func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string) (bool, error) {
+func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string, minCommits int, minAge time.Duration) (bool, error) {
 	// Both revisions reach git's argv, so each is held to a commit id before
 	// the call (the omSkewCommitRevs guard, gt-8n9hj).
 	if err := omSkewCommitRevs(installed, remote); err != nil {
@@ -191,10 +191,10 @@ func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string) (bool, er
 	}
 	// A binary path can change the hm binary (a test file or testdata path only when a
 	// //go:embed directive names it: hmSkewReachesBinary), and the installed hm is behind
-	// only once it is as far behind as the image-pins planner files a refresh at, so a
-	// single landing raises no second alarm for a state the planner owns (gt-g7tfxp).
+	// only once it is minCommits or minAge behind: the escalation passes the image-pins
+	// planner's thresholds, rebuild_hm 0 and 0, its own bar (gt-g7tfxp, gt-72jahw).
 	// A clone that cannot answer, or a lag that cannot be measured, is an error, not a skew.
-	return d.hmSkewPastThresholds(src, installed, remote, strings.Split(out, "\x00"))
+	return d.hmSkewPastThresholds(src, installed, remote, strings.Split(out, "\x00"), minCommits, minAge)
 }
 
 // hmSkewCloneLacks reports whether the clone has no commit for sha. A rev-parse
