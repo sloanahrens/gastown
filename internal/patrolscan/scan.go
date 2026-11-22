@@ -1053,6 +1053,11 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		if f, ok := s.revivePushed(rig, name, res); ok {
 			return f, true
 		}
+		// A live seat whose model stream was cut before it pushed idles at its
+		// prompt, with no pushed branch for revivePushed to resume (gt-hd29ip).
+		if f, ok := s.reviveCut(rig, name, res); ok {
+			return f, true
+		}
 		// A live seat that stopped on an escalation of its own and went quiet
 		// after it was closed never read the answer (reviveAnswered).
 		if f, ok := s.reviveAnswered(rig, name, res); ok {
