@@ -2,6 +2,7 @@ package land
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -959,9 +960,12 @@ var sourceReadCalls = map[string]bool{
 }
 
 // sourceReadLiterals returns the string literals of one test file that reach a
-// read: an argument of a sourceReadCalls call (a filepath.Join's literals are
-// joined, since the path is built from segments), or the value of a const or var
-// that is itself an argument of one. A literal in a comment is not in the AST.
+// read: an argument of a sourceReadCalls call, or a const or var identifier
+// holding a literal that is one (a filepath.Join's segments are joined, since the
+// path is built from them). A literal in a comment is not in the AST. Known
+// misses, not holes: a := variable, a path built by concatenation or read through a
+// helper, and a table-struct field passed to a read in a loop; the next such miss
+// gets a row.
 func sourceReadLiterals(f *ast.File) []string {
 	unquote := func(e ast.Expr) (string, bool) {
 		lit, ok := e.(*ast.BasicLit)
@@ -971,8 +975,21 @@ func sourceReadLiterals(f *ast.File) []string {
 		v, err := strconv.Unquote(lit.Value)
 		return v, err == nil
 	}
+	held := map[string]string{} // identifier -> the literal it holds
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.ValueSpec:
+			for i, name := range n.Names {
+				if i < len(n.Values) {
+					if v, ok := unquote(n.Values[i]); ok {
+						held[name.Name] = v
+					}
+				}
+			}
+		}
+		return true
+	})
 	var out []string
-	used := map[string]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -984,11 +1001,13 @@ func sourceReadLiterals(f *ast.File) []string {
 		}
 		var segs []string
 		for _, arg := range call.Args {
-			if v, ok := unquote(arg); ok {
+			v, ok := unquote(arg)
+			if id, isID := arg.(*ast.Ident); isID {
+				v, ok = held[id.Name]
+			}
+			if ok {
 				out = append(out, v)
 				segs = append(segs, v)
-			} else if id, ok := arg.(*ast.Ident); ok {
-				used[id.Name] = true
 			}
 		}
 		if sel.Sel.Name == "Join" {
@@ -996,36 +1015,19 @@ func sourceReadLiterals(f *ast.File) []string {
 		}
 		return true
 	})
-	ast.Inspect(f, func(n ast.Node) bool {
-		if vs, ok := n.(*ast.ValueSpec); ok {
-			for i, name := range vs.Names {
-				if v, ok := unquote(valueAt(vs.Values, i)); ok && used[name.Name] {
-					out = append(out, v)
-				}
-			}
-		}
-		return true
-	})
 	return out
 }
 
-func valueAt(values []ast.Expr, i int) ast.Expr {
-	if i < len(values) {
-		return values[i]
-	}
-	return nil
-}
-
-// uncoveredSourceReads scans every _test.go under internal/ in fsys for a read
-// of an existing Go file of ANOTHER package (internal/x/y.go, ../x/y.go from the
-// test's directory, or a Join that builds one) and returns "test file: literal"
-// for each one no guard in guards selects for that test's package. A change to such
-// a file does not select the reading test's package, so presubmit would not run it
-// (gt-bdxcct).
-func uncoveredSourceReads(t *testing.T, fsys fs.FS, guards []treeWideGuard) []string {
-	t.Helper()
-	var out []string
-	err := fs.WalkDir(fsys, "internal", func(file string, d fs.DirEntry, err error) error {
+// uncoveredSourceReads scans every _test.go under internal/ in fsys for a read of
+// an existing Go file of ANOTHER package (internal/x/y.go, ../x/y.go from the
+// test's directory, or a Join that builds one). It returns "test file: path" for
+// each one no guard in guards selects for that test's package, and separately for
+// each such read in a file tagged //go:build integration: presubmit's unit tests do
+// not run those and changed.go leaves them out on purpose (lint covers them), so
+// they are exempt, and listed so the exemption cannot silently grow (gt-bdxcct).
+// An error other than a missing target stops the scan.
+func uncoveredSourceReads(fsys fs.FS, guards []treeWideGuard) (uncovered, exempt []string, err error) {
+	err = fs.WalkDir(fsys, "internal", func(file string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(file, "_test.go") {
 			return err
 		}
@@ -1033,15 +1035,11 @@ func uncoveredSourceReads(t *testing.T, fsys fs.FS, guards []treeWideGuard) []st
 		if err != nil {
 			return err
 		}
-		// An integration-tier file (build tag integration) is not run by presubmit's
-		// unit tests, and changed.go leaves those out on purpose: lint covers them.
-		if strings.Contains(string(src[:min(len(src), 200)]), "//go:build integration") {
-			return nil
-		}
 		f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.SkipObjectResolution)
 		if err != nil {
 			return err
 		}
+		integration := strings.Contains(string(src[:min(len(src), 200)]), "//go:build integration")
 		pkg := path.Dir(file)
 		for _, name := range sourceReadLiterals(f) {
 			target := name
@@ -1053,58 +1051,98 @@ func uncoveredSourceReads(t *testing.T, fsys fs.FS, guards []treeWideGuard) []st
 			if !strings.HasSuffix(target, ".go") || !strings.HasPrefix(target, "internal/") || path.Dir(target) == pkg {
 				continue
 			}
-			if _, err := fs.Stat(fsys, target); err != nil {
+			if _, err := fs.Stat(fsys, target); errors.Is(err, fs.ErrNotExist) {
 				continue
+			} else if err != nil {
+				return fmt.Errorf("%s reads %s: %w", file, target, err)
 			}
+			pair := file + ": " + target
 			covered := slices.ContainsFunc(guards, func(g treeWideGuard) bool {
 				return g.pkg == pkg && g.trips([]string{target}, nil, nil)
 			})
-			if !covered && !slices.Contains(out, file+": "+target) {
-				out = append(out, file+": "+target)
+			switch {
+			case covered || slices.Contains(uncovered, pair) || slices.Contains(exempt, pair):
+			case integration:
+				exempt = append(exempt, pair)
+			default:
+				uncovered = append(uncovered, pair)
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("scanning the test sources: %v", err)
+	return uncovered, exempt, err
+}
+
+// permissionDeniedFS fails statting the target with a permission error, as a target
+// the scan cannot stat would.
+type permissionDeniedFS struct{ fstest.MapFS }
+
+func (f permissionDeniedFS) Stat(name string) (fs.FileInfo, error) {
+	if name == "internal/other/o.go" {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
 	}
-	return out
+	return f.MapFS.Stat(name)
 }
 
 // TestTreeWideGuardsCoverEverySourceReadingTest: a test that reads a Go file of
 // another package must have a treeWideGuards entry that judges that file, or a
 // change to the file passes presubmit and fails the gate (gt-jie24r did). The real
-// tree must be covered; the fixture rows pin what the scan counts.
+// tree must be covered, and the integration-tier exemption is exactly the three
+// reads measured on 2026-11-21; the fixture rows pin what the scan counts.
 func TestTreeWideGuardsCoverEverySourceReadingTest(t *testing.T) {
 	t.Parallel()
-	if got := uncoveredSourceReads(t, os.DirFS("../.."), treeWideGuards); len(got) != 0 {
-		t.Errorf("tests read another package's source with no treeWideGuards entry for it (add one in changed.go):\n%s", strings.Join(got, "\n"))
+	uncovered, exempt, err := uncoveredSourceReads(os.DirFS("../.."), treeWideGuards)
+	if err != nil {
+		t.Fatalf("scanning the real tree: %v", err)
 	}
-	tree := func(readerBody string) fstest.MapFS {
+	if len(uncovered) != 0 {
+		t.Errorf("tests read another package's source with no treeWideGuards entry for it (add one in changed.go):\n%s", strings.Join(uncovered, "\n"))
+	}
+	wantExempt := []string{
+		"internal/done/done_revert_check_integration_test.go: internal/cmd/polecat.go",
+		"internal/done/done_revert_check_integration_test.go: internal/slot/main_test.go",
+		"internal/makegate/testintegration_integration_test.go: internal/cmd/scheduler_integration_test.go",
+	}
+	slices.Sort(exempt)
+	if !slices.Equal(exempt, wantExempt) {
+		t.Errorf("integration-tier reads exempt from the guard table = %q, want exactly %q (a new one needs a guard entry or a reason here)", exempt, wantExempt)
+	}
+	// tree is a fixture with one reader test (src is the whole file), a file of its
+	// own package and a file of another.
+	tree := func(src string) fstest.MapFS {
 		return fstest.MapFS{
-			"internal/reader/r_test.go": {Data: []byte("package reader\n" + readerBody)},
+			"internal/reader/r_test.go": {Data: []byte(src)},
 			"internal/reader/own.go":    {Data: []byte("package reader\n")},
 			"internal/other/o.go":       {Data: []byte("package other\n")},
 		}
 	}
+	const pk = "package reader\n"
 	covering := []treeWideGuard{{pkg: "internal/reader", judges: func(rel string) bool { return rel == "internal/other/o.go" }}}
+	pair := []string{"internal/reader/r_test.go: internal/other/o.go"}
 	for _, tc := range []struct {
-		name   string
-		body   string
-		guards []treeWideGuard
-		want   []string
+		name       string
+		body       string
+		guards     []treeWideGuard
+		want       []string
+		wantExempt []string
 	}{
-		{"a read with no entry", "func f() { os.ReadFile(\"../other/o.go\") }\n", nil, []string{"internal/reader/r_test.go: internal/other/o.go"}},
-		{"the same read with an entry", "func f() { os.ReadFile(\"internal/other/o.go\") }\n", covering, nil},
-		{"a read through a const", "const p = \"../other/o.go\"\nfunc f() { parser.ParseFile(nil, p, nil, 0) }\n", nil, []string{"internal/reader/r_test.go: internal/other/o.go"}},
-		{"a path built by Join", "func f() { os.ReadFile(filepath.Join(root, \"internal\", \"other\", \"o.go\")) }\n", nil, []string{"internal/reader/r_test.go: internal/other/o.go"}},
-		{"an integration-tier file", "//go:build integration\n\npackage reader\nfunc f() { os.ReadFile(\"../other/o.go\") }\n", nil, nil},
-		{"a literal that is data, never read", "var fixture = \"internal/other/o.go\"\n", nil, nil},
-		{"a file of the test's own package", "func f() { os.ReadFile(\"own.go\") }\n", nil, nil},
-		{"a path named in a comment only", "// reads ../other/o.go\nfunc f() { os.ReadFile(\"x\") }\n", nil, nil},
+		{"a read with no entry", pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", nil, pair, nil},
+		{"the same read with an entry", pk + "func f() { os.ReadFile(\"internal/other/o.go\") }\n", covering, nil, nil},
+		{"a read through a const", pk + "const p = \"../other/o.go\"\nfunc f() { parser.ParseFile(nil, p, nil, 0) }\n", nil, pair, nil},
+		{"a path built by Join", pk + "func f() { os.ReadFile(filepath.Join(root, \"internal\", \"other\", \"o.go\")) }\n", nil, pair, nil},
+		{"a Join with a const segment", pk + "const dir = \"other\"\nfunc f() { os.ReadFile(filepath.Join(root, \"internal\", dir, \"o.go\")) }\n", nil, pair, nil},
+		{"a literal that is data, never read", pk + "var fixture = \"internal/other/o.go\"\n", nil, nil, nil},
+		{"a file of the test's own package", pk + "func f() { os.ReadFile(\"own.go\") }\n", nil, nil, nil},
+		{"a path named in a comment only", pk + "// reads ../other/o.go\nfunc f() { os.ReadFile(\"x\") }\n", nil, nil, nil},
+		{"an integration-tier file", "//go:build integration\n\n" + pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", nil, nil, pair},
 	} {
-		if got := uncoveredSourceReads(t, tree(tc.body), tc.guards); !slices.Equal(got, tc.want) {
-			t.Errorf("%s: uncovered = %q, want %q", tc.name, got, tc.want)
+		got, gotExempt, err := uncoveredSourceReads(tree(tc.body), tc.guards)
+		if err != nil || !slices.Equal(got, tc.want) || !slices.Equal(gotExempt, tc.wantExempt) {
+			t.Errorf("%s: uncovered = %q, exempt = %q, err %v; want %q and %q", tc.name, got, gotExempt, err, tc.want, tc.wantExempt)
 		}
+	}
+	denied := permissionDeniedFS{tree(pk + "func f() { os.ReadFile(\"../other/o.go\") }\n")}
+	if _, _, err := uncoveredSourceReads(denied, nil); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("a target that cannot be statted: err = %v, want the permission error, not a skipped read", err)
 	}
 }
