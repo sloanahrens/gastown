@@ -234,6 +234,10 @@ var guardTriggers = []struct {
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
+	// A new scanning test can be in any package, test files included, and the
+	// exemption list is the completeness guard's other input (gt-xr4eke).
+	{"internal/land", "A\x00internal/foo/x_test.go\x00"},
+	{"internal/land", "M\x00" + scanningExemptionsPath + "\x00"},
 	// The always entries run on any non-empty diff; a docs-only path is the
 	// change no predicate names (gt-t4rchq).
 	{"internal/mayorrig", unguarded},
@@ -261,6 +265,9 @@ var guardRequiredTests = map[string][]string{
 		"TestImageRegistryBaseNotPrependedInSource",
 		"TestOwnerPlaceholderFilesHaveOnlyKnownReaders",
 	},
+	// A row selecting internal/land for a new scanning test must carry the
+	// completeness guard itself, not just the package (gt-xr4eke).
+	"internal/land": {"TestEveryTreeScanningTestIsRegistered"},
 }
 
 // unguarded is a changed path no guard predicate reads: a doc outside every
