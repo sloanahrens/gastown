@@ -256,9 +256,10 @@ func (f *fakeGateRunFS) EndsInNewline(string) (bool, error) {
 	}
 	return true, nil
 }
-func (f *fakeGateRunFS) ReadFile(string) ([]byte, error) { return nil, nil }
-func (f *fakeGateRunFS) Remove(string) error             { return nil }
-func (f *fakeGateRunFS) Rename(string, string) error     { return nil }
+func (f *fakeGateRunFS) ReadFile(string) ([]byte, error)  { return nil, nil }
+func (f *fakeGateRunFS) Remove(string) error              { return nil }
+func (f *fakeGateRunFS) Rename(string, string) error      { return nil }
+func (f *fakeGateRunFS) ReadDir(string) ([]string, error) { return nil, nil }
 
 // memGateRunFS is an in-memory gateRunFS whose failures a row names by path part
 // (gt-t3upsa); a write or close that fails does so for the month file only.
@@ -269,7 +270,9 @@ type memGateRunFS struct {
 	openFailOn, writeFailOn, clsOn string
 	opened                         []string // every path OpenAppend was asked for
 	halfWriteOn                    string   // a write to paths holding this stores half its bytes, then fails
-	readFailOn                     string   // a read error applies to paths holding this ("" = all)
+	readDirErr                     error
+	removeFailOn                   string // a remove error applies to paths holding this ("" = all)
+	readFailOn                     string // a read error applies to paths holding this ("" = all)
 	err                            error
 }
 
@@ -292,10 +295,26 @@ func (m *memGateRunFS) EndsInNewline(p string) (bool, error) {
 	return len(b) == 0 || b[len(b)-1] == '\n', nil
 }
 func (m *memGateRunFS) Remove(p string) error {
-	if m.removeErr == nil {
-		delete(m.files, p)
+	if m.removeErr != nil && strings.Contains(p, m.removeFailOn) {
+		return m.removeErr
 	}
-	return m.removeErr
+	delete(m.files, p)
+	return nil
+}
+
+// ReadDir lists the file names directly under dir, in name order.
+func (m *memGateRunFS) ReadDir(dir string) ([]string, error) {
+	if m.readDirErr != nil {
+		return nil, m.readDirErr
+	}
+	var names []string
+	for p := range m.files {
+		if filepath.Dir(p) == dir {
+			names = append(names, filepath.Base(p))
+		}
+	}
+	slices.Sort(names)
+	return names, nil
 }
 func (m *memGateRunFS) Rename(from, to string) error {
 	if m.renameErr != nil {
@@ -959,5 +978,89 @@ func TestGateRunStoreWriteMonthFile(t *testing.T) {
 				t.Errorf("a failed step changed the month file")
 			}
 		})
+	}
+}
+
+// TestGateRunStoreRetention: a rotation deletes the month files that are past the
+// retention and keeps the newer ones, the current log and the rejects file; a
+// delete or a listing that fails is returned after the row is appended, with the
+// log holding the row; and an append that does not rotate deletes nothing
+// (gt-hixpa4).
+func TestGateRunStoreRetention(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	cur := gateRunsPath("/town")
+	dir := filepath.Dir(cur)
+	now := time.Date(2027, 3, 15, 12, 0, 0, 0, time.UTC)
+	oldMonth, keptMonth := filepath.Join(dir, "gate-runs-2026-10.jsonl.gz"), filepath.Join(dir, "gate-runs-2027-02.jsonl.gz")
+	otherOld := filepath.Join(dir, "gate-runs-2026-09.jsonl.gz")
+	rejects := filepath.Join(dir, gateRunRejectsFile)
+	for _, tc := range []struct {
+		name      string
+		limit     int64
+		setup     func(*memGateRunFS)
+		wantGone  []string
+		wantKept  []string
+		wantError bool
+	}{
+		{"expired month files go, the newer one, the rejects file and the log stay", 1, func(*memGateRunFS) {},
+			[]string{oldMonth, otherOld}, []string{keptMonth, rejects}, false},
+		{"an append that does not rotate deletes nothing", 1 << 30, func(*memGateRunFS) {},
+			nil, []string{oldMonth, otherOld, keptMonth, rejects}, false},
+		{"a delete that fails (the first listed) is returned and the next expired file still goes", 1, func(m *memGateRunFS) { m.removeErr, m.removeFailOn = boom, "2026-09" },
+			[]string{oldMonth}, []string{otherOld, keptMonth}, true},
+		{"a listing that fails is returned", 1, func(m *memGateRunFS) { m.readDirErr = boom },
+			nil, []string{oldMonth, otherOld, keptMonth}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			month := func(bead string, ts time.Time) []byte {
+				r := sampleGateRun(bead)
+				r.TS = ts
+				return gzipRows(t, r)
+			}
+			fsys.files[oldMonth], fsys.files[otherOld] = month("gt-a", time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)), month("gt-b", time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC))
+			fsys.files[keptMonth], fsys.files[rejects] = month("gt-c", time.Date(2027, 2, 5, 0, 0, 0, 0, time.UTC)), []byte("torn\n")
+			old := sampleGateRun("gt-log")
+			old.TS = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+			fsys.files[cur] = []byte(mustLine(t, old) + "\n")
+			tc.setup(fsys)
+			row := sampleGateRun("gt-new")
+			row.TS = now
+			err := appendGateRunAt(fsys, "/town", row, tc.limit, now)
+			if (err != nil) != tc.wantError || tc.wantError && !errors.Is(err, boom) {
+				t.Fatalf("error = %v, want error %t wrapping %v", err, tc.wantError, boom)
+			}
+			for _, p := range tc.wantGone {
+				if _, ok := fsys.files[p]; ok {
+					t.Errorf("%s was not deleted", filepath.Base(p))
+				}
+			}
+			for _, p := range tc.wantKept {
+				if _, ok := fsys.files[p]; !ok {
+					t.Errorf("%s was deleted", filepath.Base(p))
+				}
+			}
+			if got := beadsIn(t, fsys.files[cur], false); !slices.Contains(got, "gt-new") {
+				t.Errorf("log = %v, want the appended row in it", got)
+			}
+		})
+	}
+}
+
+// TestOSGateRunFSReadDir: the real listing returns the names under a directory and
+// an error for one that does not exist (gt-hixpa4).
+func TestOSGateRunFSReadDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gate-runs.jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if names, err := (osGateRunFS{}).ReadDir(dir); err != nil || !slices.Equal(names, []string{"gate-runs.jsonl"}) {
+		t.Errorf("ReadDir = %v, %v; want [gate-runs.jsonl]", names, err)
+	}
+	if _, err := (osGateRunFS{}).ReadDir(filepath.Join(dir, "missing")); err == nil {
+		t.Error("ReadDir of a missing directory = nil error, want one")
 	}
 }
