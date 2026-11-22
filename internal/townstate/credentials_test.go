@@ -42,6 +42,9 @@ func TestFindCredentials(t *testing.T) {
 		{"an escaped quote inside an array element", `{"api_keys":["a\"b"]}`, []string{"json:api_keys"}},
 		{"a duplicate key reports both arrays", `{"api_keys":["one"],"api_keys":["two"]}`, []string{"json:api_keys", "json:api_keys"}},
 		{"a nested array under a credential key", `{"api_keys":[["one"],"two"]}`, []string{"json:api_keys", "json:api_keys"}},
+		{"a nested object under a credential key", `{"password":{"value":"hunter2"}}`, []string{"json:password"}},
+		{"a nested non-credential key under a credential key", `{"api_key":{"outer":{"inner":"v"}}}`, []string{"json:api_key"}},
+		{"an array of objects under a credential key", `{"password":[{"secret":"x"},{"name":"y"}]}`, []string{"json:password", "json:password"}},
 		{"array elements that are references or empty are not credentials", `{"api_keys":["$GT_X",""]}`, nil},
 		{"a keys array of plain names is exempt", `{"keys":["a","b"]}`, nil},
 		{"a keys array holding a token-shaped name is found", `{"keys":["` + token + `"]}`, []string{"json:keys"}},
@@ -306,6 +309,7 @@ func TestFindCredentialsExemptPaths(t *testing.T) {
 		{"a toleration key holding an array is exempt", `{"tolerations":[{"key":["abc"]}]}`, nil},
 		{"the daemon's om_token_meta holding an array is exempt", `{"daemon":{"om_token_meta":["abc"]}}`, nil},
 		{"a toleration key array holding a token is still found", `{"tolerations":[{"key":["` + token + `"]}]}`, []string{"value:shape"}},
+		{"a toleration key holding an object is exempt", `{"tolerations":[{"key":{"x":"abc"}}]}`, nil},
 		{"a toleration key holding a number is exempt", `{"tolerations":[{"key":5}]}`, nil},
 		{"a toleration key array holding a number is exempt", `{"tolerations":[{"key":[5]}]}`, nil},
 		{"a number under a key elsewhere is found", `{"other":{"key":5}}`, []string{"json:key"}},
@@ -470,6 +474,50 @@ func TestRedactJSONRedactsANumberUnderACredentialKey(t *testing.T) {
 			`{"password":true,"secret":null}`, 0},
 		{"a number under another name stays", `{"n":1,"models":[1,2]}`,
 			`{"n":1,"models":[1,2]}`, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, n, err := RedactJSON([]byte(c.in))
+			if err != nil {
+				t.Fatalf("RedactJSON(%q): %v", c.in, err)
+			}
+			if string(out) != c.want || n != c.wantN {
+				t.Fatalf("RedactJSON(%q) = %q, %d; want %q, %d", c.in, out, n, c.want, c.wantN)
+			}
+			if !json.Valid(out) {
+				t.Fatalf("output %q is not valid JSON", out)
+			}
+			if got := FindCredentials(out); len(got) != 0 {
+				t.Fatalf("output %q still holds credentials: %q", out, got)
+			}
+		})
+	}
+}
+
+// A credential-named key owns the whole value under it, nested objects and arrays
+// included: every string and number leaf is a json:key finding and is replaced by
+// the marker, whatever the name of the key that holds it. A boolean, a null, an
+// empty string, a reference and a leaf under a plain key stay (gt-pwfy1z).
+func TestRedactJSONRedactsEveryStringLeafOfANestedObject(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		in    string
+		want  string
+		wantN int
+	}{
+		{"a nested object under password", `{"password":{"value":"hunter2"}}`,
+			`{"password":{"value":"<redacted>"}}`, 1},
+		{"an array of objects under password", `{"password":[{"secret":"x"},{"name":"y"}]}`,
+			`{"password":[{"secret":"<redacted>"},{"name":"<redacted>"}]}`, 2},
+		{"a nested non-credential key stays under the credential key", `{"api_key":{"outer":{"inner":"v"}}}`,
+			`{"api_key":{"outer":{"inner":"<redacted>"}}}`, 1},
+		{"a number leaf of a nested object is replaced whole", `{"token":{"n":5,"m":"x"}}`,
+			`{"token":{"n":"<redacted>","m":"<redacted>"}}`, 2},
+		{"a boolean, a null, an empty string and a reference stay", `{"password":{"on":true,"off":null,"e":"","r":"$GT_X"}}`,
+			`{"password":{"on":true,"off":null,"e":"","r":"$GT_X"}}`, 0},
+		{"a nested object under another name stays", `{"n":{"name":"y"}}`,
+			`{"n":{"name":"y"}}`, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
