@@ -14,6 +14,10 @@ import (
 // or a gzip member whose content is, is flagged rather than read.
 const maxFlaggedBytes = 64 << 20
 
+// MaxFlaggedBytes is the bound FlaggedContent reads under, exported so a caller
+// that refuses a file by its declared size uses the rule's own number.
+const MaxFlaggedBytes = maxFlaggedBytes
+
 // gzipMagic opens every gzip member.
 var gzipMagic = []byte{0x1f, 0x8b}
 
