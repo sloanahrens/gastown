@@ -2325,3 +2325,51 @@ func TestDashboardRejectCountUnreadableRecords(t *testing.T) {
 		})
 	}
 }
+
+// TestDashboardRejectCountRunningRowCountsAllRecords: a running row says how
+// often its bead was refused over every record the reader handed in, so a bead
+// refused 25 hours ago and merging again still reads 2 on the row the operator
+// watches; the day the table draws does not bound that count (gt-6eb4qk).
+func TestDashboardRejectCountRunningRowCountsAllRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	live := []dashboard.LandingRow{
+		{At: now.Add(-time.Minute), Bead: "gt-retry", Rig: "gastown", Outcome: "running"},
+		{At: now.Add(-2 * time.Minute), Bead: "gt-firsttry", Rig: "gastown", Outcome: "running"},
+	}
+	rejs := []omRejection{
+		{At: now.Add(-25 * time.Hour), Bead: "gt-retry", Kind: "review"}, // before the day drawn, still a refusal
+		{At: now.Add(-5 * time.Minute), Bead: "gt-retry", Kind: "gate"},
+	}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+
+	got := map[string]int{}
+	for _, r := range rows {
+		if r.Outcome == "running" {
+			got[r.Bead] = r.RejectCount
+		}
+	}
+	want := map[string]int{"gt-retry": 2, "gt-firsttry": 0}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("running rows' reject counts = %v, want %v", got, want)
+	}
+}
+
+// TestDashboardRejectCountRunningRowNoRecords: a rejection log that read
+// nothing leaves the running row built, with a count of 0 — the row is never
+// dropped for want of records (gt-6eb4qk).
+func TestDashboardRejectCountRunningRowNoRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	live := []dashboard.LandingRow{{At: now.Add(-time.Minute), Bead: "gt-run", Rig: "gastown", Outcome: "running"}}
+
+	rows := buildRecentLandings(now, nil, nil, nil, live, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want the running row still built with no rejection records", rows)
+	}
+	if rows[0].Outcome != "running" || rows[0].RejectCount != 0 {
+		t.Errorf("row = %+v, want a running row with RejectCount 0", rows[0])
+	}
+}
