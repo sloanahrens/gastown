@@ -761,6 +761,18 @@ type StreamCutter interface {
 	StreamCut(rig, polecat string) (bool, error)
 }
 
+// UnnamedEscalationFiler is the optional Env extension that tells the overseer about a seat
+// that stopped on ESCALATED without filing an escalation that names its bead: it files one on the
+// seat's behalf, idempotently by its own key. A host without it files nothing.
+type UnnamedEscalationFiler interface {
+	FileUnnamedEscalation(rig, polecat, bead string) error
+}
+
+// unnamedEscalationGrace is how long after the agent record's last write a seat stopped on
+// ESCALATED may have no escalation naming its bead before the tick files one for it: time for the
+// seat's own escalation to land.
+const unnamedEscalationGrace = 10 * time.Minute
+
 // SpanEnv is the optional Env extension that closes the attempt a confirmed
 // dead seat left open. gt sling opens an attempt and gt done ends one, so a
 // seat that dies without either leaves its bead looking unfinished; a host
@@ -1225,6 +1237,11 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 			if err != nil {
 				return unknown("escalations unreadable", err)
 			}
+			if v.Verdict == EscalationUnnamed {
+				if why, filed := s.fileUnnamed(rig, name, work.ID, agent, now); filed {
+					return skip(why)
+				}
+			}
 			if v.Verdict != EscalationResolved {
 				// Detail is "" for not-stopped. This branch already read the
 				// record as the ESCALATED stop, so that answer should not come
@@ -1606,6 +1623,23 @@ func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, boo
 	quiet := res.QuietFor.Round(time.Second)
 	reason := fmt.Sprintf("patrol scan: revived %s after %s quiet: its model stream was cut and the seat never resumed; the preserved worktree resumes the bead", work.ID, quiet)
 	return s.reviveRestart(rig, name, work, now, quiet, reason), true
+}
+
+// fileUnnamed files the missing escalation of a seat stopped on ESCALATED whose escalations name
+// no bead of its own, once the agent record is older than unnamedEscalationGrace. It reports
+// filed=true with the seat's skip detail when it called the filer, success or failure, and false
+// when the host has no filer, the record has no write time or the grace has not passed: the seat
+// is then skipped as before.
+func (s *Scanner) fileUnnamed(rig, name, bead string, agent AgentRecord, now time.Time) (why string, filed bool) {
+	filer, ok := s.env.(UnnamedEscalationFiler)
+	if !ok || agent.UpdatedAt.IsZero() || now.Sub(agent.UpdatedAt) < unnamedEscalationGrace {
+		return "", false
+	}
+	why = "agent_state stuck: exit ESCALATED and no escalation names " + bead
+	if err := filer.FileUnnamedEscalation(rig, name, bead); err != nil {
+		return why + "; filing one failed: " + err.Error(), true
+	}
+	return why + "; filed one for the overseer", true
 }
 
 // reviveAnswered restarts a LIVE seat that stopped on an escalation of its own
