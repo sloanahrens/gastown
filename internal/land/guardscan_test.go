@@ -1,9 +1,11 @@
 package land
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +22,22 @@ func TestCallWalksParent(t *testing.T) {
 		}
 		if got := callWalksParent(call.(*ast.CallExpr)); got != want {
 			t.Errorf("callWalksParent(%s) = %v, want %v", expr, got, want)
+		}
+	}
+}
+
+func TestParseGoFile(t *testing.T) {
+	t.Parallel()
+	for src, wantErr := range map[string]bool{
+		"package p\n\nfunc F() {}": false,
+		"package p\n\nfunc (":      true,
+	} {
+		f, err := parseGoFile("file.go", []byte(src))
+		if !wantErr && (f == nil || err != nil) {
+			t.Fatalf("parseGoFile(%q) = %v, %v; want a parsed file", src, f, err)
+		}
+		if wantErr && (err == nil || !strings.HasPrefix(err.Error(), "file.go") || errors.Unwrap(err) == nil) {
+			t.Errorf("parseGoFile(%q) error = %v, want the name first and the parser error wrapped", src, err)
 		}
 	}
 }
