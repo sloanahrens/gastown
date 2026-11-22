@@ -74,3 +74,56 @@ func TestCloudInputMountRefusesBadPaths(t *testing.T) {
 		t.Errorf("Build with both cloud directories on one path = %v, want a refusal naming a cloud field", err)
 	}
 }
+
+// TestCloudInputMountSetsTheEnv names each mounted cloud directory in the daemon
+// container's environment at the path the pod mounts it, and names neither when
+// no Values path mounts one; the dashboard names neither either (gt-9936jc).
+func TestCloudInputMountSetsTheEnv(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range []struct {
+		name string
+		v    Values
+	}{{"golden", goldenValues(t)}, {"rehearsal", rehearsalValues(t)}} {
+		unset := podEnvMap(mustBuild(t, m.v).Deployment.Spec.Template.Spec.Containers[0])
+		set := m.v
+		set.CloudReportsHostPath, set.CloudReleasesHostPath = cloudReportsHostPath, cloudReleasesHostPath
+		setEnv := podEnvMap(mustBuild(t, set).Deployment.Spec.Template.Spec.Containers[0])
+		for name, want := range map[string]string{
+			cloudReportsEnv:  cloudReportsHostPath,
+			cloudReleasesEnv: cloudReleasesHostPath,
+		} {
+			if got, ok := setEnv[name]; !ok || got != want {
+				t.Errorf("%s: the daemon's %s = %q (present %t), want %q", m.name, name, got, ok, want)
+			}
+			if got, ok := unset[name]; ok {
+				t.Errorf("%s: the daemon carries %s = %q with no Values path, want no such name", m.name, name, got)
+			}
+		}
+	}
+
+	// The dashboard mounts no cloud directory, so it names none of them.
+	dv := dashboardValues(t)
+	dv.CloudReportsHostPath, dv.CloudReleasesHostPath = cloudReportsHostPath, cloudReleasesHostPath
+	dashboard := podEnvMap(mustBuild(t, dv).DashboardDeployment.Spec.Template.Spec.Containers[0])
+	for _, name := range []string{cloudReportsEnv, cloudReleasesEnv} {
+		if got, ok := dashboard[name]; ok {
+			t.Errorf("the dashboard carries %s = %q, but it mounts no such directory", name, got)
+		}
+	}
+}
+
+// TestPodEnvCloudDropReasonsNameTheMount holds each cloud drop reason to its
+// condition, naming the Values field whose mount makes the pod set the name (gt-9936jc).
+func TestPodEnvCloudDropReasonsNameTheMount(t *testing.T) {
+	t.Parallel()
+
+	for name, field := range map[string]string{
+		cloudReportsEnv:  "Values.CloudReportsHostPath",
+		cloudReleasesEnv: "Values.CloudReleasesHostPath",
+	} {
+		if reason := composeOnlyEnv[name]; !strings.Contains(reason, field) || !strings.Contains(reason, "only when") {
+			t.Errorf("composeOnlyEnv[%s] = %q, want a reason naming %s and 'only when'", name, reason, field)
+		}
+	}
+}
