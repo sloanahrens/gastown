@@ -357,6 +357,74 @@ func TestMaintenanceGCStateReplacementEdges(t *testing.T) {
 	})
 }
 
+// TestMaintenanceGCStateUpdateLeavesAFileItCannotRead is gt-tv0919's box: a
+// write over a state file it cannot READ returns the read's error and leaves
+// the file byte for byte, keeping no copy and stamping nothing, because a
+// transient EACCES must not wipe the squash records and archive cursors; a file
+// it can read but not parse is still replaced, with one copy kept and the stamp.
+func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	t.Run("a file it cannot read", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := maintenanceGCStatePath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		original := []byte(`{"post_gc_bytes":{"hq":1048576},"squash":{"gt":{"last_run":"2026-10-01T03:10:00Z","outcome":"completed"}}}`)
+		if err := os.WriteFile(path, original, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o000); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+		err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow)
+		if err == nil {
+			t.Fatal("recordMaintenanceGCRun wrote over a state file it cannot read")
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("error = %v, want the read's permission error", err)
+		}
+		if _, statErr := os.Stat(path + squashStateCorruptSuffix); !os.IsNotExist(statErr) {
+			t.Errorf("a copy exists at %s, want none when the file was never read", path+squashStateCorruptSuffix)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod back: %v", err)
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, original) {
+			t.Errorf("the state file changed: %q, err %v, want it as it was, %q", got, readErr, original)
+		}
+	})
+	t.Run("a file it cannot parse", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := maintenanceGCStatePath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		corrupt := []byte(`{"post_gc_bytes":`)
+		if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before := time.Now().UTC()
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+			t.Fatalf("record over an unparseable file: %v", err)
+		}
+		st, err := loadMaintenanceGCState(town)
+		if err != nil || st.PostGCBytes["hq"] != mib {
+			t.Fatalf("after the replacement: state=%v err=%v", st, err)
+		}
+		if st.StateResetAt.Before(before) || st.StateResetCopy != path+squashStateCorruptSuffix {
+			t.Errorf("the stamp = %v and copy %q, want a time at or after %v and %q", st.StateResetAt, st.StateResetCopy, before, path+squashStateCorruptSuffix)
+		}
+		if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, corrupt) {
+			t.Errorf("the kept copy = %q, %v, want the unparseable bytes", got, err)
+		}
+	})
+}
+
 // stateCopyFault is a copy file whose write or close fails.
 type stateCopyFault struct{ writeErr, closeErr error }
 
