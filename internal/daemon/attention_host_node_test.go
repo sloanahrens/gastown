@@ -201,6 +201,7 @@ func TestCollectNodeDiskOneUnreadableNodeStillRulesTheOthers(t *testing.T) {
 	held := attention.Item{Key: hostRuleNodeDiskCrit, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityHigh, Summary: "held"}
 	heldWarn := attention.Item{Key: hostRuleNodeDiskWarn, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityLow, Summary: "held warning"}
 	heldProbe := attention.Item{Key: controlProbeKey, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityLow, Summary: "held probe"}
+	heldWorkerProbe := attention.Item{Key: probeKey, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityLow, Summary: "held probe"}
 	warn := hostDisk{UsedPct: 85, FreeGB: 150}
 	tests := []struct {
 		name  string
@@ -256,6 +257,12 @@ func TestCollectNodeDiskOneUnreadableNodeStillRulesTheOthers(t *testing.T) {
 			name:  "a recovered node's held probe line is not carried while the other node is unreadable",
 			reads: []hostNodeRead{nodeRead(control, quiet), nodeReadFailed(worker)},
 			prev:  []attention.Item{heldProbe},
+			want:  []string{probeKey},
+		},
+		{
+			name:  "a node unreadable on two consecutive ticks raises one probe item, not the held one beside it",
+			reads: []hostNodeRead{nodeRead(control, quiet), nodeReadFailed(worker)},
+			prev:  []attention.Item{heldWorkerProbe},
 			want:  []string{probeKey},
 		},
 	}
