@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,108 @@ func TestLandReadyRelistStillReadyBeadAttemptedOnce(t *testing.T) {
 	rep := h.w.Pass(ctx)
 	if rep.Landed != 1 || len(h.lander.calls) != 1 {
 		t.Fatalf("report %v with %s; want the still-ready bead attempted once", rep, landedOrder(h.lander.calls))
+	}
+}
+
+// TestLandReadyRelistStillReadyBeadStopsBeforeTheGuard: a pass whose bead
+// stays ready after its landing ends after that one attempt, under the handled
+// set, so neither of the harness's loop guards is reached (gt-ek7hmt).
+func TestLandReadyRelistStillReadyBeadStopsBeforeTheGuard(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-p2a", 2, "2026-09-30T10:00:00Z")
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != 1 || len(h.lander.calls) != 1 {
+		t.Fatalf("report %v with %s; want the still-ready bead landed once", rep, landedOrder(h.lander.calls))
+	}
+	if h.guard.failed || h.loopFailed {
+		t.Fatalf("the loop guards were reached by a pass that ends after one landing (lists %d, drain reads %d); want neither", h.guard.lists, h.loopReads)
+	}
+	// The pass's one bead costs one list of the ready board and one re-list
+	// after its landing.
+	if h.guard.lists != 2 {
+		t.Fatalf("listed the ready board %d times; want the first list and the re-list after the landing", h.guard.lists)
+	}
+}
+
+// recordingTB keeps the harness's report instead of failing the test that
+// drives the guard, so a row can assert the line the guard names.
+type recordingTB struct {
+	testing.TB
+	errors []string
+}
+
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+
+// TestGuardedBeadsReportsALoopThatDoesNotEnd: past readyListLimit lists of the
+// ready board the guard reports the loop once and returns an error on every
+// later list, which is what the pass's relist branch turns into a failure and
+// a return (gt-ek7hmt).
+func TestGuardedBeadsReportsALoopThatDoesNotEnd(t *testing.T) {
+	t.Parallel()
+	ready := beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1}
+	want := fmt.Sprintf("the pass listed the ready board %d times: its loop does not end", readyListLimit)
+	rec := &recordingTB{TB: t}
+	b := &guardedBeads{Fake: beadsfake.New(beadsfake.WithPrefix("gt")), t: rec}
+
+	for i := 0; i < readyListLimit; i++ {
+		if _, err := b.List(ready); err != nil {
+			t.Fatalf("list %d of the limit returned %v; want no error until the limit is passed", i+1, err)
+		}
+	}
+	if len(rec.errors) != 0 {
+		t.Fatalf("the guard reported %v at the limit; want nothing until it is passed", rec.errors)
+	}
+
+	if _, err := b.List(ready); err == nil || err.Error() != want {
+		t.Fatalf("list past the limit = %v; want the guard's error %q", err, want)
+	}
+	if len(rec.errors) != 1 || rec.errors[0] != want {
+		t.Fatalf("the guard reported %v; want %q once", rec.errors, want)
+	}
+
+	if _, err := b.List(ready); err == nil {
+		t.Fatal("the second list past the limit returned no error; want the pass's relist to keep failing")
+	}
+	if len(rec.errors) != 1 {
+		t.Fatalf("the guard reported %d times after a second list past the limit; want once", len(rec.errors))
+	}
+
+	// A list of another board is not the pass's loop and never counts.
+	if _, err := b.List(beads.ListOptions{Label: LabelRevert, Priority: -1}); err != nil {
+		t.Fatalf("a list of %s returned %v; want it untouched by the guard", LabelRevert, err)
+	}
+}
+
+// TestHarnessDrainGuardReportsALoopThatDoesNotEnd: the backstop guard covers
+// the loops that skip a bead without listing again: past passIterationLimit
+// reads it reports the loop once and answers draining, which ends the pass at
+// its next iteration (gt-ek7hmt).
+func TestHarnessDrainGuardReportsALoopThatDoesNotEnd(t *testing.T) {
+	t.Parallel()
+	want := fmt.Sprintf("the pass read its drain flag %d times: its loop does not end", passIterationLimit)
+	rec := &recordingTB{TB: t}
+	h := newHarness(rec)
+
+	for i := 0; i < passIterationLimit; i++ {
+		if h.w.Draining() {
+			t.Fatalf("drain read %d of the limit answered true; want the pass to run until the limit is passed", i+1)
+		}
+	}
+	if len(rec.errors) != 0 {
+		t.Fatalf("the guard reported %v at the limit; want nothing until it is passed", rec.errors)
+	}
+
+	if !h.w.Draining() {
+		t.Fatal("the read past the limit answered not draining; the pass's loop would not end")
+	}
+	if len(rec.errors) != 1 || rec.errors[0] != want {
+		t.Fatalf("the guard reported %v; want %q once", rec.errors, want)
+	}
+	if again := h.w.Draining(); !again || len(rec.errors) != 1 {
+		t.Fatalf("a later read answered %v and the guard reported %d times; want draining and once", again, len(rec.errors))
 	}
 }
 
