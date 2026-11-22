@@ -220,3 +220,48 @@ func TestRebootCheckHostVMsReadOnly(t *testing.T) {
 		})
 	}
 }
+
+// verbOf is the verb of a docker or colima argv: the first argument after any
+// --context pair.
+func verbOf(args []string) string {
+	if len(args) >= 2 && args[0] == "--context" {
+		return verbOf(args[2:])
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// TestRebootCheckHostChecksReadOnly pins that the whole host list only reads:
+// the Runner sees docker's ps and colima's list, each as the verb of its argv,
+// and no shell string, so no check makes another read (gt-h1w81n).
+func TestRebootCheckHostChecksReadOnly(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		switch name {
+		case "docker":
+			return []byte("gt-dolt\nhm-postgres\n"), nil
+		case "colima":
+			return []byte(`[{"name":"gt-control","status":"Running"},` +
+				`{"name":"gt-sbx","status":"Running"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+	RunAll(context.Background(), HostChecks(run))
+	var verbs []string
+	for _, c := range calls {
+		name, args := c[0], c[1:]
+		verbs = append(verbs, name+" "+verbOf(args))
+		for _, a := range args {
+			if strings.ContainsAny(a, " ;&|`$<>") || a == "-c" {
+				t.Errorf("call %q carries a shell string in %q", c, a)
+			}
+		}
+	}
+	if want := []string{"docker ps", "colima list"}; !reflect.DeepEqual(verbs, want) {
+		t.Errorf("runner verbs = %q, want only %q", verbs, want)
+	}
+}
