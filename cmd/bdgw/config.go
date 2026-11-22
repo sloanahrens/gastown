@@ -40,6 +40,8 @@ type config struct {
 	tokensDir        string
 	beadPrefixes     string
 	maxConcurrent    int
+	// doltCredentialFile is the file bd reads its Dolt user and password from.
+	doltCredentialFile string
 	// logPerPod puts the call log in a subdirectory named for the pod, so two
 	// gateway pods never append to one call.log.
 	logPerPod bool
@@ -75,6 +77,7 @@ func bindShared(fs *flag.FlagSet, c *config) {
 	fs.StringVar(&c.doltPort, "dolt-port", c.doltPort, "the Dolt port the workspace resolves to")
 	fs.StringVar(&c.trackerURL, "tracker-url", c.trackerURL, "the tracker endpoint, empty when the town runs none")
 	fs.StringVar(&c.trackerTokenFile, "tracker-token-file", c.trackerTokenFile, "the gateway's tracker credential file")
+	fs.StringVar(&c.doltCredentialFile, "dolt-credential-file", c.doltCredentialFile, "the Dolt credential file bd reads its user and password from, empty for none")
 	fs.StringVar(&c.verbsPath, "verbs", c.verbsPath, "the verbs file (deploy/bd/verbs.json)")
 	fs.StringVar(&c.logDir, "log-dir", c.logDir, "the call log's directory")
 	fs.StringVar(&c.tokensDir, "tokens-dir", c.tokensDir, "the token directory")
@@ -124,23 +127,26 @@ func (c config) prefixes() []string {
 	return out
 }
 
+// options is the executor's settings: the one place a config value becomes an
+// Options field.
+func (c config) options() bdgateway.Options {
+	return bdgateway.Options{
+		Binary:             c.bd,
+		WorkspaceRoot:      c.workspaceRoot,
+		Home:               c.home,
+		Path:               c.searchPath,
+		DoltHost:           c.doltHost,
+		DoltPort:           c.doltPort,
+		DoltCredentialFile: c.doltCredentialFile,
+		TrackerURL:         c.trackerURL,
+		TrackerTokenFile:   c.trackerTokenFile,
+		MaxConcurrent:      c.maxConcurrent,
+	}
+}
+
 // executor builds the one executor both transports run calls through.
 func (c config) executor() (*bdgateway.Executor, error) {
-	e, err := bdgateway.New(bdgateway.Options{
-		Binary:           c.bd,
-		WorkspaceRoot:    c.workspaceRoot,
-		Home:             c.home,
-		Path:             c.searchPath,
-		DoltHost:         c.doltHost,
-		DoltPort:         c.doltPort,
-		TrackerURL:       c.trackerURL,
-		TrackerTokenFile: c.trackerTokenFile,
-		MaxConcurrent:    c.maxConcurrent,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return e, nil
+	return bdgateway.New(c.options())
 }
 
 // callLogDir is the directory the call log is written in. With --log-per-pod it

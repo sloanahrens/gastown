@@ -2,6 +2,7 @@ package bdgateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
 	"os"
@@ -123,6 +124,49 @@ func TestExecutorDoltCredentialReadEveryCall(t *testing.T) {
 		}
 		if got := envMap(runner.records()[i].env)["BEADS_DOLT_PASSWORD"]; got != password {
 			t.Errorf("call %d carried BEADS_DOLT_PASSWORD = %q, want the file's %q", i+1, got, password)
+		}
+	}
+}
+
+// TestExecutorDoltCredentialCallerEnvRefused: a caller that sends either Dolt
+// variable is refused and starts no bd, so the credential reaches bd only
+// through the gateway's own credential file.
+func TestExecutorDoltCredentialCallerEnvRefused(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"BEADS_DOLT_SERVER_USER", "BEADS_DOLT_PASSWORD"} {
+		runner := &fakeRunner{}
+		e := newDoltCredentialExecutor(t, testWorkspace(t), runner, "")
+		err := e.Exec(context.Background(), Request{
+			Argv: []string{"list"},
+			Rig:  "gastown",
+			Env:  map[string]string{name: "from-caller"},
+		}, nil, io.Discard)
+		if !errors.Is(err, ErrEnvNotAllowed) || len(runner.records()) != 0 {
+			t.Fatalf("%s from the caller: Exec = %v and %d calls, want %v and no call", name, err, len(runner.records()), ErrEnvNotAllowed)
+		}
+	}
+}
+
+// TestExecutorDoltCredentialFileError: a credential file the gateway cannot
+// trust fails the call, and the error names the file and holds no value from
+// it.
+func TestExecutorDoltCredentialFileError(t *testing.T) {
+	t.Parallel()
+	insecure := writeDoltCredential(t, "user=gateway\npassword=s3cret\n")
+	// Chmod after the write, so the refusal comes from the file's mode and not
+	// from the umask this host runs with.
+	if err := os.Chmod(insecure, 0o644); err != nil {
+		t.Fatalf("setting the credential file's mode: %v", err)
+	}
+	for _, path := range []string{insecure, t.TempDir()} {
+		runner := &fakeRunner{}
+		e := newDoltCredentialExecutor(t, testWorkspace(t), runner, path)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("Exec with credential file %q = %v, want an error naming the path", path, err)
+		}
+		if strings.Contains(err.Error(), "s3cret") || len(runner.records()) != 0 {
+			t.Errorf("credential file %q: err = %v, want no password in it and no bd started", path, err)
 		}
 	}
 }
