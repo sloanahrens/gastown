@@ -406,7 +406,8 @@ type hangingCommentBeads struct {
 func (b *hangingCommentBeads) AddComment(string, string) error { <-b.release; return nil }
 
 // TestCommentVerdictTimeoutLogs: a write that never answers logs 'did not
-// finish' and returns, so the landing is unaffected (gt-y82k93).
+// finish' and returns, so the landing is unaffected, and the comment is queued
+// for a later pass (gt-y82k93, gt-bqnv54).
 func TestCommentVerdictTimeoutLogs(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -415,11 +416,52 @@ func TestCommentVerdictTimeoutLogs(t *testing.T) {
 	l := f.lander()
 	l.Beads = &hangingCommentBeads{Fake: f.bd, release: release}
 	l.auditTimeout = 10 * time.Millisecond
+	q := queueAt(t, false)
+	l.Records = &q
 	var out strings.Builder
 	l.Out = &out
 	l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove}, time.Time{}, time.Time{})
 	if want := "did not finish in 10ms; the landing is unaffected"; !strings.Contains(out.String(), want) {
 		t.Errorf("log = %q, want %q", out.String(), want)
+	}
+	if got, err := q.Pending(); err != nil || len(got) != 1 || got[0].Kind != RecordKindComment {
+		t.Errorf("Pending = %+v, %v; want the comment queued", got, err)
+	}
+}
+
+// TestCommentVerdictCommentQueue: a comment that fails all its tries is
+// queued under the candidate head's marker; one that is written queues
+// nothing, and a nil queue keeps today's behaviour (gt-bqnv54).
+func TestCommentVerdictCommentQueue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		fails  int  // tries the write fails before it is left off
+		queue  bool // l.Records is set
+		queued int
+	}{
+		{"a comment that fails all its tries is queued", 3, true, 1},
+		{"a comment that is written queues nothing", 0, true, 0},
+		{"a nil queue behaves as today", 3, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l, w := f.lander(), f.work
+			l.Beads = &commentBeads{Fake: f.bd, flaky: tc.fails}
+			var q RecordQueue // left nil, and empty, on the nil-queue row
+			if tc.queue {
+				q = queueAt(t, false)
+				l.Records = &q
+			}
+			w.CandidateHead = "feedface12345678"
+			l.commentVerdict(w, Verdict{Verdict: VerdictApprove, Score: 0.91}, time.Now(), time.Now())
+			got, err := q.Pending()
+			if key := verdictCommentHead(w.CandidateHead); err != nil || len(got) != tc.queued ||
+				(tc.queued == 1 && (got[0].Kind != RecordKindComment || got[0].Key != key)) {
+				t.Fatalf("Pending = %+v, %v; want %d comment(s) keyed by %q", got, err, tc.queued, key)
+			}
+		})
 	}
 }
 
