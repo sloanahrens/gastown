@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -1545,6 +1546,10 @@ func TestSquashRecordUnreadableStateFailsClosed(t *testing.T) {
 	// database is due when the next check reads it.
 	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
 		st.Squash["gt"] = squashRunRecord{LastRun: squashTestNow, Outcome: squashOutcomeCompleted}
+		// The write over the corrupt file stamped the replacement with the real
+		// time, which is ahead of this test's fixed clock: this test is about a
+		// readable file, so the stamp is cleared (gt-cbm58l).
+		st.StateResetAt, st.StateResetCopy = time.Time{}, ""
 	}); err != nil {
 		t.Fatalf("writing the readable state: %v", err)
 	}
@@ -2216,3 +2221,205 @@ var (
 	_ driver.QueryerContext = squashFakeConn{}
 	_ driver.Connector      = squashFakeConnector{}
 )
+
+// resetState writes the state a gc write over an unreadable file leaves: the
+// replacement stamp and where the old bytes were kept, and the squash record db
+// holds when it holds one (gt-cbm58l).
+func resetState(t *testing.T, d *Daemon, stamp time.Time, copyPath string, record time.Time) {
+	t.Helper()
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+		st.StateResetAt, st.StateResetCopy = stamp, copyPath
+		if !record.IsZero() {
+			st.Squash["gt"] = squashRunRecord{LastRun: record, Outcome: squashOutcomeCompleted}
+		}
+	}); err != nil {
+		t.Fatalf("writing the reset state: %v", err)
+	}
+}
+
+// TestSquashCheckHoldsTheGateAfterAStateReset: for 24 hours after a state reset
+// every database's gate is held (its squash records are gone), with one
+// squash:state-reset alert over any number of checks; after the day a due
+// database squashes and the alert clears; a stamp in the future is a fault, not
+// a hold (gt-cbm58l).
+func TestSquashCheckHoldsTheGateAfterAStateReset(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		stamp      time.Duration // from the check's now; zero is no stamp
+		record     time.Duration // the database's own record from now; zero is none
+		wantRuns   int
+		wantReset  int // open squash:state-reset alerts after two checks
+		wantFaulty int // open squash:state alerts
+	}{
+		{"within the day no database squashes and the alert stands once", -2 * time.Hour, 0, 0, 1, 0},
+		{"a database record later than the stamp keeps the gate shut", -23 * time.Hour, -time.Hour, 0, 1, 0},
+		{"a minute before the day is out the gate still holds", -23*time.Hour - 59*time.Minute, 0, 0, 1, 0},
+		{"a minute past the day the hold has ended", -24*time.Hour - time.Minute, 0, 1, 0, 0},
+		{"25 hours after the stamp a due database squashes and no alert is open", -25 * time.Hour, 0, 1, 0, 0},
+		{"no stamp changes nothing", 0, 0, 1, 0, 0},
+		{"a stamp 30 seconds ahead still holds every database (a last run after now would open the gate)", 30 * time.Second, 0, 0, 1, 0},
+		{"a stamp a year ahead is a fault, not a hold", 365 * 24 * time.Hour, 0, 0, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+			var stamp, record time.Time
+			if tc.stamp != 0 {
+				stamp = squashTestNow.Add(tc.stamp)
+			}
+			if tc.record != 0 {
+				record = squashTestNow.Add(tc.record)
+			}
+			if !stamp.IsZero() {
+				resetState(t, d, stamp, maintenanceGCStatePath(d.config.TownRoot)+squashStateCorruptSuffix, record)
+			}
+
+			d.runScheduledMaintenance()
+			d.maint.now = func() time.Time { return squashTestNow.Add(squashCheckRetryAfter + time.Minute) }
+			d.runScheduledMaintenance()
+
+			if calls != tc.wantRuns {
+				t.Errorf("the checks started %d runs, want %d", calls, tc.wantRuns)
+			}
+			rec := d.notify().(*notifyfake.Recorder)
+			if got := len(rec.OpenEscalations(squashStateResetAlertKey)); got != tc.wantReset {
+				t.Errorf("open %q alerts = %d, want %d", squashStateResetAlertKey, got, tc.wantReset)
+			}
+			if got := len(rec.OpenEscalations(squashStateAlertKey)); got != tc.wantFaulty {
+				t.Errorf("open %q alerts = %d, want %d", squashStateAlertKey, got, tc.wantFaulty)
+			}
+		})
+	}
+}
+
+// TestSquashStateResetAlertNamesNoContent: the alert names the stamp and the
+// copy's path (or why it was not kept) and nothing from the files.
+func TestSquashStateResetAlertNamesNoContent(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	stamp := squashTestNow.Add(-2 * time.Hour)
+	copyPath := maintenanceGCStatePath(d.config.TownRoot) + squashStateCorruptSuffix
+	token := "AK" + "IA" + strings.Repeat("Q", 16)
+	if err := os.MkdirAll(filepath.Dir(copyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, []byte(`{"squash":{"gt":{"outcome":"`+token+`"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetState(t, d, stamp, copyPath, time.Time{})
+
+	d.runScheduledMaintenance()
+
+	open := d.notify().(*notifyfake.Recorder).OpenEscalations(squashStateResetAlertKey)
+	if len(open) != 1 {
+		t.Fatalf("open %q alerts = %d, want 1", squashStateResetAlertKey, len(open))
+	}
+	text := fmt.Sprintf("%+v", open[0])
+	if !strings.Contains(text, stamp.UTC().Format(time.RFC3339)) || !strings.Contains(text, copyPath) || strings.Contains(text, token) {
+		t.Errorf("the alert = %s, want the stamp %s and the copy %s and none of the file's contents", text, stamp.UTC().Format(time.RFC3339), copyPath)
+	}
+}
+
+// TestSquashStateResetAlertClearsAfterTheDay: the alert a held gate raised is
+// cleared by the first check past the day, and that check squashes a due database.
+func TestSquashStateResetAlertClearsAfterTheDay(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+	resetState(t, d, squashTestNow.Add(-23*time.Hour-50*time.Minute), "kept", time.Time{})
+	rec := d.notify().(*notifyfake.Recorder)
+
+	d.runScheduledMaintenance()
+	if calls != 0 || len(rec.OpenEscalations(squashStateResetAlertKey)) != 1 {
+		t.Fatalf("inside the day: %d runs and %d open alerts, want 0 and 1", calls, len(rec.OpenEscalations(squashStateResetAlertKey)))
+	}
+	// No check runs between the two: a decided check is next due a full interval
+	// later, so the alert stands past the end of the hold until that check, up to
+	// one interval past the day.
+	later := squashTestNow.Add(squashCheckInterval + time.Minute)
+	d.maint.now = func() time.Time { return later }
+	writeSquashBackup(t, squashBackupRoot(t, d), later.Add(-6*time.Hour), later.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, later.Add(-time.Hour))
+	d.runScheduledMaintenance()
+
+	if calls != 1 || len(rec.OpenEscalations(squashStateResetAlertKey)) != 0 {
+		t.Errorf("past the day: %d runs and %d open alerts, want 1 and 0", calls, len(rec.OpenEscalations(squashStateResetAlertKey)))
+	}
+}
+
+// TestSquashFaultClearsTheResetAlert: a stamp that turns out to be ahead of the
+// clock is a fault the squash:state alert reports, and an open squash:state-reset
+// alert of an earlier check does not stand beside it saying the opposite
+// (gt-cbm58l).
+func TestSquashFaultClearsTheResetAlert(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+	resetState(t, d, squashTestNow.Add(-time.Hour), "kept", time.Time{})
+	rec := d.notify().(*notifyfake.Recorder)
+
+	d.runScheduledMaintenance()
+	if len(rec.OpenEscalations(squashStateResetAlertKey)) != 1 {
+		t.Fatalf("held check: %d open reset alerts, want 1", len(rec.OpenEscalations(squashStateResetAlertKey)))
+	}
+	later := squashTestNow.Add(squashCheckInterval + time.Minute)
+	resetState(t, d, later.Add(365*24*time.Hour), "kept", time.Time{})
+	d.maint.now = func() time.Time { return later }
+	d.runScheduledMaintenance()
+
+	if got := len(rec.OpenEscalations(squashStateAlertKey)); got != 1 {
+		t.Errorf("open %q alerts = %d, want the fault", squashStateAlertKey, got)
+	}
+	if got := len(rec.OpenEscalations(squashStateResetAlertKey)); got != 0 {
+		t.Errorf("open %q alerts = %d beside the fault, want 0", squashStateResetAlertKey, got)
+	}
+}
+
+// TestSquashStampToleranceIsOneMinute: one check, a stamp this far ahead of its
+// clock: up to and including one minute it is a hold, past it a fault that runs
+// no database and raises squash:state until the stamp is repaired or removed,
+// never a hold counted from that date (a corrupt stamp fails closed) (gt-cbm58l).
+func TestSquashStampToleranceIsOneMinute(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		ahead  time.Duration
+		fault  int
+		holdAl int
+	}{
+		{"exactly at the tolerance is a hold", time.Minute, 0, 1},
+		{"90 seconds ahead is a fault", 90 * time.Second, 1, 0},
+		{"5 minutes ahead is a fault", 5 * time.Minute, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+			resetState(t, d, squashTestNow.Add(tc.ahead), "kept", time.Time{})
+			rec := d.notify().(*notifyfake.Recorder)
+
+			d.runScheduledMaintenance()
+
+			if calls != 0 {
+				t.Errorf("the check started %d runs, want none", calls)
+			}
+			if got := len(rec.OpenEscalations(squashStateAlertKey)); got != tc.fault {
+				t.Errorf("open %q alerts = %d, want %d", squashStateAlertKey, got, tc.fault)
+			}
+			if got := len(rec.OpenEscalations(squashStateResetAlertKey)); got != tc.holdAl {
+				t.Errorf("open %q alerts = %d, want %d", squashStateResetAlertKey, got, tc.holdAl)
+			}
+		})
+	}
+}
