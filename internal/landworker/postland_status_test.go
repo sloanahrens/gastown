@@ -1284,9 +1284,10 @@ func TestPostLandStatusDroppedEntriesAreRecordedInTheState(t *testing.T) {
 }
 
 // TestPostLandStatusPassHasOneDeadline: the reads of one pass share one budget,
-// so a list of entries whose reads each stall holds the pass for the budget, not
-// for the count times the read timeout; the entries it did not reach are read
-// first on the next pass.
+// so a list of entries whose reads each stall holds the pass until the budget
+// ends, not for the count times the read timeout; the entries it did not reach
+// are read first on the next pass. The first stalled read ends the pass by
+// cancelling its pass context, so no test depends on a real clock.
 func TestPostLandStatusPassHasOneDeadline(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1294,27 +1295,31 @@ func TestPostLandStatusPassHasOneDeadline(t *testing.T) {
 	store := &MemoryMainState{}
 	clk := &manualClock{now: statusT0}
 	var reads atomic.Int32
+	// endPass ends the running pass: the stalled read calls it once it has
+	// counted itself, so the pass ends exactly when its first read starts, on any host.
+	endPass := context.CancelFunc(func() {})
 	stall := func(readCtx context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
 		reads.Add(1)
+		endPass()
 		<-readCtx.Done() // a Forgejo that never answers: only the deadline ends the read
 		return nil, readCtx.Err()
 	}
 	r := v.runner(stall, store, clk, time.Hour)
 	r.readTimeoutOverride = 500 * time.Millisecond
-	r.passBudgetOverride = 50 * time.Millisecond
+	r.passContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		pass, cancel := context.WithCancel(parent)
+		endPass = cancel
+		return pass, cancel
+	}
 	for i := range 5 {
 		r.Trigger(ctx, PostLand{Commit: fmt.Sprintf("commit%02d", i), Target: "main"})
 	}
-	start := time.Now()
 	r.PollPending(ctx)
-	if took := time.Since(start); took > 5*time.Second {
-		t.Fatalf("the pass took %s with a 50ms budget and five stalled reads of a minute each", took)
-	}
 	if got := len(pendingOf(t, store)); got != 5 {
 		t.Fatalf("%d pending entries after a budget-cut pass, want all five kept", got)
 	}
 	if got := reads.Load(); got != 1 {
-		t.Fatalf("%d reads started inside a 50ms pass budget, want only the first: the budget ends the pass, not each read", got)
+		t.Fatalf("%d reads started in one pass, want only the first: the pass context ends the pass, not each read", got)
 	}
 }
 
