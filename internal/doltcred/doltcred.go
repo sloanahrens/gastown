@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // Credential is a Dolt user and password read from a credential file. The
@@ -85,30 +86,35 @@ var (
 // can read, an unknown key, a repeated key and a line without '=', and it
 // returns a credential only with a nil error. Every error names the path and
 // the rule it broke; none holds a value from the file.
+//
+// The path is opened first and every check runs on that descriptor, so a path
+// swapped between the checks and the read cannot get another file past them;
+// O_NONBLOCK keeps a FIFO swapped in from holding the open (gt-fzsz5z).
 func Read(path string) (Credential, error) {
 	if path == "" {
 		return Credential{}, nil
 	}
-	fi, err := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Credential{}, nil
 	}
+	if err != nil {
+		return Credential{}, fmt.Errorf("%s: cannot open the credential file: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return Credential{}, fmt.Errorf("%s: cannot read the credential file's metadata: %w", path, err)
 	}
 	if err := checkFile(path, fi); err != nil {
 		return Credential{}, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return Credential{}, fmt.Errorf("%s: cannot open the credential file: %w", path, err)
-	}
-	defer f.Close()
 	return parse(path, f)
 }
 
-// checkFile refuses a path that is not a regular file, because reading a FIFO
-// or a device can wait forever, and a file group or other can read.
+// checkFile refuses a path that is not a regular file, because a FIFO or a
+// device is not a credential, and a file group or other can read. fi describes
+// the opened descriptor, so it is the file parse reads.
 func checkFile(path string, fi fs.FileInfo) error {
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%s: the credential path must be a regular file", path)
