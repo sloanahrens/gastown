@@ -194,6 +194,61 @@ func TestDeployerCredReadFS(t *testing.T) {
 	}
 }
 
+// TestDeployerCredReadFSRefuses: Dir.Open refuses a symlink at the last element,
+// which os.Root would follow, and a name with a path separator.
+func TestDeployerCredReadFSRefuses(t *testing.T) {
+	t.Parallel()
+	const target = "approval.json"
+	// setup makes a 0700 directory holding target, and returns it. The CI runner's
+	// umask is 000, so TempDir is not 0700 there.
+	setup := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		//testpolicy:allow no-exec-files — the rule flags any literal mode with an execute bit; this chmod sets a test directory to 0700, and no file becomes executable
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("could not set the test directory to 0700: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, target), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("could not write %s: %v", target, err)
+		}
+		return dir
+	}
+	// refuse opens name through a handle on dir and fails the test unless the
+	// open is refused; a handle that is opened anyway is closed.
+	refuse := func(t *testing.T, dir, name string) {
+		t.Helper()
+		handle := openDir(t, dir)
+		defer closeDir(t, handle)
+		file, err := handle.Open(name)
+		if err == nil {
+			t.Errorf("Dir.Open of %q read a name it must refuse", name)
+			if cerr := file.Close(); cerr != nil {
+				t.Errorf("could not close %s: %v", name, cerr)
+			}
+		}
+	}
+	t.Run("a symlink at the last element", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		if err := os.Symlink(target, filepath.Join(dir, "link.json")); err != nil {
+			t.Fatalf("could not link link.json: %v", err)
+		}
+		refuse(t, dir, "link.json")
+	})
+	t.Run("a name with a path separator", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			t.Fatalf("could not make %s: %v", sub, err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, target), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("could not write %s: %v", target, err)
+		}
+		refuse(t, dir, "sub/"+target)
+	})
+}
+
 // TestDeployerCredReadFSErrors: each failure path of the read side returns its
 // error rather than an empty report.
 func TestDeployerCredReadFSErrors(t *testing.T) {
