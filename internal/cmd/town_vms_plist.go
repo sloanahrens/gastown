@@ -6,6 +6,8 @@ import (
 	"io"
 	"path/filepath"
 	"text/template"
+
+	"github.com/spf13/cobra"
 )
 
 // townVMsPlistTemplate is the com.gastown.colima-vms job: a thin wrapper that
@@ -78,4 +80,27 @@ func writeTownVMsPlist(w io.Writer, gt, home string) error {
 		return fmt.Errorf("rendering the com.gastown.colima-vms plist: %w", err)
 	}
 	return nil
+}
+
+// newTownVMsPlistCmd builds `plist`: it prints the com.gastown.colima-vms job for the
+// overseer's apply step to load. It only renders: it never runs launchctl and never
+// touches ~/Library/LaunchAgents. Both flags are required; the refusals of a
+// relative, empty or newline value are gt-i6d00y's (gt-097npg).
+func newTownVMsPlistCmd() *cobra.Command {
+	var gt, home string
+	cmd := &cobra.Command{
+		Use:   "plist --gt <path> --home <dir>",
+		Short: "Print the launchd job that runs gt town vms start at load",
+		Args:  cobra.NoArgs,
+		// A refusal prints no usage: stdout carries the plist and nothing else.
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return writeTownVMsPlist(cmd.OutOrStdout(), gt, home)
+		},
+	}
+	cmd.Flags().StringVar(&gt, "gt", "", "the absolute path of the Mac gt binary the job runs")
+	cmd.Flags().StringVar(&home, "home", "", "the home directory of the user the job runs as")
+	_ = cmd.MarkFlagRequired("gt")
+	_ = cmd.MarkFlagRequired("home")
+	return cmd
 }
