@@ -418,9 +418,10 @@ func TestMetricsExtractAttentionGaps(t *testing.T) {
 			if len(tc.summary) == 0 {
 				return
 			}
+			it := itemByKey(t, attention.State{Items: items}, tc.want[0])
 			for _, want := range tc.summary {
-				if !strings.Contains(items[0].Summary, want) {
-					t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+				if !strings.Contains(it.Summary, want) {
+					t.Errorf("summary = %q, want it to carry %q", it.Summary, want)
 				}
 			}
 		})
