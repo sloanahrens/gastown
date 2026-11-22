@@ -456,3 +456,56 @@ func TestLandReviewsScrubSurfacesAFailedSkippedLine(t *testing.T) {
 		t.Fatalf("a writer failing at the skipped line returned %v, want an error naming the write", err)
 	}
 }
+
+// TestLandReviewsScrubOversizeLineJoinsIdsAndCount: the line is built from the whole
+// ScrubResult (so the caller cannot drop the oversize count), and lists the ids, then the
+// oversize count when there is one, and reads as before for ids alone.
+func TestLandReviewsScrubOversizeLineJoinsIdsAndCount(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		ids      []string
+		oversize int
+		want     string
+	}{
+		{"ids only", []string{"gt-esc1", "gt-esc2"}, 0, "gt-esc1, gt-esc2"},
+		{"ids and one oversize row", []string{"gt-esc1"}, 1, "gt-esc1; 1 oversize row"},
+		{"ids and several oversize rows", []string{"gt-esc1"}, 3, "gt-esc1; 3 oversize rows"},
+		{"oversize only", nil, 2, "none; 2 oversize rows"},
+	} {
+		if got := landReviewsScrubSkippedLine(land.ScrubResult{SkippedBeads: tc.ids, Oversize: tc.oversize}); got != tc.want {
+			t.Errorf("%s: line = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLandReviewsScrubOversizeOnlyReportsAndFailsApply: a scrub that skipped no bead
+// and met one oversize row names the oversize row on the skipped beads line in both
+// modes and the JSON path, and only --apply exits 1: the exit counts oversize alone
+// (gt-axehgm). The result is built directly: a real oversize row is a 16 MiB line.
+func TestLandReviewsScrubOversizeOnlyReportsAndFailsApply(t *testing.T) {
+	t.Parallel()
+	res := land.ScrubResult{Rows: 3, Oversize: 1}
+	for _, tc := range []struct {
+		name         string
+		apply, json  bool
+		wantLine     string
+		wantExitCode int
+	}{
+		{"dry run", false, false, "skipped beads: none; 1 oversize row\n", 0},
+		{"apply", true, false, "skipped beads: none; 1 oversize row\n", 1},
+		{"apply, json", true, true, `"oversize": 1`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := writeLandReviewsScrubReport(&out, res, tc.apply, tc.json)
+			if got := reviewsScrubExitCode(err); got != tc.wantExitCode {
+				t.Errorf("exit status = %d (error %v), want %d", got, err, tc.wantExitCode)
+			}
+			if !strings.Contains(out.String(), tc.wantLine) {
+				t.Errorf("output = %q, want it to hold %q", out.String(), tc.wantLine)
+			}
+		})
+	}
+}

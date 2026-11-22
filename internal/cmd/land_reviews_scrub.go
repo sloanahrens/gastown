@@ -81,6 +81,14 @@ func landReviewsScrubReportFrom(findTown func() (string, error), out io.Writer, 
 	if err != nil {
 		return err
 	}
+	return writeLandReviewsScrubReport(out, res, apply, asJSON)
+}
+
+// writeLandReviewsScrubReport prints one scrub's figures, text or JSON, and fails an
+// --apply that left rows it could not rewrite. It takes the result whole, so a test
+// drives it with a ScrubResult no real log can produce cheaply (an oversize row is a
+// 16 MiB line).
+func writeLandReviewsScrubReport(out io.Writer, res land.ScrubResult, apply, asJSON bool) error {
 	if asJSON {
 		if err := writeLandReviewsScrubJSON(out, res, apply); err != nil {
 			return err
@@ -91,13 +99,13 @@ func landReviewsScrubReportFrom(findTown func() (string, error), out io.Writer, 
 	if apply {
 		mode = "applied"
 	}
-	_, err = fmt.Fprintf(out, "reviews-scrub (%s): %d rows, %d would change, %d words, oversize %d, skipped %d\nbeads: %s\n",
+	_, err := fmt.Fprintf(out, "reviews-scrub (%s): %d rows, %d would change, %d words, oversize %d, skipped %d\nbeads: %s\n",
 		mode, res.Rows, res.RowsChanged, res.Words, res.Oversize, res.Skipped, strings.Join(res.Beads, ", "))
 	if err != nil {
 		return fmt.Errorf("writing the plan: %w", err)
 	}
 	if res.Skipped != 0 || res.Oversize != 0 {
-		if _, err := fmt.Fprintf(out, "skipped beads: %s\n", landReviewsScrubSkippedIDs(res.SkippedBeads)); err != nil {
+		if _, err := fmt.Fprintf(out, "skipped beads: %s\n", landReviewsScrubSkippedLine(res)); err != nil {
 			return fmt.Errorf("writing the plan: %w", err)
 		}
 	}
@@ -114,14 +122,23 @@ func landReviewsScrubApplyExit(res land.ScrubResult, apply bool) error {
 	return fmt.Errorf("reviews-scrub --apply left %d skipped and %d oversize row(s) in the log", res.Skipped, res.Oversize)
 }
 
-// landReviewsScrubSkippedIDs lists the skipped rows by label. An oversize line
-// is never decoded, so it has no bead id to list: a run with only oversize rows
-// reads none.
-func landReviewsScrubSkippedIDs(ids []string) string {
-	if len(ids) == 0 {
-		return "none"
+// landReviewsScrubSkippedLine is what follows `skipped beads:`: the skipped rows by
+// label, then the oversize count. An oversize line is never decoded, so it has no
+// bead id to list; a run with only oversize rows reads `none; N oversize rows`, so
+// an --apply that exits 1 names its cause.
+func landReviewsScrubSkippedLine(res land.ScrubResult) string {
+	ids, oversize := res.SkippedBeads, res.Oversize
+	line := "none"
+	if len(ids) > 0 {
+		line = strings.Join(ids, ", ")
 	}
-	return strings.Join(ids, ", ")
+	switch {
+	case oversize == 1:
+		line += "; 1 oversize row"
+	case oversize > 1:
+		line += fmt.Sprintf("; %d oversize rows", oversize)
+	}
+	return line
 }
 
 // landReviewsScrubPlan is the scrub's figures as --json prints them.
