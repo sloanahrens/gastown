@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/storypoints"
 )
@@ -85,43 +87,59 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 // weekly run's auto-adoption asks for it, so the rank-rule path reads no first-round
 // cell.
 func (c Commands) decideStoryPoints(ctx context.Context, real RealTown, env Env, rule func([]storypoints.Holdout) storypoints.Adoption, firstRound bool) error {
+	_, err := c.decideStoryPointsWrite(ctx, real, env, rule, firstRound)
+	return err
+}
+
+// storyPointsWritten is what decideStoryPointsWrite wrote: whether it adopted, the
+// version it adopted, and the version file the weights it replaced were kept as,
+// empty when there were none (the checked-in weights were in use).
+type storyPointsWritten struct {
+	adopted  bool
+	version  string
+	previous string
+}
+
+// decideStoryPointsWrite is decideStoryPoints, and returns what it wrote, so the
+// weekly run can log the adoption it made.
+func (c Commands) decideStoryPointsWrite(ctx context.Context, real RealTown, env Env, rule func([]storypoints.Holdout) storypoints.Adoption, firstRound bool) (storyPointsWritten, error) {
 	store := c.storyPointsStore.withHost()
 	dir, landings, err := storyPointsExtract(env, real.Extract.OutDir)
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	proposedPath, proposedData, err := storyPointsProposedFile(env, dir)
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	proposed, err := storypoints.LoadWeights(bytes.NewReader(proposedData))
 	if err != nil {
-		return fmt.Errorf("proposed weights %s: %w", proposedPath, err)
+		return storyPointsWritten{}, fmt.Errorf("proposed weights %s: %w", proposedPath, err)
 	}
 	header, rows, err := ReadLandings(bytes.NewReader(landings))
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	if !slices.Contains(header, "polecat_work") {
-		return fmt.Errorf("%s: no polecat_work column (run %s first): the table is from an older extract",
+		return storyPointsWritten{}, fmt.Errorf("%s: no polecat_work column (run %s first): the table is from an older extract",
 			filepath.Join(dir, landingsName), CommandExtract)
 	}
 	if firstRound {
 		if missing := missingFirstRoundColumns(header); len(missing) > 0 {
-			return fmt.Errorf("%s: no %s column (run %s first): the first-round holdout cannot be read, so the adoption is refused",
+			return storyPointsWritten{}, fmt.Errorf("%s: no %s column (run %s first): the first-round holdout cannot be read, so the adoption is refused",
 				filepath.Join(dir, landingsName), strings.Join(missing, " and "), CommandExtract)
 		}
 	}
 	currentPath := storypoints.RuntimeWeightsPath(real.Town)
 	if currentPath == "" {
-		return errors.New("no town root, so no runtime weights path")
+		return storyPointsWritten{}, errors.New("no town root, so no runtime weights path")
 	}
 	current, currentData, err := storyPointsWeightsInUse(env, c.StoryPointsBase, currentPath)
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	if err := storyPointsComparable(proposed, current); err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	embedder := c.Embedder
 	if embedder == nil {
@@ -129,44 +147,45 @@ func (c Commands) decideStoryPoints(ctx context.Context, real RealTown, env Env,
 	}
 	samples, _, err := trainingSamplesWith(ctx, env, real.Town, rows, proposed, embedder, firstRound)
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	holdout, err := storyPointsHoldout(samples, proposed, current)
 	if err != nil {
-		return err
+		return storyPointsWritten{}, err
 	}
 	decision := rule(holdout)
 	if !decision.Adopted {
-		return c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
+		return storyPointsWritten{}, c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
 	}
 
 	runtimeDir := filepath.Dir(currentPath)
 	stem := strings.TrimSuffix(filepath.Base(currentPath), ".json")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", runtimeDir, err)
+		return storyPointsWritten{}, fmt.Errorf("create %s: %w", runtimeDir, err)
 	}
 	kept := ""
 	if currentData != nil {
 		if kept, err = storyPointsSaveVersion(store, runtimeDir, stem, currentData); err != nil {
-			return err
+			return storyPointsWritten{}, err
 		}
 	}
 	if err := store.Write(runtimeDir, filepath.Base(currentPath), func(w io.Writer) error {
 		_, err := w.Write(proposedData)
 		return err
 	}); err != nil {
-		return fmt.Errorf("write %s: %w", currentPath, err)
+		return storyPointsWritten{}, fmt.Errorf("write %s: %w", currentPath, err)
 	}
+	written := storyPointsWritten{adopted: true, version: proposed.Version(), previous: kept}
 	// Retention runs after the write: a write that fails must not cost an older
 	// version. A trim that fails leaves the extra versions for the next adoption.
 	if err := storyPointsTrimVersions(store, runtimeDir, stem, storyPointsVersionKeep); err != nil {
-		return fmt.Errorf("wrote %s but could not trim old versions: %w", currentPath, err)
+		return written, fmt.Errorf("wrote %s but could not trim old versions: %w", currentPath, err)
 	}
 	if kept != "" {
-		return c.receipt("%s%s; wrote %s and kept the weights it replaced as %s",
+		return written, c.receipt("%s%s; wrote %s and kept the weights it replaced as %s",
 			storyPointsAdoptReceipt, decision.Reason, currentPath, kept)
 	}
-	return c.receipt("%s%s; wrote %s", storyPointsAdoptReceipt, decision.Reason, currentPath)
+	return written, c.receipt("%s%s; wrote %s", storyPointsAdoptReceipt, decision.Reason, currentPath)
 }
 
 // storyPointsProposedFile reads the proposed weights the retrain left beside the
@@ -448,4 +467,49 @@ func (c Commands) revertStoryPoints(real RealTown, env Env) error {
 		return fmt.Errorf("restore %s from %s: %w", path, versionPath, err)
 	}
 	return c.receipt("%srestored %s from %s", storyPointsAdoptReceipt, path, name)
+}
+
+// storyPointsAdoptionsName is the log, beside the runtime weights, of each adoption
+// the weekly run makes, for the week-after check of the next bead (gt-q2rrvb).
+const storyPointsAdoptionsName = "adoptions.jsonl"
+
+// storyPointsAdoption is one line of the adoptions log: the adoption's time, the
+// version it was kept as, and Previous, the version file the weights it replaced
+// were kept as (empty when the checked-in weights were in use).
+type storyPointsAdoption struct {
+	Event    string    `json:"event"`
+	At       time.Time `json:"at"`
+	Version  string    `json:"version,omitempty"`
+	Previous string    `json:"previous,omitempty"`
+}
+
+// storyPointsAdoptionsPath is the adoptions log beside the runtime weights of town.
+func storyPointsAdoptionsPath(town string) string {
+	return filepath.Join(filepath.Dir(storypoints.RuntimeWeightsPath(town)), storyPointsAdoptionsName)
+}
+
+// appendStoryPointsAdoption appends a line to the adoptions log. The file is
+// rewritten whole through the store, as the other writes here are, so a write that
+// fails leaves the log as it was.
+func (c Commands) appendStoryPointsAdoption(env Env, path string, a storyPointsAdoption) error {
+	prior, err := env.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	line, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	buf.Write(prior)
+	buf.Write(line)
+	buf.WriteByte('\n')
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	return c.storyPointsStore.withHost().Write(dir, filepath.Base(path), func(w io.Writer) error {
+		_, err := w.Write(buf.Bytes())
+		return err
+	})
 }
