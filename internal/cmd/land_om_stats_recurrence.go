@@ -25,19 +25,33 @@ import (
 // withholds the follow-up for four weeks (Q37).
 const landOmStatsRecurrenceFollowDays = 28
 
+// landOmStatsRecurrenceMinFindings is the smallest side whose rate compares.
+const landOmStatsRecurrenceMinFindings = 30
+
 // landOmStatsRecurrenceSide is one side's tally and the figures derived from it.
 type landOmStatsRecurrenceSide struct {
 	Findings int     `json:"findings"`
 	Followed int     `json:"followed"`
 	Rate     float64 `json:"rate"`
+	TooSmall bool    `json:"too_small"`
 }
 
-// finish derives a side's rate inside recurrence, so the table and the JSON read
-// one filled row and cannot disagree.
+// finish derives a side's rate and its too-small flag inside recurrence, so the
+// table and the JSON read one filled row and cannot disagree.
 func (s *landOmStatsRecurrenceSide) finish() {
 	if s.Findings > 0 {
 		s.Rate = float64(s.Followed) / float64(s.Findings)
 	}
+	s.TooSmall = s.Findings < landOmStatsRecurrenceMinFindings
+}
+
+// rateText is the rate as the table prints it: "-" for a side with no findings,
+// which has no rate, not a measured zero (gt-4tw8kl).
+func (s landOmStatsRecurrenceSide) rateText() string {
+	if s.Findings == 0 {
+		return "-"
+	}
+	return landOmStatsPercent(s.Rate)
 }
 
 // landOmStatsRecurrenceClass is one hold-out class's two sides.
@@ -184,15 +198,20 @@ func landOmStatsRecurrenceReportFrom(fsys landOmStatsFS, findTown func() (string
 	return writeLandOmStatsRecurrenceTable(out, recurrence(records, now))
 }
 
-// writeLandOmStatsRecurrenceTable prints each hold-out class's two sides.
+// writeLandOmStatsRecurrenceTable prints each hold-out class's two sides and the
+// note when either side is too small to compare.
 func writeLandOmStatsRecurrenceTable(w io.Writer, rows []landOmStatsRecurrenceClass) error {
 	fmt.Fprintln(w, "\nRecurrence of minor findings within 28 days of their own review")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Class\tHeld out\tHeld followed\tHeld rate\tFiled\tFiled followed\tFiled rate")
+	fmt.Fprintln(tw, "Class\tHeld out\tHeld followed\tHeld rate\tFiled\tFiled followed\tFiled rate\tNote")
 	for _, row := range rows {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%d\t%d\t%s\n", row.ID,
-			row.HeldOut.Findings, row.HeldOut.Followed, landOmStatsPercent(row.HeldOut.Rate),
-			row.Filed.Findings, row.Filed.Followed, landOmStatsPercent(row.Filed.Rate))
+		note := ""
+		if row.HeldOut.TooSmall || row.Filed.TooSmall {
+			note = "too small to compare"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%d\t%d\t%s\t%s\n", row.ID,
+			row.HeldOut.Findings, row.HeldOut.Followed, row.HeldOut.rateText(),
+			row.Filed.Findings, row.Filed.Followed, row.Filed.rateText(), note)
 	}
 	return tw.Flush()
 }

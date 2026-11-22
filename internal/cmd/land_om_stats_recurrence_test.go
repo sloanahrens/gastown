@@ -210,10 +210,18 @@ func landOmStatsRecurrenceOutputs(t *testing.T) (text, raw string) {
 			lines = append(lines, string(line))
 		}
 	}
+	return landOmStatsRecurrenceRun(t, lines, in.Add(time.Hour))
+}
+
+// landOmStatsRecurrenceRun runs the report over the record lines at a fixed now,
+// through the fakes and never through the command's package-level flags, as text
+// and as JSON.
+func landOmStatsRecurrenceRun(t *testing.T, lines []string, now time.Time) (text, raw string) {
+	t.Helper()
 	fake := &landOmStatsFakeFS{files: map[string]string{"/rec": strings.Join(lines, "\n") + "\n", "/log": ""}}
 	report := func(asJSON bool) string {
 		var out strings.Builder
-		if err := landOmStatsRecurrenceReportFrom(fake, omStatsNoTown(t), &out, "", "/rec", "/log", asJSON, in.Add(time.Hour)); err != nil {
+		if err := landOmStatsRecurrenceReportFrom(fake, omStatsNoTown(t), &out, "", "/rec", "/log", asJSON, now); err != nil {
 			t.Fatalf("the report: %v", err)
 		}
 		return out.String()
@@ -242,7 +250,7 @@ func TestLandOmStatsRecurrenceJSONCarriesTheRows(t *testing.T) {
 		t.Fatalf("decoding the JSON: %v", err)
 	}
 	first := doc.Recurrence[0]
-	one, two := landOmStatsRecurrenceSide{Findings: 1, Followed: 1, Rate: 1}, landOmStatsRecurrenceSide{Findings: 2, Followed: 1, Rate: 0.5}
+	one, two := landOmStatsRecurrenceSide{Findings: 1, Followed: 1, Rate: 1, TooSmall: true}, landOmStatsRecurrenceSide{Findings: 2, Followed: 1, Rate: 0.5, TooSmall: true}
 	if len(doc.Recurrence) != len(omlessons.HoldOutClasses) || !((first.HeldOut == one && first.Filed == two) || (first.HeldOut == two && first.Filed == one)) {
 		t.Errorf("recurrence rows = %+v, want one per class and, on the first, one side with %+v and the other with %+v", doc.Recurrence, one, two)
 	}
@@ -311,10 +319,119 @@ func TestLandOmStatsRecurrenceTextAndJSONAgree(t *testing.T) {
 	}
 	for _, row := range doc.Recurrence {
 		want := fmt.Sprintf("%s %d %d %s %d %d %s", row.ID,
-			row.HeldOut.Findings, row.HeldOut.Followed, landOmStatsPercent(row.HeldOut.Rate),
-			row.Filed.Findings, row.Filed.Followed, landOmStatsPercent(row.Filed.Rate))
-		if got := strings.Join(strings.Fields(landOmStatsRecurrenceTableLine(text, row.ID)), " "); got != want {
+			row.HeldOut.Findings, row.HeldOut.Followed, row.HeldOut.rateText(),
+			row.Filed.Findings, row.Filed.Followed, row.Filed.rateText())
+		line := strings.Join(strings.Fields(landOmStatsRecurrenceTableLine(text, row.ID)), " ")
+		if note := strings.HasSuffix(line, "too small to compare"); note != (row.HeldOut.TooSmall || row.Filed.TooSmall) {
+			t.Errorf("%s: table note %t, JSON too_small %t/%t", row.ID, note, row.HeldOut.TooSmall, row.Filed.TooSmall)
+		}
+		if got := strings.TrimSuffix(line, " too small to compare"); got != want {
 			t.Errorf("table row %q, want %q", got, want)
 		}
+	}
+}
+
+// landOmStatsRecurrenceBeadsMax bounds the search for beads of each side: the
+// hold-out puts about a fifth of beads on the held side, so a few hundred
+// candidates fill a side of thirty, and a search that runs out fails the test
+// instead of spinning.
+const landOmStatsRecurrenceBeadsMax = 10000
+
+// landOmStatsRecurrenceBeads takes beads ("gt-big-0000", ...) until heldN fall on
+// the held side and filedN on the filed side, as heldOut reports them, and says
+// false when landOmStatsRecurrenceBeadsMax candidates did not fill both sides.
+func landOmStatsRecurrenceBeads(heldN, filedN int, heldOut func(bead string) bool) (held, filed []string, ok bool) {
+	for i := 0; i < landOmStatsRecurrenceBeadsMax; i++ {
+		if len(held) >= heldN && len(filed) >= filedN {
+			return held, filed, true
+		}
+		bead := fmt.Sprintf("gt-big-%04d", i)
+		if heldOut(bead) && len(held) < heldN {
+			held = append(held, bead)
+		} else if !heldOut(bead) && len(filed) < filedN {
+			filed = append(filed, bead)
+		}
+	}
+	return held, filed, len(held) >= heldN && len(filed) >= filedN
+}
+
+// TestLandOmStatsRecurrenceBeadSearchIsBounded: a hold-out that never answers
+// true makes the search stop with the counts it reached, not spin.
+func TestLandOmStatsRecurrenceBeadSearchIsBounded(t *testing.T) {
+	t.Parallel()
+	held, filed, ok := landOmStatsRecurrenceBeads(3, 2, func(string) bool { return false })
+	if ok || len(held) != 0 || len(filed) != 2 {
+		t.Errorf("search = %d held, %d filed, ok %v; want 0 held, 2 filed and a failed search", len(held), len(filed), ok)
+	}
+}
+
+// TestLandOmStatsRecurrenceSmallSample: a side with fewer than 30 findings prints
+// the too-small note and the JSON carries the flag, while a class with 30 or more
+// on both sides prints no note and its flags are false (gt-4tw8kl).
+func TestLandOmStatsRecurrenceSmallSample(t *testing.T) {
+	t.Parallel()
+	small, smallRaw := landOmStatsRecurrenceOutputs(t)
+	var doc landOmStatsRecurrenceDoc
+	if err := json.Unmarshal([]byte(smallRaw), &doc); err != nil {
+		t.Fatalf("decoding the JSON: %v", err)
+	}
+	first := doc.Recurrence[0]
+	if !first.HeldOut.TooSmall || !first.Filed.TooSmall || !strings.HasSuffix(strings.TrimSpace(landOmStatsRecurrenceTableLine(small, first.ID)), "too small to compare") {
+		t.Errorf("a side under %d findings: JSON %+v, table %q, want the flags and the note", landOmStatsRecurrenceMinFindings, first, landOmStatsRecurrenceTableLine(small, first.ID))
+	}
+	// The first class with heldN findings held out and filedN filed: one finding
+	// per bead, beads taken until each side holds its count.
+	in, class := omlessons.HoldOutStart.Add(time.Hour), omlessons.HoldOutClasses[0]
+	f := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/foo.go", Title: "the documentation says the flag defaults to true"}
+	sides := func(heldN, filedN int) (string, landOmStatsRecurrenceClass) {
+		held, filed, ok := landOmStatsRecurrenceBeads(heldN, filedN, func(bead string) bool { return omlessons.HeldOut(bead, class, in) })
+		if !ok {
+			t.Fatalf("%d candidate beads gave %d held and %d filed, want %d and %d", landOmStatsRecurrenceBeadsMax, len(held), len(filed), heldN, filedN)
+		}
+		var lines []string
+		for _, bead := range append(held, filed...) {
+			line, err := json.Marshal(land.ReviewRecord{BeadID: bead, At: in, FindingText: []land.ReviewFindingText{f}})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			lines = append(lines, string(line))
+		}
+		text, raw := landOmStatsRecurrenceRun(t, lines, in.Add(time.Hour))
+		var got landOmStatsRecurrenceDoc
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("decoding the JSON: %v", err)
+		}
+		return landOmStatsRecurrenceTableLine(text, class), got.Recurrence[0]
+	}
+	threshold := landOmStatsRecurrenceMinFindings
+	if line, row := sides(threshold, threshold); row.HeldOut.TooSmall || row.Filed.TooSmall || strings.Contains(line, "too small") {
+		t.Errorf("%d findings per side: JSON %+v, table %q, want no flag and no note", threshold, row, line)
+	}
+	if line, row := sides(threshold, threshold-1); row.HeldOut.TooSmall || !row.Filed.TooSmall || !strings.HasSuffix(strings.TrimSpace(line), "too small to compare") {
+		t.Errorf("%d held and %d filed: JSON %+v, table %q, want the note and only the filed flag", threshold, threshold-1, row, line)
+	}
+}
+
+// TestLandOmStatsRecurrenceZeroFindings: a side with no findings prints "-" for
+// its rate and carries rate 0 in the JSON, not a measured "0.0%" (gt-4tw8kl).
+func TestLandOmStatsRecurrenceZeroFindings(t *testing.T) {
+	t.Parallel()
+	text, raw := landOmStatsRecurrenceOutputs(t)
+	var doc landOmStatsRecurrenceDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("decoding the JSON: %v", err)
+	}
+	var empty landOmStatsRecurrenceClass
+	for _, row := range doc.Recurrence {
+		if row.HeldOut.Findings == 0 && row.Filed.Findings == 0 {
+			empty = row
+			break
+		}
+	}
+	if empty.ID == "" || empty.HeldOut.Rate != 0 || empty.Filed.Rate != 0 {
+		t.Fatalf("no class with no findings and a zero rate in %+v", doc.Recurrence)
+	}
+	if got := strings.Join(strings.Fields(landOmStatsRecurrenceTableLine(text, empty.ID)), " "); !strings.HasPrefix(got, empty.ID+" 0 0 - 0 0 -") {
+		t.Errorf("table row %q, want the placeholder \"-\" for both rates", got)
 	}
 }
