@@ -121,6 +121,10 @@ type ReviewRecord struct {
 	// is a line about the feed's own work rather than a verdict, so the readers
 	// that count verdicts skip it (gt-3arxj).
 	Queue *FollowupQueue `json:"followup_queue,omitempty"`
+	// Skips is set on a skips line, which the feed appends when its skip policy
+	// drops findings: an audit of what was not filed. It is bookkeeping rather
+	// than a verdict, so the readers that count verdicts skip it (gt-plcst6).
+	Skips *FollowupSkips `json:"followup_skips,omitempty"`
 	// Bar is the review threshold in the reviewed tree's .om.json, 0 when the
 	// tree names none.
 	Bar float64   `json:"bar"`
@@ -141,24 +145,26 @@ type ReviewFindingText struct {
 	Class string `json:"class,omitempty"`
 }
 
-// IsQueueLine reports whether raw is a follow-up queue line: a record whose
-// followup_queue carries a payload, which the feed's backpressure bound holds
-// findings in until a later landing has room (gt-3arxj). Every reader of the
-// log decides this here — the feed's own reads, the om-stats report, the
-// metrics loaders and the rejection join — so none can drift on what a queue
-// line is.
+// IsQueueLine reports whether raw is one of the log's bookkeeping lines rather
+// than a verdict: a follow-up queue line, whose followup_queue carries the
+// findings the feed's backpressure bound holds until a later landing has room
+// (gt-3arxj), or a follow-up skips line, whose followup_skips carries what the
+// skip policy dropped (gt-plcst6). Every reader of the log decides this here —
+// the feed's own reads, the om-stats report, the metrics loaders and the
+// rejection join — so none can drift on what a verdict is.
 //
-// A null payload names no queue line: it carries no findings, and the readers
-// that decode the record read it the same way. The loaders therefore report such
-// a line as one they could not use rather than skipping it uncounted, so a
+// A null payload names neither line: it carries nothing, and the readers that
+// decode the record read it the same way. The loaders therefore report such a
+// line as one they could not use rather than skipping it uncounted, so a
 // hand-edited marker is never silently a review (gt-3arxj).
 func IsQueueLine(raw []byte) bool {
 	var line struct {
 		Queue *json.RawMessage `json:"followup_queue"`
+		Skips *json.RawMessage `json:"followup_skips"`
 	}
 	// A JSON null unmarshals into a nil pointer, so the marker is the payload
 	// itself rather than the field's presence.
-	return json.Unmarshal(raw, &line) == nil && line.Queue != nil
+	return json.Unmarshal(raw, &line) == nil && (line.Queue != nil || line.Skips != nil)
 }
 
 // reviewFindingTexts is a verdict's findings as its record keeps them.
@@ -398,6 +404,30 @@ type QueuedFollowup struct {
 	Findings []ReviewFindingText
 }
 
+// FollowupSkipped is one skipped finding on a skips line: class, file, the
+// policy's reason and fingerprint, never its title or claim (gt-plcst6).
+type FollowupSkipped struct {
+	Class       string `json:"class,omitempty"`
+	File        string `json:"file,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+// FollowupSkips is a skips line's payload: the findings one landing's skip
+// policy dropped (gt-plcst6).
+type FollowupSkips struct {
+	Findings []FollowupSkipped `json:"findings"`
+}
+
+// FollowupSkipsRecord is one skips line as AppendSkips writes it: the landing
+// whose skip policy dropped findings, when, and the findings themselves.
+type FollowupSkipsRecord struct {
+	BeadID   string
+	Rig      string
+	At       time.Time
+	Findings []FollowupSkipped
+}
+
 // IsRejection reports whether the landing refused the work on this verdict:
 // om asked for changes, or the worker turned an approval away on its findings.
 func (r ReviewRecord) IsRejection() bool {
@@ -465,6 +495,14 @@ func (f *ReviewsFile) AppendQueue(q QueuedFollowup) error {
 	return nil
 }
 
+// AppendSkips appends this landing's skipped findings as one skips line: an
+// audit of what the follow-up skip policy dropped, which the verdict readers
+// skip like a queue line (gt-plcst6).
+func (f *ReviewsFile) AppendSkips(rec FollowupSkipsRecord) error {
+	return f.Append(ReviewRecord{BeadID: rec.BeadID, Rig: rec.Rig, At: rec.At,
+		Skips: &FollowupSkips{Findings: rec.Findings}})
+}
+
 // queueChunks splits a landing's held findings into the lines the queue keeps:
 // as many findings as fit under maxReviewLineBytes, at most
 // maxQueueLineFindings of them, with each claim bounded first.
@@ -510,7 +548,8 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 			return
 		}
 		var rec ReviewRecord
-		if json.Unmarshal(raw, &rec) != nil {
+		// A skips line also passes IsQueueLine and carries no queue payload.
+		if json.Unmarshal(raw, &rec) != nil || rec.Queue == nil {
 			return
 		}
 		queued = append(queued, QueuedFollowup{Bead: rec.BeadID, Rig: rec.Rig, At: rec.At,
@@ -570,9 +609,9 @@ func ScanReviewLines(r io.Reader, fn func(line []byte)) (tooLong int, err error)
 // Since returns the verdict records at or after t, in file order. A file that
 // does not exist yet is no records, and a torn or unparsable line is skipped,
 // as the landings file's readers do: the lines around it are still the log. A
-// queue line is not a verdict and is left out, so a reader joining a bead's
-// first record joins its verdict rather than the feed's bookkeeping
-// (gt-3arxj).
+// queue line or a skips line is not a verdict and is left out, so a reader
+// joining a bead's first record joins its verdict rather than the feed's
+// bookkeeping (gt-3arxj, gt-plcst6).
 func (f *ReviewsFile) Since(t time.Time) ([]ReviewRecord, error) {
 	fh, err := os.Open(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
