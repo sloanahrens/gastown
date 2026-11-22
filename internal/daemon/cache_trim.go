@@ -944,18 +944,32 @@ func (d *Daemon) cacheTrimFailedJobError(ctx context.Context, kubeconfig, namesp
 }
 
 // cacheTrimLogLine returns the last line of one container's log of the trim
-// Job, cut at cacheTrimFailLineLimit characters, or "" when the log cannot be
-// read or holds no line.
+// Job, its control characters replaced by spaces and the rest cut at
+// cacheTrimFailLineLimit characters, or "" when the log cannot be read or
+// holds no line.
 func (d *Daemon) cacheTrimLogLine(ctx context.Context, kubeconfig, namespace, jobName, container string) string {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "logs", "job/"+jobName, "-n", namespace, "-c", container, "--tail=1")
 	if err != nil {
 		return ""
 	}
-	line := lastLine(string(out))
+	line := cacheTrimPrintable(lastLine(string(out)))
 	if r := []rune(line); len(r) > cacheTrimFailLineLimit {
 		line = string(r[:cacheTrimFailLineLimit])
 	}
 	return line
+}
+
+// cacheTrimPrintable returns s with every control character, each rune below
+// U+0020 and U+007F, replaced by a space. The line it returns holds no ESC to
+// start a sequence and no carriage return to overwrite the log line, so the
+// container's own output cannot act in the daemon's log or the park's summary.
+func cacheTrimPrintable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // cacheTrimJobPod is the part of a trim Job's pod the stuck-pull read decides
