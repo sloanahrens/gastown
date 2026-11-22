@@ -167,18 +167,16 @@ func (d *Daemon) ciCacheDueVolumes(now time.Time, every time.Duration) []ciCache
 	return due
 }
 
-// ciCacheTrimNoReason is the why a failed trim puts in each volume's attention
-// item: it names the patrol's disk_maintenance log line for the failure, which
-// the later beads put into the item itself (gt-76cz9d, gt-u6garf).
+// ciCacheTrimNoReason is the why a volume's own failed trim puts in its attention
+// item: it names the patrol's disk_maintenance log line (gt-76cz9d, gt-u6garf).
 const ciCacheTrimNoReason = "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time"
 
 // ciCacheFailDue concludes each volume in due as a failed run: the volume's next
 // attempt is its normal cadence, a full interval after concluded, and its failure
-// raises one attention item keyed to that volume (gt-76cz9d). A pass that fails
-// before it tries any volume concludes every due volume the same way.
-func (d *Daemon) ciCacheFailDue(ctx context.Context, due []ciCacheVolume, concluded time.Time, every time.Duration) {
+// raises one attention item keyed to that volume, carrying why (gt-76cz9d, gt-x7hl2a).
+func (d *Daemon) ciCacheFailDue(ctx context.Context, due []ciCacheVolume, concluded time.Time, every time.Duration, why string) {
 	for _, v := range due {
-		d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, false, concluded, every, ciCacheTrimNoReason)
+		d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, false, concluded, every, why)
 	}
 }
 
@@ -685,7 +683,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheFailDue(ctx, due, s.now(), every)
+		d.ciCacheFailDue(ctx, due, s.now(), every, err.Error())
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
@@ -696,7 +694,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 			kind = "pod not running"
 		}
 		d.ciCacheTrimLogf(kind, "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheFailDue(ctx, due, s.now(), every)
+		d.ciCacheFailDue(ctx, due, s.now(), every, err.Error())
 		return false
 	}
 
@@ -716,7 +714,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 			continue
 		}
 		verdict = false
-		d.ciCacheFailDue(ctx, []ciCacheVolume{v}, s.now(), every)
+		d.ciCacheFailDue(ctx, []ciCacheVolume{v}, s.now(), every, ciCacheTrimNoReason)
 	}
 	return verdict
 }
