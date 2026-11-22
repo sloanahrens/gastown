@@ -311,3 +311,54 @@ func TestRebootCheckClusterForwardCommands(t *testing.T) {
 		})
 	}
 }
+
+// clusterFake is a Runner that answers every read in ClusterChecks with a
+// healthy cluster and records every argv.
+func clusterFake(calls *[][]string) Runner {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string{name}, args...))
+		switch {
+		case name == "curl":
+			return []byte("200"), nil
+		case strings.Contains(strings.Join(args, " "), "get pods"):
+			return []byte(readyPodsJSON), nil
+		case name == "kubectl":
+			return []byte(deploymentsJSON(deploymentJSON("daemon", 1, 1),
+				deploymentJSON("dashboard", 1, 1))), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+}
+
+// TestRebootCheckClusterOrder pins that ClusterChecks returns the Forgejo,
+// replicas and forward checks in the operations doc's order, and that on a
+// healthy cluster the Runner ran exactly those three read commands and nothing
+// else (gt-ia7aq7).
+func TestRebootCheckClusterOrder(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	checks := ClusterChecks(clusterFake(&calls))
+	rows := RunAll(context.Background(), checks)
+	wantNames := []string{"5 forgejo", "6 replicas", "9 forward"}
+	if len(rows) != len(wantNames) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(wantNames))
+	}
+	for i, row := range rows {
+		if row.Name != wantNames[i] {
+			t.Errorf("rows[%d].Name = %q, want %q", i, row.Name, wantNames[i])
+		}
+		if !row.OK {
+			t.Errorf("row %q not OK on a healthy cluster: %q", row.Name, row.Detail)
+		}
+	}
+	wantCalls := [][]string{
+		{"kubectl", "--context", "colima-gt-control", "-n", "forgejo", "get", "pods", "-o", "json"},
+		{"kubectl", "--context", "colima-gt-control", "-n", "gt",
+			"get", "deploy", "daemon", "dashboard", "-o", "json"},
+		{"curl", "--max-time", "5", "-s", "-o", "/dev/null",
+			"-w", "%{http_code}", "http://127.0.0.1:8787/api/state"},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("runner calls = %q, want only %q", calls, wantCalls)
+	}
+}

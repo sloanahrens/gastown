@@ -144,3 +144,10 @@ func ForwardCheck(run Runner) Check {
 		},
 	}
 }
+
+// ClusterChecks returns the cluster checks in the order the operations doc runs
+// them: the Forgejo pods, the daemon and dashboard replicas, then the dashboard
+// forward (gt-ia7aq7).
+func ClusterChecks(run Runner) []Check {
+	return []Check{ForgejoCheck(run), ReplicasCheck(run), ForwardCheck(run)}
+}
