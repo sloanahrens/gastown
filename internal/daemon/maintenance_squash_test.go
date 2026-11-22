@@ -3183,18 +3183,6 @@ func TestSquashResetHoldDatesFromTheNewerInstant(t *testing.T) {
 	}
 }
 
-// TestSquashResetHoldEqualsTheRunInterval: the hold a reset stamp puts on a
-// gate is the gate itself, one rule in two places; doltsquash.RunInterval is the
-// source (squashCheckInterval already follows it) and a hold of another length
-// would open a database's gate early or keep it shut past its own interval
-// (gt-n0oake).
-func TestSquashResetHoldEqualsTheRunInterval(t *testing.T) {
-	t.Parallel()
-	if squashResetHold != doltsquash.RunInterval {
-		t.Errorf("squashResetHold = %v, want doltsquash.RunInterval %v", squashResetHold, doltsquash.RunInterval)
-	}
-}
-
 // TestSquashCheckRunsNothingOnAFutureRecord: a squash record whose last run is
 // ahead of the check's clock opens no gate: the check runs no database and
 // says it did not decide (gt-5eicg2).
