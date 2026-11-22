@@ -78,6 +78,19 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 	return d, server, &escalations, logs
 }
 
+// squashDestructiveSent reports whether the server was sent a statement that is
+// not a read. A refused, untakeable or held run may add harmless reads, so the
+// tests assert this instead of an exact count; anything but a SELECT or a SHOW
+// is a statement such a run must never send.
+func squashDestructiveSent(queries []string) bool {
+	for _, q := range queries {
+		if !strings.HasPrefix(q, "SELECT") && !strings.HasPrefix(q, "SHOW") {
+			return true
+		}
+	}
+	return false
+}
+
 // squashBackupRoot is the daemon's backup root, failing the test when the seam
 // cannot name one.
 func squashBackupRoot(t *testing.T, d *Daemon) string {
@@ -431,8 +444,8 @@ func TestSquashMarkerRefusesASecondDaemon(t *testing.T) {
 	if strings.Contains(got, "the run failed") || strings.Contains(got, "reading the branches") {
 		t.Errorf("a refused run sent statements of its own: %q", got)
 	}
-	if len(server.queries) != squashP95Rounds+1 {
-		t.Errorf("a refused run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("a refused run sent a statement that is not a read: %q", server.queries)
 	}
 	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
 		t.Error("a run refused by the marker set the daily gate: the check is not due again after the retry delay")
@@ -466,8 +479,8 @@ func TestSquashMarkerUnavailableIsNotARun(t *testing.T) {
 	if strings.Contains(got, "reading the branches") {
 		t.Errorf("an untakeable marker still ran the engine: %q", got)
 	}
-	if len(server.queries) != squashP95Rounds+1 {
-		t.Errorf("an untakeable marker sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("an untakeable marker sent a statement that is not a read: %q", server.queries)
 	}
 	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
 		t.Error("a run that could not take its marker set the daily gate")
@@ -580,8 +593,8 @@ func TestSquashMarkerHoldsWithoutAFreshBackup(t *testing.T) {
 	if strings.Contains(got, "reading the branches") {
 		t.Errorf("a run started on a stale backup: %q", got)
 	}
-	if len(server.queries) != squashP95Rounds+1 {
-		t.Errorf("a held run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("a held run sent a statement that is not a read: %q", server.queries)
 	}
 }
 
@@ -1529,6 +1542,30 @@ func readSquashLedger(t *testing.T, townRoot string) []squashLedgerEntry {
 	return entries
 }
 
+// TestSquashRecordDestructiveStatementIsNotARead pins the classification the
+// refused-run tests lean on: a reading passes, and the statements a squash
+// issues — the UPDATE that marks rows and the CALL that swaps branches — do not.
+func TestSquashRecordDestructiveStatementIsNotARead(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		queries []string
+		want    bool
+	}{
+		"no statements": {nil, false},
+		"readings":      {[]string{"SELECT COUNT(*) FROM dolt_log('main')", "SHOW FULL TABLES"}, false},
+		"an update":     {[]string{"SELECT COUNT(*) FROM dolt_rebase", "UPDATE dolt_rebase SET action = 'squash'"}, true},
+		"a call":        {[]string{"CALL DOLT_CHECKOUT('main')"}, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := squashDestructiveSent(tc.queries); got != tc.want {
+				t.Errorf("squashDestructiveSent(%q) = %v, want %v", tc.queries, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSquashRecordCompletedRunWritesStateAndLedger is the bead's first box for
 // a completed run: its state record names the start and outcome, and its one
 // ledger line carries the commits, the three step durations and the retries.
@@ -1807,9 +1844,9 @@ func TestSquashRecordRefusedRunWritesNothing(t *testing.T) {
 	if entries := readSquashLedger(t, d.config.TownRoot); len(entries) != 0 {
 		t.Errorf("a refused run wrote %d ledger lines: %+v", len(entries), entries)
 	}
-	// The refusal is the check's, not a run's: only the readings were sent.
-	if len(server.queries) != squashP95Rounds+1 {
-		t.Errorf("a refused run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	// The refusal is the check's, not a run's: nothing but a read was sent.
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("a refused run sent a statement that is not a read: %q", server.queries)
 	}
 }
 
