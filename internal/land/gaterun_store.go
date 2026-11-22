@@ -92,6 +92,22 @@ func archivedGateRunKeys(fsys gateRunFS, month string) (map[string]bool, error) 
 	return keys, nil
 }
 
+// gateRunRejectsFile holds the lines of the gate-run log that did not decode.
+const gateRunRejectsFile = "gate-runs-rejects.jsonl"
+
+// appendGateRunRejects appends the lines the rotation could not decode to path.
+func appendGateRunRejects(fsys gateRunFS, path string, lines []byte) error {
+	f, err := fsys.OpenAppend(path)
+	if err != nil {
+		return fmt.Errorf("land: opening %s: %w", path, err)
+	}
+	_, werr := f.Write(lines)
+	if werr = errors.Join(werr, f.Close()); werr != nil {
+		return fmt.Errorf("land: keeping the undecodable lines in %s: %w", path, werr)
+	}
+	return nil
+}
+
 // rotateGateRuns moves the rows of the current log into one gzipped file per
 // month beside it, a month file that exists gaining a further gzip member, and
 // removes the current log only once every month file is written, so a failure
@@ -103,10 +119,14 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		return fmt.Errorf("land: reading %s to rotate it: %w", path, err)
 	}
 	var rows []GateRun
+	var rejects []byte // every line that did not decode, as it was read, each with its newline
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		var r *GateRun
-		if json.Unmarshal(line, &r) == nil && r != nil {
+		switch {
+		case json.Unmarshal(line, &r) == nil && r != nil:
 			rows = append(rows, *r)
+		case len(bytes.TrimSpace(line)) > 0:
+			rejects = append(append(rejects, line...), '\n')
 		}
 	}
 	for _, group := range groupGateRunsByMonth(rows) {
@@ -137,6 +157,15 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		werr = errors.Join(werr, zw.Close(), f.Close())
 		if werr != nil {
 			return fmt.Errorf("land: writing %s: %w", month, werr)
+		}
+	}
+	if len(rejects) > 0 {
+		// Kept, not destroyed with the log: a body that is a whole gate run with a
+		// ts that has no zone is real data lost to a format slip (gt-a78yu0). A
+		// failed write removes nothing; a retry archives the month files again
+		// idempotently, and the rejects file is plain text that is never rotated.
+		if err := appendGateRunRejects(fsys, filepath.Join(filepath.Dir(path), gateRunRejectsFile), rejects); err != nil {
+			return err
 		}
 	}
 	if err := fsys.Remove(path); err != nil {
