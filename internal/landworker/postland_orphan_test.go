@@ -167,12 +167,6 @@ func TestPostLandOrphanAsk(t *testing.T) {
 			responses: []fakeStatusRead{{status: missing}}, end: ended,
 			passes: 1, wantAsks: 0, wantLeft: 1,
 		},
-		{
-			name:  "a zero clock asks nothing and marks nothing",
-			clock: time.Time{}, advance: 0,
-			responses: []fakeStatusRead{{status: pending}}, end: ended,
-			passes: 1, wantAsks: 0, wantLeft: 1,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -431,5 +425,158 @@ func TestPostLandOrphanAskBackoffSurvivesJSON(t *testing.T) {
 	}
 	if !got.OrphanAsked.Equal(e.OrphanAsked) {
 		t.Errorf("after a round trip OrphanAsked = %v, want %v", got.OrphanAsked, e.OrphanAsked)
+	}
+}
+
+// orphanPendingRead is the status source every orphan test starts from: one
+// pending read that repeats, so the entry keeps waiting between passes.
+func orphanPendingRead() *fakeStatusReads {
+	return &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+}
+
+// TestPostLandOrphanLiveRun: a seam that answers a live run leaves the entry
+// unmarked. Only an ended run is an orphan: a check that can still report a
+// verdict keeps waiting (gt-vdudjh).
+func TestPostLandOrphanLiveRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+	seam := &orphanSeam{end: RunEnd{Run: 11205, Status: "running"}}
+	r := v.runner(orphanPendingRead().read, store, clk, 0)
+	r.RunEnded = seam.ask
+	r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+	clk.Advance(PostLandOrphanAfter)
+
+	pollWithin(t, r, ctx)
+
+	if got := seam.count(); got != 1 {
+		t.Fatalf("the seam was asked %d times, want 1", got)
+	}
+	left := pendingOf(t, store)
+	if len(left) != 1 || !left[0].OrphanedAt.IsZero() || left[0].OrphanRun != "" {
+		t.Fatalf("pending = %+v, want the entry unmarked for a live run", left)
+	}
+	if logs := v.logText(); strings.Contains(logs, "orphaned at ") {
+		t.Fatalf("a live run was logged as orphaned:\n%s", logs)
+	}
+}
+
+// TestPostLandOrphanNilSeam: a runner with no run seam checks nothing. The pass
+// still reads the status and leaves the entry unmarked, so the wait goes on as
+// it did before the seam existed (gt-vdudjh).
+func TestPostLandOrphanNilSeam(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+	reads := orphanPendingRead()
+	r := v.runner(reads.read, store, clk, 0)
+	r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+	clk.Advance(PostLandOrphanAfter)
+
+	pollWithin(t, r, ctx)
+
+	if got := reads.count(); got != 1 {
+		t.Fatalf("the status was read %d times, want 1", got)
+	}
+	left := pendingOf(t, store)
+	if len(left) != 1 || !left[0].OrphanedAt.IsZero() || left[0].OrphanRun != "" {
+		t.Fatalf("pending = %+v, want the entry unmarked with no seam to ask", left)
+	}
+}
+
+// TestPostLandOrphanErrorLeavesUnmarked: a seam error is not an end. The entry
+// stays unmarked, the WARNING says the entry keeps waiting, and once the ask
+// interval has passed a later due read asks the seam again (gt-vdudjh).
+func TestPostLandOrphanErrorLeavesUnmarked(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+	seam := &orphanSeam{err: errors.New("forgejo answered 500")}
+	r := v.runner(orphanPendingRead().read, store, clk, 0)
+	r.RunEnded = seam.ask
+	r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+	clk.Advance(PostLandOrphanAfter)
+
+	pollWithin(t, r, ctx)
+
+	if got := seam.count(); got != 1 {
+		t.Fatalf("the seam was asked %d times at the window, want 1", got)
+	}
+	left := pendingOf(t, store)
+	if len(left) != 1 || !left[0].OrphanedAt.IsZero() || left[0].OrphanRun != "" {
+		t.Fatalf("pending = %+v, want the entry unmarked after a seam error", left)
+	}
+	if logs := v.logText(); !strings.Contains(logs, "the entry keeps waiting") {
+		t.Fatalf("logs do not say the entry keeps waiting:\n%s", logs)
+	}
+
+	clk.Advance(PostLandOrphanAskEvery)
+	pollWithin(t, r, ctx)
+
+	if got := seam.count(); got != 2 {
+		t.Fatalf("the seam was asked %d times after the ask interval, want 2", got)
+	}
+	if left := pendingOf(t, store); len(left) != 1 || !left[0].OrphanedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the entry still unmarked while the seam errors", left)
+	}
+}
+
+// TestPostLandOrphanGreenDecided: a green read at the orphan window decides the
+// entry as before and the seam is never asked: a decided read is not evidence
+// the run is silent (gt-vdudjh).
+func TestPostLandOrphanGreenDecided(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+	green := combinedFor(statusContext, forgejo.StateSuccess)
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: green}}}
+	seam := &orphanSeam{end: RunEnd{Run: 11205, Status: "cancelled", Ended: true}}
+	r := v.runner(reads.read, store, clk, 0)
+	r.RunEnded = seam.ask
+	r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+	clk.Advance(PostLandOrphanAfter)
+
+	pollWithin(t, r, ctx)
+
+	if got := seam.count(); got != 0 {
+		t.Fatalf("the seam was asked %d times for a green verdict, want 0", got)
+	}
+	if greens, _, _ := v.counts(); greens != 1 {
+		t.Fatalf("green verdicts = %d, want 1", greens)
+	}
+	if left := pendingOf(t, store); len(left) != 0 {
+		t.Fatalf("%d pending entries left after a green verdict, want 0: %+v", len(left), left)
+	}
+}
+
+// TestPostLandOrphanZeroClock: a zero clock is no clock to mark by, so the seam
+// is not asked and nothing is marked. Moved from the gt-xgjwe0 table row.
+func TestPostLandOrphanZeroClock(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{}
+	seam := &orphanSeam{end: RunEnd{Run: 11205, Status: "cancelled", Ended: true}}
+	r := v.runner(orphanPendingRead().read, store, clk, 0)
+	r.RunEnded = seam.ask
+	r.Trigger(ctx, PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"})
+
+	pollWithin(t, r, ctx)
+
+	if got := seam.count(); got != 0 {
+		t.Fatalf("the seam was asked %d times with a zero clock, want 0", got)
+	}
+	left := pendingOf(t, store)
+	if len(left) != 1 || !left[0].OrphanedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the entry unmarked with no clock", left)
 	}
 }
