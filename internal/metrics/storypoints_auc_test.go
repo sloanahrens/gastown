@@ -64,7 +64,7 @@ func TestLongAUCInterval(t *testing.T) {
 		resamples int
 	}{
 		{name: "perfect ordering skips the one-class resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}},
-		{name: "no resample drew both classes", est: []float64{1, 2}, measured: []float64{20, 10}, wantErr: "no usable resample"},
+		{name: "no resample drew both classes", est: []float64{1, 2}, measured: []float64{20, 10}, wantErr: "0 of 40 resamples usable"},
 		{name: "unequal lengths", est: []float64{1, 2}, measured: []float64{30}, wantErr: "2 estimates, 1 measured"},
 		{name: "a NaN estimate is refused", est: []float64{9, 2, math.NaN(), 0.5}, measured: []float64{30, 10, 5, 3}, wantErr: "not finite"},
 		{name: "negative resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}, resamples: -1, wantErr: "resamples"},
@@ -102,5 +102,42 @@ func TestLongAUCInterval(t *testing.T) {
 		if err2 != nil || lo2 != lo || hi2 != hi {
 			t.Fatalf("LongAUCInterval with one seed = %v..%v then %v..%v, %v, want the same", lo, hi, lo2, hi2, err2)
 		}
+	}
+}
+
+// TestLongAUCIntervalRefuses: an interval needs two resamples, and at least half
+// of them must draw both classes. A series whose resamples come out one-class
+// more often than not is an error naming the usable count; a balanced series
+// returns an interval. One long bead in 40 draws the long bead in about 64% of
+// its resamples, so it stays above half; a one-long, one-short series is the
+// shape that can fall below it.
+func TestLongAUCIntervalRefuses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		est       []float64
+		measured  []float64
+		resamples int
+		seed      uint64
+		wantErr   string
+	}{
+		{name: "one resample", est: []float64{9, 1, 2}, measured: []float64{40, 10, 5}, resamples: 1, seed: 1, wantErr: "1 resamples, want at least 2"},
+		{name: "one long bead among two keeps under half usable", est: []float64{9, 1}, measured: []float64{40, 10}, resamples: 400, seed: 4, wantErr: "192 of 400 resamples usable"},
+		{name: "balanced series", est: []float64{9, 1, 8, 2}, measured: []float64{40, 10, 30, 5}, resamples: 400, seed: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			lo, hi, err := LongAUCInterval(tt.est, tt.measured, 20, tt.resamples, tt.seed)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || lo != 0 || hi != 0 {
+					t.Fatalf("LongAUCInterval = %v..%v, %v, want 0..0 and an error naming %q", lo, hi, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || lo < 0 || hi > 1 || lo > hi {
+				t.Fatalf("LongAUCInterval = %v..%v, %v, want an interval 0 <= lo <= hi <= 1", lo, hi, err)
+			}
+		})
 	}
 }
