@@ -1610,16 +1610,25 @@ func (w *Worker) announce(id, key, msg string) {
 // is a write nothing reads (gt-r9pj9). Every key posted is remembered, not just
 // the last, so a bead whose outcome alternates — refused for one reason, then
 // another, then the first again — does not re-post each one in turn. A failed
-// write is logged as what failed and leaves the key unset, so the next pass
-// tries again.
+// write is logged as what failed, then queued as an annotation record for the
+// drain, and the key is set so neither the queue nor a later pass posts it
+// again. With no queue, or a queue that refuses it, the key stays unset and the
+// next pass tries again (gt-o021qa).
 func (w *Worker) annotate(id, key, what, msg string) {
 	st := w.bead(id)
 	if st.annotated[key] {
 		return
 	}
 	if err := w.Beads.AddComment(id, msg); err != nil {
-		w.logf("%s: %s: %v", id, what, err)
-		return
+		w.logf("%s: %s (key %s): %v", id, what, key, err)
+		if w.Records != nil {
+			if err := w.Records.Enqueue(land.PendingRecord{Bead: id, Kind: land.RecordKindAnnotation, Key: key, Text: msg, At: w.now()}); err != nil {
+				w.logf("%s: %s (key %s): queueing the annotation: %v", id, what, key, err)
+				return
+			}
+		} else {
+			return
+		}
 	}
 	if st.annotated == nil {
 		st.annotated = map[string]bool{}

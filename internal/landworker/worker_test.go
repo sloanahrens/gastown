@@ -534,7 +534,7 @@ func TestPassHumanRejectionCommentFailureIsLogged(t *testing.T) {
 	mu.Lock()
 	joined := strings.Join(logs, "\n")
 	mu.Unlock()
-	if !strings.Contains(joined, "adding the human-rejection comment: bd down") {
+	if !strings.Contains(joined, "adding the human-rejection comment (key human-rejection:") || !strings.Contains(joined, "bd down") {
 		t.Fatalf("logs %q; want the comment failure logged", joined)
 	}
 	if cs := h.comments(t, "gt-abc"); len(cs) != 0 {
