@@ -428,6 +428,9 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 	ctx, cancel := context.WithTimeout(parent, g.waitTimeout())
 	defer cancel()
 	blips := 0
+	// unreported counts the consecutive reads with no verdict: the poll line is
+	// written on the first and every fifth of them (gt-72qo4k).
+	unreported := 0
 	for {
 		state, err := g.state(ctx, wf, &res)
 		if err != nil {
@@ -436,6 +439,7 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 				// not a blip to tolerate.
 				return g.waitedOut(parent, wf, res)
 			}
+			unreported = 0
 			blips++
 			if blips > candidateStatusErrorTolerance {
 				res.Err = fmt.Errorf("%d consecutive status reads failed: %w", blips, err)
@@ -455,7 +459,10 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 				res.State = CandidateFailed
 				return res
 			}
-			g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
+			unreported++
+			if unreported%5 == 1 {
+				g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
+			}
 		}
 		timer := time.NewTimer(g.pollInterval())
 		select {

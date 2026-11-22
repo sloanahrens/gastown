@@ -1134,6 +1134,44 @@ func (b *blipAfterReads) CombinedStatus(ctx context.Context, owner, repo, ref st
 	return b.CandidateStatus.CombinedStatus(ctx, owner, repo, ref)
 }
 
+// pollLines counts the "has not reported" lines a gate writes before a pass.
+func pollLines(t *testing.T, client CandidateStatus) int {
+	t.Helper()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	gate := fastGate(client)
+	var log strings.Builder
+	gate.Out = &log
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidatePassed {
+		t.Fatalf("state = %v, want passed", res.State)
+	}
+	return strings.Count(log.String(), "has not reported")
+}
+
+// TestCandidateGatePollLogsEveryFifthRead: seven silent reads then a pass write
+// the poll line on the first read and the sixth (gt-72qo4k).
+func TestCandidateGatePollLogsEveryFifthRead(t *testing.T) {
+	t.Parallel()
+	pending := status(forgejo.StatePending, "ci / gate (push)")
+	statuses := append(slices.Repeat([]forgejo.CommitStatus{pending}, 7), status(forgejo.StateSuccess, "ci / gate (push)"))
+	if got := pollLines(t, &fakeForgejo{statuses: statuses}); got != 2 {
+		t.Fatalf("%d poll line(s) for seven silent reads, want 2 (the first and the sixth)", got)
+	}
+}
+
+// TestCandidateGatePollLogsResetOnError: an error between silent reads makes the
+// next silent read write the line again (gt-72qo4k).
+func TestCandidateGatePollLogsResetOnError(t *testing.T) {
+	t.Parallel()
+	pending := status(forgejo.StatePending, "ci / gate (push)")
+	statuses := append(slices.Repeat([]forgejo.CommitStatus{pending}, 3), status(forgejo.StateSuccess, "ci / gate (push)"))
+	gate := &blipAfterReads{CandidateStatus: &fakeForgejo{statuses: statuses}, blipAt: map[int]error{3: errors.New("connection reset by peer")}}
+	if got := pollLines(t, gate); got != 2 {
+		t.Fatalf("%d poll line(s), want the first read's and the one after the error", got)
+	}
+}
+
 // TestCandidateGateGivesUpAfterTheTolerance: errors past the tolerance are not
 // a wait that never ends; the landing takes the infra path with the last
 // error.
