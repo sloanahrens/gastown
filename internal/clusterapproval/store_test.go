@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -358,5 +359,84 @@ func TestClusterApprovalStoreErrorsNameNoContent(t *testing.T) {
 	}
 	if strings.Contains(msg, secretKey) || strings.Contains(msg, secretValue) {
 		t.Fatalf("the refusal %q carries the record's key or value", msg)
+	}
+}
+
+// swapAfterOpenDir is the real disk, except the first OpenDir runs swap once the directory is open.
+type swapAfterOpenDir struct {
+	deployercred.Disk
+	swap func() error
+	ran  bool
+}
+
+func (s *swapAfterOpenDir) OpenDir(name string) (deployercred.Dir, error) {
+	dir, err := s.Disk.OpenDir(name)
+	if err != nil || s.ran {
+		return dir, err
+	}
+	s.ran = true
+	if err := s.swap(); err != nil {
+		_ = dir.Close() // the swap failed before any read: a close error changes nothing
+		return nil, err
+	}
+	return dir, nil
+}
+
+// writeApprovalTree writes <tree>/approvals/<goodID>.json, modes 0750 and 0640,
+// owned by the test's uid and gid, and returns the approvals directory.
+func writeApprovalTree(t *testing.T, base, tree string, fields map[string]any) string {
+	dir := filepath.Join(base, tree, "approvals")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-exec-files — the target is the approvals directory: the reader requires 0750, whose owner-execute bit is the directory search bit
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, goodID+".json")
+	if err := os.WriteFile(file, []byte(recordText(fields)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestClusterApprovalStoreSwappedAncestor proves ReadRecord reads the record it
+// checked when the opened path is swapped for a symlink right after OpenDir. Rows
+// swap the approval directory, or the directory above it, for a decoy tree holding
+// a second valid record. Mutation proof: a ReadRecord that opened the directory by
+// its path again after OpenDir reads the decoy record and fails got != want.
+func TestClusterApprovalStoreSwappedAncestor(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, swapped, target string }{
+		{"the approval directory", filepath.Join("real", "approvals"), filepath.Join("decoy", "approvals")},
+		{"the directory above the approval directory", "real", "decoy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// macOS keeps the temp dir under /var, a symlink that refuseSymlinkChain refuses.
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := writeApprovalTree(t, base, "real", goodRecord())
+			writeApprovalTree(t, base, "decoy", with(goodRecord(), map[string]any{"plan_sha256": strings.Repeat("b2", 32)}))
+
+			swapped := filepath.Join(base, tt.swapped)
+			fsys := &swapAfterOpenDir{swap: func() error {
+				if err := os.Rename(swapped, swapped+".moved"); err != nil {
+					return err
+				}
+				return os.Symlink(filepath.Join(base, tt.target), swapped)
+			}}
+			got, err := ReadRecord(fsys, os.Getuid(), os.Getgid(), dir, goodID)
+			want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)}
+			if !fsys.ran || err != nil || got != want {
+				t.Fatalf("swap ran %v: ReadRecord read %+v, %v after the swap, want the record it checked: %+v", fsys.ran, got, err, want)
+			}
+		})
 	}
 }
