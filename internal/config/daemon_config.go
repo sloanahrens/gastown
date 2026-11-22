@@ -1170,11 +1170,14 @@ type ScheduledMaintenanceConfig struct {
 	ArchiveDir string `json:"archive_dir,omitempty"`
 
 	// TownStateBackupRoot is where the nightly town-state backup writes its
-	// dated nights (internal/daemon/town_state_nightly.go, gt-5dgbcy). Empty
-	// turns the step off. The daemon refuses a relative path, as ParseArchiveDir
+	// dated nights (internal/daemon/town_state_nightly.go, gt-5dgbcy). A nil
+	// pointer is the key left out of a present section: the step alerts rather
+	// than reads it as off, so a backup that does nothing because nobody set
+	// its root is never silent. A pointer to the empty string turns the step
+	// off deliberately. The daemon refuses a relative path, as ParseArchiveDir
 	// refuses one, since a root resolved against the daemon's working directory
 	// is a backup nobody can find.
-	TownStateBackupRoot string `json:"town_state_backup_root,omitempty"`
+	TownStateBackupRoot *string `json:"town_state_backup_root,omitempty"`
 
 	// ArchiveCommitLimit bounds one maintenance run's dolt_log read per
 	// database, so a first export against a whole history writes a bounded

@@ -1136,12 +1136,20 @@ func TestMaintenanceGCCycleWithoutDataDirRunsWeekly(t *testing.T) {
 // --- wiring through runScheduledMaintenance ---------------------------------
 
 // gcModeConfig is a config whose window is open at the fake clock's reading.
+// The nightly town-state backup is off by an explicit empty string: these tests
+// are about the Dolt backup, gc and the alert under test, and a section with
+// the key left out now alerts (gt-l9qnva), which would add a second escalation
+// to every tick they observe.
 func gcModeConfig() *DaemonPatrolConfig {
 	window := gcTestNow.Truncate(time.Hour).Format("15:04")
 	return &DaemonPatrolConfig{
 		Type: "daemon-patrol-config", Version: 1,
 		Patrols: &PatrolsConfig{
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: true, Window: window},
+			ScheduledMaintenance: &ScheduledMaintenanceConfig{
+				Enabled:             true,
+				Window:              window,
+				TownStateBackupRoot: nightlyRoot(""),
+			},
 		},
 	}
 }

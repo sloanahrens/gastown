@@ -391,7 +391,7 @@ const alertKeyTownStateNightly = "town_state_backup:nightly"
 
 // errTownStateNightlyOff reports a setting that is present and empty: the step
 // is off by the operator's choice, which is logged once a day, not alerted.
-var errTownStateNightlyOff = errors.New("town_state_backup_root is empty")
+var errTownStateNightlyOff = errors.New("town_state_backup_root is explicitly empty")
 
 // townStateNightlyOutcome is what one maintenance cycle's town-state step took.
 type townStateNightlyOutcome int
@@ -409,17 +409,24 @@ const (
 // townStateNightlyRoot returns the directory the nightly town-state backup
 // writes into. A config with no scheduled_maintenance section is an error
 // rather than the off state: a town whose section is missing would otherwise
-// keep no backup and say nothing, while an operator who means to turn the step
-// off has the key to leave empty (gt-5dgbcy). A relative root is refused for
-// the reason ParseArchiveDir refuses one: resolved against the daemon's working
-// directory it writes a backup nobody can find.
+// keep no backup and say nothing (gt-5dgbcy). So is a present section whose
+// town_state_backup_root key is absent: only an explicit empty string is the
+// operator's off state, and a root nobody set must alert rather than pass as
+// off. A relative root is refused for the reason ParseArchiveDir refuses one:
+// resolved against the daemon's working directory it writes a backup nobody
+// can find.
 func (d *Daemon) townStateNightlyRoot() (string, error) {
 	pc := d.patrol()
 	if pc == nil || pc.Patrols == nil || pc.Patrols.ScheduledMaintenance == nil {
 		return "", fmt.Errorf("the scheduled_maintenance patrol config is absent, so %s has no value",
 			config.MaintenanceTownStateBackupRootKey)
 	}
-	root := strings.TrimSpace(pc.Patrols.ScheduledMaintenance.TownStateBackupRoot)
+	setting := pc.Patrols.ScheduledMaintenance.TownStateBackupRoot
+	if setting == nil {
+		return "", fmt.Errorf("%s is unset: set it to an absolute path, or to \"\" to turn the nightly backup off",
+			config.MaintenanceTownStateBackupRootKey)
+	}
+	root := strings.TrimSpace(*setting)
 	if root == "" {
 		return "", errTownStateNightlyOff
 	}
@@ -441,13 +448,13 @@ func (d *Daemon) runTownStateBackupStep(now time.Time) townStateNightlyOutcome {
 		// Keyed by date: a town whose cycle runs twice in one day says it once,
 		// and the next day says it again.
 		d.townStateNightlyLog.logAs(d.logger.Printf, "off", now.Format(time.DateOnly),
-			fmt.Sprintf("scheduled_maintenance: town-state backup is off: %s is empty",
+			fmt.Sprintf("scheduled_maintenance: town-state backup is off: %s is explicitly empty",
 				config.MaintenanceTownStateBackupRootKey))
 		// Off is the operator's choice, so the step's alert is settled on every
 		// off run: an alert raised on an earlier night must not outlive turning
 		// the step off on purpose.
 		d.clearAlerts("the nightly town-state backup is off: "+
-			config.MaintenanceTownStateBackupRootKey+" is empty",
+			config.MaintenanceTownStateBackupRootKey+" is explicitly empty",
 			alertKeyTownStateNightly)
 		return townStateNightlyOff
 	case err != nil:
