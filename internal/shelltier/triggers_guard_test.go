@@ -6,24 +6,21 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 	"github.com/steveyegge/gastown/internal/tiertrigger"
 )
 
-// repoRoot is the worktree this test file sits in, so the guards read the
-// scripts the manifest lists rather than a copy of them.
+// repoRoot is the worktree this test runs in, so the guards read the
+// scripts the manifest lists rather than a copy of them. modroot walks up
+// from go test's working directory, which -trimpath leaves intact.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller did not report this test file's path")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	return modroot.Root(t)
 }
 
 // repoFiles returns the reader the guards use on the tree this test runs in.
