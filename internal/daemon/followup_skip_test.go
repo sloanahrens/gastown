@@ -133,6 +133,24 @@ func TestFollowupSkipPolicyIsWired(t *testing.T) {
 	}
 }
 
+// TestFollowupSkipPolicySetsTheClass: applyFollowupPolicy installs the class
+// function beside the skip hook, so the feed's skips line records the class of a
+// finding the policy drops, read from the same title and claim (gt-xwdiiy).
+func TestFollowupSkipPolicySetsTheClass(t *testing.T) {
+	t.Parallel()
+	var l land.Lander
+	applyFollowupPolicy(&l)
+	if l.FollowupClass == nil {
+		t.Fatal("applyFollowupPolicy left FollowupClass nil, so a skips line records the empty class")
+	}
+	c := land.FollowupCandidate{Path: "internal/land/advice.go",
+		Title: "Comment narrates the old retry loop",
+		Claim: "the comment describes a loop the caller no longer runs"}
+	if got, want := l.FollowupClass(c), commentClaimClass; got != want {
+		t.Errorf("FollowupClass(comment-claim) = %q, want %q", got, want)
+	}
+}
+
 // TestApplyFollowupPolicyBuildsThroughPolicyFor: applyFollowupPolicy builds its
 // hook through policyFor, so a fake fixed inside the hold-out window withholds
 // what the same fake fixed before it keeps (gt-l0q48h).
@@ -327,6 +345,34 @@ func TestFollowupSkipPolicyFilesUnsureTitles(t *testing.T) {
 	})
 }
 
+// TestFollowupSkipPolicyIsPureAndTotal: the policy is a function of its Work and
+// candidate alone, so the feed's later ask about a held finding gets the same
+// answer (gt-r66hk7), and a zero Work with a zero candidate answers without a
+// panic (the hook has no error return, gt-g97vlb). It runs every policy table
+// above, whose runner asks each row three times at the fixed clock.
+func TestFollowupSkipPolicyIsPureAndTotal(t *testing.T) {
+	t.Parallel()
+	for _, table := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"skip", TestFollowupSkipPolicy},
+		{"keeps real defects", TestFollowupSkipPolicyKeepsRealDefects},
+		{"hold-out", TestFollowupSkipPolicyHoldOut},
+		{"hold-out scope", TestFollowupSkipPolicyHoldOutScope},
+		{"keeps mismatch findings", TestFollowupSkipPolicyKeepsMismatchFindings},
+		{"skips form nits", TestFollowupSkipPolicySkipsFormNits},
+		{"files unsure titles", TestFollowupSkipPolicyFilesUnsureTitles},
+	} {
+		t.Run(table.name, table.run)
+	}
+
+	p := followupPolicy{now: func() time.Time { return followupBeforeHoldOut }}
+	if got := p.reason(land.Work{}, land.FollowupCandidate{}); got != "" {
+		t.Errorf("reason(zero Work, zero candidate) = %q, want it filed", got)
+	}
+}
+
 // The hold-out clocks: inside the window, and after it ends.
 var (
 	followupHoldOutInside = omlessons.HoldOutStart.Add(24 * time.Hour)
@@ -353,7 +399,16 @@ func runFollowupPolicyCases(t *testing.T, at time.Time, cases []followupPolicyCa
 				}
 			}
 			c := land.FollowupCandidate{Path: tc.path, Title: tc.title, Claim: tc.claim, Severity: "minor"}
-			if got := p.reason(land.Work{BeadID: tc.bead}, c); got != tc.reason {
+			w := land.Work{BeadID: tc.bead}
+			got := p.reason(w, c)
+			// The feed asks a held finding again on each pass, so the row is
+			// asked three times and must give one answer (gt-r66hk7).
+			for ask := 2; ask <= 3; ask++ {
+				if again := p.reason(w, c); again != got {
+					t.Fatalf("followupPolicy.reason asked %d times = %q, want %q: the policy answered differently", ask, again, got)
+				}
+			}
+			if got != tc.reason {
 				t.Errorf("followupPolicy.reason(%q on %s, bead %q) = %q, want %q", tc.title, tc.path, tc.bead, got, tc.reason)
 			}
 		})
