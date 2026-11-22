@@ -1639,8 +1639,18 @@ func (s *Scanner) fileUnnamed(rig, name, bead string, agent AgentRecord, now tim
 		return "", false
 	}
 	why = "agent_state stuck: exit ESCALATED and no escalation names " + bead
+	// The escalation the host files is raised by the daemon, not the seat, so the verdict stays
+	// unnamed after it: the ledger holds the exit it was filed for (the record's write time), and
+	// a later ESCALATED exit has a later write and files again.
+	key := "unnamed-escalation:" + rig + "/" + name + "/" + bead
+	if at, done := s.ledger.LastReported(key); done && !at.Before(agent.UpdatedAt) {
+		return why + "; the escalation for the overseer was filed already", true
+	}
 	if err := filer.FileUnnamedEscalation(rig, name, bead); err != nil {
 		return why + "; filing one failed: " + err.Error(), true
+	}
+	if err := s.ledger.MarkReported(key, agent.UpdatedAt); err != nil {
+		return why + "; filed one for the overseer but remembering it failed: " + err.Error(), true
 	}
 	return why + "; filed one for the overseer", true
 }

@@ -107,3 +107,77 @@ func TestUnnamedEscalationLeavesTheOtherVerdictsAlone(t *testing.T) {
 		}
 	})
 }
+
+// failingLedger is a ledger whose marks fail, to see the filing reported and tried again.
+type failingLedger struct{ memLedger }
+
+func (failingLedger) MarkReported(string, time.Time) error { return errors.New("ledger: disk full") }
+
+func unnamedTick(env *filerEnv, ledger Ledger) Report {
+	return New(env, ledger, Options{Now: func() time.Time { return now }}).Tick("gastown")
+}
+
+// TestUnnamedEscalationIsFiledOncePerExit: after a successful filing the filer is not called on
+// the next ticks (the seat stays unnamed, since the daemon raised the escalation, not the seat),
+// the seat is skipped as filed already, and a later ESCALATED exit (a newer record write) files
+// again (gt-5wmwv4).
+func TestUnnamedEscalationIsFiledOncePerExit(t *testing.T) {
+	t.Parallel()
+	env := &filerEnv{fakeEnv: unnamedStop(unnamedEscalationGrace + time.Minute)}
+	ledger := memLedger{}
+
+	unnamedTick(env, ledger)
+	unnamedTick(env, ledger)
+	r := unnamedTick(env, ledger)
+
+	if len(env.filed) != 1 {
+		t.Fatalf("filed = %v after three ticks, want exactly one call", env.filed)
+	}
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "was filed already") {
+		t.Errorf("third tick: %q %q, want skipped as filed already", f.Outcome, f.Detail)
+	}
+
+	rec := env.agents["ruby"]
+	rec.UpdatedAt = now.Add(-unnamedEscalationGrace - time.Second) // a later exit than the one filed for
+	env.agents["ruby"] = rec
+	unnamedTick(env, ledger)
+	if len(env.filed) != 2 {
+		t.Errorf("filed = %v after a later exit, want a second call", env.filed)
+	}
+}
+
+// TestUnnamedEscalationFailuresAreNotMarked: a failed filing marks nothing, so the next tick
+// calls the filer again with the failure in the detail; a mark that fails is named in the detail
+// and the next tick calls the filer again too (gt-5wmwv4).
+func TestUnnamedEscalationFailuresAreNotMarked(t *testing.T) {
+	t.Parallel()
+	t.Run("a failed filing", func(t *testing.T) {
+		t.Parallel()
+		env := &filerEnv{fakeEnv: unnamedStop(unnamedEscalationGrace + time.Minute), err: errors.New("gt escalate: refused")}
+		ledger := memLedger{}
+		unnamedTick(env, ledger)
+		r := unnamedTick(env, ledger)
+		if len(env.filed) != 2 {
+			t.Errorf("filed = %v, want a call on each tick while the failure stands", env.filed)
+		}
+		if f := seatFinding(t, r, "ruby"); !strings.Contains(f.Detail, "filing one failed: gt escalate: refused") {
+			t.Errorf("detail = %q, want the failure named every tick", f.Detail)
+		}
+		if len(ledger) != 0 {
+			t.Errorf("ledger = %v, want nothing marked for a failed filing", ledger)
+		}
+	})
+	t.Run("a mark that fails", func(t *testing.T) {
+		t.Parallel()
+		env := &filerEnv{fakeEnv: unnamedStop(unnamedEscalationGrace + time.Minute)}
+		ledger := failingLedger{memLedger{}}
+		unnamedTick(env, ledger)
+		r := unnamedTick(env, ledger)
+		if len(env.filed) != 2 {
+			t.Errorf("filed = %v, want the filer called again while the mark cannot be written", env.filed)
+		}
+		if f := seatFinding(t, r, "ruby"); !strings.Contains(f.Detail, "remembering it failed: ledger: disk full") {
+			t.Errorf("detail = %q, want the failed mark named", f.Detail)
+		}
+	})
+}
