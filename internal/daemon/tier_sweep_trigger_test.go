@@ -35,14 +35,22 @@ type awaitTarget interface {
 // test policy refuses in a unit test.
 func awaitOrFail[T any](t awaitTarget, ch <-chan T, what string) T {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), awaitOrFailTimeout)
+	return awaitOrFailWithin(t, ch, what, awaitOrFailTimeout)
+}
+
+// awaitOrFailWithin is the timed core of awaitOrFail. Tests that drive the
+// timeout branch pass a bound short enough to wait out, rather than sitting
+// through awaitOrFailTimeout to prove it fires.
+func awaitOrFailWithin[T any](t awaitTarget, ch <-chan T, what string, d time.Duration) T {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	select {
 	case v := <-ch:
 		return v
 	case <-ctx.Done():
 		var zero T
-		t.Fatalf("waited %s for %s; it never came", awaitOrFailTimeout, what)
+		t.Fatalf("waited %s for %s; it never came", d, what)
 		return zero
 	}
 }
@@ -62,7 +70,9 @@ func (f *awaitFailFake) Fatalf(format string, args ...any) {
 }
 
 // A never-signalled channel fails its waiter in bounded time, naming what was
-// awaited: no passing test reaches that branch, so it is driven here.
+// awaited: no passing test reaches that branch, so it is driven here. The
+// 20 ms bound exercises the same branch as awaitOrFailTimeout without waiting
+// 2 s for it.
 func TestAwaitOrFailFailsOnASilentChannel(t *testing.T) {
 	t.Parallel()
 	if awaitOrFailTimeout >= 5*time.Second {
@@ -75,7 +85,7 @@ func TestAwaitOrFailFailsOnASilentChannel(t *testing.T) {
 				t.Fatalf("awaitOrFail answered a silent channel instead of failing: %v", r)
 			}
 		}()
-		awaitOrFail(f, make(chan struct{}), "the checkout seam")
+		awaitOrFailWithin(f, make(chan struct{}), "the checkout seam", 20*time.Millisecond)
 	}()
 	if !strings.Contains(f.msg, "the checkout seam") {
 		t.Fatalf("failure message %q does not name what was awaited", f.msg)
