@@ -17,13 +17,16 @@ import (
 var driftTick = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 // driftReading is a read of the measure with one reading and one weights name.
+// The rank correlation is its own interval, so a case that names only a rho is
+// as precise as that rho at both ends (gt-le1e09); a case whose interval is
+// wider than its point uses driftReadingWithInterval.
 func driftReading(rho float64, measurable bool, weights string) metrics.StoryPointsDriftRead {
 	return metrics.StoryPointsDriftRead{
 		Dir:     "/town/.runtime/metrics/2026-11-14",
 		Weights: weights,
 		Drift: metrics.StoryPointsDrift{
 			N:       100,
-			Current: metrics.StoryPointsDriftReading{N: 100, Rho: rho, Measurable: measurable},
+			Current: metrics.StoryPointsDriftReading{N: 100, Rho: rho, Lo: rho, Hi: rho, Measurable: measurable},
 		},
 	}
 }
@@ -55,6 +58,32 @@ func storyPointEvents(t *testing.T, f *attentionFixture, key string) []attention
 		}
 	}
 	return out
+}
+
+// TestStoryPointsDriftAttentionFixtureCarriesTheInterval: the fixture a drift
+// case is built from carries the 95% interval beside the point reading, so a
+// case that names only a rho is as precise as that rho at both ends, and a case
+// that needs a wider interval gets back the three values it gave (gt-le1e09).
+func TestStoryPointsDriftAttentionFixtureCarriesTheInterval(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		read        metrics.StoryPointsDriftRead
+		rho, lo, hi float64
+	}{
+		{"the default helper is as precise as its rho", driftReading(0.42, true, "v3"), 0.42, 0.42, 0.42},
+		{"the explicit helper carries the interval it was given", driftReadingWithInterval(0.31, 0.17, 0.47, "v1"), 0.31, 0.17, 0.47},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.read.Drift.Current
+			if got.Rho != tc.rho || got.Lo != tc.lo || got.Hi != tc.hi {
+				t.Errorf("reading = rho %v, lo %v, hi %v, want rho %v, lo %v, hi %v",
+					got.Rho, got.Lo, got.Hi, tc.rho, tc.lo, tc.hi)
+			}
+		})
+	}
 }
 
 // TestStoryPointsDriftAttentionRaisesOneItemNamingTheValueAndWeights: a reading
