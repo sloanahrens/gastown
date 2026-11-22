@@ -33,6 +33,8 @@ type gateRunFS interface {
 	OpenAppend(path string) (io.WriteCloser, error)
 	// Size is the file's length, 0 when it does not exist.
 	Size(path string) (int64, error)
+	// EndsInNewline is true when the file is missing or empty, or its last byte is a newline.
+	EndsInNewline(path string) (bool, error)
 	ReadFile(path string) ([]byte, error)
 	Remove(path string) error
 	Rename(from, to string) error
@@ -48,6 +50,26 @@ func (osGateRunFS) Size(path string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+func (osGateRunFS) EndsInNewline(path string) (bool, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: the path is under the town root
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }() // read-only: a close error cannot lose a run
+	// One error return for the stat and the read: either failing refuses the append.
+	info, err := f.Stat()
+	var last [1]byte
+	if err == nil && info.Size() > 0 {
+		_, err = f.ReadAt(last[:], info.Size()-1)
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Size() == 0 || last[0] == '\n', nil
 }
 func (osGateRunFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) } //nolint:gosec // G304: the path is under the town root
 func (osGateRunFS) Remove(path string) error             { return os.Remove(path) }
@@ -239,6 +261,16 @@ func appendGateRunLimit(fsys gateRunFS, townRoot string, r GateRun, limit int64)
 		rotateErr = fmt.Errorf("land: sizing %s: %w", path, err)
 	} else if gateRunRotationDue(size, limit) {
 		rotateErr = rotateGateRuns(fsys, path)
+	}
+	// A short write can leave a line with no newline. The row then starts a line
+	// of its own, in the same write, so it does not glue onto the fragment
+	// (gt-7i2okn). This check runs after the rotation, which removes the log.
+	endsNL, err := fsys.EndsInNewline(path)
+	if err != nil {
+		return errors.Join(fmt.Errorf("land: checking the end of %s: %w", path, err), rotateErr)
+	}
+	if !endsNL {
+		line = append([]byte{'\n'}, line...)
 	}
 	f, err := fsys.OpenAppend(path)
 	if err != nil {
