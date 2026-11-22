@@ -39,14 +39,17 @@ const nodeImagePruneStepPrefix = "node-prune: "
 // now as its start;
 // an applied run logs its summary line and records its row the same way. A run that
 // reached its log keeps its report in both modes; one that failed earlier records the
-// failed row of nodeImagePruneFailed instead. Every runner error reaches the caller.
+// failed row of nodeImagePruneFailed instead. Every runner error reaches the caller,
+// and a run that cannot start logs why and records nothing (bead gt-gejrwk).
 func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error {
 	name, err := nodePruneJobName(runID)
 	if err != nil {
+		d.nodeImagePruneNotStarted(err)
 		return err
 	}
 	image, err := d.nodePruneImage()
 	if err != nil {
+		d.nodeImagePruneNotStarted(err)
 		return err
 	}
 	rep, err := runNodeImagePrune(ctx, kube, name, image, nodeImagePruneKeep, apply)
@@ -80,6 +83,24 @@ func (d *Daemon) nodeImagePruneReport(rep nodePruneReport, runErr error, started
 		Stats:     stats,
 	}, apply)
 	return runErr
+}
+
+// nodeImagePruneNotStartedMax is the longest error text a "not started" line carries.
+const nodeImagePruneNotStartedMax = 200
+
+// nodeImagePruneNotStarted logs why a prune that never reached the cluster did not
+// start: the error's first line, cut at nodeImagePruneNotStartedMax bytes, since one
+// logger call is one line. Both errors are the daemon's own text, and nothing ran,
+// so no ledger row is recorded (bead gt-gejrwk).
+func (d *Daemon) nodeImagePruneNotStarted(err error) {
+	msg := err.Error()
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	if len(msg) > nodeImagePruneNotStartedMax {
+		msg = strings.ToValidUTF8(msg[:nodeImagePruneNotStartedMax], "")
+	}
+	d.logger.Printf("node_image_prune: not started: %s", msg)
 }
 
 // nodeImagePruneFailed logs a run that returned an error before its log gave a

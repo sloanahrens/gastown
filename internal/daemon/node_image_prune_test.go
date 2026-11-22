@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -445,6 +446,41 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 			assert.ErrorContains(t, err, row.wantErr)
 			assert.Equal(t, row.wantCalls, strings.Join(kube.calls, " "))
 		})
+	}
+}
+
+// TestNodeImagePruneOnceNotStartedLogsTheReason: a refused run id and a town with no
+// running polecat image each return the error, log why on one line and record nothing.
+func TestNodeImagePruneOnceNotStartedLogsTheReason(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct{ name, runID, wantErr string }{
+		{"run id refused", "20261104T20", "does not give a lower-case DNS-1123 Job name"},
+		{"no running polecat image", nodeImagePruneRunID, "no running polecat image"},
+	} {
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		kube := &fakeKube{list: nodeImagePruneKubeList()}
+		err := d.nodeImagePruneOnce(context.Background(), kube, row.runID, false, nodeImagePruneStart)
+		require.ErrorContains(t, err, row.wantErr, row.name)
+		assert.Equal(t, "node_image_prune: not started: "+err.Error()+"\n", logs.String(), row.name)
+		_, ok := lastNodeImagePruneRun(t, d.config.TownRoot)
+		assert.False(t, ok, "nothing ran, so no ledger row is recorded")
+		assert.Empty(t, kube.calls, "a prune that cannot start touches no cluster")
+	}
+}
+
+// TestNodeImagePruneOnceNotStartedCutsTheText: the line is the error's first line,
+// cut at 200 bytes without splitting a rune. The daemon's own errors are single-line,
+// so synthetic errors of over 500 bytes drive the cut.
+func TestNodeImagePruneOnceNotStartedCutsTheText(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct{ name, text, want string }{
+		{"first line kept", "the reason: " + strings.Repeat("a", 100) + "\n" + strings.Repeat("b", 400), "the reason: " + strings.Repeat("a", 100)},
+		{"cut at 200 bytes", "the reason " + strings.Repeat("a", 400) + "\n" + strings.Repeat("b", 100), "the reason " + strings.Repeat("a", 189)},
+		{"no split rune", strings.Repeat("a", 199) + "é" + strings.Repeat("b", 400), strings.Repeat("a", 199)},
+	} {
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		d.nodeImagePruneNotStarted(errors.New(row.text))
+		assert.Equal(t, "node_image_prune: not started: "+row.want+"\n", logs.String(), row.name)
 	}
 }
 
