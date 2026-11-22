@@ -55,9 +55,9 @@ type DaemonStep struct {
 // Docker Desktop), so a fork that contributes upstream keeps them out of the
 // shared diff.
 var daemonSteps = []DaemonStep{
-	{"polecat-image", DaemonStepPlugin, DaemonStepHost, nil, "built by hand each cycle: its directory is the image's build program, and go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
-	{"hm-sync", DaemonStepPlugin, DaemonStepRuns, []string{"hm", "git", "bd"}, "hm, make and go against hm-postgres on Docker Desktop"},
-	{"cloud-check", DaemonStepPlugin, DaemonStepHost, nil, "the Docker Desktop engine and /Users/Shared/gt-cloud"},
+	{"polecat-image", DaemonStepPlugin, DaemonStepHost, nil, "the host-side build program of the sandbox image until a CI job builds that image (gt-gg9hv.15)"},
+	{"hm-sync", DaemonStepPlugin, DaemonStepRuns, []string{"hm", "git", "bd"}, "runs in the container: the pod's receipt hq-wisp-8c6yl, 2026-11-19 23:41, 'exit 0 after 5m44s'"},
+	{"cloud-check", DaemonStepPlugin, DaemonStepHost, nil, "replaced in the pod by the cloud_check patrol, which runs the cloudcheck binary the image carries; this plugin stays in daemon.container_off until its directory is deleted"},
 	{"app-promote", DaemonStepPlugin, DaemonStepRuns, []string{"gt"}, "runs in the container: daemon.log 2026-11-08 12:52:16 'Handler: script plugin app-promote skipped (exit 0 after 0s); nothing to do this run', a clean skip, so the log shows no promotion; its one exec is gt"},
 	{"devops-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin devops-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/reports, which the live compose does not mount"},
 	{"release-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin release-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/releases, which the live compose does not mount, or of two files under HOME"},
@@ -75,7 +75,7 @@ var daemonSteps = []DaemonStep{
 	{"health_notify", DaemonStepPatrol, DaemonStepSeam, nil, "the macOS notify scripts (deferred by the operator)"},
 
 	{"dolt_server", DaemonStepPatrol, DaemonStepHost, nil, "starts and watches the Dolt server, which runs on the host; the container reaches it over host.docker.internal"},
-	{"hm_sync", DaemonStepPatrol, DaemonStepHost, nil, "hm on the host (the plugin of the same name does the same)"},
+	{"hm_sync", DaemonStepPatrol, DaemonStepHost, nil, "off: the hm-sync plugin runs this in the container"},
 	{"landing_infra", DaemonStepPatrol, DaemonStepHost, nil, "the landing worker's companion: watches Forgejo and its run queue for a landing worker that runs on the host"},
 	{"resource_sampler", DaemonStepPatrol, DaemonStepSeam, nil, "ps rows for the host's components would describe the container"},
 	{"sandbox_sampler", DaemonStepPatrol, DaemonStepRuns, []string{"openshell"}, "in process, and its one exec per live seat is openshell sandbox exec, which the image carries (deploy/daemon/Dockerfile, gt-7d7jvn)"},
