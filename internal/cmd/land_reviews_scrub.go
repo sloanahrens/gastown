@@ -31,7 +31,9 @@ Reads the town's review records (.runtime/landings/reviews.jsonl) and prints,
 without writing, the row and word counts, the lines too long to examine, and
 the changed rows' bead ids. No row text is printed. --json prints the same
 figures as an object. --apply rewrites the log, replacing each flagged word; a
-second run finds nothing to change. A missing log is an error naming its path.
+second run finds nothing to change. A row it skips is kept and named under
+skipped beads; --apply exits 1 when any row is skipped or oversize. A missing
+log is an error naming its path.
 
 Examples:
   gt land reviews-scrub
@@ -80,7 +82,10 @@ func landReviewsScrubReportFrom(findTown func() (string, error), out io.Writer, 
 		return err
 	}
 	if asJSON {
-		return writeLandReviewsScrubJSON(out, res, apply)
+		if err := writeLandReviewsScrubJSON(out, res, apply); err != nil {
+			return err
+		}
+		return landReviewsScrubApplyExit(res, apply)
 	}
 	mode := "dry run"
 	if apply {
@@ -91,7 +96,32 @@ func landReviewsScrubReportFrom(findTown func() (string, error), out io.Writer, 
 	if err != nil {
 		return fmt.Errorf("writing the plan: %w", err)
 	}
-	return nil
+	if res.Skipped != 0 || res.Oversize != 0 {
+		if _, err := fmt.Fprintf(out, "skipped beads: %s\n", landReviewsScrubSkippedIDs(res.SkippedBeads)); err != nil {
+			return fmt.Errorf("writing the plan: %w", err)
+		}
+	}
+	return landReviewsScrubApplyExit(res, apply)
+}
+
+// landReviewsScrubApplyExit fails an --apply that left rows the scrub could not
+// rewrite: a skipped row is kept byte for byte, and an oversize line is not
+// decoded, so the run must not exit clean. A dry run only reports them.
+func landReviewsScrubApplyExit(res land.ScrubResult, apply bool) error {
+	if !apply || (res.Skipped == 0 && res.Oversize == 0) {
+		return nil
+	}
+	return fmt.Errorf("reviews-scrub --apply left %d skipped and %d oversize row(s) in the log", res.Skipped, res.Oversize)
+}
+
+// landReviewsScrubSkippedIDs lists the skipped rows by label. An oversize line
+// is never decoded, so it has no bead id to list: a run with only oversize rows
+// reads none.
+func landReviewsScrubSkippedIDs(ids []string) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	return strings.Join(ids, ", ")
 }
 
 // landReviewsScrubPlan is the scrub's figures as --json prints them.

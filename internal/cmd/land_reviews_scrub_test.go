@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -323,4 +324,135 @@ func TestLandReviewsScrubJSON(t *testing.T) {
 			t.Errorf("JSON plan = %s, want an empty beads list printed as []", out.String())
 		}
 	})
+}
+
+// reviewsScrubSkippedRow is a row whose flagged word the raw line does not
+// hold: the token's middle byte is JSON-escaped, so the scrub skips the row.
+func reviewsScrubSkippedRow(t *testing.T, bead string) []byte {
+	t.Helper()
+	line, err := json.Marshal(land.ReviewRecord{BeadID: bead, Verdict: land.VerdictRequestChanges, Findings: 1,
+		FindingText: []land.ReviewFindingText{{Claim: "it logs " + reviewsScrubToken}}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	mid := len(reviewsScrubToken) / 2
+	esc := fmt.Sprintf(`\u%04x`, reviewsScrubToken[mid])
+	return bytes.Replace(line, []byte(reviewsScrubToken), []byte(reviewsScrubToken[:mid]+esc+reviewsScrubToken[mid+1:]), 1)
+}
+
+// reviewsScrubExitCode is the status the command's error maps to, 0 for nil.
+func reviewsScrubExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	return exitCodeForError(err)
+}
+
+// TestLandReviewsScrubSkippedRowNamedAndFailsApply: a skipped row is named by
+// its bead id in both modes; --apply exits 1 and a dry run exits 0. The token
+// never reaches the output.
+func TestLandReviewsScrubSkippedRowNamedAndFailsApply(t *testing.T) {
+	t.Parallel()
+	log := append(reviewsScrubLogBytes(t), append(reviewsScrubSkippedRow(t, "gt-esc1"), '\n')...)
+	for _, tc := range []struct {
+		name  string
+		apply bool
+		want  string
+		exit  int
+	}{
+		{"dry run", false, "reviews-scrub (dry run): 4 rows, 1 would change, 1 words, oversize 0, skipped 1\nbeads: gt-slit1\nskipped beads: gt-esc1\n", 0},
+		{"apply", true, "reviews-scrub (applied): 4 rows, 1 would change, 1 words, oversize 0, skipped 1\nbeads: gt-slit1\nskipped beads: gt-esc1\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+			if err := os.WriteFile(path, log, 0o600); err != nil {
+				t.Fatalf("writing the fixture log: %v", err)
+			}
+			var out bytes.Buffer
+			err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, tc.apply, false)
+			if got := reviewsScrubExitCode(err); got != tc.exit {
+				t.Errorf("exit status = %d (error %v), want %d", got, err, tc.exit)
+			}
+			if out.String() != tc.want {
+				t.Errorf("output = %q, want %q", out.String(), tc.want)
+			}
+			assertReviewsScrubNoToken(t, out.String())
+		})
+	}
+}
+
+// TestLandReviewsScrubCleanLogPrintsNoSkippedLine: a log with no skipped row
+// prints no skipped beads line, and --apply exits 0.
+func TestLandReviewsScrubCleanLogPrintsNoSkippedLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		apply bool
+	}{{"dry run", false}, {"apply", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeReviewsScrubFixture(t, t.TempDir())
+			var out bytes.Buffer
+			if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, tc.apply, false); err != nil {
+				t.Fatalf("landReviewsScrubReportFrom: %v", err)
+			}
+			if strings.Contains(out.String(), "skipped beads:") {
+				t.Errorf("a log with no skipped row printed the skipped line:\n%s", out.String())
+			}
+			assertReviewsScrubNoToken(t, out.String())
+		})
+	}
+}
+
+// TestLandReviewsScrubSkippedRowJSONFailsApply: --json still carries the figures,
+// and --apply over a skipped row exits 1 in that mode too.
+func TestLandReviewsScrubSkippedRowJSONFailsApply(t *testing.T) {
+	t.Parallel()
+	log := append(reviewsScrubLogBytes(t), append(reviewsScrubSkippedRow(t, "gt-esc1"), '\n')...)
+	path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	if err := os.WriteFile(path, log, 0o600); err != nil {
+		t.Fatalf("writing the fixture log: %v", err)
+	}
+	var out bytes.Buffer
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, true, true)
+	if got := reviewsScrubExitCode(err); got != 1 {
+		t.Errorf("--json --apply exit status = %d (error %v), want 1", got, err)
+	}
+	var plan landReviewsScrubPlan
+	if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+		t.Fatalf("the JSON output does not parse: %v", err)
+	}
+	if plan.DryRun || plan.Skipped != 1 {
+		t.Errorf("JSON plan = %+v, want dry_run false and skipped 1", plan)
+	}
+	assertReviewsScrubNoToken(t, out.String())
+}
+
+// reviewsScrubSecondWriteFails accepts the first write and fails the next one.
+type reviewsScrubSecondWriteFails struct{ writes int }
+
+func (w *reviewsScrubSecondWriteFails) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, errors.New("write failed")
+	}
+	return len(p), nil
+}
+
+// TestLandReviewsScrubSurfacesAFailedSkippedLine: a writer that takes the counts
+// line and refuses the `skipped beads:` line is the run's error, not a clean exit.
+func TestLandReviewsScrubSurfacesAFailedSkippedLine(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	log := append(reviewsScrubLogBytes(t), append(reviewsScrubSkippedRow(t, "gt-esc1"), '\n')...)
+	if err := os.WriteFile(path, log, 0o600); err != nil {
+		t.Fatalf("writing the fixture log: %v", err)
+	}
+
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &reviewsScrubSecondWriteFails{}, path, false, false)
+
+	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
+		t.Fatalf("a writer failing at the skipped line returned %v, want an error naming the write", err)
+	}
 }
