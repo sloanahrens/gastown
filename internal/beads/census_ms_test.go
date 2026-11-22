@@ -158,3 +158,46 @@ func TestTickEffCensusMsStraddlesReset(t *testing.T) {
 		t.Fatalf("window 2 rows = %+v, want one row of count 1 and 40 ms (call B alone)", rows)
 	}
 }
+
+// TestCensusMsIgnoresAnElapsedTimeThatIsNotPositive drives real calls through the
+// callNow clock: a clock that steps backwards between a call's two readings
+// adds nothing to the row's milliseconds, and the call stays counted; a
+// backwards step after a real 10 ms call leaves the 10. Only the negative rows
+// depend on censusRecordEnd's ms <= 0 guard: a zero and a sub-millisecond call
+// truncate to 0 ms before it, so those two rows pin the truncation (gt-72x71m).
+//
+//testpolicy:allow parallel — it swaps the package-level callNow clock, so no test may run beside it
+func TestCensusMsIgnoresAnElapsedTimeThatIsNotPositive(t *testing.T) {
+	clock := &fakeCallClock{now: time.Unix(0, 0)}
+	prior := callNow
+	//testpolicy:allow no-global-swap — restores the clock seam swapped below
+	t.Cleanup(func() { callNow = prior })
+	//testpolicy:allow no-global-swap — the fake clock runBdOnce reads is the swap this test makes
+	callNow = clock.read
+	for _, tc := range []struct {
+		name  string
+		steps []time.Duration // what the clock moves during each call
+		wantM int64
+	}{
+		{"a clock stepped backwards", []time.Duration{-5 * time.Millisecond}, 0},
+		{"a zero elapsed time", []time.Duration{0}, 0},
+		{"under a millisecond", []time.Duration{900 * time.Microsecond}, 0},
+		{"backwards after a real call", []time.Duration{10 * time.Millisecond, -5 * time.Millisecond}, 10},
+	} {
+		resetCensus(t)
+		for _, step := range tc.steps {
+			r := newRecorder(func([]string) reply {
+				clock.advance(step)
+				return reply{stdout: "[]"}
+			})
+			b := newRecordedBeads(t.TempDir(), r)
+			if _, err := b.runBdOnce(context.Background(), nil, nil, []string{"list", "--json"}); err != nil {
+				t.Fatalf("%s: runBdOnce: %v", tc.name, err)
+			}
+		}
+		rows := CensusSnapshotAndReset()
+		if len(rows) != 1 || rows[0].Count != len(tc.steps) || rows[0].Ms != tc.wantM {
+			t.Errorf("%s: rows = %+v, want one row counted %d times with %d ms", tc.name, rows, len(tc.steps), tc.wantM)
+		}
+	}
+}
