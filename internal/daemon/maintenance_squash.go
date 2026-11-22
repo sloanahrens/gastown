@@ -264,10 +264,11 @@ func (d *Daemon) triggerSquashCheck() {
 // doltsquash.Decide's answer with the cut, and runs a due database through
 // doltsquash.Run. A check that finished every database records its completion,
 // so it is not due again for a day. A check that could not decide, could not
-// run, or found the run marker, the maintenance gc flag or doltMaintMu held is
-// NOT recorded as completed: it is due again after squashCheckRetryAfter, so a
-// day of unreadable inputs or a run a second daemon, a gc cycle or a Dolt task
-// holds does not set the daily gate (overseer decision, gt-g4iwk0).
+// recover or run, or found the run marker, the maintenance gc flag or
+// doltMaintMu held is NOT recorded as completed: it is due again after
+// squashCheckRetryAfter, so a day of unreadable inputs or a run a second
+// daemon, a gc cycle or a Dolt task holds does not set the daily gate
+// (overseer decision, gt-g4iwk0).
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
@@ -347,10 +348,10 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	for _, db := range step.settings.Databases {
 		// A failed or killed run can leave the database with no main, and its own
 		// record then holds the 24-hour gate shut, so recovery runs first, before
-		// the readings and Decide, whatever either says (gt-ngculo). What the
-		// call returns: a Recovery is logged here (gt-oym2v2); the sibling beads
-		// handle an error and a clean catalog, and the error is dropped until
-		// they land.
+		// the readings and Decide, whatever either says (gt-ngculo). A Recovery is
+		// logged here (gt-oym2v2); a held marker and an error each leave this
+		// database's check undecided and skip it, because its catalog is not one
+		// the readings and Decide can safely judge.
 		recovery, err := d.maintenance().squashRecover(ctx, d, db, now, step.settings)
 		if errors.Is(err, doltsquash.ErrRunMarkerHeld) {
 			// A live run holds the town's marker, so the database's branches
@@ -360,6 +361,15 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			// after the retry delay rather than held for a day.
 			undecided = true
 			d.logger.Printf("squash: %s: another daemon holds the run marker — skipping the recovery and this check", db)
+			continue
+		}
+		if err != nil {
+			// A recovery that failed may have left the dead run's branches in
+			// place or only partly dropped, so the database's state is unknown:
+			// Decide could start a run over an unrecovered catalog. The check is
+			// due again after the retry delay rather than held for a day.
+			undecided = true
+			d.logger.Printf("squash: WARNING: %s: the recovery failed: %v — the check did not decide", db, err)
 			continue
 		}
 		if recovery != nil {

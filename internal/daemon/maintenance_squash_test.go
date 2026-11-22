@@ -2547,6 +2547,43 @@ func TestSquashCheckSkipsRecoveryOnAHeldMarker(t *testing.T) {
 	}
 }
 
+// TestSquashCheckRecoveryErrorMarksUndecided is the bead's first box: a
+// RecoverOnly error other than a held marker marks the check undecided and logs
+// the failure, and the database is skipped — the readings and Decide must not
+// run over a catalog the recovery could not settle. A backup a night keeps is
+// written, so the readings would be readable and the check would record its
+// completion if it got past the recovery. The check is due again after the
+// retry delay rather than for a day.
+func TestSquashCheckRecoveryErrorMarksUndecided(t *testing.T) {
+	t.Parallel()
+	d, server, _, logs := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		return nil, errors.New("the recovery could not drop compact-work")
+	}
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		t.Error("the run was started after the recovery failed")
+		return doltsquash.RunResult{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: WARNING: gt: the recovery failed: the recovery could not drop compact-work — the check did not decide") {
+		t.Errorf("the recovery's error was not logged as an undecided check: %q", got)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("the check sent %d statements after the recovery failed, want none: %q", len(server.queries), server.queries)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter-time.Minute), squashCheckInterval); due.due {
+		t.Error("the check was due again before the retry delay")
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a recovery error set the daily gate: the check is not due again after the retry delay")
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
