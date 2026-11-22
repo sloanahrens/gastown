@@ -1413,25 +1413,72 @@ func runDoltLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	return doltLogsTo(townRoot, cmd.OutOrStdout(), cmd.ErrOrStderr(), liveDoltLogReads(), doltLogLines, doltLogFollow)
+}
+
+// writeDoltLogStaleNotice writes the stale-log notice for logFile to w when one
+// applies. A log that cannot be stat'd is an error, never read as fresh.
+func writeDoltLogStaleNotice(w io.Writer, logFile string, now time.Time, container string) error {
+	info, err := os.Stat(logFile)
+	if err != nil {
+		return err
+	}
+	if notice := doltLogStaleNotice(info.ModTime(), now, container); notice != "" {
+		_, err = fmt.Fprintln(w, notice)
+		return err
+	}
+	return nil
+}
+
+// doltLogContainer is the town's dolt.external_container, or "" when none is
+// set or the setting cannot be read; the notice then names the setting.
+func doltLogContainer(config *doltserver.Config) string {
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return ""
+	}
+	return container
+}
+
+// doltLogReads is what the dolt log commands take from outside the process: the
+// clock that dates the stale-log notice, and the tail that prints the lines.
+type doltLogReads struct {
+	now  func() time.Time
+	tail func(args []string, out, errw io.Writer) error
+}
+
+func liveDoltLogReads() doltLogReads {
+	return doltLogReads{now: time.Now, tail: execDoltLogTail}
+}
+
+// execDoltLogTail runs the system tail with args, its stdout to out and its stderr to errw.
+func execDoltLogTail(args []string, out, errw io.Writer) error {
+	tailCmd := exec.Command("tail", args...)
+	tailCmd.Stdout = out
+	tailCmd.Stderr = errw
+	return tailCmd.Run()
+}
+
+// doltLogsTo writes the stale-log notice for the town's dolt.log to errw, then
+// its last lines (or follows it) to out.
+func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines int, follow bool) error {
 	config := doltserver.DefaultConfig(townRoot)
 
 	if _, err := os.Stat(config.LogFile); os.IsNotExist(err) {
 		return fmt.Errorf("no log file found at %s", config.LogFile)
 	}
 
-	if doltLogFollow {
+	if err := writeDoltLogStaleNotice(errw, config.LogFile, reads.now(), doltLogContainer(config)); err != nil {
+		return err
+	}
+
+	if follow {
 		// Use tail -f for following
-		tailCmd := exec.Command("tail", "-f", config.LogFile)
-		tailCmd.Stdout = os.Stdout
-		tailCmd.Stderr = os.Stderr
-		return tailCmd.Run()
+		return reads.tail([]string{"-f", config.LogFile}, out, errw)
 	}
 
 	// Use tail -n for last N lines
-	tailCmd := exec.Command("tail", "-n", strconv.Itoa(doltLogLines), config.LogFile)
-	tailCmd.Stdout = os.Stdout
-	tailCmd.Stderr = os.Stderr
-	return tailCmd.Run()
+	return reads.tail([]string{"-n", strconv.Itoa(lines), config.LogFile}, out, errw)
 }
 
 func runDoltDump(cmd *cobra.Command, args []string) error {
@@ -1440,58 +1487,65 @@ func runDoltDump(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	running, pid, err := doltserver.IsRunning(townRoot)
+	return dumpDoltDiagnostics(townRoot, cmd.OutOrStdout(), cmd.ErrOrStderr(), doltserver.IsRunning, liveDoltLogReads())
+}
+
+// dumpDoltDiagnostics is the body of gt dolt dump: running reports the live
+// server, and reads dates the stale-log notice and prints the log tail.
+func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(string) (bool, int, error), reads doltLogReads) error {
+	isRunning, pid, err := running(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking server status: %w", err)
 	}
-	if !running {
+	if !isRunning {
 		return fmt.Errorf("Dolt server is not running — nothing to dump")
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
 
-	fmt.Printf("Dolt diagnostic snapshot (non-fatal)\n")
-	fmt.Printf("  Live PID:   %d\n", pid)
-	fmt.Printf("  Port:       %d\n", config.Port)
-	fmt.Printf("  Data dir:   %s\n", config.DataDir)
-	fmt.Printf("  Log file:   %s\n", config.LogFile)
-	fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+	fmt.Fprintf(out, "Dolt diagnostic snapshot (non-fatal)\n")
+	fmt.Fprintf(out, "  Live PID:   %d\n", pid)
+	fmt.Fprintf(out, "  Port:       %d\n", config.Port)
+	fmt.Fprintf(out, "  Data dir:   %s\n", config.DataDir)
+	fmt.Fprintf(out, "  Log file:   %s\n", config.LogFile)
+	fmt.Fprintf(out, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
 
 	if info, err := doltserver.ReadSQLServerInfo(townRoot); err == nil {
-		fmt.Printf("  SQL metadata: %s\n", info.Path)
-		fmt.Printf("    PID:       %d\n", info.PID)
-		fmt.Printf("    Port:      %d\n", info.Port)
+		fmt.Fprintf(out, "  SQL metadata: %s\n", info.Path)
+		fmt.Fprintf(out, "    PID:       %d\n", info.PID)
+		fmt.Fprintf(out, "    Port:      %d\n", info.Port)
 		if info.ServerID != "" {
-			fmt.Printf("    Server ID: %s\n", info.ServerID)
+			fmt.Fprintf(out, "    Server ID: %s\n", info.ServerID)
 		}
 	} else {
-		fmt.Printf("  SQL metadata: unavailable (%v)\n", err)
+		fmt.Fprintf(out, "  SQL metadata: unavailable (%v)\n", err)
 	}
 
 	if state, err := doltserver.LoadState(townRoot); err == nil && state.PID > 0 {
-		fmt.Printf("  Daemon state: %s\n", doltserver.StateFile(townRoot))
-		fmt.Printf("    PID:       %d", state.PID)
+		fmt.Fprintf(out, "  Daemon state: %s\n", doltserver.StateFile(townRoot))
+		fmt.Fprintf(out, "    PID:       %d", state.PID)
 		if state.PID != pid {
-			fmt.Printf(" (stale; live PID is %d)", pid)
+			fmt.Fprintf(out, " (stale; live PID is %d)", pid)
 		}
-		fmt.Println()
+		fmt.Fprintln(out)
 		if !state.StartedAt.IsZero() {
-			fmt.Printf("    Started:   %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(out, "    Started:   %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 		}
 		if state.DataDir != "" {
-			fmt.Printf("    Data dir:  %s\n", state.DataDir)
+			fmt.Fprintf(out, "    Data dir:  %s\n", state.DataDir)
 		}
 	}
 
-	fmt.Printf("\nRecent Dolt log lines:\n")
-	tailCmd := exec.Command("tail", "-n", "200", config.LogFile)
-	tailCmd.Stdout = os.Stdout
-	tailCmd.Stderr = os.Stderr
-	if err := tailCmd.Run(); err != nil {
-		fmt.Printf("  (unable to read recent logs: %v)\n", err)
+	if err := writeDoltLogStaleNotice(errw, config.LogFile, reads.now(), doltLogContainer(config)); err != nil {
+		fmt.Fprintf(errw, "dolt.log age unknown: %v\n", err)
 	}
 
-	fmt.Printf("\nNo signal was sent. Do not use kill -QUIT for routine diagnostics unless the Dolt version has been verified not to terminate on SIGQUIT.\n")
+	fmt.Fprintf(out, "\nRecent Dolt log lines:\n")
+	if err := reads.tail([]string{"-n", "200", config.LogFile}, out, errw); err != nil {
+		fmt.Fprintf(out, "  (unable to read recent logs: %v)\n", err)
+	}
+
+	fmt.Fprintf(out, "\nNo signal was sent. Do not use kill -QUIT for routine diagnostics unless the Dolt version has been verified not to terminate on SIGQUIT.\n")
 
 	return nil
 }

@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,5 +76,224 @@ func TestDoltLogStaleNotice(t *testing.T) {
 				t.Errorf("notice %q names %q", got, tc.refuse)
 			}
 		})
+	}
+}
+
+// writeDoltLogStaleFixture writes the host dolt.log of townRoot with the given
+// modification time.
+func writeDoltLogStaleFixture(t *testing.T, townRoot string, mtime time.Time) {
+	t.Helper()
+	logFile := filepath.Join(townRoot, "daemon", "dolt.log")
+	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logFile, []byte("serving line one\nserving line two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(logFile, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// cannedTail answers the tail the unit tier does not start: it prints the two
+// lines the fixture log holds, to out.
+func cannedTail(_ []string, out, _ io.Writer) error {
+	_, err := io.WriteString(out, "serving line one\nserving line two\n")
+	return err
+}
+
+// fixedDoltLogReads is the clock and tail the dolt log commands read, with the
+// clock held at now.
+func fixedDoltLogReads(now time.Time) doltLogReads {
+	return doltLogReads{now: func() time.Time { return now }, tail: cannedTail}
+}
+
+// TestDoltLogStaleNoticeWrite: the notice writer prints a stale log's notice,
+// prints nothing for a fresh log, and returns an error when the log cannot be
+// read, never reading it as fresh.
+func TestDoltLogStaleNoticeWrite(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		age        time.Duration
+		missing    bool
+		wantNotice bool
+		wantErr    bool
+	}{
+		{name: "fifteen days stale writes the notice", age: 15 * 24 * time.Hour, wantNotice: true},
+		{name: "five minutes fresh writes nothing", age: 5 * time.Minute},
+		{name: "missing log is an error, not a clean log", missing: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logFile := filepath.Join(t.TempDir(), "dolt.log")
+			if !tc.missing {
+				if err := os.WriteFile(logFile, []byte("line\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mtime := now.Add(-tc.age)
+				if err := os.Chtimes(logFile, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			err := writeDoltLogStaleNotice(&out, logFile, now, "gt-dolt")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("writeDoltLogStaleNotice error = %v, want error %t", err, tc.wantErr)
+			}
+			if (out.Len() > 0) != tc.wantNotice {
+				t.Fatalf("notice = %q, want notice %t", out.String(), tc.wantNotice)
+			}
+		})
+	}
+}
+
+// TestDoltLogStaleNoticeOnLogsCommand: gt dolt logs prints the stale notice
+// before the log's lines, and prints no notice for a fresh log. An unusable
+// dolt.external_container names the setting rather than a docker command.
+func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		container  string
+		age        time.Duration
+		wantNotice bool
+		want       []string
+	}{
+		{
+			name:       "fifteen day old log prints the container notice before its lines",
+			container:  "gt-dolt",
+			age:        15 * 24 * time.Hour,
+			wantNotice: true,
+			want:       []string{"15 days ago", "docker logs gt-dolt"},
+		},
+		{
+			name:       "five minute old log prints no notice",
+			container:  "gt-dolt",
+			age:        5 * time.Minute,
+			wantNotice: false,
+		},
+		{
+			name:       "unusable container setting names the setting",
+			container:  "-v",
+			age:        15 * 24 * time.Hour,
+			wantNotice: true,
+			want:       []string{"15 days ago", "dolt.external_container"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := externalContainerTownRoot(t, tc.container)
+			writeDoltLogStaleFixture(t, townRoot, now.Add(-tc.age))
+
+			// One buffer takes both streams, so the order of the notice and the lines is the order written.
+			var out bytes.Buffer
+			if err := doltLogsTo(townRoot, &out, &out, fixedDoltLogReads(now), 50, false); err != nil {
+				t.Fatalf("doltLogsTo: %v", err)
+			}
+			got := out.String()
+			lines := strings.Index(got, "serving line one")
+			if lines < 0 {
+				t.Fatalf("log lines missing from output %q", got)
+			}
+			notice := strings.Index(got, "dolt.log is stale")
+			if !tc.wantNotice {
+				if notice >= 0 {
+					t.Fatalf("output %q has a notice, want none", got)
+				}
+				return
+			}
+			if notice < 0 || notice > lines {
+				t.Fatalf("notice at %d, log lines at %d, in %q: want the notice before the lines", notice, lines, got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("output %q does not name %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDoltLogStaleNoticeOnDumpCommand: gt dolt dump prints the same stale notice
+// on stderr and keeps its log lines on stdout. A log it cannot read says its age
+// is unknown on stderr instead of reading as fresh.
+func TestDoltLogStaleNoticeOnDumpCommand(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		age        time.Duration
+		missing    bool
+		wantStderr string
+	}{
+		{name: "fifteen day old log prints the notice on stderr", age: 15 * 24 * time.Hour, wantStderr: "15 days ago"},
+		{name: "five minute old log prints no notice", age: 5 * time.Minute},
+		{name: "missing log says its age is unknown", missing: true, wantStderr: "dolt.log age unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := externalContainerTownRoot(t, "gt-dolt")
+			if !tc.missing {
+				writeDoltLogStaleFixture(t, townRoot, now.Add(-tc.age))
+			}
+			running := func(string) (bool, int, error) { return true, 4242, nil }
+
+			var out, errw bytes.Buffer
+			if err := dumpDoltDiagnostics(townRoot, &out, &errw, running, fixedDoltLogReads(now)); err != nil {
+				t.Fatalf("dumpDoltDiagnostics: %v", err)
+			}
+			if !strings.Contains(out.String(), "Recent Dolt log lines:") {
+				t.Errorf("stdout %q has no log section", out.String())
+			}
+			if tc.missing {
+				if !strings.Contains(errw.String(), tc.wantStderr) {
+					t.Errorf("stderr %q does not say %q", errw.String(), tc.wantStderr)
+				}
+				return
+			}
+			if tc.wantStderr == "" {
+				if errw.Len() > 0 {
+					t.Fatalf("stderr %q, want none", errw.String())
+				}
+			} else if !strings.Contains(errw.String(), tc.wantStderr) {
+				t.Errorf("stderr %q does not say %q", errw.String(), tc.wantStderr)
+			}
+			if !strings.Contains(out.String(), "serving line one") {
+				t.Errorf("stdout %q lost the log lines", out.String())
+			}
+		})
+	}
+}
+
+// TestDoltLogStaleNoticeOnLogsCommandUnreadableLogIsAnError: a log whose age cannot
+// be read, here because its parent is a file (a stat error that is not "not
+// found"), is the command's error and prints nothing: it never reads as fresh and
+// never runs the tail.
+func TestDoltLogStaleNoticeOnLogsCommandUnreadableLogIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tailed := false
+	reads := doltLogReads{
+		now:  func() time.Time { return time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC) },
+		tail: func([]string, io.Writer, io.Writer) error { tailed = true; return nil },
+	}
+	var out, errw bytes.Buffer
+
+	err := doltLogsTo(townRoot, &out, &errw, reads, 50, false)
+
+	if err == nil {
+		t.Fatal("doltLogsTo over a log it cannot stat returned no error")
+	}
+	if tailed || out.Len() != 0 || errw.Len() != 0 {
+		t.Errorf("tailed=%v out=%q err=%q, want nothing printed and no tail", tailed, out.String(), errw.String())
 	}
 }
