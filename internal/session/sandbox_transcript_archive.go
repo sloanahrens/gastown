@@ -117,7 +117,7 @@ func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string) er
 			return nil
 		}},
 		{"open", func() (err error) {
-			src, err = root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+			src, err = root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 			return err
 		}},
 		{"fstat", func() error {
