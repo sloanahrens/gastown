@@ -204,8 +204,6 @@ func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
 	t.Parallel()
 	under := driftReadingWithInterval(0.41, 0.35, 0.47, "v1")
 	straddle := driftReadingWithInterval(0.45, 0.38, 0.55, "v1")
-	nanHi := driftReadingWithInterval(0.41, 0.35, math.NaN(), "v1")
-	nanLo := driftReadingWithInterval(0.41, math.NaN(), 0.47, "v1")
 	tests := []struct {
 		name    string
 		reads   []metrics.StoryPointsDriftRead
@@ -215,9 +213,6 @@ func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
 		{"an interval wholly under the bar raises one", []metrics.StoryPointsDriftRead{under}, 1, false},
 		{"a straddling interval raises nothing", []metrics.StoryPointsDriftRead{straddle}, 0, false},
 		{"a straddling interval clears the held item", []metrics.StoryPointsDriftRead{under, straddle}, 0, true},
-		{"a NaN Hi keeps the held item", []metrics.StoryPointsDriftRead{under, nanHi}, 1, false},
-		{"a NaN Lo keeps the held item", []metrics.StoryPointsDriftRead{under, nanLo}, 1, false},
-		{"a NaN Lo raises nothing when none is held", []metrics.StoryPointsDriftRead{nanLo}, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -384,6 +379,54 @@ func TestStoryPointsDriftAttentionRefusesAMeasurableReadingWithNoNumber(t *testi
 		if len(items) == 1 && !strings.Contains(items[0].Summary, fmt.Sprint(rho)) {
 			t.Errorf("summary %q does not name the reading %v", items[0].Summary, rho)
 		}
+	}
+}
+
+// TestStoryPointsDriftAttentionRefusesAnIntervalThatIsNotAnInterval: a measurable
+// reading whose interval has an end that is not a number, or a Lo above its Hi,
+// raises the unreadable item naming the field and no drift item; a drift item
+// already held stays beside it (gt-jo1lnr).
+func TestStoryPointsDriftAttentionRefusesAnIntervalThatIsNotAnInterval(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		read metrics.StoryPointsDriftRead
+		held bool
+		want string
+	}{
+		{"a NaN Lo", driftReadingWithInterval(0.4, math.NaN(), 0.47, "v1"), false, "Lo is not a number"},
+		{"a NaN Hi", driftReadingWithInterval(0.4, 0.35, math.NaN(), "v1"), false, "Hi is not a number"},
+		{"a +Inf Hi", driftReadingWithInterval(0.4, 0.35, math.Inf(1), "v1"), false, "Hi is not a number"},
+		{"a Lo above Hi", driftReadingWithInterval(0.4, 0.47, 0.35, "v1"), false, "Lo is above Hi"},
+		{"a NaN Hi with a drift item held", driftReadingWithInterval(0.4, 0.35, math.NaN(), "v1"), true, "Hi is not a number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) { return tc.read, nil })
+			if tc.held {
+				f.src.prev = attention.State{Items: []attention.Item{{Key: storyPointsDriftKey, Kind: attention.KindStoryPointsDrift}}}
+			}
+			items := f.collect(t, f.src.collectStoryPointsDrift)
+			var unreadable, drift int
+			for _, it := range items {
+				switch it.Key {
+				case storyPointsDriftUnreadableKey:
+					unreadable++
+					if !strings.Contains(it.Summary, tc.want) {
+						t.Errorf("summary %q does not name %q", it.Summary, tc.want)
+					}
+				case storyPointsDriftKey:
+					drift++
+				}
+			}
+			wantDrift := 0
+			if tc.held {
+				wantDrift = 1
+			}
+			if unreadable != 1 || drift != wantDrift {
+				t.Errorf("items = %+v, want the unreadable item and %d drift item(s)", items, wantDrift)
+			}
+		})
 	}
 }
 

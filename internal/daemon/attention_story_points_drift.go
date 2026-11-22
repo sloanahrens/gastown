@@ -84,11 +84,11 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 	if !reading.Measurable {
 		return s.keepHeldDrift(), nil
 	}
-	// An interval end that is not a number reads as "not failing" in the rule
-	// below and would clear a live item: keep the held item and raise nothing,
-	// until the unreadable item (gt-jo1lnr) takes this case.
-	if math.IsNaN(reading.Lo) || math.IsInf(reading.Lo, 0) || math.IsNaN(reading.Hi) || math.IsInf(reading.Hi, 0) {
-		return s.keepHeldDrift(), nil
+	// An interval that is not an interval would read as "not failing" in the
+	// rule below and clear a live item: it is the unreadable item instead, and a
+	// drift item already held stays.
+	if fault := driftIntervalFault(reading); fault != "" {
+		return s.keepHeldDrift(storyPointsDriftUnreadableItem("the measurable reading's interval: " + fault)), nil
 	}
 	if !storyPointsDriftFailing(reading) {
 		return nil, nil
@@ -101,6 +101,21 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 			"story points estimate drift: the 95%% interval %.2f to %.2f of the rank correlation %.2f over the last %d landings of the %s extract lies wholly under %.2f; weights %s",
 			reading.Lo, math.Floor(reading.Hi*100)/100, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
 	}}, nil
+}
+
+// driftIntervalFault names what is wrong with a measurable reading's rank
+// interval, empty when it is fine: an end that is not a number, or a Lo above
+// Hi. The text names the field and never the value.
+func driftIntervalFault(r metrics.StoryPointsDriftReading) string {
+	switch {
+	case math.IsNaN(r.Lo) || math.IsInf(r.Lo, 0):
+		return "Lo is not a number"
+	case math.IsNaN(r.Hi) || math.IsInf(r.Hi, 0):
+		return "Hi is not a number"
+	case r.Lo > r.Hi:
+		return "Lo is above Hi"
+	}
+	return ""
 }
 
 // keepHeldDrift is items plus the drift item the previous tick raised, when one
