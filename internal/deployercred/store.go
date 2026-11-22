@@ -142,7 +142,21 @@ func (d diskDir) Stat() (Info, error) {
 	return infoOf(fi), nil
 }
 
+// Open refuses a name that is not one plain file in the directory. os.Root
+// follows an in-root symlink, so the last element is lstat'd and refused before
+// anything is opened (a link to a FIFO would block the open). The lstat and the
+// open are two calls: a symlink swapped in between is followed inside the root.
 func (d diskDir) Open(name string) (ReadFile, error) {
+	if err := checkName(name); err != nil {
+		return nil, err
+	}
+	info, err := d.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("the credential %s is a symlink, and a credential is never a link", name)
+	}
 	f, err := d.root.Open(name)
 	if err != nil {
 		return nil, err
