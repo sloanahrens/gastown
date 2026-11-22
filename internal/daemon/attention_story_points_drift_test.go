@@ -351,6 +351,50 @@ func TestStoryPointsDriftAttentionNilReadSeamRaisesNothing(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftFailingRank: the drift decision reads the whole interval,
+// so a measurable reading whose Hi is under the bar is failing, one whose Hi is
+// over it is not, and an unmeasurable reading is never failing.
+func TestStoryPointsDriftFailingRank(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		reading metrics.StoryPointsDriftReading
+		want    bool
+	}{
+		{
+			name:    "a measurable interval entirely under the bar",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.41, Lo: 0.35, Hi: 0.47, Measurable: true},
+			want:    true,
+		},
+		{
+			name:    "a measurable interval entirely over the bar",
+			reading: metrics.StoryPointsDriftReading{N: 100, Rho: 0.60, Lo: 0.54, Hi: 0.66, Measurable: true},
+			want:    false,
+		},
+		{
+			name: "an unmeasurable reading",
+			reading: metrics.StoryPointsDriftReading{N: 12, Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN(),
+				Measurable: false, Why: "fewer than 30 landings"},
+			want: false,
+		},
+		{
+			// Measurable is read before Hi, so a reading the measure could not
+			// take is not failing whatever numbers it carries.
+			name:    "an unmeasurable reading whose Hi is under the bar",
+			reading: metrics.StoryPointsDriftReading{N: 12, Rho: 0.41, Lo: 0.35, Hi: 0.47, Measurable: false},
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := storyPointsDriftFailing(tc.reading); got != tc.want {
+				t.Errorf("storyPointsDriftFailing(%+v) = %v, want %v", tc.reading, got, tc.want)
+			}
+		})
+	}
+}
+
 // countKind is the items of one kind.
 func countKind(items []attention.Item, kind attention.Kind) int {
 	n := 0

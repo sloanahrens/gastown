@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/metrics"
 )
 
 // storyPointsDriftBar is the rank correlation the drift measure must hold: below
@@ -24,6 +25,20 @@ const storyPointsDriftKey = "storypoints-drift"
 // estimator would refuse. Without it the queue of a town whose extract stopped
 // would look exactly like a town without drift (gt-my0o23).
 const storyPointsDriftUnreadableKey = "storypoints-drift:unreadable"
+
+// storyPointsDriftFailing is the drift decision: the estimate is failing on the
+// rank correlation only when the whole 95% interval of Rho lies under
+// storyPointsDriftBar. The point reading alone is mostly noise, since it fires
+// on the windows whose interval straddles the bar; the cost is that a true rank
+// correlation of 0.40 reads as failing only on the windows where the point
+// reading is near 0.33 (gt-7gzf3g). An unmeasurable reading is not failing: a
+// measurement not taken says nothing about whether the drift stands.
+func storyPointsDriftFailing(r metrics.StoryPointsDriftReading) bool {
+	if !r.Measurable {
+		return false
+	}
+	return r.Hi < storyPointsDriftBar
+}
 
 // collectStoryPointsDrift raises the drift item when the newest extract's
 // landings rank below storyPointsDriftBar, and the unreadable item when no
