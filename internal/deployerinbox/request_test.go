@@ -231,3 +231,24 @@ func TestDeployerInboxParse(t *testing.T) {
 		})
 	}
 }
+
+// TestDeployerInboxIsRequestName: a request file's name is a UTC stamp, eight hex digits and
+// .json: the one test for a name the inbox reader and ParseRequest share, so a .DS_Store, a
+// temporary file or a name with another stem is not a request (gt-fqsb68).
+func TestDeployerInboxIsRequestName(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]bool{
+		"20261119T181450Z-0123abcd.json":      true,
+		".DS_Store":                           false,
+		".20261119T181450Z-0123abcd.json":     false,
+		"20261119T181450Z-0123abcd":           false,
+		"20261119T181450Z-0123abcd.json.part": false,
+		"20261119T181450Z-0123ABCD.json":      false,
+		"notes.json":                          false,
+		"":                                    false,
+	} {
+		if got := deployerinbox.IsRequestName(name); got != want {
+			t.Errorf("IsRequestName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
