@@ -2,10 +2,27 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+// diskMaintCheckReason concludes one failure with why and asserts the item text, byte for byte.
+func diskMaintCheckReason(t *testing.T, why, want string) {
+	t.Helper()
+	d, _, f := diskMaintTestDaemon(t)
+	d.diskMaintConclude(context.Background(), "vol", "the trim", false, diskMaintNow, 2*time.Hour, why)
+	open := f.notify.OpenEscalations(diskMaintFailedKey("vol"))
+	if len(open) != 1 {
+		t.Fatalf("open items = %+v, want one", open)
+	}
+	wantMsg := fmt.Sprintf("disk maintenance %s did not reach a verdict at %s: %s; the next attempt is at its normal cadence, in %s",
+		"the trim", diskMaintNow.Format(time.RFC3339), want, 2*time.Hour)
+	if open[0].Reason != wantMsg {
+		t.Errorf("item text = %q, want %q", open[0].Reason, wantMsg)
+	}
+}
 
 // TestDiskMaintConcludeFailureRaisesOnceAndSchedulesTheFullInterval pins
 // gt-q9gvmy: a failed conclusion records the full interval, leaves no retry
@@ -93,5 +110,34 @@ func TestDiskMaintConcludeFailedSendIsNotMarkedOpen(t *testing.T) {
 	d.diskMaintConclude(context.Background(), "vol", "the trim", false, diskMaintNow, time.Hour, "why")
 	if open := f.notify.OpenEscalations(key); len(open) != 1 {
 		t.Errorf("the next conclusion did not raise the item: %+v", open)
+	}
+}
+
+// TestDiskMaintConcludeReasonFirstLineAndCut pins gt-u6garf: first line, carriage returns and tabs as spaces, cut to 300 runes with "..." last.
+func TestDiskMaintConcludeReasonFirstLineAndCut(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, why, want string }{
+		{"a multi-line reason keeps only its first line", "kubectl exited 1\nthe pod refused the volume", "kubectl exited 1"},
+		{"carriage return and tab become single spaces", "kubectl\texited\t1\r\nsecond line", "kubectl exited 1"},
+		{"a reason longer than 300 runes is cut with ... last", strings.Repeat("x", 301), strings.Repeat("x", 297) + "..."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			diskMaintCheckReason(t, tt.why, tt.want)
+		})
+	}
+}
+
+// TestDiskMaintConcludeReasonEmptyKeepsTheFixedSentence pins gt-u6garf: an empty or white-space-only reason keeps the fixed sentence, byte for byte.
+func TestDiskMaintConcludeReasonEmptyKeepsTheFixedSentence(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, why string }{
+		{"an empty reason", ""},
+		{"a white-space-only reason", " \t\n\r  "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			diskMaintCheckReason(t, tt.why, diskMaintNoReason)
+		})
 	}
 }

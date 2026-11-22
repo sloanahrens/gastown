@@ -157,7 +157,7 @@ func (d *Daemon) runSweepRunsPrunePass(mode string) {
 	}
 	verdict := d.sweepRunsPrune(mode, keep, minAge)
 	concluded := s.now()
-	d.diskMaintConclude(ctx, sweepRunsPruneName, "sweep-run prune", verdict, concluded, every, "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time")
+	d.diskMaintConclude(ctx, sweepRunsPruneName, "sweep-run prune", verdict, concluded, every, diskMaintNoReason)
 }
 
 // sweepRunsDirectory is one directory the plan lists, with the rig it is in, the
