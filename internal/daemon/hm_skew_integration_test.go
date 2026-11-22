@@ -130,7 +130,8 @@ func TestIntegrationHMSkewRealCloneEscalatesOnACodeChange(t *testing.T) {
 }
 
 // TestHMSkewRealCloneIgnoresADocsOnlyChange: the same skew over a commit that
-// changes only markdown and docs escalates nothing.
+// changes only markdown, docs, test files and testdata (none of which a
+// //go:embed directive names) escalates nothing.
 func TestIntegrationHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
@@ -144,6 +145,39 @@ func TestIntegrationHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
 
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, logs = %q, want none for a docs-only change", esc, logs.String())
+	}
+}
+
+// TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives: a commit that changes only
+// a testdata file is no skew until a //go:embed directive of the hm source names
+// that file, read from the real clone by git grep, and then it is one (gt-pcixw3).
+func TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		embed string
+		skew  bool
+	}{
+		{"a directive naming something else", "//go:embed schema.sql\nvar schema string\n", false},
+		{"a directive naming the changed testdata file", "//go:embed testdata/x.json\nvar fixture string\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, rig, _, _ := hmSkewRealTown(t)
+			hmSkewCommit(t, rig, "internal/foo/embed.go", "package foo\n\nimport _ \"embed\"\n\n"+tc.embed)
+			hmSkewCommit(t, rig, "internal/foo/testdata/x.json", "{}\n")
+			installed := hmSkewGitIn(t, rig, "rev-parse", "HEAD")
+			hmSkewCommit(t, rig, "internal/foo/testdata/x.json", "{\"a\":1}\n")
+			hmSkewCommit(t, rig, "internal/foo/bar_test.go", "package foo\n")
+			hmSkewGitIn(t, rig, "push", "-q", "origin", "main")
+			d, rec, logs := hmSkewRealDaemon(t, town, &installed)
+
+			d.hmSkewOnce()
+
+			if got := len(rec.Escalations()) == 1; got != tc.skew {
+				t.Errorf("escalated = %t, want %t (escalations %+v, logs %q)", got, tc.skew, rec.Escalations(), logs.String())
+			}
+		})
 	}
 }
 
