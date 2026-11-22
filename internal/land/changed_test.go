@@ -228,6 +228,9 @@ var guardTriggers = []struct {
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/deps", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/git", "M\x00internal/daemon/patrol.go\x00"},
+	// TestNoTerminalBackgroundProbe walks every non-test Go file under
+	// internal/, so a change to any of them is its input (gt-kfde9l).
+	{"internal/ui", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},

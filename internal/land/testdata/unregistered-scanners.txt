@@ -45,4 +45,3 @@ internal/tiersweep TestIntegrationUnreadableListIsRed # a fake repo answers the 
 internal/tiersweep TestSweepDefaultsReadFileToTheDisk # a temp root holds the fixture test files the tier reads; it walks no real tree
 internal/tiersweep TestSweepGitSource # an injected exec answers the git ls-files listing; it walks no real tree
 internal/tiersweep TestSweepProductionWiringHonorsRoot # a fake git answers the ls-files listing under a written-in root; it walks no real tree
-internal/ui TestNoTerminalBackgroundProbe # walks every non-test Go file under internal/, the real tree; it is an unregistered guard, follow-up gt-kfde9l registers it in treeWideGuards
