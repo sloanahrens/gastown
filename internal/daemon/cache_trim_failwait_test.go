@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 )
 
 // The waits on the trim Job and the log reads a failed Job's last line comes
@@ -137,6 +138,40 @@ func TestCacheTrimFailWaitNamesOneCutLine(t *testing.T) {
 			}
 			held.await(t)
 		})
+	}
+}
+
+// TestCacheTrimFailWaitCutsTheLineByCharacters pins that the cut the failed
+// error's line takes counts characters, not bytes: a line of 250 three-byte
+// characters is cut to cacheTrimFailLineLimit of them, 600 bytes of valid
+// UTF-8. A cut by bytes would spend the limit on 200 bytes and end inside a
+// character.
+func TestCacheTrimFailWaitCutsTheLineByCharacters(t *testing.T) {
+	t.Parallel()
+	const snowman = "☃" // three bytes each
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitFailedVerb:  {},
+		cacheTrimFailWaitTrimLogVerb: {stdout: strings.Repeat(snowman, 250) + "\n"},
+	})
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+	finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if finished || err == nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+	}
+	held.await(t)
+	prefix := "the trim Job " + cacheTrimJob + " failed: "
+	line, named := strings.CutPrefix(err.Error(), prefix)
+	if !named {
+		t.Fatalf("error = %q; want it to name the line after %q", err, prefix)
+	}
+	if !utf8.ValidString(line) {
+		t.Errorf("the error's line is not valid UTF-8; want whole characters")
+	}
+	if got, want := len(line), 3*cacheTrimFailLineLimit; got != want {
+		t.Errorf("the error's line is %d bytes; want %d", got, want)
+	}
+	if got := strings.Count(line, snowman); got != cacheTrimFailLineLimit {
+		t.Errorf("the error's line holds %d characters; want %d", got, cacheTrimFailLineLimit)
 	}
 }
 
