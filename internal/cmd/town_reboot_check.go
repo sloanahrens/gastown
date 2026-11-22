@@ -29,7 +29,7 @@ seen and the repair to run. Nothing is changed. Text output exits 0 whatever the
 --json prints the same rows as one JSON array and exits 1 when any row is not OK.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		asJSON, err := cmd.Flags().GetBool("json")
+		asJSON, err := townRebootCheckJSONFlag(cmd)
 		if err != nil {
 			return err
 		}
@@ -42,6 +42,16 @@ seen and the repair to run. Nothing is changed. Text output exits 0 whatever the
 func init() {
 	townRebootCheckCmd.Flags().Bool("json", false, "print the rows as one JSON array")
 	townCmd.AddCommand(townRebootCheckCmd)
+}
+
+// townRebootCheckJSONFlag reads --json from the command. A command without the flag is an
+// error, not a text run.
+func townRebootCheckJSONFlag(cmd *cobra.Command) (bool, error) {
+	asJSON, err := cmd.Flags().GetBool("json")
+	if err != nil {
+		return false, fmt.Errorf("reading --json: %w", err)
+	}
+	return asJSON, nil
 }
 
 // townRebootCheckEnv is what the command runs on: the town, the settings lookup, the check
@@ -109,11 +119,9 @@ func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
 // printRebootRowsJSON prints the rows as one JSON array, then returns exit 1 when any row is not
 // OK. The array is printed first, so a script reads every row, its fix and the status together.
 func printRebootRowsJSON(out io.Writer, rows []townreboot.Row) error {
-	data, err := json.MarshalIndent(rows, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding the reboot checks: %w", err)
-	}
-	if _, err := fmt.Fprintf(out, "%s\n", data); err != nil {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rows); err != nil {
 		return fmt.Errorf("printing the reboot checks: %w", err)
 	}
 	failed := 0

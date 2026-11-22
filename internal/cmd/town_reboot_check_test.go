@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/townreboot"
 )
@@ -308,5 +310,31 @@ func TestTownRebootCheckJSONWriteError(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "pipe closed") {
 		t.Errorf("runTownRebootCheck = %v, want an error containing %q", err, "pipe closed")
+	}
+}
+
+// TestTownRebootCheckJSONFlagReadsTheFlag: the registered --json flag reads as false by default
+// and as true once set (gt-ukmp5e).
+func TestTownRebootCheckJSONFlagReadsTheFlag(t *testing.T) {
+	t.Parallel()
+	set := &cobra.Command{}
+	set.Flags().Bool("json", true, "")
+
+	if got, err := townRebootCheckJSONFlag(townRebootCheckCmd); err != nil || got {
+		t.Errorf("default --json = %v, %v; want false, nil", got, err)
+	}
+	if got, err := townRebootCheckJSONFlag(set); err != nil || !got {
+		t.Errorf("set --json = %v, %v; want true, nil", got, err)
+	}
+}
+
+// TestTownRebootCheckJSONFlagMissingIsError: a command without the flag is an error naming the
+// flag, not a silent text run (gt-ukmp5e).
+func TestTownRebootCheckJSONFlagMissingIsError(t *testing.T) {
+	t.Parallel()
+	_, err := townRebootCheckJSONFlag(&cobra.Command{})
+
+	if err == nil || !strings.Contains(err.Error(), "--json") {
+		t.Errorf("townRebootCheckJSONFlag = %v, want an error naming --json", err)
 	}
 }
