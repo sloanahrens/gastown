@@ -77,13 +77,14 @@ const (
 	// child process.  Kept at 60 s so that, even under slot-starvation or
 	// Dolt contention (the conditions that produced the gt-tlwv drops on
 	// 2026-09-16), the child has enough wall-clock to acquire the slot and
-	// complete the Dolt write.  The caller retries up to 3 attempts with
-	// exponential backoff, giving ~120 s total budget.
+	// complete the Dolt write.  Each call makes one attempt: a failure is
+	// returned, and the caller's next tick raises the same key again.
 	defaultEscalationTimeout = 60 * time.Second
 
-	// maxEscalationRetries is the maximum number of attempts before giving up
-	// and logging the escalation to the feed as a last-resort fallback.
-	maxEscalationRetries = 3
+	// maxEscalationRetries is the number of delivery attempts per call: one. A
+	// retry on a timer is a defect (operator, 2026-11-20): the error is returned
+	// and the drop is logged to the feed (escalation_dropped), not slept on.
+	maxEscalationRetries = 1
 
 	// gitPostBufferBytes raises http.postBuffer above git's 1 MB default on the
 	// offsite backup repo. JSONL exports accumulate across many unpushed
@@ -2058,9 +2059,9 @@ func (d *Daemon) escalate(source, message string) {
 // call site rather than inferred from prose that may embed varying detail.
 //
 // Under load (slot-starvation, Dolt contention) gt escalate can take >10 s.
-// We raise the per-attempt timeout to 60 s, retry up to maxEscalationRetries
-// times with exponential backoff, and on final drop log the full message to
-// the feed as a last-resort fallback (gt-tlwv).
+// We raise the per-attempt timeout to 60 s, make one attempt per call (no retry
+// and no backoff), return the error, and on the drop log the full message to the
+// feed as a last-resort fallback (gt-tlwv).
 func (d *Daemon) escalateAlert(key, source, message string) {
 	// The callers that do not branch on delivery have no next action to take on a
 	// drop: escalateAlertErr's own escalation_dropped feed line is their record.
