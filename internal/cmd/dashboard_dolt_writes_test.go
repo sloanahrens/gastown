@@ -158,3 +158,34 @@ func TestDoltWritesSectionCarriesTheHourAndThePeak(t *testing.T) {
 		}
 	})
 }
+
+// TestDoltWritesSectionLeavesOutActorsTheAnswerLacks: an answer with no per-actor
+// counts (nil) draws no actor rows and says so in the Note, an answer whose actors
+// wrote nothing (empty) does not, and a later answer with actors counts as usual
+// (gt-usakr9). A stats error is the section's error (the failed-read row of
+// TestDoltWritesSectionRanksTheSixBusiestActors).
+func TestDoltWritesSectionLeavesOutActorsTheAnswerLacks(t *testing.T) {
+	t.Parallel()
+	at := func(m int) time.Time { return time.Date(2026, 11, 22, 12, m, 0, 0, time.UTC) }
+	reads := []map[string]uint64{nil, {}, {"a": 0}, {"a": 60}}
+	i := 0
+	s := newDoltWritesSection(func(context.Context) (map[string]uint64, error) { i++; return reads[i-1], nil },
+		func() time.Time { return at(5 * i) })
+	for step, want := range []struct {
+		note string
+		rows [][]string
+	}{
+		{"the gateway's stats carry no per-actor counts, so the actor rows are left out", nil},
+		{"last hour: 0 writes; peak 10-minute bucket of the last 24 hours: 0", nil},
+		{"last hour: 0 writes; peak 10-minute bucket of the last 24 hours: 0", nil},
+		{"last hour: 60 writes; peak 10-minute bucket of the last 24 hours: 60", [][]string{{"a", "6.0"}}},
+	} {
+		got, err := s.read(context.Background(), time.Time{})
+		if err != nil {
+			t.Fatalf("step %d: %v", step+1, err)
+		}
+		if got.Note != want.note || !reflect.DeepEqual(got.Rows, want.rows) {
+			t.Errorf("step %d: note %q rows %q, want %q and %q", step+1, got.Note, got.Rows, want.note, want.rows)
+		}
+	}
+}
