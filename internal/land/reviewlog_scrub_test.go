@@ -920,3 +920,124 @@ func TestReviewLogScrubRewriteScansAMillionByteLine(t *testing.T) {
 	}
 	assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
 }
+
+// TestScrubRefusesAChangedLogBetweenReadAndReplace: another process (the landing
+// worker) may append to the log after the scrub read it. A replace then would drop
+// that line, so the scrub compares the log's size and modification time with what
+// it read and refuses when either moved (gt-l9c9gy).
+func TestScrubRefusesAChangedLogBetweenReadAndReplace(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	for name, change := range map[string]func(t *testing.T, path string) []byte{
+		"a line appended": func(t *testing.T, path string) []byte {
+			extra := []byte(`{"bead_id":"gt-late","verdict":"approve"}` + "\n")
+			fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("opening the log to append: %v", err)
+			}
+			defer fh.Close()
+			if _, err := fh.Write(extra); err != nil {
+				t.Fatalf("appending: %v", err)
+			}
+			return extra
+		},
+		"a line appended with the mtime put back": func(t *testing.T, path string) []byte {
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			extra := []byte(`{"bead_id":"gt-late","verdict":"approve"}` + "\n")
+			fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("opening the log to append: %v", err)
+			}
+			if _, err := fh.Write(extra); err != nil {
+				t.Fatalf("appending: %v", err)
+			}
+			if err := fh.Close(); err != nil {
+				t.Fatalf("closing: %v", err)
+			}
+			if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+				t.Fatalf("putting the mtime back: %v", err)
+			}
+			return extra
+		},
+		"the mtime moved": func(t *testing.T, path string) []byte {
+			later := time.Now().Add(time.Hour)
+			if err := os.Chtimes(path, later, later); err != nil {
+				t.Fatalf("moving the mtime: %v", err)
+			}
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			before := scrubTestLogBytes(t, scrubTestThreeRows(token)...)
+			logf, path := writeScrubTestLog(t, before)
+			var extra []byte
+			logf.beforeReplace = func() { extra = change(t, path) }
+			replaced := 0
+			logf.replace = func(string, []byte, os.FileMode) error { replaced++; return nil }
+
+			_, err := logf.Scrub(true)
+
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "changed") {
+				t.Fatalf("Scrub(true) returned %v, want an error naming the path and that the log changed", err)
+			}
+			assertNoScrubToken(t, err.Error(), token)
+			if replaced != 0 {
+				t.Errorf("replace was called %d time(s) over a log that changed", replaced)
+			}
+			after, rerr := os.ReadFile(path)
+			if rerr != nil {
+				t.Fatalf("reading the log: %v", rerr)
+			}
+			if !bytes.Equal(after, append(append([]byte{}, before...), extra...)) {
+				t.Errorf("the log is not as its writer left it")
+			}
+		})
+	}
+}
+
+// TestScrubReplacesAnUnchangedLog: a log nobody touched since the read is replaced
+// as before.
+func TestScrubReplacesAnUnchangedLog(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	logf, path := writeScrubTestLog(t, scrubTestLogBytes(t, scrubTestThreeRows(token)...))
+	logf.beforeReplace = func() {}
+
+	if _, err := logf.Scrub(true); err != nil {
+		t.Fatalf("Scrub(true) over an unchanged log: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the log: %v", err)
+	}
+	assertNoScrubToken(t, string(after), token)
+}
+
+// TestScrubRefusesALogThatVanishedBeforeTheReplace: a log that cannot be checked
+// again is not replaced either; the error names the path.
+func TestScrubRefusesALogThatVanishedBeforeTheReplace(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	logf, path := writeScrubTestLog(t, scrubTestLogBytes(t, scrubTestThreeRows(token)...))
+	logf.beforeReplace = func() {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("removing the log: %v", err)
+		}
+	}
+	replaced := 0
+	logf.replace = func(string, []byte, os.FileMode) error { replaced++; return nil }
+
+	_, err := logf.Scrub(true)
+
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "checking it before the replace") {
+		t.Fatalf("Scrub(true) over a vanished log returned %v, want an error naming the path", err)
+	}
+	if replaced != 0 {
+		t.Errorf("replace was called %d time(s) over a log that could not be checked", replaced)
+	}
+}
