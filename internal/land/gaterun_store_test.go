@@ -409,8 +409,14 @@ type holdingGateRunFS struct {
 	inRead  chan struct{}
 	release chan struct{}
 	once    sync.Once
+	relOnce sync.Once
 	sizes   atomic.Int32
 }
+
+// open releases the blocked read; safe to call more than once, so a Cleanup can
+// release it when the test fails before its own release and no append keeps the
+// package mutex.
+func (h *holdingGateRunFS) open() { h.relOnce.Do(func() { close(h.release) }) }
 
 func (h *holdingGateRunFS) Size(p string) (int64, error) {
 	h.sizes.Add(1)
@@ -445,6 +451,7 @@ func awaitGateRun(t *testing.T, ch <-chan struct{}, what string) {
 //testpolicy:allow parallel — holds the package-wide gate-run mutex that every other append in this package also takes
 func TestGateRunStoreAnAppendDuringARotationIsNotLost(t *testing.T) {
 	h := &holdingGateRunFS{memGateRunFS: newMemGateRunFS(), inRead: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(h.open)
 	cur := gateRunsPath("/town")
 	old := sampleGateRun("gt-old")
 	old.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -469,7 +476,7 @@ func TestGateRunStoreAnAppendDuringARotationIsNotLost(t *testing.T) {
 	if n := h.sizes.Load(); n != 1 {
 		t.Errorf("%d appends reached the filesystem while the first held a rotation open, want 1", n)
 	}
-	close(h.release)
+	h.open()
 	awaitGateRun(t, aDone, "the first append")
 	awaitGateRun(t, bDone, "the second append")
 	got := beadsIn(t, h.files[cur], false)
