@@ -747,6 +747,9 @@ func setLongReading(r *StoryPointsDriftReading, est, measured []float64) {
 	}
 	lo, hi, err := LongAUCInterval(est, measured, storyPointsLongMinutes, bootstrapResamples, bootstrapSeed)
 	if err != nil {
+		// Unreachable for a real window, so it has no row: with LongAUC already
+		// answering, one bead on a side leaves about 37% one-class resamples, under
+		// the half that refuses. Same as BootstrapSpearman in intervalReading.
 		return
 	}
 	r.LongAUC, r.LongLo, r.LongHi, r.LongMeasurable = auc, lo, hi, true
