@@ -117,6 +117,12 @@ const RunInterval = 24 * time.Hour
 // older than the cut.
 const maxKeepDays = int(time.Duration(1<<63-1) / (24 * time.Hour))
 
+// lastRunSkew is how far a recorded last run may sit ahead of the check's clock
+// before it is a fault: a clock set back a little is not one. It is unexported
+// because nothing outside the package reads it; the error names the skew size,
+// not a timestamp, so it carries no stored value.
+const lastRunSkew = time.Minute
+
 // Decision is a daily check's answer for one database.
 type Decision struct {
 	// Due reports whether a squash run may start now.
@@ -135,10 +141,10 @@ type Decision struct {
 // Decide reports whether a squash run is due at now for one database, with the
 // cut instant it would squash to. lastRun is when the previous run started,
 // zero when none is recorded; a run started inside RunInterval holds the check
-// back even when a threshold trips. A stamp after now is read as a backwards
-// clock and holds nothing back, so a clock set back costs one extra run rather
-// than a schedule that never comes due. A KeepDays below 1 is an error, not a
-// decision.
+// back even when a threshold trips. A lastRun more than lastRunSkew after now
+// is an error: a run cannot have started in the future, and reading it as no
+// run would open the gate for as long as the stamp stays ahead. One within the
+// skew counts as now. A KeepDays below 1 is an error, not a decision.
 // A KeepDays above maxKeepDays is an error too: the window would wrap and the
 // cut would no longer be then minus the window.
 func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
@@ -148,6 +154,12 @@ func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
 	if cfg.KeepDays > maxKeepDays {
 		return Decision{}, fmt.Errorf("doltsquash: keep_days %d is above %d, the longest window the cut can reach", cfg.KeepDays, maxKeepDays)
 	}
+	if lastRun.After(now.Add(lastRunSkew)) {
+		return Decision{}, fmt.Errorf("doltsquash: the last run is in the future, %s after the check's clock and past the %s skew allowed, so the gate cannot be judged", lastRun.Sub(now).Truncate(time.Second), lastRunSkew)
+	}
+	if lastRun.After(now) {
+		lastRun = now
+	}
 	v := Evaluate(in, cfg.Thresholds)
 	d := Decision{
 		Cut:     now.Add(-time.Duration(cfg.KeepDays) * 24 * time.Hour),
@@ -156,7 +168,7 @@ func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
 	switch {
 	case !v.Tripped():
 		d.Reason = "no threshold tripped"
-	case !lastRun.IsZero() && !lastRun.After(now) && now.Sub(lastRun) < RunInterval:
+	case !lastRun.IsZero() && now.Sub(lastRun) < RunInterval:
 		d.Reason = fmt.Sprintf("tripped (%s), but the last run started %s ago, inside the %s gate",
 			joinTriggers(v.TrippedBy), now.Sub(lastRun).Truncate(time.Minute), hours(RunInterval))
 	default:

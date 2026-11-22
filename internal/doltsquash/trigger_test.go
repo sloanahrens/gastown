@@ -337,13 +337,6 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 			wantReason: "tripped (backup bytes), but the last run started 23h59m0s ago, inside the 24h gate",
 		},
 		{
-			name:       "a stamp after the clock holds nothing back",
-			in:         backupBytesTrips(),
-			lastRun:    now.Add(time.Hour),
-			wantDue:    true,
-			wantReason: "due: backup bytes over the limit",
-		},
-		{
 			name: "nothing tripped and never run is not due",
 			in: Inputs{
 				BackupBytes:    Read[int64](5 << 30),
@@ -448,5 +441,42 @@ func TestCutAcceptsTheLongestKeepWindow(t *testing.T) {
 	}
 	if !got.Cut.Before(now) {
 		t.Errorf("Cut = %s, want before now %s", got.Cut, now)
+	}
+}
+
+// TestDecideLastRunInTheFuture: a last run after the check's clock is no run
+// that holds the gate, and no run that opens it: more than a minute ahead is an
+// error and nothing runs, up to a minute ahead counts as now (the gate holds),
+// and the past cases are unchanged (gt-5eicg2).
+func TestDecideLastRunInTheFuture(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		lastRun time.Time
+		wantDue bool
+		wantErr bool
+	}{
+		{"an hour ahead is refused", now.Add(time.Hour), false, true},
+		{"one minute and a second ahead is refused", now.Add(time.Minute + time.Second), false, true},
+		{"exactly one minute ahead holds the gate", now.Add(time.Minute), false, false},
+		{"59 seconds ahead holds the gate", now.Add(59 * time.Second), false, false},
+		{"an hour ago holds the gate", now.Add(-time.Hour), false, false},
+		{"past the interval is due", now.Add(-RunInterval - time.Minute), true, false},
+		{"no run recorded is due", time.Time{}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Decide(now, tc.lastRun, backupBytesTrips(), designSettings())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Decide error = %v, want error %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "the last run is in the future") {
+				t.Errorf("Decide error %q lacks the words \"the last run is in the future\"", err)
+			}
+			if got.Due != tc.wantDue {
+				t.Errorf("Due = %v, want %v (reason %q)", got.Due, tc.wantDue, got.Reason)
+			}
+		})
 	}
 }

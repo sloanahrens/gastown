@@ -2476,3 +2476,31 @@ func TestSquashResetHoldEqualsTheRunInterval(t *testing.T) {
 		t.Errorf("squashResetHold = %v, want doltsquash.RunInterval %v", squashResetHold, doltsquash.RunInterval)
 	}
 }
+
+// TestSquashCheckRunsNothingOnAFutureRecord: a squash record whose last run is
+// ahead of the check's clock opens no gate: the check runs no database and
+// says it did not decide (gt-5eicg2).
+func TestSquashCheckRunsNothingOnAFutureRecord(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+		st.Squash["gt"] = squashRunRecord{LastRun: squashTestNow.Add(24 * time.Hour), Outcome: squashOutcomeCompleted}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if calls != 0 {
+		t.Errorf("the check started %d runs on a record dated a day ahead, want none", calls)
+	}
+	// A swallowed error runs nothing too: the check must say it did not decide.
+	for _, want := range []string{"squash: WARNING: gt: doltsquash: the last run is in the future", "the check did not decide"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the check's log lacks %q: %q", want, logs.String())
+		}
+	}
+}
