@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,17 +93,19 @@ func TestSlingReusesNextSeatWhenFirstIsTaken(t *testing.T) {
 
 // TestSlingRefusedAtDirCapRecordsNoRespawn: when every seat refuses and the rig
 // is at the cap, the sling is refused with the cap error. The polecat never
-// started, so the bead's respawn count is untouched.
+// started, so the bead's respawn count is untouched and no scan mark is
+// recorded: the caller acts on the cap refusal, not on a reuse miss.
 func TestSlingRefusedAtDirCapRecordsNoRespawn(t *testing.T) {
 	t.Parallel()
 	const bead = "gt-next"
 	townRoot, seats := fullRig(t, 30)
 	fake := &idlePolecatReuseFake{seats: seats, reuseErrFor: refuseSeats(seats)}
+	env, steps := recordingStepEnv()
 	if _, err := polecat.RecordBeadRespawn(townRoot, bead); err != nil {
 		t.Fatal(err)
 	}
 
-	info, err := reuseOrRefuseAtDirCap(fake, fakeIdleReuseEnv(), townRoot, "rig", 30,
+	info, err := reuseOrRefuseAtDirCap(fake, env, townRoot, "rig", 30,
 		SlingSpawnOptions{HookBead: bead}, recordRespawnFn(t, townRoot, bead))
 
 	if err == nil || !strings.Contains(err.Error(), "30 live polecat seats (max 30)") {
@@ -116,6 +119,9 @@ func TestSlingRefusedAtDirCapRecordsNoRespawn(t *testing.T) {
 	}
 	if got := respawnCountOf(t, townRoot, bead); got != 1 {
 		t.Errorf("respawn count = %d after a cap refusal, want the 1 it had before", got)
+	}
+	if len(*steps) != 0 {
+		t.Errorf("steps = %v after a cap refusal; want none", *steps)
 	}
 }
 
@@ -354,5 +360,54 @@ func TestSlingRetriedSeatGetsSameSlingOptions(t *testing.T) {
 	}
 	if second.HookBead != bead || second.ResumeBranch != resume {
 		t.Errorf("retry options = %+v; want hook %q and resume %q", second, bead, resume)
+	}
+}
+
+// recordingStepEnv is fakeIdleReuseEnv whose step timer keeps its names in order.
+func recordingStepEnv() (idleReuseEnv, *[]string) {
+	var steps []string
+	env := fakeIdleReuseEnv()
+	env.step = func(name string) { steps = append(steps, name) }
+	return env, &steps
+}
+
+// TestReuseMissMarksTheScan guards gt-o1j1hs. The idle-seat listing and the
+// live-seat count run before a sling reuses a seat or allocates one, and the
+// step timer bills the gap since the last mark to the next one, so an unmarked
+// scan hides in allocate. A reused seat keeps reuse; no seat marks reuse-miss.
+func TestReuseMissMarksTheScan(t *testing.T) {
+	t.Parallel()
+	const bead = "gt-next"
+	tests := []struct {
+		name  string
+		seats int
+		reuse bool
+		want  []string
+	}{
+		{"a reused seat marks reuse only", 1, true, []string{"reuse"}},
+		{"no idle seat marks reuse-miss", 5, false, []string{"reuse-miss"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, seats := fullRig(t, tt.seats)
+			env, steps := recordingStepEnv()
+			fake := &idlePolecatReuseFake{}
+			if tt.reuse {
+				fake.seats = seats
+			}
+			info, err := reuseOrRefuseAtDirCap(fake, env, townRoot, "rig", 30,
+				SlingSpawnOptions{HookBead: bead}, recordRespawnFn(t, townRoot, bead))
+
+			if err != nil {
+				t.Fatalf("err = %v; want no refusal below the cap", err)
+			}
+			if reused := info != nil; reused != tt.reuse {
+				t.Fatalf("reused = %v; want %v", reused, tt.reuse)
+			}
+			if !slices.Equal(*steps, tt.want) {
+				t.Errorf("steps = %v; want %v", *steps, tt.want)
+			}
+		})
 	}
 }
