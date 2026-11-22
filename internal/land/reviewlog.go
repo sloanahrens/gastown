@@ -121,6 +121,8 @@ type ReviewRecord struct {
 	// is a line about the feed's own work rather than a verdict, so the readers
 	// that count verdicts skip it (gt-3arxj).
 	Queue *FollowupQueue `json:"followup_queue,omitempty"`
+	// Skips is set on a skips line: an audit of what the skip policy dropped (gt-plcst6).
+	Skips *FollowupSkips `json:"followup_skips,omitempty"`
 	// Bar is the review threshold in the reviewed tree's .om.json, 0 when the
 	// tree names none.
 	Bar float64   `json:"bar"`
@@ -141,24 +143,22 @@ type ReviewFindingText struct {
 	Class string `json:"class,omitempty"`
 }
 
-// IsQueueLine reports whether raw is a follow-up queue line: a record whose
-// followup_queue carries a payload, which the feed's backpressure bound holds
-// findings in until a later landing has room (gt-3arxj). Every reader of the
-// log decides this here — the feed's own reads, the om-stats report, the
-// metrics loaders and the rejection join — so none can drift on what a queue
-// line is.
+// IsQueueLine reports whether raw is a bookkeeping line rather than a verdict:
+// a queue line (followup_queue, gt-3arxj) or a skips line (followup_skips, what
+// the skip policy dropped, gt-plcst6). Every reader decides here, so none drifts.
 //
-// A null payload names no queue line: it carries no findings, and the readers
+// A null payload names neither line: it carries no findings, and the readers
 // that decode the record read it the same way. The loaders therefore report such
 // a line as one they could not use rather than skipping it uncounted, so a
 // hand-edited marker is never silently a review (gt-3arxj).
 func IsQueueLine(raw []byte) bool {
 	var line struct {
 		Queue *json.RawMessage `json:"followup_queue"`
+		Skips *json.RawMessage `json:"followup_skips"`
 	}
 	// A JSON null unmarshals into a nil pointer, so the marker is the payload
 	// itself rather than the field's presence.
-	return json.Unmarshal(raw, &line) == nil && line.Queue != nil
+	return json.Unmarshal(raw, &line) == nil && (line.Queue != nil || line.Skips != nil)
 }
 
 // reviewFindingTexts is a verdict's findings as its record keeps them.
@@ -398,6 +398,27 @@ type QueuedFollowup struct {
 	Findings []ReviewFindingText
 }
 
+// FollowupSkipped is one dropped finding: class, file, reason and fingerprint, no title or claim (gt-plcst6).
+type FollowupSkipped struct {
+	Class       string `json:"class,omitempty"`
+	File        string `json:"file,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+// FollowupSkips is a skips line's payload (gt-plcst6).
+type FollowupSkips struct {
+	Findings []FollowupSkipped `json:"findings"`
+}
+
+// FollowupSkipsRecord is one skips line as AppendSkips writes it (gt-plcst6).
+type FollowupSkipsRecord struct {
+	BeadID   string
+	Rig      string
+	At       time.Time
+	Findings []FollowupSkipped
+}
+
 // IsRejection reports whether the landing refused the work on this verdict:
 // om asked for changes, or the worker turned an approval away on its findings.
 func (r ReviewRecord) IsRejection() bool {
@@ -465,6 +486,21 @@ func (f *ReviewsFile) AppendQueue(q QueuedFollowup) error {
 	return nil
 }
 
+// AppendSkips appends one skips line (gt-plcst6), refusing a line past the log's bound.
+func (f *ReviewsFile) AppendSkips(rec FollowupSkipsRecord) error {
+	line, err := json.Marshal(ReviewRecord{BeadID: rec.BeadID, Rig: rec.Rig, At: rec.At,
+		Skips: &FollowupSkips{Findings: rec.Findings}})
+	if err == nil && len(line)+1 > maxReviewLineBytes {
+		err = fmt.Errorf("skips record for %s past the %d-byte line bound", rec.BeadID, maxReviewLineBytes)
+	}
+	if err != nil {
+		return err
+	}
+	reviewsMu.Lock()
+	defer reviewsMu.Unlock()
+	return appendJSONLine(f.Path, append(line, '\n'), nil)
+}
+
 // queueChunks splits a landing's held findings into the lines the queue keeps:
 // as many findings as fit under maxReviewLineBytes, at most
 // maxQueueLineFindings of them, with each claim bounded first.
@@ -510,7 +546,7 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 			return
 		}
 		var rec ReviewRecord
-		if json.Unmarshal(raw, &rec) != nil {
+		if json.Unmarshal(raw, &rec) != nil || rec.Queue == nil { // a skips line passes IsQueueLine with no queue
 			return
 		}
 		queued = append(queued, QueuedFollowup{Bead: rec.BeadID, Rig: rec.Rig, At: rec.At,
