@@ -102,6 +102,9 @@ func diskMaintControlDaemon(t *testing.T, cfg *DaemonPatrolConfig, k *controlKub
 	for _, v := range ciCacheVolumes {
 		d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), diskMaintNow)
 	}
+	// The CI engine prune is held the same way: its failed run raises an item too
+	// (gt-3e23rz).
+	d.diskMaintSchedule.record(ciEnginePruneName, diskMaintNow)
 	d.diskMaint.readDisks = nil // the production read, with the control kubectl below
 	healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
 	// The sandbox disk parses kubelet node stats, not df output.

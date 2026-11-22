@@ -545,6 +545,18 @@ func engineAlerts(f *ciCacheFixture) *notifyfake.Recorder {
 	return f.d.notifier.(*notifyfake.Recorder)
 }
 
+// enginePruneItems is the escalations in f that name the CI engine prune: the
+// fixture's cache trim volumes fail too and raise their own items (gt-76cz9d).
+func enginePruneItems(f *ciCacheFixture) []notifyfake.Call {
+	var items []notifyfake.Call
+	for _, e := range engineAlerts(f).Escalations() {
+		if strings.Contains(e.Escalation.Description, "CI engine prune") {
+			items = append(items, e)
+		}
+	}
+	return items
+}
+
 // engineConcludedAt asserts the engine prune's last run concluded at at, asked
 // for no retry, and left its failure item open.
 func engineConcludedAt(t *testing.T, f *ciCacheFixture, at time.Time) {
@@ -853,7 +865,7 @@ func TestCIEnginePruneFailureRaisesOnce(t *testing.T) {
 	f.tick()
 	f.drain()
 	engineConcludedAt(t, f, ciCacheTestStart)
-	if got := len(engineAlerts(f).Escalations()); got != 1 {
+	if got := len(enginePruneItems(f)); got != 1 {
 		t.Errorf("escalations = %d before the full interval, want the one already open", got)
 	}
 
@@ -862,7 +874,7 @@ func TestCIEnginePruneFailureRaisesOnce(t *testing.T) {
 	f.tick()
 	f.drain()
 	engineConcludedAt(t, f, ciCacheTestStart.Add(every))
-	if got := len(engineAlerts(f).Escalations()); got != 1 {
+	if got := len(enginePruneItems(f)); got != 1 {
 		t.Errorf("escalations = %d after a second failure, want the one already open", got)
 	}
 
