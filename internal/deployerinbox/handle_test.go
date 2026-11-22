@@ -408,6 +408,83 @@ func TestDeployerInboxHandleRefuses(t *testing.T) {
 			}
 		})
 	}
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	mismatched := handleRecord(plan)
+	mismatched.PlanSHA256 = strings.Repeat("0", len(plan.SHA256))
+	expired := handleRecord(plan)
+	expired.ExpiresAt = handleNow.Add(-time.Second)
+	movedLive := maps.Clone(plan.Versions)
+	movedLive["Deployment/control/gt"] = "8"
+	applyCases := []struct {
+		name   string
+		steps  *fakeSteps
+		calls  []string
+		reason string
+	}{
+		{
+			name:   "the record is missing",
+			steps:  &fakeSteps{plan: plan, recordErr: deployerinbox.ErrNoApproval},
+			calls:  []string{"Plan p", "ReadRecord " + id},
+			reason: fmt.Sprintf("the plan %q is not approved yet: %s", "p", deployerinbox.ErrNoApproval),
+		},
+		{
+			name:   "the record approves another digest",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: mismatched},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, mismatched, plan, plan.Versions),
+		},
+		{
+			name:   "the record expired",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: expired},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, expired, plan, plan.Versions),
+		},
+		{
+			name:   "a live version moved before the verify",
+			steps:  &fakeSteps{plan: plan, live: movedLive, record: handleRecord(plan)},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, handleRecord(plan), plan, movedLive),
+		},
+	}
+	for _, tc := range applyCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindApply, Plan: "p"}
+
+			answer := deployerinbox.Handle(context.Background(), tc.steps, req, handleNow)
+
+			if answer.Status != deployerinbox.StatusRefused {
+				t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusRefused, answer.Detail)
+			}
+			if answer.Detail != tc.reason {
+				t.Errorf("detail = %q, want the reason %q", answer.Detail, tc.reason)
+			}
+			if !slices.Equal(tc.steps.calls, tc.calls) {
+				t.Errorf("calls = %v, want %v: Apply is not reached", tc.steps.calls, tc.calls)
+			}
+			if tc.steps.appliedPlan.SHA256 != "" || tc.steps.appliedLive != nil {
+				t.Errorf("Apply was handed %+v and %v, want nothing applied", tc.steps.appliedPlan, tc.steps.appliedLive)
+			}
+		})
+	}
+}
+
+// refusedByVerify returns the reason Verify gives for rec, and fails the test
+// unless Verify refuses it, so each row's reason is one Verify really gives.
+func refusedByVerify(t *testing.T, rec clusterapproval.Record, plan clusterapproval.Plan, live map[string]string) string {
+	t.Helper()
+	err := clusterapproval.Verify(rec, plan, live, handleNow)
+	if err == nil {
+		t.Fatalf("Verify(%+v) = nil, want the record refused", rec)
+	}
+	return err.Error()
 }
 
 func TestDeployerInboxHandleFails(t *testing.T) {
