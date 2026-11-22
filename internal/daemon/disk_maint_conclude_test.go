@@ -41,10 +41,41 @@ func TestDiskMaintConcludeFailureRaisesOnceAndSchedulesTheFullInterval(t *testin
 	}
 }
 
-// TestDiskMaintConcludeFailedSendLeavesTheItemUnmarked pins the send's end: a
+// TestDiskMaintConcludeSuccessClearsAndASecondFailureRaisesAgain pins the
+// other half: a conclusion that reaches a verdict clears the item a failure
+// opened, and a failure after it raises a new one.
+func TestDiskMaintConcludeSuccessClearsAndASecondFailureRaisesAgain(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	const name, label, why = "ci-cache-trim/vol", "the CI cache volume trim of vol", "kubectl exited 1"
+	key := diskMaintFailedKey(name)
+	every := 2 * time.Hour
+
+	d.diskMaintConclude(context.Background(), name, label, false, diskMaintNow, every, why)
+	if open := f.notify.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("open items after the failure = %+v, want one", open)
+	}
+
+	cleared := diskMaintNow.Add(every)
+	d.diskMaintConclude(context.Background(), name, label, true, cleared, every, "")
+	if open := f.notify.OpenEscalations(key); len(open) != 0 {
+		t.Errorf("open items after the success = %+v, want none", open)
+	}
+	if got := d.diskMaintSchedule.lastRunAt(name); !got.Equal(cleared) {
+		t.Errorf("last run after the success = %v, want %v", got, cleared)
+	}
+
+	failedAgain := cleared.Add(every)
+	d.diskMaintConclude(context.Background(), name, label, false, failedAgain, every, why)
+	if open := f.notify.OpenEscalations(key); len(open) != 1 {
+		t.Errorf("open items after a later failure = %+v, want one", open)
+	}
+}
+
+// TestDiskMaintConcludeFailedSendIsNotMarkedOpen pins the send's end: a
 // failure whose alert did not land is logged and left unmarked, so the next
 // failure raises it rather than reading it as already open.
-func TestDiskMaintConcludeFailedSendLeavesTheItemUnmarked(t *testing.T) {
+func TestDiskMaintConcludeFailedSendIsNotMarkedOpen(t *testing.T) {
 	t.Parallel()
 	d, buf, f := diskMaintTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
