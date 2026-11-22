@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -88,20 +89,17 @@ func TestTranscriptArchiveMovesTheCopy(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "missing-archive")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a missing copy made an archive: %v", err)
 	}
-	// A copy or archive path it cannot read or make is an error, not an empty archive.
+	// A copy path it cannot open, or an archive it cannot make, is an error, not
+	// an empty archive; the files that can move still do.
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "archive")
-	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), link); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct{ copyDir, archiveDir, want string }{
-		{filepath.Join(blocker, "copy"), archiveDir, "reading the transcript copy"},
-		{copyDir, filepath.Join(blocker, "archive"), "checking the transcript archive"},
-		{copyDir, link, "creating the transcript archive"},
+		{filepath.Join(blocker, "copy"), archiveDir, "opening the transcript copy"},
+		{copyDir, filepath.Join(blocker, "archive"), "into the transcript archive"},
 	} {
+		writeTranscript(t, filepath.Join(copyDir, "fresh.jsonl"))
 		if err := archiveCopiedTranscripts(tc.copyDir, tc.archiveDir); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want wording %q", tc.archiveDir, err, tc.want)
 		}
@@ -117,11 +115,69 @@ func TestTranscriptArchiveRenameFailureNamesTheFile(t *testing.T) {
 	own := filepath.Join(copyDir, "ses-1.jsonl")
 	writeTranscript(t, own)
 	failed := errors.New("rename refused")
-	err := archiveCopiedTranscriptsWith(copyDir, archiveDir, func(string, string) error { return failed })
-	if !errors.Is(err, failed) || !strings.Contains(err.Error(), own) {
-		t.Fatalf("a failed move = %v, want the rename error naming %s", err, own)
+	err := archiveCopiedTranscriptsWith(copyDir, archiveDir, func(_ *os.Root, rel, _ string) error {
+		return fmt.Errorf("moving %s into the transcript archive: %w", rel, failed)
+	})
+	if !errors.Is(err, failed) || !strings.Contains(err.Error(), "ses-1.jsonl") {
+		t.Fatalf("a failed move = %v, want the move's error naming %s", err, own)
 	}
 	if _, err := os.Stat(own); err != nil {
 		t.Errorf("the file whose move failed left the copy: %v", err)
 	}
+}
+
+// TestTranscriptArchiveRefusesAParentSwappedForALink: the copy comes from an
+// untrusted sandbox. A subagent folder swapped for a link to a directory outside
+// the copy, between the listing and the move, must not move the transcript it
+// holds there: the move is refused with an error naming the path, the outside
+// file stays, and nothing reaches the archive (gt-1xoiib).
+func TestTranscriptArchiveRefusesAParentSwappedForALink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	copyDir, archiveDir, outside := filepath.Join(root, "copy"), filepath.Join(root, "archive"), filepath.Join(root, "outside")
+	secret := filepath.Join(outside, "host.jsonl")
+	writeTranscript(t, secret)
+	if err := os.MkdirAll(copyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(copyDir, "subagents")); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(archiveDir, "host.jsonl")
+	err := moveConfined(mustRoot(t, copyDir), "subagents/host.jsonl", dest)
+	if err == nil || !strings.Contains(err.Error(), "subagents/host.jsonl") {
+		t.Errorf("a move through a link out of the copy = %v, want an error naming the path", err)
+	}
+	if _, serr := os.Stat(secret); serr != nil {
+		t.Errorf("the file outside the copy moved: %v", serr)
+	}
+	if _, serr := os.Stat(dest); !errors.Is(serr, fs.ErrNotExist) {
+		t.Errorf("the outside file reached the archive: %v", serr)
+	}
+	if _, serr := os.Stat(archiveDir); !errors.Is(serr, fs.ErrNotExist) {
+		t.Errorf("the refused move made the archive directory: %v", serr)
+	}
+	// A leaf swapped for a link, even to a file inside the copy, is refused too.
+	target := filepath.Join(copyDir, "real.jsonl")
+	writeTranscript(t, target)
+	if err := os.Symlink(target, filepath.Join(copyDir, "swapped.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	err = moveConfined(mustRoot(t, copyDir), "swapped.jsonl", dest)
+	if err == nil || !strings.Contains(err.Error(), "no longer a regular file") {
+		t.Errorf("a move of a link leaf = %v, want it refused as no longer a regular file", err)
+	}
+	if _, serr := os.Stat(dest); !errors.Is(serr, fs.ErrNotExist) {
+		t.Errorf("the link's target reached the archive: %v", serr)
+	}
+}
+
+func mustRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r
 }
