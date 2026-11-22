@@ -527,6 +527,52 @@ func queueChunks(q QueuedFollowup) [][]ReviewFindingText {
 	return chunks
 }
 
+// AppendSkipsChunked appends a pass's skipped findings as one skips line per chunk
+// of findings that fits under three quarters of maxReviewLineBytes, in order: a
+// line past the bound is one every reader skips unseen. A finding that alone does
+// not fit is an error, returned before any chunk is written (gt-p1tafj).
+func (f *ReviewsFile) AppendSkipsChunked(rec FollowupSkipsRecord) error {
+	chunks, err := skipChunks(rec.Findings, maxReviewLineBytes)
+	if err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		part := rec
+		part.Findings = chunk
+		if err := f.AppendSkips(part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// skipChunks cuts findings into chunks that each fit under three quarters of limit,
+// the margin queueChunks keeps for the line's other fields. The loop is bounded by
+// the number of findings.
+func skipChunks(findings []FollowupSkipped, limit int) ([][]FollowupSkipped, error) {
+	room := limit - limit/4
+	var chunks [][]FollowupSkipped
+	var cur []FollowupSkipped
+	size := 0
+	for _, s := range findings {
+		raw, _ := json.Marshal(s) // four strings: it cannot fail
+		n := len(raw) + 1
+		if n > room {
+			return nil, fmt.Errorf("a skipped finding does not fit a review line: %s is %d bytes against %d", s.Fingerprint, n, room)
+		}
+		if len(cur) > 0 && size+n > room {
+			chunks = append(chunks, cur)
+			cur, size = nil, 0
+		}
+		cur = append(cur, s)
+		size += n
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks, nil
+}
+
 // Queued returns the queue lines, oldest first. A torn or unparsable line is
 // skipped, and so is one longer than maxReviewLineBytes: the lines around it
 // are still the queue, and one line the feed cannot read must not stop it
