@@ -1245,6 +1245,56 @@ func TestCandidateGateGivesUpAfterTheTolerance(t *testing.T) {
 	}
 }
 
+// TestCandidateGatePollErrorToleranceUnchanged pins the tolerated outage at
+// candidateStatusErrorTolerance consecutive read errors: they are retried, the
+// one past them fails, and a good read between errors clears the count.
+// Mutation: reset the count on every read and the past-the-tolerance case passes.
+func TestCandidateGatePollErrorToleranceUnchanged(t *testing.T) {
+	t.Parallel()
+	blip := errors.New("forgejo: GET statuses returned 502")
+	pending := status(forgejo.StatePending, "ci / gate (push)")
+	passed := status(forgejo.StateSuccess, "ci / gate (push)")
+	// waitOnce drives the production wait on an instant poll timer.
+	waitOnce := func(client CandidateStatus) CandidateResult {
+		gate := fastGate(client)
+		gate.WaitTimeout = 2 * time.Second
+		gate.waitTimer = func(time.Duration) <-chan time.Time {
+			fired := make(chan time.Time)
+			close(fired)
+			return fired
+		}
+		return gate.wait(context.Background(), GateWorkflow{Name: "ci", Job: "gate"}, CandidateResult{Branch: "land/gt-abc"})
+	}
+
+	tolerated := &fakeForgejo{statusErrs: slices.Repeat([]error{blip}, candidateStatusErrorTolerance), statuses: []forgejo.CommitStatus{passed}}
+	if res := waitOnce(tolerated); res.Err != nil || res.State != CandidatePassed {
+		t.Fatalf("%d consecutive errors: state = %v, err = %v; the tolerance's own reads must still reach the verdict",
+			candidateStatusErrorTolerance, res.State, res.Err)
+	}
+
+	past := &fakeForgejo{statusErrs: slices.Repeat([]error{blip}, candidateStatusErrorTolerance+1), statuses: []forgejo.CommitStatus{passed}}
+	res := waitOnce(past)
+	if res.Err == nil || !errors.Is(res.Err, blip) || !strings.Contains(res.Err.Error(), "consecutive") || res.State != CandidateSilent || past.polls != candidateStatusErrorTolerance+1 {
+		t.Fatalf("state = %v after %d poll(s), err = %v; want the consecutive-errors failure past the tolerance as no verdict",
+			res.State, past.polls, res.Err)
+	}
+
+	// A good read between the errors clears the count, so the tolerance has to
+	// run out again behind it rather than on the first error past it.
+	blipAt := map[int]error{}
+	for i := 1; i <= 2*candidateStatusErrorTolerance+2; i++ {
+		if i != candidateStatusErrorTolerance+1 {
+			blipAt[i] = blip
+		}
+	}
+	reset := &blipAfterReads{CandidateStatus: &fakeForgejo{statuses: []forgejo.CommitStatus{pending}}, blipAt: blipAt}
+	res = waitOnce(reset)
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "consecutive") || reset.reads != 2*candidateStatusErrorTolerance+2 {
+		t.Fatalf("reads = %d, state = %v, err = %v; want the pending read to clear the count and a give-up on read %d",
+			reset.reads, res.State, res.Err, 2*candidateStatusErrorTolerance+2)
+	}
+}
+
 // TestCandidateGateFailedStatusEndsTheWaitImmediately: a status that reported a
 // failure is a verdict, not a blip. It is not retried, even with blips left in
 // the tolerance.
