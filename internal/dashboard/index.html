@@ -398,6 +398,9 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 /* One row per landed commit in the System updates pane: the sha, then its stage
    chips in pipeline order. A stage that never ran keeps the dim token. */
 .surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+/* The header's worst-state glyph. A class of its own because the retired Tier
+   sweeps icon's class must stay gone (gt-gfglv0, gt-jug4e0). */
+.suico{font-weight:700}
 .subanner{border-bottom:1px solid var(--line);padding:2px 0 6px;margin-bottom:4px;font-weight:600}
 .subanner.ended{font-weight:400;color:var(--dim)}
 .tag.absent{color:var(--dim)}
@@ -549,7 +552,7 @@ a.hrow:hover{background:#19212b}
     <section id="activitysec" data-fold="activity" data-default-collapsed><h2>Town activity <span class="r" id="activitynote"></span></h2><div class="body" id="activity"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
-    <section data-fold="systemupdates"><h2>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
+    <section data-fold="systemupdates"><h2><span class="suico" id="systemupdatesico"></span>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
   <div class="col">
@@ -2938,6 +2941,29 @@ function deployStages(r) {
 const SYSTEM_UPDATE_STAGES = ["post-land", "shell", "integration", "race", "images", "roll"];
 const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
 
+// The pair chip (gt-jug4e0) sits between the images and roll chips and reads the
+// row's own Pair, as the hub classified it: a ready pair waits amber for its
+// roll, a building pair wears amber and the running mark, a failed, refused or
+// stuck pair is red, and an absent pair and one nobody classified are grey —
+// unknown with a question mark. A pair is never green: green means done, and a
+// ready pair is still waiting.
+const SYSTEM_UPDATE_PAIR_CHIPS = {
+  ready: ["warnc", "waiting for roll", "ready"],
+  building: ["warnc", "◌", "building"],
+  failed: ["badc", "✗", "failed"],
+  refused: ["badc", "✗", "refused"],
+  stuck: ["badc", "✗", "stuck"],
+  unknown: ["absent", "?", "unknown"],
+  absent: ["absent", "–", "absent"],
+};
+
+// systemUpdatePairChip is the pair chip's colour, glyph and word. A Pair the
+// page does not know, including one the row has not filled, is unknown rather
+// than absent: a reading nobody made is not a commit with no pair.
+function systemUpdatePairChip(pair) {
+  return SYSTEM_UPDATE_PAIR_CHIPS[pair] || SYSTEM_UPDATE_PAIR_CHIPS.unknown;
+}
+
 // systemUpdateStageState folds one stage of a row to its state: a pipeline run
 // is its status, the sweep a verdict per tier, a roll its outcome.
 function systemUpdateStageState(row, stage) {
@@ -2998,25 +3024,66 @@ function systemUpdateBannerLine(b) {
   return line;
 }
 
+// The pane header's icon follows the worst chip the pane drew, red above amber.
+// Green and grey earn no colour of their own — a pair is never green, and grey
+// is nothing read — so the icon stays the heading's muted dash unless a red or
+// amber chip is present. A colour the rank does not know ranks with them
+// (gt-jug4e0).
+const SYSTEM_UPDATE_CHIP_RANK = {badc: 2, warnc: 1};
+
+// systemUpdateChip draws one chip: its colour class, the glyph its state
+// carries, and a title naming the state.
+function systemUpdateChip(name, cls, glyph, word) {
+  const chip = el("span", "tag " + cls, name + " " + glyph);
+  chip.title = name + ": " + word;
+  return chip;
+}
+
+// paintSystemUpdatesIcon is the pane header's worst state: red while any chip
+// is red, amber while one is amber, and the heading's muted dash while none is.
+// A grey chip never earns a colour here, so a pair nobody read cannot make the
+// heading read clear or alarmed (gt-jug4e0).
+function paintSystemUpdatesIcon(chips) {
+  const ico = $("systemupdatesico");
+  if (!ico) return;
+  const rank = c => SYSTEM_UPDATE_CHIP_RANK[c.cls] || 0;
+  let worst = null;
+  for (const c of chips) if (!worst || rank(c) > rank(worst)) worst = c;
+  let glyph = "–", cls = "", why = chips.length ? "no red or amber chip" : "no chips to read";
+  if (worst && rank(worst) === 2) { glyph = "✗"; cls = "badc"; why = "the worst chip: " + worst.name + ": " + worst.word; }
+  else if (worst && rank(worst) === 1) { glyph = "◌"; cls = "warnc"; why = "the worst chip: " + worst.name + ": " + worst.word; }
+  ico.textContent = glyph;
+  ico.className = "suico" + (cls ? " " + cls : "");
+  ico.title = why;
+}
+
 function renderSystemUpdates(s) {
   const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
   if (pushSkip("systemupdates", s)) return;
-  const box = $("systemupdates"), rows = (su && su.rows) || [];
+  const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
   if (banner) box.append(systemUpdateBannerLine(banner));
-  if (!rows.length) { box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
+  if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
     line.append(el("span", "title", row.sha || "–"));
     for (const stage of SYSTEM_UPDATE_STAGES) {
       const state = systemUpdateStageState(row, stage);
       const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state === "absent" && systemUpdateStageUnknown(su, stage) ? "unknown" : state];
-      const chip = el("span", "tag " + cls, stage + " " + glyph);
-      chip.title = stage + ": " + word;
-      line.append(chip);
+      line.append(systemUpdateChip(stage, cls, glyph, word));
+      chips.push({name: stage, cls: cls, word: word});
+      // The pair chip goes between the stages that build the images and the
+      // roll that consumes them, and reads the row's Pair rather than its roll:
+      // a commit with a roll keeps the pair the hub classified for it.
+      if (stage === "images") {
+        const [pcls, pglyph, pword] = systemUpdatePairChip(row.pair);
+        line.append(systemUpdateChip("pair", pcls, pglyph, pword));
+        chips.push({name: "pair", cls: pcls, word: pword});
+      }
     }
     box.append(line);
   }
+  paintSystemUpdatesIcon(chips);
   $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
 }
 
