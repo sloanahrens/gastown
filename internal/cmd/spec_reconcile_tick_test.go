@@ -70,31 +70,11 @@ func TestSpecTickNotesAnUnreadableSandboxListing(t *testing.T) {
 	}
 }
 
-// TestSpecRosterCleanReconcileKeepsTheLine is the byte-identical half: a reading
-// whose seats are all the sandboxes the gateway runs prints exactly today's
-// line.
-func TestSpecRosterCleanReconcileKeepsTheLine(t *testing.T) {
-	t.Parallel()
-	f := newFakeSpecTown()
-	f.seats = []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2}}
-	f.roster = specRosterFrom([]poolSession{
-		{name: "gt-live", agent: "deepseek-flash", sandbox: "gt-live", rig: "gastown", polecat: "live"},
-	}, nil)
-	// A clean reconciliation has no notes by construction, which is what a
-	// roster that read the seats' own sandboxes produces.
-	f.roster.Reconcile = poolReconcileNotes{}
-
-	if r := runSpecDispatchCycle(backgroundEnv(f)); r.Roster != "deepseek-flash 1/2" {
-		t.Fatalf("tick roster = %q, want today's line", r.Roster)
-	}
-}
-
-// TestSpecRosterReadsTheCensusOnceForTheReconcile is the wiring: the roster step
-// asks the census for the running sandboxes once per tick, and names the stray
-// against the seats it counted. A listing that cannot be read is the unavailable
-// note, and the tick's roster still comes back.
-func TestSpecRosterReadsTheCensusOnceForTheReconcile(t *testing.T) {
-	t.Parallel()
+// specRosterTown is a temp town with two polecat seats, capable and ember, that
+// the fake lister reports as live on claude-sonnet, so the production roster
+// step counts both. It is the fixture both roster tests drive.
+func specRosterTown(t *testing.T) (string, *config.TownSettings, *fakeLister) {
+	t.Helper()
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	for _, name := range []string{"capable", "ember"} {
@@ -112,60 +92,107 @@ func TestSpecRosterReadsTheCensusOnceForTheReconcile(t *testing.T) {
 			"ga-ember":   time.Now().Add(-time.Hour),
 		},
 	}
-	store := func(string) beads.Client { return beadsfake.New() }
-	readSet := func(running func() ([]string, error)) poolReconcileReads {
-		return poolReconcileReads{
-			Running: running,
-			SeatOf: func(sandbox string) (string, string, bool) {
-				return "gastown", strings.TrimPrefix(sandbox, "ga-"), true
-			},
-			Dispose: func(rig, name string) (polecat.WorkstateDisposition, error) {
-				return polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}, nil
-			},
-		}
+	return town, ts, lister
+}
+
+// specRosterReads is the reconciliation read set the production roster step is
+// handed: the running sandboxes from the test's fake gateway, and the seat and
+// disposition lookups the town's registry and polecat state answer.
+func specRosterReads(running func() ([]string, error)) poolReconcileReads {
+	return poolReconcileReads{
+		Running: running,
+		SeatOf: func(sandbox string) (string, string, bool) {
+			return "gastown", strings.TrimPrefix(sandbox, "ga-"), true
+		},
+		Dispose: func(rig, name string) (polecat.WorkstateDisposition, error) {
+			return polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}, nil
+		},
 	}
+}
+
+// specRosterStepFor is the tick's production roster step over the fixture,
+// specDispatchRoster, wired the way a tick wires it.
+func specRosterStepFor(town string, ts *config.TownSettings, lister *fakeLister, reads poolReconcileReads) func() (specRoster, error) {
+	var snap atomic.Pointer[poolSeatSnapshot]
+	return specDispatchRoster(newSpecTickReads(), town, ts,
+		func() sessionLister { return lister },
+		func(string) beads.Client { return beadsfake.New() },
+		&snap, reads)
+}
+
+// TestSpecRosterCleanReconcileKeepsTheLine is the byte-identical half: a reading
+// whose seats are all the sandboxes the gateway runs prints exactly today's
+// line. It runs the tick's production roster step, specDispatchRoster, so the
+// census read and the reconcile wiring are the ones the tick uses.
+func TestSpecRosterCleanReconcileKeepsTheLine(t *testing.T) {
+	t.Parallel()
+	town, ts, lister := specRosterTown(t)
+	calls := 0
+	reads := specRosterReads(func() ([]string, error) {
+		calls++
+		// Both counted seats have a running sandbox, so nothing disagrees and
+		// the picture is today's line.
+		return []string{"ga-capable", "ga-ember"}, nil
+	})
+	f := newFakeSpecTown()
+	f.seats = []specdispatch.Seat{{Agent: "claude-sonnet", Cap: 5}}
+	env := f.env()
+	env.Roster = specRosterStepFor(town, ts, lister, reads)
+
+	if r := runSpecDispatchCycle(env); r.Roster != "claude-sonnet 2/5" {
+		t.Fatalf("tick roster = %q, want today's line", r.Roster)
+	}
+	if calls != 1 {
+		t.Fatalf("the census was read %d times, want 1", calls)
+	}
+}
+
+// TestSpecRosterReadsTheCensusOnceForTheReconcile is the wiring: the roster step
+// asks the census for the running sandboxes once per tick, and names the stray
+// against the seats it counted. A listing that cannot be read is the unavailable
+// note, and the roster still comes back.
+func TestSpecRosterReadsTheCensusOnceForTheReconcile(t *testing.T) {
+	t.Parallel()
+	town, ts, lister := specRosterTown(t)
 	tests := []struct {
-		name  string
-		want  poolReconcileNotes
-		calls int
+		name    string
+		running []string // the sandboxes the fake gateway lists; the error row lists none
+		want    poolReconcileNotes
 	}{
 		{
-			name:  "a stray sandbox and a seat with none are named",
-			calls: 1,
+			// ga-capable and ga-ember are the fake lister's sessions, so the
+			// roster counts both seats. The gateway lists ga-capable and a stray
+			// ga-stray, so ga-ember is a counted seat with no running sandbox and
+			// ga-stray is a running sandbox no counted seat holds.
+			name:    "a stray sandbox and a seat with none are named",
+			running: []string{"ga-capable", "ga-stray"},
 			want: poolReconcileNotes{
 				Uncounted: []specdispatch.HeldSeat{{Name: "ga-stray", State: "idle-pr-open"}},
 				NoSandbox: []specdispatch.HeldSeat{{Name: "ga-ember", State: "idle-pr-open"}},
 			},
 		},
 		{
-			name:  "a listing that cannot be read is the unavailable note",
-			calls: 1,
-			want:  poolReconcileNotes{Unavailable: true},
+			name: "a listing that cannot be read is the unavailable note",
+			want: poolReconcileNotes{Unavailable: true},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			running := func() ([]string, error) {
+			reads := specRosterReads(func() ([]string, error) {
 				calls++
 				if tc.want.Unavailable {
 					return nil, errors.New("gateway down")
 				}
-				// ga-capable is the counted seat: it names no NoSandbox. ga-stray
-				// is uncounted, and ga-ember is a counted seat whose sandbox is
-				// gone, carried in by the roster's seat list below.
-				return []string{"ga-capable", "ga-stray"}, nil
-			}
-			reads := readSet(running)
-			var snap atomic.Pointer[poolSeatSnapshot]
-			roster, err := specDispatchRoster(newSpecTickReads(), town, ts,
-				func() sessionLister { return lister }, store, &snap, reads)()
+				return tc.running, nil
+			})
+			roster, err := specRosterStepFor(town, ts, lister, reads)()
 			if err != nil {
 				t.Fatalf("roster: %v", err)
 			}
-			if calls != tc.calls {
-				t.Fatalf("the census was read %d times, want %d", calls, tc.calls)
+			if calls != 1 {
+				t.Fatalf("the census was read %d times, want 1: one read per tick", calls)
 			}
 			if !reflect.DeepEqual(roster.Reconcile, tc.want) {
 				t.Fatalf("reconcile = %+v, want %+v", roster.Reconcile, tc.want)
