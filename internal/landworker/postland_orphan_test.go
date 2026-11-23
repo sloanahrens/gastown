@@ -429,6 +429,81 @@ func TestPostLandOrphanAskBackoffIsPerEntry(t *testing.T) {
 	}
 }
 
+// TestPostLandOrphanFutureStamps: a stamp later than the clock, from a clock
+// that stepped back or a state file written by a runner whose clock was ahead,
+// counts as waited: the entry is asked at the next due read, the ask repairs
+// the stamp, and the ask interval runs from the repair. An entry asked exactly
+// PostLandOrphanAskEvery ago is asked again, one asked a second less is not
+// (gt-ctavmh).
+func TestPostLandOrphanFutureStamps(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	t0 := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		entry   PendingPostLand
+		at      time.Time
+		asks    []int // seam asks after each pass, one pass per entry and PostLandOrphanAskEvery apart
+		stamped bool  // the first pass asks and so writes OrphanAsked = the clock
+	}{
+		{
+			name:    "an OrphanAsked after the clock",
+			entry:   PendingPostLand{Land: pl, Context: statusContext, Since: t0, OrphanAsked: t0.Add(time.Hour)},
+			at:      t0.Add(PostLandOrphanAfter),
+			asks:    []int{1, 2},
+			stamped: true,
+		},
+		{
+			name:    "a Since after the clock",
+			entry:   PendingPostLand{Land: pl, Context: statusContext, Since: t0.Add(24 * time.Hour)},
+			at:      t0,
+			asks:    []int{1, 2},
+			stamped: true,
+		},
+		{
+			name:  "asked exactly the interval ago",
+			entry: PendingPostLand{Land: pl, Context: statusContext, Since: t0.Add(-PostLandOrphanAfter), OrphanAsked: t0.Add(-PostLandOrphanAskEvery)},
+			at:    t0,
+			asks:  []int{1},
+		},
+		{
+			name:  "asked a second less",
+			entry: PendingPostLand{Land: pl, Context: statusContext, Since: t0.Add(-PostLandOrphanAfter), OrphanAsked: t0.Add(-PostLandOrphanAskEvery + time.Second)},
+			at:    t0,
+			asks:  []int{0},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := &MemoryMainState{}
+			if err := store.Save(MainState{PostLandPending: []PendingPostLand{tt.entry}}); err != nil {
+				t.Fatalf("seeding the store: %v", err)
+			}
+			clk := &manualClock{now: tt.at}
+			seam := &orphanSeam{end: RunEnd{Run: 11205, Status: "running"}}
+			r := (&statusVerdicts{}).runner(orphanPendingRead().read, store, clk, 0)
+			r.RunEnded = seam.ask
+
+			for i, want := range tt.asks {
+				if i > 0 {
+					clk.Advance(PostLandOrphanAskEvery)
+				}
+				pollWithin(t, r, ctx)
+				if got := seam.count(); got != want {
+					t.Fatalf("pass %d: the seam was asked %d times, want %d", i+1, got, want)
+				}
+				if i == 0 && tt.stamped {
+					if left := pendingOf(t, store); len(left) != 1 || !left[0].OrphanAsked.Equal(tt.at) {
+						t.Fatalf("pending = %+v, want the ask to stamp OrphanAsked at %v", left, tt.at)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPostLandOrphanAskBackoffSurvivesJSON(t *testing.T) {
 	t.Parallel()
 	e := PendingPostLand{Land: PostLand{Commit: "abc1234"}, OrphanAsked: time.Date(2026, 11, 21, 12, 10, 0, 0, time.UTC)}
