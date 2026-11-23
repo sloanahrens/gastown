@@ -9,6 +9,7 @@ import (
 )
 
 func TestLandedFilesCacheRoundTrip(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "landed.jsonl")
 	c, err := openLandedFilesCache(path)
 	if err != nil {
@@ -48,6 +49,7 @@ func TestLandedFilesCacheRoundTrip(t *testing.T) {
 }
 
 func TestLandedFilesCacheErrors(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "landed.jsonl")
 	if err := os.WriteFile(path, []byte("{\"base\":\"a\",\"head\":\"b\",\"files\":[]}\nnot json\n"), 0o644); err != nil {
