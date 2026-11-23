@@ -93,29 +93,44 @@ func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect
 // selects without a reader still selects with one, including a rename out of a
 // path-judged file. With a nil reader the result is GuardSelects's.
 func GuardSelectsWithContent(nameStatus string, hasGo func(dir string) bool, read ContentReader) ([]GuardSelect, error) {
-	triggered := map[string]bool{}
+	tripped := make([]bool, len(treeWideGuards))
 	err := eachChange(nameStatus, func(_, now, gone []string) {
-		for _, g := range treeWideGuards {
-			if triggered[g.pkg] || !hasGo(g.pkg) {
-				continue
-			}
-			if g.trips(now, gone, read) {
-				triggered[g.pkg] = true
+		for i, g := range treeWideGuards {
+			if !tripped[i] && hasGo(g.pkg) && g.trips(now, gone, read) {
+				tripped[i] = true
 			}
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
-	tests := map[string][]string{}
-	for _, g := range treeWideGuards {
-		tests[g.pkg] = append(tests[g.pkg], g.tests...)
+	// A package runs every entry's tests once any entry trips, since the entry
+	// that tripped can share an input with one whose predicate misses the
+	// changed path (err wide). A package holding an always entry selects only
+	// its tripped entries: the always entry already selects the package on
+	// every non-empty diff, so the union would put every other entry's tests on
+	// every diff (gt-mzwho4).
+	trippedPkg := map[string]bool{}
+	alwaysPkg := map[string]bool{}
+	for i, g := range treeWideGuards {
+		if g.always {
+			alwaysPkg[g.pkg] = true
+		}
+		if tripped[i] {
+			trippedPkg[g.pkg] = true
+		}
 	}
-	if len(triggered) == 0 {
+	tests := map[string][]string{}
+	for i, g := range treeWideGuards {
+		if tripped[i] || (trippedPkg[g.pkg] && !alwaysPkg[g.pkg]) {
+			tests[g.pkg] = append(tests[g.pkg], g.tests...)
+		}
+	}
+	if len(tests) == 0 {
 		return nil, nil
 	}
-	sel := make([]GuardSelect, 0, len(triggered))
-	for pkg := range triggered {
+	sel := make([]GuardSelect, 0, len(tests))
+	for pkg := range tests {
 		names := tests[pkg]
 		sort.Strings(names)
 		sel = append(sel, GuardSelect{Package: pkg, Tests: names})
@@ -378,6 +393,17 @@ var treeWideGuards = []treeWideGuard{
 		pkg:    "internal/podengine",
 		tests:  []string{"TestEveryEngineSiteHasARowPerFunction"},
 		always: true,
+	},
+	{
+		// TestTierSweepGateIsTheRegistrySetting reads
+		// internal/config/daemon_config.go for the field the document's tier
+		// sweep rows cite, so a change to it must run the test. The package's
+		// always entry runs only its own test, so the read needs an entry
+		// (gt-mzwho4). A deletion counts: the test opens the file.
+		pkg:     "internal/podengine",
+		tests:   []string{"TestTierSweepGateIsTheRegistrySetting"},
+		judges:  func(rel string) bool { return rel == "internal/config/daemon_config.go" },
+		removal: true,
 	},
 	{
 		// TestPolicy, TestUnitTierMain, TestDockerTier and friends walk every
