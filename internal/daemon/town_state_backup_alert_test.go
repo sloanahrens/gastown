@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -69,5 +71,77 @@ func TestTownStateBackupAlertRaisesOnceAndClears(t *testing.T) {
 	}
 	if open := rec.OpenEscalations(key); len(open) != 0 {
 		t.Errorf("after the path was clean, the item is still open: %+v", open)
+	}
+}
+
+// TestTownStateBackupAlertFailingTickKeepsItems: a tick whose push fails after
+// a refusal raised the path's item leaves the sync alert and the item open and
+// clears no path key, so a clean tick is what decides the item.
+func TestTownStateBackupAlertFailingTickKeepsItems(t *testing.T) {
+	t.Parallel()
+	d, rec, tree := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	d.syncTownStateBackup()
+
+	// The failing tick needs a changed file to reach the push it is faulted at.
+	delete(tree, townStateRefusedPath)
+	tree["settings/themes/dark.json"] = &fstest.MapFile{Data: []byte(`{"bg":"#111"}`)}
+	orig := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return townStateFault{orig(dir), "push"} }
+	d.syncTownStateBackup()
+
+	if open := rec.OpenEscalations(alertKeyTownStateBackup); len(open) != 1 {
+		t.Fatalf("after the failing tick, the sync alert is open %d time(s), want 1", len(open))
+	}
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Errorf("after the failing tick, the path's item is open %d time(s), want 1", len(open))
+	}
+	if n := townStateClearsOf(rec, key); n != 0 {
+		t.Errorf("a failing tick cleared the path's key %d time(s), want 0", n)
+	}
+}
+
+// TestTownStateBackupAlertRaiseFailureIsRetried: an item whose raise the
+// notifier dropped is raised at the next tick.
+func TestTownStateBackupAlertRaiseFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	d, rec, _ := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+	d.clock = &diskMaintNoSleepClock{FakeClock: clockwork.NewFakeClockAt(diskMaintNow)}
+
+	rec.Fail(notifyfake.KindEscalate, errors.New("injected: raise"))
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 0 {
+		t.Fatalf("after the dropped raise, the item is open: %+v", open)
+	}
+
+	rec.Fail(notifyfake.KindEscalate, nil)
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("after the next tick, the item is open %d time(s), want 1", len(open))
+	}
+}
+
+// TestTownStateBackupAlertClearFailureIsRetried: an item whose clear the
+// notifier dropped stays open, and the next tick clears it.
+func TestTownStateBackupAlertClearFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	d, rec, tree := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	d.syncTownStateBackup()
+	delete(tree, townStateRefusedPath)
+
+	rec.Fail(notifyfake.KindClear, errors.New("injected: clear"))
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("after the dropped clear, the item is open %d time(s), want 1", len(open))
+	}
+
+	rec.Fail(notifyfake.KindClear, nil)
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 0 {
+		t.Fatalf("after the next tick, the item is still open: %+v", open)
 	}
 }
