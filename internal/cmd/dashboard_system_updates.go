@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -39,6 +40,32 @@ func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func()
 		}
 		return last
 	}
+}
+
+// systemUpdatesPipelineFor is the section's pipeline read for the gastown rig's
+// remote: nil when no remote is named (the rig is not cut over, so the section
+// joins no runs), and a read that reports a failure, with no runs, when the
+// remote cannot be looked up or parsed, so the section raises RunsUnknown instead
+// of reading like a healthy town with no runs. build makes the throttled read
+// for owner/repo (om finding 46a9e85f).
+func systemUpdatesPipelineFor(remote string, remoteErr error, build func(repo string) func() *dashboard.GastownPipeline, logf func(format string, args ...any)) func() *dashboard.GastownPipeline {
+	failed := func(why error) func() *dashboard.GastownPipeline {
+		logf("dashboard: the System updates pipeline has no gastown repository to read: %v", why)
+		return func() *dashboard.GastownPipeline {
+			return &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}, Error: "remote"}
+		}
+	}
+	if remoteErr != nil {
+		return failed(remoteErr)
+	}
+	if remote == "" {
+		return nil
+	}
+	owner, repo, err := land.RepoFromRemoteURL(remote)
+	if err != nil {
+		return failed(err)
+	}
+	return build(owner + "/" + repo)
 }
 
 // systemUpdates is the feed's System updates section: the tier sweeps the sweep

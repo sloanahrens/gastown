@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -290,6 +291,45 @@ func TestSystemUpdatesPipelineUnknown(t *testing.T) {
 			read := func() *dashboard.GastownPipeline { return tt.read }
 			got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
 			assert.Equal(t, tt.want, got.RunsUnknown)
+		})
+	}
+}
+
+// TestSystemUpdatesPipelineForRemote: no remote means no pipeline; a remote that
+// cannot be looked up or parsed is a read that reports a failure with no runs, so
+// the section raises RunsUnknown; a good remote builds the read for owner/repo.
+func TestSystemUpdatesPipelineForRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		remote    string
+		remoteErr error
+		wantNil   bool
+		wantErr   bool
+		wantRepo  string
+	}{
+		{"no remote named", "", nil, true, false, ""},
+		{"the remote lookup failed", "", errors.New("registry unreadable"), false, true, ""},
+		{"an unparseable remote", "not a remote url", nil, false, true, ""},
+		{"a good remote", "http://forgejo:3000/owner/repo.git", nil, false, false, "owner/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var built string
+			good := func() *dashboard.GastownPipeline { return &dashboard.GastownPipeline{} }
+			read := systemUpdatesPipelineFor(tt.remote, tt.remoteErr, func(repo string) func() *dashboard.GastownPipeline {
+				built = repo
+				return good
+			}, func(string, ...any) {})
+			if tt.wantNil {
+				assert.Nil(t, read)
+				return
+			}
+			require.NotNil(t, read)
+			got := read()
+			assert.Equal(t, tt.wantErr, got.Error != "" && len(got.Runs) == 0)
+			assert.Equal(t, tt.wantRepo, built)
 		})
 	}
 }
