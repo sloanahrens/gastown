@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-23 gt-aejf3n: rule 9's line-limit bullet reports the measured and declared lines, not a split (seventeen rules).
 - 2026-11-21 gt-vysc1i: rule 9's line-limit bullet pushes the seat's branch before the split comment, so a seat stopped by a size limit keeps its commit; paid for by dropping rule 1's second example (gt-p85pw.73) and rule 3's example (gt-z6qre.12), no rule cut (seventeen rules).
 - 2026-11-20 gt-a69nku: added rule 9's line-limit bullet: a line limit in Constraints is a cap, so a diff past 1.5 times it stops for a split. Paid for by dropping the provenance parentheticals (claude-9a8, gt-690mog, gt-0sztd, gt-tpg0p.33, gt-qpeei.15, gt-r1up7, gt-km9jt, gt-dl4nv.13) and the "A hit is a question, not a verdict" sentence from the rendered text, no rule cut and none added (seventeen rules).
 - 2026-11-14 gt-dpl81b: removed the local review round: the operator retired it, so the "Before gt done" checklist no longer asks a polecat to preview its branch or answer findings before submitting.
@@ -26,7 +27,7 @@
 
 ## Before you write code
 
-Read the bead's Goal, Constraints, Out of scope and Acceptance. Write a short plan in `scratch/plan.md`: for each acceptance box, what must be wired (the caller, flag or field that makes it real) and which test goes red without it; every refusal branch the design needs; the one way this design most likely fails in production. Check the diff against it before `gt done`.
+Read the bead's Goal, Constraints, Out of scope and Acceptance. Write a short plan in `scratch/plan.md`: for each acceptance box, what must be wired (the caller or field) and which test goes red without it; every refusal branch the design needs; the one way this design most likely fails in production. Check the diff against it before `gt done`.
 
 ## Town rules that always apply
 
@@ -61,7 +62,7 @@ Read before you write code. Seventeen rules. Each names om's finding and an exam
 
 ## 1. Failure is not success (fail-open)
 
-A failed, unreadable or unwired input must stop, refuse or escalate, never pass as clean (the most common major finding). om flags:
+A failed, unreadable or unwired input must stop, refuse or escalate, never pass as clean. om flags:
 - an unreadable file, record or status read as absent, empty or clean, or a parser error read as "does not apply";
 - a refusal that returns what a healthy answer returns (0, nil, exit 0, SKIPPED, GREEN);
 - a guard whose input is not wired defaults to allow ("PushInFlight gate is a constant false"): unknown denies;
@@ -70,7 +71,7 @@ A failed, unreadable or unwired input must stop, refuse or escalate, never pass 
 
 ## 2. Each criterion needs a test that fails without it
 
-Every acceptance box needs a test that is red when the behaviour is removed. Mutate it yourself: delete the line or flip the condition, run the test, restore.
+Every acceptance box needs a test that is red when the behaviour is removed. Mutate it yourself: delete it or flip it, run the test, restore.
 - om flags: "criterion ... has no test".
 
 ## 3. Test the branch that refuses, not only the happy path
@@ -80,7 +81,7 @@ Every error or refusal branch in the diff has a test that drives it: one table r
 
 ## 4. Untrusted input is not trusted by its prefix, its text or its shape
 
-Anything an author or caller writes (a comment, bead field, path, name) can be forged or hostile. Decide authority from something the writer cannot write; validate a value before it reaches a path, argv or request.
+Anything an author or caller writes can be forged or hostile. Decide authority from something the writer cannot write; validate a value before it reaches a path, argv or request.
 - om flags: "decision authority is granted by prefix alone, so any commenter can forge a decision"; an owner/name spliced into a request path.
 
 ## 5. An author cannot review or rebut their own work
@@ -102,7 +103,7 @@ The Tests section is the rule. om flags: "new parsing and state logic added to a
 ## 9. Stay in scope
 
 Change only what the bead asks for.
-- A line limit in Constraints is a cap, not an estimate: past 1.5 times, stop; push with `git push origin HEAD:refs/heads/<your branch>` (never `--force`); comment the sha and that the bead needs a split; run gt done.
+- A Constraints line limit is a cap, not an estimate: past 1.5 times, stop; push with `git push origin HEAD:refs/heads/<your branch>` (never `--force`); comment the sha, the measured added lines and the declared limit; run gt done, and if it refuses past twice the limit, stop and wait for the overseer; do not propose a split.
 - om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps"; "change touches files outside the stated scope". If another file must change, say why in a bead comment.
 
 ## 10. Test the call site, not the helper
@@ -118,7 +119,7 @@ Never put captured output in an error or log: name the rule and the command, sin
 ## 12. Finish what the bead names, and wire it
 
 Every Goal clause and box is implemented and reachable: a new function, flag or field has a production caller, a table has every row the Goal lists, and a fix changes production code (a pin test alone is a finding).
-- om flags: "Goal's refusal conditions ... are not implemented"; "has no in-tree caller". Example: gt-gojo0 (a table named 9 callers, the Goal said 16).
+- om flags: "Goal's refusal conditions ... are not implemented"; "has no in-tree caller". Example: gt-gojo0.
 
 ## 13. State, order, locks and timeouts
 
@@ -132,7 +133,7 @@ Re-read every comment, doc or help line you add against the code. No line number
 
 ## 15. Rework: answer every open finding
 
-A bead that comes back has a MERGE REJECTION block in its notes. Fix every finding in it, including those marked "still open": om repeats them. Rework is where new defects appear (reject rate 33% on a first review, 55% on a third): after every edit re-read your added lines against every other rule, not only the lines a finding named. Never loosen a test or a limit to land the fix. If a finding is wrong, say why on the bead with evidence.
+A bead that comes back has a MERGE REJECTION block in its notes. Fix every finding in it, including those marked "still open": om repeats them. Rework is where new defects appear: after every edit re-read your added lines against every other rule, not only the lines a finding named. Never loosen a test or a limit to land the fix. If a finding is wrong, say why on the bead with evidence.
 - om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered".
 
 ## 16. One workspace per answer
@@ -143,7 +144,7 @@ Code that builds a view, a total, a bill or a limit for one workspace checks tha
 ## 17. Run the tier the gate skips
 
 `make gate` runs the unit tier only; docs/testing.md says what it runs. When your diff changes a function, type or fixture that a file tagged `//go:build integration` uses, in your package or a caller's, run those packages with `go test -tags integration ./<pkg>/...` and paste the result, or write "not run: <reason>" in the bead notes. A package whose tests need a container is "not run: container": the landing worker runs the container suites on the merged tree. Never call a change tested on the gate's result alone.
-- om flags: "integration-tagged callers not run", "gate does not exercise this change" (proposed wording, no finding yet). Example: gt-26dvk.
+- om flags: "integration-tagged callers not run", "gate does not exercise this change". Example: gt-26dvk.
 
 # Before gt done
 
