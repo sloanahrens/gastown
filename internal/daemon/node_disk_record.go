@@ -5,6 +5,8 @@ package daemon
 // it and a prune's effect shown (gt-9bt0of). The disk maintenance patrol writes
 // the sandbox node's reading into the same file (gt-cya9c0), so one mutex
 // guards the read-modify-write and each writer replaces only the nodes it names.
+// No entry is ever pruned, so a node that leaves the cluster keeps its last
+// reading: a stale entry is expected to persist.
 
 import (
 	"encoding/json"
