@@ -59,8 +59,18 @@ func TestTownStateBackupAlertRaisesOnceAndClears(t *testing.T) {
 	if len(got) != 1 || got[0].Escalation.Fingerprint != key {
 		t.Fatalf("after two refusing ticks, escalations = %+v, want one under %s", got, key)
 	}
-	if reason := got[0].Escalation.Reason; !strings.Contains(reason, townStateRefusedPath) || strings.Contains(reason, "PLANTED-123") {
-		t.Errorf("item text = %q, want the path and no value", reason)
+	// The item is written to the attention queue and the escalation mail, so its
+	// text is the path and the fixed sentence exactly: anything appended would
+	// publish the credential the refusal exists to keep out.
+	reason := got[0].Escalation.Reason
+	wantText := townStateRefusedPath + " holds a credential and is not backed up"
+	if reason != wantText {
+		t.Errorf("item text = %q, want exactly %q", reason, wantText)
+	}
+	// The fixture's refused file holds this value; no sentence may carry it.
+	const refusedValue = "PLANTED-123"
+	if strings.Contains(reason, refusedValue) {
+		t.Errorf("item text = %q, holds the credential the refused file carries", reason)
 	}
 
 	delete(tree, townStateRefusedPath)
