@@ -154,7 +154,7 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 			}
 			// The apply refuses a split the dry run refuses, writing nothing.
 			before := splitJournalLen(t, db)
-			err = runSpecSplitApplyOn(&out, row.beadID, "gastown", db.Show, func(string) *specdispatch.TargetTree { return row.tree }, db)
+			err = runSpecSplitApplyOn(&out, row.beadID, "gastown", db.Show, func(string) *specdispatch.TargetTree { return row.tree }, splitPassingCheck(), db)
 			if err == nil {
 				t.Errorf("runSpecSplitApplyOn() error = nil, want a refusal")
 			}
@@ -253,7 +253,7 @@ func TestSpecSplitApplyCreates(t *testing.T) {
 
 	var out bytes.Buffer
 	err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
-		func(string) *specdispatch.TargetTree { return splitTree() }, db)
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db)
 	if err != nil {
 		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
 	}
@@ -291,6 +291,43 @@ func TestSpecSplitApplyCreates(t *testing.T) {
 	}
 }
 
+// TestSpecSplitApplyStops: --apply runs the dry-run checks before its first
+// write, so a failed check prints its reason, exits 1 and creates nothing.
+func TestSpecSplitApplyStops(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		check specSplitCheck
+		want  string
+	}{
+		{"piece B over the trigger", splitCheckFor(10, map[string]splitPieceFake{"A": {minutes: 6}, "B": {minutes: 10}}),
+			"verdict: fails: piece B: estimate 10.0 min is at or over the 10-minute trigger"},
+		{"no split trigger", splitCheckFor(0, map[string]splitPieceFake{"A": {minutes: 6}, "B": {minutes: 7}}),
+			"no split trigger is set"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+			before := splitJournalLen(t, db)
+
+			var out bytes.Buffer
+			err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
+				func(string) *specdispatch.TargetTree { return splitTree() }, tc.check, db)
+			if code := exitCodeForError(err); err == nil || code != 1 {
+				t.Fatalf("runSpecSplitApplyOn() error = %v, want exit 1", err)
+			}
+			if after := splitJournalLen(t, db); after != before {
+				t.Errorf("journal records = %d after the refused apply, want %d", after, before)
+			}
+			if got := out.String() + err.Error(); !strings.Contains(got, tc.want) {
+				t.Errorf("refusal = %q, want it to name %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSpecSplitIsRegisteredUnderSpec: gt spec split is reachable from the root
 // command, so the dry run is what a user runs.
 func TestSpecSplitIsRegisteredUnderSpec(t *testing.T) {
@@ -312,8 +349,8 @@ type splitRefusingWriter struct{}
 
 func (splitRefusingWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
 
-// TestSpecSplitReportsAFailedWrite: a draft that cannot be written to the
-// output is an error, not a silent partial print.
+// TestSpecSplitReportsAFailedWrite: a draft or a failed verdict that cannot be
+// written to the output is an error, not a silent partial print.
 func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
@@ -322,6 +359,12 @@ func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 	err := runSpecSplitOn(splitRefusingWriter{}, "gt-split", true, db.Show, func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck())
 	if err == nil {
 		t.Errorf("runSpecSplitOn() error = nil on a refused write, want an error")
+	}
+	check := splitCheckFor(10, map[string]splitPieceFake{"A": {minutes: 6}, "B": {minutes: 10}})
+	err = runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, check, db)
+	if err == nil || !strings.Contains(err.Error(), "cannot report the failed checks") {
+		t.Errorf("runSpecSplitApplyOn() error = %v on a refused write, want the report failure", err)
 	}
 }
 
