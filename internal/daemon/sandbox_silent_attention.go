@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -49,8 +51,8 @@ const (
 // overseer reads whether the agent is working before the overrun bound stops
 // it. A readable listing with a newer transcript, a seat younger than the
 // window, a seat that has written no transcript yet, and a seat its intent
-// record says is submitted, held or stopped each raise nothing, which clears a
-// seat's item.
+// record says is submitted, held, stopped or stopped on an escalation each
+// raise nothing, which clears a seat's item.
 //
 // A seat is judged only when the town's settings still hold its profile and
 // that profile is kubernetes: the docker driver is out of this item's scope,
@@ -128,13 +130,13 @@ func (s *attentionSources) collectSilentSandboxSeats(ctx context.Context) ([]att
 // whether it raises one, and the error that fails the collection. A seat
 // younger than sandboxSilentAfter, one with no transcript yet, and one whose
 // newest transcript is recent each raise nothing. A seat the intent record says
-// is submitted, held or stopped writes no transcript while it waits, so it
-// raises nothing and costs no exec. A record that cannot be read is returned as
-// an error, so the collection fails and keeps the seat's previous item rather
-// than reading an unknown as a seat that is not waiting. A listing that cannot
-// be read raises nothing new and keeps the seat's previous item, so a gateway
-// that did not answer does not clear a real alarm; its failure is logged once
-// per seat.
+// is submitted, held, stopped or stopped on an escalation writes no transcript
+// while it waits, so it raises nothing and costs no exec. A record that cannot
+// be read is returned as an error, so the collection fails and keeps the seat's
+// previous item rather than reading an unknown as a seat that is not waiting. A
+// listing that cannot be read raises nothing new and keeps the seat's previous
+// item, so a gateway that did not answer does not clear a real alarm; its
+// failure is logged once per seat.
 func (s *attentionSources) silentSandboxSeat(ctx context.Context, rec session.SandboxRecord) (attention.Item, bool, error) {
 	key := sandboxSilentKeyPrefix + rec.Rig + "/" + rec.Polecat
 	// A seat younger than the window has not been silent, whatever its clock
@@ -142,14 +144,16 @@ func (s *attentionSources) silentSandboxSeat(ctx context.Context, rec session.Sa
 	if !rec.CreatedAt.IsZero() && s.now.Sub(rec.CreatedAt) <= sandboxSilentAfter {
 		return attention.Item{}, false, nil
 	}
-	// A submitted, held or stopped seat writes no transcript while it waits, so
-	// its silence is not an alarm. The read is the seat end's, so both rule the
-	// same record; a record that cannot be read fails the collection.
+	// A submitted, held, stopped or stopped-on-an-escalation seat writes no
+	// transcript while it waits, so its silence is not an alarm. The read is the
+	// seat end's, so both rule the same record; a record that cannot be read
+	// fails the collection.
 	state, err := intent.Read(s.d.config.TownRoot, supervisor.IntentSeat(supervisor.SeatFor(rec.Rig, constants.RolePolecat, rec.Polecat)))
 	if err != nil {
 		return attention.Item{}, false, fmt.Errorf("reading the intent record of the sandbox seat %s/%s: %w", rec.Rig, rec.Polecat, err)
 	}
-	if state.Held() || state.Submitted() || state.EffectiveDesired() == intent.DesiredStop {
+	if state.Held() || state.Submitted() || state.EffectiveDesired() == intent.DesiredStop ||
+		sandboxSeatStoppedOnEscalated(state) {
 		return attention.Item{}, false, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sandboxSilentReadTimeout)
@@ -157,6 +161,16 @@ func (s *attentionSources) silentSandboxSeat(ctx context.Context, rec session.Sa
 	listed, listErr := s.sandboxSeatTranscripts(readCtx, rec)
 	it, raised := s.silentSandboxSeatOutcome(rec, key, listed, listErr)
 	return it, raised, nil
+}
+
+// sandboxSeatStoppedOnEscalated reports whether the seat's record says its last
+// turn stopped on an escalation: exit_type ESCALATED beside turn_state stuck,
+// the pair gt done writes and the agent bead carries for the same stop
+// (patrolscan.AgentRecord.StoppedOnEscalated). The seat waits for the operator
+// there, so its silence is not an alarm (gt-851woj).
+func sandboxSeatStoppedOnEscalated(rec intent.Record) bool {
+	return strings.EqualFold(strings.TrimSpace(rec.TurnState), string(beads.AgentStateStuck)) &&
+		strings.EqualFold(strings.TrimSpace(rec.ExitType), patrolscan.ExitEscalated)
 }
 
 // silentSandboxSeatOutcome is one seat's judgment from its listing read. A
