@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/seatship"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -441,4 +442,15 @@ func (h *patrolScanHost) removeRecord(name string) error {
 		return h.removeSandboxRecord(h.town(), name)
 	}
 	return session.CleanupSandboxWith(nil, h.town(), name)
+}
+
+// seatEndRecord reads the newest SEAT-END comment the seat shipped on its bead,
+// found false when the bead carries none. A bead whose comments cannot be read
+// is returned, never read as a seat with no record: the caller runs the pull.
+// A landing that names no bead has no record to read.
+func (h *patrolScanHost) seatEndRecord(rig, name, bead string) (seatship.Payload, bool, error) {
+	if bead == "" {
+		return seatship.Payload{}, false, nil
+	}
+	return readSeatEndRecord(h.recoveryBeads(), rig, name, bead)
 }

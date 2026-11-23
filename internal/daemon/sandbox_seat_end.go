@@ -262,12 +262,30 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			h.clearPendingSeatEnd(rig, name)
 			return nil
 		}
+		// A seat that shipped a SEAT-END comment has its usage and outbox there:
+		// the record is stored before the outbox is applied and both pulls are
+		// skipped. A seat with none, or an unreadable bead, takes the pull.
+		seatRecord, hasRecord, recordErr := h.seatEndRecord(rig, name, landing.BeadID)
+		if recordErr != nil {
+			log("its SEAT-END comment cannot be read, so the pull runs: %v", recordErr)
+		}
+		var recordPath string
+		if hasRecord {
+			path, storeErr := storeSeatEndRecord(h.d.ctxOrBackground(), h.seatUsage.store, h.town(), seatRecord)
+			if storeErr != nil {
+				// The record is the seat's only copy of what it shipped.
+				kept = "its SEAT-END record is not stored: " + storeErr.Error()
+				h.clearPendingSeatEnd(rig, name)
+				return nil
+			}
+			recordPath = path
+		}
 		// Everything the seat wrote leaves the sandbox before the sandbox does:
 		// its outbox here, and its transcripts in the delete below. Both calls
 		// this pass can make to delete a sandbox follow this step, so a copy that
 		// fails keeps the seat and leaves the only copy of the seat's words where
 		// it is (gt-c6tofd).
-		if !end.SandboxGone {
+		if !hasRecord && !end.SandboxGone {
 			if why := h.copySeatOutbox(rig, name, end.Gateway); why != "" {
 				kept = why
 				h.clearPendingSeatEnd(rig, name)
@@ -337,8 +355,15 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			}
 		}
 		// The usage record is written before the transcripts' worktree goes. A
-		// failure is logged and the removal goes on (gt-6qc3nw.12).
-		written, incomplete, usageErr := h.writeSeatUsage(rig, name, landing, start, startErr)
+		// failure is logged and the removal goes on (gt-6qc3nw.12); a stored
+		// SEAT-END record is already its usage record.
+		var written string
+		var incomplete, usageErr error
+		if hasRecord {
+			written = recordPath
+		} else {
+			written, incomplete, usageErr = h.writeSeatUsage(rig, name, landing, start, startErr)
+		}
 		switch {
 		case usageErr != nil && written == "":
 			log("its usage record is not written: %v", usageErr)
