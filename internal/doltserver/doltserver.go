@@ -54,6 +54,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltcred"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/style"
@@ -319,6 +320,16 @@ type Config struct {
 	// dolt.external_container; ExternalContainer stays empty in that case.
 	externalContainerErr error
 
+	// credential is the credential the town's settings/dolt-credentials file
+	// holds, read only for a town whose operational.dolt sets neither user nor
+	// password. The password stays a Secret here: UserDSN reveals it at the
+	// point of use, and nothing prints it.
+	credential doltcred.Credential
+
+	// credentialErr is why that file could not be read, carried so a caller
+	// refuses instead of connecting as the default user with no password.
+	credentialErr error
+
 	// lookupHost resolves Host for IsRemote; nil is net.LookupHost.
 	lookupHost func(string) ([]string, error)
 }
@@ -337,6 +348,17 @@ func (c *Config) ExternalContainerSetting() (string, error) {
 	return c.ExternalContainer, nil
 }
 
+// CredentialError returns the failure reading the town's Dolt credential file,
+// or nil when no file was read or it read cleanly. A caller that builds a DSN
+// from UserDSN must refuse on it: a credential file the town cannot read must
+// never leave the client connecting as the default user with no password.
+func (c *Config) CredentialError() error {
+	if c == nil {
+		return nil
+	}
+	return c.credentialErr
+}
+
 // ErrNoEndpoint: the town names no Dolt endpoint, neither in mayor/town.json
 // nor in a managed .dolt-data/config.yaml.
 var ErrNoEndpoint = errors.New("town has no Dolt endpoint: mayor/town.json has no \"dolt\" port and .dolt-data/config.yaml is absent; set one with: gt config set dolt.port <port>")
@@ -350,7 +372,10 @@ var ErrNoEndpoint = errors.New("town has no Dolt endpoint: mayor/town.json has n
 // event scheduler, stats, auto-GC) and the password are settings facts read
 // from the town's operational.dolt config (gt-y3pgh.2.3, .2.4). The password
 // is a ${VAR} reference into settings/daemon.env, never an environment
-// variable of this process (config.ResolveDoltPassword).
+// variable of this process (config.ResolveDoltPassword). A town that sets
+// neither user nor password may hold both in the settings directory's
+// credential file instead; UserDSN carries them and CredentialError reports a
+// file that cannot be read.
 func (h *host) DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
@@ -406,13 +431,27 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 		config.AutoGC = autoGc
 	}
 
-	if u, ok := doltCfg.UserSetting(); ok {
-		config.User = u
+	user, userSet := doltCfg.UserSetting()
+	if userSet {
+		config.User = user
 	}
 	// The password is the same kind of settings fact: operational.dolt.password
 	// holds a ${VAR} reference resolved from settings/daemon.env (the process
 	// environment is the fallback). A town that sets nothing has none.
 	config.Password = configpkg.ResolveDoltPassword(townRoot, doltCfg)
+	// A town that sets neither user nor password may keep its credential in
+	// the settings directory's file instead. An explicit setting wins and the
+	// file is not read then; an absent file leaves the default user and no
+	// password. The file's values reach the DSN through UserDSN alone.
+	_, passwordSet := doltCfg.PasswordSetting()
+	if !userSet && !passwordSet {
+		cred, err := readTownCredential(townRoot)
+		if err != nil {
+			config.credentialErr = err
+		} else {
+			config.credential = cred
+		}
+	}
 	if ll, ok := doltCfg.LogLevelSetting(); ok {
 		config.LogLevel = ll
 		config.logLevelSet = true
@@ -482,9 +521,20 @@ func (c *Config) SQLArgs() []string {
 // password are laid out the way mysql.ParseDSN reads them back. An empty User
 // is the default user: a bare ":password" would otherwise reach a caller that
 // reads an empty user part as root with no password.
+//
+// The town's credential file supplies the user and password when no explicit
+// operational.dolt setting does; its password is revealed here, at the point
+// of use, and nowhere else. A caller must check CredentialError first: an
+// unreadable file leaves this with the default user and no password.
 func (c *Config) UserDSN() string {
 	cfg := mysql.NewConfig()
 	cfg.User, cfg.Passwd = c.User, c.Password
+	if c.credential.User != "" {
+		cfg.User = c.credential.User
+	}
+	if password := c.credential.Password.Reveal(); password != "" {
+		cfg.Passwd = password
+	}
 	if cfg.User == "" {
 		cfg.User = DefaultUser
 	}

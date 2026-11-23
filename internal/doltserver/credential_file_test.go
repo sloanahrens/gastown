@@ -79,6 +79,58 @@ func TestReadTownCredentialFileRefusesInsecureMode(t *testing.T) {
 	}
 }
 
+// TestCredentialFileUserDSNCarriesFileCredential: with no explicit
+// operational.dolt setting, the DSN every daemon and gt dolt connection is
+// built from carries the credential file's user and password.
+func TestCredentialFileUserDSNCarriesFileCredential(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownCredential(t, town, "user=gt\npassword=hunter2\n", 0o600)
+
+	config := DefaultConfig(town)
+	if err := config.CredentialError(); err != nil {
+		t.Fatalf("CredentialError = %v, want nil", err)
+	}
+	if got, want := config.UserDSN(), "gt:hunter2"; got != want {
+		t.Errorf("UserDSN = %q, want %q", got, want)
+	}
+}
+
+// TestCredentialFileNoFileLeavesUserDSNAsToday: a town with no credential file
+// connects exactly as before the file was read: the default user, no password.
+func TestCredentialFileNoFileLeavesUserDSNAsToday(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultConfig(t.TempDir())
+	if err := config.CredentialError(); err != nil {
+		t.Fatalf("CredentialError = %v, want nil for an absent file", err)
+	}
+	if got := config.UserDSN(); got != DefaultUser {
+		t.Errorf("UserDSN = %q, want %q", got, DefaultUser)
+	}
+}
+
+// TestCredentialFileUnreadableStaysCredentialError: a credential file the
+// config resolution cannot read is kept as CredentialError, naming the file and
+// holding nothing from it. A malformed file stands in for any read failure here
+// because it refuses under root as well; the insecure-file case is gt-ijc7w1.
+func TestCredentialFileUnreadableStaysCredentialError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\nextra=1\n", 0o600)
+
+	err := DefaultConfig(town).CredentialError()
+	if err == nil {
+		t.Fatal("DefaultConfig read a malformed credential file cleanly")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the file %q", err, path)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error %q holds the password", err)
+	}
+}
+
 // TestReadTownCredentialFileRefusesUnknownKey: a file with an unknown key is
 // refused with an error that names the file and holds no value from it.
 func TestReadTownCredentialFileRefusesUnknownKey(t *testing.T) {
