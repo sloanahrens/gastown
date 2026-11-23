@@ -656,6 +656,7 @@ presubmit: lint
 	fi; \
 	echo "presubmit: go.mod rationale check (go run ./internal/presubmit/cmd/gomodrationale)" >&2; \
 	go run ./internal/presubmit/cmd/gomodrationale -base $(PRESUBMIT_BASE) || { echo "presubmit: FAILED at the go.mod rationale check (the message above names the commit and the cause)" >&2; exit 1; }; \
+	echo "presubmit: test-wait bound check (go run ./internal/presubmit/cmd/testwaits)" >&2; go run ./internal/presubmit/cmd/testwaits -base $(PRESUBMIT_BASE) || { echo "presubmit: FAILED at the test-wait bound check (the message above names the file, line and wait)" >&2; exit 1; }; \
 	gtdir=$$(mktemp -d) || { echo "presubmit: FAILED making room for the machine-stdout check" >&2; exit 1; }; \
 	$(MAKE) --no-print-directory build BUILD_DIR="$$gtdir" >/dev/null || { rm -rf "$$gtdir"; echo "presubmit: FAILED building gt for the machine-stdout check" >&2; exit 1; }; \
 	echo "presubmit: machine-readable stdout check (go run ./cmd/machinecheck)" >&2; \
