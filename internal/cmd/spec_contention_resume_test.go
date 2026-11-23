@@ -189,6 +189,44 @@ func TestSpecContentionResumeHoldsABeadWhoseRecordCannotBeRead(t *testing.T) {
 	}
 }
 
+// A record the probe cannot read is reported through the read itself, not only
+// by the probe: specCandidatesRetrying copies the probe's lines into its errors
+// while the bead stays held, so the tick log says why nothing was slung
+// (gt-lhgvm5).
+func TestSpecContentionResumeReportsAnUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	held := contentionHeldIssue("gt-a", specTestNow.Add(-time.Second))
+	held.Metadata = nil
+	db := beadsfake.New()
+	db.Seed(held)
+	store := contentionDropStore{db}
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{&held}, nil
+	}
+
+	got := specCandidatesRetrying(townRoot, 2, board, notDocked, contentionResumeRetry(store))
+
+	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
+		t.Fatalf("candidates = %+v, LabeledFailed = %d; want the unreadable bead held", got.Candidates, got.LabeledFailed)
+	}
+	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "gt-a") || !strings.Contains(got.Errors[0], "cannot be read") {
+		t.Errorf("errors = %v, want the probe's line naming gt-a and the unreadable schedule", got.Errors)
+	}
+	if len(got.Retried) != 0 {
+		t.Errorf("Retried = %v, want none for a bead whose schedule cannot be read", got.Retried)
+	}
+	issue, err := store.Show("gt-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range []string{specdispatch.DispatchFailedLabel, specdispatch.ContentionLabel} {
+		if !slices.Contains(issue.Labels, kept) {
+			t.Errorf("labels = %v, want %s kept", issue.Labels, kept)
+		}
+	}
+}
+
 // The clear removes the two labels and the three schedule keys and nothing
 // else: another label and another writer's metadata stay for their own reader.
 func TestSpecContentionResumeClearKeepsTheBeadsOtherState(t *testing.T) {
