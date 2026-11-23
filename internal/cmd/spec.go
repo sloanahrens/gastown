@@ -4930,12 +4930,15 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 }
 
 // rosterRigNames names the rigs the seat picture reads: the known rigs whose
-// polecat directory holds a polecat, when the dead-hooked walk reads them, which
-// needs the pool to own seats and a town to read. Those are the rigs whose
-// batches can be read before their first seat is asked about; a rig with no
-// polecat directory holds no seat the walk can find, so reading one spends bd
-// calls the seat read would not have made (gt-0mzpm). An unlistable rig is kept
-// and its error returned with the names (gt-khp9zg, gt-vg9vyi).
+// polecat directory holds a polecat, and the known rigs a live sandbox record
+// names, when the dead-hooked walk reads them, which needs the pool to own seats
+// and a town to read. Those are the rigs whose batches can be read before their
+// first seat is asked about; a rig with no polecat directory holds no seat the
+// walk can find, so reading one spends bd calls the seat read would not have
+// made (gt-0mzpm). A sandbox seat has no polecat directory in the town, so its
+// record keeps its rig read (gt-qrm3vj). A record listing that fails is an
+// error, never the absence of records. An unlistable rig is kept and its error
+// returned with the names (gt-khp9zg, gt-vg9vyi).
 func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error) {
 	if townRoot == "" || !poolOwnsSeats(pool) {
 		return nil, nil
@@ -4944,7 +4947,28 @@ func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	return rigsWithPolecatDirs(townRoot, rigs)
+	records, err := specLiveSandboxRecords(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("listing live sandbox records: %w", err)
+	}
+	kept, first := rigsWithPolecatDirs(townRoot, rigs)
+	// A rig a record names is read even with no polecat directory, in the
+	// registry's order: its sandbox seat has none in the town, and the
+	// directory filter alone would hide it (gt-qrm3vj).
+	read := make(map[string]bool, len(kept)+len(records))
+	for _, rig := range kept {
+		read[rig] = true
+	}
+	for _, rec := range records {
+		read[rec.Rig] = true
+	}
+	out := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		if read[rig] {
+			out = append(out, rig)
+		}
+	}
+	return out, first
 }
 
 // rigsWithPolecatDirs returns the names in rigs whose rig holds a polecat
