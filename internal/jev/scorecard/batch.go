@@ -45,18 +45,33 @@ type beadLister interface {
 // showChunk bounds how many ids go on one bd command line.
 const showChunk = 100
 
+// GoneError counts the beads a batched read named that the store no longer
+// holds: the map it came with keeps every bead that was found, and a gone bead
+// makes no label, as a one-at-a-time read of it does.
+type GoneError struct{ N int }
+
+// Error is the count alone, so a caller that warns on any error prints one
+// line: "3 beads gone".
+func (e *GoneError) Error() string { return fmt.Sprintf("%d beads gone", e.N) }
+
 // showAll reads the beads named ids from r in as few calls as it can: one list
 // query per chunk, then a batched show for what the query did not return (an
 // id in another store, or a wisp). A reader that cannot batch yields nothing,
-// and so does an id no batch found or a call that failed: the caller reads
-// those one at a time, which gives back the exact error or not-found answer a
-// single read does.
+// and so does an id no batch found: the caller reads those one at a time,
+// which gives back the exact answer a single read does.
 //
-// The error is the batch calls that failed, joined, or a list that did not
-// agree with a show; the map is still whatever could be read, and the caller
-// says so with warnf and goes on. The list is checked against a show of one id
-// because bd list prints fewer fields than bd show, and an adapter that read a
-// field the list leaves out would label from an empty one.
+// A chunk whose read fails because the store no longer holds some of its ids is
+// read again one id at a time: the beads it finds stay in the map and the
+// missing ones are counted in a *GoneError. That is the answer a single read
+// gives (attention.go's bead turns not-found into no bead), so the batch agrees
+// with it. A failure that does not wrap beads.ErrNotFound is reported as it is.
+//
+// The error is the *GoneError, when beads are gone, joined with the calls that
+// failed for another reason and a list that did not agree with a show; the map
+// is still whatever could be read, and the caller says so with warnf and goes
+// on. The list is checked against a show of one id because bd list prints fewer
+// fields than bd show, and an adapter that read a field the list leaves out
+// would label from an empty one.
 func showAll(r any, ids []string) (map[string]*beads.Issue, error) {
 	var list func([]string) (map[string]*beads.Issue, error)
 	switch v := r.(type) {
@@ -83,19 +98,53 @@ func showAll(r any, ids []string) (map[string]*beads.Issue, error) {
 	}
 	found := make(map[string]*beads.Issue, len(want))
 	var errs []error
+	gone := make(map[string]bool)
 	readChunks := func(ids []string, read func([]string) (map[string]*beads.Issue, error)) {
 		for len(ids) > 0 {
 			n := min(showChunk, len(ids))
-			got, err := read(ids[:n])
-			if err != nil {
-				errs = append(errs, err)
-			}
+			chunk := ids[:n]
+			ids = ids[n:]
+			got, err := read(chunk)
 			for id, issue := range got {
 				if issue != nil {
 					found[id] = issue
 				}
 			}
-			ids = ids[n:]
+			if err == nil {
+				continue
+			}
+			if !errors.Is(err, beads.ErrNotFound) {
+				errs = append(errs, err)
+				continue
+			}
+			// The chunk names ids the store no longer holds. A single read
+			// names them, so every bead the chunk does hold is kept and the
+			// gone ones are counted instead of failing the chunk.
+			count := 0
+			for _, id := range chunk {
+				if found[id] != nil {
+					continue
+				}
+				one, oneErr := read([]string{id})
+				for foundID, issue := range one {
+					if issue != nil {
+						found[foundID] = issue
+					}
+				}
+				switch {
+				case oneErr == nil:
+				case errors.Is(oneErr, beads.ErrNotFound):
+					gone[id] = true
+					count++
+				default:
+					errs = append(errs, oneErr)
+				}
+			}
+			if count == 0 {
+				// No single read named a gone bead, so missing beads do not
+				// explain the batch failure: report it.
+				errs = append(errs, err)
+			}
 		}
 	}
 	if canList {
@@ -108,11 +157,14 @@ func showAll(r any, ids []string) (map[string]*beads.Issue, error) {
 	if canBatch {
 		var rest []string
 		for _, id := range want {
-			if found[id] == nil {
+			if found[id] == nil && !gone[id] {
 				rest = append(rest, id)
 			}
 		}
 		readChunks(rest, batcher.ShowMultiple)
+	}
+	if len(gone) > 0 {
+		errs = append([]error{&GoneError{N: len(gone)}}, errs...)
 	}
 	return found, errors.Join(errs...)
 }
