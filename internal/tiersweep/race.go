@@ -39,10 +39,23 @@ func (s *Sweep) Race() (line string, red bool) {
 func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	start := s.Now()
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
+	// A run's log file and resume key are its package name, followed by ~label
+	// when it has one (Runner.tasks). Two runs that build the same name would
+	// share one log and key, the second counted passed from the first's record,
+	// so both are refused before anything runs.
+	seen := make(map[string]bool, len(runs))
 	for _, run := range runs {
 		if run.label != "" && !raceLabelRE.MatchString(run.label) {
 			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: label %q is not [A-Za-z0-9._-]+ (logs %s) in %s", run.label, s.Opts.LogDir, FormatDuration(elapsed())), true
 		}
+		name := run.pkg
+		if run.label != "" {
+			name += "~" + run.label
+		}
+		if seen[name] {
+			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: %s is listed twice (logs %s) in %s", name, s.Opts.LogDir, FormatDuration(elapsed())), true
+		}
+		seen[name] = true
 	}
 	runner := &Runner{
 		Exec:     s.Exec,

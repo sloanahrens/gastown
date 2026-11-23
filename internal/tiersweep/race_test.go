@@ -199,3 +199,42 @@ func TestRaceTierKeepsTwoEntriesOnOnePackageApart(t *testing.T) {
 		t.Errorf("raceTier with a space in the label = %q, %v, ran %v; want %q, true, no command", line, red, fake.calls, want)
 	}
 }
+
+// TestRaceTierRefusesTwoEntriesWithOnePackageAndLabel: two entries that would
+// share one name, log file and resume key are refused before any run, naming
+// the pair, while entries that differ in package or label still run.
+func TestRaceTierRefusesTwoEntriesWithOnePackageAndLabel(t *testing.T) {
+	t.Parallel()
+	labeled := raceRun{pkg: "./one", args: []string{"-run", "One"}, label: "x"}
+	plain := raceRun{pkg: "./one", args: []string{"-run", "One"}}
+	other := plain
+	other.label = "y"
+	green := "tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs %s) in 0s"
+	cases := []struct {
+		name string
+		runs []raceRun
+		// want is the summary line; %s is the log directory the sweep writes.
+		want string
+		red  bool
+		ran  int
+	}{
+		{"same package and label", []raceRun{labeled, labeled}, "tier-sweep: race RED passed=0 failed=0 skipped=0: ./one~x is listed twice (logs %s) in 0s", true, 0},
+		{"same package different labels", []raceRun{labeled, other}, green, false, 2},
+		{"same package one label empty", []raceRun{labeled, plain}, green, false, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeTier{}
+			s := raceSweep(t, fake)
+			line, red := s.raceTier(c.runs)
+			want := fmt.Sprintf(c.want, s.Opts.LogDir)
+			if line != want || red != c.red {
+				t.Errorf("raceTier(%v) = %q, %v; want %q, %v", c.runs, line, red, want, c.red)
+			}
+			if len(fake.calls) != c.ran {
+				t.Errorf("raceTier(%v) ran %d commands, want %d", c.runs, len(fake.calls), c.ran)
+			}
+		})
+	}
+}
