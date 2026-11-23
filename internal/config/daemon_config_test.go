@@ -2569,3 +2569,42 @@ func TestImagePinDurabilityImagePinLayersConfigKey(t *testing.T) {
 		t.Fatal("an unknown key decoded, want a refusal naming it")
 	}
 }
+
+// TestNoBeadAccessOutboxPollConfig: the outbox_poll key fills
+// PatrolsConfig.OutboxPoll, which is what IsPatrolEnabled reads, and a patrols
+// block that does not name it leaves the field nil so the patrol stays off
+// (gt-0hkj0c, gt-pju7xi).
+func TestNoBeadAccessOutboxPollConfig(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		doc  string
+		want *bool
+	}{
+		{"the patrols block names outbox_poll", `{"patrols":{"outbox_poll":{"enabled":true}}}`, boolPtr(true)},
+		{"the patrols block omits outbox_poll", `{"patrols":{}}`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.doc), &cfg); err != nil {
+				t.Fatalf("%s does not decode: %v", tc.doc, err)
+			}
+			if cfg.Patrols == nil {
+				t.Fatalf("%s decoded Patrols nil", tc.doc)
+			}
+			if tc.want == nil {
+				if cfg.Patrols.OutboxPoll != nil {
+					t.Errorf("an omitted outbox_poll decoded as %+v, want nil", cfg.Patrols.OutboxPoll)
+				}
+				return
+			}
+			if cfg.Patrols.OutboxPoll == nil || cfg.Patrols.OutboxPoll.Enabled != *tc.want {
+				t.Errorf("outbox_poll decoded as %+v, want enabled:%v", cfg.Patrols.OutboxPoll, *tc.want)
+			}
+		})
+	}
+}
