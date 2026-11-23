@@ -527,8 +527,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
 	spend, spendReason := resolveSpend(spendCmd, beadReads.costSamples, whyLog)
 	// The System updates section joins the pipeline runs through the same
-	// cadence the Deploys reader uses, so the section's own faster poll costs
-	// no Forgejo calls.
+	// cadence the Deploys reader uses (Config.DeploysEvery is set from the same
+	// constant), so the section's own faster poll costs no Forgejo calls.
 	systemUpdatesRead := func() *dashboard.SystemUpdates {
 		return systemUpdates(townRoot, tierSweeps, gastownPipeline, time.Now())
 	}
@@ -558,6 +558,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
+		DeploysEvery:   systemUpdatesPipelineEvery,
 		Reports:        func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir:     dashboardReportsDir(townRoot),
 		Birds:          func() []dashboard.BirdReport { return birds.Read(time.Now()) },
@@ -1338,10 +1339,10 @@ func dashboardJevCap(townRoot string) func() (*float64, error) {
 // (dashboardForgejoBase), so the panes reach the Forgejo the rigs use.
 //
 // The function also returns the System updates section's pipeline read: the
-// gastown rig's post-land and images runs, gated to the Deploys reader's default
-// cadence so the section's faster poll costs no Forgejo calls. With no viewer
-// token file, or no gastown repository for it to read, the read is nil and the
-// section joins no runs.
+// gastown rig's post-land and images runs, gated to the same cadence the Deploys
+// reader polls at so the section's faster poll costs no Forgejo calls. With no
+// viewer token file, or no gastown repository for it to read, the read is nil
+// and the section joins no runs.
 func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging, func() *dashboard.GastownPipeline) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
@@ -1358,7 +1359,7 @@ func dashboardForgejoReaders(townRoot string, repos []string, logf func(format s
 	var pipeline func() *dashboard.GastownPipeline
 	if remote, err := rigForgejoRemote(townRoot, "gastown"); err == nil && remote != "" {
 		if owner, repo, err := land.RepoFromRemoteURL(remote); err == nil {
-			pipeline = newSystemUpdatesPipeline(dashboard.NewGastownPipelineReader(client, owner+"/"+repo).Read, time.Now)
+			pipeline = newSystemUpdatesPipeline(dashboard.NewGastownPipelineReader(client, owner+"/"+repo).Read, time.Now, systemUpdatesPipelineEvery)
 		}
 	}
 	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship, pipeline

@@ -14,25 +14,28 @@ import (
 const systemUpdatesHistoryRuns = 50
 
 // systemUpdatesPipelineEvery is how often the gastown repository's pipeline runs
-// are re-read: the cadence the Deploys reader is scheduled at (the hub's
-// DeploysEvery default), because one read is two Forgejo list calls and the
-// runs move far slower than the section is built.
+// are re-read. It is the hub's Deploys cadence, which newDashboardHub sets from
+// this constant, because one read is two Forgejo list calls and the runs move
+// far slower than the section is built.
 const systemUpdatesPipelineEvery = time.Minute
 
-// newSystemUpdatesPipeline gates read to one call per systemUpdatesPipelineEvery,
-// timed by now: a section built inside the window reuses the runs the last read
-// published, so the section's faster poll costs the repository nothing.
-func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time) func() *dashboard.GastownPipeline {
+// newSystemUpdatesPipeline gates read so it runs at most once per every, timed
+// by now: a section built inside the window reuses what the last read
+// published, so the section's faster poll costs the repository nothing. have
+// records that a read happened, so a nil result is cached like any other.
+func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time, every time.Duration) func() *dashboard.GastownPipeline {
 	var mu sync.Mutex
 	var last *dashboard.GastownPipeline
 	var at time.Time
+	var have bool
 	return func() *dashboard.GastownPipeline {
 		mu.Lock()
 		defer mu.Unlock()
 		readAt := now()
-		if last == nil || readAt.Sub(at) >= systemUpdatesPipelineEvery {
+		if !have || readAt.Sub(at) >= every {
 			last = read()
 			at = readAt
+			have = true
 		}
 		return last
 	}

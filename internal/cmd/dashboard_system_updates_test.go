@@ -174,8 +174,7 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableSweepLog(t *testing.T) {
 }
 
 // The post-land and images runs of a swept commit fill that row's Runs, so the
-// pane's stage chips have what they draw; a nil read leaves every row without
-// runs, the section a town with no viewer client draws today (gt-nhdxkq).
+// pane's stage chips have what they draw (gt-nhdxkq).
 func TestSystemUpdatesPipelineJoinsRunsForASweptCommit(t *testing.T) {
 	t.Parallel()
 
@@ -186,19 +185,77 @@ func TestSystemUpdatesPipelineJoinsRunsForASweptCommit(t *testing.T) {
 		{Workflow: "post-land.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
 	}
 	read := func() *dashboard.GastownPipeline { return &dashboard.GastownPipeline{Runs: runs} }
+
+	got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+
+	require.Len(t, got.Rows, 1, "the swept commit names one row")
+	assert.Equal(t, runs, got.Rows[0].Runs)
+}
+
+// A nil pipeline read leaves every row without runs, the section a town with no
+// viewer client draws today (gt-nhdxkq).
+func TestSystemUpdatesPipelineNilLeavesRowsWithoutRuns(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeDaemonLog(t, root, "2026/11/18 09:00:00 tier_sweep: gastown: swept 9f8e7d6c (shell GREEN, integration GREEN) in 9m36s")
+
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+
+	require.Len(t, got.Rows, 1, "the swept commit names one row")
+	assert.Empty(t, got.Rows[0].Runs)
+}
+
+// The pipeline read is two Forgejo list calls, so it runs once per cadence: a
+// build inside the window reuses the last read, a nil result included, and one
+// at or past the window reads again (gt-nhdxkq, om finding de02a01e).
+func TestSystemUpdatesPipelineThrottle(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	first := &dashboard.GastownPipeline{At: base}
+	second := &dashboard.GastownPipeline{At: base.Add(time.Minute)}
 	for _, tc := range []struct {
-		name     string
-		pipeline func() *dashboard.GastownPipeline
-		want     []dashboard.PipelineRun
+		name      string
+		first     *dashboard.GastownPipeline
+		advance   time.Duration
+		wantReads int
+		want      *dashboard.GastownPipeline
 	}{
-		{"runs for the swept commit", read, runs},
-		{"no pipeline read", nil, nil},
+		{"inside the window reuses the last read", first, 30 * time.Second, 1, first},
+		{"after the window reads again", first, time.Minute, 2, second},
+		{"a nil read is cached inside the window", nil, 30 * time.Second, 1, nil},
+		{"a nil read after the window reads again", nil, time.Minute, 2, second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := systemUpdates(root, newTierSweepReader(root), tc.pipeline, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
-			require.Len(t, got.Rows, 1, "the swept commit names one row")
-			assert.Equal(t, tc.want, got.Rows[0].Runs)
+			clock := base
+			reads := 0
+			read := func() *dashboard.GastownPipeline {
+				reads++
+				if reads == 1 {
+					return tc.first
+				}
+				return second
+			}
+			poll := newSystemUpdatesPipeline(read, func() time.Time { return clock }, time.Minute)
+
+			got := poll()
+			assert.Equal(t, 1, reads, "the first call reads")
+			if tc.first == nil {
+				assert.Nil(t, got)
+			} else {
+				assert.Same(t, tc.first, got)
+			}
+			clock = clock.Add(tc.advance)
+			got = poll()
+
+			assert.Equal(t, tc.wantReads, reads, "the read count")
+			if tc.want == nil {
+				assert.Nil(t, got)
+			} else {
+				assert.Same(t, tc.want, got)
+			}
 		})
 	}
 }
