@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict and vet fields from
@@ -48,6 +49,24 @@ type GateRun struct {
 // the pole is read from the full list before the cut, and PackageCount says how many there were.
 const gateRunPackagesKept = 20
 
+// gateRunTextMax bounds a gate-run row's text fields. The parser copies log text, so a long
+// package, test or cgroup line is cut: 256 is well past the longest real one (a 68-byte import
+// path, a 91-byte test name) and keeps the row small.
+const gateRunTextMax = 256
+
+// gateRunText is s cut to gateRunTextMax bytes on a rune boundary: a rune the cut would split is
+// dropped whole, so the kept text is valid UTF-8 and no longer than the limit.
+func gateRunText(s string) string {
+	if len(s) <= gateRunTextMax {
+		return s
+	}
+	cut := gateRunTextMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // GateRunPackage is one package's wall time; GateRunTest is one slow test's.
 type GateRunPackage struct {
 	Pkg string  `json:"pkg"`
@@ -76,7 +95,8 @@ var vetWallRE = regexp.MustCompile(`^integration vet: \d+ packages in \d+ module
 // packages, slow tests, CPUs and pole; a "(cached)" ok line counts one cached package. A missing
 // marker, or a stage that does not run forward, leaves its field zero, a tierwall line or a vet
 // duration it cannot read is skipped rather than read as a value, and a line without a leading
-// RFC3339 timestamp is skipped.
+// RFC3339 timestamp is skipped. Each text field it copies is cut to gateRunTextMax bytes on a
+// rune boundary.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
@@ -123,6 +143,15 @@ func ParseGateRunLog(log string) GateRun {
 	run.PolePkg, run.PoleS = gatePole(run.Packages)
 	run.PackageCount = len(run.Packages)
 	run.Packages = slowestPackages(run.Packages)
+	run.Cgroup = gateRunText(run.Cgroup)
+	run.PolePkg = gateRunText(run.PolePkg)
+	for i := range run.Packages {
+		run.Packages[i].Pkg = gateRunText(run.Packages[i].Pkg)
+	}
+	for i := range run.SlowTests {
+		run.SlowTests[i].Pkg = gateRunText(run.SlowTests[i].Pkg)
+		run.SlowTests[i].Test = gateRunText(run.SlowTests[i].Test)
+	}
 	return run
 }
 

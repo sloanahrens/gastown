@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // runnerTaskLine is the first line of a gate job log, as Forgejo's runner writes it.
@@ -289,5 +290,46 @@ func TestParseGateRunLogKeepsTheSlowestPackages(t *testing.T) {
 	small := ParseGateRunLog("2026-11-19T10:02:00Z tierwall: example.test/a 1s\n2026-11-19T10:02:00Z tierwall: example.test/b 2s\n")
 	if small.PackageCount != 2 || len(small.Packages) != 2 || small.Packages[0].Pkg != "example.test/b" {
 		t.Errorf("a tier of 2 = count %d, packages %+v, want both kept slowest first", small.PackageCount, small.Packages)
+	}
+}
+
+// TestParseGateRunLogBoundsTheText: the text fields of a row are log text, so a hostile or corrupt
+// log must not be copied in uncapped. Each keeps at most 256 bytes, cut on a rune boundary, so a
+// 1 MiB line costs a bounded row and the kept text stays valid UTF-8.
+func TestParseGateRunLogBoundsTheText(t *testing.T) {
+	t.Parallel()
+	big := "2026-11-19T10:02:00Z tierwall: cpus: NumCPU=16 GOMAXPROCS=12 cgroup=" +
+		strings.Repeat("€", 350000) + "\n" // 1.05 MB of 3-byte runes
+	if got := ParseGateRunLog(big).Cgroup; len(got) > 256 || !utf8.ValidString(got) {
+		t.Errorf("Cgroup from a 1 MiB line = %d bytes (valid UTF-8 %v), want at most 256 and valid", len(got), utf8.ValidString(got))
+	}
+
+	// One token of exactly n bytes ending in a 3-byte rune, in every text field. The 257-byte
+	// token's rune starts at byte 254, so it crosses the 256-byte cap and is dropped whole.
+	tests := []struct{ n, kept int }{{255, 255}, {256, 256}, {257, 254}}
+	for _, tc := range tests {
+		token := strings.Repeat("a", tc.n-3) + "€"
+		log := "2026-11-19T10:02:00Z tierwall: cpus: NumCPU=16 GOMAXPROCS=12 cgroup=" + token + "\n" +
+			"2026-11-19T10:02:00Z tierwall: " + token + " 5s\n" +
+			"2026-11-19T10:02:00Z tierwall: slow tests\n" +
+			"2026-11-19T10:02:00Z tierwall:   " + token + " " + token + " 3s\n"
+		got := ParseGateRunLog(log)
+		want := token[:tc.kept]
+		if got.Cgroup != want {
+			t.Errorf("%d-byte cgroup = %q, want %q", tc.n, got.Cgroup, want)
+		}
+		if got.PolePkg != want {
+			t.Errorf("%d-byte pole = %q, want %q", tc.n, got.PolePkg, want)
+		}
+		if len(got.Packages) != 1 || got.Packages[0].Pkg != want {
+			t.Fatalf("%d-byte packages = %+v, want one %q", tc.n, got.Packages, want)
+		}
+		if len(got.SlowTests) != 1 || got.SlowTests[0].Pkg != want || got.SlowTests[0].Test != want {
+			t.Fatalf("%d-byte slow tests = %+v, want one %q/%q", tc.n, got.SlowTests, want, want)
+		}
+		if !utf8.ValidString(got.Cgroup) || !utf8.ValidString(got.PolePkg) ||
+			!utf8.ValidString(got.Packages[0].Pkg) || !utf8.ValidString(got.SlowTests[0].Test) {
+			t.Errorf("%d-byte row kept invalid UTF-8", tc.n)
+		}
 	}
 }
