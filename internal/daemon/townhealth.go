@@ -108,6 +108,18 @@ type healthSources struct {
 	// behind counts the commits between a rig's last promoted commit and its
 	// green main; nil reads the rig's repository.
 	behind func(rigName, promoted, green string) (int, error)
+	// sweepState reads one rig's tier sweep record; nil reads the town root's
+	// (gt-1q2qhb).
+	sweepState func(rig string) (tierSweepState, error)
+}
+
+// readSweepState reads one rig's tier sweep record through the field when one
+// is set, and otherwise from the town root (gt-1q2qhb).
+func (s *healthSources) readSweepState(rig string) (tierSweepState, error) {
+	if s.sweepState != nil {
+		return s.sweepState(rig)
+	}
+	return readTierSweepState(s.townRoot(), rig)
 }
 
 // sweepRecordOf turns one rig's tier sweep state into the townhealth
