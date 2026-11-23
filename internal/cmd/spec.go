@@ -4819,7 +4819,7 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 	if err := batch.readRigs(rigs); err != nil {
 		return poolSeatSnapshot{}, err
 	}
-	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, nil, work, pool, now)
+	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
 }
 
 // rosterRigNames names the rigs the seat picture reads: every known rig when
@@ -4856,10 +4856,10 @@ func rigsWithPolecatDirs(townRoot string, rigs []string) (kept []string, first e
 
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
 // seats the disposition releases, so a tick's slings can count them free too.
-func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, _ polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
+func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
 	at := now()
 	recorded, released := releasedSeatRecorder(disposition)
-	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, nil, work, pool)
+	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, work, pool)
 	if err != nil {
 		return poolSeatSnapshot{}, err
 	}

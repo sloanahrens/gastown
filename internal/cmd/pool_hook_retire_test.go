@@ -93,3 +93,43 @@ func TestPoolHookRetirePlumbingSources(t *testing.T) {
 		}
 	}
 }
+
+// TestPoolHookRetireSignature is gt-ujao98, the last of the hook read's
+// retirement: the three outer pool functions no longer take the hook-held seam
+// the earlier beads emptied, and the type they named is gone. It is red while
+// any signature still carries a polecatHookHeldFunc parameter.
+func TestPoolHookRetireSignature(t *testing.T) {
+	t.Parallel()
+	outer := map[string]any{
+		"poolSeatSessionsWith":       poolSeatSessionsWith,
+		"poolSeatSessionsProbedWith": poolSeatSessionsProbedWith,
+		"poolSeatSnapshotWith":       poolSeatSnapshotWith,
+	}
+	for name, fn := range outer {
+		typ := reflect.TypeOf(fn)
+		for i := 0; i < typ.NumIn(); i++ {
+			if got := typ.In(i).Name(); got == "polecatHookHeldFunc" {
+				t.Errorf("%s still takes a %s parameter", name, got)
+			}
+		}
+	}
+
+	fset := token.NewFileSet()
+	for _, path := range poolPackageSources(t) {
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.Name == "polecatHookHeldFunc" {
+					t.Errorf("%s still declares the polecatHookHeldFunc type", path)
+				}
+			}
+		}
+	}
+}

@@ -600,14 +600,6 @@ func (l censusLister) GetSessionCreatedTime(name string) (time.Time, error) {
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, error)
 
-// polecatHookHeldFunc reports whether one polecat's seat still holds live
-// work, read from its beads alone: the same agent, assignment and hook reads
-// polecatDispositionFunc makes, stopped before the worktree probe.
-//
-// The outer seams accept it and ignore it until gt-ujao98 removes the
-// parameter; no read reaches it any more (gt-j8elkb).
-type polecatHookHeldFunc func(rigName, polecatName string) (bool, error)
-
 // poolSeatReads is the town's beads reads one seat read makes, passed in rather
 // than reached for so the read can be driven with no database (docs/testing.md):
 // the polecat's agent bead, the work bead assigned to it, and the by-id lookup
@@ -1872,7 +1864,7 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // submission records in it — the seat its restart takes again, and the window
 // the dispatcher's roster runs for a whole tick (gt-0axfg).
 func (r *poolRouter) seatSnapshot() (poolSeatSnapshot, error) {
-	return poolSeatSnapshotWith(r.lister(), r.townRoot, r.disposition, nil, r.work, r.pool(), r.now)
+	return poolSeatSnapshotWith(r.lister(), r.townRoot, r.disposition, r.work, r.pool(), r.now)
 }
 
 // lister is the tmux source this router's seat reads take sessions from: the

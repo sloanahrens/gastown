@@ -255,7 +255,7 @@ func TestPoolCapacityModelsAgreeWithTheList(t *testing.T) {
 				}
 				return state, nil
 			}
-			got, err := poolSeatSessionsWith(lister, town, disposition, hookHeldOf(disposition), work, seatPool("deepseek-flash", 3))
+			got, err := poolSeatSessionsWith(lister, town, disposition, work, seatPool("deepseek-flash", 3))
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -442,7 +442,7 @@ func TestPoolCountsAWorkingSeatWithARunningSession(t *testing.T) {
 			}}
 
 			got, err := poolSeatSessionsWith(lister, town,
-				poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil,
+				poolDispositionAnswering(town, reads), nil,
 				seatPool("deepseek-flash", 3))
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)

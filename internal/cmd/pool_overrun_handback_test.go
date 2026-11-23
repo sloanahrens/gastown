@@ -41,7 +41,7 @@ func TestPoolRosterDoesNotCountAHandedBackSeat(t *testing.T) {
 			// against that clean, measured answer.
 			reads.probe = stageCleanProbeSeat(t, town, "gastown", "ember")
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}

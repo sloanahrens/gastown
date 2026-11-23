@@ -338,7 +338,7 @@ func TestPoolCountsASandboxSeatOnItsRecordedClass(t *testing.T) {
 	ts := config.NewTownSettings()
 	ts.PolecatPool = pool
 
-	sessions, err := poolSeatSessionsWith(lister, town, nil, noHeldHooks, nil, pool)
+	sessions, err := poolSeatSessionsWith(lister, town, nil, nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -2122,7 +2122,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 
 			// The picture `gt daemon dispatch-check` nudges from and the spec
 			// dispatcher's roster reads.
-			picture, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, noHeldHooks, work, pool)
+			picture, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -2476,28 +2476,6 @@ func poolDispositionAnswering(town string, reads poolSeatReads) polecatDispositi
 	}
 }
 
-// poolHookHeldAnswering is the cheap hook-held read over the canned reads: the
-// bead half of the seat read above, with no worktree probe.
-func poolHookHeldAnswering(town string, reads poolSeatReads) polecatHookHeldFunc {
-	return func(rigName, polecatName string) (bool, error) {
-		return poolPolecatHookHeldWith(town, rigName, polecatName, reads)
-	}
-}
-
-// hookHeldOf answers the cheap hook read from a fake full seat read, for the
-// tests that drive the seat picture without measuring the split: it reports
-// the same HookHeld the full read does. A nil read answers noHeldHooks, so a
-// caller with no seat read still walks to no dead-hooked seat.
-func hookHeldOf(disposition polecatDispositionFunc) polecatHookHeldFunc {
-	if disposition == nil {
-		return noHeldHooks
-	}
-	return func(rigName, polecatName string) (bool, error) {
-		state, err := disposition(rigName, polecatName)
-		return state.HookHeld, err
-	}
-}
-
 // deadSeatRead fakes a sessionless seat's read: a measured disposition, free
 // when free says it does not count toward capacity. Since gt-v5n2be the walk
 // decides from this read rather than from HookHeld, so a fixture that means
@@ -2584,7 +2562,7 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			// sessionless read frees it only against that measured answer.
 			reads.probe = stageCleanProbeSeat(t, town, "gastown", "ember")
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -2624,7 +2602,7 @@ func TestPoolRosterHoldsADeferredExitSeatUnderTheTownTotal(t *testing.T) {
 	writeTownPolecatDir(t, town, "gastown", "ember")
 	reads := poolSeatReadsAnswering(t, deferredExitFields(), assignedActiveWork("gt-92qx3"))
 
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -3081,7 +3059,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 		return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}}, nil
 	}
 	pool := seatPool("claude-haiku", 1)
-	snap, err := poolSeatSnapshotWith(lister, town, disposition, hookHeldOf(disposition), nil, pool, func() time.Time { return rosterAt })
+	snap, err := poolSeatSnapshotWith(lister, town, disposition, nil, pool, func() time.Time { return rosterAt })
 	if err != nil {
 		t.Fatalf("roster: %v", err)
 	}
