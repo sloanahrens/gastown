@@ -1211,3 +1211,137 @@ func TestSweepReadsBeadsInOneBatch(t *testing.T) {
 		}
 	})
 }
+
+// partialBatchStore is the batch double with an answer that is only partial:
+// drop names the ids it answers nothing for, as the real client leaves out an
+// id it could not find (Beads.ShowMultiple: "Missing IDs are not included"),
+// nilEntry names the ids it answers with no record at all, and blankStatus
+// names the ids whose entry carries an empty status.
+type partialBatchStore struct {
+	*batchStore
+	drop        map[string]bool
+	nilEntry    map[string]bool
+	blankStatus map[string]bool
+}
+
+func (s *partialBatchStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	all, err := s.batchStore.ShowMultiple(ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*beads.Issue, len(all))
+	for id, issue := range all {
+		switch {
+		case s.drop[id]:
+			continue
+		case s.nilEntry[id]:
+			out[id] = nil
+		case s.blankStatus[id]:
+			blank := *issue
+			blank.Status = ""
+			out[id] = &blank
+		default:
+			out[id] = issue
+		}
+	}
+	return out, nil
+}
+
+// TestSweepPartialBatchReadsMissingBeads: a batch that answers only some of
+// its ids is not a whole answer. An open bead and one bd cannot find are each
+// read with one Show and keep their branch; a closed bead the batch left out
+// is read with Show and swept. Counting a missing bead done deletes the first
+// two (gt-vnktef).
+func TestSweepPartialBatchReadsMissingBeads(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const (
+		openBranch   = "polecat/opal/gt-swp0+x1"
+		goneBranch   = "polecat/opal/gt-swp1+x1"
+		closedBranch = "polecat/opal/gt-swp2+x1"
+	)
+	h.seedLeftover(t, openBranch, "gt-swp0", "open", true, 2*time.Hour)
+	h.seedLeftover(t, goneBranch, "gt-swp1", "closed", true, 2*time.Hour)
+	h.seedLeftover(t, closedBranch, "gt-swp2", "closed", true, 2*time.Hour)
+	if err := h.bd.DeleteIssues("gt-swp1"); err != nil {
+		t.Fatalf("removing gt-swp1: %v", err)
+	}
+	store := &partialBatchStore{
+		batchStore: &batchStore{Beads: h.bd, fake: h.bd},
+		drop:       map[string]bool{"gt-swp0": true, "gt-swp2": true},
+	}
+	h.w.Beads = store
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.Pass(context.Background())
+
+	if want := []string{closedBranch}; !slices.Equal(h.remote.deleted, want) {
+		t.Errorf("deleted %v; want only %v", h.remote.deleted, want)
+	}
+	if got := slices.Sorted(slices.Values(store.shows)); !slices.Equal(got, []string{"gt-swp0", "gt-swp1", "gt-swp2"}) {
+		t.Errorf("shows %v; want one Show for each bead the batch left out", store.shows)
+	}
+	for _, branch := range []string{openBranch, goneBranch} {
+		if _, ok := h.remote.remoteRefs["refs/heads/"+branch]; !ok {
+			t.Errorf("%s is gone from origin; want it kept", branch)
+		}
+	}
+	if !logged(logs, "gt-swp1") {
+		t.Errorf("logs %q; want one naming the bead bd cannot find", logs)
+	}
+}
+
+// TestSweepPartialBatchKeepsANilEntry: a batch entry with no record proves
+// nothing about its bead, so its branch stays. Counting a nil entry done
+// deletes it (gt-vnktef).
+func TestSweepPartialBatchKeepsANilEntry(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const kept = "polecat/opal/gt-swn0+x1"
+	h.seedLeftover(t, kept, "gt-swn0", "closed", true, 2*time.Hour)
+	store := &partialBatchStore{
+		batchStore: &batchStore{Beads: h.bd, fake: h.bd},
+		nilEntry:   map[string]bool{"gt-swn0": true},
+	}
+	h.w.Beads = store
+
+	h.w.Pass(context.Background())
+
+	if len(h.remote.deleted) != 0 {
+		t.Errorf("deleted %v; want the nil entry's branch kept", h.remote.deleted)
+	}
+	if _, ok := h.remote.remoteRefs["refs/heads/"+kept]; !ok {
+		t.Fatalf("%s is gone from origin; want it kept", kept)
+	}
+	if len(store.shows) != 0 {
+		t.Errorf("shows %v; want no Show for an id the batch answered", store.shows)
+	}
+}
+
+// TestSweepPartialBatchKeepsAnEmptyStatus: a batch entry whose status is empty
+// says nothing about the bead, and an unknown status never licenses a delete.
+// Counting an empty status done deletes the branch (gt-vnktef).
+func TestSweepPartialBatchKeepsAnEmptyStatus(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const kept = "polecat/opal/gt-swe0+x1"
+	h.seedLeftover(t, kept, "gt-swe0", "closed", true, 2*time.Hour)
+	store := &partialBatchStore{
+		batchStore:  &batchStore{Beads: h.bd, fake: h.bd},
+		blankStatus: map[string]bool{"gt-swe0": true},
+	}
+	h.w.Beads = store
+
+	h.w.Pass(context.Background())
+
+	if len(h.remote.deleted) != 0 {
+		t.Errorf("deleted %v; want an empty-status entry's branch kept", h.remote.deleted)
+	}
+	if _, ok := h.remote.remoteRefs["refs/heads/"+kept]; !ok {
+		t.Fatalf("%s is gone from origin; want it kept", kept)
+	}
+	if len(store.shows) != 0 {
+		t.Errorf("shows %v; want no Show for an id the batch answered", store.shows)
+	}
+}
