@@ -1,6 +1,7 @@
 package growth
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -311,6 +312,71 @@ func TestAppendKeepsLinesItCannotParse(t *testing.T) {
 	want := []Sample{at(1), at(2)}
 	if !sameSamples(got, want) {
 		t.Fatalf("ReadCount = %v, want %v", got, want)
+	}
+}
+
+// TestAppendDropsOverlongLines pins what Append's doc says it does with a
+// damaged ring: a line over maxLineBytes is discarded rather than carried into
+// the rewrite, so the corrupt line ReadCount reported before the append is
+// gone after it.
+func TestAppendDropsOverlongLines(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "growth.jsonl")
+	overlong := strings.Repeat("x", maxLineBytes+1)
+	seeded := []string{line(t, at(1)), overlong, line(t, at(2))}
+	if err := os.WriteFile(path, []byte(strings.Join(seeded, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("seeding ring: %v", err)
+	}
+	if _, corrupt, err := ReadCount(path); err != nil {
+		t.Fatalf("ReadCount before Append: %v", err)
+	} else if corrupt != 1 {
+		t.Fatalf("ReadCount counted %d corrupt lines before Append, want the one over %d bytes", corrupt, maxLineBytes)
+	}
+	if err := Append(path, at(3), 0); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, corrupt, err := ReadCount(path)
+	if err != nil {
+		t.Fatalf("ReadCount after Append: %v", err)
+	}
+	if corrupt != 0 {
+		t.Errorf("ReadCount counted %d corrupt lines after Append, want 0: the over-long line is dropped, not carried", corrupt)
+	}
+	want := []Sample{at(1), at(2), at(3)}
+	if !sameSamples(got, want) {
+		t.Fatalf("ReadCount = %v, want %v", got, want)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading ring: %v", err)
+	}
+	if bytes.Contains(raw, []byte(overlong)) {
+		t.Error("Append carried the over-long line into the rewritten ring")
+	}
+}
+
+// TestAppendIsSingleWriter pins the rule Append's doc states: Append reads the
+// ring and rewrites the whole file, so one writer at a time must serialize on
+// the path, as the daemon's growth lock does. The whole rewrite shows here: a
+// seeded line with surrounding space comes back exactly as a later append
+// writes one, so Append did not just add a line to the end.
+func TestAppendIsSingleWriter(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "growth.jsonl")
+	seeded := "  " + line(t, at(1)) + "  \n" + line(t, at(2)) + "\n"
+	if err := os.WriteFile(path, []byte(seeded), 0o644); err != nil {
+		t.Fatalf("seeding ring: %v", err)
+	}
+	if err := Append(path, at(3), 0); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading ring: %v", err)
+	}
+	want := line(t, at(1)) + "\n" + line(t, at(2)) + "\n" + line(t, at(3)) + "\n"
+	if string(raw) != want {
+		t.Fatalf("ring after Append =\n%q\nwant the whole file rewritten as\n%q", raw, want)
 	}
 }
 
