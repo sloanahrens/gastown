@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +21,15 @@ func writeEmptyDaemonLog(t *testing.T, root string) {
 	dir := filepath.Join(root, "daemon")
 	require.NoError(t, os.MkdirAll(dir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "daemon.log"), nil, 0o600))
+}
+
+// writeDaemonLog makes the daemon log readable with one sweep line, so the
+// section has a swept commit to join.
+func writeDaemonLog(t *testing.T, root, line string) {
+	t.Helper()
+	writeEmptyDaemonLog(t, root)
+	path := filepath.Join(root, "daemon", "daemon.log")
+	require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o600))
 }
 
 // The section's rolls come from the update history: a finished run is a roll to
@@ -43,7 +53,7 @@ func TestSystemUpdatesNowSupplyJoinsRollsFromHistory(t *testing.T) {
 		Outcome:   update.OutcomeOK,
 	}))
 
-	got := systemUpdates(root, newTierSweepReader(root), started.Add(time.Hour))
+	got := systemUpdates(root, newTierSweepReader(root), nil, started.Add(time.Hour))
 
 	require.Len(t, got.Rows, 1, "the roll names one commit row")
 	row := got.Rows[0]
@@ -99,7 +109,7 @@ func TestSystemUpdatesRollNamesTheStepAPartialRollMissed(t *testing.T) {
 				Steps:     tc.steps,
 			}))
 
-			got := systemUpdates(root, newTierSweepReader(root), started)
+			got := systemUpdates(root, newTierSweepReader(root), nil, started)
 
 			require.Len(t, got.Rows, 1, "the roll names one commit row")
 			require.NotNil(t, got.Rows[0].Roll)
@@ -119,7 +129,7 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableHistory(t *testing.T) {
 	// A directory where the history file belongs: the file cannot be read as one.
 	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "history.jsonl"), 0o700))
 
-	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
 
 	assert.True(t, got.Unavailable)
 	assert.Empty(t, got.Rows)
@@ -137,7 +147,7 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableUpdateRecord(t *testing.T) {
 	// A directory where the state record belongs: it cannot be read as a file.
 	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "state.json"), 0o700))
 
-	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
 
 	assert.True(t, got.RollUnknown)
 }
@@ -158,10 +168,50 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableSweepLog(t *testing.T) {
 		Outcome:   update.OutcomeOK,
 	}))
 
-	got := systemUpdates(root, newTierSweepReader(root), started)
+	got := systemUpdates(root, newTierSweepReader(root), nil, started)
 
 	assert.True(t, got.Unavailable, "no daemon log means no sweep stage was read")
 	require.Len(t, got.Rows, 1, "the roll still joins")
+}
+
+// The post-land and images runs of a swept commit fill that row's Runs, so the
+// pane's stage chips have what they draw (gt-nhdxkq).
+func TestSystemUpdatesPipelineJoinsRunsForASweptCommit(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeDaemonLog(t, root, "2026/11/18 09:00:00 tier_sweep: gastown: swept 9f8e7d6c (shell GREEN, integration GREEN) in 9m36s")
+	runs := []dashboard.PipelineRun{
+		{Workflow: "images.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
+		{Workflow: "post-land.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
+	}
+	other := dashboard.PipelineRun{Workflow: "images.yml", SHA: "1a2b3c4d5e6f", Status: "success"}
+	read := func() *dashboard.GastownPipeline {
+		return &dashboard.GastownPipeline{Runs: append([]dashboard.PipelineRun{other}, runs...)}
+	}
+
+	got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+
+	byCommit := map[string][]dashboard.PipelineRun{}
+	for _, row := range got.Rows {
+		byCommit[row.SHA] = row.Runs
+	}
+	assert.Equal(t, runs, byCommit["9f8e7d6c5b4a"], "the swept commit's row holds its own two runs and no other commit's")
+	assert.Equal(t, []dashboard.PipelineRun{other}, byCommit["1a2b3c4d5e6f"], "another commit's run sits in that commit's own row")
+}
+
+// A nil pipeline read leaves every row without runs, the section a town with no
+// viewer client draws today (gt-nhdxkq).
+func TestSystemUpdatesPipelineNilLeavesRowsWithoutRuns(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeDaemonLog(t, root, "2026/11/18 09:00:00 tier_sweep: gastown: swept 9f8e7d6c (shell GREEN, integration GREEN) in 9m36s")
+
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+
+	require.Len(t, got.Rows, 1, "the swept commit names one row")
+	assert.Empty(t, got.Rows[0].Runs)
 }
 
 // The pipeline read is throttled: a build inside the window answers the previous
@@ -236,6 +286,75 @@ func TestSystemUpdatesPipelineThrottle(t *testing.T) {
 					assert.Same(t, s.want, got, "step %d: result", i)
 				}
 			}
+		})
+	}
+}
+
+// TestSystemUpdatesPipelineUnknown: a pipeline read that failed with no good runs
+// marks the section RunsUnknown; one that failed but holds last good runs keeps
+// them and marks nothing; a healthy empty read marks nothing.
+func TestSystemUpdatesPipelineUnknown(t *testing.T) {
+	t.Parallel()
+	good := []dashboard.PipelineRun{{Workflow: "images.yml", SHA: "9f8e7d6c5b4a", Status: "success"}}
+	tests := []struct {
+		name string
+		read *dashboard.GastownPipeline
+		want bool
+	}{
+		{"a failed read with no runs", &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}, Error: "timeout"}, true},
+		{"a failed read with last good runs", &dashboard.GastownPipeline{Runs: good, Error: "timeout"}, false},
+		{"a healthy read with no runs", &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}}, false},
+		{"no pipeline", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			read := func() *dashboard.GastownPipeline { return tt.read }
+			got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+			assert.Equal(t, tt.want, got.RunsUnknown)
+		})
+	}
+}
+
+// TestSystemUpdatesPipelineForRemote: a remote that is not named,
+// cannot be looked up or cannot be parsed is a read that reports a failure with no runs, so
+// the section raises RunsUnknown; a good remote builds the read for owner/repo.
+func TestSystemUpdatesPipelineForRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		remote    string
+		remoteErr error
+		wantNil   bool
+		wantErr   bool
+		wantRepo  string
+	}{
+		{"no remote named", "", nil, false, true, ""},
+		{"the remote lookup failed", "", errors.New("registry unreadable"), false, true, ""},
+		{"an unparseable remote", "not a remote url", nil, false, true, ""},
+		{"a good remote", "http://forgejo:3000/owner/repo.git", nil, false, false, "owner/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var built string
+			good := func() *dashboard.GastownPipeline { return &dashboard.GastownPipeline{} }
+			read := systemUpdatesPipelineFor(tt.remote, tt.remoteErr, func(repo string) func() *dashboard.GastownPipeline {
+				built = repo
+				return good
+			}, func(string, ...any) {})
+			if tt.wantNil {
+				assert.Nil(t, read)
+				return
+			}
+			require.NotNil(t, read)
+			got := read()
+			assert.Equal(t, tt.wantErr, got.Error != "" && len(got.Runs) == 0)
+			root := t.TempDir()
+			su := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+			assert.Equal(t, tt.wantErr, su.RunsUnknown, "the section flags what the read reported")
+			assert.Equal(t, tt.wantRepo, built)
 		})
 	}
 }

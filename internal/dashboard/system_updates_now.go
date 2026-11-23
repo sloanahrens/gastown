@@ -20,6 +20,10 @@ type SystemUpdates struct {
 	// nothing running.
 	RollUnknown  bool `json:"roll_unknown,omitempty"`
 	SweepUnknown bool `json:"sweep_unknown,omitempty"`
+	// RunsUnknown says the gastown pipeline read failed and held no earlier
+	// good runs, so the rows' post-land and images stages are readings that
+	// failed, never commits with no runs. Last good runs are shown, not flagged.
+	RunsUnknown bool `json:"runs_unknown,omitempty"`
 }
 
 // SystemUpdatesNow is what runs right now: a roll, a sweep, or both.
