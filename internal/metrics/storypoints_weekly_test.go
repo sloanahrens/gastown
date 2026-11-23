@@ -528,3 +528,83 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 		})
 	}
 }
+
+// weeklyCachePath is the embedding cache the weekly run keeps under the town.
+func weeklyCachePath(town string) string {
+	return filepath.Join(town, ".runtime", "metrics", "embed-cache.jsonl")
+}
+
+// cacheStore is the fixture's store with each bead's Constraints naming it, so
+// every bead embeds a text of its own and one cache line is one bead.
+func (f trainTestFixture) cacheStore() trainTestStore {
+	s := f.store()
+	for id, issue := range s.issues {
+		issue.Description = strings.Replace(issue.Description, "- keep the change small", "- keep the change small for "+id, 1)
+	}
+	return s
+}
+
+// countingEmbedder answers as trainTestEmbedder does and counts its calls; with
+// failAfter set it fails from the call after that many.
+type countingEmbedder struct {
+	failAfter, calls int
+}
+
+func (e *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if e.failAfter > 0 && e.calls >= e.failAfter {
+		return nil, errors.New("embedder unreachable")
+	}
+	e.calls++
+	return trainTestEmbedder{}.Embed(ctx, text)
+}
+
+// TestStoryPointsWeeklyCacheKeepsWhatAFailedRunEmbedded: a weekly run whose
+// embedder stops answering partway keeps one cache line per embedding it got,
+// and the next hour asks the embedder only for the beads the cache does not
+// hold, so the retry finishes the retrain instead of re-embedding the lot
+// (gt-tibj01).
+func TestStoryPointsWeeklyCacheKeepsWhatAFailedRunEmbedded(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	const embedded = 10
+	beads := func(context.Context, string) BeadStore { return fix.cacheStore() }
+	down := &countingEmbedder{failAfter: embedded}
+	c := weeklyCommands(t, fix, &strings.Builder{}, weeklyNow, weeklyBase(t), down)
+	c.Env.Beads = beads
+	if err := c.RunStoryPointsWeekly(context.Background()); err == nil {
+		t.Fatal("first hour err = nil, want the embedder's failure returned")
+	}
+	if got := strings.Count(readAt(t, weeklyCachePath(fix.town)), "\n"); got != embedded {
+		t.Fatalf("cache holds %d lines after %d embeddings, want all %d kept", got, embedded, embedded)
+	}
+	up := &countingEmbedder{}
+	c = weeklyCommands(t, fix, &strings.Builder{}, weeklyNow.Add(time.Hour), weeklyBase(t), up)
+	c.Env.Beads = beads
+	if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
+		t.Fatalf("second hour err = %v, want it to finish on the cache", err)
+	}
+	if got, want := up.calls, len(fix.beads)-embedded; got != want {
+		t.Errorf("second hour embedded %d beads, want only the %d the first hour left", got, want)
+	}
+}
+
+// TestStoryPointsWeeklyCacheRefusesAFileItCannotRead: a cache that cannot be read
+// is not an empty one, so the run fails naming it, asks the embedder for
+// nothing, and spends the week on the line.
+func TestStoryPointsWeeklyCacheRefusesAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	// A directory where the cache file goes reads as an error, not an empty cache.
+	if err := os.MkdirAll(weeklyCachePath(fix.town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	emb := &countingEmbedder{}
+	err := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), emb).RunStoryPointsWeekly(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "embedding cache") {
+		t.Fatalf("err = %v, want the unreadable cache returned", err)
+	}
+	if emb.calls != 0 || !strings.Contains(out.String(), "the week is spent") {
+		t.Errorf("embedder calls = %d, out = %q; want none and the week spent", emb.calls, out.String())
+	}
+}

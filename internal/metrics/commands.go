@@ -508,7 +508,16 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if embedder == nil {
 		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
-	embedder = weeklyEmbedder{inner: embedder}
+	// The run's embeddings are cached under the town, so one killed at the hour's
+	// cap keeps what it embedded and the next hour embeds only the rest
+	// (gt-tibj01). A cache that cannot be read is not an empty one, so its
+	// failure goes through weeklyFailure like a step that could not run.
+	cached, err := storypoints.NewCachedEmbedder(embedder,
+		filepath.Join(real.Town, ".runtime", "metrics", "embed-cache.jsonl"), base.EmbeddingModel())
+	if err != nil {
+		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
+	}
+	embedder = weeklyEmbedder{inner: cached}
 	// The week-after check judges the last adoption before this week's proposal can
 	// replace the weights it kept.
 	if err := c.checkStoryPointsAdoption(ctx, real, env, embedder, now); err != nil {
