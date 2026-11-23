@@ -9,20 +9,18 @@ import (
 	"github.com/steveyegge/gastown/internal/townbackup"
 )
 
-// townStateBackupMount is where the daemon pod sees the backup root. It is the
-// path the command's help names, since the command is meant to run in the pod.
-const townStateBackupMount = "/Users/Shared/gt-backups/town-state"
+// townStateBackupRootSetting names the nightly backup root, which the pod mounts
+// as a deployment value (docs/architecture.md).
+const townStateBackupRootSetting = "maintenance.town_state_backup_root"
 
 var townStateBackupCmd = &cobra.Command{
 	Use:   "backup",
 	Short: "Judge the nightly town-state backup archives",
 	Long: `Judge the nightly town-state backups the daemon writes (internal/townbackup):
-one dated directory per night under a backup root outside the town root.
-
-Run these in the daemon pod through the wrapper (gt-wrap), where the backup
-root is mounted at ` + townStateBackupMount + `; on the Mac it is
-<home>/gt-backups/town-state. The pod's mount is the view the daemon writes
-through, so a person or a doctor check judges the night the daemon took.`,
+one dated directory per night under a backup root outside the town root. The
+root is the directory ` + townStateBackupRootSetting + ` names; before running
+these, read how the daemon pod mounts it in docs/architecture.md (The
+Deployment). A night's archive is its state.tar.gz.`,
 	RunE: requireSubcommand,
 }
 
@@ -35,12 +33,12 @@ doctor check can judge the night: an archive it cannot read in full, one with
 no regular file or no mayor/town.json, and one carrying a secret-shaped name or
 a credential are all refused.
 
-Run it in the daemon pod through the wrapper (gt-wrap), where the backup root
-is mounted at ` + townStateBackupMount + `: the archive of a night is its
-state.tar.gz.
+The archive is <backup-root>/<date>/state.tar.gz, the root being the directory
+` + townStateBackupRootSetting + ` names, which the daemon pod mounts the
+host's copy at (docs/architecture.md).
 
 Examples:
-  gt town state backup verify ` + townStateBackupMount + `/2026-11-18/state.tar.gz`,
+  gt town state backup verify <backup-root>/2026-11-18/state.tar.gz`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTownStateBackupVerify,
 }

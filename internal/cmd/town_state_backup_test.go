@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // townStateBackupArchive writes a gzip tar archive holding each entry as a
@@ -84,6 +86,43 @@ func TestTownStateBackupVerifyRefusesASecretNamedEntry(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("a refusal printed %q, want no counts", out.String())
+	}
+}
+
+// TestTownStateBackupHelpNamesNoMountPath: the pod's mount is a deployment
+// value, so the help names the setting and points at docs/architecture.md
+// instead of hardcoding a path (gt-tbzlnh).
+func TestTownStateBackupHelpNamesNoMountPath(t *testing.T) {
+	t.Parallel()
+	for _, c := range []*cobra.Command{townStateBackupCmd, townStateBackupVerifyCmd} {
+		help := c.Long + "\n" + c.Example
+		if strings.Contains(help, "/Users/") || !strings.Contains(help, "docs/architecture.md") {
+			t.Errorf("%s help = %q, want no hardcoded path and a docs/architecture.md pointer", c.Name(), help)
+		}
+	}
+}
+
+// TestTownStateBackupVerifyRefusesAtTheCommand drives the command's two
+// refusals: an archive with no mayor/town.json and one that is not a gzip
+// stream. Each returns the command's wrap, names the rule and prints no counts.
+func TestTownStateBackupVerifyRefusesAtTheCommand(t *testing.T) {
+	t.Parallel()
+	noIdentity, _ := townStateBackupArchive(t, [][2]string{{"settings/config.json", `{}`}})
+	notGzip := filepath.Join(t.TempDir(), "state.tar.gz")
+	if err := os.WriteFile(notGzip, []byte("not gzip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, archive, want string }{
+		{"no mayor/town.json", noIdentity, "has no mayor/town.json"},
+		{"not a gzip stream", notGzip, "not a readable gzip stream"},
+	} {
+		var out bytes.Buffer
+		cmd := &cobra.Command{Use: "verify"}
+		cmd.SetOut(&out)
+		err := runTownStateBackupVerify(cmd, []string{tc.archive})
+		if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "town state backup verify:") || out.Len() != 0 {
+			t.Errorf("%s: err = %v, out = %q; want the command's refusal naming %q and no counts", tc.name, err, out.String(), tc.want)
+		}
 	}
 }
 
