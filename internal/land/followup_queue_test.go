@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // The follow-up queue: the findings a landing's backpressure bound held back
@@ -413,16 +414,11 @@ func TestFollowupFeedKeepsAnOverlongLineAndStillCompacts(t *testing.T) {
 }
 
 // privateLandingsPath is the path of a landings file in a directory only this
-// account can write: t.TempDir is 0777 under the runner's open umask, and
-// ensureLandingsDir refuses a landings dir other accounts can write.
+// account can write: ensureLandingsDir refuses a landings dir other accounts
+// can write (gt-aq8dej).
 func privateLandingsPath(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	//testpolicy:allow no-exec-files — a directory, not a file: t.TempDir is 0777 under the runner's open umask, so it is made private
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Join(dir, "landings.jsonl")
+	return filepath.Join(testutil.PrivateTempDir(t), "landings.jsonl")
 }
 
 // budgetWeek is a landings file with n records landed inside the seven-day
