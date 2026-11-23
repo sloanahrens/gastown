@@ -67,11 +67,13 @@ const maxRetryDelays = 32
 // failure, given the total time it may spend waiting: half a second, then one,
 // two and three seconds, then five seconds each. A wait that would take the sum
 // past total is left out, so a zero total gives none and the waits always fit.
-// At most 32 waits are returned, so a total large enough to take more stops at
-// the cap. The waits are what a call spends waiting, not the
-// whole budget: time an attempt spends failing counts against the same total,
-// so the caller stops when what is left is too little to try with. The result
-// is pure: no clock and no sleep.
+// The number of waits is capped at 32, which the schedule reaches at a total of
+// 146.5 seconds (the 6.5-second ladder plus 28 five-second waits); a larger
+// total returns those same 32 waits, so an effectively unlimited total cannot
+// grow the slice. The waits are what a call spends waiting, not the whole
+// budget: time an attempt spends failing counts against the same total, so the
+// caller stops when what is left is too little to try with. The result is pure:
+// no clock and no sleep.
 func RetrySchedule(total time.Duration) []time.Duration {
 	ladder := [...]time.Duration{
 		500 * time.Millisecond,

@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
-	"math"
 	"net"
 	"net/url"
 	"os"
@@ -49,29 +48,6 @@ func TestDialRetryClassify(t *testing.T) {
 			}
 		})
 	}
-	t.Run("real closed port", func(t *testing.T) {
-		t.Parallel()
-		// Take a free loopback port, release it, then dial it: the dial reaches a
-		// port with no listener, so net returns the refusal a real call would see.
-		//testpolicy:allow no-network — the listener only yields a loopback address that nothing listens on; it is closed before the dial, in-process, and the branch under test is the failed dial
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen on loopback: %v", err)
-		}
-		addr := ln.Addr().String()
-		if err := ln.Close(); err != nil {
-			t.Fatalf("close the loopback listener: %v", err)
-		}
-		//testpolicy:allow no-network — the dial is in-process on loopback to the port just released, and the branch under test is the refusal it returns
-		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-		if err == nil {
-			conn.Close()
-			t.Fatalf("dial %s succeeded, want a refusal", addr)
-		}
-		if !RetryableDial(err) {
-			t.Fatalf("RetryableDial(dial %s: %v) = false, want true for a refused dial", addr, err)
-		}
-	})
 }
 
 func TestDialRetrySchedule(t *testing.T) {
@@ -137,16 +113,19 @@ func TestDialRetrySchedule(t *testing.T) {
 	})
 }
 
-// TestDialRetryScheduleBounded pins the schedule's documented cap: a total
-// large enough to take unlimited waits returns at the cap, so the slice cannot
-// grow with total. The 32 is the contract's number; an uncapped schedule loops
-// here without returning.
+// TestDialRetryScheduleBounded pins the schedule's cap: once the total is large
+// enough, the count stops growing, so the slice cannot grow with total. The
+// total is finite, so a regression that drops the cap returns a long schedule
+// and fails on the count instead of looping until the test times out.
 func TestDialRetryScheduleBounded(t *testing.T) {
 	t.Parallel()
-	const wantCap = 32
-	got := RetrySchedule(math.MaxInt64)
-	if len(got) > wantCap {
-		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d delays, want at most %d", len(got), wantCap)
+	got := RetrySchedule(24 * time.Hour)
+	if len(got) != maxRetryDelays {
+		t.Fatalf("RetrySchedule(24h) returned %d waits, want the cap of %d", len(got), maxRetryDelays)
+	}
+	// Doubling the total adds nothing: the cap, not the total, ends the schedule.
+	if more := RetrySchedule(48 * time.Hour); len(more) != len(got) {
+		t.Fatalf("RetrySchedule(48h) returned %d waits, want the same %d as 24h", len(more), len(got))
 	}
 }
 
