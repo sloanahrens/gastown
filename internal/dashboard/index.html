@@ -395,7 +395,6 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 .mgthead{font-size:12px;font-weight:700;color:var(--dim)}
 .mgchart{display:block;width:100%;height:auto;margin-top:4px}
 .mgtcap{color:var(--dim);font-size:11px;margin-top:2px;overflow-wrap:anywhere}
-.sweepico{font-weight:700}
 /* One row per landed commit in the System updates pane: the sha, then its stage
    chips in pipeline order. A stage that never ran keeps the dim token. */
 .surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
@@ -549,7 +548,6 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="systemupdates"><h2>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
-    <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
   <div class="col">
@@ -2981,167 +2979,6 @@ function renderSystemUpdates(s) {
   $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
 }
 
-// One compact line per sweep: when, which rig and sha, a verdict per tier, and
-// how long the whole cycle took. A tier the sweep did not run is left blank, and
-// a RED one carries the failing units its rig's record still holds.
-const TIERSWEEP_TIERS = ["shell", "integration", "race"];
-
-// The When column's reading of a sweep's stamp, shared with the icon's tooltip
-// so the two cannot disagree about which sweep a verdict came from.
-function sweepWhen(at) {
-  const d = new Date(at);
-  return d.toDateString() === new Date().toDateString() ? clock(at).slice(0, 5) : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(at).slice(0, 5);
-}
-
-// Each tier's most recent verdict, keyed by tier. This is the rule the daemon's
-// attention list holds to (internal/daemon/attention.go): a tier a sweep did
-// not run keeps the result of the sweep that last did, so a newer shell-only
-// GREEN cannot hide an integration RED still standing. The first row naming a
-// tier wins because the reader hands them over newest first
-// (dashboard_tier_sweep.go recent()).
-function tierSweepLatest(sweeps) {
-  const latest = {};
-  for (const row of sweeps || []) (row.stages || []).forEach(x => { if (!latest[x.tier]) latest[x.tier] = {verdict: x.verdict, at: row.at}; });
-  return latest;
-}
-
-// The pane's title icon, the one verdict a collapsed pane still shows. Green
-// needs every tier's most recent result GREEN and red needs one RED; a tier
-// that has never reported leaves it neutral, because an unknown result is
-// neither. A sweep in flight is not a verdict (gt-5qk83).
-function tierSweepIcon(ts) {
-  const none = {glyph: "–", cls: "", title: "no tier sweep results"};
-  if (!ts) return none;
-  if (ts.unavailable) return {glyph: "–", cls: "", title: "the daemon log could not be read"};
-  if (!(ts.sweeps || []).length) return none;
-  const latest = tierSweepLatest(ts.sweeps);
-  const title = TIERSWEEP_TIERS.map(tier => { const v = latest[tier]; return tier + " " + (v ? v.verdict + " " + sweepWhen(v.at) : "–"); }).join(", ");
-  // RED first: one red tier outranks any number of greens.
-  if (TIERSWEEP_TIERS.some(tier => latest[tier] && latest[tier].verdict === "RED")) return {glyph: "✗", cls: "badc", title};
-  if (TIERSWEEP_TIERS.every(tier => latest[tier] && latest[tier].verdict === "GREEN")) return {glyph: "✓", cls: "good", title};
-  return {glyph: "–", cls: "", title};
-}
-
-// The neutral state carries no colour class of its own, so the dash takes the
-// h2's muted tone. Green and red reuse the page's good and badc tokens, which
-// keeps colour from being the only carrier of the verdict.
-function paintTierIcon(ts) {
-  const ico = $("tiersweepico");
-  if (!ico) return;
-  const v = tierSweepIcon(ts);
-  ico.textContent = v.glyph;
-  ico.className = "sweepico" + (v.cls ? " " + v.cls : "");
-  ico.title = v.title;
-}
-
-function renderTierSweep(s) {
-  if (pushSkip("tiersweep", s)) return;
-  const box = $("tiersweep");
-  box.replaceChildren();
-  const ts = s.tiersweep;
-  // Painted ahead of the empty paths' returns, so an unreadable log reads as
-  // nothing known rather than as a stale green.
-  paintTierIcon(ts);
-  if (!ts) { box.append(el("div", "empty", "reading the daemon log…")); $("tiersweepnote").textContent = ""; return; }
-  if (ts.unavailable) { box.append(el("div", "badc", "unavailable: the daemon log could not be read")); $("tiersweepnote").textContent = ""; return; }
-  const kv = el("div", "kv");
-  const run = ts.running;
-  const st = el("div");
-  // The cycle's own stage list when the daemon logged one; an older log gives
-  // only the stage the fallback inferred.
-  if (run) {
-    const stages = (run.tiers && run.tiers.length) ? run.tiers.join(", ") : run.tier;
-    st.append(el("b", "good", "running"), el("span", "", run.rig + " · " + stages + " · " + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));
-  } else st.append(el("b", "", "idle"), el("span", "", "no sweep is running"));
-  kv.append(st);
-  box.append(kv);
-  const rows = ts.sweeps || [];
-  if (!rows.length) {
-    box.append(el("div", "empty", "no sweeps in the daemon log"));
-    renderTierSweepRegistry(box, ts);
-    $("tiersweepnote").textContent = "";
-    return;
-  }
-  const t = el("table");
-  const hr = el("tr");
-  [["When"], ["Rig"], ["Sha"], ...TIERSWEEP_TIERS.map(x => [x]), ["Total", "the whole cycle, every stage the sweep ran", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
-  t.append(hr);
-  for (const row of rows) {
-    const tr = el("tr");
-    tr.append(el("td", "title", sweepWhen(row.at)));
-    tr.append(el("td", "", row.rig));
-    tr.append(el("td", "title", row.sha || "–"));
-    const by = {};
-    (row.stages || []).forEach(x => by[x.tier] = x);
-    TIERSWEEP_TIERS.forEach(tier => {
-      const v = by[tier];
-      if (!v) { tr.append(el("td", "title", "–")); return; }
-      const cell = el("td", v.verdict === "RED" ? "badc" : v.verdict === "GREEN" ? "good" : "", v.verdict);
-      if ((v.failed || []).length) cell.title = "failed: " + v.failed.join(", ");
-      tr.append(cell);
-    });
-    tr.append(el("td", "n", row.secs == null ? "–" : fmtDur(row.secs)));
-    t.append(tr);
-  }
-  box.append(t);
-  // The newest RED the record still explains, named under the table so it reads
-  // without a hover.
-  const newest = rows[0];
-  (newest.stages || []).filter(x => x.verdict === "RED" && (x.failed || []).length).forEach(x => {
-    box.append(el("div", "badc title", newest.rig + " " + x.tier + " RED: " + x.failed.join(", ")));
-  });
-  renderTierSweepRegistry(box, ts);
-  $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
-}
-
-// One wall-time trend per rig, oldest sweep at the left: a line per tier the
-// rig ran plus the cycle's total, drawn with the landings trend's own chart so
-// devops test speed reads the way gate time does. The reader keeps 30 sweeps
-// per rig (tierSweepTrendPerRig); a rig with none says so rather than drawing
-// an empty chart, and an empty trend never stops the pane.
-const TIERSWEEP_TREND_COLORS = ["#58a6ff", "#d29922", "#39c5bb", "#d2a8ff"];
-function tierSweepTrendSeries(trend) {
-  const sweeps = trend.sweeps || [];
-  const pts = sweeps.map(r => ({t: new Date(r.at).getTime(), walls: r.walls || {}, total: r.total_secs}));
-  const tiers = TIERSWEEP_TIERS.filter(tier => pts.some(p => p.walls[tier] != null));
-  const series = [], key = [];
-  tiers.forEach((tier, i) => {
-    const color = TIERSWEEP_TREND_COLORS[i % TIERSWEEP_TREND_COLORS.length];
-    series.push({color, pts: pts.map(p => ({t: p.t, v: p.walls[tier]}))});
-    key.push([color, tier]);
-  });
-  if (pts.some(p => p.total != null)) {
-    series.push({color: "#8b949e", pts: pts.map(p => ({t: p.t, v: p.total}))});
-    key.push(["#8b949e", "total"]);
-  }
-  return {series, key};
-}
-// renderTierSweepRegistry draws the trends, and says so when the town's rig list
-// could not be read: the trends then show only the rigs the log names. It runs
-// whether or not the log holds sweeps, since a rig can have a trend without one.
-function renderTierSweepRegistry(box, ts) {
-  if (ts.trends_unavailable) box.append(el("div", "badc", "rig list unavailable: the town's registry could not be read, so the trends show only rigs the log names"));
-  renderTierSweepTrends(box, ts.trends);
-}
-function renderTierSweepTrends(box, trends) {
-  for (const trend of trends || []) {
-    const sweeps = trend.sweeps || [];
-    const head = el("div", "k");
-    head.append(el("b", "", trend.rig), el("span", "", sweeps.length ? " " + sweeps.length + " sweeps · wall time each" : ""));
-    box.append(head);
-    if (!sweeps.length) { box.append(el("div", "empty", "no sweeps yet")); continue; }
-    const st = tierSweepTrendSeries(trend);
-    // A series with no value at all (every tier and total absent) has no line to
-    // draw and no peak to name: say so rather than draw an empty chart.
-    const vals = st.series.flatMap(x => x.pts.map(p => p.v)).filter(v => v != null);
-    if (!vals.length) { box.append(el("div", "empty", "no wall times recorded")); continue; }
-    const t0 = Math.min(...sweeps.map(r => new Date(r.at).getTime()));
-    const t1 = Math.max(...sweeps.map(r => new Date(r.at).getTime()));
-    const peak = Math.max(...vals);
-    box.append(el("div", "k title", "wall time per sweep · " + sweeps.length + " sweeps · peak " + fmtDur(peak)), chartSVG(st.series, t0, Math.max(t1, t0 + 1), 600, 48, 3 * 3600e3), legend(st.key));
-  }
-}
-
 // The Actions section's status colours, reusing the page's own tokens: success
 // green, failure red, one still waiting or running amber, cancelled or skipped
 // muted. A status the page has never seen stays muted rather than guessing.
@@ -4201,7 +4038,7 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
-// The JEV panel, under the Tier sweeps and folded until opened. The panel reads
+// The JEV panel, folded until opened. The panel reads
 // as the operator's glance: a header line with the scores' age, the batteries
 // ok and off, and the spend bar against the cap with the top caller; then
 // EARNING with each question's lift, labeled count and consumer; WATCHING; STUCK
@@ -6017,7 +5854,6 @@ const PANES = {
   disk: {sec: "machine", body: ["disk"], read: s => s.disk, draw: s => renderDisk(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
   systemupdates: {sec: "systemupdates", body: ["systemupdates"], read: s => s.system_updates, draw: s => renderSystemUpdates(s)},
-  tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   dolt: {sec: "dolt", body: ["dolt"], read: s => [s.dolt, readInput(s, "dolt")], draw: s => renderDolt(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
@@ -6086,7 +5922,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderTierSweep(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -6254,7 +6090,7 @@ function foldSave(key, closed) {
 }
 // foldLegacyTitle is the name a section's choice was saved under before it had
 // a key: the heading's first text run, or the whole heading where the first
-// child is an element with no text of its own (the tier sweep's icon).
+// child is an element with no text of its own.
 function foldLegacyTitle(head) {
   return String(((head.firstChild && head.firstChild.textContent) || head.textContent) || "").trim();
 }
@@ -6383,10 +6219,6 @@ function setupCollapse() {
   });
 }
 setupCollapse();
-// Painted only after setupCollapse has read each pane's heading: the icon is
-// the tier title's first child, so a glyph already in it would become the
-// pane's legacy fold name and drop a remembered one.
-paintTierIcon(null);
 // A running action's elapsed and a finished one's age drift between pushes, so
 // each of those cells carries the stamp it counts from and one ticker a second
 // moves them, without redrawing a pane the reader may be reading.
@@ -6464,7 +6296,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>

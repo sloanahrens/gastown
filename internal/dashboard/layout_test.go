@@ -6,12 +6,9 @@ import (
 	"testing"
 )
 
-// The Work panel wants to sit under the tier sweeps, the landing history
-// beside om review, the feed under the Work panel at the foot of the left
-// column, and the tier sweeps beside the rigs they sweep, so the panes are
-// placed by column in index.html rather than by data. Reading the embedded
-// page is what keeps a section that drifts back to the wrong column from
-// passing (gt-9bf2m, gt-fn9e6.48).
+// The panes are placed by column in index.html rather than by data. Reading the
+// embedded page is what keeps a section that drifts back to the wrong column
+// from passing (gt-9bf2m, gt-fn9e6.48).
 func TestPaneColumns(t *testing.T) {
 	t.Parallel()
 
@@ -27,11 +24,11 @@ func TestPaneColumns(t *testing.T) {
 		{"attentionnote", "left", "", "costnote"},
 		{"activitynote", "left", "eventsnote", "costnote"},
 		{"costnote", "left", "attentionnote", "rigsnote"},
-		{"rigsnote", "left", "costnote", "tiersweepnote"},
-		{"tiersweepnote", "left", "rigsnote", "beadsnote"},
-		// The Beads pane sits directly under the tier sweeps
-		// (TestBeadsPaneSitsDirectlyUnderTierSweeps reads the exact order).
-		{"beadsnote", "left", "tiersweepnote", ""},
+		{"rigsnote", "left", "costnote", "systemupdatesnote"},
+		{"systemupdatesnote", "left", "rigsnote", "beadsnote"},
+		// The Beads pane sits directly under the System updates pane
+		// (TestBeadsPaneSitsDirectlyUnderSystemUpdates reads the exact order).
+		{"beadsnote", "left", "systemupdatesnote", ""},
 		// The Polecats note is not a column pane: it sits in the Landings block
 		// (TestPolecatsIsInLandingsBetweenItsFiguresAndRows).
 		{"machnote", "right", "", "cloudnote"},
@@ -108,12 +105,12 @@ func TestEntryFramesRestartTheWatchdog(t *testing.T) {
 }
 
 // A reader's saved folds may still name sections the page has dropped (feed,
-// overseer): they are ignored, and the sections that remain keep their saved
-// choice and their defaults (gt-069f5).
+// overseer, tiersweep): they are ignored, and the sections that remain keep
+// their saved choice and their defaults (gt-069f5, gt-gfglv0).
 func TestSavedFoldsNamingRemovedSectionsAreIgnored(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOMStoring(t, map[string]string{"gt-fold": `{"feed":false,"overseer":false,"landings":true,"birds":false}`})
+	dom := newPageDOMStoring(t, map[string]string{"gt-fold": `{"feed":false,"overseer":false,"tiersweep":false,"landings":true,"birds":false}`})
 	wantFold(t, dom.fold(t, "landings"), "landings", true)
 	wantFold(t, dom.fold(t, "birds"), "birds", false)
 	wantFold(t, dom.fold(t, "rigs"), "rigs", true)

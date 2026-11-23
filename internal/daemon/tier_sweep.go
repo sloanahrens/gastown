@@ -1550,8 +1550,8 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 
 	stages := tierSweepStages(rig)
 	// The cycle's start, logged before the first stage runs so the dashboard's
-	// Tier sweeps pane reads a sweep as running from its true beginning, over
-	// the stages it will run, instead of inferring it from the shell stage
+	// tiersweep feed section reads a sweep as running from its true beginning,
+	// over the stages it will run, instead of inferring it from the shell stage
 	// finishing (gt-rntre). Nothing reaches here for a skipped cycle.
 	d.logger.Printf("tier_sweep: %s: sweep started %s (%s)", rig, shortSHA(sha), tierSweepTierList(stages))
 	run := seams.run

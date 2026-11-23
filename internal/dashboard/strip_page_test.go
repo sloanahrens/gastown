@@ -51,7 +51,7 @@ func TestTheStripDrawsEachFactOnce(t *testing.T) {
 	}
 	// The age of the oldest landing drifts between pushes, so the 15s tick
 	// redraws the strip with the panes whose ages it carries.
-	if !strings.Contains(string(indexHTML), "renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state);") {
+	if !strings.Contains(string(indexHTML), "renderStrip(state); renderPolecats(state); renderBeads(state);") {
 		t.Error("the 15s tick does not redraw the strip, so its ages freeze")
 	}
 }

@@ -62,7 +62,7 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 			t.Errorf("%s writes its ages below the early return, so they freeze (note=%d skip=%d)", pane.fn, note, skip)
 		}
 	}
-	if !strings.Contains(string(indexHTML), "renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state);") {
+	if !strings.Contains(string(indexHTML), "renderStrip(state); renderPolecats(state); renderBeads(state);") {
 		t.Error("the 15s tick does not redraw the Polecats and Beads notes, so their ages still freeze")
 	}
 
