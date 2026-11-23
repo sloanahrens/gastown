@@ -401,6 +401,10 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 /* The header's worst-state glyph. A class of its own because the retired Tier
    sweeps icon's class must stay gone (gt-gfglv0, gt-jug4e0). */
 .suico{font-weight:700}
+/* The Maintenance jobs pane draws its rows with .surow and its header glyph
+   with .suico; the row that opens a job's runs is the only control there. */
+#jobs .surow[role=button]{cursor:pointer}
+.jobruns{flex-basis:100%;padding-left:10px}
 .subanner{border-bottom:1px solid var(--line);padding:2px 0 6px;margin-bottom:4px;font-weight:600}
 .subanner.ended{font-weight:400;color:var(--dim)}
 .tag.absent{color:var(--dim)}
@@ -552,6 +556,7 @@ a.hrow:hover{background:#19212b}
     <section id="activitysec" data-fold="activity" data-default-collapsed><h2>Town activity <span class="r" id="activitynote"></span></h2><div class="body" id="activity"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
+    <section data-fold="jobs"><h2><span class="suico" id="jobsico"></span>Maintenance jobs <span class="r" id="jobsnote"></span></h2><div class="body" id="jobs"></div></section>
     <section data-fold="systemupdates"><h2><span class="suico" id="systemupdatesico"></span>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
@@ -3039,12 +3044,13 @@ function systemUpdateChip(name, cls, glyph, word) {
   return chip;
 }
 
-// paintSystemUpdatesIcon is the pane header's worst state: red while any chip
-// is red, amber while one is amber, and the heading's muted dash while none is.
-// A grey chip never earns a colour here, so a pair nobody read cannot make the
-// heading read clear or alarmed (gt-jug4e0).
-function paintSystemUpdatesIcon(chips) {
-  const ico = $("systemupdatesico");
+// paintPaneIcon is a pane header's worst state, drawn from the chips the pane
+// itself drew: red while any chip is red, amber while one is amber, and the
+// heading's muted dash while none is. A grey chip never earns a colour here, so
+// a reading nobody made cannot make the heading read clear or alarmed
+// (gt-jug4e0). The System updates and Maintenance jobs panes share it.
+function paintPaneIcon(id, chips) {
+  const ico = $(id);
   if (!ico) return;
   const rank = c => SYSTEM_UPDATE_CHIP_RANK[c.cls] || 0;
   let worst = null;
@@ -3056,6 +3062,9 @@ function paintSystemUpdatesIcon(chips) {
   ico.className = "suico" + (cls ? " " + cls : "");
   ico.title = why;
 }
+
+// paintSystemUpdatesIcon is the System updates header's worst state (gt-jug4e0).
+function paintSystemUpdatesIcon(chips) { paintPaneIcon("systemupdatesico", chips); }
 
 function renderSystemUpdates(s) {
   const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
@@ -3085,6 +3094,156 @@ function renderSystemUpdates(s) {
   }
   paintSystemUpdatesIcon(chips);
   $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
+}
+
+// The Maintenance jobs pane (gt-6yof7o): one row per job from the Jobs section
+// the hub folds `gt jobs --json` into (jobs.go), and nothing the page fetches.
+// A row is the job's name, a chip coloured by the worst thing true of it, the
+// last run's age and duration, and its headline stat; clicking it opens the
+// job's newest runs. The pane reads reads.jobs only to say whether the section
+// it drew is still current.
+const JOBS_STATES = ["never_run", "overdue", "ok", "no_cadence", "unknown"];
+// JOBS_OUTCOMES is every outcome the section names; the empty one is a no-op
+// run, which neither failed nor did its work (jobs.go).
+const JOBS_OUTCOMES = ["", "ok", "failed", "refused", "deferred"];
+// JOBS_MARKS is a job's chip by the worst thing true of it: green ok, red
+// failed or overdue, amber a job that never ran, has no cadence, or whose run
+// was refused or deferred, and grey unknown. The glyphs are the System updates
+// chips' so both panes' headers read alike.
+const JOBS_MARKS = {
+  ok: ["good", "✓", "ok"],
+  failed: ["badc", "✗", "failed"],
+  overdue: ["badc", "✗", "overdue"],
+  never_run: ["warnc", "◌", "never run"],
+  no_cadence: ["warnc", "◌", "no cadence"],
+  refused: ["warnc", "◌", "refused"],
+  deferred: ["warnc", "◌", "deferred"],
+  unknown: ["absent", "?", "unknown"],
+};
+// JOBS_BYTE_STATS is the headline stats that count bytes, drawn in GiB.
+const JOBS_BYTE_STATS = ["reclaimed_bytes", "build_cache_bytes", "bytes_freed"];
+// JOBS_RUN_MARKS is one run's outcome chip: green ok, red failed, amber
+// refused or deferred, grey a no-op, and grey with a question mark an outcome
+// this page does not name.
+const JOBS_RUN_MARKS = {
+  "": ["absent", "–", "no-op"],
+  ok: ["good", "✓", "ok"],
+  failed: ["badc", "✗", "failed"],
+  refused: ["warnc", "◌", "refused"],
+  deferred: ["warnc", "◌", "deferred"],
+  unknown: ["absent", "?", "unknown"],
+};
+// jobsOpen is the jobs whose newest runs the reader has opened, by name.
+const jobsOpen = new Set();
+
+// jobMark is a row's colour, glyph and word, ranked as jobs.go ranks a row:
+// unknown, overdue, a failed run, a job that never ran or has no cadence, a
+// refused or deferred run, then ok. A state or outcome this page does not name
+// is unknown, so a job the report does not vouch for never reads as well
+// (gt-6yof7o).
+function jobMark(r) {
+  if (!r) return JOBS_MARKS.unknown;
+  const state = r.state, outcome = r.outcome || "";
+  if (!JOBS_STATES.includes(state) || !JOBS_OUTCOMES.includes(outcome) || state === "unknown") return JOBS_MARKS.unknown;
+  if (state === "overdue") return JOBS_MARKS.overdue;
+  if (outcome === "failed") return JOBS_MARKS.failed;
+  if (state === "never_run" || state === "no_cadence") return JOBS_MARKS[state];
+  if (outcome === "refused" || outcome === "deferred") return JOBS_MARKS[outcome];
+  return JOBS_MARKS.ok;
+}
+
+// jobStatWords is a headline stat as the row draws it: a percentage as itself,
+// a byte count in GiB, a millisecond figure as a duration, and a stat this page
+// does not know with its name beside the raw figure rather than a guessed unit.
+function jobStatWords(h) {
+  if (!h || typeof h.value !== "number") return "";
+  if (h.name === "used_percent") return h.value + "%";
+  if (JOBS_BYTE_STATS.includes(h.name)) return diskGiB(h.value) + " GiB";
+  if (h.name === "duration_ms") return fmtDur(h.value / 1000);
+  return h.value + (h.name ? " " + h.name : "");
+}
+
+// jobRunLine is one of a job's newest runs: how long ago it ended (or started,
+// for a run that has not ended), how long it took, and its outcome.
+function jobRunLine(run) {
+  const line = el("div", "surow");
+  const at = run.ended_at || run.started_at;
+  line.append(el("span", "title", neverRead(at) ? "–" : age(at) + " ago"));
+  const from = new Date(run.started_at || 0).getTime();
+  const to = new Date(run.ended_at || 0).getTime();
+  const took = !neverRead(run.started_at) && !neverRead(run.ended_at) ? (to - from) / 1000 : null;
+  line.append(el("span", "title", took != null && took >= 0 ? fmtDur(took) : "–"));
+  const mark = JOBS_RUN_MARKS[run.outcome || ""] || JOBS_RUN_MARKS.unknown;
+  const chip = el("span", "tag " + mark[0], mark[1] + " " + mark[2]);
+  chip.title = "run: " + mark[2];
+  line.append(chip);
+  return line;
+}
+
+// jobRuns is the box a clicked row opens: the job's newest runs, newest first
+// as the section sorted them. The section keeps at most five, so this draws
+// those the report kept.
+function jobRuns(r) {
+  const box = el("div", "jobruns");
+  const runs = r.runs || [];
+  if (!runs.length) { box.append(el("div", "surow empty", "no runs recorded")); return box; }
+  for (const run of runs) box.append(jobRunLine(run));
+  return box;
+}
+
+// jobRow is one job's line. A job whose state or outcome the page does not
+// name is drawn grey, never green.
+function jobRow(r, open) {
+  const row = el("div", "surow");
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute("aria-expanded", open ? "true" : "false");
+  row.append(el("span", "", r.name || "–"));
+  const mark = jobMark(r);
+  const chip = el("span", "tag " + mark[0], mark[1] + " " + mark[2]);
+  chip.title = mark[2];
+  row.append(chip);
+  const at = r.last_run;
+  const last = el("span", "title", !at ? "never ran" : neverRead(at) ? "unreadable" : age(at));
+  last.title = !at ? "no run recorded" : neverRead(at) ? "the last run stamp cannot be read" : "last run " + age(at) + " ago";
+  row.append(last);
+  const took = el("span", "title", typeof r.duration_ms === "number" && r.duration_ms >= 0 ? fmtDur(r.duration_ms / 1000) : "–");
+  took.title = "how long the newest finished run took";
+  row.append(took);
+  const headline = jobStatWords(r.headline);
+  if (headline) {
+    const stat = el("span", "", headline);
+    stat.title = "headline stat: " + (r.headline.name || "unnamed");
+    row.append(stat);
+  }
+  const toggle = () => { open ? jobsOpen.delete(r.name) : jobsOpen.add(r.name); renderJobs(state); };
+  row.onclick = toggle;
+  row.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); } });
+  if (open) row.append(jobRuns(r));
+  return row;
+}
+
+// renderJobs draws the pane from the state's Jobs section. A read that failed
+// or went old says so above the rows, and paintsRead greys them: the kept list
+// is never drawn as current (gt-16wpss).
+function renderJobs(s) {
+  if (pushSkip("jobs", s)) return;
+  const r = readOf(s, "jobs"), j = s.jobs;
+  const box = $("jobs"), note = $("jobsnote");
+  box.replaceChildren();
+  paintsRead(box, note, r);
+  const rows = (j && j.rows) || [], chips = [];
+  for (const row of rows) {
+    box.append(jobRow(row, jobsOpen.has(row.name)));
+    const mark = jobMark(row);
+    chips.push({name: row.name, cls: mark[0], word: mark[2]});
+  }
+  paintPaneIcon("jobsico", chips);
+  note.textContent = readCaption(r, rows.length ? [rows.length + (rows.length === 1 ? " job" : " jobs")] : []);
+  if (r && r.error) box.prepend(el("div", "surow badc", rows.length ? "the read failed; this is the last good list" : "the read failed; no job list has been read"));
+  else if (r && r.stale && rows.length) box.prepend(el("div", "surow warnc", "this job list is stale"));
+  else if (!j) box.append(el("div", "empty", r && r.never ? "the jobs have not been read" : "reading the jobs…"));
+  else if (!rows.length) box.append(el("div", "empty", "no jobs"));
 }
 
 // The Actions section's status colours, reusing the page's own tokens: success
@@ -5962,6 +6121,7 @@ const PANES = {
   disk: {sec: "machine", body: ["disk"], read: s => s.disk, draw: s => renderDisk(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
   systemupdates: {sec: "systemupdates", body: ["systemupdates"], read: s => s.system_updates, draw: s => renderSystemUpdates(s)},
+  jobs: {sec: "jobs", body: ["jobs"], read: s => [s.jobs, readInput(s, "jobs")], draw: s => renderJobs(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   dolt: {sec: "dolt", body: ["dolt"], read: s => [s.dolt, readInput(s, "dolt")], draw: s => renderDolt(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
@@ -6030,7 +6190,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderJobs(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -6404,7 +6564,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderSystemUpdates(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderSystemUpdates(state); renderJobs(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
