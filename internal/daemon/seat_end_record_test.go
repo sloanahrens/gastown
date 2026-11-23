@@ -258,3 +258,90 @@ func TestSeatEndNoRecordMarkerRefused(t *testing.T) {
 		})
 	}
 }
+
+// writeSeatEndNoRecordAt writes body at rel under the marker directory and
+// returns that path.
+func writeSeatEndNoRecordAt(t *testing.T, town, rel, body string) string {
+	t.Helper()
+	path := filepath.Join(seatEndNoRecordsDir(town), rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestSeatEndNoRecordUnreadableMarkerIsAnError: a marker the read cannot use
+// is an error naming its file, never a seat quietly dropped from the read
+// (gt-wssxhd).
+func TestSeatEndNoRecordUnreadableMarkerIsAnError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// plant writes the bad marker and returns its path.
+		plant func(t *testing.T, town string) string
+	}{
+		{name: "malformed json", plant: func(t *testing.T, town string) string {
+			return writeSeatEndNoRecordAt(t, town, filepath.Join(endRig, endPolecat+".json"), "{")
+		}},
+		{name: "a marker naming no bead", plant: func(t *testing.T, town string) string {
+			return writeSeatEndNoRecordAt(t, town, filepath.Join(endRig, endPolecat+".json"), "{}")
+		}},
+		{name: "a name that is not a seat name", plant: func(t *testing.T, town string) string {
+			return writeSeatEndNoRecordAt(t, town, filepath.Join(endRig, "bad name.json"), `{"bead":"`+endBead+`"}`)
+		}},
+		{name: "a directory named like a marker", plant: func(t *testing.T, town string) string {
+			path := filepath.Join(seatEndNoRecordsDir(town), endRig, endPolecat+".json")
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "a file outside a rig directory", plant: func(t *testing.T, town string) string {
+			return writeSeatEndNoRecordAt(t, town, "stray", "x")
+		}},
+		{name: "a marker directory that is a file", plant: func(t *testing.T, town string) string {
+			return writeSeatEndNoRecordAt(t, town, "", "x")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			want := tt.plant(t, town)
+			markers, err := readSeatEndNoRecords(town)
+			if err == nil {
+				t.Fatalf("readSeatEndNoRecords read %s without an error, markers %+v", want, markers)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %s", err, want)
+			}
+		})
+	}
+}
+
+// TestSeatEndNoRecordIgnoresATempFile: an atomic write's temp file beside a
+// marker is not a marker, so the read returns the real one alone (gt-wssxhd).
+func TestSeatEndNoRecordIgnoresATempFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := recordSeatEndNoRecord(town, endRig, endPolecat, endBead); err != nil {
+		t.Fatalf("recordSeatEndNoRecord: %v", err)
+	}
+	// An atomic write names its temp file <marker>.json.tmp.<random>, so it
+	// does not end in .json and the read skips it rather than refusing on it.
+	writeSeatEndNoRecordFile(t, town, endPolecat+".json.tmp.12345", `{"bead":"gt-stale"}`)
+	markers, err := readSeatEndNoRecords(town)
+	if err != nil {
+		t.Fatalf("readSeatEndNoRecords: %v", err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("markers = %+v; want the one real marker", markers)
+	}
+	got := markers[0]
+	if got.Rig != endRig || got.Polecat != endPolecat || got.Bead != endBead {
+		t.Errorf("marker = %+v; want %s/%s bead %s", got, endRig, endPolecat, endBead)
+	}
+}
