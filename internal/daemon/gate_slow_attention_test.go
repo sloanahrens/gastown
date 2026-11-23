@@ -55,12 +55,19 @@ func TestGateSlowAttentionItems(t *testing.T) {
 				return
 			}
 			newest := tc.runs[len(tc.runs)-1]
-			it := got[0]
-			if it.Key != "gate-slow:"+tc.rig || it.Severity != attention.SeverityMedium {
-				t.Errorf("item key %q severity %q, want gate-slow:%s medium", it.Key, it.Severity, tc.rig)
-			}
-			if !strings.Contains(it.Summary, newest.PolePkg) || !strings.Contains(it.Summary, fmt.Sprintf("tier %.0fs", newest.TierS)) {
-				t.Errorf("summary %q does not name pole %q and tier %.0fs", it.Summary, newest.PolePkg, newest.TierS)
+			for _, it := range got {
+				if it.Kind != attention.KindGateSlow {
+					t.Errorf("item %+v kind %q, want %q", it, it.Kind, attention.KindGateSlow)
+				}
+				if !gateSlowOwned(it) {
+					t.Errorf("the gate-slow owns predicate does not own %+v", it)
+				}
+				if it.Key != "gate-slow:"+tc.rig || it.Severity != attention.SeverityMedium {
+					t.Errorf("item key %q severity %q, want gate-slow:%s medium", it.Key, it.Severity, tc.rig)
+				}
+				if !strings.Contains(it.Summary, newest.PolePkg) || !strings.Contains(it.Summary, fmt.Sprintf("tier %.0fs", newest.TierS)) {
+					t.Errorf("summary %q does not name pole %q and tier %.0fs", it.Summary, newest.PolePkg, newest.TierS)
+				}
 			}
 		})
 	}
@@ -74,12 +81,12 @@ func TestGateSlowAttentionFailedRead(t *testing.T) {
 		t.Fatalf("making the unreadable log: %v", err)
 	}
 	prev := attention.State{Items: []attention.Item{
-		{Key: "gate-slow:gastown", Severity: attention.SeverityMedium, Summary: "previous gate-slow"},
-		{Key: "stall:gastown/opal", Severity: attention.SeverityHigh, Summary: "another collector's item"},
+		{Kind: attention.KindGateSlow, Key: "gate-slow:gastown", Severity: attention.SeverityMedium, Summary: "previous gate-slow"},
+		{Kind: attention.KindPolecatStall, Key: "stall:gastown/opal", Severity: attention.SeverityHigh, Summary: "another collector's item"},
 	}}
 	var logs strings.Builder
 	logf := func(format string, args ...any) { fmt.Fprintf(&logs, format+"\n", args...) }
-	got := collectAttention(context.Background(), prev, []attentionCollector{{collect: f.src.collectGateSlow, owns: gateSlowItem}}, logf)
+	got := collectAttention(context.Background(), prev, []attentionCollector{{collect: f.src.collectGateSlow, owns: gateSlowOwned}}, logf)
 
 	if len(got) != 1 || got[0].Summary != "previous gate-slow" {
 		t.Fatalf("a failed read kept %+v, want only the previous gate-slow item", got)

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/land"
@@ -57,6 +56,7 @@ func gateSlowItems(runs []land.GateRun, rig string) []attention.Item {
 		pole = "unknown"
 	}
 	return []attention.Item{{
+		Kind:     attention.KindGateSlow,
 		Key:      gateSlowPrefix + rig,
 		Severity: attention.SeverityMedium,
 		Rig:      rig,
@@ -82,9 +82,4 @@ func (s *attentionSources) collectGateSlow(_ context.Context) ([]attention.Item,
 		}
 	}
 	return out, nil
-}
-
-// gateSlowItem picks the gate-slow items out of the previous items a failed read keeps.
-func gateSlowItem(it attention.Item) bool {
-	return strings.HasPrefix(it.Key, gateSlowPrefix)
 }
