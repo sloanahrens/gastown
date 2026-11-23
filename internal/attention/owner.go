@@ -115,6 +115,9 @@ var ruleOwners = map[string]Owner{
 	// A pair ready to roll is the overseer's to act on: the wake names the pair
 	// and the commit it is for (gt-4nlpw8).
 	RuleDeployPairReady: OwnerOverseer,
+	// Lifting the red hold is the overseer's before a person is woken: it fixes
+	// what set the hold and starts dispatch again (gt-7j8krh).
+	RuleRedHold: OwnerOverseer,
 	// A pair check that cannot read is the overseer's to look at: while it is
 	// broken, no roll is reported as ready (gt-4nlpw8).
 	RuleDeployPairUnreadable: OwnerOverseer,

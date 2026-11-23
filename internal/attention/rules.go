@@ -173,6 +173,10 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+
+	// RuleRedHold is the red hold rule: dispatch starts no work while the hold
+	// is set, so the overseer is woken to lift it (gt-7j8krh).
+	RuleRedHold = "hold.red"
 	// RuleStoryPoints is the weekly step changing the story-point weights by
 	// itself: an adoption, a revert, or a second refusal in a row, each a
 	// record that the estimate the town dispatches by moved or stopped moving
@@ -339,6 +343,9 @@ var ruleFlags = map[string]RuleFlags{
 	// the next look: the roll starts when it can, not when someone notices
 	// (gt-4nlpw8).
 	RuleDeployPairReady: flagsWake,
+	// A red hold stops every dispatch until it is lifted: the overseer is
+	// woken to lift it (gt-7j8krh).
+	RuleRedHold: flagsWake,
 	// A pair check that cannot read is a measurement that stopped, not a
 	// failure: it is queued for the overseer's next look, the same way a green
 	// ref the image build cannot read is (gt-4nlpw8).
@@ -563,6 +570,7 @@ var kindRules = map[Kind]string{
 	KindGreenRef:                      RuleGreenRef,
 	KindDoltImageBehind:               RuleDoltImageBehind,
 	KindDeployPairReady:               RuleDeployPairReady,
+	KindRedHoldHeld:                   RuleRedHold,
 	KindDeployPairUnreadable:          RuleDeployPairUnreadable,
 	KindDeployPairStuck:               RuleDeployPairStuck,
 	KindDeployPairRefused:             RuleDeployPairRefused,
