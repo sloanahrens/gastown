@@ -197,3 +197,68 @@ func TestStoryPointsAdoptionAttentionIsWiredAndRegistered(t *testing.T) {
 		t.Error("the story-points collector is registered with no collect")
 	}
 }
+
+// TestStoryPointsRefusedAttention: the last two weekly outcomes both refused
+// raise one story-points:refused item; one refusal or a newer adoption raises
+// none, and refused lines leave the adopted item as it was (gt-ti2sdg).
+func TestStoryPointsRefusedAttention(t *testing.T) {
+	t.Parallel()
+	refused := func(at, reason string) string {
+		return `{"event":"refused","at":"` + at + `","reason":"` + reason + `"}`
+	}
+	const (
+		older      = "2026-11-15T12:00:00Z"
+		newer      = "2026-11-22T12:00:00Z"
+		oldAdopted = `{"event":"adopted","at":"2026-11-01T12:00:00Z","version":"v4"}`
+		newAdopted = `{"event":"adopted","at":"2026-11-20T12:00:00Z","version":"v3"}`
+	)
+	tests := []struct {
+		name                       string
+		log                        string
+		wantRefused                int
+		refusedNames, adoptedNames []string
+	}{
+		{"two refused raise the item with both reasons", refused(older, "the rank rule rejected the week") + "\n" + refused(newer, "the proposal did worse"), 1, []string{"the rank rule rejected the week", "the proposal did worse", "2026-11-22"}, nil},
+		{"one refused raises none", refused(newer, "the proposal did worse"), 0, nil, nil},
+		{"refused, adopted, refused raises none", refused(older, "first") + "\n" + oldAdopted + "\n" + refused(newer, "second"), 0, nil, nil},
+		{"adopted, refused, refused raises the item", oldAdopted + "\n" + refused(older, "first") + "\n" + refused(newer, "second"), 1, []string{"first", "second", "2026-11-22"}, nil},
+		{"refused lines leave the adopted item as it was", newAdopted + "\n" + refused(older, "did worse") + "\n" + refused(newer, "did worse"), 1, nil, []string{"version v3", "2026-11-20"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := adoptionLog(t, tc.log+"\n")
+			var refusedItems, adoptedItems []attention.Item
+			for _, it := range f.collect(t, f.src.collectStoryPointsAdoptions) {
+				switch {
+				case it.Key == storyPointsRefusedKey:
+					refusedItems = append(refusedItems, it)
+				case strings.HasPrefix(it.Key, "story-points:adopted:"):
+					adoptedItems = append(adoptedItems, it)
+				}
+			}
+			if len(refusedItems) != tc.wantRefused {
+				t.Fatalf("raised %d refused items, want %d: %+v", len(refusedItems), tc.wantRefused, refusedItems)
+			}
+			for _, it := range refusedItems {
+				if it.Kind != attention.KindStoryPoints {
+					t.Errorf("refused item %+v, want the story-points kind", it)
+				}
+			}
+			want, got := tc.refusedNames, refusedItems
+			if tc.adoptedNames != nil {
+				if len(adoptedItems) != 1 {
+					t.Fatalf("raised %d adopted items, want one: %+v", len(adoptedItems), adoptedItems)
+				}
+				want, got = tc.adoptedNames, adoptedItems
+			}
+			for _, it := range got {
+				for _, w := range want {
+					if !strings.Contains(it.Summary, w) {
+						t.Errorf("summary %q, want it to name %q", it.Summary, w)
+					}
+				}
+			}
+		})
+	}
+}
