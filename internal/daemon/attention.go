@@ -847,22 +847,11 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindImagePinsDeadLayer, collect: s.collectImagePinLayersDeadLayer},
 		// The slow gate the last runs of a rig show (gt-l0t2tg). The owns
 		// predicate keeps only its own items when the run log cannot be read.
-		{kind: attention.KindGateSlow, collect: s.collectGateSlowItems, owns: gateSlowOwned},
+		{kind: attention.KindGateSlow, collect: s.collectGateSlow, owns: gateSlowOwned},
 		// The gate-run log's last failed append, until the next one succeeds
 		// (gt-nwea8n). It reads the daemon's own memory, so it cannot fail.
 		{kind: attention.KindGateRunLog, collect: s.collectGateRunLog},
 	}, s.questionCollectors()...)
-}
-
-// collectGateSlowItems is collectGateSlow with the kind set on each item. The
-// gate-slow items it builds leave Kind empty, and an item with no kind has no
-// rule, so it would never reach the overseer (gt-l0t2tg).
-func (s *attentionSources) collectGateSlowItems(ctx context.Context) ([]attention.Item, error) {
-	items, err := s.collectGateSlow(ctx)
-	for i := range items {
-		items[i].Kind = attention.KindGateSlow
-	}
-	return items, err
 }
 
 // gateSlowOwned picks the gate-slow items out of the previous items a failed
