@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // dir is the repo's directives/ directory, read from this package's place in
@@ -229,6 +231,87 @@ func TestPolecatDirectiveLineLimitIsACap(t *testing.T) {
 	for _, clause := range []string{"is a cap, not an estimate", "1.5 times"} {
 		if !strings.Contains(text[start:start+1+end], clause) {
 			t.Errorf("rule 9 lacks the clause %q", clause)
+		}
+	}
+}
+
+// TestPolecatDirectiveContradictionRule pins gt-hkllkj: rule 9 of the rendered
+// polecat directive carries the formula's contradiction rule -- when an
+// acceptance box and a Constraint cannot both hold, the seat escalates rather
+// than adding an exemption, allowlist row or special case -- and names the
+// formula's item 10 as authoritative so the two cannot drift. It renders the
+// directive through config.LoadRoleDirective, so the Changelog's copy of the
+// words does not satisfy it.
+func TestPolecatDirectiveContradictionRule(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(config.CentralDirectiveDir(town), "polecat.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(readDirective(t, "polecat.md")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := config.LoadRoleDirective("polecat", town, "")
+
+	const heading = "\n## 9. Stay in scope\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("the rendered polecat directive has no rule 9 titled \"Stay in scope\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n## 10.")
+	if end < 0 {
+		t.Fatal("the rendered polecat directive has no rule 10 after rule 9")
+	}
+	rule := body[:end]
+	for _, clause := range []string{
+		"cannot both hold",
+		"gt escalate",
+		"never add an exemption",
+		"allowlist row",
+		"special case",
+		"mol-polecat-work",
+		"is authoritative",
+	} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 9 lacks the contradiction clause %q", clause)
+		}
+	}
+}
+
+// TestPolecatDirectivePrivateTempDir pins gt-r4cnk2: rule 7 of the rendered
+// polecat directive sends a test that needs a private directory to
+// testutil.PrivateTempDir(t), a t.TempDir() at 0700 (gt-aq8dej), so a seat does
+// not chmod its own directory under a CI job's open umask. It renders the
+// directive through config.LoadRoleDirective, so the Changelog's copy of the
+// words does not satisfy it.
+func TestPolecatDirectivePrivateTempDir(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(config.CentralDirectiveDir(town), "polecat.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(readDirective(t, "polecat.md")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := config.LoadRoleDirective("polecat", town, "")
+
+	const heading = "\n## 7. Hermetic tests\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("the rendered polecat directive has no rule 7 titled \"Hermetic tests\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n## 8.")
+	if end < 0 {
+		t.Fatal("the rendered polecat directive has no rule 8 after rule 7")
+	}
+	rule := body[:end]
+	for _, clause := range []string{"private directory", "t.TempDir()", "0700", "PrivateTempDir"} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 7 lacks the clause %q", clause)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -109,7 +110,10 @@ func init() {
 // deployerEnv is what a deployer command reads from the host: the running user,
 // the filesystem and the environment. Production fills it from os and os/user;
 // a test fills it with a fixed user and a fake filesystem, so no test reads the
-// developer's own identity.
+// developer's own identity. The seams are struct fields, not the package-level
+// variables gt-5wyd9y named: the rig's test policy forbids steering a unit test
+// by setting a package-level variable, and a per-test struct keeps t.Parallel
+// safe (gt-z82llg, om finding 85d6feb2fa22).
 type deployerEnv struct {
 	// command names the subcommand in a refusal.
 	command string
@@ -223,14 +227,27 @@ func runTownDeployerCSRIn(env townDeployerCSREnv) error {
 
 	if env.outCSR != "" {
 		if err := env.write(env.outCSR, csrYAML, 0o644); err != nil {
-			return fmt.Errorf("writing the %s signing request to %s: %w", env.name, env.outCSR, err)
+			return discardDeployerKey(env, id, fmt.Errorf("writing the %s signing request to %s: %w", env.name, env.outCSR, err))
 		}
 		return nil
 	}
 	if _, err := env.out.Write(csrYAML); err != nil {
-		return fmt.Errorf("printing the %s signing request: %w", env.name, err)
+		return discardDeployerKey(env, id, fmt.Errorf("printing the %s signing request: %w", env.name, err))
 	}
 	return nil
+}
+
+// discardDeployerKey removes the key Store just wrote when the signing request
+// it was made for could not be written or printed: a key with no request to
+// sign is only a secret left on disk (gt-z82llg, om finding 2edb2c374671). An
+// absent key needs no removal, and a removal that also fails is reported with
+// the cause.
+func discardDeployerKey(env townDeployerCSREnv, id deployercred.Identity, cause error) error {
+	path := filepath.Join(env.dir, deployerNamedKey(id))
+	if err := env.fs.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return errors.Join(cause, fmt.Errorf("removing the %s key %s: %w", id, path, err))
+	}
+	return cause
 }
 
 // deployerNamedKey is the file name Store writes the identity's key under; the

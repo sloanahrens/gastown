@@ -110,6 +110,10 @@ type ExtractEnv struct {
 	BdShowCap int
 	// TownRoot is the town whose gate-runs log the extract reads; it must be set.
 	TownRoot string
+	// GateRunReader reads the gate runs of the town at townRoot and counts the
+	// lines it could not parse; nil is land.ReadGateRuns. A test injects it to
+	// drive the gate-run columns from rows it holds, with no town on disk.
+	GateRunReader func(townRoot string) ([]land.GateRun, int, error)
 	// JevLog is the Jev dispatch log the landings' jev columns read, by path.
 	// A missing file leaves those columns empty and is named in the footer; it
 	// must be set, so an unwired log is never read as an absent one.
@@ -354,7 +358,11 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	}
 	// The gate runs are read before the first write too, so an unreadable log
 	// refuses the extract rather than leaving part of a set behind.
-	gateRuns, gateSkipped, err := land.ReadGateRuns(env.TownRoot)
+	readGateRuns := env.GateRunReader
+	if readGateRuns == nil {
+		readGateRuns = land.ReadGateRuns
+	}
+	gateRuns, gateSkipped, err := readGateRuns(env.TownRoot)
 	if err != nil {
 		return res, fmt.Errorf("extract: %w", err)
 	}

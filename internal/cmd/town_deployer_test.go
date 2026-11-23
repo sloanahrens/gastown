@@ -118,6 +118,15 @@ type failingDeployerWriter struct{}
 
 func (failingDeployerWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
 
+// removeFailDeployerFS is the fake filesystem whose Remove fails, so a test
+// drives the removal that keeps a key from outliving its signing request.
+type removeFailDeployerFS struct {
+	*fakeDeployerFS
+	err error
+}
+
+func (f removeFailDeployerFS) Remove(string) error { return f.err }
+
 // deployerUser reads a fixed user, so a test never consults the host's own.
 func deployerUser(name, uid string) func() (*user.User, error) {
 	return func() (*user.User, error) { return &user.User{Username: name, Uid: uid}, nil }
@@ -260,9 +269,9 @@ func TestTownDeployerRefuses(t *testing.T) {
 		// fake Store would write into.
 		edit func(env *townDeployerCSREnv, fsys *fakeDeployerFS)
 		want string
-		// afterStore says the refusal comes after Store wrote the key: the
-		// request output failed, and the key it signs is already on disk.
-		afterStore bool
+		// keyLeft says the refusal leaves the key Store wrote on disk: the
+		// request output failed, and the removal that follows it failed too.
+		keyLeft bool
 	}{
 		{
 			name: "inside a pod",
@@ -333,14 +342,22 @@ func TestTownDeployerRefuses(t *testing.T) {
 				env.outCSR = "/home/example/apply.csr.yaml"
 				env.write = func(string, []byte, fs.FileMode) error { return errors.New("disk full") }
 			},
-			want:       "writing the gt-deployer-apply signing request to",
-			afterStore: true,
+			want: "writing the gt-deployer-apply signing request to",
 		},
 		{
-			name:       "standard output refuses the write",
-			edit:       func(env *townDeployerCSREnv, _ *fakeDeployerFS) { env.out = failingDeployerWriter{} },
-			want:       "printing the gt-deployer-apply signing request",
-			afterStore: true,
+			name: "standard output refuses the write",
+			edit: func(env *townDeployerCSREnv, _ *fakeDeployerFS) { env.out = failingDeployerWriter{} },
+			want: "printing the gt-deployer-apply signing request",
+		},
+		{
+			name: "the request cannot be written and the key cannot be removed",
+			edit: func(env *townDeployerCSREnv, fsys *fakeDeployerFS) {
+				env.outCSR = "/home/example/apply.csr.yaml"
+				env.write = func(string, []byte, fs.FileMode) error { return errors.New("disk full") }
+				env.fs = removeFailDeployerFS{fakeDeployerFS: fsys, err: errors.New("remove refused")}
+			},
+			want:    "removing the gt-deployer-apply key",
+			keyLeft: true,
 		},
 	}
 	for _, tc := range cases {
@@ -353,8 +370,8 @@ func TestTownDeployerRefuses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownDeployerCSRIn = %v, want a refusal naming %q", err, tc.want)
 			}
-			if got := hasDeployerKey(fsys); got != tc.afterStore {
-				t.Errorf("a key was written = %v, want %v: %v", got, tc.afterStore, fsys.entries)
+			if got := hasDeployerKey(fsys); got != tc.keyLeft {
+				t.Errorf("the key is left on disk = %v, want %v", got, tc.keyLeft)
 			}
 		})
 	}
