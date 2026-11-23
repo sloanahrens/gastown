@@ -99,16 +99,21 @@ func TestUsageReplayHelpNamesTheDryRunDefault(t *testing.T) {
 	}
 }
 
+// Run from a directory below the town root: the default lookup finds the town
+// for the store, never the working directory.
+//
+//testpolicy:allow parallel — moves the working directory, which another parallel test must not change mid-run
 func TestUsageReplayUsesTheTownStoreFromAnyDirectory(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
+	writeTownRoot(t, town)
 	replayRecFile(t, filepath.Join(constants.TownRuntimePath(town), "usage"), "gt-a")
-	deps := defaultUsageReplayDeps()
-	deps.townRoot = func() (string, error) { return town, nil }
+	//testpolicy:allow no-chdir — the working directory is the input under test: the store must resolve from it, not to it
+	t.Chdir(filepath.Join(town, "mayor"))
 	var from string
+	deps := defaultUsageReplayDeps()
 	deps.openStore = func(root string) (usageattrib.ReplayStore, error) { from = root; return beadsfake.New(), nil }
-	if _, _, code := replayRun(t, deps); code != 0 || from != town {
-		t.Fatalf("exit %d from store root %q; want 0 and the town root %q", code, from, town)
+	if out, _, code := replayRun(t, deps); code != 0 || from != town || !strings.Contains(out, "files: 1") {
+		t.Fatalf("exit %d, store root %q, stdout %q; want 0, the town root %q, and its one record", code, from, out, town)
 	}
 }
 

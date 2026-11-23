@@ -32,12 +32,11 @@ func newUsageReplayCmd(deps usageReplayDeps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Write the usage rows the record files are missing (a dry run by default)",
-		Long: `Write a usage_records row for each record file whose bead and kind has none,
-from <town>/.runtime/usage into the town's usage_records store, whatever the
-working directory. By default the run is a dry run and writes nothing; --apply
-writes the rows. Output is one line per count (files, written or would write,
-skipped, failed), then one line per failed file on stderr. Exit 0 when no file
-failed, 1 when one did, 2 when the run could not be made.`,
+		Long: `Write a usage_records row for each record file whose bead and kind has none, from
+<town>/.runtime/usage into the town's usage_records store, whatever the working directory.
+By default the run is a dry run and writes nothing; --apply writes the rows. Output is one
+line per count (files, written or would write, skipped, failed), then one line per failed
+file on stderr. Exit 0 when no file failed, 1 when one did, 2 when the run could not be made.`,
 		Args: cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUsageReplay(cmd, deps, apply)
