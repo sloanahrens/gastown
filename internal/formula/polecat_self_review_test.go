@@ -33,40 +33,87 @@ func numberedItem(t *testing.T, step string, n int) string {
 	return strings.Join(lines[start:], "\n")
 }
 
+// collapse folds the line wrapping the formula uses into single spaces, so a
+// check for a phrase does not depend on where the source wraps.
+func collapse(s string) string {
+	return regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
+}
+
 // TestPolecatSelfReviewIsThePreSubmitChecklist pins gt-df9f7v: the self-review
-// step is the single pre-submit checklist, laid out in nine items. It opens
-// with a requirement walk and checks unbounded waits, and it tells the seat to
-// put the integration-tier line in the commit body, where om reads it, not in
-// the bead notes.
+// step is the seat's single pre-submit checklist. It parses, sits between the
+// commit and build-check steps, and has nine numbered items whose first walks
+// the bead's requirements, whose fifth bounds the seats' waits, and whose
+// ninth reports the integration tier in the commit body where om reads it.
 func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 	t.Parallel()
 	f := decodePolecatWork(t)
-	step := f.step(t, "self-review")
 
-	for n := 1; n <= 9; n++ {
-		if !regexp.MustCompile(fmt.Sprintf(`(?m)^%d\. `, n)).MatchString(step) {
-			t.Fatalf("the self-review step has no numbered item %d", n)
+	// The checklist runs on committed changes: self-review's neighbours are
+	// the commit step and the build check.
+	ids := make([]string, len(f.Steps))
+	for i, s := range f.Steps {
+		ids[i] = s.ID
+	}
+	prev, next := "", ""
+	for i, id := range ids {
+		if id != "self-review" {
+			continue
+		}
+		if i > 0 {
+			prev = ids[i-1]
+		}
+		if i+1 < len(ids) {
+			next = ids[i+1]
 		}
 	}
-	if regexp.MustCompile(`(?m)^10\. `).MatchString(step) {
-		t.Error("the self-review step has a tenth item, want nine")
+	if prev != "commit-changes" || next != "build-check" {
+		t.Errorf("self-review sits between %q and %q, want commit-changes and build-check", prev, next)
 	}
 
-	if got := numberedItem(t, step, 1); !strings.Contains(got, "Requirements (9, 12)") {
-		t.Errorf("item 1 does not name Requirements (9, 12):\n%s", got)
-	}
-	if got := numberedItem(t, step, 5); !strings.Contains(got, "Waits (13)") {
-		t.Errorf("item 5 does not name Waits (13):\n%s", got)
+	step := f.step(t, "self-review")
+
+	// Exactly nine items: the single pre-submit checklist.
+	if got := len(regexp.MustCompile(`(?m)^\d+\. `).FindAllString(step, -1)); got != 9 {
+		t.Fatalf("the self-review step has %d numbered items, want 9", got)
 	}
 
-	item9 := numberedItem(t, step, 9)
+	// Item 1 extends the plan written in "Before you write code" with the diff
+	// line that meets each requirement; it points at that plan rather than
+	// restating how to write it (R2).
+	item1 := collapse(numberedItem(t, step, 1))
+	for _, want := range []string{"Before you write code", "Acceptance"} {
+		if !strings.Contains(item1, want) {
+			t.Errorf("item 1 does not walk the requirements: lacks %q:\n%s", want, item1)
+		}
+	}
+	if strings.Contains(item1, "Write a short plan") {
+		t.Errorf("item 1 restates the plan procedure instead of pointing at it:\n%s", item1)
+	}
+
+	// Item 5 is the waits check: it names the unbounded-wait tokens and the
+	// bound every hit needs.
+	item5 := collapse(numberedItem(t, step, 5))
+	for _, want := range []string{"time[.]Sleep", "deadline"} {
+		if !strings.Contains(item5, want) {
+			t.Errorf("item 5 is not the waits check: lacks %q:\n%s", want, item5)
+		}
+	}
+
+	// Item 9 reports the integration tier in the commit body, where om reads
+	// it, and reports a real outcome or a real reason. A canned line emitted
+	// for every package reports a run that did not happen (rule 1).
+	item9 := collapse(numberedItem(t, step, 9))
 	for _, want := range []string{
 		"go vet -tags integration",
 		"near the top of the commit body",
 		"not bead notes",
+		"integration tier not run: <reason>",
 	} {
 		if !strings.Contains(item9, want) {
 			t.Errorf("item 9 lacks %q:\n%s", want, item9)
 		}
+	}
+	if strings.Contains(item9, "needs a container; the overseer runs it") {
+		t.Errorf("item 9 hard-codes one reason for every package instead of the real one:\n%s", item9)
 	}
 }

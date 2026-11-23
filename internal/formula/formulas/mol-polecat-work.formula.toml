@@ -429,11 +429,11 @@ Let `D` below stand for `git diff -U0 origin/{{base_branch}}...HEAD`. A hit is a
 question, not a verdict. Fix what you find now; amend or add commits as needed.
 Apply **Push as you go** after each commit.
 
-1. Requirements (9, 12): for each Goal clause, Constraint, Out-of-scope line and
-   Acceptance box, write in `scratch/plan.md` the file:line of your diff that
-   meets it. A line with none is unfinished. If the bead's Gate does not run a
-   package you edited, run that package's tests yourself and say so in the
-   commit body.
+1. Requirements (9, 12): extend the plan from "Before you write code" in
+   `scratch/plan.md` with the file:line of your diff that meets each Goal
+   clause, Constraint, Out-of-scope line and Acceptance box. A line with none
+   is unfinished. If the bead's Gate does not run a package you edited, run
+   that package's tests yourself and say so in the commit body.
 2. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
    read every added `if err != nil` branch. Each hit returns, wraps or escalates; an unknown or unreadable input denies.
 3. Wiring (12): `D -- '*.go' | grep -E '^[+]func '`, then `grep -rn <name>` for a
@@ -460,8 +460,10 @@ git diff --stat origin/{{base_branch}}...HEAD
 # Only files named in your Constraints for {{issue}} should appear
 ```
    For each `//go:build integration` file your diff reaches (`grep -rl 'go:build integration' --include='*.go' .`),
-   run `go vet -tags integration ./<pkg>/...` and put one line near the top of the commit body (om reads commit bodies, not bead notes):
-   `integration tier not run: needs a container; the overseer runs it`.
+   run `go vet -tags integration ./<pkg>/...`, and where the package's integration tests need no container,
+   run `go test -tags integration ./<pkg>/...`. Put the command and its outcome near the top of the commit
+   body (om reads commit bodies, not bead notes); for a tier that did not run, write that tier's real reason
+   as `integration tier not run: <reason>`. Report each package's result; never repeat one canned reason.
 
 If you accidentally modified unrelated files, remove those changes.
 
