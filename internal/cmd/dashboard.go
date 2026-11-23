@@ -403,10 +403,22 @@ func dashboardGatewayReader(getenv func(string) string) tailGatewayReader {
 	return pusher
 }
 
+// dashboardHubSeam lets a test drive the hub's feed without the environment:
+// gateway stands in for the reader dashboardGatewayReader(os.Getenv) builds when
+// it is set, and observe receives the options the feed's sources are built
+// from. The command passes no seam, so production reads the environment and
+// observes nothing.
+type dashboardHubSeam struct {
+	gateway tailGatewayReader
+	observe func(tailOptions)
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
-// when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
+// when the server stops. A test passes at most one seam to give the hub's feed
+// a gateway reader and to see the options it builds (gt-5jz9bs); the command
+// passes none.
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer, seams ...dashboardHubSeam) (*dashboard.Hub, func(), error) {
 	// The cloud step's source comes from these settings, so a file that does
 	// not parse stops the hub here rather than showing a pane read from a step
 	// the town meant to configure differently.
@@ -436,7 +448,19 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// before the tracker.
 	dispatches := events.NewDispatchReader(townRoot)
 	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog, dispatches)
-	sources, preface, err := buildTailSources(dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys, dashboardGatewayReader(os.Getenv)))
+	var seam dashboardHubSeam
+	if len(seams) > 0 {
+		seam = seams[0]
+	}
+	gateway := seam.gateway
+	if gateway == nil {
+		gateway = dashboardGatewayReader(os.Getenv)
+	}
+	tailOpts := dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys, gateway)
+	if seam.observe != nil {
+		seam.observe(tailOpts)
+	}
+	sources, preface, err := buildTailSources(tailOpts)
 	if err != nil {
 		return nil, nil, err
 	}
