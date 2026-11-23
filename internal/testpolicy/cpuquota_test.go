@@ -3,6 +3,8 @@ package testpolicy
 import (
 	"errors"
 	"io/fs"
+	"math"
+	"strconv"
 	"testing"
 )
 
@@ -66,8 +68,24 @@ func TestCPUQuotaFallsThrough(t *testing.T) {
 		{"zero variable", nil, nil, map[string]string{CPUQuotaEnv: "0"}, 8, 8},
 		{"negative variable", nil, nil, map[string]string{CPUQuotaEnv: "-3"}, 8, 8},
 		{"unreadable cpu.max", nil, []string{cpuMaxPath}, nil, 8, 8},
+		{"garbage cpu.max falls to the variable", map[string]string{cpuMaxPath: "garbage"}, nil, map[string]string{CPUQuotaEnv: "6"}, 8, 6},
+		{"garbage cpu.max falls to numCPU", map[string]string{cpuMaxPath: "garbage"}, nil, nil, 8, 8},
+		{"zero-quota cpu.max falls to the variable", map[string]string{cpuMaxPath: "0 100000"}, nil, map[string]string{CPUQuotaEnv: "6"}, 8, 6},
+		{"zero-quota cpu.max falls to numCPU", map[string]string{cpuMaxPath: "0 100000"}, nil, nil, 8, 8},
+		{"single-field cpu.max falls to the variable", map[string]string{cpuMaxPath: "100000"}, nil, map[string]string{CPUQuotaEnv: "6"}, 8, 6},
+		{"single-field cpu.max falls to numCPU", map[string]string{cpuMaxPath: "100000"}, nil, nil, 8, 8},
 		{"v1 quota when cpu.max is absent", map[string]string{cpuQuotaPath: "250000", cpuPeriodPath: "100000"}, nil, nil, 8, 3},
 		{"v1 unlimited quota", map[string]string{cpuQuotaPath: "-1", cpuPeriodPath: "100000"}, nil, nil, 8, 8},
 		{"v1 period unreadable", map[string]string{cpuQuotaPath: "250000"}, nil, nil, 8, 8},
+	})
+}
+
+// TestCPUQuotaOverflow checks that a quota near math.MaxInt64 rounds up without
+// overflowing into a negative CPU count.
+func TestCPUQuotaOverflow(t *testing.T) {
+	t.Parallel()
+	cpuMax := strconv.FormatInt(math.MaxInt64, 10) + " " + strconv.FormatInt(math.MaxInt64/2, 10)
+	runQuotaCases(t, []quotaCase{
+		{"quota near MaxInt64 rounds up", map[string]string{cpuMaxPath: cpuMax}, nil, nil, 8, 3},
 	})
 }
