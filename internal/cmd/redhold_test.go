@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
+
+// redHoldTestFailingWriter fails every write, driving the print error branches.
+type redHoldTestFailingWriter struct{}
+
+func (redHoldTestFailingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
 // redHoldTestRun executes `gt red-hold status` over root and returns its output.
 func redHoldTestRun(t *testing.T, root string) (string, error) {
@@ -66,5 +72,42 @@ func TestRedHoldCmdStatusBadFile(t *testing.T) {
 	got, err := redHoldTestRun(t, root)
 	if err == nil {
 		t.Fatalf("output = %q, a corrupt file exited 0; want an error", got)
+	}
+}
+
+func TestRedHoldCmdStatusNoTown(t *testing.T) {
+	t.Parallel()
+	c := newRedHoldCmdWith(func() (string, error) { return "", errors.New("no town") })
+	c.SetArgs([]string{"status"})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err == nil {
+		t.Fatal("a failed town lookup exited 0; want an error")
+	}
+}
+
+// redHoldTestHeldTown is a town root holding one reason.
+func redHoldTestHeldTown(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	rec := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{
+		{Kind: dispatch.RedHoldSweepRed, Since: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)},
+	}}
+	if err := dispatch.WriteRedHold(root, rec); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestRedHoldCmdStatusWriteError(t *testing.T) {
+	t.Parallel()
+	for _, root := range []string{t.TempDir(), redHoldTestHeldTown(t)} {
+		c := newRedHoldCmd()
+		c.SetArgs([]string{"status", "--town-root", root})
+		c.SetOut(redHoldTestFailingWriter{})
+		c.SetErr(io.Discard)
+		if err := c.Execute(); err == nil {
+			t.Errorf("a failing writer over %s exited 0; want an error", root)
+		}
 	}
 }

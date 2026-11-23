@@ -13,6 +13,11 @@ import (
 
 // newRedHoldCmd builds `gt red-hold`; a test builds a fresh one so its flag state is its own.
 func newRedHoldCmd() *cobra.Command {
+	return newRedHoldCmdWith(workspace.FindFromCwdOrError)
+}
+
+// newRedHoldCmdWith takes the town finder as a seam so a test drives its failure.
+func newRedHoldCmdWith(findTownRoot func() (string, error)) *cobra.Command {
 	var townRoot string
 	status := &cobra.Command{
 		Use:   "status",
@@ -22,7 +27,7 @@ func newRedHoldCmd() *cobra.Command {
 			root := townRoot
 			if root == "" {
 				var err error
-				if root, err = workspace.FindFromCwdOrError(); err != nil {
+				if root, err = findTownRoot(); err != nil {
 					return err
 				}
 			}
