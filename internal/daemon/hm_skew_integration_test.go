@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
@@ -20,16 +21,33 @@ import (
 // production reading makes. Only `hm version` is answered from the test, since
 // the test has no installed hm to ask.
 
+// hmSkewInstalledAge is how far in the past the fixture dates the installed
+// side: past imagePinsFileAge, the age at which the escalation flags a skew.
+const hmSkewInstalledAge = imagePinsFileAge + 24*time.Hour
+
 // hmSkewGitIn runs git in dir with a fixed identity and no user or system
 // config, and fails the test on error.
 func hmSkewGitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	return hmSkewGitInAt(t, time.Time{}, dir, args...)
+}
+
+// hmSkewGitInAt is hmSkewGitIn with a committer and author time: a zero when
+// leaves both to the clock, anything else dates the commit, so a test can put
+// the installed commit past the planner's age threshold.
+func hmSkewGitInAt(t *testing.T, when time.Time, dir string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"GIT_AUTHOR_NAME=hm-skew", "GIT_AUTHOR_EMAIL=hm-skew@example.invalid",
 		"GIT_COMMITTER_NAME=hm-skew", "GIT_COMMITTER_EMAIL=hm-skew@example.invalid",
 		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
 	)
+	if !when.IsZero() {
+		date := when.Format(time.RFC3339)
+		env = append(env, "GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date)
+	}
+	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -43,6 +61,13 @@ func hmSkewGitIn(t *testing.T, dir string, args ...string) string {
 // new commit's full sha.
 func hmSkewCommit(t *testing.T, rig, path, content string) string {
 	t.Helper()
+	return hmSkewCommitAt(t, rig, path, content, time.Time{})
+}
+
+// hmSkewCommitAt is hmSkewCommit with a committer and author time: a zero when
+// leaves both to the clock.
+func hmSkewCommitAt(t *testing.T, rig, path, content string, when time.Time) string {
+	t.Helper()
 	full := filepath.Join(rig, filepath.FromSlash(path))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatal(err)
@@ -50,8 +75,8 @@ func hmSkewCommit(t *testing.T, rig, path, content string) string {
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hmSkewGitIn(t, rig, "add", "--", path)
-	hmSkewGitIn(t, rig, "commit", "-q", "-m", "change "+path)
+	hmSkewGitInAt(t, when, rig, "add", "--", path)
+	hmSkewGitInAt(t, when, rig, "commit", "-q", "-m", "change "+path)
 	return hmSkewGitIn(t, rig, "rev-parse", "HEAD")
 }
 
@@ -59,7 +84,9 @@ func hmSkewCommit(t *testing.T, rig, path, content string) string {
 // origin: rig is the rig's worktree, origin the bare repository it pushes main
 // to, and the rig's bare repository (hm/.repo.git) carries the same origin url,
 // which is where the skew check reads it. The first commit (the installed hm's)
-// is returned as base.
+// is returned as base; it is dated past the planner's age threshold, so a tip
+// committed now is a skew the escalation flags, while a one-commit lag dated
+// now would sit under the threshold and raise nothing.
 func hmSkewRealTown(t *testing.T) (town, rig, origin, base string) {
 	t.Helper()
 	town = t.TempDir()
@@ -67,7 +94,7 @@ func hmSkewRealTown(t *testing.T) (town, rig, origin, base string) {
 	rig = filepath.Join(town, "hm", "mayor", "rig")
 	mkdirs(t, rig)
 	hmSkewGitIn(t, rig, "init", "-q", "-b", "main")
-	base = hmSkewCommit(t, rig, "README.md", "one\n")
+	base = hmSkewCommitAt(t, rig, "README.md", "one\n", time.Now().Add(-hmSkewInstalledAge))
 	hmSkewGitIn(t, town, "init", "-q", "--bare", origin)
 	hmSkewGitIn(t, rig, "remote", "add", "origin", origin)
 	hmSkewGitIn(t, rig, "push", "-q", "origin", "main")
@@ -102,9 +129,10 @@ func hmSkewRealDaemon(t *testing.T, town string, installed *string) (*Daemon, *n
 	return d, rec, &logs
 }
 
-// TestHMSkewRealCloneEscalatesOnACodeChange: an installed hm at the first commit,
-// with origin's main moved by a commit that changes a code path, escalates once
-// under hm-skew, and the clone the monitor made is the job-owned one.
+// TestHMSkewRealCloneEscalatesOnACodeChange: an installed hm at the first
+// commit, dated past the planner's age threshold, with origin's main moved by a
+// commit that changes a code path, escalates once under hm-skew, and the clone
+// the monitor made is the job-owned one.
 func TestIntegrationHMSkewRealCloneEscalatesOnACodeChange(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
@@ -151,6 +179,8 @@ func TestIntegrationHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
 // TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives: a commit that changes only
 // a testdata file is no skew until a //go:embed directive of the hm source names
 // that file, read from the real clone by git grep, and then it is one (gt-pcixw3).
+// The installed commit is dated past the planner's age threshold, so the rule
+// alone decides each row and the lag never does.
 func TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -164,8 +194,9 @@ func TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			town, rig, _, _ := hmSkewRealTown(t)
-			hmSkewCommit(t, rig, "internal/foo/embed.go", "package foo\n\nimport _ \"embed\"\n\n"+tc.embed)
-			hmSkewCommit(t, rig, "internal/foo/testdata/x.json", "{}\n")
+			old := time.Now().Add(-hmSkewInstalledAge)
+			hmSkewCommitAt(t, rig, "internal/foo/embed.go", "package foo\n\nimport _ \"embed\"\n\n"+tc.embed, old)
+			hmSkewCommitAt(t, rig, "internal/foo/testdata/x.json", "{}\n", old)
 			installed := hmSkewGitIn(t, rig, "rev-parse", "HEAD")
 			hmSkewCommit(t, rig, "internal/foo/testdata/x.json", "{\"a\":1}\n")
 			hmSkewCommit(t, rig, "internal/foo/bar_test.go", "package foo\n")
@@ -182,10 +213,10 @@ func TestIntegrationHMSkewRealCloneReadsTheEmbedDirectives(t *testing.T) {
 }
 
 // TestHMSkewRealCloneFollowsOriginMain: a clone made by one reading judges the
-// tip a later reading names. The first reading alarms on a code change; once
-// the installed hm is at the new tip and that tip only changes docs, the next
-// reading clears the alert. A clone that never fetched the new tip could not
-// make that clear.
+// tip a later reading names. The first reading alarms on a code change, its
+// installed commit dated past the planner's age threshold; once the installed hm
+// is at the new tip and that tip only changes docs, the next reading clears the
+// alert. A clone that never fetched the new tip could not make that clear.
 func TestIntegrationHMSkewRealCloneFollowsOriginMain(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
