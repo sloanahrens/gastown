@@ -1242,6 +1242,67 @@ func TestSquashRunFreesBothGuardsOnEveryEnd(t *testing.T) {
 	}
 }
 
+// TestSquashRunFreesBothGuardsWhenTheRunPanics is the panic box: a run that
+// panics is recovered by the caller after both defers have run, so neither the
+// gc flag nor doltMaintMu is left held by the unwinding.
+func TestSquashRunFreesBothGuardsWhenTheRunPanics(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	var calls int
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		calls++
+		panic("the engine panicked")
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("the panicking run was not recovered")
+			}
+		}()
+		_, _ = d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
+	}()
+
+	if calls != 1 {
+		t.Fatalf("the call started %d run(s), want 1", calls)
+	}
+	if d.maintenanceGCRunning.Load() {
+		t.Error("a panicking run left the maintenance gc flag held")
+	}
+	assertSquashMaintMuFree(t, d)
+}
+
+// TestSquashRunRefusedByTheGCCycleLeavesTheMutexFree is the flag box: a call
+// refused by a held gc flag returns before doltMaintMu is taken, so the flag's
+// holder takes the mutex itself, and the flag stays the holder's until it
+// releases it.
+func TestSquashRunRefusedByTheGCCycleLeavesTheMutexFree(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	var calls int
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		t.Fatal("the maintenance gc flag was already held")
+	}
+	defer d.maintenanceGCRunning.Store(false)
+
+	_, err := d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
+	if !errors.Is(err, errSquashGCRunning) {
+		t.Fatalf("returned %v, want %v", err, errSquashGCRunning)
+	}
+	if calls != 0 {
+		t.Errorf("the refused call started %d run(s)", calls)
+	}
+
+	if !d.doltMaintMu.TryLock() {
+		t.Fatal("the refused call left doltMaintMu held")
+	}
+	d.doltMaintMu.Unlock()
+	if !d.maintenanceGCRunning.Load() {
+		t.Fatal("the refused call released the gc flag it did not take")
+	}
+}
+
 // TestSquashRunInFlightRefusesAGCCycle is the bead's second box for the other
 // direction: a gc cycle started while a squash run is in flight is refused by
 // its own CompareAndSwap, so nothing is dispatched beside the run and the run
