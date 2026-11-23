@@ -34,16 +34,9 @@ func TestPatrolScanUnnamedBranchRef(t *testing.T) {
 		{"failed head read", func(p *pushedTown) {
 			p.git.originErr = errors.New("ls-remote: transport failed")
 		}, "pushed branch unreadable: read origin's"},
-		{"failed branch read after a head", func(p *pushedTown) {
-			pushed(p)
-			opens := 0
-			p.d.overrunSeatGitFn = func(overrunSeat) (daemonGit, error) {
-				if opens++; opens == 2 {
-					return nil, errors.New("the seat's worktree vanished")
-				}
-				return p.git, nil
-			}
-		}, "pushed branch unreadable: open the worktree of gastown/capable: the seat's worktree vanished"},
+		{"failed branch read", func(p *pushedTown) {
+			p.d.openGitFn = func(string) daemonGit { return branchReadFails{p.git} }
+		}, "pushed branch unreadable: gastown/capable: read the seat's branch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

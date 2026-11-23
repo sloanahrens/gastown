@@ -16,8 +16,8 @@ const unnamedEscalationNotesTail = 300
 
 // FileUnnamedEscalation implements patrolscan.UnnamedEscalationFiler (gt-7046im): it raises the
 // escalation a seat should have filed when it stopped on ESCALATED, naming the seat, the bead, the
-// work it pushed and what to do. A delivery error is returned wrapped with the seat and the bead; the tick reports
-// it in the seat's detail and tries again on the next tick.
+// work it pushed and what to do. A delivery error is returned wrapped with the seat and the bead;
+// the tick reports it in the seat's detail and tries again on the next tick.
 func (h *patrolScanHost) FileUnnamedEscalation(rig, name, bead string) error {
 	message := fmt.Sprintf("%s/%s exited ESCALATED on %s but filed no escalation naming it: %s; read its last notes (bd show %s, gt peek %s/%s), then answer, or nuke the seat and re-sling the bead. %s",
 		rig, name, bead, h.unnamedPushed(rig, name), bead, rig, name, h.unnamedNotes(rig, bead))
@@ -32,28 +32,14 @@ func (h *patrolScanHost) FileUnnamedEscalation(rig, name, bead string) error {
 // branch" when origin holds nothing newer than the sling, and the failure of
 // either read named in place of the clause, because the filing still goes out.
 func (h *patrolScanHost) unnamedPushed(rig, name string) string {
-	sha, err := h.PushedSinceSling(rig, name)
+	branch, sha, err := h.pushedSinceSling(rig, name)
 	if err != nil {
 		return "pushed branch unreadable: " + err.Error()
 	}
 	if sha == "" {
 		return "no pushed branch"
 	}
-	branch, err := h.seatBranchOf(rig, name)
-	if err != nil {
-		return "pushed branch unreadable: " + err.Error()
-	}
 	return "branch " + branch + " @ " + shortSHA(sha) + " pushed"
-}
-
-// seatBranchOf is the branch of the handle PushedSinceSling would push from:
-// the same overrun worktree selection, which reads only the rig and the seat.
-func (h *patrolScanHost) seatBranchOf(rig, name string) (string, error) {
-	g, err := h.d.overrunSeatGit(overrunSeat{Rig: rig, Polecat: name})
-	if err != nil {
-		return "", fmt.Errorf("open the worktree of %s/%s: %w", rig, name, err)
-	}
-	return seatBranch(g)
 }
 
 // unnamedNotes is the notes line of the escalation: the last unnamedEscalationNotesTail
