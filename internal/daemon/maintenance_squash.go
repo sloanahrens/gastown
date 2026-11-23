@@ -19,6 +19,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltsquash"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
@@ -923,7 +924,10 @@ func squashErrorClass(runErr error) string {
 }
 
 // redactLedgerError is what the ledger records for a failed run's error. The
-// message is split into words and each word is replaced with
+// message first passes through land.ScrubText, the town's content rule, which
+// finds a token glued to other characters or embedded in a path; the word pass
+// below finds a token only at the start of a word. It is then split into words
+// and each word is replaced with
 // ledgerRedactedMarker when it could hold a credential: it contains an @ or a
 // ://, townstate.FindCredentials flags it (a NAME=value pair), or
 // config.LooksLikeSecret finds a token in it. A Dolt or driver error that
@@ -931,6 +935,7 @@ func squashErrorClass(runErr error) string {
 // the nightly backup that archives it. The result is cut to ledgerErrorLimit
 // runes, ending in "..." when the message was longer.
 func redactLedgerError(msg string) string {
+	msg = land.ScrubText(msg)
 	words := strings.Fields(msg)
 	for i, word := range words {
 		if strings.Contains(word, "@") || strings.Contains(word, "://") ||
