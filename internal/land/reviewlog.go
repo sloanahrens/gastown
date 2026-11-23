@@ -198,14 +198,15 @@ const redactedWord = "<redacted>"
 // scrubClaim replaces every token-shaped run in a finding's text with
 // redactedWord and keeps every other byte: om's title, path and claim quote the
 // reviewed code, and a credential in one must not reach the review log
-// (gt-uxbi5y, gt-kwx3vs). It decides
-// no boundaries by word: at each letter or digit not glued to one before it (or
-// starting a distinctive prefix, glued or not), it takes the run of token bytes that starts there and asks the rule, which is
-// anchored at the start of what it is given, so a token in backticks, brackets,
-// quotes, a URL query or after any name or joiner starts at its own offset. A
-// token with an ambiguous short prefix (`sk-`) glued to a letter before it is not
-// found, unless the letter ends an escape (`\n`, `%3D`): that is the one residual,
-// kept because the rule's prefixes (`sk-`) occur inside ordinary words.
+// (gt-uxbi5y, gt-kwx3vs). It decides no boundaries by word: at each letter or
+// digit not glued to one before it (or starting a distinctive prefix, glued or
+// not), it takes the run of token bytes that starts there and asks the rule,
+// which is anchored at the start of what it is given, so a token in backticks,
+// brackets, quotes, a URL query or after any name or joiner starts at its own
+// offset. A token with an ambiguous short prefix (`sk-`) glued to a letter
+// before it is not found, unless the letter ends an escape (`\n`, `%3D`): that
+// is the one residual, kept because the rule's prefixes (`sk-`) occur inside
+// ordinary words.
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
 // It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,

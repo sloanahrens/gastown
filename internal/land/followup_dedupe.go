@@ -50,8 +50,12 @@ var followupStopWords = map[string]bool{
 // The path is kept as given (only path.Clean, so "./x.go" and "x.go" agree);
 // lowercasing applies to the title, because a path is case-sensitive on the
 // filesystems this runs on.
+//
+// A token-shaped word in either is scrubbed first (gt-kwx3vs), so a finding
+// refiled from the review log's scrubbed queue line fingerprints like the raw
+// finding om raised and matches its bead instead of filing a second one.
 func Fingerprint(fpath, title string) string {
-	sum := sha256.Sum256([]byte(normalizePath(fpath) + "\n" + normalizeTitle(title)))
+	sum := sha256.Sum256([]byte(normalizePath(scrubClaim(fpath)) + "\n" + normalizeTitle(scrubClaim(title))))
 	return FingerprintPrefix + hex.EncodeToString(sum[:])[:12]
 }
 

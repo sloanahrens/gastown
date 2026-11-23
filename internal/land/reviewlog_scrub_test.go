@@ -183,18 +183,36 @@ func TestReviewLogScrubRecordedFindingTitleAndPath(t *testing.T) {
 }
 
 // TestReviewLogScrubHeldFindingTitleAndPath: a held finding's title and path
-// reach the queue line scrubbed like its claim (gt-kwx3vs).
+// reach the queue line scrubbed, and the finding refiled from it keeps the raw
+// finding's fingerprint, so its bead is matched instead of filed twice (gt-kwx3vs).
 func TestReviewLogScrubHeldFindingTitleAndPath(t *testing.T) {
 	t.Parallel()
-	held := heldFindingTexts([]FollowupCandidate{{
-		Title: "it logs " + scrubTestFamilies["aws"] + " verbatim",
-		Path:  "internal/land/" + scrubTestFamilies["slack"],
-	}})[0]
-	if want := "it logs <redacted> verbatim"; held.Title != want {
-		t.Errorf("queued title = %q, want %q", held.Title, want)
+	rawTitle := "it logs " + scrubTestFamilies["aws"] + " verbatim"
+	rawPath := "internal/land/" + scrubTestFamilies["slack"]
+	logf := &ReviewsFile{Path: filepath.Join(t.TempDir(), ReviewsFileName)}
+	queue := QueuedFollowup{Bead: "gt-x", Rig: "gastown", Findings: heldFindingTexts([]FollowupCandidate{{
+		ID: "f-1", Severity: omSeverityMinor, Path: rawPath, Title: rawTitle, Claim: "the key reaches the log",
+	}})}
+	if err := logf.AppendQueue(queue); err != nil {
+		t.Fatalf("AppendQueue: %v", err)
 	}
-	if want := "internal/land/<redacted>"; held.File != want {
-		t.Errorf("queued path = %q, want %q", held.File, want)
+	queued, err := logf.Queued()
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("Queued = %d lines, %v, want one", len(queued), err)
+	}
+	if got := queued[0].Findings[0]; got.Title != "it logs <redacted> verbatim" || got.File != "internal/land/<redacted>" {
+		t.Errorf("queued title/path = %q/%q, want both scrubbed", got.Title, got.File)
+	}
+	refiled := (&Lander{}).queuedCandidates(queued[0], nil, nil)
+	if len(refiled) != 1 {
+		t.Fatalf("the queue line refiled %d findings, want one", len(refiled))
+	}
+	want := Fingerprint(rawPath, rawTitle)
+	if d := Decide(refiled[0], []ExistingFollowup{{ID: "gt-old", Labels: []string{want}}}, 0); d.Action != DedupeComment || d.Target != "gt-old" {
+		t.Errorf("Decide = %+v, want the bead the raw finding was filed as", d)
+	}
+	if spec := bundleSpec(Work{BeadID: "gt-x"}, Result{}, time.Time{}, followupGroup{Package: "internal/land", Findings: refiled}); !slices.Contains(spec.Labels, want) {
+		t.Errorf("filed labels = %v, want the raw finding's %s", spec.Labels, want)
 	}
 }
 
