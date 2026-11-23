@@ -1655,11 +1655,25 @@ func (e *overrunPushDivergedError) reason() string {
 // rejection, worded "non-fast-forward" when git knows the remote ref's history
 // and "fetch first" when it knows only that the ref moved.
 func isNonFastForwardPush(err error) bool {
-	var ge *git.GitError
-	if !errors.As(err, &ge) {
+	if err == nil {
 		return false
 	}
-	return strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")
+	var ge *git.GitError
+	if errors.As(err, &ge) && (strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")) {
+		return true
+	}
+	// A sandbox seat's push comes back from session exec as text, not a
+	// *git.GitError (backend_openshell_ops.go), so the refusal must be read
+	// from the message; only a [rejected] line carries git's own wording
+	// (gt-ro8oxj). A [remote rejected] line is a different refusal: the hook
+	// or the server declined it, and no rescue is due.
+	for _, line := range strings.Split(err.Error(), "\n") {
+		if strings.Contains(line, "[rejected]") &&
+			(strings.Contains(line, "non-fast-forward") || strings.Contains(line, "fetch first")) {
+			return true
+		}
+	}
+	return false
 }
 
 // originBranchSHA is the commit origin holds for branch, or "" when origin

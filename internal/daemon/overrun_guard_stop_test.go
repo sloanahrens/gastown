@@ -2930,3 +2930,34 @@ func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestIsNonFastForwardPush(t *testing.T) {
+	// A sandbox seat's push runs through session exec, whose error carries the
+	// refusal as text and never as a *git.GitError (gt-ro8oxj).
+	sandbox := func(gitText string) error {
+		return fmt.Errorf("git push: %w", fmt.Errorf("git push in sandbox gt-nux: %s", gitText))
+	}
+	refused := func(stderr string) error {
+		return &git.GitError{Command: "push", Stderr: stderr, Err: errors.New("exit status 1")}
+	}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "sandbox text non-fast-forward", err: sandbox("exit status 1: error: failed to push some refs\n ! [rejected] 64efa97 -> b (non-fast-forward)"), want: true},
+		{name: "host git error non-fast-forward", err: refused(" ! [rejected] b -> b (non-fast-forward)"), want: true},
+		{name: "sandbox text fetch first", err: sandbox("exit status 1: ! [rejected] main -> main (fetch first)"), want: true},
+		{name: "text mentioning non-fast-forward without a rejected line", err: sandbox("exit status 1: pre-receive hook says non-fast-forward"), want: false},
+		{name: "remote rejected pre-receive hook declined", err: sandbox("exit status 1: ! [remote rejected] main -> main (pre-receive hook declined)"), want: false},
+		{name: "permission denied", err: sandbox("exit status 1: fatal: permission denied"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNonFastForwardPush(tt.err); got != tt.want {
+				t.Errorf("isNonFastForwardPush(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
+	}
+}
