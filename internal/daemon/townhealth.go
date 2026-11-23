@@ -121,6 +121,33 @@ func sweepRecordOf(st tierSweepState, err error) townhealth.SweepRecord {
 	return townhealth.SweepRecord{Known: true, RedCycles: st.RedCycles, LastGreenAt: st.LastGreenAt}
 }
 
+// combineSweepRecords merges the swept rigs' records into the one the health
+// line reports (gt-gm0ek2): the largest RedCycles, the oldest LastGreenAt (zero
+// if any rig has none), and unknown if any rig is unread or the slice is empty.
+func combineSweepRecords(recs []townhealth.SweepRecord) townhealth.SweepRecord {
+	if len(recs) == 0 {
+		return townhealth.SweepRecord{}
+	}
+	var redCycles int
+	var lastGreen time.Time
+	var noGreen bool
+	for _, rec := range recs {
+		if !rec.Known {
+			return townhealth.SweepRecord{}
+		}
+		redCycles = max(redCycles, rec.RedCycles)
+		if rec.LastGreenAt.IsZero() {
+			noGreen = true
+		} else if lastGreen.IsZero() || rec.LastGreenAt.Before(lastGreen) {
+			lastGreen = rec.LastGreenAt
+		}
+	}
+	if noGreen {
+		lastGreen = time.Time{}
+	}
+	return townhealth.SweepRecord{Known: true, RedCycles: redCycles, LastGreenAt: lastGreen}
+}
+
 // execTaxState is what a report said about the exec tax, for the transition
 // log. A nil report, or one from before the probe measured, is unknown.
 func execTaxState(r *townhealth.Report, th townhealth.Thresholds) exectax.State {
