@@ -106,7 +106,7 @@ The Tests section is the rule. om flags: "new parsing and state logic added to a
 Change only what the bead asks for.
 - If an acceptance box and a Constraint cannot both hold, STOP and `gt escalate` naming both; never add an exemption, allowlist row or special case to make both pass (mol-polecat-work item 10 is authoritative).
 - Constraints line limit is a cap, not an estimate: past 1.5 times, push your branch (never `--force`); comment sha and measured/declared lines; `gt done`; await the overseer past twice; no split.
-- om flags: "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency"; "outside the bead's Constraints or stated scope" — say why on the bead.
+- om flags: "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency"; "outside the bead's Constraints"; "outside the stated scope" — say why.
 
 ## 10. Test the call site, not the helper
 
