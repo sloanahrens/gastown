@@ -2257,22 +2257,28 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	}
 }
 
-// The stop records a seat that made no commit of its own: a kept branch level
-// with the rig's target, with a clean checkpoint, is no-work beside the empty
-// rework answer, so the next hand-back can say the seat did nothing at all. A
-// branch with a commit of its own, or finished work already on origin, is not
-// no-work (gt-ahzkhx).
+// The stop records a seat that made no commit of its own: a kept branch whose
+// origin head the target contains is no-work. A head beyond the target, finished
+// work on origin, or a failed read is not (gt-ahzkhx).
 func TestOverrunGuardNoWorkIsDecidedByTheStop(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name     string
-		held     bool // the target already contains the branch head
-		finished bool // finished work is on origin
-		want     bool
+		name        string
+		branchSHA   string          // what origin holds for the kept branch before the push
+		ancestors   map[string]bool // the target contains the branch head
+		checkpoint  bool            // the checkpoint committed the seat's uncommitted work
+		finished    bool            // the read made before the push found finished work on origin
+		ancestorErr bool            // the ancestry read fails
+		want        bool
 	}{
-		{name: "branch level with the target", held: true, want: true},
-		{name: "branch with a commit of its own"},
-		{name: "finished work already on origin", finished: true},
+		{name: "branch level with the target", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, want: true},
+		{name: "a commit of its own beyond the target", branchSHA: "abc1234"},
+		// The checkpoint's commit reaches origin above the target: work.
+		{name: "a checkpoint commit above the target", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, checkpoint: true},
+		// The target advanced to contain the finished head between the two
+		// reads; the ReworkSHA guard keeps the finished answer.
+		{name: "finished work on origin wins over a level read", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, finished: true},
+		{name: "a failed read is not no-work", branchSHA: "abc1234", ancestorErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2283,27 +2289,36 @@ func TestOverrunGuardNoWorkIsDecidedByTheStop(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			var ancestors map[string]bool
-			if tc.held {
-				ancestors = map[string]bool{"abc1234 main222": true}
+			g := &pushStubGit{branch: stopSeat.Branch, sha: tc.branchSHA, ancestors: tc.ancestors,
+				originRefs: []git.RemoteRef{
+					{Hash: tc.branchSHA, Name: "refs/heads/" + stopSeat.Branch},
+					{Hash: "main222", Name: "refs/heads/main"},
+				}}
+			if tc.ancestorErr {
+				g.ancestorErr = errors.New("ancestry unreadable")
 			}
-			d.openGitFn = func(string) daemonGit {
-				return &pushStubGit{branch: stopSeat.Branch, sha: "abc1234", ancestors: ancestors,
-					originRefs: []git.RemoteRef{
-						{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch},
-						{Hash: "main222", Name: "refs/heads/main"},
-					}}
+			d.openGitFn = func(string) daemonGit { return g }
+			if tc.checkpoint {
+				s.checkpoint = func(overrunSeat) error {
+					// The checkpoint commit, which the stop's push then puts on
+					// origin above the target.
+					g.originRefs[0].Hash = "def5678"
+					return nil
+				}
 			}
 			if tc.finished {
 				s.finishedOnOrigin = func(overrunSeat) string { return "abc1234" }
 			}
-			var noWork bool
+			var noWork, handed bool
 			handBack := s.handBack
 			s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
-				noWork = seat.NoWork
+				noWork, handed = seat.NoWork, true
 				return handBack(seat, elapsed, note)
 			}
 			d.runOverrunGuard(s)
+			if !handed {
+				t.Fatal("the seat was not handed back, so NoWork was never observed")
+			}
 			if noWork != tc.want {
 				t.Errorf("handed-back seat NoWork = %t, want %t", noWork, tc.want)
 			}
