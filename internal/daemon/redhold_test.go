@@ -150,6 +150,39 @@ func TestRedHoldEvalSweepTriggers(t *testing.T) {
 	}
 }
 
+func TestRedHoldEvalMainRed(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	held := now.Add(-time.Hour)
+	tests := []struct {
+		name string
+		in   redHoldInputs
+		prev []dispatch.RedHoldReason
+		want []dispatch.RedHoldReason
+	}{
+		{"a red main holds as main-red", redHoldInputs{MainRed: []string{"gastown"}}, nil,
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: gastown"}}},
+		{"an empty list holds nothing", redHoldInputs{MainRed: []string{}}, nil, nil},
+		{"several red rigs name every rig in input order", redHoldInputs{MainRed: []string{"gastown", "other"}}, nil,
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: gastown, other"}}},
+		{"a held main-red keeps its Since and sorts with the other kinds",
+			redHoldInputs{MainRed: []string{"gastown"}, Sweeps: []redHoldSweep{{Rig: "other", RedCycles: 2}}},
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: held}},
+			[]dispatch.RedHoldReason{
+				{Kind: dispatch.RedHoldMainRed, Since: held, Detail: "main red: gastown"},
+				{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "other: 2 red cycles"},
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evalRedHold(tt.in, now, dispatch.RedHoldRecord{Reasons: tt.prev})
+			if !reflect.DeepEqual(got.Reasons, tt.want) {
+				t.Errorf("reasons = %+v, want %+v", got.Reasons, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedHoldEvalDriftTriggers(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
