@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
@@ -23,12 +24,11 @@ const polecatManifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 // (gt-plvm2h).
 const polecatImageFix = "gt town cluster render --polecat-image on the digest the registry answers"
 
-// bdGatewayFix is the repair when the gateway has no ready replica. A pod that
-// fails readiness has no Service endpoint, so nothing reaches the gateway until
-// one is ready; a push goes through the push Service once it exists, and the
-// exec-pod route until then (gt-plvm2h).
-const bdGatewayFix = "gt bd workspace push through the push Service once it exists " +
-	"(bead: bd gateway push Service), else the exec-pod route"
+// bdGatewayFix is the repair when the gateway has no ready replica: a pod that
+// fails readiness has no Service endpoint, so nothing reaches the gateway. A
+// push goes through the push Service when the render includes it, and the
+// exec-pod route otherwise (gt-plvm2h).
+const bdGatewayFix = "gt bd workspace push through the push Service when the render includes it, else the exec-pod route"
 
 // daemonDeployment is the part of the daemon Deployment the image check reads.
 // The polecat image travels only on the pod template's annotations, so the
@@ -126,6 +126,13 @@ func polecatImageCheck(run Runner, registryBase string) Check {
 			if err != nil {
 				return Result{Detail: fmt.Sprintf("read the registry digest: %v", err)}
 			}
+			status, hasStatus := answerStatus(string(out))
+			if !hasStatus {
+				return Result{Detail: "the registry read answered no HTTP status"}
+			}
+			if status < 200 || status > 299 {
+				return Result{Detail: fmt.Sprintf("the registry answered HTTP %d for the manifest", status)}
+			}
 			got, found := headerValue(string(out), "Docker-Content-Digest")
 			if !found {
 				return Result{Detail: "the registry answered no Docker-Content-Digest header"}
@@ -144,6 +151,19 @@ func polecatImageCheck(run Runner, registryBase string) Check {
 	}
 }
 
+// answerStatus reads the HTTP status code from curl -sI's status line;
+// hasStatus is false when that line is not a status line, so a garbled answer
+// is never read as a success.
+func answerStatus(headers string) (status int, hasStatus bool) {
+	line, _, _ := strings.Cut(headers, "\n")
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0, false
+	}
+	status, err := strconv.Atoi(fields[1])
+	return status, err == nil && status >= 100 && status <= 599
+}
+
 // headerValue reads the value of the response header named want from curl -sI's
 // output. The name is matched without case, as HTTP header names are, and a
 // header line with no colon is skipped rather than read as a name.
@@ -158,8 +178,10 @@ func headerValue(headers, want string) (string, bool) {
 }
 
 // bdGatewayCheck reads the bd gateway Deployment's ready replicas and passes at
-// one or more (gt-plvm2h). A town before the gateway cutover has no Deployment,
-// which the check reports as not deployed rather than as a failure.
+// one or more (gt-plvm2h). A town before the gateway cutover has no Deployment;
+// that is not deployed only after the daemon Deployment answers the same read,
+// so an empty answer with no proof the read reached the cluster is a failure
+// (gt-47r2a5). Both are read by name, so the read takes get, never a list.
 func bdGatewayCheck(run Runner) Check {
 	return Check{
 		Name: "8 bd gateway",
@@ -174,6 +196,11 @@ func bdGatewayCheck(run Runner) Check {
 				return Result{Detail: fmt.Sprintf("read deployment %s: %v", k8sdaemon.BdGatewayName, err)}
 			}
 			if strings.TrimSpace(string(out)) == "" {
+				anchor, aerr := run(ctx, "kubectl", "--context", "colima-gt-control",
+					"-n", k8sdaemon.DefaultNamespace, "get", "deployment", k8sdaemon.Name, "-o", "json")
+				if aerr != nil || strings.TrimSpace(string(anchor)) == "" {
+					return Result{Detail: "the deployment read answered nothing"}
+				}
 				return Result{OK: true, Detail: "not deployed"}
 			}
 			var d gatewayDeployment
