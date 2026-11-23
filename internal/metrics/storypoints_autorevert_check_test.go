@@ -308,3 +308,46 @@ func TestStoryPointsAutoRevertFailures(t *testing.T) {
 		}
 	})
 }
+
+// TestStoryPointsAutoRevertIgnoresRefusedLines: refused lines sit in the log beside the
+// adoption, after it or before it, and the check must still judge the newest adopted line
+// and read a refused line as neither an adoption nor a check (gt-f32pgl). The rows hold on
+// the unchanged check, which scans for the events it names.
+func TestStoryPointsAutoRevertIgnoresRefusedLines(t *testing.T) {
+	t.Parallel()
+	const day = 24 * time.Hour
+	good := adoptTestWeights{boxes: 0.25, intercept: 3.5}.JSON()
+	worse := adoptTestWeights{boxes: 0.25, intercept: 2.9}.JSON()
+	at, due := autoRevertCheckAdoptedAt, autoRevertCheckAdoptedAt.Add(7*day)
+	adoption := fmt.Sprintf(`{"event":"adopted","at":%q,"version":"v1","previous":"weights.v1.json"}`+"\n", at.Format(time.RFC3339))
+	refused := `{"event":"refused","at":"` + due.Format(time.RFC3339) + `","reason":"the proposal did worse"}` + "\n"
+	earlier := `{"event":"refused","at":"` + at.Add(-day).Format(time.RFC3339) + `","reason":"the proposal did worse"}` + "\n"
+
+	for _, tc := range []struct{ name, adopted, previous, log, outcome string }{
+		{"a worse adoption with two refused lines after it is reverted and recorded", worse, good, adoption + refused + refused, "reverted"},
+		{"a better adoption with two refused lines after it is kept", good, worse, adoption + refused + refused, "kept"},
+		{"refused lines before the newest adoption do not hide it", worse, good, earlier + earlier + adoption, "reverted"},
+		{"a refused line is not an adoption and not a check", good, "", earlier + earlier, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fix, out, err := runAutoRevertCheck(t, autoRevertCheckCase{adopted: tc.adopted, previous: tc.previous, now: due, log: tc.log})
+			if err != nil {
+				t.Fatalf("check: %v", err)
+			}
+			log := readAt(t, storyPointsAdoptionsPath(fix.town))
+			if tc.outcome == "" {
+				if out != "" || strings.Contains(log, `"checked"`) {
+					t.Errorf("check = %q on log %q; want nothing checked for a log with no adoption", out, log)
+				}
+				return
+			}
+			if !strings.Contains(log, `"outcome":"`+tc.outcome+`"`) {
+				t.Errorf("log = %q, want the check recorded as %s", log, tc.outcome)
+			}
+			if got := readAt(t, adoptRuntimePath(fix.town)); tc.outcome == "reverted" && got != tc.previous {
+				t.Errorf("runtime weights = %q, want the weights it replaced", got)
+			}
+		})
+	}
+}
