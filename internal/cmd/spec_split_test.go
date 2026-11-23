@@ -349,8 +349,8 @@ type splitRefusingWriter struct{}
 
 func (splitRefusingWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
 
-// TestSpecSplitReportsAFailedWrite: a draft that cannot be written to the
-// output is an error, not a silent partial print.
+// TestSpecSplitReportsAFailedWrite: a draft or a failed verdict that cannot be
+// written to the output is an error, not a silent partial print.
 func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
@@ -359,6 +359,12 @@ func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 	err := runSpecSplitOn(splitRefusingWriter{}, "gt-split", true, db.Show, func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck())
 	if err == nil {
 		t.Errorf("runSpecSplitOn() error = nil on a refused write, want an error")
+	}
+	check := splitCheckFor(10, map[string]splitPieceFake{"A": {minutes: 6}, "B": {minutes: 10}})
+	err = runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, check, db)
+	if err == nil || !strings.Contains(err.Error(), "cannot report the failed checks") {
+		t.Errorf("runSpecSplitApplyOn() error = %v on a refused write, want the report failure", err)
 	}
 }
 
