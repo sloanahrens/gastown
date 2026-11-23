@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -66,5 +67,37 @@ func TestCombineSweepRecordsMerges(t *testing.T) {
 				t.Errorf("combineSweepRecords(%+v) = %+v, want %+v", tc.recs, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHealthSourceSweepStateReader pins readSweepState: the field answers when
+// set, its error included and the town unread, and the town root otherwise (gt-1q2qhb).
+func TestHealthSourceSweepStateReader(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	townRec := tierSweepState{LastSHA: "from the town"}
+	if err := writeTierSweepState(town, "gastown", townRec); err != nil {
+		t.Fatalf("writing the town record: %v", err)
+	}
+	fieldErr := errors.New("the field's own failure")
+	field := func(rig string) (tierSweepState, error) { return tierSweepState{LastSHA: "swept " + rig}, nil }
+	cases := []struct {
+		name    string
+		field   func(rig string) (tierSweepState, error)
+		want    tierSweepState
+		wantErr error
+	}{
+		{"the field's state answers", field, tierSweepState{LastSHA: "swept gastown"}, nil},
+		{"the field's error answers", func(string) (tierSweepState, error) { return tierSweepState{}, fieldErr }, tierSweepState{}, fieldErr},
+		{"no field reads the town's record", nil, townRec, nil},
+	}
+	for _, tc := range cases {
+		s := &healthSources{d: &Daemon{config: &Config{TownRoot: town}}, sweepState: tc.field}
+		got, err := s.readSweepState("gastown")
+		if !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: error = %v, want %v", tc.name, err, tc.wantErr)
+		} else if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: readSweepState = %+v, want %+v", tc.name, got, tc.want)
+		}
 	}
 }
