@@ -178,6 +178,25 @@ func TestRunRefusesWhatThePreflightRefuses(t *testing.T) {
 	}
 }
 
+// TestImagePreflightShaHelpNamesEveryImage holds the -sha help: the job builds
+// every image at the green commit, so the flag says so and does not claim two.
+// -h returns from fs.Parse before the command reads a tool or opens a socket,
+// so the lookup, the version read and the registry are nil and unused.
+func TestImagePreflightShaHelpNamesEveryImage(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr strings.Builder
+
+	if code := run([]string{"-h"}, &stdout, &stderr, nil, nil, nil); code != 2 {
+		t.Fatalf("run with -h exited %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "every image") {
+		t.Errorf("the -sha help is %q, want it to say every image", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "both images") {
+		t.Errorf("the -sha help is %q, want it to stop saying both images", stderr.String())
+	}
+}
+
 // TestRunRefusesACommandLineWithoutTheEnvFile holds the flag rule: the path
 // the later steps read is required, and the command says so.
 func TestRunRefusesACommandLineWithoutTheEnvFile(t *testing.T) {
