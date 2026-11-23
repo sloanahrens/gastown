@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -431,17 +433,8 @@ func (d *Daemon) loadTownStateRaised() {
 // the sorted path list. A failed write is logged and does not fail the tick:
 // the next change writes the set again.
 func (d *Daemon) recordTownStateRaised() {
-	paths := make([]string, 0, len(d.townStateRaised))
-	for path := range d.townStateRaised {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	file := townStateRaisedPath(d.config.TownRoot)
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		d.logger.Printf("town_state_backup: recording the refused paths: %v", err)
-		return
-	}
-	if err := atomicfile.WriteJSON(file, paths); err != nil {
+	paths := slices.Sorted(maps.Keys(d.townStateRaised))
+	if err := atomicfile.EnsureDirAndWriteJSON(townStateRaisedPath(d.config.TownRoot), paths); err != nil {
 		d.logger.Printf("town_state_backup: recording the refused paths: %v", err)
 	}
 }
