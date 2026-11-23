@@ -346,7 +346,7 @@ func TestSpecSplitApplyNamesAFailedWrite(t *testing.T) {
 
 			var out bytes.Buffer
 			err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
-				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), &failing)
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), &failing, nil)
 			if err == nil {
 				t.Fatalf("runSpecSplitApplyOn() error = nil, want the failed write reported")
 			}
@@ -367,7 +367,7 @@ func TestSpecSplitApplyReportsAFailedOutput(t *testing.T) {
 	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
 
 	err := runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
-		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db)
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot report the split of gt-split") {
 		t.Errorf("runSpecSplitApplyOn() error = %v on a refused report, want the report failure", err)
 	}
