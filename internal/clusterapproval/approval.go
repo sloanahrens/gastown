@@ -74,10 +74,10 @@ type Record struct {
 }
 
 // ParseRecord decodes the approval record the broker writes and refuses it
-// unless every key is exact, the cluster, plan hash, act and proposal id are
-// present and valid, both times are in UTC and the window is longer than zero
-// and no longer than MaxValidity. It reads no clock: the caller decides
-// whether the window covers its moment.
+// unless every key is exact, the cluster, plan hash and proposal id are valid,
+// the act is the one known act, both times are in UTC and the window is longer
+// than zero and no longer than MaxValidity. It reads no clock: the caller
+// decides whether the window covers its moment.
 func ParseRecord(data []byte) (Record, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := readDelim(dec, '{'); err != nil {
@@ -121,6 +121,12 @@ func ParseRecord(data []byte) (Record, error) {
 	}
 	if act == "" {
 		return Record{}, errors.New("clusterapproval: the record has no act")
+	}
+	// The act is compared to the only act the system knows and refused with a
+	// text that does not echo it, so free text from a record never reaches an
+	// error (gt-s4w952).
+	if act != ActApplyPlan {
+		return Record{}, errors.New("clusterapproval: the record's act is not a known act")
 	}
 	cluster, err := recordString(values, "cluster")
 	if err != nil {
