@@ -37,7 +37,10 @@ func (h *host) CommitsLastDay(ctx context.Context, townRoot string) ([]DBCommits
 		return nil, nil
 	}
 
-	dsn := fmt.Sprintf("%s@tcp(%s)/", config.UserDSN(), config.HostPort())
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return nil, err
+	}
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening mysql connection: %w", err)
