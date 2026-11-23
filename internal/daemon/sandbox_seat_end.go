@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/seatship"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
@@ -93,6 +94,12 @@ type sandboxSeatEnd struct {
 	// seat's last submission: the battery reads the transcript out of the
 	// host worktree this step removes (gt-381oj).
 	RulesPending bool
+	// SeatRecord is the newest SEAT-END comment the seat shipped on its bead,
+	// when HasSeatRecord is set. The end stores it and skips the outbox and
+	// transcript pulls, but only when it is this seat's: a pool seat reuses
+	// rig, polecat and bead, so the start decides (recordOfSeat, gt-g73e2q).
+	SeatRecord    seatship.Payload
+	HasSeatRecord bool
 }
 
 // rulesPendingReason is the keep reason of a seat whose only outstanding fact
@@ -262,12 +269,36 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			h.clearPendingSeatEnd(rig, name)
 			return nil
 		}
+		// A seat that shipped a SEAT-END comment has its usage and outbox there:
+		// the record is stored before the outbox is applied and both pulls are
+		// skipped. The comment names its seat only by rig, polecat and bead,
+		// which a pool seat reuses for its next task, so it counts only when its
+		// usage ends after this seat started; a comment from a predecessor, or a
+		// bead whose comments cannot be read, takes the pull (gt-g73e2q). The
+		// start is read here, ahead of every sandbox delete below, before the
+		// record it comes from can go.
+		start, startErr := h.seatStartedAt(rig, name, landing.Submitted)
+		hasRecord := end.HasSeatRecord && recordOfSeat(end.SeatRecord, start)
+		if end.HasSeatRecord && !hasRecord {
+			log("its SEAT-END comment does not carry usage from this seat, so the pull runs")
+		}
+		var recordPath string
+		if hasRecord {
+			path, storeErr := storeSeatEndRecord(h.d.ctxOrBackground(), h.seatUsage.store, h.town(), end.SeatRecord)
+			if storeErr != nil {
+				// The record is the seat's only copy of what it shipped.
+				kept = "its SEAT-END record is not stored: " + storeErr.Error()
+				h.clearPendingSeatEnd(rig, name)
+				return nil
+			}
+			recordPath = path
+		}
 		// Everything the seat wrote leaves the sandbox before the sandbox does:
 		// its outbox here, and its transcripts in the delete below. Both calls
 		// this pass can make to delete a sandbox follow this step, so a copy that
 		// fails keeps the seat and leaves the only copy of the seat's words where
 		// it is (gt-c6tofd).
-		if !end.SandboxGone {
+		if !hasRecord && !end.SandboxGone {
 			if why := h.copySeatOutbox(rig, name, end.Gateway); why != "" {
 				kept = why
 				h.clearPendingSeatEnd(rig, name)
@@ -286,17 +317,12 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// A sandbox the gateway still holds is ended here, at the landing, once
 		// every other fact releases the seat (gt-0vb2fy). The probe takes that
 		// sandbox as gone, so a seat kept for any other reason keeps it for the
-		// patrol, as before. The start is read before the held sandbox's record
-		// is removed, while the record still holds it (gt-6qc3nw.12).
+		// patrol, as before. The start was read above, while the held sandbox's
+		// record still held it (gt-6qc3nw.12).
 		probe := end
 		probe.SandboxGone = true
 		held := !end.SandboxGone && !end.SandboxErrored && probe.keepReason() == ""
-		var (
-			start    time.Time
-			startErr error
-		)
 		if held {
-			start, startErr = h.seatStartedAt(rig, name, landing.Submitted)
 			if why := h.endHeldSandboxAtLanding(rig, name); why != "" {
 				kept = why
 				h.clearPendingSeatEnd(rig, name)
@@ -318,14 +344,6 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			}
 			return nil
 		}
-		// The seat's start is read before the errored sandbox below is deleted,
-		// since its record is the only place the start is kept (gt-6qc3nw.12).
-		// A record the teardown removed earlier leaves its start on the ledger
-		// (gt-kovllv). A held sandbox's start was read above, before its record
-		// went.
-		if !held {
-			start, startErr = h.seatStartedAt(rig, name, landing.Submitted)
-		}
 		// Every guard has let the seat go, so its errored sandbox holds no work
 		// the landing does not already have. It is deleted before the host
 		// directories, so the seat name is free once they are gone (gt-jhoi1).
@@ -337,8 +355,15 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			}
 		}
 		// The usage record is written before the transcripts' worktree goes. A
-		// failure is logged and the removal goes on (gt-6qc3nw.12).
-		written, incomplete, usageErr := h.writeSeatUsage(rig, name, landing, start, startErr)
+		// failure is logged and the removal goes on (gt-6qc3nw.12); a stored
+		// SEAT-END record is already its usage record.
+		var written string
+		var incomplete, usageErr error
+		if hasRecord {
+			written = recordPath
+		} else {
+			written, incomplete, usageErr = h.writeSeatUsage(rig, name, landing, start, startErr)
+		}
 		switch {
 		case usageErr != nil && written == "":
 			log("its usage record is not written: %v", usageErr)
@@ -548,6 +573,15 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 	}
 	end.Retired = !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop
 	end.RulesPending = h.rulesPending(rig, name, landing.Submitted)
+	// The record is read here so both seat-end entry points, the landing's
+	// startSandboxSeatEnd and the patrol's, reach it through this measurement.
+	// A bead whose comments cannot be read takes the pull, the behavior
+	// before the record, and says so (gt-g73e2q).
+	if seatRecord, found, err := h.seatEndRecord(rig, name, landing.BeadID); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: its SEAT-END comment cannot be read, so the pull runs: %v", rig, name, err)
+	} else if found {
+		end.SeatRecord, end.HasSeatRecord = seatRecord, true
+	}
 	return end, ""
 }
 
