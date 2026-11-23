@@ -516,6 +516,46 @@ func TestRedHoldStepUnknownKeepsPreviousState(t *testing.T) {
 	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
 }
 
+// TestRedHoldStepMainRed pins what the main-red read feeds the evaluator: a red
+// rig is named, a nil reader contributes nothing, and an unreadable read keeps
+// the file, logging once across heartbeats.
+func TestRedHoldStepMainRed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	read := func(string) (tierSweepState, error) { return tierSweepState{}, nil }
+	quiet := func(string, ...any) {}
+	src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: read, MainRed: func(rig string) (bool, error) { return rig == "beta", nil }, Now: func() time.Time { return now }}
+	require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, quiet))
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: beta"}}, rec.Reasons, "a red main for one of two rigs names that rig")
+
+	green := t.TempDir()
+	src.MainRed = nil
+	require.NoError(t, runRedHold(green, src, map[string]bool{}, quiet))
+	require.NoFileExists(t, dispatch.RedHoldPath(green), "a nil reader contributes nothing")
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	unreadLog := map[string]bool{}
+	boom := func(string) (bool, error) { return false, errors.New("reading main state") }
+	src = redHoldSources{Rigs: []string{"gastown"}, Read: read, MainRed: boom}
+	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	rec, err = dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, redHoldSentinel, rec, "an unreadable read keeps the file")
+	line := "red hold: main-red state unreadable; keeping the previous state"
+	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
+	src.MainRed = func(string) (bool, error) { return false, nil }
+	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "the recovery evaluates again")
+	src.MainRed = boom
+	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
+}
+
 func TestRedHoldStepRefusals(t *testing.T) {
 	t.Parallel()
 	red := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil }}
