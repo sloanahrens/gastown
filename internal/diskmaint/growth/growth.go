@@ -60,6 +60,14 @@ func validSample(s Sample) bool {
 // Append writes s as one JSON line to path and trims the file to its newest
 // keep lines, DefaultKeep when keep is not positive. The write goes through a
 // temp file and a rename, so a crash leaves the old ring whole.
+//
+// Append reads the ring and rewrites it whole and takes no lock, so one writer
+// at a time must own path: the daemon's growth lock (diskGrowthState.mu in
+// internal/daemon) is that writer, and two Appends racing on one path can lose
+// a sample. A line over maxLineBytes in the ring being rewritten is discarded
+// rather than carried forward; ReadCount counts such a line as corrupt until
+// an Append removes it. Append refuses an empty path with errEmptyPath and a
+// sample Read would call corrupt with errInvalidSample.
 func Append(path string, s Sample, keep int) error {
 	if path == "" {
 		return errEmptyPath
@@ -96,7 +104,9 @@ func Append(path string, s Sample, keep int) error {
 
 // Read returns the samples stored at path, in line order. A line that does not
 // parse as a Sample is skipped and a file that does not exist yet holds no
-// samples; ReadCount also reports how many lines were skipped.
+// samples; ReadCount also reports how many lines were skipped. Read errors on
+// an empty path and on a ring it cannot open or read, so a ring the reader
+// cannot see never passes as one with no samples.
 func Read(path string) ([]Sample, error) {
 	samples, _, err := ReadCount(path)
 	return samples, err
