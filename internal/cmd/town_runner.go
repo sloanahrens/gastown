@@ -45,6 +45,12 @@ type rollApplier interface {
 	Diff(ctx context.Context) ([]string, error)
 }
 
+// rolloutBounder is an applier that holds the rollout bound its wait enforces,
+// so the step text prints that same bound instead of a second copy.
+type rolloutBounder interface {
+	rolloutBound() time.Duration
+}
+
 // runnerTarget is the runner as runnerroll.Run's target.
 type runnerTarget struct {
 	applier rollApplier
@@ -97,6 +103,10 @@ type runnerApplier struct {
 	applied *appliedRunnerDeployment
 	out     io.Writer
 }
+
+// rolloutBound is the rollout wait WaitReady enforces. The roll prints it in
+// step 4 from here, so the step text and the wait cannot name different bounds.
+func (a runnerApplier) rolloutBound() time.Duration { return a.rolloutWait }
 
 // Wired reports the seam the applier is missing. A roll without one refuses
 // before it takes the landing hold rather than failing halfway through.
@@ -278,9 +288,22 @@ type runnerRollDeps struct {
 	apply       rollApplier
 	landingWait time.Duration
 	runsWait    time.Duration
+	// rolloutWait is the bound for a target that holds none of its own; a
+	// runnerApplier's own bound wins in rolloutBound.
 	rolloutWait time.Duration
 	dryRun      bool
 	out         io.Writer
+}
+
+// rolloutBound is the rollout wait the roll prints in step 4 and hands to
+// runnerroll: the applier's own bound where it has one, so the printed text and
+// the wait cannot disagree. A target with no bound of its own uses the deps'
+// value, and checkRoll refuses a zero bound before any step prints.
+func (d runnerRollDeps) rolloutBound() time.Duration {
+	if b, ok := d.apply.(rolloutBounder); ok {
+		return b.rolloutBound()
+	}
+	return d.rolloutWait
 }
 
 var townRunnerCmd = &cobra.Command{
@@ -296,12 +319,15 @@ var townRunnerRollCmd = &cobra.Command{
 prints the steps, their bounds and their order, then the runner drift compare's
 lines against the live cluster, and takes no hold and writes nothing.
 
-The hold is released on every exit path, including SIGINT and SIGTERM. A failed
-release reads the hold again and prints what to do by whose hold it is now: a
-removal command only while the file is this roll's. A wait that times out, a
-manifest that cannot be built, an apply that fails and a rollout that does not
-become ready each exit non-zero and release the hold. The Deployment's Recreate
-strategy rolls the pod; this never deletes it.
+Once the hold store and the two waits are wired, a roll releases the hold on
+every exit path, including SIGINT and SIGTERM; until then a real roll refuses
+before it takes the hold. A second signal restores the default action and can end
+the process before the release finishes, which leaves the hold for the operator
+to clear. A failed release reads the hold again and prints what to do by whose
+hold it is now: a removal command only while the file is this roll's. A wait
+that times out, a manifest that cannot be built, an apply that fails and a
+rollout that does not become ready each exit non-zero and release the hold. The
+Deployment's Recreate strategy rolls the pod; this never deletes it.
 
 Examples:
   gt town runner roll --dry-run
@@ -375,7 +401,6 @@ func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait, ro
 		},
 		landingWait: landingWait,
 		runsWait:    runsWait,
-		rolloutWait: rolloutWait,
 		dryRun:      dryRun,
 		out:         out,
 	}
@@ -407,7 +432,7 @@ func (d runnerRollDeps) step(n int) string {
 	case 3:
 		return fmt.Sprintf("wait for the gate and post-land runs to finish (bound %s)", d.runsWait)
 	case 4:
-		return fmt.Sprintf("apply the manifests, then wait for the rollout (bound %s) and the Deployment's readiness condition", d.rolloutWait)
+		return fmt.Sprintf("apply the manifests, then wait for the rollout (bound %s) and the Deployment's readiness condition", d.rolloutBound())
 	default:
 		return "release the landing hold"
 	}
@@ -451,7 +476,7 @@ func runTownRunnerRoll(d runnerRollDeps) error {
 	opts := runnerroll.RollOptions{
 		LandingWait: d.landingWait,
 		RunsWait:    d.runsWait,
-		RolloutWait: d.rolloutWait,
+		RolloutWait: d.rolloutBound(),
 		DryRun:      d.dryRun,
 		Step:        d.step,
 	}
