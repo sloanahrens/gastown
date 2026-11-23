@@ -36,6 +36,13 @@ const adviceFailureText = "the Goal or Constraints mentions %q but no acceptance
 // adviceLintBoxText is the sentence Advice returns for a box a seat cannot tick.
 const adviceLintBoxText = "an acceptance box demands that lint passes: a seat cannot run lint and the landing gate does; drop the box or say go vet"
 
+// adviceDeclaredLinesText is the sentence Advice returns when the Size section's
+// Change line declares fewer added lines than beads of the same estimate
+// usually land with. The gate refuses past twice the declared number, which a
+// finished branch cannot act on, so the advice names the declaration that keeps
+// under the gate (gt-tkche7).
+const adviceDeclaredLinesText = "the Change line declares %d added lines, but beads estimated at %.1f minutes landed with a median of %d (p75 %d, p90 %d) and the gate refuses past twice the declared number: declare at least %d, or split"
+
 // adviceLintPassRe matches a lint word and a pass word within 40 characters.
 var adviceLintPassRe = regexp.MustCompile(`(?i)\blint\b.{0,40}\bpass(?:es|ed)?\b|\bpass(?:es|ed)?\b.{0,40}\blint\b`)
 
@@ -97,6 +104,7 @@ func Advice(s Spec) []string {
 	if adviceDemandsLint(s, sections) {
 		advice = append(advice, adviceLintBoxText)
 	}
+	advice = append(advice, declaredLinesAdvice(s, sections)...)
 	advice = append(advice, otherRigAdvice(s, sections)...)
 	for _, label := range ExcludedLabels() {
 		if s.HasLabel(label) {
@@ -126,6 +134,38 @@ func adviceDemandsLint(s Spec, sections map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// spMinutes reads the bead's sp-minutes estimate; found is false when no label
+// reads, since the landed-lines table cannot place an unreadable estimate.
+func spMinutes(labels []string) (float64, bool) {
+	_, minutes, found, err := storyPointsMinutes(labels)
+	if err != nil || !found {
+		return 0, false
+	}
+	return minutes, true
+}
+
+// declaredLinesAdvice is the declared-lines advisory (gt-tkche7): a Change line
+// below what its estimate band advises (LinesBand.Advise) gets one line naming
+// the band's median, p75 and p90 and the declaration that keeps under the gate.
+// A bead with no readable estimate, no parseable Change line, or minutes
+// outside the table gets none rather than a guessed number.
+func declaredLinesAdvice(s Spec, sections map[string]string) []string {
+	minutes, ok := spMinutes(s.Labels)
+	if !ok {
+		return nil
+	}
+	budget, found, err := ParseChangeBudget(sections["size"])
+	if err != nil || !found {
+		return nil
+	}
+	band, ok := LandedLines(minutes)
+	if !ok || budget.Lines >= band.Advise() {
+		return nil
+	}
+	return []string{fmt.Sprintf(adviceDeclaredLinesText,
+		budget.Lines, minutes, band.Median, band.P75, band.P90, band.Advise())}
 }
 
 // otherRigPhrase matches a line that places a read in a rig's repository: "in
