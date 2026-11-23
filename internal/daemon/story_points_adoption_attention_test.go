@@ -73,6 +73,45 @@ func TestStoryPointsAdoptionAttentionRecords(t *testing.T) {
 	}
 }
 
+// TestStoryPointsAdoptionAttentionSkipsOtherEvents: the reader raises an item
+// only for an adopted line and for a checked line whose outcome is reverted. A
+// refused line (the weekly run writes one when it rejects the week's proposal,
+// gt-7typlt), a kept check and an event the reader does not know raise nothing,
+// so a week in which the weights did not change raises no adoption.
+func TestStoryPointsAdoptionAttentionSkipsOtherEvents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, log, item, want string
+	}{
+		{
+			name: "an adopted line, a refused line, a kept check and an unknown event",
+			log: `{"event":"adopted","at":"2026-11-20T12:00:00Z","version":"v3"}` + "\n" +
+				`{"event":"refused","at":"2026-11-21T12:00:00Z","reason":"the rank rule rejected the week"}` + "\n" +
+				`{"event":"checked","at":"2026-11-21T12:00:00Z","adopted_at":"2026-11-20T12:00:00Z","outcome":"kept"}` + "\n" +
+				`{"event":"reviewed","at":"2026-11-21T12:00:00Z","version":"v9"}`,
+			item: "story-points:adopted:",
+			want: "version v3",
+		},
+		{
+			name: "a reverted check",
+			log:  `{"event":"checked","at":"2026-11-21T12:00:00Z","adopted_at":"2026-11-13T12:00:00Z","outcome":"reverted"}`,
+			item: "story-points:reverted:",
+			want: "the adoption at 2026-11-13T12:00:00Z",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := adoptionLog(t, tc.log+"\n")
+			items := f.collect(t, f.src.collectStoryPointsAdoptions)
+			if len(items) != 1 || items[0].Kind != attention.KindStoryPoints ||
+				!strings.HasPrefix(items[0].Key, tc.item) || !strings.Contains(items[0].Summary, tc.want) {
+				t.Fatalf("raised %+v, want exactly one %q item naming %q", items, tc.item, tc.want)
+			}
+		})
+	}
+}
+
 // TestStoryPointsAdoptionAttentionUnreadable: a missing log is no adoption and
 // raises nothing, while a log that cannot be read or does not parse raises one
 // unreadable item and no adopted or reverted item beside it.
