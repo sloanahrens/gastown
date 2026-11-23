@@ -10,11 +10,10 @@ import (
 	"github.com/steveyegge/gastown/internal/usagerecord"
 )
 
-// WriteUsageRecord appends row to the fake's usage records. As bd's sample add
-// does, it refuses a row beads.ValidateUsageRecordRow refuses, and it stores
-// BuiltAt in UTC at second precision and Start and End in UTC. The row is a
-// copy, so changing row afterwards does not change what a read returns.
-func (f *Fake) WriteUsageRecord(_ context.Context, row beads.UsageRecordRow) error {
+// CheckUsageRecordRow refuses what WriteUsageRecord refuses before it stores a
+// row, and stores nothing: a dry run counts a row this accepts as one an apply
+// writes.
+func (f *Fake) CheckUsageRecordRow(_ context.Context, row beads.UsageRecordRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failure("sample add"); err != nil {
@@ -23,6 +22,19 @@ func (f *Fake) WriteUsageRecord(_ context.Context, row beads.UsageRecordRow) err
 	if err := beads.ValidateUsageRecordRow(row); err != nil {
 		return fmt.Errorf("sample add: %w", err)
 	}
+	return nil
+}
+
+// WriteUsageRecord appends row to the fake's usage records. As bd's sample add
+// does, it refuses what CheckUsageRecordRow refuses, and it stores BuiltAt in
+// UTC at second precision and Start and End in UTC. The row is a copy, so
+// changing row afterwards does not change what a read returns.
+func (f *Fake) WriteUsageRecord(ctx context.Context, row beads.UsageRecordRow) error {
+	if err := f.CheckUsageRecordRow(ctx, row); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	row.BuiltAt = row.BuiltAt.UTC().Truncate(time.Second)
 	row.Record.Start = row.Record.Start.UTC()
 	row.Record.End = row.Record.End.UTC()
