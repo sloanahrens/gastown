@@ -4914,17 +4914,22 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
 }
 
-// rosterRigNames names the rigs the seat picture reads: every known rig when
-// the dead-hooked walk reads them, which needs the pool to own seats and a town
-// to read. Those are the rigs whose batches can be read before their first seat
-// is asked about; with no such walk the read reaches only the live sessions'
-// rigs, one seat at a time, and reading idle rigs here would spend bd calls the
-// seat read would not have made (gt-0mzpm).
+// rosterRigNames names the rigs the seat picture reads: the known rigs whose
+// polecat directory holds a polecat, when the dead-hooked walk reads them, which
+// needs the pool to own seats and a town to read. Those are the rigs whose
+// batches can be read before their first seat is asked about; a rig with no
+// polecat directory holds no seat the walk can find, so reading one spends bd
+// calls the seat read would not have made (gt-0mzpm). An unlistable rig is kept
+// and its error returned with the names (gt-khp9zg, gt-vg9vyi).
 func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error) {
 	if townRoot == "" || !poolOwnsSeats(pool) {
 		return nil, nil
 	}
-	return knownRigNames(townRoot)
+	rigs, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return rigsWithPolecatDirs(townRoot, rigs)
 }
 
 // rigsWithPolecatDirs returns the names in rigs whose rig holds a polecat
