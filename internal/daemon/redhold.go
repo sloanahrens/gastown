@@ -36,6 +36,15 @@ type redHoldInputs struct {
 	// OldestGreenAt is the oldest LastGreenAt across the swept rigs; the zero
 	// time means unknown and triggers nothing.
 	OldestGreenAt time.Time
+	// UpdateOutcome is the last update run's outcome; "", "ok" and "running"
+	// are healthy and anything else holds as roll-failed.
+	UpdateOutcome string
+	// UpdateTarget is the commit the update run rolled to.
+	UpdateTarget string
+	// ImagesRetries is the failed images builds recorded for one green sha.
+	ImagesRetries int
+	// PairStuck is the green shas whose image pair never became ready.
+	PairStuck []string
 }
 
 // redHoldSweepOf converts one rig's sweep record into the evaluator's input; ok
@@ -92,6 +101,9 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 // sweep-no-result when unread, sweep-red otherwise, with Detail naming every rig.
 // Waiting at or above redHoldBehind is behind-main; an OldestGreenAt older than
 // redHoldGreenStale is green-stale, and the zero time is unknown and adds nothing.
+// An UpdateOutcome other than "", "ok" or "running" is roll-failed; ImagesRetries
+// at or above tierSweepImagesRetryMax is images-failed; any PairStuck sha is
+// pair-stuck.
 func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) dispatch.RedHoldRecord {
 	details := map[string][]string{}
 	for _, s := range in.Sweeps {
@@ -110,6 +122,19 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 	if age := now.Sub(in.OldestGreenAt); !in.OldestGreenAt.IsZero() && age > redHoldGreenStale {
 		details[dispatch.RedHoldGreenStale] = []string{fmt.Sprintf("no green sweep for %dh", int(age.Hours()))}
 	}
+	if o := in.UpdateOutcome; o != "" && o != "ok" && o != "running" {
+		details[dispatch.RedHoldRollFailed] = []string{fmt.Sprintf("update %s at %s", o, redHoldShort(in.UpdateTarget))}
+	}
+	if in.ImagesRetries >= tierSweepImagesRetryMax {
+		details[dispatch.RedHoldImagesFailed] = []string{fmt.Sprintf("images build failed %d times", in.ImagesRetries)}
+	}
+	if len(in.PairStuck) > 0 {
+		shas := make([]string, len(in.PairStuck))
+		for i, sha := range in.PairStuck {
+			shas[i] = redHoldShort(sha)
+		}
+		details[dispatch.RedHoldPairStuck] = []string{"stuck pair: " + strings.Join(shas, ", ")}
+	}
 	var reasons []dispatch.RedHoldReason
 	for _, kind := range slices.Sorted(maps.Keys(details)) {
 		since := now
@@ -122,6 +147,15 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 		reasons = append(reasons, dispatch.RedHoldReason{Kind: kind, Since: since, Detail: strings.Join(details[kind], ", ")})
 	}
 	return dispatch.RedHoldRecord{Reasons: reasons}
+}
+
+// redHoldShort returns the first 12 characters of a commit id, or the whole id
+// when it is shorter.
+func redHoldShort(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the

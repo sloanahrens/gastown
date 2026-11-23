@@ -151,6 +151,51 @@ func TestRedHoldEvalDriftTriggers(t *testing.T) {
 	}
 }
 
+func TestRedHoldEvalRollTriggers(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	held := now.Add(-time.Hour)
+	target := "0123456789abcdef0123456789abcdef"
+	roll := func(outcome string) []dispatch.RedHoldReason {
+		return []dispatch.RedHoldReason{{Kind: dispatch.RedHoldRollFailed, Since: now, Detail: "update " + outcome + " at 0123456789ab"}}
+	}
+	tests := []struct {
+		name string
+		in   redHoldInputs
+		prev []dispatch.RedHoldReason
+		want []dispatch.RedHoldReason
+	}{
+		{"an update that failed holds", redHoldInputs{UpdateOutcome: "failed", UpdateTarget: target}, nil, roll("failed")},
+		{"an update that came back partial holds", redHoldInputs{UpdateOutcome: "partial", UpdateTarget: target}, nil, roll("partial")},
+		{"an aborted update holds", redHoldInputs{UpdateOutcome: "aborted", UpdateTarget: target}, nil, roll("aborted")},
+		{"an interrupted update holds", redHoldInputs{UpdateOutcome: "interrupted", UpdateTarget: target}, nil, roll("interrupted")},
+		{"an update still running holds nothing", redHoldInputs{UpdateOutcome: "running", UpdateTarget: target}, nil, nil},
+		{"an update that finished ok holds nothing", redHoldInputs{UpdateOutcome: "ok", UpdateTarget: target}, nil, nil},
+		{"no update outcome holds nothing", redHoldInputs{}, nil, nil},
+		{"images at the retry cap hold", redHoldInputs{ImagesRetries: 3}, nil,
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldImagesFailed, Since: now, Detail: "images build failed 3 times"}}},
+		{"images one retry under the cap hold nothing", redHoldInputs{ImagesRetries: 2}, nil, nil},
+		{"a stuck pair names each sha cut to 12 characters", redHoldInputs{PairStuck: []string{"abcdef1234567890deadbeef", "abc"}}, nil,
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: abcdef123456, abc"}}},
+		{"the roll reasons sort together and a held one keeps its Since",
+			redHoldInputs{UpdateOutcome: "failed", UpdateTarget: target, ImagesRetries: 4, PairStuck: []string{target}},
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldRollFailed, Since: held}},
+			[]dispatch.RedHoldReason{
+				{Kind: dispatch.RedHoldImagesFailed, Since: now, Detail: "images build failed 4 times"},
+				{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: 0123456789ab"},
+				{Kind: dispatch.RedHoldRollFailed, Since: held, Detail: "update failed at 0123456789ab"},
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evalRedHold(tt.in, now, dispatch.RedHoldRecord{Reasons: tt.prev})
+			if !reflect.DeepEqual(got.Reasons, tt.want) {
+				t.Errorf("reasons = %+v, want %+v", got.Reasons, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedHoldChangeLine(t *testing.T) {
 	t.Parallel()
 	at := time.Unix(1_700_000_000, 0).UTC()
