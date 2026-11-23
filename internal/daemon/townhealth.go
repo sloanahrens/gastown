@@ -111,6 +111,34 @@ type healthSources struct {
 	// sweepState reads one rig's tier sweep record; nil reads the town root's
 	// (gt-1q2qhb).
 	sweepState func(rig string) (tierSweepState, error)
+	// sweepRigs lists the rigs a tier sweep cycle covers; nil reads the
+	// daemon's patrol setting and known rigs (gt-zme5gu).
+	sweepRigs func() []string
+}
+
+// sweptRigs is the rigs the tier sweep covers: the field when set, otherwise
+// the daemon's patrol setting. A stopped patrol, or no daemon, sweeps nothing.
+func (s *healthSources) sweptRigs() []string {
+	if s.sweepRigs != nil {
+		return s.sweepRigs()
+	}
+	if s.d == nil || !s.d.isPatrolActive("tier_sweep") {
+		return nil
+	}
+	return tierSweepRigs(s.d.patrol(), s.d.getKnownRigs())
+}
+
+// Sweep reports the town-wide tier sweep as one record over every swept rig
+// (gt-zme5gu): the records merge, so one red rig reddens the town and one
+// unread rig makes it unknown, which is never green. No swept rig is unknown
+// too, not a known zero.
+func (s *healthSources) Sweep() (townhealth.SweepRecord, error) {
+	rigs := s.sweptRigs()
+	recs := make([]townhealth.SweepRecord, 0, len(rigs))
+	for _, rig := range rigs {
+		recs = append(recs, sweepRecordOf(s.readSweepState(rig)))
+	}
+	return combineSweepRecords(recs), nil
 }
 
 // readSweepState reads one rig's tier sweep record through the field when one

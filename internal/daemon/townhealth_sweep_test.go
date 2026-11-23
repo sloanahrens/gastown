@@ -70,6 +70,55 @@ func TestCombineSweepRecordsMerges(t *testing.T) {
 	}
 }
 
+// TestHealthSourceSweep pins Sweep (gt-zme5gu): the swept rigs merge to the
+// largest red cycle count and oldest green time, and an unread rig, a stopped
+// patrol or no daemon at all is unknown, never a known zero.
+func TestHealthSourceSweep(t *testing.T) {
+	t.Parallel()
+	older := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 11, 22, 20, 0, 0, 0, time.UTC)
+	readErr := errors.New("the record cannot be read")
+	cases := []struct {
+		name string
+		src  *healthSources
+		want townhealth.SweepRecord
+	}{
+		{"two rigs merge", &healthSources{
+			sweepRigs: func() []string { return []string{"gastown", "beads"} },
+			sweepState: func(rig string) (tierSweepState, error) {
+				if rig == "beads" {
+					return tierSweepState{RedCycles: 3, LastGreenAt: older}, nil
+				}
+				return tierSweepState{RedCycles: 1, LastGreenAt: newer}, nil
+			},
+		}, townhealth.SweepRecord{Known: true, RedCycles: 3, LastGreenAt: older}},
+		{"an unread rig is unknown", &healthSources{
+			sweepRigs: func() []string { return []string{"gastown", "beads"} },
+			sweepState: func(rig string) (tierSweepState, error) {
+				if rig == "beads" {
+					return tierSweepState{}, readErr
+				}
+				return tierSweepState{LastGreenAt: newer}, nil
+			},
+		}, townhealth.SweepRecord{}},
+		{"no swept rig", &healthSources{sweepRigs: func() []string { return nil }}, townhealth.SweepRecord{}},
+		{"a stopped patrol", &healthSources{d: &Daemon{disabledPatrols: map[string]bool{"tier_sweep": true}}}, townhealth.SweepRecord{}},
+		{"no daemon to ask", &healthSources{}, townhealth.SweepRecord{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tc.src.Sweep()
+			if err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Sweep = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHealthSourceSweepStateReader pins readSweepState: the field answers when
 // set, its error included and the town unread, and the town root otherwise (gt-1q2qhb).
 func TestHealthSourceSweepStateReader(t *testing.T) {
