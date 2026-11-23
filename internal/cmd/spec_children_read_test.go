@@ -156,7 +156,7 @@ func TestTickEffSQLChildren(t *testing.T) {
 	if len(calls) != 1 || !strings.Contains(calls[0].String(), "'gt-a', 'gt-b', 'gt-c'") {
 		t.Fatalf("read the chunk as %d calls: %v, want one naming all three ids", len(calls), calls)
 	}
-	want := map[string][]beadsql.ChildStatus{"gt-a": {{ID: "gt-a.1", Status: "open"}}, "gt-b": {}}
+	want := map[string][]*beads.Issue{"gt-a": {{ID: "gt-a.1", Status: "open"}}, "gt-b": {}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("children = %#v, want %#v; the header record is no parent", got, want)
 	}
@@ -166,6 +166,44 @@ func TestTickEffSQLChildren(t *testing.T) {
 	refused := errors.New("refused")
 	if _, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, refused }), []string{"gt-a"}); !errors.Is(err, refused) {
 		t.Errorf("reader error = %v, want %v", err, refused)
+	}
+	short := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+		return [][]string{{"p.id", "c.id", "status"}, {"gt-a"}}, nil
+	})
+	if _, err := specChildrenFromSQL(short, []string{"gt-a"}); err == nil {
+		t.Error("a short record: error = nil; want the parse refusal")
+	}
+}
+
+// A chunk of three parents, two with children and one childless, is keyed as
+// specChildrenRead keys it: each child keeps its id and status, the childless
+// parent has an entry with no children, and an id the database does not hold
+// has no key (gt-78t3bz).
+func TestTickEffSQLChildrenKeys(t *testing.T) {
+	t.Parallel()
+	read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+		return [][]string{
+			{"p.id", "c.id", "status"},
+			{"gt-a", "gt-a.1", "in_progress"},
+			{"gt-b", "gt-b.1", "closed"},
+			{"gt-b", "gt-b.2", "open"},
+			{"gt-c", "", ""},
+		}, nil
+	})
+	got, err := specChildrenFromSQL(read, []string{"gt-a", "gt-b", "gt-c", "gt-d"})
+	if err != nil {
+		t.Fatalf("specChildrenFromSQL: %v", err)
+	}
+	want := map[string][]*beads.Issue{
+		"gt-a": {{ID: "gt-a.1", Status: "in_progress"}},
+		"gt-b": {{ID: "gt-b.1", Status: "closed"}, {ID: "gt-b.2", Status: "open"}},
+		"gt-c": {},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("children = %#v, want %#v; the childless parent is keyed empty", got, want)
+	}
+	if _, ok := got["gt-d"]; ok {
+		t.Errorf("absent gt-d has a key; want none, so the scan reads it alone")
 	}
 }
 
