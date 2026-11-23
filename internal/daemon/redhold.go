@@ -52,3 +52,27 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 	}
 	return dispatch.RedHoldRecord{Reasons: reasons}
 }
+
+// redHoldChangeLine says what the daemon logs when the red hold changes: "" when
+// the kind set is unchanged, 'red hold: set: <sorted kinds>' when next holds a
+// different set, and 'red hold: cleared' when none remain. Since and Detail do
+// not count, so a reason that merely refreshed them logs nothing.
+func redHoldChangeLine(prev, next dispatch.RedHoldRecord) string {
+	prevKinds, nextKinds := redHoldKinds(prev), redHoldKinds(next)
+	if slices.Equal(prevKinds, nextKinds) {
+		return ""
+	}
+	if len(nextKinds) == 0 {
+		return "red hold: cleared"
+	}
+	return "red hold: set: " + strings.Join(nextKinds, ", ")
+}
+
+// redHoldKinds returns the record's distinct kinds, sorted.
+func redHoldKinds(rec dispatch.RedHoldRecord) []string {
+	seen := make(map[string]bool, len(rec.Reasons))
+	for _, r := range rec.Reasons {
+		seen[r.Kind] = true
+	}
+	return slices.Sorted(maps.Keys(seen))
+}
