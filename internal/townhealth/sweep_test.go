@@ -72,3 +72,45 @@ func TestHealthSweep(t *testing.T) {
 		})
 	}
 }
+
+// TestHealthSweepLineNamesTheCause drives Compute and Line: the line says why
+// the sweep is red, or that its record is unknown, in place of the "red" both
+// red reasons share, and a green sweep adds nothing. The last two rows build the
+// field by hand: they pin a detail the evaluation does not write, and the
+// fallback that still names it (gt-6k21z3).
+func TestHealthSweepLineNamesTheCause(t *testing.T) {
+	t.Parallel()
+	line := func(src Sweep) string {
+		in := inputs(healthy())
+		in.Sweep = src
+		return Line(Compute(context.Background(), in), now, DefaultStaleAfter)
+	}
+	handBuilt := func(detail string) string {
+		r := Report{At: ago(time.Minute), Verdict: Red, Fields: []Field{
+			{Name: FieldSweep, Tag: Recorded, Verdict: Red, Value: "red", Detail: detail},
+		}}
+		return Line(r, now, DefaultStaleAfter)
+	}
+	for _, tc := range []struct{ name, got, want string }{
+		{"two red cycles", line(staticSweep{SweepRecord{Known: true, RedCycles: 2, LastGreenAt: ago(time.Hour)}}), "sweep=RED 2 cycles[R]"},
+		{"three stale hours", line(staticSweep{SweepRecord{Known: true, LastGreenAt: ago(3 * time.Hour)}}), "sweep=no green 3h[R]"},
+		{"two stale days read as whole hours", line(staticSweep{SweepRecord{Known: true, LastGreenAt: ago(48 * time.Hour)}}), "sweep=no green 48h[R]"},
+		{"an unknown record", line(staticSweep{SweepRecord{Known: false}}), "sweep=UNKNOWN"},
+		{"a green sweep adds nothing", line(staticSweep{SweepRecord{Known: true, RedCycles: 1, LastGreenAt: ago(time.Hour)}}), ""},
+		{"a wording the line does not know", handBuilt("the sweep is red for another reason"), "sweep=the sweep is red for another reason[R]"},
+		{"a day count it cannot read", handBuilt("no green sweep in 2hd"), "sweep=no green 2hd[R]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.want == "" {
+				if strings.Contains(tc.got, FieldSweep) {
+					t.Errorf("line = %q, want a green sweep to add nothing", tc.got)
+				}
+				return
+			}
+			if !strings.Contains(tc.got, tc.want) {
+				t.Errorf("line = %q, want it to carry %q", tc.got, tc.want)
+			}
+		})
+	}
+}
