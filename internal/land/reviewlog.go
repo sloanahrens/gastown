@@ -274,6 +274,14 @@ func tokenEnd(s string, i int) int {
 	capped := end < len(s) && tokenByte(s[end])
 	run := strings.TrimRight(s[i:end], ".:")
 	n := acceptedLen(run)
+	if n == 0 && strings.HasPrefix(s[i:], "eyJ") {
+		// An unsecured JWT ends in the '.' of its empty signature, which the
+		// trim took for the sentence's: try the run as written, then shorter
+		// starts until the trim region is used up.
+		for k := end; k > i+len(run) && n == 0; k-- {
+			n = acceptedLen(s[i:k])
+		}
+	}
 	if n == 0 {
 		return i
 	}
@@ -344,11 +352,12 @@ func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' ||
 // (risk-assessment-framework, ask_user_for_input).
 const distinctivePrefixLen = 4
 
-// knownPrefixes are all the rule's prefixes and the ASIA of its temporary-key
-// shape: the only starts a token the rule accepts can have; distinctivePrefixes
-// are those of them long enough to be found at any offset, glued or not.
+// knownPrefixes are all the rule's prefixes and the ASIA and eyJ of its key-id
+// and JWT shapes: the only starts a token the rule accepts can have; distinctive
+// ones are those long enough to be found glued inside a word. eyJ, as ASIA, is
+// too short: the shape, not the prefix, decides.
 var knownPrefixes, distinctivePrefixes = func() (all, distinctive []string) {
-	all = []string{"ASIA"}
+	all = []string{"ASIA", "eyJ"}
 	distinctive = []string{"ASIA"}
 	for _, p := range config.SecretValuePrefixes() {
 		all = append(all, p)
