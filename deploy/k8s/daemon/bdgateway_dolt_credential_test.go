@@ -33,6 +33,43 @@ func readinessCommand(t *testing.T, pod PodSpec) []string {
 	return probe.Exec.Command
 }
 
+// TestBdGatewayDoltCredentialRefusals drives the value's two refusals: a name the
+// API server would not accept, and a rehearsal render, which mounts no live-pod
+// credential. Each names the field, and a refused Build returns no gateway.
+func TestBdGatewayDoltCredentialRefusals(t *testing.T) {
+	t.Parallel()
+	const field = "Values.BdGatewayDoltCredentialSecret"
+	tests := []struct {
+		name   string
+		mutate func(*Values)
+	}{
+		{"a name that is not a DNS-1123 subdomain", func(v *Values) { v.BdGatewayDoltCredentialSecret = "Bd_Gateway_Dolt_Credentials" }},
+		{"a rehearsal render", func(v *Values) {
+			v.Rehearsal = true
+			v.Namespace = "gt-rehearsal"
+			v.ConfirmContainerStopped = false
+			v.OMToken = false
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayDoltCredentialValues(t)
+			tc.mutate(&v)
+			m, err := Build(v)
+			if err == nil {
+				t.Fatalf("Build succeeded, want a refusal naming %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("the refusal = %q, want it to name %s", err, field)
+			}
+			if m.BdGatewayDeployment.Kind != "" {
+				t.Errorf("a refused Build returned a gateway Deployment")
+			}
+		})
+	}
+}
+
 // TestBdGatewayDoltCredentialOff holds an unset value to the golden the gateway had
 // before the Dolt credential: a render with no credential Secret adds no volume and
 // no flag.
