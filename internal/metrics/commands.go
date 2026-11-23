@@ -603,6 +603,16 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 			adoptErr = errors.Join(adoptErr, fmt.Errorf("the adoption of %s is not logged, so it is not checked: %w", written.version, err))
 		}
 	}
+	// A refusal is logged as the week's other outcome, carrying the rule's reason, so the
+	// reader and the attention item see every week the weights were left alone. The
+	// receipt the decision returned is kept in the error, as the adoption's is.
+	if written.refused {
+		if err := c.appendStoryPointsAdoption(env, storyPointsAdoptionsPath(real.Town), storyPointsAdoption{
+			Event: "refused", At: now, Reason: written.reason,
+		}); err != nil {
+			adoptErr = errors.Join(adoptErr, fmt.Errorf("the refusal is not logged: %w", err))
+		}
+	}
 	if adoptErr != nil {
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, adoptErr)
 	}
