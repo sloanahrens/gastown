@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// forgejoFix is the operations doc's repair for a Forgejo pod that the reboot
-// left not Ready: clear the pod waiting out its backoff, and when its log names
-// host.lima.internal, the VM's resolver is the cause and gt town vms start fixes
-// it (gt-9deo22).
+// forgejoFix is the repair the operations doc's "After a Mac reboot" step 5
+// gives, copied here so a failing row prints it: clear the pod waiting out its
+// backoff, and when its log names host.lima.internal, the VM's resolver is the
+// cause and gt town vms start fixes it (gt-9deo22).
 const forgejoFix = "delete a pod that is waiting out its backoff; " +
 	"if the pod log says lookup host.lima.internal, run gt town vms start"
 
@@ -20,13 +20,14 @@ type forgejoPods struct {
 	Items []forgejoPod `json:"items"`
 }
 
-// forgejoPod carries the two fields the check reads: the name to report and the
-// conditions that say whether the pod is Ready.
+// forgejoPod carries the fields the check reads: the name, the phase that says
+// a job pod has completed, and the conditions that say whether it is Ready.
 type forgejoPod struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Status struct {
+		Phase      string                `json:"phase"`
 		Conditions []forgejoPodCondition `json:"conditions"`
 	} `json:"status"`
 }
@@ -67,15 +68,30 @@ func ForgejoCheck(run Runner) Check {
 				return Result{Detail: "no pods in namespace forgejo"}
 			}
 			var notReady []string
+			ready, completed := 0, 0
 			for _, pod := range list.Items {
+				if pod.Status.Phase == "Succeeded" {
+					// A Completed job pod has no Ready condition to wait on.
+					completed++
+					continue
+				}
 				if !podReady(pod) {
 					notReady = append(notReady, pod.Metadata.Name)
+					continue
 				}
+				ready++
 			}
 			if len(notReady) > 0 {
 				return Result{Detail: "not ready: " + strings.Join(notReady, ", "), Fix: forgejoFix}
 			}
-			return Result{OK: true, Detail: fmt.Sprintf("%d pods ready", len(list.Items))}
+			if ready == 0 {
+				// Only finished job pods are left, so Forgejo itself is not up.
+				return Result{Detail: fmt.Sprintf("no running pods (%d completed)", completed)}
+			}
+			if completed > 0 {
+				return Result{OK: true, Detail: fmt.Sprintf("%d pods ready, %d completed", ready, completed)}
+			}
+			return Result{OK: true, Detail: fmt.Sprintf("%d pods ready", ready)}
 		},
 	}
 }
