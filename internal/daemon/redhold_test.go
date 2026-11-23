@@ -44,3 +44,35 @@ func TestRedHoldEvalSweepTriggers(t *testing.T) {
 		})
 	}
 }
+
+func TestRedHoldChangeLine(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1_700_000_000, 0).UTC()
+	rec := func(reasons ...dispatch.RedHoldReason) dispatch.RedHoldRecord {
+		return dispatch.RedHoldRecord{Reasons: reasons}
+	}
+	red := func(since time.Time, detail string) dispatch.RedHoldReason {
+		return dispatch.RedHoldReason{Kind: dispatch.RedHoldSweepRed, Since: since, Detail: detail}
+	}
+	tests := []struct {
+		name       string
+		prev, next dispatch.RedHoldRecord
+		want       string
+	}{
+		{"both empty log nothing", rec(), rec(), ""},
+		{"equal kinds log nothing", rec(red(at, "")), rec(red(at, "")), ""},
+		{"no hold to one kind sets it", rec(), rec(red(at, "")), "red hold: set: sweep-red"},
+		{"a new kind is listed sorted", rec(red(at, "")), rec(red(at, ""), dispatch.RedHoldReason{Kind: dispatch.RedHoldBehindMain, Since: at}), "red hold: set: behind-main, sweep-red"},
+		{"one kind to none clears it", rec(red(at, "")), rec(), "red hold: cleared"},
+		{"a changed Since is silent", rec(red(at, "")), rec(red(at.Add(time.Hour), "")), ""},
+		{"a changed Detail is silent", rec(red(at, "old")), rec(red(at, "new")), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := redHoldChangeLine(tt.prev, tt.next); got != tt.want {
+				t.Errorf("redHoldChangeLine(%+v, %+v) = %q, want %q", tt.prev, tt.next, got, tt.want)
+			}
+		})
+	}
+}
