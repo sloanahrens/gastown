@@ -216,6 +216,24 @@ func TestReviewLogScrubHeldFindingTitleAndPath(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubFingerprintKeepsItsIdentity pins what the scrub in
+// Fingerprint must keep (gt-kwx3vs): an ordinary title and path fingerprint
+// exactly as main does, and a finding refiled from the scrubbed queue line
+// fingerprints like the raw finding om raised. Without the scrub the raw and
+// refiled texts hash apart, so this fails.
+func TestReviewLogScrubFingerprintKeepsItsIdentity(t *testing.T) {
+	t.Parallel()
+	// Computed on origin/main from the same ordinary title and path.
+	if got, want := Fingerprint("internal/land/reviewlog.go", "the refusal has no test"), "om-fp:f4be1f1cde2a"; got != want {
+		t.Errorf("ordinary fingerprint = %s, want main's %s", got, want)
+	}
+	c := FollowupCandidate{Path: "internal/land/" + scrubTestFamilies["slack"], Title: "it logs " + scrubTestFamilies["aws"] + " verbatim"}
+	refiled := heldFindingTexts([]FollowupCandidate{c})[0]
+	if got, want := Fingerprint(refiled.File, refiled.Title), Fingerprint(c.Path, c.Title); got != want {
+		t.Errorf("refiled fingerprint = %s, want the raw finding's %s", got, want)
+	}
+}
+
 // TestReviewLogScrubHeldFinding: a held finding's claim reaches the log through a queue line.
 func TestReviewLogScrubHeldFinding(t *testing.T) {
 	t.Parallel()
