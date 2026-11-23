@@ -72,12 +72,12 @@ type StartStep struct {
 	run func(*startRun, StartStep)
 }
 
-// StartPlan is every step a start runs, in the order Start runs them, so the
+// startPlan is every step a start runs, in the order Start runs them, so the
 // order the dry run prints cannot disagree with the run (gt-dzduz6). The
 // sandbox VM goes first because the launchd job started gt-control first, which
 // let its 5001 forward loop while the sandbox registry had not yet bound the
 // port (gt-igzpx9).
-var StartPlan = []StartStep{
+var startPlan = []StartStep{
 	{Name: profileSandbox, profile: profileSandbox, run: (*startRun).startVM},
 	{Name: profileControl, profile: profileControl, run: (*startRun).startVM},
 	{Name: "containers", run: (*startRun).startContainers},
@@ -85,11 +85,16 @@ var StartPlan = []StartStep{
 	{Name: "registry", run: (*startRun).repairRegistry},
 }
 
+// StartPlan returns the steps a start runs, in order, as a copy (gt-2dbzp1).
+func StartPlan() []StartStep {
+	return append([]StartStep(nil), startPlan...)
+}
+
 // startRun is one run of Start: the plan it runs, what it runs commands
 // through, and what it has recorded so far.
 type startRun struct {
-	// plan is the list Start runs. The DNS step repairs this list's VM steps;
-	// reading StartPlan there would make its own initializer a cycle.
+	// plan is the copy of the start steps this run works from; the DNS step
+	// repairs this list's VM steps.
 	plan   []StartStep
 	ctx    context.Context
 	run    Runner
@@ -100,8 +105,8 @@ type startRun struct {
 	failed []error
 }
 
-// Start runs StartPlan's steps in order and returns the report of every step
-// run; a failed step is recorded and the later steps that can still run are
+// Start runs the steps of StartPlan() in order and returns the report of every
+// step run; a failed step is recorded and the later steps that can still run are
 // still tried, and Start returns one error naming each failed step at the end,
 // never a success (gt-igzpx9, gt-4eig1r). A canceled context stops the run
 // before the next step or try (gt-v6trh9).
@@ -112,7 +117,7 @@ func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func(
 	if sleep == nil {
 		return nil, errors.New("Start: nil sleep")
 	}
-	s := &startRun{plan: StartPlan, ctx: ctx, run: run, sleep: sleep, now: now, home: home}
+	s := &startRun{plan: StartPlan(), ctx: ctx, run: run, sleep: sleep, now: now, home: home}
 	for _, step := range s.plan {
 		if err := ctx.Err(); err != nil {
 			s.failed = append(s.failed, fmt.Errorf("start stopped before %s: %w", step.Name, err))

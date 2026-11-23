@@ -116,11 +116,11 @@ func runTownVMsStart(cmd *cobra.Command, env townVMsStartEnv, flagHome string, d
 	return errors.Join(startErr, writeErr)
 }
 
-// printTownVMsStartOrder prints one line per step of vmstart.StartPlan, in the
-// order Start runs them, so a printed order cannot disagree with the run the
-// dry run previews (gt-sp84je).
+// printTownVMsStartOrder prints one line per step of vmstart.StartPlan(), in
+// the order Start runs them, so a printed order cannot disagree with the run
+// the dry run previews (gt-sp84je).
 func printTownVMsStartOrder(out io.Writer) error {
-	for _, step := range vmstart.StartPlan {
+	for _, step := range vmstart.StartPlan() {
 		if _, err := fmt.Fprintln(out, step.Name); err != nil {
 			return fmt.Errorf("printing the start step order: %w", err)
 		}
