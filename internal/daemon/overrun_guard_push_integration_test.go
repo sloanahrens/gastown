@@ -104,6 +104,60 @@ func TestIntegrationOverrunPushNonFastForwardStaleTrackingRefStaysPaused(t *test
 	}
 }
 
+// TestIntegrationOriginHeadSinceFetchesTheMissingHeadIntoFetchHeadOnly runs the
+// origin-ahead read on real git: origin holds a commit above the worktree's
+// branch tip whose object the seat never fetched. The read accepts it as
+// finished work and brings the object in through FETCH_HEAD alone — no ref
+// moves and the working tree is untouched — so the "fetched into no
+// destination" contract no longer rests on the stub's refspec string
+// (gt-x32qui, gt-xg5pl0).
+func TestIntegrationOriginHeadSinceFetchesTheMissingHeadIntoFetchHeadOnly(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunPushFixture(t, d.config.TownRoot)
+	// The polecat clone carries the single-branch fetch refspec the town's
+	// polecat worktrees use (main only), so the read's bare refs/heads/<branch>
+	// maps to no remote-tracking ref and cannot move the stale origin/<branch>
+	// the clone already holds. A refspec with a destination would move it, which
+	// the refs read below catches.
+	mustRunGit(t, f.seat, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+	// The worktree's branch starts at the base, so its tip is an ancestor of
+	// origin's head and the ancestry test has a path to pass.
+	f.seatBranchAt(t, "origin/main")
+
+	// Origin gains a head above the branch's old tip after the seat's clone, so
+	// the seat's repository has never seen its object.
+	mustRunGit(t, f.seed, "reset", "--hard", f.branchSHA)
+	if err := os.WriteFile(filepath.Join(f.seed, "ahead.txt"), []byte("origin holds this\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, f.seed, "add", "ahead.txt")
+	mustRunGitDated(t, f.seed, "commit", "-m", "add ahead.txt")
+	head := mustRunGit(t, f.seed, "rev-parse", "HEAD")
+	mustRunGit(t, f.seed, "push", "origin", "HEAD:refs/heads/"+stopSeat.Branch)
+	if out, err := exec.Command("git", "-C", f.seat, "cat-file", "-e", head).CombinedOutput(); err == nil {
+		t.Fatalf("the seat already holds %s (%s): the read would not need a fetch", head, out)
+	}
+
+	refsBefore := mustRunGit(t, f.seat, "for-each-ref", "--format=%(refname) %(objectname)")
+	seated := stopSeat
+	// The head's fixed committer date (2000-01-01) is after the sling, so the
+	// read can tell it was produced by the run without the wall clock.
+	seated.SlingAt = time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
+	if got := d.overrunFinishedOnOrigin(seated); got != head {
+		t.Fatalf("finished on origin = %q, want %s: the tip is an ancestor of origin's head", got, head)
+	}
+	if refsAfter := mustRunGit(t, f.seat, "for-each-ref", "--format=%(refname) %(objectname)"); refsAfter != refsBefore {
+		t.Errorf("refs moved across the read:\nbefore:\n%s\nafter:\n%s", refsBefore, refsAfter)
+	}
+	if got := mustRunGit(t, f.seat, "rev-parse", "FETCH_HEAD"); got != head {
+		t.Errorf("FETCH_HEAD = %s, want origin's head %s", got, head)
+	}
+	if dirty := mustRunGit(t, f.seat, "status", "--porcelain"); dirty != "" {
+		t.Errorf("working tree changed across the read:\n%s", dirty)
+	}
+}
+
 // overrunPushFixture is a bare origin, a seed checkout that writes origin's
 // history, and the seat's clone of origin at the path the stop resolves a
 // polecat worktree to.
