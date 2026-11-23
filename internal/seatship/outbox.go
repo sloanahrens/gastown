@@ -27,7 +27,7 @@ func OutboxFrom(dir string, capBytes int64) (map[string]string, error) {
 		}
 		return nil, fmt.Errorf("seatship: open outbox %s: %w", dir, err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	files := make(map[string]string, 2)
 	for _, name := range []string{outbox.ResultFile, outbox.NotesFile} {
 		data, err := readOutboxFile(root, name, capBytes)

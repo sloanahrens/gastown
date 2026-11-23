@@ -1,6 +1,7 @@
 package seatship
 
 import (
+	"context"
 	"math"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // escapeSymlink points result.json at a secret beside the outbox by a relative link leaving it.
@@ -16,6 +18,30 @@ func escapeSymlink(base, dir string) error {
 		return err
 	}
 	return os.Symlink(filepath.Join("..", "secret"), filepath.Join(dir, "result.json"))
+}
+
+// outboxBounded runs OutboxFrom and fails the row if it does not return in
+// time, so a regression that blocks on a FIFO fails rather than hangs the package.
+func outboxBounded(t *testing.T, dir string, cap int64) (map[string]string, error) {
+	t.Helper()
+	type result struct {
+		files map[string]string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		files, err := OutboxFrom(dir, cap)
+		done <- result{files, err}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	select {
+	case r := <-done:
+		return r.files, r.err
+	case <-ctx.Done():
+		t.Fatal("OutboxFrom did not return within the test's bound")
+		return nil, nil
+	}
 }
 
 func TestSeatShipOutbox(t *testing.T) {
@@ -64,7 +90,7 @@ func TestSeatShipOutbox(t *testing.T) {
 			if tt.special != nil {
 				must(tt.special(base, dir))
 			}
-			got, err := OutboxFrom(dir, tt.cap)
+			got, err := outboxBounded(t, dir, tt.cap)
 			switch {
 			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
 				t.Fatalf("OutboxFrom = %v, %v; want an error naming %s", got, err, tt.wantErr)
