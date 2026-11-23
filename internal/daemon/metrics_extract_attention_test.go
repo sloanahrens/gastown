@@ -349,10 +349,11 @@ func TestMetricsExtractAttentionGaps(t *testing.T) {
 	tests := []struct {
 		name string
 		// days are written in order; a day with no footer passes "".
-		days    [][2]string
-		noRoot  bool
-		want    []string // item keys
-		summary []string // substrings the first wanted item's summary carries
+		days       [][2]string
+		noRoot     bool
+		want       []string // item keys
+		summary    []string // substrings the first wanted item's summary carries
+		notSummary []string // substrings that summary must not carry
 	}{
 		{
 			name: "a footer with gaps",
@@ -362,6 +363,16 @@ func TestMetricsExtractAttentionGaps(t *testing.T) {
 				"2 gaps",
 				"ledger: missing reviewer column",
 			},
+		},
+		{
+			name: "a footer with one gap",
+			days: [][2]string{{"2026-11-19", `{"gaps":[["ledger","missing reviewer column"]]}`}},
+			want: []string{metricsExtractGapsKey},
+			summary: []string{
+				"1 gap",
+				"ledger: missing reviewer column",
+			},
+			notSummary: []string{"1 gaps"},
 		},
 		{
 			name: "a clean footer",
@@ -415,13 +426,18 @@ func TestMetricsExtractAttentionGaps(t *testing.T) {
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("keys = %v, want %v", got, tc.want)
 			}
-			if len(tc.summary) == 0 {
+			if len(tc.summary) == 0 && len(tc.notSummary) == 0 {
 				return
 			}
 			it := itemByKey(t, attention.State{Items: items}, tc.want[0])
 			for _, want := range tc.summary {
 				if !strings.Contains(it.Summary, want) {
 					t.Errorf("summary = %q, want it to carry %q", it.Summary, want)
+				}
+			}
+			for _, not := range tc.notSummary {
+				if strings.Contains(it.Summary, not) {
+					t.Errorf("summary = %q, want it not to carry %q", it.Summary, not)
 				}
 			}
 		})
