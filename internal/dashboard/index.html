@@ -398,6 +398,8 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 /* One row per landed commit in the System updates pane: the sha, then its stage
    chips in pipeline order. A stage that never ran keeps the dim token. */
 .surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+.subanner{border-bottom:1px solid var(--line);padding:2px 0 6px;margin-bottom:4px;font-weight:600}
+.subanner.ended{font-weight:400;color:var(--dim)}
 .tag.absent{color:var(--dim)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
@@ -2959,10 +2961,49 @@ function systemUpdateStageUnknown(su, stage) {
   return !!(su.unavailable || su.sweep_unknown);
 }
 
+// The pane's banner while a roll runs (gt-o8m8ho): its step, wall time and the
+// builds it moves between. The feed names only a roll in flight, so an ended
+// roll's banner stays SYSTEM_UPDATES_BANNER_STAY_MS after the first push without it.
+const SYSTEM_UPDATES_BANNER_STAY_MS = 10 * 60 * 1000;
+let systemUpdateBanner = null; // {roll, until}; until is 0 while the roll runs
+
+// systemUpdateBannerRoll answers the roll to draw and whether it ended. It runs
+// on every push, drawn or skipped, so an end is dated by the first push without
+// the roll, not the next redraw; an ended roll is kept to a deadline.
+function systemUpdateBannerRoll(su, now) {
+  const roll = su && su.now && su.now.roll;
+  if (roll) {
+    systemUpdateBanner = {roll: roll, until: 0};
+    return {roll: roll, ended: false};
+  }
+  if (!systemUpdateBanner) return null;
+  if (!systemUpdateBanner.until) systemUpdateBanner.until = now + SYSTEM_UPDATES_BANNER_STAY_MS;
+  if (now > systemUpdateBanner.until) {
+    systemUpdateBanner = null;
+    return null;
+  }
+  return {roll: systemUpdateBanner.roll, ended: true};
+}
+
+// systemUpdateBannerLine is the banner: what the roll is doing, the step, the
+// elapsed time and the short shas it moves from and to.
+function systemUpdateBannerLine(b) {
+  const roll = b.roll, sha = x => String(x || "").slice(0, 12) || "–";
+  const line = el("div", "surow subanner" + (b.ended ? " ended" : ""));
+  line.append(el("span", "subannerword", b.ended ? "roll ended" : "rolling"));
+  line.append(el("span", "tag" + (b.ended ? "" : " warnc"), roll.step || "starting"));
+  line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  line.append(el("span", "subannercommits", sha(roll.from) + " → " + sha(roll.to)));
+  line.title = "gt update run " + (roll.run_id || "?") + (b.ended ? ", ended" : "");
+  return line;
+}
+
 function renderSystemUpdates(s) {
+  const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
   if (pushSkip("systemupdates", s)) return;
-  const box = $("systemupdates"), su = s.system_updates, rows = (su && su.rows) || [];
+  const box = $("systemupdates"), rows = (su && su.rows) || [];
   box.replaceChildren();
+  if (banner) box.append(systemUpdateBannerLine(banner));
   if (!rows.length) { box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
@@ -6296,7 +6337,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderSystemUpdates(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
