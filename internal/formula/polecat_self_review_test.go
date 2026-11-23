@@ -41,9 +41,10 @@ func collapse(s string) string {
 
 // TestPolecatSelfReviewIsThePreSubmitChecklist pins gt-df9f7v: the self-review
 // step is the seat's single pre-submit checklist. It parses, sits between the
-// commit and build-check steps, and has nine numbered items whose first walks
-// the bead's requirements, whose fifth bounds the seats' waits, and whose
-// ninth reports the integration tier in the commit body where om reads it.
+// commit and build-check steps, and has ten numbered items whose first walks
+// the bead's requirements, whose fifth bounds the seats' waits, whose ninth
+// reports the integration tier in the commit body where om reads it, and whose
+// tenth is the contradiction rule (gt-emsjtj).
 func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 	t.Parallel()
 	f := decodePolecatWork(t)
@@ -72,9 +73,9 @@ func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 
 	step := f.step(t, "self-review")
 
-	// Exactly nine items: the single pre-submit checklist.
-	if got := len(regexp.MustCompile(`(?m)^\d+\. `).FindAllString(step, -1)); got != 9 {
-		t.Fatalf("the self-review step has %d numbered items, want 9", got)
+	// Exactly ten items: the checklist plus the contradiction rule.
+	if got := len(regexp.MustCompile(`(?m)^\d+\. `).FindAllString(step, -1)); got != 10 {
+		t.Fatalf("the self-review step has %d numbered items, want 10", got)
 	}
 
 	// Item 1 extends the plan written in "Before you write code" with the diff
@@ -115,5 +116,39 @@ func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 	}
 	if strings.Contains(item9, "needs a container; the overseer runs it") {
 		t.Errorf("item 9 hard-codes one reason for every package instead of the real one:\n%s", item9)
+	}
+}
+
+// TestSelfReviewContradictionItem pins gt-emsjtj: when an acceptance box and a
+// Constraint cannot both hold, the seat stops and escalates naming both, rather
+// than inventing an exemption, allowlist row or special case that lets each
+// side pass (gt-s7suwn, gt-4kf6kk).
+func TestSelfReviewContradictionItem(t *testing.T) {
+	t.Parallel()
+	step := decodePolecatWork(t).step(t, "self-review")
+
+	// The step's exit criteria follow the last item; keep the assertion on the
+	// item's own text.
+	item10 := collapse(numberedItem(t, step, 10))
+	if before, _, ok := strings.Cut(item10, "**Exit criteria:**"); ok {
+		item10 = before
+	}
+	for _, want := range []string{
+		"Contradictions",
+		"gt escalate",
+		"acceptance box",
+		"Constraint",
+		"naming both",
+		"never add an exemption, allowlist row or special case",
+	} {
+		if !strings.Contains(item10, want) {
+			t.Errorf("item 10 lacks %q:\n%s", want, item10)
+		}
+	}
+
+	// Items one to nine keep their text and order (gt-emsjtj), so the
+	// contradiction rule is last.
+	if regexp.MustCompile(`(?m)^11\. `).MatchString(step) {
+		t.Errorf("the self-review step has an item after the contradiction rule")
 	}
 }
