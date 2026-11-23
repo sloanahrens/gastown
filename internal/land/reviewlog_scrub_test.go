@@ -18,10 +18,12 @@ import (
 
 // The tokens are built from parts so this file holds no token-shaped literal.
 var scrubTestFamilies = map[string]string{
-	"aws":    "AK" + "IA" + strings.Repeat("Q", 16),
-	"google": "AI" + "za" + strings.Repeat("b", 35),
-	"slack":  "xo" + "xb-" + strings.Repeat("9", 24),
-	"asia":   "AS" + "IA" + strings.Repeat("Z", 16),
+	"aws":           "AK" + "IA" + strings.Repeat("Q", 16),
+	"google":        "AI" + "za" + strings.Repeat("b", 35),
+	"slack":         "xo" + "xb-" + strings.Repeat("9", 24),
+	"asia":          "AS" + "IA" + strings.Repeat("Z", 16),
+	"jwt":           "ey" + "J" + strings.Repeat("a", 12) + "." + strings.Repeat("b", 12) + "." + strings.Repeat("c", 12),
+	"jwt-unsecured": "ey" + "J" + strings.Repeat("a", 12) + "." + strings.Repeat("b", 12) + ".",
 }
 
 // scrubTestWrappers are the forms a token is quoted in: each is a format with the
@@ -72,7 +74,7 @@ func TestReviewLogScrubKeepsWhatIsNoSecret(t *testing.T) {
 // key id followed by token bytes ('+x', '-x', '.x', '/x', '=x', ':x') is cut at
 // the joiner, or ('z9', 'key') where its upper-case bytes end, and replaced with the tail kept; a prefix token takes such a tail
 // with it (more redaction, never less); a sentence's '.' or ':' after any token
-// is not part of it.
+// is not part of it, even where it follows an unsecured JWT's own signature '.
 func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
 	t.Parallel()
 	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x", "z9", "key"} {
@@ -81,7 +83,7 @@ func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
 			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
 		}
 	}
-	for _, family := range []string{"asia", "aws"} {
+	for _, family := range []string{"asia", "aws", "jwt", "jwt-unsecured"} {
 		for _, tail := range []string{".", ":"} {
 			claim := "id " + scrubTestFamilies[family] + tail + " end"
 			if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {

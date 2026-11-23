@@ -18,6 +18,10 @@ const (
 
 func TestLooksLikeSecret(t *testing.T) {
 	t.Parallel()
+	// A JWT is built from parts so this file holds no token-shaped literal.
+	jwt := func(sig string) string {
+		return "ey" + "J" + strings.Repeat("a", 12) + "." + strings.Repeat("b", 12) + "." + sig
+	}
 	for _, tt := range []struct {
 		key, value string
 		want       bool
@@ -35,9 +39,16 @@ func TestLooksLikeSecret(t *testing.T) {
 		{"CLAUDE_CODE_TOTAL_TOKENS_REMINDER", "1234567890123456789", false}, // a number
 		{"GOOGLE_APPLICATION_CREDENTIALS_SECRET", "/home/x/creds/service.json", false},
 		{"ANTHROPIC_MODEL", "deepseek-v4-flash-20260901", false},
-		{"AWS_REGION", "ASIA-PACIFIC-EAST-1", false},         // a region, not a session key ID
-		{"AWS_SESSION_KEY_ID", "ASIA0123456789ABCDEF", true}, // temporary key ID shape
-		{"DB_PASSWD", "abcdefghijklmnopqrstuvwxyz", true},    // PASSWD names a password
+		{"AWS_REGION", "ASIA-PACIFIC-EAST-1", false},                                                       // a region, not a session key ID
+		{"AWS_SESSION_KEY_ID", "ASIA0123456789ABCDEF", true},                                               // temporary key ID shape
+		{"WHATEVER", jwt(strings.Repeat("c", 12)), true},                                                   // JWT shape, any key
+		{"WHATEVER", jwt(""), true},                                                                        // unsecured JWT
+		{"WHATEVER", "internal.daemonimage.credentials", false},                                            // dotted identifier
+		{"WHATEVER", "v2026.11.23.4567", false},                                                            // version string
+		{"WHATEVER", "ey" + "J" + strings.Repeat("a", 8) + "." + strings.Repeat("b", 8), false},            // two parts
+		{"WHATEVER", "ey" + "J" + "abc." + strings.Repeat("b", 12) + "." + strings.Repeat("c", 12), false}, // short header
+		{"WHATEVER", "ey" + "J" + strings.Repeat("a", 12) + "." + strings.Repeat("b", 12) + ".sig", false}, // short signature
+		{"DB_PASSWD", "abcdefghijklmnopqrstuvwxyz", true},                                                  // PASSWD names a password
 	} {
 		if got := LooksLikeSecret(tt.key, tt.value); got != tt.want {
 			t.Errorf("LooksLikeSecret(%s, %q) = %v, want %v", tt.key, tt.value, got, tt.want)

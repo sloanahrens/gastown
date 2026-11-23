@@ -125,6 +125,11 @@ func SecretValuePrefixes() []string { return slices.Clone(secretValuePrefixes) }
 // letters and digits. The dashes in region names such as ASIA-PACIFIC-EAST-1 keep them out.
 var temporaryKeyIDShape = regexp.MustCompile(`^ASIA[0-9A-Z]+$`)
 
+// jwtShape is a JSON web token: a header that starts eyJ (base64url of a JSON
+// object), a payload and a signature, dot-separated base64url. The signature may
+// be empty (an unsecured token); a non-empty one is at least as long as a part.
+var jwtShape = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.([A-Za-z0-9_-]{8,})?$`)
+
 // secretKeyMarkers mark an env key whose value is a credential.
 var secretKeyMarkers = []string{
 	"TOKEN", "API_KEY", "APIKEY", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE",
@@ -156,6 +161,9 @@ func LooksLikeSecret(key, value string) bool {
 		}
 	}
 	if temporaryKeyIDShape.MatchString(v) {
+		return true
+	}
+	if jwtShape.MatchString(v) {
 		return true
 	}
 	return IsSecretKey(key)
