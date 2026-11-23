@@ -112,6 +112,11 @@ func sessionStart(s SessionUsage) (time.Time, bool) {
 	return start, found
 }
 
+// DedupeSessions drops the copies of a repeated message id that more than one session counted, so a
+// resumed session's repeated messages count once, as Scan does before it builds a record. paths[i]
+// is the transcript sessions[i] was read from. The sessions are changed in place.
+func DedupeSessions(sessions []SessionUsage, paths []string) { dedupeAcross(sessions, paths) }
+
 // dedupeAcross decides, over all the sessions before any total is summed, which session counts each
 // repeated message id, so the answer does not depend on the order the sessions were read in. A
 // resumed session repeats the messages of the session it resumed. The owner of an id is the session

@@ -44,6 +44,8 @@ func TestSeatShipUsageFrom(t *testing.T) {
 		wantComplete               bool
 	}{
 		{"two nested transcripts are summed and bound the record", map[string]file{"a/s1.jsonl": {t1, fmt.Sprintf(transcriptLine, "s1", 10, 20)}, "s2.jsonl": {t0, fmt.Sprintf(transcriptLine, "s2", 5, 6)}}, time.Time{}, time.Time{}, []string{"s1", "s2"}, 2, 15, 26, t0, t1, true},
+		{"a session's subagents count once, with their session", map[string]file{"proj/sess-1.jsonl": {t1, fmt.Sprintf(transcriptLine, "own", 10, 20)}, "proj/sess-1/subagents/agent-x.jsonl": {t0, fmt.Sprintf(transcriptLine, "sub", 5, 6)}}, time.Time{}, time.Time{}, []string{"sess-1"}, 2, 15, 26, t1, t1, true},
+		{"a message repeated by a resumed session counts once", map[string]file{"a.jsonl": {t0, fmt.Sprintf(transcriptLine, "dup", 10, 20)}, "b.jsonl": {t1, fmt.Sprintf(transcriptLine, "dup", 10, 20) + fmt.Sprintf(transcriptLine, "uniq", 5, 6)}}, time.Time{}, time.Time{}, []string{"a", "b"}, 2, 15, 26, t0, t1, true},
 		{"an empty directory is incomplete and not an error", nil, time.Time{}, time.Time{}, nil, 0, 0, 0, time.Time{}, time.Time{}, false},
 		{"a supplied bound is kept", map[string]file{"s1.jsonl": {t1, fmt.Sprintf(transcriptLine, "s1", 10, 20)}}, t0, t1.Add(time.Hour), []string{"s1"}, 1, 10, 20, t0, t1.Add(time.Hour), true},
 		{"a line that does not parse marks the record incomplete", map[string]file{"s1.jsonl": {t1, fmt.Sprintf(transcriptLine, "s1", 10, 20) + "{not json\n"}}, time.Time{}, time.Time{}, []string{"s1"}, 1, 10, 20, t1, t1, false},
