@@ -1204,6 +1204,76 @@ func TestTickEffOneSeatReadsOneChildren(t *testing.T) {
 	}
 }
 
+// The town sets spec_dispatch.max_per_tick (3 in the live config), and that
+// ceiling must not lift the free-seat bound: with every seat at its cap the
+// tick still reads no candidate's children (gt-n3l0sm).
+func TestTickEffCeilingNoSeatReadsNoChildren(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-c00", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-c01", 2, "2026-09-29T10:01:00Z"),
+		cleanSpec("gt-c02", 2, "2026-09-29T10:02:00Z"),
+	)
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2, "claude-sonnet": 2}}
+	env := f.env()
+	env.PerTick = 3
+	reads := 0
+	env.Children = func(string) ([]specdispatch.Child, error) {
+		reads++
+		return nil, nil
+	}
+	r := runSpecDispatchCycle(env)
+	if reads != 0 {
+		t.Fatalf("children read %d times with no free seat and a ceiling of 3, want none", reads)
+	}
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+		t.Fatalf("slung %v, dispatched %d; want none", f.slung, len(r.Dispatched))
+	}
+	if len(r.Skipped) != 3 {
+		t.Fatalf("skipped %d candidates, want 3: %+v", len(r.Skipped), r.Skipped)
+	}
+	for _, s := range r.Skipped {
+		if !strings.Contains(s.Line, specdispatch.SkipNoSeat) {
+			t.Errorf("%s: line %q, want the no-seat line", s.Bead, s.Line)
+		}
+	}
+}
+
+// With one free seat and the same ceiling of 3, the first clean candidate
+// takes the seat and the rest are refused for want of a seat before their
+// children are read (gt-n3l0sm).
+func TestTickEffCeilingOneSeatReadsOneChildren(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-c00", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-c01", 2, "2026-09-29T10:01:00Z"),
+		cleanSpec("gt-c02", 2, "2026-09-29T10:02:00Z"),
+	)
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 1, "claude-sonnet": 2}}
+	env := f.env()
+	env.PerTick = 3
+	var read []string
+	env.Children = func(id string) ([]specdispatch.Child, error) {
+		read = append(read, id)
+		return nil, nil
+	}
+	r := runSpecDispatchCycle(env)
+	if len(read) != 1 || read[0] != "gt-c00" {
+		t.Fatalf("children read for %v, want only gt-c00", read)
+	}
+	if len(f.slung) != 1 || f.slung[0] != "gt-c00" {
+		t.Fatalf("slung %v, want only gt-c00", f.slung)
+	}
+	if len(r.Skipped) != 2 {
+		t.Fatalf("skipped %d candidates, want 2: %+v", len(r.Skipped), r.Skipped)
+	}
+	for _, s := range r.Skipped {
+		if !strings.Contains(s.Line, specdispatch.SkipNoSeat) {
+			t.Errorf("%s: line %q, want the no-seat line", s.Bead, s.Line)
+		}
+	}
+}
+
 // A container at the head of the board does not take the one free seat: its
 // open child holds it, so the next clean candidate is dispatched (gt-o9bp0s).
 func TestTickEffContainerKeepsTheSlot(t *testing.T) {
