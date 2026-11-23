@@ -15,6 +15,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/stretchr/testify/require"
@@ -661,6 +662,48 @@ func TestCheckRedHoldRollPairStuck(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: 0123456789ab"}}, rec.Reasons,
 		"only the stuck item's commit holds, never the ready pair's")
+}
+
+// TestCheckRedHoldMainRed pins the step's reader to the rig's landworker state
+// file, including an unreadable one that keeps the previous record.
+func TestCheckRedHoldMainRed(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	green, next := "0123456789abcdef0123456789abcdef01234567", "fedcba9876543210fedcba9876543210fedcba98"
+	red := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: gastown"}}
+	tests := map[string]struct {
+		state   *landworker.MainState
+		corrupt bool
+		want    []dispatch.RedHoldReason
+	}{
+		"a last run past the last green holds":               {&landworker.MainState{LastGreen: green, LastRun: next}, false, red},
+		"a last run equal to the last green holds nothing":   {&landworker.MainState{LastGreen: green, LastRun: green}, false, nil},
+		"a last green with no run holds nothing":             {&landworker.MainState{LastGreen: green}, false, nil},
+		"a revert in flight holds on a green run":            {&landworker.MainState{LastGreen: green, LastRun: green, Revert: &landworker.PendingRevert{Culprit: next}}, false, red},
+		"no state file holds nothing":                        {nil, false, nil},
+		"an unreadable state file keeps the previous record": {nil, true, redHoldSentinel.Reasons},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeKnownRigs(t, townRoot, "gastown")
+			path := RedMainStatePath(townRoot, "gastown")
+			switch {
+			case tc.corrupt:
+				require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+			case tc.state != nil:
+				require.NoError(t, (fileMainState{path: path}).Save(*tc.state))
+			}
+			d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(io.Discard, "", 0), clock: clockwork.NewFakeClockAt(now)}
+			d.checkRedHold()
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, rec.Reasons)
+		})
+	}
 }
 
 func TestRedHoldStepRefusals(t *testing.T) {
