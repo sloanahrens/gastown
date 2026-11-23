@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -59,7 +58,6 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 		},
 	}
 	backupRoot := t.TempDir()
-	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	d.maint.now = func() time.Time { return squashTestNow }
 	d.maint.dispatch = func(fn func()) { fn() }
 	d.maint.escalate = func(_ *Daemon, source, message string) {
@@ -347,13 +345,14 @@ func TestSquashP95IsNearestRank(t *testing.T) {
 	}
 }
 
-// TestSquashCheckTrippedRunsTheDatabase: a reading over its threshold logs the
-// trigger and the cut, then hands the database to the engine. The fake answers
-// the run's first branch read with the one column it gives every read, which is
-// not the two a recovery reads, so the run stops there and releases the marker.
-// The check is due again after the retry delay rather than setting the daily
-// gate.
-func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
+// TestSquashMarkerTrippedCheckRunsTheDatabase: a reading over its threshold logs
+// the trigger and the cut, then hands the database to the engine, which holds
+// the town's run marker for the run. The run's failure is reported rather than
+// read as a day's work done, and the check is due again after the retry delay
+// rather than setting the daily gate. The SquashMarker prefix is what
+// gt-w7g4oa's gate line (-run 'SquashMarker') selects, so a rename back into the
+// TestSquashCheck family hides this test from that filter (gt-4o1ujx).
+func TestSquashMarkerTrippedCheckRunsTheDatabase(t *testing.T) {
 	t.Parallel()
 	bigger := int64(100)
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
@@ -369,12 +368,13 @@ func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
 	if !strings.Contains(got, "squash: gt: due: backup bytes over the limit, cut 2026-11-09T12:00:00Z") {
 		t.Errorf("the tripped reason or its cut is missing: %q", got)
 	}
-	if !strings.Contains(got, "reading the branches a dead run may have left") {
-		t.Errorf("the due database was not run: %q", got)
+	if !strings.Contains(got, "squash: WARNING: gt: the run failed: doltsquash: reading the branches a dead run may have left") {
+		t.Errorf("the due database was not run, or its failure was not reported: %q", got)
 	}
-	// The readings, then the run's one branch read.
-	if len(server.queries) != squashP95Rounds+2 {
-		t.Errorf("the check sent %d statements, want %d", len(server.queries), squashP95Rounds+2)
+	// Recovery runs before any step that writes, so a run that failed in it
+	// sent no statement that is not a read; one would mean a write came first.
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("the run sent a statement that is not a read before its catalog read: %v", server.queries)
 	}
 	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter-time.Minute), squashCheckInterval); due.due {
 		t.Error("a failed run was due again before the retry delay")
