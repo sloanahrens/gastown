@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
@@ -1995,6 +1996,61 @@ func TestSquashRecordRedactsATokenJoinedToCharacters(t *testing.T) {
 				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
 			}
 		})
+	}
+}
+
+// squashAnthropicToken builds an Anthropic-key-shaped string for the path rows:
+// built the way squashJoinedToken is, so the source holds no literal token.
+func squashAnthropicToken() string {
+	return "sk-ant-api03-" + strings.Repeat("Z9y8X7", 6)
+}
+
+// TestSquashLedgerRedactsAPathEmbeddedToken is the bead's box for the path
+// shapes: a token inside a path keeps the word pass from finding it, because the
+// word begins with "/" and the secret rule refuses a path. land.ScrubText finds
+// the token at its own offset, so neither the token nor its first 12 characters
+// reaches the ledger line; with the scrub replaced by the identity both rows
+// fail.
+func TestSquashLedgerRedactsAPathEmbeddedToken(t *testing.T) {
+	t.Parallel()
+	tok, key := squashJoinedToken(), squashAnthropicToken()
+	cases := []struct{ name, in, token string }{
+		{"a github token in a file name", "open /settings/" + tok + ".json: no such file", tok},
+		{"an sk-ant key in a directory", "open /etc/" + key + "/x: permission denied", key},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(tc.in))
+			if strings.Contains(e.Error, tc.token) || strings.Contains(e.Error, tc.token[:12]) {
+				t.Errorf("the ledger line holds the token or its first 12 characters: %q", e.Error)
+			}
+			if !strings.Contains(e.Error, ledgerRedactedMarker) {
+				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
+			}
+		})
+	}
+}
+
+// TestSquashLedgerRedactsATokenAcrossTheCut is the bead's box for a token that
+// straddles the rune cut: 243 two-byte runes put the token at rune 243, so it
+// spans rune ledgerErrorLimit. Redaction runs before the cut,
+// so no "ghp_" prefix survives, the line is at most ledgerErrorLimit runes, and
+// cutting by runes keeps it valid UTF-8. A cut taken before the scrub keeps only
+// ten of the token's characters, which with the cut's "..." is still shorter
+// than the secret rule's minimum, so the "ghp_" prefix fails this row.
+func TestSquashLedgerRedactsATokenAcrossTheCut(t *testing.T) {
+	t.Parallel()
+	msg := strings.Repeat("é", 243) + squashJoinedToken() + strings.Repeat("é", 40)
+	e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(msg))
+	if strings.Contains(e.Error, "ghp_") {
+		t.Errorf("the ledger line holds the token's prefix: %q", e.Error)
+	}
+	if n := utf8.RuneCountInString(e.Error); n > ledgerErrorLimit {
+		t.Errorf("the ledger line holds %d runes, want at most %d", n, ledgerErrorLimit)
+	}
+	if !utf8.ValidString(e.Error) {
+		t.Errorf("the ledger line is not valid UTF-8: %q", e.Error)
 	}
 }
 
