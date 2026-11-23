@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -165,6 +166,48 @@ func TestCredentialFileTCPDSNRefuses(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") {
 		t.Errorf("error %q holds the password", err)
+	}
+}
+
+// TestCredentialFileTCPDSNCallersRefuse: every caller of tcpDSN returns the
+// credential error for a town whose credential file cannot be read, instead of
+// connecting as the default user with no password.
+func TestCredentialFileTCPDSNCallersRefuse(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\nextra=1\n", 0o600)
+	// CommitsLastDay reads the database list before it builds a DSN, and a
+	// town with none connects to nothing.
+	dbDir := filepath.Join(town, ".dolt-data", "hq", ".dolt", "noms")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", dbDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "manifest"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	h := newFakeHost().host()
+	h.openDB = func(dsn string) (*sql.DB, error) {
+		t.Errorf("opened a connection with DSN %q, want a refusal", dsn)
+		return nil, errors.New("fake host: no SQL server")
+	}
+	config := h.DefaultConfig(town)
+	for name, call := range map[string]func() error{
+		"pingSQL":              func() error { return h.pingSQL(config) },
+		"remoteDatabaseExists": func() error { _, err := h.remoteDatabaseExists(config, "hq"); return err },
+		"createRemoteDatabase": func() error { return h.createRemoteDatabase(config, "hq") },
+		"MeasureQueryLatency":  func() error { _, err := h.MeasureQueryLatency(town); return err },
+		"GetLastCommitAge":     func() error { _, _, err := h.GetLastCommitAge(town); return err },
+		"CommitsLastDay":       func() error { _, err := h.CommitsLastDay(context.Background(), town); return err },
+	} {
+		err := call()
+		if err == nil {
+			t.Errorf("%s accepted a town whose credential file cannot be read", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("%s error %q, want the credential error naming %s and no value", name, err, path)
+		}
 	}
 }
 
