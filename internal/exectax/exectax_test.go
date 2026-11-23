@@ -3,9 +3,11 @@ package exectax
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -79,6 +81,61 @@ func TestProbeWritesTheSamplesIntoItsOwnDirectory(t *testing.T) {
 			t.Errorf("%s outlived the probe: a probe must leave nothing behind", p)
 		}
 	}
+}
+
+func TestProbeReportsAFailedSampleWrite(t *testing.T) {
+	t.Parallel()
+	f := &timed{err: errors.New("exec ran after the write failed")}
+	_, err := Probe(context.Background(), Options{Samples: 1, Dir: filepath.Join(t.TempDir(), "missing"), Exec: f.exec})
+	if err == nil || len(f.paths) != 0 {
+		t.Fatalf("Probe = %v after %d execs, want the sample write error and no exec", err, len(f.paths))
+	}
+}
+
+// lockedSample embeds the sample file and records the fork lock at close; the
+// opener records it at open.
+type lockedSample struct {
+	io.WriteCloser
+	held map[string]bool
+}
+
+func (s *lockedSample) Close() error {
+	s.held["close"] = forkLockHeld()
+	return s.WriteCloser.Close()
+}
+
+// forkLockHeld reports whether a fork would wait now; TryLock is undone before
+// returning either way.
+func forkLockHeld() bool {
+	if syscall.ForkLock.TryLock() {
+		syscall.ForkLock.Unlock()
+		return false
+	}
+	return true
+}
+
+//testpolicy:allow parallel — another test's probe holds the same fork lock, so only a serial test reads the lock as this probe's
+func TestProbeHoldsTheForkLockAcrossTheSampleWrite(t *testing.T) {
+	held := map[string]bool{}
+	f := &timed{times: []time.Duration{time.Millisecond}}
+	_, err := Probe(context.Background(), Options{Samples: 1, Exec: f.exec, open: func(path string) (io.WriteCloser, error) {
+		held["open"] = forkLockHeld()
+		file, err := openSample(path)
+		if err != nil {
+			return nil, err
+		}
+		return &lockedSample{WriteCloser: file, held: held}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held["open"] || !held["close"] {
+		t.Errorf("the fork lock was not held at the sample's open (%v) or close (%v): a fork then can inherit the write descriptor and fail its exec as text file busy", held["open"], held["close"])
+	}
+	if !syscall.ForkLock.TryLock() {
+		t.Fatal("Probe returned with the fork lock still held")
+	}
+	syscall.ForkLock.Unlock()
 }
 
 func TestProbeStopsOnAFailedExec(t *testing.T) {

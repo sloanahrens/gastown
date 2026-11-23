@@ -271,6 +271,11 @@ type attentionSources struct {
 	// jobList lists the maintenance jobs for the job-overdue collector: nil
 	// until the daemon's start code has set JobListSource (job_overdue_attention.go).
 	jobList func(now time.Time) ([]JobReading, error)
+	// patrolOff reports whether the daemon holds a patrol off, naming the same
+	// setting patrolOffReason reads. The job-overdue collector skips a job it
+	// reports off, so a switched-off maintenance job never reads as overdue
+	// (gt-9r7i8p).
+	patrolOff func(name string) bool
 
 	// imagePinLayers is the image_pin_layers run's dead-layer record
 	// (image_pin_layers.go): nil while the patrol is off, so its items clear.
@@ -949,6 +954,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		root := d.config.TownRoot
 		s.jobList = func(now time.Time) ([]JobReading, error) { return list(root, now) }
 	}
+	s.patrolOff = func(name string) bool { return d.patrolOffReason(name) != "" }
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
 	s.pairReady = d.pairReady.observed

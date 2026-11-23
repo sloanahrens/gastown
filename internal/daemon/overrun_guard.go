@@ -143,6 +143,14 @@ type overrunSeat struct {
 	// seat's finished work was already on origin: the commit both hold for the
 	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
 	ReworkSHA string
+	// NoWork is set only on the seat handed to handBack, when the kept branch
+	// carried no commit of its own: after the stop's push, the commit origin
+	// holds for it is one the rig's target already contains. A checkpoint that
+	// committed uncommitted work pushed the head beyond the target, so that
+	// seat did work, and a read that fails closes to "", so neither is no-work.
+	// It marks a seat that did no work, so the hand-back is not a size finding
+	// (overrunStop, step 5).
+	NoWork bool
 	// EmptyBranchTarget is the rig's target name, set only on a seat handed back
 	// with nothing beyond it: the branch is empty, so the hand-back drops the
 	// needs-split label and says the bead starts clean (overrunStop, step 5).

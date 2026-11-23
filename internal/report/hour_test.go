@@ -132,6 +132,11 @@ func (s reportNoWriteStore) WriteCostSample(context.Context, beads.Sample) error
 	return nil
 }
 
+func (s reportNoWriteStore) CheckUsageRecordRow(context.Context, beads.UsageRecordRow) error {
+	s.fail("CheckUsageRecordRow")
+	return nil
+}
+
 func (s reportNoWriteStore) WriteUsageRecord(context.Context, beads.UsageRecordRow) error {
 	s.fail("WriteUsageRecord")
 	return nil

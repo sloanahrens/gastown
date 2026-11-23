@@ -91,17 +91,20 @@ func (c Commands) decideStoryPoints(ctx context.Context, real RealTown, env Env,
 	return err
 }
 
-// storyPointsWritten is what decideStoryPointsWrite wrote: whether it adopted, the
-// version it adopted, and the version file the weights it replaced were kept as,
-// empty when there were none (the checked-in weights were in use).
+// storyPointsWritten is what decideStoryPointsWrite wrote or refused: whether it adopted,
+// the version it adopted, and the version file the weights it replaced were kept as, empty
+// when there were none (the checked-in weights were in use); or, when the rule refused the
+// proposal, that it refused and the rule's one-line reason.
 type storyPointsWritten struct {
 	adopted  bool
 	version  string
 	previous string
+	refused  bool
+	reason   string
 }
 
-// decideStoryPointsWrite is decideStoryPoints, and returns what it wrote, so the
-// weekly run can log the adoption it made.
+// decideStoryPointsWrite is decideStoryPoints, and returns what it wrote or refused, so
+// the weekly run can log the week's outcome.
 func (c Commands) decideStoryPointsWrite(ctx context.Context, real RealTown, env Env, rule func([]storypoints.Holdout) storypoints.Adoption, firstRound bool) (storyPointsWritten, error) {
 	store := c.storyPointsStore.withHost()
 	dir, landings, err := storyPointsExtract(env, real.Extract.OutDir)
@@ -155,7 +158,8 @@ func (c Commands) decideStoryPointsWrite(ctx context.Context, real RealTown, env
 	}
 	decision := rule(holdout)
 	if !decision.Adopted {
-		return storyPointsWritten{}, c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
+		return storyPointsWritten{refused: true, reason: decision.Reason},
+			c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
 	}
 
 	runtimeDir := filepath.Dir(currentPath)

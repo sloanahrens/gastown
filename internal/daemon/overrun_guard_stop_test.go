@@ -2257,6 +2257,75 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	}
 }
 
+// The stop records a seat that made no commit of its own: a kept branch whose
+// origin head the target contains is no-work. A head beyond the target, finished
+// work on origin, or a failed read is not (gt-ahzkhx).
+func TestOverrunGuardNoWorkIsDecidedByTheStop(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		branchSHA   string          // what origin holds for the kept branch before the push
+		ancestors   map[string]bool // the target contains the branch head
+		checkpoint  bool            // the checkpoint committed the seat's uncommitted work
+		finished    bool            // the read made before the push found finished work on origin
+		ancestorErr bool            // the ancestry read fails
+		want        bool
+	}{
+		{name: "branch level with the target", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, want: true},
+		{name: "a commit of its own beyond the target", branchSHA: "abc1234"},
+		// The checkpoint's commit reaches origin above the target: work.
+		{name: "a checkpoint commit above the target", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, checkpoint: true},
+		// The target advanced to contain the finished head between the two
+		// reads; the ReworkSHA guard keeps the finished answer.
+		{name: "finished work on origin wins over a level read", branchSHA: "abc1234", ancestors: map[string]bool{"abc1234 main222": true}, finished: true},
+		{name: "a failed read is not no-work", branchSHA: "abc1234", ancestorErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			s := f.seams()
+			worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			g := &pushStubGit{branch: stopSeat.Branch, sha: tc.branchSHA, ancestors: tc.ancestors,
+				originRefs: []git.RemoteRef{
+					{Hash: tc.branchSHA, Name: "refs/heads/" + stopSeat.Branch},
+					{Hash: "main222", Name: "refs/heads/main"},
+				}}
+			if tc.ancestorErr {
+				g.ancestorErr = errors.New("ancestry unreadable")
+			}
+			d.openGitFn = func(string) daemonGit { return g }
+			if tc.checkpoint {
+				s.checkpoint = func(overrunSeat) error {
+					// The checkpoint commit, which the stop's push then puts on
+					// origin above the target.
+					g.originRefs[0].Hash = "def5678"
+					return nil
+				}
+			}
+			if tc.finished {
+				s.finishedOnOrigin = func(overrunSeat) string { return "abc1234" }
+			}
+			var noWork, handed bool
+			handBack := s.handBack
+			s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+				noWork, handed = seat.NoWork, true
+				return handBack(seat, elapsed, note)
+			}
+			d.runOverrunGuard(s)
+			if !handed {
+				t.Fatal("the seat was not handed back, so NoWork was never observed")
+			}
+			if noWork != tc.want {
+				t.Errorf("handed-back seat NoWork = %t, want %t", noWork, tc.want)
+			}
+		})
+	}
+}
+
 // Every stop that cannot show the finished work on origin keeps needs-split.
 func TestStop_UnfinishedOrUnpushedWorkKeepsNeedsSplit(t *testing.T) {
 	t.Parallel()

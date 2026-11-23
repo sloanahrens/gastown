@@ -6950,10 +6950,9 @@ func TestProbeDSNsBracketIPv6Host(t *testing.T) {
 	}
 }
 
-// The connection-string getters build their DSNs outside tcpDSN, and
-// CommitsLastDay builds its own. Every DSN this package writes takes its
-// address from HostPort, so no non-test source may format host:port by hand
-// (gt-nqp8h).
+// The connection-string getters build their display DSNs outside tcpDSN.
+// Every DSN this package writes takes its address from HostPort, so no
+// non-test source may format host:port by hand (gt-nqp8h).
 func TestDSNsBuildAddressWithHostPort(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().townPort(DefaultPort).host()

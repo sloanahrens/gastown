@@ -13,9 +13,11 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -163,10 +165,11 @@ func TestSandboxSilentAttention(t *testing.T) {
 }
 
 // TestSandboxSilentAttentionSeatState is the bead's first box: a seat the
-// intent record says is submitted, held or stopped writes no transcript while
-// it waits, so its old transcript raises no item and costs no exec; a seat
-// whose record asks for run, and a seat with no record at all, still raise
-// (gt-p43bbd).
+// intent record says is submitted, held, stopped or stopped on an escalation
+// writes no transcript while it waits, so its old transcript raises no item and
+// costs no exec; a seat whose record asks for run, an escalated exit whose turn
+// did not end stuck, and a seat with no record at all, still raise
+// (gt-p43bbd, gt-851woj).
 func TestSandboxSilentAttentionSeatState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -179,6 +182,8 @@ func TestSandboxSilentAttentionSeatState(t *testing.T) {
 		{name: "a parked seat raises no item", record: &intent.Record{Desired: intent.DesiredPark}},
 		{name: "a frozen seat raises no item", record: &intent.Record{Frozen: true}},
 		{name: "a stopped seat raises no item", record: &intent.Record{Desired: intent.DesiredStop}},
+		{name: "an escalated seat raises no item", record: &intent.Record{TurnState: string(beads.AgentStateStuck), ExitType: patrolscan.ExitEscalated}},
+		{name: "an escalated exit whose turn did not end stuck raises its item", record: &intent.Record{ExitType: patrolscan.ExitEscalated}, wantItem: true, wantRead: 1},
 		{name: "a running seat raises its item", record: &intent.Record{Desired: intent.DesiredRun}, wantItem: true, wantRead: 1},
 		{name: "a seat with no record raises its item", wantItem: true, wantRead: 1},
 	}
@@ -445,6 +450,51 @@ func TestSandboxSilentAttentionRefusals(t *testing.T) {
 			t.Errorf("listings read = %d, want none after the tick's deadline", f.reads)
 		}
 	})
+}
+
+// TestSandboxSilentAttentionBoundary is the bead's box: the window's edge is
+// quiet, not silent. A seat whose newest transcript is exactly
+// sandboxSilentAfter old raises nothing and one a second older raises the
+// item; a seat created exactly sandboxSilentAfter ago raises nothing and costs
+// no exec even when its newest transcript is older, and one a second older
+// raises its item (gt-wvi5m1).
+func TestSandboxSilentAttentionBoundary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		seatAge    time.Duration
+		transcript time.Duration
+		wantItem   bool
+		wantRead   int
+	}{
+		{name: "a transcript exactly the window old raises nothing", seatAge: 2 * time.Hour, transcript: sandboxSilentAfter, wantRead: 1},
+		{name: "a transcript a second older raises its item", seatAge: 2 * time.Hour, transcript: sandboxSilentAfter + time.Second, wantItem: true, wantRead: 1},
+		{name: "a seat exactly the window old raises nothing", seatAge: sandboxSilentAfter, transcript: sandboxSilentAfter + time.Minute},
+		{name: "a seat a second older raises its item", seatAge: sandboxSilentAfter + time.Second, transcript: sandboxSilentAfter + time.Minute, wantItem: true, wantRead: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSilentSandboxFixture(t)
+			seat := f.seat(t, "gt-gastown-mango", "gastown", "mango", tc.seatAge)
+			f.transcript(seat.Session, tc.transcript)
+
+			items, err := f.collect(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantItem {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none at the window's edge", items)
+				}
+			} else if len(items) != 1 || items[0].Key != "sandbox-silent:gastown/mango" {
+				t.Fatalf("items = %+v, want one item on sandbox-silent:gastown/mango", items)
+			}
+			if f.reads != tc.wantRead {
+				t.Errorf("listings read = %d, want %d", f.reads, tc.wantRead)
+			}
+		})
+	}
 }
 
 // unreadableMarks counts the seats whose unreadable listing has been logged,

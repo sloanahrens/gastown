@@ -26,11 +26,15 @@ type SizeAnswer struct {
 type Answers struct {
 	// LandsFirstTry is nil on lines logged after lands_first_try left the
 	// battery, so a missing value reads as missing, not as a probability of 0.
-	LandsFirstTry      *float64   `json:"lands_first_try,omitempty"`
-	FitsTwentyMinutes  float64    `json:"fits_twenty_minutes"`
-	AcceptanceTickable float64    `json:"acceptance_tickable"`
-	NeedsStrongModel   float64    `json:"needs_strong_model"`
-	TouchesDaemon      float64    `json:"touches_daemon"`
+	LandsFirstTry     *float64 `json:"lands_first_try,omitempty"`
+	FitsTwentyMinutes float64  `json:"fits_twenty_minutes"`
+	// AcceptanceTickable, NeedsStrongModel and TouchesDaemon are pointers for
+	// the same reason: a line that leaves one out reads it as missing, not as
+	// a probability of 0. Lines written while the battery still asks them carry
+	// all three, as do Version 2 lines logged before this.
+	AcceptanceTickable *float64   `json:"acceptance_tickable,omitempty"`
+	NeedsStrongModel   *float64   `json:"needs_strong_model,omitempty"`
+	TouchesDaemon      *float64   `json:"touches_daemon,omitempty"`
 	Size               SizeAnswer `json:"size"`
 }
 

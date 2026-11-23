@@ -169,6 +169,7 @@ folds into the dashboard.`,
 func init() {
 	rootCmd.AddCommand(usageCmd)
 	usageCmd.AddCommand(newUsageSampleCmd(defaultUsageSampleDeps()))
+	usageCmd.AddCommand(newUsageReplayCmd(defaultUsageReplayDeps()))
 }
 
 func newUsageSampleCmd(deps usageSampleDeps) *cobra.Command {
