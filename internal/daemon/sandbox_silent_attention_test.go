@@ -13,9 +13,11 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -163,10 +165,11 @@ func TestSandboxSilentAttention(t *testing.T) {
 }
 
 // TestSandboxSilentAttentionSeatState is the bead's first box: a seat the
-// intent record says is submitted, held or stopped writes no transcript while
-// it waits, so its old transcript raises no item and costs no exec; a seat
-// whose record asks for run, and a seat with no record at all, still raise
-// (gt-p43bbd).
+// intent record says is submitted, held, stopped or stopped on an escalation
+// writes no transcript while it waits, so its old transcript raises no item and
+// costs no exec; a seat whose record asks for run, an escalated exit whose turn
+// did not end stuck, and a seat with no record at all, still raise
+// (gt-p43bbd, gt-851woj).
 func TestSandboxSilentAttentionSeatState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -179,6 +182,8 @@ func TestSandboxSilentAttentionSeatState(t *testing.T) {
 		{name: "a parked seat raises no item", record: &intent.Record{Desired: intent.DesiredPark}},
 		{name: "a frozen seat raises no item", record: &intent.Record{Frozen: true}},
 		{name: "a stopped seat raises no item", record: &intent.Record{Desired: intent.DesiredStop}},
+		{name: "an escalated seat raises no item", record: &intent.Record{TurnState: string(beads.AgentStateStuck), ExitType: patrolscan.ExitEscalated}},
+		{name: "an escalated exit whose turn did not end stuck raises its item", record: &intent.Record{ExitType: patrolscan.ExitEscalated}, wantItem: true, wantRead: 1},
 		{name: "a running seat raises its item", record: &intent.Record{Desired: intent.DesiredRun}, wantItem: true, wantRead: 1},
 		{name: "a seat with no record raises its item", wantItem: true, wantRead: 1},
 	}
