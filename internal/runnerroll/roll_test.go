@@ -121,7 +121,6 @@ func newRollFixture() *rollFixture {
 	f.opts = RollOptions{
 		LandingWait: 10 * time.Minute,
 		RunsWait:    20 * time.Minute,
-		RolloutWait: 10 * time.Minute,
 		Step:        func(n int) string { return fmt.Sprintf("step name %d", n) },
 	}
 	return f
@@ -483,10 +482,10 @@ func TestRunRefusesARollItCannotRun(t *testing.T) {
 		mutate    func(*rollFixture)
 		nilTarget bool
 		want      string
+		notWant   string
 	}{
-		{name: "no landing wait", mutate: func(f *rollFixture) { f.opts.LandingWait = 0 }, want: "longer than zero"},
+		{name: "no landing wait", mutate: func(f *rollFixture) { f.opts.LandingWait = 0 }, want: "longer than zero", notWant: "rollout"},
 		{name: "no runs wait", mutate: func(f *rollFixture) { f.opts.RunsWait = -time.Second }, want: "longer than zero"},
-		{name: "no rollout wait", mutate: func(f *rollFixture) { f.opts.RolloutWait = 0 }, want: "longer than zero"},
 		{name: "no step names", mutate: func(f *rollFixture) { f.opts.Step = nil }, want: "no step names"},
 		{name: "no target", nilTarget: true, want: "no target"},
 		{name: "nowhere to print", mutate: func(f *rollFixture) { f.deps.Out = nil }, want: "nowhere to print"},
@@ -512,6 +511,9 @@ func TestRunRefusesARollItCannotRun(t *testing.T) {
 
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want it to name %q", err, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("error = %v, want it not to name %q: the roll does not check that bound", err, tc.notWant)
 			}
 			if len(f.log.calls) != 0 {
 				t.Errorf("calls = %v, want none: a refused roll takes nothing", f.log.calls)

@@ -304,7 +304,6 @@ func runTownClusterRoll(d clusterRollDeps) error {
 	opts := runnerroll.RollOptions{
 		LandingWait: d.landingWait,
 		RunsWait:    d.runsWait,
-		RolloutWait: d.rolloutWait,
 		DryRun:      d.dryRun,
 		Step:        d.step,
 	}

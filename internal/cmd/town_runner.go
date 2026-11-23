@@ -295,10 +295,9 @@ type runnerRollDeps struct {
 	out         io.Writer
 }
 
-// rolloutBound is the rollout wait the roll prints in step 4 and hands to
-// runnerroll: the applier's own bound where it has one, so the printed text and
-// the wait cannot disagree. A target with no bound of its own uses the deps'
-// value, and checkRoll refuses a zero bound before any step prints.
+// rolloutBound is the rollout wait the roll prints in step 4: the applier's own
+// bound where it has one, so the printed text and the wait the target enforces
+// cannot disagree. A target with no bound of its own uses the deps' value.
 func (d runnerRollDeps) rolloutBound() time.Duration {
 	if b, ok := d.apply.(rolloutBounder); ok {
 		return b.rolloutBound()
@@ -476,7 +475,6 @@ func runTownRunnerRoll(d runnerRollDeps) error {
 	opts := runnerroll.RollOptions{
 		LandingWait: d.landingWait,
 		RunsWait:    d.runsWait,
-		RolloutWait: d.rolloutBound(),
 		DryRun:      d.dryRun,
 		Step:        d.step,
 	}

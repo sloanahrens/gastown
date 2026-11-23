@@ -58,9 +58,6 @@ type RollDeps struct {
 type RollOptions struct {
 	LandingWait time.Duration
 	RunsWait    time.Duration
-	// RolloutWait is the bound Run refuses when it is not positive. The target's
-	// WaitReady enforces it, since the target owns that wait.
-	RolloutWait time.Duration
 	DryRun      bool
 	// Step names step n, 1 to 5, for printing.
 	Step func(n int) string
@@ -147,8 +144,8 @@ func dryRun(ctx context.Context, deps RollDeps, t Target, opts RollOptions) erro
 // that cannot end, a step name or a target that is missing, and, for a real
 // roll, every seam its steps read.
 func checkRoll(deps RollDeps, t Target, opts RollOptions) error {
-	if opts.LandingWait <= 0 || opts.RunsWait <= 0 || opts.RolloutWait <= 0 {
-		return fmt.Errorf("the waits must be longer than zero: --landing-wait %s, --runs-wait %s, --rollout-wait %s", opts.LandingWait, opts.RunsWait, opts.RolloutWait)
+	if opts.LandingWait <= 0 || opts.RunsWait <= 0 {
+		return fmt.Errorf("the waits must be longer than zero: --landing-wait %s, --runs-wait %s", opts.LandingWait, opts.RunsWait)
 	}
 	if opts.Step == nil {
 		return errors.New("the roll has no step names, so it cannot print what it does")
