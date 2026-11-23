@@ -575,7 +575,7 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 	end.RulesPending = h.rulesPending(rig, name, landing.Submitted)
 	// The record is read here so both seat-end entry points, the landing's
 	// startSandboxSeatEnd and the patrol's, reach it through this measurement.
-	// A bead whose comments cannot be read takes the pull, the behaviour
+	// A bead whose comments cannot be read takes the pull, the behavior
 	// before the record, and says so (gt-g73e2q).
 	if seatRecord, found, err := h.seatEndRecord(rig, name, landing.BeadID); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: its SEAT-END comment cannot be read, so the pull runs: %v", rig, name, err)
