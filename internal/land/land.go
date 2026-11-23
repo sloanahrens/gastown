@@ -239,10 +239,6 @@ type Lander struct {
 	// test can reach the timeout without waiting it out. Zero keeps
 	// commentTimeout.
 	auditTimeout time.Duration
-	// sleep, when set, is the wait retryWrite takes between tries; no production
-	// write reaches it since they became try-once (gt-hounmt, gt-2yutrf). Nil
-	// means a real wait; tests inject one that waits nothing.
-	sleep func(time.Duration)
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
