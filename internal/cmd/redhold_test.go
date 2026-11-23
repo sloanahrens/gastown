@@ -147,3 +147,67 @@ func TestRedHoldCmdStatusWriteError(t *testing.T) {
 		}
 	}
 }
+
+// redHoldTestLiftRun executes `gt red-hold lift` over find with the actor fixed.
+func redHoldTestLiftRun(t *testing.T, find func() (string, error), out io.Writer, args ...string) error {
+	t.Helper()
+	c := newRedHoldCmdWith(find, func(string) string { return "town/crew/overseer" })
+	c.SetArgs(append([]string{"lift"}, args...))
+	c.SetOut(out)
+	c.SetErr(io.Discard)
+	return c.Execute()
+}
+
+func TestRedHoldCmdLift(t *testing.T) {
+	t.Parallel()
+	held, quiet, open := redHoldTestHeldTown(t), redHoldTestHeldTown(t), t.TempDir()
+	corrupt := redHoldTestHeldTown(t)
+	if err := os.WriteFile(dispatch.RedHoldPath(corrupt), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blocked := redHoldTestHeldTown(t)
+	// A directory where the request file goes makes the atomic rename fail.
+	if err := os.MkdirAll(dispatch.RedHoldLiftPath(blocked), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	find := func(root string) func() (string, error) { return func() (string, error) { return root, nil } }
+	cases := []struct {
+		name, root, want string
+		find             func() (string, error)
+		args             []string
+		wantReq, noRead  bool
+	}{
+		{name: "writes the request", root: held, find: find(held), want: "lift requested; the daemon decides on its next heartbeat; see gt red-hold status\n", args: []string{"--reason", "fixed"}, wantReq: true},
+		{name: "missing reason", root: quiet, find: find(quiet)},
+		{name: "blank reason", root: quiet, find: find(quiet), args: []string{"--reason", "  "}},
+		{name: "nothing to lift", root: open, find: find(open), want: "nothing to lift\n", args: []string{"--reason", "fixed"}},
+		{name: "no town", root: t.TempDir(), find: func() (string, error) { return "", errors.New("no town") }, args: []string{"--reason", "fixed"}},
+		{name: "corrupt red hold", root: corrupt, find: find(corrupt), args: []string{"--reason", "fixed"}},
+		{name: "request write fails", root: blocked, find: find(blocked), args: []string{"--reason", "fixed"}, noRead: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := redHoldTestLiftRun(t, tc.find, &out, tc.args...)
+			if (err == nil) != tc.wantReq || (err != nil && exitCodeForError(err) != 1) {
+				t.Fatalf("err = %v, want error %v exiting 1", err, !tc.wantReq)
+			}
+			if out.String() != tc.want {
+				t.Errorf("output = %q, want %q", out.String(), tc.want)
+			}
+			if tc.noRead {
+				return
+			}
+			req, ok, err := dispatch.ReadLift(tc.root)
+			if err != nil || ok != tc.wantReq || (ok && (req.Reason != "fixed" || req.By != "town/crew/overseer" || req.At.IsZero())) {
+				t.Fatalf("request = %+v present %v, err %v; want present %v, with reason and actor when present", req, ok, err, tc.wantReq)
+			}
+		})
+	}
+	// A failing writer over an open and a held town drives both print-error branches.
+	for _, root := range []string{open, held} {
+		if err := redHoldTestLiftRun(t, find(root), redHoldTestFailingWriter{}, "--reason", "fixed"); err == nil {
+			t.Errorf("a failing writer over %s exited 0; want an error", root)
+		}
+	}
+}
