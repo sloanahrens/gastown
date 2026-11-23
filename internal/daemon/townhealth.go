@@ -249,12 +249,29 @@ func (s *healthSources) Dispatch() (townhealth.DispatchRecord, error) {
 	rec := townhealth.DispatchRecord{Active: s.d.isPatrolActive("spec_dispatch")}
 	if s.d.config != nil {
 		rec.Hold = dispatch.OperatorHold(s.d.config.TownRoot)
+		rec.RedHold = redHoldKindsLine(s.d.config.TownRoot)
 	}
 	// A parked ticker records no tick, so the field would otherwise read it
 	// as a dispatcher gone silent (spec_seats.go, gt-jdnab).
 	rec.Parked = s.d.specSeats.parked()
 	rec.Ticks = s.d.dispatchTickRecords()
 	return rec, nil
+}
+
+// redHoldKindsLine names the kinds the red hold file stands for, in the file's
+// order and comma separated. No file is "", and a file that cannot be read or
+// parsed is "unreadable": the kinds cannot be shown, and an empty string would
+// read as no hold at all.
+func redHoldKindsLine(townRoot string) string {
+	rec, err := dispatch.ReadRedHold(townRoot)
+	if err != nil {
+		return "unreadable"
+	}
+	kinds := make([]string, len(rec.Reasons))
+	for i, r := range rec.Reasons {
+		kinds[i] = r.Kind
+	}
+	return strings.Join(kinds, ", ")
 }
 
 func (s *healthSources) townRoot() string { return s.d.config.TownRoot }
