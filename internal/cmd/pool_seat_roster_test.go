@@ -319,6 +319,30 @@ func TestRosterResultEqualsTheSequentialRead(t *testing.T) {
 	}
 }
 
+// TestTickEffRosterRigsWithSeats is gt-vg9vyi: only the rigs with a polecat are
+// read, so a five-rig town with seats in two reads the batch for those two.
+func TestTickEffRosterRigsWithSeats(t *testing.T) {
+	t.Parallel()
+	town, dbs, lister := rosterTown(t, map[string][]string{
+		"arig": {"p1"}, "brig": {"p1"}, "crig": {}, "drig": {}, "erig": {},
+	})
+	var mu sync.Mutex
+	var read []string
+	storeFor := func(dir string) beads.Client {
+		mu.Lock()
+		read = append(read, filepath.Base(dir))
+		mu.Unlock()
+		return dbs[filepath.Base(dir)]
+	}
+	if _, err := rosterSnapshotOn(rosterBatch(town, storeFor, 4), nil, town, seatPool("deepseek-flash", 10), lister, time.Now); err != nil {
+		t.Fatalf("roster read: %v", err)
+	}
+	sort.Strings(read)
+	if want := []string{"arig", "brig"}; !reflect.DeepEqual(read, want) {
+		t.Errorf("the batch was read for %v, want %v", read, want)
+	}
+}
+
 // TestRosterErrorIsTheFirstRigInNameOrder is gt-0mzpm: when more than one rig
 // cannot be read, the roster reports the first rig in name order, as the
 // sequential walk does, whatever order the concurrent reads finish in. It drives
