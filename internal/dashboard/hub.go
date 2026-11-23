@@ -60,9 +60,14 @@ type Hub struct {
 	prev   State
 	// queueItems is the attention queue's items as the last poll read them,
 	// which classify the panel's rows when it next publishes, and queueFailed
-	// whether that read could be made at all (gt-tv5v2).
+	// whether that read could be made at all (gt-tv5v2). queueKnown says those
+	// items are a reading — the last poll read the queue and the read succeeded.
+	// It is false before the first successful read, after a failed one, and while
+	// no items reader is configured, so a pair computed from an unread queue is
+	// unknown, never absent (gt-clorl0).
 	queueItems  []attention.Item
 	queueFailed bool
+	queueKnown  bool
 
 	// wake releases every parked worker when a page connects after an idle
 	// spell, so the first page does not wait out a whole interval for fresh
@@ -654,13 +659,15 @@ func (h *Hub) pollAttention() {
 	evs, acks := h.cfg.Attention()
 	var queue []attention.Item
 	var queueFailed bool
+	var queueKnown bool
 	if h.cfg.AttentionItems != nil {
 		items, err := h.cfg.AttentionItems()
 		queue, queueFailed = items, err != nil
+		queueKnown = err == nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.queueItems, h.queueFailed = queue, queueFailed
+	h.queueItems, h.queueFailed, h.queueKnown = queue, queueFailed, queueKnown
 	raised, removed := h.alerts.ObserveAttention(evs, acks)
 	if len(removed) > 0 {
 		gone := make(map[string]bool, len(removed))

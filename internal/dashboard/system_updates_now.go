@@ -93,6 +93,10 @@ func (h *Hub) pollSystemUpdates() {
 	su.SweepUnknown = sweep == nil || sweep.Unavailable
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// The pair state joins the rows with the attention items, which are the
+	// hub's own read rather than the section reader's (gt-clorl0). queueKnown
+	// says those items are a reading; until then a row is unknown, never absent.
+	classifySystemUpdatePairs(su.Rows, h.queueItems, h.queueKnown)
 	h.state.SystemUpdates = su
 	h.publishLocked()
 }

@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 // The System updates section joins the three places a landed commit shows up —
@@ -36,13 +38,28 @@ type SystemUpdateRoll struct {
 	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
 
+// The states a commit row's Pair names.
+const (
+	pairAbsent   = "absent"
+	pairBuilding = "building"
+	pairReady    = "ready"
+	pairFailed   = "failed"
+	pairRefused  = "refused"
+	pairStuck    = "stuck"
+	pairUnknown  = "unknown"
+)
+
 // SystemUpdateRow is one landed commit as the System updates section draws it:
-// its sha cut to twelve characters and whichever of the three stages have run.
+// its sha cut to twelve characters, whichever of the three stages have run, and
+// the state of its image pair.
 type SystemUpdateRow struct {
 	SHA   string            `json:"sha"`
 	Sweep *TierSweepRow     `json:"sweep,omitempty"`
 	Runs  []PipelineRun     `json:"runs,omitempty"`
 	Roll  *SystemUpdateRoll `json:"roll,omitempty"`
+	// Pair is the commit's images pair as the hub classified it, one of the
+	// pair constants; it is empty only before the hub fills it.
+	Pair string `json:"pair"`
 }
 
 // SystemUpdateRows joins sweeps, pipeline runs and rolls into at most limit rows,
@@ -159,4 +176,76 @@ func newest(a, b time.Time) time.Time {
 		return b
 	}
 	return a
+}
+
+// classifySystemUpdatePairs sets each row's Pair from the hub's attention items
+// and the images run the row carries. A queue that was not read leaves every row
+// unknown, never absent, so an attention read that failed, has not run yet, or
+// has no items reader does not read as a commit with no pair.
+//
+// Several readings can name one commit, so the state is taken in this order:
+// refused, failed, stuck, ready, building, absent. The green ref's own
+// publication is not read: a commit whose images have not started is absent, and
+// a ref that failed to publish is the green-ref attention item, which is not one
+// of the kinds mapped here.
+func classifySystemUpdatePairs(rows []SystemUpdateRow, items []attention.Item, queueKnown bool) {
+	for i := range rows {
+		rows[i].Pair = systemUpdatePair(rows[i], items, queueKnown)
+	}
+}
+
+// systemUpdatePair is one row's state: the attention items that name its commit
+// by the join's own prefix rule, and the status of its newest images run. An
+// unread or failed queue known nothing, so the state is unknown.
+func systemUpdatePair(row SystemUpdateRow, items []attention.Item, queueKnown bool) string {
+	if !queueKnown {
+		return pairUnknown
+	}
+	var ready, failed, refused, stuck, building bool
+	for _, it := range items {
+		if !sameCommit(it.SHA, row.SHA) {
+			continue
+		}
+		switch it.Kind {
+		case attention.KindDeployPairRefused:
+			refused = true
+		case attention.KindImagesFailed:
+			failed = true
+		case attention.KindDeployPairStuck:
+			stuck = true
+		case attention.KindDeployPairReady:
+			ready = true
+		}
+	}
+	switch newestImagesStatus(row.Runs) {
+	case pipelineRunning, pipelineQueued:
+		building = true
+	case pipelineFailure:
+		failed = true
+	}
+	switch {
+	case refused:
+		return pairRefused
+	case failed:
+		return pairFailed
+	case stuck:
+		return pairStuck
+	case ready:
+		return pairReady
+	case building:
+		return pairBuilding
+	}
+	return pairAbsent
+}
+
+// newestImagesStatus is the status of the newest images run the row carries. The
+// pipeline lists runs newest first and the join keeps that order, so the first
+// images run is the newest; a run of the post-land workflow is skipped.
+func newestImagesStatus(runs []PipelineRun) string {
+	for _, run := range runs {
+		if run.Workflow == imagesWorkflow {
+			return run.Status
+		}
+	}
+	return ""
 }
