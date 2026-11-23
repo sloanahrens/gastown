@@ -1,16 +1,20 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	gtgit "github.com/steveyegge/gastown/internal/git"
@@ -367,8 +371,11 @@ func (d *Daemon) syncTownStateBackup() {
 // refused and clears the item of each path it no longer refuses. A failed raise
 // or clear leaves townStateRaised as it was, so the next tick tries again. The
 // text names the path, never a value. townStateRaised is touched only inside a
-// cycle, which jsonlGitBackupRunning serializes.
+// cycle, which jsonlGitBackupRunning serializes. It starts from the set the
+// previous daemon left on disk, so an item raised before a restart is cleared
+// by the daemon after it.
 func (d *Daemon) reconcileTownStateRefusals(refused []string) {
+	d.loadTownStateRaised()
 	now := make(map[string]struct{}, len(refused))
 	for _, path := range refused {
 		now[path] = struct{}{}
@@ -378,10 +385,8 @@ func (d *Daemon) reconcileTownStateRefusals(refused []string) {
 		if err := d.escalateAlertErr(townStateRefusedKey(path), "town_state_backup", path+" holds a credential and is not backed up"); err != nil {
 			continue
 		}
-		if d.townStateRaised == nil {
-			d.townStateRaised = map[string]struct{}{}
-		}
 		d.townStateRaised[path] = struct{}{}
+		d.recordTownStateRaised()
 	}
 	for path := range d.townStateRaised {
 		if _, ok := now[path]; ok {
@@ -389,7 +394,48 @@ func (d *Daemon) reconcileTownStateRefusals(refused []string) {
 		}
 		if err := d.clearAlertsErr("town_state_backup path is clean", townStateRefusedKey(path)); err == nil {
 			delete(d.townStateRaised, path)
+			d.recordTownStateRaised()
 		}
+	}
+}
+
+// townStateRaisedPath is where the refusal set outlives the daemon.
+func townStateRaisedPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "town-state-raised.json")
+}
+
+// loadTownStateRaised puts the set a previous daemon wrote into
+// d.townStateRaised, once per daemon: an item raised before a restart is
+// cleared by the daemon after it, which never raised the item itself. A
+// missing or unreadable file is an empty set, so a path refused again is
+// raised afresh. A nil set is this daemon's first reconcile; nothing else
+// creates the map, so a non-nil one has already been read.
+func (d *Daemon) loadTownStateRaised() {
+	if d.townStateRaised != nil {
+		return
+	}
+	d.townStateRaised = map[string]struct{}{}
+	data, err := os.ReadFile(townStateRaisedPath(d.config.TownRoot))
+	if err != nil {
+		return
+	}
+	var paths []string
+	if err := json.Unmarshal(data, &paths); err != nil {
+		d.logger.Printf("town_state_backup: ignoring %s, which is not a path list: %v", townStateRaisedPath(d.config.TownRoot), err)
+		return
+	}
+	for _, path := range paths {
+		d.townStateRaised[path] = struct{}{}
+	}
+}
+
+// recordTownStateRaised writes the refusal set to disk after each change, as
+// the sorted path list. A failed write is logged and does not fail the tick:
+// the next change writes the set again.
+func (d *Daemon) recordTownStateRaised() {
+	paths := slices.Sorted(maps.Keys(d.townStateRaised))
+	if err := atomicfile.EnsureDirAndWriteJSON(townStateRaisedPath(d.config.TownRoot), paths); err != nil {
+		d.logger.Printf("town_state_backup: recording the refused paths: %v", err)
 	}
 }
 
