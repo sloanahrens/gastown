@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -26,9 +25,10 @@ const polecatManifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 const polecatImageFix = "gt town cluster render --polecat-image on the digest the registry answers"
 
 // bdGatewayFix is the repair when the gateway has no ready replica: a pod that
-// fails readiness has no Service endpoint, so nothing reaches the gateway
-// (gt-plvm2h).
-const bdGatewayFix = "gt bd workspace push through the push Service, else the exec-pod route"
+// fails readiness has no Service endpoint, so nothing reaches the gateway. A
+// push goes through the push Service when the render includes it, and the
+// exec-pod route otherwise (gt-plvm2h).
+const bdGatewayFix = "gt bd workspace push through the push Service when the render includes it, else the exec-pod route"
 
 // daemonDeployment is the part of the daemon Deployment the image check reads.
 // The polecat image travels only on the pod template's annotations, so the
@@ -43,12 +43,11 @@ type daemonDeployment struct {
 	} `json:"spec"`
 }
 
-// gatewayDeployment is one item of the Deployment list the gateway check reads.
-// A Deployment that never became ready carries no readyReplicas, which decodes
-// as 0: the same no-ready-pod state the check reports.
+// gatewayDeployment is the part of the bd-gateway Deployment the gateway check
+// reads. A Deployment that never became ready carries no readyReplicas, which
+// decodes as 0: the same no-ready-pod state the check reports.
 type gatewayDeployment struct {
-	Metadata struct{ Name string } `json:"metadata"`
-	Status   struct {
+	Status struct {
 		ReadyReplicas int `json:"readyReplicas"`
 	} `json:"status"`
 }
@@ -178,9 +177,11 @@ func headerValue(headers, want string) (string, bool) {
 	return "", false
 }
 
-// bdGatewayCheck reads the bd gateway Deployment from the namespace's
-// Deployment list and passes at one or more ready replicas (gt-plvm2h). A list
-// without the Deployment is not deployed; an empty answer is a failed read.
+// bdGatewayCheck reads the bd gateway Deployment's ready replicas and passes at
+// one or more (gt-plvm2h). A town before the gateway cutover has no Deployment;
+// that is not deployed only after the daemon Deployment answers the same read,
+// so an empty answer with no proof the read reached the cluster is a failure
+// (gt-47r2a5). Both are read by name, so the read takes get, never a list.
 func bdGatewayCheck(run Runner) Check {
 	return Check{
 		Name: "8 bd gateway",
@@ -189,26 +190,23 @@ func bdGatewayCheck(run Runner) Check {
 				return Result{Detail: "no runner configured"}
 			}
 			out, err := run(ctx, "kubectl", "--context", "colima-gt-control",
-				"-n", k8sdaemon.DefaultNamespace, "get", "deployments", "-o", "json")
+				"-n", k8sdaemon.DefaultNamespace, "get", "deployment", k8sdaemon.BdGatewayName,
+				"-o", "json", "--ignore-not-found")
 			if err != nil {
-				return Result{Detail: fmt.Sprintf("list deployments: %v", err)}
+				return Result{Detail: fmt.Sprintf("read deployment %s: %v", k8sdaemon.BdGatewayName, err)}
 			}
 			if strings.TrimSpace(string(out)) == "" {
-				return Result{Detail: "the deployment list answered nothing"}
-			}
-			var list struct {
-				Items []gatewayDeployment `json:"items"`
-			}
-			if err := json.Unmarshal(out, &list); err != nil {
-				return Result{Detail: fmt.Sprintf("parse the deployment list: %v", err)}
-			}
-			i := slices.IndexFunc(list.Items, func(d gatewayDeployment) bool {
-				return d.Metadata.Name == k8sdaemon.BdGatewayName
-			})
-			if i < 0 {
+				anchor, aerr := run(ctx, "kubectl", "--context", "colima-gt-control",
+					"-n", k8sdaemon.DefaultNamespace, "get", "deployment", k8sdaemon.Name, "-o", "json")
+				if aerr != nil || strings.TrimSpace(string(anchor)) == "" {
+					return Result{Detail: "the deployment read answered nothing"}
+				}
 				return Result{OK: true, Detail: "not deployed"}
 			}
-			d := list.Items[i]
+			var d gatewayDeployment
+			if err := json.Unmarshal(out, &d); err != nil {
+				return Result{Detail: fmt.Sprintf("parse deployment %s: %v", k8sdaemon.BdGatewayName, err)}
+			}
 			if d.Status.ReadyReplicas < 1 {
 				return Result{
 					Detail: "no ready replica: a pod that fails readiness has no Service endpoint",
