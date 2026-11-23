@@ -280,6 +280,42 @@ func TestPolecatDirectiveContradictionRule(t *testing.T) {
 	}
 }
 
+// TestPolecatDirectivePrivateTempDir pins gt-r4cnk2: rule 7 of the rendered
+// polecat directive sends a test that needs a private directory to
+// testutil.PrivateTempDir(t), a t.TempDir() at 0700 (gt-aq8dej), so a seat does
+// not chmod its own directory under a CI job's open umask. It renders the
+// directive through config.LoadRoleDirective, so the Changelog's copy of the
+// words does not satisfy it.
+func TestPolecatDirectivePrivateTempDir(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(config.CentralDirectiveDir(town), "polecat.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(readDirective(t, "polecat.md")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := config.LoadRoleDirective("polecat", town, "")
+
+	const heading = "\n## 7. Hermetic tests\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("the rendered polecat directive has no rule 7 titled \"Hermetic tests\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n## 8.")
+	if end < 0 {
+		t.Fatal("the rendered polecat directive has no rule 8 after rule 7")
+	}
+	rule := body[:end]
+	for _, clause := range []string{"private directory", "t.TempDir()", "0700", "PrivateTempDir"} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 7 lacks the clause %q", clause)
+		}
+	}
+}
+
 // TestPolecatDirectiveChecklistPointsAtRule17 pins gt-qgum2's rework: line 11
 // of the "Before gt done" checklist is the checklist's caller of rule 17. It
 // points at the rule instead of restating its command, and its search covers
