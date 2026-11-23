@@ -17,8 +17,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 const (
@@ -45,8 +48,9 @@ const (
 // sandboxSilentAfter old. The item names the seat and its bead, so the
 // overseer reads whether the agent is working before the overrun bound stops
 // it. A readable listing with a newer transcript, a seat younger than the
-// window, and a seat that has written no transcript yet each raise nothing,
-// which clears a seat's item.
+// window, a seat that has written no transcript yet, and a seat its intent
+// record says is submitted, held or stopped each raise nothing, which clears a
+// seat's item.
 //
 // A seat is judged only when the town's settings still hold its profile and
 // that profile is kubernetes: the docker driver is out of this item's scope,
@@ -55,11 +59,11 @@ const (
 //
 // A registry or profile read that fails returns the error and no items, so the
 // previous tick's items are kept rather than cleared by an unanswered read. A
-// record that cannot be read, or that names another session or a name an exec
-// must not address, fails the collection the same way. A listing that cannot
-// be read raises no new item and says so once per seat; the item the seat
-// already had is kept, since an unanswered gateway is not a seat whose
-// transcripts are recent. The tick's deadline ends the pass before the next
+// record that cannot be read, an intent record that cannot be read, or a record
+// that names another session or a name an exec must not address, fails the
+// collection the same way. A listing that cannot be read raises no new item and
+// says so once per seat; the item the seat already had is kept, since an
+// unanswered gateway is not a seat whose transcripts are recent. The tick's deadline ends the pass before the next
 // seat's read, and such a pass fails, so its previous items are kept and no
 // seat is cleared by a gateway that stopped answering mid-pass.
 func (s *attentionSources) collectSilentSandboxSeats(ctx context.Context) ([]attention.Item, error) {
@@ -107,7 +111,11 @@ func (s *attentionSources) collectSilentSandboxSeats(ctx context.Context) ([]att
 		if profile.Driver != agentconfig.SandboxDriverKubernetes {
 			continue
 		}
-		if it, raised := s.silentSandboxSeat(ctx, rec); raised {
+		it, raised, err := s.silentSandboxSeat(ctx, rec)
+		if err != nil {
+			return nil, err
+		}
+		if raised {
 			out = append(out, it)
 		}
 	}
@@ -117,23 +125,48 @@ func (s *attentionSources) collectSilentSandboxSeats(ctx context.Context) ([]att
 }
 
 // silentSandboxSeat judges one live seat: it returns the item the seat raises,
-// and whether it raises one. A seat younger than sandboxSilentAfter, one with
-// no transcript yet, and one whose newest transcript is recent each raise
-// nothing. A listing that cannot be read raises nothing new and keeps the
-// seat's previous item, so a gateway that did not answer does not clear a real
-// alarm; its failure is logged once per seat.
-func (s *attentionSources) silentSandboxSeat(ctx context.Context, rec session.SandboxRecord) (attention.Item, bool) {
+// whether it raises one, and the error that fails the collection. A seat
+// younger than sandboxSilentAfter, one with no transcript yet, and one whose
+// newest transcript is recent each raise nothing. A seat the intent record says
+// is submitted, held or stopped writes no transcript while it waits, so it
+// raises nothing and costs no exec. A record that cannot be read is returned as
+// an error, so the collection fails and keeps the seat's previous item rather
+// than reading an unknown as a seat that is not waiting. A listing that cannot
+// be read raises nothing new and keeps the seat's previous item, so a gateway
+// that did not answer does not clear a real alarm; its failure is logged once
+// per seat.
+func (s *attentionSources) silentSandboxSeat(ctx context.Context, rec session.SandboxRecord) (attention.Item, bool, error) {
 	key := sandboxSilentKeyPrefix + rec.Rig + "/" + rec.Polecat
 	// A seat younger than the window has not been silent, whatever its clock
 	// skew says about a transcript.
 	if !rec.CreatedAt.IsZero() && s.now.Sub(rec.CreatedAt) <= sandboxSilentAfter {
-		return attention.Item{}, false
+		return attention.Item{}, false, nil
+	}
+	// A submitted, held or stopped seat writes no transcript while it waits, so
+	// its silence is not an alarm. The read is the seat end's, so both rule the
+	// same record; a record that cannot be read fails the collection.
+	state, err := intent.Read(s.d.config.TownRoot, supervisor.IntentSeat(supervisor.SeatFor(rec.Rig, constants.RolePolecat, rec.Polecat)))
+	if err != nil {
+		return attention.Item{}, false, fmt.Errorf("reading the intent record of the sandbox seat %s/%s: %w", rec.Rig, rec.Polecat, err)
+	}
+	if state.Held() || state.Submitted() || state.EffectiveDesired() == intent.DesiredStop {
+		return attention.Item{}, false, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sandboxSilentReadTimeout)
 	defer cancel()
-	listed, err := s.sandboxSeatTranscripts(readCtx, rec)
-	if err != nil {
-		s.logSilentSandboxSeatUnreadable(rec, err)
+	listed, listErr := s.sandboxSeatTranscripts(readCtx, rec)
+	it, raised := s.silentSandboxSeatOutcome(rec, key, listed, listErr)
+	return it, raised, nil
+}
+
+// silentSandboxSeatOutcome is one seat's judgment from its listing read. A
+// listing that could not be read logs its failure once per seat and keeps the
+// item the seat already had, so a gateway that did not answer does not clear a
+// real alarm. A readable listing raises the item for a newest transcript older
+// than the window, and nothing for a recent one or for no transcript at all.
+func (s *attentionSources) silentSandboxSeatOutcome(rec session.SandboxRecord, key string, listed []session.SandboxTranscript, listErr error) (attention.Item, bool) {
+	if listErr != nil {
+		s.logSilentSandboxSeatUnreadable(rec, listErr)
 		for _, it := range s.prev.Items {
 			if it.Key == key {
 				return it, true
