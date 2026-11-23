@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -36,6 +37,38 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *das
 	// so the record is read here to tell the page which one a missing roll is.
 	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))
 	return su
+}
+
+// systemUpdatesPipelineEvery is the window the section's pipeline read reuses
+// its last answer for: one minute, the Deploys block's own default
+// (DeploysEvery, internal/dashboard/types.go). The section is built far more
+// often than that, and each read costs two Forgejo list calls (gt-066cn5).
+const systemUpdatesPipelineEvery = time.Minute
+
+// newSystemUpdatesPipeline throttles read to one call per every. A call inside
+// the window answers the previous result, a nil one included, so consecutive
+// builds of the section do not each pay the read's two Forgejo list calls; the
+// first call after the window reads again. Concurrent calls share the window
+// rather than racing into a second read (gt-066cn5).
+func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time, every time.Duration) func() *dashboard.GastownPipeline {
+	var (
+		mu     sync.Mutex
+		reads  int
+		last   *dashboard.GastownPipeline
+		lastAt time.Time
+	)
+	return func() *dashboard.GastownPipeline {
+		mu.Lock()
+		defer mu.Unlock()
+		at := now()
+		if reads > 0 && at.Sub(lastAt) < every {
+			return last
+		}
+		reads++
+		last = read()
+		lastAt = at
+		return last
+	}
 }
 
 // rollStep is the step a partial roll did not pass: the first step the run
