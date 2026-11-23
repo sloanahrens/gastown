@@ -421,19 +421,25 @@ func (p *Pass) askState(ctx context.Context, state string) (*jev.Answers, error)
 	return p.Asker.Ask(ctx, state, qs)
 }
 
-// lineAnswers copies the battery's answers into the log's shape.
+// lineAnswers copies the battery's answers into the log's shape. The battery
+// still asks the three answers that may leave it, so every line written today
+// carries them.
 func lineAnswers(a *jev.Answers) Answers {
 	return Answers{
 		FitsTwentyMinutes:  a.Noul[qFitsTwentyMinutes],
-		AcceptanceTickable: a.Noul[qAcceptanceTickable],
-		NeedsStrongModel:   a.Noul[qNeedsStrongModel],
-		TouchesDaemon:      a.Noul[qTouchesDaemon],
+		AcceptanceTickable: ptr(a.Noul[qAcceptanceTickable]),
+		NeedsStrongModel:   ptr(a.Noul[qNeedsStrongModel]),
+		TouchesDaemon:      ptr(a.Noul[qTouchesDaemon]),
 		Size: SizeAnswer{
 			Score:      a.Score[qSize].Score,
 			Confidence: a.Score[qSize].Confidence,
 		},
 	}
 }
+
+// ptr is the address of v, so an answer taken from the battery's map is
+// present in the logged line.
+func ptr(v float64) *float64 { return &v }
 
 // buildState returns the state for one bead with the agent the dispatcher
 // seats for it.
