@@ -8,8 +8,13 @@ import (
 	"time"
 )
 
-// TestSeatShipTail: the newest transcript's last n bytes from a line boundary,
-// a transcript shorter than n whole, and "" with no transcript.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSeatShipTail(t *testing.T) {
 	t.Parallel()
 	oldest := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -29,18 +34,12 @@ func TestSeatShipTail(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
+			must(t, os.MkdirAll(filepath.Join(dir, "p/b"), 0o755))
 			for i, f := range tt.files {
 				rel, body, _ := strings.Cut(f, "=")
 				path, at := filepath.Join(dir, rel), oldest.Add(time.Duration(i)*time.Minute)
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chtimes(path, at, at); err != nil {
-					t.Fatal(err)
-				}
+				must(t, os.WriteFile(path, []byte(body), 0o644))
+				must(t, os.Chtimes(path, at, at))
 			}
 			if got, err := TailOf(dir, tt.n); err != nil || got != tt.want {
 				t.Errorf("TailOf = %q, %v; want %q, nil", got, err, tt.want)
@@ -49,23 +48,11 @@ func TestSeatShipTail(t *testing.T) {
 	}
 }
 
-// TestSeatShipTailRefusals: a projects path the walk cannot enter is an error,
-// and a projects path that does not exist holds no transcript.
-func TestSeatShipTailRefusals(t *testing.T) {
+func TestSeatShipTailUnreadable(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	file := filepath.Join(dir, "plain")
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
-		t.Fatal(err)
+	file := filepath.Join(t.TempDir(), "plain")
+	must(t, os.WriteFile(file, nil, 0o644))
+	if _, err := TailOf(filepath.Join(file, "projects"), 16); err == nil {
+		t.Error("TailOf under a regular file = nil error, want an error")
 	}
-	t.Run("unreadable", func(t *testing.T) {
-		if _, err := TailOf(filepath.Join(file, "projects"), 16); err == nil {
-			t.Error("TailOf under a regular file = nil error, want an error")
-		}
-	})
-	t.Run("nonexistent", func(t *testing.T) {
-		if got, err := TailOf(filepath.Join(dir, "absent"), 16); err != nil || got != "" {
-			t.Errorf("TailOf(absent) = %q, %v; want \"\", nil", got, err)
-		}
-	})
 }

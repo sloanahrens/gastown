@@ -2,8 +2,6 @@ package seatship
 
 import (
 	"bytes"
-	"errors"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,16 +11,9 @@ import (
 
 // TailOf returns the last n bytes of the newest *.jsonl transcript under
 // projectsDir, starting at a line boundary, and "" when there is none. A
-// projectsDir that does not exist holds none; one that cannot be walked is an
-// error, never "".
+// projectsDir the walk cannot enter is an error, never "".
 func TailOf(projectsDir string, n int) (string, error) {
-	if _, err := os.Stat(projectsDir); errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	} else if err != nil {
-		return "", err
-	}
-	var newest string
-	var newestTime time.Time
+	newest, newestTime := "", time.Time{}
 	err := filepath.WalkDir(projectsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return err
@@ -48,14 +39,13 @@ func TailOf(projectsDir string, n int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	size := info.Size()
-	start := min(max(size-int64(n), 0), size)
+	start := min(max(info.Size()-int64(n), 0), info.Size())
 	cut := start > 0
 	if cut { // read one byte back, so a boundary right at start is seen
 		start--
 	}
-	buf := make([]byte, size-start)
-	if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+	buf := make([]byte, info.Size()-start)
+	if _, err := f.ReadAt(buf, start); err != nil {
 		return "", err
 	}
 	if cut { // drop the partial first line
