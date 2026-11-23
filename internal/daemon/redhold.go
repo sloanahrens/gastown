@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -198,16 +200,18 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 }
 
 // checkRedHold is the heartbeat's red hold step: it evaluates every swept rig's
-// record and publishes daemon/red-hold from them.
+// record and the roll sources, and publishes daemon/red-hold from them.
 func (d *Daemon) checkRedHold() {
 	if d.redHoldUnread == nil {
 		d.redHoldUnread = map[string]bool{}
 	}
 	src := redHoldSources{
-		Rigs:    tierSweepRigs(d.patrol(), d.getKnownRigs()),
-		Read:    func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
-		Waiting: d.redHoldWaiting,
-		Now:     d.clk().Now,
+		Rigs:      tierSweepRigs(d.patrol(), d.getKnownRigs()),
+		Read:      func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
+		Waiting:   d.redHoldWaiting,
+		Update:    d.redHoldUpdate,
+		PairStuck: d.redHoldPairStuck,
+		Now:       d.clk().Now,
 	}
 	if err := runRedHold(d.config.TownRoot, src, d.redHoldUnread, d.logger.Printf); err != nil {
 		d.logger.Printf("red hold step: %v", err)
@@ -229,6 +233,32 @@ func (d *Daemon) redHoldWaiting() (int, error) {
 		return 0, errors.New("the installed build's staleness could not be read")
 	}
 	return d.updateLandingsWaiting(repoRoot, info.BinaryCommit)
+}
+
+// redHoldUpdate reads the last update run's outcome and the commit it set out to
+// install; no state is "", "" and no error, an unreadable one is an error.
+func (d *Daemon) redHoldUpdate() (string, string, error) {
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	st, err := store.Read()
+	if errors.Is(err, update.ErrNoState) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return string(st.Outcome), st.Target.SHA, nil
+}
+
+// redHoldPairStuck is the commits whose image pair never became ready, as the
+// pair check last raised them.
+func (d *Daemon) redHoldPairStuck() []string {
+	var shas []string
+	for _, it := range d.pairReady.observed() {
+		if it.Kind == attention.KindDeployPairStuck {
+			shas = append(shas, it.SHA)
+		}
+	}
+	return shas
 }
 
 // redHoldShort returns the first 12 characters of a commit id, or the whole id

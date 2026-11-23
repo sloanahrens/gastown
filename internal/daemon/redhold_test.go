@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/stretchr/testify/require"
 )
@@ -614,6 +618,49 @@ func TestCheckRedHoldWaitingStep(t *testing.T) {
 			require.Equal(t, alarm, logs.String(), "two heartbeats log the alarm once")
 		})
 	}
+}
+
+// TestCheckRedHoldRollUpdate pins the step's update source to the run's state
+// file: no state is not an error and clears the previous record, a failed
+// outcome with its target holds roll-failed, and an unreadable state is unknown.
+func TestCheckRedHoldRollUpdate(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	townRoot := t.TempDir()
+	store := update.Store{Dir: update.Dir(townRoot)}
+	d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(io.Discard, "", 0), clock: clockwork.NewFakeClockAt(now)}
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	d.checkRedHold()
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a town with no update state holds nothing")
+	require.NoError(t, store.Write(update.State{Outcome: update.OutcomeFailed, Target: update.Target{SHA: "0123456789abcdef0123456789abcdef01234567"}}))
+	d.checkRedHold()
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldRollFailed, Since: now, Detail: "update failed at 0123456789ab"}}, rec.Reasons)
+	require.NoError(t, os.WriteFile(store.Path(), []byte("{not json"), 0o600))
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	d.checkRedHold()
+	rec, err = dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, redHoldSentinel, rec, "an unreadable state is unknown, not clean")
+}
+
+// TestCheckRedHoldRollPairStuck pins the step's stuck-pair source: the pair
+// check's stuck commits hold, its ready pair does not.
+func TestCheckRedHoldRollPairStuck(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	townRoot := t.TempDir()
+	d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(io.Discard, "", 0), clock: clockwork.NewFakeClockAt(now)}
+	d.pairReady.held = map[string][]attention.Item{"alpha": {
+		{Key: "deploy-pair-stuck:alpha:0123456789ab", Kind: attention.KindDeployPairStuck, SHA: "0123456789abcdef0123456789abcdef01234567"},
+		{Key: "deploy-pair-ready:alpha:fedcba987654", Kind: attention.KindDeployPairReady, SHA: "fedcba9876543210fedcba9876543210fedcba98"},
+	}}
+	d.checkRedHold()
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: 0123456789ab"}}, rec.Reasons,
+		"only the stuck item's commit holds, never the ready pair's")
 }
 
 func TestRedHoldStepRefusals(t *testing.T) {
