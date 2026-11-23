@@ -61,14 +61,16 @@ To restore a night:
    ```
 
 The archive holds no Secrets: the backup export leaves out every entry whose
-path has a secret shape, a name ending in `.env`, `.key`, `.pem` or `.dsn` or
-holding `token` or `secret`, and `--secrets-manifest` keeps the manifest's
-files out of the seed's stream and of its listing. The Secrets come from the
-operator's own copy of the config directory, `~/.config/gt`: `gt daemon compose
-write --config-dir ~/.config/gt --secrets-manifest deploy/daemon/secrets.yaml`
-mounts the manifest's files read-only for a container, and `gt town cluster
-render` turns the same list into the pod's Secrets. A restored claim takes them
-from that copy, not from the archive.
+path has a secret shape, and `--secrets-manifest` keeps the manifest's
+files out of the seed's stream and of its listing. Before changing what counts
+as a secret shape, read `backupSecretEntry` and the `SecretShape` it calls in
+`internal/townstate/secretshape.go`; they are the one definition. The Secrets
+come from the operator's own copy of the config directory, `~/.config/gt`:
+`gt daemon compose write --image gt-daemon:<rev> --config-dir ~/.config/gt
+--secrets-manifest deploy/daemon/secrets.yaml` mounts the manifest's files
+read-only for a container, and `gt town cluster render` turns the same list
+into the pod's Secrets. A restored claim takes them from that copy, not from the
+archive.
 
 `TestTownStateBackupRestoreIsAcceptedBySeed`
 (`internal/cmd/town_state_backup_restore_test.go`, from bead gt-9x9bou) proves

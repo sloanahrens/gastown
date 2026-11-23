@@ -156,6 +156,8 @@ Town-level role defaults live in `mayor/config.json` in the town root's
 | `post_land_status_context` | `string` | `""` | Take the post-land verdict from the landed commit's Forgejo status in this context instead of running `post_land_command` (gt-gg9hv.7.1). The verdict rules (green, red, and what counts as UNKNOWN) live in one place, `postLandStatusRead` in `internal/landworker/postland_status.go`; nothing waits on CI while a verdict is open, it is bounded by `post_land_timeout`, and a timed-out one raises one attention item per rig and landed commit; a verdict that arrives after the timeout is logged and clears that item, and is not acted on. Verdicts are ordered: one for a commit older than the newest verdict the rig holds moves nothing (no `LastGreen`, no promotion, no bead, no revert). A red status alone never reverts: with a `post_land_command` the check is rerun at the landed commit and only a rerun that fails again takes the red-main path that attributes by diff and can revert; with none, the red-main bead is filed and no revert follows. An unreadable rig settings file raises an attention item. Wins over `post_land_command`. Read from `settings/config.json` only. |
 | `max_ready_for_dispatch` | `int` | `0` | `gt sling` refuses new work while the rig has more ready MRs than this. 0 = guard off. |
 | `followup_backpressure` | `int` | `40` | Open `om-followup` bundles at which the follow-up feed (`landing.followups`) stops filing for this rig. The bound counts bundles, not the findings inside them, and it is counted as each bundle is created, so a landing that files one bundle per package stops at it rather than carrying the count past it; appending to an open bundle never counts. The findings it holds back are queued and filed by a later landing with room, so the count falling back under the bound resumes the feed rather than losing work; the queue itself is described under `landing.followups`. While it holds the feed back it logs how many findings were queued and raises one low attention item a day (gt-4ty22, gt-3arxj). Unset means 40. |
+| `followup_max_added_lines` | `int` | `80` | The added lines an `om-followup` bead's branch may spend. `gt done` reads the branch's numstat diff over the merge base and refuses a submission over it, telling the polecat to escalate the finding it could not fix in budget (gt-eyum7q, gt-c9cp26). Zero or unset means 80. |
+| `followup_max_files` | `int` | `3` | The files an `om-followup` bead's branch may touch; `gt done` refuses a submission over either budget. Zero or unset means 3 (gt-eyum7q). |
 | `merge_strategy` | `string` | `""` | Passed to the polecat formula as `merge_strategy` |
 | `require_review` | `*bool` | `false` | Passed to the polecat formula as `require_review=true` |
 | `editorial.required` | `bool` | `false` | Read by the `editorial-required` doctor check only |
@@ -476,10 +478,10 @@ bead's Goal, Constraints, Acceptance and Size sections and its Acceptance field.
 When the latest `SP ESTIMATE v1` comment carries the same hash, it writes
 nothing. `--force` estimates again regardless. Otherwise it removes the bead's
 old `sp:`, `sp-rung:`, `sp-minutes:` and `sp-large` labels, adds the new ones,
-and posts the note as a comment. An estimate that is at or over 10 minutes on a
-rung other than `shape` also gets `sp-large` and a note line saying it is
-predicted to land over 300 added lines and may be worth splitting; an estimate
-under that line loses any earlier `sp-large`. `--dry-run` prints the labels and
+and posts the note as a comment. An estimate that meets the `sp-large`
+condition above also gets that label and a note line saying it may be worth
+splitting; an estimate that no longer meets it loses any earlier `sp-large`.
+`--dry-run` prints the labels and
 the note and writes nothing. `--json` prints the outcome as JSON. The note's
 first line is `SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>`; the rest names the
 minutes, the inputs used, each skipped input with its reason, and the nearest
@@ -586,7 +588,11 @@ unchanged text, so the tick logs a line saying the route cannot judge it
 (gt-s93y6n). A bead the route cannot judge at all (an estimate that errors or
 times out, or no rung) is slung, records `sp-rung:none`, and the shadow report
 counts it under rung `none`, not as below the trigger. A bead already carrying
-the split label is held and not touched again.
+the split label is held, unless its own labels record an estimate that no
+longer stands the decision up: under the trigger, or at the `shape-embed` or
+`shape` rung. That tick posts a `SPLIT LABEL STALE v1` note, takes the label off
+and offers the bead to dispatch again; a note or removal that fails leaves the
+label on and the bead held (gt-71y4v3).
 
 The landings pane's points velocity is a separate reading of polecat time; see
 [Story-point velocity](#story-point-velocity).
