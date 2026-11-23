@@ -234,6 +234,23 @@ func TestReviewLogScrubFingerprintKeepsItsIdentity(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubFingerprintReadsPastTheBound: the scrub reads only
+// scrubInputBound bytes, so a title or path that differs from another only past
+// that bound must still fingerprint apart, and the same text must fingerprint the same.
+func TestReviewLogScrubFingerprintReadsPastTheBound(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", scrubInputBound)
+	if Fingerprint("a.go", long+"one") == Fingerprint("a.go", long+"two") {
+		t.Error("two titles that differ only past the bound share a fingerprint")
+	}
+	if Fingerprint(long+"one", "t") == Fingerprint(long+"two", "t") {
+		t.Error("two paths that differ only past the bound share a fingerprint")
+	}
+	if Fingerprint("a.go", long+"one") != Fingerprint("a.go", long+"one") {
+		t.Error("the same long title fingerprints differently twice")
+	}
+}
+
 // TestReviewLogScrubHeldFinding: a held finding's claim reaches the log through a queue line.
 func TestReviewLogScrubHeldFinding(t *testing.T) {
 	t.Parallel()

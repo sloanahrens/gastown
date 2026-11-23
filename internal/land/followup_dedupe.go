@@ -54,8 +54,20 @@ var followupStopWords = map[string]bool{
 // scrubbed queue line fingerprints like the raw finding om raised and matches
 // its bead instead of filing a second one.
 func Fingerprint(fpath, title string) string {
-	sum := sha256.Sum256([]byte(normalizePath(scrubClaim(fpath)) + "\n" + normalizeTitle(scrubClaim(title))))
+	sum := sha256.Sum256([]byte(normalizePath(fingerprintText(fpath)) + "\n" + normalizeTitle(fingerprintText(title))))
 	return FingerprintPrefix + hex.EncodeToString(sum[:])[:12]
+}
+
+// fingerprintText is s scrubbed for the fingerprint's hash. The scrub reads only
+// scrubInputBound bytes, so the rest of a longer text is folded in as a digest:
+// two findings that differ only past the bound still fingerprint apart.
+func fingerprintText(s string) string {
+	out := scrubClaim(s)
+	if rest := s[len(cutAtRune(s, scrubInputBound)):]; rest != "" {
+		sum := sha256.Sum256([]byte(rest))
+		out += "\n" + hex.EncodeToString(sum[:8])
+	}
+	return out
 }
 
 // TitleSimilarity scores two finding titles as the Jaccard index of their word
