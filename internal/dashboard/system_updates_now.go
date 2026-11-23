@@ -28,12 +28,15 @@ type SystemUpdatesNow struct {
 	Sweep *NowSweep `json:"sweep,omitempty"`
 }
 
-// NowRoll is the gt update run in flight: its run id, the step it is on, and its
-// wall time so far, as the update section reports them.
+// NowRoll is the gt update run in flight: its run id, the step it is on, its
+// wall time so far and the builds it moves between, as the update section
+// reports them off the run's target.
 type NowRoll struct {
 	RunID      string `json:"run_id"`
 	Step       string `json:"step"`
 	ElapsedSec int    `json:"elapsed_sec"`
+	From       string `json:"from,omitempty"`
+	To         string `json:"to,omitempty"`
 }
 
 // NowSweep is the tier sweep in flight: the rig it sweeps, the tier it is at,
@@ -60,7 +63,7 @@ func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []
 func systemUpdatesNow(u *UpdateStatus, ts *TierSweep) *SystemUpdatesNow {
 	var now SystemUpdatesNow
 	if u != nil && u.Running {
-		now.Roll = &NowRoll{RunID: u.RunID, Step: u.Current, ElapsedSec: u.ElapsedSec}
+		now.Roll = &NowRoll{RunID: u.RunID, Step: u.Current, ElapsedSec: u.ElapsedSec, From: u.From, To: u.To}
 	}
 	if ts != nil && ts.Running != nil {
 		now.Sweep = &NowSweep{Rig: ts.Running.Rig, Tier: ts.Running.Tier, ElapsedSec: ts.Running.ElapsedSec}

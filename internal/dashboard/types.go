@@ -858,11 +858,14 @@ type UpdateStep struct {
 // Running still true means the job died without writing its end: the reader
 // reports it that way rather than dropping it, so the page can draw the dead
 // state. EndedAt is nil while the run is in flight and the time it finished
-// once it ended. Steps is every step of the plan in run order.
+// once it ended. From and To are the builds the run moves between, off its
+// target. Steps is every step of the plan in run order.
 type UpdateStatus struct {
 	Running         bool         `json:"running"`
 	RunID           string       `json:"run_id"`
 	Source          string       `json:"source"`
+	From            string       `json:"from,omitempty"`
+	To              string       `json:"to,omitempty"`
 	Current         string       `json:"current,omitempty"`
 	Outcome         string       `json:"outcome"`
 	StartedAt       time.Time    `json:"started_at"`

@@ -347,6 +347,7 @@ var ageAllowList = map[string]string{
 	"const since = now - EVENT_STATS_WINDOW_MS;":                                                                "the start of the event stats window: a count of milliseconds",
 	"const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;":                                          "the page's watchdog clock, not a stamp from the server",
 	"if (now - lastEvent < SILENT_MS) return;":                                                                  "the page's watchdog clock, not a stamp from the server",
+	"if (now - systemUpdateBanner.endedAt > SYSTEM_UPDATES_BANNER_STAY_MS) {":                                   "the page's clock against the time it first saw the roll gone: both the page's own, not stamps from the server",
 }
 
 // expressionEnd returns the offset where the expression that starts at from ends:

@@ -80,6 +80,8 @@ func (r *updateStatusReader) read(now time.Time) *dashboard.UpdateStatus {
 		Running:   running,
 		RunID:     st.RunID,
 		Source:    st.Source,
+		From:      st.Target.InstalledSHA,
+		To:        st.Target.SHA,
 		Current:   string(st.Current),
 		Outcome:   string(st.Outcome),
 		StartedAt: st.StartedAt,

@@ -17,7 +17,7 @@ import (
 func TestSystemUpdatesNowNamesTheRollAndSweepRunning(t *testing.T) {
 	t.Parallel()
 
-	running := &UpdateStatus{Running: true, RunID: "run-7", Current: "install", ElapsedSec: 480, StartedAt: sysTestClock}
+	running := &UpdateStatus{Running: true, RunID: "run-7", Current: "install", ElapsedSec: 480, StartedAt: sysTestClock, From: "1111aaaa", To: "2222bbbb"}
 	finished := &UpdateStatus{RunID: "run-6", Outcome: "ok", Current: "verify", ElapsedSec: 300, StartedAt: sysTestClock}
 	sweeping := &TierSweep{Running: &TierSweepRun{Rig: "gastown", Tier: "integration", ElapsedSec: 42}}
 	idle := &TierSweep{Sweeps: []TierSweepRow{{At: sysTestClock, Rig: "gastown", SHA: sysTestSHA(3)[:8]}}}
@@ -33,7 +33,7 @@ func TestSystemUpdatesNowNamesTheRollAndSweepRunning(t *testing.T) {
 			name:   "a roll running",
 			update: running,
 			sweep:  idle,
-			want:   &SystemUpdatesNow{Roll: &NowRoll{RunID: "run-7", Step: "install", ElapsedSec: 480}},
+			want:   &SystemUpdatesNow{Roll: &NowRoll{RunID: "run-7", Step: "install", ElapsedSec: 480, From: "1111aaaa", To: "2222bbbb"}},
 		},
 		{
 			name:   "a sweep running",
@@ -46,7 +46,7 @@ func TestSystemUpdatesNowNamesTheRollAndSweepRunning(t *testing.T) {
 			update: running,
 			sweep:  sweeping,
 			want: &SystemUpdatesNow{
-				Roll:  &NowRoll{RunID: "run-7", Step: "install", ElapsedSec: 480},
+				Roll:  &NowRoll{RunID: "run-7", Step: "install", ElapsedSec: 480, From: "1111aaaa", To: "2222bbbb"},
 				Sweep: &NowSweep{Rig: "gastown", Tier: "integration", ElapsedSec: 42},
 			},
 		},

@@ -51,6 +51,7 @@ func TestDashboardUpdateStatusFromARunningState(t *testing.T) {
 		HeartbeatAt: now.Add(-20 * time.Second),
 		Current:     update.StepInstall,
 		Outcome:     update.OutcomeRunning,
+		Target:      update.Target{InstalledSHA: "1111aaaa", SHA: "2222bbbb"},
 		Steps: []update.StepRecord{
 			{Name: update.StepPlan, WillRun: true, Result: update.ResultOK, Detail: "six steps"},
 			{Name: update.StepDrain, WillRun: true, Result: update.ResultRunning},
@@ -69,6 +70,9 @@ func TestDashboardUpdateStatusFromARunningState(t *testing.T) {
 	}
 	if got.Current != string(update.StepInstall) {
 		t.Errorf("Current = %q, want %q", got.Current, update.StepInstall)
+	}
+	if got.From != "1111aaaa" || got.To != "2222bbbb" {
+		t.Errorf("From/To = %q/%q, want the run's target builds", got.From, got.To)
 	}
 	if got.ElapsedSec != 8*60 {
 		t.Errorf("ElapsedSec = %d, want %d", got.ElapsedSec, 8*60)
