@@ -1780,3 +1780,81 @@ func TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess(t *testing.T) {
 		})
 	}
 }
+
+// TestRunRemovesAStaleResultBeforeItStarts: a launch that reuses the claim of a
+// daemon replaced mid-run can find an earlier attempt's result.json there. The
+// run removes it before the clone, so a run that dies before writing its own is
+// never read as that attempt's verdict (gt-45j3n8).
+func TestRunRemovesAStaleResultBeforeItStarts(t *testing.T) {
+	t.Parallel()
+
+	// staleResult is an earlier attempt's result: whole and readable, naming
+	// this run's rig and sha, with a GREEN verdict only that attempt reached.
+	staleResult := sweeprunner.Result{
+		Rig:      "gastown",
+		SHA:      testSHA,
+		Started:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finished: time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
+		Runner:   sweeprunner.Runner{Backend: runnerBackend, Image: runnerImage, CPUs: 1},
+		Tiers:    []sweeprunner.Tier{{Tier: tiersweep.TierIntegration, Summary: "tier-sweep: integration GREEN passed=9 failed=0 skipped=0"}},
+	}
+
+	// removeOnlyTheResult is the Deps.RemoveAll a row uses: the real removal
+	// for the result file, and nothing for the harness's work directory, which
+	// the rest of the case reads.
+	removeOnlyTheResult := func(h *harness) func(string) error {
+		resultPath := filepath.Join(h.out, sweeprunner.ResultFileName)
+		return func(path string) error {
+			if path == resultPath {
+				return os.RemoveAll(path)
+			}
+			return nil
+		}
+	}
+
+	t.Run("a failed clone writes the run's own RED result over the stale one", func(t *testing.T) {
+		t.Parallel()
+		var h *harness
+		h = newHarness(t, func(string, string, string) error {
+			if _, err := os.Stat(filepath.Join(h.out, sweeprunner.ResultFileName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the earlier attempt's result is still there when the clone starts (stat: %v)", err)
+			}
+			return errors.New("fatal: could not read from remote repository")
+		}, nil)
+		h.deps.RemoveAll = removeOnlyTheResult(h)
+		if err := sweeprunner.Write(h.out, staleResult); err != nil {
+			t.Fatalf("writing the earlier attempt's result: %v", err)
+		}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+		if err != nil {
+			t.Fatalf("read the result: %v", err)
+		}
+		verdicts, err := sweeprunner.ToTierResults(r)
+		if err != nil {
+			t.Fatalf("convert the result: %v", err)
+		}
+		if got := verdicts[tiersweep.TierIntegration]; got.Verdict != "RED" || got.Passed != 0 {
+			t.Errorf("integration = %+v, want the run's own RED, not the earlier attempt's GREEN passed=9", got)
+		}
+	})
+
+	t.Run("a run that cannot report a result leaves none behind", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func([]string, map[string]string, io.Writer, io.Writer) int {
+			return sweepNoExit
+		})
+		h.deps.RemoveAll = removeOnlyTheResult(h)
+		if err := sweeprunner.Write(h.out, staleResult); err != nil {
+			t.Fatalf("writing the earlier attempt's result: %v", err)
+		}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git"); code != FailureExit {
+			t.Fatalf("exit code = %d, want %d (stderr %q)", code, FailureExit, h.stderr.String())
+		}
+		if h.resultFileExists(t) {
+			t.Fatal("a run that could not report a result left the earlier attempt's result.json in place")
+		}
+	})
+}
