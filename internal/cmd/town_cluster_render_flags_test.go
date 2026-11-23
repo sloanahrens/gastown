@@ -513,6 +513,45 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 	}
 }
 
+// TestTownClusterRenderFlagsRefuseBadCloudPaths drives each cloud directory
+// flag through the render: the flag value reaches Values and the daemon
+// render's Build refuses a relative or unclean path there, with an error naming
+// the Values field it landed in, so a bad flag value never reaches the pod spec
+// (gt-tnl0g8, the validator of gt-9gcfj3).
+func TestTownClusterRenderFlagsRefuseBadCloudPaths(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, value, field, other string
+		reports                   bool
+	}{
+		{"a relative reports path", "gt-cloud/reports", "Values.CloudReportsHostPath", "Values.CloudReleasesHostPath", true},
+		{"an unclean releases path", "/Users/Shared/gt-cloud/../reports", "Values.CloudReleasesHostPath", "Values.CloudReportsHostPath", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			if tc.reports {
+				f.cloudReportsHostPath = tc.value
+			} else {
+				f.cloudReleasesHostPath = tc.value
+			}
+			town := clusterRenderTestTown(t)
+			v, _, _, err := clusterRenderValues(clusterRenderDepsAt(t, town, io.Discard), f,
+				func() (string, error) { return town, nil })
+			if err != nil {
+				t.Fatalf("clusterRenderValues: %v", err)
+			}
+			if _, err := k8sdaemon.Build(v); err == nil {
+				t.Fatalf("Build rendered the bad path %q into a pod spec", tc.value)
+			} else if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("Build refused %q with %q, want an error naming %s", tc.value, err, tc.field)
+			} else if strings.Contains(err.Error(), tc.other) {
+				t.Errorf("Build refused %q with %q, which names the other field %s", tc.value, err, tc.other)
+			}
+		})
+	}
+}
+
 // TestTownClusterRenderFlagsCloudHostPathsAreRegistered: both cloud directory
 // flags exist and are empty by default, so a render that names neither mounts
 // nothing (gt-s8yd4x).
