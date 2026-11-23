@@ -409,26 +409,30 @@ func specSplitDependents(db beads.Client, raw specSplitRawDeps, beadID string) (
 }
 
 // specSplitMoveDependents moves each dependent off beadID and onto piece B,
-// keeping its relation. The B edge is added before the original edge is
-// removed, so a failed add leaves the dependent on the still-open original
-// rather than on nothing. A dependent with several relations to beadID gets
-// each of them on B, and its edges to the original are removed once. It returns
-// the dependents moved so far, so a failure names them.
+// keeping its relation. Every relation a dependent holds gets its B edge before
+// any edge to the original is removed, so a failed add, on the first relation or
+// a later one, leaves the dependent on the still-open original rather than on
+// nothing. The dependent's edges to the original are then removed once. It
+// returns the dependents moved so far, so a failure names them.
 func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, beadID, bID string, dependents []beads.IssueDep) ([]string, error) {
-	var moved []string
-	removed := make(map[string]bool, len(dependents))
+	var order, moved []string
+	relations := make(map[string][]string, len(dependents))
 	for _, dep := range dependents {
-		if err := db.AddTypedDependency(dep.ID, bID, dep.DependencyType); err != nil {
-			return moved, fmt.Errorf("moving dependent %s onto piece B %s: %w", dep.ID, bID, err)
+		if _, ok := relations[dep.ID]; !ok {
+			order = append(order, dep.ID)
 		}
-		if removed[dep.ID] {
-			continue
+		relations[dep.ID] = append(relations[dep.ID], dep.DependencyType)
+	}
+	for _, id := range order {
+		for _, rel := range relations[id] {
+			if err := db.AddTypedDependency(id, bID, rel); err != nil {
+				return moved, fmt.Errorf("moving dependent %s onto piece B %s: %w", id, bID, err)
+			}
 		}
-		removed[dep.ID] = true
-		if err := specSplitRemoveEdgesTo(db, raw, dep.ID, beadID); err != nil {
+		if err := specSplitRemoveEdgesTo(db, raw, id, beadID); err != nil {
 			return moved, err
 		}
-		moved = append(moved, dep.ID)
+		moved = append(moved, id)
 	}
 	return moved, nil
 }

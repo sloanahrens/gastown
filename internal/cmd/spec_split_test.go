@@ -596,6 +596,54 @@ func (s splitMoveRefuses) AddTypedDependency(issue, dependsOn, depType string) e
 	return s.Client.AddTypedDependency(issue, dependsOn, depType)
 }
 
+// splitRelationRefuses is a store whose dependency add fails for one relation of
+// one dependent, so a test drives a failure after that dependent's earlier
+// relation already reached piece B.
+type splitRelationRefuses struct {
+	beads.Client
+	id, rel string
+}
+
+func (s splitRelationRefuses) AddTypedDependency(issue, dependsOn, depType string) error {
+	if issue == s.id && depType == s.rel {
+		return errors.New("dep add refused")
+	}
+	return s.Client.AddTypedDependency(issue, dependsOn, depType)
+}
+
+// TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails: a dependent
+// holding blocks and tracks whose tracks add fails keeps both edges to the
+// original, and the error does not list it as moved.
+func TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	for _, rel := range []string{"blocks", "tracks"} {
+		if err := db.AddTypedDependency("gt-downstream", "gt-split", rel); err != nil {
+			t.Fatalf("AddTypedDependency(%s): %v", rel, err)
+		}
+	}
+	err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), splitRelationRefuses{Client: db, id: "gt-downstream", rel: "tracks"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "moved: none") {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want a refusal that lists no dependent as moved", err)
+	}
+	dependent, showErr := db.Show("gt-downstream")
+	if showErr != nil {
+		t.Fatalf("Show(gt-downstream): %v", showErr)
+	}
+	got := make(map[string]bool, len(dependent.Dependencies))
+	for _, dep := range dependent.Dependencies {
+		got[dep.ID+" "+dep.DependencyType] = true
+	}
+	for _, want := range []string{"gt-split blocks", "gt-split tracks"} {
+		if !got[want] {
+			t.Errorf("dependent dependencies = %+v, want the original edge %q kept", dependent.Dependencies, want)
+		}
+	}
+}
+
 // TestSpecSplitApplyNamesTheDependentsItMoved: a move that fails partway names
 // the dependents already moved and the one that did not.
 func TestSpecSplitApplyNamesTheDependentsItMoved(t *testing.T) {
