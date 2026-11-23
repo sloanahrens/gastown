@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -66,6 +67,46 @@ func assertNoClaudeDirMount(t *testing.T, what string, spec PodSpec) {
 	}
 }
 
+// retiredFlagViolations walks the non-test Go files under the tops beneath root,
+// leaving out allowed, and returns one line for each file that names a retired
+// flag. scanned is how many files it read, so a caller can tell a clean tree
+// from one the walk never reached.
+func retiredFlagViolations(root string, tops, flags []string, allowed string) (violations []string, scanned int, err error) {
+	for _, top := range tops {
+		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if rel == allowed {
+				return nil
+			}
+			scanned++
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, flag := range flags {
+				if bytes.Contains(data, []byte(flag)) {
+					violations = append(violations, fmt.Sprintf("%s names the retired flag %s", rel, flag))
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, scanned, fmt.Errorf("walking %s: %w", top, err)
+		}
+	}
+	return violations, scanned, nil
+}
+
 // TestClaudeDirGoneGuard holds the two retired flags to their one remaining
 // mention: the refusal in internal/cmd/town_cluster_render.go that tells an
 // operator why the flag is gone. No other non-test Go source under internal/ or
@@ -88,40 +129,41 @@ func TestClaudeDirGoneGuard(t *testing.T) {
 		}
 	}
 
-	scanned := 0
-	for _, top := range []string{"internal", "deploy"} {
-		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			rel = filepath.ToSlash(rel)
-			if rel == allowed {
-				return nil
-			}
-			scanned++
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			for _, flag := range retiredFlags {
-				if bytes.Contains(data, []byte(flag)) {
-					t.Errorf("%s names the retired flag %s, want only %s to", rel, flag, allowed)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("walking %s: %v", top, err)
-		}
+	violations, scanned, err := retiredFlagViolations(root, []string{"internal", "deploy"}, retiredFlags, allowed)
+	if err != nil {
+		t.Fatalf("scanning the source: %v", err)
+	}
+	for _, v := range violations {
+		t.Errorf("%s, want only %s to", v, allowed)
 	}
 	if scanned == 0 {
 		t.Fatalf("the guard read no non-test Go source under internal/ or deploy/, so the scan looked at nothing")
+	}
+}
+
+// TestClaudeDirGoneGuardReportsAViolation drives the guard's failing branch: a
+// non-test Go file beside the exemption that names a retired flag is reported,
+// while the exempt file and a _test.go naming one are not (gt-f9pens).
+func TestClaudeDirGoneGuardReportsAViolation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal"), 0o755); err != nil {
+		t.Fatalf("creating internal: %v", err)
+	}
+	for rel, body := range map[string]string{
+		"internal/refusal.go":      "refuse dashboard-claude-dir",
+		"internal/other.go":        "// daemon-claude-dir is retired",
+		"internal/ignored_test.go": "// dashboard-claude-dir",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel)), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", rel, err)
+		}
+	}
+	violations, scanned, err := retiredFlagViolations(root, []string{"internal"}, []string{"dashboard-claude-dir", "daemon-claude-dir"}, "internal/refusal.go")
+	if err != nil {
+		t.Fatalf("scanning the built tree: %v", err)
+	}
+	if want := "internal/other.go names the retired flag daemon-claude-dir"; len(violations) != 1 || violations[0] != want || scanned != 1 {
+		t.Errorf("violations = %q, scanned = %d, want [%q] and 1 file read", violations, scanned, want)
 	}
 }
