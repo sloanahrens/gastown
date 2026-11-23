@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -596,5 +598,150 @@ func TestSpecDispatchDoesNotHoldACandidateThatNamesNoTestFile(t *testing.T) {
 	}
 	if len(f.slung) != 1 {
 		t.Fatalf("slung = %v, want the one candidate (skipped %+v)", f.slung, r.Skipped)
+	}
+}
+
+// The tick builds a rig's target claims once: two candidates of one beads
+// directory share one read and one slice, and a candidate of another directory
+// reads its own (gt-w6oid6).
+func TestSpecClaimsMemoReadsOncePerDirectory(t *testing.T) {
+	t.Parallel()
+	dirs := map[string]string{"gt-a": "/town/gastown", "gt-b": "/town/gastown", "om-a": "/town/om"}
+	var reads []string
+	memo := specClaimsMemoFrom(
+		func(id string) string { return dirs[id] },
+		func(id string) ([]specdispatch.Claimant, error) {
+			reads = append(reads, id)
+			return []specdispatch.Claimant{{ID: "peer-of-" + id}}, nil
+		})
+	first, err := memo("gt-a")
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	second, err := memo("gt-b")
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if len(reads) != 1 || reads[0] != "gt-a" {
+		t.Fatalf("reads = %v, want one read, for gt-a", reads)
+	}
+	if len(second) != 1 || &first[0] != &second[0] {
+		t.Fatalf("second candidate of the directory got %+v, want the first read's slice", second)
+	}
+	other, err := memo("om-a")
+	if err != nil {
+		t.Fatalf("other directory read: %v", err)
+	}
+	if len(reads) != 2 || reads[1] != "om-a" || other[0].ID != "peer-of-om-a" {
+		t.Fatalf("reads = %v, other = %+v, want a second read for om-a", reads, other)
+	}
+}
+
+// A failed read holds that candidate only: it is returned, not remembered, so
+// the next candidate of the directory asks again (gt-w6oid6).
+func TestSpecClaimsMemoDoesNotRememberAnError(t *testing.T) {
+	t.Parallel()
+	failing := true
+	calls := 0
+	memo := specClaimsMemoFrom(
+		func(string) string { return "/town/gastown" },
+		func(string) ([]specdispatch.Claimant, error) {
+			calls++
+			if failing {
+				return nil, errors.New("pool unreadable")
+			}
+			return []specdispatch.Claimant{{ID: "peer"}}, nil
+		})
+	if _, err := memo("gt-a"); err == nil {
+		t.Fatalf("a failed read returned no error")
+	}
+	failing = false
+	got, err := memo("gt-b")
+	if err != nil || len(got) != 1 || calls != 2 {
+		t.Fatalf("after the failure: got %+v, err %v, %d reads; want the peer from a second read", got, err, calls)
+	}
+}
+
+// The memo changes nothing the claim rule decides: with the claims read through
+// it, the second bead of a target claim is still held by the first, which the
+// rule learns from the beads the tick slated, not from a fresher pool; and the
+// pool is read once for the three candidates (gt-w6oid6).
+func TestSpecClaimsMemoStillHoldsTheSecondBeadOfATargetClaim(t *testing.T) {
+	t.Parallel()
+	const claimFile = "src/lib/__tests__/wanderHops.test.ts"
+	desc := "- `" + claimFile + "` only."
+	peers := []specdispatch.Claimant{{
+		ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+		Paths: []string{claimFile},
+	}}
+	noFile := cleanSpec("fr-nofile", 1, "2026-10-31T08:00:00Z")
+	first := cleanSpec("fr-z64c", 1, "2026-10-31T09:00:00Z")
+	first.Description = desc
+	second := cleanSpec("fr-zdzs", 1, "2026-10-31T15:00:00Z")
+	second.Description = desc
+
+	f := newFakeSpecTown(noFile, first, second)
+	f.claims = map[string][]specdispatch.Claimant{"fr-nofile": peers, "fr-z64c": peers, "fr-zdzs": peers}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateOff
+	env.PerTick = 3
+	reads := 0
+	direct := env.Claims
+	env.Claims = specClaimsMemoFrom(
+		func(string) string { return "/town/fr" },
+		func(id string) ([]specdispatch.Claimant, error) {
+			reads++
+			return direct(id)
+		})
+
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "fr-nofile fr-z64c" {
+		t.Fatalf("slung %q, want the file-less bead and the first of the pair", got)
+	}
+	var held string
+	for _, e := range r.Skipped {
+		if e.Bead == "fr-zdzs" {
+			held = e.Line
+		}
+	}
+	if !strings.Contains(held, "held:") || !strings.Contains(held, "fr-z64c") {
+		t.Fatalf("fr-zdzs line %q, want the hold naming fr-z64c; skipped %+v", held, r.Skipped)
+	}
+	if reads != 1 {
+		t.Fatalf("the pool was read %d times for the tick, want once", reads)
+	}
+}
+
+// The memo is keyed on the directory the town's routes give a bead: two beads
+// of one rig share a read and a bead of another rig reads its own, over the
+// production resolver (gt-w6oid6).
+func TestSpecClaimsMemoKeysOnTheRoutedBeadsDirectory(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"hq-","path":"."}
+{"prefix":"gt-","path":"gastown/mayor/rig"}
+{"prefix":"dv-","path":"devops/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", beads.RoutesFileName), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var reads []string
+	memo := specClaimsMemoFrom(
+		func(id string) string { return duplicateBeadsDir(townRoot, id) },
+		func(id string) ([]specdispatch.Claimant, error) {
+			reads = append(reads, id)
+			return nil, nil
+		})
+	for _, id := range []string{"gt-a", "gt-b", "dv-a", "gt-c"} {
+		if _, err := memo(id); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	if len(reads) != 2 || reads[0] != "gt-a" || reads[1] != "dv-a" {
+		t.Fatalf("reads = %v, want one for the gastown rig (gt-a) and one for devops (dv-a)", reads)
 	}
 }
