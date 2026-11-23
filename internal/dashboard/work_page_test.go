@@ -1172,7 +1172,7 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 
 // TestBeadsIsAGridPanelAndLandingsStaysLast reads the embedded page: Beads is an
 // ordinary panel of the dashboard's grid, the left column's last section below
-// Tier sweeps, with no .pair wrapper or rule left, and Landings still the page's
+// System updates, with no .pair wrapper or rule left, and Landings still the page's
 // last block. The Polecats half moved into the Landings block
 // (TestPolecatsIsInLandingsBetweenItsFiguresAndRows) (gt-sfpm6, gt-vcr3z, gt-lpo20).
 func TestBeadsIsAGridPanelAndLandingsStaysLast(t *testing.T) {
@@ -1188,15 +1188,15 @@ func TestBeadsIsAGridPanelAndLandingsStaysLast(t *testing.T) {
 	if len(cols) != 3 {
 		t.Fatalf("index.html splits into %d columns, want 2", len(cols)-1)
 	}
-	// The Beads panel sits in the left column directly under Tier sweeps
-	// (TestBeadsPaneSitsDirectlyUnderTierSweeps reads the exact order).
+	// The Beads panel sits in the left column directly under System updates
+	// (TestBeadsPaneSitsDirectlyUnderSystemUpdates reads the exact order).
 	// The Polecats section is no longer a grid panel: it sits in the Landings
 	// body (TestPolecatsIsInLandingsBetweenItsFiguresAndRows).
 	for _, tc := range []struct {
 		key, before string
 		column      string
 	}{
-		{"beads", "tiersweep", cols[1]},
+		{"beads", "systemupdates", cols[1]},
 	} {
 		at := strings.Index(tc.column, `data-fold="`+tc.key+`"`)
 		if at < 0 {

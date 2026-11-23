@@ -1359,18 +1359,14 @@ func TestJevScorecardNoCacheIsNotAFailedRead(t *testing.T) {
 	}
 }
 
-// The JEV panel sits after Tier sweeps, starts folded until it is opened, and
-// is drawn on every render.
-func TestJevPanelSitsAfterTierSweepsAndFoldsUntilOpened(t *testing.T) {
+// The JEV panel starts folded until it is opened, and is drawn on every
+// render. Its column is pinned by TestJevAndMangoSitUnderOMReview.
+func TestJevPanelFoldsUntilOpened(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	at := strings.Index(page, `<section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>`)
-	if at < 0 {
+	if !strings.Contains(page, `<section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>`) {
 		t.Fatal("index.html has no JEV panel")
-	}
-	if tier := strings.Index(page, `<section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps`); tier < 0 || tier > at {
-		t.Error("the JEV panel is not after Tier sweeps")
 	}
 	dom := newPageDOM(t)
 	if !dom.fold(t, "jev").Collapsed {

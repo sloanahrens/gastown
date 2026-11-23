@@ -115,7 +115,7 @@ beside the DeepSeek and Claude lines: the calls and dollars over the command's
 prints anything else shows the row as unavailable and leaves the other spend
 lines alone; an empty value leaves the row out.
 
-The JEV panel, under the Tier sweeps, reads the scorecard cache that
+The JEV panel reads the scorecard cache that
 gt jev scorecard --refresh writes (<town>/.runtime/jev/scorecard.json) every
 minute while a page is open and starts no process for it. It draws one line per
 battery: its items logged, how many of them are labeled, how many the report

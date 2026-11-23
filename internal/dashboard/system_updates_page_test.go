@@ -231,18 +231,15 @@ func TestSystemUpdatesPageDrawsTheEmptyStateAndCountNote(t *testing.T) {
 	}
 }
 
-// The pane is a new fold directly above Tier sweeps, which stays put, so Beads
-// keeps sitting directly under Tier sweeps. The page's push table points the
-// section at the pane, and its redraw draws it.
-func TestSystemUpdatesPageSitsDirectlyAboveTierSweeps(t *testing.T) {
+// The pane is a fold in the left column, directly above Beads
+// (TestBeadsPaneSitsDirectlyUnderSystemUpdates reads that pair). The page's
+// push table points the section at the pane, and its redraw draws it.
+func TestSystemUpdatesPageIsALeftColumnFold(t *testing.T) {
 	t.Parallel()
 
 	left, right := pageColumnKeys(t)
-	if got := paneAbove(t, left, "tiersweep"); got != "systemupdates" {
-		t.Errorf("the pane above Tier sweeps is %q, want systemupdates", got)
-	}
-	if got := paneAbove(t, left, "beads"); got != "tiersweep" {
-		t.Errorf("the pane above Beads is %q, want Tier sweeps", got)
+	if !slices.Contains(left, "systemupdates") {
+		t.Errorf("the left column holds %v, with no System updates pane", left)
 	}
 	if slices.Contains(right, "systemupdates") {
 		t.Error("the System updates pane is also in the right column")
