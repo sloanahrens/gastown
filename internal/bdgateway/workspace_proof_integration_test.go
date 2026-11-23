@@ -68,11 +68,15 @@ const (
 	proofRequireEnv  = "BD_PROOF_REQUIRE"
 )
 
-// The reasons a sandbox run skips instead of failing.
+// The phrases the skip and error lines carry, one per input the environment
+// does not provide: each names the input and where the town provides it
+// (gt-al5tjf).
 const (
-	skipNoBead     = proofBeadEnv + " is unset: the proof has no bead to read"
-	skipNoEndpoint = proofDoltHostEnv + " and " + proofDoltPortEnv + " must both name the Dolt endpoint"
-	skipNoBd       = "bd is not on PATH and " + proofBdBinEnv + " is unset"
+	proofMissingPrefix = "the proof is missing "
+	needBead           = proofBeadEnv + " (a bead id the Dolt database holds)"
+	needHost           = proofDoltHostEnv + " (the town's Dolt endpoint, which gt dolt status names)"
+	needPort           = proofDoltPortEnv + " (the town's Dolt endpoint port)"
+	needBd             = "bd (a native bd at the town's schema, on PATH or named by " + proofBdBinEnv + ")"
 )
 
 // proofSetup is what the proof resolved from the environment.
@@ -122,10 +126,8 @@ func proofRequired(raw string) (bool, error) {
 }
 
 // proofPrereqs resolves the real bd, the Dolt endpoint and the proof bead. A
-// non-empty skip means the environment cannot run the proof; an error means it
-// is misconfigured and the proof must not pass silently. With
-// BD_PROOF_REQUIRE set, a missing prerequisite is an error rather than a skip,
-// so a gate command can demand that the proof really ran.
+// non-empty skip names every missing input at once; an error means the
+// environment is misconfigured. BD_PROOF_REQUIRE turns a skip into that error.
 func proofPrereqs(getenv func(string) string, lookPath func(string) (string, error)) (setup proofSetup, skip string, err error) {
 	required, err := proofRequired(getenv(proofRequireEnv))
 	if err != nil {
@@ -138,11 +140,8 @@ func proofPrereqs(getenv func(string) string, lookPath func(string) (string, err
 		return proofSetup{}, reason, nil
 	}
 	beadID := strings.TrimSpace(getenv(proofBeadEnv))
-	if beadID == "" {
-		return unavailable(skipNoBead)
-	}
 	prefix, _, ok := strings.Cut(beadID, "-")
-	if !ok || prefix == "" {
+	if beadID != "" && (!ok || prefix == "") {
 		return proofSetup{}, "", fmt.Errorf("%s %q has no prefix before a dash, so the proof cannot name the gateway workspace", proofBeadEnv, beadID)
 	}
 	// The prefix becomes a directory name under the temp root, so it must be one
@@ -153,15 +152,27 @@ func proofPrereqs(getenv func(string) string, lookPath func(string) (string, err
 	}
 	host := strings.TrimSpace(getenv(proofDoltHostEnv))
 	port := strings.TrimSpace(getenv(proofDoltPortEnv))
-	if host == "" || port == "" {
-		return unavailable(skipNoEndpoint)
-	}
 	bdPath := strings.TrimSpace(getenv(proofBdBinEnv))
 	if bdPath == "" {
-		bdPath, err = lookPath("bd")
-		if err != nil {
-			return unavailable(skipNoBd)
+		if found, lookErr := lookPath("bd"); lookErr == nil {
+			bdPath = strings.TrimSpace(found)
 		}
+	}
+	var missing []string
+	if beadID == "" {
+		missing = append(missing, needBead)
+	}
+	if host == "" {
+		missing = append(missing, needHost)
+	}
+	if port == "" {
+		missing = append(missing, needPort)
+	}
+	if bdPath == "" {
+		missing = append(missing, needBd)
+	}
+	if len(missing) > 0 {
+		return unavailable(proofMissingPrefix + strings.Join(missing, ", ") + "; docs/testing.md names the command that runs the proof")
 	}
 	return proofSetup{
 		bdPath:    bdPath,
@@ -360,17 +371,17 @@ func TestIntegrationWorkspaceProofEnvBranches(t *testing.T) {
 		{
 			name:     "no bead",
 			env:      []string{proofDoltHostEnv + "=dolt.test", proofDoltPortEnv + "=3307", noPath},
-			wantText: skipNoBead,
+			wantText: needBead + ", " + needBd,
 		},
 		{
 			name:     "no endpoint",
 			env:      []string{proofBeadEnv + "=gt-probe-1", proofDoltHostEnv + "=dolt.test", noPath},
-			wantText: skipNoEndpoint,
+			wantText: needPort + ", " + needBd,
 		},
 		{
 			name:     "no bd",
 			env:      []string{proofBeadEnv + "=gt-probe-1", proofDoltHostEnv + "=dolt.test", proofDoltPortEnv + "=3307", noPath},
-			wantText: skipNoBd,
+			wantText: needBd,
 		},
 		{
 			name:     "bead id without a prefix",
@@ -387,13 +398,13 @@ func TestIntegrationWorkspaceProofEnvBranches(t *testing.T) {
 		{
 			name:     "required run with no bead",
 			env:      []string{requireOn, proofDoltHostEnv + "=dolt.test", proofDoltPortEnv + "=3307", noPath},
-			wantText: proofRequireEnv + " is set but the proof cannot run: " + skipNoBead,
+			wantText: proofRequireEnv + " is set but the proof cannot run: " + proofMissingPrefix + needBead + ", " + needBd,
 			wantFail: true,
 		},
 		{
 			name:     "required run with no bd",
 			env:      []string{requireOn, proofBeadEnv + "=gt-probe-1", proofDoltHostEnv + "=dolt.test", proofDoltPortEnv + "=3307", noPath},
-			wantText: proofRequireEnv + " is set but the proof cannot run: " + skipNoBd,
+			wantText: proofRequireEnv + " is set but the proof cannot run: " + proofMissingPrefix + needBd,
 			wantFail: true,
 		},
 		{
@@ -415,6 +426,37 @@ func TestIntegrationWorkspaceProofEnvBranches(t *testing.T) {
 			}
 			if !strings.Contains(string(out), tc.wantText) {
 				t.Fatalf("the child proof's output does not contain %q:\n%s", tc.wantText, out)
+			}
+		})
+	}
+}
+
+// TestIntegrationProofPrereqs drives proofPrereqs through a fake getenv and a
+// lookPath that never finds bd, so it runs with no bd, Dolt or child process.
+// Each row asserts the one skip line names every input it leaves out, and the
+// row that sets them all gets no skip.
+func TestIntegrationProofPrereqs(t *testing.T) {
+	notFound := func(string) (string, error) { return "", errors.New("bd not found") }
+	cases := []struct {
+		name    string
+		env     map[string]string
+		missing []string // nil when the row sets every input
+	}{
+		{name: "nothing set", missing: []string{proofBeadEnv, proofDoltHostEnv, proofDoltPortEnv, proofBdBinEnv}},
+		{name: "only the bead set", env: map[string]string{proofBeadEnv: "gt-probe-1"}, missing: []string{proofDoltHostEnv, proofDoltPortEnv, proofBdBinEnv}},
+		{name: "bead and endpoint set, no bd", env: map[string]string{proofBeadEnv: "gt-probe-1", proofDoltHostEnv: "dolt.test", proofDoltPortEnv: "3307"}, missing: []string{proofBdBinEnv}},
+		{name: "all set", env: map[string]string{proofBeadEnv: "gt-probe-1", proofDoltHostEnv: "dolt.test", proofDoltPortEnv: "3307", proofBdBinEnv: "/fake/bd"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, skip, err := proofPrereqs(func(key string) string { return tc.env[key] }, notFound)
+			if err != nil || (skip == "") != (tc.missing == nil) {
+				t.Fatalf("proofPrereqs skip = %q, err = %v, want a skip: %v", skip, err, tc.missing != nil)
+			}
+			for _, name := range tc.missing {
+				if !strings.Contains(skip, name) {
+					t.Errorf("%q does not name %s", skip, name)
+				}
 			}
 		})
 	}
