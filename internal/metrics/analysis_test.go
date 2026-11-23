@@ -366,13 +366,15 @@ func writeTownFile(t *testing.T, path, body string) {
 }
 
 // analysisOptions is the analysis's paths for town, with the extract answered
-// by the day directory analysisTown wrote.
+// by the day directory analysisTown wrote and the gateway check opted out, so a
+// test that leaves Extract unset states that decision too (gt-xzo9xr).
 func analysisOptions(town string) AnalysisOptions {
 	return AnalysisOptions{
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
 		Extract:     analysisExtract(filepath.Join(town, ".runtime", "metrics", analysisDay), new([]extractCall)),
 		LookPath:    goOnPath,
+		BdGateway:   BdGatewayNone,
 	}
 }
 

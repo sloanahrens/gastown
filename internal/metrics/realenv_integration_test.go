@@ -26,7 +26,7 @@ func TestIntegrationRealEnv(t *testing.T) {
 	real, err := RealEnv(ctx, RealEnvOptions{
 		Today: "smoke",
 		Town:  smokeTown(t),
-		Run:   OSRunnerDir(DefaultAllowEnv),
+		Run:   OSRunnerDir(DefaultAllowEnv), BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)

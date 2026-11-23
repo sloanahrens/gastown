@@ -146,7 +146,8 @@ type AnalysisOptions struct {
 	// makes. It cannot fail the run: a caller reports its own failures.
 	BeforeRun func(ctx context.Context, period string)
 	// BdGateway is the gateway check the in-process extract runs before it reads
-	// the town; nil runs with none. It is ignored when Extract is set.
+	// the town. It is required when Extract is nil: nil refuses the run, and
+	// BdGatewayNone is the explicit opt-out. Ignored when Extract is set.
 	BdGateway BdGatewayCheck
 }
 
@@ -207,6 +208,10 @@ type AnalysisResult struct {
 	BeadChangesDropped []DroppedItem
 }
 
+// errNoAnalysisBdGatewayDecision refuses an AnalysisOptions whose in-process
+// extract leaves BdGateway unset: a decision the caller makes, not a silent skip.
+var errNoAnalysisBdGatewayDecision = errors.New("analysis: AnalysisOptions.BdGateway is unset for the in-process extract; pass a check or BdGatewayNone")
+
 // RunAnalysis runs the daily analysis when its stamp is older than DueAfter, and
 // publishes panel.json, the joined landings and the stamp into
 // <town>/.runtime/metrics/latest. A run that is not due returns Ran false and
@@ -226,6 +231,8 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, errors.New("analysis: AnalysisOptions.MangoGitDir is unset, so mango cannot be built")
 	case o.MangoBin == "":
 		return res, errors.New("analysis: AnalysisOptions.MangoBin is unset, so mango cannot be run")
+	case o.Extract == nil && o.BdGateway == nil:
+		return res, errNoAnalysisBdGatewayDecision
 	case env.Now == nil:
 		return res, errors.New("analysis: Env.Now is unset")
 	case env.ReadFile == nil:
@@ -401,7 +408,8 @@ func readStamp(env Env, path string) (time.Time, error) {
 // commit once. It returns the day directory the extract wrote. run is the
 // runner every git and bd command goes through; home is the directory the
 // extract's town and docs defaults join to, empty for the process's own;
-// bdGateway is the check RealEnv runs before it reads the town, nil for none.
+// bdGateway is the check RealEnv runs before it reads the town; RealEnv refuses
+// nil, so RunAnalysis refuses an unset field before it calls this.
 func inProcessExtract(now time.Time, home string, run RunnerDir, bdGateway BdGatewayCheck) func(ctx context.Context, town, docsDir string) (string, error) {
 	return func(ctx context.Context, town, docsDir string) (string, error) {
 		real, err := RealEnv(ctx, RealEnvOptions{

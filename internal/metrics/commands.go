@@ -73,7 +73,9 @@ type Commands struct {
 	// Wire builds the day's town; nil wires the host's real env.
 	Wire func(ctx context.Context) (RealTown, error)
 	// BdGateway is the gateway check the default Wire runs before it reads the
-	// town; nil runs with none. The host's caller injects it (gt-g8oimf).
+	// town. The decision is required: the host injects a check (gt-g8oimf), and
+	// a caller that means "no check" passes BdGatewayNone, because the extract
+	// refuses a nil field (gt-xzo9xr).
 	BdGateway BdGatewayCheck
 	// Env reads the files the mango section, backtest and report read; nil is
 	// OSEnv over the town Wire returned.
