@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -60,6 +61,39 @@ func specTargetClaims(townRoot, beadID string) ([]specdispatch.Claimant, error) 
 	return specTargetClaimsFrom(beadID, duplicateBeadsDir(townRoot, beadID), func(beadsDir string) ([]duplicateCandidate, error) {
 		return slingDuplicatePools.poolFor(slingStores{}, beadsDir)
 	})
+}
+
+// specClaimsMemo is the tick's claim reader: specTargetClaims read once per
+// beads directory, not once per candidate (gt-w6oid6). Each call walks the
+// rig's whole pool and parses every bead's design text, which was about 25 s of
+// CPU in a 58 s tick.
+func specClaimsMemo(townRoot string) func(beadID string) ([]specdispatch.Claimant, error) {
+	return specClaimsMemoFrom(
+		func(beadID string) string { return duplicateBeadsDir(townRoot, beadID) },
+		func(beadID string) ([]specdispatch.Claimant, error) { return specTargetClaims(townRoot, beadID) })
+}
+
+// specClaimsMemoFrom is specClaimsMemo with the directory resolution and the
+// read injected. The returned func shares one slice among the candidates of a
+// directory (the claim rule only reads it), and a failed read is returned but
+// not remembered, so the next candidate of the directory asks again.
+func specClaimsMemoFrom(dirOf func(beadID string) string, read func(beadID string) ([]specdispatch.Claimant, error)) func(beadID string) ([]specdispatch.Claimant, error) {
+	var mu sync.Mutex
+	byDir := map[string][]specdispatch.Claimant{}
+	return func(beadID string) ([]specdispatch.Claimant, error) {
+		dir := dirOf(beadID)
+		mu.Lock()
+		defer mu.Unlock()
+		if got, ok := byDir[dir]; ok {
+			return got, nil
+		}
+		got, err := read(beadID)
+		if err != nil {
+			return nil, err
+		}
+		byDir[dir] = got
+		return got, nil
+	}
 }
 
 // specTargetClaimsFrom is specTargetClaims with the beads directory resolution

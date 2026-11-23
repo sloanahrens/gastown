@@ -4528,9 +4528,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		// The target-claim rule's peer set comes from the guard's own pool, so a
 		// sling that reuses the cached pool costs no read of its own (gt-n6jbw).
-		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
-			return specTargetClaims(townRoot, beadID)
-		},
+		Claims:      specClaimsMemo(townRoot),
 		RigHold:     func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		HeldRigHold: specHeldRigHold(townRoot),
 		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {

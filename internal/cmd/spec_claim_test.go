@@ -598,3 +598,64 @@ func TestSpecDispatchDoesNotHoldACandidateThatNamesNoTestFile(t *testing.T) {
 		t.Fatalf("slung = %v, want the one candidate (skipped %+v)", f.slung, r.Skipped)
 	}
 }
+
+// The tick builds a rig's target claims once: two candidates of one beads
+// directory share one read and one slice, and a candidate of another directory
+// reads its own (gt-w6oid6).
+func TestSpecClaimsMemoReadsOncePerDirectory(t *testing.T) {
+	t.Parallel()
+	dirs := map[string]string{"gt-a": "/town/gastown", "gt-b": "/town/gastown", "om-a": "/town/om"}
+	var reads []string
+	memo := specClaimsMemoFrom(
+		func(id string) string { return dirs[id] },
+		func(id string) ([]specdispatch.Claimant, error) {
+			reads = append(reads, id)
+			return []specdispatch.Claimant{{ID: "peer-of-" + id}}, nil
+		})
+	first, err := memo("gt-a")
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	second, err := memo("gt-b")
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if len(reads) != 1 || reads[0] != "gt-a" {
+		t.Fatalf("reads = %v, want one read, for gt-a", reads)
+	}
+	if len(second) != 1 || &first[0] != &second[0] {
+		t.Fatalf("second candidate of the directory got %+v, want the first read's slice", second)
+	}
+	other, err := memo("om-a")
+	if err != nil {
+		t.Fatalf("other directory read: %v", err)
+	}
+	if len(reads) != 2 || reads[1] != "om-a" || other[0].ID != "peer-of-om-a" {
+		t.Fatalf("reads = %v, other = %+v, want a second read for om-a", reads, other)
+	}
+}
+
+// A failed read holds that candidate only: it is returned, not remembered, so
+// the next candidate of the directory asks again (gt-w6oid6).
+func TestSpecClaimsMemoDoesNotRememberAnError(t *testing.T) {
+	t.Parallel()
+	failing := true
+	calls := 0
+	memo := specClaimsMemoFrom(
+		func(string) string { return "/town/gastown" },
+		func(string) ([]specdispatch.Claimant, error) {
+			calls++
+			if failing {
+				return nil, errors.New("pool unreadable")
+			}
+			return []specdispatch.Claimant{{ID: "peer"}}, nil
+		})
+	if _, err := memo("gt-a"); err == nil {
+		t.Fatalf("a failed read returned no error")
+	}
+	failing = false
+	got, err := memo("gt-b")
+	if err != nil || len(got) != 1 || calls != 2 {
+		t.Fatalf("after the failure: got %+v, err %v, %d reads; want the peer from a second read", got, err, calls)
+	}
+}
