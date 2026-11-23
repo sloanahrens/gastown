@@ -624,8 +624,11 @@ type sqlReader interface {
 	SQLCSV(query beadsql.Query) ([][]string, error)
 }
 
-// specChildrenFromSQL reads the children of ids in one SQL call, each parent keyed to its children; a parent the database does not hold has no key.
-func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]beadsql.ChildStatus, error) {
+// specChildrenFromSQL reads the children of ids in one SQL call, each parent
+// keyed to its children as issues with an id and status. A childless parent the
+// database holds is keyed empty, and an id it does not hold has no key, as
+// specChildrenRead answers.
+func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]*beads.Issue, error) {
 	rows, err := c.SQLCSV(beadsql.ChildStatuses(ids...))
 	if err != nil {
 		return nil, err
@@ -633,7 +636,19 @@ func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]beadsql.ChildS
 	if len(rows) > 0 {
 		rows = rows[1:] // SQLCSV keeps the header record, which is no parent
 	}
-	return beadsql.ParseChildStatuses(rows)
+	statuses, err := beadsql.ParseChildStatuses(rows)
+	if err != nil {
+		return nil, err
+	}
+	kids := make(map[string][]*beads.Issue, len(statuses))
+	for parent, children := range statuses {
+		is := make([]*beads.Issue, 0, len(children))
+		for _, child := range children {
+			is = append(is, &beads.Issue{ID: child.ID, Status: child.Status})
+		}
+		kids[parent] = is
+	}
+	return kids, nil
 }
 
 // specChildrenReader is the default children read of specCandidateChildren: the
