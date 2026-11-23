@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -46,6 +47,12 @@ func slingGiveBackReason(err error) (reason string, giveBack bool) {
 		return "an image-drift deferral", true
 	case errors.Is(err, ErrBondLockTimeout):
 		return "a bond-lock deferral", true
+	// The two seat-branch refusals of internal/sling/run.go carry this type;
+	// the held-bead refusal that also follows the spawn does not, and keeps its
+	// count, since handing it back would let every dispatch tick of a held bead
+	// roll back a polecat without limit (gt-dzqkdw).
+	case errors.Is(err, sling.ErrSeatBranchRefused):
+		return "a seat-branch refusal after the spawn", true
 	case errors.Is(err, ErrAssigneeLockTimeout),
 		assigneeLockTextShape.MatchString(text):
 		return "an assignee-lock timeout", true
