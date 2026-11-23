@@ -160,6 +160,97 @@ func TestReviewLogScrubRecordedFindingText(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubRecordedFindingTitleAndPath: a finding's title and path are
+// scrubbed like its claim, and an ordinary pair is kept (gt-kwx3vs).
+func TestReviewLogScrubRecordedFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                string
+		f                   Finding
+		wantTitle, wantFile string
+	}{
+		{"title quotes a token", Finding{Title: "it logs " + scrubTestFamilies["aws"] + " verbatim", Path: "internal/land/note.go"}, "it logs <redacted> verbatim", "internal/land/note.go"},
+		{"path holds a token after a slash", Finding{Title: "the refusal has no test", Path: "internal/land/" + scrubTestFamilies["slack"]}, "the refusal has no test", "internal/land/<redacted>"},
+		{"ordinary title and path", Finding{Title: "the refusal has no test", Path: "internal/land/reviewlog.go"}, "the refusal has no test", "internal/land/reviewlog.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if rec := reviewFindingTexts([]Finding{tc.f})[0]; rec.Title != tc.wantTitle || rec.File != tc.wantFile {
+				t.Errorf("recorded title/path = %q/%q, want %q/%q", rec.Title, rec.File, tc.wantTitle, tc.wantFile)
+			}
+		})
+	}
+}
+
+// TestReviewLogScrubHeldFindingTitleAndPath: a held finding's title and path
+// reach the queue line scrubbed, and the finding refiled from it keeps the raw
+// finding's fingerprint, so its bead is matched instead of filed twice (gt-kwx3vs).
+func TestReviewLogScrubHeldFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	rawTitle := "it logs " + scrubTestFamilies["aws"] + " verbatim"
+	rawPath := "internal/land/" + scrubTestFamilies["slack"]
+	logf := &ReviewsFile{Path: filepath.Join(t.TempDir(), ReviewsFileName)}
+	queue := QueuedFollowup{Bead: "gt-x", Rig: "gastown", Findings: heldFindingTexts([]FollowupCandidate{{
+		ID: "f-1", Severity: omSeverityMinor, Path: rawPath, Title: rawTitle, Claim: "the key reaches the log",
+	}})}
+	if err := logf.AppendQueue(queue); err != nil {
+		t.Fatalf("AppendQueue: %v", err)
+	}
+	queued, err := logf.Queued()
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("Queued = %d lines, %v, want one", len(queued), err)
+	}
+	if got := queued[0].Findings[0]; got.Title != "it logs <redacted> verbatim" || got.File != "internal/land/<redacted>" {
+		t.Errorf("queued title/path = %q/%q, want both scrubbed", got.Title, got.File)
+	}
+	refiled := (&Lander{}).queuedCandidates(queued[0], nil, nil)
+	if len(refiled) != 1 {
+		t.Fatalf("the queue line refiled %d findings, want one", len(refiled))
+	}
+	want := Fingerprint(rawPath, rawTitle)
+	if d := Decide(refiled[0], []ExistingFollowup{{ID: "gt-old", Labels: []string{want}}}, 0); d.Action != DedupeComment || d.Target != "gt-old" {
+		t.Errorf("Decide = %+v, want the bead the raw finding was filed as", d)
+	}
+	if spec := bundleSpec(Work{BeadID: "gt-x"}, Result{}, time.Time{}, followupGroup{Package: "internal/land", Findings: refiled}); !slices.Contains(spec.Labels, want) {
+		t.Errorf("filed labels = %v, want the raw finding's %s", spec.Labels, want)
+	}
+}
+
+// TestReviewLogScrubFingerprintKeepsItsIdentity pins what the scrub in
+// Fingerprint must keep (gt-kwx3vs): an ordinary title and path fingerprint
+// exactly as main does, and a finding refiled from the scrubbed queue line
+// fingerprints like the raw finding om raised. Without the scrub the raw and
+// refiled texts hash apart, so this fails.
+func TestReviewLogScrubFingerprintKeepsItsIdentity(t *testing.T) {
+	t.Parallel()
+	// Computed on origin/main from the same ordinary title and path.
+	if got, want := Fingerprint("internal/land/reviewlog.go", "the refusal has no test"), "om-fp:f4be1f1cde2a"; got != want {
+		t.Errorf("ordinary fingerprint = %s, want main's %s", got, want)
+	}
+	c := FollowupCandidate{Path: "internal/land/" + scrubTestFamilies["slack"], Title: "it logs " + scrubTestFamilies["aws"] + " verbatim"}
+	refiled := heldFindingTexts([]FollowupCandidate{c})[0]
+	if got, want := Fingerprint(refiled.File, refiled.Title), Fingerprint(c.Path, c.Title); got != want {
+		t.Errorf("refiled fingerprint = %s, want the raw finding's %s", got, want)
+	}
+}
+
+// TestReviewLogScrubFingerprintReadsPastTheBound: the scrub reads only
+// scrubInputBound bytes, so a title or path that differs from another only past
+// that bound must still fingerprint apart, and the same text must fingerprint the same.
+func TestReviewLogScrubFingerprintReadsPastTheBound(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", scrubInputBound)
+	if Fingerprint("a.go", long+"one") == Fingerprint("a.go", long+"two") {
+		t.Error("two titles that differ only past the bound share a fingerprint")
+	}
+	if Fingerprint(long+"one", "t") == Fingerprint(long+"two", "t") {
+		t.Error("two paths that differ only past the bound share a fingerprint")
+	}
+	if Fingerprint("a.go", long+"one") != Fingerprint("a.go", long+"one") {
+		t.Error("the same long title fingerprints differently twice")
+	}
+}
+
 // TestReviewLogScrubHeldFinding: a held finding's claim reaches the log through a queue line.
 func TestReviewLogScrubHeldFinding(t *testing.T) {
 	t.Parallel()

@@ -47,12 +47,27 @@ var followupStopWords = map[string]bool{
 // label and matched on the next run. An empty path is allowed: it still
 // fingerprints, and it never equals the fingerprint of a named path.
 //
-// The path is kept as given (only path.Clean, so "./x.go" and "x.go" agree);
-// lowercasing applies to the title, because a path is case-sensitive on the
-// filesystems this runs on.
+// Each is scrubbed of token-shaped words before hashing (gt-kwx3vs), then
+// normalized: path.Clean on the path, so "./x.go" and "x.go" agree, and
+// lowercasing on the title, because a path is case-sensitive on the filesystems
+// this runs on. Scrubbing first means a finding refiled from the review log's
+// scrubbed queue line fingerprints like the raw finding om raised and matches
+// its bead instead of filing a second one.
 func Fingerprint(fpath, title string) string {
-	sum := sha256.Sum256([]byte(normalizePath(fpath) + "\n" + normalizeTitle(title)))
+	sum := sha256.Sum256([]byte(normalizePath(fingerprintText(fpath)) + "\n" + normalizeTitle(fingerprintText(title))))
 	return FingerprintPrefix + hex.EncodeToString(sum[:])[:12]
+}
+
+// fingerprintText is s scrubbed for the fingerprint's hash. The scrub reads only
+// scrubInputBound bytes, so the rest of a longer text is folded in as a digest:
+// two findings that differ only past the bound still fingerprint apart.
+func fingerprintText(s string) string {
+	out := scrubClaim(s)
+	if rest := s[len(cutAtRune(s, scrubInputBound)):]; rest != "" {
+		sum := sha256.Sum256([]byte(rest))
+		out += "\n" + hex.EncodeToString(sum[:8])
+	}
+	return out
 }
 
 // TitleSimilarity scores two finding titles as the Jaccard index of their word
