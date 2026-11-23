@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
@@ -23,12 +25,10 @@ const polecatManifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 // (gt-plvm2h).
 const polecatImageFix = "gt town cluster render --polecat-image on the digest the registry answers"
 
-// bdGatewayFix is the repair when the gateway has no ready replica. A pod that
-// fails readiness has no Service endpoint, so nothing reaches the gateway until
-// one is ready; a push goes through the push Service once it exists, and the
-// exec-pod route until then (gt-plvm2h).
-const bdGatewayFix = "gt bd workspace push through the push Service once it exists " +
-	"(bead: bd gateway push Service), else the exec-pod route"
+// bdGatewayFix is the repair when the gateway has no ready replica: a pod that
+// fails readiness has no Service endpoint, so nothing reaches the gateway
+// (gt-plvm2h).
+const bdGatewayFix = "gt bd workspace push through the push Service, else the exec-pod route"
 
 // daemonDeployment is the part of the daemon Deployment the image check reads.
 // The polecat image travels only on the pod template's annotations, so the
@@ -43,11 +43,12 @@ type daemonDeployment struct {
 	} `json:"spec"`
 }
 
-// gatewayDeployment is the part of the bd-gateway Deployment the gateway check
-// reads. A Deployment that never became ready carries no readyReplicas, which
-// decodes as 0: the same no-ready-pod state the check reports.
+// gatewayDeployment is one item of the Deployment list the gateway check reads.
+// A Deployment that never became ready carries no readyReplicas, which decodes
+// as 0: the same no-ready-pod state the check reports.
 type gatewayDeployment struct {
-	Status struct {
+	Metadata struct{ Name string } `json:"metadata"`
+	Status   struct {
 		ReadyReplicas int `json:"readyReplicas"`
 	} `json:"status"`
 }
@@ -126,6 +127,13 @@ func polecatImageCheck(run Runner, registryBase string) Check {
 			if err != nil {
 				return Result{Detail: fmt.Sprintf("read the registry digest: %v", err)}
 			}
+			status, hasStatus := answerStatus(string(out))
+			if !hasStatus {
+				return Result{Detail: "the registry read answered no HTTP status"}
+			}
+			if status < 200 || status > 299 {
+				return Result{Detail: fmt.Sprintf("the registry answered HTTP %d for the manifest", status)}
+			}
 			got, found := headerValue(string(out), "Docker-Content-Digest")
 			if !found {
 				return Result{Detail: "the registry answered no Docker-Content-Digest header"}
@@ -144,6 +152,19 @@ func polecatImageCheck(run Runner, registryBase string) Check {
 	}
 }
 
+// answerStatus reads the HTTP status code from curl -sI's status line;
+// hasStatus is false when that line is not a status line, so a garbled answer
+// is never read as a success.
+func answerStatus(headers string) (status int, hasStatus bool) {
+	line, _, _ := strings.Cut(headers, "\n")
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0, false
+	}
+	status, err := strconv.Atoi(fields[1])
+	return status, err == nil && status >= 100 && status <= 599
+}
+
 // headerValue reads the value of the response header named want from curl -sI's
 // output. The name is matched without case, as HTTP header names are, and a
 // header line with no colon is skipped rather than read as a name.
@@ -157,9 +178,9 @@ func headerValue(headers, want string) (string, bool) {
 	return "", false
 }
 
-// bdGatewayCheck reads the bd gateway Deployment's ready replicas and passes at
-// one or more (gt-plvm2h). A town before the gateway cutover has no Deployment,
-// which the check reports as not deployed rather than as a failure.
+// bdGatewayCheck reads the bd gateway Deployment from the namespace's
+// Deployment list and passes at one or more ready replicas (gt-plvm2h). A list
+// without the Deployment is not deployed; an empty answer is a failed read.
 func bdGatewayCheck(run Runner) Check {
 	return Check{
 		Name: "8 bd gateway",
@@ -168,18 +189,26 @@ func bdGatewayCheck(run Runner) Check {
 				return Result{Detail: "no runner configured"}
 			}
 			out, err := run(ctx, "kubectl", "--context", "colima-gt-control",
-				"-n", k8sdaemon.DefaultNamespace, "get", "deployment", k8sdaemon.BdGatewayName,
-				"-o", "json", "--ignore-not-found")
+				"-n", k8sdaemon.DefaultNamespace, "get", "deployments", "-o", "json")
 			if err != nil {
-				return Result{Detail: fmt.Sprintf("read deployment %s: %v", k8sdaemon.BdGatewayName, err)}
+				return Result{Detail: fmt.Sprintf("list deployments: %v", err)}
 			}
 			if strings.TrimSpace(string(out)) == "" {
+				return Result{Detail: "the deployment list answered nothing"}
+			}
+			var list struct {
+				Items []gatewayDeployment `json:"items"`
+			}
+			if err := json.Unmarshal(out, &list); err != nil {
+				return Result{Detail: fmt.Sprintf("parse the deployment list: %v", err)}
+			}
+			i := slices.IndexFunc(list.Items, func(d gatewayDeployment) bool {
+				return d.Metadata.Name == k8sdaemon.BdGatewayName
+			})
+			if i < 0 {
 				return Result{OK: true, Detail: "not deployed"}
 			}
-			var d gatewayDeployment
-			if err := json.Unmarshal(out, &d); err != nil {
-				return Result{Detail: fmt.Sprintf("parse deployment %s: %v", k8sdaemon.BdGatewayName, err)}
-			}
+			d := list.Items[i]
 			if d.Status.ReadyReplicas < 1 {
 				return Result{
 					Detail: "no ready replica: a pod that fails readiness has no Service endpoint",
