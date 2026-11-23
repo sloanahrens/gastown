@@ -932,6 +932,63 @@ func TestWriteFileAtomicRemovesItsTempFileOnFailure(t *testing.T) {
 	}
 }
 
+func writeRecord(t *testing.T, dir, bead, kind string) Stored {
+	t.Helper()
+	f := factsIn("ws-a")
+	f.Bead, f.Kind = bead, kind
+	st, err := Merge(dir, Build(f, []SessionUsage{sessA}), []string{"s-a"})
+	if err != nil {
+		t.Fatalf("writing %s's %s record: %v", bead, kind, err)
+	}
+	return st
+}
+func TestRecordFiles(t *testing.T) {
+	t.Parallel()
+	t.Run("reads both kinds", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		for _, kind := range []string{dashboard.UsageKindWork, dashboard.UsageKindOM} {
+			want := writeRecord(t, dir, "gt-abc12", kind)
+			if got, err := ReadRecordFile(recordPath(dir, "gt-abc12", kind)); err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("%s record read as %+v (%v), want what the writer stored %+v", kind, got, err, want)
+			}
+		}
+	})
+	t.Run("refuses a file that is not a record", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "notes.json")
+		if err := os.WriteFile(path, []byte("not a record"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadRecordFile(path); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("ReadRecordFile of a non-record = %v, want an error naming %s", err, path)
+		}
+	})
+	t.Run("lists the record files", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeRecord(t, dir, "gt-abc12", dashboard.UsageKindOM)
+		writeRecord(t, dir, "gt-abc12", dashboard.UsageKindWork)
+		if err := os.Mkdir(filepath.Join(dir, recordsSubdir, "sub.work.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"gt-abc12.work.json.123.tmp", "gt-abc12.other.json", "notes.txt"} {
+			if err := os.WriteFile(filepath.Join(dir, recordsSubdir, name), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := []string{recordPath(dir, "gt-abc12", dashboard.UsageKindOM), recordPath(dir, "gt-abc12", dashboard.UsageKindWork)}
+		if got, err := RecordFilePaths(dir); err != nil || !slices.Equal(got, want) {
+			t.Fatalf("RecordFilePaths = %v (%v), want %v", got, err, want)
+		}
+	})
+	t.Run("refuses a missing directory", func(t *testing.T) {
+		t.Parallel()
+		if _, err := RecordFilePaths(t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("RecordFilePaths of a missing records directory = %v, want an error wrapping fs.ErrNotExist", err)
+		}
+	})
+}
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
