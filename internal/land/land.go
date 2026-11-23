@@ -239,8 +239,9 @@ type Lander struct {
 	// test can reach the timeout without waiting it out. Zero keeps
 	// commentTimeout.
 	auditTimeout time.Duration
-	// sleep, when set, is the wait between a refused bead write and its retry
-	// (gt-hounmt). Nil means a real wait; tests inject one that waits nothing.
+	// sleep, when set, is the wait retryWrite takes between tries; no production
+	// write reaches it since they became try-once (gt-hounmt, gt-2yutrf). Nil
+	// means a real wait; tests inject one that waits nothing.
 	sleep func(time.Duration)
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
@@ -2486,8 +2487,9 @@ func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejec
 // an earlier pass already wrote and then failed to finish is completed, never
 // recorded twice: appending a second identical block would burn a rework
 // attempt the author never saw, and at MaxReworkAttempts the bead is escalated
-// with no rework comment ever posted (gt-zqqcr).
-func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
+// with no rework comment ever posted (gt-zqqcr). ctx is unused: every gated
+// write is tried once (gt-2yutrf).
+func (l *Lander) reject(_ context.Context, issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
 	repeat, err := l.rejectionAlreadyRecorded(issue, w, rej)
 	if err != nil {
 		// Without repeat the lane check cannot run, so NoEscalate stays false (gt-dtx3ht).
@@ -2570,13 +2572,12 @@ func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Re
 	}
 	l.logf("%s", line)
 	if !repeat {
-		// A transient bd failure is retried before the note is reported as not
-		// written (gt-hounmt); one that still fails is queued (gt-r2rmz6).
+		// A refused write fails at once, not retried; the queue keeps it for a
+		// later pass (gt-r2rmz6, gt-2yutrf).
 		text := FormatRejectionNote(note)
-		if err := retryWrite(ctx, l.sleep, func() error {
-			return l.Beads.AppendNotes(w.BeadID, text)
-		}); err != nil {
+		if err := l.Beads.AppendNotes(w.BeadID, text); err != nil {
 			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
+			l.logf("%s: could not append the rejection note (%v)", w.BeadID, err)
 			if qerr := l.queueRecord(PendingRecord{Bead: w.BeadID, Kind: RecordKindNotes, Key: w.Head + " " + kind, Text: text}); qerr != nil {
 				rej.RecordErr = fmt.Errorf("%w; queueing it for a later pass failed: %v", rej.RecordErr, qerr)
 				l.logf("%s: could not queue the rejection note for a later pass (%v)", w.BeadID, qerr)
