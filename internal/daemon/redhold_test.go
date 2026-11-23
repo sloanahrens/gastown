@@ -1,12 +1,41 @@
 package daemon
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
+
+func TestRedHoldSweepOf(t *testing.T) {
+	t.Parallel()
+	one := func(ts tierSweepTierResult) tierSweepState {
+		return tierSweepState{RedCycles: 3, Tiers: map[string]tierSweepTierResult{"race": ts}}
+	}
+	tests := []struct {
+		name   string
+		st     tierSweepState
+		err    error
+		want   redHoldSweep
+		wantOK bool
+	}{
+		{"a no-result cause reports no result", one(tierSweepTierResult{Verdict: tierSweepRed, Cause: tierSweepRunnerNoResult}), nil, redHoldSweep{Rig: "gastown", RedCycles: 3, NoResult: true}, true},
+		{"the sweep's no-result failing name reports no result", one(tierSweepTierResult{Verdict: tierSweepRed, Failed: 1, FailedNames: []string{tierSweepRunnerNoResult}}), nil, redHoldSweep{Rig: "gastown", RedCycles: 3, NoResult: true}, true},
+		{"a red tier of another cause is sweep-red", one(tierSweepTierResult{Verdict: tierSweepRed, Cause: "step failed"}), nil, redHoldSweep{Rig: "gastown", RedCycles: 3}, true},
+		{"a green tier's no-result cause reports no result as false", one(tierSweepTierResult{Verdict: tierSweepGreen, Cause: tierSweepRunnerNoResult}), nil, redHoldSweep{Rig: "gastown", RedCycles: 3}, true},
+		{"an unreadable record is unknown whatever it holds", one(tierSweepTierResult{Verdict: tierSweepRed, Cause: tierSweepRunnerNoResult}), errors.New("reading the record"), redHoldSweep{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := redHoldSweepOf("gastown", tt.st, tt.err)
+			if ok != tt.wantOK || !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("redHoldSweepOf = %+v, %v; want %+v, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
 
 func TestRedHoldEvalSweepTriggers(t *testing.T) {
 	t.Parallel()
