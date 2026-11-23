@@ -50,10 +50,10 @@ The verdict line says whether both pieces lint ok and estimate under the split
 trigger. A piece at or within 0.3 minutes of the trigger fails, and so does a
 piece the lint refuses; the command exits 1 when either fails.
 
-With --apply the two pieces are created: piece A, then piece B whose PIECE_A
-placeholder is replaced by A's id, then B's dependency on A, then the original
-closed naming both ids. The pieces keep the original's priority and rig. A
-refusal before the first write creates nothing.
+With --apply the dry-run checks run first: a draft that fails prints its reason
+and creates nothing. Then the two pieces are created: piece A, then piece B whose
+PIECE_A placeholder is replaced by A's id, then B's dependency on A, then the
+original closed naming both ids. The pieces keep the original's priority and rig.
 
 One of --dry-run or --apply is required: without one the command refuses.`,
 	Args:         cobra.ExactArgs(1),
@@ -107,10 +107,6 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun, apply bool, fi
 	}
 	read := func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }
 	target := func(id string) *specdispatch.TargetTree { return specLintTarget(townRoot, id, openRigTree) }
-	if apply {
-		return runSpecSplitApplyOn(out, beadID, specBeadRig(townRoot, beadID), read, target,
-			beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)))
-	}
 	sd, err := readSpecDispatchConfig(townRoot)
 	if err != nil {
 		return fmt.Errorf("cannot read patrols.spec_dispatch: %w", err)
@@ -119,12 +115,12 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun, apply bool, fi
 	if err != nil {
 		return fmt.Errorf("cannot judge the drafts of %s: %w", beadID, err)
 	}
-	return runSpecSplitOn(out, beadID, dryRun, read, target,
-		specSplitCheck{
-			Trigger:  sd.StoryPointsSplitOver(),
-			Estimate: specSplitEstimate(townRoot, errw),
-			Lint:     lint,
-		})
+	check := specSplitCheck{Trigger: sd.StoryPointsSplitOver(), Estimate: specSplitEstimate(townRoot, errw), Lint: lint}
+	if apply {
+		return runSpecSplitApplyOn(out, beadID, specBeadRig(townRoot, beadID), read, target, check,
+			beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)))
+	}
+	return runSpecSplitOn(out, beadID, dryRun, read, target, check)
 }
 
 // runSpecSplitOn prints the two piece drafts of beadID to out, then each
@@ -136,9 +132,6 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun, apply bool, fi
 func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRead, target specSplitTarget, check specSplitCheck) error {
 	if !dryRun {
 		return errors.New("gt spec split needs --dry-run to print the two drafts or --apply to create them")
-	}
-	if check.Trigger <= 0 {
-		return fmt.Errorf("cannot judge the drafts of %s: no split trigger is set (story_points.split_over_minutes)", beadID)
 	}
 	issue, tree, plan, err := specSplitPlan(beadID, read, target)
 	if err != nil {
@@ -221,13 +214,29 @@ func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*
 
 // runSpecSplitApplyOn creates the two pieces of beadID and closes it: piece A,
 // piece B with PIECE_A replaced by A's id, B's dependency on A, then the original
-// closed naming both ids. A refusal plans before the first write. A write that
-// fails after an earlier one names what exists; undoing a partial apply is not
-// done here.
-func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, target specSplitTarget, db beads.Client) error {
-	issue, _, plan, err := specSplitPlan(beadID, read, target)
+// closed naming both ids. The dry-run checks run first, so a failed one creates
+// nothing. A write that fails after an earlier one names what exists; undoing a
+// partial apply is not done here.
+func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, target specSplitTarget, check specSplitCheck, db beads.Client) error {
+	issue, tree, plan, err := specSplitPlan(beadID, read, target)
 	if err != nil {
 		return err
+	}
+	judged, err := specSplitJudgeAll(beadID, issue, tree, []specsplit.Piece{plan.A, plan.B}, check)
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, j := range judged {
+		if j.Fail != "" {
+			failures = append(failures, fmt.Sprintf("piece %s: %s", j.Piece.Name, j.Fail))
+		}
+	}
+	if len(failures) > 0 {
+		if _, err := fmt.Fprintf(out, "verdict: fails: %s\n", strings.Join(failures, "; ")); err != nil {
+			return fmt.Errorf("cannot report the failed checks of %s: %w", beadID, err)
+		}
+		return NewSilentExit(specLintExitRefused)
 	}
 	a, err := db.Create(specSplitPieceOptions(issue, plan.A, rig, ""))
 	if err != nil {
@@ -269,8 +278,12 @@ func specSplitPieceOptions(issue *beads.Issue, piece specsplit.Piece, rig, aID s
 
 // specSplitJudgeAll estimates and lints each piece's draft, nothing written.
 // An estimate that errors refuses the whole split: a piece that could not be
-// estimated has no minutes to judge.
+// estimated has no minutes to judge. Without a trigger no draft can be judged,
+// so that refuses too.
 func specSplitJudgeAll(beadID string, issue *beads.Issue, tree *specdispatch.TargetTree, pieces []specsplit.Piece, check specSplitCheck) ([]specSplitJudgement, error) {
+	if check.Trigger <= 0 {
+		return nil, fmt.Errorf("cannot judge the drafts of %s: no split trigger is set (story_points.split_over_minutes)", beadID)
+	}
 	judged := make([]specSplitJudgement, 0, len(pieces))
 	for _, piece := range pieces {
 		draft := &beads.Issue{

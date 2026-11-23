@@ -214,55 +214,77 @@ func TestSystemUpdatesPipelineNilLeavesRowsWithoutRuns(t *testing.T) {
 	assert.Empty(t, got.Rows[0].Runs)
 }
 
-// The pipeline read is two Forgejo list calls, so it runs once per cadence: a
-// build inside the window reuses the last read, a nil result included, and one
-// at or past the window reads again (gt-nhdxkq, om finding de02a01e).
+// The pipeline read is throttled: a build inside the window answers the previous
+// result without the read's Forgejo calls, a nil one included, and the first
+// build at the caller's window reads again (gt-066cn5).
 func TestSystemUpdatesPipelineThrottle(t *testing.T) {
 	t.Parallel()
 
-	base := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
-	first := &dashboard.GastownPipeline{At: base}
-	second := &dashboard.GastownPipeline{At: base.Add(time.Minute)}
-	for _, tc := range []struct {
-		name      string
-		first     *dashboard.GastownPipeline
-		advance   time.Duration
-		wantReads int
+	start := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
+	first := &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{{Workflow: "post-land.yml"}}, At: start}
+	second := &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{{Workflow: "images.yml"}}, At: start}
+
+	type step struct {
+		at        time.Duration // since start
+		wantReads int           // underlying reads made by the end of the step
 		want      *dashboard.GastownPipeline
+	}
+	for _, tc := range []struct {
+		name    string
+		every   time.Duration
+		results []*dashboard.GastownPipeline // each underlying read answers with the next
+		steps   []step
 	}{
-		{"inside the window reuses the last read", first, 30 * time.Second, 1, first},
-		{"after the window reads again", first, time.Minute, 2, second},
-		{"a nil read is cached inside the window", nil, 30 * time.Second, 1, nil},
-		{"a nil read after the window reads again", nil, time.Minute, 2, second},
+		{
+			name:    "first call reads and a second inside the window reuses it",
+			every:   systemUpdatesPipelineEvery,
+			results: []*dashboard.GastownPipeline{first},
+			steps: []step{
+				{at: 0, wantReads: 1, want: first},
+				{at: 30 * time.Second, wantReads: 1, want: first},
+			},
+		},
+		{
+			name:    "a nil read is cached inside the window",
+			every:   systemUpdatesPipelineEvery,
+			results: []*dashboard.GastownPipeline{nil},
+			steps: []step{
+				{at: 0, wantReads: 1, want: nil},
+				{at: 30 * time.Second, wantReads: 1, want: nil},
+			},
+		},
+		{
+			name:    "a call at the caller's window's end reads again",
+			every:   10 * time.Second,
+			results: []*dashboard.GastownPipeline{first, second},
+			steps: []step{
+				{at: 0, wantReads: 1, want: first},
+				{at: 10 * time.Second, wantReads: 2, want: second},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			clock := base
+
+			at := start
 			reads := 0
 			read := func() *dashboard.GastownPipeline {
+				require.Less(t, reads, len(tc.results), "the throttle read more often than the row allows")
+				got := tc.results[reads]
 				reads++
-				if reads == 1 {
-					return tc.first
+				return got
+			}
+			throttled := newSystemUpdatesPipeline(read, func() time.Time { return at }, tc.every)
+
+			for i, s := range tc.steps {
+				at = start.Add(s.at)
+				got := throttled()
+				assert.Equal(t, s.wantReads, reads, "step %d: underlying reads", i)
+				if s.want == nil {
+					assert.Nil(t, got, "step %d: result", i)
+				} else {
+					assert.Same(t, s.want, got, "step %d: result", i)
 				}
-				return second
-			}
-			poll := newSystemUpdatesPipeline(read, func() time.Time { return clock }, time.Minute)
-
-			got := poll()
-			assert.Equal(t, 1, reads, "the first call reads")
-			if tc.first == nil {
-				assert.Nil(t, got)
-			} else {
-				assert.Same(t, tc.first, got)
-			}
-			clock = clock.Add(tc.advance)
-			got = poll()
-
-			assert.Equal(t, tc.wantReads, reads, "the read count")
-			if tc.want == nil {
-				assert.Nil(t, got)
-			} else {
-				assert.Same(t, tc.want, got)
 			}
 		})
 	}
@@ -329,6 +351,9 @@ func TestSystemUpdatesPipelineForRemote(t *testing.T) {
 			require.NotNil(t, read)
 			got := read()
 			assert.Equal(t, tt.wantErr, got.Error != "" && len(got.Runs) == 0)
+			root := t.TempDir()
+			su := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+			assert.Equal(t, tt.wantErr, su.RunsUnknown, "the section flags what the read reported")
 			assert.Equal(t, tt.wantRepo, built)
 		})
 	}

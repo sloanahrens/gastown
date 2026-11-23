@@ -1341,8 +1341,9 @@ func dashboardJevCap(townRoot string) func() (*float64, error) {
 // The function also returns the System updates section's pipeline read: the
 // gastown rig's post-land and images runs, gated to the same cadence the Deploys
 // reader polls at so the section's faster poll costs no Forgejo calls. With no
-// viewer token file, or no gastown repository for it to read, the read is nil
-// and the section joins no runs.
+// viewer token file the read is nil and the section joins no runs; a gastown rig
+// whose remote is missing, unreadable or unparseable gets a failed read, so the
+// section raises RunsUnknown (systemUpdatesPipelineFor).
 func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging, func() *dashboard.GastownPipeline) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)

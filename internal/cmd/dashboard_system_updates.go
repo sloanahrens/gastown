@@ -14,34 +14,6 @@ import (
 // for its rolls, so the rolls of the newest commit rows are among them.
 const systemUpdatesHistoryRuns = 50
 
-// systemUpdatesPipelineEvery is how often the gastown repository's pipeline runs
-// are re-read. It is the hub's Deploys cadence, which newDashboardHub sets from
-// this constant, because one read is two Forgejo list calls and the runs move
-// far slower than the section is built.
-const systemUpdatesPipelineEvery = time.Minute
-
-// newSystemUpdatesPipeline gates read so it runs at most once per every, timed
-// by now: a section built inside the window reuses what the last read
-// published, so the section's faster poll costs the repository nothing. have
-// records that a read happened, so a nil result is cached like any other.
-func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time, every time.Duration) func() *dashboard.GastownPipeline {
-	var mu sync.Mutex
-	var last *dashboard.GastownPipeline
-	var at time.Time
-	var have bool
-	return func() *dashboard.GastownPipeline {
-		mu.Lock()
-		defer mu.Unlock()
-		readAt := now()
-		if !have || readAt.Sub(at) >= every {
-			last = read()
-			at = readAt
-			have = true
-		}
-		return last
-	}
-}
-
 // systemUpdatesPipelineFor is the section's pipeline read for the gastown rig's
 // remote: a read that reports a failure, with no runs, when the remote is not
 // named (the gastown rig is cut over, so none is a misconfiguration), cannot be
@@ -52,7 +24,7 @@ func systemUpdatesPipelineFor(remote string, remoteErr error, build func(repo st
 	failed := func(why error) func() *dashboard.GastownPipeline {
 		logf("dashboard: the System updates pipeline has no gastown repository to read: %v", why)
 		return func() *dashboard.GastownPipeline {
-			return &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}, Error: "remote"}
+			return &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}, Error: "bad repo name"}
 		}
 	}
 	if remoteErr != nil {
@@ -100,6 +72,40 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, pipeline func() *da
 	// failed: the run stages are unknown, not absent (gt-nhdxkq).
 	su.RunsUnknown = pipelineRead != nil && pipelineRead.Error != "" && len(pipelineRead.Runs) == 0
 	return su
+}
+
+// systemUpdatesPipelineEvery is the window the section's pipeline read reuses
+// its last answer for: one minute, the Deploys block's own default
+// (DeploysEvery, internal/dashboard/types.go). The section is built far more
+// often than that, and each read costs two Forgejo list calls (gt-066cn5).
+const systemUpdatesPipelineEvery = time.Minute
+
+// newSystemUpdatesPipeline throttles read to one call per every. A call inside
+// the window answers the previous result, a nil one included, so consecutive
+// builds of the section do not each pay the read's two Forgejo list calls; the
+// first call after the window reads again. Concurrent calls share the window
+// rather than racing into a second read (gt-066cn5). The mutex is held across
+// the read on purpose: that is the single flight, and the read is bounded by the
+// Forgejo client's own timeout.
+func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time, every time.Duration) func() *dashboard.GastownPipeline {
+	var (
+		mu     sync.Mutex
+		reads  int
+		last   *dashboard.GastownPipeline
+		lastAt time.Time
+	)
+	return func() *dashboard.GastownPipeline {
+		mu.Lock()
+		defer mu.Unlock()
+		at := now()
+		if reads > 0 && at.Sub(lastAt) < every {
+			return last
+		}
+		reads++
+		last = read()
+		lastAt = at
+		return last
+	}
 }
 
 // rollStep is the step a partial roll did not pass: the first step the run
