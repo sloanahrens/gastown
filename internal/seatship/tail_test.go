@@ -15,6 +15,14 @@ func must(t *testing.T, err error) {
 	}
 }
 
+// linkTranscript plants a symlink named like a transcript, pointing at a file
+// outside the transcript names.
+func linkTranscript(t *testing.T, dir string) {
+	t.Helper()
+	must(t, os.WriteFile(filepath.Join(dir, "out.txt"), []byte("secret\n"), 0o644))
+	must(t, os.Symlink(filepath.Join(dir, "out.txt"), filepath.Join(dir, "x.jsonl")))
+}
+
 func TestSeatShipTail(t *testing.T) {
 	t.Parallel()
 	oldest := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -34,10 +42,7 @@ func TestSeatShipTail(t *testing.T) {
 		{"a final record longer than n has no line boundary", []string{"p/a.jsonl=abc\nlongrecord\n"}, nil, "", 4, "", false},
 		{"no transcript", nil, nil, "", 100, "", false},
 		{"a projects directory that does not exist", nil, nil, "absent", 100, "", true},
-		{"a symlinked transcript is refused, not followed", nil, func(t *testing.T, dir string) {
-			must(t, os.WriteFile(filepath.Join(dir, "out.txt"), []byte("secret\n"), 0o644))
-			must(t, os.Symlink(filepath.Join(dir, "out.txt"), filepath.Join(dir, "x.jsonl")))
-		}, "", 16, "", true},
+		{"a symlinked transcript is refused, not followed", nil, linkTranscript, "", 16, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
