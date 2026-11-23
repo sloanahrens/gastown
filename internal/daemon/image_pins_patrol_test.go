@@ -2388,8 +2388,10 @@ func imagePinsPathCountResultIn(t *testing.T, town string, run cmdRunFunc) (int,
 }
 
 // TestImagePinsReadDoesNotHoldARefusal: a failed read that is a refusal (the bd
-// tip lacks the samples build) is kept at once, not read as the last good state,
-// and it does not use up the hold a transport failure gets (gt-rtxkwt).
+// tip lacks the samples build) is kept at once, not read as the last good state
+// (gt-rtxkwt). It is still stored as the pin's last state, so a transport
+// failure after it holds the refusal rather than the good read from before it
+// (gt-yfvld4).
 func TestImagePinsReadDoesNotHoldARefusal(t *testing.T) {
 	t.Parallel()
 	good := ImagePinState{Name: "bd", Pin: "p1", Tip: "t1", Behind: 2}
@@ -2398,24 +2400,32 @@ func TestImagePinsReadDoesNotHoldARefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		seq  []ImagePinState
-		held []bool // per tick: the read came back as the last good state
+		want []ImagePinState // per tick: the state the tick reads after the hold
+		held int             // ticks the hold logged
 	}{
-		{"a refusal after a good read keeps its error", []ImagePinState{good, refused}, []bool{false, false}},
-		{"a refusal uses none of the hold a transport failure gets", []ImagePinState{good, refused, transport, transport, transport}, []bool{false, false, true, true, false}},
-		{"a transport failure after a good read is held", []ImagePinState{good, transport}, []bool{false, true}},
+		{"a refusal after a good read keeps its error", []ImagePinState{good, refused}, []ImagePinState{good, refused}, 0},
+		{"a transport failure after a good read is held", []ImagePinState{good, transport}, []ImagePinState{good, good}, 1},
+		// The row this bead rewrites: the old expectation read the good state on
+		// both transport ticks after the refusal. A refusal is a judgment about
+		// the pin as it stands, so it is the state a failed read after it holds
+		// (overseer ruling 15:5x, gt-yfvld4).
+		{"a refusal is held through a transport failure, not the good read before it", []ImagePinState{good, refused, transport, transport}, []ImagePinState{good, refused, refused, refused}, 2},
+		{"a good read after a held refusal starts over", []ImagePinState{refused, transport, good}, []ImagePinState{refused, refused, good}, 1},
+		{"a refusal after two failed transport ticks is still held", []ImagePinState{transport, transport, refused, transport}, []ImagePinState{transport, transport, refused, refused}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := &Daemon{logger: log.New(io.Discard, "", 0)}
+			var logs strings.Builder
+			d := &Daemon{logger: log.New(&logs, "", 0)}
 			for i, st := range tc.seq {
 				states := []ImagePinState{st}
 				d.holdFailedImagePins(states)
-				if got := states[0] == good; got != tc.held[i] && i > 0 {
-					t.Errorf("tick %d read as the last good state = %v, want %v (state %+v)", i, got, tc.held[i], states[0])
+				if states[0] != tc.want[i] {
+					t.Errorf("tick %d read %+v, want %+v", i, states[0], tc.want[i])
 				}
-				if i > 0 && st.Err != nil && errors.Is(st.Err, daemonimage.ErrPinRefused) && !errors.Is(states[0].Err, daemonimage.ErrPinRefused) {
-					t.Errorf("tick %d lost the refusal: %+v", i, states[0])
-				}
+			}
+			if n := strings.Count(logs.String(), "held ticks"); n != tc.held {
+				t.Errorf("the log named %d held tick(s), want %d: %q", n, tc.held, logs.String())
 			}
 		})
 	}
