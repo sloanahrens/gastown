@@ -167,3 +167,31 @@ func TestSpecDispatchCandidateStepsEstimateHoldsCounted(t *testing.T) {
 		t.Fatalf("CandidatesSteps[estimate] = %v, want %v (report %+v)", got, want, r.CandidatesSteps)
 	}
 }
+
+// TestSpecDispatchCandidateStepsLineNamesTheStepsInNameOrder: the cost line
+// names each candidates-phase step with its summed time in name order, so the
+// line reads the same from run to run (gt-3xfcel).
+func TestSpecDispatchCandidateStepsLineNamesTheStepsInNameOrder(t *testing.T) {
+	t.Parallel()
+	steps := map[string]time.Duration{
+		"verdict": 3 * time.Second, "lint": 900 * time.Millisecond,
+		"estimate": 7 * time.Second, "shape": 1500 * time.Millisecond,
+	}
+	got := specTickCost(newSpecTickReads(), time.Second, 0, 0, 0, 0, 0, steps)
+	want := "tick cost: 0 bd read call(s) outside the sling path in 1s; candidate steps estimate 7s, lint 900ms, shape 1.5s, verdict 3s"
+	if got != want {
+		t.Fatalf("cost line = %q, want %q", got, want)
+	}
+}
+
+// TestSpecDispatchCandidateStepsLineUnchangedWithNone: a tick whose candidates
+// phase timed no step prints the line it always has (gt-3xfcel).
+func TestSpecDispatchCandidateStepsLineUnchangedWithNone(t *testing.T) {
+	t.Parallel()
+	want := "tick cost: 0 bd read call(s) outside the sling path in 1.5s; 3 sling(s) in parallel, slowest 900ms"
+	for _, steps := range []map[string]time.Duration{nil, {}} {
+		if got := specTickCost(newSpecTickReads(), 1500*time.Millisecond, 3, 900*time.Millisecond, 0, 0, 0, steps); got != want {
+			t.Fatalf("cost line with %v steps = %q, want %q", steps, got, want)
+		}
+	}
+}

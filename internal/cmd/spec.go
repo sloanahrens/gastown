@@ -4700,7 +4700,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// its cost. The bd subprocess time is read once here, at the end of the
 		// tick, so the counters hold every call the tick made (gt-d2hzix).
 		bdCalls, bdTotal, bdSlowest := tickCallTime()
-		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, bdCalls, bdTotal, bdSlowest))
+		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, bdCalls, bdTotal, bdSlowest, report.CandidatesSteps))
 	}
 	// The census is written for the daemon that started the tick, so it can log
 	// the subprocess's calls under its own census line; a failure to write it is
@@ -4729,13 +4729,26 @@ var tickCallTime = beads.CallTimeSnapshotAndReset
 // specTickCost is the tick's one cost line. It counts the reads the tick makes
 // itself. The sling path, the pre-sling re-read and the writes are not counted.
 // bdTotal is the time inside the tick's bd subprocesses, summed, so parallel calls can exceed its wall time (gt-9oo03n).
-func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest time.Duration, bdCalls int, bdTotal, bdSlowest time.Duration) string {
+// steps is the candidates phase's own time per step, named in name order so the line reads the same from run to run (gt-3xfcel).
+func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest time.Duration, bdCalls int, bdTotal, bdSlowest time.Duration, steps map[string]time.Duration) string {
 	line := fmt.Sprintf("tick cost: %d bd read call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
 	if bdCalls > 0 {
 		line += fmt.Sprintf("; bd time summed %s in %d subprocess(es), slowest %s", bdTotal.Round(time.Millisecond), bdCalls, bdSlowest.Round(time.Millisecond))
 	}
 	if slings > 0 {
 		line += fmt.Sprintf("; %d sling(s) in parallel, slowest %s", slings, slowest.Round(time.Millisecond))
+	}
+	if len(steps) > 0 {
+		names := make([]string, 0, len(steps))
+		for name := range steps {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		named := make([]string, 0, len(names))
+		for _, name := range names {
+			named = append(named, fmt.Sprintf("%s %s", name, steps[name].Round(time.Millisecond)))
+		}
+		line += "; candidate steps " + strings.Join(named, ", ")
 	}
 	return line
 }
