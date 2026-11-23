@@ -536,12 +536,9 @@ func sameBdListArgv(got, want []string) bool {
 //  1. bd v0.59+ ignores --json on `list` without --flat and emits tree text, so
 //     json.Unmarshal fails. The stub models that, meaning a regression that
 //     drops the injection fails here the way it would against a real bd.
-//  2. A routed call names the town's .beads, whose routes.jsonl sends each
-//     prefix to the rig database that holds it (gt-judxkm). With no BEADS_DIR
-//     the bd gateway forwarder refuses the call, and pinned to one rig's .beads
-//     the query silently hides every other rig's escalations — the original
-//     gt-wbxb "No escalations found" symptom. The stub records the variable,
-//     and the test requires it to name the town's directory.
+//  2. A routed call must name the town's .beads; pinned to one rig's .beads it
+//     silently hides every other rig's escalations (gt-wbxb), so the stub
+//     records the variable and the test requires the town's directory.
 //
 // Regression test for the review of MR gt-wisp-nysy, where runWithRouting had
 // neither the --flat injection nor the retry that run/runWithStdin perform.
