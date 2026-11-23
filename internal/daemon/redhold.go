@@ -382,33 +382,29 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	return nil
 }
 
-// redHoldLedgerPath returns a town's red hold lift ledger.
-func redHoldLedgerPath(townRoot string) string {
-	return filepath.Join(townRoot, ".runtime", "red-hold", "ledger.jsonl")
-}
-
 // liftRedHold applies a granted request: it removes the hold file, appends one
-// ledger line, logs the lift and clears the request. A failure keeps the
-// request, so the next heartbeat repeats the lift.
+// ledger line, logs the lift and clears the request. The first failure stops the
+// sequence with the request in place, so the next heartbeat repeats the lift.
 func liftRedHold(townRoot string, req dispatch.LiftRequest, at time.Time, logf func(format string, args ...any)) error {
-	if err := dispatch.WriteRedHold(townRoot, dispatch.RedHoldRecord{}); err != nil {
-		return fmt.Errorf("write red hold: %w", err)
+	step, err := "write red hold", dispatch.WriteRedHold(townRoot, dispatch.RedHoldRecord{})
+	if err == nil {
+		step, err = "record red hold lift", appendRedHoldLift(townRoot, at, req.Reason, req.By)
 	}
-	if err := appendRedHoldLift(townRoot, at, req.Reason, req.By); err != nil {
-		return fmt.Errorf("record red hold lift: %w", err)
+	if err == nil {
+		logf("red hold: lifted by %s: %s", req.By, req.Reason)
+		step, err = "clear lift request", dispatch.ClearLift(townRoot)
 	}
-	logf("red hold: lifted by %s: %s", req.By, req.Reason)
-	if err := dispatch.ClearLift(townRoot); err != nil {
-		return fmt.Errorf("clear lift request: %w", err)
+	if err != nil {
+		return fmt.Errorf("lift red hold: %s: %w", step, err)
 	}
 	return nil
 }
 
-// appendRedHoldLift appends one lift line to the town's ledger, creating the
-// file and its directory. The one O_APPEND write of one line cannot interleave
-// with a concurrent append.
+// appendRedHoldLift appends one lift line to the town's ledger at
+// <town>/.runtime/red-hold/ledger.jsonl, creating the file and its directory.
+// The one O_APPEND write of one line cannot interleave with a concurrent append.
 func appendRedHoldLift(townRoot string, at time.Time, reason, by string) error {
-	path := redHoldLedgerPath(townRoot)
+	path := filepath.Join(townRoot, ".runtime", "red-hold", "ledger.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

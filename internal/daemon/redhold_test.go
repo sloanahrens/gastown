@@ -488,7 +488,7 @@ func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, redHoldSentinel, rec, tt.name)
 			require.Empty(t, logs, tt.name)
-			require.NoFileExists(t, redHoldLedgerPath(townRoot), "an unchanged hold records no lift")
+			require.NoFileExists(t, filepath.Join(townRoot, redHoldLedgerRel), "an unchanged hold records no lift")
 		})
 	}
 }
@@ -708,9 +708,10 @@ func TestCheckRedHoldMainRed(t *testing.T) {
 	}
 }
 
-// TestRedHoldStepLift pins the lift branch and its refusals: a request with a
-// clear evaluation removes the hold file, records one ledger line, logs the lift
-// and clears the request, while an unreadable request or ledger is an error.
+// redHoldLedgerRel is the lift ledger the step appends to, under the town root.
+const redHoldLedgerRel = ".runtime/red-hold/ledger.jsonl"
+
+// TestRedHoldStepLift pins the lift branch, its ledger record and its refusals.
 func TestRedHoldStepLift(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -736,7 +737,7 @@ func TestRedHoldStepLift(t *testing.T) {
 	require.Equal(t, []string{"red hold: lifted by overseer: main fixed"}, logs)
 	require.NoFileExists(t, dispatch.RedHoldPath(root), "the lift removes the hold file")
 	require.NoFileExists(t, dispatch.RedHoldLiftPath(root), "the lift clears the request")
-	data, rerr := os.ReadFile(redHoldLedgerPath(root))
+	data, rerr := os.ReadFile(filepath.Join(root, redHoldLedgerRel))
 	require.NoError(t, rerr)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
@@ -744,7 +745,7 @@ func TestRedHoldStepLift(t *testing.T) {
 
 	err, _, root = run(t, nil)
 	require.NoError(t, err)
-	require.NoFileExists(t, redHoldLedgerPath(root), "no request records no lift")
+	require.NoFileExists(t, filepath.Join(root, redHoldLedgerRel), "no request records no lift")
 	err, _, root = run(t, func(t *testing.T, root string) {
 		hold(t, root)
 		path := dispatch.RedHoldLiftPath(root)
@@ -754,11 +755,15 @@ func TestRedHoldStepLift(t *testing.T) {
 	require.ErrorContains(t, err, "read lift request")
 	require.FileExists(t, dispatch.RedHoldPath(root), "an unreadable request keeps the hold")
 	require.FileExists(t, dispatch.RedHoldLiftPath(root), "an unreadable request is not cleared")
-	require.NoFileExists(t, redHoldLedgerPath(root), "an unreadable request records no lift")
 
 	err, _, root = run(t, func(t *testing.T, root string) {
 		lift(t, root)
-		require.NoError(t, os.WriteFile(filepath.Join(root, ".runtime"), []byte("not a directory"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(root, redHoldLedgerRel), 0o755))
+	})
+	require.ErrorContains(t, err, "record red hold lift")
+	err, _, root = run(t, func(t *testing.T, root string) {
+		lift(t, root)
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".runtime"), nil, 0o600))
 	})
 	require.ErrorContains(t, err, "record red hold lift")
 	require.FileExists(t, dispatch.RedHoldLiftPath(root), "a failed record keeps the request")
