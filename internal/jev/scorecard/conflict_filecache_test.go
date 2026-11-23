@@ -59,6 +59,9 @@ func TestLandedFilesCacheErrors(t *testing.T) {
 		t.Fatalf("decode error = %v; want the path and line 2", err)
 	}
 	target := filepath.Join(dir, "unwritable.jsonl")
+	if _, err := openLandedFilesCache(dir); err == nil || !strings.Contains(err.Error(), "reading the landed files cache") {
+		t.Fatalf("open a directory = %v; want a read error", err)
+	}
 	c, err := openLandedFilesCache(target)
 	if err != nil {
 		t.Fatalf("open missing: %v", err)

@@ -60,10 +60,9 @@ func (c *landedFilesCache) Get(base, head string) ([]string, bool) {
 // Put appends the pair's files as one O_APPEND write and remembers them. A
 // later line for the same pair replaces the earlier one.
 func (c *landedFilesCache) Put(base, head string, files []string) error {
-	line, err := json.Marshal(landedFilesLine{Base: base, Head: head, Files: files})
-	if err != nil {
-		return fmt.Errorf("encoding the files of %s...%s: %w", base, head, err)
-	}
+	// The line holds only strings and a string slice, so its JSON cannot fail
+	// to encode.
+	line, _ := json.Marshal(landedFilesLine{Base: base, Head: head, Files: files})
 	if err := appendBytes(c.path, append(line, '\n')); err != nil {
 		return fmt.Errorf("appending to the landed files cache %s: %w", c.path, err)
 	}
