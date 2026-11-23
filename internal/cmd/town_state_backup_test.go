@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -89,31 +90,56 @@ func TestTownStateBackupVerifyRefusesASecretNamedEntry(t *testing.T) {
 	}
 }
 
+// hostPathToken matches an absolute or home-anchored path token in a help
+// string. A deployment value is a setting, not a path: the help names the
+// setting and leaves where it points to docs/architecture.md.
+var hostPathToken = regexp.MustCompile(`(^|[\s(])~?/`)
+
+// docsPointer matches the "docs/architecture.md (<section>)" pointer the help
+// carries and captures the section it names.
+var docsPointer = regexp.MustCompile(`docs/architecture\.md \(([^)]+)\)`)
+
 // TestTownStateBackupHelpNamesNoMountPath: the help names the deployment setting
-// and a docs/architecture.md heading that exists, and hardcodes no host path.
+// and no host path, and its docs pointer resolves to a heading the doc has, so a
+// pointer to a section the doc lacks turns the test red.
 func TestTownStateBackupHelpNamesNoMountPath(t *testing.T) {
 	t.Parallel()
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "architecture.md"))
+	if err != nil {
+		t.Fatalf("reading docs/architecture.md: %v", err)
+	}
 	for _, c := range []*cobra.Command{townStateBackupCmd, townStateBackupVerifyCmd} {
 		help := c.Long + "\n" + c.Example
-		if !strings.Contains(help, townStateBackupRootSetting) || strings.Contains(help, "/Users/") || !strings.Contains(help, "docs/architecture.md (The daemon)") {
-			t.Errorf("%s help = %q, want the setting, no host path and the docs/architecture.md (The daemon) pointer", c.Name(), help)
+		if !strings.Contains(help, townStateBackupRootSetting) {
+			t.Errorf("%s help = %q, want it to name %s", c.Name(), help, townStateBackupRootSetting)
 		}
-	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "architecture.md"))
-	if err != nil || !strings.Contains(string(doc), "\n### The daemon\n") {
-		t.Errorf("docs/architecture.md has no \"The daemon\" section the help points at (read err %v)", err)
+		if hostPathToken.MatchString(help) {
+			t.Errorf("%s help = %q, want no host path", c.Name(), help)
+		}
+		m := docsPointer.FindStringSubmatch(help)
+		if m == nil {
+			t.Errorf("%s help = %q, want a docs/architecture.md (<section>) pointer", c.Name(), help)
+			continue
+		}
+		if !strings.Contains(string(doc), "\n### "+m[1]+"\n") {
+			t.Errorf("%s points at docs/architecture.md (%s), which has no such heading", c.Name(), m[1])
+		}
 	}
 }
 
 // TestTownStateBackupVerifyRefusesAtTheCommand drives the command's two
-// refusals: an archive with no mayor/town.json and one that is not a gzip
+// refusals: an archive with no mayor/town.json and a file that is not a gzip
 // stream. Each returns the command's wrap, names the rule and prints no counts.
 func TestTownStateBackupVerifyRefusesAtTheCommand(t *testing.T) {
 	t.Parallel()
 	noIdentity, _ := townStateBackupArchive(t, [][2]string{{"settings/config.json", `{}`}})
+	notGzip := filepath.Join(t.TempDir(), "state.tar.gz")
+	if err := os.WriteFile(notGzip, []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct{ name, archive, want string }{
 		{"no mayor/town.json", noIdentity, "has no mayor/town.json"},
-		{"not a gzip stream", t.TempDir(), "not a readable gzip stream"},
+		{"not a gzip stream", notGzip, "not a readable gzip stream"},
 	} {
 		var out bytes.Buffer
 		cmd := &cobra.Command{Use: "verify"}

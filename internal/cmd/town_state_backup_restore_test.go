@@ -78,71 +78,45 @@ func missingIdentityArchive(t *testing.T) string {
 	})
 }
 
-// extractTownRoot extracts the night's archive into root with podUnpack, this
-// package's pod unpack, so a name that would leave the root is refused here, as
-// the pod's import refuses one.
-func extractTownRoot(t *testing.T, archive, root string) string {
-	t.Helper()
-	f, err := os.Open(archive)
-	if err != nil {
-		t.Fatalf("opening %s: %v", archive, err)
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		t.Fatalf("%s is not a gzip stream: %v", archive, err)
-	}
-	if err := podUnpack(root, gz); err != nil {
-		t.Fatalf("extracting %s: %v", archive, err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatalf("closing %s: %v", archive, err)
-	}
-	return root
-}
-
-// restoreNight is the runbook's restore in order: the verify step judges the
-// archive, and only one it accepts is extracted into root.
-func restoreNight(t *testing.T, archive, root string) error {
-	t.Helper()
-	if err := runTownStateBackupVerifyIn(townStateBackupVerifyEnv{archive: archive, out: io.Discard}); err != nil {
-		return err
-	}
-	extractTownRoot(t, archive, root)
-	return nil
-}
-
 // TestTownStateBackupRestoreIsAcceptedBySeed proves a backup night restores: the
-// archive the nightly step writes, extracted into a fresh town root, is accepted
-// unchanged by gt town state seed into an empty claim.
+// production restore command extracts the archive the nightly step writes into a
+// fresh town root, and gt town state seed accepts it into an empty claim.
 func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 	t.Parallel()
-	t.Run("the archive Verify reads holds the settings rows and no secret-shaped file", func(t *testing.T) {
+	t.Run("the restored root holds the settings rows and no secret-shaped file", func(t *testing.T) {
 		t.Parallel()
 		town := backupRestoreTown(t)
 		archive := backupNightArchive(t, town)
 		if _, err := townbackup.Verify(archive); err != nil {
 			t.Fatalf("the night's archive does not verify: %v", err)
 		}
-		extracted := townTreeSnapshot(t, extractTownRoot(t, archive, t.TempDir()))
-		for _, rel := range []string{"settings/config.json", "gastown/settings/config.json"} {
-			if got, want := extracted[rel], hostFileText(t, town, rel); got != want {
-				t.Errorf("the extracted %s = %q, want the town's %q", rel, got, want)
-			}
+		root := filepath.Join(t.TempDir(), "restored")
+		if err := restoreBackupNight(archive, root, io.Discard); err != nil {
+			t.Fatalf("restoring the night's archive: %v", err)
 		}
-		if _, ok := extracted["mayor/town.json"]; !ok {
-			t.Errorf("the extracted archive has no mayor/town.json: %v", extracted)
+		restored := townTreeSnapshot(t, root)
+		if got, want := restored["gastown/settings/config.json"], hostFileText(t, town, "gastown/settings/config.json"); got != want {
+			t.Errorf("the restored rig settings = %q, want the town's %q", got, want)
 		}
-		for name := range extracted {
+		// Import writes the town's settings file without the Mac's
+		// daemon.supervisor: a restore root has no Mac, and the seed writes the
+		// claim without it too.
+		if settings := restored["settings/config.json"]; !strings.Contains(settings, "landing_worker") || strings.Contains(settings, "supervisor") {
+			t.Errorf("the restored settings = %q, want the archived patrols and no daemon.supervisor", settings)
+		}
+		if _, ok := restored["mayor/town.json"]; !ok {
+			t.Errorf("the restored archive has no mayor/town.json: %v", restored)
+		}
+		for name := range restored {
 			if townstate.SecretShape(name) {
-				t.Errorf("the extracted archive holds the secret-shaped %s: %v", name, extracted)
+				t.Errorf("the restored archive holds the secret-shaped %s: %v", name, restored)
 			}
 		}
 	})
-	t.Run("the extracted root is seeded into an empty claim and the verify matches", func(t *testing.T) {
+	t.Run("the restored root is seeded into an empty claim and the verify matches", func(t *testing.T) {
 		t.Parallel()
 		root := filepath.Join(t.TempDir(), "restored")
-		if err := restoreNight(t, backupNightArchive(t, backupRestoreTown(t)), root); err != nil {
+		if err := restoreBackupNight(backupNightArchive(t, backupRestoreTown(t)), root, io.Discard); err != nil {
 			t.Fatalf("restoring the night's archive: %v", err)
 		}
 		s := newSeedSession(t, root)
@@ -159,9 +133,9 @@ func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 	t.Run("the verify step refuses an archive with no mayor/town.json, so no root is extracted", func(t *testing.T) {
 		t.Parallel()
 		root := filepath.Join(t.TempDir(), "restored")
-		err := restoreNight(t, missingIdentityArchive(t), root)
+		err := restoreBackupNight(missingIdentityArchive(t), root, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "mayor/town.json") {
-			t.Fatalf("restoreNight = %v, want the missing identity file refused", err)
+			t.Fatalf("restoreBackupNight = %v, want the missing identity file refused", err)
 		}
 		if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
 			t.Errorf("a refused archive left a root at %s (stat: %v), so a seed could run over it", root, statErr)
