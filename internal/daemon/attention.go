@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -790,6 +791,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
+		// The red hold the daemon publishes while automatic dispatch is parked
+		// (gt-e57cks): one high item until it lifts.
+		{kind: attention.KindRedHoldHeld, collect: s.collectRedHold},
 		// The weekly story-points step's adoptions and reverts in the last week,
 		// and the adoptions log that could not be read (gt-g2dgme).
 		{kind: attention.KindStoryPoints, collect: s.collectStoryPointsAdoptions},
@@ -867,6 +871,37 @@ func (s *attentionSources) collectGateRunLog(context.Context) ([]attention.Item,
 		Severity: attention.SeverityMedium,
 		Summary:  "the gate-run log could not be appended: " + msg,
 	}}, nil
+}
+
+// collectRedHold raises one high item while the red hold names at least one
+// reason, keyed hold:red whatever the reason count. A missing file or an empty
+// record raises none. A file that cannot be read raises its own item, so the
+// failure shows rather than passing as no hold; it returns no error, so the
+// keep-previous path never runs for this kind.
+func (s *attentionSources) collectRedHold(context.Context) ([]attention.Item, error) {
+	rec, err := dispatch.ReadRedHold(s.d.config.TownRoot)
+	var summary string
+	switch {
+	case err != nil:
+		summary = "red hold unreadable: " + err.Error()
+	case len(rec.Reasons) == 0:
+		return nil, nil
+	default:
+		var kinds []string
+		var details strings.Builder
+		for _, r := range rec.Reasons {
+			kinds = append(kinds, r.Kind)
+			if r.Detail != "" {
+				details.WriteString("; " + r.Kind + ": " + r.Detail)
+			}
+			if len(r.CureBeads) > 0 {
+				details.WriteString(" (cure: " + strings.Join(r.CureBeads, ", ") + ")")
+			}
+		}
+		summary = "dispatch held by the red hold: " + strings.Join(kinds, ", ") + details.String()
+	}
+	return []attention.Item{{Key: "hold:red", Kind: attention.KindRedHoldHeld,
+		Severity: attention.SeverityHigh, Summary: summary}}, nil
 }
 
 // attentionSources builds the production reads. The bead lists go through the
