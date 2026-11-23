@@ -76,17 +76,21 @@ const redHoldWaitingKey = "\x00waiting"
 // redHoldUpdateKey keys unreadLog for the update outcome; no rig directory name can be it.
 const redHoldUpdateKey = "\x00update"
 
+// redHoldMainRedKey keys unreadLog for the main-red read; no rig directory name can be it.
+const redHoldMainRedKey = "\x00mainred"
+
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
 // names in read order, the reader for one name, the waiter for the count of
 // landings not in the installed build, the reader for the update run's outcome
-// and target commit, the stuck pairs, and the clock. A nil Waiting, Update or
-// PairStuck contributes nothing.
+// and target commit, the stuck pairs, the main-red reader, and the clock. A nil
+// Waiting, Update, PairStuck or MainRed contributes nothing.
 type redHoldSources struct {
 	Rigs      []string
 	Read      func(rig string) (tierSweepState, error)
 	Waiting   func() (int, error)                        // nil means no count
 	Update    func() (outcome, target string, err error) // nil means no outcome
 	PairStuck func() []string                            // nil means no pairs
+	MainRed   func(rig string) (bool, error)             // nil means no main-red read
 	Now       func() time.Time                           // nil means time.Now
 }
 
@@ -207,10 +211,9 @@ func redHoldShort(id string) string {
 }
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the
-// record and logging the change once. An unreadable sweep record, waiting count
-// or update state leaves the file untouched, so it never clears a hold, and is
-// logged once until it reads again; unreadLog holds those across heartbeats and
-// is non-nil.
+// record and logging the change once. An unreadable source leaves the file
+// untouched, so it never clears a hold, and is logged once until it reads again;
+// unreadLog holds those across heartbeats and is non-nil.
 func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
@@ -218,9 +221,9 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 		return fmt.Errorf("read red hold: %w", err)
 	}
 	// Forget the rigs that read again, so a later outage logs anew; the waiting
-	// count and the update state are forgotten below, once they read.
+	// count, the update state and the main-red read are forgotten below.
 	maps.DeleteFunc(unreadLog, func(key string, _ bool) bool {
-		return key != redHoldWaitingKey && key != redHoldUpdateKey && !slices.Contains(unknown, key)
+		return key != redHoldWaitingKey && key != redHoldUpdateKey && key != redHoldMainRedKey && !slices.Contains(unknown, key)
 	})
 	if len(unknown) > 0 {
 		for _, rig := range unknown {
@@ -258,6 +261,22 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	if src.PairStuck != nil {
 		in.PairStuck = src.PairStuck()
 	}
+	if src.MainRed != nil {
+		for _, rig := range src.Rigs {
+			red, err := src.MainRed(rig)
+			if err != nil {
+				if !unreadLog[redHoldMainRedKey] {
+					unreadLog[redHoldMainRedKey] = true
+					logf("red hold: main-red state unreadable; keeping the previous state")
+				}
+				return nil
+			}
+			if red {
+				in.MainRed = append(in.MainRed, rig)
+			}
+		}
+	}
+	delete(unreadLog, redHoldMainRedKey)
 	now := src.Now
 	if now == nil {
 		now = time.Now
