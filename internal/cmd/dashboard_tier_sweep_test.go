@@ -412,6 +412,25 @@ func TestTierSweepTrendPerRigCarriesTierWalls(t *testing.T) {
 	}
 }
 
+// A stage the runner ran appends the split of its wall time after the duration:
+// the feed still reads the finish and charts the tier's run time (gt-qc72jj).
+// Mutation: drop the note from tierSweepStageRe and the integration wall goes
+// missing from the swept row.
+func TestTierSweepReadsARunnerStageLineWithItsTimingNote(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/10/03 20:21:05 tier_sweep: gastown: integration finished (exit 0) in 20m0s (start lag 5s, tests 19m0s, tail 55s); last lines:",
+		"2026/10/03 20:22:30 tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN) in 22m30s",
+	)
+	ts := r.read(time.Date(2026, 10, 3, 22, 0, 0, 0, time.Local))
+	if len(ts.Sweeps) != 1 {
+		t.Fatalf("sweeps = %+v, want the swept row", ts.Sweeps)
+	}
+	if got := ts.Sweeps[0].Walls["integration"]; got != 1200 {
+		t.Errorf("integration wall = %v, want 1200s from the runner stage's line", got)
+	}
+}
+
 // A rig's trend keeps the newest 30 sweeps, not the first: the pane exists to
 // show devops speed moving now, and an older window would freeze a month ago.
 func TestTierSweepTrendKeepsTheNewest30(t *testing.T) {

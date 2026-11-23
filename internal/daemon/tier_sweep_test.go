@@ -1894,20 +1894,25 @@ func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
 
 // TestTierSweepLogsSlotWait: a stage's wall can be mostly the container-gate
 // queue, so the finished line names the wait apart from the run time
-// (gt-sy14g). Mutation: drop the waitNote append and the first row goes red;
-// the second holds the wait under a second out of the line.
+// (gt-sy14g). A runner stage's timing note comes before it (gt-qc72jj).
+// Mutation: drop the waitNote append and the first row goes red; the second
+// holds the wait under a second out of the line.
 func TestTierSweepLogsSlotWait(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name     string
-		slotWait time.Duration
-		want     string
-		notWant  string
+		name       string
+		slotWait   time.Duration
+		timingNote string
+		want       string
+		notWant    string
 	}{
-		{"a wait is named apart from the run time", 22*time.Minute + 27*time.Second,
+		{"a wait is named apart from the run time", 22*time.Minute + 27*time.Second, "",
 			"tier_sweep: gastown: integration finished (exit 0) in 26m53s (slot wait 22m27s);", ""},
-		{"no wait adds nothing", 0,
+		{"no wait adds nothing", 0, "",
 			"tier_sweep: gastown: integration finished (exit 0) in 26m53s;", "slot wait"},
+		{"the timing note comes before the wait", 22*time.Minute + 27*time.Second,
+			" (start lag 5s, tests 21m0s, tail 9s)",
+			"tier_sweep: gastown: integration finished (exit 0) in 26m53s (start lag 5s, tests 21m0s, tail 9s) (slot wait 22m27s);", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1921,7 +1926,7 @@ func TestTierSweepLogsSlotWait(t *testing.T) {
 				for _, tier := range st.tiers {
 					fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 in 4m23s\n", tier)
 				}
-				res := tierSweepStageResult{output: b.String(), exitCode: 0, ran: true}
+				res := tierSweepStageResult{output: b.String(), exitCode: 0, ran: true, timingNote: tc.timingNote}
 				if st.slot {
 					res.slotWait = tc.slotWait
 				}

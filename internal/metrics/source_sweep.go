@@ -17,6 +17,9 @@ import (
 //
 //	tier_sweep: <rig>: <tier> finished (exit <n>) in <duration>; last lines:
 //
+// A stage the runner ran appends the split of its wall time after the duration
+// (start lag, tests, tail); the duration is still its run time.
+//
 // The durations of the finished lines stamped in the last hour are summed and
 // reported in minutes:
 //
@@ -53,8 +56,10 @@ func (s sweepSource) tailBound() int64 {
 
 // sweepFinishedRe matches a stage's finished line after its "tier_sweep: "
 // prefix is trimmed. The rig and tier names are free text, so the pattern is
-// anchored on the words around them rather than on a field count.
-var sweepFinishedRe = regexp.MustCompile(`^.+?: .+? finished \(exit -?\d+\) in (\S+);`)
+// anchored on the words around them rather than on a field count. A runner
+// stage's timing note follows the duration and is part of the line, not of the
+// duration (gt-qc72jj).
+var sweepFinishedRe = regexp.MustCompile(`^.+?: .+? finished \(exit -?\d+\) in (\S+)(?: \(start lag [^)]*\))?;`)
 
 func (sweepSource) Group() string { return "sweep" }
 
