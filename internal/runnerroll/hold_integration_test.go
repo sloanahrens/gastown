@@ -92,6 +92,48 @@ func TestIntegrationHoldCreateIsExclusive(t *testing.T) {
 	assertOnlyHold(t, dir)
 }
 
+// TestIntegrationHoldInspectRoundTrip walks Inspect over one town root: no file is
+// HoldMissing, this roll's own hold is HoldOwn, and another holder's hold is HoldOther.
+func TestIntegrationHoldInspectRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), integrationBound)
+	defer cancel()
+	store, dir := integrationStore(t)
+	// own is the handle Inspect is asked with; its token is the one the own hold
+	// is written with, so the file carries it until row three replaces it.
+	own := &Hold{Token: "tok-1", store: store}
+	rows := []struct {
+		name    string
+		prepare func() error
+		want    HoldState
+	}{
+		{"no hold", func() error { return nil }, HoldMissing},
+		{"own hold", func() error {
+			h, err := takeWith(ctx, store, "roll-a", "roll 1/5", fixedNow, fixedToken("tok-1"))
+			own = h
+			return err
+		}, HoldOwn},
+		{"another holder's hold", func() error {
+			if err := own.Release(ctx); err != nil {
+				return err
+			}
+			return store.Create(ctx, "other\nowner=b token=t-b at=x")
+		}, HoldOther},
+	}
+	for _, row := range rows {
+		if err := row.prepare(); err != nil {
+			t.Fatalf("prepare %q: %v", row.name, err)
+		}
+		got, err := own.Inspect(ctx)
+		if err != nil {
+			t.Fatalf("Inspect after %q: %v", row.name, err)
+		}
+		if got.State != row.want {
+			t.Errorf("Inspect after %q = %v, want %v", row.name, got.State, row.want)
+		}
+	}
+	assertOnlyHold(t, dir)
+}
+
 // TestIntegrationHoldReadClassifies: Read tells a missing, an own and another's file apart.
 func TestIntegrationHoldReadClassifies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), integrationBound)
