@@ -1943,6 +1943,44 @@ func TestSquashRecordRedactsTheRunError(t *testing.T) {
 	}
 }
 
+// squashJoinedToken builds a GitHub-token-shaped string for the joined-token
+// rows: a literal token in the source would read as a secret to a scanner, and
+// the shape is all the rule looks at.
+func squashJoinedToken() string {
+	return "ghp_" + strings.Repeat("A1b2C3", 6)
+}
+
+// TestSquashRecordRedactsATokenJoinedToCharacters is the bead's box for the
+// shapes the word pass misses: a token with a colon, comma, semicolon, dash or
+// parenthesis glued to it reaches neither the ledger line nor the backup that
+// archives it. The message passes through the town's land.ScrubText before the
+// word pass, so every joined shape is redacted; with the scrub replaced by the
+// identity these rows fail.
+func TestSquashRecordRedactsATokenJoinedToCharacters(t *testing.T) {
+	t.Parallel()
+	tok := squashJoinedToken()
+	prefix := tok[:12]
+	cases := []struct{ name, in string }{
+		{"after a colon", "doltsquash: err:" + tok + ":end"},
+		{"between commas", "doltsquash: a," + tok + ",b"},
+		{"after a semicolon", "doltsquash: a;" + tok + ";b"},
+		{"after a dash", "doltsquash: x-" + tok},
+		{"in parentheses", "doltsquash: (" + tok + ")"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(tc.in))
+			if strings.Contains(e.Error, tok) || strings.Contains(e.Error, prefix) {
+				t.Errorf("the ledger line holds the token or its first 12 characters: %q", e.Error)
+			}
+			if !strings.Contains(e.Error, ledgerRedactedMarker) {
+				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
+			}
+		})
+	}
+}
+
 // TestSquashRecordClassifiesTheRunError: error_class names a deadline run
 // timeout, a canceled run canceled and any other failure other, and the field is
 // absent when the run had no error.
