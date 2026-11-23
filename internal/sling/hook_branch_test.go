@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/landworker"
 )
 
 // hookBranchTestOptions is a sling for gt-wlrgk8: the bead whose work the
@@ -45,6 +46,31 @@ func TestBranchBeadShapes(t *testing.T) {
 			t.Parallel()
 			if got := branchBead(tc.branch); got != tc.want {
 				t.Errorf("branchBead(%q) = %q, want %q", tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBranchBeadParity: the hook guard and the landing worker each read the
+// bead a seat's branch names, and a shape they read differently hooks a bead
+// onto one branch and lands it from another. Every row of branchBeadShapes
+// must read the same through branchBead and through landworker.BeadForBranch,
+// and both must give the row's want (gt-u9fqky, gt-4p6lw6).
+func TestBranchBeadParity(t *testing.T) {
+	t.Parallel()
+	for _, tc := range branchBeadShapes {
+		t.Run(tc.branch, func(t *testing.T) {
+			t.Parallel()
+			guard, lander := branchBead(tc.branch), landworker.BeadForBranch(tc.branch)
+			if guard != lander {
+				t.Errorf("the parsers disagree on %q: branchBead = %q, landworker.BeadForBranch = %q",
+					tc.branch, guard, lander)
+			}
+			if guard != tc.want {
+				t.Errorf("branchBead(%q) = %q, want %q", tc.branch, guard, tc.want)
+			}
+			if lander != tc.want {
+				t.Errorf("landworker.BeadForBranch(%q) = %q, want %q", tc.branch, lander, tc.want)
 			}
 		})
 	}
