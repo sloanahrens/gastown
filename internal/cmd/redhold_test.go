@@ -159,6 +159,7 @@ func redHoldTestLiftRun(t *testing.T, find func() (string, error), out io.Writer
 }
 
 func TestRedHoldCmdLift(t *testing.T) {
+	t.Parallel()
 	held, quiet, open := redHoldTestHeldTown(t), redHoldTestHeldTown(t), t.TempDir()
 	corrupt := redHoldTestHeldTown(t)
 	if err := os.WriteFile(dispatch.RedHoldPath(corrupt), []byte("{not json"), 0o644); err != nil {
