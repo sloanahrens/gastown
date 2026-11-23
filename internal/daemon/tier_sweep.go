@@ -248,6 +248,10 @@ type tierSweepState struct {
 	// green throughout. It is the skip key: while origin/main equals it there
 	// is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
+	// RedCycles counts the consecutive finished cycles that came back with a
+	// RED tier: a fully green cycle resets it, and a cycle that judged no RED
+	// tier leaves it (gt-9duu8b).
+	RedCycles int `json:"red_cycles,omitempty"`
 	// ImagesRetries counts the re-runs an images failure at ImagesRetrySHA has
 	// already cost. The pair belongs together: the count is read only while
 	// ImagesRetrySHA equals LastGreenSHA, and every cycle rewrites the pair
@@ -1718,6 +1722,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// it planned and says nothing about the rest, and a tier the script does not
 	// offer has no verdict to hold the tip back (gt-qgrdy).
 	green := !partial && tierSweepAllGreen(results, stages, notOffered)
+	state.RedCycles = tierSweepRedCycles(prior.RedCycles, results, green)
 	if green {
 		state.LastGreenSHA = sha
 		// Caught up with the tip it covered: nothing is owed.
@@ -1860,6 +1865,22 @@ func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSwee
 		}
 	}
 	return judged
+}
+
+// tierSweepRedCycles is the record's consecutive-red count after one cycle: a
+// fully green cycle resets it, a cycle that judged any tier RED adds one, and a
+// cycle that judged no RED tier leaves it, since a partial cycle says nothing
+// about the tiers it skipped (gt-9duu8b).
+func tierSweepRedCycles(prior int, results map[string]tierSweepTierResult, green bool) int {
+	if green {
+		return 0
+	}
+	for _, res := range results {
+		if res.Verdict == tierSweepRed {
+			return prior + 1
+		}
+	}
+	return prior
 }
 
 // tierSweepSweptLine is the log line that closes a cycle. The dashboard reads
