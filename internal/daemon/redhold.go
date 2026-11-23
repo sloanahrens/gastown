@@ -93,9 +93,8 @@ type redHoldSources struct {
 // redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
 // A rig whose record could not be read is left out of the inputs, keeping its
 // prior state, and named in the second value in Rigs order so the caller can log
-// it. OldestGreenAt is the oldest LastGreenAt across the known rigs, and the zero
-// time when any known rig has none. ImagesRetries is the largest count across the
-// known rigs.
+// it. OldestGreenAt is the oldest LastGreenAt across the known rigs, zero when any
+// has none; ImagesRetries is the largest count across the known rigs.
 func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 	var in redHoldInputs
 	var unknown []string

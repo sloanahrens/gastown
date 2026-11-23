@@ -387,8 +387,7 @@ func TestRedHoldStepRollFeedsInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: func(rig string) (tierSweepState, error) { return tt.states[rig], nil },
-				Update: tt.update, PairStuck: tt.pairs, Now: func() time.Time { return now }}
+			src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: func(rig string) (tierSweepState, error) { return tt.states[rig], nil }, Update: tt.update, PairStuck: tt.pairs, Now: func() time.Time { return now }}
 			require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
 			rec, err := dispatch.ReadRedHold(townRoot)
 			require.NoError(t, err)
