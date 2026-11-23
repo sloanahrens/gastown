@@ -11,10 +11,8 @@ import (
 	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
-// budgetBlockingEmbedder waits for its context to end and answers with the
-// context's error, the way a slow embedder answers the run that gives up on it.
-// A call without a deadline is refused at once, so a run that set no budget
-// fails its case instead of hanging.
+// budgetBlockingEmbedder waits for its context to end and answers with its
+// error; a call without a deadline is refused at once instead of hanging.
 type budgetBlockingEmbedder struct{}
 
 func (budgetBlockingEmbedder) Embed(ctx context.Context, _ string) ([]float32, error) {
@@ -26,9 +24,9 @@ func (budgetBlockingEmbedder) Embed(ctx context.Context, _ string) ([]float32, e
 }
 
 // TestStoryPointsWeeklyBudget: a due run ends itself at Commands.Budget. Its end
-// at the week-after check or the retrain is a wait: nil error, the waiting line,
-// no stamp. A failed progress write is still returned; any other failure keeps
-// its old handling and spends the week (gt-tc6uc8).
+// while wiring the town, at the week-after check or at the retrain is a wait:
+// nil error, the waiting line, no stamp. A failed progress write is still
+// returned; any other failure keeps its old handling and spends the week.
 func TestStoryPointsWeeklyBudget(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -36,11 +34,13 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 		adoption  bool // the week-after check is the step the budget ends
 		badBeads  bool // the retrain fails on a landing time that does not parse
 		failWrite bool // the progress line cannot be written
+		wireWait  bool // the town's wire is the step the budget ends
 	}{
-		{"retrain waits", false, false, false},
-		{"adoption check waits", true, false, false},
-		{"progress write failure is returned", false, false, true},
-		{"another failure spends the week", false, true, false},
+		{"retrain waits", false, false, false, false},
+		{"adoption check waits", true, false, false, false},
+		{"the wire waits", false, false, false, true},
+		{"progress write failure is returned", false, false, true, false},
+		{"another failure spends the week", false, true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -62,7 +62,14 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 			}
 			var out strings.Builder
 			c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), emb)
-			c.Budget = 5 * time.Millisecond
+			// The bad-beads case does real work, so it keeps the default budget:
+			// its failure is the landing time, never a wall clock.
+			if !tc.badBeads {
+				c.Budget = 5 * time.Millisecond
+			}
+			if tc.wireWait {
+				c.Wire = func(ctx context.Context) (RealTown, error) { <-ctx.Done(); return RealTown{}, ctx.Err() }
+			}
 			if tc.failWrite {
 				c.Progress = failingWriter{}
 			}
@@ -72,8 +79,7 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 
 			switch {
 			case tc.badBeads:
-				if err == nil || !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "last tuesday") ||
-					!strings.Contains(got, "the week is spent") {
+				if err == nil || !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "last tuesday") || !strings.Contains(got, "the week is spent") {
 					t.Fatalf("err = %v, out = %q, want the failure, its cause and that the week is spent", err, got)
 				}
 				if want := weeklyNow.UTC().Format(time.RFC3339); weeklyLastRun(t, fix.town) != want {
@@ -87,8 +93,7 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RunStoryPointsWeekly err = %v, want nil: the budget's end is a wait", err)
 				}
-				if !strings.HasPrefix(got, "story points weekly: waiting: the 5ms budget ended") ||
-					!strings.Contains(got, "the next hour continues from the embedding cache") {
+				if !strings.HasPrefix(got, "story points weekly: waiting: the 5ms budget ended") || !strings.Contains(got, "the next hour continues from the embedding cache") {
 					t.Errorf("out = %q, want the wait naming the budget and the cache", got)
 				}
 				if stamp := weeklyLastRun(t, fix.town); stamp != last.Format(time.RFC3339) {

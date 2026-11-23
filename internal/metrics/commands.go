@@ -437,13 +437,11 @@ func extractRanYesterday(env Env, outDir string) (bool, error) {
 // that reached a decision, not the last run that tried.
 const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
 
-// StoryPointsWeeklyBudget is how long a due weekly run may take before it ends
-// itself as a wait that keeps the week open: ten minutes, inside the town-metrics
-// plugin's fifteen-minute timeout (plugins/town-metrics/plugin.md).
+// StoryPointsWeeklyBudget is the due run's own deadline: ten minutes, inside
+// the plugin's fifteen-minute timeout.
 const StoryPointsWeeklyBudget = 10 * time.Minute
 
-// storyPointsWeeklyWait is the weekly run's line when its own budget ends: the
-// cache holds what it embedded, so the next hour continues from it.
+// storyPointsWeeklyWait is the line when the budget ends.
 const storyPointsWeeklyWait = "story points weekly: waiting: the %s budget ended; the next hour continues from the embedding cache"
 
 // storyPointsWeeklyStampName is the file beside the runtime weights that holds
@@ -472,9 +470,9 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
-// for nothing. A due run ends itself at Commands.Budget (zero is
-// StoryPointsWeeklyBudget): that end on the retrain or the week-after check is
-// a wait that records no stamp and returns nil, so the week stays open.
+// for nothing. A due run ends itself at Commands.Budget (zero is StoryPointsWeeklyBudget):
+// an end while it wires the town, retrains or checks the last adoption is a
+// wait that records no stamp and returns nil, so the week stays open.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -499,10 +497,7 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if !Due(last, now, StoryPointsWeeklyEvery) {
 		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
 	}
-	// The due run ends itself before the plugin's timeout can kill it. The budget
-	// bounds the retrain and the week-after check, so one that outlives it
-	// reports waiting with the cache intact instead of dying before it can
-	// record anything.
+	// The due run ends itself before the plugin's timeout can kill it.
 	budget := c.Budget
 	if budget == 0 {
 		budget = StoryPointsWeeklyBudget
@@ -518,6 +513,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	real, env, err := c.wire(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return c.receipt(storyPointsWeeklyWait, budget)
+		}
 		return fmt.Errorf("story points weekly: %w", err)
 	}
 	if real.Town == "" {
