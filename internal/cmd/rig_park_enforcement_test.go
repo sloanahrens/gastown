@@ -42,6 +42,18 @@ func TestParkAndUnparkRigs(t *testing.T) {
 	}
 
 	out.Reset()
+	// Seed the rig store so the negative assertion reads the file, not just the
+	// output (gt-wf9s0a): unpark must leave .beads/config.yaml as it was. The
+	// rig-root .beads is the dir FindRigBeadsDir resolves while it exists, so a
+	// regression that turns the events journal back on writes here.
+	rigConfig := filepath.Join(town, "testrig", ".beads", "config.yaml")
+	const rigConfigBody = "issue-prefix: tr\n"
+	if err := os.MkdirAll(filepath.Dir(rigConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigConfig, []byte(rigConfigBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := unparkRigs(&out, town, []string{"testrig", "otherrig"}); err != nil {
 		t.Fatalf("unparkRigs = %v", err)
 	}
@@ -55,6 +67,11 @@ func TestParkAndUnparkRigs(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "events journal") {
 		t.Errorf("unpark output = %q, want no mention of the events journal", out.String())
+	}
+	if got, err := os.ReadFile(rigConfig); err != nil {
+		t.Errorf("reading the rig config after unpark: %v", err)
+	} else if string(got) != rigConfigBody {
+		t.Errorf("unpark wrote the rig config: got %q, want it left as %q", got, rigConfigBody)
 	}
 
 	out.Reset()
