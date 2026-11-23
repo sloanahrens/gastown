@@ -63,6 +63,42 @@ func TestRebootCheckEngineNilRun(t *testing.T) {
 	}
 }
 
+// TestRebootCheckEnginePanic pins the recovery: a panicking check becomes a
+// failed row and the checks after it still run.
+func TestRebootCheckEnginePanic(t *testing.T) {
+	t.Parallel()
+	rows := RunAll(context.Background(), []Check{
+		{Name: "boom", Run: func(context.Context) Result { panic("kaboom") }},
+		{Name: "after", Run: func(context.Context) Result { return Result{OK: true} }},
+	})
+	if len(rows) != 2 || rows[0].OK || rows[0].Detail != "check panicked: kaboom" || !rows[1].OK {
+		t.Fatalf("rows = %+v, want a panic row then a passing check", rows)
+	}
+}
+
+// TestRebootCheckClusterForgejoCompleted pins the pod phases: a completed job
+// pod is not a failure, a namespace holding only completed pods fails, and a
+// failed pod still fails. The fixtures and helpers come from cluster_test.go.
+func TestRebootCheckClusterForgejoCompleted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, out, wantDetail string
+		wantOK                bool
+	}{
+		{"ready pods beside a completed one", `{"items":[{"metadata":{"name":"forgejo-0"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"forgejo-1"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"forgejo-runner-done"},"status":{"phase":"Succeeded","conditions":[{"type":"Ready","status":"False"}]}}]}`, "2 pods ready, 1 completed", true},
+		{"only completed pods", `{"items":[{"metadata":{"name":"forgejo-runner-done"},"status":{"phase":"Succeeded","conditions":[{"type":"Ready","status":"False"}]}}]}`, "no running pods (1 completed)", false},
+		{"a failed pod", `{"items":[{"metadata":{"name":"forgejo-runner-failed"},"status":{"phase":"Failed","conditions":[{"type":"Ready","status":"False"}]}}]}`, "not ready: forgejo-runner-failed", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := forgejoRow(podListing(tt.out))
+			if row.OK != tt.wantOK || row.Detail != tt.wantDetail {
+				t.Errorf("row = %+v, want OK=%v, detail %q", row, tt.wantOK, tt.wantDetail)
+			}
+		})
+	}
+}
+
 // TestRebootCheckEngineFormat pins both output forms: the text is one line per
 // row ending with the boot-noise note, and the JSON carries the same rows and
 // the note.
