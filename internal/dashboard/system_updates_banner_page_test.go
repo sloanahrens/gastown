@@ -8,8 +8,7 @@ import (
 )
 
 // The pane leads with a banner while a gt update roll runs (gt-o8m8ho): its
-// step, elapsed time and the builds it moves between. An ended roll's banner
-// stays for the page's named ten minutes and then goes; an idle Now draws none.
+// step, elapsed and the builds it moves between; an ended roll stays ten minutes.
 
 func bannerRoll() map[string]any {
 	return map[string]any{"run_id": "run-7", "step": "install", "elapsed_sec": 480, "from": "1111aaaa2222", "to": "3333bbbb4444"}
@@ -31,6 +30,18 @@ func paneBanner(t *testing.T, dom *pageDOM) string {
 		return ""
 	}
 	return dom.descend(t, "systemupdates", 0, 0).Text
+}
+
+// drawState sets the page's reading and draws it, the way an SSE state frame does.
+func drawState(t *testing.T, dom *pageDOM, st map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("encoding the reading: %v", err)
+	}
+	if _, err := dom.vm.RunString("state = " + string(raw) + "; renderAll();"); err != nil {
+		t.Fatalf("drawing the reading: %v", err)
+	}
 }
 
 // A running roll draws the banner above the rows: rolling, the step, elapsed and
@@ -66,35 +77,27 @@ func TestSystemUpdatesBannerDrawsNoFromAsADash(t *testing.T) {
 	}
 }
 
-// An ended roll's banner outlives the poll that stops naming it by the page's
-// named constant, then goes: the 15 s tick redraws from held state, so no new
-// state is needed for the line to disappear.
+// An ended roll's banner is dated by the first push that no longer names it,
+// even one that skips the pane's redraw, and stays ten minutes to the
+// millisecond: exactly ten minutes is still there, a millisecond later gone.
 func TestSystemUpdatesBannerKeepsAnEndedRollTenMinutes(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.press(t, "systemupdates", "click")
-	for _, st := range []map[string]any{bannerState(bannerRoll(), systemUpdateGoodRow()), bannerState(nil, systemUpdateGoodRow())} {
-		raw, err := json.Marshal(st)
-		if err != nil {
-			t.Fatalf("encoding the reading: %v", err)
-		}
-		if _, err := dom.vm.RunString("state = " + string(raw) + "; renderAll();"); err != nil {
-			t.Fatalf("drawing the reading: %v", err)
-		}
-	}
-	if got := paneBanner(t, dom); got != "roll ended" {
-		t.Fatalf("a roll no poll names any more reads %q, want its banner kept as ended", got)
-	}
-
+	drawState(t, dom, bannerState(nil, systemUpdateGoodRow()))                           // the pane's recorded key
+	dom.call(t, "renderSystemUpdates", bannerState(bannerRoll(), systemUpdateGoodRow())) // the running roll
+	drawState(t, dom, bannerState(nil, systemUpdateGoodRow()))                           // same key: the push skips, still dating the end
 	stay := pageNumber(t, dom, "SYSTEM_UPDATES_BANNER_STAY_MS")
-	pageExpr(t, dom, "__advance("+strconv.Itoa(stay-15000)+")")
+	pageExpr(t, dom, "__clock = "+strconv.Itoa(stay))
+	dom.call(t, "renderSystemUpdates", bannerState(nil, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "roll ended" {
-		t.Errorf("under ten minutes the banner reads %q, want it still there", got)
+		t.Fatalf("at exactly ten minutes the banner reads %q, want it still there", got)
 	}
-	pageExpr(t, dom, "__advance(30000)")
+	pageExpr(t, dom, "__clock = "+strconv.Itoa(stay+1))
+	dom.call(t, "renderSystemUpdates", bannerState(nil, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "" {
-		t.Errorf("past ten minutes the banner reads %q, want it gone", got)
+		t.Errorf("a millisecond past ten minutes the banner reads %q, want it gone", got)
 	}
 }
 
