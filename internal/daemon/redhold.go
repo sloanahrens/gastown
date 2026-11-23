@@ -44,6 +44,32 @@ func redHoldSweepOf(rig string, st tierSweepState, err error) (redHoldSweep, boo
 	return s, true
 }
 
+// redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
+// names in the order to read them, and the reader for one name.
+type redHoldSources struct {
+	Rigs []string
+	Read func(rig string) (tierSweepState, error)
+}
+
+// redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
+// A rig whose record could not be read is left out of the inputs, keeping its
+// prior state, and named in the second value in Rigs order so the caller can log
+// it.
+func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
+	var in redHoldInputs
+	var unknown []string
+	for _, rig := range src.Rigs {
+		st, err := src.Read(rig)
+		s, ok := redHoldSweepOf(rig, st, err)
+		if !ok {
+			unknown = append(unknown, rig)
+			continue
+		}
+		in.Sweeps = append(in.Sweeps, s)
+	}
+	return in, unknown
+}
+
 // evalRedHold returns the sweep reasons that hold dispatch: one per kind, sorted
 // by kind, each keeping prev's Since when the kind already held and taking now when
 // new. A sweep under redHoldSweepCycles contributes nothing; at or above it is
