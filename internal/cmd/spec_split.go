@@ -247,7 +247,7 @@ func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, 
 		}
 		return NewSilentExit(specLintExitRefused)
 	}
-	dependents, err := specSplitDependents(db, raw, beadID)
+	dependents, err := specSplitDependents(db, raw, rig, beadID)
 	if err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, 
 	if err := db.AddDependency(b.ID, a.ID); err != nil {
 		return fmt.Errorf("created piece A as %s and piece B as %s, but cannot wire B after A: %w", a.ID, b.ID, err)
 	}
-	moved, err := specSplitMoveDependents(db, raw, beadID, b.ID, dependents)
+	moved, err := specSplitMoveDependents(db, raw, rig, beadID, b.ID, dependents)
 	if err != nil {
 		movedText := "none"
 		if len(moved) > 0 {
@@ -380,7 +380,7 @@ func (s specSplitSQLDeps) column(q beadsql.Query, col string) ([]string, error) 
 // specSplitDependents returns every dependent of beadID and its relation: the
 // ones the store lists, then the ones its list leaves out, read raw when raw is
 // not nil. A dependent and relation the store already listed is not repeated.
-func specSplitDependents(db beads.Client, raw specSplitRawDeps, beadID string) ([]beads.IssueDep, error) {
+func specSplitDependents(db beads.Client, raw specSplitRawDeps, rig, beadID string) ([]beads.IssueDep, error) {
 	dependents, err := db.DepListUp(beadID, "")
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the dependents of %s: %w", beadID, err)
@@ -397,10 +397,34 @@ func specSplitDependents(db beads.Client, raw specSplitRawDeps, beadID string) (
 	for _, dep := range dependents {
 		seen[relation{dep.ID, dep.DependencyType}] = true
 	}
+	listed := make(map[string]bool, len(dependents))
+	for _, dep := range dependents {
+		listed[dep.ID] = true
+	}
+	// The raw read matches an external edge by its id alone, so a dependent
+	// only the raw read finds is kept when one of its stored targets names the
+	// original, and left alone when the edge names another rig's bead.
+	named := make(map[string]bool)
 	for _, dep := range extra {
 		key := relation{dep.ID, dep.DependencyType}
 		if seen[key] {
 			continue
+		}
+		if !listed[dep.ID] {
+			ok, checked := named[dep.ID]
+			if !checked {
+				refs, err := raw.Targets(dep.ID)
+				if err != nil {
+					return nil, fmt.Errorf("reading the dependencies of %s: %w", dep.ID, err)
+				}
+				for _, ref := range refs {
+					ok = ok || specSplitNamesOriginal(ref, rig, beadID)
+				}
+				named[dep.ID] = ok
+			}
+			if !ok {
+				continue
+			}
 		}
 		seen[key] = true
 		dependents = append(dependents, dep)
@@ -414,7 +438,7 @@ func specSplitDependents(db beads.Client, raw specSplitRawDeps, beadID string) (
 // a later one, leaves the dependent on the still-open original rather than on
 // nothing. The dependent's edges to the original are then removed once. It
 // returns the dependents moved so far, so a failure names them.
-func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, beadID, bID string, dependents []beads.IssueDep) ([]string, error) {
+func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, rig, beadID, bID string, dependents []beads.IssueDep) ([]string, error) {
 	var order, moved []string
 	relations := make(map[string][]string, len(dependents))
 	for _, dep := range dependents {
@@ -429,12 +453,28 @@ func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, beadID, bID 
 				return moved, fmt.Errorf("moving dependent %s onto piece B %s: %w", id, bID, err)
 			}
 		}
-		if err := specSplitRemoveEdgesTo(db, raw, id, beadID); err != nil {
+		if err := specSplitRemoveEdgesTo(db, raw, rig, id, beadID); err != nil {
 			return moved, err
 		}
 		moved = append(moved, id)
 	}
 	return moved, nil
+}
+
+// specSplitNamesOriginal reports whether a stored dependency target names the
+// original: its plain id, or external:<x>:<id> where <x> is the id's own prefix
+// or the original's rig. An external edge with another segment names a bead of
+// the same id in another rig, which this split does not touch.
+func specSplitNamesOriginal(ref, rig, beadID string) bool {
+	if ref == beadID {
+		return true
+	}
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 || parts[0] != "external" || parts[2] != beadID {
+		return false
+	}
+	prefix, _, _ := strings.Cut(beadID, "-")
+	return parts[1] == prefix || parts[1] == rig
 }
 
 // specSplitRemoveEdgesTo removes issue's edges that name beadID, each in the
@@ -443,7 +483,7 @@ func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, beadID, bID 
 // edge kept outside that table (a wisp dependent's edge is in
 // wisp_dependencies). Without a raw read the plain form is the only one the
 // store's own list can hold.
-func specSplitRemoveEdgesTo(db beads.Client, raw specSplitRawDeps, issue, beadID string) error {
+func specSplitRemoveEdgesTo(db beads.Client, raw specSplitRawDeps, rig, issue, beadID string) error {
 	refs := []string{beadID}
 	if raw != nil {
 		var err error
@@ -455,7 +495,7 @@ func specSplitRemoveEdgesTo(db beads.Client, raw specSplitRawDeps, issue, beadID
 	removed := false
 	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
-		if seen[ref] || beads.ExtractIssueID(ref) != beadID {
+		if seen[ref] || !specSplitNamesOriginal(ref, rig, beadID) {
 			continue
 		}
 		seen[ref] = true

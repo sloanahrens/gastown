@@ -526,6 +526,12 @@ type splitRawScript struct {
 	targetErr  error
 }
 
+// splitListsNone is a store whose own dependents list leaves everything out,
+// so only the raw read can find a dependent.
+type splitListsNone struct{ beads.Client }
+
+func (splitListsNone) DepListUp(string, string) ([]beads.IssueDep, error) { return nil, nil }
+
 func (s splitRawScript) Dependents(string) ([]beads.IssueDep, error) {
 	if s.depErr != nil {
 		return nil, s.depErr
@@ -548,14 +554,78 @@ func TestSpecSplitApplyMovesAnExternalEdge(t *testing.T) {
 	db := beadsfake.New()
 	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
 	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
-	if err := db.AddTypedDependency("gt-downstream", "external:om:gt-split", "blocks"); err != nil {
+	if err := db.AddTypedDependency("gt-downstream", "external:gt:gt-split", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
 	store := &splitRecordingRemove{Client: db}
-	raw := splitRawScript{targets: []string{"external:om:gt-split"}}
+	raw := splitRawScript{targets: []string{"external:gt:gt-split"}}
 	b, dependent := splitApplyAndShow(t, store, db, raw)
-	if want := "gt-downstream off external:om:gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+	if want := "gt-downstream off external:gt:gt-split"; len(store.removed) != 1 || store.removed[0] != want {
 		t.Errorf("removed = %v, want the stored external ref alone (%q)", store.removed, want)
+	}
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyFindsADependentOnlyTheRawReadSees: a dependent the store's
+// list leaves out, whose stored edge names the original as external:<prefix>:<id>,
+// is found by the raw read, moved onto B, and loses that edge in its stored form.
+func TestSpecSplitApplyFindsADependentOnlyTheRawReadSees(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddTypedDependency("gt-downstream", "external:gt:gt-split", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	store := &splitRecordingRemove{Client: splitListsNone{db}}
+	raw := splitRawScript{dependents: []beads.IssueDep{{ID: "gt-downstream", DependencyType: "blocks"}}, targets: []string{"external:gt:gt-split"}}
+	b, dependent := splitApplyAndShow(t, store, db, raw)
+	if want := "gt-downstream off external:gt:gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want %q", store.removed, want)
+	}
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyLeavesAnotherRigsEdgeAlone: the raw read matches an
+// external edge by its id, so a dependent whose edge is external:om:gt-split
+// names another rig's gt-split. It gets no edge to piece B and no edge is removed.
+func TestSpecSplitApplyLeavesAnotherRigsEdgeAlone(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddTypedDependency("gt-downstream", "external:om:gt-split", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	store := &splitRecordingRemove{Client: splitListsNone{db}}
+	raw := splitRawScript{dependents: []beads.IssueDep{{ID: "gt-downstream", DependencyType: "blocks"}}, targets: []string{"external:om:gt-split"}}
+	if err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), store, raw); err != nil {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
+	}
+	dependent, err := db.Show("gt-downstream")
+	if err != nil {
+		t.Fatalf("show dependent: %v", err)
+	}
+	if len(dependent.Dependencies) != 0 {
+		t.Errorf("dependent dependencies = %+v, want no edge to piece B for another rig's bead", dependent.Dependencies)
+	}
+	if len(store.removed) != 0 {
+		t.Errorf("removed = %v, want no edge removed", store.removed)
+	}
+}
+
+// TestSpecSplitApplyKeepsAnotherRigsEdgeOnARealDependent: a dependent of the
+// original that also holds external:om:gt-split, another rig's bead of the same
+// id, is moved off the original alone and keeps that other edge.
+func TestSpecSplitApplyKeepsAnotherRigsEdgeOnARealDependent(t *testing.T) {
+	t.Parallel()
+	db := splitApplyFixture(t)
+	store := &splitRecordingRemove{Client: db}
+	raw := splitRawScript{targets: []string{"gt-split", "external:om:gt-split"}}
+	b, dependent := splitApplyAndShow(t, store, db, raw)
+	if want := "gt-downstream off gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want only %q", store.removed, want)
 	}
 	splitWantBAlone(t, dependent, b)
 }
