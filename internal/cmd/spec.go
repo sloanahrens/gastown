@@ -3207,9 +3207,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// the sling. The shadow setting only observes; the split route reads the
 		// same estimate and holds a bead over its trigger. A failed or
 		// timed-out estimate is one logged line, and the bead is slung as it
-		// would be without the setting.
+		// would be without the setting. Its cost is the candidates phase's own,
+		// so it is timed by step whether it slings or holds (gt-wga76n).
 		if env.StoryPointShadow || env.StoryPointSplitOver > 0 {
-			step := specStoryPointStep(env, id, latest)
+			var step specStoryPointStepResult
+			candidateSteps.time("estimate", func() { step = specStoryPointStep(env, id, latest) })
 			report.Notices = append(report.Notices, step.Notices...)
 			report.Errors = append(report.Errors, step.Errors...)
 			if step.Hold != "" {
