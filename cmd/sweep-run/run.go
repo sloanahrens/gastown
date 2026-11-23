@@ -195,9 +195,14 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	}
 	// An earlier attempt of the same run can have left its result here, which a
 	// run that dies before writing its own would be read as (gt-45j3n8). Remove
-	// it before any work starts; a removal that cannot be made ends the run loud
-	// in part 2 (gt-ev02jt), so this call's error is not acted on here.
-	_ = d.RemoveAll(filepath.Join(opts.Out, sweeprunner.ResultFileName))
+	// it before any work starts; a result the run cannot remove must not be left
+	// beside one it writes, so that failure ends the run here, before the clone
+	// and with no result of its own (gt-ev02jt).
+	resultPath := filepath.Join(opts.Out, sweeprunner.ResultFileName)
+	if err := d.RemoveAll(resultPath); err != nil {
+		fmt.Fprintf(stderr, "%s: remove the earlier result %s: %v\n", name, resultPath, err)
+		return FailureExit
+	}
 	work, err := workDirectory(d, opts, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: create the work directory: %v\n", name, err)
