@@ -13,7 +13,7 @@ import (
 
 // TestTownDeployerServeCommand: serve is registered under gt town deployer, takes no
 // arguments, marks four flags required, and hands the run their values (gt-p1ej8c).
-func TestTownDeployerServeCommand(t *testing.T) {
+func TestTownDeployerServeCommand(t *testing.T) { //testpolicy:allow parallel — it drives the process-wide serve command and the serveSteps seam init registers once
 	found, _, err := townDeployerCmd.Find([]string{"serve"})
 	if err != nil || found != townDeployerServeCmd || found.Use != "serve" {
 		t.Fatalf("gt town deployer Find(serve) = %v, %v; want the serve command", found, err)
@@ -31,11 +31,11 @@ func TestTownDeployerServeCommand(t *testing.T) {
 	inbox, answers, state := newServeTestDirs(t)
 	writeServeRequest(t, inbox, serveOlderID)
 	steps := &serveFakeSteps{}
-	serveSteps = steps
+	serveSteps = steps //testpolicy:allow no-global-swap — serveSteps is the production steps seam gt-1afrbd fills, and the run reads the steps only from it
 	var out bytes.Buffer
 	found.SetOut(&out)
 	t.Cleanup(func() {
-		serveSteps = nil
+		serveSteps = nil //testpolicy:allow no-global-swap — restores the seam set above
 		found.SetOut(nil)
 		found.Flags().VisitAll(func(f *pflag.Flag) { _ = f.Value.Set(f.DefValue) })
 	})
