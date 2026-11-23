@@ -186,3 +186,79 @@ func TestSystemUpdatesPairOtherSha(t *testing.T) {
 	assert.Equal(t, pairAbsent, bySHA[all[:8]], "another commit's item set this row's pair")
 	assert.Equal(t, pairRefused, bySHA[other[:8]], "the refused item did not reach its own row")
 }
+
+// Until the attention queue has been read, a row's Pair is unknown, never
+// absent: a section poll that runs before the first attention poll, a hub with
+// no attention reader, and a hub whose items reader is missing all leave the
+// queue unknown. A read that fails after a good one forgets the items it
+// returned, so they never classify a row.
+func TestSystemUpdatesPairUnread(t *testing.T) {
+	t.Parallel()
+
+	sha := sysTestSHA(1)
+	section := func() *SystemUpdates {
+		sweeps := []TierSweepRow{{At: sysTestClock, Rig: "gastown", SHA: sha[:8]}}
+		return NewSystemUpdates(sweeps, nil, nil, false)
+	}
+	pairOf := func(t *testing.T, h *Hub) string {
+		t.Helper()
+		got := h.State().SystemUpdates
+		require.NotNil(t, got, "the section is in the feed once its reader reports")
+		require.Len(t, got.Rows, 1, "the section did not carry the commit row")
+		return got.Rows[0].Pair
+	}
+	readyItem := func() ([]attention.Item, error) {
+		return []attention.Item{pairTestItem(attention.KindDeployPairReady, sha)}, nil
+	}
+
+	t.Run("the attention poll has not run", func(t *testing.T) {
+		t.Parallel()
+		h := NewHub(Config{
+			Attention:      func() ([]attention.Event, attention.Acks) { return nil, attention.Acks{} },
+			AttentionItems: readyItem,
+			SystemUpdates:  section,
+		})
+		h.pollSystemUpdates()
+		assert.Equal(t, pairUnknown, pairOf(t, h), "a row read as a commit with no pair before the queue was read")
+	})
+
+	t.Run("no attention reader", func(t *testing.T) {
+		t.Parallel()
+		h := NewHub(Config{SystemUpdates: section})
+		h.pollSystemUpdates()
+		assert.Equal(t, pairUnknown, pairOf(t, h), "a hub with no attention reader read a row as a commit with no pair")
+	})
+
+	t.Run("no items reader", func(t *testing.T) {
+		t.Parallel()
+		h := NewHub(Config{
+			Attention:     func() ([]attention.Event, attention.Acks) { return nil, attention.Acks{} },
+			SystemUpdates: section,
+		})
+		h.pollAttention()
+		h.pollSystemUpdates()
+		assert.Equal(t, pairUnknown, pairOf(t, h), "a queue with no items reader read as a commit with no pair")
+	})
+
+	t.Run("a failed read after a good one", func(t *testing.T) {
+		t.Parallel()
+		fail := false
+		h := NewHub(Config{
+			Attention: func() ([]attention.Event, attention.Acks) { return nil, attention.Acks{} },
+			AttentionItems: func() ([]attention.Item, error) {
+				if fail {
+					return nil, errors.New("the queue's state could not be read")
+				}
+				return readyItem()
+			},
+			SystemUpdates: section,
+		})
+		h.pollAttention()
+		h.pollSystemUpdates()
+		assert.Equal(t, pairReady, pairOf(t, h), "a good read did not classify the row")
+		fail = true
+		h.pollAttention()
+		h.pollSystemUpdates()
+		assert.Equal(t, pairUnknown, pairOf(t, h), "the items of an earlier good read survived a failed read")
+	})
+}

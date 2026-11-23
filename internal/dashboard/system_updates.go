@@ -179,25 +179,26 @@ func newest(a, b time.Time) time.Time {
 }
 
 // classifySystemUpdatePairs sets each row's Pair from the hub's attention items
-// and the images run the row carries. An attention read that failed leaves every
-// row unknown, never absent, so the items it could not return do not read as a
-// commit with no pair.
+// and the images run the row carries. A queue that was not read leaves every row
+// unknown, never absent, so an attention read that failed, has not run yet, or
+// has no items reader does not read as a commit with no pair.
 //
 // Several readings can name one commit, so the state is taken in this order:
 // refused, failed, stuck, ready, building, absent. The green ref's own
 // publication is not read: a commit whose images have not started is absent, and
 // a ref that failed to publish is the green-ref attention item, which is not one
 // of the kinds mapped here.
-func classifySystemUpdatePairs(rows []SystemUpdateRow, items []attention.Item, queueFailed bool) {
+func classifySystemUpdatePairs(rows []SystemUpdateRow, items []attention.Item, queueKnown bool) {
 	for i := range rows {
-		rows[i].Pair = systemUpdatePair(rows[i], items, queueFailed)
+		rows[i].Pair = systemUpdatePair(rows[i], items, queueKnown)
 	}
 }
 
 // systemUpdatePair is one row's state: the attention items that name its commit
-// by the join's own prefix rule, and the status of its newest images run.
-func systemUpdatePair(row SystemUpdateRow, items []attention.Item, queueFailed bool) string {
-	if queueFailed {
+// by the join's own prefix rule, and the status of its newest images run. An
+// unread or failed queue known nothing, so the state is unknown.
+func systemUpdatePair(row SystemUpdateRow, items []attention.Item, queueKnown bool) string {
+	if !queueKnown {
 		return pairUnknown
 	}
 	var ready, failed, refused, stuck, building bool
