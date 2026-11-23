@@ -106,6 +106,44 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 	})
 }
 
+// TestEnsureNewSessionSocketSafeRefusalLeadsWithProbeError: a sweep or a bead quotes only
+// the first line of a refusal (gt-n4j0yj), so the probe's error must come
+// first, inside the first 100 characters.
+func TestEnsureNewSessionSocketSafeRefusalLeadsWithProbeError(t *testing.T) {
+	t.Parallel()
+	timeoutRun := func(t *testing.T) error {
+		done, advance := probeGuard(t, 0, 1)
+		advance(newSessionSocketProbeTimeout)
+		return <-done
+	}
+	noServerRun := func(t *testing.T) error {
+		fs := newFakeSockets()
+		fs.set(guardPath, sockLive)
+		s := newScripted(bySub(map[string]reply{"list-sessions": fail("no server running on " + guardPath)}))
+		return guardTmux(fs, s).ensureNewSessionSocketSafe()
+	}
+	for _, tc := range []struct {
+		name  string
+		run   func(*testing.T) error
+		cause string
+	}{
+		{"timed_out_probe", timeoutRun, "tmux list-sessions timed out after " + newSessionSocketProbeTimeout.String()},
+		{"no_server_probe", noServerRun, "no tmux server running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(t)
+			if err == nil {
+				t.Fatalf("%s = nil, want a refusal", tc.name)
+			}
+			msg := err.Error()
+			first := msg[:min(len(msg), 100)]
+			if !strings.HasPrefix(first, tc.cause) || !strings.Contains(msg, "refusing to start a new session") || !strings.Contains(msg, "gt-h9z") {
+				t.Fatalf("%s = %q, want the probe error %q first, within 100 characters, then the refusal and gt-h9z", tc.name, msg, tc.cause)
+			}
+		})
+	}
+}
+
 func TestNewSessionVariantsUseSocketGuard(t *testing.T) {
 	t.Parallel()
 	fs := newFakeSockets()
