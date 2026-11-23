@@ -2,6 +2,8 @@ package beadsql
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"slices"
@@ -398,6 +400,7 @@ func TestTickEffRigHeadsQuery(t *testing.T) {
 	}{
 		{"unsafe name", RigHeads([]string{"gt", "x`; DROP TABLE issues"}), "invalid identifier"},
 		{"dashed name", RigHeads([]string{"claude-beads"}), "cannot be named in a @@ variable"},
+		{"duplicate name", RigHeads([]string{"gt", "om", "gt"}), "is named twice"},
 		{"no database", RigHeads(nil), "needs at least one database"},
 		{"too many", RigHeads(make([]string, RigHeadLimit+1)), "at most 32 databases"},
 	} {
@@ -468,6 +471,73 @@ func TestTickEffChildStatusesQuery(t *testing.T) {
 	if _, err := ChildStatuses(make([]string, ChildStatusesLimit+1)...).Inline(); err == nil {
 		t.Errorf("%d parent ids: Inline accepted the statement", ChildStatusesLimit+1)
 	}
+}
+
+// TestTickEffChildStatusesAtTheLimit: exactly ChildStatusesLimit parents is
+// accepted and inlines — the limit is the most a read may take, and a caller
+// reading a full page must not be refused on the row that fills it.
+func TestTickEffChildStatusesAtTheLimit(t *testing.T) {
+	t.Parallel()
+	ids := make([]string, ChildStatusesLimit)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gt-%d", i)
+	}
+	q := ChildStatuses(ids...)
+	if _, err := q.Inline(); err != nil {
+		t.Fatalf("ChildStatuses at exactly %d ids: Inline: %v", ChildStatusesLimit, err)
+	}
+	if got := strings.Count(q.text, "?"); got != ChildStatusesLimit {
+		t.Errorf("statement has %d placeholders, want %d:\n%s", got, ChildStatusesLimit, q.text)
+	}
+}
+
+// TestTickEffChildStatusesBindsItsArgs: DB.Query sends ChildStatuses with its
+// ids bound by the driver — the statement keeps its placeholders and the values
+// reach the driver as arguments in order, not inlined as SQL text.
+func TestTickEffChildStatusesBindsItsArgs(t *testing.T) {
+	t.Parallel()
+	ids := []string{"gt-a", "gt-b"}
+	rec := &boundArgs{}
+	db := &DB{db: sql.OpenDB(rec)}
+	defer db.Close()
+	rows, err := db.Query(context.Background(), ChildStatuses(ids...))
+	if err != nil {
+		t.Fatalf("DB.Query: %v", err)
+	}
+	defer rows.Close()
+	stmt, vals := rec.sql, rec.vals
+	if !strings.Contains(stmt, "IN (?, ?)") {
+		t.Errorf("statement reaching the driver lacks its placeholders:\n%s", stmt)
+	}
+	if len(vals) != len(ids) {
+		t.Fatalf("%d bound args reaching the driver, want %d", len(vals), len(ids))
+	}
+	for i, id := range ids {
+		if vals[i].Value != id {
+			t.Errorf("arg %d = %v, want %q", i, vals[i].Value, id)
+		}
+	}
+}
+
+// boundArgs is a database/sql driver that records the statement and arguments
+// the driver-bound path handed it, so a test can tell binding from inlining.
+type boundArgs struct {
+	sql  string
+	vals []driver.NamedValue
+}
+
+func (b *boundArgs) Connect(context.Context) (driver.Conn, error) { return b, nil }
+func (b *boundArgs) Driver() driver.Driver                        { return b }
+func (b *boundArgs) Open(string) (driver.Conn, error)             { return b, nil }
+func (b *boundArgs) Close() error                                 { return nil }
+func (b *boundArgs) Begin() (driver.Tx, error)                    { return nil, errors.New("tx unsupported") }
+func (b *boundArgs) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("prepare unsupported")
+}
+
+func (b *boundArgs) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	b.sql, b.vals = query, args
+	return &fakeRows{cols: []string{"p.id", "c.id", "c.status"}}, nil
 }
 
 // TestTickEffParseChildStatuses: a parent's rows collect under it, a row with

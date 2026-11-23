@@ -172,6 +172,9 @@ type RigHash struct {
 // the variable itself. A name is spliced into a Dolt variable, which holds
 // letters, digits and underscores: a dash, legal in ident, is refused here
 // rather than sent as a statement Dolt cannot parse.
+// A database named twice is refused too: it would repeat its two columns, which
+// ParseRigHeads can never pair, so the statement could only fail after it was
+// sent.
 func RigHeads(databases []string) Query {
 	if len(databases) == 0 {
 		return Query{err: errors.New("beadsql: RigHeads needs at least one database")}
@@ -179,6 +182,7 @@ func RigHeads(databases []string) Query {
 	if len(databases) > RigHeadLimit {
 		return Query{err: fmt.Errorf("beadsql: RigHeads reads at most %d databases, got %d", RigHeadLimit, len(databases))}
 	}
+	seen := make(map[string]bool, len(databases))
 	var vars []string
 	for _, db := range databases {
 		if err := ident(db); err != nil {
@@ -187,6 +191,10 @@ func RigHeads(databases []string) Query {
 		if strings.Contains(db, "-") {
 			return Query{err: fmt.Errorf("beadsql: database %q cannot be named in a @@ variable", db)}
 		}
+		if seen[db] {
+			return Query{err: fmt.Errorf("beadsql: database %q is named twice", db)}
+		}
+		seen[db] = true
 		vars = append(vars, "@@"+db+"_head AS "+db+"_head", "@@"+db+"_working AS "+db+"_working")
 	}
 	return declared("SELECT " + strings.Join(vars, ", "))
