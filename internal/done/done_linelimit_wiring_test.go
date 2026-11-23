@@ -48,7 +48,7 @@ func TestLineLimitWiringRefusesAPolecatPastTwiceTheLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("checkBranchForSubmit accepted a polecat branch past twice the declared limit")
 	}
-	for _, want := range []string{"Change exceeds the 70-added-line constraint", "141 added lines", splitLine} {
+	for _, want := range []string{"Change exceeds the 70-added-line constraint", "141 added lines", overLimitLine} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal missing %q:\n%s", want, err)
 		}
@@ -101,8 +101,8 @@ func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 		wantPushes int
 		wantWarn   string
 	}{
-		{name: "sandbox_polecat_refused", polecat: true, wantErr: splitLine, wantPushes: 1},
-		{name: "sandbox_polecat_push_fails", polecat: true, pushErr: errors.New("connection reset"), wantErr: splitLine, wantWarn: "could not push " + doneTestBranch},
+		{name: "sandbox_polecat_refused", polecat: true, wantErr: overLimitLine, wantPushes: 1},
+		{name: "sandbox_polecat_push_fails", polecat: true, pushErr: errors.New("connection reset"), wantErr: overLimitLine, wantWarn: "could not push " + doneTestBranch},
 		{name: "sandbox_crew_past_limit", polecat: false},
 		{name: "sandbox_polecat_count_fails", polecat: true, countFails: true, wantErr: "added-line check"},
 		{name: "sandbox_crew_count_fails", polecat: false, countFails: true, wantErr: "added-line check"},
@@ -138,7 +138,7 @@ func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 // declared limit ends its refusal with the short sha its push left on origin and
 // the branch; a failed push ends it with the line saying the work is not pushed
 // (gt-96m2m0), and a bead that already landed (its push does not run) adds no
-// such line, so the refusal ends with the split line (gt-s0kxmj).
+// such line, so the refusal ends with the over-limit line (gt-s0kxmj).
 func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -177,7 +177,7 @@ func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 				}
 				return
 			}
-			want := splitLine
+			want := overLimitLine
 			if tt.pushedLine {
 				want = "your work is pushed at " + ShortSHA(h.repo.head) + " on " + doneTestBranch
 			}

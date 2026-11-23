@@ -10,10 +10,11 @@ import (
 // limit, so the skipped check is visible rather than silent (gt-wxpd0y).
 const noLimitLine = "no limit declared in the bead's Size or Constraints: the added-line check did not run"
 
-// splitLine is what a refusal past twice the limit tells the seat to do
-// instead of trimming (gt-wxpd0y): push the commit first so it outlives the
-// seat and a split can be built from it (gt-574kps).
-const splitLine = "This needs a split, not a trim: push the branch first with a plain git push origin HEAD:refs/heads/<your branch> (never --force), read git ls-remote origin <your branch> and check the tip is your HEAD, comment both shas on the bead, then comment that the bead needs a split and stop; do not run gt done again with the same change."
+// overLimitLine is what a refusal past twice the limit tells a finished seat to
+// do (gt-wxpd0y, gt-8f4y1k): push the commit first so it outlives the seat
+// (gt-574kps), report the measured added lines and the declared limit, and stop
+// for the overseer to decide whether to raise the limit or split the bead.
+const overLimitLine = "The measured added lines are over twice the limit the bead declares. Push the branch first with a plain git push origin HEAD:refs/heads/<your branch> (never --force), read git ls-remote origin <your branch> and check the tip is your HEAD, then comment both shas, the measured added lines and the declared limit on the bead and stop: the overseer decides whether to raise the declared limit or split the bead. Do not propose a split and do not run gt done again with the same change."
 
 // lineLimitVerdict decides whether added is too many for the limit the bead
 // declares, checked at the largest of several numbers, and returns the lines
@@ -40,7 +41,7 @@ func lineLimitVerdict(limits []int, added int) (refuse bool, lines []string) {
 	line := fmt.Sprintf("Change exceeds the %d-added-line constraint: %d added lines against %d declared (%sthe refusal is at twice the limit).",
 		limit, added, limit, stated)
 	if added > 2*limit {
-		return true, []string{line, splitLine}
+		return true, []string{line, overLimitLine}
 	}
 	if added > limit {
 		return false, []string{line}
