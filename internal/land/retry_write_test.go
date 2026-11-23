@@ -15,13 +15,15 @@ import (
 )
 
 // flakyNoteBeads refuses its first fails AppendNotes calls as a dropped
-// connection does, then writes through (gt-hounmt).
+// connection does, then writes through; calls counts the attempts (gt-hounmt).
 type flakyNoteBeads struct {
 	*beadsfake.Fake
 	fails int
+	calls int
 }
 
 func (b *flakyNoteBeads) AppendNotes(id, note string) error {
+	b.calls++
 	if b.fails > 0 {
 		b.fails--
 		return errors.New("dolt: connection refused")
@@ -99,31 +101,41 @@ func TestRetryWriteStopsAtTheDeadline(t *testing.T) {
 	}
 }
 
-// TestRejectRetriesTheNote: a note that fails twice is recorded with no
-// RecordErr; one that fails three times is reported on it (gt-hounmt).
-func TestRejectRetriesTheNote(t *testing.T) {
+// TestRejectNoteWriteTriedOnce: the note write is tried once. One that fails is
+// left off the bead, logged and reported on the rejection; one that succeeds is
+// the only attempt and reports nothing (gt-2yutrf).
+func TestRejectNoteWriteTriedOnce(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name     string
-		fails    int
-		recorded bool
+		name   string
+		fails  int
+		noted  bool
+		logged bool
 	}{
-		{"a note that fails twice is recorded", 2, true},
-		{"a note that fails three times is reported", 3, false},
+		{"a note that fails is not written", 1, false, true},
+		{"a note that is written is not logged", 0, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newLandFixture(t)
 			l := f.lander()
-			l.Beads = &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
-			l.sleep = func(time.Duration) {}
+			b := &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
+			l.Beads = b
+			var log strings.Builder
+			l.Out = &log
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
 			if err := l.reject(context.Background(), f.bead(), f.work, rej, nil); err != rej {
 				t.Fatalf("reject = %v; want the rejection", err)
 			}
+			if b.calls != 1 {
+				t.Errorf("AppendNotes calls = %d; want one try", b.calls)
+			}
 			_, noted := ParseRejectionNote(f.bead().Notes)
-			if (rej.RecordErr == nil) != tc.recorded || noted != tc.recorded {
-				t.Errorf("RecordErr = %v, noted = %v; want recorded = %v", rej.RecordErr, noted, tc.recorded)
+			if noted != tc.noted || (rej.RecordErr != nil) != !tc.noted {
+				t.Errorf("noted = %v, RecordErr = %v; want noted = %v", noted, rej.RecordErr, tc.noted)
+			}
+			if got := strings.Contains(log.String(), "could not append the rejection note"); got != tc.logged {
+				t.Errorf("logged %q; want %v", log.String(), tc.logged)
 			}
 		})
 	}
@@ -149,8 +161,8 @@ func queueAt(t *testing.T, blocked bool) RecordQueue {
 	return RecordQueue{Path: filepath.Join(dir, "landing-records.jsonl")}
 }
 
-// TestRejectQueuesTheNote: a note that fails all three tries is queued, one
-// that is written is not, and a queue that also fails is named (gt-r2rmz6).
+// TestRejectQueuesTheNote: a note whose one try fails is queued, one that is
+// written is not, and a queue that also fails is named (gt-r2rmz6, gt-2yutrf).
 func TestRejectQueuesTheNote(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -159,27 +171,30 @@ func TestRejectQueuesTheNote(t *testing.T) {
 		blocked bool // the queue's directory cannot be made
 		queued  int
 	}{
-		{"a note that fails all three tries is queued", 3, false, 1},
+		{"a note that fails its one try is queued", 1, false, 1},
 		{"a note that is written queues nothing", 0, false, 0},
-		{"a note that cannot be queued either names both", 3, true, 0},
+		{"a note that cannot be queued either names both", 1, true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newLandFixture(t)
 			l := f.lander()
-			l.Beads = &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
-			l.sleep = func(time.Duration) {}
+			b := &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
+			l.Beads = b
 			q := queueAt(t, tc.blocked)
 			l.Records = &q
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
 			if err := l.reject(context.Background(), f.bead(), f.work, rej, nil); err != rej {
 				t.Fatalf("reject = %v; want the rejection", err)
 			}
+			if b.calls != 1 {
+				t.Errorf("AppendNotes calls = %d; want one try", b.calls)
+			}
 			if (rej.RecordErr != nil) != (tc.fails > 0) {
 				t.Errorf("RecordErr = %v; want it set = %v", rej.RecordErr, tc.fails > 0)
 			}
 			if tc.blocked {
-				if !strings.Contains(rej.RecordErr.Error(), "queueing it for a later pass failed") {
+				if rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "queueing it for a later pass failed") {
 					t.Errorf("RecordErr = %v; want the failed queue named", rej.RecordErr)
 				}
 				return
