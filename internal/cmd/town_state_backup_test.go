@@ -89,16 +89,19 @@ func TestTownStateBackupVerifyRefusesASecretNamedEntry(t *testing.T) {
 	}
 }
 
-// TestTownStateBackupHelpNamesNoMountPath: the pod's mount is a deployment
-// value, so the help names the setting and points at docs/architecture.md
-// instead of hardcoding a path (gt-tbzlnh).
+// TestTownStateBackupHelpNamesNoMountPath: the help names the deployment setting
+// and a docs/architecture.md heading that exists, and hardcodes no host path.
 func TestTownStateBackupHelpNamesNoMountPath(t *testing.T) {
 	t.Parallel()
 	for _, c := range []*cobra.Command{townStateBackupCmd, townStateBackupVerifyCmd} {
 		help := c.Long + "\n" + c.Example
-		if strings.Contains(help, "/Users/") || !strings.Contains(help, "docs/architecture.md") {
-			t.Errorf("%s help = %q, want no hardcoded path and a docs/architecture.md pointer", c.Name(), help)
+		if !strings.Contains(help, townStateBackupRootSetting) || strings.Contains(help, "/Users/") || !strings.Contains(help, "docs/architecture.md (The daemon)") {
+			t.Errorf("%s help = %q, want the setting, no host path and the docs/architecture.md (The daemon) pointer", c.Name(), help)
 		}
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "architecture.md"))
+	if err != nil || !strings.Contains(string(doc), "\n### The daemon\n") {
+		t.Errorf("docs/architecture.md has no \"The daemon\" section the help points at (read err %v)", err)
 	}
 }
 
@@ -108,13 +111,9 @@ func TestTownStateBackupHelpNamesNoMountPath(t *testing.T) {
 func TestTownStateBackupVerifyRefusesAtTheCommand(t *testing.T) {
 	t.Parallel()
 	noIdentity, _ := townStateBackupArchive(t, [][2]string{{"settings/config.json", `{}`}})
-	notGzip := filepath.Join(t.TempDir(), "state.tar.gz")
-	if err := os.WriteFile(notGzip, []byte("not gzip"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct{ name, archive, want string }{
 		{"no mayor/town.json", noIdentity, "has no mayor/town.json"},
-		{"not a gzip stream", notGzip, "not a readable gzip stream"},
+		{"not a gzip stream", t.TempDir(), "not a readable gzip stream"},
 	} {
 		var out bytes.Buffer
 		cmd := &cobra.Command{Use: "verify"}

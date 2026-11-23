@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
 	"github.com/steveyegge/gastown/internal/townbackup"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
@@ -49,9 +47,7 @@ func gzipArchive(t *testing.T, write func(io.Writer) error) string {
 	return archive
 }
 
-// backupNightArchive writes the archive a night holds: the backup set the
-// production export command produces, gzipped at the night's archive name, as
-// the nightly step writes it. The test decides neither the set nor its rows.
+// backupNightArchive writes a night's archive from the production export command.
 func backupNightArchive(t *testing.T, town string) string {
 	t.Helper()
 	var set bytes.Buffer
@@ -82,10 +78,10 @@ func missingIdentityArchive(t *testing.T) string {
 	})
 }
 
-// extractTownRoot extracts the night's archive into a fresh town root with
-// podUnpack, this package's pod unpack, so a name that would leave the root is
-// refused here, as the pod's import refuses one.
-func extractTownRoot(t *testing.T, archive string) string {
+// extractTownRoot extracts the night's archive into root with podUnpack, this
+// package's pod unpack, so a name that would leave the root is refused here, as
+// the pod's import refuses one.
+func extractTownRoot(t *testing.T, archive, root string) string {
 	t.Helper()
 	f, err := os.Open(archive)
 	if err != nil {
@@ -96,7 +92,6 @@ func extractTownRoot(t *testing.T, archive string) string {
 	if err != nil {
 		t.Fatalf("%s is not a gzip stream: %v", archive, err)
 	}
-	root := t.TempDir()
 	if err := podUnpack(root, gz); err != nil {
 		t.Fatalf("extracting %s: %v", archive, err)
 	}
@@ -106,9 +101,20 @@ func extractTownRoot(t *testing.T, archive string) string {
 	return root
 }
 
+// restoreNight is the runbook's restore in order: the verify step judges the
+// archive, and only one it accepts is extracted into root.
+func restoreNight(t *testing.T, archive, root string) error {
+	t.Helper()
+	if err := runTownStateBackupVerifyIn(townStateBackupVerifyEnv{archive: archive, out: io.Discard}); err != nil {
+		return err
+	}
+	extractTownRoot(t, archive, root)
+	return nil
+}
+
 // TestTownStateBackupRestoreIsAcceptedBySeed proves a backup night restores: the
-// archive a night holds, extracted into a fresh town root, is accepted unchanged
-// by gt town state seed into an empty claim.
+// archive the nightly step writes, extracted into a fresh town root, is accepted
+// unchanged by gt town state seed into an empty claim.
 func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 	t.Parallel()
 	t.Run("the archive Verify reads holds the settings rows and no secret-shaped file", func(t *testing.T) {
@@ -118,7 +124,7 @@ func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 		if _, err := townbackup.Verify(archive); err != nil {
 			t.Fatalf("the night's archive does not verify: %v", err)
 		}
-		extracted := townTreeSnapshot(t, extractTownRoot(t, archive))
+		extracted := townTreeSnapshot(t, extractTownRoot(t, archive, t.TempDir()))
 		for _, rel := range []string{"settings/config.json", "gastown/settings/config.json"} {
 			if got, want := extracted[rel], hostFileText(t, town, rel); got != want {
 				t.Errorf("the extracted %s = %q, want the town's %q", rel, got, want)
@@ -135,14 +141,11 @@ func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 	})
 	t.Run("the extracted root is seeded into an empty claim and the verify matches", func(t *testing.T) {
 		t.Parallel()
-		archive := backupNightArchive(t, backupRestoreTown(t))
-		// The restore runs the verify command before it extracts, as the runbook does.
-		cmd := &cobra.Command{Use: "verify"}
-		cmd.SetOut(io.Discard)
-		if err := runTownStateBackupVerify(cmd, []string{archive}); err != nil {
-			t.Fatalf("the verify command refused the night's archive: %v", err)
+		root := filepath.Join(t.TempDir(), "restored")
+		if err := restoreNight(t, backupNightArchive(t, backupRestoreTown(t)), root); err != nil {
+			t.Fatalf("restoring the night's archive: %v", err)
 		}
-		s := newSeedSession(t, extractTownRoot(t, archive))
+		s := newSeedSession(t, root)
 		if err := runTownStateSeedIn(s.env); err != nil {
 			t.Fatalf("seeding the restored root: %v\n%s", err, s.out.String())
 		}
@@ -153,18 +156,15 @@ func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 			t.Errorf("the claim has no settings/config.json after the seed: %v", err)
 		}
 	})
-	t.Run("the verify command refuses an archive with no mayor/town.json, so no seed runs", func(t *testing.T) {
+	t.Run("the verify step refuses an archive with no mayor/town.json, so no root is extracted", func(t *testing.T) {
 		t.Parallel()
-		var out bytes.Buffer
-		cmd := &cobra.Command{Use: "verify"}
-		cmd.SetOut(&out)
-		if err := runTownStateBackupVerify(cmd, []string{missingIdentityArchive(t)}); err == nil || !strings.Contains(err.Error(), "mayor/town.json") {
-			t.Fatalf("the verify command = %v, want the missing identity file refused", err)
+		root := filepath.Join(t.TempDir(), "restored")
+		err := restoreNight(t, missingIdentityArchive(t), root)
+		if err == nil || !strings.Contains(err.Error(), "mayor/town.json") {
+			t.Fatalf("restoreNight = %v, want the missing identity file refused", err)
 		}
-		if out.Len() != 0 {
-			t.Errorf("a refusal printed %q, want no counts", out.String())
+		if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+			t.Errorf("a refused archive left a root at %s (stat: %v), so a seed could run over it", root, statErr)
 		}
-		// The verify command is the step that refuses the archive, and the
-		// restore extracts only an archive it accepts, so no root exists to seed.
 	})
 }

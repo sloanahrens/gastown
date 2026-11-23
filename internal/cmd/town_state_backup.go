@@ -18,9 +18,9 @@ var townStateBackupCmd = &cobra.Command{
 	Short: "Judge the nightly town-state backup archives",
 	Long: `Judge the nightly town-state backups the daemon writes (internal/townbackup):
 one dated directory per night under a backup root outside the town root. The
-root is the directory ` + townStateBackupRootSetting + ` names; before running
-these, read how the daemon pod mounts it in docs/architecture.md (The
-Deployment). A night's archive is its state.tar.gz.`,
+root is the directory ` + townStateBackupRootSetting + ` names; the daemon pod
+mounts the host's copy there, as docs/architecture.md (The daemon) says. A
+night's archive is its state.tar.gz.`,
 	RunE: requireSubcommand,
 }
 
@@ -34,8 +34,8 @@ no regular file or no mayor/town.json, and one carrying a secret-shaped name or
 a credential are all refused.
 
 The archive is <backup-root>/<date>/state.tar.gz, the root being the directory
-` + townStateBackupRootSetting + ` names, which the daemon pod mounts the
-host's copy at (docs/architecture.md).
+` + townStateBackupRootSetting + ` names; docs/architecture.md (The daemon) says
+where the daemon pod mounts the host's copy.
 
 Examples:
   gt town state backup verify <backup-root>/2026-11-18/state.tar.gz`,
