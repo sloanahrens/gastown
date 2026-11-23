@@ -211,6 +211,7 @@ func (d *Daemon) checkRedHold() {
 		Waiting:   d.redHoldWaiting,
 		Update:    d.redHoldUpdate,
 		PairStuck: d.redHoldPairStuck,
+		MainRed:   d.redHoldMainRed,
 		Now:       d.clk().Now,
 	}
 	if err := runRedHold(d.config.TownRoot, src, d.redHoldUnread, d.logger.Printf); err != nil {
@@ -259,6 +260,17 @@ func (d *Daemon) redHoldPairStuck() []string {
 		}
 	}
 	return shas
+}
+
+// redHoldMainRed reports whether one rig's main is red: its last run differs
+// from the last green, or a revert is in flight. A missing file is the zero
+// state (not red); an unreadable one is the error, which keeps the previous hold.
+func (d *Daemon) redHoldMainRed(rig string) (bool, error) {
+	st, err := fileMainState{path: RedMainStatePath(d.config.TownRoot, rig)}.Load()
+	if err != nil {
+		return false, err
+	}
+	return (st.LastRun != "" && st.LastRun != st.LastGreen) || st.Revert != nil, nil
 }
 
 // redHoldShort returns the first 12 characters of a commit id, or the whole id
