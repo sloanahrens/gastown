@@ -126,6 +126,11 @@ func token(f Field) string {
 	if f.Name == FieldSweep {
 		return sweepToken(f)
 	}
+	// The red hold's kinds are a list to scan, so they keep their spacing
+	// where every other value is compacted (gt-xq3s9u).
+	if f.Name == FieldDispatch && strings.HasPrefix(f.Value, redHoldPrefix) {
+		return f.Key() + "=" + f.Value + "[R]"
+	}
 	switch f.Tag {
 	case Unknown:
 		return f.Key() + "[?]"
