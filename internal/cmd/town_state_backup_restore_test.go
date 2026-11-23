@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -141,4 +142,44 @@ func TestTownStateBackupRestoreIsAcceptedBySeed(t *testing.T) {
 			t.Errorf("a refused archive left a root at %s (stat: %v), so a seed could run over it", root, statErr)
 		}
 	})
+}
+
+// restoreBackupNight is the restore a test performs by hand, as the runbook has
+// an operator do it (docs/daemon-container.md): the production verify judges
+// the archive, and only an archive it accepts is imported into root, so a
+// refused night leaves no root a seed could run over. There is no production
+// restore command by design (gt-9x9bou: any production change is out of scope). Import writes
+// daemon-owned rows only, so the backup set's shared rows are passed as
+// daemon-owned: a fresh restore root has no session to own them. It writes the
+// town settings file without the Mac's daemon.supervisor, which the seed strips
+// from the claim as well.
+func restoreBackupNight(archive, root string, out io.Writer) error {
+	if err := runTownStateBackupVerifyIn(townStateBackupVerifyEnv{archive: archive, out: out}); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("creating the restore root %s: %w", root, err)
+	}
+	f, err := os.Open(archive)
+	if err != nil {
+		return fmt.Errorf("restoring %s: %w", archive, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("restoring %s: %w", archive, err)
+	}
+	m := &townstate.Manifest{Entries: townstate.Default().Backup()}
+	for i := range m.Entries {
+		m.Entries[i].Owner = townstate.OwnerDaemon
+	}
+	s, err := townstate.Import(gz, root, m, townstate.ImportOptions{})
+	if cerr := gz.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	fmt.Fprintln(out, s.String())
+	if err != nil {
+		return fmt.Errorf("restoring the town state: %w", err)
+	}
+	return nil
 }
