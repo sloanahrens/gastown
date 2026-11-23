@@ -68,21 +68,29 @@ func redHoldSweepOf(rig string, st tierSweepState, err error) (redHoldSweep, boo
 	return s, true
 }
 
+// redHoldWaitingKey keys unreadLog for the waiting count; no rig directory name can be it.
+const redHoldWaitingKey = "\x00waiting"
+
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
-// names in read order, the reader for one name, and the clock for a new Since.
+// names in read order, the reader for one name, the waiter for the count of
+// landings not in the installed build, and the clock for a new Since.
 type redHoldSources struct {
-	Rigs []string
-	Read func(rig string) (tierSweepState, error)
-	Now  func() time.Time // nil means time.Now
+	Rigs    []string
+	Read    func(rig string) (tierSweepState, error)
+	Waiting func() (int, error) // nil means no count
+	Now     func() time.Time    // nil means time.Now
 }
 
 // redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
 // A rig whose record could not be read is left out of the inputs, keeping its
 // prior state, and named in the second value in Rigs order so the caller can log
-// it.
+// it. OldestGreenAt is the oldest LastGreenAt across the known rigs, and the zero
+// time when any known rig has none.
 func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 	var in redHoldInputs
 	var unknown []string
+	var oldest time.Time
+	noGreen := false
 	for _, rig := range src.Rigs {
 		st, err := src.Read(rig)
 		s, ok := redHoldSweepOf(rig, st, err)
@@ -91,7 +99,13 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 			continue
 		}
 		in.Sweeps = append(in.Sweeps, s)
+		if st.LastGreenAt.IsZero() {
+			oldest, noGreen = time.Time{}, true
+		} else if !noGreen && (oldest.IsZero() || st.LastGreenAt.Before(oldest)) {
+			oldest = st.LastGreenAt
+		}
 	}
+	in.OldestGreenAt = oldest
 	return in, unknown
 }
 
@@ -159,17 +173,18 @@ func redHoldShort(id string) string {
 }
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the
-// record and logging the change once. An unreadable sweep record leaves the file
-// untouched, so it never clears a hold, and is logged once per rig until that
-// rig reads again; unreadLog holds those rigs across heartbeats and is non-nil.
+// record and logging the change once. An unreadable sweep record or waiting
+// count leaves the file untouched, so it never clears a hold, and is logged once
+// until it reads again; unreadLog holds those across heartbeats and is non-nil.
 func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
 	if err != nil {
 		return fmt.Errorf("read red hold: %w", err)
 	}
-	// Forget the rigs that read again, so a later outage logs anew.
-	maps.DeleteFunc(unreadLog, func(rig string, _ bool) bool { return !slices.Contains(unknown, rig) })
+	// Forget the rigs that read again, so a later outage logs anew; the waiting
+	// count is forgotten below, once it reads.
+	maps.DeleteFunc(unreadLog, func(key string, _ bool) bool { return key != redHoldWaitingKey && !slices.Contains(unknown, key) })
 	if len(unknown) > 0 {
 		for _, rig := range unknown {
 			if !unreadLog[rig] {
@@ -179,6 +194,18 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 		}
 		return nil
 	}
+	if src.Waiting != nil {
+		waiting, err := src.Waiting()
+		if err != nil {
+			if !unreadLog[redHoldWaitingKey] {
+				unreadLog[redHoldWaitingKey] = true
+				logf("red hold: waiting landings unreadable; keeping the previous state")
+			}
+			return nil
+		}
+		in.Waiting = waiting
+	}
+	delete(unreadLog, redHoldWaitingKey)
 	now := src.Now
 	if now == nil {
 		now = time.Now

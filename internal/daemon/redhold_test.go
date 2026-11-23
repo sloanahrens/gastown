@@ -251,6 +251,69 @@ func TestRedHoldStepSetsThenClears(t *testing.T) {
 	require.Equal(t, []string{"red hold: set: sweep-red", "red hold: cleared"}, logs, "each change logs once")
 }
 
+// TestRedHoldStepDriftFeedsInputs pins that the step hands the evaluator the
+// waiting count and the oldest green sweep across the known rigs.
+func TestRedHoldStepDriftFeedsInputs(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	behind := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldBehindMain, Since: now, Detail: "100 landings behind main"}}
+	stale := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldGreenStale, Since: now, Detail: "no green sweep for 4h"}}
+	old := tierSweepState{LastGreenAt: now.Add(-4 * time.Hour)}
+	count := func(n int) func() (int, error) { return func() (int, error) { return n, nil } }
+	tests := []struct {
+		name   string
+		rigs   []string
+		states map[string]tierSweepState
+		wait   func() (int, error)
+		want   []dispatch.RedHoldReason
+	}{
+		{"waiting at the threshold holds behind-main", []string{"gastown"}, map[string]tierSweepState{"gastown": {}}, count(100), behind},
+		{"the oldest green sweep 4 hours old holds green-stale", []string{"alpha", "beta"}, map[string]tierSweepState{"alpha": {LastGreenAt: now.Add(-time.Hour)}, "beta": old}, nil, stale},
+		{"a known rig with no green sweep leaves the time unknown", []string{"alpha", "beta"}, map[string]tierSweepState{"alpha": old, "beta": {}}, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			src := redHoldSources{Rigs: tt.rigs, Read: func(rig string) (tierSweepState, error) { return tt.states[rig], nil }, Waiting: tt.wait, Now: func() time.Time { return now }}
+			require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, rec.Reasons)
+		})
+	}
+}
+
+// TestRedHoldStepDriftWaitingError pins the keep-previous rule for an unreadable
+// count and that a nil counter contributes 0.
+func TestRedHoldStepDriftWaitingError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	const line = "red hold: waiting landings unreadable; keeping the previous state"
+	boom := func() (int, error) { return 0, errors.New("counting landings") }
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	unreadLog := map[string]bool{}
+	step := func(wait func() (int, error)) {
+		src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{}, nil }, Waiting: wait}
+		require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	}
+
+	step(boom)
+	step(boom)
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, redHoldSentinel, rec, "an unreadable count keeps the file")
+	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
+
+	step(nil)
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a nil count contributes 0 and the green record clears the hold")
+
+	step(boom)
+	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
+}
+
 // TestRedHoldStepUnchangedIsSilent pins the runs that leave the file and log alone.
 func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
 	t.Parallel()
