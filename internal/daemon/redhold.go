@@ -35,6 +35,9 @@ type redHoldInputs struct {
 	Sweeps []redHoldSweep
 	// Waiting is the landings on main that are not in the installed build.
 	Waiting int
+	// WaitingUnread marks the count unread: behind-main keeps its previous
+	// reason and every other trigger still reads.
+	WaitingUnread bool
 	// OldestGreenAt is the oldest LastGreenAt across the swept rigs; the zero
 	// time means unknown and triggers nothing.
 	OldestGreenAt time.Time
@@ -134,8 +137,9 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 // kind, each keeping prev's Since when the kind already held and taking now when
 // new. A sweep under redHoldSweepCycles contributes nothing; at or above it is
 // sweep-no-result when unread, sweep-red otherwise, with Detail naming every rig.
-// Waiting at or above redHoldBehind is behind-main; an OldestGreenAt older than
-// redHoldGreenStale is green-stale, and the zero time is unknown and adds nothing.
+// Waiting at or above redHoldBehind is behind-main; an unread count keeps prev's
+// behind-main reason. An OldestGreenAt older than redHoldGreenStale is
+// green-stale, and the zero time is unknown and adds nothing.
 // An UpdateOutcome other than "", "ok" or "running" is roll-failed; ImagesRetries
 // at or above tierSweepImagesRetryMax is images-failed; any PairStuck sha is
 // pair-stuck; any MainRed rig is main-red, with Detail naming every rig.
@@ -151,7 +155,13 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 		}
 		details[kind] = append(details[kind], fmt.Sprintf("%s: %d red cycles", s.Rig, s.RedCycles))
 	}
-	if in.Waiting >= redHoldBehind {
+	if in.WaitingUnread {
+		for _, r := range prev.Reasons {
+			if r.Kind == dispatch.RedHoldBehindMain {
+				details[r.Kind] = []string{r.Detail}
+			}
+		}
+	} else if in.Waiting >= redHoldBehind {
 		details[dispatch.RedHoldBehindMain] = []string{fmt.Sprintf("%d landings behind main", in.Waiting)}
 	}
 	if age := now.Sub(in.OldestGreenAt); !in.OldestGreenAt.IsZero() && age > redHoldGreenStale {
@@ -207,8 +217,8 @@ func (d *Daemon) checkRedHold() {
 // redHoldWaiting counts the landings waiting to deploy, as the update patrol
 // reads them: the town's gt source checkout and the installed build's commit.
 // A town with no checkout is an error, not zero: without the checkout nothing
-// proves a landing is not in the installed build. The step keeps its previous
-// hold on an error and logs that the count went unread.
+// proves a landing is not in the installed build. The step keeps the previous
+// behind-main reason on an error and logs that the count went unread.
 func (d *Daemon) redHoldWaiting() (int, error) {
 	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
 	if err != nil {
@@ -231,9 +241,11 @@ func redHoldShort(id string) string {
 }
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the
-// record and logging the change once. An unreadable source leaves the file
-// untouched, so it never clears a hold, and is logged once until it reads again;
-// unreadLog holds those across heartbeats and is non-nil.
+// record and logging the change once. An unreadable sweep record, update state
+// or main-red read leaves the file untouched, so it never clears a hold; an
+// unread waiting count keeps only its behind-main reason and every other trigger
+// still reads. Each outage is logged once until it reads again; unreadLog holds
+// those across heartbeats and is non-nil.
 func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
@@ -257,15 +269,18 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	if src.Waiting != nil {
 		waiting, err := src.Waiting()
 		if err != nil {
+			in.WaitingUnread = true
 			if !unreadLog[redHoldWaitingKey] {
 				unreadLog[redHoldWaitingKey] = true
 				logf("red hold: waiting landings unreadable; keeping the previous state")
 			}
-			return nil
+		} else {
+			in.Waiting = waiting
 		}
-		in.Waiting = waiting
 	}
-	delete(unreadLog, redHoldWaitingKey)
+	if !in.WaitingUnread {
+		delete(unreadLog, redHoldWaitingKey)
+	}
 	if src.Update != nil {
 		outcome, target, err := src.Update()
 		if err != nil {

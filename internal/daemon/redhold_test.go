@@ -35,9 +35,6 @@ func TestHeartbeatRedHoldRunsTheStep(t *testing.T) {
 	require.NoError(t, writeTierSweepState(townRoot, "gastown", tierSweepState{RedCycles: redHoldSweepCycles}))
 	logs := &lockedBuffer{}
 	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0)}
-	// The step's waiting read needs the town's checkout and a readable build.
-	createUpdateSource(t, townRoot)
-	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return &version.StaleBinaryInfo{BinaryCommit: unknownCommit} }
 	found[0].run(d)
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
@@ -434,33 +431,35 @@ func TestRedHoldStepRollUpdateError(t *testing.T) {
 }
 
 // TestRedHoldStepDriftWaitingError pins the keep-previous rule for an unreadable
-// count and that a nil counter contributes 0.
+// count: only behind-main survives, every other trigger still reads, and a nil
+// counter contributes 0.
 func TestRedHoldStepDriftWaitingError(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 	const line = "red hold: waiting landings unreadable; keeping the previous state"
+	behind := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldBehindMain, Detail: "5 landings behind main"}}}
+	require.NoError(t, dispatch.WriteRedHold(townRoot, behind))
 	boom := func() (int, error) { return 0, errors.New("counting landings") }
 	var logs []string
 	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	unreadLog := map[string]bool{}
-	step := func(wait func() (int, error)) {
-		src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{}, nil }, Waiting: wait}
-		require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
+	step := func(cycles int, wait func() (int, error)) {
+		read := func(string) (tierSweepState, error) { return tierSweepState{RedCycles: cycles}, nil }
+		require.NoError(t, runRedHold(townRoot, redHoldSources{Rigs: []string{"gastown"}, Read: read, Waiting: wait}, unreadLog, logf))
 	}
 
-	step(boom)
-	step(boom)
+	step(redHoldSweepCycles, boom)
+	step(redHoldSweepCycles, boom)
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
-	require.Equal(t, redHoldSentinel, rec, "an unreadable count keeps the file")
-	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
+	require.Equal(t, []string{dispatch.RedHoldBehindMain, dispatch.RedHoldSweepRed}, redHoldKinds(rec), "the sweep reason publishes while an unread count keeps behind-main")
+	require.Equal(t, []string{line, "red hold: set: behind-main, sweep-red"}, logs, "two heartbeats log one outage once")
 
-	step(nil)
+	step(0, nil)
 	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a nil count contributes 0 and the green record clears the hold")
 
-	step(boom)
-	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
+	step(0, boom)
+	require.Equal(t, []string{line, "red hold: set: behind-main, sweep-red", "red hold: cleared", line}, logs, "a second outage logs again")
 }
 
 // TestRedHoldStepUnchangedIsSilent pins the runs that leave the file and log alone.
@@ -568,8 +567,7 @@ func TestCheckRedHoldWaiting(t *testing.T) {
 	repo := createUpdateSource(t, fx.d.config.TownRoot)
 	fx.git.InitRepo(t, repo)
 	build := fx.git.Commit(t, repo, "main", "installed build", map[string]string{"a.txt": "a\n"})
-	later := fx.git.Commit(t, repo, "main", "landed after the build", map[string]string{"b.txt": "b\n"})
-	fx.appendLandings(t, later)
+	fx.appendLandings(t, fx.git.Commit(t, repo, "main", "landed after the build", map[string]string{"b.txt": "b\n"}))
 	stale := &version.StaleBinaryInfo{BinaryCommit: build, RepoCommit: unknownCommit}
 	fx.d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return stale }
 	got, err := fx.d.redHoldWaiting()
@@ -577,21 +575,23 @@ func TestCheckRedHoldWaiting(t *testing.T) {
 	require.Equal(t, 1, got, "the landing after the build is waiting")
 }
 
-// TestCheckRedHoldWaitingErrorKeepsTheHold pins that an unreadable waiting count
-// keeps the previous hold and logs the alarm once: an unreadable staleness, an
-// unknown installed build, or a town with no gt source checkout.
-func TestCheckRedHoldWaitingErrorKeepsTheHold(t *testing.T) {
+// TestCheckRedHoldWaitingStep pins the step's wiring: a readable count clears
+// behind-main and logs no alarm, and each unreadable read keeps it, logging once.
+func TestCheckRedHoldWaitingStep(t *testing.T) {
 	t.Parallel()
+	const alarm = "red hold: waiting landings unreadable; keeping the previous state\n"
+	behind := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldBehindMain, Detail: "5 landings behind main"}}}
 	for name, tc := range map[string]struct {
 		info   *version.StaleBinaryInfo
 		source bool
+		alarm  bool
 	}{
-		"an unreadable staleness":    {nil, true},
-		"an unknown installed build": {&version.StaleBinaryInfo{}, true},
-		"no gt source checkout":      {&version.StaleBinaryInfo{}, false},
+		"a readable count":           {&version.StaleBinaryInfo{BinaryCommit: unknownCommit}, true, false},
+		"an unreadable staleness":    {nil, true, true},
+		"an unknown installed build": {&version.StaleBinaryInfo{}, true, true},
+		"no gt source checkout":      {&version.StaleBinaryInfo{}, false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			townRoot := t.TempDir()
 			logs := &lockedBuffer{}
 			d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(logs, "", 0)}
@@ -599,14 +599,19 @@ func TestCheckRedHoldWaitingErrorKeepsTheHold(t *testing.T) {
 				createUpdateSource(t, townRoot)
 			}
 			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return tc.info }
-			require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+			require.NoError(t, dispatch.WriteRedHold(townRoot, behind))
 			for range 2 {
 				d.checkRedHold()
 			}
+			if !tc.alarm {
+				require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a readable count clears behind-main")
+				require.Equal(t, "red hold: cleared\n", logs.String(), "a readable count logs no alarm")
+				return
+			}
 			rec, err := dispatch.ReadRedHold(townRoot)
 			require.NoError(t, err)
-			require.Equal(t, redHoldSentinel, rec, "a waiting error keeps the previous hold")
-			require.Equal(t, "red hold: waiting landings unreadable; keeping the previous state\n", logs.String(), "two heartbeats log the alarm once")
+			require.Equal(t, behind, rec, "an unreadable count keeps the previous behind-main reason")
+			require.Equal(t, alarm, logs.String(), "two heartbeats log the alarm once")
 		})
 	}
 }
