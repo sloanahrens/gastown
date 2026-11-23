@@ -98,6 +98,10 @@ func TestTownStateNightlyWritesVerifiedNight(t *testing.T) {
 			t.Errorf("the log names the town's %s: %q", name, logs.String())
 		}
 	}
+	// Nor a path: no line names the backup root (gt-18rrbw).
+	if logged := logs.String(); strings.Contains(logged, root) {
+		t.Errorf("the log carries a backup path: %q", logged)
+	}
 }
 
 // TestTownStateNightlyArchiveMode is the acceptance box: the archive reads 0600
@@ -316,8 +320,8 @@ func TestTownStateNightlyRefusesToCommit(t *testing.T) {
 		},
 		{
 			// A stale partial holds a directory where the manifest goes, so
-			// the commit fails; the partial it leaves is removed by the next
-			// run or by rotation.
+			// the commit fails; the partial it leaves is reused by the next
+			// run or removed by rotation.
 			name: "commit fails",
 			root: func(t *testing.T) string {
 				t.Helper()
@@ -439,6 +443,40 @@ func TestTownStateNightlyRotatesTo14(t *testing.T) {
 	}
 	if _, err := os.Stat(townbackup.Dir(root, now)); err != nil {
 		t.Errorf("rotation removed tonight's night: %v", err)
+	}
+}
+
+// TestTownStateNightlyWarnsWhenRotationFails drives the branch a failed
+// rotation takes: the night is committed and verified, so the run reports
+// success and the log warns instead (gt-18rrbw). The rotation is a failing stub
+// rather than a directory whose mode denies the removal, so the branch runs
+// under any uid, Windows included, where the mode bits would be ignored.
+func TestTownStateNightlyWarnsWhenRotationFails(t *testing.T) {
+	t.Parallel()
+	town := nightlyTestTown(t)
+	root := t.TempDir()
+	// One kept night shows the run does not lose what rotation could not trim.
+	kept := time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC)
+	nightlyTestSeedNight(t, root, kept)
+	now := nightlyTestNow()
+	var logs strings.Builder
+	d := nightlyTestDaemon(town, &logs)
+	rotateErr := errors.New("rotation could not trim the backup root")
+	rotate := func(string, int) ([]string, error) { return nil, rotateErr }
+
+	if err := d.takeTownStateNight(root, now, rotate); err != nil {
+		t.Fatalf("takeTownStateNight = %v, want success: a rotation failure only costs space", err)
+	}
+
+	if logged := logs.String(); !strings.Contains(logged, "WARNING: town-state backup rotation: ") ||
+		!strings.Contains(logged, rotateErr.Error()) {
+		t.Errorf("the log carries no rotation warning naming the failure: %q", logged)
+	}
+	if _, err := os.Stat(townbackup.Dir(root, now)); err != nil {
+		t.Errorf("the rotation failure lost tonight's night: %v", err)
+	}
+	if _, err := os.Stat(townbackup.Dir(root, kept)); err != nil {
+		t.Errorf("the rotation failure did not leave the kept night in place: %v", err)
 	}
 }
 
