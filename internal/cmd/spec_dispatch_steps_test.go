@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -81,5 +83,87 @@ func TestSpecDispatchCandidateStepsNilTimer(t *testing.T) {
 	}
 	if got := steps.all(); got != nil {
 		t.Fatalf("a nil timer reported %+v, want none", got)
+	}
+}
+
+// TestSpecDispatchCandidateStepsEstimateSum: two candidates whose estimate
+// takes different amounts of the tick's clock report the sum under the estimate
+// step (gt-wga76n).
+func TestSpecDispatchCandidateStepsEstimateSum(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-b", 2, "2026-09-29T11:00:00Z"),
+	)
+	clock := &specStepClock{now: specTestNow}
+	env := f.env()
+	env.Now = clock.Now
+	env.PerTick = 2
+	env.StoryPointShadow = true
+	costs := map[string]time.Duration{"gt-a": 3 * time.Second, "gt-b": 4 * time.Second}
+	env.StoryPointEstimate = func(_ context.Context, id string) (specEstimateOutcome, error) {
+		clock.advance(costs[id])
+		return splitOutcome("estimated", 2, 5, "all", "nearest beads: gt-c"), nil
+	}
+	r := runSpecDispatchCycle(env)
+	if got, want := r.CandidatesSteps["estimate"], 7*time.Second; got != want {
+		t.Fatalf("CandidatesSteps[estimate] = %v, want %v (report %+v)", got, want, r.CandidatesSteps)
+	}
+}
+
+// TestSpecDispatchCandidateStepsEstimateHeldBefore: a candidate the tick holds
+// before the story-point step is never estimated, so its estimate time is not
+// in the report (gt-wga76n).
+func TestSpecDispatchCandidateStepsEstimateHeldBefore(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-held", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-slung", 2, "2026-09-29T11:00:00Z"),
+	)
+	held := f.specs["gt-held"]
+	held.Metadata = contentionMetadata(specTestNow.Add(-time.Minute), 1, specTestNow.Add(time.Hour))
+	f.specs["gt-held"] = held
+	clock := &specStepClock{now: specTestNow}
+	env := f.env()
+	env.Now = clock.Now
+	env.PerTick = 2
+	env.StoryPointSplitOver = 15
+	var estimated []string
+	env.StoryPointEstimate = func(_ context.Context, id string) (specEstimateOutcome, error) {
+		estimated = append(estimated, id)
+		clock.advance(4 * time.Second)
+		return splitOutcome("estimated", 2, 5, "all", "nearest beads: gt-c"), nil
+	}
+	r := runSpecDispatchCycle(env)
+	if want := []string{"gt-slung"}; !slices.Equal(estimated, want) {
+		t.Fatalf("estimated %v, want only %v", estimated, want)
+	}
+	if got, want := r.CandidatesSteps["estimate"], 4*time.Second; got != want {
+		t.Fatalf("CandidatesSteps[estimate] = %v, want %v (report %+v)", got, want, r.CandidatesSteps)
+	}
+}
+
+// TestSpecDispatchCandidateStepsEstimateHoldsCounted: the step that holds a
+// bead for splitting is still timed under estimate (gt-wga76n).
+func TestSpecDispatchCandidateStepsEstimateHoldsCounted(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	clock := &specStepClock{now: specTestNow}
+	env := f.env()
+	env.Now = clock.Now
+	env.StoryPointSplitOver = 15
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		clock.advance(9 * time.Second)
+		return splitOutcome("estimated", 13, 20, "all", "nearest beads: gt-b"), nil
+	}
+	r := runSpecDispatchCycle(env)
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want the bead held for splitting", f.slung)
+	}
+	if len(splitHoldLines(r.Skipped)) == 0 {
+		t.Fatalf("skipped = %+v, want the split hold line", r.Skipped)
+	}
+	if got, want := r.CandidatesSteps["estimate"], 9*time.Second; got != want {
+		t.Fatalf("CandidatesSteps[estimate] = %v, want %v (report %+v)", got, want, r.CandidatesSteps)
 	}
 }
