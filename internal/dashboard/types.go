@@ -1109,8 +1109,10 @@ type Config struct {
 	// Update reads the gt update job's run from the record it writes. Nil, or
 	// a nil return, leaves the feed without an update section.
 	Update func() *UpdateStatus
-	// SystemUpdates reads the System updates section's commit rows. Nil leaves
-	// the feed without the section.
+	// SystemUpdates reads the System updates section's joined commit rows and
+	// sets RollUnknown when the update record cannot be read; the hub fills the
+	// Now block and SweepUnknown from its own reads. Nil leaves the feed without
+	// the section.
 	SystemUpdates func() *SystemUpdates
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed

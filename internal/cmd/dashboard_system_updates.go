@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -29,5 +30,17 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *das
 			EndedAt:   run.EndedAt,
 		})
 	}
-	return dashboard.NewSystemUpdates(ts.Sweeps, nil, rolls, ts.Unavailable || err != nil)
+	su := dashboard.NewSystemUpdates(ts.Sweeps, nil, rolls, ts.Unavailable || err != nil)
+	// The update reader answers nil for both no run and a record it cannot read,
+	// so the record is read here to tell the page which one a missing roll is.
+	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))
+	return su
+}
+
+// updateRecordUnreadable reports whether the update job's state record exists
+// but cannot be read. A missing record is the answer for a town that never ran
+// the job, which is not unknown.
+func updateRecordUnreadable(dir string) bool {
+	_, err := (&update.Store{Dir: dir}).Read()
+	return err != nil && !errors.Is(err, update.ErrNoState)
 }

@@ -67,10 +67,27 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableHistory(t *testing.T) {
 	// A directory where the history file belongs: the file cannot be read as one.
 	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "history.jsonl"), 0o700))
 
-	got := systemUpdates(root, newTierSweepReader(root), time.Now())
+	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
 
 	assert.True(t, got.Unavailable)
 	assert.Empty(t, got.Rows)
+	assert.False(t, got.RollUnknown, "no state record is the answer for a town that never ran the job")
+}
+
+// An update record that exists but cannot be read marks the roll unknown: a
+// section with no Now.Roll is then a reading that failed, never a town with no
+// roll running.
+func TestSystemUpdatesNowSupplyFlagsAnUnreadableUpdateRecord(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeEmptyDaemonLog(t, root)
+	// A directory where the state record belongs: it cannot be read as a file.
+	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "state.json"), 0o700))
+
+	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+
+	assert.True(t, got.RollUnknown)
 }
 
 // A sweep log that cannot be read marks the section unavailable even when the

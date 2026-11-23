@@ -2,9 +2,9 @@ package dashboard
 
 // The System updates section is the feed's join of landed commits (rows, from
 // system_updates.go) and the Now block, which names what runs at this moment: a
-// gt update roll, a tier sweep, or both. The Now block is read from the update
-// section and the tier sweep's running record the hub already holds, so it
-// names the same run the page's other panes name.
+// gt update roll, a tier sweep, or both. The poll reads the update record and
+// the tier sweep's running record itself, so the block names the same moment as
+// the section it rides on.
 
 // SystemUpdates is the feed's System updates section. Rows are the newest landed
 // commits, newest first. Now names the roll or sweep running at the poll's
@@ -15,6 +15,11 @@ type SystemUpdates struct {
 	Now         *SystemUpdatesNow `json:"now,omitempty"`
 	Rows        []SystemUpdateRow `json:"rows"`
 	Unavailable bool              `json:"unavailable,omitempty"`
+	// RollUnknown and SweepUnknown say the source behind one half of Now could
+	// not be read, so a missing half is a reading that failed, never a town with
+	// nothing running.
+	RollUnknown  bool `json:"roll_unknown,omitempty"`
+	SweepUnknown bool `json:"sweep_unknown,omitempty"`
 }
 
 // SystemUpdatesNow is what runs right now: a roll, a sweep, or both.
@@ -67,16 +72,27 @@ func systemUpdatesNow(u *UpdateStatus, ts *TierSweep) *SystemUpdatesNow {
 }
 
 // pollSystemUpdates reads the section into the feed. A nil read keeps the last
-// section, the way pollTierSweep does. The Now block is built from the update
-// section and the tier sweep as the hub holds them at this poll.
+// section, the way pollTierSweep does. The update record and the tier sweep are
+// read at this poll's own instant, so the Now block names the same moment as the
+// section rather than whatever an older poll left in the feed. A sweep source
+// that is missing or unreadable marks its half unknown, never idle.
 func (h *Hub) pollSystemUpdates() {
 	su := h.cfg.SystemUpdates()
 	if su == nil {
 		return
 	}
+	var update *UpdateStatus
+	if h.cfg.Update != nil {
+		update = h.cfg.Update()
+	}
+	var sweep *TierSweep
+	if h.cfg.TierSweep != nil {
+		sweep = h.cfg.TierSweep()
+	}
+	su.Now = systemUpdatesNow(update, sweep)
+	su.SweepUnknown = sweep == nil || sweep.Unavailable
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	su.Now = systemUpdatesNow(h.state.Update, h.state.TierSweep)
 	h.state.SystemUpdates = su
 	h.publishLocked()
 }
