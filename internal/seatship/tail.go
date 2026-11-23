@@ -11,14 +11,16 @@ import (
 
 // TailOf returns the last n bytes of the newest *.jsonl transcript under
 // projectsDir, starting at a line boundary, and "" when there is none. A
-// projectsDir the walk cannot enter is an error, never "".
+// projectsDir the walk cannot enter is an error, never "". The newest
+// transcript is read whole and only its tail is returned.
 func TailOf(projectsDir string, n int) (string, error) {
-	newest, newestTime := "", time.Time{}
+	newest := ""
+	var newestTime time.Time
 	err := filepath.WalkDir(projectsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return err
 		}
-		info, err := d.Info()
+		info, err := os.Stat(path)
 		if err != nil {
 			return err
 		}
@@ -30,30 +32,19 @@ func TailOf(projectsDir string, n int) (string, error) {
 	if err != nil || newest == "" {
 		return "", err
 	}
-	f, err := os.Open(newest)
+	b, err := os.ReadFile(newest)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	start := min(max(info.Size()-int64(n), 0), info.Size())
-	cut := start > 0
-	if cut { // read one byte back, so a boundary right at start is seen
-		start--
-	}
-	buf := make([]byte, info.Size()-start)
-	if _, err := f.ReadAt(buf, start); err != nil {
-		return "", err
-	}
-	if cut { // drop the partial first line
-		i := bytes.IndexByte(buf, '\n')
-		if i < 0 {
-			return "", nil
+	if start := min(max(len(b)-n, 0), len(b)); start > 0 {
+		if b[start-1] != '\n' { // the window starts mid-line: drop its remains
+			i := bytes.IndexByte(b[start:], '\n')
+			if i < 0 {
+				return "", nil
+			}
+			start += i + 1
 		}
-		buf = buf[i+1:]
+		b = b[start:]
 	}
-	return string(buf), nil
+	return string(b), nil
 }

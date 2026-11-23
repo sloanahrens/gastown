@@ -48,11 +48,22 @@ func TestSeatShipTail(t *testing.T) {
 	}
 }
 
-func TestSeatShipTailUnreadable(t *testing.T) {
+func TestSeatShipTailErrors(t *testing.T) {
 	t.Parallel()
-	file := filepath.Join(t.TempDir(), "plain")
-	must(t, os.WriteFile(file, nil, 0o644))
-	if _, err := TailOf(filepath.Join(file, "projects"), 16); err == nil {
+	plain := filepath.Join(t.TempDir(), "plain")
+	must(t, os.WriteFile(plain, nil, 0o644))
+	if _, err := TailOf(filepath.Join(plain, "projects"), 16); err == nil {
 		t.Error("TailOf under a regular file = nil error, want an error")
+	}
+	dangling := t.TempDir()
+	must(t, os.Symlink(filepath.Join(dangling, "gone"), filepath.Join(dangling, "dangling.jsonl")))
+	if _, err := TailOf(dangling, 16); err == nil {
+		t.Error("TailOf over a dangling transcript = nil error, want an error")
+	}
+	dir := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	must(t, os.Symlink(filepath.Join(dir, "sub"), filepath.Join(dir, "x.jsonl")))
+	if _, err := TailOf(dir, 16); err == nil {
+		t.Error("TailOf read a directory as a transcript, want an error")
 	}
 }
