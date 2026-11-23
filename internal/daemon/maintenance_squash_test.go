@@ -847,6 +847,101 @@ func TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain(t *testing.T) {
 	}
 }
 
+// TestSquashArchiveBehindTheCutStillRunsThePass is the first row: an archive
+// record that is non-zero but still before the cut is not coverage. The pass
+// runs — the commit read is made — and only the pass's result decides the run:
+// one that ends short of the cut leaves the run waiting, one that reaches the
+// cut starts it.
+func TestSquashArchiveBehindTheCutStillRunsThePass(t *testing.T) {
+	t.Parallel()
+	cut := squashTestNow.AddDate(0, 0, -7)
+	through := cut.Add(-2 * time.Hour)
+	cases := map[string]struct {
+		commits []archiveCommit
+		limit   int
+		runs    bool
+	}{
+		"the pass stops short of the cut": {
+			commits: []archiveCommit{
+				{Hash: "s1", Committer: "gastown/crew/overseer", Date: cut.Add(-90 * time.Minute), Message: "behind"},
+				{Hash: "s2", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "still behind"},
+			},
+			limit: 1,
+			runs:  false,
+		},
+		"the pass reaches the cut": {
+			commits: []archiveCommit{
+				{Hash: "r1", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "behind"},
+				{Hash: "r2", Committer: "gastown/crew/overseer", Date: cut.Add(time.Hour), Message: "past the cut"},
+			},
+			limit: 0,
+			runs:  true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			seedSquashArchiveThrough(t, d, through)
+			fake := withSquashArchive(t, d, t.TempDir(), tc.commits, tc.limit)
+			d.maint.archiveMaxBatches = 1
+			var runs int
+			scriptSquashRun(d, &runs, doltsquash.RunResult{}, nil)
+
+			d.runScheduledMaintenance()
+
+			if fake.reads == 0 {
+				t.Errorf("the pass did not run for an archive through %s, behind the cut %s: %q",
+					through.UTC().Format(time.RFC3339), cut.UTC().Format(time.RFC3339), logs.String())
+			}
+			if tc.runs {
+				if runs != 1 {
+					t.Errorf("the run did not start once the pass reached the cut: %d run(s): %q", runs, logs.String())
+				}
+				return
+			}
+			if runs != 0 {
+				t.Errorf("a run started on an archive short of the cut: %d run(s): %q", runs, logs.String())
+			}
+			want := "squash: gt: the run waits for the next day's check: the history archive is through " +
+				tc.commits[0].Date.UTC().Format(time.RFC3339) + ", short of the cut " + cut.UTC().Format(time.RFC3339)
+			if got := logs.String(); !strings.Contains(got, want) {
+				t.Errorf("the short pass was not deferred naming its through-date and the cut: %q", got)
+			}
+		})
+	}
+}
+
+// TestSquashArchiveRunReceivesTheCutTheArchiveWasAskedToReach is the second row: the
+// run squashes to the archive's cut, dec.Cut, and not one a step moves. The
+// seam runSquashDatabase hands doltsquash.Run carries the cut it was given, so a
+// cut moved past dec.Cut — which would discard commits the archive was never
+// asked to cover — fails here.
+func TestSquashArchiveRunReceivesTheCutTheArchiveWasAskedToReach(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var got time.Time
+	runs := 0
+	d.maint.squashRun = func(_ context.Context, in doltsquash.RunInput) (doltsquash.RunResult, error) {
+		runs++
+		got = in.Cut
+		return doltsquash.RunResult{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	want := squashTestNow.Add(-7 * 24 * time.Hour)
+	if runs != 1 {
+		t.Fatalf("the check started %d runs, want 1: %q", runs, logs.String())
+	}
+	if !got.Equal(want) {
+		t.Errorf("the run received cut %s, want %s (dec.Cut, to the nanosecond)",
+			got.UTC().Format(time.RFC3339Nano), want.UTC().Format(time.RFC3339Nano))
+	}
+}
+
 // TestSquashArchiveRunsWhileTheTownIsHeld is the bead's third box: the archive
 // pass takes no dispatch hold. The operator's dispatch hold is in place and the
 // gc's quiet-work guard reports the daemon busy, yet neither is asked or waited
