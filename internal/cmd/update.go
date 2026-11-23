@@ -202,6 +202,60 @@ type podVerifyProbes struct {
 	run    update.RunFunc
 }
 
+// readyPassthrough relays the readiness answer of the probe set a pod wrapper
+// carries. An embedded update.VerifyProbes interface promotes only its own four
+// methods, so a wrapper that embeds it drops the inner set's Ready and the roll's
+// health check falls back to the line rule (gt-v5eh75). A wrapper embeds this
+// only when the inner set answers Ready, so a set that cannot answer readiness
+// never becomes a ReadyProbes and keeps the line rule.
+type readyPassthrough struct {
+	update.ReadyProbes
+}
+
+// podVerifyReadyProbes is podVerifyProbes over a probe set that answers
+// readiness, carrying the answer through to the health check.
+type podVerifyReadyProbes struct {
+	podVerifyProbes
+	readyPassthrough
+}
+
+var _ update.ReadyProbes = podVerifyReadyProbes{}
+
+// podCrashReadyProbes is podCrashProbes over a probe set that answers readiness.
+// Both wrappers are embedded by value, so the pair and crash extensions survive
+// beside the readiness answer.
+type podCrashReadyProbes struct {
+	podCrashProbes
+	readyPassthrough
+}
+
+var _ update.ReadyProbes = podCrashReadyProbes{}
+var _ update.CrashProbes = podCrashReadyProbes{}
+var _ update.PairProbes = podCrashReadyProbes{}
+
+// podVerifyProbesFor wraps p in the pod's verify probes, keeping the readiness
+// answer p gives. The wrapper alone embeds only update.VerifyProbes, so without
+// the ready shape the health check would never ask the town whether it can take
+// traffic and a RED queue-state line would fail a roll that succeeded.
+func podVerifyProbesFor(p update.VerifyProbes, target podDaemonTarget, run update.RunFunc) update.VerifyProbes {
+	w := podVerifyProbes{VerifyProbes: p, target: target, run: run}
+	if ready, ok := p.(update.ReadyProbes); ok {
+		return podVerifyReadyProbes{podVerifyProbes: w, readyPassthrough: readyPassthrough{ReadyProbes: ready}}
+	}
+	return w
+}
+
+// podCrashProbesFor wraps inner in the crash probe's pair probes, keeping the
+// readiness answer inner gives.
+func podCrashProbesFor(inner update.VerifyProbes, label podImageLabelProbes, target podDaemonTarget, run update.RunFunc, clock update.Clock) update.VerifyProbes {
+	label.VerifyProbes = inner
+	w := podCrashProbes{podImageLabelProbes: label, target: target, run: run, clock: clock}
+	if ready, ok := inner.(update.ReadyProbes); ok {
+		return podCrashReadyProbes{podCrashProbes: w, readyPassthrough: readyPassthrough{ReadyProbes: ready}}
+	}
+	return w
+}
+
 // GTVersion is the build the pod's gt runs, read through kubectl exec under
 // podProbeBound. The embedded probe reads the executable of the run, which in
 // the update Job is the build the Job was started from, not the build the cycle
@@ -252,7 +306,7 @@ func podDaemonDeps(seams updateSeams, deps update.Deps, pod *podDaemonTarget) (u
 	if seams.PodRun == nil {
 		return update.Deps{}, errors.New("no pod command runner is wired")
 	}
-	deps.Verify = podVerifyProbes{VerifyProbes: deps.Verify, target: *pod, run: seams.PodRun}
+	deps.Verify = podVerifyProbesFor(deps.Verify, *pod, seams.PodRun)
 	if deps.Probes != nil {
 		deps.Probes = podInstalledProbes{Probes: deps.Probes, target: *pod, run: seams.PodRun}
 	}
@@ -509,18 +563,12 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		// It is set on deps.Verify here, before digestInstaller reads it into the
 		// digest install's probes, because imageDeps is shared with rollback and a
 		// probe set there would reach the restore too.
-		deps.Verify = podCrashProbes{
-			podImageLabelProbes: podImageLabelProbes{
-				VerifyProbes: deps.Verify,
-				label:        podTargetImageLabel(seams.Images, townRoot, req.Images),
-				wantPolecat:  podRefDigest(imagesValues.Polecat),
-				annotation:   podTargetAnnotation(*pod, seams.PodRun),
-				devTag:       podTargetDevTag(*pod, seams.PodRun),
-			},
-			target: *pod,
-			run:    seams.PodRun,
-			clock:  deps.Clock,
-		}
+		deps.Verify = podCrashProbesFor(deps.Verify, podImageLabelProbes{
+			label:       podTargetImageLabel(seams.Images, townRoot, req.Images),
+			wantPolecat: podRefDigest(imagesValues.Polecat),
+			annotation:  podTargetAnnotation(*pod, seams.PodRun),
+			devTag:      podTargetDevTag(*pod, seams.PodRun),
+		}, *pod, seams.PodRun, deps.Clock)
 	}
 	if req.Images != "" {
 		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out)

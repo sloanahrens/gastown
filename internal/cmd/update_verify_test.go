@@ -610,3 +610,107 @@ func TestVerifyImageLabelReadsTheValuesFile(t *testing.T) {
 		}
 	})
 }
+
+// podVerifyCompositionForTest builds the verify probe set a pod-target run
+// gets, the way runUpdate builds it: podDaemonDeps wraps the run's own probes
+// for the pod, and the crash probe wraps those with the pair probes.
+func podVerifyCompositionForTest(t *testing.T, base update.VerifyProbes) update.VerifyProbes {
+	t.Helper()
+	seams := updateSeams{PodRun: func(context.Context, string, []string, string, ...string) (string, int, error) {
+		return "gt version " + podTargetCommit + " built on test\n", 0, nil
+	}}
+	deps, err := podDaemonDeps(seams, update.Deps{Verify: base}, &podVerifyTarget)
+	if err != nil {
+		t.Fatalf("wrapping the pod's verify probes: %v", err)
+	}
+	return podCrashProbesFor(deps.Verify, podImageLabelProbes{}, podVerifyTarget, seams.PodRun, nil)
+}
+
+// TestPodVerifyCompositionCarriesReady holds the readiness answer through the
+// pod probe wrappers: a pod roll passes its health check by the town's own
+// readiness answer, so a RED line from queue states must not fail a roll whose
+// install and restart succeeded. Both wrappers embed update.VerifyProbes,
+// which promotes no Ready, so the composed set must still satisfy
+// update.ReadyProbes and the health check must ask it.
+func TestPodVerifyCompositionCarriesReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	cases := []struct {
+		name          string
+		runOutput     string
+		runExit       int
+		wantOK        bool
+		wantLine      string
+		wantReadyNote bool
+	}{
+		{
+			name:          "a ready town passes a RED queue-state line with the ready note",
+			runOutput:     "RED tick 31s ago: escalation=oldest_9h needs-overseer=2\n",
+			runExit:       0,
+			wantOK:        true,
+			wantLine:      "RED tick 31s ago: escalation=oldest_9h needs-overseer=2",
+			wantReadyNote: true,
+		},
+		{
+			name:      "a town that is not ready fails naming not ready",
+			runOutput: "RED tick 3m ago: main/devops=red[R]\nnot ready: main/devops is red\n",
+			runExit:   2,
+			wantOK:    false,
+			wantLine:  "not ready",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := newVerifyProbes(verifyProbeEnv{
+				Exe: verifyProbeExe,
+				Run: func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return tc.runOutput, tc.runExit, nil
+				},
+			})
+			probes := podVerifyCompositionForTest(t, base)
+			if _, ok := probes.(update.ReadyProbes); !ok {
+				t.Fatalf("the pod verify composition %T does not answer readiness, so the health check falls back to the line rule", probes)
+			}
+			check := podVerifyCheck(t, update.Verify(ctx, probes, podTargetCommit), "health")
+			if check.OK != tc.wantOK {
+				t.Fatalf("health check = %+v, want OK %v", check, tc.wantOK)
+			}
+			if !strings.Contains(check.Detail, tc.wantLine) {
+				t.Errorf("health detail %q does not name %q", check.Detail, tc.wantLine)
+			}
+			if tc.wantReadyNote && !strings.Contains(check.Detail, "(ready:") {
+				t.Errorf("passing detail %q does not carry the ready note", check.Detail)
+			}
+		})
+	}
+}
+
+// podPlainProbes is a verify probe set that answers no readiness. It is the
+// base a pod composition must keep the line rule for.
+type podPlainProbes struct{ line string }
+
+func (podPlainProbes) GTVersion(context.Context) (string, error)     { return podTargetCommit, nil }
+func (podPlainProbes) DaemonVersion(context.Context) (string, error) { return podTargetCommit, nil }
+func (podPlainProbes) ImageLabel(context.Context) (string, error)    { return podTargetCommit, nil }
+func (p podPlainProbes) Health(context.Context) (string, error)      { return p.line, nil }
+
+// TestPodVerifyCompositionWithoutReadyKeepsTheLineRule: a composition whose
+// base answers no readiness never claims readiness, so the health check keeps
+// the line rule and a RED queue-state line still fails.
+func TestPodVerifyCompositionWithoutReadyKeepsTheLineRule(t *testing.T) {
+	t.Parallel()
+	line := "RED tick 31s ago: escalation=oldest_9h needs-overseer=2"
+	probes := podVerifyCompositionForTest(t, podPlainProbes{line: line})
+	if _, ok := probes.(update.ReadyProbes); ok {
+		t.Fatalf("the composition %T claims readiness its base cannot answer", probes)
+	}
+	check := podVerifyCheck(t, update.Verify(context.Background(), probes, podTargetCommit), "health")
+	if check.OK {
+		t.Errorf("a RED line passed the line rule: %+v", check)
+	}
+	if check.Detail != line {
+		t.Errorf("health detail = %q, want the line as read %q", check.Detail, line)
+	}
+}
