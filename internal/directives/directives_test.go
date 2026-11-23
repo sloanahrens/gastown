@@ -238,9 +238,10 @@ func TestPolecatDirectiveLineLimitIsACap(t *testing.T) {
 // TestPolecatDirectiveContradictionRule pins gt-hkllkj: rule 9 of the rendered
 // polecat directive carries the formula's contradiction rule -- when an
 // acceptance box and a Constraint cannot both hold, the seat escalates rather
-// than adding an exemption -- and points at the formula's copy so the two
-// cannot drift. It renders the directive through config.LoadRoleDirective, so
-// the Changelog's copy of the words does not satisfy it.
+// than adding an exemption, allowlist row or special case -- and names the
+// formula's item 10 as authoritative so the two cannot drift. It renders the
+// directive through config.LoadRoleDirective, so the Changelog's copy of the
+// words does not satisfy it.
 func TestPolecatDirectiveContradictionRule(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -268,7 +269,10 @@ func TestPolecatDirectiveContradictionRule(t *testing.T) {
 		"cannot both hold",
 		"gt escalate",
 		"never add an exemption",
+		"allowlist row",
+		"special case",
 		"mol-polecat-work",
+		"is authoritative",
 	} {
 		if !strings.Contains(rule, clause) {
 			t.Errorf("rule 9 lacks the contradiction clause %q", clause)
