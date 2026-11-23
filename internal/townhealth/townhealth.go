@@ -685,6 +685,11 @@ func (t DispatchTick) declined() bool {
 type DispatchRecord struct {
 	Active bool
 	Hold   string
+	// RedHold names the kinds of the red hold holding automatic dispatch,
+	// comma separated ("sweep-red, main-red"); empty while none stands.
+	// Unlike the operator's Hold it reports a fault elsewhere in the town,
+	// so the field reads RED the moment one stands (gt-xq3s9u).
+	RedHold string
 	// Parked names why the dispatcher is not ticking at all — the seat
 	// settings it reads every tick could not be read — and is empty while
 	// reads work. A parked ticker runs no tick to record, so without this
@@ -1589,9 +1594,22 @@ func withFailedLabels(f Field, n int) Field {
 	return f
 }
 
+// redHoldPrefix begins the dispatcher value that names the red hold kinds; the
+// line keeps its spacing where every other value is compacted (gt-xq3s9u).
+const redHoldPrefix = "held by red hold ("
+
 // dispatchField judges the dispatcher's own state; dispatch adds the beads the
 // spec-dispatch-failed label holds out of the queue to whatever it returns.
 func dispatchField(in Inputs, rec DispatchRecord, ticks []DispatchTick, win time.Duration) Field {
+	// Checked first: while the red hold stands the dispatcher has stopped
+	// ticking by design, so the line must name the cause at once rather than
+	// read "silent" after the window or green while the daemon is young
+	// (gt-xq3s9u).
+	if rec.RedHold != "" {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red,
+			Value:  redHoldPrefix + rec.RedHold + ")",
+			Detail: "the red hold stands: " + rec.RedHold}
+	}
 	if rec.Hold != "" {
 		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "held", Detail: rec.Hold}
 	}
