@@ -233,3 +233,43 @@ func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 		})
 	}
 }
+
+// The lint's p25 refusal reads the same forms the gate does (gt-hc43nx): a
+// same-line budget and a lead-in that declare 30 added lines at 9.8 minutes are
+// both refused, naming the band's p25 (58), while a 60-line declaration in
+// either form is not refused. The rows are driven through Lint so deleting the
+// Size-section fallback turns them red.
+func TestDeclaredLinesRefuseReadsTheGateForms(t *testing.T) {
+	t.Parallel()
+
+	const wantReason = "the Change line declares 30 added lines, below what three in four beads estimated at 9.8 minutes landed with (p25 58); declare at least 227, or split"
+
+	for _, tc := range []struct {
+		name       string
+		size       string
+		wantReason string
+	}{
+		{"a same-line 30", "One worker, one landing. Change: at most 30 added lines in 2 files.", wantReason},
+		{"a lead-in 30", "One worker, one landing. About 30 added lines.", wantReason},
+		{"a same-line 60", "One worker, one landing. Change: at most 60 added lines in 2 files.", ""},
+		{"a lead-in 60", "One worker, one landing. About 60 added lines.", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := sizedSpec(tc.size, "sp-minutes:9.8")
+			v := Lint(s, defaultTemplate())
+			got := ""
+			for _, r := range v.Refusals {
+				if r.Field == "size" {
+					got = r.Reason
+				}
+			}
+			if got != tc.wantReason {
+				t.Fatalf("size refusal = %q, want %q (verdict %s)", got, tc.wantReason, v.Line(s.ID))
+			}
+			if tc.wantReason == "" && v.Route == RouteRefuse {
+				t.Fatalf("Lint() refused %q, want no refusal", v.Line(s.ID))
+			}
+		})
+	}
+}
