@@ -172,8 +172,21 @@ func TestRunHookBranchGuardAllowsOwnResumeAndNonPolecatBranches(t *testing.T) {
 // defers the bead and asks again (gt-5wkraj, gt-u9fqky).
 func TestRunHookUnreadableBranch(t *testing.T) {
 	t.Parallel()
-	f := &fakeSlingDeps{branchErr: errors.New("git rev-parse: not a repository")}
+	const (
+		seat          = "gastown/polecats/onyx"
+		branchErrText = "git rev-parse: not a repository"
+	)
+	opts := hookBranchTestOptions()
+	f := &fakeSlingDeps{branchErr: errors.New(branchErrText)}
 	d := f.deps()
+	var out strings.Builder
+	d.Out = &out
+	rollbackBeads := make([]string, 0, 1)
+	rollbackArtifacts := d.RollbackArtifacts
+	d.RollbackArtifacts = func(spawn *Spawn, townRoot, beadID, hookWorkDir string) {
+		rollbackBeads = append(rollbackBeads, beadID)
+		rollbackArtifacts(spawn, townRoot, beadID, hookWorkDir)
+	}
 	reads := 0
 	read := d.WorktreeBranch
 	d.WorktreeBranch = func(dir string) (string, error) {
@@ -181,13 +194,20 @@ func TestRunHookUnreadableBranch(t *testing.T) {
 		return read(dir)
 	}
 
-	result, err := Run(context.Background(), d, hookBranchTestOptions())
+	result, err := Run(context.Background(), d, opts)
 	if err == nil {
 		t.Fatalf("an unreadable branch hooked the bead with the guard off (result %+v)", result)
 	}
-	if !strings.Contains(err.Error(), dispatch.SlingRefusalMarker) {
-		t.Errorf("err = %v, want the refusal marker %q: an automatic dispatcher must defer the bead and ask again, not count a failed dispatch",
+	if reason, ok := dispatch.SlingRefusalReason(err.Error()); !ok {
+		t.Errorf("err = %v, SlingRefusalReason reports no refusal, want the marker %q: an automatic dispatcher must defer the bead and ask again, not count a failed dispatch",
 			err, dispatch.SlingRefusalMarker)
+	} else if !strings.Contains(reason, "could not be read") {
+		t.Errorf("refusal = %q, want the unreadable-branch sentence", reason)
+	}
+	// The read bound is what stops a persistent failure from spinning the
+	// dispatch; the re-read is what lets a transient one answer.
+	if reads > 3 {
+		t.Errorf("read the seat's branch %d time(s), want at most 3", reads)
 	}
 	if reads < 2 {
 		t.Errorf("read the seat's branch %d time(s), want a re-read before the refusal", reads)
@@ -197,6 +217,13 @@ func TestRunHookUnreadableBranch(t *testing.T) {
 	}
 	if f.started != 0 {
 		t.Errorf("a session was started %d time(s), want 0", f.started)
+	}
+	if len(rollbackBeads) != 1 || rollbackBeads[0] != opts.BeadID {
+		t.Errorf("rolled back %v, want the spawn given back once for %q: the refusal is past the spawn",
+			rollbackBeads, opts.BeadID)
+	}
+	if got := out.String(); !strings.Contains(got, "the worktree branch of seat "+seat) || !strings.Contains(got, branchErrText) {
+		t.Errorf("output = %q, want a warning naming the seat %q and the read error %q", got, seat, branchErrText)
 	}
 }
 
