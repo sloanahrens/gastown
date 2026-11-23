@@ -467,6 +467,12 @@ git diff --stat origin/{{base_branch}}...HEAD
 
 If you accidentally modified unrelated files, remove those changes.
 
+10. Contradictions (9): if an acceptance box and a Constraint cannot both hold,
+    STOP and run
+    `gt escalate -s medium "CONTRADICTION: <bead-id> box <n> vs Constraint <m>"`
+    naming both; never add an exemption, allowlist row or special case to make
+    both pass.
+
 **Exit criteria:** every hit above is fixed or justified, and the diff is ready
 for the build check."""
 
