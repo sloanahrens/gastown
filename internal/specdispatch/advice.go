@@ -146,22 +146,38 @@ func spMinutes(labels []string) (float64, bool) {
 	return minutes, true
 }
 
+// declaredLinesBand reads the inputs the declared-lines refusal and advice
+// share (gt-tkche7, gt-vb9pi9): the bead's sp-minutes estimate, the Change
+// line in its Size section, and the landed-lines band for those minutes. ok is
+// false when the estimate does not read, the Change line is absent or does not
+// parse, or the minutes fall outside the table, so neither the refusal nor the
+// advice guesses a number.
+func declaredLinesBand(s Spec, sections map[string]string) (ChangeBudget, float64, LinesBand, bool) {
+	minutes, ok := spMinutes(s.Labels)
+	if !ok {
+		return ChangeBudget{}, 0, LinesBand{}, false
+	}
+	budget, found, err := ParseChangeBudget(sections["size"])
+	if err != nil || !found {
+		return ChangeBudget{}, 0, LinesBand{}, false
+	}
+	band, ok := LandedLines(minutes)
+	if !ok {
+		return ChangeBudget{}, 0, LinesBand{}, false
+	}
+	return budget, minutes, band, true
+}
+
 // declaredLinesAdvice is the declared-lines advisory (gt-tkche7): a Change line
 // below what its estimate band advises (LinesBand.Advise) gets one line naming
 // the band's median, p75 and p90 and the declaration that keeps under the gate.
 // A bead with no readable estimate, no parseable Change line, or minutes
-// outside the table gets none rather than a guessed number.
+// outside the table gets none rather than a guessed number. A declaration
+// below the band's Refuse is the refusal's to name (gt-vb9pi9), so no line is
+// repeated for it here.
 func declaredLinesAdvice(s Spec, sections map[string]string) []string {
-	minutes, ok := spMinutes(s.Labels)
-	if !ok {
-		return nil
-	}
-	budget, found, err := ParseChangeBudget(sections["size"])
-	if err != nil || !found {
-		return nil
-	}
-	band, ok := LandedLines(minutes)
-	if !ok || budget.Lines >= band.Advise() {
+	budget, minutes, band, ok := declaredLinesBand(s, sections)
+	if !ok || budget.Lines < band.Refuse() || budget.Lines >= band.Advise() {
 		return nil
 	}
 	return []string{fmt.Sprintf(adviceDeclaredLinesText,
