@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -283,11 +286,12 @@ func redHoldShort(id string) string {
 }
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the
-// record and logging the change once. An unreadable sweep record, update state
-// or main-red read leaves the file untouched, so it never clears a hold; an
-// unread waiting count keeps only its behind-main reason and every other trigger
-// still reads. Each outage is logged once until it reads again; unreadLog holds
-// those across heartbeats and is non-nil.
+// record and logging the change once. An unreadable sweep record, update state,
+// main-red read or lift request leaves the file untouched, so it never clears a
+// hold; an unread waiting count keeps only its behind-main reason and every
+// other trigger still reads. Each outage is logged once until it reads again;
+// unreadLog holds those across heartbeats and is non-nil. A lift request lifts
+// the hold and is recorded when the evaluation is clear.
 func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
@@ -358,7 +362,15 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	if now == nil {
 		now = time.Now
 	}
-	next := evalRedHold(in, now(), prev)
+	at := now()
+	next := evalRedHold(in, at, prev)
+	req, requested, err := dispatch.ReadLift(townRoot)
+	if err != nil {
+		return fmt.Errorf("read lift request: %w", err)
+	}
+	if requested && len(next.Reasons) == 0 {
+		return liftRedHold(townRoot, req, at, logf)
+	}
 	line := redHoldChangeLine(prev, next)
 	if line == "" {
 		return nil
@@ -368,6 +380,44 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	}
 	logf("%s", line)
 	return nil
+}
+
+// liftRedHold applies a granted request: it removes the hold file, appends one
+// ledger line, logs the lift and clears the request. The first failure stops the
+// sequence with the request in place, so the next heartbeat repeats the lift.
+func liftRedHold(townRoot string, req dispatch.LiftRequest, at time.Time, logf func(format string, args ...any)) error {
+	step, err := "write red hold", dispatch.WriteRedHold(townRoot, dispatch.RedHoldRecord{})
+	if err == nil {
+		step, err = "record red hold lift", appendRedHoldLift(townRoot, at, req.Reason, req.By)
+	}
+	if err == nil {
+		logf("red hold: lifted by %s: %s", req.By, req.Reason)
+		step, err = "clear lift request", dispatch.ClearLift(townRoot)
+	}
+	if err != nil {
+		return fmt.Errorf("lift red hold: %s: %w", step, err)
+	}
+	return nil
+}
+
+// appendRedHoldLift appends one lift line to the town's ledger at
+// <town>/.runtime/red-hold/ledger.jsonl, creating the file and its directory.
+// The one O_APPEND write of one line cannot interleave with a concurrent append.
+func appendRedHoldLift(townRoot string, at time.Time, reason, by string) error {
+	path := filepath.Join(townRoot, ".runtime", "red-hold", "ledger.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	werr := json.NewEncoder(f).Encode(map[string]any{"at": at, "reason": reason, "by": by, "lifted": true})
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // redHoldChangeLine says what the daemon logs when the red hold changes: "" when
