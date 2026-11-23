@@ -3,15 +3,50 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/stretchr/testify/require"
 )
+
+// TestHeartbeatRedHoldRunsTheStep pins the step's registration and the hold it
+// publishes from the sweep record.
+func TestHeartbeatRedHoldRunsTheStep(t *testing.T) {
+	t.Parallel()
+	var found []heartbeatStep
+	for _, s := range heartbeatSteps {
+		if s.name == "red-hold" {
+			found = append(found, s)
+		}
+	}
+	require.Len(t, found, 1, "the heartbeat lists red-hold once")
+	require.Equal(t, reflect.ValueOf((*Daemon).checkRedHold).Pointer(), reflect.ValueOf(found[0].run).Pointer(),
+		"the red-hold step runs checkRedHold")
+
+	townRoot := t.TempDir()
+	writeKnownRigs(t, townRoot, "gastown")
+	require.NoError(t, writeTierSweepState(townRoot, "gastown", tierSweepState{RedCycles: redHoldSweepCycles}))
+	logs := &lockedBuffer{}
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0)}
+	found[0].run(d)
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Len(t, rec.Reasons, 1)
+	require.Equal(t, dispatch.RedHoldSweepRed, rec.Reasons[0].Kind)
+
+	// An unreadable record logs once across two runs: the unread log outlives
+	// one heartbeat.
+	require.NoError(t, os.WriteFile(tierSweepStatePath(townRoot, "gastown"), []byte("{not json"), 0o600))
+	found[0].run(d)
+	found[0].run(d)
+	require.Equal(t, 1, strings.Count(logs.String(), "sweep record unreadable for gastown"), logs.String())
+}
 
 func TestRedHoldSweepOf(t *testing.T) {
 	t.Parallel()

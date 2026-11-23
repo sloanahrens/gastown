@@ -149,6 +149,22 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 	return dispatch.RedHoldRecord{Reasons: reasons}
 }
 
+// checkRedHold is the heartbeat's red hold step: it evaluates every swept rig's
+// record and publishes daemon/red-hold from them.
+func (d *Daemon) checkRedHold() {
+	if d.redHoldUnread == nil {
+		d.redHoldUnread = map[string]bool{}
+	}
+	src := redHoldSources{
+		Rigs: tierSweepRigs(d.patrol(), d.getKnownRigs()),
+		Read: func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
+		Now:  d.clk().Now,
+	}
+	if err := runRedHold(d.config.TownRoot, src, d.redHoldUnread, d.logger.Printf); err != nil {
+		d.logger.Printf("red hold step: %v", err)
+	}
+}
+
 // redHoldShort returns the first 12 characters of a commit id, or the whole id
 // when it is shorter.
 func redHoldShort(id string) string {

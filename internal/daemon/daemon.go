@@ -108,6 +108,10 @@ type Daemon struct {
 	// verdict and tier-sweep call that builds its promoter (gt-mxa3op).
 	promoteViaLog logLatch
 
+	// redHoldUnread holds the rigs whose sweep record the last red hold step
+	// could not read, so an outage logs once, not every heartbeat (gt-583rx6).
+	redHoldUnread map[string]bool
+
 	// townStateNightlyLog logs the nightly town-state backup's off reason once
 	// per day, so a cycle that runs twice in one day (a request and the
 	// window) does not repeat it (gt-5dgbcy).
@@ -3060,6 +3064,10 @@ var heartbeatSteps = []heartbeatStep{
 	// hour (gt-4nlpw8). It reads only, so it is not lifecycle: an E-stopped town
 	// still gets the report.
 	{name: "pair-ready", run: (*Daemon).checkPairReady},
+
+	// Evaluate the tier sweep records and publish the dispatch red hold
+	// (gt-bm4erq). It reads records and writes one file, so it is not lifecycle.
+	{name: "red-hold", run: (*Daemon).checkRedHold},
 
 	// Kill ghost sessions left over from stale registry (default "gt" prefix).
 	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},
