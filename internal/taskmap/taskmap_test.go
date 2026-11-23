@@ -316,6 +316,29 @@ func TestConfigDaemonSetCheckPointsAtBackupName(t *testing.T) {
 	}
 }
 
+// TestTownDeployerRequestCheckNamesTheSign pins the line place_town_deployer.go
+// gives town deployer request (gt-z82llg, om finding 2abe307dca93): the Check
+// gives the sign the step worked and leaves the request's refusal rules to the
+// command's own help, so it states none of them again.
+func TestTownDeployerRequestCheckNamesTheSign(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("town deployer request")
+	if !ok {
+		t.Fatal(`Lookup("town deployer request") found no entry`)
+	}
+	for _, rule := range []string{"plan, apply or rollback", "plan directory name", "already in the inbox", "inside a pod"} {
+		if strings.Contains(e.Check, rule) {
+			t.Errorf("town deployer request Check = %q; it restates the rule %q, want the sign the step worked", e.Check, rule)
+		}
+	}
+	for _, sign := range []string{"<inbox>/<id>.json", "inbox schema"} {
+		if !strings.Contains(e.Check, sign) {
+			t.Errorf("town deployer request Check = %q; it does not name the sign %q", e.Check, sign)
+		}
+	}
+}
+
 // TestSessionInjectUseOpensWhenPhrase pins the opening place_p5e.go gives
 // session inject (gt-z96kdl): the Use names the situation and opens with the
 // required phrase, "Use this when".
