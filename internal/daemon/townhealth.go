@@ -110,6 +110,17 @@ type healthSources struct {
 	behind func(rigName, promoted, green string) (int, error)
 }
 
+// sweepRecordOf turns one rig's tier sweep state into the townhealth
+// evaluator's record. An unread record is unknown, which is never green;
+// otherwise it carries the red cycle count and the time of the last fully
+// green cycle (gt-ffs6cx).
+func sweepRecordOf(st tierSweepState, err error) townhealth.SweepRecord {
+	if err != nil {
+		return townhealth.SweepRecord{}
+	}
+	return townhealth.SweepRecord{Known: true, RedCycles: st.RedCycles, LastGreenAt: st.LastGreenAt}
+}
+
 // execTaxState is what a report said about the exec tax, for the transition
 // log. A nil report, or one from before the probe measured, is unknown.
 func execTaxState(r *townhealth.Report, th townhealth.Thresholds) exectax.State {
