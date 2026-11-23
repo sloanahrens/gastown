@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -75,6 +76,24 @@ const (
 	// Service, which publishes the pod before it is ready.
 	bdGatewayPushPortName = "push"
 )
+
+// validateBdGatewayDoltCredential refuses the Dolt credential Secret value the
+// cluster cannot mount. The API server accepts a Secret name only as a DNS-1123
+// subdomain, and the credential is a live-pod credential, so a rehearsal render,
+// which mounts none, refuses it. It runs whether or not the gateway image is set,
+// so a value named for a pod the render does not build is still checked.
+func (v Values) validateBdGatewayDoltCredential() error {
+	if v.BdGatewayDoltCredentialSecret == "" {
+		return nil
+	}
+	if !validDNS1123Subdomain(v.BdGatewayDoltCredentialSecret) {
+		return fmt.Errorf("Values.BdGatewayDoltCredentialSecret %q: want a Secret name, a DNS-1123 subdomain", v.BdGatewayDoltCredentialSecret)
+	}
+	if v.Rehearsal {
+		return errors.New("Values.BdGatewayDoltCredentialSecret is set with Values.Rehearsal: the Dolt credential is a live-pod credential, and a rehearsal mounts none")
+	}
+	return nil
+}
 
 // BdGatewayMaxReplicas is the most gateway pods a render runs: two, so one serves
 // while the other rolls or fails.

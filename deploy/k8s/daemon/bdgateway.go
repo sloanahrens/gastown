@@ -151,9 +151,13 @@ const (
 // needs Values.HostGatewayIP, since its Dolt host resolves only through that
 // address's hostAliases entry. The token-copy init container runs Values.ProxyImage,
 // so the gateway needs that too. A negative concurrency cap is refused even with no
-// image. With no image the workload is not rendered, and the gateway's token Secret
-// name is not read.
+// image, as is a Dolt credential Secret that is not a DNS-1123 subdomain or that a
+// rehearsal names. With no image the workload is not rendered, and the gateway's
+// token Secret name is not read.
 func (v Values) validateBdGatewayWorkload() error {
+	if err := v.validateBdGatewayDoltCredential(); err != nil {
+		return err
+	}
 	if v.BdGatewayMaxConcurrent < 0 {
 		return fmt.Errorf("Values.BdGatewayMaxConcurrent %d: want zero, which leaves --max-concurrent off so the gateway's own default applies, or a positive cap", v.BdGatewayMaxConcurrent)
 	}
