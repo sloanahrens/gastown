@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,7 @@ func TestJevSummaryListsOffBatteriesOnce(t *testing.T) {
 		JevBattery{Name: "notes", Items: 0, ScoredAt: &now, Questions: []JevQuestion{off}},
 		JevBattery{Name: "landing", Failed: true},
 	)
+	sc.Disabled = []string{"dedupe", "testsel"}
 	s := BuildJevSummary(sc, nil, nil)
 	if s == nil {
 		t.Fatal("a scorecard built no summary")
@@ -244,6 +246,80 @@ func TestJevSummaryListsOffBatteriesOnce(t *testing.T) {
 	}
 	if len(s.Retire) != 0 {
 		t.Errorf("Retire = %+v, want none", s.Retire)
+	}
+}
+
+// jevPanelState is the JEV panel's state for a scorecard and its summary as the
+// hub sends them: their own JSON, so the test draws what the server would.
+func jevPanelState(t *testing.T, now time.Time, sc *JevScorecard, sum *JevSummary) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"jev_scorecard": sc, "jev_summary": sum})
+	if err != nil {
+		t.Fatalf("marshalling the JEV state: %v", err)
+	}
+	var over map[string]any
+	if err := json.Unmarshal(b, &over); err != nil {
+		t.Fatalf("unmarshalling the JEV state: %v", err)
+	}
+	return jevStateAt(now, over)
+}
+
+// The off list is the patrol config's Disabled names: a battery named there is
+// off once and takes no row, even when it also has a report, and a battery not
+// named draws as before.
+func TestJevOffComesFromDisabledList(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	scored := now.Add(-5 * time.Hour)
+	sc := jevSummaryScored(now,
+		JevBattery{Name: "drift", Items: 12, ScoredAt: &scored},
+		JevBattery{Name: "logtriage", Items: 4, ScoredAt: &scored},
+		JevBattery{Name: "attention", Items: 7, ScoredAt: &scored},
+		JevBattery{Name: "dedupe", Items: 3, ScoredAt: &scored},
+	)
+	sc.Disabled = []string{"drift", "logtriage", "drift"}
+	s := BuildJevSummary(sc, nil, nil)
+	if s == nil {
+		t.Fatal("a scorecard built no summary")
+	}
+	if want := []string{"drift", "logtriage"}; !reflect.DeepEqual(s.Off, want) {
+		t.Errorf("Off = %q, want %q: the config's names, each once", s.Off, want)
+	}
+
+	rows, _, _ := drawJevAt(t, now, jevPanelState(t, now, sc, s))
+	var drawn []string
+	for _, r := range rows {
+		drawn = append(drawn, r.Cells[0].Text)
+	}
+	if len(drawn) != 2 || !strings.HasPrefix(drawn[0], "attention") || !strings.HasPrefix(drawn[1], "dedupe") {
+		t.Errorf("the battery rows = %q, want attention and dedupe: a named battery takes no row", drawn)
+	}
+}
+
+// When the patrol config cannot be read the header line says so in place of the
+// ok and off counts, which would otherwise read as every battery on.
+func TestJevHeaderSaysConfigUnreadable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	scored := now.Add(-5 * time.Hour)
+	sc := &JevScorecard{
+		Batteries: []JevBattery{
+			{Name: "attention", Items: 7, ScoredAt: &scored},
+			{Name: "landing", Items: 5, ScoredAt: &scored},
+		},
+		ScoredAt:         &scored,
+		ConfigUnreadable: true,
+	}
+	sc.Tally()
+	s := BuildJevSummary(sc, nil, nil)
+
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	drawJevIn(t, dom, jevPanelState(t, now, sc, s))
+	if got, want := jevClassText(t, dom, "jvtitle"), "scored 5h00m ago · patrol config unreadable"; got != want {
+		t.Errorf("the header line = %q, want %q", got, want)
 	}
 }
 

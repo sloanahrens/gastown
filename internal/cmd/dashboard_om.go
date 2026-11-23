@@ -129,11 +129,15 @@ type omMerge struct {
 	Done bool
 }
 
-// omRecord is a landings record plus the field the landing worker writes for
-// a landing that touched risk paths.
+// omRecord is a landings record plus fields the landing worker writes that
+// landings.Record does not mirror: the risk paths a landing touched, and the
+// minutes its sp: estimate was computed as (gt-iwzoje).
 type omRecord struct {
 	landings.Record
 	RiskPaths []string `json:"risk_paths"`
+	// SPMinutes is divided into the landing's actual time for the trend's day
+	// line (gt-mp1rh0).
+	SPMinutes *float64 `json:"sp_minutes"`
 }
 
 // omConfig is the reviewer's own config: what backend, how deep, how strict.

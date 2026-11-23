@@ -261,11 +261,6 @@ type JevQuestion struct {
 	PrecisionAtBest *float64 `json:"precision_at_best,omitempty"`
 }
 
-// jevOffBatteries are the batteries the panel lists as off by name: the town
-// runs neither the duplicate-finding pass nor the test-selection battery, so
-// neither takes a row. An off battery is listed once, in Off.
-var jevOffBatteries = map[string]bool{"dedupe": true, "testsel": true}
-
 // jevPatrolBatteries is the patrol's list. A battery with a report of no items
 // that is not on it is off; one that is on it keeps its row while its log is
 // empty, so the page shows it as quiet rather than as off.
@@ -400,7 +395,7 @@ func BuildJevSummary(sc *JevScorecard, spend *JevSpend, capUSD *float64) *JevSum
 	}
 	off := map[string]bool{}
 	for _, b := range sc.Batteries {
-		if !jevIsOff(b) {
+		if !jevIsOff(b, sc.Disabled) {
 			continue
 		}
 		off[b.Name] = true
@@ -443,12 +438,12 @@ func BuildJevSummary(sc *JevScorecard, spend *JevSpend, capUSD *float64) *JevSum
 	return s
 }
 
-// jevIsOff is whether the panel lists a battery as off: it is one of the
-// names the town runs without, or it reports a log with no items and is not on
-// the patrol's list. A battery with no report is never off, since its missing
-// line is a failed read and not an empty log.
-func jevIsOff(b JevBattery) bool {
-	if jevOffBatteries[b.Name] {
+// jevIsOff is whether the panel lists a battery as off: the patrol config names
+// it in disabled, or it reports a log with no items and is not on the patrol's
+// list. A battery with no report is never off, since its missing line is a
+// failed read and not an empty log.
+func jevIsOff(b JevBattery, disabled []string) bool {
+	if slices.Contains(disabled, b.Name) {
 		return true
 	}
 	return b.ScoredAt != nil && b.Items == 0 && !jevPatrolBatteries[b.Name]

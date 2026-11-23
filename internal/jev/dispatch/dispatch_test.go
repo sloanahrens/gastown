@@ -58,10 +58,7 @@ func answers() *jev.Answers {
 	return &jev.Answers{
 		Model: "jev-test-1",
 		Noul: map[string]float64{
-			qFitsTwentyMinutes:  0.8,
-			qAcceptanceTickable: 0.7,
-			qNeedsStrongModel:   0.2,
-			qTouchesDaemon:      0.1,
+			qFitsTwentyMinutes: 0.8,
 		},
 		Score: map[string]jev.ScoreAnswer{qSize: {Score: 1, Confidence: 0.6}},
 	}
@@ -232,12 +229,8 @@ func TestJevDispatchPassLogsOneLinePerNewPlacement(t *testing.T) {
 		t.Errorf("attached_at = %v, want %s", got[2]["attached_at"], stamp(20))
 	}
 	ans, _ := got[2]["answers"].(map[string]any)
-	wantAnswers := []string{"acceptance_tickable", "fits_twenty_minutes", "needs_strong_model", "size", "touches_daemon"}
-	if !reflect.DeepEqual(keys(ans), wantAnswers) {
-		t.Fatalf("answer keys = %v, want %v", keys(ans), wantAnswers)
-	}
-	if ans["touches_daemon"] != 0.1 {
-		t.Errorf("answers = %v, want the noul probabilities", ans)
+	if ans["fits_twenty_minutes"] != 0.8 {
+		t.Errorf("answers = %v, want the noul probability of fits_twenty_minutes", ans)
 	}
 	if size, _ := ans["size"].(map[string]any); size["score"] != 1.0 || size["confidence"] != 0.6 {
 		t.Errorf("size = %v, want score 1 at confidence 0.6", ans["size"])
@@ -497,8 +490,7 @@ func TestJevDispatchQuestionsAreTheBattery(t *testing.T) {
 	t.Parallel()
 	qs := questions()
 	types := map[string]string{
-		qFitsTwentyMinutes: typeNoul, qAcceptanceTickable: typeNoul,
-		qNeedsStrongModel: typeNoul, qTouchesDaemon: typeNoul, qSize: typeScore,
+		qFitsTwentyMinutes: typeNoul, qSize: typeScore,
 	}
 	if len(qs) != len(types) {
 		t.Fatalf("%d questions, want %d", len(qs), len(types))
@@ -516,8 +508,26 @@ func TestJevDispatchQuestionsAreTheBattery(t *testing.T) {
 	if n := len(qs[qSize].Levels); n != 3 {
 		t.Errorf("size rubric has %d levels, want 3", n)
 	}
-	if Version < 1 {
-		t.Errorf("Version = %d, want at least 1", Version)
+	if Version != 3 {
+		t.Errorf("Version = %d, want 3: a smaller battery starts a new scorecard series", Version)
+	}
+}
+
+// A line the pass writes carries no answer the battery no longer asks, so the
+// scorecard reads those questions as missing on it.
+func TestJevDispatchLineLeavesOutTheDroppedAnswers(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody)})
+
+	mustRun(t, h.pass)
+
+	got := h.lines(t)
+	if len(got) != 1 {
+		t.Fatalf("log = %v, want one line", got)
+	}
+	ans, _ := got[0]["answers"].(map[string]any)
+	if want := []string{"fits_twenty_minutes", "size"}; !reflect.DeepEqual(keys(ans), want) {
+		t.Errorf("answer keys = %v, want %v", keys(ans), want)
 	}
 }
 

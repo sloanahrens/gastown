@@ -616,10 +616,8 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.ImagePinLayers.Enabled
 	}
-	// outbox_poll is opt-in, and its key absent means off: each tick reads
-	// every running seat's outbox through the sandbox gateway (gt-dq4ce6), so a
-	// town must ask for it (gt-0hkj0c; the PatrolsConfig.OutboxPoll field says
-	// why).
+	// outbox_poll is opt-in; its key absent means off (gt-0hkj0c; the
+	// PatrolsConfig.OutboxPoll field says why).
 	if patrol == "outbox_poll" {
 		if config == nil || config.Patrols == nil || config.Patrols.OutboxPoll == nil {
 			return false

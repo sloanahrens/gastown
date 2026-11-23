@@ -5,26 +5,55 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// budgetBlockingEmbedder waits for its context to end; without a deadline it refuses.
-type budgetBlockingEmbedder struct{}
+// stepBudget is the run's budget context in a test: its Done closes when the step
+// the row means calls end, and Err then reads context.DeadlineExceeded.
+type stepBudget struct {
+	context.Context // the caller's context, for Value
+	done            chan struct{}
+	once            sync.Once
+}
 
-func (budgetBlockingEmbedder) Embed(ctx context.Context, _ string) ([]float32, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		return nil, fmt.Errorf("embedder called without a deadline")
+// context is the seam RunStoryPointsWeekly makes its budget context with.
+func (b *stepBudget) context(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+	return b, func() {}
+}
+
+func (b *stepBudget) end()                  { b.once.Do(func() { close(b.done) }) }
+func (b *stepBudget) Done() <-chan struct{} { return b.done }
+func (b *stepBudget) Err() error {
+	select {
+	case <-b.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
+}
+
+// budgetStepEmbedder ends the run's budget when first called, then waits for it;
+// it refuses a context the seam did not make, so a skipped seam fails, not hangs.
+type budgetStepEmbedder struct{ step *stepBudget }
+
+func (e budgetStepEmbedder) Embed(ctx context.Context, _ string) ([]float32, error) {
+	if ctx != context.Context(e.step) {
+		return nil, fmt.Errorf("embedder called with a context the budget seam did not make")
+	}
+	e.step.end()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-// TestStoryPointsWeeklyBudget: a due run ends itself at Commands.Budget. Its end
+// TestStoryPointsWeeklyBudget: a due run ends itself at its budget. Its end
 // while wiring the town, at the week-after check or at the retrain is a wait:
 // nil error, the waiting line naming that step, no stamp, and a failed progress
 // write still returned. A step error carrying context.DeadlineExceeded without the
-// run's budget having ended spends the week, as an ordinary failure does.
+// run's budget having ended spends the week, as an ordinary failure does. A row
+// that ends at the budget fills Commands.BudgetContext with a stepBudget, so the
+// run ends at the step the row means and not on a timer.
 func TestStoryPointsWeeklyBudget(t *testing.T) {
 	t.Parallel()
 	// step is the step a budget wait must name; an empty step fails for cause.
@@ -51,14 +80,23 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 					weeklyNow.Add(-storyPointsCheckAge-24*time.Hour).Format(time.RFC3339)))
 			}
 			var out strings.Builder
-			c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), budgetBlockingEmbedder{})
-			// Only a row that ends at the budget blocks on it, so only those take
-			// one; a case that does real work keeps the default ten minutes.
+			c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), budgetStepEmbedder{})
+			var step *stepBudget
 			if tc.step != "" {
-				c.Budget = 5 * time.Millisecond
+				step = &stepBudget{Context: context.Background(), done: make(chan struct{})}
+				c.BudgetContext = step.context
+				c.Embedder = budgetStepEmbedder{step: step}
 			}
 			if tc.wireWait {
-				c.Wire = func(ctx context.Context) (RealTown, error) { <-ctx.Done(); return RealTown{}, ctx.Err() }
+				// The seam's wire ends the budget itself; without one (the caller's
+				// deadline row) the caller's context ends it.
+				c.Wire = func(ctx context.Context) (RealTown, error) {
+					if step != nil {
+						step.end()
+					}
+					<-ctx.Done()
+					return RealTown{}, ctx.Err()
+				}
 			}
 			if tc.failWrite {
 				c.Progress = failingWriter{}
@@ -100,7 +138,7 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RunStoryPointsWeekly err = %v, want nil: the budget's end is a wait", err)
 				}
-				if want := fmt.Sprintf("story points weekly: waiting: the 5ms budget ended while %s; the next hour continues from the embedding cache", tc.step); strings.TrimSpace(line) != want {
+				if want := fmt.Sprintf("story points weekly: waiting: the %s budget ended while %s; the next hour continues from the embedding cache", StoryPointsWeeklyBudget, tc.step); strings.TrimSpace(line) != want {
 					t.Errorf("out = %q, want %q: the wait naming the step and the cache", line, want)
 				}
 				if !tc.adoption {

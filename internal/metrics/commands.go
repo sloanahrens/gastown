@@ -117,6 +117,10 @@ type Commands struct {
 	Now func() time.Time
 	// Budget bounds the due weekly run; zero is StoryPointsWeeklyBudget.
 	Budget time.Duration
+	// BudgetContext makes the due run's budget context from the caller's and the
+	// budget; nil is context.WithTimeout. A test supplies one to end the budget
+	// at the step it means, so no wall clock spends it at an earlier step.
+	BudgetContext func(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc)
 	// storyPointsStore is the filesystem storypoints-adopt lists, writes and
 	// deletes beside the runtime weights. The zero value is the host's; a test
 	// fills the one function it needs to refuse.
@@ -509,7 +513,11 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	budget := cmp.Or(c.Budget, StoryPointsWeeklyBudget)
 	parent := ctx
-	ctx, cancel := context.WithTimeout(parent, budget)
+	budgetContext := context.WithTimeout
+	if c.BudgetContext != nil {
+		budgetContext = c.BudgetContext
+	}
+	ctx, cancel := budgetContext(parent, budget)
 	defer cancel()
 	if c.AutoAdoptReader != nil {
 		on, err := c.AutoAdoptReader()
@@ -601,6 +609,16 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 			Event: "adopted", At: now, Version: written.version, Previous: written.previous,
 		}); err != nil {
 			adoptErr = errors.Join(adoptErr, fmt.Errorf("the adoption of %s is not logged, so it is not checked: %w", written.version, err))
+		}
+	}
+	// A refusal is logged as the week's other outcome, carrying the rule's reason, so the
+	// reader and the attention item see every week the weights were left alone. The
+	// receipt the decision returned is kept in the error, as the adoption's is.
+	if written.refused {
+		if err := c.appendStoryPointsAdoption(env, storyPointsAdoptionsPath(real.Town), storyPointsAdoption{
+			Event: "refused", At: now, Reason: written.reason,
+		}); err != nil {
+			adoptErr = errors.Join(adoptErr, fmt.Errorf("the refusal is not logged: %w", err))
 		}
 	}
 	if adoptErr != nil {

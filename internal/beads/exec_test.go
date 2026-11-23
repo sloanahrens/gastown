@@ -90,8 +90,9 @@ func TestNilEnvCarriesPWD(t *testing.T) {
 		{"CommandContextWithEnv", CommandContextWithEnv(context.Background(), "/work", nil, "list")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if !hasEnvEntry(tc.cmd.Environ(), "PWD=/work") {
-				t.Fatalf("Environ() = %v, want a PWD=/work entry", tc.cmd.Environ())
+			env := tc.cmd.Environ()
+			if !hasEnvEntry(env, "PWD=/work") {
+				t.Fatalf("Environ() has no PWD=/work entry (%d entries)", len(env))
 			}
 		})
 	}
@@ -102,8 +103,9 @@ func TestNilEnvCarriesPWD(t *testing.T) {
 func TestExplicitEnvLeavesPWDtoCaller(t *testing.T) {
 	t.Parallel()
 	cmd := CommandWithEnv("/work", []string{"PATH=/usr/bin"}, "list")
-	if hasEnvEntry(cmd.Environ(), "PWD=/work") {
-		t.Fatalf("Environ() = %v, want no injected PWD", cmd.Environ())
+	env := cmd.Environ()
+	if hasEnvEntry(env, "PWD=/work") {
+		t.Fatalf("Environ() has a PWD entry, want none (%d entries)", len(env))
 	}
 }
 

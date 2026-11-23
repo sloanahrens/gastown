@@ -446,6 +446,66 @@ func TestGuardSelectsATierSweepChangeRunsTheSweeprunnerShapeGuard(t *testing.T) 
 	}
 }
 
+// selection returns the tests sel runs for pkg.
+func selection(sel []GuardSelect, pkg string) []string {
+	for _, s := range sel {
+		if s.Package == pkg {
+			return s.Tests
+		}
+	}
+	return nil
+}
+
+// TestGuardSelectsRunsThePodengineTestOnlyOnTheFileItReads: the podengine
+// always entry runs only its own test, so the package's judged entry is
+// selected only when daemon_config.go changed; another config file and a diff
+// no predicate names leave it out (gt-mzwho4).
+func TestGuardSelectsRunsThePodengineTestOnlyOnTheFileItReads(t *testing.T) {
+	t.Parallel()
+	const judged = "TestTierSweepGateIsTheRegistrySetting"
+	for _, tc := range []struct {
+		diff string
+		want bool
+	}{
+		{"M\x00internal/config/daemon_config.go\x00", true},
+		{"D\x00internal/config/daemon_config.go\x00", true},
+		{"M\x00internal/config/agent.go\x00", false},
+		{unguarded, false},
+	} {
+		sel, err := GuardSelects(tc.diff, func(string) bool { return true })
+		if err != nil {
+			t.Fatalf("GuardSelects(%q): %v", tc.diff, err)
+		}
+		if got := slices.Contains(selection(sel, "internal/podengine"), judged); got != tc.want {
+			t.Errorf("GuardSelects(%q) selects %s = %v, want %v", tc.diff, judged, got, tc.want)
+		}
+	}
+}
+
+// TestGuardSelectsKeepsEveryEntryOfAPackageWithNoAlwaysEntry: a package with no
+// always entry runs all its entries' tests once any entry trips, so an entry
+// that tripped brings in one whose predicate misses the changed path (err
+// wide). Only a package holding an always entry selects per entry (gt-mzwho4).
+func TestGuardSelectsKeepsEveryEntryOfAPackageWithNoAlwaysEntry(t *testing.T) {
+	t.Parallel()
+	// A Makefile change trips internal/cmd's command-tokens entry and not its
+	// cluster-render one, which must still run.
+	sel, err := GuardSelects("M\x00Makefile\x00", func(string) bool { return true })
+	if err != nil {
+		t.Fatalf("GuardSelects: %v", err)
+	}
+	var want []string
+	for _, g := range treeWideGuards {
+		if g.pkg == "internal/cmd" {
+			want = append(want, g.tests...)
+		}
+	}
+	sort.Strings(want)
+	if got := selection(sel, "internal/cmd"); !slices.Equal(got, want) {
+		t.Errorf("GuardSelects(Makefile) internal/cmd tests = %v, want every entry's %v", got, want)
+	}
+}
+
 // TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard: a docs-only diff
 // is no input of the internal/config guard, so presubmit leaves it out.
 func TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard(t *testing.T) {
@@ -1081,6 +1141,8 @@ func sourceReadLiterals(f *ast.File) []string {
 // each such read in a file tagged //go:build integration: presubmit's unit tests do
 // not run those and changed.go leaves them out on purpose (lint covers them), so
 // they are exempt, and listed so the exemption cannot silently grow (gt-bdxcct).
+// Only an entry with a judges predicate covers a read: an always entry runs the
+// tests it names, never the reading test, so it covers nothing (gt-mzwho4).
 // An error other than a missing target stops the scan.
 func uncoveredSourceReads(fsys fs.FS, guards []treeWideGuard) (uncovered, exempt []string, err error) {
 	err = fs.WalkDir(fsys, "internal", func(file string, d fs.DirEntry, err error) error {
@@ -1114,7 +1176,7 @@ func uncoveredSourceReads(fsys fs.FS, guards []treeWideGuard) (uncovered, exempt
 			}
 			pair := file + ": " + target
 			covered := slices.ContainsFunc(guards, func(g treeWideGuard) bool {
-				return g.pkg == pkg && g.trips([]string{target}, nil, nil)
+				return g.pkg == pkg && g.judges != nil && g.trips([]string{target}, nil, nil)
 			})
 			switch {
 			case covered || slices.Contains(uncovered, pair) || slices.Contains(exempt, pair):
@@ -1174,6 +1236,7 @@ func TestTreeWideGuardsCoverEverySourceReadingTest(t *testing.T) {
 	}
 	const pk = "package reader\n"
 	covering := []treeWideGuard{{pkg: "internal/reader", judges: func(rel string) bool { return rel == "internal/other/o.go" }}}
+	alwaysOnly := []treeWideGuard{{pkg: "internal/reader", tests: []string{"TestAlwaysRuns"}, always: true}}
 	pair := []string{"internal/reader/r_test.go: internal/other/o.go"}
 	for _, tc := range []struct {
 		name       string
@@ -1184,6 +1247,8 @@ func TestTreeWideGuardsCoverEverySourceReadingTest(t *testing.T) {
 	}{
 		{"a read with no entry", pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", nil, pair, nil},
 		{"the same read with an entry", pk + "func f() { os.ReadFile(\"internal/other/o.go\") }\n", covering, nil, nil},
+		{"a read with only an always entry", pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", alwaysOnly, pair, nil},
+		{"the same read with a judging entry", pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", covering, nil, nil},
 		{"a read through a const", pk + "const p = \"../other/o.go\"\nfunc f() { parser.ParseFile(nil, p, nil, 0) }\n", nil, pair, nil},
 		{"a path built by Join", pk + "func f() { os.ReadFile(filepath.Join(root, \"internal\", \"other\", \"o.go\")) }\n", nil, pair, nil},
 		{"a Join with a const segment", pk + "const dir = \"other\"\nfunc f() { os.ReadFile(filepath.Join(root, \"internal\", dir, \"o.go\")) }\n", nil, pair, nil},

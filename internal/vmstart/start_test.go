@@ -101,30 +101,21 @@ func reportCommands(report Report) []string {
 	return cmds
 }
 
-// callIndex is where calls first holds argv, or -1.
-func callIndex(calls [][]string, argv []string) int {
-	for i, call := range calls {
-		if reflect.DeepEqual(call, argv) {
+// callIndexAfter is where calls first holds argv at or after from, or -1.
+func callIndexAfter(calls [][]string, argv []string, from int) int {
+	for i := from; i < len(calls); i++ {
+		if reflect.DeepEqual(calls[i], argv) {
 			return i
 		}
 	}
 	return -1
 }
 
-// TestVMStartPlanOrder: StartPlan prints the order `gt town vms start
-// --dry-run` prints, and Start runs the steps in that order, each step's first
-// call after the previous step's.
-func TestVMStartPlanOrder(t *testing.T) {
-	t.Parallel()
-	var names []string
-	for _, step := range StartPlan {
-		names = append(names, step.Name)
-	}
-	if want := []string{"gt-sbx", "gt-control", "containers", "DNS", "registry"}; !reflect.DeepEqual(names, want) {
-		t.Fatalf("StartPlan prints %q, want %q", names, want)
-	}
+// planOrderErr is nil when each step's first call lies after the call matched
+// for the step before it, so a call made earlier cannot satisfy it.
+func planOrderErr(calls [][]string) error {
 	// firstCall is the command each step runs first, written out here so a run
-	// that takes the steps in another order fails this test.
+	// that takes the steps in another order fails this check.
 	firstCall := map[string][]string{
 		"gt-sbx":     startArgv("gt-sbx"),
 		"gt-control": startArgv("gt-control"),
@@ -132,46 +123,75 @@ func TestVMStartPlanOrder(t *testing.T) {
 		"DNS":        readArgv("gt-sbx"),
 		"registry":   registryLsofArgv,
 	}
-	r := &queueRunner{queues: startQueues(startStarts())}
-	if _, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test"); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
 	prev := -1
-	for _, step := range StartPlan {
+	for _, step := range StartPlan() {
 		argv, ok := firstCall[step.Name]
 		if !ok {
-			t.Fatalf("step %q has no first call written out for it", step.Name)
+			return fmt.Errorf("step %q has no first call written out for it", step.Name)
 		}
-		at := callIndex(r.calls, argv)
-		if at < 0 {
-			t.Fatalf("step %q ran no %q: calls = %q", step.Name, argv, r.calls)
-		}
+		at := callIndexAfter(calls, argv, prev+1)
 		if at <= prev {
-			t.Fatalf("step %q ran at call %d, not after the step before it at %d: calls = %q", step.Name, at, prev, r.calls)
+			return fmt.Errorf("step %q ran no %q after the step before it at %d: calls = %q", step.Name, argv, prev, calls)
 		}
 		prev = at
 	}
+	return nil
 }
 
-// TestVMStartRunOrder: the sandbox VM starts first, then the control VM, then
-// the containers, and a run where every step passes sleeps nowhere.
+// TestVMStartPlanOrder: StartPlan returns the order `gt town vms start
+// --dry-run` prints, and a caller's change to its copy cannot change the plan.
+func TestVMStartPlanOrder(t *testing.T) {
+	t.Parallel()
+	var names []string
+	for _, step := range StartPlan() {
+		names = append(names, step.Name)
+	}
+	if want := []string{"gt-sbx", "gt-control", "containers", "DNS", "registry"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("StartPlan returns %q, want %q", names, want)
+	}
+
+	// A caller that changes the plan it gets cannot change what Start runs.
+	mine := StartPlan()
+	want := mine[0].Name
+	mine[0] = StartStep{Name: "changed"}
+	if got := StartPlan()[0].Name; got != want {
+		t.Fatalf("StartPlan() after a caller changed its copy = %q, want %q", got, want)
+	}
+}
+
+// TestVMStartRunOrder: a run where every step passes takes the steps in plan
+// order, sleeps nowhere, and reports one row per step. It checks that order
+// rather than the whole call list (gt-2dbzp1).
 func TestVMStartRunOrder(t *testing.T) {
 	t.Parallel()
 	r := &queueRunner{queues: startQueues(startStarts())}
 	var slept []time.Duration
-	report, err := Start(context.Background(), r.run, recordingSleep(&slept), time.Now, "/home/test")
+	report, err := Start(context.Background(), r.run, recordingSleep(&slept), repairClock, "/home/test")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	want := [][]string{startArgv("gt-sbx"), startArgv("gt-control"), containersArgv}
-	if len(r.calls) < len(want) || !reflect.DeepEqual(r.calls[:len(want)], want) {
-		t.Fatalf("calls = %q, want them to begin %q", r.calls, want)
+	if err := planOrderErr(r.calls); err != nil {
+		t.Fatal(err)
 	}
 	if len(slept) != 0 {
 		t.Fatalf("slept %v, want no sleep", slept)
 	}
 	if len(report) != 3 {
 		t.Fatalf("report = %s, want one row per step", report)
+	}
+
+	// A step's call recorded once before its own step, as a retried start
+	// would be, must not satisfy the order check early.
+	repeated := append([][]string{readArgv("gt-sbx")}, r.calls...)
+	if err := planOrderErr(repeated); err != nil {
+		t.Fatal(err)
+	}
+
+	// A run that takes the control VM before the sandbox VM must be refused.
+	swapped := append([][]string(nil), r.calls...)
+	swapped[0], swapped[1] = swapped[1], swapped[0]
+	if err := planOrderErr(swapped); err == nil {
+		t.Fatal("planOrderErr over the control VM before the sandbox VM = nil, want an order error")
 	}
 }
 
@@ -205,7 +225,7 @@ func TestVMStartRunRetries(t *testing.T) {
 				cmdKey(containersArgv):          {{}},
 			})}
 			var slept []time.Duration
-			report, err := Start(context.Background(), r.run, recordingSleep(&slept), time.Now, "/home/test")
+			report, err := Start(context.Background(), r.run, recordingSleep(&slept), repairClock, "/home/test")
 			if !reflect.DeepEqual(slept, tc.wantSleeps) {
 				t.Fatalf("slept %v, want %v", slept, tc.wantSleeps)
 			}
@@ -289,7 +309,7 @@ func TestVMStartCancelStopsRun(t *testing.T) {
 				return out, err
 			}
 			var slept []time.Duration
-			report, err := Start(ctx, run, recordingSleep(&slept), time.Now, "/home/test")
+			report, err := Start(ctx, run, recordingSleep(&slept), repairClock, "/home/test")
 			if err == nil {
 				t.Fatalf("Start returned nil over a canceled context: %s", report)
 			}
@@ -317,7 +337,7 @@ func TestVMStartRunError(t *testing.T) {
 		cmdKey(startArgv("gt-control")): {{}},
 		cmdKey(containersArgv):          {{err: exit}},
 	})}
-	report, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test")
+	report, err := Start(context.Background(), r.run, func(time.Duration) {}, repairClock, "/home/test")
 	if err == nil {
 		t.Fatalf("Start returned nil over a failed container start: %s", report)
 	}
@@ -336,7 +356,7 @@ func TestVMStartRunError(t *testing.T) {
 func TestVMStartRepairsOrder(t *testing.T) {
 	t.Parallel()
 	r := &queueRunner{queues: startQueues(startStarts())}
-	if _, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test"); err != nil {
+	if _, err := Start(context.Background(), r.run, func(time.Duration) {}, repairClock, "/home/test"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(r.calls) != 3+len(repairReads) {
@@ -420,7 +440,7 @@ func TestVMStartRepairsReport(t *testing.T) {
 		queues := startQueues(startStarts())
 		queues[cmdKey(registryLsofArgv)] = []reply{{err: errors.New("exit status 2")}}
 		r := &queueRunner{queues: queues}
-		report, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, repairHome)
+		report, err := Start(context.Background(), r.run, func(time.Duration) {}, repairClock, repairHome)
 		if err == nil {
 			t.Fatalf("Start returned nil over a failed registry repair: %s", report)
 		}
@@ -445,10 +465,10 @@ func TestVMStartRunRefuses(t *testing.T) {
 	sleep := func(time.Duration) {}
 	cases := map[string]func() (Report, error){
 		"nil runner": func() (Report, error) {
-			return Start(context.Background(), nil, sleep, time.Now, "/home/test")
+			return Start(context.Background(), nil, sleep, repairClock, "/home/test")
 		},
 		"nil sleep": func() (Report, error) {
-			return Start(context.Background(), run, nil, time.Now, "/home/test")
+			return Start(context.Background(), run, nil, repairClock, "/home/test")
 		},
 	}
 	for name, start := range cases {

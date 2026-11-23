@@ -1768,6 +1768,31 @@ function loadSummary(loads) {
   return "load · now " + now.toFixed(1) + " · 24 hour average " + avg.toFixed(1) + " · peak " + Math.max(...vals).toFixed(1) + " · " + vals.length + " of 24 hours recorded (only while a page is open)";
 }
 
+// estimateDayRows is the daily estimate against actual line: one row per landing
+// day in the trend's window, the landings counted, the median actual over
+// estimated minutes and the share of them within 25 percent of the estimate. A
+// day with fewer than five measured landings carries no ratio, and with no ratio
+// the row reads "too few" rather than a zero; both figures are zero there, and a
+// measured ratio is always above zero, since the actual and the estimate are both
+// positive. The day's skipped landings, those with no usable sp: estimate, ride
+// the row's title (gt-1xtwib).
+function estimateDayRows(days) {
+  if (!days.length) return null;
+  const box = el("div", "estdays");
+  box.append(el("div", "k title", "estimate against actual, by landing day"));
+  for (const d of days) {
+    const n = d.n || 0;
+    const row = el("div", "erow");
+    const reading = d.median_ratio > 0
+      ? "median " + d.median_ratio.toFixed(2) + "× the estimate · " + Math.round((d.within_25 || 0) * 100) + "% within 25% of the estimate"
+      : "too few";
+    row.append(el("span", "", d.day), document.createTextNode(" · "), el("span", "", n + (n === 1 ? " landing" : " landings")), document.createTextNode(" · "), el("span", "title", reading));
+    if (d.skipped) row.title = d.skipped + (d.skipped === 1 ? " landing" : " landings") + " skipped: no usable sp: estimate";
+    box.append(row);
+  }
+  return box;
+}
+
 // landingsPauseNote says the overseer's landing hold stands and why, or that the
 // hold is unknown because the health report could not be read. Polecats keep
 // working under the hold, so the note says so.
@@ -1896,6 +1921,11 @@ function renderTrend(s) {
   // The differences draw over the feed's whole window, up to 72 hours, not the
   // trend's 24: the feed judges each one against its whole series (gt-vd91ny.7).
   if (vel) lhbody.append(vel.diff);
+
+  // The daily estimate against actual sits under the hourly trend it judges:
+  // one row per landing day in the same window (gt-1xtwib).
+  const est = estimateDayRows(t.estimate_days || []);
+  if (est) lhbody.append(est);
 
   // The gate, om and load readings are one compact stats line each, off the
   // same reading the chart above draws.
@@ -4480,7 +4510,8 @@ function jevSpendLine(sum, jev) {
 // that are ok, and how many are off. A battery that is off is not counted as ok.
 // The off list is the summary's, so without a summary the header says it is
 // unavailable rather than counting every battery as ok and reporting none off,
-// which would read as a healthy town.
+// which would read as a healthy town. When the patrol config cannot be read the
+// off count is unknown, so the line says that in place of both counts.
 function jevHeader(sum, sc, off, jev) {
   const box = el("div", "jvhead");
   let line;
@@ -4488,9 +4519,10 @@ function jevHeader(sum, sc, off, jev) {
     line = "Jev summary unavailable";
   } else {
     const at = sum.refreshed ? sum.refreshed : sc.scored_at;
+    const scored = at ? "scored " + age(at) + " ago" : "score time unknown";
     const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
-    line = (at ? "scored " + age(at) + " ago" : "score time unknown") +
-      " · " + ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off";
+    line = scored + " · " + (sc.config_unreadable ? "patrol config unreadable"
+      : ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off");
   }
   box.append(el("div", "jvtitle", line));
   box.append(jevSpendLine(sum, jev));

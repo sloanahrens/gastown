@@ -65,6 +65,28 @@ func TestSpecContentionRecordASuccessfulSlingClearsTheSchedule(t *testing.T) {
 	}
 }
 
+// A clear that fails leaves the stale schedule on the bead: the failure is
+// reported in the tick, and the sling that ended the contended run stands
+// (gt-kmkpao).
+func TestSpecContentionClearFailsReportsTheErrorAndKeepsTheSling(t *testing.T) {
+	t.Parallel()
+	spec := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	spec.Metadata = contentionMetadata(specTestNow.Add(-20*time.Second), 2, specTestNow.Add(-5*time.Second))
+	f := newFakeSpecTown(spec)
+	f.clearContentionErr["gt-a"] = errors.New("bd update: boom")
+	r := runSpecDispatchCycle(f.env())
+
+	if len(r.Dispatched) != 1 || len(f.slung) != 1 {
+		t.Fatalf("dispatched %+v slung %v, want the bead slung despite the failed clear", r.Dispatched, f.slung)
+	}
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "clearing the contention retry") || !strings.Contains(r.Errors[0], "bd update: boom") {
+		t.Errorf("errors = %v, want one naming the failed schedule clear", r.Errors)
+	}
+	if rec, ok := specdispatch.ContentionRecord(f.specs["gt-a"].Metadata); !ok || rec.Attempts != 2 {
+		t.Errorf("metadata %q record %+v (ok %v), want the stale schedule left in place", f.specs["gt-a"].Metadata, rec, ok)
+	}
+}
+
 // A schedule that cannot be written is reported in the tick, and the bead is
 // deferred and unlabeled: the loss is the host's, so a person has nothing to
 // clear (gt-kmkpao).

@@ -6,7 +6,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,11 +76,12 @@ func TestHelperSubcommandsAreDispatchedByTheImage(t *testing.T) {
 		}
 	}
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	// go test runs the test binary in the package directory, which -trimpath
+	// leaves intact; a source path reported by the binary is the module path.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("reading the package directory: %v", err)
 	}
-	dir := filepath.Dir(thisFile)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("reading %s: %v", dir, err)

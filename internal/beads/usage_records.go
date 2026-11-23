@@ -38,16 +38,23 @@ type UsageRecordRow struct {
 	Sessions []string
 }
 
-// WriteUsageRecord appends row to the usage records through bd sample add. It
-// refuses what ValidateUsageRecordRow refuses, before bd runs; a bd whose help
-// does not list the sample verb is refused by name (beads be-1qqu).
-func (b *Beads) WriteUsageRecord(ctx context.Context, row UsageRecordRow) error {
-	if err := ValidateUsageRecordRow(row); err != nil {
-		return fmt.Errorf("bd sample add: %w", err)
-	}
+// CheckUsageRecordRow refuses what WriteUsageRecord refuses before it runs bd,
+// and writes nothing: a dry run counts a row this accepts as one an apply
+// writes.
+func (b *Beads) CheckUsageRecordRow(ctx context.Context, row UsageRecordRow) error {
+	_, _, err := b.usageRecordPayload(ctx, row)
+	return err
+}
+
+// usageRecordPayload is the precheck WriteUsageRecord runs: it refuses the row
+// and a bd that cannot take it, and returns the sample at and payload to write.
+func (b *Beads) usageRecordPayload(ctx context.Context, row UsageRecordRow) (string, []byte, error) {
 	at, err := sampleAt(row.BuiltAt)
 	if err != nil {
-		return fmt.Errorf("bd sample add: %w", err)
+		return "", nil, fmt.Errorf("bd sample add: %w", err)
+	}
+	if err := ValidateUsageRecordRow(row); err != nil {
+		return "", nil, fmt.Errorf("bd sample add: %w", err)
 	}
 	// Start and End are the run's own bounds, so their instant is kept and only
 	// their location is pinned.
@@ -55,14 +62,24 @@ func (b *Beads) WriteUsageRecord(ctx context.Context, row UsageRecordRow) error 
 	row.Record.End = row.Record.End.UTC()
 	payload, err := row.payloadJSON()
 	if err != nil {
-		return fmt.Errorf("bd sample add: %w", err)
+		return "", nil, fmt.Errorf("bd sample add: %w", err)
 	}
 	offers, err := b.sampleOffersVerb(ctx)
 	if err != nil {
-		return fmt.Errorf("bd sample add: %w", err)
+		return "", nil, fmt.Errorf("bd sample add: %w", err)
 	}
 	if !offers {
-		return fmt.Errorf("bd sample add: the bd on PATH does not offer the sample verb (beads be-1qqu); refusing to write a %s row", SampleKindUsageRecord)
+		return "", nil, fmt.Errorf("bd sample add: the bd on PATH does not offer the sample verb (beads be-1qqu); refusing to write a %s row", SampleKindUsageRecord)
+	}
+	return at, payload, nil
+}
+
+// WriteUsageRecord appends row to the usage records through bd sample add. It
+// refuses what CheckUsageRecordRow refuses, before bd runs.
+func (b *Beads) WriteUsageRecord(ctx context.Context, row UsageRecordRow) error {
+	at, payload, err := b.usageRecordPayload(ctx, row)
+	if err != nil {
+		return err
 	}
 	args := []string{"sample", "add", "--kind", SampleKindUsageRecord, "--at", at, "--json", "-"}
 	// No retry loop (runOnceCtx): a row is an append, so a retry after a

@@ -2447,9 +2447,7 @@ type ImagePinLayersConfig struct {
 // (internal/daemon/outbox_poll.go, docs/plans/2026-11-14-no-bead-access-plan.md
 // O4).
 //
-// The patrol is opt-in. Each tick reads every running seat through the sandbox
-// gateway (gt-dq4ce6), so a town that has not asked for it must not get it from
-// a default.
+// The patrol is opt-in; the PatrolsConfig.OutboxPoll field says why.
 type OutboxPollConfig struct {
 	Enabled bool `json:"enabled"`
 }
