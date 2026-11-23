@@ -14,6 +14,8 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -160,6 +162,56 @@ func TestSandboxSilentAttention(t *testing.T) {
 	}
 }
 
+// TestSandboxSilentAttentionSeatState is the bead's first box: a seat the
+// intent record says is submitted, held or stopped writes no transcript while
+// it waits, so its old transcript raises no item and costs no exec; a seat
+// whose record asks for run, and a seat with no record at all, still raise
+// (gt-p43bbd).
+func TestSandboxSilentAttentionSeatState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		record   *intent.Record
+		wantItem bool
+		wantRead int
+	}{
+		{name: "a submitted seat raises no item", record: &intent.Record{Desired: intent.DesiredSubmitted}},
+		{name: "a parked seat raises no item", record: &intent.Record{Desired: intent.DesiredPark}},
+		{name: "a frozen seat raises no item", record: &intent.Record{Frozen: true}},
+		{name: "a stopped seat raises no item", record: &intent.Record{Desired: intent.DesiredStop}},
+		{name: "a running seat raises its item", record: &intent.Record{Desired: intent.DesiredRun}, wantItem: true, wantRead: 1},
+		{name: "a seat with no record raises its item", wantItem: true, wantRead: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSilentSandboxFixture(t)
+			seat := f.seat(t, "gt-gastown-mango", "gastown", "mango", 2*time.Hour)
+			f.transcript(seat.Session, 31*time.Minute)
+			if tc.record != nil {
+				f.writeIntent(t, seat.Rig, seat.Polecat, *tc.record)
+			}
+
+			items, err := f.collect(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantItem {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none from a seat the record says is not waiting", items)
+				}
+			} else {
+				if len(items) != 1 || items[0].Key != "sandbox-silent:gastown/mango" {
+					t.Fatalf("items = %+v, want one item on sandbox-silent:gastown/mango", items)
+				}
+			}
+			if f.reads != tc.wantRead {
+				t.Errorf("listings read = %d, want %d", f.reads, tc.wantRead)
+			}
+		})
+	}
+}
+
 // TestSandboxSilentAttentionRefusals is the bead's second box, and the
 // collector's refusal branches. A listing that cannot be read raises no new
 // item and logs one line per seat, while the item the seat already had is
@@ -209,6 +261,27 @@ func TestSandboxSilentAttentionRefusals(t *testing.T) {
 		}
 		if len(items) != 1 || items[0].Key != openItem.Key {
 			t.Fatalf("items = %+v, want the seat's previous item kept", items)
+		}
+	})
+
+	t.Run("an unreadable intent record fails the collection and keeps the previous item", func(t *testing.T) {
+		t.Parallel()
+		f := newSilentSandboxFixture(t)
+		seat := f.seat(t, "gt-gastown-mango", "gastown", "mango", 2*time.Hour)
+		f.transcript(seat.Session, 31*time.Minute)
+		f.writeRawIntent(t, seat.Rig, seat.Polecat, `{"desired":`)
+		f.src.prev = attention.State{Items: []attention.Item{openItem}}
+
+		if _, err := f.collect(t); err == nil {
+			t.Fatal("collect = nil error, want the unreadable intent record refused")
+		}
+		if f.reads != 0 {
+			t.Errorf("listings read = %d, want none from a seat whose record cannot be read", f.reads)
+		}
+		items := collectAttention(context.Background(), f.src.prev,
+			[]attentionCollector{collectorFor(t, f.src, attention.KindSandboxSilent)}, f.d.logger.Printf)
+		if len(items) != 1 || items[0].Key != openItem.Key || items[0].Summary != openItem.Summary {
+			t.Fatalf("items = %+v, want the seat's previous item kept through the failed collection", items)
 		}
 	})
 
@@ -383,6 +456,26 @@ func (f *silentSandboxFixture) unreadableMarks() int {
 		return true
 	})
 	return n
+}
+
+// writeIntent files the seat's intent record, so a test can show what the
+// seat's state says while its transcript stays old.
+func (f *silentSandboxFixture) writeIntent(t *testing.T, rig, polecat string, rec intent.Record) {
+	t.Helper()
+	writeJSONFile(t, intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: polecat}.Path(f.town), rec)
+}
+
+// writeRawIntent files bytes under the seat's intent record path, so a test can
+// write a record that intent.Read refuses.
+func (f *silentSandboxFixture) writeRawIntent(t *testing.T, rig, polecat, raw string) {
+	t.Helper()
+	path := intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: polecat}.Path(f.town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // writeRawRecord files a record's bytes under the registry name, so a test can
