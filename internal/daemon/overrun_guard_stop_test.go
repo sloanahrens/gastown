@@ -2257,6 +2257,60 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	}
 }
 
+// The stop records a seat that made no commit of its own: a kept branch level
+// with the rig's target, with a clean checkpoint, is no-work beside the empty
+// rework answer, so the next hand-back can say the seat did nothing at all. A
+// branch with a commit of its own, or finished work already on origin, is not
+// no-work (gt-ahzkhx).
+func TestOverrunGuardNoWorkIsDecidedByTheStop(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		held     bool // the target already contains the branch head
+		finished bool // finished work is on origin
+		want     bool
+	}{
+		{name: "branch level with the target", held: true, want: true},
+		{name: "branch with a commit of its own"},
+		{name: "finished work already on origin", finished: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			s := f.seams()
+			worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var ancestors map[string]bool
+			if tc.held {
+				ancestors = map[string]bool{"abc1234 main222": true}
+			}
+			d.openGitFn = func(string) daemonGit {
+				return &pushStubGit{branch: stopSeat.Branch, sha: "abc1234", ancestors: ancestors,
+					originRefs: []git.RemoteRef{
+						{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch},
+						{Hash: "main222", Name: "refs/heads/main"},
+					}}
+			}
+			if tc.finished {
+				s.finishedOnOrigin = func(overrunSeat) string { return "abc1234" }
+			}
+			var noWork bool
+			handBack := s.handBack
+			s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+				noWork = seat.NoWork
+				return handBack(seat, elapsed, note)
+			}
+			d.runOverrunGuard(s)
+			if noWork != tc.want {
+				t.Errorf("handed-back seat NoWork = %t, want %t", noWork, tc.want)
+			}
+		})
+	}
+}
+
 // Every stop that cannot show the finished work on origin keeps needs-split.
 func TestStop_UnfinishedOrUnpushedWorkKeepsNeedsSplit(t *testing.T) {
 	t.Parallel()

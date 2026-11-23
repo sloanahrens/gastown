@@ -618,6 +618,12 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		// A rescue or an unanswered origin read keeps needs-split.
 		if st.ReworkSHA == "" && st.SaveRescue == "" && originReadGaveUp == "" {
 			handed.EmptyBranchTarget = d.overrunEmptyBranchTarget(handed)
+			// Nothing beyond the target is no commit of the seat's own: the
+			// stop records no-work beside the rework answer, so a later
+			// hand-back says the seat did nothing rather than asking for a
+			// split (gt-ahzkhx). The read fails closed to "", so an unknown
+			// branch stays false and keeps needs-split.
+			handed.NoWork = handed.EmptyBranchTarget != ""
 		}
 	}
 	var notes []string
