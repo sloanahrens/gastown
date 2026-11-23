@@ -67,12 +67,50 @@ func BootHold(townRoot string) string {
 	return fmt.Sprintf("%s (%s); remove the file by hand if the daemon is retired", reason, path)
 }
 
+// RedHold returns the reason the daemon's red hold file holds automatic
+// dispatch, or "" when the file does not exist. A file that cannot be read or
+// parsed, or that names no reasons, holds fail closed: the daemon's answer
+// cannot be ruled out, and a file a dead daemon left is removed by hand
+// (daemon/red-hold under the town root).
+func RedHold(townRoot string) string {
+	if townRoot == "" {
+		return "no town root to read the red hold from; treating as held"
+	}
+	path := RedHoldPath(townRoot)
+	// ReadRedHold maps a missing file to an empty record, so absence is settled here.
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	rec, err := ReadRedHold(townRoot)
+	if err != nil {
+		return redHoldUnreadable(err)
+	}
+	if len(rec.Reasons) == 0 {
+		return redHoldUnreadable(fmt.Errorf("%s names no reasons", path))
+	}
+	kinds := make([]string, len(rec.Reasons))
+	oldest := rec.Reasons[0].Since
+	for i, reason := range rec.Reasons {
+		kinds[i] = reason.Kind
+		if reason.Since.Before(oldest) {
+			oldest = reason.Since
+		}
+	}
+	return fmt.Sprintf("red hold: %s since %s (%s)",
+		strings.Join(kinds, ", "), oldest.UTC().Format(time.RFC3339), path)
+}
+
+// redHoldUnreadable is RedHold's fail-closed reason for a record it cannot trust.
+func redHoldUnreadable(err error) string {
+	return fmt.Sprintf("red hold unreadable (%v); treating as held; remove the file by hand if the daemon is retired", err)
+}
+
 // OperatorHold reports why automatic dispatch must not run in this town right
 // now, or "" when it may. It answers for the operator's hold file, for a
-// town-wide ESTOP, for the daemon's boot hold file and for the Ring when it is
-// Waned, the holds the seat-refill plugin checked and the spec dispatcher
-// checks now. It is the one dispatch choke point for e-stop (gt-4k3fj.4);
-// restarts and kills have theirs in internal/supervisor.
+// town-wide ESTOP, for the daemon's boot hold and red hold files and for the
+// Ring when it is Waned, the holds the seat-refill plugin checked and the spec
+// dispatcher checks now. It is the one dispatch choke point for e-stop
+// (gt-4k3fj.4); restarts and kills have theirs in internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
 // operator is the decision the hold file defers to; an e-stop, the boot hold
@@ -205,6 +243,7 @@ func holdView(townRoot string, key ring.KeyFunc, now time.Time, rigs rigLister) 
 		{Name: OperatorHoldSource, Reason: operatorHoldFileReason(townRoot)},
 		{Name: "town ESTOP", Reason: estopHold(townRoot, "")},
 		{Name: "boot hold", Reason: BootHold(townRoot)},
+		{Name: "red hold", Reason: RedHold(townRoot)},
 		{Name: "Ring", Reason: ring.Hold(townRoot, key, now)},
 	}
 	names, err := rigs(townRoot)
