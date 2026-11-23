@@ -466,3 +466,131 @@ func TestSeatEndNoRecordRaised(t *testing.T) {
 		})
 	}
 }
+
+// seatEndNoRecordKey is the key one seat's marker raises.
+func seatEndNoRecordKey(rig, name string) string { return "seat-end-no-record:" + rig + "/" + name }
+
+// TestSeatEndNoRecordClears: a marked seat's item clears on the tick its bead
+// carries a SEAT-END comment naming the seat, read through the real decode.
+func TestSeatEndNoRecordClears(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	key := seatEndNoRecordKey(endRig, endPolecat)
+	bd := beadsfake.New()
+	bd.Seed(beads.Issue{ID: endBead, Title: "seat"})
+	f.d.openRecoveryBeads = func([]string) beads.Client { return bd }
+	if err := recordSeatEndNoRecord(f.d.config.TownRoot, endRig, endPolecat, endBead); err != nil {
+		t.Fatalf("recordSeatEndNoRecord: %v", err)
+	}
+	if _, ok := attention.Find(f.tick(t, keptSeatAttentionNow), key); !ok {
+		t.Fatalf("first tick holds no %s item, want the marked seat's", key)
+	}
+	if err := bd.AddComment(endBead, seatEndComment(t, seatship.Payload{Rig: endRig, Polecat: endPolecat, Bead: endBead})); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	if it, ok := attention.Find(f.tick(t, keptSeatAttentionNow.Add(time.Minute)), key); ok {
+		t.Fatalf("item %+v stands after its SEAT-END comment appeared, want cleared", it)
+	}
+	for _, e := range f.events(t) {
+		if e.Key == key && e.State == attention.EventCleared {
+			return
+		}
+	}
+	t.Errorf("events hold no cleared transition for %s", key)
+}
+
+// TestSeatEndNoRecordOneItemPerSeat: a seat holds one item however many ticks
+// its marker stands, keyed by the seat, so another bead replaces that item.
+func TestSeatEndNoRecordOneItemPerSeat(t *testing.T) {
+	t.Parallel()
+	seat := seatEndNoRecord{Rig: endRig, Polecat: endPolecat, Bead: endBead}
+	tests := []struct {
+		name    string
+		markers []seatEndNoRecord
+		rewrite *seatEndNoRecord  // replaces the marker between the ticks
+		want    map[string]string // key -> bead after the second tick
+	}{
+		{name: "one seat over two ticks", markers: []seatEndNoRecord{seat},
+			want: map[string]string{seatEndNoRecordKey(endRig, endPolecat): endBead}},
+		{name: "a marker rewritten with another bead", markers: []seatEndNoRecord{seat},
+			rewrite: &seatEndNoRecord{Rig: endRig, Polecat: endPolecat, Bead: "gt-other"},
+			want:    map[string]string{seatEndNoRecordKey(endRig, endPolecat): "gt-other"}},
+		{name: "two seats", markers: []seatEndNoRecord{seat, {Rig: endRig, Polecat: "basalt", Bead: "gt-b2c3d"}},
+			want: map[string]string{seatEndNoRecordKey(endRig, endPolecat): endBead, seatEndNoRecordKey(endRig, "basalt"): "gt-b2c3d"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			for _, m := range tt.markers {
+				if err := recordSeatEndNoRecord(f.d.config.TownRoot, m.Rig, m.Polecat, m.Bead); err != nil {
+					t.Fatalf("recordSeatEndNoRecord: %v", err)
+				}
+			}
+			seatEndNoRecordSource(f, nil) // no seat carries a SEAT-END comment
+			f.tick(t, keptSeatAttentionNow)
+			if tt.rewrite != nil {
+				if err := recordSeatEndNoRecord(f.d.config.TownRoot, tt.rewrite.Rig, tt.rewrite.Polecat, tt.rewrite.Bead); err != nil {
+					t.Fatalf("rewriting the marker: %v", err)
+				}
+			}
+			st := f.tick(t, keptSeatAttentionNow.Add(time.Minute))
+			got := map[string]string{}
+			for _, it := range st.Items {
+				if !strings.HasPrefix(it.Key, "seat-end-no-record:") {
+					continue
+				}
+				got[it.Key] = it.Bead
+				if it.FirstSeen.After(keptSeatAttentionNow) {
+					t.Errorf("%s FirstSeen = %v, want the first tick's time", it.Key, it.FirstSeen)
+				}
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("items = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSeatEndNoRecordNoReaderIsAnError: a clear check the bead reader cannot
+// answer is an error, never a record that cleared, so the item stands.
+func TestSeatEndNoRecordNoReaderIsAnError(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	key := seatEndNoRecordKey(endRig, endPolecat)
+	if err := recordSeatEndNoRecord(f.d.config.TownRoot, endRig, endPolecat, endBead); err != nil {
+		t.Fatalf("recordSeatEndNoRecord: %v", err)
+	}
+	// A bead reader holding no bead answers the clear check with an error.
+	f.d.openRecoveryBeads = func([]string) beads.Client { return beadsfake.New() }
+	h := &patrolScanHost{d: f.d, openRecoveryBeads: f.d.openRecoveryBeads}
+	if _, found, err := h.seatEndRecord(endRig, endPolecat, endBead); err == nil || found {
+		t.Fatalf("seatEndRecord = found %v, err %v; want the no-answer error", found, err)
+	}
+	items, err := collectorFor(t, f.src, attention.KindSeatEndNoRecord).collect(context.Background())
+	if err != nil || len(items) != 1 || items[0].Key != key {
+		t.Fatalf("collect = %+v, %v; want the seat's one item standing through the failed read", items, err)
+	}
+	if !strings.Contains(f.logs.String(), "seat-end-no-record "+endRig+"/"+endPolecat) {
+		t.Errorf("log %q does not name the seat whose clear check failed", f.logs.String())
+	}
+}
+
+// TestSeatEndNoRecordFailedCollectKeepsOnlyItsItems: a failed collector keeps
+// the previous items of its kind and key alone, and the log names it.
+func TestSeatEndNoRecordFailedCollectKeepsOnlyItsItems(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	writeSeatEndNoRecordFile(t, f.d.config.TownRoot, endPolecat+".json", "{") // fails the collect
+	prev := attention.State{Items: []attention.Item{
+		{Kind: attention.KindSeatEndNoRecord, Key: seatEndNoRecordKey(endRig, endPolecat)},
+		{Kind: attention.KindSeatEndNoRecord, Key: "imported:gt-x"},
+		{Kind: attention.KindRedMain, Key: seatEndNoRecordKey(endRig, "other")},
+	}}
+	items := collectAttention(context.Background(), prev,
+		[]attentionCollector{collectorFor(t, f.src, attention.KindSeatEndNoRecord)}, f.d.logger.Printf)
+	if len(items) != 1 || items[0].Key != seatEndNoRecordKey(endRig, endPolecat) ||
+		!strings.Contains(f.logs.String(), "attention: collector seat-end-no-record: ") {
+		t.Errorf("items = %+v beside log %q, want only the seat's item kept and the failure named", items, f.logs.String())
+	}
+}
