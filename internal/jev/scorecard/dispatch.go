@@ -139,7 +139,7 @@ func (a *dispatchAdapter) Prefetch(_ context.Context, items []Item) {
 		a.beads = b
 	}
 	shown, err := showAll(a.beads, itemIDs(items))
-	if err != nil {
+	if err := warnShowErr(err); err != nil {
 		warnf("reading the placed beads in a batch: %v", err)
 	}
 	a.shown = shown

@@ -84,14 +84,16 @@ func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
 
 // ShowAll reads several of a rig's beads in as few calls as it can. A rig whose
 // store cannot be opened, a bead it does not hold and a failed call all leave
-// the bead out of the result, for the caller to read one at a time. The error
-// says which batch read failed; the result still holds what was read.
+// the bead out of the result, for the caller to read one at a time. The beads
+// gone from the store are said once on stderr; the error carries the rest of
+// what failed, and the result still holds what was read.
 func (t *townNotes) ShowAll(rig string, ids []string) (map[string]*beads.Issue, error) {
 	b, err := t.store(rig)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s's beads: %w", rig, err)
 	}
-	return showAll(b, ids)
+	got, err := showAll(b, ids)
+	return got, warnShowErr(err)
 }
 
 // rigShowAller reads several of a rig's beads at once. townNotes is one.

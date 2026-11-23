@@ -99,7 +99,7 @@ type finding struct {
 // commit their close reasons name in one pass, so Label makes no call per item.
 func (f *finding) Prefetch(ctx context.Context, items []Item) {
 	issues, err := showAll(f.beads, itemIDs(items))
-	if err != nil {
+	if err := warnShowErr(err); err != nil {
 		warnf("reading the finding beads in a batch: %v", err)
 	}
 	f.issues = issues

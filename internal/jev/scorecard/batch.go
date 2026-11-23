@@ -50,9 +50,49 @@ const showChunk = 100
 // makes no label, as a one-at-a-time read of it does.
 type GoneError struct{ N int }
 
-// Error is the count alone, so a caller that warns on any error prints one
-// line: "3 beads gone".
+// Error is the count alone, so warnShowErr prints one line: "3 beads gone".
 func (e *GoneError) Error() string { return fmt.Sprintf("%d beads gone", e.N) }
+
+// warnShowErr says on stderr that a batched read named beads the store no
+// longer holds: one line for the count, however many are gone, and not the
+// batch warning. It returns what is left of err for the caller's own warning:
+// nil when the gone beads are all that was wrong, and err itself when it holds
+// no *GoneError above zero.
+func warnShowErr(err error) error {
+	var gone *GoneError
+	if !errors.As(err, &gone) || gone.N <= 0 {
+		return err
+	}
+	rest := dropGone(err)
+	var kept *GoneError
+	if errors.As(rest, &kept) {
+		// The count came wrapped in another error, which cannot lose it
+		// without its own message, so the caller's warning names it once.
+		return err
+	}
+	warnf("%d beads gone", gone.N)
+	return rest
+}
+
+// dropGone returns err without the *GoneError showAll joins into it, so a
+// caller's warning names only what failed for another reason. Every other
+// error stays whole: only a join is taken apart and put back.
+func dropGone(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(*GoneError); ok {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var rest []error
+		for _, e := range joined.Unwrap() {
+			rest = append(rest, dropGone(e))
+		}
+		return errors.Join(rest...)
+	}
+	return err
+}
 
 // showAll reads the beads named ids from r in as few calls as it can: one list
 // query per chunk, then a batched show for what the query did not return (an

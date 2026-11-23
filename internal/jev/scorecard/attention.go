@@ -198,7 +198,7 @@ func (a *attentionAdapter) Prefetch(_ context.Context, items []Item) {
 		ids = append(ids, a.lines[it.ID].Bead)
 	}
 	got, err := showAll(a.beads, ids)
-	if err != nil {
+	if err := warnShowErr(err); err != nil {
 		warnf("reading the attention beads in a batch: %v", err)
 	}
 	for id, issue := range got {
