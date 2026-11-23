@@ -480,6 +480,9 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // line names the step: an end while wiring the town, retraining or checking the last adoption is a
 // wait that records no stamp and returns nil, so the week stays open. That end is read from the
 // budget context's expiry: an inner error carrying context.DeadlineExceeded is the step's failure.
+// The adoption decision that follows the retrain embeds only texts the retrain
+// cached and writes files without a context, so the budget cannot end inside the
+// write: a failure there is the decision's own.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that

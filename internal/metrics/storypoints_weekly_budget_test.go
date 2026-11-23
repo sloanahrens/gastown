@@ -29,15 +29,16 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 	t.Parallel()
 	// step is the step a budget wait must name; an empty step fails for cause.
 	for _, tc := range []struct {
-		name                                 string
-		adoption, failWrite, wireWait, inner bool
-		step, cause                          string
+		name                                             string
+		adoption, failWrite, wireWait, inner, callerEnds bool
+		step, cause                                      string
 	}{
-		{"retrain waits", false, false, false, false, "retraining", ""},
-		{"adoption check waits", true, false, false, false, "checking the last adoption", ""},
-		{"the wire waits", false, false, true, false, "wiring the town", ""},
-		{"progress write failure is returned", false, true, false, false, "retraining", ""},
-		{"an inner deadline is not the budget", false, false, false, true, "", "context deadline exceeded"},
+		{"retrain waits", false, false, false, false, false, "retraining", ""},
+		{"adoption check waits", true, false, false, false, false, "checking the last adoption", ""},
+		{"the wire waits", false, false, true, false, false, "wiring the town", ""},
+		{"progress write failure is returned", false, true, false, false, false, "retraining", ""},
+		{"an inner deadline is not the budget", false, false, false, true, false, "", "context deadline exceeded"},
+		{"the caller's own deadline is not the budget", false, false, true, false, true, "", "context deadline exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -72,10 +73,20 @@ func TestStoryPointsWeeklyBudget(t *testing.T) {
 				}
 			}
 
-			err := c.RunStoryPointsWeekly(context.Background())
+			ctx := context.Background()
+			if tc.callerEnds {
+				var stop context.CancelFunc
+				ctx, stop = context.WithDeadline(ctx, time.Unix(1, 0))
+				defer stop()
+			}
+			err := c.RunStoryPointsWeekly(ctx)
 			line := out.String()
 			wantStamp := last.Format(time.RFC3339)
 			switch {
+			case tc.callerEnds:
+				if err == nil || !strings.Contains(err.Error(), tc.cause) || strings.Contains(line, "waiting") {
+					t.Fatalf("err = %v, out = %q, want the caller's deadline returned and no waiting line", err, line)
+				}
 			case tc.cause != "":
 				wantStamp = weeklyNow.UTC().Format(time.RFC3339)
 				if err == nil || !strings.HasPrefix(line, "story points weekly: failed: ") || !strings.Contains(line, tc.cause) || !strings.Contains(line, "the week is spent") {
