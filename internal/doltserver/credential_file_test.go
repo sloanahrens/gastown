@@ -1,6 +1,9 @@
 package doltserver
 
 import (
+	"bytes"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +141,62 @@ func TestCredentialFileUserDSNFailsClosed(t *testing.T) {
 	dsn := DefaultConfig(town).UserDSN()
 	if !strings.HasPrefix(dsn, unreadableCredentialUser) || strings.Contains(dsn, DefaultUser+"@") || strings.Contains(dsn, "hunter2") {
 		t.Errorf("UserDSN() = %q, want the %s user with no password and not the default user", dsn, unreadableCredentialUser)
+	}
+}
+
+// TestCredentialFileTCPDSNRefuses: with a credential file the town cannot
+// read, the TCP DSN the daemon connects with is not built at all: tcpDSN
+// returns the credential error and no DSN, never one that would fall back to
+// the default user.
+func TestCredentialFileTCPDSNRefuses(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\nextra=1\n", 0o600)
+
+	dsn, err := DefaultConfig(town).tcpDSN()
+	if err == nil {
+		t.Fatalf("tcpDSN = %q, want the credential error", dsn)
+	}
+	if dsn != "" {
+		t.Errorf("tcpDSN = %q alongside an error, want no DSN", dsn)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the file %q", err, path)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error %q holds the password", err)
+	}
+}
+
+// TestCredentialFileDrainSkipsAndWarns: a stop whose credential file cannot be
+// read skips the connection drain instead of opening a connection as the
+// default user, and warns on the host's warning sink naming the file and no
+// value from it.
+func TestCredentialFileDrainSkipsAndWarns(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\nextra=1\n", 0o600)
+
+	h := newFakeHost().host()
+	var warnings bytes.Buffer
+	h.warn = &warnings
+	opened := false
+	h.openDB = func(string) (*sql.DB, error) {
+		opened = true
+		return nil, errors.New("fake host: no SQL server")
+	}
+
+	h.drainConnectionsBeforeStop(h.DefaultConfig(town))
+
+	if opened {
+		t.Error("drain opened a connection with an unreadable credential file")
+	}
+	got := warnings.String()
+	if !strings.Contains(got, path) {
+		t.Errorf("warning %q does not name the file %q", got, path)
+	}
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("warning %q holds the password", got)
 	}
 }
 
