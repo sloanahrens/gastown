@@ -78,6 +78,9 @@ func TestSpecTickSlingSideReadsOnceAndSkipsOnTownTotal(t *testing.T) {
 	const reason = ": no seat: over the town total: 3/3 live polecats across every seat"
 	want := []string{
 		"gt-box2" + reason,
+		// gt-box is a container: at the town total it is refused before its
+		// children are read, like every other candidate (gt-n3l0sm).
+		"gt-box" + reason,
 		"gt-c1" + reason,
 		"gt-c2" + reason,
 		"gt-c3" + reason,

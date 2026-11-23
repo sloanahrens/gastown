@@ -2955,6 +2955,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
 			continue
 		}
+		// With no free seat left, ChooseSeat refuses every candidate and its
+		// reason does not depend on the candidate's children, so the refusal
+		// comes before the children read. The per-tick limit above cannot do
+		// this when the town sets a max_per_tick ceiling, because the ceiling
+		// stays positive whatever the seats are: a full pool then read every
+		// candidate's children before ChooseSeat refused it, 47 to 61 s a tick
+		// (gt-n3l0sm).
+		budget.Now = env.Now()
+		if budget.FreeSeats() == 0 {
+			if seat := specdispatch.ChooseSeat(budget, full); seat.Skip {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipNoSeat, seat.Reason)})
+				continue
+			}
+		}
 		// A bead whose children are open is a container, not a unit of work:
 		// its scope is already sliced into children a seat will take, so
 		// spending one on the parent duplicates them (gt-gektq). An unreadable
