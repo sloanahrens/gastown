@@ -927,6 +927,14 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if r, refused := changeBudgetRefusal(s, sections["size"], opts); refused {
 		failures = append(failures, r)
 	}
+	// A Change line declaring fewer added lines than the 25th percentile of
+	// what beads at the same estimate landed with trips the landing gate at
+	// twice the declared number, where a finished branch cannot act on it; it
+	// is refused here, naming the declaration that keeps under the gate
+	// (gt-vb9pi9).
+	if r, refused := declaredLinesRefusal(s, sections); refused {
+		failures = append(failures, r)
+	}
 	if len(failures) > 0 {
 		return refusal(failures...)
 	}
@@ -1049,6 +1057,24 @@ func changeBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) 
 	return Refusal{Field: "size", Reason: fmt.Sprintf(
 		"the Size section declares at most %d added lines, over the change budget maximum of %d: split the bead by package (one bead per package) or by test group (one bead per group of acceptance boxes that share a fake)",
 		budget.Lines, opts.BudgetMaxLines)}, true
+}
+
+// declaredLinesRefusal is the lint's verdict on a Change line that declares
+// fewer added lines than the 25th percentile of what beads at the same
+// estimate landed with (gt-vb9pi9): such a bead trips the landing gate at
+// twice its declared number, which a finished branch cannot act on, so it is
+// refused here naming the declared number, the estimate, the band's p25 and
+// the declaration that keeps under the gate (LinesBand.Advise) or a split. It
+// reads the same inputs as the advice (declaredLinesBand), so a bead neither
+// can place gets neither a refusal nor a guessed number.
+func declaredLinesRefusal(s Spec, sections map[string]string) (Refusal, bool) {
+	budget, minutes, band, ok := declaredLinesBand(s, sections)
+	if !ok || budget.Lines >= band.Refuse() {
+		return Refusal{}, false
+	}
+	return Refusal{Field: "size", Reason: fmt.Sprintf(
+		"the Change line declares %d added lines, below what three in four beads estimated at %.1f minutes landed with (p25 %d); declare at least %d, or split",
+		budget.Lines, minutes, band.Refuse(), band.Advise())}, true
 }
 
 // The change budget's warning (gt-ed0hjd): the lint warns when a declared
