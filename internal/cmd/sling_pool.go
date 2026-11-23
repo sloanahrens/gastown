@@ -1099,9 +1099,9 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 }
 
 // poolPolecatSeatStateFromBeadRead finishes a seat read whose beads were
-// already read, so a caller that asked the cheap hook-held question (and got
-// its answer from these beads) does not read them again. bd is the rig's beads
-// client poolReadSeatBeads returned.
+// already read, so a batch that kept the read for a second ask about the same
+// seat does not read them again. bd is the rig's beads client the caller read
+// the seat with.
 func poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName string, reads poolSeatReads, bd beads.Client, seat poolSeatBeadRead) (poolSeatState, error) {
 	if seat.fields == nil {
 		// No agent bead: nothing to read, and safest read is "still occupied"

@@ -60,21 +60,64 @@ func TestAgentBeadRetireDeadHookedLogsTheHookDisagreement(t *testing.T) {
 }
 
 // TestAgentBeadRetireDeadHookedLogsOncePerSeat: the walk asks the seat's batch
-// once, and a read that asks it again for the same seat does not log a second
-// line — the window records a disagreeing seat, not each ask.
+// once, and a read that asks it again for the same seat neither logs a second
+// line nor reads the seat's beads again — the window records a disagreeing
+// seat, not each ask, and the batch's cache answers the second ask (gt-ac14z9,
+// gt-hz9wkp).
 func TestAgentBeadRetireDeadHookedLogsOncePerSeat(t *testing.T) {
 	t.Parallel()
-	town, _, batch, lines := seatShadowTown(t, "ember", "gt-bead-hook")
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "ember")
+	db := beadsfake.New()
+	seedPolecatAgentBead(db, town, "gastown", "ember", "gt-bead-hook")
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
 		intent.Record{WorkBead: "gt-intent-bead"})
+
+	// The batch's list reads are refused, so every ask for the seat falls back
+	// to the per-seat reads the counting store sees: the second ask's store
+	// calls are the cache's, and can only be none if disposition kept the first
+	// ask's read.
+	store := newCountingStore(db)
+	store.failBatch = true
+	batch := batchOver(town, store)
+	lines := &bytes.Buffer{}
+	batch.shadow = lines
+
+	if _, err := batch.disposition("gastown", "ember"); err != nil {
+		t.Fatalf("disposition: %v", err)
+	}
+	first := seatReadCountsOf(store)
+	if first.lists == 0 && len(first.multis) == 0 && len(first.shows) == 0 && first.assigned == 0 {
+		t.Fatal("the first ask spent no store calls; the read comparison would be vacuous")
+	}
+	if _, err := batch.disposition("gastown", "ember"); err != nil {
+		t.Fatalf("disposition again: %v", err)
+	}
+	if got := seatReadCountsOf(store); !reflect.DeepEqual(got, first) {
+		t.Errorf("the second ask's reads = %+v, want the first read's %+v", got, first)
+	}
+	if got := shadowLines(lines); len(got) != 1 {
+		t.Fatalf("shadow lines = %q, want one line for the one seat", got)
+	}
+}
+
+// TestAgentBeadRetireDeadHookedAgreeingSourcesLogNothing: a seat whose two
+// sources name the same bead logs nothing, asked once or twice through
+// disposition — the window's lines are the disagreements alone (gt-9h7c2n).
+func TestAgentBeadRetireDeadHookedAgreeingSourcesLogNothing(t *testing.T) {
+	t.Parallel()
+	town, _, batch, lines := seatShadowTown(t, "ember", "gt-same")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
+		intent.Record{WorkBead: "gt-same"})
 
 	for range []int{0, 1} {
 		if _, err := batch.disposition("gastown", "ember"); err != nil {
 			t.Fatalf("disposition: %v", err)
 		}
 	}
-	if got := shadowLines(lines); len(got) != 1 {
-		t.Fatalf("shadow lines = %q, want one line for the one seat", got)
+	if got := shadowLines(lines); len(got) != 0 {
+		t.Fatalf("shadow lines = %q, want none for a seat whose sources agree", got)
 	}
 }
 

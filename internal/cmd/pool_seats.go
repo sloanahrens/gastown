@@ -345,8 +345,8 @@ type rigSeatBatch struct {
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
 	held     map[string]*beads.Issue // work, hook and source-issue beads, by id
 
-	// seatMu guards seats, the bead half each seat's cheap hook-held read
-	// already made. disposition continues from it rather than reading the same
+	// seatMu guards seats, the bead half disposition read for each seat. A later
+	// ask about the same seat continues from it rather than reading the same
 	// beads again for the seat the dead-hooked walk then probes (gt-gg9hv.73).
 	seatMu sync.Mutex
 	seats  map[string]poolSeatBeadRead
@@ -402,14 +402,15 @@ func (b *poolSeatBatch) seatReads(rigName string) poolSeatReads {
 	return reads
 }
 
-// disposition is the polecatDispositionFunc the batch answers. A seat already
-// in the cache answers from its own bead read; nothing fills that cache in
-// production (gt-hz9wkp).
+// disposition is the polecatDispositionFunc the batch answers. The seat read it
+// makes is kept in the cache, so the same batch asks the beads about a seat
+// once: a seat already in the cache answers from that read rather than a second
+// one (gt-ac14z9).
 //
 // Both branches hold the seat's bead read in hand, so a comparison of the
 // seat's hook needs no second read of the beads: each logs the seat's shadow
-// line before it returns, so the evidence P1.7 reads comes from this call
-// alone.
+// line before it returns, and shadowSeatHook logs a seat once per batch, so the
+// evidence P1.7 reads comes from this call alone.
 func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
 	rb := b.rig(rigName)
 	reads := b.seatReads(rigName)
@@ -424,6 +425,12 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	if err != nil {
 		return poolSeatState{}, err
 	}
+	rb.seatMu.Lock()
+	if rb.seats == nil {
+		rb.seats = make(map[string]poolSeatBeadRead)
+	}
+	rb.seats[polecatName] = seat
+	rb.seatMu.Unlock()
 	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
 	return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
 }

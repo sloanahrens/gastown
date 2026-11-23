@@ -637,9 +637,8 @@ func seatReadCountsOf(store *countingStore) seatReadCounts {
 
 // TestPoolHookRetireDispositionUncached is gt-ac14z9: a seat the batch has not
 // cached takes its uncached branch, and the state and the reads it spends are
-// the per-seat read's. The right-hand read is the one
-// disposition made before the change: the batch's own reads, handed whole to
-// poolPolecatSeatStateWith.
+// the per-seat read's. The right-hand read is the one disposition made before
+// the change: the batch's own reads, handed whole to poolPolecatSeatStateWith.
 func TestPoolHookRetireDispositionUncached(t *testing.T) {
 	t.Parallel()
 	town, db, _ := seatTown(t, 2)
