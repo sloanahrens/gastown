@@ -2950,6 +2950,17 @@ function systemUpdateStageState(row, stage) {
   return st ? (st.verdict === "GREEN" ? "ok" : "failed") : "absent";
 }
 
+// systemUpdateStageUnknown says whether the source behind one stage of a row
+// could not be read, so a stage missing from it is unknown, not absent: the run
+// may have happened and its record been lost. A source the rows join at all
+// marks the whole section unavailable; the roll's own record marks only the roll,
+// and a sweep that answered nil marks only the sweep.
+function systemUpdateStageUnknown(su, stage) {
+  if (stage === "roll") return !!(su.unavailable || su.roll_unknown);
+  if (stage === "post-land" || stage === "images") return !!su.unavailable;
+  return !!(su.unavailable || su.sweep_unknown);
+}
+
 function renderSystemUpdates(s) {
   if (pushSkip("systemupdates", s)) return;
   const box = $("systemupdates"), su = s.system_updates, rows = (su && su.rows) || [];
@@ -2960,7 +2971,7 @@ function renderSystemUpdates(s) {
     line.append(el("span", "title", row.sha || "–"));
     for (const stage of SYSTEM_UPDATE_STAGES) {
       const state = systemUpdateStageState(row, stage);
-      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[su.unavailable && state === "absent" ? "unknown" : state];
+      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state === "absent" && systemUpdateStageUnknown(su, stage) ? "unknown" : state];
       const chip = el("span", "tag " + cls, stage + " " + glyph);
       chip.title = stage + ": " + word;
       line.append(chip);
