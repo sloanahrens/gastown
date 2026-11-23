@@ -29,8 +29,10 @@ type landedFilesCache struct {
 }
 
 // openLandedFilesCache reads the JSON lines at path. A missing file is empty;
-// a last line without its newline is a torn append and is dropped; a complete
-// line that does not decode is an error naming the path and line number.
+// a last line without its newline is a torn append, cut from the file so the
+// next Put appends a line of its own rather than completing the fragment; a
+// complete line that does not decode is an error naming the path and line
+// number.
 func openLandedFilesCache(path string) (*landedFilesCache, error) {
 	c := &landedFilesCache{path: path, byPair: make(map[landingPair][]string)}
 	data, err := os.ReadFile(path)
@@ -41,6 +43,11 @@ func openLandedFilesCache(path string) (*landedFilesCache, error) {
 		return nil, fmt.Errorf("reading the landed files cache %s: %w", path, err)
 	}
 	lines := bytes.Split(data, []byte("\n"))
+	if n := len(lines[len(lines)-1]); n > 0 {
+		if err := os.Truncate(path, int64(len(data)-n)); err != nil {
+			return nil, fmt.Errorf("dropping the torn last line of %s: %w", path, err)
+		}
+	}
 	for i, line := range lines[:len(lines)-1] {
 		var e landedFilesLine
 		if err := json.Unmarshal(line, &e); err != nil {
@@ -51,21 +58,26 @@ func openLandedFilesCache(path string) (*landedFilesCache, error) {
 	return c, nil
 }
 
-// Get returns the pair's cached files and whether the cache holds it.
+// Get returns a copy of the pair's cached files and whether the cache holds
+// it, so a caller cannot change what the cache remembers.
 func (c *landedFilesCache) Get(base, head string) ([]string, bool) {
 	files, ok := c.byPair[landingPair{base, head}]
+	if ok {
+		files = append([]string(nil), files...)
+	}
 	return files, ok
 }
 
 // Put appends the pair's files as one O_APPEND write and remembers them. A
 // later line for the same pair replaces the earlier one.
 func (c *landedFilesCache) Put(base, head string, files []string) error {
+	owned := append([]string(nil), files...)
 	// The line holds only strings and a string slice, so its JSON cannot fail
 	// to encode.
-	line, _ := json.Marshal(landedFilesLine{Base: base, Head: head, Files: files})
+	line, _ := json.Marshal(landedFilesLine{Base: base, Head: head, Files: owned})
 	if err := appendBytes(c.path, append(line, '\n')); err != nil {
 		return fmt.Errorf("appending to the landed files cache %s: %w", c.path, err)
 	}
-	c.byPair[landingPair{base, head}] = files
+	c.byPair[landingPair{base, head}] = owned
 	return nil
 }

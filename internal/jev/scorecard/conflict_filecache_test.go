@@ -46,6 +46,32 @@ func TestLandedFilesCacheRoundTrip(t *testing.T) {
 	if got, ok := reopened.Get("base", "head"); !ok || !reflect.DeepEqual(got, []string{"new.go"}) {
 		t.Fatalf("reopened get = %v, %v; want the later [new.go]", got, ok)
 	}
+	// A Put after the torn line must not append onto the fragment: the reopen
+	// below would decode the glued line and fail. A second instance opened on
+	// the same file then adds its own line, which must survive too.
+	second, err := openLandedFilesCache(path)
+	if err != nil {
+		t.Fatalf("open beside the reopened cache: %v", err)
+	}
+	if err := reopened.Put("after", "torn", []string{"a.go"}); err != nil {
+		t.Fatalf("put after torn line: %v", err)
+	}
+	if err := second.Put("second", "writer", []string{"b.go"}); err != nil {
+		t.Fatalf("put from a second instance: %v", err)
+	}
+	after, err := openLandedFilesCache(path)
+	if err != nil {
+		t.Fatalf("reopen after puts past a torn line: %v", err)
+	}
+	for _, want := range []struct{ base, head, file string }{
+		{"after", "torn", "a.go"},
+		{"second", "writer", "b.go"},
+	} {
+		got, ok := after.Get(want.base, want.head)
+		if !ok || !reflect.DeepEqual(got, []string{want.file}) {
+			t.Errorf("get %s %s = %v, %v; want [%s]", want.base, want.head, got, ok, want.file)
+		}
+	}
 }
 
 func TestLandedFilesCacheErrors(t *testing.T) {
@@ -58,18 +84,28 @@ func TestLandedFilesCacheErrors(t *testing.T) {
 	if _, err := openLandedFilesCache(path); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "line 2") {
 		t.Fatalf("decode error = %v; want the path and line 2", err)
 	}
-	target := filepath.Join(dir, "unwritable.jsonl")
+	asDir := filepath.Join(dir, "as-dir.jsonl")
 	if _, err := openLandedFilesCache(dir); err == nil || !strings.Contains(err.Error(), "reading the landed files cache") {
 		t.Fatalf("open a directory = %v; want a read error", err)
 	}
-	c, err := openLandedFilesCache(target)
+	c, err := openLandedFilesCache(asDir)
 	if err != nil {
 		t.Fatalf("open missing: %v", err)
 	}
-	if err := os.Mkdir(target, 0o755); err != nil {
+	if err := os.Mkdir(asDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Put("a", "b", []string{"x.go"}); err == nil || !strings.Contains(err.Error(), target) {
-		t.Fatalf("put error = %v; want it to name %s", err, target)
+	if err := c.Put("a", "b", []string{"x.go"}); err == nil || !strings.Contains(err.Error(), asDir) {
+		t.Fatalf("put error = %v; want it to name %s", err, asDir)
+	}
+	torn := filepath.Join(dir, "torn-readonly.jsonl")
+	if err := os.WriteFile(torn, []byte(`{"base":"a"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(torn, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openLandedFilesCache(torn); err == nil || !strings.Contains(err.Error(), torn) {
+		t.Fatalf("open a torn cache it cannot cut = %v; want an error naming %s", err, torn)
 	}
 }
