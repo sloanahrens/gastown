@@ -28,7 +28,7 @@ func TestIntegrationRealEnvWorkspaceFinderDefault(t *testing.T) {
 	t.Setenv(envTown, "")
 	runner := &realRunner{answer: realGit(town)}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
-		Today: "smoke", Home: "/home", Files: seamFiles{}.seam(), Run: runner.run,
+		Today: "smoke", Home: "/home", Files: seamFiles{}.seam(), Run: runner.run, BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
@@ -57,7 +57,7 @@ func TestIntegrationRealEnvInjectedGetenvIgnoresTheWorkingDirectory(t *testing.T
 	t.Chdir(town)
 	runner := &realRunner{answer: realGit(town)}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
-		Today: "smoke", Home: "/home", Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run,
+		Today: "smoke", Home: "/home", Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run, BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)

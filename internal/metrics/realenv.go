@@ -138,7 +138,8 @@ type RealEnvOptions struct {
 	// Run runs every git and bd command; nil is an error.
 	Run RunnerDir
 	// BdGateway refuses the extract when the bd it would run is not wired to a
-	// gateway; nil runs with no check, as the extract did before the check.
+	// gateway. It is required: nil is errNoBdGatewayDecision, so "no check" is
+	// the explicit BdGatewayNone.
 	BdGateway BdGatewayCheck
 }
 
@@ -165,10 +166,11 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if opts.BdGateway != nil {
-		if err := opts.BdGateway(getenv); err != nil {
-			return real, fmt.Errorf("real env: the metrics extract refuses to run: %w", err)
-		}
+	if opts.BdGateway == nil {
+		return real, errNoBdGatewayDecision
+	}
+	if err := opts.BdGateway(getenv); err != nil {
+		return real, fmt.Errorf("real env: the metrics extract refuses to run: %w", err)
 	}
 	findHome := func() (string, error) { return homeDir(opts.Home, opts.HomeDir) }
 	home, err := findHome()
@@ -396,6 +398,14 @@ func realBd(ctx context.Context, r RunnerDir) BdRun {
 // stops the extract before it runs a command, so no empty estimates are written
 // (gt-g8oimf).
 type BdGatewayCheck func(getenv func(string) string) error
+
+// errNoBdGatewayDecision refuses a RealEnvOptions that leaves BdGateway unset:
+// the check is a decision the caller makes, not a silent skip.
+var errNoBdGatewayDecision = errors.New("real env: RealEnvOptions.BdGateway is unset; pass a check or BdGatewayNone")
+
+// BdGatewayNone is the explicit opt-out from the gateway check, which RealEnv
+// and the daily analysis refuse to leave nil.
+func BdGatewayNone(func(string) string) error { return nil }
 
 // rigRepo is the path of a rig's bare repository.
 func rigRepo(town, rig string) string {

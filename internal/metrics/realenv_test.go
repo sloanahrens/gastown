@@ -118,6 +118,7 @@ func realWired(t *testing.T, today string) (real RealTown, town, home string, ru
 	runner = &realRunner{answer: realGit(town)}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: today, Town: town, DocsDir: filepath.Join(home, "docs"), Home: home, Getenv: noEnv, Run: runner.run,
+		BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
@@ -204,6 +205,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		}}
 		real, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err != nil {
 			t.Fatalf("RealEnv: %v", err)
@@ -237,6 +239,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		runner := &realRunner{answer: realGit(town)}
 		real, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err != nil {
 			t.Fatalf("RealEnv: %v", err)
@@ -277,6 +280,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		}}
 		real, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err != nil {
 			t.Fatalf("RealEnv: %v", err)
@@ -311,7 +315,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 				runner := &realRunner{answer: realGit(town)}
 				real, err := RealEnv(context.Background(), RealEnvOptions{
 					Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv,
-					Files: tc.files(town), Run: runner.run,
+					Files: tc.files(town), Run: runner.run, BdGateway: BdGatewayNone,
 				})
 				if err != nil {
 					t.Fatalf("RealEnv: %v", err)
@@ -340,6 +344,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		runner := &realRunner{answer: realGit(town)}
 		_, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err == nil || !strings.Contains(err.Error(), "claude route") || !strings.Contains(err.Error(), "outside the town root") {
 			t.Errorf("RealEnv error = %v, want the escaping route path refused", err)
@@ -361,6 +366,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		runner := &realRunner{answer: realGit(town)}
 		_, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err == nil || !strings.Contains(err.Error(), "claude route") || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("RealEnv error = %v, want the unreadable route table refused", err)
@@ -373,6 +379,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		runner := &realRunner{answer: realGit(town)}
 		_, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err == nil || !strings.Contains(err.Error(), "claude route") {
 			t.Errorf("RealEnv error = %v, want the malformed route refused", err)
@@ -400,6 +407,7 @@ func TestRealEnvClaudeRoute(t *testing.T) {
 		runner := &realRunner{answer: realGit(town)}
 		_, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+			BdGateway: BdGatewayNone,
 		})
 		if err == nil || !strings.Contains(err.Error(), "claude workspace") || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("RealEnv error = %v, want the unreadable workspace refused", err)
@@ -500,6 +508,7 @@ func TestRealEnvLivesWithNoSourceFiles(t *testing.T) {
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: t.TempDir(), Getenv: noEnv, Run: runner.run,
+		BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
@@ -557,7 +566,7 @@ func TestRealEnvStopsOnAGitLogItCannotRead(t *testing.T) {
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) {
 		return nil, errors.New("git failed")
 	}}
-	_, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
+	_, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run, BdGateway: BdGatewayNone})
 	if err == nil {
 		t.Fatal("RealEnv wired a town whose om history it could not read")
 	}
@@ -575,7 +584,7 @@ func TestRealEnvStopsOnAMalformedHistoryLine(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	_, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
+	_, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run, BdGateway: BdGatewayNone})
 	if err == nil || !strings.Contains(err.Error(), "not a time and a commit") {
 		t.Errorf("RealEnv error = %v, want the malformed line refused", err)
 	}
@@ -583,7 +592,7 @@ func TestRealEnvStopsOnAMalformedHistoryLine(t *testing.T) {
 
 func TestRealEnvNeedsARunner(t *testing.T) {
 	t.Parallel()
-	if _, err := RealEnv(context.Background(), RealEnvOptions{Town: t.TempDir(), Getenv: noEnv}); err == nil {
+	if _, err := RealEnv(context.Background(), RealEnvOptions{Town: t.TempDir(), Getenv: noEnv, BdGateway: BdGatewayNone}); err == nil {
 		t.Fatal("RealEnv wired a town with no runner")
 	}
 }
@@ -606,7 +615,8 @@ func refusedGateway(func(string) string) error {
 
 // TestRealEnvGatewayRefuses pins the extract's gateway guard: an injected check
 // that refuses makes RealEnv refuse before any command runs, a check that passes
-// builds the bd runner, and no check builds it as before (gt-g8oimf).
+// builds the bd runner, and the explicit opt-out builds it with no check
+// (gt-g8oimf).
 func TestRealEnvGatewayRefuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -619,7 +629,7 @@ func TestRealEnvGatewayRefuses(t *testing.T) {
 			env: map[string]string{}, wantErr: "BD_GATEWAY_URL"},
 		{name: "a passing check builds the bd runner", check: gatewayCheck,
 			env: map[string]string{"BD_GATEWAY_URL": "http://gateway:7440"}},
-		{name: "no check builds the bd runner as before", env: map[string]string{}},
+		{name: "the explicit opt-out builds the bd runner", check: BdGatewayNone, env: map[string]string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -650,6 +660,44 @@ func TestRealEnvGatewayRefuses(t *testing.T) {
 				t.Fatalf("RealEnv ran %d commands before refusing, want none", len(runner.calls))
 			}
 		})
+	}
+}
+
+// TestRealEnvRequiresAGatewayDecision pins that the gateway check is a required
+// decision: options that leave BdGateway unset refuse with the named error
+// before a command runs, rather than running as if the forwarder were healthy.
+// BdGatewayNone is the explicit opt-out (gt-g8oimf, gt-xzo9xr).
+func TestRealEnvRequiresAGatewayDecision(t *testing.T) {
+	t.Parallel()
+	town, home := realFixture(t)
+	runner := &realRunner{answer: realGit(town)}
+	_, err := RealEnv(context.Background(), RealEnvOptions{
+		Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Run: runner.run,
+	})
+	if !errors.Is(err, errNoBdGatewayDecision) {
+		t.Fatalf("RealEnv error = %v, want %v", err, errNoBdGatewayDecision)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("RealEnv ran %d commands before refusing, want none", len(runner.calls))
+	}
+}
+
+// TestRunAnalysisRequiresAGatewayDecision pins that the analysis's in-process
+// extract makes the same required decision: options that leave BdGateway unset
+// refuse with the named error before any command runs, rather than defaulting
+// to no check (gt-xzo9xr).
+func TestRunAnalysisRequiresAGatewayDecision(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	opts.Extract, opts.BdGateway = nil, nil
+	env, calls := analysisEnv(t, town, dayDir, nil)
+	_, err := RunAnalysis(context.Background(), env, opts)
+	if !errors.Is(err, errNoAnalysisBdGatewayDecision) {
+		t.Fatalf("RunAnalysis error = %v, want %v", err, errNoAnalysisBdGatewayDecision)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("RunAnalysis ran %d commands before refusing, want none", len(*calls))
 	}
 }
 
@@ -705,7 +753,8 @@ func TestRealEnvStopsWhenTheHomeCannotBeFound(t *testing.T) {
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
 	_, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: t.TempDir(), DocsDir: t.TempDir(), Getenv: noEnv, Run: runner.run,
-		HomeDir: func() (string, error) { return "", errors.New("no home directory") },
+		BdGateway: BdGatewayNone,
+		HomeDir:   func() (string, error) { return "", errors.New("no home directory") },
 	})
 	if err == nil || err.Error() != "real env: no home directory" {
 		t.Errorf("RealEnv error = %v, want %q", err, "real env: no home directory")
@@ -718,6 +767,7 @@ func TestRealEnvDoesNotWriteTheTown(t *testing.T) {
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
 	if _, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: t.TempDir(), Getenv: noEnv, Run: runner.run,
+		BdGateway: BdGatewayNone,
 	}); err != nil {
 		t.Fatalf("RealEnv: %v", err)
 	}
@@ -754,6 +804,7 @@ func TestRealEnvStopsOnASourceDirectoryItCannotList(t *testing.T) {
 			runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
 			_, err := RealEnv(context.Background(), RealEnvOptions{
 				Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: t.TempDir(), Getenv: noEnv, Run: runner.run,
+				BdGateway: BdGatewayNone,
 			})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("RealEnv error = %v, want the %s directory refused", err, tc.want)
@@ -770,6 +821,7 @@ func TestRealEnvListsNothingWhereAFileSits(t *testing.T) {
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: t.TempDir(), Getenv: noEnv, Run: runner.run,
+		BdGateway: BdGatewayNone,
 	})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
@@ -832,6 +884,7 @@ func seamWired(t *testing.T, files seamFiles) (RealTown, error) {
 	runner := &realRunner{answer: realGit(townOfSeam)}
 	return RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: townOfSeam, DocsDir: "/docs", Home: "/home", Getenv: noEnv, Files: files.seam(), Run: runner.run,
+		BdGateway: BdGatewayNone,
 	})
 }
 
@@ -1045,6 +1098,7 @@ func TestRealEnvRefusesAWorkspaceFinderThatFailed(t *testing.T) {
 	runner := &realRunner{answer: realGit("/t")}
 	_, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Home: "/home", Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run,
+		BdGateway:     BdGatewayNone,
 		WorkspaceRoot: func() (string, error) { return "", boom },
 	})
 	if !errors.Is(err, boom) {
@@ -1062,6 +1116,7 @@ func TestTownRootPrefersWorkspaceOverHome(t *testing.T) {
 	runner := &realRunner{answer: realGit(town)}
 	real, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Home: home, Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run,
+		BdGateway:     BdGatewayNone,
 		WorkspaceRoot: func() (string, error) { return town, nil },
 	})
 	if err != nil {
@@ -1097,7 +1152,7 @@ func TestRealEnvDefaultsFromTheEnvironment(t *testing.T) {
 	docs := filepath.Join(home, "docs-env")
 	fromEnv := map[string]string{envTown: town, envDocs: docs}
 	runner := &realRunner{answer: realGit(town)}
-	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Home: home, Run: runner.run,
+	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Home: home, Run: runner.run, BdGateway: BdGatewayNone,
 		Getenv: func(name string) string { return fromEnv[name] }})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
@@ -1153,7 +1208,7 @@ func TestRealEnvReadsCachesThatSaveCachesWrote(t *testing.T) {
 		t.Fatalf("SaveCaches: %v", err)
 	}
 	runner := &realRunner{answer: realGit(town)}
-	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
+	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run, BdGateway: BdGatewayNone})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
 	}
@@ -1193,7 +1248,7 @@ func TestEstimateCacheWiringRoundTrip(t *testing.T) {
 	}
 	runner := &realRunner{answer: answer}
 	wired := func() RealTown {
-		real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
+		real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run, BdGateway: BdGatewayNone})
 		if err != nil {
 			t.Fatalf("RealEnv: %v", err)
 		}
