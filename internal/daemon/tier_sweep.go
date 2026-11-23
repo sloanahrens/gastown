@@ -1769,6 +1769,31 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	return !deferred
 }
 
+// tierSweepRunnerTimingNote splits an off-host stage's wall time where the
+// result stamps it: the lag before the run started, its tests, and the tail
+// from its finish to the stage reading the result. A line that shows only the
+// stage's elapsed time cannot say which part went long.
+//
+// started and finished come from the pod's clock and stageStart and now from
+// the daemon's, so a skew can make the lag or the tail negative: that is
+// written as 0s. A result with no start or no finish, or one that finished
+// before it started, has no split to show and gets the empty string.
+func tierSweepRunnerTimingNote(stageStart, started, finished, now time.Time) string {
+	if started.IsZero() || finished.IsZero() || finished.Before(started) {
+		return ""
+	}
+	lag := started.Sub(stageStart)
+	if lag < 0 {
+		lag = 0
+	}
+	tail := now.Sub(finished)
+	if tail < 0 {
+		tail = 0
+	}
+	return fmt.Sprintf(" (start lag %s, tests %s, tail %s)",
+		lag.Round(time.Second), finished.Sub(started).Round(time.Second), tail.Round(time.Second))
+}
+
 // tierSweepRecordedTiers is the verdict map one cycle leaves in the record:
 // every tier the cycle judged, under this cycle's tip, plus — for a partial
 // cycle, one that stopped before running every stage it planned or before a
