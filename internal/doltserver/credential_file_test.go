@@ -131,6 +131,51 @@ func TestCredentialFileUnreadableStaysCredentialError(t *testing.T) {
 	}
 }
 
+// TestCredentialFileExplicitPasswordWins: an explicit operational.dolt.password
+// wins over the town's credential file, and the file is not read. The file here
+// is malformed, which every reader refuses at any mode, so a read would set a
+// CredentialError; a nil CredentialError proves it was never read.
+func TestCredentialFileExplicitPasswordWins(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownDoltSettings(t, town, `{"password":"${GT_DOLT_PASSWORD}"}`)
+	writeTownDaemonEnv(t, town, "GT_DOLT_PASSWORD=explicitpass")
+	writeTownCredential(t, town, "user=fileuser\npassword=filepass\nextra=1\n", 0o600)
+
+	config := DefaultConfig(town)
+	if err := config.CredentialError(); err != nil {
+		t.Fatalf("CredentialError = %v, want nil: an explicit password must leave the credential file unread", err)
+	}
+	if got, want := config.UserDSN(), DefaultUser+":explicitpass"; got != want {
+		t.Errorf("UserDSN = %q, want %q from the explicit setting", got, want)
+	}
+}
+
+// TestCredentialFileInsecureFileErrors: a credential file group or other can
+// read makes the town's resolution record an error that names the file and
+// holds no value from it. The mode check reads the file's mode bits, which root
+// sees as every user does, so this runs as root without a skip (gt-ijc7w1).
+func TestCredentialFileInsecureFileErrors(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\n", 0o600)
+	// Chmod, not the write mode: the test must see 0644 under any umask.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod %s: %v", path, err)
+	}
+
+	err := DefaultConfig(town).CredentialError()
+	if err == nil {
+		t.Fatal("DefaultConfig accepted a 0644 credential file")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the file %q", err, path)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error %q holds the password", err)
+	}
+}
+
 // TestCredentialFileUserDSNFailsClosed: with a credential file the town cannot
 // read, UserDSN names a user no server has and no password, never the default
 // user, so a caller that skips CredentialError fails to connect.
