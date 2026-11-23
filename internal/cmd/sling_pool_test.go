@@ -532,7 +532,6 @@ func (w *testPoolTown) process() *poolRouter {
 		pool:        func() *config.PolecatPool { return w.pool },
 		sessions:    func() sessionLister { return w.lister },
 		disposition: freeDeadSeats,
-		hookHeld:    noHeldHooks,
 		seats: &poolSeatLedger{
 			townRoot: w.root,
 			fs:       w.fs,
@@ -1036,22 +1035,6 @@ func (b *seatReadBarrier) reads() []polecatDispositionFunc {
 	return out
 }
 
-// hooks hands out one cheap hook-held read per decision, blocked the same way:
-// the seat picture's first bd-backed read for a sessionless polecat is the hold
-// read, so a test that measures the read's place against the lock watches this
-// one (gt-gg9hv.73).
-func (b *seatReadBarrier) hooks() []polecatHookHeldFunc {
-	out := make([]polecatHookHeldFunc, b.want)
-	for i := range out {
-		var once sync.Once
-		out[i] = func(string, string) (bool, error) {
-			once.Do(func() { b.arrive(i) })
-			return false, nil
-		}
-	}
-	return out
-}
-
 // seatDecision is what one concurrent `gt sling` decided.
 type seatDecision struct {
 	agent  string
@@ -1070,7 +1053,6 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 	lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	now := func() time.Time { return poolTestNow }
 	reads := barrier.reads()
-	hooks := barrier.hooks()
 	out := make([]seatDecision, len(reads))
 	finished := make(chan struct{}, len(reads))
 	for i := range reads {
@@ -1080,7 +1062,6 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 			r.pool = func() *config.PolecatPool { return pool }
 			r.sessions = func() sessionLister { return lister }
 			r.disposition = reads[i]
-			r.hookHeld = hooks[i]
 			r.now = now
 			// The decision lock, watched: this decision reaching it before its
 			// own read started is the read inside the lock.
@@ -1210,13 +1191,8 @@ func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
 	r.pool = func() *config.PolecatPool { return cappedPool(2) }
 	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
-	// A sessionless seat's first bd-backed read is the cheap hold read, so it
-	// is the seat-state read this test watches fall outside the lock
-	// (gt-gg9hv.73).
-	r.hookHeld = func(string, string) (bool, error) {
-		reader.note()
-		return false, nil
-	}
+	// A sessionless seat's own state is the bd-backed read this test watches
+	// fall outside the lock (gt-gg9hv.73).
 	r.disposition = func(string, string) (poolSeatState, error) {
 		reader.note()
 		return deadSeatRead(true), nil
@@ -1396,10 +1372,8 @@ func TestSeatDecisionCountsTheSessionTheSeatPictureDidNotRead(t *testing.T) {
 			r.pool = func() *config.PolecatPool { return cappedPool(1) }
 			r.sessions = func() sessionLister { return lister }
 			// The seat's own state says done with an open MR, so the picture
-			// releases it.
-			// The seat holds a hook, so the picture reads its state: the read
-			// that releases it is what this test is about (gt-gg9hv.73).
-			r.hookHeld = func(string, string) (bool, error) { return true, nil }
+			// releases it: the read that releases it is what this test is
+			// about (gt-gg9hv.73).
 			r.disposition = func(string, string) (poolSeatState, error) {
 				d := polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}
 				return poolSeatState{Disposition: d, DeadDisposition: d, DeadRead: true}, nil
@@ -2163,7 +2137,6 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 				pool:        func() *config.PolecatPool { return pool },
 				sessions:    func() sessionLister { return c.lister },
 				disposition: freeDeadSeats,
-				hookHeld:    noHeldHooks,
 				work:        work,
 				seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 				now:         func() time.Time { return poolTestNow },
@@ -2200,7 +2173,6 @@ func TestRouteRefusesASeatMidLanding(t *testing.T) {
 		pool:        func() *config.PolecatPool { return pool },
 		sessions:    func() sessionLister { return &fakeLister{} },
 		disposition: freeDeadSeats,
-		hookHeld:    noHeldHooks,
 		work:        submittedWork("gt-ruby"),
 		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 		now:         func() time.Time { return poolTestNow },

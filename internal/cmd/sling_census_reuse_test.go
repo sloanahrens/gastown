@@ -66,7 +66,6 @@ func TestSlingCensusIsSharedByReuse(t *testing.T) {
 		pool:        func() *config.PolecatPool { return pool },
 		sessions:    func() sessionLister { return lister },
 		disposition: freeDeadSeats,
-		hookHeld:    noHeldHooks,
 		work:        submittedWork(),
 		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 		now:         func() time.Time { return poolTestNow },

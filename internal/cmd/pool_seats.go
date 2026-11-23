@@ -68,15 +68,14 @@ func sandboxDeadSamples(townRoot string) int {
 // and mid-landing together (gt-xmcyk). Each source skips the seats an earlier
 // one already named, so a seat is one seat however many of them describe it.
 func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
-	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolHookHeldFor(townRoot), poolSeatWorkFor(townRoot), pool)
+	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), nil, poolSeatWorkFor(townRoot), pool)
 }
 
 // poolSeatSessionsWith is poolSeatSessions with the town's reads explicit: the
 // per-seat polecat-state read (listPolecatSessions' disposition) and the
 // batched work-bead read the landing seats are confirmed with. A caller with
 // no town to read (a test) passes nil for both of them. The hook-held seam is
-// still accepted and ignored so callers outside this bead compile untouched;
-// gt-hz9wkp removes it.
+// accepted and ignored until gt-ujao98 removes it.
 func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, _ polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
 	sessions, _, err := poolSeatSessionsProbedWith(t, townRoot, disposition, nil, work, pool)
 	return sessions, err
@@ -346,8 +345,8 @@ type rigSeatBatch struct {
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
 	held     map[string]*beads.Issue // work, hook and source-issue beads, by id
 
-	// seatMu guards seats, the bead half each seat's cheap hook-held read
-	// already made. disposition continues from it rather than reading the same
+	// seatMu guards seats, the bead half disposition read for each seat. A later
+	// ask about the same seat continues from it rather than reading the same
 	// beads again for the seat the dead-hooked walk then probes (gt-gg9hv.73).
 	seatMu sync.Mutex
 	seats  map[string]poolSeatBeadRead
@@ -403,15 +402,15 @@ func (b *poolSeatBatch) seatReads(rigName string) poolSeatReads {
 	return reads
 }
 
-// disposition is the polecatDispositionFunc the batch answers. A seat read
-// twice costs one bd call: the answer comes from the bead read the batch
-// already holds. hookHeld is the only current filler of that cache and
-// gt-hz9wkp removes it.
+// disposition is the polecatDispositionFunc the batch answers. The seat read it
+// makes is kept in the cache, so the same batch asks the beads about a seat
+// once: a seat already in the cache answers from that read rather than a second
+// one (gt-ac14z9).
 //
 // Both branches hold the seat's bead read in hand, so a comparison of the
 // seat's hook needs no second read of the beads: each logs the seat's shadow
-// line before it returns, so the evidence P1.7 reads no longer depends on
-// hookHeld's own call.
+// line before it returns, and shadowSeatHook logs a seat once per batch, so the
+// evidence P1.7 reads comes from this call alone.
 func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
 	rb := b.rig(rigName)
 	reads := b.seatReads(rigName)
@@ -426,32 +425,14 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	if err != nil {
 		return poolSeatState{}, err
 	}
-	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
-	return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
-}
-
-// hookHeld is the polecatHookHeldFunc the batch answers: the bead half of
-// disposition's read, answered from the same batch, with the worktree probe
-// left unrun. It keeps that bead read for disposition; the next bead removes
-// the hook-held plumbing (gt-hz9wkp).
-func (b *poolSeatBatch) hookHeld(rigName, polecatName string) (bool, error) {
-	rb := b.rig(rigName)
-	seat, _, err := poolReadSeatBeads(b.townRoot, rigName, polecatName, b.seatReads(rigName))
-	if err != nil {
-		return false, err
-	}
-	// The hook read above keeps deciding the count; the shadow window only
-	// records where the intent record answers differently, so the answer above
-	// is returned whatever this logs (docs/plans/2026-11-15-agent-bead-retirement-plan.md,
-	// P1.7).
-	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
 	rb.seatMu.Lock()
 	if rb.seats == nil {
 		rb.seats = make(map[string]poolSeatBeadRead)
 	}
 	rb.seats[polecatName] = seat
 	rb.seatMu.Unlock()
-	return seat.held, nil
+	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
+	return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
 }
 
 // shadowSeatHook logs where a sessionless seat's intent record and its agent

@@ -1890,18 +1890,6 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 	})
 
-	t.Run("the batch's hold read cannot read the agent bead", func(t *testing.T) {
-		t.Parallel()
-		town, _ := deadHookedWalkTestTown(t, "ember")
-		store := agentBeadFailsStore{Fake: beadsfake.New(), err: errors.New("bd show: boom")}
-		batch := newPoolSeatBatch(town,
-			func(string) beads.Client { return store },
-			func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
-		if held, err := batch.hookHeld("gastown", "ember"); err == nil {
-			t.Fatalf("a failing agent-bead read answered held=%v", held)
-		}
-	})
-
 	t.Run("the town's hold read cannot read the agent bead", func(t *testing.T) {
 		t.Parallel()
 		reads := poolSeatReads{agentBead: func(beads.Client, string) (*beads.Issue, *beads.AgentFields, error) {
@@ -1954,8 +1942,7 @@ func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
 			disposition := func(_ string, polecatName string) (poolSeatState, error) {
 				return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: c.held(polecatName)}, nil
 			}
-			hookHeld := func(_ string, polecatName string) (bool, error) { return c.held(polecatName), nil }
-			snap, err := poolSeatSnapshotWith(&fakeLister{}, town, disposition, hookHeld, nil, pool, func() time.Time { return now })
+			snap, err := poolSeatSnapshotWith(&fakeLister{}, town, disposition, nil, nil, pool, func() time.Time { return now })
 			if err != nil {
 				t.Fatalf("poolSeatSnapshotWith: %v", err)
 			}

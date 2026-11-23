@@ -93,7 +93,7 @@ func batchOverStore(town string, store beads.Client) *poolSeatBatch {
 // handing the call site both reads the batch answers.
 func poolSeatSessionsOverBatch(t *testing.T, lister sessionLister, town string, batch *poolSeatBatch, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
 	t.Helper()
-	return poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, work, pool)
+	return poolSeatSessionsWith(lister, town, batch.disposition, nil, work, pool)
 }
 
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
@@ -398,7 +398,7 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestPoolSeatBatchReadsAbsentSourceIssueLive(t *testing.T) {
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -635,11 +635,10 @@ func seatReadCountsOf(store *countingStore) seatReadCounts {
 	return seatReadCounts{shows: store.shows, multis: store.multis, lists: store.lists, assigned: store.assigned}
 }
 
-// TestPoolHookRetireDispositionUncached is gt-ac14z9: a seat nobody asked
-// hookHeld about takes the batch's uncached branch, and the state and the
-// reads it spends are the per-seat read's. The right-hand read is the one
-// disposition made before the change: the batch's own reads, handed whole to
-// poolPolecatSeatStateWith.
+// TestPoolHookRetireDispositionUncached is gt-ac14z9: a seat the batch has not
+// cached takes its uncached branch, and the state and the reads it spends are
+// the per-seat read's. The right-hand read is the one disposition made before
+// the change: the batch's own reads, handed whole to poolPolecatSeatStateWith.
 func TestPoolHookRetireDispositionUncached(t *testing.T) {
 	t.Parallel()
 	town, db, _ := seatTown(t, 2)

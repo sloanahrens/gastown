@@ -602,13 +602,10 @@ type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, er
 
 // polecatHookHeldFunc reports whether one polecat's seat still holds live
 // work, read from its beads alone: the same agent, assignment and hook reads
-// polecatDispositionFunc makes, stopped before the worktree probe. A nil func
-// is an error for the dead-hooked walk, never an empty one.
+// polecatDispositionFunc makes, stopped before the worktree probe.
 //
-// The roster's dead-hooked walk asks this first and the full seat read only
-// for a seat that holds a hook: a polecat with no hook is skipped whatever its
-// worktree says, so probing that worktree was work no answer used
-// (gt-gg9hv.73).
+// The outer seams accept it and ignore it until gt-ujao98 removes the
+// parameter; no read reaches it any more (gt-j8elkb).
 type polecatHookHeldFunc func(rigName, polecatName string) (bool, error)
 
 // poolSeatReads is the town's beads reads one seat read makes, passed in rather
@@ -712,19 +709,6 @@ func poolDispositionFor(townRoot string) polecatDispositionFunc {
 	}
 	return func(rigName, polecatName string) (poolSeatState, error) {
 		return poolPolecatSeatState(townRoot, rigName, polecatName)
-	}
-}
-
-// poolHookHeldFor is the cheap hook-held read a caller in townRoot wants, or
-// nil when there is no town to read. It is the bead half of poolDispositionFor:
-// a caller that must know whether a seat holds a hook before it pays that
-// read's worktree probe asks this first.
-func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
-	if townRoot == "" {
-		return nil
-	}
-	return func(rigName, polecatName string) (bool, error) {
-		return poolPolecatHookHeld(townRoot, rigName, polecatName)
 	}
 }
 
@@ -1089,15 +1073,7 @@ func poolReadSeatBeads(townRoot, rigName, polecatName string, reads poolSeatRead
 	}, bd, nil
 }
 
-// poolPolecatHookHeld reports whether a polecat's seat still holds live work,
-// from its beads alone: the read poolDispositionFor makes, stopped before the
-// worktree probe. It is for a caller that needs the hold decision first and
-// the full state only for a seat that holds one.
-func poolPolecatHookHeld(townRoot, rigName, polecatName string) (bool, error) {
-	return poolPolecatHookHeldWith(townRoot, rigName, polecatName, poolSeatReadsFor())
-}
-
-// poolPolecatHookHeldWith is poolPolecatHookHeld with the town's beads reads
+// poolPolecatHookHeldWith is the beads-half seat read with the town's reads
 // passed in, so a test drives it with no database.
 func poolPolecatHookHeldWith(townRoot, rigName, polecatName string, reads poolSeatReads) (bool, error) {
 	seat, _, err := poolReadSeatBeads(townRoot, rigName, polecatName, reads)
@@ -1123,9 +1099,9 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 }
 
 // poolPolecatSeatStateFromBeadRead finishes a seat read whose beads were
-// already read, so a caller that asked the cheap hook-held question (and got
-// its answer from these beads) does not read them again. bd is the rig's beads
-// client poolReadSeatBeads returned.
+// already read, so a batch that kept the read for a second ask about the same
+// seat does not read them again. bd is the rig's beads client the caller read
+// the seat with.
 func poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName string, reads poolSeatReads, bd beads.Client, seat poolSeatBeadRead) (poolSeatState, error) {
 	if seat.fields == nil {
 		// No agent bead: nothing to read, and safest read is "still occupied"
@@ -1753,9 +1729,6 @@ type poolRouter struct {
 	work        poolSeatWorkFunc
 	seats       *poolSeatLedger
 	now         func() time.Time
-	// hookHeld is kept for the outer seams that still accept a hook-held read
-	// (gt-j8elkb); the next bead removes the field (gt-hz9wkp).
-	hookHeld polecatHookHeldFunc
 }
 
 // poolRouterFor wires the pool decision to the town on disk, the tmux server,
@@ -1790,7 +1763,6 @@ func poolRouterForWith(townRoot string, store *poolSeatClaimStore, storeFor func
 		},
 		sessions:    newPoolSessionLister,
 		disposition: batch.disposition,
-		hookHeld:    batch.hookHeld,
 		work:        func(ids []string) (map[string]*beads.Issue, error) { return storeFor(townRoot).ShowMultiple(ids) },
 		seats:       poolSeatLedgerFor(townRoot, store),
 		now:         time.Now,
@@ -1900,7 +1872,7 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // submission records in it — the seat its restart takes again, and the window
 // the dispatcher's roster runs for a whole tick (gt-0axfg).
 func (r *poolRouter) seatSnapshot() (poolSeatSnapshot, error) {
-	return poolSeatSnapshotWith(r.lister(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now)
+	return poolSeatSnapshotWith(r.lister(), r.townRoot, r.disposition, nil, r.work, r.pool(), r.now)
 }
 
 // lister is the tmux source this router's seat reads take sessions from: the
