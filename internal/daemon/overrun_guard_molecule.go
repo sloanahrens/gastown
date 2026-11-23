@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,8 +27,10 @@ type overrunHandBackStore interface {
 }
 
 // handBackEndingMolecule hands the stopped seat's bead back (polecat.HandBackNoted,
-// or polecat.HandBackRework when seat.ReworkSHA names finished work already on
-// origin) and then ends the molecule the bead carried, so a stopped run
+// polecat.HandBackRework when seat.ReworkSHA names finished work already on
+// origin, or polecat.HandBackEmptyBranch when seat.EmptyBranchTarget names a
+// target the branch holds nothing beyond) and then ends the molecule the bead
+// carried, so a stopped run
 // leaves no open molecule beside the one a re-dispatch pours. The bead is
 // closed by neither step, which is why the closeMoleculeOfClosedBead path
 // (gt-x1d8s) never sees it.
@@ -54,9 +57,12 @@ func handBackEndingMolecule(ctx context.Context, store overrunHandBackStore, log
 	w := polecat.NewBeadWriter(store, overrunActor)
 	assignee := overrunSeatAssignee(seat)
 	var err error
-	if seat.ReworkSHA != "" {
+	switch {
+	case seat.ReworkSHA != "":
 		err = polecat.HandBackRework(ctx, w, seat.Bead, assignee, seat.Branch, seat.ReworkSHA, elapsed, note)
-	} else {
+	case seat.EmptyBranchTarget != "":
+		err = polecat.HandBackEmptyBranch(ctx, w, seat.Bead, assignee, seat.Branch, seat.EmptyBranchTarget, elapsed, note)
+	default:
 		err = polecat.HandBackNoted(ctx, w, seat.Bead, assignee, seat.Branch, elapsed, note)
 	}
 	if err != nil {
@@ -75,6 +81,29 @@ func handBackEndingMolecule(ctx context.Context, store overrunHandBackStore, log
 		logf("overrun_guard: %s/%s: ended molecule %s of %s (%d bead(s) closed)", seat.Rig, seat.Polecat, molID, seat.Bead, n)
 	}
 	return nil
+}
+
+// overrunEmptyBranchTarget is the rig's target name when the seat's kept branch
+// holds no commit the target lacks (a branch cut from it at the spawn), ""
+// otherwise. Any failed read answers "", so an unknown branch keeps needs-split.
+func (d *Daemon) overrunEmptyBranchTarget(seat overrunSeat) string {
+	workDir := resolvePolecatWorktree(filepath.Join(d.config.TownRoot, seat.Rig, "polecats"), seat.Polecat, seat.Rig)
+	if workDir == "" || seat.Branch == "" || seat.Branch == "HEAD" {
+		return ""
+	}
+	target, err := rigDefaultBranch(filepath.Join(d.config.TownRoot, seat.Rig))
+	if err != nil {
+		return ""
+	}
+	g := d.gitAt(workDir)
+	head, targetSHA := originBranchSHA(g, seat.Branch), originBranchSHA(g, target)
+	if head == "" || targetSHA == "" || !overrunOriginCommitHeld(g, seat.Branch, head) || !overrunOriginCommitHeld(g, target, targetSHA) {
+		return ""
+	}
+	if contained, err := g.IsAncestor(head, targetSHA); err != nil || !contained {
+		return ""
+	}
+	return target
 }
 
 // endOverrunMolecule closes molID's open descendants and then molID, and

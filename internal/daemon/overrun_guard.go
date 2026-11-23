@@ -143,6 +143,10 @@ type overrunSeat struct {
 	// seat's finished work was already on origin: the commit both hold for the
 	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
 	ReworkSHA string
+	// EmptyBranchTarget is the rig's target name, set only on a seat handed back
+	// with nothing beyond it: the branch is empty, so the hand-back drops the
+	// needs-split label and says the bead starts clean (overrunStop, step 5).
+	EmptyBranchTarget string
 }
 
 // overrunKeptRead is one bead's last good read and when the guard made it.

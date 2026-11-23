@@ -2125,15 +2125,18 @@ func TestStop_FinishedBranchAlreadyOnOriginIsHandedBackAsRework(t *testing.T) {
 // A seat slung a rework bead resumes the branch the landing worker rejected, so
 // its worktree head is already origin's head. A seat that committed nothing
 // since it was slung has produced no work: the stop is an overrun, and the bead
-// goes back for a split rather than back as finished work, which the next
-// polecat's stand-down would turn into another wasted session. A head the seat
-// did commit after its sling still goes back as rework.
+// goes back rather than back as finished work, which the next polecat's
+// stand-down would turn into another wasted session. A head the rig's target
+// already contains is no work to resume either: the bead goes back with no
+// label and says the branch is empty, so it is slung fresh. A head the seat did
+// commit after its sling and beyond the target still goes back as rework.
 func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		committed  time.Time
 		mainHolds  bool
+		stub       func(*pushStubGit)
 		wantLabel  string
 		wantRework string
 	}{
@@ -2145,10 +2148,26 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 		{
 			// A branch cut from main at the spawn holds main's commit and
 			// nothing of its own: the head was committed after the sling, but
-			// main already contains it, so resuming it is a wasted session.
+			// main already contains it, so resuming it is a wasted session and
+			// the bead starts clean instead of being split.
 			name:      "origin's head is one main already contains",
 			committed: overrunSlung.Add(5 * time.Minute),
 			mainHolds: true,
+		},
+		{
+			// The empty-branch note is only for a branch origin really holds:
+			// a read that cannot place the branch keeps needs-split.
+			name: "branch absent from origin keeps needs-split",
+			stub: func(g *pushStubGit) {
+				g.originRefs = g.originRefs[1:]
+			},
+			wantLabel: polecat.NeedsSplitLabel,
+		},
+		{
+			name: "unreadable ancestry keeps needs-split",
+			stub: func(g *pushStubGit) {
+				g.ancestorErr = errors.New("boom")
+			},
 			wantLabel: polecat.NeedsSplitLabel,
 		},
 		{
@@ -2186,6 +2205,9 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 				},
 				ancestors: ancestors,
 			}
+			if tc.stub != nil {
+				tc.stub(g)
+			}
 			d.openGitFn = func(string) daemonGit { return g }
 			s.finishedOnOrigin = d.overrunFinishedOnOrigin
 
@@ -2202,23 +2224,34 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			d.runOverrunGuard(s)
 
 			work, comments := handedBackBead(t, store)
-			other := polecat.ReworkLabel
-			if tc.wantLabel == polecat.ReworkLabel {
-				other = polecat.NeedsSplitLabel
+			if work.Status != "open" || work.Assignee != "" {
+				t.Errorf("bead = status %q assignee %q, want open and unassigned", work.Status, work.Assignee)
 			}
-			if !beads.HasLabel(work, tc.wantLabel) || beads.HasLabel(work, other) {
-				t.Errorf("bead labels %v, want %s and not %s", work.Labels, tc.wantLabel, other)
+			for _, label := range []string{polecat.NeedsSplitLabel, polecat.ReworkLabel} {
+				if got := beads.HasLabel(work, label); got != (label == tc.wantLabel) {
+					t.Errorf("bead labels %v: %s present %v, want %v", work.Labels, label, got, label == tc.wantLabel)
+				}
 			}
 			if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.ReworkSHA != tc.wantRework {
 				t.Errorf("state ReworkSHA = %q, want %q", st.ReworkSHA, tc.wantRework)
 			}
-			if tc.wantRework == "" && !strings.Contains(comments, "Split the bead") {
-				t.Errorf("comment %q lacks the split instruction", comments)
-			}
-			if tc.wantRework == "" && strings.Contains(comments, "reuse branch") {
-				t.Errorf("comment %q claims finished work for the next polecat to reuse", comments)
-			}
-			if tc.wantRework != "" && !strings.Contains(comments, "on origin") {
+			switch {
+			case tc.wantLabel == "":
+				for _, part := range []string{"holds no commits beyond main", "nothing to resume", "starts clean"} {
+					if !strings.Contains(comments, part) {
+						t.Errorf("comment %q lacks %q", comments, part)
+					}
+				}
+				for _, part := range []string{"Split the bead", "work kept", "reuse branch"} {
+					if strings.Contains(comments, part) {
+						t.Errorf("comment %q carries %q", comments, part)
+					}
+				}
+			case tc.wantRework == "":
+				if !strings.Contains(comments, "Split the bead") || strings.Contains(comments, "reuse branch") {
+					t.Errorf("comment %q, want the split instruction and no reuse", comments)
+				}
+			case !strings.Contains(comments, "on origin"):
 				t.Errorf("comment %q does not name the finished work on origin", comments)
 			}
 		})
