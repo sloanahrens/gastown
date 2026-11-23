@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/conflict"
 	"github.com/steveyegge/gastown/internal/jev/submission"
@@ -774,5 +775,188 @@ func TestConflictContextCountsRejectionsWithoutAOwnTip(t *testing.T) {
 	}
 	if got := a.Context(); got != nil {
 		t.Errorf("Context = %q, want none when every rejection names its tip", got)
+	}
+}
+
+// diffCounter counts the diff runs a conflict repo is asked for, so a test can
+// say what the cache saved.
+type diffCounter struct {
+	ConflictRepo
+	diffs int
+}
+
+func (d *diffCounter) Run(ctx context.Context, args ...string) (string, error) {
+	if args[0] == "diff" {
+		d.diffs++
+	}
+	return d.ConflictRepo.Run(ctx, args...)
+}
+
+// conflictFilesCachePath is where an adapter keeps a landing's changed files.
+func conflictFilesCachePath(town string) string {
+	return filepath.Join(town, constants.DirRuntime, "jev", "conflict_files.jsonl")
+}
+
+// cachePairTown is a town whose two beads landed over disjoint files, with the
+// repo its adapters read and the pair to label.
+func cachePairTown(t *testing.T) (string, *linearRepo, Item) {
+	t.Helper()
+	town := t.TempDir()
+	repo, sha := linearHistory([]map[string]string{
+		{"base.txt": "base"},
+		{"a.go": "a"},
+		{"b.go": "b"},
+	})
+	writeLandings(t, town, sha, map[string]int{"gt-a": 1, "gt-b": 2})
+	item, err := newConflictAdapter(town, nil).Parse(conflictLine(t, "gt-a", "gt-b", 0.5, 0.5, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return town, repo, item
+}
+
+// labelWithWarnings labels item on a, capturing the warnings a reports.
+func labelWithWarnings(t *testing.T, a *conflictAdapter, item Item) (Labeling, []string) {
+	t.Helper()
+	var warned []string
+	a.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	got, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	return got, warned
+}
+
+// TestConflictFilesCacheSecondRunMakesNoDiff: a second adapter over the same
+// town reads a landing's changed files from the cache the first one wrote, so
+// it runs no diff and labels the pair the same.
+func TestConflictFilesCacheSecondRunMakesNoDiff(t *testing.T) {
+	t.Parallel()
+	town, repo, item := cachePairTown(t)
+	first := &diffCounter{ConflictRepo: repo}
+	want, err := newConflictAdapter(town, func() (ConflictRepo, error) { return first, nil }).Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("first label: %v", err)
+	}
+	if first.diffs == 0 {
+		t.Fatal("the first run read no landing's files from git, so the test proves nothing")
+	}
+	if _, err := os.Stat(conflictFilesCachePath(town)); err != nil {
+		t.Fatalf("the first run kept no cache at %s: %v", conflictFilesCachePath(town), err)
+	}
+
+	second := &diffCounter{ConflictRepo: repo}
+	got, err := newConflictAdapter(town, func() (ConflictRepo, error) { return second, nil }).Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("second label: %v", err)
+	}
+	if second.diffs != 0 {
+		t.Errorf("the second run made %d diff run(s), want the cache to answer them", second.diffs)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("second label = %+v, want %+v", got, want)
+	}
+}
+
+// TestConflictFilesCacheFailuresDoNotChangeLabels: a cache hit opens no clone,
+// and a cache that cannot be read, appended to or created is reported once
+// while the pair is labeled from git as before.
+func TestConflictFilesCacheFailuresDoNotChangeLabels(t *testing.T) {
+	t.Parallel()
+	want := Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: false}, Rule: ruleConflictDisjointFiles}
+
+	t.Run("a cache hit opens no clone", func(t *testing.T) {
+		t.Parallel()
+		town, repo, item := cachePairTown(t)
+		if _, err := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil }).Label(context.Background(), item); err != nil {
+			t.Fatalf("first label: %v", err)
+		}
+		opened := 0
+		a := newConflictAdapter(town, func() (ConflictRepo, error) { opened++; return repo, nil })
+		got, warned := labelWithWarnings(t, a, item)
+		if opened != 0 {
+			t.Errorf("opened the clone %d time(s) for a cached landing, want 0", opened)
+		}
+		if len(warned) != 0 {
+			t.Errorf("warnings = %q, want none", warned)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("label = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("an unreadable cache file", func(t *testing.T) {
+		t.Parallel()
+		town, repo, item := cachePairTown(t)
+		path := conflictFilesCachePath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("not json\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, warned := labelWithWarnings(t, newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil }), item)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("label = %+v, want %+v", got, want)
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], path) {
+			t.Errorf("warnings = %q, want one naming %s", warned, path)
+		}
+	})
+
+	t.Run("a Put that fails", func(t *testing.T) {
+		t.Parallel()
+		town, repo, item := cachePairTown(t)
+		a := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil })
+		broken, err := openLandedFilesCacheOn(conflictFilesCachePath(town), landedFilesFS{
+			lock:     func(string) (func() error, error) { return nil, errors.New("cache is read-only") },
+			truncate: os.Truncate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.filesCache = broken
+		got, warned := labelWithWarnings(t, a, item)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("label = %+v, want %+v", got, want)
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], "cache is read-only") {
+			t.Errorf("warnings = %q, want one carrying the Put failure", warned)
+		}
+	})
+
+	t.Run("a cache directory that cannot be made", func(t *testing.T) {
+		t.Parallel()
+		town, repo, item := cachePairTown(t)
+		dir := filepath.Dir(conflictFilesCachePath(town))
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, warned := labelWithWarnings(t, newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil }), item)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("label = %+v, want %+v", got, want)
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], dir) {
+			t.Errorf("warnings = %q, want one naming %s", warned, dir)
+		}
+	})
+}
+
+// A read-only adapter reads and writes the same cache as a fetching one.
+func TestConflictFilesCacheReadOnlyAdapterUsesIt(t *testing.T) {
+	t.Parallel()
+	town, repo, item := cachePairTown(t)
+	if _, err := NewConflictReadOnly(town, func() (ConflictRepo, error) { return repo, nil }).Label(context.Background(), item); err != nil {
+		t.Fatalf("read-only label: %v", err)
+	}
+	if _, err := os.Stat(conflictFilesCachePath(town)); err != nil {
+		t.Fatalf("the read-only run kept no cache: %v", err)
+	}
+	second := &diffCounter{ConflictRepo: repo}
+	if _, err := NewConflictReadOnly(town, func() (ConflictRepo, error) { return second, nil }).Label(context.Background(), item); err != nil {
+		t.Fatalf("second read-only label: %v", err)
+	}
+	if second.diffs != 0 {
+		t.Errorf("the second read-only run made %d diff run(s), want the cache to answer them", second.diffs)
 	}
 }

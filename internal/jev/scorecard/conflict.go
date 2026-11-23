@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/jev/conflict"
 	"github.com/steveyegge/gastown/internal/jev/submission"
@@ -116,6 +117,14 @@ type conflictAdapter struct {
 	landed map[string]*land.LandingRecord
 	// files is each landed bead's changed files, by bead.
 	files map[string]map[string]bool
+	// filesCache is the file-backed cache of a landing's changed files, opened
+	// on the first read; nil with cacheTried set means it could not be opened.
+	filesCache  *landedFilesCache
+	cacheTried  bool
+	cacheWarned bool // the unusable-cache warning is reported once
+	// warn reports an unusable cache; nil is warnf. A test sets it to see the
+	// warning without swapping os.Stderr.
+	warn func(format string, args ...any)
 	// rejections is, per bead, the target tip each of its conflict rejections
 	// was built on.
 	rejections map[string][]string
@@ -334,13 +343,25 @@ func (a *conflictAdapter) rejectedAfter(ctx context.Context, bead string, landed
 // landedFiles returns the files a bead's landing changed, from its fork point
 // to its head in the bare clone: the range is three-dot because the record's
 // base is the target tip at land time, which can hold landings made after the
-// bead forked (gt-wu2ab). A bead is read once.
+// bead forked (gt-wu2ab). A bead is read once; a landing's base and head are
+// full commit ids, so the cache answers a pair it holds before any clone opens.
 func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *land.LandingRecord) (map[string]bool, error) {
 	if files, ok := a.files[bead]; ok {
 		return files, nil
 	}
 	if !safeRef(rec.Base) || !safeRef(rec.Head) {
 		return nil, fmt.Errorf("landing of %s names refs the clone will not read: %q...%q", bead, rec.Base, rec.Head)
+	}
+	cache := a.landingFilesCache()
+	if cache != nil {
+		if cached, ok := cache.Get(rec.Base, rec.Head); ok {
+			files := map[string]bool{}
+			for _, f := range cached {
+				files[f] = true
+			}
+			a.files[bead] = files
+			return files, nil
+		}
 	}
 	repo, err := a.clone(ctx)
 	if err != nil {
@@ -351,13 +372,60 @@ func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *lan
 		return nil, fmt.Errorf("listing the files of %s: %w", bead, err)
 	}
 	files := map[string]bool{}
+	var names []string
 	for _, f := range strings.Split(strings.TrimSpace(out), "\n") {
 		if f != "" {
 			files[f] = true
+			names = append(names, f)
+		}
+	}
+	if cache != nil {
+		if err := cache.Put(rec.Base, rec.Head, names); err != nil {
+			a.warnCacheUnusable(err)
 		}
 	}
 	a.files[bead] = files
 	return files, nil
+}
+
+// landingFilesCachePath is where the cache of landings' changed files lives.
+func landingFilesCachePath(town string) string {
+	return filepath.Join(town, constants.DirRuntime, "jev", "conflict_files.jsonl")
+}
+
+// landingFilesCache opens the cache of landings' changed files on first use. A
+// cache that cannot be opened is nil, so the read goes to git, warned once.
+func (a *conflictAdapter) landingFilesCache() *landedFilesCache {
+	if a.filesCache != nil || a.cacheTried {
+		return a.filesCache
+	}
+	a.cacheTried = true
+	path := landingFilesCachePath(a.town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		a.warnCacheUnusable(fmt.Errorf("creating %s: %w", filepath.Dir(path), err))
+		return nil
+	}
+	c, err := openLandedFilesCache(path)
+	if err != nil {
+		a.warnCacheUnusable(err)
+		return nil
+	}
+	a.filesCache = c
+	return c
+}
+
+// warnCacheUnusable reports the first failure to use the cache, once per
+// adapter, so a broken cache costs one warning rather than one per landing.
+func (a *conflictAdapter) warnCacheUnusable(err error) {
+	if a.cacheWarned {
+		return
+	}
+	a.cacheWarned = true
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
+	warn("reading landings' files from git: the landed files cache is unusable: %v", err)
 }
 
 // holdsLandings says whether the clone holds the base and head commits of every
