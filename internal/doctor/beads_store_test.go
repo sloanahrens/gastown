@@ -235,6 +235,9 @@ func (noBeadsDB) WriteCostSample(context.Context, beads.Sample) error {
 func (noBeadsDB) ReadCostSamples(context.Context, string, time.Time, int) ([]beads.Sample, error) {
 	return nil, errNoDatabase
 }
+func (noBeadsDB) CheckUsageRecordRow(context.Context, beads.UsageRecordRow) error {
+	return errNoDatabase
+}
 func (noBeadsDB) WriteUsageRecord(context.Context, beads.UsageRecordRow) error {
 	return errNoDatabase
 }
