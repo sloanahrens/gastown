@@ -1,0 +1,65 @@
+package cmd
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+// newRedHoldCmd builds `gt red-hold`; a test builds a fresh one so its flag state is its own.
+func newRedHoldCmd() *cobra.Command {
+	var townRoot string
+	status := &cobra.Command{
+		Use:   "status",
+		Short: "Print why automatic dispatch is held, one line per reason",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			root := townRoot
+			if root == "" {
+				var err error
+				if root, err = workspace.FindFromCwdOrError(); err != nil {
+					return err
+				}
+			}
+			rec, err := dispatch.ReadRedHold(root)
+			if err != nil {
+				return fmt.Errorf("reading the red hold: %w", err)
+			}
+			if len(rec.Reasons) == 0 {
+				_, err := fmt.Fprintln(cmd.OutOrStdout(), "red hold: open")
+				return err
+			}
+			for _, r := range rec.Reasons {
+				line := r.Kind + " since " + r.Since.Format(time.RFC3339)
+				if r.Detail != "" {
+					line += " " + r.Detail
+				}
+				if len(r.CureBeads) > 0 {
+					line += " cure: " + strings.Join(r.CureBeads, " ")
+				}
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), line); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	status.Flags().StringVar(&townRoot, "town-root", "", "Town root to read (default: the town containing the working directory)")
+	c := &cobra.Command{
+		Use:     "red-hold",
+		GroupID: GroupDiag,
+		Short:   "Inspect the red hold that parks automatic dispatch",
+		RunE:    requireSubcommand,
+	}
+	c.AddCommand(status)
+	return c
+}
+
+func init() {
+	rootCmd.AddCommand(newRedHoldCmd())
+}
