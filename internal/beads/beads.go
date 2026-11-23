@@ -2159,7 +2159,6 @@ func (b *Beads) runBdOnce(callCtx context.Context, stdinData []byte, runEnv []st
 // routes.jsonl sends a bead of a listed prefix to the rig database that holds
 // it. `gt escalate list` reads this way because escalations live in the
 // database of the rig that filed them (gt-wbxb).
-// See: sling_helpers.go verifyBeadExists/hookBeadWithRetry for the same pattern.
 func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
 	// Same --flat handling as run/runWithStdin: routed call sites are "list ...
 	// --json" queries too, and bd v0.59+ emits tree text for those without
