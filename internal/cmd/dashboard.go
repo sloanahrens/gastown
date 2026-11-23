@@ -423,7 +423,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
-	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
+	forgejoFeed, forgejoDeploys, stagingShip, gastownPipeline := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
 	news, err := dashboardNewsReader(townRoot)
 	if err != nil {
 		return nil, nil, err
@@ -526,6 +526,12 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
 	spend, spendReason := resolveSpend(spendCmd, beadReads.costSamples, whyLog)
+	// The System updates section joins the pipeline runs through the same
+	// cadence the Deploys reader uses, so the section's own faster poll costs
+	// no Forgejo calls.
+	systemUpdatesRead := func() *dashboard.SystemUpdates {
+		return systemUpdates(townRoot, tierSweeps, gastownPipeline, time.Now())
+	}
 	return dashboard.NewHub(dashboard.Config{
 		Feed: feed,
 		Summary: func() dashboard.Summary {
@@ -548,7 +554,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
-		SystemUpdates:  func() *dashboard.SystemUpdates { return systemUpdates(townRoot, tierSweeps, time.Now()) },
+		SystemUpdates:  systemUpdatesRead,
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
@@ -1330,7 +1336,13 @@ func dashboardJevCap(townRoot string) func() (*float64, error) {
 // with no spend command. The token is read once, here, and never leaves the
 // client. The client reads the API root the rigs' Forgejo remote names
 // (dashboardForgejoBase), so the panes reach the Forgejo the rigs use.
-func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
+//
+// The function also returns the System updates section's pipeline read: the
+// gastown rig's post-land and images runs, gated to the Deploys reader's default
+// cadence so the section's faster poll costs no Forgejo calls. With no viewer
+// token file, or no gastown repository for it to read, the read is nil and the
+// section joins no runs.
+func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging, func() *dashboard.GastownPipeline) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
@@ -1340,10 +1352,16 @@ func dashboardForgejoReaders(townRoot string, repos []string, logf func(format s
 	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	staging := dashboard.NewStagingReader(client, rigShipRepos(townRoot))
-	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship
+	var pipeline func() *dashboard.GastownPipeline
+	if remote, err := rigForgejoRemote(townRoot, "gastown"); err == nil && remote != "" {
+		if owner, repo, err := land.RepoFromRemoteURL(remote); err == nil {
+			pipeline = newSystemUpdatesPipeline(dashboard.NewGastownPipelineReader(client, owner+"/"+repo).Read, time.Now)
+		}
+	}
+	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship, pipeline
 }
 
 // dashboardNewsReader wires the News pane's reader, or none when

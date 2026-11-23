@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -12,11 +13,37 @@ import (
 // for its rolls, so the rolls of the newest commit rows are among them.
 const systemUpdatesHistoryRuns = 50
 
+// systemUpdatesPipelineEvery is how often the gastown repository's pipeline runs
+// are re-read: the cadence the Deploys reader is scheduled at (the hub's
+// DeploysEvery default), because one read is two Forgejo list calls and the
+// runs move far slower than the section is built.
+const systemUpdatesPipelineEvery = time.Minute
+
+// newSystemUpdatesPipeline gates read to one call per systemUpdatesPipelineEvery,
+// timed by now: a section built inside the window reuses the runs the last read
+// published, so the section's faster poll costs the repository nothing.
+func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func() time.Time) func() *dashboard.GastownPipeline {
+	var mu sync.Mutex
+	var last *dashboard.GastownPipeline
+	var at time.Time
+	return func() *dashboard.GastownPipeline {
+		mu.Lock()
+		defer mu.Unlock()
+		readAt := now()
+		if last == nil || readAt.Sub(at) >= systemUpdatesPipelineEvery {
+			last = read()
+			at = readAt
+		}
+		return last
+	}
+}
+
 // systemUpdates is the feed's System updates section: the tier sweeps the sweep
-// reader holds joined with the finished rolls in the update history. A sweep log
-// or history that cannot be read marks the section unavailable, so the rows it
-// did join are not taken for every commit's full record.
-func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *dashboard.SystemUpdates {
+// reader holds joined with the finished rolls in the update history and the
+// gastown repository's post-land and images runs. A sweep log or history that
+// cannot be read marks the section unavailable, so the rows it did join are not
+// taken for every commit's full record. A nil pipeline read joins no runs.
+func systemUpdates(townRoot string, sweeps *tierSweepReader, pipeline func() *dashboard.GastownPipeline, now time.Time) *dashboard.SystemUpdates {
 	ts := sweeps.read(now)
 	runs, err := update.ReadHistory(update.Dir(townRoot), systemUpdatesHistoryRuns)
 	rolls := make([]dashboard.SystemUpdateRoll, 0, len(runs))
@@ -31,7 +58,11 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *das
 			EndedAt:   run.EndedAt,
 		})
 	}
-	su := dashboard.NewSystemUpdates(ts.Sweeps, nil, rolls, ts.Unavailable || err != nil)
+	var pipelineRead *dashboard.GastownPipeline
+	if pipeline != nil {
+		pipelineRead = pipeline()
+	}
+	su := dashboard.NewSystemUpdates(ts.Sweeps, pipelineRead, rolls, ts.Unavailable || err != nil)
 	// The update reader answers nil for both no run and a record it cannot read,
 	// so the record is read here to tell the page which one a missing roll is.
 	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -19,6 +20,15 @@ func writeEmptyDaemonLog(t *testing.T, root string) {
 	dir := filepath.Join(root, "daemon")
 	require.NoError(t, os.MkdirAll(dir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "daemon.log"), nil, 0o600))
+}
+
+// writeDaemonLog makes the daemon log readable with one sweep line, so the
+// section has a swept commit to join.
+func writeDaemonLog(t *testing.T, root, line string) {
+	t.Helper()
+	writeEmptyDaemonLog(t, root)
+	path := filepath.Join(root, "daemon", "daemon.log")
+	require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o600))
 }
 
 // The section's rolls come from the update history: a finished run is a roll to
@@ -42,7 +52,7 @@ func TestSystemUpdatesNowSupplyJoinsRollsFromHistory(t *testing.T) {
 		Outcome:   update.OutcomeOK,
 	}))
 
-	got := systemUpdates(root, newTierSweepReader(root), started.Add(time.Hour))
+	got := systemUpdates(root, newTierSweepReader(root), nil, started.Add(time.Hour))
 
 	require.Len(t, got.Rows, 1, "the roll names one commit row")
 	row := got.Rows[0]
@@ -98,7 +108,7 @@ func TestSystemUpdatesRollNamesTheStepAPartialRollMissed(t *testing.T) {
 				Steps:     tc.steps,
 			}))
 
-			got := systemUpdates(root, newTierSweepReader(root), started)
+			got := systemUpdates(root, newTierSweepReader(root), nil, started)
 
 			require.Len(t, got.Rows, 1, "the roll names one commit row")
 			require.NotNil(t, got.Rows[0].Roll)
@@ -118,7 +128,7 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableHistory(t *testing.T) {
 	// A directory where the history file belongs: the file cannot be read as one.
 	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "history.jsonl"), 0o700))
 
-	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
 
 	assert.True(t, got.Unavailable)
 	assert.Empty(t, got.Rows)
@@ -136,7 +146,7 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableUpdateRecord(t *testing.T) {
 	// A directory where the state record belongs: it cannot be read as a file.
 	require.NoError(t, os.MkdirAll(filepath.Join(update.Dir(root), "state.json"), 0o700))
 
-	got := systemUpdates(root, newTierSweepReader(root), time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+	got := systemUpdates(root, newTierSweepReader(root), nil, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
 
 	assert.True(t, got.RollUnknown)
 }
@@ -157,8 +167,38 @@ func TestSystemUpdatesNowSupplyFlagsAnUnreadableSweepLog(t *testing.T) {
 		Outcome:   update.OutcomeOK,
 	}))
 
-	got := systemUpdates(root, newTierSweepReader(root), started)
+	got := systemUpdates(root, newTierSweepReader(root), nil, started)
 
 	assert.True(t, got.Unavailable, "no daemon log means no sweep stage was read")
 	require.Len(t, got.Rows, 1, "the roll still joins")
+}
+
+// The post-land and images runs of a swept commit fill that row's Runs, so the
+// pane's stage chips have what they draw; a nil read leaves every row without
+// runs, the section a town with no viewer client draws today (gt-nhdxkq).
+func TestSystemUpdatesPipelineJoinsRunsForASweptCommit(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeDaemonLog(t, root, "2026/11/18 09:00:00 tier_sweep: gastown: swept 9f8e7d6c (shell GREEN, integration GREEN) in 9m36s")
+	runs := []dashboard.PipelineRun{
+		{Workflow: "images.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
+		{Workflow: "post-land.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
+	}
+	read := func() *dashboard.GastownPipeline { return &dashboard.GastownPipeline{Runs: runs} }
+	for _, tc := range []struct {
+		name     string
+		pipeline func() *dashboard.GastownPipeline
+		want     []dashboard.PipelineRun
+	}{
+		{"runs for the swept commit", read, runs},
+		{"no pipeline read", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := systemUpdates(root, newTierSweepReader(root), tc.pipeline, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+			require.Len(t, got.Rows, 1, "the swept commit names one row")
+			assert.Equal(t, tc.want, got.Rows[0].Runs)
+		})
+	}
 }
