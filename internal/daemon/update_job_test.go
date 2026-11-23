@@ -1622,6 +1622,56 @@ func TestUpdateJobGatewayURLLookupFails(t *testing.T) {
 	}
 }
 
+// TestUpdateJobGatewayURLRefusesUserinfo: a BD_GATEWAY_URL that carries userinfo
+// is refused on an IP host and a name alike, before any lookup, and no Job is
+// created. The error names the variable and says the URL carries userinfo; it
+// never echoes the value, so the credential stays out of it.
+func TestUpdateJobGatewayURLRefusesUserinfo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		// secrets are the parts of raw the error must not carry.
+		secrets []string
+	}{
+		{
+			// Split so the hygiene scan does not read the fixture as an address.
+			name:    "a user and a password on a name",
+			raw:     "http://" + "user:secret" + "@gateway.local:7440",
+			secrets: []string{"user:secret", "secret"},
+		},
+		{
+			name:    "a user alone on an IP host",
+			raw:     "http://tok@10.0.0.5:7440",
+			secrets: []string{"tok"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			lookups := 0
+			r.d.lookupHost = func(context.Context, string) ([]string, error) {
+				lookups++
+				return []string{"192.168.5.2"}, nil
+			}
+
+			err := r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, r.commits[2])
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), k8sdaemon.BdGatewayURLEnv)
+			assert.Contains(t, err.Error(), "carries userinfo")
+			assert.Zero(t, lookups, "a URL with userinfo was resolved")
+			assert.Empty(t, r.cluster.calls, "a refused launch reached the cluster")
+			assert.NotContains(t, err.Error(), tt.raw, "the error echoes the URL")
+			for _, secret := range tt.secrets {
+				assert.NotContains(t, err.Error(), secret, "the error echoes a credential")
+			}
+		})
+	}
+}
+
 // TestUpdateJobGatewayLookupHasADeadline: the gateway host lookup is given a context
 // whose deadline is no more than updateJobLookupTimeout after the launch starts, so
 // a stalled resolver cannot hold the heartbeat. The deadline is read from the
