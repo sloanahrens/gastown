@@ -559,7 +559,12 @@ func planBeads(runs []Run, all []SessionUsage, owners []int, mtimes []time.Time,
 			existing, err := ReadWork(usageDir, bead)
 			switch {
 			case err == nil:
-				if isFinal(allEnded, anyEnded, latestEnd, newest, now) && sameSet(existing.Sessions, ids) {
+				if len(ids) == 0 && storedCoversRuns(existing, runs, g.runs, ws, allEnded) {
+					// A seat's end writes its own record and no transcript copy reaches the
+					// host, so a copy-less scan keeps it while it still covers every run of
+					// the bead (gt-45plfs).
+					p.kept = true
+				} else if isFinal(allEnded, anyEnded, latestEnd, newest, now) && sameSet(existing.Sessions, ids) {
 					p.kept = true
 				}
 			case !errors.Is(err, fs.ErrNotExist):
@@ -569,6 +574,23 @@ func planBeads(runs []Run, all []SessionUsage, owners []int, mtimes []time.Time,
 		plans = append(plans, p)
 	}
 	return plans, nil
+}
+
+// storedCoversRuns reports whether a bead's stored record can stand for a scan that found no
+// copy of its sessions: every run of the bead has ended and the record is complete, carries no
+// error, names the bead's workspace and its window covers each run. A record that misses a run
+// is not kept, since the scan has no other source for that run's usage (gt-45plfs).
+func storedCoversRuns(st Stored, runs []Run, idx []int, workspace string, allEnded bool) bool {
+	if !allEnded || !st.Record.Complete || st.Error != "" || st.Record.Workspace != workspace {
+		return false
+	}
+	for _, i := range idx {
+		r := runs[i]
+		if st.Record.Start.After(r.Start) || (r.Ended && st.Record.End.Before(r.End)) {
+			return false
+		}
+	}
+	return true
 }
 
 // isFinal is whether a bead's record can no longer change on its own: every run ended and the last
