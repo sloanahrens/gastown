@@ -296,7 +296,13 @@ func TestIntegrationPolecatImageLetsACleanTreePastItsGuardToTheBuild(t *testing.
 	if strings.Contains(out, "uncommitted or untracked") {
 		t.Fatalf("polecat-image refused a clean tree at its tree guard\n%s", out)
 	}
-	ctx := filepath.Join(p.dir, "deploy", "polecat", "context")
+	// The recipe runs make -C, so it prints the resolved path; on macOS the
+	// TempDir path under /var is a symlink to /private/var.
+	dir, err := filepath.EvalSymlinks(p.dir)
+	if err != nil {
+		t.Fatalf("resolve the scratch dir %s: %v", p.dir, err)
+	}
+	ctx := filepath.Join(dir, "deploy", "polecat", "context")
 	log := p.goInvocations(t)
 	if !strings.Contains(log, "run ./internal/polecat/imagectx/cmd/build -rev ") || !strings.Contains(log, "-out "+ctx) {
 		t.Fatalf("the recipe never ran the context command into %s\n%s", ctx, log)
