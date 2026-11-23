@@ -163,6 +163,10 @@ func TestTickEffSQLChildren(t *testing.T) {
 	if got, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, nil }), []string{"gt-a"}); err != nil || len(got) != 0 {
 		t.Errorf("no records: children = %v, %v; want none", got, err)
 	}
+	refused := errors.New("refused")
+	if _, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, refused }), []string{"gt-a"}); !errors.Is(err, refused) {
+		t.Errorf("reader error = %v, want %v", err, refused)
+	}
 }
 
 // A chunk read the deadline ended is left for the next tick: one call, no
