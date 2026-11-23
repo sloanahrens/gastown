@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -143,4 +145,75 @@ func recordSeatEndNoRecord(townRoot, rig, name, bead string) error {
 		return err
 	}
 	return atomicfile.EnsureDirAndWriteJSON(path, seatEndNoRecord{Bead: bead})
+}
+
+// readSeatEndNoRecords returns every seat's marker that its end found no record
+// of its work, one per seat. The path names the seat, so each marker carries
+// its rig, polecat and file. Only *.json files are markers, so an atomic
+// write's temp file is skipped; a marker the read cannot use is an error naming
+// its file, and no marker is returned with it, so a caller never acts on a
+// half-read store (gt-wssxhd).
+func readSeatEndNoRecords(townRoot string) ([]seatEndNoRecord, error) {
+	dir := seatEndNoRecordsDir(townRoot)
+	rigs, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var markers []seatEndNoRecord
+	var bad []error
+	for _, rigEntry := range rigs {
+		rigPath := filepath.Join(dir, rigEntry.Name())
+		if !rigEntry.IsDir() {
+			bad = append(bad, fmt.Errorf("seat end no record marker %s: it is not under a rig", rigPath))
+			continue
+		}
+		entries, err := os.ReadDir(rigPath)
+		if err != nil {
+			bad = append(bad, fmt.Errorf("seat end no record markers in %s: %w", rigPath, err))
+			continue
+		}
+		for _, entry := range entries {
+			name, isMarker := strings.CutSuffix(entry.Name(), ".json")
+			if !isMarker {
+				continue // an atomic write's temp file, or something that is not a marker
+			}
+			path := filepath.Join(rigPath, entry.Name())
+			if err := polecat.CheckSandboxSeatNames(rigEntry.Name(), name); err != nil {
+				bad = append(bad, fmt.Errorf("seat end no record marker %s: %w", path, err))
+				continue
+			}
+			marker, err := readSeatEndNoRecord(path)
+			if err != nil {
+				bad = append(bad, err)
+				continue
+			}
+			marker.Rig, marker.Polecat, marker.path = rigEntry.Name(), name, path
+			markers = append(markers, marker)
+		}
+	}
+	if err := errors.Join(bad...); err != nil {
+		return nil, err
+	}
+	return markers, nil
+}
+
+// readSeatEndNoRecord reads one marker. A file that will not read or decode,
+// or a marker that names no bead, is an error naming the file: the writer
+// refuses to make such a marker, so it can only be a corrupt one.
+func readSeatEndNoRecord(path string) (seatEndNoRecord, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the town's own runtime path
+	if err != nil {
+		return seatEndNoRecord{}, fmt.Errorf("seat end no record marker %s: %w", path, err)
+	}
+	var marker seatEndNoRecord
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return seatEndNoRecord{}, fmt.Errorf("seat end no record marker %s: %w", path, err)
+	}
+	if marker.Bead == "" {
+		return seatEndNoRecord{}, fmt.Errorf("seat end no record marker %s: it names no bead", path)
+	}
+	return marker, nil
 }
