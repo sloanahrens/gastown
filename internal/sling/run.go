@@ -521,12 +521,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		fmt.Fprintf(d.out(), "  %s the worktree branch of seat %s could not be read: %v\n", style.Dim.Render("Warning:"), targetAgent, branchErr)
 		rollbackSpawnedPolecat(beadToHook, "Seat worktree branch unreadable")
 		result.ErrMsg = fmt.Sprintf("seat %s: worktree branch unreadable", targetAgent)
-		return result, fmt.Errorf("%s %s: the worktree branch of seat %s could not be read after %d attempts, so the hook cannot be checked against another bead's branch; the dispatch is deferred until it can be read",
+		return result, newSeatBranchRefusal("%s %s: the worktree branch of seat %s could not be read after %d attempts, so the hook cannot be checked against another bead's branch; the dispatch is deferred until it can be read",
 			dispatch.SlingRefusalMarker, opts.BeadID, targetAgent, worktreeBranchReadAttempts)
 	} else if other := branchBead(branch); other != "" && other != opts.BeadID && branch != opts.ResumeBranch {
 		rollbackSpawnedPolecat(beadToHook, "Seat worktree holds another bead's branch")
 		result.ErrMsg = fmt.Sprintf("seat %s has %s checked out, named for %s", targetAgent, branch, other)
-		return result, fmt.Errorf("%s %s: the seat %s already has %s checked out, which carries %s's work, so the hook would be written onto another bead's branch\nResume that branch with --branch to take the work deliberately, or clear the seat's worktree first",
+		return result, newSeatBranchRefusal("%s %s: the seat %s already has %s checked out, which carries %s's work, so the hook would be written onto another bead's branch\nResume that branch with --branch to take the work deliberately, or clear the seat's worktree first",
 			dispatch.SlingRefusalMarker, opts.BeadID, targetAgent, branch, other)
 	}
 	// The fields ride on the hook write, one bd update and one Dolt commit,
