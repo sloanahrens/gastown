@@ -149,6 +149,18 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 			if out.Len() != 0 {
 				t.Errorf("output on refusal = %q, want none", out.String())
 			}
+			if !row.dryRun {
+				return
+			}
+			// The apply refuses a split the dry run refuses, writing nothing.
+			before := splitJournalLen(t, db)
+			err = runSpecSplitApplyOn(&out, row.beadID, "gastown", db.Show, func(string) *specdispatch.TargetTree { return row.tree }, db)
+			if err == nil {
+				t.Errorf("runSpecSplitApplyOn() error = nil, want a refusal")
+			}
+			if after := splitJournalLen(t, db); after != before {
+				t.Errorf("journal records = %d after the refused apply, want %d", after, before)
+			}
 		})
 	}
 }
@@ -202,6 +214,83 @@ func TestSpecSplitDryRunRefusal(t *testing.T) {
 	}
 }
 
+// splitLinkedBeadDescription is splitBeadDescription whose piece B bullet cites
+// a symbol piece A declares, so piece B's text carries PIECE_A.
+const splitLinkedBeadDescription = `## Goal
+
+Split two packages.
+
+## Constraints
+
+- Add ` + "`func Parse`" + ` to internal/alpha/alpha.go.
+- Wire the reader in internal/beta/beta.go, calling ` + "`alpha.Parse`" + `.
+
+## Acceptance
+
+- [ ] The parser works. Run: go test ./internal/alpha -run TestParse
+- [ ] The reader works. Run: go test ./internal/beta -run TestRead
+`
+
+// splitCreatedPiece is the created piece named name among issues.
+func splitCreatedPiece(t *testing.T, issues []*beads.Issue, name string) *beads.Issue {
+	t.Helper()
+	for _, issue := range issues {
+		if strings.HasSuffix(issue.Title, "(piece "+name+")") {
+			return issue
+		}
+	}
+	t.Fatalf("no piece %s among %d issues", name, len(issues))
+	return nil
+}
+
+// TestSpecSplitApplyCreates: --apply creates piece A and piece B, replaces
+// PIECE_A in B's text with A's id, wires B to depend on A, and closes the
+// original naming both ids. Both pieces keep the original's priority.
+func TestSpecSplitApplyCreates(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitLinkedBeadDescription, Priority: 1})
+
+	var out bytes.Buffer
+	err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, db)
+	if err != nil {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
+	}
+	issues, err := db.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Errorf("issues = %d after the apply, want the original and two pieces", len(issues))
+	}
+	a, b := splitCreatedPiece(t, issues, "A"), splitCreatedPiece(t, issues, "B")
+	for _, piece := range []*beads.Issue{a, b} {
+		if piece.Priority != 1 {
+			t.Errorf("%s priority = %d, want the original's 1", piece.Title, piece.Priority)
+		}
+	}
+	if strings.Contains(b.Description, "PIECE_A") || !strings.Contains(b.Description, "created by bead "+a.ID) {
+		t.Errorf("piece B text has not replaced PIECE_A with %s:\n%s", a.ID, b.Description)
+	}
+	if len(b.Dependencies) != 1 || b.Dependencies[0].ID != a.ID || b.Dependencies[0].DependencyType != "blocks" {
+		t.Errorf("piece B dependencies = %+v, want A %s alone", b.Dependencies, a.ID)
+	}
+	original, err := db.Show("gt-split")
+	if err != nil {
+		t.Fatalf("show original: %v", err)
+	}
+	if original.Status != "closed" {
+		t.Errorf("original status = %q, want closed", original.Status)
+	}
+	if want := "split into " + a.ID + " and " + b.ID; original.CloseReason != want {
+		t.Errorf("original close reason = %q, want %q", original.CloseReason, want)
+	}
+	if want := "split gt-split into " + a.ID + " and " + b.ID; !strings.Contains(out.String(), want) {
+		t.Errorf("output = %q, want it to name the split %q", out.String(), want)
+	}
+}
+
 // TestSpecSplitIsRegisteredUnderSpec: gt spec split is reachable from the root
 // command, so the dry run is what a user runs.
 func TestSpecSplitIsRegisteredUnderSpec(t *testing.T) {
@@ -212,6 +301,9 @@ func TestSpecSplitIsRegisteredUnderSpec(t *testing.T) {
 	}
 	if cmd.Name() != "split" || cmd.Parent() == nil || cmd.Parent().Name() != "spec" {
 		t.Errorf("Find(spec split) = %q under %v, want split under spec", cmd.Name(), cmd.Parent())
+	}
+	if cmd.Flags().Lookup("apply") == nil {
+		t.Error("gt spec split has no --apply flag")
 	}
 }
 
@@ -240,12 +332,24 @@ func TestSpecSplitRefusesOutsideATown(t *testing.T) {
 	var out bytes.Buffer
 	noTown := func() (string, error) { return "", errors.New("no town above the directory") }
 
-	err := runSpecSplitFrom(&out, &bytes.Buffer{}, "gt-split", true, noTown)
+	err := runSpecSplitFrom(&out, &bytes.Buffer{}, "gt-split", true, false, noTown)
 	if err == nil {
 		t.Errorf("runSpecSplitFrom() error = nil with no town, want an error")
 	}
 	if out.Len() != 0 {
 		t.Errorf("runSpecSplitFrom() printed %q before refusing, want nothing", out.String())
+	}
+}
+
+// TestSpecSplitRefusesBothModes: --dry-run and --apply together are refused
+// before the town is read.
+func TestSpecSplitRefusesBothModes(t *testing.T) {
+	t.Parallel()
+	noTown := func() (string, error) { return "", errors.New("no town above the directory") }
+
+	err := runSpecSplitFrom(&bytes.Buffer{}, &bytes.Buffer{}, "gt-split", true, true, noTown)
+	if err == nil || !strings.Contains(err.Error(), "--dry-run or --apply") {
+		t.Errorf("runSpecSplitFrom() error = %v, want a refusal of both modes", err)
 	}
 }
 
@@ -278,7 +382,7 @@ func TestSpecSplitRefusesAnUnjudgeableTown(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			err := runSpecSplitFrom(&out, &bytes.Buffer{}, "gt-split", true, func() (string, error) { return town, nil })
+			err := runSpecSplitFrom(&out, &bytes.Buffer{}, "gt-split", true, false, func() (string, error) { return town, nil })
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("runSpecSplitFrom() error = %v, want a refusal naming %q", err, tc.wantErr)
 			}

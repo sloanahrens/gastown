@@ -26,10 +26,17 @@ const specSplitMargin = 0.3
 // specSplitDryRun is the --dry-run flag of gt spec split.
 var specSplitDryRun bool
 
+// specSplitApply is the --apply flag of gt spec split.
+var specSplitApply bool
+
+func init() {
+	specSplitCmd.Flags().BoolVar(&specSplitApply, "apply", false, "Create the two piece beads, wire B after A and close the original")
+}
+
 var specSplitCmd = &cobra.Command{
 	Use:   "split <bead-id>",
-	Short: "Print the two drafts a bead splits into, creating nothing",
-	Long: `Split a work bead into two pieces by package and print both drafts.
+	Short: "Print the two drafts a bead splits into, or create them with --apply",
+	Long: `Split a work bead into two pieces by package, printing or creating them.
 
 Each Constraints bullet and acceptance box is placed in the package directory it
 names. The packages are divided between piece A and piece B, which depends on
@@ -38,13 +45,17 @@ A. Each draft is the full bead text that piece would carry.
 The packages are read from the rig's target branch. A bead that cannot be
 split is refused with the reason and exits non-zero.
 
-Each draft is then estimated and linted, and nothing is written. The verdict
-line says whether both pieces lint ok and estimate under the split trigger. A
-piece at or within 0.3 minutes of the trigger fails, and so does a piece the
-lint refuses; the command exits 1 when either fails.
+With --dry-run each draft is then estimated and linted, and nothing is written.
+The verdict line says whether both pieces lint ok and estimate under the split
+trigger. A piece at or within 0.3 minutes of the trigger fails, and so does a
+piece the lint refuses; the command exits 1 when either fails.
 
-Only --dry-run is available: without it the command refuses. A dry run writes
-nothing and creates no bead.`,
+With --apply the two pieces are created: piece A, then piece B whose PIECE_A
+placeholder is replaced by A's id, then B's dependency on A, then the original
+closed naming both ids. The pieces keep the original's priority and rig. A
+refusal before the first write creates nothing.
+
+One of --dry-run or --apply is required: without one the command refuses.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runSpecSplit,
@@ -80,16 +91,25 @@ type specSplitJudgement struct {
 }
 
 func runSpecSplit(cmd *cobra.Command, args []string) error {
-	return runSpecSplitFrom(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], specSplitDryRun, workspace.FindFromCwd)
+	return runSpecSplitFrom(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], specSplitDryRun, specSplitApply, workspace.FindFromCwd)
 }
 
-// runSpecSplitFrom resolves the town with find, reads its settings, and runs
-// runSpecSplitOn with the production estimate and lint. find is a parameter so
-// a test can make the town unfindable. errw takes the estimate's warnings.
-func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun bool, find func() (string, error)) error {
+// runSpecSplitFrom resolves the town with find, then applies the split or runs
+// the dry run with the production estimate and lint. find is a parameter so a
+// test can make the town unfindable. errw takes the estimate's warnings.
+func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun, apply bool, find func() (string, error)) error {
+	if dryRun && apply {
+		return errors.New("pass one of --dry-run or --apply, not both")
+	}
 	townRoot, err := find()
 	if err != nil {
 		return fmt.Errorf("cannot find the town: %w", err)
+	}
+	read := func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }
+	target := func(id string) *specdispatch.TargetTree { return specLintTarget(townRoot, id, openRigTree) }
+	if apply {
+		return runSpecSplitApplyOn(out, beadID, specBeadRig(townRoot, beadID), read, target,
+			beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)))
 	}
 	sd, err := readSpecDispatchConfig(townRoot)
 	if err != nil {
@@ -99,9 +119,7 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun bool, find func
 	if err != nil {
 		return fmt.Errorf("cannot judge the drafts of %s: %w", beadID, err)
 	}
-	return runSpecSplitOn(out, beadID, dryRun,
-		func(id string) (*beads.Issue, error) { return showBead(townRoot, id) },
-		func(id string) *specdispatch.TargetTree { return specLintTarget(townRoot, id, openRigTree) },
+	return runSpecSplitOn(out, beadID, dryRun, read, target,
 		specSplitCheck{
 			Trigger:  sd.StoryPointsSplitOver(),
 			Estimate: specSplitEstimate(townRoot, errw),
@@ -117,38 +135,14 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun bool, find func
 // first.
 func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRead, target specSplitTarget, check specSplitCheck) error {
 	if !dryRun {
-		return errors.New("gt spec split writes nothing yet: pass --dry-run to print the two drafts")
+		return errors.New("gt spec split needs --dry-run to print the two drafts or --apply to create them")
 	}
 	if check.Trigger <= 0 {
 		return fmt.Errorf("cannot judge the drafts of %s: no split trigger is set (story_points.split_over_minutes)", beadID)
 	}
-	issue, err := read(beadID)
+	issue, tree, plan, err := specSplitPlan(beadID, read, target)
 	if err != nil {
-		return fmt.Errorf("cannot read bead %s: %w", beadID, err)
-	}
-	tree := target(beadID)
-	if tree == nil {
-		return fmt.Errorf("cannot read the target branch's files for %s", beadID)
-	}
-	if tree.Err != "" {
-		return fmt.Errorf("cannot read the target branch's files for %s: %s", beadID, tree.Err)
-	}
-	spec := specsplit.Spec{
-		Constraints: specdispatch.Sections(issue.Description)["constraints"],
-		Acceptance:  beads.AcceptanceText(issue),
-		Dirs:        specSplitPackageDirs(tree.Files),
-		BaseFiles:   specSplitBaseFiles(tree.Files),
-		// The target inventory lists files, not symbols, so the command knows
-		// of no existing symbol and every symbol A declares keeps its note.
-		BaseSymbols: map[string]bool{},
-	}
-	groups, err := specsplit.Group(spec)
-	if err != nil {
-		return fmt.Errorf("cannot split %s: %w", beadID, err)
-	}
-	plan, err := specsplit.Plan(spec, groups)
-	if err != nil {
-		return fmt.Errorf("cannot split %s: %w", beadID, err)
+		return err
 	}
 	pieces := []specsplit.Piece{plan.A, plan.B}
 	judged, err := specSplitJudgeAll(beadID, issue, tree, pieces, check)
@@ -189,6 +183,88 @@ func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRea
 		return NewSilentExit(specLintExitRefused)
 	}
 	return nil
+}
+
+// specSplitPlan reads beadID, reads the target branch's files and plans the two
+// pieces. Both modes refuse here, before anything is written.
+func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*beads.Issue, *specdispatch.TargetTree, specsplit.SplitPlan, error) {
+	issue, err := read(beadID)
+	if err != nil {
+		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read bead %s: %w", beadID, err)
+	}
+	tree := target(beadID)
+	if tree == nil {
+		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read the target branch's files for %s", beadID)
+	}
+	if tree.Err != "" {
+		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read the target branch's files for %s: %s", beadID, tree.Err)
+	}
+	spec := specsplit.Spec{
+		Constraints: specdispatch.Sections(issue.Description)["constraints"],
+		Acceptance:  beads.AcceptanceText(issue),
+		Dirs:        specSplitPackageDirs(tree.Files),
+		BaseFiles:   specSplitBaseFiles(tree.Files),
+		// The target inventory lists files, not symbols, so the command knows
+		// of no existing symbol and every symbol A declares keeps its note.
+		BaseSymbols: map[string]bool{},
+	}
+	groups, err := specsplit.Group(spec)
+	if err != nil {
+		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot split %s: %w", beadID, err)
+	}
+	plan, err := specsplit.Plan(spec, groups)
+	if err != nil {
+		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot split %s: %w", beadID, err)
+	}
+	return issue, tree, plan, nil
+}
+
+// runSpecSplitApplyOn creates the two pieces of beadID and closes it: piece A,
+// piece B with PIECE_A replaced by A's id, B's dependency on A, then the original
+// closed naming both ids. A refusal plans before the first write. A write that
+// fails after an earlier one names what exists; undoing a partial apply is not
+// done here.
+func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, target specSplitTarget, db beads.Client) error {
+	issue, _, plan, err := specSplitPlan(beadID, read, target)
+	if err != nil {
+		return err
+	}
+	a, err := db.Create(specSplitPieceOptions(issue, plan.A, rig, ""))
+	if err != nil {
+		return fmt.Errorf("cannot create piece A of %s: %w", beadID, err)
+	}
+	b, err := db.Create(specSplitPieceOptions(issue, plan.B, rig, a.ID))
+	if err != nil {
+		return fmt.Errorf("created piece A as %s, but cannot create piece B of %s: %w", a.ID, beadID, err)
+	}
+	if err := db.AddDependency(b.ID, a.ID); err != nil {
+		return fmt.Errorf("created piece A as %s and piece B as %s, but cannot wire B after A: %w", a.ID, b.ID, err)
+	}
+	reason := fmt.Sprintf("split into %s and %s", a.ID, b.ID)
+	if err := db.CloseWithReason(reason, beadID); err != nil {
+		return fmt.Errorf("created piece A as %s and piece B as %s, but cannot close %s: %w", a.ID, b.ID, beadID, err)
+	}
+	if _, err := fmt.Fprintf(out, "split %s into %s and %s\n", beadID, a.ID, b.ID); err != nil {
+		return fmt.Errorf("cannot report the split of %s: %w", beadID, err)
+	}
+	return nil
+}
+
+// specSplitPieceOptions is the create of one piece: the original's title with the
+// piece name, its priority and rig, and the piece's text with PIECE_A replaced by
+// aID when the piece depends on A.
+func specSplitPieceOptions(issue *beads.Issue, piece specsplit.Piece, rig, aID string) beads.CreateOptions {
+	text := piece.Text
+	if aID != "" {
+		text = strings.ReplaceAll(text, "PIECE_A", aID)
+	}
+	return beads.CreateOptions{
+		Title:       fmt.Sprintf("%s (piece %s)", issue.Title, piece.Name),
+		Description: text,
+		Type:        "task",
+		Priority:    issue.Priority,
+		Rig:         rig,
+	}
 }
 
 // specSplitJudgeAll estimates and lints each piece's draft, nothing written.
