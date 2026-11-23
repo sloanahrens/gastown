@@ -167,11 +167,16 @@ func (d *Daemon) ciCacheDueVolumes(now time.Time, every time.Duration) []ciCache
 	return due
 }
 
-// ciCacheRetryDue asks each volume in due to be tried again in a retry interval,
-// for a pass that reached none of them.
-func (d *Daemon) ciCacheRetryDue(due []ciCacheVolume, concluded time.Time) {
+// ciCacheTrimNoReason is the fixed sentence a failed volume's attention item must
+// not carry: each failure names its own reason instead (gt-u8n4tx, gt-u6garf).
+const ciCacheTrimNoReason = "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time"
+
+// ciCacheFailDue concludes each volume in due as a failed run: the volume's next
+// attempt is its normal cadence, a full interval after concluded, and its failure
+// raises one attention item keyed to that volume, carrying why (gt-76cz9d, gt-x7hl2a).
+func (d *Daemon) ciCacheFailDue(ctx context.Context, due []ciCacheVolume, concluded time.Time, every time.Duration, why string) {
 	for _, v := range due {
-		d.diskMaintSchedule.recordRetry(ciCacheVolumeSchedule(v), concluded.Add(cacheTrimRetryInterval))
+		d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, false, concluded, every, why)
 	}
 }
 
@@ -657,11 +662,12 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 // every one of them reached a verdict. The runner's pod is listed once; each due
 // volume then gets its own exec, in table order, so a failure on one volume is
 // logged under that volume and does not stop the next. A volume's verdict is
-// kept under its own schedule key, so a failed volume is retried in its own
-// fifteen minutes and the others keep their cadence. A run that removed files,
-// or found nothing to remove, is a verdict. A volume whose exec or reply failed
-// is a failed run that says why and removes nothing: a missing path or a stopped
-// container is never read as a volume with nothing to trim.
+// kept under its own schedule key, so a failed volume's next attempt is its own
+// full interval and its failure raises one item under that volume's key. A run
+// that removed files, or found nothing to remove, is a verdict. A volume whose
+// exec or reply failed is a failed run that says why and removes nothing: a
+// missing path or a stopped container is never read as a volume with nothing to
+// trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -677,7 +683,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheRetryDue(due, s.now())
+		d.ciCacheFailDue(ctx, due, s.now(), every, err.Error())
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
@@ -688,7 +694,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 			kind = "pod not running"
 		}
 		d.ciCacheTrimLogf(kind, "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
-		d.ciCacheRetryDue(due, s.now())
+		d.ciCacheFailDue(ctx, due, s.now(), every, err.Error())
 		return false
 	}
 
@@ -700,14 +706,16 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		if v.lru {
 			v.capKiB = gocacheCap / 1024
 		}
-		// A run that could not reach a verdict is tried again soon, not after the
-		// full interval, as the cache trim's failed run is (gt-gg9hv.24.6).
-		if d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
-			d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), s.now())
+		// A run that could not reach a verdict is a failed run: the volume's next
+		// attempt is the full interval, and the failure raises one item under the
+		// volume's key, carrying why that volume's own trim failed (gt-76cz9d, gt-u8n4tx).
+		ok, why := d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn)
+		if ok {
+			d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, true, s.now(), every, "")
 			continue
 		}
 		verdict = false
-		d.ciCacheRetryDue([]ciCacheVolume{v}, s.now())
+		d.ciCacheFailDue(ctx, []ciCacheVolume{v}, s.now(), every, why)
 	}
 	return verdict
 }
@@ -751,14 +759,16 @@ func ciCacheTrimProgram(mode string, v ciCacheVolume, minutes int64) ([]string, 
 }
 
 // ciCacheTrimVolume runs the trim over one volume and reports whether it reached a
-// verdict. A volume whose exec or reply failed is a failed run that names the
-// volume and removes nothing.
-func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration, warn int64) bool {
+// verdict; when it did not, reason is the first line of the failure or refusal the
+// trim logs for that volume, which the volume's item carries (gt-u8n4tx). A volume
+// whose exec or reply failed is a failed run that names the volume and removes
+// nothing.
+func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration, warn int64) (verdict bool, reason string) {
 	minutes := int64(maxAge / time.Minute)
 	program, err := ciCacheTrimProgram(mode, v, minutes)
 	if err != nil {
 		d.ciCacheTrimLogf("program refused "+v.name, "disk_maintenance: ci cache trim: %s: the volume's program could not be built: %v; nothing trimmed", v.name, err)
-		return false
+		return false, fmt.Sprintf("the volume's program could not be built: %v", err)
 	}
 	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--", "sh"}, program...)
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
@@ -766,11 +776,15 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		var status interface{ ExitCode() int }
 		if errors.As(err, &status) && status.ExitCode() == ciCacheMissingPathExit {
 			d.ciCacheTrimLogf("volume path missing "+v.name, "disk_maintenance: ci cache trim: %s: the volume path %s is not in the %s container; nothing trimmed", v.name, v.root, ciCacheContainer)
-			return false
+			return false, fmt.Sprintf("the volume path %s is not in the %s container", v.root, ciCacheContainer)
 		}
 		d.ciCacheTrimLogf("exec failed "+v.name, "disk_maintenance: ci cache trim: %s: the exec into the %s container failed: %v: %s; nothing trimmed",
 			v.name, ciCacheContainer, err, lastLine(string(stderr)))
-		return false
+		reason = fmt.Sprintf("the exec into the %s container failed: %v", ciCacheContainer, err)
+		if out := lastLine(string(stderr)); out != "" {
+			reason += ": " + out
+		}
+		return false, reason
 	}
 	// A dry run of an lru volume reads the LRU list program's reply: one line per
 	// selected file before the three figures, each checked and counted against the
@@ -784,7 +798,7 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	}
 	if err != nil {
 		d.ciCacheTrimLogf("reply unreadable "+v.name, "disk_maintenance: ci cache trim: %s: the volume's reply could not be read: %v; nothing trimmed", v.name, err)
-		return false
+		return false, fmt.Sprintf("the volume's reply could not be read: %v", err)
 	}
 
 	before := polecatimage.Human(reply.beforeKiB * 1024)
@@ -812,7 +826,7 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 			v.name, reply.removed, v.unit(), before, ageText)
 	}
 	d.ciCacheTrimMeasure(mode, v, reply, warn)
-	return true
+	return true, ""
 }
 
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's

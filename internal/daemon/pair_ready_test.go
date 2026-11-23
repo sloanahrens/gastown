@@ -1796,6 +1796,45 @@ func TestImagesFailedQuotesTheLogLineAsData(t *testing.T) {
 	}
 }
 
+// failedImagesItems runs the check on a failed images run for pairGreen whose
+// job log is log, and returns the items it raised.
+func failedImagesItems(t *testing.T, log string) []attention.Item {
+	t.Helper()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.api.logs[pairImagesJob] = log
+	fx.run(pairT0)
+	return fx.check.observed()
+}
+
+// TestImagesErrorLineMatchesBothSpellings: buildkit prints its failure as
+// "ERROR:" and the guards print theirs as "Error:", so either spelling names
+// the line the item quotes, still first in log order.
+func TestImagesErrorLineMatchesBothSpellings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, log, want string }{
+		{"buildkit's ERROR line", "#3 ERROR: data.forgejo.org/oci/docker@sha256:7bf70dcb: not found", `log: "#3 ERROR: data.forgejo.org/oci/docker@sha256:7bf70dcb: not found"`},
+		{"a guard's Error line before a later ERROR line", pairImagesLine + "\nERROR: failed to solve: process failed", `log: "` + pairImagesLine + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			items := failedImagesItems(t, tc.log)
+			require.Len(t, items, 1)
+			assert.Contains(t, items[0].Summary, tc.want)
+		})
+	}
+}
+
+// TestImagesErrorLineNeitherSpellingIsEmpty: a log with neither spelling (a
+// lowercase "error:" is neither) names no reason, so the item still says so.
+func TestImagesErrorLineNeitherSpellingIsEmpty(t *testing.T) {
+	t.Parallel()
+	items := failedImagesItems(t, "error: lowercase is neither spelling\nstep failed")
+	require.Len(t, items, 1)
+	assert.Contains(t, items[0].Summary, "the job log names no Error: line")
+}
+
 // TestImagesFailedHasItsOwnCollector: a failed build is a third kind from the
 // pair check's one read, so it needs a collector of its own to reach the queue
 // and to survive a failed collector beside it.
@@ -1951,25 +1990,43 @@ func (c pairAncestryFailClone) IsAncestor(ancestor, descendant string) (bool, er
 
 // TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild: when ancestry cannot be
 // judged, a clone read that fails or a rig with no clone at all, the failed build
-// stands and the scan says it is incomplete rather than clearing the item.
+// stands and the scan says it is incomplete, naming the green it could not judge
+// and why.
 func TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild(t *testing.T) {
 	t.Parallel()
 	clone, c := pairCloneHistory(t)
-	cases := map[string]func(fx *pairFixture){
-		"clone read fails": func(fx *pairFixture) { fx.git = pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]} },
-		"no clone": func(fx *pairFixture) {
-			fx.git = nil
-			fx.api.compares = map[string]int{c[1] + "..." + c[0]: 0, c[0] + "..." + c[1]: 1, c[2] + "..." + c[0]: 0, c[0] + "..." + c[2]: 2}
+	cases := map[string]struct {
+		setup  func(fx *pairFixture)
+		reason string
+	}{
+		"clone read fails": {
+			setup:  func(fx *pairFixture) { fx.git = pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]} },
+			reason: "the clone could not judge the ancestry",
+		},
+		"no clone": {
+			setup: func(fx *pairFixture) {
+				fx.git = nil
+				fx.api.compares = map[string]int{c[1] + "..." + c[0]: 0, c[0] + "..." + c[1]: 1, c[2] + "..." + c[0]: 0, c[0] + "..." + c[2]: 2}
+			},
+			reason: "the rig has no local clone to judge it behind a ready green",
 		},
 	}
-	for name, setup := range cases {
+	for name, tt := range cases {
 		fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
-		setup(fx)
+		tt.setup(fx)
 
 		fx.run(pairT0)
 
-		assert.Contains(t, pairItemKeys(fx.check.observed()), "images-failed:gastown:"+c[1][:12], name+": the failed build was cleared without a judged ancestry")
-		assert.NotEmpty(t, fx.logs, name+": the incomplete scan was not logged")
+		items := fx.check.observed()
+		assert.Contains(t, pairItemKeys(items), "images-failed:gastown:"+c[1][:12], name+": the failed build was cleared without a judged ancestry")
+		var incomplete string
+		for _, it := range items {
+			if it.Key == "deploy-pair-unreadable:rig:gastown" {
+				incomplete = it.Summary
+			}
+		}
+		assert.Contains(t, incomplete, "green/"+c[1][:12], name+": the incomplete scan did not name the green it could not judge")
+		assert.Contains(t, incomplete, tt.reason, name+": the incomplete scan did not name why it could not judge the green")
 	}
 }
 

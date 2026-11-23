@@ -868,6 +868,29 @@ func TestRunOverrunGuard_GateTimeBeforeARestartIsNotCarried(t *testing.T) {
 	}
 }
 
+// A seat whose gate state was never read successfully has nothing to carry: the
+// first failed read counts all of its time, as it did before the carry existed.
+// Only an in-gate answer that a successful read saw is ever carried (gt-9ju7cf).
+func TestTickEffGateReadFailureWithoutState(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-nostate1"})
+	// Every gate read fails, so the seat never has an answer to carry.
+	f.gateRunning = scriptedGateReads()
+
+	stoppedAt := tickUntilStop(d, f, 60)
+	if want := overrunSlung.Add(20 * time.Minute); !stoppedAt.Equal(want) {
+		t.Errorf("stopped at %v, want %v: a never-read seat counts all of its time at the first failed read",
+			stoppedAt.Sub(overrunSlung), want.Sub(overrunSlung))
+	}
+	if strings.Contains(buf.String(), "carrying its last gate answer") {
+		t.Errorf("a seat never read in its gate carried an answer:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "(failure 1 in a row), counting all of its time") {
+		t.Errorf("log does not say the first failed read counts all of its time:\n%s", buf.String())
+	}
+}
+
 // The guard judges the bead's clock, not the seat's: a bead handed on by a
 // seat to a second seat is nudged or stopped on the dispatch it first went out
 // on, even though that seat has held it only a few minutes. A done event ends
@@ -1022,6 +1045,190 @@ func TestRunOverrunGuard_AHandSlingStartsANewRunClock(t *testing.T) {
 			f.now = tt.now
 			seams := f.seams()
 			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
+
+			d.runOverrunGuard(seams)
+
+			if !slices.Equal(f.nudges, tt.nudges) {
+				t.Errorf("nudges = %v, want %v", f.nudges, tt.nudges)
+			}
+			if !slices.Equal(f.stops, tt.stops) {
+				t.Errorf("stops = %v, want %v", f.stops, tt.stops)
+			}
+		})
+	}
+}
+
+// A seat is dated by a sling that names it, not by another seat's sling
+// (gt-ydc5c4): gt-v90ftl went to rictus at 22:24:47 and the dispatcher had
+// already hooked it onto furiosa before her sling was written. Furiosa's spawns
+// at 22:36:39 and 00:26:05 are not a dispatch to her, so the log dates no run of
+// hers and at 00:26:50 the guard stops nothing. On the same log with the target
+// check removed the first spawn after rictus's sling reads as her clock and she
+// is stopped 1h50m into a run she was never dispatched on. A sling naming no
+// seat cannot show the bead moved, so it keeps the clock it always had.
+func TestRunOverrunGuard_AnotherSeatsSlingIsNotTheSeatsClock(t *testing.T) {
+	t.Parallel()
+	// target is the payload of the 22:24:47 sling; "" writes a sling that names
+	// no seat, which cannot show the bead moved and keeps the clock it always had.
+	line := func(target string) string {
+		payload := `{"bead":"gt-v90ftl"}`
+		if target != "" {
+			payload = fmt.Sprintf(`{"bead":"gt-v90ftl","target":%q}`, target)
+		}
+		return fmt.Sprintf(`{"ts":"2026-11-21T22:24:47Z","source":"gt","type":"sling","actor":%q,"payload":%s,"visibility":"both"}`,
+			events.SpecDispatchActor, payload)
+	}
+	spawn := func(ts string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"spawn","actor":"gt","payload":{"rig":"gastown","polecat":"furiosa"},"visibility":"both"}`, ts)
+	}
+	for _, tt := range []struct {
+		name   string
+		target string
+		// want is the clock slungAt answers; ok false means it answers none.
+		want  time.Time
+		ok    bool
+		stops []string
+	}{
+		{
+			name:   "another seat's sling dates no clock",
+			target: "gastown/polecats/rictus",
+		},
+		{
+			// No seat named: the log cannot show the bead moved, so the clock is
+			// the seat's first spawn after it, as before.
+			name:  "a sling naming no seat keeps the clock",
+			want:  time.Date(2026, 11, 21, 22, 36, 39, 0, time.UTC),
+			ok:    true,
+			stops: []string{"gastown/furiosa"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			body := strings.Join([]string{
+				line(tt.target),
+				spawn("2026-11-21T22:36:39Z"),
+				spawn("2026-11-22T00:26:05Z"),
+			}, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-v90ftl"}
+			f := newOverrunFake(0, seat)
+			f.now = time.Date(2026, 11, 22, 0, 26, 50, 0, time.UTC)
+			seams := f.seams()
+			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
+
+			got, ok := seams.slungAt(seat)
+			if ok != tt.ok {
+				t.Fatalf("slungAt = %v (%t), want ok %t", got, ok, tt.ok)
+			}
+			if ok && !got.Equal(tt.want) {
+				t.Errorf("slungAt = %v, want %v", got, tt.want)
+			}
+
+			d.runOverrunGuard(seams)
+
+			if !slices.Equal(f.stops, tt.stops) {
+				t.Errorf("stops = %v, want %v", f.stops, tt.stops)
+			}
+			if len(f.nudges) != 0 {
+				t.Errorf("nudges = %v, want none: the log dates no nudge for this seat", f.nudges)
+			}
+		})
+	}
+}
+
+// Part 1's target check must leave the clock's other rules where they were
+// (gt-vset3k). On a log shaped like the one gt-v90ftl went out on, a sling
+// that names the seat dates the run from that sling, not a spawn written while
+// the seat held another bead; a repeat sling to the seat that already holds
+// the bead keeps the run's original clock; a sling naming no seat cannot show
+// the bead moved and keeps the clock it always had; and a crew sling to the
+// same seat starts a new run.
+func TestRunOverrunGuard_TheClockKeepsItsRulesOverARealLog(t *testing.T) {
+	t.Parallel()
+	sling := func(ts, actor, target string) string {
+		payload := `{"bead":"gt-v90ftl"}`
+		if target != "" {
+			payload = fmt.Sprintf(`{"bead":"gt-v90ftl","target":%q}`, target)
+		}
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"sling","actor":%q,"payload":%s,"visibility":"both"}`, ts, actor, payload)
+	}
+	spawn := func(ts string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"spawn","actor":"gt","payload":{"rig":"gastown","polecat":"furiosa"},"visibility":"both"}`, ts)
+	}
+	for _, tt := range []struct {
+		name          string
+		log           []string
+		want          time.Time // the clock slungAt answers
+		now           time.Time // when the guard judges it
+		nudges, stops []string
+	}{
+		{
+			name: "the sling to the seat dates the run",
+			log: []string{
+				sling("2026-11-21T22:24:47Z", events.SpecDispatchActor, "gastown/polecats/rictus"),
+				spawn("2026-11-21T22:36:39Z"), spawn("2026-11-22T00:26:05Z"),
+				sling("2026-11-22T00:26:40Z", events.SpecDispatchActor, "gastown/polecats/furiosa"),
+			},
+			want:   time.Date(2026, 11, 22, 0, 26, 40, 0, time.UTC),
+			now:    time.Date(2026, 11, 22, 0, 40, 0, 0, time.UTC),
+			nudges: []string{"gastown/furiosa"},
+		},
+		{
+			name: "a repeat sling to the same seat keeps the run",
+			log: []string{
+				sling("2026-11-21T22:24:47Z", events.SpecDispatchActor, "gastown/polecats/furiosa"),
+				spawn("2026-11-21T22:36:39Z"),
+				sling("2026-11-22T00:26:40Z", events.SpecDispatchActor, "gastown/polecats/furiosa"),
+			},
+			// The run still starts at its first sling, so its first spawn dates
+			// it; a restart on the repeat tick would date it 00:26:40 and only mark.
+			want:  time.Date(2026, 11, 21, 22, 36, 39, 0, time.UTC),
+			now:   time.Date(2026, 11, 22, 0, 40, 0, 0, time.UTC),
+			stops: []string{"gastown/furiosa"},
+		},
+		{
+			name: "a sling naming no seat keeps the clock",
+			log: []string{
+				sling("2026-11-21T22:24:47Z", events.SpecDispatchActor, ""),
+				spawn("2026-11-21T22:36:39Z"), spawn("2026-11-22T00:26:05Z"),
+			},
+			want:  time.Date(2026, 11, 21, 22, 36, 39, 0, time.UTC),
+			now:   time.Date(2026, 11, 22, 0, 26, 50, 0, time.UTC),
+			stops: []string{"gastown/furiosa"},
+		},
+		{
+			name: "a crew sling to the same seat starts a new run",
+			log: []string{
+				sling("2026-11-21T22:24:47Z", events.SpecDispatchActor, "gastown/polecats/furiosa"),
+				spawn("2026-11-21T22:36:39Z"),
+				sling("2026-11-22T00:26:40Z", "town/crew/overseer", "gastown/polecats/furiosa"),
+			},
+			// The hand sling starts a new run at its own time; keeping the old
+			// clock would stop the seat.
+			want:   time.Date(2026, 11, 22, 0, 26, 40, 0, time.UTC),
+			now:    time.Date(2026, 11, 22, 0, 40, 0, 0, time.UTC),
+			nudges: []string{"gastown/furiosa"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			body := strings.Join(tt.log, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-v90ftl"}
+			f := newOverrunFake(0, seat)
+			f.now = tt.now
+			seams := f.seams()
+			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
+
+			if got, ok := seams.slungAt(seat); !ok || !got.Equal(tt.want) {
+				t.Errorf("slungAt = %v (%t), want %v", got, ok, tt.want)
+			}
 
 			d.runOverrunGuard(seams)
 
@@ -1215,7 +1422,9 @@ func TestOverrunSlungReader_ASubmissionEndsTheRun(t *testing.T) {
 			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
 
 			r := &overrunSlungReader{d: d}
-			got, ok := r.slungAt(overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11", SubmittedAt: tt.submittedAt})
+			// The fixture's slings all name capable, so the seat asking is
+			// capable: asking for another seat is the read gt-ydc5c4 refuses.
+			got, ok := r.slungAt(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11", SubmittedAt: tt.submittedAt})
 			if ok != tt.ok {
 				t.Fatalf("slungAt found = %t, want %t (got %v)", ok, tt.ok, got)
 			}

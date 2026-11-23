@@ -25,6 +25,12 @@ const changeBudgetPrefix = "change:"
 // not match rather than a budget of no lines.
 var changeBudgetRe = regexp.MustCompile(`(?i)^change:\s+at\s+most\s+([1-9][0-9]*)\s+added\s+lines(?:\s+in\s+([1-9][0-9]*)\s+files)?\.?$`)
 
+// declaredLineLimitRe matches every wording in which a bead declares its
+// added-line limit to the done gate (gt-obyuam, gt-uq5b9u). It is copied
+// verbatim from internal/done/linelimit.go, whose copy gt-yzhigm deletes
+// (gt-hc43nx).
+var declaredLineLimitRe = regexp.MustCompile(`(?i)\b(?:(?:about|under|at most|roughly|up to)\s+(\d+)\s+added lines?|(\d+)-added-line|(?:budget|limit|cap|stop)(?:\s+(?:is|of|at))?\s*(?::\s*|\s+)(\d+)\s+added lines?)\b`)
+
 // budgetEmphasis removes the characters that mark emphasized text, so
 // **bold**, __bold__ and *italic* read as the words they decorate.
 var budgetEmphasis = strings.NewReplacer("*", "", "_", "")
@@ -44,7 +50,9 @@ type ChangeBudget struct {
 // through the markdown a bead's prose carries — the leading bullet and the
 // emphasis budgetLineText strips — so a bulleted or bolded budget is found
 // rather than skipped as though the author had stated none. The first matching
-// line answers; every "Change:" line must match.
+// line answers; every "Change:" line must match. When no line starts "Change:",
+// every wording DeclaredLineLimits reads is a declaration: the smallest number
+// is the budget and Files is 0, so the lint reads what the gate refuses on.
 func ParseChangeBudget(size string) (ChangeBudget, bool, error) {
 	var budget ChangeBudget
 	found := false
@@ -75,7 +83,46 @@ func ParseChangeBudget(size string) (ChangeBudget, bool, error) {
 		}
 		found = true
 	}
+	if !found {
+		if limits := DeclaredLineLimits(size); len(limits) > 0 {
+			budget.Lines = limits[0]
+			for _, l := range limits[1:] {
+				if l < budget.Lines {
+					budget.Lines = l
+				}
+			}
+			found = true
+		}
+	}
 	return budget, found, nil
+}
+
+// DeclaredLineLimits returns the added-line limits a bead's text declares, in
+// order of appearance and once each, or nil when it declares none.
+func DeclaredLineLimits(text string) []int {
+	var limits []int
+	seen := make(map[int]bool)
+	for _, m := range declaredLineLimitRe.FindAllStringSubmatch(text, -1) {
+		digits := m[1]
+		if digits == "" {
+			digits = m[2]
+		}
+		if digits == "" {
+			digits = m[3]
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			// A count too large for an int is not a line limit a bead means,
+			// and []int has no room to carry it, so the match states none.
+			continue
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		limits = append(limits, n)
+	}
+	return limits
 }
 
 // budgetLineText returns a Size body line without the markdown that decorates

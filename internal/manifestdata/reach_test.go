@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // packagePath is this package's import path, the root of the captured graph.
@@ -22,15 +24,11 @@ const packagePath = "github.com/steveyegge/gastown/internal/manifestdata"
 // reports for this package.
 const regenerateCommand = `{ echo "# $(go env GOVERSION)"; go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' . ; } > testdata/imports.golist.txt`
 
-// packageDir is the directory of this package's source, found from this file
-// rather than from the working directory a test may be run in.
+// packageDir is the directory of this package's source, derived from the
+// module root so it survives go test -trimpath.
 func packageDir(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller cannot locate this test file")
-	}
-	return filepath.Dir(file)
+	return filepath.Join(modroot.Root(t), "internal", "manifestdata")
 }
 
 // goFiles lists the package's non-test Go files, the ones the capture must

@@ -20,6 +20,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -45,6 +46,10 @@ const (
 // window, so the only trim due is the CI trim.
 var ciCacheTestStart = time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 
+// ciCacheTestEvery is the CI trim's cadence the fixture pins: every volume's
+// next attempt, after a verdict or a failure, is this far after its conclusion.
+const ciCacheTestEvery = time.Hour
+
 // ciCachePodsRunningJSON is one runner pod whose dind container is running.
 const ciCachePodsRunningJSON = `{"items":[{"metadata":{"name":"` + ciCacheTestPod + `"},` +
 	`"status":{"containerStatuses":[` +
@@ -63,6 +68,8 @@ type ciCacheFixture struct {
 	cli  *fakeCLI
 	logs *bytes.Buffer
 	now  time.Time
+	// notify records the escalations a failed volume's item sends.
+	notify *notifyfake.Recorder
 	// pending holds the passes the patrol dispatched and the test has not run.
 	pending []func()
 	// pods is the reply the pod list gets. exec is the reply the exec into the
@@ -85,6 +92,7 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	f := &ciCacheFixture{
 		logs:      &logs,
 		now:       ciCacheTestStart,
+		notify:    notifyfake.New(),
 		pods:      cliReply{stdout: ciCachePodsRunningJSON},
 		exec:      ciCacheGocacheExecReply(mode, 40<<20, 3, 10<<20),
 		npmExec:   ciCacheReply(512<<10, 0, 512<<10),
@@ -108,6 +116,8 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	})
 
 	patrol := diskMaintEnabled("", mode)
+	// The fixture pins the cadence it asserts, so the default cannot move it.
+	patrol.Patrols.DiskMaintenance.CICacheTrimInterval = ciCacheTestEvery.String()
 	patrol.Patrols.TierSweep = &agentconfig.TierSweepConfig{
 		Enabled: true,
 		Runner: &agentconfig.TierSweepRunnerConfig{
@@ -119,6 +129,7 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(&logs, "", 0),
 		patrolConfig: patrol,
+		notifier:     f.notify,
 	}
 	d.execCmd = f.cli.run
 	d.maint.quiet = func(*Daemon) (bool, string) { return true, "" }
@@ -403,8 +414,8 @@ func TestCICacheTrimGocacheDryRunRefusedReply(t *testing.T) {
 		if strings.Contains(logs, ciCacheGocacheVolume+": would remove") {
 			t.Errorf("a refused volume was reported as a reading:\n%s", logs)
 		}
-		if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); !got.Equal(want) {
-			t.Errorf("retry at %v, want %v: a failed run is retried soon", got, want)
+		if got := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])); !got.IsZero() {
+			t.Errorf("retry at = %v, want none: a failed run is not retried on a timer", got)
 		}
 	})
 
@@ -482,7 +493,8 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
 			at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
 
-			if ok := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20); ok {
+			ok, why := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20)
+			if ok {
 				t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
 			}
 			if n := len(f.execs()); n != 0 {
@@ -490,6 +502,9 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			}
 			if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
 				t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+			}
+			if want := "the volume's program could not be built: "; !strings.Contains(why, want) {
+				t.Errorf("the refusal's reason = %q, want it to carry %q", why, want)
 			}
 		})
 	}
@@ -579,7 +594,7 @@ func TestCICacheTrimConstantsMatchTheRunnerManifest(t *testing.T) {
 
 // TestCICacheTrimSchedule: due an interval after the last verdict and not before,
 // with one pass in flight at a time, a re-read of the due check when a pass
-// starts, and a failed run retried in fifteen minutes.
+// starts, and a failed run's next attempt at the same full interval.
 func TestCICacheTrimSchedule(t *testing.T) {
 	t.Parallel()
 	t.Run("due after the interval, one pass at a time", func(t *testing.T) {
@@ -645,66 +660,76 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed run is retried in fifteen minutes", func(t *testing.T) {
+	t.Run("a failed run's next attempt is the full interval", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
 		f.tick()
 		f.drain()
 
-		f.at(14 * time.Minute)
+		f.at(ciCacheTestEvery - time.Minute)
 		f.tick()
 		if len(f.pending) != 0 {
-			t.Fatalf("a failed run was retried at 14m: the retry is 15 minutes out")
+			t.Fatalf("a failed run was retried a minute short of the interval: a failure is not retried on a timer")
 		}
-		f.at(15 * time.Minute)
+		f.at(ciCacheTestEvery)
 		f.tick()
 		if len(f.pending) != 1 {
-			t.Fatalf("a failed run was not retried at 15m: dispatched %d", len(f.pending))
+			t.Fatalf("a failed run was not tried again at its normal cadence: dispatched %d", len(f.pending))
 		}
 	})
 
-	t.Run("a failed ci-npm does not move ci-gocache's cadence", func(t *testing.T) {
-		t.Parallel()
-		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.npmExec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
-		f.tick()
-		f.drain()
+}
 
-		f.at(15 * time.Minute)
-		f.tick()
-		f.drain()
-		if n := volumeExecs(f, ciCacheGocacheVolume); n != 1 {
-			t.Fatalf("ci-gocache ran %d times, want 1: its verdict at 0m stands, and ci-npm's failure must not retry it at 15m", n)
-		}
-		if n := volumeExecs(f, ciCacheNpmVolume); n != 2 {
-			t.Fatalf("ci-npm ran %d times, want 2: the failed volume is retried in fifteen minutes", n)
-		}
-	})
+// TestCICacheTrimFailureRaisesOncePerVolume: a failed trim of one volume records
+// that volume's full interval, asks for no retry and raises one item keyed to
+// that volume; another volume's cadence is not moved, and a success at the full
+// interval clears the item (gt-76cz9d).
+func TestCICacheTrimFailureRaisesOncePerVolume(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+	f.tick()
+	f.drain()
 
-	t.Run("a failed ci-gocache does not move ci-npm's cadence", func(t *testing.T) {
-		t.Parallel()
-		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
-		f.tick()
-		f.drain()
+	failed := ciCacheVolumes[0]
+	failedKey := diskMaintFailedKey(ciCacheVolumeSchedule(failed))
+	open := f.notify.OpenEscalations(failedKey)
+	if len(open) != 1 {
+		t.Fatalf("open items for %s = %+v, want one", failed.name, open)
+	}
+	if got := f.d.diskMaintSchedule.lastRunAt(ciCacheVolumeSchedule(failed)); !got.Equal(ciCacheTestStart) {
+		t.Errorf("the failed volume's last run = %v, want %v: a failure concludes the run", got, ciCacheTestStart)
+	}
+	if got := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(failed)); !got.IsZero() {
+		t.Errorf("the failed volume asked for a retry at %v, want none: its next attempt is its normal cadence", got)
+	}
 
-		f.at(15 * time.Minute)
-		f.tick()
-		f.drain()
-		if n := volumeExecs(f, ciCacheNpmVolume); n != 1 {
-			t.Fatalf("ci-npm ran %d times, want 1: its verdict at 0m stands, and ci-gocache's failure must not retry it at 15m", n)
-		}
-		if n := volumeExecs(f, ciCacheGocacheVolume); n != 2 {
-			t.Fatalf("ci-gocache ran %d times, want 2: the failed volume is retried in fifteen minutes", n)
-		}
-	})
+	// Each other volume reached a verdict at the same instant and raised none.
+	other := ciCacheVolumes[1]
+	if got := f.d.diskMaintSchedule.lastRunAt(ciCacheVolumeSchedule(other)); !got.Equal(ciCacheTestStart) {
+		t.Errorf("%s's last run = %v, want %v", other.name, got, ciCacheTestStart)
+	}
+	if got := f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(other))); len(got) != 0 {
+		t.Errorf("%s raised %d item(s), want none: its trim reached a verdict", other.name, len(got))
+	}
+
+	// The next attempt is its normal cadence, and its verdict clears the item.
+	f.exec = ciCacheGocacheExecReply(agentconfig.DiskMaintenanceModeApply, 40<<20, 3, 10<<20)
+	f.at(ciCacheTestEvery)
+	f.tick()
+	f.drain()
+	if n := volumeExecs(f, ciCacheGocacheVolume); n != 2 {
+		t.Errorf("the failed volume ran %d times at the full interval, want 2", n)
+	}
+	if open := f.notify.OpenEscalations(failedKey); len(open) != 0 {
+		t.Errorf("the item is still open after a verdict: %+v", open)
+	}
 }
 
 // TestCICacheTrimFailuresAreFailedRuns: a run that cannot read the volume, reach
 // the container or make sense of the reply is a failed run with its own line,
-// logged once an hour, retried soon, and never read as a volume with nothing to
-// trim.
+// held to once an hour, and never read as a volume with nothing to trim.
 func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -763,6 +788,8 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			// Half the log hold's window, so the second attempt lands inside it.
+			f.d.patrolConfig.Patrols.DiskMaintenance.CICacheTrimInterval = "30m"
 			if tt.pods != (cliReply{}) {
 				f.pods = tt.pods
 			}
@@ -784,16 +811,20 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 				t.Errorf("a failed volume reported a removal:\n%s", f.logs.String())
 			}
 			if n := len(f.d.cacheTrimNoOp.observed()); n != 0 {
-				t.Errorf("a failed run raised %d attention item(s): a failure is not a reading", n)
+				t.Errorf("a failed run raised %d no-op item(s): a failure is not a reading", n)
 			}
-			if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); !got.Equal(want) {
-				t.Errorf("retry at %v, want %v: a failed run is retried in fifteen minutes", got, want)
+			if got := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])); !got.IsZero() {
+				t.Errorf("retry at = %v, want none: a failure is not retried on a timer", got)
 			}
 
-			// The same failure a retry later is logged once in the hour.
-			f.at(cacheTrimRetryInterval)
+			// The same failure at the next attempt, inside the hour, is held to
+			// the one line.
+			f.at(30 * time.Minute)
 			f.tick()
 			f.drain()
+			if got, want := f.d.diskMaintSchedule.lastRunAt(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(30*time.Minute); !got.Equal(want) {
+				t.Errorf("the failed volume's last run = %v, want %v: the next attempt is the normal cadence", got, want)
+			}
 			if n := strings.Count(f.logs.String(), tt.want); n != 1 {
 				t.Errorf("the failure was logged %d times across two attempts, want once an hour", n)
 			}
@@ -809,18 +840,19 @@ func TestCICacheTrimHoldsAFailureWhoseTextVaries(t *testing.T) {
 	t.Parallel()
 	const want = "the exec into the dind container failed"
 	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	// Half the log hold's window, so the next attempt lands inside it.
+	f.d.patrolConfig.Patrols.DiskMaintenance.CICacheTrimInterval = "30m"
 	f.exec = cliReply{stderr: "error: container not found: 1a2b3c\n", code: 1}
 	f.tick()
 	f.drain()
 
 	f.exec = cliReply{stderr: "error: container not found: 9f8e7d\n", code: 1}
-	f.at(cacheTrimRetryInterval)
+	f.at(30 * time.Minute)
 	f.tick()
 	f.drain()
 
-	// Only the failed volume is due at the retry: ci-npm keeps its verdict.
 	if n := volumeExecs(f, ciCacheGocacheVolume); n != 2 {
-		t.Fatalf("ci-gocache ran %d execs, want 2: the retry must run", n)
+		t.Fatalf("ci-gocache ran %d execs, want 2: the next attempt must run", n)
 	}
 	if n := strings.Count(f.logs.String(), want); n != 1 {
 		t.Errorf("the failure was logged %d times across two attempts with different output, want once an hour:\n%s", n, f.logs.String())
@@ -833,12 +865,14 @@ func TestCICacheTrimHoldsAFailureWhoseTextVaries(t *testing.T) {
 func TestCICacheTrimHoldsEachFaultKindApart(t *testing.T) {
 	t.Parallel()
 	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	// Half the log hold's window, so the next attempt lands inside it.
+	f.d.patrolConfig.Patrols.DiskMaintenance.CICacheTrimInterval = "30m"
 	f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
 	f.tick()
 	f.drain()
 
 	f.pods = cliReply{stderr: "error: the server is unavailable\n", code: 1}
-	f.at(cacheTrimRetryInterval)
+	f.at(30 * time.Minute)
 	f.tick()
 	f.drain()
 
@@ -846,6 +880,75 @@ func TestCICacheTrimHoldsEachFaultKindApart(t *testing.T) {
 		if n := strings.Count(f.logs.String(), want); n != 1 {
 			t.Errorf("logged %q %d times, want once: a different fault was hidden:\n%s", want, n, f.logs.String())
 		}
+	}
+}
+
+// TestCICacheTrimPassFailureItemCarriesTheReason pins gt-x7hl2a: a pass that fails
+// before it tries any volume puts the error's first line, not the fixed sentence,
+// into each due volume's item.
+func TestCICacheTrimPassFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(f *ciCacheFixture)
+		want  string
+	}{
+		{"a pod listing failure", func(f *ciCacheFixture) { f.pods = cliReply{stderr: "error: the server is unavailable\n", code: 1} }, "the runner's pods could not be read: exit status 1: error: the server is unavailable"},
+		{"a context refusal", func(f *ciCacheFixture) { f.d.patrolConfig.Patrols.TierSweep.Runner.Context = "" }, errCICacheTrimNoContext.Error()},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			due := f.d.ciCacheDueVolumes(f.now, ciCacheTestEvery)
+			tt.setup(f)
+			f.tick()
+			f.drain()
+			for _, v := range due {
+				open := f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(v)))
+				if len(open) != 1 || !strings.Contains(open[0].Reason, tt.want) || strings.Contains(open[0].Reason, ciCacheTrimNoReason) {
+					t.Fatalf("%s's item = %+v, want one carrying %q and not the fixed sentence", v.name, open, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestCICacheTrimVolumeFailureItemCarriesTheReason pins gt-u8n4tx: a volume's own
+// failed trim puts its failure's first line, not the fixed sentence, into that
+// volume's item; a refusal with no error text to show carries its own sentence.
+func TestCICacheTrimVolumeFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		exec cliReply
+		want string
+	}{
+		{"an exec failure carries its error's first line", cliReply{startErr: errors.New("fork/exec /usr/bin/kubectl: no such file or directory\na later line")}, "the exec into the dind container failed: fork/exec /usr/bin/kubectl: no such file or directory"},
+		{"a missing path carries the refusal's sentence", cliReply{stderr: "volume path not found\n", code: ciCacheMissingPathExit}, "the volume path " + ciCacheTestGocacheRoot + " is not in the " + ciCacheContainer + " container"},
+		{"an unreadable reply carries its refusal", cliReply{stdout: "du: cannot access the path\n"}, "the volume's reply could not be read: the reply has 1 line(s), want three"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			f.exec = tt.exec
+			f.tick()
+			f.drain()
+
+			failed := ciCacheVolumes[0]
+			open := f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(failed)))
+			if len(open) != 1 || !strings.Contains(open[0].Reason, tt.want) {
+				t.Fatalf("%s's items = %+v, want one carrying %q", failed.name, open, tt.want)
+			}
+			if strings.Contains(open[0].Reason, ciCacheTrimNoReason) || strings.Contains(open[0].Reason, "a later line") {
+				t.Errorf("%s's item carries more than its failure's first line: %q", failed.name, open[0].Reason)
+			}
+			// The other due volumes reached a verdict: their items are unchanged.
+			if other := ciCacheVolumes[1]; len(f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(other)))) != 0 {
+				t.Errorf("%s raised an item, want none: another volume's item is unchanged", other.name)
+			}
+		})
 	}
 }
 
@@ -857,7 +960,8 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 		name   string
 		mutate func(f *ciCacheFixture)
 		want   string
-		// retry is whether the refused run is tried again in fifteen minutes.
+		// retry is whether the refused run concludes each due volume as a failed
+		// run at the full interval.
 		retry bool
 	}{
 		{
@@ -932,8 +1036,11 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 			if !strings.Contains(f.logs.String(), tt.want) {
 				t.Errorf("logs do not name the refusal %q:\n%s", tt.want, f.logs.String())
 			}
-			if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); tt.retry && !got.Equal(want) {
-				t.Errorf("retry at %v, want %v: a refused run is tried again in fifteen minutes", got, want)
+			if !tt.retry {
+				return
+			}
+			if got := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])); !got.IsZero() {
+				t.Errorf("retry at = %v, want none: a refused run is not retried on a timer", got)
 			}
 		})
 	}

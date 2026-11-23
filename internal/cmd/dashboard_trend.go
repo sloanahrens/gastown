@@ -379,6 +379,8 @@ type rejectedBeadFields struct {
 // limit rows: limit is the table's row bound, and the caller always passes one
 // (gt-1j1bf). live is the landings in flight, which go above the bound rather
 // than inside it: a landing running now is not one of the day's finished rows.
+// Each live row carries how often its bead was refused, counted over every
+// rejection record handed in rather than the day the table draws (gt-6eb4qk).
 // The title of a bead is asked for only once the rows to show are known, and
 // only for the first recentTitleRows of them, so that read is bounded by the
 // table rather than by the day's traffic. The rows past that take their title
@@ -529,7 +531,15 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		rows = rows[:limit]
 	}
 	if len(live) > 0 {
-		rows = append(append([]dashboard.LandingRow(nil), live...), rows...)
+		running := make([]dashboard.LandingRow, len(live))
+		copy(running, live)
+		// A running row is a retry when its bead was refused before, however
+		// long ago: the count is over every record the reader handed in, not
+		// the day the table draws (gt-6eb4qk).
+		for i := range running {
+			running[i].RejectCount = len(rejectTimes[running[i].Bead])
+		}
+		rows = append(running, rows...)
 	}
 	if rejectedFields != nil {
 		// The beads are collected after the bound, so the read covers the rows

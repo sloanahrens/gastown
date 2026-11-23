@@ -60,9 +60,14 @@ type Hub struct {
 	prev   State
 	// queueItems is the attention queue's items as the last poll read them,
 	// which classify the panel's rows when it next publishes, and queueFailed
-	// whether that read could be made at all (gt-tv5v2).
+	// whether that read could be made at all (gt-tv5v2). queueKnown says those
+	// items are a reading — the last poll read the queue and the read succeeded.
+	// It is false before the first successful read, after a failed one, and while
+	// no items reader is configured, so a pair computed from an unread queue is
+	// unknown, never absent (gt-clorl0).
 	queueItems  []attention.Item
 	queueFailed bool
+	queueKnown  bool
 
 	// wake releases every parked worker when a page connects after an idle
 	// spell, so the first page does not wait out a whole interval for fresh
@@ -194,6 +199,9 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 	if h.cfg.Update != nil {
 		start(h.cfg.UpdateEvery, h.pollUpdate)
+	}
+	if h.cfg.SystemUpdates != nil {
+		start(h.cfg.SystemUpdatesEvery, h.pollSystemUpdates)
 	}
 	if h.cfg.Forgejo != nil {
 		start(h.cfg.ForgejoEvery, h.pollForgejo)
@@ -651,13 +659,15 @@ func (h *Hub) pollAttention() {
 	evs, acks := h.cfg.Attention()
 	var queue []attention.Item
 	var queueFailed bool
+	var queueKnown bool
 	if h.cfg.AttentionItems != nil {
 		items, err := h.cfg.AttentionItems()
 		queue, queueFailed = items, err != nil
+		queueKnown = err == nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.queueItems, h.queueFailed = queue, queueFailed
+	h.queueItems, h.queueFailed, h.queueKnown = queue, queueFailed, queueKnown
 	raised, removed := h.alerts.ObserveAttention(evs, acks)
 	if len(removed) > 0 {
 		gone := make(map[string]bool, len(removed))
@@ -1366,12 +1376,14 @@ func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
 }
 
 // pollJobs reads the maintenance job list and keeps the last good one across a
-// failed read, like the Jev spend row beside it.
+// failed read, marked so the pane can say the rows are old rather than current
+// (gt-16wpss).
 func (h *Hub) pollJobs() {
 	j := h.cfg.Jobs()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if j == nil {
+		h.state.Jobs = jobsFailedRead(h.state.Jobs)
 		h.readFailedLocked(SourceJobs, h.cfg.JobsEvery)
 		h.publishLocked()
 		return
@@ -1379,6 +1391,20 @@ func (h *Hub) pollJobs() {
 	h.state.Jobs = j
 	h.readOKLocked(SourceJobs, h.cfg.JobsEvery)
 	h.publishLocked()
+}
+
+// jobsFailedRead is the list the hub keeps after a failed read: the last good
+// one marked, or an empty marked list when no read has succeeded, so a wired
+// reader that fails leaves a marked section rather than none. The last good
+// value is copied, not marked in place, since a snapshot already handed out
+// still points at it.
+func jobsFailedRead(last *Jobs) *Jobs {
+	marked := Jobs{Rows: []JobRow{}}
+	if last != nil {
+		marked = *last
+	}
+	marked.ReadFailed, marked.Stale = true, true
+	return &marked
 }
 
 // pollDolt reads the Dolt panel and keeps the last good one across a failed

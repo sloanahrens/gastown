@@ -108,6 +108,84 @@ type healthSources struct {
 	// behind counts the commits between a rig's last promoted commit and its
 	// green main; nil reads the rig's repository.
 	behind func(rigName, promoted, green string) (int, error)
+	// sweepState reads one rig's tier sweep record; nil reads the town root's
+	// (gt-1q2qhb).
+	sweepState func(rig string) (tierSweepState, error)
+	// sweepRigs lists the rigs a tier sweep cycle covers; nil reads the
+	// daemon's patrol setting and known rigs (gt-zme5gu).
+	sweepRigs func() []string
+}
+
+// sweptRigs is the rigs the tier sweep covers: the field when set, otherwise
+// the daemon's patrol setting. A stopped patrol, or no daemon, sweeps nothing.
+func (s *healthSources) sweptRigs() []string {
+	if s.sweepRigs != nil {
+		return s.sweepRigs()
+	}
+	if s.d == nil || !s.d.isPatrolActive("tier_sweep") {
+		return nil
+	}
+	return tierSweepRigs(s.d.patrol(), s.d.getKnownRigs())
+}
+
+// Sweep reports the town-wide tier sweep as one record over every swept rig
+// (gt-zme5gu): the records merge, so one red rig reddens the town and one
+// unread rig makes it unknown, which is never green. No swept rig is unknown
+// too, not a known zero.
+func (s *healthSources) Sweep() (townhealth.SweepRecord, error) {
+	rigs := s.sweptRigs()
+	recs := make([]townhealth.SweepRecord, 0, len(rigs))
+	for _, rig := range rigs {
+		recs = append(recs, sweepRecordOf(s.readSweepState(rig)))
+	}
+	return combineSweepRecords(recs), nil
+}
+
+// readSweepState reads one rig's tier sweep record through the field when one
+// is set, and otherwise from the town root (gt-1q2qhb).
+func (s *healthSources) readSweepState(rig string) (tierSweepState, error) {
+	if s.sweepState != nil {
+		return s.sweepState(rig)
+	}
+	return readTierSweepState(s.townRoot(), rig)
+}
+
+// sweepRecordOf turns one rig's tier sweep state into the townhealth
+// evaluator's record. An unread record is unknown, which is never green;
+// otherwise it carries the red cycle count and the time of the last fully
+// green cycle (gt-ffs6cx).
+func sweepRecordOf(st tierSweepState, err error) townhealth.SweepRecord {
+	if err != nil {
+		return townhealth.SweepRecord{}
+	}
+	return townhealth.SweepRecord{Known: true, RedCycles: st.RedCycles, LastGreenAt: st.LastGreenAt}
+}
+
+// combineSweepRecords merges the swept rigs' records into the one the health
+// line reports (gt-gm0ek2): the largest RedCycles, the oldest LastGreenAt (zero
+// if any rig has none), and unknown if any rig is unread or the slice is empty.
+func combineSweepRecords(recs []townhealth.SweepRecord) townhealth.SweepRecord {
+	if len(recs) == 0 {
+		return townhealth.SweepRecord{}
+	}
+	var redCycles int
+	var lastGreen time.Time
+	var noGreen bool
+	for _, rec := range recs {
+		if !rec.Known {
+			return townhealth.SweepRecord{}
+		}
+		redCycles = max(redCycles, rec.RedCycles)
+		if rec.LastGreenAt.IsZero() {
+			noGreen = true
+		} else if lastGreen.IsZero() || rec.LastGreenAt.Before(lastGreen) {
+			lastGreen = rec.LastGreenAt
+		}
+	}
+	if noGreen {
+		lastGreen = time.Time{}
+	}
+	return townhealth.SweepRecord{Known: true, RedCycles: redCycles, LastGreenAt: lastGreen}
 }
 
 // execTaxState is what a report said about the exec tax, for the transition
@@ -171,12 +249,29 @@ func (s *healthSources) Dispatch() (townhealth.DispatchRecord, error) {
 	rec := townhealth.DispatchRecord{Active: s.d.isPatrolActive("spec_dispatch")}
 	if s.d.config != nil {
 		rec.Hold = dispatch.OperatorHold(s.d.config.TownRoot)
+		rec.RedHold = redHoldKindsLine(s.d.config.TownRoot)
 	}
 	// A parked ticker records no tick, so the field would otherwise read it
 	// as a dispatcher gone silent (spec_seats.go, gt-jdnab).
 	rec.Parked = s.d.specSeats.parked()
 	rec.Ticks = s.d.dispatchTickRecords()
 	return rec, nil
+}
+
+// redHoldKindsLine names the kinds the red hold file stands for, in the file's
+// order and comma separated. No file is "", and a file that cannot be read or
+// parsed is "unreadable": the kinds cannot be shown, and an empty string would
+// read as no hold at all.
+func redHoldKindsLine(townRoot string) string {
+	rec, err := dispatch.ReadRedHold(townRoot)
+	if err != nil {
+		return "unreadable"
+	}
+	kinds := make([]string, len(rec.Reasons))
+	for i, r := range rec.Reasons {
+		kinds[i] = r.Kind
+	}
+	return strings.Join(kinds, ", ")
 }
 
 func (s *healthSources) townRoot() string { return s.d.config.TownRoot }

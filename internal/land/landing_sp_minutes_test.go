@@ -32,6 +32,13 @@ func TestLandingRecordSPMinutesWritten(t *testing.T) {
 	if rec.SPSlung != "rework" {
 		t.Errorf("landings file sp_slung = %q, want rework: %s", rec.SPSlung, line)
 	}
+	// Other tools read these two keys by name out of the raw line, so the
+	// round trip through LandingRecord's own tags proves nothing about them.
+	for _, want := range []string{`"sp_minutes":10.8`, `"sp_slung":"rework"`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("landings line lacks %s: %s", want, line)
+		}
+	}
 	bead, err := f.bd.Show(f.work.BeadID)
 	if err != nil {
 		t.Fatal(err)

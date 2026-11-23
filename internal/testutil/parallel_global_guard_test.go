@@ -5,11 +5,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // parallelGlobalWaiver is the comment marker that excuses a parallel test from
@@ -710,16 +711,12 @@ func TestParallelEmbeddingCycleEnds(t *testing.T) {
 	return root
 }
 
-// repoRoot locates the module root from this file's position. The guard has to
-// read the whole tree, not just its own package, because the parallel test and
-// the helper it misuses can live in any package.
+// repoRoot locates the module root from the test's working directory. The
+// guard has to read the whole tree, not just its own package, because the
+// parallel test and the helper it misuses can live in any package.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	return modroot.Root(t)
 }
 
 // seamScanner walks the module once, then answers the only question the guard

@@ -123,7 +123,7 @@ func (f *landFixture) lander() *Lander {
 	}
 	l := &Lander{Repo: f.repo, WorkRoot: f.workRoot, Candidate: &gateCandidate{f: f}, Merger: f.merger,
 		Reviewer: f.review, Beads: f.bd, Landings: lf,
-		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }, sleep: func(time.Duration) {}}
+		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }}
 	if f.git != nil {
 		l.openRepo = func(dir string) Repo { return f.git.Open(dir) }
 		// gitfake records no commit authors, so the fake landing's head reads as
@@ -3477,5 +3477,133 @@ func TestReviewUsageWindowIsInjectedClock(t *testing.T) {
 	}
 	if !got[0].Start.Equal(start) || !got[0].End.Equal(end) {
 		t.Errorf("usage window = [%v, %v], want the injected clock's [%v, %v]", got[0].Start, got[0].End, start, end)
+	}
+}
+
+// flakyNoteBeads refuses its first fails AppendNotes calls as a dropped
+// connection does, then writes through; calls counts the attempts (gt-hounmt).
+type flakyNoteBeads struct {
+	*beadsfake.Fake
+	fails int
+	calls int
+}
+
+func (b *flakyNoteBeads) AppendNotes(id, note string) error {
+	b.calls++
+	if b.fails > 0 {
+		b.fails--
+		return errors.New("dolt: connection refused")
+	}
+	return b.Fake.AppendNotes(id, note)
+}
+
+// TestRejectNoteWriteTriedOnce: the note write is tried once. One that fails is
+// left off the bead, logged and reported on the rejection; one that succeeds is
+// the only attempt and reports nothing (gt-2yutrf).
+func TestRejectNoteWriteTriedOnce(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		fails  int
+		noted  bool
+		logged bool
+	}{
+		{"a note that fails is not written", 1, false, true},
+		{"a note that is written is not logged", 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l := f.lander()
+			b := &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
+			l.Beads = b
+			var log strings.Builder
+			l.Out = &log
+			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
+			if err := l.reject(context.Background(), f.bead(), f.work, rej, nil); err != rej {
+				t.Fatalf("reject = %v; want the rejection", err)
+			}
+			if b.calls != 1 {
+				t.Errorf("AppendNotes calls = %d; want one try", b.calls)
+			}
+			_, noted := ParseRejectionNote(f.bead().Notes)
+			if noted != tc.noted || (rej.RecordErr != nil) != !tc.noted {
+				t.Errorf("noted = %v, RecordErr = %v; want noted = %v", noted, rej.RecordErr, tc.noted)
+			}
+			if got := strings.Contains(log.String(), "could not append the rejection note"); got != tc.logged {
+				t.Errorf("logged %q; want %v", log.String(), tc.logged)
+			}
+		})
+	}
+}
+
+// queueAt is a queue in a directory the queue accepts, or with blocked a queue
+// whose directory is a file, so it cannot be made (gt-r2rmz6). t.TempDir is 0777
+// under the CI runner's open umask, which the queue refuses.
+func queueAt(t *testing.T, blocked bool) RecordQueue {
+	t.Helper()
+	dir := t.TempDir()
+	if blocked {
+		blocker := filepath.Join(dir, "blocker")
+		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return RecordQueue{Path: filepath.Join(blocker, "landing-records.jsonl")}
+	}
+	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the queue reach its file
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return RecordQueue{Path: filepath.Join(dir, "landing-records.jsonl")}
+}
+
+// TestRejectQueuesTheNote: a note whose one try fails is queued, one that is
+// written is not, and a queue that also fails is named (gt-r2rmz6, gt-2yutrf).
+func TestRejectQueuesTheNote(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		fails   int
+		blocked bool // the queue's directory cannot be made
+		queued  int
+	}{
+		{"a note that fails its one try is queued", 1, false, 1},
+		{"a note that is written queues nothing", 0, false, 0},
+		{"a note that cannot be queued either names both", 1, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l := f.lander()
+			b := &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
+			l.Beads = b
+			q := queueAt(t, tc.blocked)
+			l.Records = &q
+			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
+			if err := l.reject(context.Background(), f.bead(), f.work, rej, nil); err != rej {
+				t.Fatalf("reject = %v; want the rejection", err)
+			}
+			if b.calls != 1 {
+				t.Errorf("AppendNotes calls = %d; want one try", b.calls)
+			}
+			if (rej.RecordErr != nil) != (tc.fails > 0) {
+				t.Errorf("RecordErr = %v; want it set = %v", rej.RecordErr, tc.fails > 0)
+			}
+			if tc.blocked {
+				if rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "queueing it for a later pass failed") {
+					t.Errorf("RecordErr = %v; want the failed queue named", rej.RecordErr)
+				}
+				return
+			}
+			got, err := q.Pending()
+			if err != nil || len(got) != tc.queued {
+				t.Fatalf("Pending = %+v, %v; want %d queued", got, err, tc.queued)
+			}
+			if tc.queued == 1 {
+				if n, ok := ParseRejectionNote(got[0].Text); !ok || n.Reason != "r" || n.Head != f.work.Head || got[0].Kind != RecordKindNotes {
+					t.Errorf("queued %+v; want the notes block for head %s", got[0], f.work.Head)
+				}
+			}
+		})
 	}
 }

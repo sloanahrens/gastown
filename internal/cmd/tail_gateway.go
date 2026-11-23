@@ -71,13 +71,17 @@ func gatewayCallKey(e bdgateway.CallEntry) string {
 }
 
 // gatewayCallText is the caller, the verb and the beads a call named, with the
-// exit and the duration when the call failed. Flags, the error text and the
-// request body are never printed.
+// exit and the duration when the call failed, and the write marked unknown when
+// the line did not record it. Flags, the error text and the request body are
+// never printed.
 func gatewayCallText(e bdgateway.CallEntry) string {
 	words := append([]string{e.Caller, e.Verb}, e.Beads...)
 	text := strings.Join(strings.Fields(strings.Join(words, " ")), " ")
 	if e.ExitCode != 0 {
 		text += fmt.Sprintf(" failed exit %d, %dms", e.ExitCode, e.DurationMS)
+	}
+	if e.Write == nil {
+		text += " write unknown"
 	}
 	return text
 }
@@ -155,10 +159,11 @@ func (s *tailGatewaySource) Poll() []tailLine {
 	s.returned = next
 
 	// A successful read is counted, not shown. A failed call, read or write, is
-	// a line of its own, so it is never counted as a read.
+	// a line of its own, and so is a call whose write the line did not record:
+	// an unknown write is not a read, so it is shown with the unknown marked.
 	reads := 0
 	for _, f := range batch {
-		if (f.call.Write == nil || !*f.call.Write) && f.call.ExitCode == 0 {
+		if f.call.Write != nil && !*f.call.Write && f.call.ExitCode == 0 {
 			reads++
 			continue
 		}

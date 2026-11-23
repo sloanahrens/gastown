@@ -172,6 +172,56 @@ func TestClusterApprovalParse(t *testing.T) {
 	}
 }
 
+func TestParseRecordActMustBeKnown(t *testing.T) {
+	t.Parallel()
+	// The free-text act is built from parts so the token is not a literal in the
+	// file; the refusal must name none of its parts.
+	parts := []string{"sk", "live", "7f3a"}
+	token := strings.Join(parts, "-")
+	tests := []struct {
+		name    string
+		act     string
+		noEcho  []string // parts the refusal must not echo; the row also runs Verify
+		wantErr string
+	}{
+		{"known act parses", ActApplyPlan, nil, ""},
+		{"another act is refused", "rollback", nil, "not a known act"},
+		{"empty act keeps its refusal", "", nil, "has no act"},
+		{"free text is refused without echoing it", token, parts, "not a known act"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseRecord([]byte(recordText(with(goodRecord(), map[string]any{"act": tt.act}))))
+			switch {
+			case tt.wantErr == "":
+				if err != nil {
+					t.Fatalf("ParseRecord: %v", err)
+				}
+				if got.Act != ActApplyPlan {
+					t.Errorf("act = %q, want %q", got.Act, ActApplyPlan)
+				}
+				return
+			case err == nil:
+				t.Fatalf("ParseRecord accepted a record with act %q", tt.act)
+			case !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("error = %q, want it to name %q", err, tt.wantErr)
+			}
+			for _, part := range tt.noEcho {
+				if strings.Contains(err.Error(), part) {
+					t.Errorf("error %q echoes the act part %q", err, part)
+				}
+			}
+			// Verify echoes the act of a Record built in code; ParseRecord is the
+			// guard that keeps that free text out of a parsed record.
+			if tt.noEcho != nil {
+				if verr := Verify(Record{Act: tt.act}, Plan{}, nil, time.Time{}); verr == nil || !strings.Contains(verr.Error(), token) {
+					t.Errorf("Verify error = %v, want it to echo the act %q", verr, token)
+				}
+			}
+		})
+	}
+}
+
 // sameRecord reports whether a and b name the same approval in the same UTC
 // form.
 func sameRecord(a, b Record) bool {

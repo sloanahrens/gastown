@@ -213,8 +213,33 @@ func TestNukePreserveForAHostSeatIsUnchanged(t *testing.T) {
 	if hostPreserveRuns != 1 {
 		t.Errorf("host preserve ran %d time(s), want once", hostPreserveRuns)
 	}
-	if report := out.String(); !strings.Contains(report, "already reachable from origin/main — nothing to preserve") {
+	if report := out.String(); !strings.Contains(report, "already merged into origin/main") {
 		t.Errorf("host seat report lost its preserve line:\n%s", report)
+	}
+}
+
+// The preserve step's line goes through preservedRefWords: a branch whose own
+// remote copy holds the tip is a backup, so the operator must never read it as
+// "reachable from" a ref. Only the rig's target branch reads as a merge
+// (gt-1k27vl).
+func TestNukePreservePrintsTheClassifiedLine(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	deps, out := preserveDeps(f, nukeE2EHostSeat,
+		func(string) (preserveOutcome, error) {
+			return preserveOutcome{RemoteRef: "origin/" + preserveBranch, AlreadyThere: true}, nil
+		},
+	)
+	if err := runPreserveNuke(f, deps); err != nil {
+		t.Fatalf("nuke returned %v, want nil", err)
+	}
+	report := out.String()
+	want := "already on origin as origin/" + preserveBranch + " (the branch's own remote copy)"
+	if !strings.Contains(report, want) {
+		t.Errorf("report does not classify the branch's own remote copy as such:\n%s", report)
+	}
+	if strings.Contains(report, "reachable from") {
+		t.Errorf("report still prints the unclassified preserve line:\n%s", report)
 	}
 }
 
@@ -392,5 +417,56 @@ func TestNukeSeatOriginReadsTheAgentBeadKindAndOrigin(t *testing.T) {
 				t.Errorf("origin reads = %d, want %d", originReads, want)
 			}
 		})
+	}
+}
+
+// A tip on the branch's own remote copy is not a landing: the line says it is
+// on origin and never that it is "reachable from" a ref (gt-wz5ct4).
+func TestNukePreserveLineSaysOnOriginForTheBranchsOwnRef(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/slit/gt-wz5ct4+mwodhucg"
+	for _, tc := range []struct{ branch, ref, target string }{
+		{branch, "origin/" + branch, "main"},
+	} {
+		got := preservedRefWords(tc.branch, tc.ref, tc.target)
+		want := "already on origin as " + tc.ref + " (the branch's own remote copy)"
+		if got != want {
+			t.Errorf("preservedRefWords(%q, %q, %q) = %q, want %q", tc.branch, tc.ref, tc.target, got, want)
+		}
+		if strings.Contains(got, "reachable from") || strings.Contains(got, "merged") {
+			t.Errorf("wording %q reads as a merge", got)
+		}
+	}
+}
+
+// A tip another branch holds is neither this branch's copy nor its landing.
+func TestNukePreserveLineNamesAnotherBranchThatHoldsTheTip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ branch, ref, target string }{
+		{"polecat/slit/gt-wz5ct4+mwodhucg", "origin/polecat/nux/gt-1k27vl", "main"},
+	} {
+		got := preservedRefWords(tc.branch, tc.ref, tc.target)
+		want := "already on origin in " + tc.ref + " (another branch holds it)"
+		if got != want {
+			t.Errorf("preservedRefWords(%q, %q, %q) = %q, want %q", tc.branch, tc.ref, tc.target, got, want)
+		}
+		if strings.Contains(got, "merged") {
+			t.Errorf("wording %q says merged for a ref that is not the target branch", got)
+		}
+	}
+}
+
+// "merged" belongs only to the rig's target branch: the same ref reads as
+// merged when it is the target and as another branch when it is not.
+func TestNukePreserveLineSaysMergedOnlyForTheTargetBranch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ ref, target, want string }{
+		{"origin/main", "main", "already merged into origin/main"},
+		{"origin/main", "dev", "already on origin in origin/main (another branch holds it)"},
+	} {
+		got := preservedRefWords("polecat/slit/gt-wz5ct4+mwodhucg", tc.ref, tc.target)
+		if got != tc.want {
+			t.Errorf("preservedRefWords(%q, %q) = %q, want %q", tc.ref, tc.target, got, tc.want)
+		}
 	}
 }

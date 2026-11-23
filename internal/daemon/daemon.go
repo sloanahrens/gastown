@@ -108,6 +108,10 @@ type Daemon struct {
 	// verdict and tier-sweep call that builds its promoter (gt-mxa3op).
 	promoteViaLog logLatch
 
+	// redHoldUnread holds the rigs whose sweep record the last red hold step
+	// could not read, so an outage logs once, not every heartbeat (gt-583rx6).
+	redHoldUnread map[string]bool
+
 	// townStateNightlyLog logs the nightly town-state backup's off reason once
 	// per day, so a cycle that runs twice in one day (a request and the
 	// window) does not repeat it (gt-5dgbcy).
@@ -527,7 +531,12 @@ type Daemon struct {
 	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
 	// runs under and the call's verb (its arguments after the shared prefix, the
 	// text cacheTrimVerb returns), handed over just before the call runs. nil in
-	// production.
+	// production, where it costs one nil check. The fixture answers a kubectl call
+	// by its verb and never sees whether a context ended the process, so a test of
+	// the context a call is made under cannot go red without it. A package-level
+	// hook in test code is refused by the test policy (no-global-swap), and a
+	// per-Daemon field is how the file's other seams, the exec runner and the
+	// clock, are shaped.
 	cacheTrimCtxSeen func(ctx context.Context, verb string)
 	// doltImage is the Dolt image check's item: the town's Dolt container runs
 	// an image more than one patch release behind the newest release, which the
@@ -3055,6 +3064,10 @@ var heartbeatSteps = []heartbeatStep{
 	// hour (gt-4nlpw8). It reads only, so it is not lifecycle: an E-stopped town
 	// still gets the report.
 	{name: "pair-ready", run: (*Daemon).checkPairReady},
+
+	// Evaluate the tier sweep records and publish the dispatch red hold
+	// (gt-bm4erq). It reads records and writes one file, so it is not lifecycle.
+	{name: "red-hold", run: (*Daemon).checkRedHold},
 
 	// Kill ghost sessions left over from stale registry (default "gt" prefix).
 	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},

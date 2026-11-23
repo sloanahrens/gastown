@@ -309,7 +309,6 @@ func TestLandSurvivesAVerdictCommentFailure(t *testing.T) {
 			f := newLandFixture(t)
 			l := f.lander()
 			l.Beads = tc.beads(f.bd)
-			l.sleep = func(time.Duration) {}
 			var log strings.Builder
 			l.Out = &log
 			res, err := l.Land(context.Background(), f.work)
@@ -331,13 +330,15 @@ func TestLandSurvivesAVerdictCommentFailure(t *testing.T) {
 }
 
 // commentBeads is a beads fake whose comments can fail: the reads a duplicate
-// check makes, or the write itself.
+// check makes, or the write itself. calls counts the write attempts, so a test
+// can tell one try from a retry.
 type commentBeads struct {
 	*beadsfake.Fake
 	failComments bool
 	failComment  bool
 	failShow     bool
 	flaky        int
+	calls        int
 }
 
 func (b *commentBeads) Show(id string) (*beads.Issue, error) {
@@ -355,6 +356,7 @@ func (b *commentBeads) Comments(id string) ([]beads.Comment, error) {
 }
 
 func (b *commentBeads) AddComment(id, text string) error {
+	b.calls++
 	if b.flaky > 0 {
 		b.flaky--
 		return errors.New("dolt: connection refused")
@@ -365,33 +367,44 @@ func (b *commentBeads) AddComment(id, text string) error {
 	return b.Fake.AddComment(id, text)
 }
 
-// TestCommentVerdictRetries: a comment that fails twice is written; one that
-// fails three times is left off and logged (gt-y82k93).
-func TestCommentVerdictRetries(t *testing.T) {
+// TestCommentVerdictTriesOnce: the verdict comment's write is tried once. A
+// write that fails is left off the bead, logged and queued for a later pass; a
+// write that succeeds is the only attempt and queues nothing (gt-emlnzk).
+func TestCommentVerdictTriesOnce(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name  string
-		fails int
-		want  int
-		alarm bool
+		name   string
+		fails  int // the first write fails
+		want   int // comments on the bead
+		queued int
+		alarm  bool
 	}{
-		{"a comment that fails twice is written", 2, 1, false},
-		{"a comment that fails three times is logged", 3, 0, true},
+		{"a comment that fails once is logged and queued", 1, 0, 1, true},
+		{"a comment that is written queues nothing", 0, 1, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newLandFixture(t)
 			l := f.lander()
-			l.Beads = &commentBeads{Fake: f.bd, flaky: tc.fails}
-			l.sleep = func(time.Duration) {}
+			beads := &commentBeads{Fake: f.bd, flaky: tc.fails}
+			l.Beads = beads
+			q := queueAt(t, false)
+			l.Records = &q
 			var log strings.Builder
 			l.Out = &log
 			l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove, Score: 0.91, Version: "v1"}, time.Now(), time.Now())
+			if beads.calls != 1 {
+				t.Errorf("AddComment calls = %d; want one try", beads.calls)
+			}
 			if got := len(f.beadComments()); got != tc.want {
 				t.Errorf("%d comment(s) on the bead; want %d", got, tc.want)
 			}
 			if got := strings.Contains(log.String(), "could not comment the om verdict"); got != tc.alarm {
 				t.Errorf("logged %q; want the alarm %v", log.String(), tc.alarm)
+			}
+			got, err := q.Pending()
+			if err != nil || len(got) != tc.queued {
+				t.Errorf("Pending = %+v, %v; want %d queued", got, err, tc.queued)
 			}
 		})
 	}
@@ -406,7 +419,8 @@ type hangingCommentBeads struct {
 func (b *hangingCommentBeads) AddComment(string, string) error { <-b.release; return nil }
 
 // TestCommentVerdictTimeoutLogs: a write that never answers logs 'did not
-// finish' and returns, so the landing is unaffected (gt-y82k93).
+// finish' and returns, so the landing is unaffected, and the comment is queued
+// for a later pass (gt-y82k93, gt-bqnv54).
 func TestCommentVerdictTimeoutLogs(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -415,10 +429,101 @@ func TestCommentVerdictTimeoutLogs(t *testing.T) {
 	l := f.lander()
 	l.Beads = &hangingCommentBeads{Fake: f.bd, release: release}
 	l.auditTimeout = 10 * time.Millisecond
+	q := queueAt(t, false)
+	l.Records = &q
 	var out strings.Builder
 	l.Out = &out
 	l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove}, time.Time{}, time.Time{})
 	if want := "did not finish in 10ms; the landing is unaffected"; !strings.Contains(out.String(), want) {
 		t.Errorf("log = %q, want %q", out.String(), want)
+	}
+	if got, err := q.Pending(); err != nil || len(got) != 1 || got[0].Kind != RecordKindComment {
+		t.Errorf("Pending = %+v, %v; want the comment queued", got, err)
+	}
+}
+
+// TestCommentVerdictCommentQueue: a comment whose write fails is queued under
+// the candidate head's marker; one that is written queues nothing, and a nil
+// queue keeps today's behaviour (gt-bqnv54).
+func TestCommentVerdictCommentQueue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		fails  int  // the write fails
+		queue  bool // l.Records is set
+		queued int
+	}{
+		{"a comment whose write fails is queued", 1, true, 1},
+		{"a comment that is written queues nothing", 0, true, 0},
+		{"a nil queue behaves as today", 1, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l, w := f.lander(), f.work
+			l.Beads = &commentBeads{Fake: f.bd, flaky: tc.fails}
+			var q RecordQueue // left nil, and empty, on the nil-queue row
+			if tc.queue {
+				q = queueAt(t, false)
+				l.Records = &q
+			}
+			w.CandidateHead = "feedface12345678"
+			l.commentVerdict(w, Verdict{Verdict: VerdictApprove, Score: 0.91}, time.Now(), time.Now())
+			got, err := q.Pending()
+			if key := verdictCommentHead(w.CandidateHead); err != nil || len(got) != tc.queued ||
+				(tc.queued == 1 && (got[0].Kind != RecordKindComment || got[0].Key != key)) {
+				t.Fatalf("Pending = %+v, %v; want %d comment(s) keyed by %q", got, err, tc.queued, key)
+			}
+		})
+	}
+}
+
+// TestQueueVerdictComment: queueVerdictComment queues one comment record keyed
+// by the head marker, a nil queue keeps nothing, and a queue that refuses is
+// logged once (gt-yz041f).
+func TestQueueVerdictComment(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		queued  bool // l.Records is set
+		blocked bool // and it cannot be written
+		logged  bool
+	}{
+		{"a comment is queued under its head marker", true, false, false},
+		{"a nil queue keeps nothing", false, false, false},
+		{"a queue that refuses is logged once", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l := newLandFixture(t).lander()
+			var log strings.Builder
+			l.Out = &log
+			if tc.queued {
+				q := queueAt(t, tc.blocked)
+				l.Records = &q
+			}
+			l.queueVerdictComment("gt-abc", "om approve 0.91 [head 12345678]", "12345678abcdef")
+			if tc.logged {
+				if n := strings.Count(log.String(), "could not queue the om verdict comment"); n != 1 {
+					t.Errorf("logged the queue failure %d times in %q; want once", n, log.String())
+				}
+				return
+			}
+			if log.Len() != 0 {
+				t.Errorf("log = %q; want nothing", log.String())
+			}
+			if !tc.queued {
+				return
+			}
+			got, err := l.Records.Pending()
+			if err != nil || len(got) != 1 {
+				t.Fatalf("Pending = %+v, %v; want one entry", got, err)
+			}
+			want := PendingRecord{Bead: "gt-abc", Kind: RecordKindComment, Key: verdictCommentHead("12345678abcdef"), Text: "om approve 0.91 [head 12345678]"}
+			got[0].At = want.At // queueRecord stamps the clock; every other field is the record's
+			if got[0] != want {
+				t.Errorf("queued %+v; want %+v", got[0], want)
+			}
+		})
 	}
 }

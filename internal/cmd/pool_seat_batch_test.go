@@ -93,7 +93,7 @@ func batchOverStore(town string, store beads.Client) *poolSeatBatch {
 // handing the call site both reads the batch answers.
 func poolSeatSessionsOverBatch(t *testing.T, lister sessionLister, town string, batch *poolSeatBatch, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
 	t.Helper()
-	return poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, work, pool)
+	return poolSeatSessionsWith(lister, town, batch.disposition, work, pool)
 }
 
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
@@ -107,7 +107,7 @@ func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
@@ -391,14 +391,14 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestPoolSeatBatchReadsSourceIssuesLiveWhenTheBatchFails(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
@@ -486,14 +486,14 @@ func TestPoolSeatBatchReadsAbsentSourceIssueLive(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestPoolSeatBatchAnswersHookBeads(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
@@ -618,6 +618,83 @@ func TestPoolSeatBatchReportsABeadThatIsNotAnAgentBead(t *testing.T) {
 	_, err := batchOver(town, newCountingStore(db)).disposition("gastown", "p01")
 	if err == nil || !strings.Contains(err.Error(), "is not an agent bead") {
 		t.Fatalf("batched seat read = %v, want the live read's not-an-agent-bead error", err)
+	}
+}
+
+// seatReadCounts is the calls a countingStore was asked for, so a test can
+// hold two seat reads to the same reads.
+type seatReadCounts struct {
+	shows    map[string]int
+	multis   [][]string
+	lists    int
+	assigned int
+}
+
+// seatReadCountsOf is the counting store's calls, by kind.
+func seatReadCountsOf(store *countingStore) seatReadCounts {
+	return seatReadCounts{shows: store.shows, multis: store.multis, lists: store.lists, assigned: store.assigned}
+}
+
+// TestPoolHookRetireDispositionUncached is gt-ac14z9: a seat the batch has not
+// cached takes its uncached branch, and the state and the reads it spends are
+// the per-seat read's. The right-hand read is the one disposition made before
+// the change: the batch's own reads, handed whole to poolPolecatSeatStateWith.
+func TestPoolHookRetireDispositionUncached(t *testing.T) {
+	t.Parallel()
+	town, db, _ := seatTown(t, 2)
+
+	beforeStore := newCountingStore(db)
+	before := batchOver(town, beforeStore)
+	want, err := poolPolecatSeatStateWith(town, "gastown", "p01", before.seatReads("gastown"))
+	if err != nil {
+		t.Fatalf("per-seat read before the change: %v", err)
+	}
+
+	store := newCountingStore(db)
+	got, err := batchOver(town, store).disposition("gastown", "p01")
+	if err != nil {
+		t.Fatalf("disposition: %v", err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("disposition = %+v, want the per-seat read's %+v", got, want)
+	}
+	gotReads, wantReads := seatReadCountsOf(store), seatReadCountsOf(beforeStore)
+	if gotReads.lists == 0 && len(gotReads.multis) == 0 && len(gotReads.shows) == 0 && gotReads.assigned == 0 {
+		t.Fatal("the seat read spent no store calls; the read comparison would be vacuous")
+	}
+	if !reflect.DeepEqual(gotReads, wantReads) {
+		t.Errorf("disposition reads = %+v, want the per-seat read's %+v", gotReads, wantReads)
+	}
+}
+
+// TestPoolHookRetireDispositionReadError is gt-ac14z9's refusal branch: a seat
+// whose bead read fails answers the error disposition returned before the
+// change, spending the same reads. A task bead where the seat's agent bead
+// goes fails the read the way a live read does.
+func TestPoolHookRetireDispositionReadError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	db := beadsfake.New()
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
+	db.Seed(beads.Issue{ID: id, Title: id, Type: "task"})
+
+	beforeStore := newCountingStore(db)
+	before := batchOver(town, beforeStore)
+	_, wantErr := poolPolecatSeatStateWith(town, "gastown", "p01", before.seatReads("gastown"))
+	if wantErr == nil {
+		t.Fatal("the per-seat read answered a task bead as a seat; the fixture does not fail the bead read")
+	}
+
+	store := newCountingStore(db)
+	_, gotErr := batchOver(town, store).disposition("gastown", "p01")
+	if gotErr == nil || gotErr.Error() != wantErr.Error() {
+		t.Fatalf("disposition error = %v, want the per-seat read's %v", gotErr, wantErr)
+	}
+	if gotReads, wantReads := seatReadCountsOf(store), seatReadCountsOf(beforeStore); !reflect.DeepEqual(gotReads, wantReads) {
+		t.Errorf("disposition reads = %+v, want the per-seat read's %+v", gotReads, wantReads)
 	}
 }
 
@@ -815,7 +892,7 @@ func TestPoolSeatBatchCountsSeatsWhenTheWorkListFails(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}

@@ -91,8 +91,8 @@ const (
 	cacheTrimJobNameDigest = 8
 
 	// cacheTrimRefusalLogInterval is how long the same cache trim line is held
-	// back. A trim that cannot start is retried every fifteen minutes, so one
-	// line an hour says the refusal without repeating it four times.
+	// back. The pass meets the same refusal again at the full interval, so one
+	// line an hour says it once without repeating it on every run.
 	cacheTrimRefusalLogInterval = time.Hour
 
 	// cacheTrimPreflightVerb is the preflight's kubectl arguments after the
@@ -332,13 +332,13 @@ func cacheTrimObjectName(prefix, claim string) string {
 // mounts, in each namespace that holds it, trimmed in the mode the patrol runs
 // in.
 //
-// It reports whether the pass reached a verdict: trimmed, or nothing to trim.
-// A pass that could not start -- unreadable profiles, values file or cap, a
-// kubeconfig that names no sandbox context, an unreadable claim list -- or a
-// claim whose trim failed for a reason the next run may clear reports false, and
-// the patrol retries it soon rather than after the full interval. A refusal the
-// config or the listing decides is a verdict: the next run judges it again at
-// the full interval.
+// It reports whether the pass reached a verdict for every claim: true when it
+// trimmed or found nothing to trim, false when it could not start -- unreadable
+// profiles, values file or cap, a kubeconfig that names no sandbox context, an
+// unreadable claim list -- or a claim whose trim failed. The return does not set
+// the schedule: diskMaintenanceTrim records the full interval from the pass's
+// conclusion whatever it returned, and a failed claim is parked, not retried on
+// the next pass. A refusal the config or the listing decides is a verdict.
 func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	profiles, err := s.sandboxes()
@@ -498,9 +498,9 @@ func (d *Daemon) cacheTrimPreflight(ctx context.Context, kubeconfig string) erro
 }
 
 // cacheTrimLogf logs one refusal or failure line, at most once an hour for the
-// same line: a trim that cannot start is retried in fifteen minutes, and saying
-// the same refusal on every retry would be four lines an hour for one fault. A
-// success is not a repeat to hold back, so it is logged through d.logger.
+// same line: the pass meets the same refusal again at the full interval, and the
+// hour-long hold keeps one fault to one line. A success is not a repeat to hold
+// back, so it is logged through d.logger.
 func (d *Daemon) cacheTrimLogf(format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
 	if d.diskMaintSchedule.allowLog(line, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
@@ -944,18 +944,32 @@ func (d *Daemon) cacheTrimFailedJobError(ctx context.Context, kubeconfig, namesp
 }
 
 // cacheTrimLogLine returns the last line of one container's log of the trim
-// Job, cut at cacheTrimFailLineLimit characters, or "" when the log cannot be
-// read or holds no line.
+// Job, its control characters replaced by spaces and the rest cut at
+// cacheTrimFailLineLimit characters, or "" when the log cannot be read or
+// holds no line.
 func (d *Daemon) cacheTrimLogLine(ctx context.Context, kubeconfig, namespace, jobName, container string) string {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "logs", "job/"+jobName, "-n", namespace, "-c", container, "--tail=1")
 	if err != nil {
 		return ""
 	}
-	line := lastLine(string(out))
+	line := cacheTrimPrintable(lastLine(string(out)))
 	if r := []rune(line); len(r) > cacheTrimFailLineLimit {
 		line = string(r[:cacheTrimFailLineLimit])
 	}
 	return line
+}
+
+// cacheTrimPrintable returns s with every control character, each rune below
+// U+0020 and U+007F, replaced by a space. The line it returns holds no ESC to
+// start a sequence and no carriage return to overwrite the log line, so the
+// container's own output cannot act in the daemon's log or the park's summary.
+func cacheTrimPrintable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // cacheTrimJobPod is the part of a trim Job's pod the stuck-pull read decides
@@ -1414,6 +1428,10 @@ type cacheTrimSource struct {
 // a sandbox that has not started still holds the cache; only a running pod can
 // answer an exec, so only a running pod is a source.
 //
+// A pod that is being deleted still holds the claim until the kubelet removes
+// it, so it still counts, but it is not a source: an exec in it is killed with
+// the pod (exit 137), and a listing read through it dies.
+//
 // A reply that cannot be decoded, names no item list, or names a pod of another
 // namespace refuses: an unreadable reply would read as no sandbox running, which
 // is a claim of idle again.
@@ -1445,7 +1463,7 @@ func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, namespace, claim
 			continue
 		}
 		sandboxes++
-		if pod.Status.Phase != "Running" {
+		if pod.Status.Phase != "Running" || pod.Metadata.DeletionTimestamp != nil {
 			continue
 		}
 		if source, ok := cacheTrimPodSource(pod, volume); ok {
@@ -1477,6 +1495,9 @@ type cacheTrimPod struct {
 type cacheTrimPodMeta struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	// DeletionTimestamp is set once the cluster has asked the pod to go: from
+	// then on the pod is on its way out and an exec in it dies with it.
+	DeletionTimestamp *string `json:"deletionTimestamp"`
 }
 
 type cacheTrimPodSpec struct {

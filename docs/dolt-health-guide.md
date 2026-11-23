@@ -72,6 +72,46 @@ mismatch.
 - **Smallest fix direction**: the least invasive code, docs, or operations change
   that would prevent repeat incidents.
 
+## Heavy Host Jobs
+
+Dolt runs in a Docker Desktop VM on the Mac, so a heavy host job — a copy or
+`git gc` of a repository over a few GB — and Dolt's queries share the Mac's disk
+and CPU. Run such a job under `taskpolicy -b` as well as `nice`. `nice` ranks
+its CPU below other work and leaves its disk IO unranked; `taskpolicy -b` puts
+the process in macOS's background CPU and IO policy, so the scheduler holds it
+back on both.
+
+Before starting a heavy job, read `sysctl vm.swapusage` and the load average
+(`uptime`). Start the job only while the swap used is below 80 percent of the
+total `vm.swapusage` reports, and note the load average with the job's record so
+a later slow Dolt cycle can be compared with it.
+
+A slow cycle leaves four readings, in this order:
+
+1. The `jsonl_git_backup:` lines in `daemon/daemon.log`. Each table gets one
+   line with its row count, elapsed time and timeout; the table that used the
+   largest share of the time names where the cycle waited.
+2. The `doctor_dog` line in the same log. A clear pass prints query latency,
+   open connections and orphan databases; one over its limit names the latency.
+3. `docker logs gt-dolt | grep 'client connection went away'`. Dolt writes this
+   line when a client connection drops, so the count rises when clients time out
+   against a slow server.
+4. `gt dolt latency`, which measures bd-style round trips against the server
+   without waiting for a daemon pass.
+
+### The 2026-11-21 Incident
+
+These figures were measured on the host on 2026-11-21, during the backup cycle
+that began at 01:12 (gt-pqzy9k). The backup's `gt` issues export was killed at
+its 60 s bound, and every query in the cycle ran 90 to 140 times slower than
+usual. The host's load average was 30 to 45. Two crew jobs were running a 14 GB
+`.git` copy under `nice` and git gc trials. The Mac's swap held 8.5 GB of 10 GB,
+with the three VMs at 82 GB resident of 128. Dolt's data directory was a bind
+mount from the Mac's disk through the Docker Desktop VM, which had 4 vCPUs, with
+`data_dir` set to `/Users/sloan/gt/.dolt-data` in the container's config. The
+copy was niced but not under `taskpolicy -b`, so it kept its share of disk IO
+while Dolt waited.
+
 ## Simulated Incident Smoke Check
 
 For documentation-only RCA work, use this smoke check to verify the checklist is

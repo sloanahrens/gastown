@@ -1,12 +1,19 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
+	"log"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -57,8 +64,18 @@ func TestTownStateBackupAlertRaisesOnceAndClears(t *testing.T) {
 	if len(got) != 1 || got[0].Escalation.Fingerprint != key {
 		t.Fatalf("after two refusing ticks, escalations = %+v, want one under %s", got, key)
 	}
-	if reason := got[0].Escalation.Reason; !strings.Contains(reason, townStateRefusedPath) || strings.Contains(reason, "PLANTED-123") {
-		t.Errorf("item text = %q, want the path and no value", reason)
+	// The item is written to the attention queue and the escalation mail, so its
+	// text is the path and the fixed sentence exactly: anything appended would
+	// publish the credential the refusal exists to keep out.
+	reason := got[0].Escalation.Reason
+	wantText := townStateRefusedPath + " holds a credential and is not backed up"
+	if reason != wantText {
+		t.Errorf("item text = %q, want exactly %q", reason, wantText)
+	}
+	// The fixture's refused file holds this value; no sentence may carry it.
+	const refusedValue = "PLANTED-123"
+	if strings.Contains(reason, refusedValue) {
+		t.Errorf("item text = %q, holds the credential the refused file carries", reason)
 	}
 
 	delete(tree, townStateRefusedPath)
@@ -69,5 +86,143 @@ func TestTownStateBackupAlertRaisesOnceAndClears(t *testing.T) {
 	}
 	if open := rec.OpenEscalations(key); len(open) != 0 {
 		t.Errorf("after the path was clean, the item is still open: %+v", open)
+	}
+}
+
+// TestTownStateBackupAlertFailingTickKeepsItems: a tick whose push fails after
+// a refusal raised the path's item leaves the sync alert and the item open and
+// clears no path key, so a clean tick is what decides the item.
+func TestTownStateBackupAlertFailingTickKeepsItems(t *testing.T) {
+	t.Parallel()
+	d, rec, tree := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	d.syncTownStateBackup()
+
+	// The failing tick needs a changed file to reach the push it is faulted at.
+	delete(tree, townStateRefusedPath)
+	tree["settings/themes/dark.json"] = &fstest.MapFile{Data: []byte(`{"bg":"#111"}`)}
+	orig := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return townStateFault{orig(dir), "push"} }
+	d.syncTownStateBackup()
+
+	if open := rec.OpenEscalations(alertKeyTownStateBackup); len(open) != 1 {
+		t.Fatalf("after the failing tick, the sync alert is open %d time(s), want 1", len(open))
+	}
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Errorf("after the failing tick, the path's item is open %d time(s), want 1", len(open))
+	}
+	if n := townStateClearsOf(rec, key); n != 0 {
+		t.Errorf("a failing tick cleared the path's key %d time(s), want 0", n)
+	}
+}
+
+// TestTownStateBackupAlertRaiseFailureIsRetried: an item whose raise the
+// notifier dropped is raised at the next tick.
+func TestTownStateBackupAlertRaiseFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	d, rec, _ := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+	d.clock = &diskMaintNoSleepClock{FakeClock: clockwork.NewFakeClockAt(diskMaintNow)}
+
+	rec.Fail(notifyfake.KindEscalate, errors.New("injected: raise"))
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 0 {
+		t.Fatalf("after the dropped raise, the item is open: %+v", open)
+	}
+
+	rec.Fail(notifyfake.KindEscalate, nil)
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("after the next tick, the item is open %d time(s), want 1", len(open))
+	}
+}
+
+// townStateNextDaemon is the daemon that starts after d dies: a fresh process
+// over the same town, backup repository, alert recorder and town files.
+func townStateNextDaemon(d *Daemon, rec *notifyfake.Recorder, tree fstest.MapFS) *Daemon {
+	next := &Daemon{
+		logger:       log.New(io.Discard, "", 0),
+		notifier:     rec,
+		clock:        d.clock,
+		config:       &Config{TownRoot: d.config.TownRoot},
+		patrolConfig: d.patrolConfig,
+		openGitFn:    d.openGitFn,
+	}
+	next.townStateRigs = d.townStateRigs
+	next.townStateFS = func(string) fs.FS { return tree }
+	return next
+}
+
+// TestTownStateBackupAlertSurvivesARestart: the refusal set outlives the
+// daemon, so the daemon after a restart clears the item a path's refusal left
+// open, and the file it reads back holds the refused paths and no value.
+func TestTownStateBackupAlertSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	t.Run("the next daemon clears an item the last one raised", func(t *testing.T) {
+		t.Parallel()
+		d, rec, tree := townStateAlertWorld(t)
+		d.syncTownStateBackup()
+		if open := rec.OpenEscalations(key); len(open) != 1 {
+			t.Fatalf("after the first daemon's tick, the item is open %d time(s), want 1", len(open))
+		}
+
+		next := townStateNextDaemon(d, rec, tree)
+		delete(tree, townStateRefusedPath)
+		next.syncTownStateBackup()
+
+		if n := townStateClearsOf(rec, key); n != 1 {
+			t.Fatalf("after the restarted daemon's clean tick, clears of %s = %d, want 1", key, n)
+		}
+		if open := rec.OpenEscalations(key); len(open) != 0 {
+			t.Errorf("after the restarted daemon, the item is still open: %+v", open)
+		}
+	})
+
+	t.Run("the file holds the refused paths and no value", func(t *testing.T) {
+		t.Parallel()
+		d, _, _ := townStateAlertWorld(t)
+		d.syncTownStateBackup()
+
+		data, err := os.ReadFile(townStateRaisedPath(d.config.TownRoot))
+		if err != nil {
+			t.Fatalf("reading the refused-path file: %v", err)
+		}
+		var paths []string
+		if err := json.Unmarshal(data, &paths); err != nil {
+			t.Fatalf("the refused-path file is not a JSON path list: %v (%q)", err, data)
+		}
+		if want := []string{townStateRefusedPath}; !reflect.DeepEqual(paths, want) {
+			t.Errorf("refused paths on disk = %v, want %v", paths, want)
+		}
+		const refusedValue = "PLANTED-123"
+		if strings.Contains(string(data), refusedValue) {
+			t.Errorf("the refused-path file holds the credential: %q", data)
+		}
+	})
+}
+
+// TestTownStateBackupAlertClearFailureIsRetried: an item whose clear the
+// notifier dropped stays open, and the next tick clears it.
+func TestTownStateBackupAlertClearFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	d, rec, tree := townStateAlertWorld(t)
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	d.syncTownStateBackup()
+	delete(tree, townStateRefusedPath)
+
+	rec.Fail(notifyfake.KindClear, errors.New("injected: clear"))
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("after the dropped clear, the item is open %d time(s), want 1", len(open))
+	}
+
+	rec.Fail(notifyfake.KindClear, nil)
+	d.syncTownStateBackup()
+	if open := rec.OpenEscalations(key); len(open) != 0 {
+		t.Fatalf("after the next tick, the item is still open: %+v", open)
 	}
 }

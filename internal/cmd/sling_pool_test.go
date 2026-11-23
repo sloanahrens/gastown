@@ -195,8 +195,8 @@ func TestChoosePoolAgentNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 
 // TestPoolCountSourcesSaysNoSessionNotDeadHooked is gt-lroj0r's refusal half:
 // a seat with no session is called what the count calls it, "with no session",
-// in the held list under the count too, and the class working prints as
-// starting. dead-hooked names the read, never a line the operator reads.
+// in the held list under the count too, and the class working prints as working
+// (gt-gzaica). dead-hooked names the read, never a line the operator reads.
 func TestPoolCountSourcesSaysNoSessionNotDeadHooked(t *testing.T) {
 	t.Parallel()
 	sessions := []poolSession{
@@ -204,7 +204,7 @@ func TestPoolCountSourcesSaysNoSessionNotDeadHooked(t *testing.T) {
 		{name: "dead/gastown/hotel", agent: "a", rig: "gastown", polecat: "hotel", deadHooked: true, deadClass: "working"},
 	}
 	got := poolCountSources("a", sessions, 2, 1)
-	want := ": 1 session, 1 with no session (1 starting); held: gastown/hotel:with no session, gt-a:session"
+	want := ": 1 session, 1 with no session (1 working); held: gastown/hotel:with no session, gt-a:session"
 	if got != want {
 		t.Fatalf("poolCountSources = %q, want %q", got, want)
 	}
@@ -338,7 +338,7 @@ func TestPoolCountsASandboxSeatOnItsRecordedClass(t *testing.T) {
 	ts := config.NewTownSettings()
 	ts.PolecatPool = pool
 
-	sessions, err := poolSeatSessionsWith(lister, town, nil, noHeldHooks, nil, pool)
+	sessions, err := poolSeatSessionsWith(lister, town, nil, nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -532,7 +532,6 @@ func (w *testPoolTown) process() *poolRouter {
 		pool:        func() *config.PolecatPool { return w.pool },
 		sessions:    func() sessionLister { return w.lister },
 		disposition: freeDeadSeats,
-		hookHeld:    noHeldHooks,
 		seats: &poolSeatLedger{
 			townRoot: w.root,
 			fs:       w.fs,
@@ -1036,22 +1035,6 @@ func (b *seatReadBarrier) reads() []polecatDispositionFunc {
 	return out
 }
 
-// hooks hands out one cheap hook-held read per decision, blocked the same way:
-// the seat picture's first bd-backed read for a sessionless polecat is the hold
-// read, so a test that measures the read's place against the lock watches this
-// one (gt-gg9hv.73).
-func (b *seatReadBarrier) hooks() []polecatHookHeldFunc {
-	out := make([]polecatHookHeldFunc, b.want)
-	for i := range out {
-		var once sync.Once
-		out[i] = func(string, string) (bool, error) {
-			once.Do(func() { b.arrive(i) })
-			return false, nil
-		}
-	}
-	return out
-}
-
 // seatDecision is what one concurrent `gt sling` decided.
 type seatDecision struct {
 	agent  string
@@ -1070,7 +1053,6 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 	lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	now := func() time.Time { return poolTestNow }
 	reads := barrier.reads()
-	hooks := barrier.hooks()
 	out := make([]seatDecision, len(reads))
 	finished := make(chan struct{}, len(reads))
 	for i := range reads {
@@ -1080,7 +1062,6 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 			r.pool = func() *config.PolecatPool { return pool }
 			r.sessions = func() sessionLister { return lister }
 			r.disposition = reads[i]
-			r.hookHeld = hooks[i]
 			r.now = now
 			// The decision lock, watched: this decision reaching it before its
 			// own read started is the read inside the lock.
@@ -1210,13 +1191,8 @@ func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
 	r.pool = func() *config.PolecatPool { return cappedPool(2) }
 	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
-	// A sessionless seat's first bd-backed read is the cheap hold read, so it
-	// is the seat-state read this test watches fall outside the lock
-	// (gt-gg9hv.73).
-	r.hookHeld = func(string, string) (bool, error) {
-		reader.note()
-		return false, nil
-	}
+	// A sessionless seat's own state is the bd-backed read this test watches
+	// fall outside the lock (gt-gg9hv.73).
 	r.disposition = func(string, string) (poolSeatState, error) {
 		reader.note()
 		return deadSeatRead(true), nil
@@ -1396,10 +1372,8 @@ func TestSeatDecisionCountsTheSessionTheSeatPictureDidNotRead(t *testing.T) {
 			r.pool = func() *config.PolecatPool { return cappedPool(1) }
 			r.sessions = func() sessionLister { return lister }
 			// The seat's own state says done with an open MR, so the picture
-			// releases it.
-			// The seat holds a hook, so the picture reads its state: the read
-			// that releases it is what this test is about (gt-gg9hv.73).
-			r.hookHeld = func(string, string) (bool, error) { return true, nil }
+			// releases it: the read that releases it is what this test is
+			// about (gt-gg9hv.73).
 			r.disposition = func(string, string) (poolSeatState, error) {
 				d := polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}
 				return poolSeatState{Disposition: d, DeadDisposition: d, DeadRead: true}, nil
@@ -2148,7 +2122,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 
 			// The picture `gt daemon dispatch-check` nudges from and the spec
 			// dispatcher's roster reads.
-			picture, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, noHeldHooks, work, pool)
+			picture, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -2163,7 +2137,6 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 				pool:        func() *config.PolecatPool { return pool },
 				sessions:    func() sessionLister { return c.lister },
 				disposition: freeDeadSeats,
-				hookHeld:    noHeldHooks,
 				work:        work,
 				seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 				now:         func() time.Time { return poolTestNow },
@@ -2200,7 +2173,6 @@ func TestRouteRefusesASeatMidLanding(t *testing.T) {
 		pool:        func() *config.PolecatPool { return pool },
 		sessions:    func() sessionLister { return &fakeLister{} },
 		disposition: freeDeadSeats,
-		hookHeld:    noHeldHooks,
 		work:        submittedWork("gt-ruby"),
 		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 		now:         func() time.Time { return poolTestNow },
@@ -2504,28 +2476,6 @@ func poolDispositionAnswering(town string, reads poolSeatReads) polecatDispositi
 	}
 }
 
-// poolHookHeldAnswering is the cheap hook-held read over the canned reads: the
-// bead half of the seat read above, with no worktree probe.
-func poolHookHeldAnswering(town string, reads poolSeatReads) polecatHookHeldFunc {
-	return func(rigName, polecatName string) (bool, error) {
-		return poolPolecatHookHeldWith(town, rigName, polecatName, reads)
-	}
-}
-
-// hookHeldOf answers the cheap hook read from a fake full seat read, for the
-// tests that drive the seat picture without measuring the split: it reports
-// the same HookHeld the full read does. A nil read answers noHeldHooks, so a
-// caller with no seat read still walks to no dead-hooked seat.
-func hookHeldOf(disposition polecatDispositionFunc) polecatHookHeldFunc {
-	if disposition == nil {
-		return noHeldHooks
-	}
-	return func(rigName, polecatName string) (bool, error) {
-		state, err := disposition(rigName, polecatName)
-		return state.HookHeld, err
-	}
-}
-
 // deadSeatRead fakes a sessionless seat's read: a measured disposition, free
 // when free says it does not count toward capacity. Since gt-v5n2be the walk
 // decides from this read rather than from HookHeld, so a fixture that means
@@ -2612,7 +2562,7 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			// sessionless read frees it only against that measured answer.
 			reads.probe = stageCleanProbeSeat(t, town, "gastown", "ember")
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -2652,7 +2602,7 @@ func TestPoolRosterHoldsADeferredExitSeatUnderTheTownTotal(t *testing.T) {
 	writeTownPolecatDir(t, town, "gastown", "ember")
 	reads := poolSeatReadsAnswering(t, deferredExitFields(), assignedActiveWork("gt-92qx3"))
 
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -3109,7 +3059,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 		return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}}, nil
 	}
 	pool := seatPool("claude-haiku", 1)
-	snap, err := poolSeatSnapshotWith(lister, town, disposition, hookHeldOf(disposition), nil, pool, func() time.Time { return rosterAt })
+	snap, err := poolSeatSnapshotWith(lister, town, disposition, nil, pool, func() time.Time { return rosterAt })
 	if err != nil {
 		t.Fatalf("roster: %v", err)
 	}

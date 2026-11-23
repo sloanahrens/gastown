@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -303,6 +304,36 @@ func TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords(t *testing.T) {
 	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 1}, run.Stats)
 }
 
+// TestNodeImagePruneOnceDryKeepsReportOnDeleteFailure: a dry run keeps its report beside its failed Job delete.
+func TestNodeImagePruneOnceDryKeepsReportOnDeleteFailure(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDry), fail: "Delete"}
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart)
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "a dry run whose Job delete failed appended no ledger row")
+	assert.Equal(t, nodeImagePruneOutcomeOK, run.Outcome)
+	assert.Equal(t, map[string]int64{"planned": 2, "removed": 0, "failed": 0, "apply": 0}, run.Stats)
+	assert.Equal(t, "node_image_prune: dry run planned 2 images\n"+
+		"node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z\n"+
+		"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z\n"+
+		"node_image_prune: node-prune: delete job gt-node-prune-20261104t200: Delete refused\n", r.logs.String())
+	require.ErrorContains(t, err, "delete job")
+}
+
+// TestNodeImagePruneOnceDryKeepsReportOtherErrorFails: a non-log-read error records the failed row alone.
+func TestNodeImagePruneOnceDryKeepsReportOtherErrorFails(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDry), fail: "Apply"}
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart)
+	require.ErrorContains(t, err, "apply job")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the failed dry run appended no ledger row")
+	assert.Equal(t, nodeImagePruneOutcomeFailed, run.Outcome)
+	assert.Equal(t, map[string]int64{"apply": 0}, run.Stats)
+}
+
 // TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow: a log that does not
 // parse gives no report to record even when the Job delete fails too: the run records
 // the figures-free failed row of its parse step, logs no summary line, and returns the
@@ -415,6 +446,41 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 			assert.ErrorContains(t, err, row.wantErr)
 			assert.Equal(t, row.wantCalls, strings.Join(kube.calls, " "))
 		})
+	}
+}
+
+// TestNodeImagePruneOnceNotStartedLogsTheReason: a refused run id and a town with no
+// running polecat image each return the error, log why on one line and record nothing.
+func TestNodeImagePruneOnceNotStartedLogsTheReason(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct{ name, runID, wantErr string }{
+		{"run id refused", "20261104T20", "does not give a lower-case DNS-1123 Job name"},
+		{"no running polecat image", nodeImagePruneRunID, "no running polecat image"},
+	} {
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		kube := &fakeKube{list: nodeImagePruneKubeList()}
+		err := d.nodeImagePruneOnce(context.Background(), kube, row.runID, false, nodeImagePruneStart)
+		require.ErrorContains(t, err, row.wantErr, row.name)
+		assert.Equal(t, "node_image_prune: not started: "+err.Error()+"\n", logs.String(), row.name)
+		_, ok := lastNodeImagePruneRun(t, d.config.TownRoot)
+		assert.False(t, ok, "nothing ran, so no ledger row is recorded")
+		assert.Empty(t, kube.calls, "a prune that cannot start touches no cluster")
+	}
+}
+
+// TestNodeImagePruneOnceNotStartedCutsTheText: the line is the error's first line,
+// cut at 200 bytes without splitting a rune. The daemon's own errors are single-line,
+// so synthetic errors of over 500 bytes drive the cut.
+func TestNodeImagePruneOnceNotStartedCutsTheText(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct{ name, text, want string }{
+		{"first line kept", "the reason: " + strings.Repeat("a", 100) + "\n" + strings.Repeat("b", 400), "the reason: " + strings.Repeat("a", 100)},
+		{"cut at 200 bytes", "the reason " + strings.Repeat("a", 400) + "\n" + strings.Repeat("b", 100), "the reason " + strings.Repeat("a", 189)},
+		{"no split rune", strings.Repeat("a", 199) + "é" + strings.Repeat("b", 400), strings.Repeat("a", 199)},
+	} {
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		d.nodeImagePruneNotStarted(errors.New(row.text))
+		assert.Equal(t, "node_image_prune: not started: "+row.want+"\n", logs.String(), row.name)
 	}
 }
 

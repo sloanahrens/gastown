@@ -1466,7 +1466,8 @@ const pinsReadDevopsTotal = 54
 // newImagePinsForgejo is the httptest Forgejo the patrol tests that read a bd
 // pin point their town at: its viewer token file authenticates the compare, a
 // head at BDSamplesFloor answers zero commits, the devops pin's head answers its
-// total, and an unanswered head is a 404.
+// total, the two bd tips the hold's test reads answer a count each, and an
+// unanswered head is a 404.
 func newImagePinsForgejo(t *testing.T) *Daemon {
 	t.Helper()
 	return newImagePinsForgejoAnswering(t, 0)
@@ -1483,6 +1484,10 @@ func newImagePinsForgejoAnswering(t *testing.T, floorBehind int) *Daemon {
 		// counts only the commits that touch its inputs, so the fixture answers
 		// the count of all of them.
 		pinsReadDevopsTip: pinsReadDevopsTotal,
+		// The hold's test reads bd's source at two tips across two good ticks, so
+		// each tip's compare answers a count the other tip's does not.
+		pinsReadBDTip:      1,
+		pinsReadMovedBDTip: 2,
 	}
 	//testpolicy:allow no-network — the compare is the subject, an httptest server answers it in-process on loopback, and the daemon reads it through the production client
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1761,27 +1766,62 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	}
 }
 
-// imagePinsBDFailureTicks reads one tick per entry of fails, each true failing bd's ls-remote, over four pins all at one commit, so no compare is asked.
-func imagePinsBDFailureTicks(t *testing.T, fails []bool, logw io.Writer) [][]ImagePinState {
-	d, fail := newImagePinsForgejo(t), new(bool)
+// pinsReadMovedBDTip is the tip bd's source answers on the second good tick of
+// the hold's read, a commit past pinsReadBDTip: a state held from the first
+// good read names the wrong tip, so the two good reads must differ.
+const pinsReadMovedBDTip = "9999999999999999999999999999999999999999"
+
+// imagePinsBDFailureTicks reads one tick per entry of fails, each true failing
+// bd's ls-remote, over four pins all at one commit, so only a bd tip below
+// differs from its pin. Each tick answers bd's ls-remote at tips[i] when that
+// entry is set, so two good ticks read different states.
+func imagePinsBDFailureTicks(t *testing.T, fails []bool, tips []string, logw io.Writer) [][]ImagePinState {
+	d, fail, tip := newImagePinsForgejo(t), new(bool), new(string)
 	d.logger = log.New(logw, "", 0)
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
-		if *fail && slices.Contains(cmd.Args, "ls-remote") && cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("beads") {
-			return nil, []byte("fatal: unable to access\n"), errors.New("git exited 128")
+		if slices.Contains(cmd.Args, "ls-remote") && cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("beads") {
+			if *fail {
+				return nil, []byte("fatal: unable to access\n"), errors.New("git exited 128")
+			}
+			if *tip != "" {
+				return []byte(pinsReadLS(*tip)), nil, nil
+			}
 		}
 		return []byte(pinsReadLS(pinsReadBDCommit)), nil, nil
 	}
 	pins := []byte("bd " + pinsReadPinURL("beads") + " " + pinsReadBDCommit + "\nom " + pinsReadPinURL("organic-mechanic") + " " + pinsReadBDCommit + "\nhm " + pinsReadPinURL("history-man") + " " + pinsReadBDCommit + "\ndevops " + pinsReadPinURL("devops") + " " + pinsReadBDCommit + "\n")
 	reads := make([][]ImagePinState, 0, len(fails))
-	for _, f := range fails {
-		*fail = f
+	for i, f := range fails {
+		*fail, *tip = f, ""
+		if i < len(tips) {
+			*tip = tips[i]
+		}
 		states, err := d.readImagePinTips(context.Background(), pins)
 		if err != nil {
-			t.Fatalf("readImagePinTips on a tick failing=%t: %v", f, err)
+			t.Fatalf("readImagePinTips on a tick failing=%t tip=%q: %v", f, *tip, err)
 		}
 		reads = append(reads, states)
 	}
 	return reads
+}
+
+// TestImagePinsReadHoldsTheMostRecentGoodState: bd's source tip moves between
+// two good reads, and the two failed ticks after them read the state at the
+// second tip, not the first: the hold stores every good read, so a failed tick
+// does not go back to a state from before the tip moved (gt-9n2hj7).
+func TestImagePinsReadHoldsTheMostRecentGoodState(t *testing.T) {
+	t.Parallel()
+	reads := imagePinsBDFailureTicks(t, []bool{false, false, true, true},
+		[]string{pinsReadBDTip, pinsReadMovedBDTip}, io.Discard)
+	first, moved := reads[0][0], reads[1][0]
+	if first.Err != nil || moved.Err != nil || first.Tip != pinsReadBDTip || moved.Tip != pinsReadMovedBDTip {
+		t.Fatalf("the good reads = %+v then %+v, want bd at tip %s then %s, each with no error", first, moved, pinsReadBDTip, pinsReadMovedBDTip)
+	}
+	for _, tick := range []int{2, 3} {
+		if reads[tick][0] != moved {
+			t.Errorf("tick %d = %+v, want bd held at its most recent good read %+v, not the earlier %+v", tick, reads[tick][0], moved, first)
+		}
+	}
 }
 
 // TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks: a bd pin that reads well
@@ -1789,7 +1829,7 @@ func imagePinsBDFailureTicks(t *testing.T, fails []bool, logw io.Writer) [][]Ima
 func TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks(t *testing.T) {
 	t.Parallel()
 	var logs strings.Builder
-	reads := imagePinsBDFailureTicks(t, []bool{false, true, true}, &logs)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true}, nil, &logs)
 	if reads[0][0].Err != nil || reads[1][0] != reads[0][0] || reads[2][0] != reads[0][0] {
 		t.Fatalf("the reads = %+v, want bd held at its good read on both failed ticks", reads)
 	}
@@ -1802,7 +1842,7 @@ func TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks(t *testing.T) {
 // row carries the read's error, which raises image-pins-unreadable (gt-tvtrx1).
 func TestImagePinsReadRaisesOnTheThirdConsecutiveFailure(t *testing.T) {
 	t.Parallel()
-	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, io.Discard)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, nil, io.Discard)
 	if reads[0][0].Err != nil || reads[1][0].Err != nil || reads[2][0].Err != nil {
 		t.Fatalf("the reads = %+v, want bd held on the first two failed ticks", reads)
 	}
@@ -1814,7 +1854,7 @@ func TestImagePinsReadRaisesOnTheThirdConsecutiveFailure(t *testing.T) {
 // TestImagePinsReadWithNoGoodStateRaisesAtOnce: a pin whose first read fails has no good state to hold, so that tick carries its error at once (gt-81kpyv).
 func TestImagePinsReadWithNoGoodStateRaisesAtOnce(t *testing.T) {
 	t.Parallel()
-	reads := imagePinsBDFailureTicks(t, []bool{true}, io.Discard)
+	reads := imagePinsBDFailureTicks(t, []bool{true}, nil, io.Discard)
 	if err := reads[0][0].Err; err == nil || !strings.Contains(err.Error(), "git exited 128") {
 		t.Fatalf("the first failed read = %+v, want bd's Err at once with no good state to hold", reads[0])
 	}
@@ -1823,7 +1863,7 @@ func TestImagePinsReadWithNoGoodStateRaisesAtOnce(t *testing.T) {
 // TestImagePinsReadAGoodReadResetsTheFailureCount: two failed ticks after a good read are held again, and the third raises, so the good read in between started the count over (gt-81kpyv).
 func TestImagePinsReadAGoodReadResetsTheFailureCount(t *testing.T) {
 	t.Parallel()
-	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, false, true, true, true}, io.Discard)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, false, true, true, true}, nil, io.Discard)
 	for _, tick := range []int{1, 2, 4, 5} {
 		if reads[tick][0] != reads[0][0] {
 			t.Fatalf("tick %d = %+v, want bd held at its good read after the count reset", tick, reads[tick])
@@ -1841,7 +1881,7 @@ func TestImagePinsReadAGoodReadResetsTheFailureCount(t *testing.T) {
 // (gt-p1bm5i).
 func TestImagePinsReadHoldsATransportErrorForExactlyTwoTicks(t *testing.T) {
 	t.Parallel()
-	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, io.Discard)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, nil, io.Discard)
 	if reads[0][0].Err != nil {
 		t.Fatalf("the good read = %+v, want bd at a good state", reads[0][0])
 	}
@@ -1933,6 +1973,38 @@ func TestImagePinsReadLogsAGoodReadWithItsDuration(t *testing.T) {
 	}
 	if got := logs.String(); strings.Contains(got, "read bd pin") || strings.Count(got, "image_pins: read ") != 4 || !strings.Contains(got, "image pin bd cannot be read") {
 		t.Fatalf("daemon.log = %q, want bd's one failed-read line, never a good read of it, the other three pins' good reads and its held tick", got)
+	}
+}
+
+// TestImagePinsReadLogsATrailingPinWithItsCount: a pin that trails its tip logs
+// its path count, never the compare total or zero, and the pins at their tips log zero (gt-6jwchb).
+func TestImagePinsReadLogsATrailingPinWithItsCount(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, clk := newImagePinsForgejo(t), clockwork.NewFakeClockAt(time.Unix(0, 0))
+	d.logger, d.clock = log.New(&logs, "", 0), clk
+	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsTip}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			clk.Advance(525 * time.Millisecond) // four calls make one tick read in 2.1s
+			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return []byte("3\n"), nil, nil
+		}
+		return []byte("100\n518500\n"), nil, nil // devops's age read: its pin's and tip's committer times
+	}
+	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	want := "image_pins: read bd pin 11111111 tip 11111111 behind 0 in 2.1s\n" +
+		"image_pins: read om pin 22222222 tip 22222222 behind 0 in 2.1s\n" +
+		"image_pins: read hm pin 33333333 tip 33333333 behind 0 in 2.1s\n" +
+		"image_pins: read devops pin 44444444 tip dddddddd behind 3 in 2.1s\n"
+	if got := logs.String(); got != want {
+		t.Fatalf("daemon.log = %q, want devops's path count 3 and the three pins at their tips behind 0, %q", got, want)
 	}
 }
 
@@ -2316,8 +2388,10 @@ func imagePinsPathCountResultIn(t *testing.T, town string, run cmdRunFunc) (int,
 }
 
 // TestImagePinsReadDoesNotHoldARefusal: a failed read that is a refusal (the bd
-// tip lacks the samples build) is kept at once, not read as the last good state,
-// and it does not use up the hold a transport failure gets (gt-rtxkwt).
+// tip lacks the samples build) is kept at once, not read as the last good state
+// (gt-rtxkwt). It is still stored as the pin's last state, so a transport
+// failure after it holds the refusal rather than the good read from before it
+// (gt-yfvld4).
 func TestImagePinsReadDoesNotHoldARefusal(t *testing.T) {
 	t.Parallel()
 	good := ImagePinState{Name: "bd", Pin: "p1", Tip: "t1", Behind: 2}
@@ -2326,24 +2400,32 @@ func TestImagePinsReadDoesNotHoldARefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		seq  []ImagePinState
-		held []bool // per tick: the read came back as the last good state
+		want []ImagePinState // per tick: the state the tick reads after the hold
+		held int             // ticks the hold logged
 	}{
-		{"a refusal after a good read keeps its error", []ImagePinState{good, refused}, []bool{false, false}},
-		{"a refusal uses none of the hold a transport failure gets", []ImagePinState{good, refused, transport, transport, transport}, []bool{false, false, true, true, false}},
-		{"a transport failure after a good read is held", []ImagePinState{good, transport}, []bool{false, true}},
+		{"a refusal after a good read keeps its error", []ImagePinState{good, refused}, []ImagePinState{good, refused}, 0},
+		{"a transport failure after a good read is held", []ImagePinState{good, transport}, []ImagePinState{good, good}, 1},
+		// The row this bead rewrites: the old expectation read the good state on
+		// both transport ticks after the refusal. A refusal is a judgment about
+		// the pin as it stands, so it is the state a failed read after it holds
+		// (overseer ruling 15:5x, gt-yfvld4).
+		{"a refusal is held through a transport failure, not the good read before it", []ImagePinState{good, refused, transport, transport}, []ImagePinState{good, refused, refused, refused}, 2},
+		{"a good read after a held refusal starts over", []ImagePinState{refused, transport, good}, []ImagePinState{refused, refused, good}, 1},
+		{"a refusal after two failed transport ticks is still held", []ImagePinState{transport, transport, refused, transport}, []ImagePinState{transport, transport, refused, refused}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := &Daemon{logger: log.New(io.Discard, "", 0)}
+			var logs strings.Builder
+			d := &Daemon{logger: log.New(&logs, "", 0)}
 			for i, st := range tc.seq {
 				states := []ImagePinState{st}
 				d.holdFailedImagePins(states)
-				if got := states[0] == good; got != tc.held[i] && i > 0 {
-					t.Errorf("tick %d read as the last good state = %v, want %v (state %+v)", i, got, tc.held[i], states[0])
+				if states[0] != tc.want[i] {
+					t.Errorf("tick %d read %+v, want %+v", i, states[0], tc.want[i])
 				}
-				if i > 0 && st.Err != nil && errors.Is(st.Err, daemonimage.ErrPinRefused) && !errors.Is(states[0].Err, daemonimage.ErrPinRefused) {
-					t.Errorf("tick %d lost the refusal: %+v", i, states[0])
-				}
+			}
+			if n := strings.Count(logs.String(), "held ticks"); n != tc.held {
+				t.Errorf("the log named %d held tick(s), want %d: %q", n, tc.held, logs.String())
 			}
 		})
 	}

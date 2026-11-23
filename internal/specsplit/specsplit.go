@@ -29,6 +29,11 @@ type Spec struct {
 	// base branch, supplied by the caller: Plan reads no file system. A file in
 	// it is never "created by" a piece, whoever edits it.
 	BaseFiles map[string]bool
+	// BaseSymbols are the symbols that exist on the base branch, supplied by the
+	// caller, keyed by the package directory, a dot and the symbol's name, such
+	// as "internal/config.Read". A symbol in it is never "created by" a piece,
+	// whoever declares it.
+	BaseSymbols map[string]bool
 }
 
 // Box is one acceptance box.
@@ -160,8 +165,8 @@ const (
 	// lists, including a slash word such as "and/or" and a date such as
 	// "2026/11/20".
 	tokenIsProse placement = iota
-	// tokenIsRoot marks the root package ".", which the caller's next bead
-	// places.
+	// tokenIsRoot marks a listed root package ".", which a bullet refuses: only
+	// a box's go test command may place the root (gt-uuk62t).
 	tokenIsRoot
 	// tokenIsPackage marks a token that names one of the spec's Dirs.
 	tokenIsPackage
@@ -284,20 +289,23 @@ func (d *dirIndex) boxPackage(run string) (pkg, reason string) {
 	var packages []string
 	root := false
 	for _, target := range targets {
-		switch p, place := d.resolve(target); place {
-		case tokenIsPackage:
-			if !contains(packages, p) {
-				packages = append(packages, p)
-			}
-		case tokenIsRoot:
+		// An unlisted root token is absent from the index, so recognize it
+		// before resolve reads it as prose: only a box can place it (gt-uuk62t).
+		if rootToken(target) {
 			root = true
+			continue
+		}
+		if p, place := d.resolve(target); place == tokenIsPackage && !contains(packages, p) {
+			packages = append(packages, p)
 		}
 	}
 	switch {
-	case root:
-		return "", "names the root package ., which this planner does not place"
-	case len(packages) > 1:
+	case root && !d.packages["."]:
+		return "", "names the root package ., but the root package is not in Dirs"
+	case (root && len(packages) > 0) || len(packages) > 1:
 		return "", "names more than one package, so it cannot be grouped by package"
+	case root:
+		return ".", ""
 	case len(packages) == 1:
 		return packages[0], ""
 	}

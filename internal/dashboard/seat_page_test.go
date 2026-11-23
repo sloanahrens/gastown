@@ -3,6 +3,9 @@ package dashboard
 import (
 	"encoding/json"
 	"maps"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,7 +117,7 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 	}{
 		{"starting draws the badge and not the times", map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
 		{"working draws the times and no badge", map[string]any{"phase": "working"}, map[string]string{"wsub": "working 20m, gate 10m"}},
-		{"one rejection is round 2", map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2"}},
+		{"one rejection is round 2", map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 		{"no rejection draws no round", map[string]any{"reject_count": 0.0}, map[string]string{"wsub": "working 20m, gate 10m"}},
 	}
 	for _, c := range cases {
@@ -134,7 +137,7 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 		want         map[string]string
 	}{
 		{"phase", map[string]any{"phase": "working"}, map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
-		{"reject_count", map[string]any{"phase": "working"}, map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2"}},
+		{"reject_count", map[string]any{"phase": "working"}, map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 	} {
 		t.Run("a change in only the "+c.name+" redraws", func(t *testing.T) {
 			dom := newPageDOM(t)
@@ -145,4 +148,59 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPolecatRowReworkPageDraws: a seat whose bead was refused for review draws
+// "rework ×N" in its Age cell, warned from the second refusal on; a 0 count,
+// sent or left off, draws nothing and leaves the row as an explicit zero's (gt-addb76).
+func TestPolecatRowReworkPageDraws(t *testing.T) {
+	t.Parallel()
+
+	// draw feeds the panel one seat, carrying reject_count only when count is
+	// not nil, so nil is the row the JSON's omitempty sends.
+	draw := func(t *testing.T, count any) *pageDOM {
+		t.Helper()
+		s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+		if count != nil {
+			s["reject_count"] = count
+		}
+		dom := newPageDOM(t)
+		callWork(t, dom, workState([]any{s}, nil))
+		return dom
+	}
+	// pill reads the rework child out of an Age cell: its text and whether it warns.
+	pill := func(subs map[string]string) (string, bool) {
+		for cls, text := range subs {
+			if slices.Contains(strings.Fields(cls), "wrework") {
+				return text, slices.Contains(strings.Fields(cls), "warnc")
+			}
+		}
+		return "", false
+	}
+
+	cases := []struct {
+		name   string
+		count  any
+		pill   string
+		warned bool
+	}{
+		{"one refusal draws rework ×1", 1.0, "rework ×1", false},
+		{"two refusals draw the pill warned", 2.0, "rework ×2", true},
+		{"an explicit zero draws nothing", 0.0, "", false},
+		{"an absent count draws nothing", nil, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, subs := seatAgeCell(t, draw(t, c.count), "agate")
+			if got, warned := pill(subs); got != c.pill || warned != c.warned {
+				t.Errorf("rework pill = %q (warn %v), want %q (warn %v); Age cell children %v", got, warned, c.pill, c.warned, subs)
+			}
+		})
+	}
+	t.Run("an absent count leaves the row as an explicit zero draws it", func(t *testing.T) {
+		zero, absent := workRows(t, draw(t, 0.0)), workRows(t, draw(t, nil))
+		if !reflect.DeepEqual(zero, absent) {
+			t.Errorf("the count-absent row's cells = %q, want the explicit-zero row %q", absent, zero)
+		}
+	})
 }

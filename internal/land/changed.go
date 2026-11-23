@@ -424,7 +424,9 @@ var treeWideGuards = []treeWideGuard{
 		// the bd gateway workload and its token secret). -run keeps the run to
 		// these three tests; the cost is compiling the internal/cmd test
 		// binary (about 10 to 30 seconds), paid only by a diff under these two
-		// paths. The rest of internal/cmd's guard tests stay out.
+		// paths. A deletion counts too: the tests import the Go packages under
+		// both paths, so a removed file there can break their build (gt-kymmes).
+		// The rest of internal/cmd's guard tests stay out.
 		pkg: "internal/cmd",
 		tests: []string{
 			"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
@@ -434,6 +436,7 @@ var treeWideGuards = []treeWideGuard{
 		judges: func(rel string) bool {
 			return strings.HasPrefix(rel, "deploy/k8s/") || strings.HasPrefix(rel, "internal/imagevalues/")
 		},
+		removal: true,
 	},
 	{
 		// TestGTPinMatchesTheSharedBuildArgv pins the daemon image's gt build
@@ -493,7 +496,7 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
-		pkg:     "internal/beads/beadsfake",
+		pkg:     "internal/modguard",
 		tests:   []string{"TestNoNewRawBdSites"},
 		judges:  goFile,
 		removal: true,
@@ -566,6 +569,15 @@ var treeWideGuards = []treeWideGuard{
 		judges: underInternal,
 	},
 	{
+		// TestNoTerminalBackgroundProbe parses every non-test Go file under
+		// internal/ for a direct termenv or lipgloss terminal background
+		// query, so any such file is its input (gt-kfde9l). A deletion cannot
+		// add a call, so it sets no removal rule.
+		pkg:    "internal/ui",
+		tests:  []string{"TestNoTerminalBackgroundProbe"},
+		judges: underInternal,
+	},
+	{
 		pkg:    "internal/testdb",
 		tests:  []string{"TestOneDefinition"},
 		judges: nonTestGo,
@@ -592,6 +604,19 @@ var treeWideGuards = []treeWideGuard{
 			"TestShippedOMThresholdIsGastownBar",
 		},
 		judges:  func(rel string) bool { return rel == ".om.json" },
+		removal: true,
+	},
+	{
+		// TestEveryTreeScanningTestIsRegistered walks the tree for tests that
+		// scan it and holds each to a treeWideGuards entry or an exemption
+		// line, so a new scanner in any package, a _test.go file included, is
+		// its input. The exemption list is its other input. A deletion counts:
+		// a removed file leaves its test's exemption line stale (gt-xr4eke).
+		pkg:   "internal/land",
+		tests: []string{"TestEveryTreeScanningTestIsRegistered"},
+		judges: func(rel string) bool {
+			return goFile(rel) || rel == "internal/land/testdata/unregistered-scanners.txt"
+		},
 		removal: true,
 	},
 	{

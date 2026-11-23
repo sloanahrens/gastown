@@ -56,6 +56,47 @@ func TestSplitGroupTwo(t *testing.T) {
 	}
 }
 
+// TestSplitGroupRootPackage: a box whose go test command names the root package
+// is placed in "." when Dirs lists the root, and refused with the reason naming
+// Dirs when it does not.
+func TestSplitGroupRootPackage(t *testing.T) {
+	t.Parallel()
+	rootBox := Box{Text: "The root check. Run: go test . -run TestRoot", Run: "go test . -run TestRoot"}
+	spec := Spec{
+		Constraints: "- Edit internal/config/env.go.",
+		Acceptance:  "- [ ] " + rootBox.Text + "\n- [ ] The setting is read. Run: go test ./internal/config -run TestEnv",
+		Dirs:        []string{".", "internal/config"},
+	}
+	got, err := Group(spec)
+	if err != nil {
+		t.Fatalf("Group() error = %v, want none", err)
+	}
+	if len(got) != 2 || got[0].Package != "internal/config" || got[1].Package != "." || !reflect.DeepEqual(got[1].Boxes, []Box{rootBox}) {
+		t.Errorf("Group() = %+v, want internal/config then the root package holding %+v", got, rootBox)
+	}
+
+	spec.Acceptance += "\n- [ ] Both. Run: go test . ./internal/config -run TestBoth"
+	if _, err := Group(spec); err == nil || !strings.Contains(err.Error(), "more than one package") {
+		t.Errorf("Group() with the root and another package error = %v, want more than one package", err)
+	}
+
+	spec.Dirs = []string{"internal/config"}
+	if _, err := Group(spec); err == nil || !strings.Contains(err.Error(), "the root package is not in Dirs") {
+		t.Errorf("Group() with an unlisted root error = %v, want it to name %q", err, "the root package is not in Dirs")
+	}
+
+	// A stray "." in a bullet is prose, so the bullet stays with its listed path.
+	spec = Spec{
+		Constraints: "- Done . Edit internal/config/env.go.",
+		Acceptance:  "- [ ] Read. Run: go test ./internal/config -run TestIt\n- [ ] Parsed. Run: go test ./internal/specsplit -run TestGroup",
+		Dirs:        testDirs,
+	}
+	if got, err = Group(spec); err != nil || got[0].Package != "internal/config" ||
+		!reflect.DeepEqual(got[0].Constraints, []string{"Done . Edit internal/config/env.go."}) {
+		t.Errorf("Group() with a stray dot in a bullet = %+v, %v; want internal/config first holding the stray-dot bullet", got, err)
+	}
+}
+
 // TestSplitGroupReadsOnlyGoTestCommands: a box guarded by a later command is
 // placed by its go test alone, so the guard's path is not read as a second
 // package.
@@ -163,15 +204,6 @@ func TestSplitGroupRefuses(t *testing.T) {
 			spec: Spec{
 				Constraints: "- Update the root package .",
 				Acceptance:  "- [ ] A test shows the setting. Run: go test ./internal/config -run TestIt",
-				Dirs:        append([]string{"."}, testDirs...),
-			},
-			wantErr: "names the root package .",
-		},
-		{
-			name: "a box that names the root package",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.",
-				Acceptance:  "- [ ] A test shows the setting. Run: go test . -run TestIt",
 				Dirs:        append([]string{"."}, testDirs...),
 			},
 			wantErr: "names the root package .",

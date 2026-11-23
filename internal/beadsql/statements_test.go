@@ -470,6 +470,42 @@ func TestTickEffChildStatusesQuery(t *testing.T) {
 	}
 }
 
+// TestTickEffParseChildStatuses: a parent's rows collect under it, a row with
+// empty child columns gives that parent an empty list rather than a missing
+// entry, and a row under the read's three columns is refused.
+func TestTickEffParseChildStatuses(t *testing.T) {
+	t.Parallel()
+	got, err := ParseChildStatuses([][]string{
+		{"gt-a", "gt-a.1", "open"},
+		{"gt-a", "gt-a.2", "closed"},
+		{"gt-b", "", ""},
+	})
+	if err != nil {
+		t.Fatalf("ParseChildStatuses: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ParseChildStatuses read %d parents, want 2: %v", len(got), got)
+	}
+	wantA := []ChildStatus{{ID: "gt-a.1", Status: "open"}, {ID: "gt-a.2", Status: "closed"}}
+	if !slices.Equal(got["gt-a"], wantA) {
+		t.Errorf("gt-a = %#v, want %#v", got["gt-a"], wantA)
+	}
+	if got["gt-b"] == nil || len(got["gt-b"]) != 0 {
+		t.Errorf("gt-b = %#v, want an empty non-nil list", got["gt-b"])
+	}
+	for _, tc := range []struct {
+		name string
+		rows [][]string
+	}{
+		{"two columns", [][]string{{"gt-a", "gt-a.1"}}},
+		{"no columns", [][]string{{}}},
+	} {
+		if _, err := ParseChildStatuses(tc.rows); err == nil {
+			t.Errorf("%s: ParseChildStatuses accepted the row", tc.name)
+		}
+	}
+}
+
 // selectFieldCount counts a SELECT list's fields.
 func selectFieldCount(t *testing.T, selectList string) int {
 	t.Helper()

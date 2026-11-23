@@ -5,6 +5,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -27,12 +28,22 @@ var zeroClaimRes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bpasses on\b`),
 }
 
+// EvidenceRequiredFrom is the instant the evidence rule applies from: a bead
+// created before it is grandfathered, so the beads filed before the rule
+// existed are not refused (gt-qhrsa4). CreatedAt is on every Spec, which is why
+// this is a date rather than a shape-version label. An empty or unparseable
+// CreatedAt parses to the zero time, which is not before this instant, so that
+// bead is checked.
+var EvidenceRequiredFrom = time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
 // evidenceRefusal refuses a bead whose acceptance claims a zero result on a
 // fixture path and shows no usable "## Evidence" section, since nothing at
-// landing can check the claim. It reads no CreatedAt: every bead is checked,
-// and the grandfather date is a later bead's rule (gt-qhrsa4). Whether an empty
-// fenced block counts as usable is a later bead's rule too (gt-afagyn).
+// landing can check the claim. A bead created before EvidenceRequiredFrom is
+// grandfathered.
 func evidenceRefusal(s Spec, sections map[string]string) (Refusal, bool) {
+	if created := parseTime(s.CreatedAt); !created.IsZero() && created.Before(EvidenceRequiredFrom) {
+		return Refusal{}, false
+	}
 	if usableEvidence(sections[evidenceSection]) {
 		return Refusal{}, false
 	}
@@ -47,9 +58,12 @@ func evidenceRefusal(s Spec, sections map[string]string) (Refusal, bool) {
 }
 
 // usableEvidence reports whether an Evidence section shows a command: a line
-// starting "$ ", or an opening fence and its closer.
+// starting "$ ", or a fence pair with at least one non-blank line between the
+// markers. A lone fence marker and an empty pair show no command, so neither is
+// evidence.
 func usableEvidence(section string) bool {
 	var fence byte
+	var held bool // a non-blank line seen between the opening fence and its closer
 	for _, line := range strings.Split(section, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "$ ") {
@@ -57,14 +71,21 @@ func usableEvidence(section string) bool {
 		}
 		marker := beads.FenceMarker(trimmed)
 		if marker == "" {
+			if fence != 0 && trimmed != "" {
+				held = true
+			}
 			continue
 		}
 		if fence == 0 {
 			fence = marker[0]
+			held = false
 			continue
 		}
 		if marker[0] == fence {
-			return true
+			if held {
+				return true
+			}
+			fence = 0
 		}
 	}
 	return false

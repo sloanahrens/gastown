@@ -44,6 +44,18 @@ type QueueBead struct {
 	// no closed span (gt-du2p9d).
 	PolecatSecs *float64 `json:"polecat_secs,omitempty"`
 
+	// PolecatLowerBound is true when PolecatSecs may understate the time: an
+	// attempt was still open, or the spans log could not be read at all, in
+	// which case PolecatSecs is absent and the time is unknown rather than zero
+	// (gt-v1a0zo).
+	PolecatLowerBound bool `json:"polecat_lower_bound,omitempty"`
+
+	// RejectCount is how many times the bead's landing has been refused by
+	// review, read from the rejection blocks in its notes, so a resubmission
+	// waiting to land reads as a retry (gt-vg3rjz). It is counted on the
+	// Landings list only; every other list leaves it zero.
+	RejectCount int `json:"reject_count,omitempty"`
+
 	// UpdatedAt is the bead's last write: for a bead waiting to land, the label
 	// write gt done makes is normally its last write, so this is when the wait
 	// started, which is how the Landings pane ages it.

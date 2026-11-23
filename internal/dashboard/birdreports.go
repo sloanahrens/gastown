@@ -77,10 +77,10 @@ const (
 	// hours old is one the bird did not rewrite.
 	birdStaleAfter = 26 * time.Hour
 
-	// birdFutureSlack is how far a written_at may lead the reader's clock
-	// before the sidecar is refused. A bird writes on the machine the reader
-	// runs on, so a written_at minutes ahead is not two clocks apart; further
-	// ahead means the sidecar does not name when it was written.
+	// birdFutureSlack is how far a written instant may lead the reader's clock
+	// before the reader drops it: a sidecar's written_at is refused, and a
+	// last-activity time is not shown. The bird writes on the reader's own
+	// machine, so an instant minutes ahead is fine; further ahead names no time.
 	birdFutureSlack = 5 * time.Minute
 
 	// birdPageLag is how much older than its sidecar a page may be before the
@@ -158,6 +158,11 @@ type BirdReport struct {
 	// written_at. A bird with a page and no sidecar has no written_at to
 	// show, so Written is the page's own mtime.
 	Written time.Time `json:"written,omitzero"`
+	// LastActive is when the bird was last active, from the WithActivity
+	// source: zero when there is no source or no answer, or when the answer
+	// leads the reader's clock by more than birdFutureSlack. It is not the
+	// report's age, which a working bird may leave days old.
+	LastActive time.Time `json:"last_active,omitzero"`
 	// Stale marks a summary older than birdStaleAfter. The page sorts these
 	// after the rows that need the operator.
 	Stale bool `json:"stale,omitempty"`
@@ -212,10 +217,12 @@ type birdSidecar struct {
 }
 
 // BirdReportsReader reads the birds of one runtime directory, marking the
-// headline reporter's row when it is given one.
+// headline reporter's row and giving each row the bird's last activity when it
+// is given those sources.
 type BirdReportsReader struct {
 	runtimeDir string
 	headline   string
+	activity   func(bird string) (time.Time, bool)
 }
 
 // WithHeadline names the reporter whose daily report is the town's headline:
@@ -228,6 +235,14 @@ func (r *BirdReportsReader) WithHeadline(name string) *BirdReportsReader {
 	return r
 }
 
+// WithActivity gives the reader each bird's last activity: fn is asked with a
+// row's bird name, and its answer becomes that row's LastActive. A reader
+// given no fn, or a bird fn answers false for, carries the zero time.
+func (r *BirdReportsReader) WithActivity(fn func(bird string) (time.Time, bool)) *BirdReportsReader {
+	r.activity = fn
+	return r
+}
+
 // NewBirdReportsReader returns a reader of the birds under runtimeDir, the
 // town's runtime directory, which names one directory per bird. The command
 // wiring names it; a reader reads the one it is given.
@@ -237,13 +252,13 @@ func NewBirdReportsReader(runtimeDir string) *BirdReportsReader {
 
 // Read returns one row per bird that has a daily report as it stands at now, in
 // the order the operator should see the rows: the ones a bird asked for
-// attention on, then the stale ones, then by name. A runtime directory the
-// reader cannot read is one row in error rather than no birds at all, so a
-// failed read never draws as an empty page.
+// attention on, then the stale ones, then by name. A row also carries its last
+// activity when the reader has a source, and a runtime directory the reader
+// cannot read is one row in error rather than no birds at all.
 func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	entries, err := os.ReadDir(r.runtimeDir)
 	if err != nil {
-		return []BirdReport{{State: BirdReportError, Note: birdRuntimeUnreadable}}
+		return r.fillActivity([]BirdReport{{State: BirdReportError, Note: birdRuntimeUnreadable}}, now)
 	}
 	names := make(map[string]bool, len(entries))
 	for _, e := range entries {
@@ -274,6 +289,27 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 		}
 		return a.Bird < b.Bird
 	})
+	return r.fillActivity(rows, now)
+}
+
+// fillActivity gives each row the last activity the source answers for its
+// bird: no source or no answer leaves LastActive zero, and an answer further
+// than birdFutureSlack ahead of now is dropped. Only LastActive is written.
+func (r *BirdReportsReader) fillActivity(rows []BirdReport, now time.Time) []BirdReport {
+	if r.activity == nil {
+		return rows
+	}
+	for i := range rows {
+		at, ok := r.activity(rows[i].Bird)
+		if !ok {
+			continue
+		}
+		at = at.UTC()
+		if at.Sub(now) > birdFutureSlack {
+			continue
+		}
+		rows[i].LastActive = at
+	}
 	return rows
 }
 

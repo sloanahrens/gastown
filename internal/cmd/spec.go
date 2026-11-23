@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -616,6 +617,23 @@ func specChildrenRead(c beads.Client, ids []string) (map[string][]*beads.Issue, 
 		kids[id] = []*beads.Issue{}
 	}
 	return kids, nil
+}
+
+// sqlReader is the SQL surface specChildrenFromSQL asks: a bd store answering a declared beadsql statement.
+type sqlReader interface {
+	SQLCSV(query beadsql.Query) ([][]string, error)
+}
+
+// specChildrenFromSQL reads the children of ids in one SQL call, each parent keyed to its children; a parent the database does not hold has no key.
+func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]beadsql.ChildStatus, error) {
+	rows, err := c.SQLCSV(beadsql.ChildStatuses(ids...))
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > 0 {
+		rows = rows[1:] // SQLCSV keeps the header record, which is no parent
+	}
+	return beadsql.ParseChildStatuses(rows)
 }
 
 // specChildrenReader is the default children read of specCandidateChildren: the
@@ -1944,6 +1962,10 @@ type specDispatchReport struct {
 	BoardTook      time.Duration `json:"board_ns,omitempty"`
 	CandidatesTook time.Duration `json:"candidates_ns,omitempty"`
 	SlingTook      time.Duration `json:"sling_ns,omitempty"`
+	// CandidatesSteps is what the candidates phase spent per step outside bd,
+	// summed over its candidates on the tick's clock, so the cost line can name
+	// the lint (gt-dld6qn); a held tick runs no candidate, so it sets none.
+	CandidatesSteps map[string]time.Duration `json:"candidates_steps_ns,omitempty"`
 	// The bd reads each phase made, counted by the tick's ledger; the daemon
 	// logs them on its 'tick took' line beside the phase times, so a slow
 	// phase is also known by how many calls it cost (gt-139dp).
@@ -2220,9 +2242,13 @@ type specDispatchEnv struct {
 	Sling         func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (polecat string, err error)
 	Sleep         func(time.Duration)
 	Now           func() time.Time
-	Template      specdispatch.Template
-	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
-	PerTick       int
+	// Lint is a candidate's shape verdict. Nil is the lint with the tick's
+	// template and settings, which is what the dispatcher runs; a test injects
+	// one whose cost its clock can report (gt-dld6qn).
+	Lint     func(specdispatch.Spec) specdispatch.LintVerdict
+	Template specdispatch.Template
+	Budget   specdispatch.Budget // agents, caps and preferences; live counts filled per tick
+	PerTick  int
 	// MaxInFlight is how many slings the tick runs at once
 	// (spec_dispatch.max_in_flight). Zero is the code default, never
 	// unbounded (gt-16pqa).
@@ -2507,6 +2533,15 @@ func specLockTimeoutRecorded(storeFor func(beadID string) beads.Client) func(bea
 	}
 }
 
+// lint is a candidate's shape verdict: the injected Lint when one is wired,
+// else the lint with the tick's template and settings.
+func (e specDispatchEnv) lint(spec specdispatch.Spec) specdispatch.LintVerdict {
+	if e.Lint != nil {
+		return e.Lint(spec)
+	}
+	return specdispatch.LintWith(spec, e.Template, e.lintOptions())
+}
+
 // lintOptions is the settings the tick lints a candidate with: the same
 // settings gt spec lint reads, so a candidate the seat's lint would refuse is
 // held here instead of slung (gt-muzkwi).
@@ -2582,6 +2617,44 @@ func (e specDispatchEnv) showFresh(beadID string) (specdispatch.Spec, error) {
 		return e.ShowFresh(beadID)
 	}
 	return e.Show(beadID)
+}
+
+// specCandidateSteps sums the candidates phase's steps by name on the tick's
+// clock, so the report says what the phase spends outside bd (gt-dld6qn); a
+// nil timer times nothing.
+type specCandidateSteps struct {
+	now    func() time.Time
+	totals map[string]time.Duration
+}
+
+// time runs fn and adds the clock time it took under name.
+func (s *specCandidateSteps) time(name string, fn func()) {
+	if s == nil {
+		fn()
+		return
+	}
+	at := s.now()
+	fn()
+	s.add(name, s.now().Sub(at))
+}
+
+// add sums d under name.
+func (s *specCandidateSteps) add(name string, d time.Duration) {
+	if s == nil {
+		return
+	}
+	if s.totals == nil {
+		s.totals = map[string]time.Duration{}
+	}
+	s.totals[name] += d
+}
+
+// all is the sum per step name, nil when the timer timed nothing.
+func (s *specCandidateSteps) all() map[string]time.Duration {
+	if s == nil {
+		return nil
+	}
+	return s.totals
 }
 
 // runSpecDispatchCycle is one tick. It never guesses: under the default warn
@@ -2741,6 +2814,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
+	candidateSteps := &specCandidateSteps{now: env.Now}
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
 		// A sling of an earlier tick is still running for this bead: it may not
@@ -2863,7 +2937,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 			full = walked
-			verdict = specdispatch.LintWith(full, env.Template, env.lintOptions())
+			// The lint's target-tree path checks are the phase's own cost
+			// outside bd, so they are timed by step (gt-dld6qn).
+			candidateSteps.time("lint", func() { verdict = env.lint(full) })
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
 		// A clean verdict is the only shape the estimate-ahead pass reads: the
@@ -2954,6 +3030,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			}
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
 			continue
+		}
+		// With no free seat left, ChooseSeat refuses every candidate and its
+		// reason does not depend on the candidate's children, so the refusal
+		// comes before the children read. The per-tick limit above cannot do
+		// this when the town sets a max_per_tick ceiling, because the ceiling
+		// stays positive whatever the seats are: a full pool then read every
+		// candidate's children before ChooseSeat refused it, 47 to 61 s a tick
+		// (gt-n3l0sm).
+		budget.Now = env.Now()
+		if budget.FreeSeats() == 0 {
+			if seat := specdispatch.ChooseSeat(budget, full); seat.Skip {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipNoSeat, seat.Reason)})
+				continue
+			}
 		}
 		// A bead whose children are open is a container, not a unit of work:
 		// its scope is already sliced into children a seat will take, so
@@ -3135,9 +3225,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// the sling. The shadow setting only observes; the split route reads the
 		// same estimate and holds a bead over its trigger. A failed or
 		// timed-out estimate is one logged line, and the bead is slung as it
-		// would be without the setting.
+		// would be without the setting. Its cost is the candidates phase's own,
+		// so it is timed by step whether it slings or holds (gt-wga76n).
 		if env.StoryPointShadow || env.StoryPointSplitOver > 0 {
-			step := specStoryPointStep(env, id, latest)
+			var step specStoryPointStepResult
+			candidateSteps.time("estimate", func() { step = specStoryPointStep(env, id, latest) })
 			report.Notices = append(report.Notices, step.Notices...)
 			report.Errors = append(report.Errors, step.Errors...)
 			if step.Hold != "" {
@@ -3156,6 +3248,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		budget.Bump(seat.Agent, budget.Now)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
+	report.CandidatesSteps = candidateSteps.all()
 	report.CandidatesCalls = env.Reads.endPhase()
 	slingAt := env.Now()
 	if env.Background {
@@ -4514,9 +4607,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		// The target-claim rule's peer set comes from the guard's own pool, so a
 		// sling that reuses the cached pool costs no read of its own (gt-n6jbw).
-		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
-			return specTargetClaims(townRoot, beadID)
-		},
+		Claims:      specClaimsMemo(townRoot),
 		RigHold:     func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		HeldRigHold: specHeldRigHold(townRoot),
 		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {
@@ -4627,7 +4718,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// its cost. The bd subprocess time is read once here, at the end of the
 		// tick, so the counters hold every call the tick made (gt-d2hzix).
 		bdCalls, bdTotal, bdSlowest := tickCallTime()
-		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, bdCalls, bdTotal, bdSlowest))
+		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, bdCalls, bdTotal, bdSlowest, report.CandidatesSteps))
 	}
 	// The census is written for the daemon that started the tick, so it can log
 	// the subprocess's calls under its own census line; a failure to write it is
@@ -4656,13 +4747,26 @@ var tickCallTime = beads.CallTimeSnapshotAndReset
 // specTickCost is the tick's one cost line. It counts the reads the tick makes
 // itself. The sling path, the pre-sling re-read and the writes are not counted.
 // bdTotal is the time inside the tick's bd subprocesses, summed, so parallel calls can exceed its wall time (gt-9oo03n).
-func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest time.Duration, bdCalls int, bdTotal, bdSlowest time.Duration) string {
+// steps is the candidates phase's own time per step, named in name order so the line reads the same from run to run (gt-3xfcel).
+func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest time.Duration, bdCalls int, bdTotal, bdSlowest time.Duration, steps map[string]time.Duration) string {
 	line := fmt.Sprintf("tick cost: %d bd read call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
 	if bdCalls > 0 {
 		line += fmt.Sprintf("; bd time summed %s in %d subprocess(es), slowest %s", bdTotal.Round(time.Millisecond), bdCalls, bdSlowest.Round(time.Millisecond))
 	}
 	if slings > 0 {
 		line += fmt.Sprintf("; %d sling(s) in parallel, slowest %s", slings, slowest.Round(time.Millisecond))
+	}
+	if len(steps) > 0 {
+		names := make([]string, 0, len(steps))
+		for name := range steps {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		named := make([]string, 0, len(names))
+		for _, name := range names {
+			named = append(named, fmt.Sprintf("%s %s", name, steps[name].Round(time.Millisecond)))
+		}
+		line += "; candidate steps " + strings.Join(named, ", ")
 	}
 	return line
 }
@@ -4807,7 +4911,7 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 	if err := batch.readRigs(rigs); err != nil {
 		return poolSeatSnapshot{}, err
 	}
-	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, batch.hookHeld, work, pool, now)
+	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
 }
 
 // rosterRigNames names the rigs the seat picture reads: every known rig when
@@ -4844,10 +4948,10 @@ func rigsWithPolecatDirs(townRoot string, rigs []string) (kept []string, first e
 
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
 // seats the disposition releases, so a tick's slings can count them free too.
-func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
+func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
 	at := now()
 	recorded, released := releasedSeatRecorder(disposition)
-	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, hookHeld, work, pool)
+	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, work, pool)
 	if err != nil {
 		return poolSeatSnapshot{}, err
 	}

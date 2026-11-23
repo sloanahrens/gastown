@@ -60,6 +60,7 @@ func hostTownVMsStartEnv() townVMsStartEnv {
 // runner and no process is started.
 func newTownVMsStartCmd(env townVMsStartEnv) *cobra.Command {
 	var home string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start both Colima VMs, start the sandbox containers and repair DNS and the registry",
@@ -82,20 +83,26 @@ Examples:
   gt town vms start --home /Users/operator`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return runTownVMsStart(c, env, home)
+			return runTownVMsStart(c, env, home, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&home, "home", "",
 		"the home directory whose Lima state the registry repair reads (default: the user's home)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"print the step order and run nothing")
 	return cmd
 }
 
 // runTownVMsStart refuses in a pod, resolves home, runs vmstart.Start and
 // prints its report; the Start error is returned after the report, so the
-// caller exits 1 with the lines that show which step failed.
-func runTownVMsStart(cmd *cobra.Command, env townVMsStartEnv, flagHome string) error {
+// caller exits 1 with the lines that show which step failed. A dry run prints
+// the step order and resolves no home, since it runs no command that reads one.
+func runTownVMsStart(cmd *cobra.Command, env townVMsStartEnv, flagHome string, dryRun bool) error {
 	if env.getenv(podEnv) != "" {
 		return fmt.Errorf("gt town vms start runs on the Mac, where colima exists, and this is a pod (%s is set); run it on the Mac instead, where the host command set runs: %s", podEnv, gtwrap.GTHostCommandList())
+	}
+	if dryRun {
+		return printTownVMsStartOrder(cmd.OutOrStdout())
 	}
 	home, err := resolveTownVMsStartHome(env, flagHome)
 	if err != nil {
@@ -107,6 +114,18 @@ func runTownVMsStart(cmd *cobra.Command, env townVMsStartEnv, flagHome string) e
 		writeErr = fmt.Errorf("writing the start report: %w", writeErr)
 	}
 	return errors.Join(startErr, writeErr)
+}
+
+// printTownVMsStartOrder prints one line per step of vmstart.StartPlan, in the
+// order Start runs them, so a printed order cannot disagree with the run the
+// dry run previews (gt-sp84je).
+func printTownVMsStartOrder(out io.Writer) error {
+	for _, step := range vmstart.StartPlan {
+		if _, err := fmt.Fprintln(out, step.Name); err != nil {
+			return fmt.Errorf("printing the start step order: %w", err)
+		}
+	}
+	return nil
 }
 
 // resolveTownVMsStartHome returns the home directory the registry repair reads:

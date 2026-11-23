@@ -386,13 +386,9 @@ type Stored struct {
 	Error    string
 }
 
-// ReadWork reads the work record of bead under usageDir. A missing file is an error wrapping
-// fs.ErrNotExist; a file this package did not write is an error too.
-func ReadWork(usageDir, bead string) (Stored, error) {
-	if !validBead(bead) {
-		return Stored{}, fmt.Errorf("usageattrib: %q is not a bead id", bead)
-	}
-	path := WorkRecordPath(usageDir, bead)
+// ReadRecordFile reads one record file of either kind, work or om. A missing file is an error
+// wrapping fs.ErrNotExist; a file this package did not write is an error too.
+func ReadRecordFile(path string) (Stored, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Stored{}, fmt.Errorf("usageattrib: reading %s: %w", path, err)
@@ -401,7 +397,40 @@ func ReadWork(usageDir, bead string) (Stored, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Stored{}, fmt.Errorf("usageattrib: %s is not a record this package wrote: %w", path, err)
 	}
-	return Stored{Record: s.UsageRecord, Sessions: s.Sessions, Error: s.Error}, nil
+	return storedOf(s), nil
+}
+
+// ReadWork reads the work record of bead under usageDir.
+func ReadWork(usageDir, bead string) (Stored, error) {
+	if !validBead(bead) {
+		return Stored{}, fmt.Errorf("usageattrib: %q is not a bead id", bead)
+	}
+	return ReadRecordFile(WorkRecordPath(usageDir, bead))
+}
+
+// RecordFilePaths lists the work and om record files under usageDir's beads directory, sorted
+// bytewise. A directory, a file of another kind and a write's temporary file are left out; a
+// missing directory is an error wrapping fs.ErrNotExist.
+func RecordFilePaths(usageDir string) ([]string, error) {
+	dir := filepath.Join(usageDir, recordsSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("usageattrib: reading the records directory: %w", err)
+	}
+	paths := []string{}
+	for _, e := range entries {
+		if !e.IsDir() && isRecordFile(e.Name()) {
+			paths = append(paths, filepath.Join(dir, e.Name()))
+		}
+	}
+	slices.Sort(paths)
+	return paths, nil
+}
+
+// isRecordFile reports whether name is the record file of a bead and kind, as recordPath writes it.
+func isRecordFile(name string) bool {
+	return strings.HasSuffix(name, "."+dashboard.UsageKindWork+".json") ||
+		strings.HasSuffix(name, "."+dashboard.UsageKindOM+".json")
 }
 
 func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {

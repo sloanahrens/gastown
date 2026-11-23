@@ -73,9 +73,9 @@ func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
 		if recheckErr != nil {
 			err = fmt.Errorf("%w; socket recheck failed: %v", err, recheckErr)
 		}
-		return fmt.Errorf("tmux socket %s has a live listener but tmux reported no server; refusing to start a new session because tmux could unlink and rebind it (see gt-h9z): %w", socketPath, err)
+		return fmt.Errorf("%w; tmux socket %s has a live listener but tmux reported no server; refusing to start a new session because tmux could unlink and rebind it (see gt-h9z)", err, socketPath)
 	} else {
-		return fmt.Errorf("tmux socket %s has a live listener but list-sessions failed; refusing to start a new session because tmux could unlink and rebind it (see gt-h9z): %w", socketPath, err)
+		return fmt.Errorf("%w; tmux socket %s has a live listener but list-sessions failed; refusing to start a new session because tmux could unlink and rebind it (see gt-h9z)", err, socketPath)
 	}
 }
 

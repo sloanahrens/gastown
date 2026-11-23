@@ -13,6 +13,7 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
@@ -162,6 +163,7 @@ func newSweepRunsFixture(t *testing.T, mode string, keep int) *sweepRunsFixture 
 		config:       &Config{TownRoot: town},
 		logger:       log.New(&logs, "", 0),
 		patrolConfig: patrol,
+		notifier:     notifyfake.New(),
 	}
 	d.diskMaint.now = func() time.Time { return sweepRunsNow }
 	d.diskMaint.sweepRunsFS = fsys
@@ -446,6 +448,79 @@ func TestSweepRunsPrunePassReadsDueAgainWhenItStarts(t *testing.T) {
 	}
 }
 
+// TestSweepRunsPruneFailureRaisesOnce: a failed pass records the full interval
+// with no retry time and raises one item, which a second failure keeps and a
+// success clears.
+func TestSweepRunsPruneFailureRaisesOnce(t *testing.T) {
+	t.Parallel()
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+	f.rigTree()
+	alerts := notifyfake.New()
+	f.d.notifier = alerts
+	every, _, _, err := sweepRunsPruneSettings(f.d.patrol())
+	if err != nil {
+		t.Fatalf("sweep runs prune settings: %v", err)
+	}
+	key := diskMaintFailedKey(sweepRunsPruneName)
+	f.fsys.readErr[f.root] = fs.ErrPermission
+
+	f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+	if last, retry := f.d.diskMaintSchedule.lastRunAt(sweepRunsPruneName), f.d.diskMaintSchedule.retryAtOf(sweepRunsPruneName); !last.Equal(sweepRunsNow) || !retry.IsZero() {
+		t.Errorf("last run %v, retry %v; want %v and no retry", last, retry, sweepRunsNow)
+	}
+	if open := alerts.OpenEscalations(key); len(open) != 1 {
+		t.Fatalf("open items after the failure = %+v, want one", open)
+	}
+
+	// The next attempt is at the normal cadence, and its failure keeps the one
+	// item the first raised.
+	f.d.diskMaint.now = func() time.Time { return sweepRunsNow.Add(every) }
+	f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+	if got := len(alerts.Escalations()); got != 1 {
+		t.Errorf("escalations = %d after a second failure, want the one already open", got)
+	}
+
+	delete(f.fsys.readErr, f.root)
+	f.d.diskMaint.now = func() time.Time { return sweepRunsNow.Add(2 * every) }
+	f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+	if open := alerts.OpenEscalations(key); len(open) != 0 {
+		t.Errorf("open items after the success = %+v, want none", open)
+	}
+}
+
+// TestSweepRunsPruneFailureItemCarriesTheReason: a failed sweep-run prune raises
+// one item whose text holds the first line of the failure it logged, not the
+// fixed sentence; a refusal that carries no Go error raises its own sentence.
+func TestSweepRunsPruneFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	for name, breakTree := range map[string]func(f *sweepRunsFixture) string{
+		"the failure's own error": func(f *sweepRunsFixture) string {
+			f.fsys.readErr[f.root] = errors.New("input/output error\nio timeout on the second line")
+			return "cannot list " + f.root + ": input/output error"
+		},
+		"a refusal with no error": func(f *sweepRunsFixture) string {
+			f.fsys.lstatMode[filepath.Join(f.root, "gastown", sweepRunsName("gastown", "0a1b2c3d"))] = fs.ModeSymlink | 0o777
+			return "gastown/" + sweepRunsName("gastown", "0a1b2c3d") + " is no longer a directory"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+			f.rigTree()
+			alerts := notifyfake.New()
+			f.d.notifier = alerts
+			why := breakTree(f)
+			f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+			open := alerts.OpenEscalations(diskMaintFailedKey(sweepRunsPruneName))
+			if len(open) != 1 || !strings.Contains(open[0].Reason, why) ||
+				strings.Contains(open[0].Reason, diskMaintNoReason) ||
+				strings.Contains(open[0].Reason, "io timeout on the second line") {
+				t.Fatalf("item = %+v, want one carrying %q alone", open, why)
+			}
+		})
+	}
+}
+
 // TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing: a dry run whose plan
 // is empty still logs its line, with zero directories and no list after it.
 func TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing(t *testing.T) {
@@ -666,7 +741,7 @@ func TestSweepRunsPruneRigSwappedForSymlink(t *testing.T) {
 	patrol := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
 	keep := 1
 	patrol.Patrols.DiskMaintenance.SweepRunsKeep = &keep
-	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), patrolConfig: patrol}
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), patrolConfig: patrol, notifier: notifyfake.New()}
 	d.diskMaint.now = func() time.Time { return sweepRunsNow }
 	d.diskMaint.dispatch = func(fn func()) { fn() }
 	d.diskMaint.sweepRunsFS = fsys

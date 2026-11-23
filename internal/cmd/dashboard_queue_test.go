@@ -138,6 +138,161 @@ func TestDashboardQueuedRowPolecatSecs(t *testing.T) {
 	}
 }
 
+// A waiting row keeps the lower-bound mark the spans reading gives it, so a
+// total that may understate the time reads "at least": the mark comes from the
+// reader's third return, and a reading that is the real time leaves it off
+// (gt-v1a0zo).
+func TestDashboardQueuedRowPolecatLowerBound(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name      string
+		secs      float64
+		attempts  []land.PolecatAttempt
+		lower     bool
+		wantSecs  *float64
+		wantLower bool
+	}{
+		{
+			name:      "an open attempt is a floor",
+			secs:      540,
+			attempts:  []land.PolecatAttempt{{Seat: "gastown/opal", Secs: 540, LowerBound: true}},
+			lower:     true,
+			wantSecs:  ptr(540.0),
+			wantLower: true,
+		},
+		{
+			name:     "a closed attempt is the time",
+			secs:     540,
+			attempts: []land.PolecatAttempt{{Seat: "gastown/opal", Secs: 540}},
+			wantSecs: ptr(540.0),
+		},
+		{
+			name: "a log with no attempts reads nothing",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			st := &fakeQueueStore{landing: []*beads.Issue{{
+				ID: "gt-queued", Title: "waits to land", Status: "open", Labels: []string{land.LabelReadyToLand},
+			}}}
+			q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").
+				withPolecatTimes(func(string, time.Time) (float64, []land.PolecatAttempt, bool) {
+					return c.secs, c.attempts, c.lower
+				}).read(time.Now())
+			if q == nil || len(q.Landing) != 1 {
+				t.Fatalf("landing = %+v", q)
+			}
+			row := q.Landing[0]
+			if row.PolecatLowerBound != c.wantLower {
+				t.Errorf("polecat_lower_bound = %v, want %v", row.PolecatLowerBound, c.wantLower)
+			}
+			switch {
+			case c.wantSecs == nil && row.PolecatSecs != nil:
+				t.Errorf("polecat secs = %v, want none", *row.PolecatSecs)
+			case c.wantSecs != nil && (row.PolecatSecs == nil || *row.PolecatSecs != *c.wantSecs):
+				t.Errorf("polecat secs = %v, want %v", row.PolecatSecs, *c.wantSecs)
+			}
+			b, err := json.Marshal(row)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if got := strings.Contains(string(b), `"polecat_lower_bound"`); got != c.wantLower {
+				t.Errorf("row JSON carries polecat_lower_bound = %v, want %v: %s", got, c.wantLower, b)
+			}
+		})
+	}
+}
+
+// A spans log that exists but cannot be read is the one case where the mark
+// matters most and the time is absent: PolecatTime answers (0, nil, true), so a
+// loop that sets the mark only when it has seconds drops it. The failing input
+// is built through the real reader, with a span store whose every read fails
+// (gt-v1a0zo).
+func TestDashboardQueuedRowUnreadableSpansLog(t *testing.T) {
+	t.Parallel()
+	f := &land.LandingsFile{Spans: &unreadableQueueSpans{err: errors.New("permission denied")}}
+	st := &fakeQueueStore{landing: []*beads.Issue{{
+		ID: "gt-queued", Title: "waits to land", Status: "open", Labels: []string{land.LabelReadyToLand},
+	}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").
+		withPolecatTimes(f.PolecatTime).read(time.Now())
+	if q == nil || len(q.Landing) != 1 {
+		t.Fatalf("a row whose spans log cannot be read must still be built: %+v", q)
+	}
+	row := q.Landing[0]
+	if row.PolecatSecs != nil {
+		t.Errorf("polecat secs = %v, want none from an unreadable log", *row.PolecatSecs)
+	}
+	if !row.PolecatLowerBound {
+		t.Error("an unreadable spans log must set polecat_lower_bound: the log existed, so there is time the reading cannot count")
+	}
+}
+
+// unreadableQueueSpans is a land.SpanSummarizer whose every read fails, the
+// shape of a span log that exists but the reader cannot open.
+type unreadableQueueSpans struct{ err error }
+
+func (u *unreadableQueueSpans) Summarize(string) (spans.Summary, error) {
+	return spans.Summary{}, u.err
+}
+
+func (u *unreadableQueueSpans) EndOpen(string, string, spans.Reason, time.Time) (bool, error) {
+	return false, u.err
+}
+
+// A queued (waiting to land) row carries how many review rejections its bead
+// has taken, so a resubmission reads as a retry. The count comes from the
+// ready-to-land list's own rows: st.List with land.LabelReadyToLand runs
+// `bd list --flat --json`, whose rows carry the issue's notes when it has any
+// (an absent notes field is an empty one, which counts 0), so no per-row read
+// is added (gt-vg3rjz).
+func TestDashboardQueuedRowRejectCountFromNotes(t *testing.T) {
+	t.Parallel()
+	two := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectReview), Reason: "fix the guard", Branch: "polecat/x/gt-queued"}) +
+		"\n" + land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Kind: string(land.RejectReview), Reason: "still open", Branch: "polecat/x/gt-queued"})
+	for _, c := range []struct {
+		name  string
+		notes string
+		want  int
+	}{
+		{"two review rejections", two, 2},
+		{"no rejections", "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			st := &fakeQueueStore{landing: []*beads.Issue{{
+				ID: "gt-queued", Title: "waits to land", Status: "open", Notes: c.notes, Labels: []string{land.LabelReadyToLand},
+			}}}
+			q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+			if q == nil || len(q.Landing) != 1 {
+				t.Fatalf("landing = %+v", q)
+			}
+			if got := q.Landing[0].RejectCount; got != c.want {
+				t.Errorf("reject_count = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// A queued row's count reads the notes with the rejection parser, not by
+// looking for the marker text: a reason that quotes a cut-off
+// "MERGE REJECTION (attempt" mid-line, with junk bytes around it, is content
+// and leaves the row built at 0 (gt-vg3rjz).
+func TestDashboardQueuedRowRejectCountGarbledNotes(t *testing.T) {
+	t.Parallel()
+	garbled := "work in progress\nsee reason: MERGE REJECTION (attempt\n\xff\xfe junk \x80"
+	st := &fakeQueueStore{landing: []*beads.Issue{{
+		ID: "gt-queued", Title: "waits to land", Status: "open", Notes: garbled, Labels: []string{land.LabelReadyToLand},
+	}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+	if q == nil || len(q.Landing) != 1 {
+		t.Fatalf("a row whose notes are garbled must still be built: %+v", q)
+	}
+	if got := q.Landing[0].RejectCount; got != 0 {
+		t.Errorf("reject_count = %d, want 0: a quoted cut-off marker is content, not a rejection block", got)
+	}
+}
+
 // A store that cannot be read is named, never shown as an empty queue.
 func TestQueueReadNamesAnUnreadableStore(t *testing.T) {
 	t.Parallel()

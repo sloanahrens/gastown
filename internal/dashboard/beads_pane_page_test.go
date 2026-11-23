@@ -40,7 +40,7 @@ func pageColumnKeys(t *testing.T) (left, right []string) {
 // (gt-70ortp). It is the one place this file pins where a pane sits: the Beads
 // tests take the pane above Beads from it instead of restating that pair.
 func beadsPageColumns() (left, right []string) {
-	return []string{"birds", "attention", "events", "activity", "cost", "rigs", "tiersweep", "beads"},
+	return []string{"birds", "attention", "events", "activity", "cost", "rigs", "jobs", "systemupdates", "beads"},
 		[]string{"news", "machine", "cloud", "forgejo", "om", "jev", "dolt", "mango"}
 }
 
@@ -56,10 +56,10 @@ func paneAbove(t *testing.T, panes []string, key string) string {
 	return panes[at-1]
 }
 
-// The Beads pane sits in the left column directly under Tier sweeps, the
-// operator's layout for the dashboard (gt-70ortp). The check reads the
+// The Beads pane sits in the left column directly under System updates, the
+// pane that replaced Tier sweeps (gt-70ortp, gt-gfglv0). The check reads the
 // embedded markup's column order, not the source text around one id.
-func TestBeadsPaneSitsDirectlyUnderTierSweeps(t *testing.T) {
+func TestBeadsPaneSitsDirectlyUnderSystemUpdates(t *testing.T) {
 	t.Parallel()
 
 	left, right := pageColumnKeys(t)
@@ -73,7 +73,7 @@ func TestBeadsPaneSitsDirectlyUnderTierSweeps(t *testing.T) {
 }
 
 // Moving the Beads pane leaves the other panes in their columns and in their
-// order: the left column ends with Beads after Tier sweeps, and the right
+// order: the left column ends with Beads after System updates, and the right
 // column holds the same panes it did, without Beads.
 func TestOtherPanesKeepTheirColumnsAndOrder(t *testing.T) {
 	t.Parallel()
@@ -89,9 +89,9 @@ func TestOtherPanesKeepTheirColumnsAndOrder(t *testing.T) {
 }
 
 // The page's sections, as the fake DOM folds them, list Beads directly after
-// Tier sweeps. The fake DOM lays sections out flat, so this reads document
-// order only; TestBeadsPaneSitsDirectlyUnderTierSweeps checks the column.
-func TestBeadsFoldFollowsTierSweepsOnThePage(t *testing.T) {
+// System updates. The fake DOM lays sections out flat, so this reads document
+// order only; TestBeadsPaneSitsDirectlyUnderSystemUpdates checks the column.
+func TestBeadsFoldFollowsSystemUpdatesOnThePage(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)

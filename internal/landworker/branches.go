@@ -293,6 +293,14 @@ func startsBeadID(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
+// BeadForBranch returns the bead that beadForBranch reads from a polecat
+// branch, "" when branch is not one. It is exported so a test outside this
+// package — internal/sling's parity test — can call the landing worker's
+// parser; run.go does not import landworker (gt-iy9apl).
+func BeadForBranch(branch string) string {
+	return beadForBranch(branch)
+}
+
 // DefaultSweepInterval is how often a worker sweeps origin for leftover
 // polecat branches when Worker.SweepInterval is unset.
 const DefaultSweepInterval = time.Hour

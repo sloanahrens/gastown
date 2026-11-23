@@ -83,6 +83,8 @@ type Commands struct {
 	Mango func(town string) string
 	// Out takes the receipt lines; nil is the process's stdout.
 	Out io.Writer
+	// Progress takes the weekly run's embedding-progress line; nil is stderr.
+	Progress io.Writer
 	// StoryPointsBase is the checked-in story-points weights the retrain keeps from
 	// and compares against; nil is storypoints.Default().
 	StoryPointsBase *storypoints.Weights
@@ -113,6 +115,8 @@ type Commands struct {
 	// Now is the clock the weekly retrain reads its last run and stamps its own;
 	// nil is the wall clock.
 	Now func() time.Time
+	// Budget bounds the due weekly run; zero is StoryPointsWeeklyBudget.
+	Budget time.Duration
 	// storyPointsStore is the filesystem storypoints-adopt lists, writes and
 	// deletes beside the runtime weights. The zero value is the host's; a test
 	// fills the one function it needs to refuse.
@@ -132,6 +136,9 @@ func (c Commands) withDefaults() Commands {
 	}
 	if c.Out == nil {
 		c.Out = os.Stdout
+	}
+	if c.Progress == nil {
+		c.Progress = os.Stderr
 	}
 	return c
 }
@@ -430,6 +437,19 @@ func extractRanYesterday(env Env, outDir string) (bool, error) {
 // that reached a decision, not the last run that tried.
 const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
 
+// StoryPointsWeeklyBudget is the due run's own deadline: ten minutes, inside
+// the plugin's fifteen-minute timeout.
+const StoryPointsWeeklyBudget = 10 * time.Minute
+
+// storyPointsWeeklyWait is the line when the budget ends, naming the step that ended.
+const storyPointsWeeklyWait = "story points weekly: waiting: the %s budget ended while %s; the next hour continues from the embedding cache"
+
+// weeklyBudgetEnded says whether the run's own budget, not the caller's context
+// and not an error carrying context.DeadlineExceeded, ended the step.
+func weeklyBudgetEnded(parent, budgetCtx context.Context) bool {
+	return parent.Err() == nil && budgetCtx.Err() == context.DeadlineExceeded
+}
+
 // storyPointsWeeklyStampName is the file beside the runtime weights that holds
 // the time the weekly retrain and adoption last reached a decision.
 const storyPointsWeeklyStampName = "weekly.stamp"
@@ -456,7 +476,13 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
-// for nothing.
+// for nothing. A due run ends itself at Commands.Budget (zero is StoryPointsWeeklyBudget), and its
+// line names the step: an end while wiring the town, retraining or checking the last adoption is a
+// wait that records no stamp and returns nil, so the week stays open. That end is read from the
+// budget context's expiry: an inner error carrying context.DeadlineExceeded is the step's failure.
+// The adoption decision that follows the retrain embeds only texts the retrain
+// cached and writes files without a context, so the budget cannot end inside the
+// write: a failure there is the decision's own.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -481,6 +507,10 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if !Due(last, now, StoryPointsWeeklyEvery) {
 		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
 	}
+	budget := cmp.Or(c.Budget, StoryPointsWeeklyBudget)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
 	if c.AutoAdoptReader != nil {
 		on, err := c.AutoAdoptReader()
 		if err != nil {
@@ -490,6 +520,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	real, env, err := c.wire(ctx)
 	if err != nil {
+		if weeklyBudgetEnded(parent, ctx) {
+			return c.receipt(storyPointsWeeklyWait, budget, "wiring the town")
+		}
 		return fmt.Errorf("story points weekly: %w", err)
 	}
 	if real.Town == "" {
@@ -508,10 +541,22 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if embedder == nil {
 		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
-	embedder = weeklyEmbedder{inner: embedder}
+	// The run's embeddings are cached under the town, so one killed at the hour's
+	// cap keeps what it embedded and the next hour embeds only the rest
+	// (gt-tibj01). A cache that cannot be read is not an empty one, so its
+	// failure goes through weeklyFailure like a step that could not run.
+	cachePath := filepath.Join(real.Town, ".runtime", "metrics", "embed-cache.jsonl")
+	cached, err := storypoints.NewCachedEmbedder(embedder, cachePath, base.EmbeddingModel())
+	if err != nil {
+		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
+	}
+	embedder = weeklyEmbedder{inner: cached}
 	// The week-after check judges the last adoption before this week's proposal can
 	// replace the weights it kept.
 	if err := c.checkStoryPointsAdoption(ctx, real, env, embedder, now); err != nil {
+		if weeklyBudgetEnded(parent, ctx) {
+			return c.receipt(storyPointsWeeklyWait, budget, "checking the last adoption")
+		}
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 	}
 	// The retrain's report goes to the day's directory; Out carries the hour's one
@@ -519,7 +564,14 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	train := c
 	train.Out = io.Discard
 	train.Embedder = embedder
-	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
+	// The progress line goes out after the train returns and before the
+	// adoption, so a run the hour kills after it still says how far it got.
+	trainErr := train.runStoryPointsTrain(ctx, real, env)
+	progressErr := c.writeStoryPointsWeeklyProgress(cachePath, cached)
+	if trainErr != nil && weeklyBudgetEnded(parent, ctx) {
+		return errors.Join(c.receipt(storyPointsWeeklyWait, budget, "retraining"), progressErr)
+	}
+	if err := errors.Join(trainErr, progressErr); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
 			return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 		}
@@ -559,6 +611,14 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	return c.receipt("story points weekly: %s",
 		strings.TrimPrefix(strings.TrimSpace(decision.String()), storyPointsAdoptReceipt))
+}
+
+// writeStoryPointsWeeklyProgress writes the cache's hits, misses and path to
+// Progress; the write is the line's only report, so it is an error (gt-tibj01).
+func (c Commands) writeStoryPointsWeeklyProgress(cachePath string, cached *storypoints.CachedEmbedder) error {
+	hits, misses := cached.Stats()
+	_, err := fmt.Fprintf(c.Progress, "story points weekly: embeddings hits=%d misses=%d cache=%s\n", hits, misses, cachePath)
+	return err
 }
 
 // weeklyFailure is the weekly run's line and error for a retrain or adoption that

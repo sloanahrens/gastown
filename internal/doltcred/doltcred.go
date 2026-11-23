@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // Credential is a Dolt user and password read from a credential file. The
@@ -78,37 +79,57 @@ var (
 )
 
 // Read returns the credential the file at path holds. An empty path, or a path
-// that does not exist, means there is no credential: Read returns the zero
+// that has no entry, means there is no credential: Read returns the zero
 // Credential and a nil error.
 //
 // Read refuses a path that is not a regular file, a file that group or other
-// can read, an unknown key, a repeated key and a line without '=', and it
+// can read, a file that holds neither a user nor a password line, a link whose
+// target is gone, an unknown key, a repeated key and a line without '=', and it
 // returns a credential only with a nil error. Every error names the path and
 // the rule it broke; none holds a value from the file.
+//
+// The path is opened first and every check runs on that descriptor, so a path
+// swapped between the checks and the read cannot get another file past them;
+// O_NONBLOCK keeps a FIFO swapped in from holding the open (gt-fzsz5z).
 func Read(path string) (Credential, error) {
 	if path == "" {
 		return Credential{}, nil
 	}
-	fi, err := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Credential{}, nil
+		return absentOrDangling(path)
 	}
+	if err != nil {
+		return Credential{}, fmt.Errorf("%s: cannot open the credential file: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return Credential{}, fmt.Errorf("%s: cannot read the credential file's metadata: %w", path, err)
 	}
 	if err := checkFile(path, fi); err != nil {
 		return Credential{}, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return Credential{}, fmt.Errorf("%s: cannot open the credential file: %w", path, err)
-	}
-	defer f.Close()
 	return parse(path, f)
 }
 
-// checkFile refuses a path that is not a regular file, because reading a FIFO
-// or a device can wait forever, and a file group or other can read.
+// absentOrDangling decides what a path the open reported missing means. A path
+// with no entry at all is no credential: the zero Credential and a nil error.
+// Lstat does not follow the final link, so a path it still finds is a link
+// whose target is gone, and the open's ENOENT for a path that exists is a
+// broken credential link, never an absent file; an Lstat that fails otherwise
+// is read the same way, since an entry it cannot confirm absent must not read
+// as no credential.
+func absentOrDangling(path string) (Credential, error) {
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return Credential{}, fmt.Errorf("%s: the credential path is a symlink to nothing, so it is a broken credential link and not an absent file", path)
+	}
+	return Credential{}, nil
+}
+
+// checkFile refuses a path that is not a regular file, because a FIFO or a
+// device is not a credential, and a file group or other can read. fi describes
+// the opened descriptor, so it is the file parse reads.
 func checkFile(path string, fi fs.FileInfo) error {
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%s: the credential path must be a regular file", path)
@@ -121,7 +142,9 @@ func checkFile(path string, fi fs.FileInfo) error {
 
 // parse reads the user= and password= lines. A value is the rest of its line,
 // so a password keeps its spaces and any further '='; blank lines and lines
-// whose first non-space character is '#' are skipped.
+// whose first non-space character is '#' are skipped. A file that names neither
+// key is misprovisioned and refused: only a path with no entry means no
+// credential.
 func parse(path string, r io.Reader) (Credential, error) {
 	var c Credential
 	var seenUser, seenPassword bool
@@ -154,6 +177,9 @@ func parse(path string, r io.Reader) (Credential, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return Credential{}, fmt.Errorf("%s: cannot read the credential file: %w", path, err)
+	}
+	if !seenUser && !seenPassword {
+		return Credential{}, fmt.Errorf("%s: the credential file holds no credential, and it must hold a user=<name> line, a password=<value> line or both", path)
 	}
 	return c, nil
 }

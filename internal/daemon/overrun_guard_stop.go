@@ -71,7 +71,8 @@ const (
 //     the commit and tells the next polecat to reuse the branch and run
 //     gt done. Every other stop (a checkpoint that committed or gave up, a
 //     push that was refused or given up, no branch on origin, a head older
-//     than the sling, a sling time the stop could not date) keeps needs-split.
+//     than the sling, a head the rig's target already contains, a sling time
+//     the stop could not date) keeps needs-split.
 //     The molecule the bead carried is ended with the hand-back
 //     (handBackEndingMolecule), so the run leaves none open. The attention
 //     item for the stop is derived from that hand-back
@@ -1563,7 +1564,15 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	if branch == "" || branch == "HEAD" {
 		return ""
 	}
-	return originHeadSince(g, branch, seat.SlingAt)
+	// The target the landing worker watches for the rig: the rig's configured
+	// default branch, else main. A rig whose config.json does not decode names
+	// no target, so the stop cannot tell finished work from a branch that
+	// target already holds and answers "": needs-split is the safe path.
+	target, err := rigDefaultBranch(filepath.Join(d.config.TownRoot, seat.Rig))
+	if err != nil {
+		return ""
+	}
+	return originHeadSince(g, branch, target, seat.SlingAt)
 }
 
 // originHeadSince is the finishedOnOrigin read: the commit origin holds for
@@ -1575,6 +1584,14 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 // above the tip: that is the seat's finished work. A tip that is not an
 // ancestor of origin's head is not in origin's history, so the branch is no
 // finished branch (gt-x32qui).
+//
+// A head the target already contains is no work: a branch cut from the target
+// at the spawn holds the target's commit and nothing of its own, so resuming it
+// would run a session on an empty branch (gt-qqoqbo). The target is the branch
+// the landing worker lands onto for the rig; its commit is read from origin and
+// made local with the same destinationless fetch the head uses, then tested as
+// an ancestor of the head's origin commit. A head origin holds above the target
+// still answers as finished work.
 //
 // The head's object may be absent from the worktree, so the branch is fetched
 // into no destination ref — no branch or remote-tracking ref moves and the
@@ -1589,10 +1606,10 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 // run, and a head merely resumed keeps the time it was pushed with.
 //
 // A branch origin lacks, an origin that cannot be asked, a fetch that fails, a
-// head whose committer time cannot be read, and an unknown sling time all
-// answer "": the stop then takes the needs-split path, whose attention item
-// asks for the operator look.
-func originHeadSince(g daemonGit, branch string, slingAt time.Time) string {
+// head whose committer time cannot be read, an unknown sling time and a target
+// ref the stop cannot read all answer "": the stop then takes the needs-split
+// path, whose attention item asks for the operator look.
+func originHeadSince(g daemonGit, branch, target string, slingAt time.Time) string {
 	tip, err := g.Rev("refs/heads/" + branch)
 	if err != nil || tip == "" {
 		return ""
@@ -1620,6 +1637,28 @@ func originHeadSince(g daemonGit, branch string, slingAt time.Time) string {
 		if ancestor, err := g.IsAncestor(tip, origin); err != nil || !ancestor {
 			return ""
 		}
+	}
+	// A head the target already contains is not work this seat produced, and
+	// resuming it would start the next polecat on an empty branch. An
+	// unreadable target is no answer either way, so it takes the same safe
+	// path as a contained head.
+	targetSHA := originBranchSHA(g, target)
+	if targetSHA == "" {
+		return ""
+	}
+	held, err := g.HasObject(targetSHA)
+	if err != nil {
+		return ""
+	}
+	if !held {
+		if err := g.FetchRefspecWithTimeout("origin", "refs/heads/"+target, git.RemoteQueryTimeout); err != nil {
+			return ""
+		}
+	}
+	// Equal is an ancestor here: git's merge-base test is true for a commit
+	// against itself, so a head sitting on the target's tip answers "".
+	if contained, err := g.IsAncestor(origin, targetSHA); err != nil || contained {
+		return ""
 	}
 	at, err := g.CommitTime(origin)
 	if err != nil || !at.After(slingAt) {
@@ -1654,12 +1693,37 @@ func (e *overrunPushDivergedError) reason() string {
 // isNonFastForwardPush reports whether err is git's non-fast-forward
 // rejection, worded "non-fast-forward" when git knows the remote ref's history
 // and "fetch first" when it knows only that the ref moved.
+//
+// It differs from the same-named predicate in internal/git/git.go, which reads
+// only a *git.GitError from the local runner. A sandbox seat's push is run
+// through session exec and comes back as text with no GitError
+// (backend_openshell_ops.go), so this predicate also reads the message, one
+// segment at a time: refusalLine (internal/session/branchrelation.go) joins
+// git's output lines with " | ", so a [rejected] segment is only a segment
+// after splitting on that separator too.
 func isNonFastForwardPush(err error) bool {
-	var ge *git.GitError
-	if !errors.As(err, &ge) {
+	if err == nil {
 		return false
 	}
-	return strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")
+	var ge *git.GitError
+	if errors.As(err, &ge) && (strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")) {
+		return true
+	}
+	// Only a plain [rejected] segment carrying git's wording is a moved ref
+	// (gt-ro8oxj). A [remote rejected] segment is a different refusal: the
+	// hook or the server declined it, and no rescue is due, so it wins over
+	// any [rejected] segment beside it.
+	sawRejected := false
+	for _, segment := range strings.Split(strings.ReplaceAll(err.Error(), " | ", "\n"), "\n") {
+		if strings.Contains(segment, "[remote rejected]") {
+			return false
+		}
+		if strings.Contains(segment, "[rejected]") &&
+			(strings.Contains(segment, "non-fast-forward") || strings.Contains(segment, "fetch first")) {
+			sawRejected = true
+		}
+	}
+	return sawRejected
 }
 
 // originBranchSHA is the commit origin holds for branch, or "" when origin
@@ -2337,19 +2401,25 @@ func (d *Daemon) overrunUnsavedWorkLocation(seat overrunSeat) (session, workDir 
 }
 
 // overrunUnsavedWorkText is the note of a save that gave up on a sandbox seat:
-// the sandbox is not to be removed, where the clone is, and the push that
-// rescues it. The step comes from SaveStage and is unknown when it is empty.
+// the sandbox is not to be removed, where the clone is, and the commands that
+// rescue it. The step comes from SaveStage and is unknown when it is empty; a
+// failed commit is rescued by staging and committing the work before the push.
 func overrunUnsavedWorkText(st overrunState, session, workDir, branch, seat, bead string) string {
 	step := "The save did not complete and the step is unknown"
+	exec := func(git string) string {
+		return fmt.Sprintf("openshell sandbox exec -n %s --no-tty --no-login-shell -- %s", session, git)
+	}
+	rescue := exec(fmt.Sprintf("git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue", workDir, seat, bead))
 	switch st.SaveStage {
 	case "commit":
 		step = "The commit failed"
+		rescue = exec(fmt.Sprintf("git -C %s add -A", workDir)) + "; " +
+			exec(fmt.Sprintf("git -C %s commit -m \"overrun save: the stopped seat's work\"", workDir)) + "; " + rescue
 	case "push":
 		step = "The push failed"
 	}
 	return fmt.Sprintf("UNSAVED WORK: sandbox %s may hold work origin lacks: do not remove it. %s (%s). The clone is %s, branch %s. "+
-		"To rescue it: openshell sandbox exec -n %s --no-tty --no-login-shell -- git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue",
-		session, step, st.SaveFailure, workDir, branch, session, workDir, seat, bead)
+		"To rescue it: %s", session, step, st.SaveFailure, workDir, branch, rescue)
 }
 
 // unsavedWorkNote is that text for the seat's sandbox, or one line saying the

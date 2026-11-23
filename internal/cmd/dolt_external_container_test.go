@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,16 +103,16 @@ func TestDoltContainerCommandsSurfaceDockerFailures(t *testing.T) {
 
 // TestDoltContainerStatusReportsTheListenerNotThePid: `gt dolt status` in a
 // town whose Dolt runs in a container reports the container's listener, not a
-// host pid: with nothing answering the SQL ping it prints the container as not
-// running even while a live process holds the pid file, names the connection it
-// tried, and leaves the pid file alone (gt-zbj2y).
+// host pid: with nothing answering the SQL ping it prints the container as
+// unreachable even while a live process holds the pid file, names the
+// connection it tried, and leaves the pid file alone (gt-zbj2y).
 //
 //testpolicy:allow parallel — the command resolves the town root from process-wide cwd and GT_TOWN_ROOT, and the report goes to the process stdout
 func TestDoltContainerStatusReportsTheListenerNotThePid(t *testing.T) {
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	// The listener is an address no dial can reach: "[" is not a bracketed
 	// host, so the SQL ping fails in-process with no resolver, socket, server
-	// or Docker, and the report has to say the container is not running.
+	// or Docker, and the report has to say the container is unreachable.
 	townConfig := `{"type":"town","version":2,"name":"t","dolt":{"host":"[","port":9,"external_container":"gt-dolt"}}`
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(townConfig), 0o600); err != nil {
 		t.Fatal(err)
@@ -157,8 +158,8 @@ func TestDoltContainerStatusReportsTheListenerNotThePid(t *testing.T) {
 		t.Fatalf("gt dolt status over a stopped container: %v", statusErr)
 	}
 
-	if want := "Dolt server is not running (container gt-dolt)"; !strings.Contains(string(out), want) {
-		t.Errorf("status output does not report the stopped container, want %q:\n%s", want, out)
+	if want := "Dolt server is unreachable (container gt-dolt)"; !strings.Contains(string(out), want) {
+		t.Errorf("status output does not report the unreachable container, want %q:\n%s", want, out)
 	}
 	if want := "Connection: root@tcp([:9)/"; !strings.Contains(string(out), want) {
 		t.Errorf("status output does not name the connection it tried, want %q:\n%s", want, out)
@@ -173,5 +174,49 @@ func TestDoltContainerStatusReportsTheListenerNotThePid(t *testing.T) {
 	}
 	if string(got) != livePID {
 		t.Errorf("pid file = %q, want it left untouched at %q", got, livePID)
+	}
+}
+
+// TestDoltStatusUnreachableSaysSo: a failed SQL ping reads as unreachable, with
+// the ping error and the 2 s bound beside it, not as a stopped container that
+// sends the reader looking for a dead process (gt-1zklt8).
+func TestDoltStatusUnreachableSaysSo(t *testing.T) {
+	t.Parallel()
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	reads := stubStatusReads(townRoot)
+	reads.isRunning = func(string) (bool, int, error) {
+		return false, 0, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+	}
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status: %v", err)
+	}
+	for _, want := range []string{
+		"Dolt server is unreachable (container gt-dolt)",
+		"Ping: dial tcp 127.0.0.1:3307: connect: connection refused",
+		"The container may still be running; a failed ping says only that no SQL answer came within 2 s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output does not carry %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not running") {
+		t.Errorf("status output calls a container whose ping failed \"not running\":\n%s", out)
+	}
+}
+
+// TestDoltStatusStoppedContainer: the stopped branch keeps its own wording, so
+// only a failed ping reads unreachable (gt-1zklt8).
+func TestDoltStatusStoppedContainer(t *testing.T) {
+	t.Parallel()
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	reads := stubStatusReads(townRoot)
+	reads.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status: %v", err)
+	}
+	if want := "Dolt server is not running (container gt-dolt)"; !strings.Contains(out, want) {
+		t.Errorf("status output does not carry %q:\n%s", want, out)
 	}
 }

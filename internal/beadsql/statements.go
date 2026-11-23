@@ -262,6 +262,30 @@ func ChildStatuses(parentIDs ...string) Query {
 	}
 }
 
+// ChildStatus is one child's id and status, as a ChildStatuses row reads them.
+type ChildStatus struct{ ID, Status string }
+
+// ParseChildStatuses turns ChildStatuses rows into each parent's children. A
+// parent whose child columns are empty maps to an empty, non-nil list, not a
+// missing entry; a row under the read's three columns is an error.
+func ParseChildStatuses(rows [][]string) (map[string][]ChildStatus, error) {
+	out := make(map[string][]ChildStatus, len(rows))
+	for i, row := range rows {
+		if len(row) < 3 {
+			return nil, fmt.Errorf("beadsql: ChildStatuses row %d has %d columns, want 3", i, len(row))
+		}
+		parent, child, status := row[0], row[1], row[2]
+		if _, ok := out[parent]; !ok {
+			out[parent] = []ChildStatus{}
+		}
+		if child == "" && status == "" {
+			continue
+		}
+		out[parent] = append(out[parent], ChildStatus{ID: child, Status: status})
+	}
+	return out, nil
+}
+
 // Doctor checks' reads. `bd list` has no ephemeral filter and folds the
 // wisps tier in with --include-infra, so these stay SQL over issues alone.
 

@@ -8,11 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // makeTestTimeout bounds one dry run. make -n prints recipes and runs nothing,
@@ -46,19 +47,12 @@ func lineOf(out, needle string) int {
 	return 0
 }
 
-// repoRoot is the checkout under test, taken from this file's path so a test
-// reads the tree it was compiled in rather than the working directory.
+// repoRoot is the checkout under test. modroot finds it from the test's
+// working directory, which go test sets to the package directory, so the test
+// reads the same tree under go test -trimpath (gt-fb04i3).
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Dir(filepath.Dir(filepath.Dir(here)))
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("checkout root %s has no go.mod, so the test would read no Makefile: %v", root, err)
-	}
-	return root
+	return modroot.Root(t)
 }
 
 // makefileText is the checkout's Makefile. A case reads it directly for what

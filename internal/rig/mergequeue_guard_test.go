@@ -6,9 +6,10 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestNoMergeSettingsCommandCallsOutsideResolver is the gt-egiv structural
@@ -29,11 +30,7 @@ import (
 // bug gt-egiv exists to close.
 func TestNoMergeSettingsCommandCallsOutsideResolver(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := modroot.Root(t)
 	internalDir := filepath.Join(repoRoot, "internal")
 
 	// The only production file allowed to call MergeSettingsCommand: the

@@ -3382,6 +3382,21 @@ func sha7(sha string) string {
 	return sha
 }
 
+// preservedRefWords phrases where the nuke found a branch's tip already on
+// origin so no reader takes it for a landing of unmerged work: the branch's
+// own remote copy is a backup, another branch's ref is neither, and only the
+// rig's target branch means merged (gt-wz5ct4). target may be a branch name
+// or its remote-tracking ref.
+func preservedRefWords(branch, ref, target string) string {
+	if ref == "origin/"+branch {
+		return fmt.Sprintf("already on origin as %s (the branch's own remote copy)", ref)
+	}
+	if target != "" && ref == "origin/"+strings.TrimPrefix(target, "origin/") {
+		return fmt.Sprintf("already merged into %s", ref)
+	}
+	return fmt.Sprintf("already on origin in %s (another branch holds it)", ref)
+}
+
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, opts nukePolecatOptions) error {
 	deps := opts.Deps
 	if deps == nil {
@@ -3527,8 +3542,8 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				preservedRef = outcome.RemoteRef
 				alreadyOnRemote = outcome.AlreadyThere
 				if outcome.AlreadyThere {
-					fmt.Fprintf(out, "  %s %s already reachable from %s — nothing to preserve\n",
-						style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
+					words := preservedRefWords(branchToDelete, outcome.RemoteRef, r.DefaultBranch())
+					fmt.Fprintf(out, "  %s %s %s\n", style.Success.Render("✓"), branchToDelete, words)
 				} else {
 					fmt.Fprintf(out, "  %s preserved branch %s as %s\n", style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
 					if outcome.RemoteRef != "origin/"+branchToDelete {

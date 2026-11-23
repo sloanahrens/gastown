@@ -1358,6 +1358,7 @@ func TestSandboxSeatEndRulesPending(t *testing.T) {
 			f := newSeatEndFake(t)
 			f.seedAgent()
 			f.retire(intent.DesiredStop)
+			f.agentDB.Seed(beads.Issue{ID: endBead, Title: "seat"})
 			var logs strings.Builder
 			d := f.host.d
 			d.logger = log.New(&logs, "", 0)

@@ -322,7 +322,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 				work = submittedWork("gt-ruby")
 			}
 
-			got, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, noHeldHooks, work, pool)
+			got, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -387,7 +387,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 				}
 				return c.state, nil
 			}
-			got, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, disposition, hookHeldOf(disposition), nil, pool)
+			got, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, disposition, nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -554,7 +554,7 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 				readTown = ""
 			}
 
-			got, err := poolOccupiedSessions(answering, town, disposition, hookHeldOf(disposition), nil, pool, time.Now, sandboxSeatDeathsFor(readTown))
+			got, err := poolOccupiedSessions(answering, town, disposition, nil, pool, time.Now, sandboxSeatDeathsFor(readTown))
 			if err != nil {
 				t.Fatalf("poolOccupiedSessions: %v", err)
 			}
@@ -600,7 +600,7 @@ func TestPoolSeatSessionsCountsAnUnreadableSeatRecordUnderUnknown(t *testing.T) 
 	}
 	disposition := func(string, string) (poolSeatState, error) { return held, nil }
 
-	got, err := poolOccupiedSessions(live, town, disposition, hookHeldOf(disposition), nil,
+	got, err := poolOccupiedSessions(live, town, disposition, nil,
 		seatPool("deepseek-flash", 3), time.Now, sandboxSeatDeathsFor(town))
 	if err != nil {
 		t.Fatalf("poolOccupiedSessions err = %v; want the seat counted, not a refusal", err)
@@ -633,7 +633,7 @@ func TestPoolSeatSessionsCountsALiveSeatWithNoRecordUnderUnknown(t *testing.T) {
 	disposition := func(string, string) (poolSeatState, error) { return held, nil }
 	pool := seatPool("deepseek-flash", 3)
 
-	got, err := poolOccupiedSessions(live, town, disposition, hookHeldOf(disposition), nil,
+	got, err := poolOccupiedSessions(live, town, disposition, nil,
 		pool, time.Now, sandboxSeatDeathsFor(town))
 	if err != nil {
 		t.Fatalf("poolOccupiedSessions: %v", err)
@@ -732,7 +732,7 @@ func TestPoolSeatSessionsKeepsASandboxSeatShortOfTheDeadThreshold(t *testing.T) 
 			}
 
 			heldRead := func(string, string) (poolSeatState, error) { return held, nil }
-			got, err := poolOccupiedSessions(answering, town, heldRead, hookHeldOf(heldRead), nil, pool, time.Now, sandboxSeatDeathsFor(town))
+			got, err := poolOccupiedSessions(answering, town, heldRead, nil, pool, time.Now, sandboxSeatDeathsFor(town))
 			if err != nil {
 				t.Fatalf("poolOccupiedSessions: %v", err)
 			}
@@ -804,7 +804,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 		}, nil
 	}
 
-	crashed, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, hookHeldOf(disposition), nil, pool)
+	crashed, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (crashed): %v", err)
 	}
@@ -816,7 +816,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
 	}}
 	recordSlungSeats(t, town, restarted)
-	after, err := poolSeatSessionsWith(restarted, town, disposition, hookHeldOf(disposition), nil, pool)
+	after, err := poolSeatSessionsWith(restarted, town, disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (restarted): %v", err)
 	}
@@ -854,7 +854,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 		}
 		return out, nil
 	}
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, noHeldHooks, over, pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +864,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 
 	// A record with no work bead names nothing to confirm, so it holds nothing.
 	writeLandingSeat(t, town, "gastown", "opal", "")
-	got, err = poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, noHeldHooks, over, pool)
+	got, err = poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +889,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: "witness"}, town,
 		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-witness"})
 
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, submittedWork("gt-ghost", "gt-witness"), pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, submittedWork("gt-ghost", "gt-witness"), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 				agent = "deepseek-flash"
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, freeDeadSeats, noHeldHooks, work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, freeDeadSeats, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1084,7 +1084,7 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			}
 			writeIntentRecord(t, seat, town, rec)
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, hookHeldOf(disposition), work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1292,7 +1292,7 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 			// The stop keeps the seat's worktree (the overrun guard keeps the
 			// sandbox as it was); it is clean, so the reset seat is free.
 			reads.probe = stageCleanProbeSeat(t, town, "gastown", "nux")
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1335,7 +1335,7 @@ func TestPoolSeatSessionsFreesACleanProbeWithoutACleanupStatus(t *testing.T) {
 		return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/gt-x"}
 	}
 
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, seatPool("deepseek-flash", 3))
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, seatPool("deepseek-flash", 3))
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -1398,7 +1398,7 @@ func TestPoolDeadHookedSessions_ParkedSeatReleasesAfterThirtyMinutes(t *testing.
 					intent.Record{Desired: intent.DesiredPark, Reason: "hand-edited"})
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, hookHeldOf(hooked), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1460,7 +1460,7 @@ func TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes(t *te
 		}, nil
 	}
 
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, hookHeldOf(hooked), nil, pool)
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -1547,9 +1547,8 @@ func TestPoolDeadHookedCountsTheMeasuredDeadRead(t *testing.T) {
 				live = []poolSession{{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"}}
 			}
 			disposition := func(string, string) (poolSeatState, error) { return c.state, nil }
-			hookHeld := func(string, string) (bool, error) { return c.state.HookHeld, nil }
 
-			got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, live, now)
+			got, probed, err := poolDeadHookedSessions(town, pool, disposition, live, now)
 			if err != nil {
 				t.Fatalf("poolDeadHookedSessions: %v", err)
 			}
@@ -1585,9 +1584,8 @@ func TestPoolDeadHookedSeatCarriesItsDispositionClass(t *testing.T) {
 			town, pool := deadHookedWalkTestTown(t, "ember")
 			state := poolSeatState{Disposition: c.disposition, DeadDisposition: c.disposition, DeadRead: true}
 			disposition := func(string, string) (poolSeatState, error) { return state, nil }
-			hookHeld := func(string, string) (bool, error) { return false, nil }
 
-			got, _, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+			got, _, err := poolDeadHookedSessions(town, pool, disposition, nil, now)
 			if err != nil {
 				t.Fatalf("poolDeadHookedSessions: %v", err)
 			}
@@ -1599,29 +1597,20 @@ func TestPoolDeadHookedSeatCarriesItsDispositionClass(t *testing.T) {
 }
 
 // TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread pins that a seat whose
-// hook or state read failed, or whose state was never measured, is counted
-// with the class unread. A failed read is returned beside the seat, so the
-// count stays fail-closed and the overseer can tell it from a measured class.
+// state read failed, or whose state was never measured, is counted with the
+// class unread. A failed read is returned beside the seat, so the count stays
+// fail-closed and the overseer can tell it from a measured class.
 func TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1760000000, 0)
-	okHook := func(string, string) (bool, error) { return false, nil }
 	cases := []struct {
 		name        string
 		disposition polecatDispositionFunc
-		hookHeld    polecatHookHeldFunc
 		wantErr     bool
 	}{
 		{
 			name:        "a state read that fails",
 			disposition: func(string, string) (poolSeatState, error) { return poolSeatState{}, errors.New("state unavailable") },
-			hookHeld:    okHook,
-			wantErr:     true,
-		},
-		{
-			name:        "a hook read that fails",
-			disposition: func(string, string) (poolSeatState, error) { return deadSeatRead(false), nil },
-			hookHeld:    func(string, string) (bool, error) { return false, errors.New("beads unavailable") },
 			wantErr:     true,
 		},
 		{
@@ -1632,14 +1621,13 @@ func TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread(t *testing.T) {
 				d := polecat.WorkstateDisposition{ReuseStatus: "idle-submitted", CountsTowardCapacity: true}
 				return poolSeatState{Disposition: d, DeadDisposition: d}, nil
 			},
-			hookHeld: okHook,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town, pool := deadHookedWalkTestTown(t, "ember")
-			got, _, err := poolDeadHookedSessions(town, pool, c.disposition, c.hookHeld, nil, now)
+			got, _, err := poolDeadHookedSessions(town, pool, c.disposition, nil, now)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("poolDeadHookedSessions error = %v, want error %v", err, c.wantErr)
 			}
@@ -1665,9 +1653,8 @@ func TestPoolDeadHookedSeatClassIsWorkingForAWorkingVerdict(t *testing.T) {
 	}
 	state := poolSeatState{Disposition: working, DeadDisposition: working, DeadRead: true, HookedBead: "gt-new"}
 	disposition := func(string, string) (poolSeatState, error) { return state, nil }
-	hookHeld := func(string, string) (bool, error) { return false, nil }
 
-	got, _, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+	got, _, err := poolDeadHookedSessions(town, pool, disposition, nil, now)
 	if err != nil {
 		t.Fatalf("poolDeadHookedSessions: %v", err)
 	}
@@ -1692,16 +1679,11 @@ func TestPoolDeadHookedProbesEachDeadSeatOnce(t *testing.T) {
 	live := []poolSession{{name: "gt-live1", agent: "deepseek-flash", rig: "gastown", polecat: "live1"}}
 
 	probes := map[string]int{}
-	hookReads := map[string]int{}
 	disposition := func(_ string, polecatName string) (poolSeatState, error) {
 		probes[polecatName]++
 		return deadSeatRead(false), nil
 	}
-	hookHeld := func(_ string, polecatName string) (bool, error) {
-		hookReads[polecatName]++
-		return false, nil
-	}
-	got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, live, time.Unix(1760000000, 0))
+	got, probed, err := poolDeadHookedSessions(town, pool, disposition, live, time.Unix(1760000000, 0))
 	if err != nil {
 		t.Fatalf("poolDeadHookedSessions: %v", err)
 	}
@@ -1712,13 +1694,92 @@ func TestPoolDeadHookedProbesEachDeadSeatOnce(t *testing.T) {
 		if probes[name] != 1 {
 			t.Fatalf("seat %s was probed %d times in one pass, want once", name, probes[name])
 		}
-		if hookReads[name] != 1 {
-			t.Fatalf("seat %s's hook was read %d times in one pass, want once", name, hookReads[name])
-		}
 	}
 	if probes["live1"] != 0 {
 		t.Fatalf("the live seat was probed %d times, want none", probes["live1"])
 	}
+}
+
+// TestPoolHookRetireWalkCounts is the walk after the separate hook read was
+// retired (gt-j8elkb): every sessionless seat is read once through its
+// disposition, and that disposition alone decides whether the seat counts. An
+// unhooked seat whose measured read does not count toward capacity is not a
+// seat; a held seat whose read counts is. The walk takes no hook seam at all,
+// so its disposition is the only answer it can consult; the test pins that it
+// reads that answer exactly once per sessionless seat.
+func TestPoolHookRetireWalkCounts(t *testing.T) {
+	t.Parallel()
+	heldCounting := deadSeatRead(false)
+	heldCounting.HookHeld = true
+	cases := []struct {
+		name  string
+		state poolSeatState
+		want  int
+	}{
+		{"an unhooked sessionless seat is not counted", deadSeatRead(true), 0},
+		{"a held seat whose disposition counts is counted", heldCounting, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "ember")
+			reads := 0
+			disposition := func(string, string) (poolSeatState, error) {
+				reads++
+				return c.state, nil
+			}
+
+			got, probed, err := poolDeadHookedSessions(town, pool, disposition, nil, time.Unix(1760000000, 0))
+			if err != nil {
+				t.Fatalf("poolDeadHookedSessions: %v", err)
+			}
+			if len(got) != c.want {
+				t.Fatalf("sessionless seats = %+v, want %d", got, c.want)
+			}
+			if reads != 1 {
+				t.Fatalf("the walk read the disposition %d times, want exactly once", reads)
+			}
+			if probed != 1 {
+				t.Fatalf("the walk probed %d seats, want 1", probed)
+			}
+		})
+	}
+}
+
+// TestPoolHookRetireWalkFailed is the fail-closed half of the retired hook read
+// (gt-j8elkb): a disposition that fails keeps its seat counted as unread with
+// the error returned beside the seats, and a nil disposition is a seam not
+// wired, named by the error rather than walked to an empty result.
+func TestPoolHookRetireWalkFailed(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+
+	t.Run("a failed disposition read keeps the seat counted and returns the error", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		disposition := func(string, string) (poolSeatState, error) {
+			return poolSeatState{}, errors.New("state unavailable")
+		}
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "state unavailable") {
+			t.Fatalf("a failed disposition = %v, want the read's error beside the seats", err)
+		}
+		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked || got[0].deadClass != "unread" {
+			t.Fatalf("a failed disposition counted %+v, want the seat counted as dead-hooked and unread", got)
+		}
+		if probed != 0 {
+			t.Fatalf("a failed disposition counted %d probes, want none", probed)
+		}
+	})
+
+	t.Run("a nil disposition is an error naming the seat disposition", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if _, _, err := poolDeadHookedSessions(town, pool, nil, nil, now); err == nil ||
+			!strings.Contains(err.Error(), "needs a seat disposition") {
+			t.Fatalf("a nil disposition = %v, want the seat disposition error", err)
+		}
+	})
 }
 
 // TestPoolDeadHookedLeavesOtherCallersAlone pins that the split stays inside
@@ -1770,23 +1831,16 @@ func (s agentBeadFailsStore) ShowMultiple([]string) (map[string]*beads.Issue, er
 }
 func (s agentBeadFailsStore) Show(string) (*beads.Issue, error) { return nil, s.err }
 
-// noHeldHooks is the hook read of a town with no held hook. A test whose seats
-// are all live, landing or claimed passes it where it has no seat state to
-// read: the walk asks it for each dead seat and skips them all, which is what
-// a nil seam meant before the walk refused nil seams (gt-gg9hv.73).
-func noHeldHooks(string, string) (bool, error) { return false, nil }
-
 // TestPoolDeadHookedReadFailuresAreReturned is the fail-closed half of the
 // split (gt-gg9hv.73): each read the seat picture can fail on returns its
-// error rather than a smaller count, the cheap hold read included. An
-// unreadable read is an unknown count, not an empty one.
+// error rather than a smaller count. An unreadable read is an unknown count,
+// not an empty one.
 func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1760000000, 0)
 	heldDisposition := func(string, string) (poolSeatState, error) {
 		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
 	}
-	heldHook := func(string, string) (bool, error) { return true, nil }
 
 	t.Run("the rig registry cannot be read", func(t *testing.T) {
 		t.Parallel()
@@ -1794,7 +1848,7 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte("{"), 0o644); err != nil {
 			t.Fatalf("write rigs.json: %v", err)
 		}
-		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, now)
 		if err == nil || !strings.Contains(err.Error(), "rig registry") {
 			t.Fatalf("an unreadable rig registry = %v, want the load failure", err)
 		}
@@ -1810,7 +1864,7 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		if err := os.WriteFile(polecats, []byte("not a directory"), 0o644); err != nil {
 			t.Fatalf("write %s: %v", polecats, err)
 		}
-		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, now)
 		if err == nil || !strings.Contains(err.Error(), "listing polecats in gastown") {
 			t.Fatalf("an unlistable rig = %v, want the listing failure", err)
 		}
@@ -1826,20 +1880,8 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		if err := os.WriteFile(claims, []byte("not a directory"), 0o644); err != nil {
 			t.Fatalf("write %s: %v", claims, err)
 		}
-		if _, _, err := poolSeatSessionsProbedWith(&fakeLister{}, town, heldDisposition, heldHook, nil, pool); err == nil {
+		if _, _, err := poolSeatSessionsProbedWith(&fakeLister{}, town, heldDisposition, nil, pool); err == nil {
 			t.Fatal("an unreadable claim set counted as no claims")
-		}
-	})
-
-	t.Run("the batch's hold read cannot read the agent bead", func(t *testing.T) {
-		t.Parallel()
-		town, _ := deadHookedWalkTestTown(t, "ember")
-		store := agentBeadFailsStore{Fake: beadsfake.New(), err: errors.New("bd show: boom")}
-		batch := newPoolSeatBatch(town,
-			func(string) beads.Client { return store },
-			func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
-		if held, err := batch.hookHeld("gastown", "ember"); err == nil {
-			t.Fatalf("a failing agent-bead read answered held=%v", held)
 		}
 	})
 
@@ -1853,34 +1895,13 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 	})
 
-	t.Run("a hook read that fails keeps the seat counted and returns the error", func(t *testing.T) {
-		t.Parallel()
-		town, pool := deadHookedWalkTestTown(t, "ember")
-		probes := 0
-		disposition := func(string, string) (poolSeatState, error) {
-			probes++
-			return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
-		}
-		hookHeld := func(string, string) (bool, error) { return false, errors.New("beads unavailable") }
-		got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
-		if err == nil || !strings.Contains(err.Error(), "beads unavailable") {
-			t.Fatalf("an unreadable hook = %v, want the read's error", err)
-		}
-		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked {
-			t.Fatalf("an unreadable hook counted %+v, want the seat counted as dead-hooked", got)
-		}
-		if probes != 0 || probed != 0 {
-			t.Fatalf("an unreadable hook ran %d probes (probed %d), want none", probes, probed)
-		}
-	})
-
 	t.Run("a state read that fails on a held seat keeps the seat counted and returns the error", func(t *testing.T) {
 		t.Parallel()
 		town, pool := deadHookedWalkTestTown(t, "ember")
 		disposition := func(string, string) (poolSeatState, error) {
 			return poolSeatState{}, errors.New("worktree unreadable")
 		}
-		got, probed, err := poolDeadHookedSessions(town, pool, disposition, heldHook, nil, now)
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, nil, now)
 		if err == nil || !strings.Contains(err.Error(), "worktree unreadable") {
 			t.Fatalf("an unreadable state = %v, want the read's error", err)
 		}
@@ -1889,24 +1910,6 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 		if probed != 0 {
 			t.Fatalf("an unreadable state counted %d probes, want none", probed)
-		}
-	})
-
-	t.Run("a nil hook read is an error, not an empty walk", func(t *testing.T) {
-		t.Parallel()
-		town, pool := deadHookedWalkTestTown(t, "ember")
-		if _, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, nil, now); err == nil {
-			t.Fatal("a nil hook read walked to an empty result without an error")
-		}
-	})
-
-	t.Run("a nil disposition is an error", func(t *testing.T) {
-		t.Parallel()
-		town, pool := deadHookedWalkTestTown(t, "ember")
-		// Every sessionless seat is read now (gt-v5n2be), so a nil read is a
-		// seam not wired wherever one is found.
-		if _, _, err := poolDeadHookedSessions(town, pool, nil, noHeldHooks, nil, now); err == nil {
-			t.Fatal("a sessionless seat with a nil disposition walked to an empty result without an error")
 		}
 	})
 }
@@ -1934,8 +1937,7 @@ func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
 			disposition := func(_ string, polecatName string) (poolSeatState, error) {
 				return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: c.held(polecatName)}, nil
 			}
-			hookHeld := func(_ string, polecatName string) (bool, error) { return c.held(polecatName), nil }
-			snap, err := poolSeatSnapshotWith(&fakeLister{}, town, disposition, hookHeld, nil, pool, func() time.Time { return now })
+			snap, err := poolSeatSnapshotWith(&fakeLister{}, town, disposition, nil, pool, func() time.Time { return now })
 			if err != nil {
 				t.Fatalf("poolSeatSnapshotWith: %v", err)
 			}

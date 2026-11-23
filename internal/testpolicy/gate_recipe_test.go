@@ -4,9 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // gateQuotaCommand is the command the gate unit tier's width comes from (gt-g9fnsa).
@@ -47,11 +48,7 @@ func gateQuotaProblem(makefile string) string {
 // width and GOMAXPROCS (gt-4fkvjg).
 func TestGateRecipe(t *testing.T) {
 	t.Parallel()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller: no path to the Makefile")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "Makefile"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "Makefile"))
 	if err != nil {
 		t.Fatalf("read the Makefile: %v", err)
 	}

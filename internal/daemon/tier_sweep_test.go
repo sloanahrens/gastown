@@ -2054,8 +2054,8 @@ func TestTierSweepLogNoteNeedsTheSlot(t *testing.T) {
 }
 
 // TestRunTierSweep_LogsSweepStarted: the cycle's start names the rig's sha and
-// every tier the cycle will run, so the dashboard's Tier sweeps pane reads an
-// exact running state instead of inferring it (gt-rntre).
+// every tier the cycle will run, so the dashboard's tiersweep feed section
+// reads an exact running state instead of inferring it (gt-rntre).
 func TestRunTierSweep_LogsSweepStarted(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

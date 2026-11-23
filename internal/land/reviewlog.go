@@ -169,7 +169,7 @@ func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, ReviewFindingText{
-			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
+			ID: f.ID, Severity: f.Severity, File: scrubClaim(f.Path), Line: f.Line, Title: scrubClaim(f.Title), Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
 		})
 	}
 	return out
@@ -195,20 +195,22 @@ func boundedClaim(s string) string {
 
 const redactedWord = "<redacted>"
 
-// scrubClaim replaces every token-shaped run in a finding's claim with
-// redactedWord and keeps every other byte: om's claim quotes the reviewed code,
-// and a credential in it must not reach the review log (gt-uxbi5y). It decides
-// no boundaries by word: at each letter or digit not glued to one before it (or
-// starting a distinctive prefix, glued or not), it takes the run of token bytes that starts there and asks the rule, which is
-// anchored at the start of what it is given, so a token in backticks, brackets,
-// quotes, a URL query or after any name or joiner starts at its own offset. A
-// token with an ambiguous short prefix (`sk-`) glued to a letter before it is not
-// found, unless the letter ends an escape (`\n`, `%3D`): that is the one residual,
-// kept because the rule's prefixes (`sk-`) occur inside ordinary words.
+// scrubClaim replaces every token-shaped run in a finding's text with
+// redactedWord and keeps every other byte: om's title, path and claim quote the
+// reviewed code, and a credential in one must not reach the review log
+// (gt-uxbi5y, gt-kwx3vs). It decides no boundaries by word: at each letter or
+// digit not glued to one before it (or starting a distinctive prefix, glued or
+// not), it takes the run of token bytes that starts there and asks the rule,
+// which is anchored at the start of what it is given, so a token in backticks,
+// brackets, quotes, a URL query or after any name or joiner starts at its own
+// offset. A token with an ambiguous short prefix (`sk-`) glued to a letter
+// before it is not found, unless the letter ends an escape (`\n`, `%3D`): that
+// is the one residual, kept because the rule's prefixes (`sk-`) occur inside
+// ordinary words.
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
 // It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,
-// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun) for
+// so its cost is bounded whatever the text: O(scrubInputBound x maxTokenRun) for
 // the tries, plus one forward pass past the cap for the tail of a longer token.
 func scrubClaim(s string) string {
 	s = cutAtRune(s, scrubInputBound)
@@ -274,6 +276,14 @@ func tokenEnd(s string, i int) int {
 	capped := end < len(s) && tokenByte(s[end])
 	run := strings.TrimRight(s[i:end], ".:")
 	n := acceptedLen(run)
+	if n == 0 && strings.HasPrefix(s[i:], "eyJ") {
+		// An unsecured JWT ends in the '.' of its empty signature, which the
+		// trim took for the sentence's: try the run as written, then shorter
+		// starts until the trim region is used up.
+		for k := end; k > i+len(run) && n == 0; k-- {
+			n = acceptedLen(s[i:k])
+		}
+	}
 	if n == 0 {
 		return i
 	}
@@ -344,11 +354,12 @@ func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' ||
 // (risk-assessment-framework, ask_user_for_input).
 const distinctivePrefixLen = 4
 
-// knownPrefixes are all the rule's prefixes and the ASIA of its temporary-key
-// shape: the only starts a token the rule accepts can have; distinctivePrefixes
-// are those of them long enough to be found at any offset, glued or not.
+// knownPrefixes are all the rule's prefixes and the ASIA and eyJ of its key-id
+// and JWT shapes: the only starts a token the rule accepts can have; distinctive
+// ones are those long enough to be found glued inside a word. eyJ, as ASIA, is
+// too short: the shape, not the prefix, decides.
 var knownPrefixes, distinctivePrefixes = func() (all, distinctive []string) {
-	all = []string{"ASIA"}
+	all = []string{"ASIA", "eyJ"}
 	distinctive = []string{"ASIA"}
 	for _, p := range config.SecretValuePrefixes() {
 		all = append(all, p)

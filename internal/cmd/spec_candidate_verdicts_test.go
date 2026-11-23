@@ -113,17 +113,19 @@ func newVerdictTick(t *testing.T, n int) *verdictTick {
 // on, the details read through the counting store, and the grouped children
 // read through the counting reader.
 func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) specDispatchEnv {
-	f.seats = []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 0}}
+	f.seats = []specdispatch.Seat{{Agent: "deepseek-flash", Cap: specCandidateFixtureSize + 1}}
 	env := f.env()
 	// The tick's own read ledger, as a fresh tick gets: the next tick must not
 	// be served from the last tick's reads.
 	reads := newSpecTickReads()
 	v.reads = reads
 	env.Reads = reads
-	// The seat pool is empty, so the per-tick limit is set above every fixture
-	// candidate: each reaches the seat choice and is skipped there, after the
-	// checks above it (the children read included), and none is hooked between
-	// ticks (gt-myexrt).
+	// The pool has free seats, so a tick with none would refuse every candidate
+	// before its children are read (gt-n3l0sm). Each fixture candidate is pinned
+	// to an agent the pool has no seat for instead: it reaches the seat choice
+	// and is skipped there, after the checks above it (the children read
+	// included), and none is hooked between ticks. The per-tick limit is set
+	// above every fixture candidate so it never stops the walk (gt-myexrt).
 	env.PerTick = specCandidateFixtureSize + 1
 	env.Verdicts = verdicts
 	board := env.Candidates
@@ -135,6 +137,7 @@ func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) spe
 			id := read.Candidates[i].Spec.ID
 			read.Candidates[i].UpdatedAt = v.rows[id]
 			read.Candidates[i].DepCount = v.deps[id]
+			read.Candidates[i].Spec.Labels = append(append([]string(nil), read.Candidates[i].Spec.Labels...), specdispatch.AgentLabelPrefix+"ghost")
 		}
 		// The details read fills the design and the admission edges from the
 		// store, exactly as the tick's own wiring does.

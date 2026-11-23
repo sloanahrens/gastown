@@ -86,9 +86,11 @@ func ContentionRecord(metadata []byte) (rec ContentionState, ok bool) {
 }
 
 // ContentionNext returns the schedule after one more lost bond at now, with
-// RetryAt set to now plus the delay for that loss. exhausted reports whether
-// ContentionWindow has passed since the first loss. A spent record stays spent
-// and is exhausted. A record with no attempts yet is a first loss dated now.
+// RetryAt set to now plus the delay for that loss. Both times are in UTC: the
+// metadata contract is RFC 3339 UTC, whatever location the caller's clock
+// carries. exhausted reports whether ContentionWindow has passed since the
+// first loss. A spent record stays spent and is exhausted. A record with no
+// attempts yet is a first loss dated now.
 func ContentionNext(rec ContentionState, now time.Time) (next ContentionState, exhausted bool) {
 	if rec.Spent {
 		return rec, true
@@ -98,9 +100,9 @@ func ContentionNext(rec ContentionState, now time.Time) (next ContentionState, e
 		first = now
 	}
 	next = ContentionState{
-		First:    first,
+		First:    first.UTC(),
 		Attempts: rec.Attempts + 1,
-		RetryAt:  now.Add(contentionDelay(rec.Attempts + 1)),
+		RetryAt:  now.Add(contentionDelay(rec.Attempts + 1)).UTC(),
 	}
 	return next, now.Sub(first) >= ContentionWindow
 }

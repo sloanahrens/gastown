@@ -3,20 +3,17 @@ package session
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // dockerfileInstructions returns the polecat Dockerfile's instructions with
 // continuation lines joined, one string each.
 func dockerfileInstructions(t *testing.T) []string {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "deploy", "polecat", "Dockerfile"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "deploy", "polecat", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}

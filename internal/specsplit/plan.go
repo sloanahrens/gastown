@@ -36,15 +36,18 @@ type SplitPlan struct {
 // that cannot become a tested piece is refused, and so are groups that do not
 // hold each of the spec's boxes exactly once.
 //
-// spec.BaseFiles must be supplied (nil is an error; an empty map means nothing
-// exists yet): B says a file "is created by" A only when A's bullets cite it
-// and it is absent from BaseFiles. A symbol is cited only from a declaration
-// code span in A's bullets. Known limit: the planner is not told which symbols
-// already exist on the base, so a symbol A's bullets declare is always noted
-// "created by", even if it exists (a BaseSymbols input would close this).
+// spec.BaseFiles and spec.BaseSymbols must be supplied (nil is an error; an
+// empty map means nothing exists yet): B says a file "is created by" A only
+// when A's bullets cite it and it is absent from BaseFiles, and says a symbol
+// is created by A only when A's bullets declare it in a declaration code span,
+// B cites it as "<package's last segment>.<name>" ("config.Read"), and it is
+// absent from BaseSymbols (keyed "internal/config.Read").
 func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	if spec.BaseFiles == nil {
 		return SplitPlan{}, fmt.Errorf("BaseFiles not supplied: the planner needs the files that exist on the base branch to say which files a piece creates; pass an empty map when none exists")
+	}
+	if spec.BaseSymbols == nil {
+		return SplitPlan{}, fmt.Errorf("BaseSymbols not supplied: the planner needs the symbols that exist on the base branch to say which symbols a piece creates; pass an empty map when none exists")
 	}
 	if len(groups) < 2 {
 		return SplitPlan{}, fmt.Errorf("a split needs at least two file groups, got %d", len(groups))
@@ -54,8 +57,8 @@ func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	}
 	half := (len(groups) + 1) / 2
 	return SplitPlan{
-		A: buildPiece("A", groups[:half], groups, nil, "", spec.BaseFiles),
-		B: buildPiece("B", groups[half:], groups, groups[:half], "A", spec.BaseFiles),
+		A: buildPiece("A", groups[:half], groups, nil, "", spec.BaseFiles, spec.BaseSymbols),
+		B: buildPiece("B", groups[half:], groups, groups[:half], "A", spec.BaseFiles, spec.BaseSymbols),
 	}, nil
 }
 
@@ -99,9 +102,10 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 }
 
 // buildPiece shapes one piece from its groups, reading allGroups for the guard
-// commands and createdFrom for the files and symbols the piece depends on. A file
-// in baseFiles exists on the base branch, so no piece creates it.
-func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string, baseFiles map[string]bool) Piece {
+// commands and createdFrom for the files and symbols the piece depends on. A
+// file in baseFiles or a symbol in baseSymbols exists on the base branch, so no
+// piece creates it.
+func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string, baseFiles, baseSymbols map[string]bool) Piece {
 	var packages []string
 	var ownBoxes []Box
 	var constraints []string
@@ -111,7 +115,7 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		constraints = append(constraints, group.Constraints...)
 	}
 	if dependsOn != "" {
-		constraints = append(constraints, createdNotes(createdFrom, groups, baseFiles)...)
+		constraints = append(constraints, createdNotes(createdFrom, groups, baseFiles, baseSymbols)...)
 	}
 	piece := Piece{
 		Name:      name,
@@ -206,41 +210,54 @@ func groupNoun(n int) string {
 }
 
 // createdNotes returns a note for each file or symbol the aGroups name that a
-// bGroups bullet cites. A file that exists on the base branch (baseFiles) gets
-// no note: a created-by note on an existing path is the spec lint's trap.
-func createdNotes(aGroups, bGroups []FileGroup, baseFiles map[string]bool) []string {
+// bGroups bullet cites. A file that exists on the base branch (baseFiles), or a
+// symbol that does (baseSymbols, keyed by the declaring group's package and the
+// symbol's name), gets no note: a created-by note on something that already
+// exists is the spec lint's trap.
+func createdNotes(aGroups, bGroups []FileGroup, baseFiles, baseSymbols map[string]bool) []string {
 	aPackages := map[string]bool{}
-	var aBullets []string
 	for _, group := range aGroups {
 		aPackages[group.Package] = true
-		aBullets = append(aBullets, group.Constraints...)
 	}
 	var bBullets []string
 	for _, group := range bGroups {
 		bBullets = append(bBullets, group.Constraints...)
 	}
 	var notes []string
-	for _, bullet := range aBullets {
-		for _, name := range createdNames(bullet, aPackages) {
-			if !name.symbol && baseFiles[name.text] {
-				continue
-			}
-			cited := citesPath(bBullets, name.text)
-			if name.symbol {
-				cited = citesSymbol(bBullets, name.text)
-			}
-			if cited {
-				notes = append(notes, name.note())
+	for _, group := range aGroups {
+		for _, bullet := range group.Constraints {
+			for _, name := range createdNames(bullet, aPackages, group.Package) {
+				if name.symbol && baseSymbols[symbolKey(group.Package, name.text)] {
+					continue
+				}
+				if !name.symbol && baseFiles[name.text] {
+					continue
+				}
+				cited := citesPath(bBullets, name.text)
+				if name.symbol {
+					cited = citesSymbol(bBullets, name.qualified)
+				}
+				if cited {
+					notes = append(notes, name.note())
+				}
 			}
 		}
 	}
 	return unique(notes)
 }
 
+// symbolKey is BaseSymbols' key for a symbol declared in a package directory.
+func symbolKey(pkg, name string) string {
+	return pkg + "." + name
+}
+
 // createdName is a file or symbol a bullet names.
 type createdName struct {
-	// text is the path or symbol as written.
+	// text is the path, or the symbol's bare name as A declares it.
 	text string
+	// qualified is the symbol as B cites it: its package's last path segment,
+	// a dot and the name ("config.Read"). Empty for a file.
+	qualified string
 	// symbol marks a backticked identifier rather than a repo path.
 	symbol bool
 }
@@ -248,9 +265,14 @@ type createdName struct {
 // note is the Constraints sentence that records which piece created the name.
 func (n createdName) note() string {
 	if n.symbol {
-		return "`" + n.text + "` is created by bead PIECE_A."
+		return "`" + n.qualified + "` is created by bead PIECE_A."
 	}
 	return n.text + " is created by bead PIECE_A."
+}
+
+// packageBase is a package directory's last path segment: "config" for internal/config.
+func packageBase(pkg string) string {
+	return pkg[strings.LastIndexByte(pkg, '/')+1:]
 }
 
 var (
@@ -262,8 +284,8 @@ var (
 )
 
 // createdNames returns the files, in aPackages, and the symbols one bullet
-// names.
-func createdNames(bullet string, aPackages map[string]bool) []createdName {
+// names, the symbols qualified by the package they are declared in.
+func createdNames(bullet string, aPackages map[string]bool, pkg string) []createdName {
 	var names []createdName
 	for _, token := range strings.FieldsFunc(bullet, splitToken) {
 		path, ok := pathToken(token)
@@ -274,7 +296,7 @@ func createdNames(bullet string, aPackages map[string]bool) []createdName {
 	}
 	for _, span := range backtickSpanRe.FindAllStringSubmatch(bullet, -1) {
 		if m := declSpanRe.FindStringSubmatch(strings.TrimSpace(span[1])); m != nil {
-			names = append(names, createdName{text: m[1], symbol: true})
+			names = append(names, createdName{text: m[1], qualified: packageBase(pkg) + "." + m[1], symbol: true})
 		}
 	}
 	return names
@@ -306,9 +328,8 @@ func citesPath(bullets []string, path string) bool {
 	return false
 }
 
-// citesSymbol reports whether any of the bullets cites the symbol in a code
-// span: the symbol as a whole identifier inside backticks. The same word in prose
-// cites nothing.
+// citesSymbol reports whether any bullet cites the qualified symbol as a whole
+// identifier in a code span; a bare name in B's code and the word in prose cite nothing.
 func citesSymbol(bullets []string, symbol string) bool {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(symbol) + `\b`)
 	for _, bullet := range bullets {

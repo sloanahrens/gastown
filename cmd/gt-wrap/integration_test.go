@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +49,38 @@ func TestIntegrationWrapperRunsGTInTheDaemon(t *testing.T) {
 	}
 }
 
+// TestIntegrationWrapperEnvFindsTheTown covers wrapperEnv's town lookup with no
+// cluster: from a directory nested in a temp town, it must name that town.
+func TestIntegrationWrapperEnvFindsTheTown(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, filepath.Dir(townMarker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, townMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(town, "cmd", "gt-wrap")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	resolved, err := filepath.EvalSymlinks(town)
+	if err != nil {
+		t.Fatalf("resolve the temp town: %v", err)
+	}
+	// t.Chdir keeps the path as given, so on a host whose temp directory sits
+	// behind a symlink (macOS /var) the env names it unresolved: compare resolved.
+	named := ""
+	for _, kv := range wrapperEnv(t) {
+		if v, ok := strings.CutPrefix(kv, "GT_TOWN_ROOT="); ok {
+			named = v
+		}
+	}
+	if got, err := filepath.EvalSymlinks(named); err != nil || got != resolved {
+		t.Fatalf("wrapperEnv names GT_TOWN_ROOT=%q (resolved %q, err %v), want %s", named, got, err, resolved)
+	}
+}
+
 // buildWrapper builds the wrapper the test runs. CGO_ENABLED=0 keeps it static
 // and keeps the build off the cgo path: the wrapper's dependency graph holds no
 // cgo package, so the icu4c headers AGENTS.md warns about for a bare `go build`
@@ -72,13 +103,13 @@ func buildWrapper(t *testing.T) string {
 // in the pod resolves the town this test runs in.
 func wrapperEnv(t *testing.T) []string {
 	t.Helper()
-	// The town is the one this checkout sits in, found from this source file:
-	// the hermetic harness moves the working directory into a sandbox town.
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("find this source file")
+	// go test runs the binary in the package's source directory; the town is
+	// the first directory above it holding the marker. -trimpath leaves the
+	// working directory alone, unlike this source file's path.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("reading this package's working directory: %v", err)
 	}
-	dir := filepath.Dir(file)
 	town := ""
 	for {
 		if _, err := os.Stat(filepath.Join(dir, townMarker)); err == nil {
@@ -92,7 +123,7 @@ func wrapperEnv(t *testing.T) []string {
 		dir = parent
 	}
 	if town == "" {
-		t.Fatalf("no town root above %s, so there is no town to run against", dir)
+		t.Fatal("no town root above the package directory, so there is no town to run against")
 	}
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".config", "gt")

@@ -151,7 +151,7 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
 .workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
-.workrow .wsub,.workrow .wstart,.workrow .wround{font-size:11px;white-space:nowrap}
+.workrow .wsub,.workrow .wstart,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -395,7 +395,19 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 .mgthead{font-size:12px;font-weight:700;color:var(--dim)}
 .mgchart{display:block;width:100%;height:auto;margin-top:4px}
 .mgtcap{color:var(--dim);font-size:11px;margin-top:2px;overflow-wrap:anywhere}
-.sweepico{font-weight:700}
+/* One row per landed commit in the System updates pane: the sha, then its stage
+   chips in pipeline order. A stage that never ran keeps the dim token. */
+.surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+/* The header's worst-state glyph. A class of its own because the retired Tier
+   sweeps icon's class must stay gone (gt-gfglv0, gt-jug4e0). */
+.suico{font-weight:700}
+/* The Maintenance jobs pane draws its rows with .surow and its header glyph
+   with .suico; the row that opens a job's runs is the only control there. */
+#jobs .surow[role=button]{cursor:pointer}
+.jobruns{flex-basis:100%;padding-left:10px}
+.subanner{border-bottom:1px solid var(--line);padding:2px 0 6px;margin-bottom:4px;font-weight:600}
+.subanner.ended{font-weight:400;color:var(--dim)}
+.tag.absent{color:var(--dim)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
 #events{max-height:40vh;overflow:auto;padding:4px 0}
@@ -544,7 +556,8 @@ a.hrow:hover{background:#19212b}
     <section id="activitysec" data-fold="activity" data-default-collapsed><h2>Town activity <span class="r" id="activitynote"></span></h2><div class="body" id="activity"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
-    <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
+    <section data-fold="jobs"><h2><span class="suico" id="jobsico"></span>Maintenance jobs <span class="r" id="jobsnote"></span></h2><div class="body" id="jobs"></div></section>
+    <section data-fold="systemupdates"><h2><span class="suico" id="systemupdatesico"></span>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
   <div class="col">
@@ -1288,6 +1301,9 @@ function paintAges(r, now) {
   if (p.bead && p.phase === "starting") r.age.append(el("div", "wstart", "starting"));
   else if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
   if (p.bead && p.reject_count > 0) r.age.append(el("div", "wround", "round " + (p.reject_count + 1)));
+  // The count itself, warned from the second refusal on so a repeat stands out
+  // (gt-addb76).
+  if (p.bead && p.reject_count >= 1) r.age.append(el("div", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
   // The Points cell reads the bead's estimate, then the elapsed time since
   // dispatch, which moves with the clock like the age does. A seat holding no
   // bead leaves it empty.
@@ -2056,12 +2072,28 @@ function landingAgentCell(row, queued) {
   return c;
 }
 
+// landingRejectPill is the refusal count a landings row wears beside its state.
+// A landed row says where it ended ("landed · after 2 rejections"), unless its
+// State cell already wears a pill (no review, om error), which keeps its own
+// word for the outcome. From the second refusal on the pill warns: a bead
+// refused twice has been through an overseer's decision, not only the worker's
+// own retry (gt-x8oh0q).
+function landingRejectPill(n, landed, stateHasPill) {
+  if (!(n > 0)) return null;
+  const count = n === 1 ? "1 rejection" : n + " rejections";
+  const g = el("span", "tag" + (n >= 2 ? " warnc" : ""), landed ? (stateHasPill ? "" : "landed · ") + "after " + count : "rejected ×" + n);
+  g.title = landed ? "landed after " + count : n + (n === 1 ? " rejection" : " rejections") + " before this attempt";
+  return g;
+}
+
 // landingStateCell is the Landings table's State column: the pill a landing
 // wears — queued, running, rejected and why, failing at which stage, no review
 // or an om error — and on its hover the detail the row used to print on a second
-// line (gt-ultode). A landed landing whose review approved it draws no pill, as
-// it drew none beside its id. A queued row's pill is drawn by the caller, which
-// knows the bead came from the Queue reader rather than from a landing record.
+// line (gt-ultode). A landed landing whose review approved it draws no state
+// pill, as it drew none beside its id, so a refusal count it carries is the
+// cell's only pill. A queued row's state pill is drawn by the caller, which knows the
+// bead came from the Queue reader rather than from a landing record; its
+// refusal count comes through the same helper.
 function landingStateCell(r) {
   const c = el("span", "lstate");
   if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; c.append(g); }
@@ -2069,6 +2101,8 @@ function landingStateCell(r) {
   else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed · " + backoffDetail(r); c.append(g); }
   else if (r.verdict === "skipped") c.append(el("span", "tag", "no review"));
   else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; c.append(g); }
+  const rej = landingRejectPill(r.reject_count, r.outcome === "landed", c.children.length > 0);
+  if (rej) c.append(rej);
   return c;
 }
 
@@ -2080,10 +2114,10 @@ function landingStateCell(r) {
 // (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell
 // names the branch's agent ("crew/<agent>/...") or, when the branch names none,
 // says bird — never a dash, which would look like missing data (gt-kmp7c); the
-// tooltip says why there is no polecat time (gt-rxs7w, gt-830fd). A row that
-// carries no reading — a queued bead, whose queue reading (QueueBead) has no
-// polecat time — reads the dash, never a figure guessed from its wait
-// (gt-duuq1).
+// tooltip says why there is no polecat time (gt-rxs7w, gt-830fd). A queued bead
+// draws the reading its QueueBead carries — polecat_secs, the + of a lower
+// bound, and the dash when the spans log gave it none, never a figure guessed
+// from its wait (gt-p77nun).
 function polecatTimeCell(row) {
   const pc = el("span", "n", row.crew ? (row.crew_agent || "bird") : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
   const attempts = row.polecat_attempts || [];
@@ -2166,11 +2200,8 @@ function landingTable(s, names, rows, waiting) {
   // and every reading then sit in the column the running and finished rows put
   // them. The wait is aged from the bead's last update — the label write gt done
   // makes is normally its last write. No stage has run, so Score, Gate, om and
-  // Ship hold the empty-column dash a running row draws. The queue reading
-  // carries no polecat time, so the Polecat time cell reads the dash
-  // polecatTimeCell draws for a row with none, never a time guessed from the
-  // wait. The worker's order is not known to this page, so a row says waiting
-  // and nothing about position.
+  // Ship hold the empty-column dash a running row draws. The worker's order is
+  // not known to this page, so a row says waiting and nothing about position.
   for (const b of shown) {
     const tr = el("div", "ltrow");
     const when = el("span", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
@@ -2188,6 +2219,8 @@ function landingTable(s, names, rows, waiting) {
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
     st.append(tag);
+    const rej = landingRejectPill(b.reject_count, false, true);
+    if (rej) st.append(rej);
     tr.append(st, polecatTimeCell(b), landingPointsCell(b.sp_estimate, null), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"));
     labelCells(tr, LT_COLS, LT_BEAD);
     tbl.append(tr);
@@ -2458,9 +2491,10 @@ function renderCloud(s) {
 }
 
 // The Birds panel draws the birds' daily reports, one row each: the bird's name
-// and the pages it wrote, the age of the summary it left, the summary itself,
-// and the bird's own ask for the operator as a badge. What a row shows is the
-// sidecar the reader read, so a summary holding markup goes through el() and
+// and the pages it wrote, the age of the summary it left and, when the reader
+// knows it, when the bird was last active, the summary itself, and the bird's
+// own ask for the operator as a badge. What a row shows is the sidecar the
+// reader read, so a summary holding markup goes through el() and
 // reads as that text; the name is itself the link to the bird's report, and the
 // "report" and "previous" links beside it open the two pages in a new tab. The
 // previous link carries when that page was written, so its label never has to
@@ -2540,7 +2574,14 @@ function drawBirds(box, s) {
     }
     if (isStale(b)) head.append(el("span", "badge warnc", "STALE"));
     else if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));
-    if (b.written) head.append(el("span", "bage", "written " + age(b.written) + " ago"));
+    // The report's age is when the bird last wrote, which is not whether it is
+    // still working: a bird writes a daily report only when asked, so its age
+    // says nothing on its own. The row also gives when the bird was last
+    // active, when the reader has that, in the same muted age (gt-j1e6s9).
+    const ages = [];
+    if (b.written) ages.push("written " + age(b.written) + " ago");
+    if (b.last_active) ages.push("last active " + age(b.last_active) + " ago");
+    if (ages.length) head.append(el("span", "bage", ages.join(" · ")));
     row.append(head);
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
     else if (b.summary) row.append(el("div", "bsum", b.summary));
@@ -2896,165 +2937,334 @@ function deployStages(r) {
   return cell;
 }
 
-// One compact line per sweep: when, which rig and sha, a verdict per tier, and
-// how long the whole cycle took. A tier the sweep did not run is left blank, and
-// a RED one carries the failing units its rig's record still holds.
-const TIERSWEEP_TIERS = ["shell", "integration", "race"];
+// The System updates pane (gt-h18aif): the feed's joined section as one row per
+// landed commit, newest first, a chip per stage in pipeline order. A stage the
+// commit never reached is grey; one missing while a source behind the section
+// could not be read is amber "not read", because an unreadable source is not a
+// commit that skipped the stage. An unknown status or outcome is failed, never
+// passed.
+const SYSTEM_UPDATE_STAGES = ["post-land", "shell", "integration", "race", "images", "roll"];
+// A partial roll wears amber with the failure mark rather than failed's red:
+// the install and restart happened, the run did not pass (gt-c8yqh9).
+const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], partial: ["warnc", "✗", "partial"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
 
-// The When column's reading of a sweep's stamp, shared with the icon's tooltip
-// so the two cannot disagree about which sweep a verdict came from.
-function sweepWhen(at) {
-  const d = new Date(at);
-  return d.toDateString() === new Date().toDateString() ? clock(at).slice(0, 5) : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(at).slice(0, 5);
+// The pair chip (gt-jug4e0) sits between the images and roll chips and reads the
+// row's own Pair, as the hub classified it: a ready pair waits amber for its
+// roll, a building pair wears amber and the running mark, a failed, refused or
+// stuck pair is red, and an absent pair and one nobody classified are grey —
+// unknown with a question mark. A pair is never green: green means done, and a
+// ready pair is still waiting.
+const SYSTEM_UPDATE_PAIR_CHIPS = {
+  ready: ["warnc", "waiting for roll", "ready"],
+  building: ["warnc", "◌", "building"],
+  failed: ["badc", "✗", "failed"],
+  refused: ["badc", "✗", "refused"],
+  stuck: ["badc", "✗", "stuck"],
+  unknown: ["absent", "?", "unknown"],
+  absent: ["absent", "–", "absent"],
+};
+
+// systemUpdatePairChip is the pair chip's colour, glyph and word. A Pair the
+// page does not know, including one the row has not filled, is unknown rather
+// than absent: a reading nobody made is not a commit with no pair.
+function systemUpdatePairChip(pair) {
+  return SYSTEM_UPDATE_PAIR_CHIPS[pair] || SYSTEM_UPDATE_PAIR_CHIPS.unknown;
 }
 
-// Each tier's most recent verdict, keyed by tier. This is the rule the daemon's
-// attention list holds to (internal/daemon/attention.go): a tier a sweep did
-// not run keeps the result of the sweep that last did, so a newer shell-only
-// GREEN cannot hide an integration RED still standing. The first row naming a
-// tier wins because the reader hands them over newest first
-// (dashboard_tier_sweep.go recent()).
-function tierSweepLatest(sweeps) {
-  const latest = {};
-  for (const row of sweeps || []) (row.stages || []).forEach(x => { if (!latest[x.tier]) latest[x.tier] = {verdict: x.verdict, at: row.at}; });
-  return latest;
+// systemUpdateStageState folds one stage of a row to its state: a pipeline run
+// is its status, the sweep a verdict per tier, a roll its outcome. A partial
+// roll gets its own state, never failed: it installed and restarted, and only a
+// later step did not pass (gt-c8yqh9).
+function systemUpdateStageState(row, stage) {
+  if (stage === "post-land" || stage === "images") {
+    const run = (row.runs || []).find(r => r.workflow === stage + ".yml");
+    return !run ? "absent" : run.status === "success" ? "ok" : (run.status === "running" || run.status === "queued" ? "running" : "failed");
+  }
+  if (stage === "roll") {
+    if (!row.roll) return "absent";
+    const outcome = row.roll.outcome;
+    if (outcome === "ok") return "ok";
+    if (outcome === "running") return "running";
+    if (outcome === "partial") return "partial";
+    return "failed";
+  }
+  const st = ((row.sweep && row.sweep.stages) || []).find(x => x.tier === stage);
+  return st ? (st.verdict === "GREEN" ? "ok" : "failed") : "absent";
 }
 
-// The pane's title icon, the one verdict a collapsed pane still shows. Green
-// needs every tier's most recent result GREEN and red needs one RED; a tier
-// that has never reported leaves it neutral, because an unknown result is
-// neither. A sweep in flight is not a verdict (gt-5qk83).
-function tierSweepIcon(ts) {
-  const none = {glyph: "–", cls: "", title: "no tier sweep results"};
-  if (!ts) return none;
-  if (ts.unavailable) return {glyph: "–", cls: "", title: "the daemon log could not be read"};
-  if (!(ts.sweeps || []).length) return none;
-  const latest = tierSweepLatest(ts.sweeps);
-  const title = TIERSWEEP_TIERS.map(tier => { const v = latest[tier]; return tier + " " + (v ? v.verdict + " " + sweepWhen(v.at) : "–"); }).join(", ");
-  // RED first: one red tier outranks any number of greens.
-  if (TIERSWEEP_TIERS.some(tier => latest[tier] && latest[tier].verdict === "RED")) return {glyph: "✗", cls: "badc", title};
-  if (TIERSWEEP_TIERS.every(tier => latest[tier] && latest[tier].verdict === "GREEN")) return {glyph: "✓", cls: "good", title};
-  return {glyph: "–", cls: "", title};
+// systemUpdatePartialWord is a partial roll chip's word: the outcome and the
+// step the roll did not pass, so a roll that installed and restarted but could
+// not verify does not read like one that never installed. A record that names
+// no step keeps the outcome word alone, never a blank title (gt-c8yqh9).
+function systemUpdatePartialWord(roll) {
+  return roll && roll.step ? "partial at " + roll.step : "partial";
 }
 
-// The neutral state carries no colour class of its own, so the dash takes the
-// h2's muted tone. Green and red reuse the page's good and badc tokens, which
-// keeps colour from being the only carrier of the verdict.
-function paintTierIcon(ts) {
-  const ico = $("tiersweepico");
+// systemUpdateStageUnknown says whether the source behind one stage of a row
+// could not be read, so a stage missing from it is unknown, not absent: the run
+// may have happened and its record been lost. A source the rows join at all
+// marks the whole section unavailable; the roll's own record marks only the roll,
+// and a sweep that answered nil marks only the sweep.
+function systemUpdateStageUnknown(su, stage) {
+  if (stage === "roll") return !!(su.unavailable || su.roll_unknown);
+  if (stage === "post-land" || stage === "images") return !!su.unavailable;
+  return !!(su.unavailable || su.sweep_unknown);
+}
+
+// The pane's banner while a roll runs (gt-o8m8ho): its step, wall time and the
+// builds it moves between. The feed names only a roll in flight, so an ended
+// roll's banner stays SYSTEM_UPDATES_BANNER_STAY_MS after the first push without it.
+const SYSTEM_UPDATES_BANNER_STAY_MS = 10 * 60 * 1000;
+let systemUpdateBanner = null; // {roll, until}; until is 0 while the roll runs
+
+// systemUpdateBannerRoll answers the roll to draw and whether it ended. It runs
+// on every push, drawn or skipped, so an end is dated by the first push without
+// the roll, not the next redraw; an ended roll is kept to a deadline.
+function systemUpdateBannerRoll(su, now) {
+  const roll = su && su.now && su.now.roll;
+  if (roll) {
+    systemUpdateBanner = {roll: roll, until: 0};
+    return {roll: roll, ended: false};
+  }
+  if (!systemUpdateBanner) return null;
+  if (!systemUpdateBanner.until) systemUpdateBanner.until = now + SYSTEM_UPDATES_BANNER_STAY_MS;
+  if (now > systemUpdateBanner.until) {
+    systemUpdateBanner = null;
+    return null;
+  }
+  return {roll: systemUpdateBanner.roll, ended: true};
+}
+
+// systemUpdateBannerLine is the banner: what the roll is doing, the step, the
+// elapsed time and the short shas it moves from and to.
+function systemUpdateBannerLine(b) {
+  const roll = b.roll, sha = x => String(x || "").slice(0, 12) || "–";
+  const line = el("div", "surow subanner" + (b.ended ? " ended" : ""));
+  line.append(el("span", "subannerword", b.ended ? "roll ended" : "rolling"));
+  line.append(el("span", "tag" + (b.ended ? "" : " warnc"), roll.step || "starting"));
+  line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  line.append(el("span", "subannercommits", sha(roll.from) + " → " + sha(roll.to)));
+  line.title = "gt update run " + (roll.run_id || "?") + (b.ended ? ", ended" : "");
+  return line;
+}
+
+// The pane header's icon follows the worst chip the pane drew, red above amber.
+// Green and grey earn no colour of their own — a pair is never green, and grey
+// is nothing read — so the icon stays the heading's muted dash unless a red or
+// amber chip is present. A colour the rank does not know ranks with them
+// (gt-jug4e0).
+const SYSTEM_UPDATE_CHIP_RANK = {badc: 2, warnc: 1};
+
+// systemUpdateChip draws one chip: its colour class, the glyph its state
+// carries, and a title naming the state.
+function systemUpdateChip(name, cls, glyph, word) {
+  const chip = el("span", "tag " + cls, name + " " + glyph);
+  chip.title = name + ": " + word;
+  return chip;
+}
+
+// paintPaneIcon is a pane header's worst state, drawn from the chips the pane
+// itself drew: red while any chip is red, amber while one is amber, and the
+// heading's muted dash while none is. A grey chip never earns a colour here, so
+// a reading nobody made cannot make the heading read clear or alarmed
+// (gt-jug4e0). The System updates and Maintenance jobs panes share it.
+function paintPaneIcon(id, chips) {
+  const ico = $(id);
   if (!ico) return;
-  const v = tierSweepIcon(ts);
-  ico.textContent = v.glyph;
-  ico.className = "sweepico" + (v.cls ? " " + v.cls : "");
-  ico.title = v.title;
+  const rank = c => SYSTEM_UPDATE_CHIP_RANK[c.cls] || 0;
+  let worst = null;
+  for (const c of chips) if (!worst || rank(c) > rank(worst)) worst = c;
+  let glyph = "–", cls = "", why = chips.length ? "no red or amber chip" : "no chips to read";
+  if (worst && rank(worst) === 2) { glyph = "✗"; cls = "badc"; why = "the worst chip: " + worst.name + ": " + worst.word; }
+  else if (worst && rank(worst) === 1) { glyph = "◌"; cls = "warnc"; why = "the worst chip: " + worst.name + ": " + worst.word; }
+  ico.textContent = glyph;
+  ico.className = "suico" + (cls ? " " + cls : "");
+  ico.title = why;
 }
 
-function renderTierSweep(s) {
-  if (pushSkip("tiersweep", s)) return;
-  const box = $("tiersweep");
+// paintSystemUpdatesIcon is the System updates header's worst state (gt-jug4e0).
+function paintSystemUpdatesIcon(chips) { paintPaneIcon("systemupdatesico", chips); }
+
+function renderSystemUpdates(s) {
+  const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
+  if (pushSkip("systemupdates", s)) return;
+  const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
-  const ts = s.tiersweep;
-  // Painted ahead of the empty paths' returns, so an unreadable log reads as
-  // nothing known rather than as a stale green.
-  paintTierIcon(ts);
-  if (!ts) { box.append(el("div", "empty", "reading the daemon log…")); $("tiersweepnote").textContent = ""; return; }
-  if (ts.unavailable) { box.append(el("div", "badc", "unavailable: the daemon log could not be read")); $("tiersweepnote").textContent = ""; return; }
-  const kv = el("div", "kv");
-  const run = ts.running;
-  const st = el("div");
-  // The cycle's own stage list when the daemon logged one; an older log gives
-  // only the stage the fallback inferred.
-  if (run) {
-    const stages = (run.tiers && run.tiers.length) ? run.tiers.join(", ") : run.tier;
-    st.append(el("b", "good", "running"), el("span", "", run.rig + " · " + stages + " · " + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));
-  } else st.append(el("b", "", "idle"), el("span", "", "no sweep is running"));
-  kv.append(st);
-  box.append(kv);
-  const rows = ts.sweeps || [];
-  if (!rows.length) {
-    box.append(el("div", "empty", "no sweeps in the daemon log"));
-    renderTierSweepRegistry(box, ts);
-    $("tiersweepnote").textContent = "";
-    return;
-  }
-  const t = el("table");
-  const hr = el("tr");
-  [["When"], ["Rig"], ["Sha"], ...TIERSWEEP_TIERS.map(x => [x]), ["Total", "the whole cycle, every stage the sweep ran", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
-  t.append(hr);
+  if (banner) box.append(systemUpdateBannerLine(banner));
+  if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
-    const tr = el("tr");
-    tr.append(el("td", "title", sweepWhen(row.at)));
-    tr.append(el("td", "", row.rig));
-    tr.append(el("td", "title", row.sha || "–"));
-    const by = {};
-    (row.stages || []).forEach(x => by[x.tier] = x);
-    TIERSWEEP_TIERS.forEach(tier => {
-      const v = by[tier];
-      if (!v) { tr.append(el("td", "title", "–")); return; }
-      const cell = el("td", v.verdict === "RED" ? "badc" : v.verdict === "GREEN" ? "good" : "", v.verdict);
-      if ((v.failed || []).length) cell.title = "failed: " + v.failed.join(", ");
-      tr.append(cell);
-    });
-    tr.append(el("td", "n", row.secs == null ? "–" : fmtDur(row.secs)));
-    t.append(tr);
+    const line = el("div", "surow");
+    line.append(el("span", "title", row.sha || "–"));
+    for (const stage of SYSTEM_UPDATE_STAGES) {
+      let state = systemUpdateStageState(row, stage);
+      if (state === "absent" && systemUpdateStageUnknown(su, stage)) state = "unknown";
+      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state];
+      const said = state === "partial" ? systemUpdatePartialWord(row.roll) : word;
+      line.append(systemUpdateChip(stage, cls, glyph, said));
+      chips.push({name: stage, cls: cls, word: said});
+      // The pair chip goes between the stages that build the images and the
+      // roll that consumes them, and reads the row's Pair rather than its roll:
+      // a commit with a roll keeps the pair the hub classified for it.
+      if (stage === "images") {
+        const [pcls, pglyph, pword] = systemUpdatePairChip(row.pair);
+        line.append(systemUpdateChip("pair", pcls, pglyph, pword));
+        chips.push({name: "pair", cls: pcls, word: pword});
+      }
+    }
+    box.append(line);
   }
-  box.append(t);
-  // The newest RED the record still explains, named under the table so it reads
-  // without a hover.
-  const newest = rows[0];
-  (newest.stages || []).filter(x => x.verdict === "RED" && (x.failed || []).length).forEach(x => {
-    box.append(el("div", "badc title", newest.rig + " " + x.tier + " RED: " + x.failed.join(", ")));
-  });
-  renderTierSweepRegistry(box, ts);
-  $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
+  paintSystemUpdatesIcon(chips);
+  $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
 }
 
-// One wall-time trend per rig, oldest sweep at the left: a line per tier the
-// rig ran plus the cycle's total, drawn with the landings trend's own chart so
-// devops test speed reads the way gate time does. The reader keeps 30 sweeps
-// per rig (tierSweepTrendPerRig); a rig with none says so rather than drawing
-// an empty chart, and an empty trend never stops the pane.
-const TIERSWEEP_TREND_COLORS = ["#58a6ff", "#d29922", "#39c5bb", "#d2a8ff"];
-function tierSweepTrendSeries(trend) {
-  const sweeps = trend.sweeps || [];
-  const pts = sweeps.map(r => ({t: new Date(r.at).getTime(), walls: r.walls || {}, total: r.total_secs}));
-  const tiers = TIERSWEEP_TIERS.filter(tier => pts.some(p => p.walls[tier] != null));
-  const series = [], key = [];
-  tiers.forEach((tier, i) => {
-    const color = TIERSWEEP_TREND_COLORS[i % TIERSWEEP_TREND_COLORS.length];
-    series.push({color, pts: pts.map(p => ({t: p.t, v: p.walls[tier]}))});
-    key.push([color, tier]);
-  });
-  if (pts.some(p => p.total != null)) {
-    series.push({color: "#8b949e", pts: pts.map(p => ({t: p.t, v: p.total}))});
-    key.push(["#8b949e", "total"]);
-  }
-  return {series, key};
+// The Maintenance jobs pane (gt-6yof7o): one row per job from the Jobs section
+// the hub folds `gt jobs --json` into (jobs.go), and nothing the page fetches.
+// A row is the job's name, a chip coloured by the worst thing true of it, the
+// last run's age and duration, and its headline stat; clicking it opens the
+// job's newest runs. The pane reads reads.jobs only to say whether the section
+// it drew is still current.
+const JOBS_STATES = ["never_run", "overdue", "ok", "no_cadence", "unknown"];
+// JOBS_OUTCOMES is every outcome the section names; the empty one is a no-op
+// run, which neither failed nor did its work (jobs.go).
+const JOBS_OUTCOMES = ["", "ok", "failed", "refused", "deferred"];
+// JOBS_MARKS is a job's chip by the worst thing true of it: green ok, red
+// failed or overdue, amber a job that never ran, has no cadence, or whose run
+// was refused or deferred, and grey unknown. The glyphs are the System updates
+// chips' so both panes' headers read alike.
+const JOBS_MARKS = {
+  ok: ["good", "✓", "ok"],
+  failed: ["badc", "✗", "failed"],
+  overdue: ["badc", "✗", "overdue"],
+  never_run: ["warnc", "◌", "never run"],
+  no_cadence: ["warnc", "◌", "no cadence"],
+  refused: ["warnc", "◌", "refused"],
+  deferred: ["warnc", "◌", "deferred"],
+  unknown: ["absent", "?", "unknown"],
+};
+// JOBS_BYTE_STATS is the headline stats that count bytes, drawn in GiB.
+const JOBS_BYTE_STATS = ["reclaimed_bytes", "build_cache_bytes", "bytes_freed"];
+// JOBS_RUN_MARKS is one run's outcome chip: green ok, red failed, amber
+// refused or deferred, grey a no-op, and grey with a question mark an outcome
+// this page does not name.
+const JOBS_RUN_MARKS = {
+  "": ["absent", "–", "no-op"],
+  ok: ["good", "✓", "ok"],
+  failed: ["badc", "✗", "failed"],
+  refused: ["warnc", "◌", "refused"],
+  deferred: ["warnc", "◌", "deferred"],
+  unknown: ["absent", "?", "unknown"],
+};
+// jobsOpen is the jobs whose newest runs the reader has opened, by name.
+const jobsOpen = new Set();
+
+// jobMark is a row's colour, glyph and word, ranked as jobs.go ranks a row:
+// unknown, overdue, a failed run, a job that never ran or has no cadence, a
+// refused or deferred run, then ok. A state or outcome this page does not name
+// is unknown, so a job the report does not vouch for never reads as well
+// (gt-6yof7o).
+function jobMark(r) {
+  if (!r) return JOBS_MARKS.unknown;
+  const state = r.state, outcome = r.outcome || "";
+  if (!JOBS_STATES.includes(state) || !JOBS_OUTCOMES.includes(outcome) || state === "unknown") return JOBS_MARKS.unknown;
+  if (state === "overdue") return JOBS_MARKS.overdue;
+  if (outcome === "failed") return JOBS_MARKS.failed;
+  if (state === "never_run" || state === "no_cadence") return JOBS_MARKS[state];
+  if (outcome === "refused" || outcome === "deferred") return JOBS_MARKS[outcome];
+  return JOBS_MARKS.ok;
 }
-// renderTierSweepRegistry draws the trends, and says so when the town's rig list
-// could not be read: the trends then show only the rigs the log names. It runs
-// whether or not the log holds sweeps, since a rig can have a trend without one.
-function renderTierSweepRegistry(box, ts) {
-  if (ts.trends_unavailable) box.append(el("div", "badc", "rig list unavailable: the town's registry could not be read, so the trends show only rigs the log names"));
-  renderTierSweepTrends(box, ts.trends);
+
+// jobStatWords is a headline stat as the row draws it: a percentage as itself,
+// a byte count in GiB, a millisecond figure as a duration, and a stat this page
+// does not know with its name beside the raw figure rather than a guessed unit.
+function jobStatWords(h) {
+  if (!h || typeof h.value !== "number") return "";
+  if (h.name === "used_percent") return h.value + "%";
+  if (JOBS_BYTE_STATS.includes(h.name)) return diskGiB(h.value) + " GiB";
+  if (h.name === "duration_ms") return fmtDur(h.value / 1000);
+  return h.value + (h.name ? " " + h.name : "");
 }
-function renderTierSweepTrends(box, trends) {
-  for (const trend of trends || []) {
-    const sweeps = trend.sweeps || [];
-    const head = el("div", "k");
-    head.append(el("b", "", trend.rig), el("span", "", sweeps.length ? " " + sweeps.length + " sweeps · wall time each" : ""));
-    box.append(head);
-    if (!sweeps.length) { box.append(el("div", "empty", "no sweeps yet")); continue; }
-    const st = tierSweepTrendSeries(trend);
-    // A series with no value at all (every tier and total absent) has no line to
-    // draw and no peak to name: say so rather than draw an empty chart.
-    const vals = st.series.flatMap(x => x.pts.map(p => p.v)).filter(v => v != null);
-    if (!vals.length) { box.append(el("div", "empty", "no wall times recorded")); continue; }
-    const t0 = Math.min(...sweeps.map(r => new Date(r.at).getTime()));
-    const t1 = Math.max(...sweeps.map(r => new Date(r.at).getTime()));
-    const peak = Math.max(...vals);
-    box.append(el("div", "k title", "wall time per sweep · " + sweeps.length + " sweeps · peak " + fmtDur(peak)), chartSVG(st.series, t0, Math.max(t1, t0 + 1), 600, 48, 3 * 3600e3), legend(st.key));
+
+// jobRunLine is one of a job's newest runs: how long ago it ended (or started,
+// for a run that has not ended), how long it took, and its outcome.
+function jobRunLine(run) {
+  const line = el("div", "surow");
+  const at = run.ended_at || run.started_at;
+  line.append(el("span", "title", neverRead(at) ? "–" : age(at) + " ago"));
+  const from = new Date(run.started_at || 0).getTime();
+  const to = new Date(run.ended_at || 0).getTime();
+  const took = !neverRead(run.started_at) && !neverRead(run.ended_at) ? (to - from) / 1000 : null;
+  line.append(el("span", "title", took != null && took >= 0 ? fmtDur(took) : "–"));
+  const mark = JOBS_RUN_MARKS[run.outcome || ""] || JOBS_RUN_MARKS.unknown;
+  const chip = el("span", "tag " + mark[0], mark[1] + " " + mark[2]);
+  chip.title = "run: " + mark[2];
+  line.append(chip);
+  return line;
+}
+
+// jobRuns is the box a clicked row opens: the job's newest runs, newest first
+// as the section sorted them. The section keeps at most five, so this draws
+// those the report kept.
+function jobRuns(r) {
+  const box = el("div", "jobruns");
+  const runs = r.runs || [];
+  if (!runs.length) { box.append(el("div", "surow empty", "no runs recorded")); return box; }
+  for (const run of runs) box.append(jobRunLine(run));
+  return box;
+}
+
+// jobRow is one job's line. A job whose state or outcome the page does not
+// name is drawn grey, never green.
+function jobRow(r, open) {
+  const row = el("div", "surow");
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute("aria-expanded", open ? "true" : "false");
+  row.append(el("span", "", r.name || "–"));
+  const mark = jobMark(r);
+  const chip = el("span", "tag " + mark[0], mark[1] + " " + mark[2]);
+  chip.title = mark[2];
+  row.append(chip);
+  const at = r.last_run;
+  const last = el("span", "title", !at ? "never ran" : neverRead(at) ? "unreadable" : age(at));
+  last.title = !at ? "no run recorded" : neverRead(at) ? "the last run stamp cannot be read" : "last run " + age(at) + " ago";
+  row.append(last);
+  const took = el("span", "title", typeof r.duration_ms === "number" && r.duration_ms >= 0 ? fmtDur(r.duration_ms / 1000) : "–");
+  took.title = "how long the newest finished run took";
+  row.append(took);
+  const headline = jobStatWords(r.headline);
+  if (headline) {
+    const stat = el("span", "", headline);
+    stat.title = "headline stat: " + (r.headline.name || "unnamed");
+    row.append(stat);
   }
+  const toggle = () => { open ? jobsOpen.delete(r.name) : jobsOpen.add(r.name); renderJobs(state); };
+  row.onclick = toggle;
+  row.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); } });
+  if (open) row.append(jobRuns(r));
+  return row;
+}
+
+// renderJobs draws the pane from the state's Jobs section. A read that failed
+// or went old says so above the rows, and paintsRead greys them: the kept list
+// is never drawn as current (gt-16wpss).
+function renderJobs(s) {
+  if (pushSkip("jobs", s)) return;
+  const r = readOf(s, "jobs"), j = s.jobs;
+  const box = $("jobs"), note = $("jobsnote");
+  box.replaceChildren();
+  paintsRead(box, note, r);
+  const rows = (j && j.rows) || [], chips = [];
+  for (const row of rows) {
+    box.append(jobRow(row, jobsOpen.has(row.name)));
+    const mark = jobMark(row);
+    chips.push({name: row.name, cls: mark[0], word: mark[2]});
+  }
+  paintPaneIcon("jobsico", chips);
+  note.textContent = readCaption(r, rows.length ? [rows.length + (rows.length === 1 ? " job" : " jobs")] : []);
+  if (r && r.error) box.prepend(el("div", "surow badc", rows.length ? "the read failed; this is the last good list" : "the read failed; no job list has been read"));
+  else if (r && r.stale && rows.length) box.prepend(el("div", "surow warnc", "this job list is stale"));
+  else if (!j) box.append(el("div", "empty", r && r.never ? "the jobs have not been read" : "reading the jobs…"));
+  else if (!rows.length) box.append(el("div", "empty", "no jobs"));
 }
 
 // The Actions section's status colours, reusing the page's own tokens: success
@@ -4116,7 +4326,7 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
-// The JEV panel, under the Tier sweeps and folded until opened. The panel reads
+// The JEV panel, folded until opened. The panel reads
 // as the operator's glance: a header line with the scores' age, the batteries
 // ok and off, and the spend bar against the cap with the top caller; then
 // EARNING with each question's lift, labeled count and consumer; WATCHING; STUCK
@@ -5931,7 +6141,8 @@ const PANES = {
   // section's: opening that section draws it, and a closed one leaves it be.
   disk: {sec: "machine", body: ["disk"], read: s => s.disk, draw: s => renderDisk(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
-  tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
+  systemupdates: {sec: "systemupdates", body: ["systemupdates"], read: s => s.system_updates, draw: s => renderSystemUpdates(s)},
+  jobs: {sec: "jobs", body: ["jobs"], read: s => [s.jobs, readInput(s, "jobs")], draw: s => renderJobs(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   dolt: {sec: "dolt", body: ["dolt"], read: s => [s.dolt, readInput(s, "dolt")], draw: s => renderDolt(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
@@ -6000,7 +6211,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderJobs(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -6168,7 +6379,7 @@ function foldSave(key, closed) {
 }
 // foldLegacyTitle is the name a section's choice was saved under before it had
 // a key: the heading's first text run, or the whole heading where the first
-// child is an element with no text of its own (the tier sweep's icon).
+// child is an element with no text of its own.
 function foldLegacyTitle(head) {
   return String(((head.firstChild && head.firstChild.textContent) || head.textContent) || "").trim();
 }
@@ -6297,10 +6508,6 @@ function setupCollapse() {
   });
 }
 setupCollapse();
-// Painted only after setupCollapse has read each pane's heading: the icon is
-// the tier title's first child, so a glyph already in it would become the
-// pane's legacy fold name and drop a remembered one.
-paintTierIcon(null);
 // A running action's elapsed and a finished one's age drift between pushes, so
 // each of those cells carries the stamp it counts from and one ticker a second
 // moves them, without redrawing a pane the reader may be reading.
@@ -6378,7 +6585,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderSystemUpdates(state); renderJobs(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>

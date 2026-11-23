@@ -725,6 +725,51 @@ func TestSquashArchiveBudgetShortOfTheCutDefersTheRun(t *testing.T) {
 	}
 }
 
+// TestSquashArchiveFailedExportDefersTheRunNamingTheError: a commit export that
+// failed with its through-date behind the cut does not cover it. At the seam the
+// result is not Reached and the error carries the export's own error; through
+// the check the deferral names that error and no run starts.
+func TestSquashArchiveFailedExportDefersTheRunNamingTheError(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	exportErr := errors.New("dolt_log read failed")
+
+	out, err := d.squashArchiveAfterPass("gt", cut, map[string]archiveDatabaseOutcome{
+		"gt": {commits: archiveExportOutcome{stop: archiveStopFailed, err: exportErr}},
+	})
+	if err == nil || !errors.Is(err, exportErr) {
+		t.Fatalf("a failed commit export returned %v, want the export's error", err)
+	}
+	if out.Reached {
+		t.Error("a failed commit export was read as reaching the cut")
+	}
+
+	// The check drives the same stop from the read failing, as production does.
+	withSquashArchive(t, d, t.TempDir(), nil, 0)
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, exportErr
+	}
+	ran := false
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		ran = true
+		return doltsquash.RunResult{}, nil
+	}
+	d.runScheduledMaintenance()
+
+	want := "squash: gt: the run waits for the next day's check: the history archive did not reach the cut " +
+		cut.UTC().Format(time.RFC3339) +
+		": the history archive's commit export failed: reading dolt_log: " + exportErr.Error()
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Errorf("the failed export was not deferred naming its error: %q", got)
+	}
+	if ran {
+		t.Error("a run started on an archive whose commit export failed")
+	}
+}
+
 // TestSquashArchiveNextDayContinuesFromTheWatermark: a short pass records its
 // through-date, and the next day's check reads only the commits after it, then
 // the run starts. Restarting the pass from the beginning re-reads archived
@@ -799,6 +844,101 @@ func TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain(t *testing.T) {
 	}
 	if !strings.Contains(got, "reading the branches") {
 		t.Errorf("the run did not start on an archive past the cut: %q", got)
+	}
+}
+
+// TestSquashArchiveBehindTheCutStillRunsThePass is the first row: an archive
+// record that is non-zero but still before the cut is not coverage. The pass
+// runs — the commit read is made — and only the pass's result decides the run:
+// one that ends short of the cut leaves the run waiting, one that reaches the
+// cut starts it.
+func TestSquashArchiveBehindTheCutStillRunsThePass(t *testing.T) {
+	t.Parallel()
+	cut := squashTestNow.AddDate(0, 0, -7)
+	through := cut.Add(-2 * time.Hour)
+	cases := map[string]struct {
+		commits []archiveCommit
+		limit   int
+		runs    bool
+	}{
+		"the pass stops short of the cut": {
+			commits: []archiveCommit{
+				{Hash: "s1", Committer: "gastown/crew/overseer", Date: cut.Add(-90 * time.Minute), Message: "behind"},
+				{Hash: "s2", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "still behind"},
+			},
+			limit: 1,
+			runs:  false,
+		},
+		"the pass reaches the cut": {
+			commits: []archiveCommit{
+				{Hash: "r1", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "behind"},
+				{Hash: "r2", Committer: "gastown/crew/overseer", Date: cut.Add(time.Hour), Message: "past the cut"},
+			},
+			limit: 0,
+			runs:  true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			seedSquashArchiveThrough(t, d, through)
+			fake := withSquashArchive(t, d, t.TempDir(), tc.commits, tc.limit)
+			d.maint.archiveMaxBatches = 1
+			var runs int
+			scriptSquashRun(d, &runs, doltsquash.RunResult{}, nil)
+
+			d.runScheduledMaintenance()
+
+			if fake.reads == 0 {
+				t.Errorf("the pass did not run for an archive through %s, behind the cut %s: %q",
+					through.UTC().Format(time.RFC3339), cut.UTC().Format(time.RFC3339), logs.String())
+			}
+			if tc.runs {
+				if runs != 1 {
+					t.Errorf("the run did not start once the pass reached the cut: %d run(s): %q", runs, logs.String())
+				}
+				return
+			}
+			if runs != 0 {
+				t.Errorf("a run started on an archive short of the cut: %d run(s): %q", runs, logs.String())
+			}
+			want := "squash: gt: the run waits for the next day's check: the history archive is through " +
+				tc.commits[0].Date.UTC().Format(time.RFC3339) + ", short of the cut " + cut.UTC().Format(time.RFC3339)
+			if got := logs.String(); !strings.Contains(got, want) {
+				t.Errorf("the short pass was not deferred naming its through-date and the cut: %q", got)
+			}
+		})
+	}
+}
+
+// TestSquashArchiveRunReceivesTheCutTheArchiveWasAskedToReach is the second row: the
+// run squashes to the archive's cut, dec.Cut, and not one a step moves. The
+// seam runSquashDatabase hands doltsquash.Run carries the cut it was given, so a
+// cut moved past dec.Cut — which would discard commits the archive was never
+// asked to cover — fails here.
+func TestSquashArchiveRunReceivesTheCutTheArchiveWasAskedToReach(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var got time.Time
+	runs := 0
+	d.maint.squashRun = func(_ context.Context, in doltsquash.RunInput) (doltsquash.RunResult, error) {
+		runs++
+		got = in.Cut
+		return doltsquash.RunResult{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	want := squashTestNow.Add(-7 * 24 * time.Hour)
+	if runs != 1 {
+		t.Fatalf("the check started %d runs, want 1: %q", runs, logs.String())
+	}
+	if !got.Equal(want) {
+		t.Errorf("the run received cut %s, want %s (dec.Cut, to the nanosecond)",
+			got.UTC().Format(time.RFC3339Nano), want.UTC().Format(time.RFC3339Nano))
 	}
 }
 
@@ -1798,6 +1938,44 @@ func TestSquashRecordRedactsTheRunError(t *testing.T) {
 				if strings.Contains(e.Error, secret) {
 					t.Errorf("the ledger line holds %q: %q", secret, e.Error)
 				}
+			}
+		})
+	}
+}
+
+// squashJoinedToken builds a GitHub-token-shaped string for the joined-token
+// rows: a literal token in the source would read as a secret to a scanner, and
+// the shape is all the rule looks at.
+func squashJoinedToken() string {
+	return "ghp_" + strings.Repeat("A1b2C3", 6)
+}
+
+// TestSquashRecordRedactsATokenJoinedToCharacters is the bead's box for the
+// shapes the word pass misses: a token with a colon, comma, semicolon, dash or
+// parenthesis glued to it reaches neither the ledger line nor the backup that
+// archives it. The message passes through the town's land.ScrubText before the
+// word pass, so every joined shape is redacted; with the scrub replaced by the
+// identity these rows fail.
+func TestSquashRecordRedactsATokenJoinedToCharacters(t *testing.T) {
+	t.Parallel()
+	tok := squashJoinedToken()
+	prefix := tok[:12]
+	cases := []struct{ name, in string }{
+		{"after a colon", "doltsquash: err:" + tok + ":end"},
+		{"between commas", "doltsquash: a," + tok + ",b"},
+		{"after a semicolon", "doltsquash: a;" + tok + ";b"},
+		{"after a dash", "doltsquash: x-" + tok},
+		{"in parentheses", "doltsquash: (" + tok + ")"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(tc.in))
+			if strings.Contains(e.Error, tok) || strings.Contains(e.Error, prefix) {
+				t.Errorf("the ledger line holds the token or its first 12 characters: %q", e.Error)
+			}
+			if !strings.Contains(e.Error, ledgerRedactedMarker) {
+				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
 			}
 		})
 	}

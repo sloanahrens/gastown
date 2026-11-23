@@ -656,6 +656,14 @@ func (p *PostLandRunner) timedOut(e PendingPostLand, now time.Time, timeout time
 	return !now.Before(e.Since.Add(timeout))
 }
 
+// stampWaited reports whether the entry has waited limit since stamp. A stamp
+// after now is a clock that stepped back, or a state file written by a runner
+// whose clock was ahead: it counts as waited, so a stored stamp cannot hold the
+// entry past its limit until the real clock reaches it (gt-ctavmh).
+func stampWaited(now, stamp time.Time, limit time.Duration) bool {
+	return stamp.After(now) || now.Sub(stamp) >= limit
+}
+
 // checkOrphan asks the runner behind res whether the check's run ended without
 // a verdict, once the pending entry has waited PostLandOrphanAfter, and marks
 // the entry when it did. It asks only about the read that found the status
@@ -668,10 +676,10 @@ func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, re
 	if p.RunEnded == nil || res.Verdict != PostLandStatusUnknown || res.State != string(forgejo.StatePending) {
 		return ""
 	}
-	if now.IsZero() || now.Sub(e.Since) < PostLandOrphanAfter || !e.OrphanedAt.IsZero() {
+	if now.IsZero() || !stampWaited(now, e.Since, PostLandOrphanAfter) || !e.OrphanedAt.IsZero() {
 		return ""
 	}
-	if !e.OrphanAsked.IsZero() && now.Sub(e.OrphanAsked) < PostLandOrphanAskEvery {
+	if !e.OrphanAsked.IsZero() && !stampWaited(now, e.OrphanAsked, PostLandOrphanAskEvery) {
 		return ""
 	}
 	e.OrphanAsked = now

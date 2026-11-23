@@ -18,16 +18,18 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// The Tier sweeps panel reads the daemon log, the only place a sweep's history
-// survives: each rig's .runtime/tier-sweep/<rig>.json keeps just its latest run
-// (internal/daemon/tier_sweep.go). The log is scanned incrementally, the way the
-// om panel scans it, so a poll reads only what it gained.
+// The feed's tiersweep section reads the daemon log, the only place a sweep's
+// history survives: each rig's .runtime/tier-sweep/<rig>.json keeps just its
+// latest run (internal/daemon/tier_sweep.go). The page draws no pane for it
+// (gt-gfglv0), but the section still goes out to other feed readers. The log is
+// scanned incrementally, the way the om panel scans it, so a poll reads only
+// what it gained.
 
 const (
-	// tierSweepRows is how many sweeps the panel lists, newest first.
+	// tierSweepRows is how many sweeps the feed section lists, newest first.
 	tierSweepRows = 5
 	// tierSweepRowsKept is the backlog the incremental scan holds, deep enough
-	// that the panel's window never falls off the end.
+	// that the feed section's window never falls off the end.
 	tierSweepRowsKept = 40
 	// tierSweepTrendPerRig is how many sweeps each rig's wall trend keeps: a
 	// month of hourly sweeps is enough to see devops test speed move.

@@ -149,7 +149,7 @@ func TestPoolSeatSessionsCarryTheBeadTheirHookNames(t *testing.T) {
 
 	batch := batchOverStore(town, db)
 	pool := seatPool("deepseek-flash", 30)
-	seats, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, submittedWork("gt-ruby"), pool)
+	seats, err := poolSeatSessionsWith(lister, town, batch.disposition, submittedWork("gt-ruby"), pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}

@@ -214,7 +214,7 @@ var guardTriggers = []struct {
 	{"internal/bdgate", "M\x00internal/session/lifecycle.go\x00"},
 	{"internal/polecat", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/beads", "M\x00internal/plugin/dispatch.go\x00"},
-	{"internal/beads/beadsfake", "A\x00internal/newpkg/new.go\x00"},
+	{"internal/modguard", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/beadsql", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/sweeprunner", "M\x00internal/daemon/tier_sweep.go\x00"},
 	{"internal/config", "M\x00cmd/gt/main.go\x00"},
@@ -228,9 +228,16 @@ var guardTriggers = []struct {
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/deps", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/git", "M\x00internal/daemon/patrol.go\x00"},
+	// TestNoTerminalBackgroundProbe walks every non-test Go file under
+	// internal/, so a change to any of them is its input (gt-kfde9l).
+	{"internal/ui", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
+	// A new scanning test can be in any package, test files included, and the
+	// exemption list is the completeness guard's other input (gt-xr4eke).
+	{"internal/land", "A\x00internal/foo/x_test.go\x00"},
+	{"internal/land", "M\x00" + scanningExemptionsPath + "\x00"},
 	// The always entries run on any non-empty diff; a docs-only path is the
 	// change no predicate names (gt-t4rchq).
 	{"internal/mayorrig", unguarded},
@@ -258,6 +265,9 @@ var guardRequiredTests = map[string][]string{
 		"TestImageRegistryBaseNotPrependedInSource",
 		"TestOwnerPlaceholderFilesHaveOnlyKnownReaders",
 	},
+	// A row selecting internal/land for a new scanning test must carry the
+	// completeness guard itself, not just the package (gt-xr4eke).
+	"internal/land": {"TestEveryTreeScanningTestIsRegistered"},
 }
 
 // unguarded is a changed path no guard predicate reads: a doc outside every
@@ -505,12 +515,40 @@ func TestGuardSelectsAClusterRenderChangeRunsTheBdGatewayRenderTests(t *testing.
 		if !reflect.DeepEqual(g.tests, required) {
 			t.Errorf("internal/cmd cluster-render entry tests = %v, want %v in that order", g.tests, required)
 		}
-		if g.removal {
-			t.Errorf("internal/cmd cluster-render entry carries removal; a rendered path is judged only as it stands after the change")
-		}
+		// A deletion selects it too: TestGuardSelectsDeletedDeployFile (gt-kymmes).
 		return
 	}
 	t.Error("no internal/cmd entry judges deploy/k8s/forgejo-runner/runner.go")
+}
+
+// TestGuardSelectsDeletedDeployFile: the cluster-render and runner-drift tests
+// import the Go packages under deploy/k8s and internal/imagevalues, so deleting
+// a Go file there breaks their build. A deletion must select the same three
+// tests a modification does (gt-kymmes).
+func TestGuardSelectsDeletedDeployFile(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	const diff = "D\x00deploy/k8s/forgejo-runner/runner.go\x00"
+	sel, err := GuardSelects(diff, hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects(%q): %v", diff, err)
+	}
+	var tests []string
+	for _, s := range sel {
+		if s.Package == "internal/cmd" {
+			tests = s.Tests
+			break
+		}
+	}
+	for _, name := range []string{
+		"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
+		"TestClusterRenderBdGatewayWorkload",
+		"TestClusterRenderBdGatewayTokenSecret",
+	} {
+		if !contains(tests, name) {
+			t.Errorf("GuardSelects(%q) internal/cmd tests = %v; want %s among them", diff, tests, name)
+		}
+	}
 }
 
 // TestShellScriptAllowlistChangeRunsTheAllowlistControl: the clean-tree guard
@@ -572,22 +610,22 @@ func TestEveryPathGuardHasAPredicate(t *testing.T) {
 	}
 }
 
-// TestAlwaysGuardsNameTestsTheirPackageHolds fails when an always entry names
-// a test function its package does not hold: a rename would otherwise turn the
-// guard into a silent no-op that presubmit runs on every diff (gt-t4rchq).
-func TestAlwaysGuardsNameTestsTheirPackageHolds(t *testing.T) {
+// TestGuardTable fails when an entry names a test function its package does
+// not hold. A rename would otherwise turn the guard into a silent no-op: a
+// presubmit run whose -run pattern matches no test passes with "no tests to
+// run". The always entries had this check alone (gt-t4rchq); a misspelled
+// internal/config name in a path-selected entry showed it must cover every
+// entry (gt-g4662m).
+func TestGuardTable(t *testing.T) {
 	t.Parallel()
 	held := map[string]map[string]bool{}
 	for _, g := range treeWideGuards {
-		if !g.always {
-			continue
-		}
 		if held[g.pkg] == nil {
 			held[g.pkg] = testFunctionsIn(t, g.pkg)
 		}
 		for _, name := range g.tests {
 			if !held[g.pkg][name] {
-				t.Errorf("%s is always and names %s, which its test files do not hold", g.pkg, name)
+				t.Errorf("%s names %s, which its test files do not hold", g.pkg, name)
 			}
 		}
 	}

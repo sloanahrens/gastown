@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 const (
@@ -1216,6 +1216,47 @@ func TestCacheTrimPodsCountsEveryHolderThatHasNotFinished(t *testing.T) {
 	}
 }
 
+// TestCacheTrimPodsSkipsATerminatingSource pins a pod on its way out: it still
+// holds the claim, so it counts, but an exec in it dies with the pod, so it is
+// not a source.
+func TestCacheTrimPodsSkipsATerminatingSource(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimPodsVerb: cacheTrimPodsReply(
+		cacheTrimPodJSON("sbx-live", "Running", cacheTrimClaimName),
+		cacheTrimDeletingPodJSON("sbx-going", cacheTrimClaimName))})
+	holders, sources, err := f.d.cacheTrimPods(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimClaimName)
+	if err != nil {
+		t.Fatalf("cacheTrimPods: %v", err)
+	}
+	if holders != 2 || len(sources) != 1 || sources[0].Pod != "sbx-live" {
+		t.Errorf("cacheTrimPods counted %d holders and read through %+v, want 2 holders and sbx-live alone", holders, sources)
+	}
+}
+
+// TestCacheTrimPodsOnlyTerminating pins a deleting pod as the claim's only
+// holder: one sandbox, and no source to read a listing through.
+func TestCacheTrimPodsOnlyTerminating(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimPodsVerb: cacheTrimPodsReply(
+		cacheTrimDeletingPodJSON("sbx-going", cacheTrimClaimName))})
+	holders, sources, err := f.d.cacheTrimPods(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimClaimName)
+	if err != nil {
+		t.Fatalf("cacheTrimPods: %v", err)
+	}
+	if holders != 1 || len(sources) != 0 {
+		t.Errorf("cacheTrimPods counted %d holders and read through %+v, want 1 holder and no source", holders, sources)
+	}
+}
+
+// cacheTrimDeletingPodJSON is cacheTrimPodJSON's running pod once it is being
+// deleted: it still mounts the claim until the kubelet takes it away.
+func cacheTrimDeletingPodJSON(name, claim string) string {
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cacheTrimNamespace + `","deletionTimestamp":"2026-11-19T17:59:18Z"},` +
+		`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
+		`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + claim + `"}}]},` +
+		`"status":{"phase":"Running"}}`
+}
+
 // cacheTrimPodJSON is one pod of a fixture's pod list in the claim's
 // namespace, mounting claim.
 func cacheTrimPodJSON(name, phase, claim string) string {
@@ -1639,11 +1680,15 @@ func TestCacheTrimParseRemoved(t *testing.T) {
 		{"text after the counts", "removed 1 absent 0 kept 0 extra\n", [3]int64{}, true},
 		{"a label that is not the result line's", "removed 8 absent 1 trimmed 3\n", [3]int64{}, true},
 		{"a second label that is not absent", "removed 1 trimmed 0 kept 0\n", [3]int64{}, true},
+		{"a second label that is trimmed", "removed 8 trimmed 1 kept 3\n", [3]int64{}, true},
+		{"a first label that is not removed", "kept 8 absent 1 kept 3\n", [3]int64{}, true},
 		{"a removed count past an int64", "removed 9223372036854775808 absent 0 kept 0\n", [3]int64{}, true},
+		{"a count of 20 digits", "removed 99999999999999999999 absent 0 kept 0\n", [3]int64{}, true},
 		{"an absent count past an int64", "removed 0 absent 9223372036854775808 kept 0\n", [3]int64{}, true},
 		{"a kept count past an int64", "removed 0 absent 0 kept 9223372036854775808\n", [3]int64{}, true},
 		{"the largest count an int64 holds", "removed 9223372036854775807 absent 0 kept 0\n", [3]int64{9223372036854775807, 0, 0}, false},
 		{"a carriage return before the newline", "removed 12 absent 1 kept 3\r\n", [3]int64{12, 1, 3}, false},
+		{"a carriage return after eight removed", "removed 8 absent 1 kept 3\r\n", [3]int64{8, 1, 3}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2411,11 +2456,7 @@ var cacheTrimSmallApplies = map[string]string{
 // directory is audited like a top-level one.
 func TestCacheTrimNoOtherLargeClientSideApply(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	root := modroot.Root(t)
 
 	seen := map[string]bool{}
 	serverSide := 0

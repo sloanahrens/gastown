@@ -7,11 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/gosrc"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // agentBeadIdentRE matches expressions that carry an agent-bead ID.
@@ -36,11 +36,7 @@ var agentBeadHelpers = map[string]bool{
 // (hq-kt9y1). This test fails the build when that pattern reappears.
 func TestNoShellBdWritesToAgentBeads(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := modroot.Root(t)
 	packages := []string{
 		"internal/cmd", "internal/daemon", "internal/polecat",
 		"internal/doctor",

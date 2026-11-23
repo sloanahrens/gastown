@@ -88,6 +88,70 @@ func TestNativeCoversGtHostCommands(t *testing.T) {
 	}
 }
 
+// TestGTHostCommandRebootRecovery shows the reboot-recovery commands run on the
+// Mac and the commands the set held before them still do, while a group alone
+// does not.
+func TestGTHostCommandRebootRecovery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "town vms start", path: "town vms start", want: true},
+		{name: "town vms plist", path: "town vms plist", want: true},
+		{name: "town reboot-check", path: "town reboot-check", want: true},
+		{name: "town forward plist", path: "town forward plist", want: true},
+		{name: "maint plan", path: "maint plan", want: true},
+		{name: "maint apply", path: "maint apply", want: true},
+		{name: "the town vms group alone", path: "town vms", want: false},
+		{name: "town vms stop", path: "town vms stop", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GTHostCommand(tt.path); got != tt.want {
+				t.Fatalf("GTHostCommand(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGTHostCommandDeployer shows the five deployer commands run on the Mac and
+// the commands the set held before them still do, while the group alone does not.
+func TestGTHostCommandDeployer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "town deployer csr", path: "town deployer csr", want: true},
+		{name: "town deployer kubeconfig", path: "town deployer kubeconfig", want: true},
+		{name: "town deployer admin-check", path: "town deployer admin-check", want: true},
+		{name: "town deployer request", path: "town deployer request", want: true},
+		{name: "town deployer serve", path: "town deployer serve", want: true},
+		{name: "the town deployer group alone", path: "town deployer", want: false},
+		{name: "an unlisted town deployer leaf", path: "town deployer status", want: false},
+		{name: "town forward plist", path: "town forward plist", want: true},
+		{name: "maint plan", path: "maint plan", want: true},
+		{name: "maint apply", path: "maint apply", want: true},
+		{name: "town runner roll", path: "town runner roll", want: true},
+		{name: "town runner resize", path: "town runner resize", want: true},
+		{name: "town vms start", path: "town vms start", want: true},
+		{name: "town vms plist", path: "town vms plist", want: true},
+		{name: "town reboot-check", path: "town reboot-check", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GTHostCommand(tt.path); got != tt.want {
+				t.Fatalf("GTHostCommand(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeGtEntryCannotNameAPathOutsideTheHostSet(t *testing.T) {
 	t.Parallel()
 	n := Native{Tool: "gt", Path: "/usr/local/bin/gt", Subcommands: []string{"status"}}

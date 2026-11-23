@@ -20,14 +20,15 @@ func twoPieceSpec() Spec {
 	return Spec{
 		Constraints: strings.Join([]string{
 			"- Add internal/config/env.go with `func Read() string`.",
-			"- Create internal/specsplit/plan.go, which calls `Read()` with internal/config/env.go.",
+			"- Create internal/specsplit/plan.go, which calls `config.Read()` with internal/config/env.go.",
 		}, "\n"),
 		Acceptance: strings.Join([]string{
 			"- [ ] The setting is read. Run: go test ./internal/config -run TestEnv; go vet ./...",
 			"- [ ] The plan is built. Run: go test ./internal/specsplit -run TestPlan",
 		}, "\n"),
-		Dirs:      testDirs,
-		BaseFiles: map[string]bool{},
+		Dirs:        testDirs,
+		BaseFiles:   map[string]bool{},
+		BaseSymbols: map[string]bool{},
 	}
 }
 
@@ -99,7 +100,7 @@ func TestSplitPlanTwoPieces(t *testing.T) {
 		"Deliver piece B: the internal/specsplit file group of the split bead",
 		"Piece A (internal/config) and anything outside piece B's file group.",
 		"- internal/config/env.go is created by bead PIECE_A.",
-		"- `Read` is created by bead PIECE_A.",
+		"- `config.Read` is created by bead PIECE_A.",
 		"- [ ] The plan is built. Run: go test ./internal/specsplit -run TestPlan",
 	} {
 		if !strings.Contains(plan.B.Text, want) {
@@ -125,8 +126,9 @@ func TestSplitPlanKeepsBoxes(t *testing.T) {
 			"- [ ] The grouping holds. Run: go test ./internal/specsplit -run TestGroup",
 			"- [ ] The plan holds. Run: go test ./internal/specsplit -run TestPlan",
 		}, "\n"),
-		Dirs:      testDirs,
-		BaseFiles: map[string]bool{},
+		Dirs:        testDirs,
+		BaseFiles:   map[string]bool{},
+		BaseSymbols: map[string]bool{},
 	}
 	groups, err := Group(spec)
 	if err != nil {
@@ -156,7 +158,7 @@ func TestSplitPlanFirstHalfRoundedUp(t *testing.T) {
 		{Text: "The plan holds. Run: go test ./internal/specsplit -run TestPlan", Run: "go test ./internal/specsplit -run TestPlan"},
 		{Text: "The check holds. Run: go test ./internal/hygiene -run TestCheck", Run: "go test ./internal/hygiene -run TestCheck"},
 	}
-	spec := Spec{Acceptance: acceptanceText(original...), Dirs: testDirs, BaseFiles: map[string]bool{}}
+	spec := Spec{Acceptance: acceptanceText(original...), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}}
 	groups := []FileGroup{
 		{Package: "internal/config", Boxes: original[:1]},
 		{Package: "internal/specsplit", Boxes: original[1:2]},
@@ -180,7 +182,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 	t.Parallel()
 	boxA := Box{Text: "The setting is read. Run: go test ./internal/config -run TestEnv", Run: "go test ./internal/config -run TestEnv"}
 	boxB := Box{Text: "The plan is built. Run: go test ./internal/specsplit -run TestPlan", Run: "go test ./internal/specsplit -run TestPlan"}
-	spec := Spec{Acceptance: acceptanceText(boxA, boxB), Dirs: testDirs, BaseFiles: map[string]bool{}}
+	spec := Spec{Acceptance: acceptanceText(boxA, boxB), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}}
 	tests := []struct {
 		name    string
 		spec    Spec
@@ -213,7 +215,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 		},
 		{
 			name: "a box with no command",
-			spec: Spec{Acceptance: acceptanceText(boxA, Box{Text: "The plan is built."}), Dirs: testDirs, BaseFiles: map[string]bool{}},
+			spec: Spec{Acceptance: acceptanceText(boxA, Box{Text: "The plan is built."}), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{{Text: "The plan is built."}}},
@@ -225,7 +227,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 			spec: Spec{Acceptance: acceptanceText(boxA, Box{
 				Text: "The plan is built. Run: make gate",
 				Run:  "make gate",
-			}), Dirs: testDirs, BaseFiles: map[string]bool{}},
+			}), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{{Text: "The plan is built. Run: make gate", Run: "make gate"}}},
@@ -234,7 +236,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 		},
 		{
 			name: "a group box the spec does not hold",
-			spec: Spec{Acceptance: acceptanceText(boxA), Dirs: testDirs, BaseFiles: map[string]bool{}},
+			spec: Spec{Acceptance: acceptanceText(boxA), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{boxB}},
@@ -246,7 +248,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 			spec: Spec{Acceptance: acceptanceText(boxA, boxB, Box{
 				Text: "The check holds. Run: go test ./internal/hygiene -run TestCheck",
 				Run:  "go test ./internal/hygiene -run TestCheck",
-			}), Dirs: testDirs, BaseFiles: map[string]bool{}},
+			}), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{boxB}},
@@ -322,8 +324,8 @@ func symbolSpec(aBullets, bBullets []string) Spec {
 // prose, cite nothing.
 func TestSplitPlanSymbolCreatedByNeedsADeclaration(t *testing.T) {
 	t.Parallel()
-	const readNote = "`Read` is created by bead PIECE_A."
-	const configNote = "`Config` is created by bead PIECE_A."
+	const readNote = "`config.Read` is created by bead PIECE_A."
+	const configNote = "`config.Config` is created by bead PIECE_A."
 	declare := []string{"- Add internal/config/env.go with `func Read() string` and `type Config struct{}`."}
 	tests := []struct {
 		name     string
@@ -333,15 +335,15 @@ func TestSplitPlanSymbolCreatedByNeedsADeclaration(t *testing.T) {
 	}{
 		{"a declared function cited in a code span of B",
 			declare,
-			[]string{"- Create internal/specsplit/plan.go, which calls `Read()`."},
+			[]string{"- Create internal/specsplit/plan.go, which calls `config.Read()`."},
 			[]string{readNote}, []string{configNote}},
 		{"a declared type cited in a code span of B",
 			declare,
-			[]string{"- Create internal/specsplit/plan.go with a field of type `Config`."},
+			[]string{"- Create internal/specsplit/plan.go with a field of type `config.Config`."},
 			[]string{configNote}, []string{readNote}},
 		{"a symbol A only calls is not created",
 			[]string{"- Edit internal/config/env.go: it calls `Read()`."},
-			[]string{"- Create internal/specsplit/plan.go, which calls `Read()`."},
+			[]string{"- Create internal/specsplit/plan.go, which calls `config.Read()`."},
 			nil, []string{readNote}},
 		{"the word in B's prose cites nothing",
 			append(append([]string{}, declare...), "- Callers in internal/config/env.go use `Read()`."),
@@ -371,6 +373,113 @@ func TestSplitPlanSymbolCreatedByNeedsADeclaration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSplitPlanSymbolsAreQualifiedByPackage: B cites A's symbol only by writing
+// it qualified with A's package, so a bare common name in B's code cites nothing.
+func TestSplitPlanSymbolsAreQualifiedByPackage(t *testing.T) {
+	t.Parallel()
+	aBullets := []string{"- Add internal/config/env.go with `func Read() string` and `func New() string`."}
+	tests := []struct {
+		name, b, note string
+		want          bool
+	}{
+		{"a qualified citation gets the note", "- Create internal/specsplit/plan.go, which calls `config.Read()`.", "`config.Read` is created by bead PIECE_A.", true},
+		{"a bare Read cites B's own package", "- Create internal/specsplit/plan.go, which calls `Read()`.", "`config.Read` is created by bead PIECE_A.", false},
+		{"a bare New cites B's own package", "- Create internal/specsplit/plan.go, which calls `New()`.", "`config.New` is created by bead PIECE_A.", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := symbolSpec(aBullets, []string{tc.b})
+			groups, err := Group(spec)
+			if err != nil {
+				t.Fatalf("Group() error = %v, want none", err)
+			}
+			plan, err := Plan(spec, groups)
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want none", err)
+			}
+			if got := strings.Contains(plan.B.Text, tc.note); got != tc.want {
+				t.Errorf("piece B note %q = %v, want %v:\n%s", tc.note, got, tc.want, plan.B.Text)
+			}
+		})
+	}
+}
+
+// TestSplitPlanBaseSymbolsNeedNoNote: B says a symbol "is created by bead
+// PIECE_A" only when the symbol A declares is absent from BaseSymbols, keyed by
+// the declaring group's package and the symbol's name. A symbol that already
+// exists on the base gets no note, and another package's symbol of the same
+// name does not hide it.
+func TestSplitPlanBaseSymbolsNeedNoNote(t *testing.T) {
+	t.Parallel()
+	const readNote = "`config.Read` is created by bead PIECE_A."
+	const configNote = "`config.Config` is created by bead PIECE_A."
+	tests := []struct {
+		name        string
+		baseSymbols map[string]bool
+		want        []string
+		wantNone    []string
+	}{
+		{"an existing symbol gets no note",
+			map[string]bool{"internal/config.Read": true},
+			[]string{configNote}, []string{readNote}},
+		{"an absent symbol gets the note",
+			map[string]bool{},
+			[]string{readNote, configNote}, nil},
+		{"another package's symbol of the same name does not hide it",
+			map[string]bool{"internal/specsplit.Read": true, "internal/config.Config": true},
+			[]string{readNote}, []string{configNote}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := symbolSpec(
+				[]string{"- Add internal/config/env.go with `func Read() string` and `type Config struct{}`."},
+				[]string{"- Create internal/specsplit/plan.go, which calls `config.Read()` and holds a `config.Config`."},
+			)
+			spec.BaseSymbols = tc.baseSymbols
+			groups, err := Group(spec)
+			if err != nil {
+				t.Fatalf("Group() error = %v, want none", err)
+			}
+			plan, err := Plan(spec, groups)
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want none", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(plan.B.Text, want) {
+					t.Errorf("piece B text lacks %q:\n%s", want, plan.B.Text)
+				}
+			}
+			for _, none := range tc.wantNone {
+				if strings.Contains(plan.B.Text, none) {
+					t.Errorf("piece B text holds %q, which the base already has:\n%s", none, plan.B.Text)
+				}
+			}
+		})
+	}
+}
+
+// TestSplitPlanRequiresBaseSymbols: a nil BaseSymbols is an error, since a
+// caller that forgot it would get the created-by trap with no signal; an empty
+// non-nil map is the legitimate "no symbol exists" input.
+func TestSplitPlanRequiresBaseSymbols(t *testing.T) {
+	t.Parallel()
+	spec := twoPieceSpec()
+	groups, err := Group(spec)
+	if err != nil {
+		t.Fatalf("Group() error = %v, want none", err)
+	}
+	spec.BaseSymbols = nil
+	if _, err := Plan(spec, groups); err == nil || !strings.Contains(err.Error(), "BaseSymbols not supplied") {
+		t.Errorf("Plan() with a nil BaseSymbols error = %v, want one naming %q", err, "BaseSymbols not supplied")
+	}
+	spec.BaseSymbols = map[string]bool{}
+	if _, err := Plan(spec, groups); err != nil {
+		t.Errorf("Plan() with an empty BaseSymbols error = %v, want none", err)
 	}
 }
 

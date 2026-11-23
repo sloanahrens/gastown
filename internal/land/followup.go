@@ -653,12 +653,12 @@ func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup,
 }
 
 // heldFindingTexts is the findings the bound held back, as the queue line keeps
-// them: scrubbed like a verdict's claims, because the queue line is the same
+// them: scrubbed like a verdict's findings, because the queue line is the same
 // review log (gt-uxbi5y).
 func heldFindingTexts(held []FollowupCandidate) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(held))
 	for _, c := range held {
-		out = append(out, ReviewFindingText{ID: c.ID, Severity: c.Severity, File: c.Path, Line: c.Line, Title: c.Title, Claim: boundedClaim(scrubClaim(c.Claim)), Class: c.Class})
+		out = append(out, ReviewFindingText{ID: c.ID, Severity: c.Severity, File: scrubClaim(c.Path), Line: c.Line, Title: scrubClaim(c.Title), Claim: boundedClaim(scrubClaim(c.Claim)), Class: c.Class})
 	}
 	return out
 }

@@ -49,7 +49,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer, lookPath func(string) (string, error), version func() (string, error), registry pincheck.Registry) int {
 	fs := flag.NewFlagSet("imagepreflight", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	sha := fs.String("sha", "", "GITHUB_SHA, the green commit the job builds both images at")
+	sha := fs.String("sha", "", "GITHUB_SHA, the green commit the job builds every image at")
 	mangoURL := fs.String("mango-url", "", "the MANGO_URL repository variable: the mango source the daemon image carries")
 	mangoCommit := fs.String("mango-commit", "", "the MANGO_COMMIT repository variable: the mango commit the daemon image carries")
 	host := fs.String("host", "", "the Forgejo host:port the pins, the images and the mango source name")

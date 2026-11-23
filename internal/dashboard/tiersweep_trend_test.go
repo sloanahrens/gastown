@@ -2,16 +2,17 @@ package dashboard
 
 import (
 	"encoding/json"
-	"strings"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
-// The wall trend reaches the page as part of the tiersweep snapshot: one entry
-// per rig, oldest sweep first, each point naming the sha, the tier walls and
-// the cycle's total under the field names the pane's script reads. This is the
-// JSON contract between the reader and the page, so it is checked where the
-// page would receive it (hub.go pollTierSweep).
+// The feed keeps the tiersweep section after the page's pane is gone
+// (gt-gfglv0): one trend entry per rig, oldest sweep first, each point naming
+// the sha, the tier walls and the cycle's total. This is the JSON contract
+// between the reader and every feed consumer, so it is checked where a reader
+// receives it (hub.go pollTierSweep).
 func TestTierSweepTrendReachesThePageJSON(t *testing.T) {
 	t.Parallel()
 
@@ -59,83 +60,55 @@ func TestTierSweepTrendReachesThePageJSON(t *testing.T) {
 	}
 }
 
-// The Tier sweeps pane draws one wall trend per rig, using the Landings trend's
-// chart: a rig whose sweeps hold walls gets a chart, and a rig that has not
-// swept yet reads "no sweeps yet" rather than an error or an empty chart. The
-// empty rig must not stop the series beside it from drawing.
-func TestTierSweepPaneDrawsATrendPerRig(t *testing.T) {
+// The page draws no Tier sweeps pane, but the feed keeps both of its sections
+// for other readers (gt-gfglv0): /api/state still serves the tiersweep
+// snapshot and the update run beside it. This is a feed contract, not a page
+// check, so it sits here rather than with the update chip's page tests.
+func TestTierSweepAndUpdateSectionsReachTheFeed(t *testing.T) {
 	t.Parallel()
 
-	total := 600.0
-	at := "2026-10-03T22:09:36Z"
-	dom := newPageDOM(t)
-	dom.call(t, "renderTierSweep", map[string]any{
-		"tiersweep": map[string]any{
-			"sweeps": []any{map[string]any{
-				"at": at, "rig": "gastown", "sha": "a9be03e4",
-				"stages": []any{map[string]any{"tier": "shell", "verdict": "GREEN"}},
-			}},
-			"trends": []any{
-				map[string]any{"rig": "gastown", "sweeps": []any{
-					map[string]any{"at": at, "sha": "b7c1d2e3", "walls": map[string]any{"shell": 70.0, "integration": 240.0}, "total_secs": total},
-					map[string]any{"at": at, "sha": "a9be03e4", "walls": map[string]any{"shell": 65.0, "integration": 180.0}, "total_secs": 570.0},
-				}},
-				map[string]any{"rig": "quiet", "sweeps": []any{}},
-			},
+	at := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		TierSweep: func() *TierSweep {
+			return &TierSweep{Sweeps: []TierSweepRow{{
+				At: at, Rig: "gastown", SHA: "a9be03e4",
+				Stages: []TierSweepStage{{Tier: "shell", Verdict: "GREEN"}},
+			}}}
+		},
+		Update: func() *UpdateStatus {
+			return &UpdateStatus{RunID: "run-1", Outcome: "ok", StartedAt: at}
 		},
 	})
+	h.pollTierSweep()
+	h.pollUpdate()
 
-	box := dom.element(t, "tiersweep")
-	for _, want := range []string{"gastown", "quiet", "no sweeps yet", "2 sweeps"} {
-		if !strings.Contains(box.Text, want) {
-			t.Errorf("the pane does not read %q: %s", want, box.Text)
-		}
+	req := httptest.NewRequest("GET", "/api/state", nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/state = %d", rec.Code)
 	}
-	if strings.Contains(box.Text, "unavailable") {
-		t.Error("a rig with no sweeps must not read as an unavailable log")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/api/state is not the page's JSON: %v", err)
 	}
-	// A chart is captioned "wall time per sweep": one for gastown, none for quiet.
-	if n := strings.Count(box.Text, "wall time per sweep"); n != 1 {
-		t.Errorf("the pane drew %d charts, want one for gastown and none for quiet", n)
-	}
-}
 
-// A trend whose sweeps carry no wall times at all has no line to draw: the pane
-// says so, and draws no chart.
-func TestTierSweepPaneSaysSoForAnAllNullTrend(t *testing.T) {
-	t.Parallel()
-	dom := newPageDOM(t)
-	dom.call(t, "renderTierSweep", map[string]any{
-		"tiersweep": map[string]any{
-			"sweeps": []any{},
-			"trends": []any{map[string]any{"rig": "gastown", "sweeps": []any{
-				map[string]any{"at": "2026-10-03T22:09:36Z", "sha": "a9be03e4"},
-			}}},
-		},
-	})
-	box := dom.element(t, "tiersweep")
-	if !strings.Contains(box.Text, "no wall times recorded") {
-		t.Errorf("an all-null trend must say so: %s", box.Text)
+	var sweep TierSweep
+	if raw, ok := body["tiersweep"]; !ok {
+		t.Error("/api/state dropped the tiersweep section")
+	} else if err := json.Unmarshal(raw, &sweep); err != nil {
+		t.Fatalf("/api/state's tiersweep section is not a TierSweep: %v", err)
+	} else if len(sweep.Sweeps) != 1 || sweep.Sweeps[0].SHA != "a9be03e4" {
+		t.Errorf("/api/state's tiersweep sweeps = %+v, want the sweep the reader returned", sweep.Sweeps)
 	}
-	if strings.Contains(box.Text, "wall time per sweep") {
-		t.Errorf("an all-null trend drew a chart: %s", box.Text)
-	}
-}
 
-// A registry that could not be read is said on the pane: the trends show only
-// the rigs the log names.
-func TestTierSweepPaneSaysSoWhenTheRegistryFailed(t *testing.T) {
-	t.Parallel()
-	dom := newPageDOM(t)
-	dom.call(t, "renderTierSweep", map[string]any{
-		"tiersweep": map[string]any{
-			"sweeps":             []any{},
-			"trends":             []any{},
-			"trends_unavailable": true,
-		},
-	})
-	box := dom.element(t, "tiersweep")
-	if !strings.Contains(box.Text, "rig list unavailable") {
-		t.Errorf("a failed registry must be said on the pane: %s", box.Text)
+	var update UpdateStatus
+	if raw, ok := body["update"]; !ok {
+		t.Error("/api/state dropped the update section")
+	} else if err := json.Unmarshal(raw, &update); err != nil {
+		t.Fatalf("/api/state's update section is not an UpdateStatus: %v", err)
+	} else if update.RunID != "run-1" {
+		t.Errorf("/api/state's update = %+v, want run-1", update)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -56,6 +57,16 @@ func TestReadReadsCredential(t *testing.T) {
 			body: "user=gt\npassword=secret",
 			want: Credential{User: "gt", Password: NewSecret("secret")},
 		},
+		{
+			name: "only a user line",
+			body: "user=gt\n",
+			want: Credential{User: "gt"},
+		},
+		{
+			name: "only a password line",
+			body: "password=secret\n",
+			want: Credential{Password: NewSecret("secret")},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,6 +79,41 @@ func TestReadReadsCredential(t *testing.T) {
 				t.Fatalf("Read = %+v (password %q), want %+v (password %q)", got, got.Password.Reveal(), tt.want, tt.want.Password.Reveal())
 			}
 		})
+	}
+}
+
+// TestReadRefusesAFileWithNoCredential: a 0600 file present with neither a
+// user= nor a password= line is misprovisioned, not absent.
+func TestReadRefusesAFileWithNoCredential(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"empty file":    "",
+		"comments only": "# the dolt credential lives here\n  # and nowhere else\n",
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := writeCredential(t, body)
+			got, err := Read(path)
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "holds no credential") || got != (Credential{}) {
+				t.Errorf("Read = %+v, %v; want no value and an error naming %q and saying the file holds no credential", got, err, path)
+			}
+		})
+	}
+}
+
+// TestReadRefusesADanglingSymlink: the open of a link to a missing target fails
+// with ENOENT while the path itself exists, so it is a broken credential link.
+func TestReadRefusesADanglingSymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "dolt-credential")
+	if err := os.Symlink(filepath.Join(dir, "missing-target"), link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := Read(link)
+	if err == nil || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "symlink to nothing") || got != (Credential{}) {
+		t.Errorf("Read = %+v, %v; want no value and an error naming %q and saying it is a symlink to nothing", got, err, link)
 	}
 }
 
@@ -181,23 +227,34 @@ func TestReadRefusesAFileItCannotOpen(t *testing.T) {
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatalf("Chmod: %v", err)
 	}
-	got, err := Read(path)
 	if os.Geteuid() == 0 {
-		// Root bypasses the permission bits, so the file opens and reads: the
-		// refusal below is what a non-root reader must get.
-		if err != nil {
-			t.Fatalf("Read failed on a file root can read: %v", err)
-		}
-		if got.Password.Reveal() != secret {
-			t.Fatalf("Read = %+v, want the password root can read", got)
-		}
-		return
+		//testpolicy:allow no-skip — root bypasses the permission bits, so a 0000 file opens for root and the refusal has no case to drive
+		t.Skip("running as root: root reads a 0000 file, so the refusal to open it cannot be tested")
 	}
+	got, err := Read(path)
 	if err == nil {
 		t.Fatalf("Read returned the credential of a file it cannot open: %+v", got)
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error %q does not name the path %q", err.Error(), path)
+	}
+}
+
+// TestReadFollowsASymlinkToA0600File reads through a 0777 link: the open
+// follows it, so the checked mode is the 0600 target's, not the link's.
+func TestReadFollowsASymlinkToA0600File(t *testing.T) {
+	t.Parallel()
+	target := writeCredential(t, "user=gt\npassword=secret\n")
+	link := filepath.Join(t.TempDir(), "dolt-credential")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := Read(link)
+	if err != nil {
+		t.Fatalf("Read of a symlink to a 0600 file: %v", err)
+	}
+	if got.User != "gt" || got.Password.Reveal() != "secret" {
+		t.Fatalf("Read = %+v, want the credential behind the link", got)
 	}
 }
 
@@ -217,9 +274,9 @@ func TestReadRefusesADirectory(t *testing.T) {
 	}
 }
 
-func TestReadRefusesAPathItCannotStat(t *testing.T) {
+func TestReadRefusesAPathItCannotOpen(t *testing.T) {
 	t.Parallel()
-	// A path below a regular file stats with ENOTDIR, which is an error and not
+	// A path below a regular file opens with ENOTDIR, which is an error and not
 	// the "no such file" that means no credential.
 	file := writeCredential(t, "user=gt\npassword=secret\n")
 	path := filepath.Join(file, "dolt-credential")
@@ -319,18 +376,94 @@ func TestCredentialRedactingMethodsHideThePassword(t *testing.T) {
 
 func TestCredentialLogValueHidesPassword(t *testing.T) {
 	t.Parallel()
-	const secret = "s3cr3t-value"
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	rec := slog.NewRecord(time.Unix(0, 0), slog.LevelInfo, "connecting", 0)
-	rec.AddAttrs(slog.Any("credential", Credential{User: "gt", Password: NewSecret(secret)}))
+	rec.AddAttrs(slog.Any("credential", Credential{User: "gt-user", Password: NewSecret(leakSecret)}))
 	if err := log.Handler().Handle(context.Background(), rec); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if strings.Contains(buf.String(), secret) {
-		t.Errorf("the log line printed the password: %s", buf.String())
+	line := buf.String()
+	var userField string
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "credential.user=") {
+			userField = field
+		}
 	}
-	if !strings.Contains(buf.String(), "gt") {
-		t.Errorf("the log line dropped the user: %s", buf.String())
+	if userField != "credential.user=gt-user" {
+		t.Errorf("the log line's user field = %q, want %q: %s", userField, "credential.user=gt-user", line)
+	}
+	if strings.Contains(line, leakSecret) {
+		t.Errorf("the log line printed the password: %s", line)
+	}
+}
+
+// TestCredentialJSONEncodingHidesPassword marshals a Credential as a value, a
+// pointer, an exported field of a struct and an element of a slice: no output
+// holds the password, and every output still names the user.
+func TestCredentialJSONEncodingHidesPassword(t *testing.T) {
+	t.Parallel()
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
+	type holder struct {
+		Cred Credential `json:"credential"`
+	}
+	tests := []struct {
+		name string
+		v    any
+	}{
+		{name: "value", v: c},
+		{name: "pointer", v: &c},
+		{name: "exported field", v: holder{Cred: c}},
+		{name: "slice", v: []Credential{c}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := json.Marshal(tt.v)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if strings.Contains(string(out), leakSecret) {
+				t.Errorf("Marshal of the %s printed the password: %s", tt.name, out)
+			}
+			if !strings.Contains(string(out), c.User) {
+				t.Errorf("Marshal of the %s dropped the user: %s", tt.name, out)
+			}
+		})
+	}
+}
+
+// TestCredentialSlogHandlersHidePassword logs a Credential through the text and
+// JSON handlers, as an attribute and inside a group: no line holds the
+// password, and every line still names the user.
+func TestCredentialSlogHandlersHidePassword(t *testing.T) {
+	t.Parallel()
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
+	handlers := map[string]func(*bytes.Buffer) slog.Handler{
+		"text": func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
+		"json": func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
+	}
+	placements := map[string]func(*slog.Record){
+		"attribute": func(r *slog.Record) { r.AddAttrs(slog.Any("credential", c)) },
+		"group":     func(r *slog.Record) { r.AddAttrs(slog.Group("creds", slog.Any("credential", c))) },
+	}
+	for hname, handler := range handlers {
+		for pname, add := range placements {
+			t.Run(hname+"/"+pname, func(t *testing.T) {
+				t.Parallel()
+				var buf bytes.Buffer
+				rec := slog.NewRecord(time.Unix(0, 0), slog.LevelInfo, "connecting", 0)
+				add(&rec)
+				if err := handler(&buf).Handle(context.Background(), rec); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+				if strings.Contains(buf.String(), leakSecret) {
+					t.Errorf("the %s handler with the credential as %s printed the password: %s", hname, pname, buf.String())
+				}
+				if !strings.Contains(buf.String(), c.User) {
+					t.Errorf("the %s handler with the credential as %s dropped the user: %s", hname, pname, buf.String())
+				}
+			})
+		}
 	}
 }

@@ -248,6 +248,14 @@ type tierSweepState struct {
 	// green throughout. It is the skip key: while origin/main equals it there
 	// is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
+	// LastGreenAt is when the cycle that set LastGreenSHA finished, so a reader
+	// can date the green tip. It moves exactly when LastGreenSHA does, and a
+	// record written before the field existed reads as the zero time (gt-igrpge).
+	LastGreenAt time.Time `json:"last_green_at,omitempty"`
+	// RedCycles counts the consecutive finished cycles that came back with a
+	// RED tier: a fully green cycle resets it, and a cycle that judged no RED
+	// tier leaves it (gt-9duu8b).
+	RedCycles int `json:"red_cycles,omitempty"`
 	// ImagesRetries counts the re-runs an images failure at ImagesRetrySHA has
 	// already cost. The pair belongs together: the count is read only while
 	// ImagesRetrySHA equals LastGreenSHA, and every cycle rewrites the pair
@@ -1542,8 +1550,8 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 
 	stages := tierSweepStages(rig)
 	// The cycle's start, logged before the first stage runs so the dashboard's
-	// Tier sweeps pane reads a sweep as running from its true beginning, over
-	// the stages it will run, instead of inferring it from the shell stage
+	// tiersweep feed section reads a sweep as running from its true beginning,
+	// over the stages it will run, instead of inferring it from the shell stage
 	// finishing (gt-rntre). Nothing reaches here for a skipped cycle.
 	d.logger.Printf("tier_sweep: %s: sweep started %s (%s)", rig, shortSHA(sha), tierSweepTierList(stages))
 	run := seams.run
@@ -1718,8 +1726,12 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// it planned and says nothing about the rest, and a tier the script does not
 	// offer has no verdict to hold the tip back (gt-qgrdy).
 	green := !partial && tierSweepAllGreen(results, stages, notOffered)
+	state.RedCycles = tierSweepRedCycles(prior.RedCycles, results, green)
 	if green {
 		state.LastGreenSHA = sha
+		// The cycle's finish, read after the stages have run: the green tip is
+		// dated by when it was proved, not by when the cycle was due (gt-igrpge).
+		state.LastGreenAt = d.clk().Now()
 		// Caught up with the tip it covered: nothing is owed.
 		state.OwedSince = time.Time{}
 	} else if state.OwedSince.IsZero() {
@@ -1860,6 +1872,22 @@ func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSwee
 		}
 	}
 	return judged
+}
+
+// tierSweepRedCycles is the record's consecutive-red count after one cycle: a
+// fully green cycle resets it, a cycle that judged any tier RED adds one, and a
+// cycle that judged no RED tier leaves it, since a partial cycle says nothing
+// about the tiers it skipped (gt-9duu8b).
+func tierSweepRedCycles(prior int, results map[string]tierSweepTierResult, green bool) int {
+	if green {
+		return 0
+	}
+	for _, res := range results {
+		if res.Verdict == tierSweepRed {
+			return prior + 1
+		}
+	}
+	return prior
 }
 
 // tierSweepSweptLine is the log line that closes a cycle. The dashboard reads
@@ -4281,4 +4309,29 @@ func lastLines(out string) string {
 		lines = lines[len(lines)-tierSweepLogTailLines:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// tierSweepRunnerTimingNote splits an off-host stage's wall time where the
+// result stamps it: the lag before the run started, its tests, and the tail
+// from its finish to the stage reading the result. A line that shows only the
+// stage's elapsed time cannot say which part went long.
+//
+// started and finished come from the pod's clock and stageStart and now from
+// the daemon's, so a skew can make the lag or the tail negative: that is
+// written as 0s. A result with no start or no finish, or one that finished
+// before it started, has no split to show and gets the empty string.
+func tierSweepRunnerTimingNote(stageStart, started, finished, now time.Time) string {
+	if started.IsZero() || finished.IsZero() || finished.Before(started) {
+		return ""
+	}
+	lag := started.Sub(stageStart)
+	if lag < 0 {
+		lag = 0
+	}
+	tail := now.Sub(finished)
+	if tail < 0 {
+		tail = 0
+	}
+	return fmt.Sprintf(" (start lag %s, tests %s, tail %s)",
+		lag.Round(time.Second), finished.Sub(started).Round(time.Second), tail.Round(time.Second))
 }

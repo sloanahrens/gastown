@@ -115,7 +115,7 @@ beside the DeepSeek and Claude lines: the calls and dollars over the command's
 prints anything else shows the row as unavailable and leaves the other spend
 lines alone; an empty value leaves the row out.
 
-The JEV panel, under the Tier sweeps, reads the scorecard cache that
+The JEV panel reads the scorecard cache that
 gt jev scorecard --refresh writes (<town>/.runtime/jev/scorecard.json) every
 minute while a page is open and starts no process for it. It draws one line per
 battery: its items logged, how many of them are labeled, how many the report
@@ -541,11 +541,14 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WatchDir:       dashboardWatchDir(townRoot),
 		SpendHours:     dashboardSpendHours(),
 		JevSpend:       dashboardJevSpend(jevSpendArgv),
+		Jobs:           dashboardJobs(jobsArgv(), execSpend),
+		JobsEvery:      jobsEvery,
 		JevScorecard:   dashboardJevScorecard(townRoot),
 		JevCap:         dashboardJevCap(townRoot),
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
+		SystemUpdates:  func() *dashboard.SystemUpdates { return systemUpdates(townRoot, tierSweeps, time.Now()) },
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
@@ -1178,6 +1181,33 @@ func dashboardJevSpendWith(argv []string, run func(ctx context.Context, argv []s
 			return nil
 		}
 		j.Window = window
+		return j
+	}
+}
+
+// jobsEvery is how often the hub reads the maintenance job list: the jobs run
+// hourly or daily, so five minutes shows a run within minutes of its line.
+const jobsEvery = 5 * time.Minute
+
+// jobsArgv is the command line the dashboard's jobs source runs: the list
+// gt jobs --json prints, folded into the Maintenance jobs section (gt-ai07su).
+func jobsArgv() []string { return []string{"gt", "jobs", "--json"} }
+
+// dashboardJobs runs the jobs command and folds its JSON into the section, nil
+// when the command fails, times out, or prints anything but the list. It shares
+// the spend commands' timeout, as the Jev spend reader beside it does.
+func dashboardJobs(argv []string, run func(context.Context, []string) ([]byte, error)) func() *dashboard.Jobs {
+	return func() *dashboard.Jobs {
+		ctx, cancel := context.WithTimeout(context.Background(), dashboardSpendTimeout)
+		defer cancel()
+		out, err := run(ctx, argv)
+		if err != nil {
+			return nil
+		}
+		j, err := dashboard.ParseJobs(out)
+		if err != nil {
+			return nil
+		}
 		return j
 	}
 }

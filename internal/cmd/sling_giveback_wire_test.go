@@ -11,12 +11,14 @@ import (
 
 // The failure texts here are the ones the town produced (gt-hsrr45): a
 // serialization abort on a mol bond, a hook write that lost the assignee lock,
-// and a seat whose session was already running. The wiring is tested against
-// what a sling actually returns, not a paraphrase of it.
+// a seat whose session was already running, and a bd gateway that did not
+// answer. The wiring is tested against what a sling actually returns, not a
+// paraphrase of it.
 const (
 	slingSerializationText = `bd mol bond mol-polecat-work gt-x: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction.`
 	slingHookLockText      = `serializing hook write for gastown/polecats/toast: timed out acquiring assignee sling lock after 10s (held by pid 10297 started 00:07:09Z; another sling may be stuck)`
 	slingRunningText       = `starting polecat session: session already running: gt-cheedo`
+	slingGatewayDownText   = `gtwrap: the bd gateway at http://bd-gateway.gt.svc:7440 did not answer, so the call did not run: connection refused`
 )
 
 // TestSlingGiveBackWireGivesBackEveryClassifiedFailure pins gt-wsf3ht: a sling
@@ -157,5 +159,61 @@ func TestSlingGiveBackWirePoolFullLeavesTheCount(t *testing.T) {
 	}
 	if got := respawnCountOf(t, townRoot, bead); got != 1 {
 		t.Errorf("respawn count after the pool-full refusal = %d, want the 1 it had", got)
+	}
+}
+
+// TestSlingGiveBackWireStart pins the give-back on finishStart, the path a
+// start takes once the polecat is spawned (gt-wsf3ht): a seat whose session is
+// already running, a bd gateway that did not answer and an assignee lock that
+// stayed held are the seat's precondition, not the bead's death, so a start
+// refused for one hands its count back. The session row is the sentinel the
+// start path returns and the gateway row its text, which has no sentinel to
+// carry it. Any other start failure keeps its count.
+func TestSlingGiveBackWireStart(t *testing.T) {
+	t.Parallel()
+	const bead = slingBead
+	cases := []struct {
+		name     string
+		startErr error
+		want     int
+	}{
+		{
+			name:     "a session that was already running",
+			startErr: fmt.Errorf("starting polecat session: %w", fmt.Errorf("%w: gt-cheedo", polecat.ErrSessionRunning)),
+			want:     1,
+		},
+		{name: "a bd gateway that did not answer", startErr: errors.New(slingGatewayDownText), want: 1},
+		{name: "an assignee lock that stayed held, as text", startErr: errors.New(slingHookLockText), want: 1},
+		{name: "a startup death", startErr: errors.New("starting polecat session: agent exited with status 1"), want: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			// One death already on the bead, so a give-back that removes the
+			// wrong increment reads as a count of 0.
+			if _, err := polecat.RecordBeadRespawn(townRoot, bead); err != nil {
+				t.Fatalf("RecordBeadRespawn: %v", err)
+			}
+			record := func() polecat.RespawnMark {
+				mark, err := polecat.RecordBeadRespawnMark(townRoot, bead)
+				if err != nil {
+					t.Fatalf("RecordBeadRespawnMark: %v", err)
+				}
+				return mark
+			}
+			s := freshSpawnInfo("rig",
+				&polecat.Polecat{Name: "alpha", Branch: "polecat/alpha/" + bead},
+				"alpha-session", "main", "main",
+				SlingSpawnOptions{HookBead: bead}, record)
+			// What slingSeatSpawn.spawn sets on the info it hands on.
+			s.townRoot = townRoot
+
+			s.finishStart("", tc.startErr)
+
+			if got := respawnCountOf(t, townRoot, bead); got != tc.want {
+				t.Errorf("respawn count after the failed start = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

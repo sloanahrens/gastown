@@ -93,6 +93,62 @@ func TestSpecLintEvidenceAllows(t *testing.T) {
 	}
 }
 
+// A usable fenced block holds at least one non-blank line between its markers;
+// a lone fence marker and an empty pair show no command, so the refusal stands.
+func TestSpecLintEvidenceFence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, section string
+		blocked       bool
+	}{
+		{"content fenced block", "```\ngo test ./internal/specdispatch\nok\n```", false},
+		{"dollar line", "$ go test ./internal/specdispatch\nok", false},
+		{"empty section", "", true},
+		{"lone fence marker", "```", true},
+		{"empty fenced block", "```\n```", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := evidenceBoxSpec("zero findings on internal/specdispatch/testdata/ok.yaml")
+			r, blocked := evidenceRefusal(s, map[string]string{"evidence": tc.section})
+			if blocked != tc.blocked {
+				t.Fatalf("evidenceRefusal(section %q) blocked = %v (%q), want %v", tc.section, blocked, r.Reason, tc.blocked)
+			}
+		})
+	}
+}
+
+// A bead created before EvidenceRequiredFrom is grandfathered: the rule did not
+// exist when it was filed, so it is not refused. A bead created at or after the
+// cutoff is checked, and so is a bead whose CreatedAt is empty or unparseable
+// (both parse to the zero time, which is not before the cutoff) (gt-qhrsa4).
+func TestSpecLintEvidenceGrandfather(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		createdAt string
+		blocked   bool
+	}{
+		{"before cutoff", "2026-11-19T23:59:59Z", false},
+		{"at cutoff", "2026-11-20T00:00:00Z", true},
+		{"after cutoff", "2026-11-20T00:00:01Z", true},
+		{"empty CreatedAt", "", true},
+		{"unparseable CreatedAt", "not a time", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := evidenceBoxSpec("zero findings on internal/specdispatch/testdata/ok.yaml")
+			s.CreatedAt = tc.createdAt
+			r, blocked := evidenceRefusal(s, Sections(s.Description))
+			if blocked != tc.blocked {
+				t.Fatalf("evidenceRefusal(CreatedAt %q) blocked = %v (%q), want %v", tc.createdAt, blocked, r.Reason, tc.blocked)
+			}
+		})
+	}
+}
+
 // A usable Evidence section suppresses the refusal; a section that shows no
 // command does not.
 func TestSpecLintEvidenceSection(t *testing.T) {
@@ -113,6 +169,48 @@ func TestSpecLintEvidenceSection(t *testing.T) {
 			r, blocked := evidenceRefusal(s, map[string]string{"evidence": tc.section})
 			if blocked != tc.want {
 				t.Fatalf("evidenceRefusal(section %q) blocked = %v (%q), want %v", tc.section, blocked, r.Reason, tc.want)
+			}
+		})
+	}
+}
+
+// The rule is wired into the lint, not only the pure function: a new bead whose
+// acceptance claims a zero result on a fixture path and shows no Evidence
+// section is refused with the "## Evidence" field, and the same bead with a
+// fenced Evidence block is clean (gt-1adj4k).
+func TestSpecLintEvidenceThroughLint(t *testing.T) {
+	t.Parallel()
+	const box = "zero findings on internal/x/testdata/ok.yaml"
+	cases := []struct {
+		name, evidence string
+		clean          bool
+	}{
+		{"no evidence refused", "", false},
+		{"fenced evidence clean", "## Evidence\n\n```\n$ go test ./internal/x -run TestOK\nok\n```", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := evidenceBoxSpec(box)
+			s.CreatedAt = "2026-11-20T00:00:00Z"
+			if tc.evidence != "" {
+				s.Description += "\n\n" + tc.evidence
+			}
+			v := Lint(s, defaultTemplate())
+			if v.Clean() != tc.clean {
+				t.Fatalf("Lint with %s: clean = %v, want %v: %s", tc.name, v.Clean(), tc.clean, v.Line(s.ID))
+			}
+			if tc.clean {
+				return
+			}
+			if v.Route != RouteRefuse {
+				t.Fatalf("Route = %q, want %q", v.Route, RouteRefuse)
+			}
+			if v.Field != "## Evidence" {
+				t.Errorf("Field = %q, want %q", v.Field, "## Evidence")
+			}
+			if !strings.Contains(v.Reason, "internal/x/testdata/ok.yaml") {
+				t.Errorf("Reason = %q, want the fixture path", v.Reason)
 			}
 		})
 	}

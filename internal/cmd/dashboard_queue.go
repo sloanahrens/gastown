@@ -318,7 +318,12 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		}
 		for _, i := range ln {
 			if beads.HasLabel(i, land.LabelReadyToLand) && beads.IssueStatus(i.Status).IsActionable() {
-				landing = append(landing, dashQueueRow(name, i))
+				row := dashQueueRow(name, i)
+				// The ready-to-land list carries each issue's notes, so the
+				// refusals a resubmission took are counted from the row the
+				// list already returned (gt-vg3rjz).
+				row.RejectCount = land.CountRejections(i.Notes)
+				landing = append(landing, row)
 			}
 		}
 	}
@@ -342,12 +347,17 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	// A waiting bead's seat has finished, so its spans log reads the way a
 	// rejected row's does: asOf zero, the whole attempt. Only the rows the
 	// table keeps are read, the same bound the trend table puts on its own.
+	// The lower-bound mark is set whether or not the reading carries time: an
+	// unreadable log answers no seconds and a lower bound, and that is the
+	// reading where the mark says the time is unknown rather than zero.
 	if r.polecat != nil {
 		for i := range q.Landing {
-			if secs, _, _ := r.polecat(q.Landing[i].ID, time.Time{}); secs > 0 {
+			secs, _, lower := r.polecat(q.Landing[i].ID, time.Time{})
+			if secs > 0 {
 				s := secs
 				q.Landing[i].PolecatSecs = &s
 			}
+			q.Landing[i].PolecatLowerBound = lower
 		}
 	}
 	// The per-store totals the capping above just computed are exact, so the

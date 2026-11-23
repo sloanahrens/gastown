@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/testutil/gosrc"
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
 // tree is the module's source, read and parsed once for every test in the
@@ -33,5 +33,5 @@ func moduleRoot() string {
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
+	os.Exit(testutil.HermeticMain(m))
 }

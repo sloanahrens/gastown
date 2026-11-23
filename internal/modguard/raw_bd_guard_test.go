@@ -1,4 +1,4 @@
-package beadsfake
+package modguard
 
 import (
 	"bufio"
@@ -186,6 +186,79 @@ func rawBdProblems(fsys fs.FS, baseline map[rawBdKey]int, floor int) []string {
 	return problems
 }
 
+// scanRawBdSharedTree counts the raw bd sites the way scanRawBdTree does, with
+// the same skips, over the shared tree's walk and source; keys are relative to root.
+func scanRawBdSharedTree(root string, walk func(string, fs.WalkDirFunc) error, source func(string) ([]byte, error)) (map[rawBdKey]int, int, error) {
+	counts, files := map[rawBdKey]int{}, 0
+	err := walk(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		switch {
+		case d.IsDir() && (rel == "internal/beads" || d.Name() == ".git" || d.Name() == "testdata" || d.Name() == "vendor" || d.Name() == "node_modules"):
+			return fs.SkipDir
+		case d.IsDir() || filepath.Ext(rel) != ".go":
+			return nil
+		}
+		src, err := source(path)
+		if err != nil {
+			return err
+		}
+		files++
+		return scanRawBd(rel, src, counts)
+	})
+	return counts, files, err
+}
+
+// TestRawBdSharedTreeSkips drives the shared tree's scan over an in-memory tree:
+// internal/beads and testdata are skipped and other Go files are counted.
+func TestRawBdSharedTreeSkips(t *testing.T) {
+	t.Parallel()
+	site := "package p\n\nfunc f() {\n\texec.Command(\"bd\", \"list\")\n}\n"
+	fsys := memTree("internal/beads/seam.go", site, "internal/cmd/testdata/x.go", site, "internal/cmd/run.go", site)
+	counts, files, err := scanRawBdSharedTree(".", func(start string, fn fs.WalkDirFunc) error { return fs.WalkDir(fsys, start, fn) },
+		func(path string) ([]byte, error) { return fs.ReadFile(fsys, path) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != 1 || fmt.Sprint(counts) != fmt.Sprint(map[rawBdKey]int{{"internal/cmd/run.go", "argv"}: 1}) {
+		t.Errorf("files = %d, counts = %v; want one file and internal/cmd/run.go's one argv site", files, counts)
+	}
+}
+
+// TestRawBdSharedTreeParity checks the two scans of the module root agree: the
+// shared tree's walk and source count the same raw bd sites in the same Go
+// files as the plain walk. TestNoNewRawBdSites may switch to the shared scan
+// only while they do.
+func TestRawBdSharedTreeParity(t *testing.T) {
+	t.Parallel()
+	// Walk takes the physical root: a symlinked checkout path would stop at
+	// the first entry, as filepath.WalkDir does.
+	root, err := filepath.EvalSymlinks(moduleRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wantFiles, err := scanRawBdTree(os.DirFS(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, files, err := scanRawBdSharedTree(root, tree.Walk, tree.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != wantFiles {
+		t.Errorf("shared tree read %d Go files, plain walk %d", files, wantFiles)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("shared tree counts = %v, plain walk = %v", got, want)
+	}
+}
+
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
 // (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
 // beads.Client and the other typed methods, not argv. The sites still
@@ -196,7 +269,7 @@ func rawBdProblems(fsys fs.FS, baseline map[rawBdKey]int, floor int) []string {
 // the contract when none fits), never by raising a count.
 func TestNoNewRawBdSites(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("raw-bd-baseline.txt")
+	src, err := os.ReadFile(filepath.Join("..", "beads", "beadsfake", "raw-bd-baseline.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +277,7 @@ func TestNoNewRawBdSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join("..", "..", "..")
+	root := filepath.Join("..", "..")
 	r, err := os.OpenRoot(root)
 	if err != nil {
 		t.Fatal(err)
@@ -237,55 +310,55 @@ func TestRawBdPolicy(t *testing.T) {
 	}{
 		{
 			name:  "a clean tree passes",
-			fsys:  tree("internal/cmd/clean.go", clean),
+			fsys:  memTree("internal/cmd/clean.go", clean),
 			floor: 1,
 		},
 		{
 			name:  "the seam package may hand out bd argv",
-			fsys:  tree("internal/beads/seam.go", site, "internal/cmd/clean.go", clean),
+			fsys:  memTree("internal/beads/seam.go", site, "internal/cmd/clean.go", clean),
 			floor: 1,
 		},
 		{
 			name:  "testdata and vendor are not scanned",
-			fsys:  tree("internal/cmd/clean.go", clean, "internal/cmd/testdata/x.go", site, "vendor/dep/x.go", site),
+			fsys:  memTree("internal/cmd/clean.go", clean, "internal/cmd/testdata/x.go", site, "vendor/dep/x.go", site),
 			floor: 1,
 		},
 		{
 			name:  "a file outside the seam that execs bd fails",
-			fsys:  tree("internal/cmd/run.go", site),
+			fsys:  memTree("internal/cmd/run.go", site),
 			floor: 1,
 			want:  []string{"internal/cmd/run.go: 1 raw bd argv site(s), baseline 0; call a typed beads method instead"},
 		},
 		{
 			name:     "a count above its baseline fails",
-			fsys:     tree("internal/cmd/two.go", twoSites),
+			fsys:     memTree("internal/cmd/two.go", twoSites),
 			baseline: map[rawBdKey]int{{"internal/cmd/two.go", "argv"}: 1},
 			floor:    1,
 			want:     []string{"internal/cmd/two.go: 2 raw bd argv site(s), baseline 1"},
 		},
 		{
 			name:     "a count below its baseline fails",
-			fsys:     tree("internal/cmd/one.go", site),
+			fsys:     memTree("internal/cmd/one.go", site),
 			baseline: map[rawBdKey]int{{"internal/cmd/one.go", "argv"}: 2},
 			floor:    1,
 			want:     []string{"internal/cmd/one.go argv: baseline 2, found 1; lower it to 1"},
 		},
 		{
 			name:     "a baseline entry with no site left fails",
-			fsys:     tree("internal/cmd/clean.go", clean),
+			fsys:     memTree("internal/cmd/clean.go", clean),
 			baseline: map[rawBdKey]int{{"internal/cmd/gone.go", "argv"}: 1},
 			floor:    1,
 			want:     []string{"internal/cmd/gone.go argv: baseline 1, found none; remove the entry"},
 		},
 		{
 			name:  "a walk that reads too few files fails",
-			fsys:  tree("internal/cmd/clean.go", clean),
+			fsys:  memTree("internal/cmd/clean.go", clean),
 			floor: 2,
 			want:  []string{"scanned 1 Go files (floor 2); the walk has stopped reading the repo"},
 		},
 		{
 			name:  "a walk error is a problem, not a pass",
-			fsys:  walkFailFS{FS: tree("internal/cmd/clean.go", clean, "internal/cmd/run.go", site), path: "internal/cmd"},
+			fsys:  walkFailFS{FS: memTree("internal/cmd/clean.go", clean, "internal/cmd/run.go", site), path: "internal/cmd"},
 			floor: 0,
 			want:  []string{"walk stopped before the counts were complete:"},
 		},
@@ -306,8 +379,10 @@ func TestRawBdPolicy(t *testing.T) {
 	}
 }
 
-// tree builds an in-memory tree from alternating path and content arguments.
-func tree(paths ...string) fs.FS {
+// memTree builds an in-memory tree from alternating path and content arguments.
+// It is named memTree because this package already has a tree variable holding
+// the module's source (main_test.go).
+func memTree(paths ...string) fs.FS {
 	m := fstest.MapFS{}
 	for i := 0; i < len(paths); i += 2 {
 		m[paths[i]] = &fstest.MapFile{Data: []byte(paths[i+1])}

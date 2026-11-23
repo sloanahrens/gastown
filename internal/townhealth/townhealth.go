@@ -118,6 +118,9 @@ const (
 	// FieldDispatch is the automatic dispatcher: whether it is filling the
 	// town's free seats (gt-xiw7o).
 	FieldDispatch = "dispatch"
+	// FieldSweep is the town-wide tier sweep: whether it is still producing a
+	// fully green cycle (gt-82qa3x).
+	FieldSweep = "sweep"
 )
 
 // Field is one health fact.
@@ -265,6 +268,17 @@ const DefaultPromoteWait = 6 * time.Hour
 // operator learns within minutes that nothing is filling the free seats
 // (gt-xiw7o).
 const DefaultDispatchWindow = 10 * time.Minute
+
+// The sweep's red conditions: two red cycles in a row is a sweep that is not
+// clearing, and three hours with no fully green sweep covers a missed hourly
+// cycle (gt-82qa3x).
+const (
+	// DefaultSweepRedCycles is how many consecutive red sweeps read RED.
+	DefaultSweepRedCycles = 2
+	// DefaultSweepGreenStale is how long a town may go without a fully green
+	// sweep before the field reads RED.
+	DefaultSweepGreenStale = 3 * time.Hour
+)
 
 // The landing wait bounds. They measure a ready-to-land submission's own age
 // — how long it has waited — not the time since the rig last landed, so a
@@ -671,6 +685,11 @@ func (t DispatchTick) declined() bool {
 type DispatchRecord struct {
 	Active bool
 	Hold   string
+	// RedHold names the kinds of the red hold holding automatic dispatch,
+	// comma separated ("sweep-red, main-red"); empty while none stands.
+	// Unlike the operator's Hold it reports a fault elsewhere in the town,
+	// so the field reads RED the moment one stands (gt-xq3s9u).
+	RedHold string
 	// Parked names why the dispatcher is not ticking at all — the seat
 	// settings it reads every tick could not be read — and is empty while
 	// reads work. A parked ticker runs no tick to record, so without this
@@ -682,6 +701,26 @@ type DispatchRecord struct {
 // Dispatcher reads the automatic dispatcher's state.
 type Dispatcher interface {
 	Dispatch() (DispatchRecord, error)
+}
+
+// SweepRecord is the town-wide tier sweep as it stands: whether a record
+// could be read at all, the run of consecutive red cycles, and when a fully
+// green sweep last finished.
+type SweepRecord struct {
+	// Known is false when the record could not be read or carries no sweep
+	// state yet. An unknown record is never green (gt-82qa3x).
+	Known bool
+	// RedCycles counts the consecutive cycles whose sweep was not fully
+	// green.
+	RedCycles int
+	// LastGreenAt is when a fully green sweep last finished; zero when none
+	// has been recorded.
+	LastGreenAt time.Time
+}
+
+// Sweep reads the tier sweep's state.
+type Sweep interface {
+	Sweep() (SweepRecord, error)
 }
 
 // Inputs are one computation's sources, clock, thresholds and previous
@@ -720,6 +759,7 @@ type Inputs struct {
 	NeedsHuman  NeedsHuman
 	Seats       Seats
 	Dispatch    Dispatcher
+	Sweep       Sweep
 	// LandingInfra is optional: nil is a town that does not probe Forgejo,
 	// and a town where no rig lands through it adds no forgejo or runner
 	// field either (gt-fn9e6.11).
@@ -755,6 +795,7 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, needsHuman(ctx, in)...)
 	r.Fields = append(r.Fields, seats(in)...)
 	r.Fields = append(r.Fields, dispatch(in))
+	r.Fields = append(r.Fields, sweep(in)...)
 	r.Fields = append(r.Fields, infra(in)...)
 	r.Verdict = Green
 	for _, f := range r.Fields {
@@ -1553,9 +1594,22 @@ func withFailedLabels(f Field, n int) Field {
 	return f
 }
 
+// redHoldPrefix begins the dispatcher value that names the red hold kinds; the
+// line keeps its spacing where every other value is compacted (gt-xq3s9u).
+const redHoldPrefix = "held by red hold ("
+
 // dispatchField judges the dispatcher's own state; dispatch adds the beads the
 // spec-dispatch-failed label holds out of the queue to whatever it returns.
 func dispatchField(in Inputs, rec DispatchRecord, ticks []DispatchTick, win time.Duration) Field {
+	// Checked first: while the red hold stands the dispatcher has stopped
+	// ticking by design, so the line must name the cause at once rather than
+	// read "silent" after the window or green while the daemon is young
+	// (gt-xq3s9u).
+	if rec.RedHold != "" {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red,
+			Value:  redHoldPrefix + rec.RedHold + ")",
+			Detail: "the red hold stands: " + rec.RedHold}
+	}
 	if rec.Hold != "" {
 		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "held", Detail: rec.Hold}
 	}
@@ -1616,6 +1670,42 @@ func freeDispatchSeat(seats []DispatchSeat) bool {
 		}
 	}
 	return false
+}
+
+// sweep judges the town-wide tier sweep: RED after DefaultSweepRedCycles red
+// cycles in a row or DefaultSweepGreenStale with no fully green sweep, GREEN
+// otherwise. A record that cannot be read, or carries no green sweep time, is
+// UNKNOWN, never GREEN: a sweep nobody can see is the failure this field
+// exists to catch.
+//
+// A nil source adds no field: a daemon reads the sweep only once its source is
+// wired (gt-zme5gu), so a town that never asks the question must not turn the
+// whole pill UNKNOWN while it waits. A wired source that cannot read its
+// record reports Known false, which is the UNKNOWN that reaches an operator
+// (gt-82qa3x).
+func sweep(in Inputs) []Field {
+	if in.Sweep == nil {
+		return nil
+	}
+	rec, err := in.Sweep.Sweep()
+	if err != nil {
+		return []Field{unknown(FieldSweep, "", "", err)}
+	}
+	if !rec.Known {
+		return []Field{unknown(FieldSweep, "", "", errors.New("the sweep record is unknown"))}
+	}
+	if rec.LastGreenAt.IsZero() {
+		return []Field{unknown(FieldSweep, "", "", errors.New("no green sweep time recorded"))}
+	}
+	if rec.RedCycles >= DefaultSweepRedCycles {
+		return []Field{{Name: FieldSweep, Tag: Recorded, Verdict: Red, Value: "red",
+			Detail: fmt.Sprintf("%d red cycles in a row", rec.RedCycles)}}
+	}
+	if age := in.Now.Sub(rec.LastGreenAt); age >= DefaultSweepGreenStale {
+		return []Field{{Name: FieldSweep, Tag: Recorded, Verdict: Red, Value: "red",
+			Detail: "no green sweep in " + Short(age)}}
+	}
+	return []Field{{Name: FieldSweep, Tag: Recorded, Verdict: Green, Value: "ok"}}
 }
 
 // Short renders a duration in its largest whole unit: 850ms, 42s, 7m, 3h,

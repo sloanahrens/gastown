@@ -2133,12 +2133,22 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		committed  time.Time
+		mainHolds  bool
 		wantLabel  string
 		wantRework string
 	}{
 		{
 			name:      "idle on the resumed branch",
 			committed: overrunSlung.Add(-time.Hour),
+			wantLabel: polecat.NeedsSplitLabel,
+		},
+		{
+			// A branch cut from main at the spawn holds main's commit and
+			// nothing of its own: the head was committed after the sling, but
+			// main already contains it, so resuming it is a wasted session.
+			name:      "origin's head is one main already contains",
+			committed: overrunSlung.Add(5 * time.Minute),
+			mainHolds: true,
 			wantLabel: polecat.NeedsSplitLabel,
 		},
 		{
@@ -2162,9 +2172,19 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// The rig's target (no config.json, so main) always answers; the
+			// row's mainHolds decides whether it contains the head.
+			var ancestors map[string]bool
+			if tc.mainHolds {
+				ancestors = map[string]bool{"abc1234 main222": true}
+			}
 			g := &pushStubGit{
 				branch: stopSeat.Branch, sha: "abc1234", commitTime: tc.committed,
-				originRefs: []git.RemoteRef{{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch}},
+				originRefs: []git.RemoteRef{
+					{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch},
+					{Hash: "main222", Name: "refs/heads/main"},
+				},
+				ancestors: ancestors,
 			}
 			d.openGitFn = func(string) daemonGit { return g }
 			s.finishedOnOrigin = d.overrunFinishedOnOrigin
@@ -2194,6 +2214,9 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			}
 			if tc.wantRework == "" && !strings.Contains(comments, "Split the bead") {
 				t.Errorf("comment %q lacks the split instruction", comments)
+			}
+			if tc.wantRework == "" && strings.Contains(comments, "reuse branch") {
+				t.Errorf("comment %q claims finished work for the next polecat to reuse", comments)
 			}
 			if tc.wantRework != "" && !strings.Contains(comments, "on origin") {
 				t.Errorf("comment %q does not name the finished work on origin", comments)
@@ -2404,6 +2427,9 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := "refs/heads/" + stopSeat.Branch
+	// The rig's target (no config.json, so main) holds an older commit: the
+	// branch is ahead of it and still counts as work.
+	target := git.RemoteRef{Hash: "main01", Name: "refs/heads/main"}
 	// The head is dated after the seat's sling: the seat produced it.
 	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	seated := stopSeat
@@ -2412,6 +2438,7 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 		originRefs: []git.RemoteRef{
 			{Hash: "1111111", Name: ref + "-other"},
 			{Hash: "abc123", Name: ref},
+			target,
 		}}
 	d.openGitFn = func(string) daemonGit { return g }
 
@@ -2442,7 +2469,7 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 
 	// The head must be one the seat committed after its sling: the same commit
 	// on both ends is not finished work when the seat only resumed it.
-	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}}, nil
+	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}, target}, nil
 	g.commitTime = slung.Add(-time.Hour)
 	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("head committed before the sling: got %q, want none", got)
@@ -2480,6 +2507,9 @@ func TestOverrunFinishedOnOrigin_OriginAheadOfTheWorktreeIsFinished(t *testing.T
 	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	seated := stopSeat
 	seated.SlingAt = slung
+	// The rig's target (no config.json, so main) answers with an older commit:
+	// the branch is ahead of it, and its object is local so the read adds no
+	// fetch beyond the branch's.
 	newStub := func() *pushStubGit {
 		return &pushStubGit{
 			branch:    stopSeat.Branch,
@@ -2487,7 +2517,9 @@ func TestOverrunFinishedOnOrigin_OriginAheadOfTheWorktreeIsFinished(t *testing.T
 			ancestors: map[string]bool{"abc123 9f8e7d6": true},
 			originRefs: []git.RemoteRef{
 				{Hash: "9f8e7d6", Name: ref},
+				{Hash: "main01", Name: "refs/heads/main"},
 			},
+			hasObject:  map[string]bool{"main01": true},
 			commitTime: slung.Add(time.Minute),
 		}
 	}
@@ -2504,7 +2536,7 @@ func TestOverrunFinishedOnOrigin_OriginAheadOfTheWorktreeIsFinished(t *testing.T
 
 	// A commit the worktree already holds needs no fetch.
 	g = newStub()
-	g.hasObject = map[string]bool{"9f8e7d6": true}
+	g.hasObject = map[string]bool{"9f8e7d6": true, "main01": true}
 	d.openGitFn = func(string) daemonGit { return g }
 	if got := d.overrunFinishedOnOrigin(seated); got != "9f8e7d6" {
 		t.Errorf("object already local: got %q, want 9f8e7d6", got)
@@ -2550,6 +2582,121 @@ func TestOverrunFinishedOnOrigin_OriginAheadOfTheWorktreeIsFinished(t *testing.T
 	g = newStub()
 	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
 		t.Errorf("sling time unknown: got %q, want none", got)
+	}
+}
+
+// A branch origin holds at a commit the rig's target already contains is not
+// finished work: a branch cut from the target at the spawn carries the
+// target's commit and nothing of its own, and handing it back as rework runs
+// the next polecat on an empty branch (gt-qqoqbo). A branch origin holds above
+// the target still answers as finished work. Every read that cannot place the
+// target answers "": needs-split, the path that asks for an operator look.
+func TestOriginHeadSince_TargetAlreadyContainsTheHeadIsNotWork(t *testing.T) {
+	t.Parallel()
+	const (
+		head    = "head111"
+		mainTip = "main222"
+	)
+	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	branchRef := "refs/heads/" + stopSeat.Branch
+	mainRef := "refs/heads/main"
+	branchOn := git.RemoteRef{Hash: head, Name: branchRef}
+	mainOn := git.RemoteRef{Hash: mainTip, Name: mainRef}
+	for _, tc := range []struct {
+		name         string
+		refs         []git.RemoteRef
+		ancestors    map[string]bool
+		hasObject    map[string]bool
+		hasObjectErr error
+		ancestorErr  error
+		fetchErr     error
+		want         string
+	}{
+		{
+			// The incident: the head is a landing commit main already holds.
+			name:      "head is an ancestor of the target",
+			refs:      []git.RemoteRef{branchOn, mainOn},
+			ancestors: map[string]bool{head + " " + mainTip: true},
+		},
+		{
+			name:      "head is one commit ahead of the target",
+			refs:      []git.RemoteRef{branchOn, mainOn},
+			ancestors: map[string]bool{mainTip + " " + head: true},
+			want:      head,
+		},
+		{
+			name:      "head equals the target's tip",
+			refs:      []git.RemoteRef{{Hash: head, Name: branchRef}, {Hash: head, Name: mainRef}},
+			ancestors: map[string]bool{head + " " + head: true},
+			hasObject: map[string]bool{head: true},
+		},
+		{
+			name: "the target ref cannot be read",
+			refs: []git.RemoteRef{branchOn},
+		},
+		{
+			name:         "the target object cannot be read",
+			refs:         []git.RemoteRef{branchOn, mainOn},
+			hasObjectErr: errors.New("repository cannot be read"),
+		},
+		{
+			name:     "the target object cannot be fetched",
+			refs:     []git.RemoteRef{branchOn, mainOn},
+			fetchErr: errors.New("fetch failed"),
+		},
+		{
+			name:        "the ancestry cannot be read",
+			refs:        []git.RemoteRef{branchOn, mainOn},
+			hasObject:   map[string]bool{mainTip: true},
+			ancestorErr: errors.New("merge-base failed"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			seated := stopSeat
+			seated.SlingAt = slung
+			g := &pushStubGit{
+				branch: stopSeat.Branch, sha: head, commitTime: slung.Add(time.Minute),
+				originRefs: tc.refs, ancestors: tc.ancestors, hasObject: tc.hasObject,
+				hasObjectErr: tc.hasObjectErr, ancestorErr: tc.ancestorErr, fetchErr: tc.fetchErr,
+			}
+			d.openGitFn = func(string) daemonGit { return g }
+
+			if got := d.overrunFinishedOnOrigin(seated); got != tc.want {
+				t.Errorf("finishedOnOrigin = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A rig whose config.json does not decode names no target branch, so the
+// finished-work read cannot tell a produced head from one the target already
+// holds: it answers "" and the stop takes the needs-split path.
+func TestOverrunFinishedOnOrigin_UnreadableRigConfigNamesNoTarget(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d.config.TownRoot, "gastown", "config.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seated := stopSeat
+	seated.SlingAt = overrunSlung
+	g := &pushStubGit{
+		branch: stopSeat.Branch, sha: "abc1234", commitTime: overrunSlung.Add(time.Minute),
+		originRefs: []git.RemoteRef{{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch}},
+	}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("finishedOnOrigin = %q, want none: an unreadable rig config names no target", got)
 	}
 }
 
@@ -2831,6 +2978,53 @@ func TestOverrunGuardStop_UnreadableEstopHoldsTheStop(t *testing.T) {
 	}
 }
 
+// A tip that adds a patch origin lacks is not finished work, and an origin that
+// cannot be asked is no confirmation either: both leave the worktree as it is,
+// on the seat's branch at its tip, so the branch stays the ref that keeps those
+// commits reachable (gt-zwh9r4).
+func TestOverrunResetOriginDivergedStays(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		prep func(t *testing.T, w *resetWorld)
+	}{
+		{"origin holds a sibling commit", func(t *testing.T, w *resetWorld) {
+			w.f.Commit(t, w.origin, stopSeat.Branch, "someone else's", map[string]string{"x.txt": "x\n"})
+		}},
+		{"origin cannot be asked", func(t *testing.T, w *resetWorld) {
+			w.f.RemoveRemote(t, w.work, "origin")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newResetWorld(t)
+			tc.prep(t, w)
+
+			if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+				t.Fatalf("reset: %v, want nil (nothing to reset is not a failure)", err)
+			}
+
+			want := "origin does not hold " + stopSeat.Branch + " at " + w.tip
+			if !strings.Contains(w.log.String(), want) {
+				t.Errorf("log does not carry the refusal %q:\n%s", want, w.log.String())
+			}
+			g := w.git()
+			if branch, err := g.CurrentBranch(); err != nil || branch != stopSeat.Branch {
+				t.Errorf("worktree is on branch %q (%v), want %s still checked out", branch, err, stopSeat.Branch)
+			}
+			if head, err := g.Rev("HEAD"); err != nil || head != w.tip {
+				t.Errorf("HEAD = %q (%v), want the seat's tip %s", head, err, w.tip)
+			}
+			if head, err := g.Rev("refs/heads/" + stopSeat.Branch); err != nil || head != w.tip {
+				t.Errorf("branch %s = %q (%v), want the seat's tip %s kept", stopSeat.Branch, head, err, w.tip)
+			}
+			if _, err := os.Stat(filepath.Join(w.work, "work.txt")); err != nil {
+				t.Errorf("the seat's file is gone: %v", err)
+			}
+		})
+	}
+}
+
 // An e-stop that lands after the seat is parked, between the check and the
 // kill, is still refused by the supervisor: the session keeps running, the
 // refusal is logged with the supervisor's text, the park is cleared so the live
@@ -2881,5 +3075,42 @@ func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
 		if len(f.handedBack) != 0 || len(f.pushed) != 0 {
 			t.Errorf("%s e-stop: hand-backs %q, pushes %q; want nothing after a refused stop", which, f.handedBack, f.pushed)
 		}
+	}
+}
+
+func TestIsNonFastForwardPush(t *testing.T) {
+	t.Parallel()
+	// A sandbox seat's push runs through session exec, whose error carries the
+	// refusal as text and never as a *git.GitError (gt-ro8oxj). refusalLine
+	// joins git's output lines with " | ", so the text arrives in that shape.
+	sandbox := func(gitText string) error {
+		return fmt.Errorf("git push: %w", fmt.Errorf("git push in sandbox gt-nux: %s", gitText))
+	}
+	refused := func(stderr string) error {
+		return &git.GitError{Command: "push", Stderr: stderr, Err: errors.New("exit status 1")}
+	}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "sandbox joined non-fast-forward", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (non-fast-forward) | error: failed to push some refs"), want: true},
+		{name: "sandbox newline non-fast-forward", err: sandbox("exit status 1: error: failed to push some refs\n ! [rejected] 64efa97 -> b (non-fast-forward)"), want: true},
+		{name: "host git error non-fast-forward", err: refused(" ! [rejected] b -> b (non-fast-forward)"), want: true},
+		{name: "sandbox joined fetch first", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (fetch first) | error: failed to push some refs"), want: true},
+		{name: "sandbox rejected segment beside a remote rejected decline", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (fetch first) | ! [remote rejected] main -> main (pre-receive hook declined)"), want: false},
+		{name: "wording on another segment does not make a rejected segment", err: sandbox("exit status 1: ! [rejected] b -> b (stale info) | error: pre-receive hook says non-fast-forward"), want: false},
+		{name: "text mentioning non-fast-forward without a rejected segment", err: sandbox("exit status 1: pre-receive hook says non-fast-forward"), want: false},
+		{name: "remote rejected pre-receive hook declined", err: sandbox("exit status 1: ! [remote rejected] main -> main (pre-receive hook declined)"), want: false},
+		{name: "permission denied", err: sandbox("exit status 1: fatal: permission denied"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isNonFastForwardPush(tt.err); got != tt.want {
+				t.Errorf("isNonFastForwardPush(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
 	}
 }

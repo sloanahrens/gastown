@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,10 @@ type fakePulls struct {
 	createErr   error
 	mergeErr    error
 	deleteErr   error
+	// reads is the branch of every GetBranch call; branches the tip each holds.
+	reads    []string
+	readErr  error
+	branches map[string]string
 	// onCall, when set, sees every call's name and context, so a test can pin
 	// the deadline each call runs under.
 	onCall func(name string, ctx context.Context)
@@ -84,6 +89,21 @@ func (f *fakePulls) MergePull(ctx context.Context, _, _ string, index int64, opt
 		return f.mergeFn(ctx, index, opt)
 	}
 	return f.mergeErr
+}
+
+func (f *fakePulls) GetBranch(ctx context.Context, _, _, branch string) (*forgejo.Branch, error) {
+	f.called("GetBranch", ctx)
+	f.reads = append(f.reads, branch)
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	tip, ok := f.branches[branch]
+	if !ok {
+		return nil, &forgejo.APIError{Method: "GET", Path: "/x", StatusCode: 404}
+	}
+	b := &forgejo.Branch{Name: branch}
+	b.Commit.ID = tip
+	return b, nil
 }
 
 func (f *fakePulls) DeleteBranch(ctx context.Context, _, _, branch string) error {
@@ -144,7 +164,7 @@ func testMerger(client *fakePulls) *ForgejoMerger {
 // and merges the PR pinned to the candidate commit.
 func TestForgejoMergerPostsTheVerdictAndFastForwards(t *testing.T) {
 	t.Parallel()
-	client := &fakePulls{}
+	client := &fakePulls{branches: map[string]string{fixtureBranch: mergeHead}}
 	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove, Score: 0.9}))
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
@@ -175,9 +195,10 @@ func TestForgejoMergerPostsTheVerdictAndFastForwards(t *testing.T) {
 	}
 	// The API merge does not apply Forgejo's delete-branch-after-merge setting,
 	// so the worker deletes the candidate itself; it is what the branch is
-	// named after the merge.
-	if len(client.deleted) != 1 || client.deleted[0] != "land/gt-abc" {
-		t.Fatalf("deleted %v after the merge, want just land/gt-abc", client.deleted)
+	// named after the merge. The source branch follows it, because its tip is
+	// still the merged head.
+	if len(client.deleted) != 2 || client.deleted[0] != "land/gt-abc" || client.deleted[1] != fixtureBranch {
+		t.Fatalf("deleted %v after the merge, want land/gt-abc then %s", client.deleted, fixtureBranch)
 	}
 }
 
@@ -222,6 +243,65 @@ func TestForgejoMergerLeavesTheCandidateWhenTheMergeDidNotHappen(t *testing.T) {
 			}
 			if len(client.deleted) != 0 {
 				t.Fatalf("deleted %v; a merge that did not happen must leave the branch for the retry", client.deleted)
+			}
+		})
+	}
+}
+
+// TestForgejoMergerDeletesTheSourceBranchOnlyAtTheMergedHead: after a confirmed
+// merge the source polecat/ or crew/ branch is deleted after land/<bead> only
+// while its tip is the merged head (gt-v37xc1); a pushed-again branch keeps
+// commits that did not merge. A failed read or delete deletes nothing.
+func TestForgejoMergerDeletesTheSourceBranchOnlyAtTheMergedHead(t *testing.T) {
+	t.Parallel()
+	const crewBranch = "crew/bird/gt-abc"
+	failedRead := &forgejo.APIError{Method: "GET", Path: "/x", StatusCode: 500}
+	failedDelete := &forgejo.APIError{Method: "DELETE", Path: "/x", StatusCode: 403}
+	for _, tc := range []struct {
+		name, branch, candidate, tip string // branch empty means fixtureBranch; tip empty means it is not on the repository
+		readErr, deleteErr           error
+		reads                        int
+		wantDeleted                  []string
+		wantLog                      string
+	}{
+		{name: "a crew branch at the merged head is deleted", branch: crewBranch, tip: mergeHead, reads: 1,
+			wantDeleted: []string{"land/gt-abc", crewBranch}, wantLog: "deleted " + crewBranch + " after the merge"},
+		{name: "a tip newer than the merged head is left", tip: "fedcba9876543210fedcba9876543210fedcba98", reads: 1,
+			wantDeleted: []string{"land/gt-abc"}, wantLog: "left " + fixtureBranch + ": tip fedcba98 is not the merged head 01234567; the branch moved past the merged head"},
+		{name: "a read that fails is left", readErr: failedRead, reads: 1, wantDeleted: []string{"land/gt-abc"}, wantLog: "left " + fixtureBranch + ": could not read the branch tip"},
+		{name: "a branch already gone is left", reads: 1, wantDeleted: []string{"land/gt-abc"}, wantLog: "left " + fixtureBranch + ": could not read the branch tip"},
+		{name: "a refused delete is logged and the merge still lands", tip: mergeHead, deleteErr: failedDelete, reads: 1,
+			wantDeleted: []string{"land/gt-abc", fixtureBranch}, wantLog: "could not delete " + fixtureBranch},
+		{name: "a branch outside the two prefixes is not read", branch: "release/gt-abc", wantDeleted: []string{"land/gt-abc"}},
+		{name: "the candidate itself is not read", branch: fixtureBranch, candidate: fixtureBranch, tip: mergeHead,
+			wantDeleted: []string{fixtureBranch}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			branch := tc.branch
+			if branch == "" {
+				branch = fixtureBranch
+			}
+			client := &fakePulls{readErr: tc.readErr, deleteErr: tc.deleteErr}
+			if tc.tip != "" {
+				client.branches = map[string]string{branch: tc.tip}
+			}
+			out := &strings.Builder{}
+			m := testMerger(client)
+			m.Out = out
+			req := mergeRequestForTest(Verdict{Verdict: VerdictApprove})
+			req.Work.Branch, req.Work.CandidateBranch = branch, tc.candidate
+			if err := m.Merge(context.Background(), req); err != nil {
+				t.Fatalf("Merge: %v; a branch the landing could not delete must not fail the merge", err)
+			}
+			if len(client.reads) != tc.reads {
+				t.Errorf("read %v, want %d reads", client.reads, tc.reads)
+			}
+			if !slices.Equal(client.deleted, tc.wantDeleted) {
+				t.Errorf("deleted %v, want %v", client.deleted, tc.wantDeleted)
+			}
+			if !strings.Contains(out.String(), tc.wantLog) {
+				t.Errorf("log = %q; want it to carry %q", out.String(), tc.wantLog)
 			}
 		})
 	}
@@ -436,8 +516,9 @@ func TestLandMergerOutdatedBranchIsARebuild(t *testing.T) {
 // TestForgejoMergerGivesEachCallItsOwnWindow: every Forgejo call's deadline is
 // set when that call starts, so a slow call spends its own budget and not the
 // next one's — under one shared deadline a slow list-pulls would consume the
-// merge's (gt-mdet3). The merge makes six calls: post, combined status, list
-// pulls, open the pull, merge, delete the candidate.
+// merge's (gt-mdet3). The merge makes seven calls: post, combined status, list
+// pulls, open the pull, merge, delete the candidate, and read then delete the
+// source branch.
 func TestForgejoMergerGivesEachCallItsOwnWindow(t *testing.T) {
 	t.Parallel()
 	client := &fakePulls{}
@@ -453,8 +534,8 @@ func TestForgejoMergerGivesEachCallItsOwnWindow(t *testing.T) {
 	if err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove})); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
-	if len(deadlines) != 6 {
-		t.Fatalf("%d calls ran under a deadline, want the 6 the merge makes", len(deadlines))
+	if len(deadlines) != 7 {
+		t.Fatalf("%d calls ran under a deadline, want the 7 the merge makes", len(deadlines))
 	}
 	windows := map[time.Time]struct{}{}
 	for _, d := range deadlines {
@@ -471,7 +552,7 @@ func TestForgejoMergerGivesEachCallItsOwnWindow(t *testing.T) {
 // merge that happened.
 func TestForgejoMergerVerifiesAMergeThatTimedOut(t *testing.T) {
 	t.Parallel()
-	client := &fakePulls{mergeErr: context.DeadlineExceeded}
+	client := &fakePulls{mergeErr: context.DeadlineExceeded, branches: map[string]string{fixtureBranch: mergeHead}}
 	req := mergeRequestForTest(Verdict{Verdict: VerdictApprove})
 	var asked []string
 	req.TargetHasCommit = func(commit string) (bool, error) {
@@ -484,8 +565,8 @@ func TestForgejoMergerVerifiesAMergeThatTimedOut(t *testing.T) {
 	if len(asked) != 1 || asked[0] != mergeHead {
 		t.Errorf("the target was asked about %v, want the candidate %s", asked, mergeHead)
 	}
-	if len(client.deleted) != 1 || client.deleted[0] != "land/gt-abc" {
-		t.Errorf("deleted %v, want the candidate of a merge that took", client.deleted)
+	if len(client.deleted) != 2 || client.deleted[0] != "land/gt-abc" || client.deleted[1] != fixtureBranch {
+		t.Errorf("deleted %v, want the candidate and the source branch of a merge that took", client.deleted)
 	}
 }
 

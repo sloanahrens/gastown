@@ -5,21 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // shippedRubricPath is the repo-root .om.json: the rubric this repo's landing
-// worker hands to om. The path is resolved from this test file, so it does not
-// depend on the test's working directory.
+// worker hands to om. The root is found from the module root, so the path
+// survives go test -trimpath.
 func shippedRubricPath(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "..", "..", ".om.json")
+	return filepath.Join(modroot.Root(t), ".om.json")
 }
 
 // omCriterion is one rubric entry. Weight is a pointer so a missing or

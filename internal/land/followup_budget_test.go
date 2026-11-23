@@ -1,9 +1,12 @@
 package land
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestFollowupBudgetDecision(t *testing.T) {
@@ -79,5 +82,71 @@ func TestFollowupBudgetLandedSince(t *testing.T) {
 	}
 	if _, err := LandedSince(&LandingsFile{Path: t.TempDir()}, cutoff); err == nil {
 		t.Error("LandedSince on a directory = nil, want the read error")
+	}
+}
+
+// TestFollowupBudgetCountsThisPass: a bead the drain files while clearing one
+// queue line counts toward the weekly budget of the next plan in the same
+// pass. Without part 1's CreatedAt stamp the next plan reads the week's filed
+// count as it stood before the pass and files over the week's share
+// (gt-y5wvum, gt-d75790).
+func TestFollowupBudgetCountsThisPass(t *testing.T) {
+	t.Parallel()
+	other := ReviewFindingText{Severity: "minor", File: "internal/queue/panel.go", Line: 20,
+		Title: "close the loop", Claim: "the loop never closes"}
+	// Eight landings: the week's first five beads are the floor and the sixth is
+	// over 25 percent. Each queue line files one bead, so with four already
+	// filed the second line is over the share once it counts the first's bead.
+	cases := []struct {
+		name        string
+		filedBefore int
+		wantFiled   int
+		wantQueued  int
+	}{
+		{"the second plan counts the first's bead and is held", 4, 1, 1},
+		{"with room under the floor both lines file", 3, 2, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			// Different packages, so the second line earns a bead of its own: an
+			// append to the first's open bundle never counts against the budget.
+			f := newFollowupFixture(t, 0.8, nil)
+			for _, line := range []struct {
+				bead    string
+				finding ReviewFindingText
+			}{{"gt-held-a", queuedFinding}, {"gt-held-b", other}} {
+				if err := f.reviews.AppendQueue(queueLine(line.bead, f.work.Rig, line.finding)); err != nil {
+					t.Fatal(err)
+				}
+				f.bd.Seed(beads.Issue{ID: line.bead, Title: "an earlier landing", Status: "closed", Type: "bug"})
+			}
+			// The fixture clock's week: a bead filed on its day counts against
+			// eight landings an hour before it.
+			week := followupDay.Add(-time.Hour)
+			f.lander.Landings = &LandingsFile{Path: privateLandingsPath(t)}
+			for i := 0; i < 8; i++ {
+				if err := f.lander.Landings.Append(LandingRecord{BeadID: fmt.Sprintf("gt-week-%d", i), LandedAt: week}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < c.filedBefore; i++ {
+				f.fake.existing = append(f.fake.existing, ExistingFollowup{ID: fmt.Sprintf("gt-filed-week-%d", i), Title: "an older finding", Status: "open", CreatedAt: week})
+			}
+			log := f.run()
+			if len(f.fake.created) != c.wantFiled {
+				t.Fatalf("filed %d beads in one pass, want %d:\n%s", len(f.fake.created), c.wantFiled, log)
+			}
+			queued, err := f.reviews.Queued()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(queued) != c.wantQueued {
+				t.Fatalf("queue = %+v, want %d line(s) left", queued, c.wantQueued)
+			}
+			if c.wantQueued > 0 && !strings.Contains(log, "weekly budget") {
+				t.Errorf("log = %q, want the second queue line held by the weekly budget", log)
+			}
+		})
 	}
 }

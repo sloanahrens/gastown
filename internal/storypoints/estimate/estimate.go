@@ -5,6 +5,7 @@
 package estimate
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -112,6 +114,9 @@ type Result struct {
 	Embedding []float32
 	// ComponentMinutes is each input's predicted minutes.
 	ComponentMinutes ComponentMinutes
+	// JevAnswers is the number of answers the Jev median was taken over; 0 when
+	// the input was skipped or its minutes came from a Prior.
+	JevAnswers int
 	// Inputs names the inputs the blend averaged, in the blend's names:
 	// shape, embed, jev.
 	Inputs []string
@@ -169,6 +174,7 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	in := storypoints.Inputs{ShapeMinutes: &shapeMinutes, Weights: weights}
 	var skipped []Skip
 	var vector []float32
+	var jevAnswers int
 	hash := SectionHash(issue)
 
 	// An unchanged bead reuses the embed and Jev minutes its earlier estimate
@@ -186,10 +192,11 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 			componentMinutes.Embed = &embedMinutes
 		}
 
-		jevFits, skip := jevInput(ctx, deps, issue)
+		jevFits, answers, skip := jevInput(ctx, deps, issue)
 		if skip != nil {
 			skipped = append(skipped, *skip)
 		} else {
+			jevAnswers = answers
 			in.JevFits = &jevFits
 		}
 	}
@@ -231,6 +238,7 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		Shape:            shape,
 		Embedding:        vector,
 		ComponentMinutes: componentMinutes,
+		JevAnswers:       jevAnswers,
 		Inputs:           blended.Inputs,
 		Skipped:          skipped,
 		Rung:             blended.Rung,
@@ -277,18 +285,21 @@ func Note(r Result) string {
 }
 
 // inputsLine renders the inputs the blend averaged, each component followed by
-// the minutes it contributed: "shape 11.0, embed 7.5, jev 5.5". An input that
-// has no minutes of its own, as size caps the blend without one, is named alone;
-// so is every input of a result built without component minutes.
+// the minutes it contributed: "shape 11.0, embed 7.5, jev 5.5 (median of 3)",
+// where the Jev entry also names the answers its median used. An input that has
+// no minutes of its own, as size caps the blend without one, is named alone; so
+// is every input of a result built without component minutes.
 func inputsLine(r Result) string {
 	parts := make([]string, 0, len(r.Inputs))
 	for _, input := range r.Inputs {
-		m := minutesForInput(r.ComponentMinutes, input)
-		if m == nil {
-			parts = append(parts, input)
-			continue
+		part := input
+		if m := minutesForInput(r.ComponentMinutes, input); m != nil {
+			part += " " + strconv.FormatFloat(*m, 'f', 1, 64)
 		}
-		parts = append(parts, input+" "+strconv.FormatFloat(*m, 'f', 1, 64))
+		if input == "jev" && r.JevAnswers > 0 {
+			part += fmt.Sprintf(" (median of %d)", r.JevAnswers)
+		}
+		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -394,22 +405,54 @@ func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *be
 	return minutes, vec, nil
 }
 
-// jevInput asks the battery for the fits_twenty_minutes probability, or returns
-// the skip that says why not. A probability outside 0 to 1 is a failed input,
-// not a failed estimate: the blend drops it as it drops an asker error.
-func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Skip) {
+// jevCalls is how many times jevInput asks the battery for a new text.
+const jevCalls = 3
+
+// jevMedian drops answers outside 0 to 1 and returns the median of the rest, or
+// false when none are left. An even count takes the mean of the middle two.
+func jevMedian(answers []float64) (float64, bool) {
+	valid := slices.DeleteFunc(slices.Clone(answers), func(a float64) bool { return !(a >= 0 && a <= 1) })
+	if len(valid) == 0 {
+		return 0, false
+	}
+	slices.Sort(valid)
+	n := len(valid)
+	return (valid[(n-1)/2] + valid[n/2]) / 2, true
+}
+
+// jevInput asks the battery jevCalls times and returns the median of the
+// answers with the count it used, or the skip that says why not. A failed call
+// or an out-of-range answer is dropped, a cap-reached ask ends the calls, and
+// with no answer left the first error, or the out-of-range answers, names it.
+func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, int, *Skip) {
 	if deps.JevAsk == nil {
-		return 0, &Skip{Input: "jev", Reason: "no Jev asker"}
+		return 0, 0, &Skip{Input: "jev", Reason: "no Jev asker"}
 	}
-	ans, err := deps.JevAsk(ctx, issue)
-	if err != nil {
-		return 0, &Skip{Input: "jev", Reason: err.Error()}
+	answers := make([]float64, 0, jevCalls)
+	used := 0
+	var firstErr error
+	for range jevCalls {
+		ans, err := deps.JevAsk(ctx, issue)
+		if err != nil {
+			firstErr = cmp.Or(firstErr, err)
+			if errors.Is(err, dispatch.ErrCapReached) {
+				break
+			}
+			continue
+		}
+		answers = append(answers, ans.FitsTwentyMinutes)
+		if ans.FitsTwentyMinutes >= 0 && ans.FitsTwentyMinutes <= 1 {
+			used++
+		}
 	}
-	p := ans.FitsTwentyMinutes
-	if !(p >= 0 && p <= 1) {
-		return 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", p)}
+	m, ok := jevMedian(answers)
+	if ok {
+		return m, used, nil
 	}
-	return p, nil
+	if firstErr != nil {
+		return 0, 0, &Skip{Input: "jev", Reason: firstErr.Error()}
+	}
+	return 0, 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", answers)}
 }
 
 // neighborsOf asks hm for the past beads nearest the issue, then records each

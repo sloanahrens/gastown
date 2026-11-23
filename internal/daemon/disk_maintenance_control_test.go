@@ -95,6 +95,16 @@ func diskMaintControlDaemon(t *testing.T, cfg *DaemonPatrolConfig, k *controlKub
 	t.Helper()
 	d, logs, f := diskMaintTestDaemon(t)
 	d.patrolConfig = cfg
+	// The control tests count the control disk's own alerts. The tier sweep's
+	// kubernetes runner also makes the CI cache trim due, and its kubectl reads
+	// fail here, so hold it past their span (gt-76cz9d).
+	cfg.Patrols.DiskMaintenance.CICacheTrimInterval = "1000h"
+	for _, v := range ciCacheVolumes {
+		d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), diskMaintNow)
+	}
+	// The CI engine prune is held the same way: its failed run raises an item too
+	// (gt-3e23rz).
+	d.diskMaintSchedule.record(ciEnginePruneName, diskMaintNow)
 	d.diskMaint.readDisks = nil // the production read, with the control kubectl below
 	healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
 	// The sandbox disk parses kubelet node stats, not df output.

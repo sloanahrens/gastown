@@ -12,7 +12,7 @@ func TestLineLimitVerdict(t *testing.T) {
 	t.Parallel()
 	refusal := []string{
 		"Change exceeds the 70-added-line constraint: 141 added lines against 70 declared (the refusal is at twice the limit).",
-		splitLine,
+		overLimitLine,
 	}
 	tests := []struct {
 		name   string
@@ -26,7 +26,7 @@ func TestLineLimitVerdict(t *testing.T) {
 			"Change exceeds the 70-added-line constraint: 140 added lines against 70 declared (the refusal is at twice the limit)."}},
 		{"past twice refuses", []int{70}, 141, true, refusal},
 		{"two numbers read at the larger", []int{45, 60}, 121, true, []string{
-			"Change exceeds the 60-added-line constraint: 121 added lines against 60 declared (the bead states 45 and 60; the refusal is at twice the limit).", splitLine}},
+			"Change exceeds the 60-added-line constraint: 121 added lines against 60 declared (the bead states 45 and 60; the refusal is at twice the limit).", overLimitLine}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,9 +39,9 @@ func TestLineLimitVerdict(t *testing.T) {
 	}
 }
 
-// TestSplitLineTellsTheSeatToPushFirst: the refusal past twice the limit sends
-// the seat to push, check ls-remote and comment both shas before the split.
-func TestSplitLineTellsTheSeatToPushFirst(t *testing.T) {
+// TestOverLimitLineTellsTheSeatToPushFirst: the refusal sends the seat to push,
+// check ls-remote and report both shas, the measured count and the limit.
+func TestOverLimitLineTellsTheSeatToPushFirst(t *testing.T) {
 	t.Parallel()
 	err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 141, nil }, "Change: at most 70 added lines in 2 files.", true)
 	if err == nil {
@@ -49,11 +49,39 @@ func TestSplitLineTellsTheSeatToPushFirst(t *testing.T) {
 	}
 	_, second, _ := strings.Cut(err.Error(), "\n")
 	push, lsRemote := strings.Index(second, "git push origin HEAD:refs/heads/"), strings.Index(second, "git ls-remote origin")
-	split := strings.Index(second, "then comment that the bead needs a split")
-	if push < 0 || lsRemote < 0 || split < 0 || push > lsRemote || lsRemote > split ||
-		!strings.Contains(second, "never --force") || !strings.Contains(second, "check the tip is your HEAD") ||
-		!strings.Contains(second, "comment both shas") {
-		t.Fatalf("the split line does not push, check ls-remote, comment both shas, then ask for a split: %s", second)
+	report := strings.Index(second, "comment both shas, the measured added lines and the declared limit")
+	if push < 0 || lsRemote < 0 || report < 0 || push > lsRemote || lsRemote > report ||
+		!strings.Contains(second, "never --force") || !strings.Contains(second, "check the tip is your HEAD") {
+		t.Fatalf("the over-limit line does not push, check ls-remote, then report both shas, the measured count and the declared limit: %s", second)
+	}
+}
+
+// TestOverLimitLineWording: the refusal tells a finished seat to report the
+// measured count and the declared limit and stop (gt-8f4y1k).
+func TestOverLimitLineWording(t *testing.T) {
+	t.Parallel()
+	err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 141, nil }, "Change: at most 70 added lines in 2 files.", true)
+	if err == nil {
+		t.Fatal("reportLineLimit accepted 141 added lines against a declared limit of 70")
+	}
+	_, second, _ := strings.Cut(err.Error(), "\n")
+	tests := []struct {
+		name   string
+		phrase string
+		want   bool
+	}{
+		{"reports the measured count", "measured added lines", true},
+		{"names the declared limit", "declared limit", true},
+		{"tells the seat not to propose a split", "Do not propose a split", true},
+		{"never says the bead needs a split", "needs a split", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := strings.Contains(second, tc.phrase); got != tc.want {
+				t.Errorf("the refusal's second line contains %q = %v, want %v: %s", tc.phrase, got, tc.want, second)
+			}
+		})
 	}
 }
 
@@ -69,7 +97,7 @@ func TestLineLimitReportRefusesPolecatOnly(t *testing.T) {
 	polecatErr := reportLineLimit(&polecatOut, &polecatErrOut, func() (int, error) { return 141, nil }, desc, true)
 	crewErr := reportLineLimit(&crewOut, &crewErrOut, func() (int, error) { return 141, nil }, desc, false)
 	noLimitErr := reportLineLimit(&noLimitOut, new(bytes.Buffer), func() (int, error) { countCalled = true; return 0, nil }, "Change: at most 2 files.", false)
-	if polecatErr == nil || !strings.Contains(polecatErr.Error(), refusal) || !strings.Contains(polecatErr.Error(), splitLine) {
+	if polecatErr == nil || !strings.Contains(polecatErr.Error(), refusal) || !strings.Contains(polecatErr.Error(), overLimitLine) {
 		t.Fatalf("reportLineLimit(polecat) = %v, want the refusal text", polecatErr)
 	}
 	if !strings.Contains(polecatOut.String(), refusal) || polecatErrOut.Len() != 0 {

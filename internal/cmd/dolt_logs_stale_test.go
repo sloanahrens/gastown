@@ -219,9 +219,10 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 	}
 }
 
-// TestDoltLogStaleNoticeOnDumpCommand: gt dolt dump prints the same stale notice
-// on stderr and keeps its log lines on stdout. A log it cannot read says its age
-// is unknown on stderr instead of reading as fresh.
+// TestDoltLogStaleNoticeOnDumpCommand: gt dolt dump in a container town prints
+// the same stale notice on stderr, names the container instead of reading the
+// host's pid, metadata and log tail, and says a log it cannot read has an
+// unknown age on stderr instead of reading as fresh (gt-h0v2nw).
 func TestDoltLogStaleNoticeOnDumpCommand(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
@@ -248,8 +249,11 @@ func TestDoltLogStaleNoticeOnDumpCommand(t *testing.T) {
 			if err := dumpDoltDiagnostics(townRoot, &out, &errw, running, fixedDoltLogReads(now)); err != nil {
 				t.Fatalf("dumpDoltDiagnostics: %v", err)
 			}
-			if !strings.Contains(out.String(), "Recent Dolt log lines:") {
-				t.Errorf("stdout %q has no log section", out.String())
+			if strings.Contains(out.String(), "Recent Dolt log lines:") {
+				t.Errorf("stdout %q reads the host log tail in container mode", out.String())
+			}
+			if !strings.Contains(out.String(), "Container mode (gt-dolt)") {
+				t.Errorf("stdout %q does not name the container", out.String())
 			}
 			if tc.missing {
 				if !strings.Contains(errw.String(), tc.wantStderr) {
@@ -264,10 +268,39 @@ func TestDoltLogStaleNoticeOnDumpCommand(t *testing.T) {
 			} else if !strings.Contains(errw.String(), tc.wantStderr) {
 				t.Errorf("stderr %q does not say %q", errw.String(), tc.wantStderr)
 			}
-			if !strings.Contains(out.String(), "serving line one") {
-				t.Errorf("stdout %q lost the log lines", out.String())
-			}
 		})
+	}
+}
+
+// TestDoltDumpHostKeepsTheHostReads: a town whose Dolt is the town's own host
+// server keeps the dump's host reads — the live pid, the host log path, the log
+// tail and the closing advisory (gt-h0v2nw).
+func TestDoltDumpHostKeepsTheHostReads(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	townRoot := plainTownRoot(t, "2026-11-02T09:30:00Z")
+	writeDoltLogStaleFixture(t, townRoot, now.Add(-5*time.Minute))
+	running := func(string) (bool, int, error) { return true, 4242, nil }
+
+	var out, errw bytes.Buffer
+	if err := dumpDoltDiagnostics(townRoot, &out, &errw, running, fixedDoltLogReads(now)); err != nil {
+		t.Fatalf("dumpDoltDiagnostics: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"Live PID:   4242",
+		"Log file:   " + filepath.Join(townRoot, "daemon", "dolt.log"),
+		"Recent Dolt log lines:",
+		"serving line one",
+		"No signal was sent.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dump %q does not name %q", got, want)
+		}
+	}
+	if errw.Len() != 0 {
+		t.Errorf("stderr %q, want none", errw.String())
 	}
 }
 

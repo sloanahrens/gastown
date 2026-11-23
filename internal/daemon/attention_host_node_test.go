@@ -135,6 +135,43 @@ func TestCollectNodeDiskWarning(t *testing.T) {
 	}
 }
 
+// The record keeps the share rounded to a whole percent, since it is the
+// human-facing figure, while the rule compares the unrounded share: 89.6% is
+// stored as 90 and still raises the warning, not the critical a rounded 90
+// would (gt-k116ee).
+func TestCollectNodeDiskRecordsTheRoundedShareAndRulesOnTheUnroundedOne(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	d := f.d
+	// 1e12 bytes of capacity with 104e9 free is 89.6% used (96.9 GiB free),
+	// above both free-space floors, so the share alone rules.
+	cli := newFakeCLIFor(func(c cliCall) cliReply {
+		if cacheTrimVerb(c.args) == "get nodes -o name" {
+			return cliReply{stdout: "node/colima-gt-control\n"}
+		}
+		return cliReply{stdout: nodeSummary("colima-gt-control", 1_000_000_000_000, 104_000_000_000)}
+	})
+	d.execCmd = cli.run
+	d.patrolConfig = nodeDiskPatrol(ciCacheTestContext)
+	d.diskMaint.getenv = func(string) string { return "" }
+	d.diskMaint.environ = func() []string { return []string{"PATH=/usr/bin", "HOME=/home/polecat"} }
+	f.src.host = newFileHostProbes(d.config.TownRoot, nil, d.controlNodeDisk)
+
+	items := f.collect(t, f.src.collectHostNodeDisk)
+	if len(items) != 1 || items[0].Key != hostRuleNodeDiskWarn {
+		t.Fatalf("items = %+v, want one %s: the rule compares the unrounded 89.6", items, hostRuleNodeDiskWarn)
+	}
+	state := readNodeDiskState(t, d.config.TownRoot)
+	stored := -1
+	if rec, ok := state.Nodes["colima-gt-control"]; ok && rec.UsedPercent != nil {
+		stored = *rec.UsedPercent
+	}
+	if stored != 90 {
+		t.Fatalf("stored used_percent = %d, want the 89.6 reading stored as 90", stored)
+	}
+}
+
 // A node read that fails is the info probe line, not an alarm, and it keeps the
 // node rule the previous tick held, as the other host probes do. A town with no
 // control cluster raises nothing at all.

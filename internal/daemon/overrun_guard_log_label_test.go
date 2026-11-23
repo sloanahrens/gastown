@@ -5,11 +5,11 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // seatGitForLogTest gives d the git handle a seat of the named kind gets: a host
@@ -176,11 +176,7 @@ func TestOverrunGuardLogSeatGitLabelNamesTheWorktreeItPicked(t *testing.T) {
 // that name a worktree as absent or kept, which examined none (gt-1mrhlg).
 func TestOverrunGuardLog_LinesNamingATipOrWorktreeNameTheWorktree(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	src := filepath.Join(filepath.Dir(thisFile), "overrun_guard_stop.go")
+	src := filepath.Join(modroot.Root(t), "internal", "daemon", "overrun_guard_stop.go")
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, src, nil, 0)
 	if err != nil {

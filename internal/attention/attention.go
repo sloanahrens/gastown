@@ -133,6 +133,9 @@ const (
 	// published, whether or not an images run exists, so no roll can start
 	// from it (gt-afwjb4).
 	KindDeployPairStuck Kind = "deploy-pair-stuck"
+	// KindRedHoldHeld: the red hold is set, so dispatch starts no work until
+	// it is lifted, and the overseer is woken to lift it (gt-7j8krh).
+	KindRedHoldHeld Kind = "red-hold-held"
 	// KindDeployPairRefused: the update ledger records a green commit's pair as
 	// refused by the pre-swap check, so no roll can start from that commit and
 	// nothing retries it (gt-d6ok4r, gt-t8vf15).
@@ -274,6 +277,7 @@ func Kinds() []Kind {
 		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
 		KindMainUnknown,
+		KindRedHoldHeld,
 	}
 }
 

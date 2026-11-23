@@ -228,3 +228,89 @@ func TestJobsDiskmaintLedgerUndecodable(t *testing.T) {
 		}
 	})
 }
+
+// writeDiskmaintLedger appends entries through the ledger writer at the daemon's path.
+func writeDiskmaintLedger(t *testing.T, root string, entries ...diskmaint.LedgerEntry) {
+	t.Helper()
+	path := filepath.Join(root, daemon.DiskMaintLedgerRelPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("make the ledger directory: %v", err)
+	}
+	ledger := diskmaint.NewLedger(path, 0)
+	for _, e := range entries {
+		if err := ledger.Append(e); err != nil {
+			t.Fatalf("append %s: %v", e.Target, err)
+		}
+	}
+}
+
+// TestJobsDiskmaintWriterRoundTrip is bead gt-855962's first criterion: entries
+// appended through the writer and read back through the rows carry its values.
+func TestJobsDiskmaintWriterRoundTrip(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	older, newer := testNow.Add(-3*time.Hour), testNow.Add(-time.Hour)
+	writeDiskmaintLedger(t, root,
+		diskmaint.LedgerEntry{TS: older, Target: "registry", Mode: "apply", Done: 9, BytesFreed: 900},
+		diskmaint.LedgerEntry{TS: newer, Target: "baks", Mode: "apply", Done: 2, BytesFreed: 40, Refused: "the backup root is busy"},
+	)
+	rows, err := List(root, Options{}, testNow)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := len(diskmaintRowsNamed(rows)); got != 2 {
+		t.Fatalf("got %d disk maintenance rows, want 2", got)
+	}
+	for _, w := range []struct {
+		name    string
+		outcome Outcome
+		done    int64
+		freed   int64
+		lastRun time.Time
+	}{
+		{"diskmaint:registry", OutcomeOK, 9, 900, older},
+		{"diskmaint:baks", OutcomeRefused, 2, 40, newer},
+	} {
+		j, ok := findJob(rows, w.name)
+		if !ok {
+			t.Errorf("no %q row", w.name)
+			continue
+		}
+		if j.Outcome != w.outcome || j.Stats["done"] != w.done || j.Stats["bytes_freed"] != w.freed || j.LastRun == nil || !j.LastRun.Equal(w.lastRun) {
+			t.Errorf("%s = %q %v last run %v, want %q done %d bytes_freed %d last run %v", w.name, j.Outcome, j.Stats, j.LastRun, w.outcome, w.done, w.freed, w.lastRun)
+		}
+	}
+}
+
+// TestJobsDiskmaintUndatedEntry is bead gt-855962's second criterion: an undated
+// applied entry is not replaced by an older dated one, nor a newer one by an older.
+func TestJobsDiskmaintUndatedEntry(t *testing.T) {
+	t.Parallel()
+	older, newer := testNow.Add(-2*time.Hour), testNow.Add(-time.Hour)
+	for _, tc := range []struct {
+		name    string
+		entries []diskmaint.LedgerEntry
+		lastRun *time.Time
+	}{
+		{"an undated entry after an older dated one keeps its place",
+			[]diskmaint.LedgerEntry{{TS: older, Target: "registry", Mode: "apply", Done: 1}, {Target: "registry", Mode: "apply", Done: 2}}, nil},
+		{"an older dated entry appended later does not replace the newer",
+			[]diskmaint.LedgerEntry{{TS: newer, Target: "registry", Mode: "apply", Done: 2}, {TS: older, Target: "registry", Mode: "apply", Done: 1}}, &newer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := fstest.MapFS{daemon.DiskMaintLedgerRelPath: {Data: ledgerBytes(t, tc.entries...)}}
+			rows, err := List(t.TempDir(), Options{diskmaintFS: fsys}, testNow)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			j, ok := findJob(rows, "diskmaint:registry")
+			if !ok {
+				t.Fatalf("no diskmaint:registry row")
+			}
+			if (tc.lastRun == nil) != (j.LastRun == nil) || (tc.lastRun != nil && !j.LastRun.Equal(*tc.lastRun)) {
+				t.Errorf("last run = %v, want %v", j.LastRun, tc.lastRun)
+			}
+		})
+	}
+}

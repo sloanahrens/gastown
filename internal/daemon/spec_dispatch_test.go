@@ -368,6 +368,12 @@ func TestDispatchRosterSeats(t *testing.T) {
 		{"claude-sonnet 2/2, total 2/10 (extra)", nil, true},
 		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session) (extra)", nil, true},
 		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session", nil, true},
+		// The note is stripped only as Picture spells it, with its leading
+		// space and no parenthesis inside; a total sharing either edge reads
+		// unreadable (gt-3kp2t8).
+		{"claude-sonnet 9/8, total 10/8(held: a:b)", nil, true},
+		{"claude-sonnet 9/8, total 10/8 (held: a:b)) (held: c:d)", nil, true},
+		{"claude-sonnet 9/8, total 10/8 (held: a:b) x)", nil, true},
 		// The tick appends the pool reconciliation's notes after "; ". The notes
 		// are not seats, and their commas sit outside any parentheses, so they
 		// are cut before the seats are split (gt-nsbeg9).

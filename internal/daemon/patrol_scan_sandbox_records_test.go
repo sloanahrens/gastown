@@ -48,6 +48,7 @@ type recordReapOpts struct {
 	deleterErr error         // the record deleter fails
 	noDeleter  bool          // neither a seam nor a linked deleter exists
 	copyErr    error         // the outbox copy fails
+	noOutbox   bool          // the outbox copy succeeds but the seat wrote no file
 	hook       string        // the seat's agent bead hook
 	agentErr   error         // the seat's agent bead cannot be read
 }
@@ -109,6 +110,9 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 		if o.copyErr != nil {
 			return o.copyErr
 		}
+		if o.noOutbox {
+			return nil // the seat wrote no outbox file: nothing to copy, no failure
+		}
 		dir := session.SandboxOutboxCopyDir(town, rec.Rig, rec.Polecat)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
@@ -169,6 +173,55 @@ func TestPatrolScanSandboxRecordsKeepsAHeldSandboxWhoseAgentBeadCannotBeRead(t *
 	}
 }
 
+// A nuked seat's agent bead is missing, which is the normal state after a nuke
+// purges it, so the patrol deletes the seat's ended held sandbox rather than
+// leaking it. A missing bead reads as nil fields with no error, and the pass
+// goes on to the outbox copy and the delete (gt-t44zvb).
+func TestPatrolScanSandboxRecordsDeletesAHeldSandboxOfANukedSeatWhoseAgentBeadIsMissing(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, agentErr: beads.ErrNotFound})
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete = %q, want %q", got, want)
+	}
+	if r.recorded() {
+		t.Error("the record survived although the nuked seat's held sandbox was deleted")
+	}
+}
+
+// Only a bead that does not exist clears the patrol's hook check: any other read
+// failure keeps the held sandbox and its record, because the hook is unknown and
+// never clear. An error that wraps beads.ErrNotFound is a missing bead, as
+// errors.Is reads it, so that one deletes (gt-t44zvb).
+func TestPatrolScanSandboxRecordsKeepsAHeldSandboxWhoseAgentBeadReadFailsWithAnythingButNotFound(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		agentErr  error
+		wantOrder string // the copy and the delete the pass makes, "" for neither
+		wantLog   string // a fragment the pass logs, "" for no assertion
+	}{
+		{"dolt_timeout_keeps_the_record", errors.New("dolt: context deadline exceeded"), "", "cannot read its agent bead"},
+		{"wrapped_not_found_deletes_the_sandbox", fmt.Errorf("queued read: %w", beads.ErrNotFound), "copy,delete", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, agentErr: tt.agentErr})
+			r.host.patrolScanSandboxRecords()
+			if got := strings.Join(r.order, ","); got != tt.wantOrder {
+				t.Errorf("order of the copy and the delete = %q, want %q", got, tt.wantOrder)
+			}
+			if gone, wantGone := !r.recorded(), tt.wantOrder != ""; gone != wantGone {
+				t.Errorf("record removed = %v, want %v", gone, wantGone)
+			}
+			if tt.wantLog != "" && !strings.Contains(r.logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want it to contain %q", r.logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
 // A held sandbox whose seat hooks nothing is deleted through the deleter as it
 // was before the hook check: the outbox copy comes first (gt-oxahwh).
 func TestPatrolScanSandboxRecordsStillDeletesAHeldSandboxWhoseHookIsClear(t *testing.T) {
@@ -218,6 +271,9 @@ func TestPatrolScanSandboxRecords(t *testing.T) {
 		{"gateway_unreachable_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", existsErr: errors.New("connection refused")}, false, true, false, false, ""},
 		{"live_session_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", liveTmux: true}, false, false, false, false, ""},
 		{"held_sandbox_with_marker_is_deleted_through_deleter", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true}, true, true, true, true, ""},
+		// ParseAgentFields trims the hook, so the description reads as no hook and
+		// the pass deletes; the patrol's own TrimSpace is not this row's subject.
+		{"held_sandbox_with_a_blank_hook_is_deleted", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true, hook: "   "}, true, true, true, true, ""},
 		{"held_sandbox_without_marker_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true}, false, true, true, false, ""},
 		{"held_sandbox_marker_exec_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, markerErr: errors.New("gateway unreachable")}, false, true, true, false, ""},
 		{"held_sandbox_deleter_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true, deleterErr: errors.New("disk full")}, false, true, true, true, ""},
@@ -284,6 +340,38 @@ func TestPatrolScanSandboxRecordsKeepsASandboxWhoseOutboxCopyFailed(t *testing.T
 	}
 	if !strings.Contains(r.logs.String(), outboxNotCopiedReason) || !strings.Contains(r.logs.String(), "transport error") {
 		t.Errorf("log = %q, want the kept reason and the copy's own error", r.logs.String())
+	}
+}
+
+// A seat that wrote no outbox is deleted as it was before the copy-out: the
+// copy succeeds with nothing in it, the sandbox and its record go, and the seat
+// end that reads the host copy later applies nothing to the bead (gt-zcky7n).
+func TestPatrolScanSandboxRecordsDeletesASeatWithNoOutboxAsBefore(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, noOutbox: true})
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete = %q, want %q", got, want)
+	}
+	if len(r.copied) != 1 {
+		t.Errorf("the outbox copy was asked %d times, want once", len(r.copied))
+	}
+	if r.recorded() {
+		t.Error("the record survived a seat that wrote no outbox")
+	}
+	// The seat end, landing after the patrol, finds an empty copy: it reports
+	// nothing and records nothing applied.
+	if reason := r.host.applySeatOutbox("gastown", "capable", "gt-x"); reason != "" {
+		t.Errorf("applySeatOutbox kept the seat for an outbox that was never written: %s", reason)
+	}
+	if _, have, err := readAppliedSeatOutbox(r.town, "gastown", "capable"); err != nil || have {
+		t.Errorf("applied record (have=%v, err=%v) after an empty outbox, want none written", have, err)
+	}
+	dir := session.SandboxOutboxCopyDir(r.town, "gastown", "capable")
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) != 0 {
+		t.Errorf("the copy directory holds %v, want nothing for a seat that wrote no outbox", entries)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reading the copy directory: %v", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/daemonimage"
@@ -227,51 +228,75 @@ func TestPlanImagePinsNamesAPinWhoseReadFailed(t *testing.T) {
 	}
 }
 
-// TestPlanImagePinsUnreadableItemCarriesTheErrorLine: the unreadable item ends
-// with the first line of the pin's read error, so the next flap says why the
-// pin cannot be read (gt-r8v4wu).
-func TestPlanImagePinsUnreadableItemCarriesTheErrorLine(t *testing.T) {
+// TestPlanImagePinsUnreadableItemCarriesThePinReadError: the unreadable item
+// carries the pin's whole read error, its line breaks turned to spaces and cut
+// to 300 characters, so the next flap says why the pin cannot be read
+// (gt-s0x1bk). The cut is by characters, not bytes, so a multi-byte error keeps
+// whole characters and the item stays valid UTF-8. An error whose text is empty
+// keeps the generic line.
+func TestPlanImagePinsUnreadableItemCarriesThePinReadError(t *testing.T) {
 	t.Parallel()
-	failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New("git fetch: exit status 128: fatal: unable to access")}
-
-	got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
-
-	const want = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it: git fetch: exit status 128: fatal: unable to access"
-	if len(got.Items) != 1 || got.Items[0].Summary != want {
-		t.Fatalf("Items = %+v, want one unreadable item with Summary %q", got.Items, want)
+	const (
+		generic = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it"
+		head    = "image pin devops cannot be read: "
+		tail    = "; it is not counted as fresh, and no refresh bead is filed for it"
+	)
+	tests := []struct {
+		name string
+		err  string
+		want string
+	}{
+		{
+			name: "an error line",
+			err:  "git fetch: exit status 128: fatal: unable to access",
+			want: head + "git fetch: exit status 128: fatal: unable to access" + tail,
+		},
+		{
+			name: "a line break becomes a space",
+			err:  "fatal: page 1\nfatal: page 2",
+			want: head + "fatal: page 1 fatal: page 2" + tail,
+		},
+		{
+			name: "an error over 300 characters is cut",
+			err:  strings.Repeat("x", 300) + "\nsecond line",
+			want: head + strings.Repeat("x", 300) + tail,
+		},
+		{
+			// 400 three-byte characters: a cut by bytes at 300 would keep only
+			// 100 of them, and one landing mid-character would break the string.
+			name: "a multi-byte error over 300 characters is cut on a character boundary",
+			err:  strings.Repeat("日", 400),
+			want: head + strings.Repeat("日", 300) + tail,
+		},
+		{
+			name: "an empty error keeps the generic line",
+			err:  "",
+			want: generic,
+		},
+		{
+			name: "a whitespace-only error keeps the generic line",
+			err:  "\n  \n",
+			want: generic,
+		},
 	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New(tt.err)}
 
-// TestPlanImagePinsUnreadableItemCutsALongOrMultiLineError: the error line is
-// cut to 160 characters and holds no newline, so a long or multi-line error
-// cannot break the attention item's text (gt-r8v4wu).
-func TestPlanImagePinsUnreadableItemCutsALongOrMultiLineError(t *testing.T) {
-	t.Parallel()
-	failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New(strings.Repeat("x", 300) + "\nsecond line")}
+			got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
 
-	got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
-
-	const head = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it: "
-	want := head + strings.Repeat("x", 160)
-	if len(got.Items) != 1 || got.Items[0].Summary != want {
-		t.Fatalf("Items = %+v, want one unreadable item with Summary %q", got.Items, want)
-	}
-}
-
-// TestPlanImagePinsUnreadableItemWithAnEmptyErrorKeepsTodaysText: an error with
-// no text to show adds no suffix, so the item reads as it did before
-// (gt-r8v4wu).
-func TestPlanImagePinsUnreadableItemWithAnEmptyErrorKeepsTodaysText(t *testing.T) {
-	t.Parallel()
-	const want = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it"
-	for _, msg := range []string{"", "\n  \n"} {
-		failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New(msg)}
-
-		got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
-
-		if len(got.Items) != 1 || got.Items[0].Summary != want {
-			t.Fatalf("Err %q: Items = %+v, want one unreadable item with Summary %q", msg, got.Items, want)
-		}
+			if len(got.Items) != 1 {
+				t.Fatalf("Items = %+v, want one unreadable item", got.Items)
+			}
+			summary := got.Items[0].Summary
+			if !utf8.ValidString(summary) {
+				t.Fatalf("Summary = %q, want valid UTF-8: the cut must land on a character boundary", summary)
+			}
+			if summary != tt.want {
+				t.Fatalf("Summary = %q, want %q", summary, tt.want)
+			}
+		})
 	}
 }
 
@@ -346,7 +371,7 @@ func TestPlanImagePinsStaleAndUnreadableItemsNameTheirPin(t *testing.T) {
 			Key:      imagePinsUnreadableKey,
 			Pin:      "om",
 			Severity: attention.SeverityMedium,
-			Summary:  "image pin om cannot be read: it is not counted as fresh, and no refresh bead is filed for it: ls-remote exited 128",
+			Summary:  "image pin om cannot be read: ls-remote exited 128; it is not counted as fresh, and no refresh bead is filed for it",
 		},
 	}
 	if !slices.Equal(got.Items, want) {
@@ -460,7 +485,7 @@ func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
 		Key:      imagePinsUnreadableKey,
 		Pin:      "bd",
 		Severity: attention.SeverityMedium,
-		Summary:  "image pin bd cannot be read: it is not counted as fresh, and no refresh bead is filed for it: ls-remote exited 128",
+		Summary:  "image pin bd cannot be read: ls-remote exited 128; it is not counted as fresh, and no refresh bead is filed for it",
 	}}
 	if !slices.Equal(got.Items, want) {
 		t.Errorf("Items = %+v, want the age items for om and hm, the stale item for hm, and the unreadable item for bd", got.Items)

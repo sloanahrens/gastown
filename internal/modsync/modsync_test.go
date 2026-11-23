@@ -3,12 +3,12 @@ package modsync
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 func TestMain(m *testing.M) { os.Exit(testutil.HermeticMain(m)) }
@@ -71,8 +71,7 @@ func unresolvable(rootMod, rootSum, trackerMod string) []string {
 
 func TestTheTrackerModuleRequiresOnlyVersionsTheRootModuleHas(t *testing.T) {
 	t.Parallel()
-	_, file, _, _ := runtime.Caller(0)
-	repo := filepath.Join(filepath.Dir(file), "..", "..")
+	repo := modroot.Root(t)
 	read := func(rel string) string {
 		b, err := os.ReadFile(filepath.Join(repo, rel))
 		if err != nil {

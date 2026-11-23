@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -24,10 +26,11 @@ type PendingRecord struct {
 	At   time.Time `json:"at"`
 }
 
-// RecordKindNotes and RecordKindComment are the two writes a queued record names.
+// The kinds name what a later pass does with Text: append notes or post a comment on the bead.
 const (
-	RecordKindNotes   = "notes"   // append Text to the bead's notes
-	RecordKindComment = "comment" // add Text as a comment on the bead
+	RecordKindNotes      = "notes"      // append Text to the bead's notes
+	RecordKindComment    = "comment"    // add Text as a comment on the bead
+	RecordKindAnnotation = "annotation" // an annotation the landing worker could not post: posted once as a comment (AnnotationQueued)
 )
 
 // RecordQueue is a JSON-lines queue of landing records at the caller's Path.
@@ -80,7 +83,7 @@ func (q RecordQueue) walk(fn func([]queueEntry) error) error {
 
 // Enqueue appends rec unless an entry with the same Bead, Kind and Key is queued.
 func (q RecordQueue) Enqueue(rec PendingRecord) error {
-	if rec.Kind != RecordKindNotes && rec.Kind != RecordKindComment {
+	if rec.Kind != RecordKindNotes && rec.Kind != RecordKindComment && rec.Kind != RecordKindAnnotation {
 		return fmt.Errorf("queueing landing record: unknown kind %q", rec.Kind)
 	}
 	if rec.Bead == "" || rec.Key == "" {
@@ -153,6 +156,17 @@ func (l *Lander) queueRecord(rec PendingRecord) error {
 	}
 	rec.At = l.now()
 	return l.Records.Enqueue(rec)
+}
+
+// AnnotationQueued reports whether a comment on the bead already carries the
+// queued annotation's exact trimmed text, so a drained annotation is not posted
+// twice (gt-xickh9).
+func AnnotationQueued(comments []beads.Comment, rec PendingRecord) bool {
+	text := strings.TrimSpace(rec.Text)
+	if text == "" {
+		return false // a blank annotation would match any blank comment
+	}
+	return slices.ContainsFunc(comments, func(c beads.Comment) bool { return strings.TrimSpace(c.Text) == text })
 }
 
 // sameEntry reports whether two records name the same queued write.

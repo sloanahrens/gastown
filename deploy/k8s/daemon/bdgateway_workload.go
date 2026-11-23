@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -44,6 +45,26 @@ const (
 	bdGatewayTokenSecretVolume = "bd-gateway-token-secret" //nolint:gosec // a volume name, not a credential
 	bdGatewayTokensVolume      = "bd-gateway-tokens"       //nolint:gosec // a volume name, not a credential
 	bdGatewayLogVolume         = "bd-gateway-log"
+	// bdGatewayDoltCredentialDir is where the gateway reads its Dolt credential
+	// file: the emptyDir the init container fills, mounted read-only.
+	bdGatewayDoltCredentialDir = "/run/bdgw/dolt" //nolint:gosec // a directory path, not a credential
+	// bdGatewayDoltCredentialKey is the credential Secret's one key, so a key added
+	// to the Secret later is not copied into the gateway's directory.
+	bdGatewayDoltCredentialKey = "credentials" //nolint:gosec // a Secret key name, not a credential
+	// bdGatewayDoltCredentialPath is the file the serve command names.
+	bdGatewayDoltCredentialPath = bdGatewayDoltCredentialDir + "/" + bdGatewayDoltCredentialKey
+	// bdGatewayDoltCredentialSecretDir is where the credential Secret is mounted,
+	// read-only, in the init container only; bdGatewayDoltCredentialCopyDir is the
+	// emptyDir it copies into. The copy is its own directory, never the token
+	// directory: the credential is not a token, and the loader inventories that
+	// directory's .token files.
+	bdGatewayDoltCredentialSecretDir = "/dolt-secrets"
+	bdGatewayDoltCredentialCopyDir   = "/dolt"
+	// bdGatewayDoltCredentialSecretVolume is the Secret the init container reads,
+	// and bdGatewayDoltCredentialVolume the emptyDir it fills and the gateway
+	// mounts.
+	bdGatewayDoltCredentialSecretVolume = "bd-gateway-dolt-credential-secret" //nolint:gosec // a volume name, not a credential
+	bdGatewayDoltCredentialVolume       = "bd-gateway-dolt-credential"        //nolint:gosec // a volume name, not a credential
 	// bdGatewayTokenSecretMode is owner and group read, so fsGroup lets the init
 	// container read the Secret.
 	bdGatewayTokenSecretMode = int32(0o440)
@@ -55,6 +76,24 @@ const (
 	// Service, which publishes the pod before it is ready.
 	bdGatewayPushPortName = "push"
 )
+
+// validateBdGatewayDoltCredential refuses the Dolt credential Secret value the
+// cluster cannot mount. The API server accepts a Secret name only as a DNS-1123
+// subdomain, and the credential is a live-pod credential, so a rehearsal render,
+// which mounts none, refuses it. It runs whether or not the gateway image is set,
+// so a value named for a pod the render does not build is still checked.
+func (v Values) validateBdGatewayDoltCredential() error {
+	if v.BdGatewayDoltCredentialSecret == "" {
+		return nil
+	}
+	if !validDNS1123Subdomain(v.BdGatewayDoltCredentialSecret) {
+		return fmt.Errorf("Values.BdGatewayDoltCredentialSecret %q: want a Secret name, a DNS-1123 subdomain", v.BdGatewayDoltCredentialSecret)
+	}
+	if v.Rehearsal {
+		return errors.New("Values.BdGatewayDoltCredentialSecret is set with Values.Rehearsal: the Dolt credential is a live-pod credential, and a rehearsal mounts none")
+	}
+	return nil
+}
 
 // BdGatewayMaxReplicas is the most gateway pods a render runs: two, so one serves
 // while the other rolls or fails.
@@ -167,22 +206,33 @@ func bdGatewayDeployment(v Values, namespace string) Deployment {
 }
 
 // bdGatewayTokenCopy is the init container that copies each token from the Secret
-// into the emptyDir at mode 0600, the mode the gateway's token loader requires. It
-// runs Values.ProxyImage, the image the daemon's relays already run, and as the pod's
-// user, so it reads the Secret through its group.
+// into the emptyDir at mode 0600, the mode the gateway's token loader requires. When
+// the render names a Dolt credential Secret it copies that file at 0600 too, so the
+// gateway's user reads the credential from a copy the pod owns. It runs
+// Values.ProxyImage, the image the daemon's relays already run, and as the pod's
+// user, so it reads each Secret through its group.
 func bdGatewayTokenCopy(v Values) Container {
 	allowEscalation := false
+	command := fmt.Sprintf("cp %s/* %s/ && chmod 0600 %s/*", bdGatewayTokenSecretDir, bdGatewayTokenCopyDir, bdGatewayTokenCopyDir)
+	mounts := []VolumeMount{
+		{Name: bdGatewayTokenSecretVolume, MountPath: bdGatewayTokenSecretDir, ReadOnly: true},
+		{Name: bdGatewayTokensVolume, MountPath: bdGatewayTokenCopyDir},
+	}
+	if v.BdGatewayDoltCredentialSecret != "" {
+		command += fmt.Sprintf(" && cp %s/* %s/ && chmod 0600 %s/*", bdGatewayDoltCredentialSecretDir, bdGatewayDoltCredentialCopyDir, bdGatewayDoltCredentialCopyDir)
+		mounts = append(mounts,
+			VolumeMount{Name: bdGatewayDoltCredentialSecretVolume, MountPath: bdGatewayDoltCredentialSecretDir, ReadOnly: true},
+			VolumeMount{Name: bdGatewayDoltCredentialVolume, MountPath: bdGatewayDoltCredentialCopyDir},
+		)
+	}
 	return Container{
 		Name:    bdGatewayTokenInit,
 		Image:   v.ProxyImage,
-		Command: []string{"sh", "-c", fmt.Sprintf("cp %s/* %s/ && chmod 0600 %s/*", bdGatewayTokenSecretDir, bdGatewayTokenCopyDir, bdGatewayTokenCopyDir)},
+		Command: []string{"sh", "-c", command},
 		SecurityContext: &ContainerSecurityContext{
 			AllowPrivilegeEscalation: &allowEscalation,
 		},
-		VolumeMounts: []VolumeMount{
-			{Name: bdGatewayTokenSecretVolume, MountPath: bdGatewayTokenSecretDir, ReadOnly: true},
-			{Name: bdGatewayTokensVolume, MountPath: bdGatewayTokenCopyDir},
-		},
+		VolumeMounts: mounts,
 	}
 }
 
@@ -214,22 +264,34 @@ func bdGatewayMaxConcurrentPerPod(total int, replicas int32) (perPod int, render
 }
 
 // bdGatewayContainer runs bdgw serve with the command the gateway's image expects.
-// Its Dolt endpoint is doltHost and doltPort, which bdGatewayDeployment passes as
-// DoltHostName and bdGatewayDoltPort; the serve command and the readiness probe both
-// take that one pair, so they cannot name different Dolt endpoints. The host resolves
-// through the pod's hostAliases entry when the render has a host gateway address.
-// Its readiness is bdgw ready on the tokens, the verb table and the workspace, the
-// three flags bdgw ready requires, plus the same Dolt endpoint, so a gateway whose
-// workspace is not ready, or whose Dolt does not answer at that endpoint, stays out
-// of bdGatewayService. The push Service publishes it either way, since an unready
-// gateway can still answer a push.
+// Its Dolt settings are doltHost and doltPort, which bdGatewayDeployment passes as
+// DoltHostName and bdGatewayDoltPort, and the credential file when the render names
+// a Dolt credential Secret; the serve command and the readiness probe both take that
+// one set, so they cannot name different Dolt endpoints or credentials. The host
+// resolves through the pod's hostAliases entry when the render has a host gateway
+// address. Its readiness is bdgw ready on the tokens, the verb table and the
+// workspace, the three flags bdgw ready requires, plus the same Dolt settings, so a
+// gateway whose workspace is not ready, or whose Dolt does not answer at that
+// endpoint, stays out of bdGatewayService. The push Service publishes it either way,
+// since an unready gateway can still answer a push.
 func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	allowEscalation := false
 	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
+	if v.BdGatewayDoltCredentialSecret != "" {
+		dolt = append(dolt, "--dolt-credential-file="+bdGatewayDoltCredentialPath)
+	}
 	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--log-per-pod", "--workspace", bdGatewayWorkspaceDir}, dolt...)
 	command = append(command, "--push-addr", ":"+strconv.Itoa(BdGatewayPushPort))
 	if perPod, render := bdGatewayMaxConcurrentPerPod(v.BdGatewayMaxConcurrent, v.bdGatewayReplicas()); render {
 		command = append(command, "--max-concurrent", strconv.Itoa(perPod))
+	}
+	mounts := []VolumeMount{
+		{Name: bdGatewayTokensVolume, MountPath: bdGatewayTokensDir, ReadOnly: true},
+		{Name: bdGatewayLogVolume, MountPath: bdGatewayLogDir},
+		{Name: BdGatewayWorkspaceClaim, MountPath: bdGatewayWorkspaceMount},
+	}
+	if v.BdGatewayDoltCredentialSecret != "" {
+		mounts = append(mounts, VolumeMount{Name: bdGatewayDoltCredentialVolume, MountPath: bdGatewayDoltCredentialDir, ReadOnly: true})
 	}
 	return Container{
 		Name:    BdGatewayName,
@@ -242,11 +304,7 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 		SecurityContext: &ContainerSecurityContext{
 			AllowPrivilegeEscalation: &allowEscalation,
 		},
-		VolumeMounts: []VolumeMount{
-			{Name: bdGatewayTokensVolume, MountPath: bdGatewayTokensDir, ReadOnly: true},
-			{Name: bdGatewayLogVolume, MountPath: bdGatewayLogDir},
-			{Name: BdGatewayWorkspaceClaim, MountPath: bdGatewayWorkspaceMount},
-		},
+		VolumeMounts: mounts,
 		// The readiness probe does not run until the startup probe passes. /healthz needs
 		// no token, so the startup probe passes as soon as the server answers on its port.
 		// Its window is 60 checks 2 s apart: a start slower than that restarts the container.
@@ -267,16 +325,29 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 
 // bdGatewayVolumes are the gateway's volumes: the token Secret at the group-readable
 // mode, the emptyDir the init container fills with the 0600 copies, the log claim,
-// and the workspace claim. The Secret is mounted whole, since the init container
-// copies a directory of tokens.
+// and the workspace claim. The token Secret is mounted whole, since the init
+// container copies a directory of tokens. A named Dolt credential Secret adds its
+// own volume, at the same mode and carrying only the credential key, and the
+// emptyDir its 0600 copy lands in.
 func bdGatewayVolumes(v Values) []Volume {
 	mode := bdGatewayTokenSecretMode
-	return []Volume{
+	volumes := []Volume{
 		{Name: bdGatewayTokenSecretVolume, Secret: &SecretVolumeSource{SecretName: v.BdGatewayTokenSecret, DefaultMode: &mode}},
 		{Name: bdGatewayTokensVolume, EmptyDir: &EmptyDirVolumeSource{}},
 		{Name: bdGatewayLogVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: BdGatewayLogClaim}},
 		{Name: BdGatewayWorkspaceClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: BdGatewayWorkspaceClaim}},
 	}
+	if v.BdGatewayDoltCredentialSecret != "" {
+		volumes = append(volumes,
+			Volume{Name: bdGatewayDoltCredentialSecretVolume, Secret: &SecretVolumeSource{
+				SecretName:  v.BdGatewayDoltCredentialSecret,
+				DefaultMode: &mode,
+				Items:       []KeyToPath{{Key: bdGatewayDoltCredentialKey, Path: bdGatewayDoltCredentialKey}},
+			}},
+			Volume{Name: bdGatewayDoltCredentialVolume, EmptyDir: &EmptyDirVolumeSource{}},
+		)
+	}
+	return volumes
 }
 
 // bdGatewayService publishes the gateway's port inside the cluster. Its selector is
