@@ -57,15 +57,21 @@ func transportFailure(err error) bool {
 		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// maxRetryDelays caps the waits RetrySchedule returns so a total taken as
+// effectively unlimited cannot grow the slice without bound. The 45-second
+// production total yields 11 waits, well under the cap (gt-mmd4s8).
+const maxRetryDelays = 32
+
 // RetrySchedule returns the waits before each retry of a call that failed with
 // a retryable error, a refused dial or a read call's mid-call transport
 // failure, given the total time it may spend waiting: half a second, then one,
 // two and three seconds, then five seconds each. A wait that would take the sum
 // past total is left out, so a zero total gives none and the waits always fit.
-// The waits are what a call spends waiting, not the whole budget: time an
-// attempt spends failing counts against the same total, so the caller stops
-// when what is left is too little to try with. The result is pure: no clock and
-// no sleep.
+// At most 32 waits are returned, so a total large enough to take more stops at
+// the cap. The waits are what a call spends waiting, not the
+// whole budget: time an attempt spends failing counts against the same total,
+// so the caller stops when what is left is too little to try with. The result
+// is pure: no clock and no sleep.
 func RetrySchedule(total time.Duration) []time.Duration {
 	ladder := [...]time.Duration{
 		500 * time.Millisecond,
@@ -78,7 +84,7 @@ func RetrySchedule(total time.Duration) []time.Duration {
 		delays []time.Duration
 		sum    time.Duration
 	)
-	for {
+	for len(delays) < maxRetryDelays {
 		next := steady
 		if len(delays) < len(ladder) {
 			next = ladder[len(delays)]
@@ -92,4 +98,5 @@ func RetrySchedule(total time.Duration) []time.Duration {
 		delays = append(delays, next)
 		sum += next
 	}
+	return delays
 }

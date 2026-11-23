@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -48,6 +49,29 @@ func TestDialRetryClassify(t *testing.T) {
 			}
 		})
 	}
+	t.Run("real closed port", func(t *testing.T) {
+		t.Parallel()
+		// Take a free loopback port, release it, then dial it: the dial reaches a
+		// port with no listener, so net returns the refusal a real call would see.
+		//testpolicy:allow no-network — the listener only yields a loopback address that nothing listens on; it is closed before the dial, in-process, and the branch under test is the failed dial
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen on loopback: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close the loopback listener: %v", err)
+		}
+		//testpolicy:allow no-network — the dial is in-process on loopback to the port just released, and the branch under test is the refusal it returns
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err == nil {
+			conn.Close()
+			t.Fatalf("dial %s succeeded, want a refusal", addr)
+		}
+		if !RetryableDial(err) {
+			t.Fatalf("RetryableDial(dial %s: %v) = false, want true for a refused dial", addr, err)
+		}
+	})
 }
 
 func TestDialRetrySchedule(t *testing.T) {
@@ -61,10 +85,9 @@ func TestDialRetrySchedule(t *testing.T) {
 			time.Second,
 			2 * time.Second,
 			3 * time.Second,
-			5 * time.Second,
 		}
-		if len(got) < len(wantStart) {
-			t.Fatalf("RetrySchedule(%v) = %v, want at least %d delays", total, got, len(wantStart))
+		if len(got) <= len(wantStart) {
+			t.Fatalf("RetrySchedule(%v) = %v, want more than the %d ladder delays", total, got, len(wantStart))
 		}
 		for i, want := range wantStart {
 			if got[i] != want {
@@ -72,13 +95,19 @@ func TestDialRetrySchedule(t *testing.T) {
 			}
 		}
 		var sum time.Duration
-		for _, d := range got[4:] {
-			if d != 5*time.Second {
-				t.Fatalf("delay %v after the ladder = %v, want 5s", d, d)
-			}
+		for _, d := range got {
 			sum += d
 		}
-		sum += 500*time.Millisecond + time.Second + 2*time.Second + 3*time.Second
+		for i, d := range got[len(wantStart):] {
+			if d != 5*time.Second {
+				t.Fatalf("delay %d after the ladder = %v, want 5s", len(wantStart)+i, d)
+			}
+		}
+		steady := len(got) - len(wantStart)
+		const wantSteady = 7
+		if steady != wantSteady {
+			t.Fatalf("the schedule has %d steady 5s steps after the ladder, want %d", steady, wantSteady)
+		}
 		if sum > total {
 			t.Fatalf("the delays sum to %v, past the %v total", sum, total)
 		}
@@ -106,6 +135,19 @@ func TestDialRetrySchedule(t *testing.T) {
 			t.Fatalf("RetrySchedule(0) = %v, want no delays", got)
 		}
 	})
+}
+
+// TestDialRetryScheduleBounded pins the schedule's documented cap: a total
+// large enough to take unlimited waits returns at the cap, so the slice cannot
+// grow with total. The 32 is the contract's number; an uncapped schedule loops
+// here without returning.
+func TestDialRetryScheduleBounded(t *testing.T) {
+	t.Parallel()
+	const wantCap = 32
+	got := RetrySchedule(math.MaxInt64)
+	if len(got) > wantCap {
+		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d delays, want at most %d", len(got), wantCap)
+	}
 }
 
 func TestRetryableReadTable(t *testing.T) {
