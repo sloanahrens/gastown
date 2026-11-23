@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -128,6 +131,41 @@ func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
 	}
 	if client.childrenOf != chunks || client.showMultiple != chunks {
 		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want %d of each, one per chunk", client.childrenOf, client.showMultiple, chunks)
+	}
+}
+
+type sqlReaderFunc func(beadsql.Query) ([][]string, error)
+
+func (f sqlReaderFunc) SQLCSV(q beadsql.Query) ([][]string, error) { return f(q) }
+
+// TestTickEffSQLChildren: one chunk of three ids is one SQL call, its records
+// parsed per parent. Mutation: a per-id read costs three calls, reading the
+// header record as data keys a third parent, and dropping the parse empties the
+// map (gt-x24i61).
+func TestTickEffSQLChildren(t *testing.T) {
+	t.Parallel()
+	var calls []beadsql.Query
+	read := sqlReaderFunc(func(q beadsql.Query) ([][]string, error) {
+		calls = append(calls, q)
+		return [][]string{{"p.id", "c.id", "status"}, {"gt-a", "gt-a.1", "open"}, {"gt-b", "", ""}}, nil
+	})
+	got, err := specChildrenFromSQL(read, []string{"gt-a", "gt-b", "gt-c"})
+	if err != nil {
+		t.Fatalf("specChildrenFromSQL: %v", err)
+	}
+	if len(calls) != 1 || !strings.Contains(calls[0].String(), "'gt-a', 'gt-b', 'gt-c'") {
+		t.Fatalf("read the chunk as %d calls: %v, want one naming all three ids", len(calls), calls)
+	}
+	want := map[string][]beadsql.ChildStatus{"gt-a": {{ID: "gt-a.1", Status: "open"}}, "gt-b": {}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("children = %#v, want %#v; the header record is no parent", got, want)
+	}
+	if got, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, nil }), []string{"gt-a"}); err != nil || len(got) != 0 {
+		t.Errorf("no records: children = %v, %v; want none", got, err)
+	}
+	refused := errors.New("refused")
+	if _, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, refused }), []string{"gt-a"}); !errors.Is(err, refused) {
+		t.Errorf("reader error = %v, want %v", err, refused)
 	}
 }
 

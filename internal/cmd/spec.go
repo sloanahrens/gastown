@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -616,6 +617,23 @@ func specChildrenRead(c beads.Client, ids []string) (map[string][]*beads.Issue, 
 		kids[id] = []*beads.Issue{}
 	}
 	return kids, nil
+}
+
+// sqlReader is the SQL surface specChildrenFromSQL asks: a bd store answering a declared beadsql statement.
+type sqlReader interface {
+	SQLCSV(query beadsql.Query) ([][]string, error)
+}
+
+// specChildrenFromSQL reads the children of ids in one SQL call, each parent keyed to its children; a parent the database does not hold has no key.
+func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]beadsql.ChildStatus, error) {
+	rows, err := c.SQLCSV(beadsql.ChildStatuses(ids...))
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > 0 {
+		rows = rows[1:] // SQLCSV keeps the header record, which is no parent
+	}
+	return beadsql.ParseChildStatuses(rows)
 }
 
 // specChildrenReader is the default children read of specCandidateChildren: the
