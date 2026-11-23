@@ -1944,6 +1944,10 @@ type specDispatchReport struct {
 	BoardTook      time.Duration `json:"board_ns,omitempty"`
 	CandidatesTook time.Duration `json:"candidates_ns,omitempty"`
 	SlingTook      time.Duration `json:"sling_ns,omitempty"`
+	// CandidatesSteps is what the candidates phase spent per step outside bd,
+	// summed over its candidates on the tick's clock, so the cost line can name
+	// the lint (gt-dld6qn); a held tick runs no candidate, so it sets none.
+	CandidatesSteps map[string]time.Duration `json:"candidates_steps_ns,omitempty"`
 	// The bd reads each phase made, counted by the tick's ledger; the daemon
 	// logs them on its 'tick took' line beside the phase times, so a slow
 	// phase is also known by how many calls it cost (gt-139dp).
@@ -2220,9 +2224,13 @@ type specDispatchEnv struct {
 	Sling         func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (polecat string, err error)
 	Sleep         func(time.Duration)
 	Now           func() time.Time
-	Template      specdispatch.Template
-	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
-	PerTick       int
+	// Lint is a candidate's shape verdict. Nil is the lint with the tick's
+	// template and settings, which is what the dispatcher runs; a test injects
+	// one whose cost its clock can report (gt-dld6qn).
+	Lint     func(specdispatch.Spec) specdispatch.LintVerdict
+	Template specdispatch.Template
+	Budget   specdispatch.Budget // agents, caps and preferences; live counts filled per tick
+	PerTick  int
 	// MaxInFlight is how many slings the tick runs at once
 	// (spec_dispatch.max_in_flight). Zero is the code default, never
 	// unbounded (gt-16pqa).
@@ -2507,6 +2515,15 @@ func specLockTimeoutRecorded(storeFor func(beadID string) beads.Client) func(bea
 	}
 }
 
+// lint is a candidate's shape verdict: the injected Lint when one is wired,
+// else the lint with the tick's template and settings.
+func (e specDispatchEnv) lint(spec specdispatch.Spec) specdispatch.LintVerdict {
+	if e.Lint != nil {
+		return e.Lint(spec)
+	}
+	return specdispatch.LintWith(spec, e.Template, e.lintOptions())
+}
+
 // lintOptions is the settings the tick lints a candidate with: the same
 // settings gt spec lint reads, so a candidate the seat's lint would refuse is
 // held here instead of slung (gt-muzkwi).
@@ -2582,6 +2599,44 @@ func (e specDispatchEnv) showFresh(beadID string) (specdispatch.Spec, error) {
 		return e.ShowFresh(beadID)
 	}
 	return e.Show(beadID)
+}
+
+// specCandidateSteps sums the candidates phase's steps by name on the tick's
+// clock, so the report says what the phase spends outside bd (gt-dld6qn); a
+// nil timer times nothing.
+type specCandidateSteps struct {
+	now    func() time.Time
+	totals map[string]time.Duration
+}
+
+// time runs fn and adds the clock time it took under name.
+func (s *specCandidateSteps) time(name string, fn func()) {
+	if s == nil {
+		fn()
+		return
+	}
+	at := s.now()
+	fn()
+	s.add(name, s.now().Sub(at))
+}
+
+// add sums d under name.
+func (s *specCandidateSteps) add(name string, d time.Duration) {
+	if s == nil {
+		return
+	}
+	if s.totals == nil {
+		s.totals = map[string]time.Duration{}
+	}
+	s.totals[name] += d
+}
+
+// all is the sum per step name, nil when the timer timed nothing.
+func (s *specCandidateSteps) all() map[string]time.Duration {
+	if s == nil {
+		return nil
+	}
+	return s.totals
 }
 
 // runSpecDispatchCycle is one tick. It never guesses: under the default warn
@@ -2741,6 +2796,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
+	candidateSteps := &specCandidateSteps{now: env.Now}
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
 		// A sling of an earlier tick is still running for this bead: it may not
@@ -2863,7 +2919,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 			full = walked
-			verdict = specdispatch.LintWith(full, env.Template, env.lintOptions())
+			// The lint's target-tree path checks are the phase's own cost
+			// outside bd, so they are timed by step (gt-dld6qn).
+			candidateSteps.time("lint", func() { verdict = env.lint(full) })
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
 		// A clean verdict is the only shape the estimate-ahead pass reads: the
@@ -3170,6 +3228,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		budget.Bump(seat.Agent, budget.Now)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
+	report.CandidatesSteps = candidateSteps.all()
 	report.CandidatesCalls = env.Reads.endPhase()
 	slingAt := env.Now()
 	if env.Background {
