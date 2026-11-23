@@ -431,6 +431,56 @@ func TestExtractWritesGateRuns(t *testing.T) {
 	}
 }
 
+// TestExtractReadsGateRunsThroughTheSeam checks the gate runs come from the
+// injected reader and not from the town's filesystem: the town root is an empty
+// directory, and the rows of gate_runs.csv are the ones the seam returned.
+func TestExtractReadsGateRunsThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	town := t.TempDir()
+	env.TownRoot = town
+	var asked string
+	env.GateRunReader = func(root string) ([]land.GateRun, int, error) {
+		asked = root
+		return []land.GateRun{extractGateRun("gt-a", 1.5), extractGateRun("gt-b", 2.25)}, 1, nil
+	}
+	extractRun(t, env)
+
+	if asked != town {
+		t.Errorf("the reader was asked about %q, want the town root %q", asked, town)
+	}
+	rows := files.rows(t, gateRunsName)
+	if len(rows) != 2 {
+		t.Fatalf("gate_runs.csv has %d rows, want the seam's 2: %v", len(rows), rows)
+	}
+	for i, want := range []struct{ bead, queue string }{{"gt-a", "1.5"}, {"gt-b", "2.25"}} {
+		if rows[i]["bead"] != want.bead || rows[i]["queue_s"] != want.queue {
+			t.Errorf("row %d = bead %q queue_s %q, want bead %q queue_s %q", i, rows[i]["bead"], rows[i]["queue_s"], want.bead, want.queue)
+		}
+	}
+	if !files.has(sidecarName) {
+		t.Fatalf("the extract wrote no %s; wrote %v", sidecarName, files.names)
+	}
+	var sidecar struct {
+		GateRunsSkipped int `json:"gate_runs_skipped"`
+	}
+	if err := json.Unmarshal(files.data[sidecarName].Bytes(), &sidecar); err != nil {
+		t.Fatalf("read the sidecar: %v", err)
+	}
+	if sidecar.GateRunsSkipped != 1 {
+		t.Errorf("sidecar gate_runs_skipped = %d, want the seam's 1", sidecar.GateRunsSkipped)
+	}
+	// The seam stands in for the read, so the rows cannot have come from disk:
+	// the town root is still empty.
+	entries, err := os.ReadDir(town)
+	if err != nil {
+		t.Fatalf("read the town root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the extract wrote %v under the town root, want nothing", entries)
+	}
+}
+
 // TestExtractWritesAHeaderOnlyGateRunsCSVForATownWithoutTheLog checks a town
 // with no gate-runs.jsonl still publishes gate_runs.csv, as its header alone.
 func TestExtractWritesAHeaderOnlyGateRunsCSVForATownWithoutTheLog(t *testing.T) {
