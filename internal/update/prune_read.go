@@ -427,30 +427,31 @@ func (r PruneRegistryReader) listingURL(image string, page int) (*url.URL, error
 }
 
 // RefLister lists a repository's branches whose names start with prefix.
-// *forgejo.Client satisfies it.
+// *forgejo.Client satisfies it; ReadGreenRefs's only external caller is
+// update_images.go's pruneGreenRefs.
 type RefLister interface {
 	ListRefs(ctx context.Context, owner, repo, prefix string) ([]forgejo.Ref, error)
 }
 
 // ReadGreenRefs returns the sha12 of every green/<sha12> ref of owner/repo from
-// one refs listing under green/, and that call is the whole listing: Forgejo's
-// refs route takes no page or limit and the client decodes the whole answer, so
-// a body cut short is an error, never a shorter list. A ref named another way is
-// not in the set. A failed listing is an error with no set, a 404 included: a
-// wrong repository name answers 404 too, and a short set would delete a green image.
+// one refs listing under green/. Forgejo's git refs route filters by ref prefix
+// and takes no page or limit, so its one answer is the whole listing, and the
+// client decodes that body whole: a cut body is an error, never a shorter list.
+// A failed listing is an error with no set, a 404 included: a wrong repository
+// name answers 404 too, and a short set would delete a green image.
 func ReadGreenRefs(ctx context.Context, refs RefLister, owner, repo string) (map[string]bool, error) {
 	if refs == nil {
 		return nil, errors.New("no ref listing is wired for the green refs")
 	}
 	list, err := refs.ListRefs(ctx, owner, repo, "green/")
 	if err != nil {
-		// A Forgejo answer's text can carry the response body, so only its
-		// status is named.
+		// A Forgejo answer's text can carry the response body, so an API
+		// error names only its status.
 		var apiErr *forgejo.APIError
 		if errors.As(err, &apiErr) {
 			return nil, fmt.Errorf("the Forgejo refs listing for %s/%s answered HTTP %d", owner, repo, apiErr.StatusCode)
 		}
-		return nil, fmt.Errorf("the Forgejo refs listing for %s/%s failed", owner, repo)
+		return nil, fmt.Errorf("the Forgejo refs listing for %s/%s failed: %w", owner, repo, err)
 	}
 	green := map[string]bool{}
 	for _, ref := range list {

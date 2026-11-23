@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -655,78 +656,38 @@ func TestPruneReadRegistryRefusesBeforeSending(t *testing.T) {
 	}
 }
 
-// pruneRefsFake answers a repository's refs in one call and records the prefix
-// each call asked for. err, when set, fails the call.
-type pruneRefsFake struct {
-	refs  []forgejo.Ref
-	err   error
-	calls []string
-}
-
-func (f *pruneRefsFake) ListRefs(_ context.Context, _, _, prefix string) ([]forgejo.Ref, error) {
-	f.calls = append(f.calls, prefix)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.refs, nil
-}
-
-// TestPruneReadGreenRefsReadsOnePrefixedCall holds that the green-ref reader
-// asks once for green/ and returns the sha12 of every green/<sha12> ref it is
-// answered, naming no other ref.
+// TestPruneReadGreenRefsReadsOnePrefixedCall drives the production client: one
+// GET of the unpaginated git refs route under green/ answers the 303 green refs
+// the pair check read in seven pages, and keeps exactly their sha12 set.
 func TestPruneReadGreenRefsReadsOnePrefixedCall(t *testing.T) {
 	t.Parallel()
-	refs := &pruneRefsFake{refs: []forgejo.Ref{
-		{Name: "green/aaaaaaaaaaaa"},
-		{Name: "green/bbbbbbbbbbbb"},
-		{Name: "green/short"},
-		{Name: "green/ABCDEF123456"},
-		{Name: "green/cccccccccccc0"},
-		{Name: "main"},
-	}}
-	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
-	if err != nil {
-		t.Fatalf("ReadGreenRefs() error = %v", err)
-	}
-	want := []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
-	var keys []string
-	for k := range got {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	if !slices.Equal(keys, want) {
-		t.Errorf("green refs = %v, want %v", keys, want)
-	}
-	if !slices.Equal(refs.calls, []string{"green/"}) {
-		t.Errorf("prefixes asked = %q, want [green/]: one call reads the refs", refs.calls)
-	}
-}
-
-// TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer holds that the one answer is
-// read whole: 303 green refs, the count the pair check read in seven pages,
-// come back from one GET with no page or limit and none dropped at a boundary.
-func TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer(t *testing.T) {
-	t.Parallel()
 	const count = 303
-	var parts []string
+	want := make(map[string]bool, count)
+	parts := make([]string, 0, count+3)
 	for i := 0; i < count; i++ {
+		want[fmt.Sprintf("%012x", i)] = true
 		parts = append(parts, fmt.Sprintf(`{"ref":"refs/heads/green/%012x","object":{"sha":%q,"type":"commit"}}`, i, strings.Repeat("a", 40)))
 	}
-	answer := "[" + strings.Join(parts, ",") + "]"
+	for _, name := range []string{"green/short", "green/ABCDEF123456", "main"} {
+		parts = append(parts, fmt.Sprintf(`{"ref":"refs/heads/%s","object":{"sha":%q,"type":"commit"}}`, name, strings.Repeat("a", 40)))
+	}
 	var sent []*http.Request
 	client := pruneForgejoClient(t, func(req *http.Request) (*http.Response, error) {
 		sent = append(sent, req)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(answer))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("[" + strings.Join(parts, ",") + "]"))}, nil
 	})
 	got, err := ReadGreenRefs(context.Background(), client, "gastown", "gastown")
 	if err != nil {
 		t.Fatalf("ReadGreenRefs() error = %v", err)
 	}
-	if len(got) != count {
-		t.Errorf("green refs = %d, want %d: the whole answer is the listing", len(got), count)
+	if !maps.Equal(got, want) {
+		t.Errorf("green refs = %d entries, want the %d green/<sha12> of one answer", len(got), count)
 	}
 	if len(sent) != 1 {
 		t.Fatalf("requests sent = %d, want 1", len(sent))
+	}
+	if p := sent[0].URL.Path; p != "/api/v1/repos/gastown/gastown/git/refs/heads/green/" {
+		t.Errorf("request path = %q, want the git refs route under green/", p)
 	}
 	if q := sent[0].URL.RawQuery; q != "" {
 		t.Errorf("request query = %q, want none: the refs route takes no page or limit", q)
@@ -752,21 +713,39 @@ func TestPruneReadRegistryRefusesARequestWithNoAnswer(t *testing.T) {
 	}
 }
 
-// TestPruneReadGreenRefsRefusesA404 holds that a 404 from the refs listing is
-// an error with no set, never an empty set: a wrong repository name answers 404
-// too, and an empty set would let the planner delete every green image.
-func TestPruneReadGreenRefsRefusesA404(t *testing.T) {
+// TestPruneReadGreenRefsRefusesAFailedListing drives the production client over
+// a 404, a wire failure and a body cut short: each is an error with no set,
+// never a short set that would let the planner delete a green image.
+func TestPruneReadGreenRefsRefusesAFailedListing(t *testing.T) {
 	t.Parallel()
-	refs := &pruneRefsFake{err: &forgejo.APIError{StatusCode: http.StatusNotFound}}
-	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
-	if err == nil {
-		t.Fatalf("ReadGreenRefs() = %v, nil error; want a refusal", got)
+	cases := []struct {
+		name, body, want string
+		status           int
+	}{
+		{"404", `{"message":"not found"}`, "HTTP 404", http.StatusNotFound},
+		{"cut short", `[{"ref":"refs/heads/green/aaaaaaaaaaaa","object":{"sha":"aaa`, "failed", http.StatusOK},
+		{"wire failure", "connection reset", "failed", 0},
 	}
-	if got != nil {
-		t.Errorf("ReadGreenRefs() returned set %v with its error", got)
-	}
-	if !strings.Contains(err.Error(), "HTTP 404") {
-		t.Errorf("error %q does not name HTTP 404", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := pruneForgejoClient(t, func(*http.Request) (*http.Response, error) {
+				if tc.status == 0 {
+					return nil, errors.New(tc.body)
+				}
+				return &http.Response{StatusCode: tc.status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			got, err := ReadGreenRefs(context.Background(), client, "gastown", "gastown")
+			if err == nil {
+				t.Fatalf("ReadGreenRefs() = %v, nil error; want a refusal", got)
+			}
+			if got != nil {
+				t.Errorf("ReadGreenRefs() returned set %v with its error", got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -783,28 +762,13 @@ func TestPruneReadGreenRefsRefusesAMissingListing(t *testing.T) {
 	}
 }
 
-// TestPruneReadGreenRefsRefusesAFailedListing holds that a refs listing that
-// fails is an error with no set returned, since a set missing a ref would let
-// the planner delete that ref's image.
-func TestPruneReadGreenRefsRefusesAFailedListing(t *testing.T) {
-	t.Parallel()
-	refs := &pruneRefsFake{err: errors.New("connection reset")}
-	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
-	if err == nil {
-		t.Fatalf("ReadGreenRefs() = %v, nil error; want a refusal", got)
-	}
-	if got != nil {
-		t.Errorf("ReadGreenRefs() returned set %v with its error", got)
-	}
-}
-
 // pruneRoundTrip is an in-process transport: every request is answered by the
 // function, and no socket is opened.
 type pruneRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f pruneRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// pruneForgejoClient is the real branch client, sending its requests through rt.
+// pruneForgejoClient is the production client, sending its requests through rt.
 func pruneForgejoClient(t *testing.T, rt pruneRoundTrip) *forgejo.Client {
 	t.Helper()
 	c, err := forgejo.NewClient("viewer",
