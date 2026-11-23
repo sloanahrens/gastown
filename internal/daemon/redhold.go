@@ -45,10 +45,12 @@ func redHoldSweepOf(rig string, st tierSweepState, err error) (redHoldSweep, boo
 }
 
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
-// names in the order to read them, and the reader for one name.
+// names in the order to read them, the reader for one name, and the clock a new
+// reason takes its Since from.
 type redHoldSources struct {
 	Rigs []string
 	Read func(rig string) (tierSweepState, error)
+	Now  func() time.Time // nil means time.Now
 }
 
 // redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
@@ -98,6 +100,35 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 		reasons = append(reasons, dispatch.RedHoldReason{Kind: kind, Since: since, Detail: strings.Join(details[kind], ", ")})
 	}
 	return dispatch.RedHoldRecord{Reasons: reasons}
+}
+
+// runRedHold evaluates the sweep sources and publishes the red hold: it writes
+// the record and logs the change line once, only when the kind set changes. A
+// rig whose record cannot be read leaves the file untouched, so an unreadable
+// record never clears a hold.
+func runRedHold(townRoot string, src redHoldSources, logf func(format string, args ...any)) error {
+	in, unknown := redHoldInputsOf(src)
+	prev, err := dispatch.ReadRedHold(townRoot)
+	if err != nil {
+		return fmt.Errorf("read red hold: %w", err)
+	}
+	if len(unknown) > 0 {
+		return nil // gt-583rx6 adds the line that names each such rig
+	}
+	now := src.Now
+	if now == nil {
+		now = time.Now
+	}
+	next := evalRedHold(in, now(), prev)
+	line := redHoldChangeLine(prev, next)
+	if line == "" {
+		return nil
+	}
+	if err := dispatch.WriteRedHold(townRoot, next); err != nil {
+		return fmt.Errorf("write red hold: %w", err)
+	}
+	logf("%s", line)
+	return nil
 }
 
 // redHoldChangeLine says what the daemon logs when the red hold changes: "" when

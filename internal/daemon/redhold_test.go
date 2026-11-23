@@ -2,11 +2,15 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRedHoldSweepOf(t *testing.T) {
@@ -141,4 +145,90 @@ func TestRedHoldChangeLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// redHoldLogs collects the lines logf writes.
+type redHoldLogs []string
+
+func (l *redHoldLogs) logf(format string, args ...any) {
+	*l = append(*l, fmt.Sprintf(format, args...))
+}
+
+// sweepStates is a redHoldSources reader serving one state per rig, and an error
+// for the named rig.
+func sweepStates(states map[string]tierSweepState, unread string) func(string) (tierSweepState, error) {
+	return func(rig string) (tierSweepState, error) {
+		if rig == unread {
+			return tierSweepState{}, errors.New("reading the record")
+		}
+		return states[rig], nil
+	}
+}
+
+func TestRedHoldStepSetsThenClears(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	states := map[string]tierSweepState{"gastown": {RedCycles: 2}}
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(states, ""), Now: func() time.Time { return now }}
+	var logs redHoldLogs
+
+	require.NoError(t, runRedHold(townRoot, src, logs.logf))
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "gastown: 2 red cycles"}}, rec.Reasons)
+
+	states["gastown"] = tierSweepState{}
+	require.NoError(t, runRedHold(townRoot, src, logs.logf))
+	_, err = os.Stat(dispatch.RedHoldPath(townRoot))
+	require.True(t, os.IsNotExist(err), "a green record removes the file")
+	require.Equal(t, redHoldLogs{"red hold: set: sweep-red", "red hold: cleared"}, logs, "each change logs once")
+}
+
+func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sentinel := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Detail: "sentinel"}}}
+	require.NoError(t, dispatch.WriteRedHold(townRoot, sentinel))
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(map[string]tierSweepState{"gastown": {RedCycles: 3}}, "")}
+	var logs redHoldLogs
+
+	require.NoError(t, runRedHold(townRoot, src, logs.logf))
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, sentinel, rec, "an unchanged kind set is not rewritten")
+	require.Empty(t, logs, "an unchanged kind set logs nothing")
+}
+
+func TestRedHoldStepUnreadableKeepsState(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sentinel := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Detail: "sentinel"}}}
+	require.NoError(t, dispatch.WriteRedHold(townRoot, sentinel))
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(nil, "gastown")}
+	var logs redHoldLogs
+
+	require.NoError(t, runRedHold(townRoot, src, logs.logf), "an unreadable sweep record is not an error")
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, sentinel, rec, "an unreadable sweep record clears nothing")
+	require.Empty(t, logs, "an unreadable sweep record changes nothing")
+}
+
+func TestRedHoldStepRefusals(t *testing.T) {
+	t.Parallel()
+	red := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(map[string]tierSweepState{"gastown": {RedCycles: 2}}, "")}
+	noLog := func(string, ...any) {}
+	t.Run("an unreadable red hold record", func(t *testing.T) {
+		townRoot := t.TempDir()
+		path := dispatch.RedHoldPath(townRoot)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+		require.ErrorContains(t, runRedHold(townRoot, red, noLog), "read red hold")
+	})
+	t.Run("a red hold record that cannot be written", func(t *testing.T) {
+		townRoot := t.TempDir()
+		require.NoError(t, os.Symlink(filepath.Join(townRoot, "missing"), filepath.Dir(dispatch.RedHoldPath(townRoot))))
+		require.ErrorContains(t, runRedHold(townRoot, red, noLog), "write red hold")
+	})
 }
