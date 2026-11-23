@@ -56,6 +56,42 @@ func TestJevDispatchRecentPrintsTheLastLines(t *testing.T) {
 	}
 }
 
+// A line that leaves the three optional answers out prints without panic, a
+// dash for each.
+func TestJevDispatchRecentPrintsDashesForMissingAnswers(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := dispatch.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"ts":"2026-11-23T12:00:00Z","bead":"gt-bare","attached_at":"2026-11-23T12:00:00Z",` +
+		`"agent":"claude-sonnet","answers":{"fits_twenty_minutes":0.5,"size":{"score":1,"confidence":0.6}},` +
+		`"question_version":3,"model":"jev-1.14.0"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := printRecentDispatch(&out, path, 5); err != nil {
+		t.Fatalf("printRecentDispatch: %v", err)
+	}
+	rows := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("printed %d rows, want a header and one line:\n%s", len(rows), out.String())
+	}
+	fields := strings.Fields(rows[1])
+	if len(fields) != 11 {
+		t.Fatalf("row has %d fields, want 11:\n%s", len(fields), rows[1])
+	}
+	// TIME is two fields, so TICKABLE, STRONG and DAEMON are 6, 7 and 8.
+	for _, i := range []int{6, 7, 8} {
+		if fields[i] != "-" {
+			t.Errorf("column %d = %q, want a dash for the missing answer:\n%s", i, fields[i], rows[1])
+		}
+	}
+}
+
 func TestJevDispatchRecentWithNoLog(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer

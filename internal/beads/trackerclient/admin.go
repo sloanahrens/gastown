@@ -37,6 +37,12 @@ func (c *Client) ReadCostSamples(context.Context, string, time.Time, int) ([]bea
 	return nil, fmt.Errorf("ReadCostSamples: the tracker client runs no bd, so it cannot read cost sample rows")
 }
 
+// CheckUsageRecordRow refuses: the tracker client runs no bd, so it cannot
+// check a row against a samples table, and no request is sent.
+func (c *Client) CheckUsageRecordRow(context.Context, beads.UsageRecordRow) error {
+	return fmt.Errorf("CheckUsageRecordRow: the tracker client runs no bd, so it cannot write a usage record row")
+}
+
 // WriteUsageRecord refuses: the tracker client runs no bd, so it has no
 // samples table to append to, and no request is sent.
 func (c *Client) WriteUsageRecord(context.Context, beads.UsageRecordRow) error {

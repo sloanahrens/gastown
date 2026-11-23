@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,6 +196,32 @@ func TestTierSweepRunnerStageLaunchesAndReadsTheResult(t *testing.T) {
 	}
 	if raceBeads != 1 || integrationBeads != 0 {
 		t.Errorf("beads = %d race, %d integration; want one for the RED unit and none for the GREEN tier", raceBeads, integrationBeads)
+	}
+}
+
+// A stage the runner ran puts the split of its wall time in the finished line,
+// after the elapsed time (gt-qc72jj). The fake clock does not move, so the run
+// started before the stage (lag 0s), its tests are its own ten minutes, and the
+// tail is 0s; its RED race tier exits the stage 1. Mutation: drop the fold's
+// timingNote or its Printf argument and this goes red.
+func TestTierSweepLogsRunnerTimingNote(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "tier-sweep: shell GREEN passed=3 failed=0 skipped=0\n")
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+		if err := sweeprunner.Write(spec.OutDir, runnerTestResult(spec, now)); err != nil {
+			t.Fatalf("the fake launch writing a result: %v", err)
+		}
+		return tierSweepLaunch{exitCode: 0}
+	}
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a verdict")
+	}
+	if want := "tier_sweep: gastown: integration finished (exit 1) in 0s (start lag 0s, tests 10m0s, tail 0s); last lines:"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log missing %q; got:\n%s", want, logs.String())
 	}
 }
 
@@ -662,7 +689,7 @@ func TestTierSweepRunnerNoTiersIsRed(t *testing.T) {
 			t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
 		}
 
-		res := d.tierSweepRunnerStageResult(tierSweepStage{rig: "gastown", tested: runnerTestSHA}, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1})
+		res := d.tierSweepRunnerStageResult(tierSweepStage{rig: "gastown", tested: runnerTestSHA}, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
 		if res.reason != tierSweepRunnerNoResult || !strings.Contains(res.output, "no tiers asked for") {
 			t.Fatalf("folded stage result = %+v, want RED naming that no tier was asked for", res)
 		}

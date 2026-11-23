@@ -42,6 +42,15 @@ func TestSourceSweepSumsTheStagesFinishedInTheHour(t *testing.T) {
 			want: sweepMinutes(80),
 		},
 		{
+			// A stage the runner ran appends the split of its wall time after
+			// the duration; the run time still counts (gt-qc72jj).
+			name: "a runner stage's timing note does not hide its run time",
+			log: sweepLog +
+				"2026/10/24 12:10:00 tier_sweep: gastown: integration finished (exit 0) in 21m0s (start lag 5s, tests 20m0s, tail 55s); last lines:\n" +
+				"tier-sweep: integration GREEN passed=66 failed=0 skipped=2 (logs /tmp/tier-sweep.x) in 20m0s\n",
+			want: sweepMinutes(21),
+		},
+		{
 			name: "a stage older than the hour is left out",
 			log: "2026/10/24 11:59:59 tier_sweep: gastown: shell finished (exit 0) in 30m0s; last lines:\n" +
 				sweepFinished("12:30:00", "5m0s"),

@@ -72,7 +72,8 @@ func renderedBdGatewayObjects(t *testing.T, out string) []string {
 }
 
 // TestClusterRenderBdGatewayWorkload holds the render of a values file with a bd
-// image: the gateway's Deployment, Service and claim are written, and the daemon,
+// image: the gateway's Deployment, Service and its workspace and call-log claims
+// are written, and the daemon,
 // the dashboard and the update Job are given the in-cluster URL. The update Job is
 // not rendered here; launchUpdateJob takes its URL from the daemon's BD_GATEWAY_URL,
 // so the daemon's environment is what is checked for it.
@@ -89,6 +90,7 @@ func TestClusterRenderBdGatewayWorkload(t *testing.T) {
 		"-deployment-bd-gateway.yaml",
 		"-service-bd-gateway.yaml",
 		"-persistentvolumeclaim-bd-gateway-workspace.yaml",
+		"-persistentvolumeclaim-bd-gateway-log.yaml",
 	} {
 		renderedFile(t, f.out, suffix)
 	}

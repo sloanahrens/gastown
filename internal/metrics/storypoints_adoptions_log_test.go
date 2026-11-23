@@ -36,8 +36,8 @@ func readAdoptionsLog(t *testing.T, town string) []storyPointsAdoption {
 // TestStoryPointsWeeklyLogsEachAdoption: each adoption the weekly run makes is logged with its
 // time, the version it was kept as and the version file the weights it replaced were kept as,
 // whichever rule adopted it: the key on (the stronger rule) and the key off (the rank rule, as
-// before the key existed) both adopt and both log; a run that adopts nothing logs nothing, and
-// the run's own outcome is unchanged (gt-q2rrvb).
+// before the key existed) both adopt and both log; a run that adopts nothing logs its refusal
+// instead, and the run's own outcome is unchanged (gt-q2rrvb, gt-7typlt).
 func TestStoryPointsWeeklyLogsEachAdoption(t *testing.T) {
 	t.Parallel()
 	previous := adoptTestWeights{boxes: 0.05, intercept: 1}.JSON()
@@ -69,9 +69,11 @@ func TestStoryPointsWeeklyLogsEachAdoption(t *testing.T) {
 		})
 	}
 
-	t.Run("a run that adopts nothing logs nothing", func(t *testing.T) {
+	t.Run("a run that adopts nothing logs one refused line", func(t *testing.T) {
 		t.Parallel()
-		// A proposal that does not rank the holdout beads is rejected, and nothing is written.
+		// A proposal that does not rank the holdout beads is rejected, and no weights are
+		// written; the rejection is logged as one refused line carrying the rule's reason,
+		// replacing the "logs nothing" this case pinned before the refusal record (gt-7typlt).
 		fix := newTrainTestFixture(t, trainTestBeads(90, 1, false))
 		writeWeeklyLastRun(t, fix.town, weeklyNow.Add(-8*24*time.Hour))
 		var out strings.Builder
@@ -80,9 +82,14 @@ func TestStoryPointsWeeklyLogsEachAdoption(t *testing.T) {
 		if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
 			t.Fatalf("RunStoryPointsWeekly: %v", err)
 		}
-		if log := readAdoptionsLog(t, fix.town); len(log) != 0 {
-			t.Errorf("adoptions log = %+v, want none for a run that adopted nothing", log)
+		log := readAdoptionsLog(t, fix.town)
+		if len(log) != 1 {
+			t.Fatalf("adoptions log = %+v, want one refused line for a run that adopted nothing", log)
 		}
+		if a := log[0]; a.Event != "refused" || a.Reason == "" {
+			t.Errorf("logged = %+v, want a refused line with the rule's reason", a)
+		}
+		requireNoWeeklyWeights(t, fix.town)
 	})
 }
 

@@ -291,6 +291,88 @@ func TestSpecSplitApplyCreates(t *testing.T) {
 	}
 }
 
+// splitFailingClient is a client whose named write refuses.
+type splitFailingClient struct {
+	beads.Client
+	refuseCreate int // the create number that refuses; 0 for none
+	refuseDepend bool
+	refuseClose  bool
+	creates      int
+}
+
+func (c *splitFailingClient) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	c.creates++
+	if c.refuseCreate == c.creates {
+		return nil, errors.New("create refused")
+	}
+	return c.Client.Create(opts)
+}
+
+func (c *splitFailingClient) AddDependency(issue, dependsOn string) error {
+	if c.refuseDepend {
+		return errors.New("dependency refused")
+	}
+	return c.Client.AddDependency(issue, dependsOn)
+}
+
+func (c *splitFailingClient) CloseWithReason(reason string, ids ...string) error {
+	if c.refuseClose {
+		return errors.New("close refused")
+	}
+	return c.Client.CloseWithReason(reason, ids...)
+}
+
+// TestSpecSplitApplyNamesAFailedWrite: a write that fails after an earlier one
+// returns an error naming what exists, never a silent partial apply.
+func TestSpecSplitApplyNamesAFailedWrite(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fail splitFailingClient
+		want []string
+	}{
+		{name: "piece A", fail: splitFailingClient{refuseCreate: 1}, want: []string{"cannot create piece A of gt-split", "create refused"}},
+		{name: "piece B after A", fail: splitFailingClient{refuseCreate: 2}, want: []string{"created piece A as", "cannot create piece B of gt-split"}},
+		{name: "the dependency", fail: splitFailingClient{refuseDepend: true}, want: []string{"created piece A as", "piece B as", "cannot wire B after A"}},
+		{name: "the close", fail: splitFailingClient{refuseClose: true}, want: []string{"created piece A as", "piece B as", "cannot close gt-split"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+			failing := tc.fail
+			failing.Client = db
+
+			var out bytes.Buffer
+			err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), &failing)
+			if err == nil {
+				t.Fatalf("runSpecSplitApplyOn() error = nil, want the failed write reported")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSpecSplitApplyReportsAFailedOutput: a split whose final report cannot be
+// written is an error naming the report, not a silent success.
+func TestSpecSplitApplyReportsAFailedOutput(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+
+	err := runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db)
+	if err == nil || !strings.Contains(err.Error(), "cannot report the split of gt-split") {
+		t.Errorf("runSpecSplitApplyOn() error = %v on a refused report, want the report failure", err)
+	}
+}
+
 // TestSpecSplitApplyStops: --apply runs the dry-run checks before its first
 // write, so a failed check prints its reason, exits 1 and creates nothing.
 func TestSpecSplitApplyStops(t *testing.T) {

@@ -93,14 +93,22 @@ type finding struct {
 	// issues holds the beads Prefetch read in one batch, by id. Label reads a
 	// bead missing from it the one-at-a-time way.
 	issues map[string]*beads.Issue
+	// warn tells the operator about a failed batch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
 }
 
 // Prefetch reads every finding bead in one batch, then sizes every landed
 // commit their close reasons name in one pass, so Label makes no call per item.
 func (f *finding) Prefetch(ctx context.Context, items []Item) {
+	warn := f.warn
+	if warn == nil {
+		warn = warnf
+	}
 	issues, err := showAll(f.beads, itemIDs(items))
-	if err != nil {
-		warnf("reading the finding beads in a batch: %v", err)
+	if err := warnShowErr(warn, "", err); err != nil {
+		warn("reading the finding beads in a batch: %v", err)
 	}
 	f.issues = issues
 	dp, ok := f.diffs.(diffPrefetcher)

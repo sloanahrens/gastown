@@ -263,3 +263,110 @@ func TestValidateDaemonPatrolConfigUpdateMinIntervalUnset(t *testing.T) {
 		}
 	})
 }
+
+// patrolDoc returns a daemon patrol document whose patrols block fill fills in.
+func patrolDoc(fill func(*PatrolsConfig)) *DaemonPatrolConfig {
+	c := &DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1, Patrols: &PatrolsConfig{}}
+	fill(c.Patrols)
+	return c
+}
+
+// checkPatrolConfig requires ValidateDaemonPatrolConfig to accept doc when want
+// is empty, and to refuse it naming want when it is not.
+func checkPatrolConfig(t *testing.T, doc *DaemonPatrolConfig, what, want string) {
+	t.Helper()
+	err := ValidateDaemonPatrolConfig(doc)
+	if want == "" {
+		if err != nil {
+			t.Fatalf("ValidateDaemonPatrolConfig(%s) = %v, want accepted", what, err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ValidateDaemonPatrolConfig(%s) = %v, want it refused naming %s", what, err, want)
+	}
+}
+
+// TestValidateDaemonPatrolConfigUpdateWindow: the config write refuses an update
+// window the daemon's Settings parse refuses, naming the settings/config.json
+// key, and accepts HH:MM or none (gt-j6249n).
+func TestValidateDaemonPatrolConfigUpdateWindow(t *testing.T) {
+	t.Parallel()
+
+	const key = "daemon.patrols.update.window"
+	cases := []struct{ what, window, want string }{
+		{"refuses 3pm", "3pm", key},
+		{"refuses 25:00", "25:00", key},
+		{"refuses 03:0", "03:0", key},
+		{"accepts HH:MM", "03:00", ""},
+		{"accepts empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.what, func(t *testing.T) {
+			t.Parallel()
+			c := patrolDoc(func(p *PatrolsConfig) { p.Update = &UpdateConfig{Enabled: true, Window: tc.window} })
+			checkPatrolConfig(t, c, "window "+tc.window, tc.want)
+		})
+	}
+}
+
+// TestValidateDaemonPatrolConfigUpdateMaxRuntime: the config write refuses an
+// update max_runtime the daemon's Settings parse refuses, naming the
+// settings/config.json key, and accepts an in-range duration or none
+// (gt-j6249n).
+func TestValidateDaemonPatrolConfigUpdateMaxRuntime(t *testing.T) {
+	t.Parallel()
+
+	const key = "daemon.patrols.update.max_runtime"
+	cases := []struct{ what, maxRuntime, want string }{
+		{"refuses 5m below the 10 minute floor", "5m", key},
+		{"refuses 13h above the 12 hour ceiling", "13h", key},
+		{"refuses a value that is not a duration", "soon", key},
+		{"accepts a duration in range", "30m", ""},
+		{"accepts empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.what, func(t *testing.T) {
+			t.Parallel()
+			c := patrolDoc(func(p *PatrolsConfig) { p.Update = &UpdateConfig{Enabled: true, MaxRuntime: tc.maxRuntime} })
+			checkPatrolConfig(t, c, "max_runtime "+tc.maxRuntime, tc.want)
+		})
+	}
+}
+
+// TestValidateDaemonPatrolConfigTierSweepIntervals: the config write refuses a
+// tier_sweep interval or restart_stale_after the sweep's run-time parse would
+// silently ignore, naming its key, and accepts a positive duration or none
+// (gt-j6249n).
+func TestValidateDaemonPatrolConfigTierSweepIntervals(t *testing.T) {
+	t.Parallel()
+
+	type field struct {
+		name, key string
+		set       func(*TierSweepConfig, string)
+	}
+	fields := []field{
+		{"interval", "daemon.patrols.tier_sweep.interval", func(c *TierSweepConfig, v string) { c.IntervalStr = v }},
+		{"restart_stale_after", "daemon.patrols.tier_sweep.restart_stale_after", func(c *TierSweepConfig, v string) { c.RestartStaleAfterStr = v }},
+	}
+	for _, f := range fields {
+		cases := []struct{ what, value, want string }{
+			{"refuses soon", "soon", f.key},
+			{"refuses 0s", "0s", f.key},
+			{"refuses -1h", "-1h", f.key},
+			{"accepts a positive duration", "1h", ""},
+			{"accepts empty", "", ""},
+		}
+		for _, tc := range cases {
+			t.Run(f.name+" "+tc.what, func(t *testing.T) {
+				t.Parallel()
+				c := patrolDoc(func(p *PatrolsConfig) {
+					ts := &TierSweepConfig{}
+					f.set(ts, tc.value)
+					p.TierSweep = ts
+				})
+				checkPatrolConfig(t, c, f.name+" "+tc.value, tc.want)
+			})
+		}
+	}
+}

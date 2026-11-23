@@ -131,6 +131,10 @@ type fakeSpecTown struct {
 	// names, so a test drives the path where the schedule cannot be recorded
 	// (gt-kmkpao).
 	contentionWriteErr map[string]error
+	// clearContentionErr fails the contention schedule's clear for the bead it
+	// names, so a test drives the path where a stale schedule cannot be taken
+	// off a bead that dispatched anyway (gt-kmkpao).
+	clearContentionErr map[string]error
 	// lockTimeoutHistoryErr fails the read of the bead's lock-timeout history,
 	// so a test drives the path where the dispatcher cannot tell a lost count
 	// from a fresh bead (gt-a4cdcd).
@@ -211,7 +215,8 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{},
 		aheadComments: map[string][]beads.Comment{}, aheadErr: map[string]error{},
 		lockTimeoutWriteErr: map[string]error{}, contentionWriteErr: map[string]error{},
-		unlabelErrs: map[string]error{}}
+		clearContentionErr: map[string]error{},
+		unlabelErrs:        map[string]error{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -486,6 +491,9 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		ClearContention: func(id string) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			if err := f.clearContentionErr[id]; err != nil {
+				return err
+			}
 			s := f.specs[id]
 			s.Metadata = nil
 			f.specs[id] = s

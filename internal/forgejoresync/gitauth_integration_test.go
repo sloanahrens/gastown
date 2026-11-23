@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // emptyRepoAdvert is a smart-HTTP upload-pack advertisement of a repository with
@@ -19,6 +20,24 @@ func emptyRepoAdvert() string {
 	pkt := func(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 	return pkt("# service=git-upload-pack\n") + "0000" +
 		pkt(strings.Repeat("0", 40)+" capabilities^{}\x00side-band-64k\n") + "0000"
+}
+
+// gitLsRemoteBound bounds each git ls-remote call so a hung remote fails its
+// sub-test in about a minute instead of spending the gate's ten, and a bound is
+// never raised to land a change (test-engineering standard, points 3 and 10).
+const gitLsRemoteBound = 30 * time.Second
+
+// callContext returns how long one call may run: bound, or the time the test has
+// left when its deadline is sooner. A zero deadline means the test set none.
+func callContext(t *testing.T, bound time.Duration, deadline time.Time) time.Duration {
+	t.Helper()
+	if deadline.IsZero() {
+		return bound
+	}
+	if remaining := time.Until(deadline); remaining < bound {
+		return remaining
+	}
+	return bound
 }
 
 // TestIntegrationGitAuthenticatesWithTheTokenVariablesStripped runs real git
@@ -68,11 +87,9 @@ func TestIntegrationGitAuthenticatesWithTheTokenVariablesStripped(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			before := served.Load()
-			// The call ends with the test, or at the test timeout when one is set.
-			ctx, cancel := t.Context(), context.CancelFunc(func() {})
-			if d, ok := t.Deadline(); ok {
-				ctx, cancel = context.WithDeadline(ctx, d)
-			}
+			// A hung call fails this sub-test at the bound, not at the package timeout.
+			deadline, _ := t.Deadline() // zero when the test set none
+			ctx, cancel := context.WithTimeout(t.Context(), callContext(t, gitLsRemoteBound, deadline))
 			defer cancel()
 			environ := append(append(append([]string{}, base...), stripped...), tc.extraEnv...)
 			cmd := gitCommandIn(ctx, environ, "git", "ls-remote", "--", tc.url)
@@ -82,6 +99,38 @@ func TestIntegrationGitAuthenticatesWithTheTokenVariablesStripped(t *testing.T) 
 			}
 			if served.Load() == before {
 				t.Fatalf("the server never saw the credential (denied %d)", denied.Load())
+			}
+		})
+	}
+}
+
+// TestIntegrationCallContextCutsTheBoundToATestDeadline pins callContext's cut: the bound
+// when the test set no deadline, the remaining time when the deadline is sooner,
+// and the bound when it is later. The distances are fractions of the bound, so
+// the constant holds the file's only whole-second literal.
+func TestIntegrationCallContextCutsTheBoundToATestDeadline(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		away time.Duration // zero: the test set no deadline
+		want time.Duration
+	}{
+		{"no test deadline", 0, gitLsRemoteBound},
+		{"deadline sooner than the bound", gitLsRemoteBound / 6, gitLsRemoteBound / 6}, // five seconds
+		{"deadline later than the bound", gitLsRemoteBound * 20, gitLsRemoteBound},     // ten minutes
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deadline time.Time
+			if tc.away != 0 {
+				deadline = time.Now().Add(tc.away)
+			}
+			got := callContext(t, gitLsRemoteBound, deadline)
+			// Setting the deadline costs a little, so the remaining time is a hair
+			// under the distance; the tenth leaves room for a delayed goroutine.
+			if got > tc.want || got < tc.want-tc.want/10 {
+				t.Fatalf("callContext(bound, deadline %v away) = %v, want about %v", tc.away, got, tc.want)
 			}
 		})
 	}

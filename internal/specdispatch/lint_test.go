@@ -886,3 +886,104 @@ func TestOtherRigListNarrowsTheSegments(t *testing.T) {
 		t.Errorf("a town directory passed with no list: %s", v.Line("gt-good"))
 	}
 }
+
+// gateCoversSpec is goodSpec whose Constraints and Gate bodies name the files
+// and commands a gate-coverage test drives. Target holds every path the
+// Constraints names, so the bead lints through the dispatcher's Lint rather
+// than LintShape.
+func gateCoversSpec(constraints, gate string, files ...string) Spec {
+	s := goodSpec()
+	s.Description = strings.Replace(s.Description, "Go only.", constraints, 1)
+	s.Description = strings.Replace(s.Description, "make gate", gate, 1)
+	target := &TargetTree{Branch: "main", Files: map[string]struct{}{}}
+	for _, f := range files {
+		target.Files[f] = struct{}{}
+	}
+	s.Target = target
+	return s
+}
+
+// TestSpecLintGateCovers pins the gate-coverage warning: a Gate that runs no
+// test for a package the Constraints edit earns one advisory line naming the
+// package, and the bead still dispatches. A Gate that runs the package, one
+// with no go test line, and a bead whose Constraints name no editable Go path
+// get no warning (gt-ll05i5).
+func TestSpecLintGateCovers(t *testing.T) {
+	t.Parallel()
+	const twoPackages = "Edit internal/daemon/a.go and internal/bdgateway/b.go."
+	twoFiles := []string{"internal/daemon/a.go", "internal/bdgateway/b.go"}
+	tests := []struct {
+		name        string
+		constraints string
+		gate        string
+		files       []string
+		wantDirs    []string // package directories the one warning must name
+	}{
+		{
+			name:        "uncovered package warns",
+			constraints: twoPackages,
+			gate:        "go test ./internal/daemon -run 'TestDaemon' -count=1",
+			files:       twoFiles,
+			wantDirs:    []string{"internal/bdgateway"},
+		},
+		{
+			name:        "both packages run",
+			constraints: twoPackages,
+			gate:        "go test ./internal/daemon ./internal/bdgateway -run 'TestDaemon'",
+			files:       twoFiles,
+		},
+		{
+			name:        "no go test gate line",
+			constraints: twoPackages,
+			gate:        "make gate",
+			files:       twoFiles,
+		},
+		{
+			name:        "parent directory covers its subpackages",
+			constraints: twoPackages,
+			gate:        "go test ./internal/...",
+			files:       twoFiles,
+		},
+		{
+			name:        "all packages cover everything",
+			constraints: twoPackages,
+			gate:        "go test ./...",
+			files:       twoFiles,
+		},
+		{
+			name:        "non-Go and reference-only paths are not edited",
+			constraints: "Edit docs/guide.md; see internal/daemon/a.go.",
+			gate:        "go test ./internal/bdgateway -run 'TestGateway'",
+			files:       []string{"docs/guide.md", "internal/daemon/a.go"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := gateCoversSpec(tc.constraints, tc.gate, tc.files...)
+			v := Lint(s, defaultTemplate())
+			if !v.Clean() {
+				t.Fatalf("verdict %q, want a clean dispatch: the warning must never refuse", v.Line(s.ID))
+			}
+			if len(tc.wantDirs) == 0 {
+				for _, w := range v.Warnings {
+					if strings.Contains(w, "the Gate runs no go test") {
+						t.Fatalf("warnings = %q, want no gate-coverage warning", v.Warnings)
+					}
+				}
+				return
+			}
+			if len(v.Warnings) != 1 {
+				t.Fatalf("warnings = %q, want one gate-coverage warning", v.Warnings)
+			}
+			for _, dir := range tc.wantDirs {
+				if !strings.Contains(v.Warnings[0], dir) {
+					t.Errorf("warning %q does not name %s", v.Warnings[0], dir)
+				}
+			}
+			if !strings.Contains(v.Warnings[0], "-run") {
+				t.Errorf("warning %q does not say to add a -run line", v.Warnings[0])
+			}
+		})
+	}
+}

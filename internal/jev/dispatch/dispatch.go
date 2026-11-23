@@ -421,13 +421,12 @@ func (p *Pass) askState(ctx context.Context, state string) (*jev.Answers, error)
 	return p.Asker.Ask(ctx, state, qs)
 }
 
-// lineAnswers copies the battery's answers into the log's shape.
+// lineAnswers copies the battery's answers into the log's shape. The three
+// answers the battery no longer asks stay nil, so a line reads them as missing
+// rather than as a probability of 0.
 func lineAnswers(a *jev.Answers) Answers {
 	return Answers{
-		FitsTwentyMinutes:  a.Noul[qFitsTwentyMinutes],
-		AcceptanceTickable: a.Noul[qAcceptanceTickable],
-		NeedsStrongModel:   a.Noul[qNeedsStrongModel],
-		TouchesDaemon:      a.Noul[qTouchesDaemon],
+		FitsTwentyMinutes: a.Noul[qFitsTwentyMinutes],
 		Size: SizeAnswer{
 			Score:      a.Score[qSize].Score,
 			Confidence: a.Score[qSize].Confidence,

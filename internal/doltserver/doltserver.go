@@ -572,8 +572,15 @@ func (c *Config) HostPort() string {
 
 // tcpDSN returns the MySQL DSN for a connection that selects no database. The
 // address comes from HostPort, so an IPv6 host stays bracketed.
-func (c *Config) tcpDSN() string {
-	return fmt.Sprintf("%s@tcp(%s)/", c.UserDSN(), c.HostPort())
+//
+// A town whose credential file cannot be read gets the credential error and no
+// DSN: a connection built anyway would fall back to the default user with no
+// password.
+func (c *Config) tcpDSN() (string, error) {
+	if err := c.CredentialError(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s@tcp(%s)/", c.UserDSN(), c.HostPort()), nil
 }
 
 // buildDoltSQLCmd constructs a non-interactive dolt sql command that always
@@ -2154,8 +2161,11 @@ const sqlPingTimeout = 2 * time.Second
 // reachability alone would accept a port forward whose container is not up, or
 // a foreign server on the port; the driver's ping asks the server itself.
 func (h *host) pingSQL(config *Config) error {
-	dsn := config.tcpDSN() + "?timeout=2s&readTimeout=2s&writeTimeout=2s"
-	db, err := h.openMySQL(dsn)
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return err
+	}
+	db, err := h.openMySQL(dsn + "?timeout=2s&readTimeout=2s&writeTimeout=2s")
 	if err != nil {
 		return err
 	}
@@ -2753,8 +2763,15 @@ func (h *host) cleanStaleSocket(socketPath string) {
 // the window where SIGTERM hits live storage I/O. Non-fatal: if the drain times
 // out or the server is unreachable, we proceed with SIGTERM anyway.
 func (h *host) drainConnectionsBeforeStop(config *Config) {
-	dsn := config.tcpDSN() + "?timeout=3s&readTimeout=5s&writeTimeout=5s"
-	db, err := h.openMySQL(dsn)
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		// Non-fatal by design: the stop proceeds with SIGTERM, and the
+		// warning names why no drain ran rather than connecting as the
+		// default user.
+		h.warnf("Warning: skipping the Dolt connection drain: %v\n", err)
+		return
+	}
+	db, err := h.openMySQL(dsn + "?timeout=3s&readTimeout=5s&writeTimeout=5s")
 	if err != nil {
 		return
 	}
@@ -3598,7 +3615,11 @@ func (h *host) initRemoteRig(townRoot, rigName string, config *Config) (InitRigR
 // name is a bind parameter, so a name that never passed databaseIdentifier
 // still cannot reach the statement as SQL.
 func (h *host) remoteDatabaseExists(config *Config, name string) (bool, error) {
-	db, err := h.openMySQL(config.tcpDSN())
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return false, err
+	}
+	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return false, err
 	}
@@ -3620,7 +3641,11 @@ func (h *host) remoteDatabaseExists(config *Config, name string) (bool, error) {
 // config's server. ident comes from databaseIdentifier, the only way a name
 // reaches this statement.
 func (h *host) createRemoteDatabase(config *Config, ident string) error {
-	db, err := h.openMySQL(config.tcpDSN())
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return err
+	}
+	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return err
 	}
@@ -5494,7 +5519,10 @@ func RecoverReadOnly(townRoot string) error {
 func (h *host) MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := config.tcpDSN()
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return 0, err
+	}
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("opening mysql connection: %w", err)
@@ -5536,7 +5564,10 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 func (h *host) GetLastCommitAge(townRoot string) (time.Duration, string, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := config.tcpDSN()
+	dsn, err := config.tcpDSN()
+	if err != nil {
+		return 0, "", err
+	}
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, "", fmt.Errorf("opening mysql connection: %w", err)

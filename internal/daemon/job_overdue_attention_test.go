@@ -263,3 +263,33 @@ func TestJobOverdueAttentionRefusals(t *testing.T) {
 		}
 	})
 }
+
+// A maintenance job whose patrol the daemon reports off raises no item even
+// past its cadence; the same reading with the patrol on raises one (gt-9r7i8p).
+func TestJobOverdueOffPatrol(t *testing.T) {
+	t.Parallel()
+	overdue := JobReading{Name: "main_branch_test", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: time.Hour}
+	for _, tc := range []struct {
+		off  bool
+		want int
+	}{{true, 0}, {false, 1}} {
+		f := newAttentionFixture(t, jobOverdueNow)
+		f.src.patrolOff = func(string) bool { return tc.off }
+		items := jobOverdueItems(t, f, []JobReading{overdue})
+		if len(items) != tc.want {
+			t.Fatalf("patrol off=%v: items = %+v, want %d", tc.off, items, tc.want)
+		}
+	}
+}
+
+// The daemon's builder wires the skip to patrolOffReason: a patrol the town
+// disables reads off and an active one reads on (gt-9r7i8p).
+func TestJobOverdueOffWiring(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, jobOverdueNow)
+	f.src.d.disabledPatrols = map[string]bool{"main_branch_test": true}
+	src := f.src.d.attentionSources(jobOverdueNow)
+	if src.patrolOff == nil || !src.patrolOff("main_branch_test") || src.patrolOff("dolt_gc") {
+		t.Errorf("patrolOff nil or not reading disabled_patrols; want main_branch_test off, dolt_gc on")
+	}
+}
