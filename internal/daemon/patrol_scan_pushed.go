@@ -18,28 +18,39 @@ import (
 // is the guard's own (overrunSlungReader.slungAt) and the decision is
 // pushedHeadSince, originHeadSince's steps with each failed read returned.
 func (h *patrolScanHost) PushedSinceSling(rig, name string) (string, error) {
+	_, sha, err := h.pushedSinceSling(rig, name)
+	return sha, err
+}
+
+// pushedSinceSling is PushedSinceSling's read with the branch kept, so a caller
+// that names the push reads the branch and the head from one handle (gt-t4wvy4).
+func (h *patrolScanHost) pushedSinceSling(rig, name string) (branch, sha string, err error) {
 	bead, err := h.seatWorkBead(rig, name)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	st, err := h.d.workBeadState(bead)
 	if err != nil {
-		return "", fmt.Errorf("read the work bead %s of %s/%s: %w", bead, rig, name, err)
+		return "", "", fmt.Errorf("read the work bead %s of %s/%s: %w", bead, rig, name, err)
 	}
 	seat := overrunSeat{Rig: rig, Polecat: name, Bead: bead, SubmittedAt: st.submittedAt, EscalatedEnd: st.escalatedAt}
 	g, err := h.d.overrunSeatGit(seat)
 	if err != nil {
-		return "", fmt.Errorf("open the worktree of %s/%s: %w", rig, name, err)
+		return "", "", fmt.Errorf("open the worktree of %s/%s: %w", rig, name, err)
 	}
-	branch, err := seatBranch(g)
+	branch, err = seatBranch(g)
 	if err != nil {
-		return "", fmt.Errorf("%s/%s: %w", rig, name, err)
+		return "", "", fmt.Errorf("%s/%s: %w", rig, name, err)
 	}
 	slung, ok := (&overrunSlungReader{d: h.d}).slungAt(seat)
 	if !ok || slung.IsZero() {
-		return "", fmt.Errorf("the sling clock of %s for %s/%s cannot be read", bead, rig, name)
+		return "", "", fmt.Errorf("the sling clock of %s for %s/%s cannot be read", bead, rig, name)
 	}
-	return pushedHeadSince(g, branch, slung)
+	sha, err = pushedHeadSince(g, branch, slung)
+	if err != nil {
+		return "", "", err
+	}
+	return branch, sha, nil
 }
 
 // pushedHeadSince is originHeadSince's decision with every failed read returned
