@@ -51,8 +51,10 @@ func newRequestTestEnv(inbox string, out io.Writer) townDeployerRequestEnv {
 	}
 }
 
-// newRequestTestInbox makes the inbox directory under the test's own
-// temporary directory and returns both paths.
+// newRequestTestInbox makes the inbox under a fresh t.TempDir and returns both
+// paths. gt-v5dblz named a directory the test creates under its own directory,
+// but the rig's test policy builds a unit test under t.TempDir
+// (gt-z82llg, om finding 1c1ba562c631).
 func newRequestTestInbox(t *testing.T) (root, inbox string) {
 	t.Helper()
 	root = t.TempDir()
