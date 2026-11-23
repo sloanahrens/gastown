@@ -4490,12 +4490,9 @@ function jevHeader(sum, sc, off, jev) {
   } else {
     const at = sum.refreshed ? sum.refreshed : sc.scored_at;
     const scored = at ? "scored " + age(at) + " ago" : "score time unknown";
-    if (sc.config_unreadable) {
-      line = scored + " · patrol config unreadable";
-    } else {
-      const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
-      line = scored + " · " + ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off";
-    }
+    const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
+    line = scored + " · " + (sc.config_unreadable ? "patrol config unreadable"
+      : ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off");
   }
   box.append(el("div", "jvtitle", line));
   box.append(jevSpendLine(sum, jev));
