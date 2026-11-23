@@ -3,6 +3,8 @@ package daemon
 import (
 	"errors"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // addedLinesStubGit is the handle a labeled seat handle wraps in these tests:
@@ -18,6 +20,12 @@ type addedLinesStubGit struct {
 func (g *addedLinesStubGit) AddedLinesSince(base string) (int, error) {
 	g.bases = append(g.bases, base)
 	return g.lines, g.err
+}
+
+// ListRemoteRefsWithHashes answers no branch, so the stop's empty-branch read
+// on this partial handle takes the needs-split path, not the nil embedded git.
+func (g *addedLinesStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	return nil, nil
 }
 
 // TestRunawayBeadLabeledSeatHandleForwardsAddedLinesSince: a labeled seat

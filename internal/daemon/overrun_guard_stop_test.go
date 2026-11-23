@@ -2155,8 +2155,7 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			mainHolds: true,
 		},
 		{
-			// The empty-branch note is only for a branch origin really holds:
-			// a read that cannot place the branch keeps needs-split.
+			// The empty-branch note needs a branch origin really holds.
 			name: "branch absent from origin keeps needs-split",
 			stub: func(g *pushStubGit) {
 				g.originRefs = g.originRefs[1:]

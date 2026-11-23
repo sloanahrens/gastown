@@ -614,8 +614,8 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	if !st.CheckpointGaveUp && !st.PushGaveUp && !sandboxKept && !saveKept {
 		handed.ReworkSHA = st.ReworkSHA
 		// No finished work and nothing held back: the branch may hold nothing
-		// beyond the target, so the hand-back names it instead of claiming kept
-		// work (gt-vov15d). A rescue or an unanswered origin read keeps needs-split.
+		// beyond the target, so the hand-back names it, not kept work (gt-vov15d).
+		// A rescue or an unanswered origin read keeps needs-split.
 		if st.ReworkSHA == "" && st.SaveRescue == "" && originReadGaveUp == "" {
 			handed.EmptyBranchTarget = d.overrunEmptyBranchTarget(handed)
 		}

@@ -91,9 +91,8 @@ func HandBackNoWork(ctx context.Context, w BeadWriter, beadID, assignee string, 
 }
 
 // HandBackEmptyBranch is HandBackNoted for a stopped polecat whose kept branch
-// holds no commit beyond target, the rig's landing branch: nothing to resume and
-// none to split. Like HandBackNoWork, the bead goes back open and unassigned with
-// no label, and the comment says the branch is empty and the bead starts clean.
+// holds no commit beyond target, the rig's landing branch: nothing to resume or
+// split. Like HandBackNoWork, the bead goes back open, unassigned and unlabelled.
 func HandBackEmptyBranch(ctx context.Context, w BeadWriter, beadID, assignee, branch, target string, elapsed time.Duration, note string) error {
 	text := fmt.Sprintf("polecat stopped after %s; branch %s holds no commits beyond %s: nothing to resume, the bead starts clean.",
 		elapsed.Round(time.Second), branch, target)
