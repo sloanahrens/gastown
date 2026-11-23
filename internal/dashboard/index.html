@@ -3004,10 +3004,11 @@ function systemUpdatePartialWord(roll) {
 // could not be read, so a stage missing from it is unknown, not absent: the run
 // may have happened and its record been lost. A source the rows join at all
 // marks the whole section unavailable; the roll's own record marks only the roll,
-// and a sweep that answered nil marks only the sweep.
+// a sweep that answered nil marks only the sweep, and a pipeline read that held
+// no earlier run marks only the two run stages (gt-nhdxkq).
 function systemUpdateStageUnknown(su, stage) {
   if (stage === "roll") return !!(su.unavailable || su.roll_unknown);
-  if (stage === "post-land" || stage === "images") return !!su.unavailable;
+  if (stage === "post-land" || stage === "images") return !!(su.unavailable || su.runs_unknown);
   return !!(su.unavailable || su.sweep_unknown);
 }
 
