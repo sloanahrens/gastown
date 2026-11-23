@@ -10,11 +10,13 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
-// gateRecipe matches the gate-test target's recipe. gateGoCommand finds a go
-// command; gateQuoted, gateComment and gateContinued strip messages, the trap
-// body, comments and a backslash continuation.
+// gateRecipe matches the gate-test target's recipe; it ends at the first
+// non-blank line that does not start with a tab, so a blank line stays inside
+// it. gateGoCommand finds a go command; gateQuoted, gateComment and
+// gateContinued strip messages, the trap body, comments and a backslash
+// continuation.
 var (
-	gateRecipe    = regexp.MustCompile(`(?m)^gate-test:\n((?:\t[^\n]*\n)+)`)
+	gateRecipe    = regexp.MustCompile(`(?m)^gate-test:\n((?:\t[^\n]*\n|[ \t]*\n)+)`)
 	gateGoCommand = regexp.MustCompile(`\bgo\s`)
 	gateQuoted    = regexp.MustCompile(`'[^']*'|"[^"]*"`)
 	gateComment   = regexp.MustCompile(`(?m)^\t@#.*\n`)
@@ -22,6 +24,12 @@ var (
 )
 
 // gateUmaskProblem returns why makefile's gate-test recipe breaks the umask rule, or "".
+//
+// Two cases are deliberately not covered. A recipe line that writes a file
+// without a go command ahead of its umask is not checked: the rule looks for a
+// go command ahead of umask 022, so a line with no go command passes. The
+// gate-lint stage (lint and exec-tax-preflight) runs outside the umask and is
+// not checked here.
 func gateUmaskProblem(makefile string) string {
 	m := gateRecipe.FindStringSubmatch(makefile)
 	if m == nil {
@@ -66,6 +74,7 @@ func TestGateUmaskRejects(t *testing.T) {
 		{"umask after the go command", "gate-test:\n\t@old=$$(umask); echo \"gate: umask was $$old, running under 0022\"\n\t@go build ./...; umask 022\n"},
 		{"no umask", "gate-test:\n\t@echo \"gate: umask was 0022, running under 0022\"\n\t@go test ./...\n"},
 		{"umask not printed", "gate-test:\n\t@umask 022; go test ./...\n"},
+		{"blank line inside the recipe", "gate-test:\n\t@old=$$(umask); echo \"gate: umask was $$old, running under 0022\"\n\t@umask 022; go build ./...\n\n\t@go test ./...; umask 022\n"},
 		{"no go command", "gate-test:\n\t@old=$$(umask); umask 022; echo \"gate: umask was $$old, running under 0022\"\n\t@echo done\n"},
 		{"no recipe", "all:\n\t@true\n"},
 	} {
