@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -157,7 +158,73 @@ func buildTrendIn(now time.Time, recs []omRecord, stages []omStage, rejs []omRej
 		}
 		tr.Stages = kept
 	}
+	tr.EstimateDays = estimateDays(recs, hours[0].Hour, hours[trendHours-1].Hour.Add(time.Hour), loc)
 	return tr
+}
+
+// estimateDayMinMeasured is the fewest measured landings a day needs before its
+// ratio is drawn: a thinner sample reads the day's traffic, not its estimates.
+const estimateDayMinMeasured = 5
+
+// estimateDays folds the landings in [since, until) into one EstimateDay per
+// local landing day, oldest first (gt-mp1rh0). A landing is measured when its
+// record carries the minutes its sp: estimate was computed as (gt-iwzoje), a
+// polecat time above zero, and no bound flag; a bound-flagged landing counts
+// in its day's N and not in the ratio, since a bound is not a measured time. A
+// record with no estimate or no polecat time counts in no day.
+func estimateDays(recs []omRecord, since, until time.Time, loc *time.Location) []dashboard.EstimateDay {
+	type dayAcc struct {
+		n      int
+		ratios []float64
+	}
+	days := map[string]*dayAcc{}
+	for _, rec := range recs {
+		if rec.LandedAt.Before(since) || !rec.LandedAt.Before(until) {
+			continue
+		}
+		if rec.SPMinutes == nil || *rec.SPMinutes <= 0 || rec.PolecatSecs <= 0 {
+			continue
+		}
+		key := rec.LandedAt.In(loc).Format("2006-01-02")
+		a := days[key]
+		if a == nil {
+			a = &dayAcc{}
+			days[key] = a
+		}
+		a.n++
+		if rec.PolecatLowerBound || rec.PolecatUpperBound {
+			continue
+		}
+		a.ratios = append(a.ratios, (rec.PolecatSecs/60) / *rec.SPMinutes)
+	}
+	out := make([]dashboard.EstimateDay, 0, len(days))
+	for day, a := range days {
+		row := dashboard.EstimateDay{Day: day, N: a.n}
+		if len(a.ratios) >= estimateDayMinMeasured {
+			row.MedianRatio = estimateMedianRatio(a.ratios)
+			within := 0
+			for _, r := range a.ratios {
+				if math.Abs(r-1) <= 0.25 {
+					within++
+				}
+			}
+			row.Within25 = float64(within) / float64(len(a.ratios))
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	return out
+}
+
+// estimateMedianRatio is the middle ratio, the mean of the two middle values
+// when the count is even.
+func estimateMedianRatio(ratios []float64) float64 {
+	sort.Float64s(ratios)
+	middle := len(ratios) / 2
+	if len(ratios)%2 == 1 {
+		return ratios[middle]
+	}
+	return (ratios[middle-1] + ratios[middle]) / 2
 }
 
 // recentLandingRows is the most finished landings and rejections the Landings

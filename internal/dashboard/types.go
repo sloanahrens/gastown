@@ -689,6 +689,22 @@ type Trend struct {
 	// LandingsPaused is the overseer's landing hold, nil when no pause stands
 	// (gt-ckc93z).
 	LandingsPaused *LandingsPause `json:"landings_paused,omitempty"`
+	// EstimateDays is one line per local landing day in the window, oldest
+	// first (gt-mp1rh0). The builder always sets it, so an empty window
+	// carries an empty list rather than no field at all.
+	EstimateDays []EstimateDay `json:"estimate_days"`
+}
+
+// EstimateDay is one local landing day's estimate against actual: the N
+// landings counted, the median of their actual over estimated minutes, and
+// the share within 25 percent (gt-mp1rh0). A bound-flagged landing counts in
+// N and not in the figures, since a bound is not a measured time; a day with
+// fewer than five measured landings carries N and no ratio.
+type EstimateDay struct {
+	Day         string  `json:"day"`
+	N           int     `json:"n"`
+	MedianRatio float64 `json:"median_ratio"`
+	Within25    float64 `json:"within_25"`
 }
 
 // LandingsPause is the landing hold the Landings pane names. Reason is the hold
