@@ -575,7 +575,15 @@ func TestWorkDirFallsBackToATempDirectory(t *testing.T) {
 		claim := t.TempDir()
 		h := newHarness(t, nil, nil)
 		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
-		h.deps.RemoveAll = func(string) error { return errors.New("device busy") }
+		// Only the clone under the claim fails: the removal of a stale result
+		// (gt-ev02jt) runs through the same seam and must be spared here, so the
+		// case still drives the fallback the test is about.
+		h.deps.RemoveAll = func(path string) error {
+			if path == filepath.Join(h.out, sweeprunner.ResultFileName) {
+				return nil
+			}
+			return errors.New("device busy")
+		}
 		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
 			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
 		}
@@ -818,7 +826,15 @@ func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
 		return 0
 	})
-	h.deps.RemoveAll = func(string) error { return errors.New("device busy") }
+	// Only the work directory's removal fails: the stale result's removal
+	// (gt-ev02jt) runs through the same seam and must be spared here, so the
+	// case still drives the cleanup after the result was written.
+	h.deps.RemoveAll = func(path string) error {
+		if path == filepath.Join(h.out, sweeprunner.ResultFileName) {
+			return nil
+		}
+		return errors.New("device busy")
+	}
 	if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
 	}
@@ -1840,4 +1856,52 @@ func TestRunRemovesAStaleResultBeforeItStarts(t *testing.T) {
 			t.Fatal("a run that could not report a result left the earlier attempt's result.json in place")
 		}
 	})
+}
+
+// TestRunEndsLoudWhenTheStaleResultCannotBeRemoved: a result.json the run cannot
+// remove must not be left beside one it writes, so the run ends with
+// FailureExit, one line naming the path and the error, before the clone, and
+// writes no result (gt-ev02jt).
+func TestRunEndsLoudWhenTheStaleResultCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, nil, nil)
+	removalErr := errors.New("read-only file system")
+	resultPath := filepath.Join(h.out, sweeprunner.ResultFileName)
+	h.deps.RemoveAll = func(path string) error {
+		if path == resultPath {
+			return removalErr
+		}
+		return nil
+	}
+	writes := 0
+	h.deps.WriteResult = func(dir string, r sweeprunner.Result) error {
+		writes++
+		return sweeprunner.Write(dir, r)
+	}
+	code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git")
+	if code != FailureExit {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", code, FailureExit, h.stderr.String())
+	}
+	if h.cloneAt != nil {
+		t.Errorf("the clone ran with %q after a removal that failed, want no clone", h.cloneAt)
+	}
+	if h.sweepAt != nil {
+		t.Errorf("the sweep ran with %q after a removal that failed, want no sweep", h.sweepAt)
+	}
+	if writes != 0 {
+		t.Errorf("WriteResult ran %d times, want none", writes)
+	}
+	if h.resultFileExists(t) {
+		t.Error("the run wrote a result after the removal failed")
+	}
+	stderr := h.stderr.String()
+	if !strings.Contains(stderr, resultPath) {
+		t.Errorf("stderr = %q, want it to name %s", stderr, resultPath)
+	}
+	if !strings.Contains(stderr, removalErr.Error()) {
+		t.Errorf("stderr = %q, want it to name the error %q", stderr, removalErr)
+	}
+	if lines := strings.Count(stderr, "\n"); lines != 1 {
+		t.Errorf("stderr holds %d lines, want one: %q", lines, stderr)
+	}
 }
