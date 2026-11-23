@@ -167,6 +167,12 @@ func TestTickEffSQLChildren(t *testing.T) {
 	if _, err := specChildrenFromSQL(sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return nil, refused }), []string{"gt-a"}); !errors.Is(err, refused) {
 		t.Errorf("reader error = %v, want %v", err, refused)
 	}
+	short := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+		return [][]string{{"p.id", "c.id", "status"}, {"gt-a"}}, nil
+	})
+	if _, err := specChildrenFromSQL(short, []string{"gt-a"}); err == nil {
+		t.Error("a short record: error = nil; want the parse refusal")
+	}
 }
 
 // A chunk of three parents, two with children and one childless, is keyed as
