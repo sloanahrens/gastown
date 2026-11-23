@@ -98,6 +98,10 @@ func TestTownStateNightlyWritesVerifiedNight(t *testing.T) {
 			t.Errorf("the log names the town's %s: %q", name, logs.String())
 		}
 	}
+	// Nor a path: no line names the backup root (gt-18rrbw).
+	if logged := logs.String(); strings.Contains(logged, root) {
+		t.Errorf("the log carries a backup path: %q", logged)
+	}
 }
 
 // TestTownStateNightlyArchiveMode is the acceptance box: the archive reads 0600
@@ -316,8 +320,8 @@ func TestTownStateNightlyRefusesToCommit(t *testing.T) {
 		},
 		{
 			// A stale partial holds a directory where the manifest goes, so
-			// the commit fails; the partial it leaves is removed by the next
-			// run or by rotation.
+			// the commit fails; the partial it leaves is reused by the next
+			// run or removed by rotation.
 			name: "commit fails",
 			root: func(t *testing.T) string {
 				t.Helper()
@@ -439,6 +443,54 @@ func TestTownStateNightlyRotatesTo14(t *testing.T) {
 	}
 	if _, err := os.Stat(townbackup.Dir(root, now)); err != nil {
 		t.Errorf("rotation removed tonight's night: %v", err)
+	}
+}
+
+// TestTownStateNightlyWarnsWhenRotationFails drives the branch a failed
+// rotation takes: the night is committed and verified, so the run reports
+// success and the log warns instead (gt-18rrbw). A night directory rotation
+// can read but not write is how the removal is denied; where the platform
+// ignores the mode bits (running as root, Windows) the failure has no case to
+// drive and the test skips.
+func TestTownStateNightlyWarnsWhenRotationFails(t *testing.T) {
+	t.Parallel()
+	town := nightlyTestTown(t)
+	root := t.TempDir()
+	for day := 1; day <= townbackup.Keep; day++ {
+		nightlyTestSeedNight(t, root, time.Date(2026, 11, day, 3, 0, 0, 0, time.UTC))
+	}
+	// Tonight makes Keep+1 nights; the oldest is the one rotation removes.
+	oldest := townbackup.Dir(root, time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC))
+	//testpolicy:allow no-exec-files — the target is the fixture directory: reading its manifest needs the search bit, and a directory that denies the removal needs no write bit
+	if err := os.Chmod(oldest, 0o555); err != nil {
+		t.Fatalf("making the oldest night read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: cleanup needs its search bit back
+		if err := os.Chmod(oldest, 0o755); err != nil {
+			t.Errorf("restoring the oldest night's mode: %v", err)
+		}
+	})
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		//testpolicy:allow no-skip — root and Windows ignore the mode bits, so a 0555 directory accepts the removal and the failure has no case to drive
+		t.Skip("the platform does not deny a removal from a 0555 directory, so the rotation failure cannot be driven")
+	}
+	now := nightlyTestNow()
+	var logs strings.Builder
+	d := nightlyTestDaemon(town, &logs)
+
+	if err := d.maintenanceTownStateBackup(root, now); err != nil {
+		t.Fatalf("maintenanceTownStateBackup = %v, want success: a rotation failure only costs space", err)
+	}
+
+	if logged := logs.String(); !strings.Contains(logged, "WARNING: town-state backup rotation:") {
+		t.Errorf("the log carries no rotation warning: %q", logged)
+	}
+	if _, err := os.Stat(townbackup.Dir(root, now)); err != nil {
+		t.Errorf("the rotation failure lost tonight's night: %v", err)
+	}
+	if _, err := os.Stat(oldest); err != nil {
+		t.Errorf("the rotation failure lost the night it could not remove: %v", err)
 	}
 }
 

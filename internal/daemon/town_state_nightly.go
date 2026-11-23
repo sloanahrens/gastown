@@ -55,7 +55,9 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 		return err
 	}
 	archive := filepath.Join(partial, townbackup.ArchiveName)
-	d.logger.Printf("scheduled_maintenance: town-state backup to %s", partial)
+	// The date, never the path: the log avoids naming the town's files, and the
+	// path tells a reader nothing the configured backup root does not (gt-18rrbw).
+	d.logger.Printf("scheduled_maintenance: town-state backup for %s", now.Format(time.DateOnly))
 
 	sum, digest, err := d.exportTownStateArchive(archive, os.Chmod)
 	if err != nil {
@@ -92,16 +94,15 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 		return failedTownStateNight(partial, err)
 	}
 
-	// A commit that fails leaves the partial night behind; the next run and
-	// rotation both remove a partial, so the failure is the error alone.
-	night, err := townbackup.Commit(root, townbackup.Manifest{
+	// A commit that fails leaves the partial night behind; the next run reuses
+	// it and rotation removes it, so the failure is the error alone.
+	if _, err := townbackup.Commit(root, townbackup.Manifest{
 		Taken: now, Files: verified.Files, Bytes: verified.Bytes, SHA256: digest,
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 	d.logger.Printf("scheduled_maintenance: town-state backup complete: %s (%d files, %d bytes)",
-		night, verified.Files, verified.Bytes)
+		now.Format(time.DateOnly), verified.Files, verified.Bytes)
 
 	removed, err := townbackup.Rotate(root, townbackup.Keep)
 	if len(removed) > 0 {
