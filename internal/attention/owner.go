@@ -155,6 +155,10 @@ var ruleOwners = map[string]Owner{
 	// A kept sandbox seat is the town's own seat to look at: the overseer reads
 	// the keep reason and acts on it before a person is woken (gt-l38v7r).
 	RuleSandboxSeatKept: OwnerOverseer,
+	// A seat with no record of its work is the town's own ledger to repair: the
+	// overseer finds the record or accepts the loss before a person is woken
+	// (gt-oa16rk).
+	RuleSeatEndNoRecord: OwnerOverseer,
 	// A rolled-back update is the overseer's to read: it names the failed check
 	// and decides whether the roll is tried again (gt-9odoqa).
 	RuleUpdateRolledBack: OwnerOverseer,

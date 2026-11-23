@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -216,4 +217,61 @@ func readSeatEndNoRecord(path string) (seatEndNoRecord, error) {
 		return seatEndNoRecord{}, fmt.Errorf("seat end no record marker %s: it names no bead", path)
 	}
 	return marker, nil
+}
+
+// collectSeatEndNoRecords raises one high item per seat whose end found no
+// record of its work, keyed by the seat so it holds one item however many ticks
+// its marker stands. An item clears once a SEAT-END comment naming the seat and
+// its bead appears on the bead.
+//
+// A marker store that cannot be read fails the collection, so the previous
+// tick's items stand rather than clearing. A comment read that does not answer
+// raises the item and logs why: only a SEAT-END comment seen on the bead clears
+// it, so an unreadable check is unknown, not a record that appeared
+// (gt-oa16rk).
+func (s *attentionSources) collectSeatEndNoRecords(_ context.Context) ([]attention.Item, error) {
+	markers, err := readSeatEndNoRecords(s.d.config.TownRoot)
+	if err != nil {
+		return nil, err
+	}
+	read := s.seatEndRecord
+	if read == nil {
+		read = func(rig, name, bead string) (bool, error) {
+			h := &patrolScanHost{d: s.d, openRecoveryBeads: s.d.openRecoveryBeads}
+			_, found, err := h.seatEndRecord(rig, name, bead)
+			return found, err
+		}
+	}
+	var out []attention.Item
+	for _, marker := range markers {
+		found, err := read(marker.Rig, marker.Polecat, marker.Bead)
+		if err != nil {
+			s.d.logger.Printf("attention: seat-end-no-record %s/%s on %s: %v", marker.Rig, marker.Polecat, marker.Bead, err)
+		}
+		if found {
+			continue
+		}
+		out = append(out, seatEndNoRecordItem(marker))
+	}
+	return out, nil
+}
+
+// seatEndNoRecordItem is the item of one seat whose end found no record of its
+// work: keyed by the seat, so the seat raises one item however many ticks its
+// marker stands, and naming the bead whose SEAT-END comment clears it.
+func seatEndNoRecordItem(marker seatEndNoRecord) attention.Item {
+	return attention.Item{
+		Key:      "seat-end-no-record:" + marker.Rig + "/" + marker.Polecat,
+		Kind:     attention.KindSeatEndNoRecord,
+		Severity: attention.SeverityHigh,
+		Rig:      marker.Rig,
+		Bead:     marker.Bead,
+		Summary:  fmt.Sprintf("%s/%s ended with no record of its work on %s: no SEAT-END comment and no transcript copy", marker.Rig, marker.Polecat, marker.Bead),
+	}
+}
+
+// seatEndNoRecordItemOwned picks the seat-end-no-record items out of the
+// previous items, so a failed collector keeps only its own (collectAttention).
+func seatEndNoRecordItemOwned(it attention.Item) bool {
+	return it.Kind == attention.KindSeatEndNoRecord && strings.HasPrefix(it.Key, "seat-end-no-record:")
 }
