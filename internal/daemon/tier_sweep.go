@@ -248,6 +248,10 @@ type tierSweepState struct {
 	// green throughout. It is the skip key: while origin/main equals it there
 	// is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
+	// LastGreenAt is when the cycle that set LastGreenSHA finished, so a reader
+	// can date the green tip. It moves exactly when LastGreenSHA does, and a
+	// record written before the field existed reads as the zero time (gt-igrpge).
+	LastGreenAt time.Time `json:"last_green_at,omitempty"`
 	// RedCycles counts the consecutive finished cycles that came back with a
 	// RED tier: a fully green cycle resets it, and a cycle that judged no RED
 	// tier leaves it (gt-9duu8b).
@@ -1725,6 +1729,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	state.RedCycles = tierSweepRedCycles(prior.RedCycles, results, green)
 	if green {
 		state.LastGreenSHA = sha
+		// The cycle's finish, read after the stages have run: the green tip is
+		// dated by when it was proved, not by when the cycle was due (gt-igrpge).
+		state.LastGreenAt = d.clk().Now()
 		// Caught up with the tip it covered: nothing is owed.
 		state.OwedSince = time.Time{}
 	} else if state.OwedSince.IsZero() {
