@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ func newRedHoldCmd() *cobra.Command {
 // newRedHoldCmdWith takes the town finder as a seam so a test drives its failure.
 func newRedHoldCmdWith(findTownRoot func() (string, error)) *cobra.Command {
 	var townRoot string
+	var asJSON bool
 	status := &cobra.Command{
 		Use:   "status",
 		Short: "Print why automatic dispatch is held, one line per reason",
@@ -34,6 +36,17 @@ func newRedHoldCmdWith(findTownRoot func() (string, error)) *cobra.Command {
 			rec, err := dispatch.ReadRedHold(root)
 			if err != nil {
 				return fmt.Errorf("reading the red hold: %w", err)
+			}
+			if asJSON {
+				if rec.Reasons == nil {
+					rec.Reasons = []dispatch.RedHoldReason{}
+				}
+				data, err := json.MarshalIndent(rec, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
+				return err
 			}
 			if len(rec.Reasons) == 0 {
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), "red hold: open")
@@ -55,6 +68,7 @@ func newRedHoldCmdWith(findTownRoot func() (string, error)) *cobra.Command {
 		},
 	}
 	status.Flags().StringVar(&townRoot, "town-root", "", "Town root to read (default: the town containing the working directory)")
+	status.Flags().BoolVar(&asJSON, "json", false, "Print the record as indented JSON")
 	c := &cobra.Command{
 		Use:     "red-hold",
 		GroupID: GroupDiag,
