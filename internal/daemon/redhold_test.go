@@ -352,6 +352,86 @@ func TestRedHoldStepDriftFeedsInputs(t *testing.T) {
 	}
 }
 
+// TestRedHoldStepRollFeedsInputs pins that the step hands the evaluator the
+// update outcome, the largest images retry count across the known rigs and the
+// stuck pairs, and that a nil source contributes nothing.
+func TestRedHoldStepRollFeedsInputs(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	green := "0123456789abcdef"
+	failed := func() (string, string, error) { return "failed", green, nil }
+	stuck := func() []string { return []string{green} }
+	tests := []struct {
+		name   string
+		states map[string]tierSweepState
+		update func() (string, string, error)
+		pairs  func() []string
+		want   []dispatch.RedHoldReason
+	}{
+		// The retry counts differ: the largest across the known rigs is 3.
+		{"an update failure, retries at the cap and a stuck pair hold all three",
+			map[string]tierSweepState{
+				"alpha": {LastGreenSHA: green, ImagesRetries: 1, ImagesRetrySHA: green},
+				"beta":  {LastGreenSHA: green, ImagesRetries: 3, ImagesRetrySHA: green},
+			}, failed, stuck,
+			[]dispatch.RedHoldReason{
+				{Kind: dispatch.RedHoldImagesFailed, Since: now, Detail: "images build failed 3 times"},
+				{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: 0123456789ab"},
+				{Kind: dispatch.RedHoldRollFailed, Since: now, Detail: "update failed at 0123456789ab"},
+			}},
+		{"retries recorded for another tip read as zero",
+			map[string]tierSweepState{"alpha": {LastGreenSHA: green, ImagesRetries: 3, ImagesRetrySHA: "fedcba9876543210"}},
+			nil, nil, nil},
+		{"a nil update and pair contribute nothing", map[string]tierSweepState{"alpha": {}}, nil, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: func(rig string) (tierSweepState, error) { return tt.states[rig], nil },
+				Update: tt.update, PairStuck: tt.pairs, Now: func() time.Time { return now }}
+			require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, rec.Reasons)
+		})
+	}
+}
+
+// TestRedHoldStepRollUpdateError pins the keep-previous rule for an unreadable
+// update state: the file is untouched, the outage logs once across heartbeats,
+// and a later outage logs again.
+func TestRedHoldStepRollUpdateError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	const line = "red hold: update state unreadable; keeping the previous state"
+	var update func() (string, string, error)
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{}, nil },
+		Update: func() (string, string, error) { return update() }}
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	unreadLog := map[string]bool{}
+	step := func() { require.NoError(t, runRedHold(townRoot, src, unreadLog, logf)) }
+
+	update = func() (string, string, error) { return "", "", errors.New("reading the update state") }
+	step()
+	step()
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, redHoldSentinel, rec, "an unreadable update state keeps the file")
+	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
+
+	update = func() (string, string, error) { return "ok", "", nil }
+	step()
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "the recovery evaluates again")
+	require.Equal(t, []string{line, "red hold: cleared"}, logs)
+
+	update = func() (string, string, error) { return "", "", errors.New("reading the update state") }
+	step()
+	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
+}
+
 // TestRedHoldStepDriftWaitingError pins the keep-previous rule for an unreadable
 // count and that a nil counter contributes 0.
 func TestRedHoldStepDriftWaitingError(t *testing.T) {
