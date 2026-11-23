@@ -441,8 +441,14 @@ const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
 // the plugin's fifteen-minute timeout.
 const StoryPointsWeeklyBudget = 10 * time.Minute
 
-// storyPointsWeeklyWait is the line when the budget ends.
-const storyPointsWeeklyWait = "story points weekly: waiting: the %s budget ended; the next hour continues from the embedding cache"
+// storyPointsWeeklyWait is the line when the budget ends, naming the step that ended.
+const storyPointsWeeklyWait = "story points weekly: waiting: the %s budget ended while %s; the next hour continues from the embedding cache"
+
+// weeklyBudgetEnded says whether the run's own budget, not the caller's context
+// and not an error carrying context.DeadlineExceeded, ended the step.
+func weeklyBudgetEnded(parent, budgetCtx context.Context) bool {
+	return parent.Err() == nil && budgetCtx.Err() == context.DeadlineExceeded
+}
 
 // storyPointsWeeklyStampName is the file beside the runtime weights that holds
 // the time the weekly retrain and adoption last reached a decision.
@@ -470,9 +476,10 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
-// for nothing. A due run ends itself at Commands.Budget (zero is StoryPointsWeeklyBudget):
-// an end while it wires the town, retrains or checks the last adoption is a
-// wait that records no stamp and returns nil, so the week stays open.
+// for nothing. A due run ends itself at Commands.Budget (zero is StoryPointsWeeklyBudget), and its
+// line names the step: an end while wiring the town, retraining or checking the last adoption is a
+// wait that records no stamp and returns nil, so the week stays open. That end is read from the
+// budget context's expiry: an inner error carrying context.DeadlineExceeded is the step's failure.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -497,12 +504,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if !Due(last, now, StoryPointsWeeklyEvery) {
 		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
 	}
-	// The due run ends itself before the plugin's timeout can kill it.
-	budget := c.Budget
-	if budget == 0 {
-		budget = StoryPointsWeeklyBudget
-	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
+	budget := cmp.Or(c.Budget, StoryPointsWeeklyBudget)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	if c.AutoAdoptReader != nil {
 		on, err := c.AutoAdoptReader()
@@ -513,8 +517,8 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	real, env, err := c.wire(ctx)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return c.receipt(storyPointsWeeklyWait, budget)
+		if weeklyBudgetEnded(parent, ctx) {
+			return c.receipt(storyPointsWeeklyWait, budget, "wiring the town")
 		}
 		return fmt.Errorf("story points weekly: %w", err)
 	}
@@ -547,8 +551,8 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	// The week-after check judges the last adoption before this week's proposal can
 	// replace the weights it kept.
 	if err := c.checkStoryPointsAdoption(ctx, real, env, embedder, now); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return c.receipt(storyPointsWeeklyWait, budget)
+		if weeklyBudgetEnded(parent, ctx) {
+			return c.receipt(storyPointsWeeklyWait, budget, "checking the last adoption")
 		}
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 	}
@@ -561,8 +565,8 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	// adoption, so a run the hour kills after it still says how far it got.
 	trainErr := train.runStoryPointsTrain(ctx, real, env)
 	progressErr := c.writeStoryPointsWeeklyProgress(cachePath, cached)
-	if trainErr != nil && errors.Is(trainErr, context.DeadlineExceeded) {
-		return errors.Join(c.receipt(storyPointsWeeklyWait, budget), progressErr)
+	if trainErr != nil && weeklyBudgetEnded(parent, ctx) {
+		return errors.Join(c.receipt(storyPointsWeeklyWait, budget, "retraining"), progressErr)
 	}
 	if err := errors.Join(trainErr, progressErr); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
