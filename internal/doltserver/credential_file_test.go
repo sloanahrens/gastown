@@ -60,10 +60,6 @@ func TestReadTownCredentialFileReadsUserAndPassword(t *testing.T) {
 // error that names the file and holds no value from it.
 func TestReadTownCredentialFileRefusesInsecureMode(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		//testpolicy:allow no-skip — root bypasses the permission bits, so chmod 0644 leaves the file open for root and the refusal has no case to drive
-		t.Skip("running as root: root reads a 0644 file, so the refusal cannot be tested")
-	}
 	town := t.TempDir()
 	path := writeTownCredential(t, town, "user=gt\npassword=hunter2\n", 0o644)
 
@@ -128,6 +124,20 @@ func TestCredentialFileUnreadableStaysCredentialError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") {
 		t.Errorf("error %q holds the password", err)
+	}
+}
+
+// TestCredentialFileUserDSNFailsClosed: with a credential file the town cannot
+// read, UserDSN names a user no server has and no password, never the default
+// user, so a caller that skips CredentialError fails to connect.
+func TestCredentialFileUserDSNFailsClosed(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownCredential(t, town, "user=gt\npassword=hunter2\nextra=1\n", 0o600)
+
+	dsn := DefaultConfig(town).UserDSN()
+	if !strings.HasPrefix(dsn, unreadableCredentialUser) || strings.Contains(dsn, DefaultUser+"@") || strings.Contains(dsn, "hunter2") {
+		t.Errorf("UserDSN() = %q, want the %s user with no password and not the default user", dsn, unreadableCredentialUser)
 	}
 }
 

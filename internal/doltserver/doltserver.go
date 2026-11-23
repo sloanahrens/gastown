@@ -152,9 +152,14 @@ func (h *host) setDoltGlobalConfig(key, value string) error {
 
 // Default configuration
 const (
-	DefaultPort           = 3307
-	DefaultUser           = "root" // Default Dolt user (no password for local access)
-	DefaultMaxConnections = 1000   // Dolt default; no reason to limit below (Tim Sehn confirmed 1k is fine)
+	DefaultPort = 3307
+	DefaultUser = "root" // Default Dolt user (no password for local access)
+
+	// unreadableCredentialUser is the reserved user UserDSN names when the town's
+	// credential file cannot be read: no server has it, so a caller that never
+	// checks CredentialError fails to connect instead of connecting as root.
+	unreadableCredentialUser = "credential-unreadable" //nolint:gosec // G101: a reserved sentinel user name, not a credential
+	DefaultMaxConnections    = 1000                    // Dolt default; no reason to limit below (Tim Sehn confirmed 1k is fine)
 
 	defaultDoltSQLServerGoMemLimit = "16GiB"
 	defaultDoltSQLServerGOGC       = "50"
@@ -525,7 +530,8 @@ func (c *Config) SQLArgs() []string {
 // The town's credential file supplies the user and password when no explicit
 // operational.dolt setting does; its password is revealed here, at the point
 // of use, and nowhere else. A caller must check CredentialError first: an
-// unreadable file leaves this with the default user and no password.
+// unreadable file makes this name a user no server has, so a caller that
+// skips that check fails to connect instead of connecting as the default user.
 func (c *Config) UserDSN() string {
 	cfg := mysql.NewConfig()
 	cfg.User, cfg.Passwd = c.User, c.Password
@@ -537,6 +543,11 @@ func (c *Config) UserDSN() string {
 	}
 	if cfg.User == "" {
 		cfg.User = DefaultUser
+	}
+	if c.credentialErr != nil {
+		// Fail closed: a credential file the town cannot read must never leave a
+		// caller that skips CredentialError connecting as the default user.
+		cfg.User, cfg.Passwd = unreadableCredentialUser, ""
 	}
 	return strings.TrimSuffix(strings.TrimSuffix(cfg.FormatDSN(), "/"), "@")
 }
