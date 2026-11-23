@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-23 gt-r4cnk2: rule 7 sends a test that needs a private directory to PrivateTempDir(t) (internal/testutil), a t.TempDir() at 0700, because a CI job can run under an open umask while a seat's sandbox does not and internal/testpolicy refuses a per-test 0o700 chmod; the rule names no chmod; paid for by trimming rule 7's om flags to their three phrases, rendered size 14,412 to 14,411 and the ceiling lowered.
 - 2026-11-23 gt-hkllkj: rule 9 carries the contradiction rule -- an acceptance box and a Constraint that cannot both hold means STOP and escalate naming both, never an exemption, allowlist row or special case -- naming mol-polecat-work item 10 as authoritative; paid for by trimming rule 9's own om flags and line-limit wording, rendered size 14,418 to 14,412 and the ceiling lowered (seventeen rules).
 - 2026-11-23 gt-aejf3n: rule 9's line-limit bullet reports the measured and declared lines, not a split (seventeen rules).
 - 2026-11-21 gt-vysc1i: rule 9's line-limit bullet pushes the seat's branch before the split comment, so a seat stopped by a size limit keeps its commit; paid for by dropping rule 1's second example (gt-p85pw.73) and rule 3's example (gt-z6qre.12), no rule cut (seventeen rules).
@@ -95,7 +96,7 @@ A claim that something passed pastes the command and its last lines of output. o
 
 ## 7. Hermetic tests
 
-The Tests section is the rule. om flags: "test depends on the host's $SHELL and prompt style, so it is not hermetic"; a test that reads the live town tree.
+The Tests section is the rule. A private directory test calls PrivateTempDir(t): a 0700 t.TempDir(). om flags: "not hermetic", "$SHELL", "live town tree".
 
 ## 8. Do not add a shell or Python script
 
