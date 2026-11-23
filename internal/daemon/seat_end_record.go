@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/seatship"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/usageattrib"
@@ -102,4 +104,43 @@ func storeSeatEndRecordWith(ctx context.Context, store usageRecordStore, townRoo
 		}
 	}
 	return path, nil
+}
+
+// seatEndNoRecord is one seat's marker that its end found no record of its work.
+// The path is the seat's identity, so only the bead is in the file: a reader
+// can match that bead's SEAT-END comment to the seat that lost it (gt-gnxclz).
+type seatEndNoRecord struct {
+	Bead    string `json:"bead"`
+	Rig     string `json:"-"`
+	Polecat string `json:"-"`
+	path    string
+}
+
+// seatEndNoRecordsDir groups the markers by rig, so a reader walks one rig's
+// seats without listing the whole town.
+func seatEndNoRecordsDir(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "seat-end-no-record")
+}
+
+// seatEndNoRecordPath names one seat's marker, refusing a rig or polecat name a
+// path cannot hold.
+func seatEndNoRecordPath(townRoot, rig, name string) (string, error) {
+	if err := polecat.CheckSandboxSeatNames(rig, name); err != nil {
+		return "", err
+	}
+	return filepath.Join(seatEndNoRecordsDir(townRoot), rig, name+".json"), nil
+}
+
+// recordSeatEndNoRecord marks that the seat's end found neither its SEAT-END
+// comment nor a transcript copy. A marker that names no bead could never be
+// cleared by one, so it is refused (gt-gnxclz).
+func recordSeatEndNoRecord(townRoot, rig, name, bead string) error {
+	if bead == "" {
+		return fmt.Errorf("seat end no record for %s/%s: it names no bead to clear it by", rig, name)
+	}
+	path, err := seatEndNoRecordPath(townRoot, rig, name)
+	if err != nil {
+		return err
+	}
+	return atomicfile.EnsureDirAndWriteJSON(path, seatEndNoRecord{Bead: bead})
 }

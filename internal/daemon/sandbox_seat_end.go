@@ -367,6 +367,12 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		switch {
 		case usageErr != nil && written == "":
 			log("its usage record is not written: %v", usageErr)
+			// Neither path gave a record: no SEAT-END comment (hasRecord false)
+			// and no transcript copy. The marker names the seat and bead so an
+			// end that lost its record can be followed up (gt-gnxclz).
+			if err := recordSeatEndNoRecord(h.town(), rig, name, landing.BeadID); err != nil {
+				log("cannot record that its end found no record: %v", err)
+			}
 		case usageErr != nil:
 			// The file is there and the row is not: the record still reads, so
 			// the line names the path rather than calling the record missing.
