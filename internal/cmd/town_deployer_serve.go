@@ -10,8 +10,62 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/deployerinbox"
 )
+
+// serveSteps is the deployer's plan, apply, rollback and record steps; nil
+// until bead gt-1afrbd wires them, and the run refuses a nil one.
+var serveSteps deployerinbox.Steps
+
+var townDeployerServeCmd = &cobra.Command{
+	Use:   "serve",
+	Short: "Answer one request from the deployer's inbox and exit",
+	Long: `Answer the oldest request in --inbox once: run its plan, apply or rollback
+steps, write the answer into --answers and move the request into <state>/done.
+
+Examples:
+  gt town deployer serve --once --as-user deployer --inbox ~deployer/.gt/deployer/inbox --answers ~deployer/.gt/deployer/answers --state ~deployer/.gt/deployer/state`,
+	Args: cobra.NoArgs,
+	RunE: runTownDeployerServe,
+}
+
+func init() {
+	townDeployerCmd.AddCommand(townDeployerServeCmd)
+	townDeployerServeCmd.Flags().Bool("once", false, "answer one request and exit; serve refuses without it")
+	townDeployerServeCmd.Flags().String("as-user", "", "the deployer user the run acts for (required)")
+	townDeployerServeCmd.Flags().String("inbox", "", "the deployer's inbox directory (required)")
+	townDeployerServeCmd.Flags().String("answers", "", "the directory answers are written into (required)")
+	townDeployerServeCmd.Flags().String("state", "", "the deployer's state directory, holding done/ (required)")
+	for _, name := range []string{"as-user", "inbox", "answers", "state"} {
+		_ = townDeployerServeCmd.MarkFlagRequired(name)
+	}
+}
+
+func runTownDeployerServe(cmd *cobra.Command, _ []string) error {
+	once, err := cmd.Flags().GetBool("once")
+	if err != nil {
+		return fmt.Errorf("reading --once: %w", err)
+	}
+	values := make(map[string]string, 3)
+	for _, name := range []string{"inbox", "answers", "state"} {
+		v, err := cmd.Flags().GetString(name)
+		if err != nil {
+			return fmt.Errorf("reading --%s: %w", name, err)
+		}
+		values[name] = v
+	}
+	return runTownDeployerServeIn(cmd.Context(), townDeployerServeEnv{
+		once:    once,
+		inbox:   values["inbox"],
+		answers: values["answers"],
+		state:   values["state"],
+		steps:   serveSteps,
+		now:     time.Now,
+		out:     cmd.OutOrStdout(),
+	})
+}
 
 // townDeployerServeEnv is what `gt town deployer serve` runs on: the flags' values
 // and the seams, so a test drives every refusal with its own steps.
