@@ -45,6 +45,8 @@ type redHoldInputs struct {
 	ImagesRetries int
 	// PairStuck is the green shas whose image pair never became ready.
 	PairStuck []string
+	// MainRed is the rigs whose main is red; the caller reads it.
+	MainRed []string
 }
 
 // redHoldSweepOf converts one rig's sweep record into the evaluator's input; ok
@@ -117,7 +119,7 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 // redHoldGreenStale is green-stale, and the zero time is unknown and adds nothing.
 // An UpdateOutcome other than "", "ok" or "running" is roll-failed; ImagesRetries
 // at or above tierSweepImagesRetryMax is images-failed; any PairStuck sha is
-// pair-stuck.
+// pair-stuck; any MainRed rig is main-red, with Detail naming every rig.
 func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) dispatch.RedHoldRecord {
 	details := map[string][]string{}
 	for _, s := range in.Sweeps {
@@ -141,6 +143,9 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 	}
 	if in.ImagesRetries >= tierSweepImagesRetryMax {
 		details[dispatch.RedHoldImagesFailed] = []string{fmt.Sprintf("images build failed %d times", in.ImagesRetries)}
+	}
+	if len(in.MainRed) > 0 {
+		details[dispatch.RedHoldMainRed] = []string{"main red: " + strings.Join(in.MainRed, ", ")}
 	}
 	if len(in.PairStuck) > 0 {
 		shas := make([]string, len(in.PairStuck))
