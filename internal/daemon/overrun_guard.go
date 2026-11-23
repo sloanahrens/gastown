@@ -1261,7 +1261,10 @@ type overrunSlungReader struct {
 // (gt-chd44) and EscalatedEnd for an escalation that submits nothing for the
 // host to repair from (gt-ntvac). With no sling in the log at all it falls back
 // to the seat's agent bead update time, which can only read short, so the
-// fallback errs toward not stopping anyone.
+// fallback errs toward not stopping anyone. A run the log dispatched to another
+// seat and never to this one is not this seat's clock, so it answers no clock
+// and the guard leaves the seat alone: a stop on the wrong seat is worse than a
+// missed one (gt-ydc5c4).
 func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 	if !r.loaded {
 		r.loaded = true
@@ -1282,6 +1285,9 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 		end = seat.EscalatedEnd
 	}
 	if start, ok := r.clock.StartSince(seat.Bead, end); ok {
+		if !r.clockNamesSeat(seat, start) {
+			return time.Time{}, false
+		}
 		// A seat that ended without a run-end event keeps the run, so its first
 		// spawn beyond the startup grace is where the next run began. Only the
 		// first counts: a later respawn must not move the clock again (gt-fv0ezj).
@@ -1300,4 +1306,42 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// clockNamesSeat reports whether the run that slungAt dated at start belongs to
+// seat: its earliest sling named this seat, or named no seat at all, which
+// cannot show the bead moved. A sling in the run that named this seat keeps the
+// bead's clock, so a bead handed seat to seat is still dated from the dispatch
+// it first went out on (gt-tzbtf). A run the log dispatched only to another seat
+// is not this seat's to answer for (gt-ydc5c4).
+func (r *overrunSlungReader) clockNamesSeat(seat overrunSeat, start time.Time) bool {
+	_, target, ok := r.clock.Dispatched(seat.Bead)
+	if !ok || target == "" || target == seatAddress(seat) {
+		// !ok is a clock taken from a run end rather than a sling, which is the
+		// seat's own submission or escalation and not another seat's dispatch.
+		return true
+	}
+	return r.slingedTo(seat, start)
+}
+
+// slingedTo reports whether the log holds a sling of seat's bead to the seat at
+// or after since, the start of the run slungAt dated. It reads the log lines
+// itself because DispatchClock exposes only the run's earliest sling.
+func (r *overrunSlungReader) slingedTo(seat overrunSeat, since time.Time) bool {
+	want := seatAddress(seat)
+	for _, ev := range r.evs {
+		if ev.Type != events.TypeSling || ev.Payload["bead"] != seat.Bead || ev.Payload["target"] != want {
+			continue
+		}
+		if ts, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil && !ts.Before(since) {
+			return true
+		}
+	}
+	return false
+}
+
+// seatAddress is the identity a sling names seat by, as role.Actor builds it for
+// a polecat: "<rig>/polecats/<name>".
+func seatAddress(seat overrunSeat) string {
+	return seat.Rig + "/polecats/" + seat.Polecat
 }
