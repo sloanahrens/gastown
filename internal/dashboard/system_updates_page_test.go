@@ -53,12 +53,17 @@ func systemUpdateGoodRow() map[string]any {
 	}
 }
 
-// systemUpdateRowText is one row's six chips as "stage=colour", in draw order.
+// systemUpdateRowText is one row's six stage chips as "stage=colour", in draw
+// order. The pair chip between images and roll is the seventh and is read by
+// the pair tests, not here.
 func systemUpdateRowText(t *testing.T, dom *pageDOM, row int) string {
 	t.Helper()
 	var out []string
-	for i := 0; i < 6; i++ {
-		chip := dom.descend(t, "systemupdates", row, i+1)
+	for i := 1; i <= 7; i++ {
+		chip := dom.descend(t, "systemupdates", row, i)
+		if strings.HasPrefix(chip.Text, "pair ") {
+			continue
+		}
 		out = append(out, strings.Fields(chip.Text)[0]+"="+strings.TrimPrefix(chip.Class, "tag "))
 	}
 	return strings.Join(out, " ")
@@ -112,8 +117,11 @@ func TestSystemUpdatesPageDrawsAnUnreadableSourceAsUnknown(t *testing.T) {
 	}{{false, "absent", "not run"}, {true, "warnc", "not read"}} {
 		dom := newPageDOM(t)
 		dom.call(t, "renderSystemUpdates", systemUpdatesState(systemUpdatesSources{unavailable: tc.unavailable}, map[string]any{"sha": "abcdef123456"}))
-		for i := 0; i < 6; i++ {
-			chip := dom.descend(t, "systemupdates", 0, i+1)
+		for i := 1; i <= 7; i++ {
+			chip := dom.descend(t, "systemupdates", 0, i)
+			if strings.HasPrefix(chip.Text, "pair ") {
+				continue
+			}
 			if !strings.Contains(" "+chip.Class+" ", " "+tc.cls+" ") || !strings.Contains(chip.Title, tc.word) {
 				t.Errorf("unavailable=%v chip %d wears %q titled %q, want %q and %q", tc.unavailable, i, chip.Class, chip.Title, tc.cls, tc.word)
 			}
@@ -144,7 +152,7 @@ func TestSystemUpdatesPageDrawsAnUnreadableRollOrSweepAsUnknown(t *testing.T) {
 			if got := systemUpdateRowText(t, dom, 0); got != tc.want {
 				t.Errorf("%s: row reads %q, want %q", tc.name, got, tc.want)
 			}
-			for _, i := range []int{1, 2, 3, 4, 5, 6} {
+			for _, i := range []int{1, 2, 3, 4, 5, 7} {
 				chip := dom.descend(t, "systemupdates", 0, i)
 				if strings.Contains(chip.Class, "warnc") && !strings.Contains(chip.Title, "not read") {
 					t.Errorf("%s: chip %d is unknown but titled %q, want a lost source", tc.name, i, chip.Title)
