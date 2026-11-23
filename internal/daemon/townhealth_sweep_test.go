@@ -31,3 +31,40 @@ func TestSweepRecordOfUnread(t *testing.T) {
 		t.Errorf("sweepRecordOf with an error = %+v, want the unknown record %+v", got, want)
 	}
 }
+
+// TestCombineSweepRecordsMerges pins how the swept rigs' records become the
+// town's one record: the largest red cycle count, the oldest green time, and
+// unknown when any rig is unread or the slice is empty (gt-gm0ek2).
+func TestCombineSweepRecordsMerges(t *testing.T) {
+	t.Parallel()
+	older := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 11, 22, 20, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		recs []townhealth.SweepRecord
+		want townhealth.SweepRecord
+	}{
+		{"largest red cycles and oldest green", []townhealth.SweepRecord{
+			{Known: true, RedCycles: 1, LastGreenAt: newer},
+			{Known: true, RedCycles: 3, LastGreenAt: older},
+		}, townhealth.SweepRecord{Known: true, RedCycles: 3, LastGreenAt: older}},
+		{"a rig with no green time leaves the town without one", []townhealth.SweepRecord{
+			{Known: true, RedCycles: 1, LastGreenAt: older},
+			{Known: true, RedCycles: 2},
+			{Known: true, RedCycles: 1, LastGreenAt: newer},
+		}, townhealth.SweepRecord{Known: true, RedCycles: 2}},
+		{"an unread record is unknown", []townhealth.SweepRecord{
+			{Known: true, RedCycles: 1, LastGreenAt: older},
+			{Known: false},
+		}, townhealth.SweepRecord{}},
+		{"an empty slice is unknown", nil, townhealth.SweepRecord{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := combineSweepRecords(tc.recs); got != tc.want {
+				t.Errorf("combineSweepRecords(%+v) = %+v, want %+v", tc.recs, got, tc.want)
+			}
+		})
+	}
+}
