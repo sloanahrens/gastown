@@ -3,6 +3,7 @@ package usageattrib
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,5 +118,52 @@ func TestReplaySkipsExistingRowsAndADryRunCountsWhatAnApplyWould(t *testing.T) {
 	}
 	if rows := readRows(t, store); len(rows) != 3 {
 		t.Fatalf("store holds %d rows, want the seed and the 2 written", len(rows))
+	}
+}
+
+// The pass's three upfront refusals: no record listing, a failed rows read,
+// and a rows read that fills its cap all stop it before any write.
+func TestReplayReturnsBeforeAnyWriteWhenItCannotListItsInput(t *testing.T) {
+	t.Parallel()
+	if _, err := Replay(context.Background(), filepath.Join(t.TempDir(), "missing"), beadsfake.New(), false); err == nil {
+		t.Error("Replay over a directory with no records succeeded, want its error")
+	}
+}
+
+func TestReplayRefusesAFailedRowsRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	putFile(t, recordPath(dir, "gt-a", dashboard.UsageKindWork), replayRec("gt-a", dashboard.UsageKindWork, "ws-a", replayBase))
+	store := beadsfake.New()
+	readErr := errors.New("the sample list did not answer")
+	store.FailWith("sample list", readErr)
+	res, err := Replay(context.Background(), dir, store, false)
+	if !errors.Is(err, readErr) || res.Written != 0 {
+		t.Fatalf("Replay with a failed rows read = %+v, %v; want its error and no write", res, err)
+	}
+	store.FailWith("sample list", nil)
+	if rows := readRows(t, store); len(rows) != 0 {
+		t.Errorf("store holds %d rows after the failed read, want none", len(rows))
+	}
+}
+
+// A store holding the cap's worth of rows may hold more, so the duplicate
+// check cannot see every row and the pass writes nothing.
+func TestReplayRefusesARowsReadThatFillsItsCap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, recordsSubdir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beadsfake.New()
+	row := beads.UsageRecordRow{BuiltAt: replayBase, Record: replayRec("gt-seed", dashboard.UsageKindWork, "ws-a", replayBase)}
+	for i := 0; i < replayRowsLimit; i++ {
+		if err := store.WriteUsageRecord(context.Background(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := Replay(context.Background(), dir, store, false)
+	if err == nil || res.Written != 0 {
+		t.Fatalf("Replay over %d rows = %+v, %v; want its cap refusal and no write", replayRowsLimit, res, err)
 	}
 }
