@@ -126,15 +126,24 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 
 // runRedHold evaluates the sweep sources and publishes the red hold, writing the
 // record and logging the change once. An unreadable sweep record leaves the file
-// untouched, so it never clears a hold.
-func runRedHold(townRoot string, src redHoldSources, logf func(format string, args ...any)) error {
+// untouched, so it never clears a hold, and is logged once per rig until that
+// rig reads again; unreadLog holds those rigs across heartbeats and is non-nil.
+func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
 	if err != nil {
 		return fmt.Errorf("read red hold: %w", err)
 	}
+	// Forget the rigs that read again, so a later outage logs anew.
+	maps.DeleteFunc(unreadLog, func(rig string, _ bool) bool { return !slices.Contains(unknown, rig) })
 	if len(unknown) > 0 {
-		return nil // gt-583rx6 adds the line that names each such rig
+		for _, rig := range unknown {
+			if !unreadLog[rig] {
+				unreadLog[rig] = true
+				logf("red hold: sweep record unreadable for %s; keeping the previous state", rig)
+			}
+		}
+		return nil
 	}
 	now := src.Now
 	if now == nil {

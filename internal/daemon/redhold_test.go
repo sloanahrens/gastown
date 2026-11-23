@@ -195,13 +195,13 @@ func TestRedHoldStepSetsThenClears(t *testing.T) {
 	var logs []string
 	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	require.NoError(t, runRedHold(townRoot, src, logf))
+	require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, logf))
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
 	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "gastown: 2 red cycles"}}, rec.Reasons)
 
 	state = tierSweepState{}
-	require.NoError(t, runRedHold(townRoot, src, logf))
+	require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, logf))
 	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a green record removes the file")
 	require.Equal(t, []string{"red hold: set: sweep-red", "red hold: cleared"}, logs, "each change logs once")
 }
@@ -214,7 +214,6 @@ func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
 		read func(string) (tierSweepState, error)
 	}{
 		{"an unchanged kind set is not rewritten", func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 3}, nil }},
-		{"an unreadable sweep record clears nothing", func(string) (tierSweepState, error) { return tierSweepState{}, errors.New("reading the record") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -222,13 +221,46 @@ func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
 			require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 			var logs []string
 			logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-			require.NoError(t, runRedHold(townRoot, redHoldSources{Rigs: []string{"gastown"}, Read: tt.read}, logf))
+			require.NoError(t, runRedHold(townRoot, redHoldSources{Rigs: []string{"gastown"}, Read: tt.read}, map[string]bool{}, logf))
 			rec, err := dispatch.ReadRedHold(townRoot)
 			require.NoError(t, err)
 			require.Equal(t, redHoldSentinel, rec, tt.name)
 			require.Empty(t, logs, tt.name)
 		})
 	}
+}
+
+// TestRedHoldStepUnknownKeepsPreviousState pins one outage logging once without
+// touching the file, a recovery evaluating again, and a second outage logging again.
+func TestRedHoldStepUnknownKeepsPreviousState(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+	const line = "red hold: sweep record unreadable for gastown; keeping the previous state"
+	var read func(string) (tierSweepState, error)
+	setRead := func(err error) { read = func(string) (tierSweepState, error) { return tierSweepState{}, err } }
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(rig string) (tierSweepState, error) { return read(rig) }}
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	unreadLog := map[string]bool{}
+	step := func() { require.NoError(t, runRedHold(townRoot, src, unreadLog, logf)) }
+
+	setRead(errors.New("reading the record"))
+	step()
+	step()
+	rec, err := dispatch.ReadRedHold(townRoot)
+	require.NoError(t, err)
+	require.Equal(t, redHoldSentinel, rec, "an unreadable record keeps the file")
+	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
+
+	setRead(nil)
+	step()
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "the recovery evaluates again")
+	require.Equal(t, []string{line, "red hold: cleared"}, logs)
+
+	setRead(errors.New("reading the record"))
+	step()
+	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
 }
 
 func TestRedHoldStepRefusals(t *testing.T) {
@@ -239,11 +271,11 @@ func TestRedHoldStepRefusals(t *testing.T) {
 		townRoot := t.TempDir()
 		require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 		require.NoError(t, os.WriteFile(dispatch.RedHoldPath(townRoot), []byte("{not json"), 0o600))
-		require.ErrorContains(t, runRedHold(townRoot, red, noLog), "read red hold")
+		require.ErrorContains(t, runRedHold(townRoot, red, map[string]bool{}, noLog), "read red hold")
 	})
 	t.Run("a red hold record that cannot be written", func(t *testing.T) {
 		townRoot := t.TempDir()
 		require.NoError(t, os.Symlink(filepath.Join(townRoot, "missing"), filepath.Dir(dispatch.RedHoldPath(townRoot))))
-		require.ErrorContains(t, runRedHold(townRoot, red, noLog), "write red hold")
+		require.ErrorContains(t, runRedHold(townRoot, red, map[string]bool{}, noLog), "write red hold")
 	})
 }
