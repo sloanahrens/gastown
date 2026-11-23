@@ -49,6 +49,8 @@ A test in this tier that cannot pass gets one of two answers, never a filter:
 
 `scripts/makefile-gate_test.sh` pins the no-filter rule and exercises it on the recipe this target carried before gt-ik4a1.2.
 
+The bd gateway's real-bd proofs in `internal/bdgateway` skip unless their inputs are set, and `proofPrereqs` names every missing one in the skip line. Set `BD_PROOF_BEAD` (a bead id the Dolt database holds) and `BEADS_DOLT_SERVER_HOST` with `BEADS_DOLT_SERVER_PORT` (the town's Dolt endpoint, which `gt dolt status` names), point `BD_REAL_BIN` at a native bd at the town's schema, and set `BD_PROOF_REQUIRE=1` so a missing input fails instead of skipping; run the proof by hand from the repository root with `BD_PROOF_BEAD=<bead> BEADS_DOLT_SERVER_HOST=127.0.0.1 BEADS_DOLT_SERVER_PORT=3307 BD_REAL_BIN=<bd> BD_PROOF_REQUIRE=1 go test -tags integration ./internal/bdgateway -count=1`.
+
 A package whose unit-tier test files call a container entry point is Docker-backed. The entry points are the `testutil` Dolt helpers, `WithDolt`, `DockerTestsEnabled` and `beads.RunTestContainerInit`. In `make gate` those tests skip, and `make test-integration` runs them. `TestDockerTier` in `internal/testpolicy` keeps `docker.txt` exact:
 - it fails on a Docker-backed package that is not listed;
 - it fails on a listed package that no longer calls an entry point.
