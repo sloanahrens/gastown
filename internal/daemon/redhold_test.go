@@ -37,6 +37,43 @@ func TestRedHoldSweepOf(t *testing.T) {
 	}
 }
 
+func TestRedHoldInputsOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rigs        []string
+		states      map[string]tierSweepState
+		unread      string
+		wantSweeps  []redHoldSweep
+		wantUnknown []string
+	}{
+		{"rigs convert in the order they are read", []string{"alpha", "beta"},
+			map[string]tierSweepState{"alpha": {RedCycles: 1}, "beta": {RedCycles: 3}}, "",
+			[]redHoldSweep{{Rig: "alpha", RedCycles: 1}, {Rig: "beta", RedCycles: 3}}, nil},
+		{"an unreadable rig is left out and named, the others convert", []string{"alpha", "beta", "gamma"},
+			map[string]tierSweepState{"alpha": {RedCycles: 3}, "gamma": {RedCycles: 1}}, "beta",
+			[]redHoldSweep{{Rig: "alpha", RedCycles: 3}, {Rig: "gamma", RedCycles: 1}}, []string{"beta"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			src := redHoldSources{Rigs: tt.rigs, Read: func(rig string) (tierSweepState, error) {
+				if rig == tt.unread {
+					return tierSweepState{}, errors.New("reading the record")
+				}
+				return tt.states[rig], nil
+			}}
+			in, unknown := redHoldInputsOf(src)
+			if !reflect.DeepEqual(in.Sweeps, tt.wantSweeps) {
+				t.Errorf("sweeps = %+v, want %+v", in.Sweeps, tt.wantSweeps)
+			}
+			if !reflect.DeepEqual(unknown, tt.wantUnknown) {
+				t.Errorf("unknown = %v, want %v", unknown, tt.wantUnknown)
+			}
+		})
+	}
+}
+
 func TestRedHoldEvalSweepTriggers(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
