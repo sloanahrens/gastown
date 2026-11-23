@@ -2944,7 +2944,9 @@ function deployStages(r) {
 // commit that skipped the stage. An unknown status or outcome is failed, never
 // passed.
 const SYSTEM_UPDATE_STAGES = ["post-land", "shell", "integration", "race", "images", "roll"];
-const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
+// A partial roll wears amber with the failure mark rather than failed's red:
+// the install and restart happened, the run did not pass (gt-c8yqh9).
+const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], partial: ["warnc", "✗", "partial"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
 
 // The pair chip (gt-jug4e0) sits between the images and roll chips and reads the
 // row's own Pair, as the hub classified it: a ready pair waits amber for its
@@ -2970,15 +2972,32 @@ function systemUpdatePairChip(pair) {
 }
 
 // systemUpdateStageState folds one stage of a row to its state: a pipeline run
-// is its status, the sweep a verdict per tier, a roll its outcome.
+// is its status, the sweep a verdict per tier, a roll its outcome. A partial
+// roll gets its own state, never failed: it installed and restarted, and only a
+// later step did not pass (gt-c8yqh9).
 function systemUpdateStageState(row, stage) {
   if (stage === "post-land" || stage === "images") {
     const run = (row.runs || []).find(r => r.workflow === stage + ".yml");
     return !run ? "absent" : run.status === "success" ? "ok" : (run.status === "running" || run.status === "queued" ? "running" : "failed");
   }
-  if (stage === "roll") return !row.roll ? "absent" : row.roll.outcome === "ok" ? "ok" : (row.roll.outcome === "running" ? "running" : "failed");
+  if (stage === "roll") {
+    if (!row.roll) return "absent";
+    const outcome = row.roll.outcome;
+    if (outcome === "ok") return "ok";
+    if (outcome === "running") return "running";
+    if (outcome === "partial") return "partial";
+    return "failed";
+  }
   const st = ((row.sweep && row.sweep.stages) || []).find(x => x.tier === stage);
   return st ? (st.verdict === "GREEN" ? "ok" : "failed") : "absent";
+}
+
+// systemUpdatePartialWord is a partial roll chip's word: the outcome and the
+// step the roll did not pass, so a roll that installed and restarted but could
+// not verify does not read like one that never installed. A record that names
+// no step keeps the outcome word alone, never a blank title (gt-c8yqh9).
+function systemUpdatePartialWord(roll) {
+  return roll && roll.step ? "partial at " + roll.step : "partial";
 }
 
 // systemUpdateStageUnknown says whether the source behind one stage of a row
@@ -3077,10 +3096,12 @@ function renderSystemUpdates(s) {
     const line = el("div", "surow");
     line.append(el("span", "title", row.sha || "–"));
     for (const stage of SYSTEM_UPDATE_STAGES) {
-      const state = systemUpdateStageState(row, stage);
-      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state === "absent" && systemUpdateStageUnknown(su, stage) ? "unknown" : state];
-      line.append(systemUpdateChip(stage, cls, glyph, word));
-      chips.push({name: stage, cls: cls, word: word});
+      let state = systemUpdateStageState(row, stage);
+      if (state === "absent" && systemUpdateStageUnknown(su, stage)) state = "unknown";
+      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state];
+      const said = state === "partial" ? systemUpdatePartialWord(row.roll) : word;
+      line.append(systemUpdateChip(stage, cls, glyph, said));
+      chips.push({name: stage, cls: cls, word: said});
       // The pair chip goes between the stages that build the images and the
       // roll that consumes them, and reads the row's Pair rather than its roll:
       // a commit with a roll keeps the pair the hub classified for it.
