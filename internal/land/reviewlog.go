@@ -169,7 +169,7 @@ func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, ReviewFindingText{
-			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
+			ID: f.ID, Severity: f.Severity, File: scrubClaim(f.Path), Line: f.Line, Title: scrubClaim(f.Title), Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
 		})
 	}
 	return out
@@ -195,9 +195,10 @@ func boundedClaim(s string) string {
 
 const redactedWord = "<redacted>"
 
-// scrubClaim replaces every token-shaped run in a finding's claim with
-// redactedWord and keeps every other byte: om's claim quotes the reviewed code,
-// and a credential in it must not reach the review log (gt-uxbi5y). It decides
+// scrubClaim replaces every token-shaped run in a finding's text with
+// redactedWord and keeps every other byte: om's title, path and claim quote the
+// reviewed code, and a credential in one must not reach the review log
+// (gt-uxbi5y, gt-kwx3vs). It decides
 // no boundaries by word: at each letter or digit not glued to one before it (or
 // starting a distinctive prefix, glued or not), it takes the run of token bytes that starts there and asks the rule, which is
 // anchored at the start of what it is given, so a token in backticks, brackets,
@@ -208,7 +209,7 @@ const redactedWord = "<redacted>"
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
 // It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,
-// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun) for
+// so its cost is bounded whatever the text: O(scrubInputBound x maxTokenRun) for
 // the tries, plus one forward pass past the cap for the tail of a longer token.
 func scrubClaim(s string) string {
 	s = cutAtRune(s, scrubInputBound)

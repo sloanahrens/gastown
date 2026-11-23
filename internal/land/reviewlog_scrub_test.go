@@ -160,6 +160,44 @@ func TestReviewLogScrubRecordedFindingText(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubRecordedFindingTitleAndPath: a finding's title and path are
+// scrubbed like its claim, and an ordinary pair is kept (gt-kwx3vs).
+func TestReviewLogScrubRecordedFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                string
+		f                   Finding
+		wantTitle, wantFile string
+	}{
+		{"title quotes a token", Finding{Title: "it logs " + scrubTestFamilies["aws"] + " verbatim", Path: "internal/land/note.go"}, "it logs <redacted> verbatim", "internal/land/note.go"},
+		{"path holds a token after a slash", Finding{Title: "the refusal has no test", Path: "internal/land/" + scrubTestFamilies["slack"]}, "the refusal has no test", "internal/land/<redacted>"},
+		{"ordinary title and path", Finding{Title: "the refusal has no test", Path: "internal/land/reviewlog.go"}, "the refusal has no test", "internal/land/reviewlog.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if rec := reviewFindingTexts([]Finding{tc.f})[0]; rec.Title != tc.wantTitle || rec.File != tc.wantFile {
+				t.Errorf("recorded title/path = %q/%q, want %q/%q", rec.Title, rec.File, tc.wantTitle, tc.wantFile)
+			}
+		})
+	}
+}
+
+// TestReviewLogScrubHeldFindingTitleAndPath: a held finding's title and path
+// reach the queue line scrubbed like its claim (gt-kwx3vs).
+func TestReviewLogScrubHeldFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	held := heldFindingTexts([]FollowupCandidate{{
+		Title: "it logs " + scrubTestFamilies["aws"] + " verbatim",
+		Path:  "internal/land/" + scrubTestFamilies["slack"],
+	}})[0]
+	if want := "it logs <redacted> verbatim"; held.Title != want {
+		t.Errorf("queued title = %q, want %q", held.Title, want)
+	}
+	if want := "internal/land/<redacted>"; held.File != want {
+		t.Errorf("queued path = %q, want %q", held.File, want)
+	}
+}
+
 // TestReviewLogScrubHeldFinding: a held finding's claim reaches the log through a queue line.
 func TestReviewLogScrubHeldFinding(t *testing.T) {
 	t.Parallel()
