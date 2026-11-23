@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-23 gt-hkllkj: rule 9 carries the contradiction rule, pointing at mol-polecat-work item 10, so a seat stops and escalates rather than inventing an exemption; paid for by trimming rule 9's own om flags and line-limit wording, no rendered growth (seventeen rules).
 - 2026-11-23 gt-aejf3n: rule 9's line-limit bullet reports the measured and declared lines, not a split (seventeen rules).
 - 2026-11-21 gt-vysc1i: rule 9's line-limit bullet pushes the seat's branch before the split comment, so a seat stopped by a size limit keeps its commit; paid for by dropping rule 1's second example (gt-p85pw.73) and rule 3's example (gt-z6qre.12), no rule cut (seventeen rules).
 - 2026-11-20 gt-a69nku: added rule 9's line-limit bullet: a line limit in Constraints is a cap, so a diff past 1.5 times it stops for a split. Paid for by dropping the provenance parentheticals (claude-9a8, gt-690mog, gt-0sztd, gt-tpg0p.33, gt-qpeei.15, gt-r1up7, gt-km9jt, gt-dl4nv.13) and the "A hit is a question, not a verdict" sentence from the rendered text, no rule cut and none added (seventeen rules).
@@ -103,8 +104,9 @@ The Tests section is the rule. om flags: "new parsing and state logic added to a
 ## 9. Stay in scope
 
 Change only what the bead asks for.
-- A Constraints line limit is a cap, not an estimate: past 1.5 times, stop; push with `git push origin HEAD:refs/heads/<your branch>` (never `--force`); comment the sha, the measured added lines and the declared limit; run gt done, and if it refuses past twice the limit, stop and wait for the overseer; do not propose a split.
-- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps"; "change touches files outside the stated scope". If another file must change, say why in a bead comment.
+- If an acceptance box and a Constraint cannot both hold, `gt escalate` (mol-polecat-work item 10); never add an exemption.
+- Constraints line limit is a cap, not an estimate: past 1.5 times, stop; `git push origin HEAD:refs/heads/<your branch>` (never `--force`); comment sha, measured/declared lines; `gt done`; refused past twice, await the overseer; no split.
+- om flags: "edit outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency"; "change outside the stated scope". If another file must change, say why on the bead.
 
 ## 10. Test the call site, not the helper
 
