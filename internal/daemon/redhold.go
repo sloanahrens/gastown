@@ -13,6 +13,14 @@ import (
 // redHoldSweepCycles is the consecutive red sweep cycles on one rig that hold dispatch.
 const redHoldSweepCycles = 2
 
+// redHoldBehind is the number of landings not in the installed build that holds
+// dispatch: the deployed daemon has drifted from main.
+const redHoldBehind = 100
+
+// redHoldGreenStale is how long a swept rig may go without a fully green cycle
+// before dispatch is held.
+const redHoldGreenStale = 3 * time.Hour
+
 // redHoldSweep is one rig's sweep history, and whether its last result was unread.
 type redHoldSweep struct {
 	Rig       string
@@ -20,8 +28,15 @@ type redHoldSweep struct {
 	NoResult  bool
 }
 
-// redHoldInputs is what the sweep triggers decide from.
-type redHoldInputs struct{ Sweeps []redHoldSweep }
+// redHoldInputs is what the triggers decide from.
+type redHoldInputs struct {
+	Sweeps []redHoldSweep
+	// Waiting is the landings on main that are not in the installed build.
+	Waiting int
+	// OldestGreenAt is the oldest LastGreenAt across the swept rigs; the zero
+	// time means unknown and triggers nothing.
+	OldestGreenAt time.Time
+}
 
 // redHoldSweepOf converts one rig's sweep record into the evaluator's input; ok
 // is false for an unknown record, which the caller leaves out to keep its prior
@@ -71,10 +86,12 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 	return in, unknown
 }
 
-// evalRedHold returns the sweep reasons that hold dispatch: one per kind, sorted
-// by kind, each keeping prev's Since when the kind already held and taking now when
+// evalRedHold returns the reasons that hold dispatch: one per kind, sorted by
+// kind, each keeping prev's Since when the kind already held and taking now when
 // new. A sweep under redHoldSweepCycles contributes nothing; at or above it is
 // sweep-no-result when unread, sweep-red otherwise, with Detail naming every rig.
+// Waiting at or above redHoldBehind is behind-main; an OldestGreenAt older than
+// redHoldGreenStale is green-stale, and the zero time is unknown and adds nothing.
 func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) dispatch.RedHoldRecord {
 	details := map[string][]string{}
 	for _, s := range in.Sweeps {
@@ -86,6 +103,12 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 			kind = dispatch.RedHoldSweepNoResult
 		}
 		details[kind] = append(details[kind], fmt.Sprintf("%s: %d red cycles", s.Rig, s.RedCycles))
+	}
+	if in.Waiting >= redHoldBehind {
+		details[dispatch.RedHoldBehindMain] = []string{fmt.Sprintf("%d landings behind main", in.Waiting)}
+	}
+	if age := now.Sub(in.OldestGreenAt); !in.OldestGreenAt.IsZero() && age > redHoldGreenStale {
+		details[dispatch.RedHoldGreenStale] = []string{fmt.Sprintf("no green sweep for %dh", int(age.Hours()))}
 	}
 	var reasons []dispatch.RedHoldReason
 	for _, kind := range slices.Sorted(maps.Keys(details)) {
