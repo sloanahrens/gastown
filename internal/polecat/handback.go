@@ -90,8 +90,20 @@ func HandBackNoWork(ctx context.Context, w BeadWriter, beadID, assignee string, 
 	return handBackLabelled(ctx, w, beadID, assignee, "", text)
 }
 
-// handBackLabelled is the hand-back HandBackNoted and HandBackRework share: it
-// releases the bead, puts label on it (none when label is empty) and adds text as the comment.
+// HandBackEmptyBranch is HandBackNoted for a stopped polecat whose kept branch
+// holds no commit beyond target, the rig's landing branch: nothing to resume or
+// split. Like HandBackNoWork, the bead goes back open, unassigned and unlabelled.
+func HandBackEmptyBranch(ctx context.Context, w BeadWriter, beadID, assignee, branch, target string, elapsed time.Duration, note string) error {
+	text := fmt.Sprintf("polecat stopped after %s; branch %s holds no commits beyond %s: nothing to resume, the bead starts clean.",
+		elapsed.Round(time.Second), branch, target)
+	if note != "" {
+		text += " " + note
+	}
+	return handBackLabelled(ctx, w, beadID, assignee, "", text)
+}
+
+// handBackLabelled is the hand-back every HandBack variant shares: it releases
+// the bead, puts label on it (none when label is empty) and adds text as the comment.
 func handBackLabelled(ctx context.Context, w BeadWriter, beadID, assignee, label, text string) error {
 	status, current, err := w.State(ctx, beadID)
 	if err != nil {
