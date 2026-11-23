@@ -491,9 +491,15 @@ func TestExtractWritesAHeaderOnlyGateRunsCSVForATownWithoutTheLog(t *testing.T) 
 	if !files.has(gateRunsName) {
 		t.Fatalf("gate_runs.csv was not written; wrote %v", files.names)
 	}
-	want := strings.Join(gateRunHeader, ",") + "\r\n"
-	if got := files.data[gateRunsName].String(); got != want {
-		t.Errorf("gate_runs.csv = %q, want the header alone %q", got, want)
+	header, rows, err := ReadLandings(bytes.NewReader(files.data[gateRunsName].Bytes()))
+	if err != nil {
+		t.Fatalf("read %s: %v", gateRunsName, err)
+	}
+	if !slices.Equal(header, gateRunHeader) {
+		t.Errorf("gate_runs.csv header = %v, want the columns %v", header, gateRunHeader)
+	}
+	if len(rows) != 0 {
+		t.Errorf("gate_runs.csv has %d data rows, want the header alone", len(rows))
 	}
 }
 

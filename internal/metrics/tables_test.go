@@ -281,9 +281,11 @@ func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 }
 
 // landingSidecarBytes is landings.sidecar.json's exact text: the mango stage
-// reads the file, so the bytes are the contract, not the decoded list. It is
-// tables.py's json.dump({"explain_only": sorted(EXPLAIN_ONLY)}, f, indent=1)
-// byte for byte, with gate_runs_skipped after it and no trailing newline.
+// reads the file, so the bytes are the contract, not the decoded list. The
+// first key, explain_only, comes from tables.py's
+// json.dump({"explain_only": sorted(EXPLAIN_ONLY)}, f, indent=1); the Go sidecar
+// adds gate_runs_skipped beyond tables.py's output, and writes no trailing
+// newline.
 const landingSidecarBytes = `{
  "explain_only": [
   "agent",
