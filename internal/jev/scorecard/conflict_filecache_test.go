@@ -27,6 +27,16 @@ func TestLandedFilesCacheRoundTrip(t *testing.T) {
 	if err := c.Put("base", "head", []string{"new.go"}); err != nil {
 		t.Fatalf("put replacement: %v", err)
 	}
+	copied := []string{"y.go"}
+	if err := c.Put("copy", "pair", copied); err != nil {
+		t.Fatalf("put copy: %v", err)
+	}
+	copied[0] = "mutated.go"
+	got, _ := c.Get("copy", "pair")
+	got[0] = "mutated.go"
+	if got, _ := c.Get("copy", "pair"); !reflect.DeepEqual(got, []string{"y.go"}) {
+		t.Fatalf("the cache followed a slice the caller changed: %v", got)
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -40,15 +50,9 @@ func TestLandedFilesCacheRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if _, ok := reopened.Get("torn", "line"); ok {
-		t.Fatal("a torn last line was read")
-	}
-	if got, ok := reopened.Get("base", "head"); !ok || !reflect.DeepEqual(got, []string{"new.go"}) {
-		t.Fatalf("reopened get = %v, %v; want the later [new.go]", got, ok)
-	}
-	// A Put after the torn line must not append onto the fragment: the reopen
-	// below would decode the glued line and fail. A second instance opened on
-	// the same file then adds its own line, which must survive too.
+	// A Put after the torn line must not append onto the fragment, and a second
+	// instance opened on the same file appends its own whole line: the reopen
+	// below decodes every line, so a glued fragment fails the test.
 	second, err := openLandedFilesCache(path)
 	if err != nil {
 		t.Fatalf("open beside the reopened cache: %v", err)
@@ -63,7 +67,11 @@ func TestLandedFilesCacheRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after puts past a torn line: %v", err)
 	}
+	if _, ok := after.Get("torn", "line"); ok {
+		t.Fatal("a torn last line was read")
+	}
 	for _, want := range []struct{ base, head, file string }{
+		{"base", "head", "new.go"},
 		{"after", "torn", "a.go"},
 		{"second", "writer", "b.go"},
 	} {
