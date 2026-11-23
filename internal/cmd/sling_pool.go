@@ -1753,8 +1753,8 @@ type poolRouter struct {
 	work        poolSeatWorkFunc
 	seats       *poolSeatLedger
 	now         func() time.Time
-	// hookHeld is the cheap hold read the dead-hooked walk asks before the
-	// full seat state (gt-gg9hv.73).
+	// hookHeld is kept for the outer seams that still accept a hook-held read
+	// (gt-j8elkb); the next bead removes the field (gt-hz9wkp).
 	hookHeld polecatHookHeldFunc
 }
 
@@ -1866,7 +1866,7 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // and that would put the count's bd reads inside the lock (gt-crkhv).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.lister(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
+		return poolOccupiedSessions(r.lister(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
 	}
 }
 
