@@ -295,8 +295,8 @@ func TestSystemUpdatesPipelineUnknown(t *testing.T) {
 	}
 }
 
-// TestSystemUpdatesPipelineForRemote: no remote means no pipeline; a remote that
-// cannot be looked up or parsed is a read that reports a failure with no runs, so
+// TestSystemUpdatesPipelineForRemote: a remote that is not named,
+// cannot be looked up or cannot be parsed is a read that reports a failure with no runs, so
 // the section raises RunsUnknown; a good remote builds the read for owner/repo.
 func TestSystemUpdatesPipelineForRemote(t *testing.T) {
 	t.Parallel()
@@ -308,7 +308,7 @@ func TestSystemUpdatesPipelineForRemote(t *testing.T) {
 		wantErr   bool
 		wantRepo  string
 	}{
-		{"no remote named", "", nil, true, false, ""},
+		{"no remote named", "", nil, false, true, ""},
 		{"the remote lookup failed", "", errors.New("registry unreadable"), false, true, ""},
 		{"an unparseable remote", "not a remote url", nil, false, true, ""},
 		{"a good remote", "http://forgejo:3000/owner/repo.git", nil, false, false, "owner/repo"},

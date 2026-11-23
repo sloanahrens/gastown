@@ -43,9 +43,9 @@ func newSystemUpdatesPipeline(read func() *dashboard.GastownPipeline, now func()
 }
 
 // systemUpdatesPipelineFor is the section's pipeline read for the gastown rig's
-// remote: nil when no remote is named (the rig is not cut over, so the section
-// joins no runs), and a read that reports a failure, with no runs, when the
-// remote cannot be looked up or parsed, so the section raises RunsUnknown instead
+// remote: a read that reports a failure, with no runs, when the remote is not
+// named (the gastown rig is cut over, so none is a misconfiguration), cannot be
+// looked up or cannot be parsed, so the section raises RunsUnknown instead
 // of reading like a healthy town with no runs. build makes the throttled read
 // for owner/repo (om finding 46a9e85f).
 func systemUpdatesPipelineFor(remote string, remoteErr error, build func(repo string) func() *dashboard.GastownPipeline, logf func(format string, args ...any)) func() *dashboard.GastownPipeline {
@@ -59,7 +59,7 @@ func systemUpdatesPipelineFor(remote string, remoteErr error, build func(repo st
 		return failed(remoteErr)
 	}
 	if remote == "" {
-		return nil
+		return failed(errors.New("the gastown rig names no forgejo remote"))
 	}
 	owner, repo, err := land.RepoFromRemoteURL(remote)
 	if err != nil {
