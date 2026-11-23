@@ -56,6 +56,57 @@ func TestSystemUpdatesNowSupplyJoinsRollsFromHistory(t *testing.T) {
 	assert.False(t, got.Unavailable, "both sources read")
 }
 
+// A partial roll carries the step it did not pass, so the pane can say why it
+// is not ok. A roll that ended any other way, or a partial one whose steps name
+// no miss, carries none and the pane falls back to the outcome word (gt-c8yqh9).
+func TestSystemUpdatesRollNamesTheStepAPartialRollMissed(t *testing.T) {
+	t.Parallel()
+
+	started := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	const target = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"
+	for _, tc := range []struct {
+		name    string
+		outcome update.Outcome
+		steps   []update.StepRecord
+		want    string
+	}{
+		{"verify failed", update.OutcomePartial, []update.StepRecord{
+			{Name: update.StepInstall, Result: update.ResultOK},
+			{Name: update.StepRestart, Result: update.ResultOK},
+			{Name: update.StepVerify, Result: update.ResultFailed},
+		}, "verify"},
+		{"restart deferred", update.OutcomePartial, []update.StepRecord{
+			{Name: update.StepRestart, Result: update.ResultDeferred},
+			{Name: update.StepVerify, Result: update.ResultSkipped},
+		}, "restart"},
+		{"partial with no miss recorded", update.OutcomePartial, nil, ""},
+		{"failed roll names no step", update.OutcomeFailed, []update.StepRecord{
+			{Name: update.StepInstall, Result: update.ResultFailed},
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeEmptyDaemonLog(t, root)
+			store := &update.Store{Dir: update.Dir(root)}
+			require.NoError(t, store.AppendHistory(update.State{
+				RunID:     "run-under-test",
+				StartedAt: started,
+				EndedAt:   started.Add(time.Minute),
+				Target:    update.Target{SHA: target},
+				Outcome:   tc.outcome,
+				Steps:     tc.steps,
+			}))
+
+			got := systemUpdates(root, newTierSweepReader(root), started)
+
+			require.Len(t, got.Rows, 1, "the roll names one commit row")
+			require.NotNil(t, got.Rows[0].Roll)
+			assert.Equal(t, tc.want, got.Rows[0].Roll.Step)
+		})
+	}
+}
+
 // A history that cannot be read is unavailable with no rows, never an empty
 // history that reads as no roll has run. The daemon log is readable here, so the
 // flag is the history's alone.

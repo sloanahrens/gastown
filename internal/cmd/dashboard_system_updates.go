@@ -26,6 +26,7 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *das
 			To:        run.Target.SHA,
 			Outcome:   string(run.Outcome),
 			Current:   string(run.Current),
+			Step:      rollStep(run),
 			StartedAt: run.StartedAt,
 			EndedAt:   run.EndedAt,
 		})
@@ -35,6 +36,23 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, now time.Time) *das
 	// so the record is read here to tell the page which one a missing roll is.
 	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))
 	return su
+}
+
+// rollStep is the step a partial roll did not pass: the first step the run
+// recorded failed or deferred, in plan order, so a run that swapped and
+// restarted but could not verify reads "verify". A roll that ended any other
+// way names none, because its outcome word already says where it stopped
+// (gt-c8yqh9).
+func rollStep(run update.HistoryLine) string {
+	if run.Outcome != update.OutcomePartial {
+		return ""
+	}
+	for _, step := range run.Steps {
+		if step.Result == update.ResultFailed || step.Result == update.ResultDeferred {
+			return string(step.Name)
+		}
+	}
+	return ""
 }
 
 // updateRecordUnreadable reports whether the update job's state record exists

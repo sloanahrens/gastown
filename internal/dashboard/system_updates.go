@@ -30,10 +30,13 @@ const (
 // internal/update: the beads test that imports this package cycles through
 // notify (gt-yu15gd).
 type SystemUpdateRoll struct {
-	From      string    `json:"from,omitempty"`
-	To        string    `json:"to"`
-	Outcome   string    `json:"outcome"`
-	Current   string    `json:"current,omitempty"`
+	From    string `json:"from,omitempty"`
+	To      string `json:"to"`
+	Outcome string `json:"outcome"`
+	Current string `json:"current,omitempty"`
+	// Step names the step a partial roll did not pass, so the pane can say why
+	// the roll is not ok; empty when the record names none (gt-c8yqh9).
+	Step      string    `json:"step,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
