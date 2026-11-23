@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,6 +35,9 @@ func TestHeartbeatRedHoldRunsTheStep(t *testing.T) {
 	require.NoError(t, writeTierSweepState(townRoot, "gastown", tierSweepState{RedCycles: redHoldSweepCycles}))
 	logs := &lockedBuffer{}
 	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0)}
+	// The step's waiting read needs the town's checkout and a readable build.
+	createUpdateSource(t, townRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return &version.StaleBinaryInfo{BinaryCommit: unknownCommit} }
 	found[0].run(d)
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
@@ -554,6 +558,57 @@ func TestRedHoldStepMainRed(t *testing.T) {
 	src.MainRed = boom
 	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
 	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
+}
+
+// TestCheckRedHoldWaiting pins the waiting count to the update patrol's read:
+// the checkout's landings against the installed build's commit, not RepoCommit.
+func TestCheckRedHoldWaiting(t *testing.T) {
+	t.Parallel()
+	fx := newUpdateWaitingFixture(t)
+	repo := createUpdateSource(t, fx.d.config.TownRoot)
+	fx.git.InitRepo(t, repo)
+	build := fx.git.Commit(t, repo, "main", "installed build", map[string]string{"a.txt": "a\n"})
+	later := fx.git.Commit(t, repo, "main", "landed after the build", map[string]string{"b.txt": "b\n"})
+	fx.appendLandings(t, later)
+	stale := &version.StaleBinaryInfo{BinaryCommit: build, RepoCommit: unknownCommit}
+	fx.d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return stale }
+	got, err := fx.d.redHoldWaiting()
+	require.NoError(t, err)
+	require.Equal(t, 1, got, "the landing after the build is waiting")
+}
+
+// TestCheckRedHoldWaitingErrorKeepsTheHold pins that an unreadable waiting count
+// keeps the previous hold and logs the alarm once: an unreadable staleness, an
+// unknown installed build, or a town with no gt source checkout.
+func TestCheckRedHoldWaitingErrorKeepsTheHold(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		info   *version.StaleBinaryInfo
+		source bool
+	}{
+		"an unreadable staleness":    {nil, true},
+		"an unknown installed build": {&version.StaleBinaryInfo{}, true},
+		"no gt source checkout":      {&version.StaleBinaryInfo{}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			logs := &lockedBuffer{}
+			d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(logs, "", 0)}
+			if tc.source {
+				createUpdateSource(t, townRoot)
+			}
+			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return tc.info }
+			require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+			for range 2 {
+				d.checkRedHold()
+			}
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, redHoldSentinel, rec, "a waiting error keeps the previous hold")
+			require.Equal(t, "red hold: waiting landings unreadable; keeping the previous state\n", logs.String(), "two heartbeats log the alarm once")
+		})
+	}
 }
 
 func TestRedHoldStepRefusals(t *testing.T) {

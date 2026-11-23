@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // redHoldSweepCycles is the consecutive red sweep cycles on one rig that hold dispatch.
@@ -192,13 +194,31 @@ func (d *Daemon) checkRedHold() {
 		d.redHoldUnread = map[string]bool{}
 	}
 	src := redHoldSources{
-		Rigs: tierSweepRigs(d.patrol(), d.getKnownRigs()),
-		Read: func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
-		Now:  d.clk().Now,
+		Rigs:    tierSweepRigs(d.patrol(), d.getKnownRigs()),
+		Read:    func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
+		Waiting: d.redHoldWaiting,
+		Now:     d.clk().Now,
 	}
 	if err := runRedHold(d.config.TownRoot, src, d.redHoldUnread, d.logger.Printf); err != nil {
 		d.logger.Printf("red hold step: %v", err)
 	}
+}
+
+// redHoldWaiting counts the landings waiting to deploy, as the update patrol
+// reads them: the town's gt source checkout and the installed build's commit.
+// A town with no checkout is an error, not zero: without the checkout nothing
+// proves a landing is not in the installed build. The step keeps its previous
+// hold on an error and logs that the count went unread.
+func (d *Daemon) redHoldWaiting() (int, error) {
+	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
+	if err != nil {
+		return 0, fmt.Errorf("read the town's gt source checkout: %w", err)
+	}
+	info, ok := d.rebuildGTStale(repoRoot)
+	if !ok {
+		return 0, errors.New("the installed build's staleness could not be read")
+	}
+	return d.updateLandingsWaiting(repoRoot, info.BinaryCommit)
 }
 
 // redHoldShort returns the first 12 characters of a commit id, or the whole id
