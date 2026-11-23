@@ -172,6 +172,72 @@ func TestClusterApprovalParse(t *testing.T) {
 	}
 }
 
+func TestParseRecordActMustBeKnown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		act     string
+		wantErr string
+	}{
+		{"known act parses", ActApplyPlan, ""},
+		{"another act is refused", "rollback", "not a known act"},
+		{"empty act keeps its refusal", "", "has no act"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := recordText(with(goodRecord(), map[string]any{"act": tt.act}))
+			got, err := ParseRecord([]byte(body))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ParseRecord: %v", err)
+				}
+				if got.Act != ActApplyPlan {
+					t.Errorf("act = %q, want %q", got.Act, ActApplyPlan)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ParseRecord accepted a record with act %q: %+v", tt.act, got)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	// A record whose act holds free text is refused without echoing it, so the
+	// text never reaches an error — and from there the answer file. Verify, which
+	// a Record built in code reaches, does echo the act; ParseRecord is the guard
+	// that keeps free text out of a parsed record (gt-s4w952).
+	parts := []string{"sk", "live", "7f3a"}
+	token := strings.Join(parts, "-")
+	t.Run("an act holding free text is refused without echoing it", func(t *testing.T) {
+		body := recordText(with(goodRecord(), map[string]any{"act": token}))
+		_, err := ParseRecord([]byte(body))
+		if err == nil {
+			t.Fatalf("ParseRecord accepted a record whose act is free text")
+		}
+		for _, part := range parts {
+			if strings.Contains(err.Error(), part) {
+				t.Errorf("ParseRecord error %q echoes the act part %q", err, part)
+			}
+		}
+
+		rec := Record{
+			Act:        token,
+			Cluster:    ClusterControl,
+			PlanSHA256: goodSHA,
+			ProposalID: goodID,
+			ApprovedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+			ExpiresAt:  time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC),
+		}
+		verifyErr := Verify(rec, Plan{Cluster: ClusterControl, SHA256: goodSHA}, nil, rec.ApprovedAt)
+		if verifyErr == nil || !strings.Contains(verifyErr.Error(), token) {
+			t.Fatalf("Verify error = %v, want it to echo the act %q", verifyErr, token)
+		}
+	})
+}
+
 // sameRecord reports whether a and b name the same approval in the same UTC
 // form.
 func sameRecord(a, b Record) bool {
