@@ -4,41 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// captureStderr runs f with the process's os.Stderr writing to a file in the
-// test's temp dir and returns what f wrote, one entry per line.
-//
-//testpolicy:allow parallel — the warning under test goes to the process's os.Stderr, which is the only writer warnf has
-func captureStderr(t *testing.T, f func()) []string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "stderr")
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("create the stderr file: %v", err)
+// warnLines returns a warn seam that appends each line it is given, formatted,
+// to lines. A test reads the warnings through it instead of swapping os.Stderr.
+func warnLines(lines *[]string) func(format string, args ...any) {
+	return func(format string, args ...any) {
+		*lines = append(*lines, fmt.Sprintf(format, args...))
 	}
-	old := os.Stderr
-	os.Stderr = file                   //testpolicy:allow no-global-swap — the warning goes to the process's os.Stderr
-	defer func() { os.Stderr = old }() //testpolicy:allow no-global-swap — restores stderr for later tests
-	f()
-	if err := file.Close(); err != nil {
-		t.Fatalf("close the stderr file: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the stderr file: %v", err)
-	}
-	text := strings.TrimSuffix(string(data), "\n")
-	if text == "" {
-		return nil
-	}
-	return strings.Split(text, "\n")
 }
 
 // goneShowBeads answers Show one id at a time and fails any batch that names a
@@ -75,19 +52,52 @@ func (g *goneShowBeads) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 	return out, nil
 }
 
-// warnShowErr says the count on one line and hands the errors a caller still
-// has to warn about back to it; a count of zero and an error holding no count
-// are the caller's whole.
-//
-//testpolicy:allow parallel — every row reads the process's stderr, which is the only writer warnf has
+// goneListBeads answers Show one id at a time, and ListByIDs with
+// beads.ErrNotFound for any query naming a bead the store no longer holds: the
+// failure showAll re-reads one id at a time. It has no batch read, so showAll
+// is driven down its lister path.
+type goneListBeads struct {
+	issues map[string]*beads.Issue
+	gone   map[string]bool
+	lists  [][]string
+}
+
+func (g *goneListBeads) Show(id string) (*beads.Issue, error) {
+	if issue, ok := g.issues[id]; ok {
+		return issue, nil
+	}
+	return nil, fmt.Errorf("%w: %s", beads.ErrNotFound, id)
+}
+
+func (g *goneListBeads) ListByIDs(ids []string) (map[string]*beads.Issue, error) {
+	g.lists = append(g.lists, append([]string(nil), ids...))
+	for _, id := range ids {
+		if g.gone[id] {
+			return nil, fmt.Errorf("bd list: %w", beads.ErrNotFound)
+		}
+	}
+	out := map[string]*beads.Issue{}
+	for _, id := range ids {
+		if issue, ok := g.issues[id]; ok {
+			out[id] = issue
+		}
+	}
+	return out, nil
+}
+
+// warnShowErr says the count on one line, with the rig when it is given one,
+// and hands the errors a caller still has to warn about back to it; a count of
+// zero and an error holding no count are the caller's whole.
 func TestWarnShowErr(t *testing.T) {
+	t.Parallel()
 	realErr := errors.New("dolt down")
 	zero := &GoneError{N: 0}
 	wrapped := fmt.Errorf("reading the batch: %w", &GoneError{N: 1})
 	cases := []struct {
-		name  string
-		err   error
-		lines []string
+		name    string
+		subject string
+		err     error
+		lines   []string
 		// want is returned as it is.
 		want error
 		// keeps names an error the result must still hold.
@@ -96,22 +106,19 @@ func TestWarnShowErr(t *testing.T) {
 		{name: "no error", err: nil},
 		{name: "an error with no count", err: realErr, want: realErr},
 		{name: "a count of zero", err: zero, want: zero},
-		{name: "the count alone", err: &GoneError{N: 3}, lines: []string{"gt jev scorecard: 3 beads gone"}},
+		{name: "the count alone", err: &GoneError{N: 3}, lines: []string{"3 beads gone"}},
+		{name: "the count of a rig", subject: "gastown", err: &GoneError{N: 3}, lines: []string{"3 beads gone in gastown"}},
 		{name: "the count joined with a real error", err: errors.Join(&GoneError{N: 2}, realErr),
-			lines: []string{"gt jev scorecard: 2 beads gone"}, keeps: realErr},
-		{name: "a count wrapped in another error", err: wrapped, want: wrapped},
+			lines: []string{"2 beads gone"}, keeps: realErr},
+		{name: "a count wrapped in another error", err: wrapped, lines: []string{"1 beads gone"}, want: wrapped},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var got error
-			lines := captureStderr(t, func() { got = warnShowErr(c.err) })
-			if len(lines) != len(c.lines) {
-				t.Fatalf("stderr = %q, want %q", lines, c.lines)
-			}
-			for i := range lines {
-				if lines[i] != c.lines[i] {
-					t.Fatalf("stderr = %q, want %q", lines, c.lines)
-				}
+			t.Parallel()
+			var lines []string
+			got := warnShowErr(warnLines(&lines), c.subject, c.err)
+			if !reflect.DeepEqual(lines, c.lines) {
+				t.Fatalf("warned %q, want %q", lines, c.lines)
 			}
 			switch {
 			case c.want != nil:
@@ -146,22 +153,26 @@ func attentionItemLines(a *attentionAdapter, beads ...string) []Item {
 	return items
 }
 
-// Three beads the store no longer holds are said once, however many there are,
-// and the ones it does hold are cached: gt-mejw9j.
-//
-//testpolicy:allow parallel — the one stderr line is what the test reads, and warnf writes it to os.Stderr
+// Three beads the store no longer holds are said once through the batch read,
+// however many there are, and the ones it does hold are cached: gt-mejw9j.
 func TestAttentionPrefetchSaysGoneBeadsOnce(t *testing.T) {
+	t.Parallel()
 	store := &goneShowBeads{
 		issues: map[string]*beads.Issue{"gt-a": {ID: "gt-a"}, "gt-b": {ID: "gt-b"}},
 		gone:   map[string]bool{"gt-x": true, "gt-y": true, "gt-z": true},
 	}
 	a := newAttentionTestAdapter(t.TempDir(), store)
+	var warnings []string
+	a.warn = warnLines(&warnings)
 	items := attentionItemLines(a, "gt-a", "gt-x", "gt-b", "gt-y", "gt-z")
 
-	lines := captureStderr(t, func() { a.Prefetch(context.Background(), items) })
+	a.Prefetch(context.Background(), items)
 
-	if len(lines) != 1 || lines[0] != "gt jev scorecard: 3 beads gone" {
-		t.Fatalf("stderr = %q, want one line %q", lines, "gt jev scorecard: 3 beads gone")
+	if !reflect.DeepEqual(warnings, []string{"3 beads gone"}) {
+		t.Fatalf("warned %q, want one line %q", warnings, "3 beads gone")
+	}
+	if len(store.batches) == 0 {
+		t.Errorf("Prefetch made no batch call, want the batcher path driven")
 	}
 	if len(a.beadCache) != 2 || a.beadCache["gt-a"] == nil || a.beadCache["gt-b"] == nil {
 		t.Errorf("cached %v, want the 2 beads the store holds", a.beadCache)
@@ -176,25 +187,53 @@ func TestAttentionPrefetchSaysGoneBeadsOnce(t *testing.T) {
 	}
 }
 
+// The lister path counts the gone beads too: the query that names one fails as
+// bd list fails, the single reads keep what the store holds, and the count is
+// said once: gt-mejw9j.
+func TestAttentionPrefetchListerSaysGoneBeadsOnce(t *testing.T) {
+	t.Parallel()
+	store := &goneListBeads{
+		issues: map[string]*beads.Issue{"gt-a": {ID: "gt-a"}, "gt-b": {ID: "gt-b"}},
+		gone:   map[string]bool{"gt-x": true, "gt-y": true, "gt-z": true},
+	}
+	a := newAttentionTestAdapter(t.TempDir(), store)
+	var warnings []string
+	a.warn = warnLines(&warnings)
+	items := attentionItemLines(a, "gt-a", "gt-x", "gt-b", "gt-y", "gt-z")
+
+	a.Prefetch(context.Background(), items)
+
+	if !reflect.DeepEqual(warnings, []string{"3 beads gone"}) {
+		t.Fatalf("warned %q, want one line %q", warnings, "3 beads gone")
+	}
+	if len(store.lists) == 0 {
+		t.Errorf("Prefetch made no list call, want the lister path driven")
+	}
+	if len(a.beadCache) != 2 || a.beadCache["gt-a"] == nil || a.beadCache["gt-b"] == nil {
+		t.Errorf("cached %v, want the 2 beads the store holds", a.beadCache)
+	}
+}
+
 // A batch that fails for another reason still warns, and says nothing about
 // beads gone.
-//
-//testpolicy:allow parallel — the warning line is what the test reads, and warnf writes it to os.Stderr
 func TestAttentionPrefetchWarnsOnARealBatchFailure(t *testing.T) {
+	t.Parallel()
 	store := &batchBeads{issues: map[string]*beads.Issue{"gt-a": {ID: "gt-a"}}, batchErr: errors.New("bd down")}
 	a := newAttentionTestAdapter(t.TempDir(), store)
+	var warnings []string
+	a.warn = warnLines(&warnings)
 	items := attentionItemLines(a, "gt-a")
 
-	lines := captureStderr(t, func() { a.Prefetch(context.Background(), items) })
+	a.Prefetch(context.Background(), items)
 
-	want := "gt jev scorecard: reading the attention beads in a batch: bd down"
-	if len(lines) != 1 || lines[0] != want {
-		t.Fatalf("stderr = %q, want one line %q", lines, want)
+	want := []string{"reading the attention beads in a batch: bd down"}
+	if !reflect.DeepEqual(warnings, want) {
+		t.Fatalf("warned %q, want %q", warnings, want)
 	}
 }
 
 // A bead gone from the store leaves the attention report exactly as the
-// one-at-a-time read made it: the count is a stderr line, not a label.
+// one-at-a-time read made it: the count is a warning line, not a label.
 func TestAttentionPrefetchGoneBeadsLeaveTheReportAsItWas(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -212,7 +251,9 @@ func TestAttentionPrefetchGoneBeadsLeaveTheReportAsItWas(t *testing.T) {
 
 	want := reportJSON(t, withoutPrefetch{newAttentionTestAdapter(town, &goneShowBeads{issues: beadsOf(cases).issues, gone: gone})})
 	store := &goneShowBeads{issues: beadsOf(cases).issues, gone: gone}
-	got := reportJSON(t, newAttentionTestAdapter(town, store))
+	a := newAttentionTestAdapter(town, store)
+	a.warn = func(string, ...any) {}
+	got := reportJSON(t, a)
 
 	if got != want {
 		t.Errorf("the batched report differs from the per-item report\n got: %s\nwant: %s", got, want)
@@ -223,51 +264,49 @@ func TestAttentionPrefetchGoneBeadsLeaveTheReportAsItWas(t *testing.T) {
 }
 
 // The finding adapter says the count once too, and caches what it read.
-//
-//testpolicy:allow parallel — the one stderr line is what the test reads, and warnf writes it to os.Stderr
 func TestFindingPrefetchSaysGoneBeadsOnce(t *testing.T) {
+	t.Parallel()
 	store := &goneShowBeads{
 		issues: map[string]*beads.Issue{"gt-f1": {ID: "gt-f1", Status: "open"}},
 		gone:   map[string]bool{"gt-f2": true},
 	}
-	f := NewFinding(t.TempDir(), store, &countingDiffs{lines: map[string]int{}})
+	f := NewFinding(t.TempDir(), store, &countingDiffs{lines: map[string]int{}}).(*finding)
+	var warnings []string
+	f.warn = warnLines(&warnings)
 
-	lines := captureStderr(t, func() {
-		f.(*finding).Prefetch(context.Background(), []Item{{ID: "gt-f1"}, {ID: "gt-f2"}})
-	})
+	f.Prefetch(context.Background(), []Item{{ID: "gt-f1"}, {ID: "gt-f2"}})
 
-	if len(lines) != 1 || lines[0] != "gt jev scorecard: 1 beads gone" {
-		t.Fatalf("stderr = %q, want one line %q", lines, "gt jev scorecard: 1 beads gone")
+	if !reflect.DeepEqual(warnings, []string{"1 beads gone"}) {
+		t.Fatalf("warned %q, want one line %q", warnings, "1 beads gone")
 	}
 }
 
 // The dispatch adapter says the count once too, and keeps the bead it read.
-//
-//testpolicy:allow parallel — the one stderr line is what the test reads, and warnf writes it to os.Stderr
 func TestDispatchPrefetchSaysGoneBeadsOnce(t *testing.T) {
+	t.Parallel()
 	store := &goneShowBeads{
 		issues: map[string]*beads.Issue{"gt-d1": {ID: "gt-d1"}},
 		gone:   map[string]bool{"gt-d2": true},
 	}
 	a := newDispatchAdapter(t.TempDir(), func() (beadReader, error) { return store, nil })
+	var warnings []string
+	a.warn = warnLines(&warnings)
 
-	lines := captureStderr(t, func() {
-		a.Prefetch(context.Background(), []Item{{ID: "gt-d1"}, {ID: "gt-d2"}})
-	})
+	a.Prefetch(context.Background(), []Item{{ID: "gt-d1"}, {ID: "gt-d2"}})
 
-	if len(lines) != 1 || lines[0] != "gt jev scorecard: 1 beads gone" {
-		t.Fatalf("stderr = %q, want one line %q", lines, "gt jev scorecard: 1 beads gone")
+	if !reflect.DeepEqual(warnings, []string{"1 beads gone"}) {
+		t.Fatalf("warned %q, want one line %q", warnings, "1 beads gone")
 	}
 	if a.shown["gt-d1"] == nil {
 		t.Errorf("shown = %v, want the bead the store holds", a.shown)
 	}
 }
 
-// The town notes' batch says the count once and keeps the bead the store
-// holds; the rigs that read through it warn only about what else failed.
-//
-//testpolicy:allow parallel — the one stderr line is what the test reads, and warnf writes it to os.Stderr
+// The town notes' batch says the count once, names the rig it is of, and keeps
+// the bead the store holds; the rigs that read through it warn only about what
+// else failed.
 func TestTownNotesShowAllSaysGoneBeadsOnce(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	run := func(_ context.Context, argv []string) ([]byte, []byte, error) {
 		switch argv[0] {
@@ -286,13 +325,13 @@ func TestTownNotesShowAllSaysGoneBeadsOnce(t *testing.T) {
 	tn := &townNotes{town: dir, stores: map[string]*beads.Beads{
 		"gastown": beads.New(dir, beads.WithRunner(run)),
 	}}
+	var warnings []string
+	tn.warn = warnLines(&warnings)
 
-	var got map[string]*beads.Issue
-	var gotErr error
-	lines := captureStderr(t, func() { got, gotErr = tn.ShowAll("gastown", []string{"gt-a", "gt-gone"}) })
+	got, gotErr := tn.ShowAll("gastown", []string{"gt-a", "gt-gone"})
 
-	if len(lines) != 1 || lines[0] != "gt jev scorecard: 1 beads gone" {
-		t.Fatalf("stderr = %q, want one line %q", lines, "gt jev scorecard: 1 beads gone")
+	if !reflect.DeepEqual(warnings, []string{"1 beads gone in gastown"}) {
+		t.Fatalf("warned %q, want one line %q", warnings, "1 beads gone in gastown")
 	}
 	if gotErr != nil {
 		t.Errorf("ShowAll error = %v, want the count taken out", gotErr)

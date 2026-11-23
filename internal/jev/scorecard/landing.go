@@ -62,6 +62,10 @@ type landingNotes interface {
 type townNotes struct {
 	town   string
 	stores map[string]*beads.Beads
+	// warn tells the operator about the beads a batch read found gone; nil
+	// means stderr through warnf. A test sets it to see the warning without
+	// swapping os.Stderr.
+	warn func(format string, args ...any)
 }
 
 func (t *townNotes) Notes(rig, bead string) (string, error) {
@@ -85,15 +89,20 @@ func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
 // ShowAll reads several of a rig's beads in as few calls as it can. A rig whose
 // store cannot be opened, a bead it does not hold and a failed call all leave
 // the bead out of the result, for the caller to read one at a time. The beads
-// gone from the store are said once on stderr; the error carries the rest of
-// what failed, and the result still holds what was read.
+// gone from the store are said once, on the rig's own line, so a caller looping
+// over rigs names the rig each count is of; the error carries the rest of what
+// failed, and the result still holds what was read.
 func (t *townNotes) ShowAll(rig string, ids []string) (map[string]*beads.Issue, error) {
 	b, err := t.store(rig)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s's beads: %w", rig, err)
 	}
+	warn := t.warn
+	if warn == nil {
+		warn = warnf
+	}
 	got, err := showAll(b, ids)
-	return got, warnShowErr(err)
+	return got, warnShowErr(warn, rig, err)
 }
 
 // rigShowAller reads several of a rig's beads at once. townNotes is one.

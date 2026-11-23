@@ -53,25 +53,28 @@ type GoneError struct{ N int }
 // Error is the count alone, so warnShowErr prints one line: "3 beads gone".
 func (e *GoneError) Error() string { return fmt.Sprintf("%d beads gone", e.N) }
 
-// warnShowErr says on stderr that a batched read named beads the store no
+// warnShowErr says through warn that a batched read named beads the store no
 // longer holds: one line for the count, however many are gone, and not the
-// batch warning. It returns what is left of err for the caller's own warning:
-// nil when the gone beads are all that was wrong, and err itself when it holds
-// no *GoneError above zero.
-func warnShowErr(err error) error {
+// batch warning. subject names the rig the count is of; an empty subject names
+// none. It returns what is left of err for the caller's own warning: nil when
+// the gone beads are all that was wrong, and the residue (err itself when it
+// holds no *GoneError above zero) otherwise.
+//
+// A count is said even when another error wraps it, so an operator always sees
+// how many beads are gone. dropGone can take a count out of a join but not out
+// of a wrapper, so a wrapped count is said once here and carried to the caller
+// as well: the wrapper's own message cannot be dropped without losing it.
+func warnShowErr(warn func(format string, args ...any), subject string, err error) error {
 	var gone *GoneError
 	if !errors.As(err, &gone) || gone.N <= 0 {
 		return err
 	}
-	rest := dropGone(err)
-	var kept *GoneError
-	if errors.As(rest, &kept) {
-		// The count came wrapped in another error, which cannot lose it
-		// without its own message, so the caller's warning names it once.
-		return err
+	if subject != "" {
+		warn("%d beads gone in %s", gone.N, subject)
+	} else {
+		warn("%d beads gone", gone.N)
 	}
-	warnf("%d beads gone", gone.N)
-	return rest
+	return dropGone(err)
 }
 
 // dropGone returns err without the *GoneError showAll joins into it, so a
