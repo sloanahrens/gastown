@@ -429,25 +429,39 @@ Let `D` below stand for `git diff -U0 origin/{{base_branch}}...HEAD`. A hit is a
 question, not a verdict. Fix what you find now; amend or add commits as needed.
 Apply **Push as you go** after each commit.
 
-1. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
+1. Requirements (9, 12): for each Goal clause, Constraint, Out-of-scope line and
+   Acceptance box, write in `scratch/plan.md` the file:line of your diff that
+   meets it. A line with none is unfinished. If the bead's Gate does not run a
+   package you edited, run that package's tests yourself and say so in the
+   commit body.
+2. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
    read every added `if err != nil` branch. Each hit returns, wraps or escalates; an unknown or unreadable input denies.
-2. Wiring (12): `D -- '*.go' | grep -E '^[+]func '`, then `grep -rn <name>` for a
+3. Wiring (12): `D -- '*.go' | grep -E '^[+]func '`, then `grep -rn <name>` for a
    caller outside tests. Compare the Goal and each acceptance box with your plan.
-3. Red without the code (2, 3, 10): each added refusal branch and call has a test
-   row; delete the guard or call, run its `-run` test, see it fail, restore.
-4. Docs and comments (14): `D | grep -nE '^[+][[:space:]]*(//|#|[*]|-)'`; read each
-   line against the code (no line numbers, no claim the code does not make).
-5. State and bounds (13): name what ends each cache, lock, retry, timeout or reset.
-6. Input (4): each caller or file value that reaches a path, argv or request is
-   validated first.
-7. Test hygiene (7, 8): `D -- '*_test.go' | grep -nE '^[+].*(time[.]Sleep|time[.]After|Setenv|Getenv|UserHomeDir|/tmp|exec[.]Command)'`
-   is empty or justified.
-8. Secrets (11): no added error or log line prints captured output, a token or a password.
-9. Scope (9): verify no unintended changes:
+4. Red without the code (2, 3, 10): each added refusal branch and call has a test
+   row; delete the guard or call, run its `-run` test, see it fail, restore. A
+   guard or policy in YAML, CEL, a regex or a Dockerfile is run as that artifact,
+   never as a Go copy of its logic.
+5. Waits (13): `D -- '*_test.go' | grep -nE '^[+].*(<-[a-zA-Z]|[.]Wait[(][)]|time[.]Sleep|time[.]After|Setenv|Getenv|UserHomeDir|/tmp|exec[.]Command)'`
+   is empty, or each hit sits in a `select` with a deadline or fake-clock case.
+   Name what ends each cache, lock, retry, timeout or reset you added.
+6. Docs and comments (14): `D | grep -nE '^[+][[:space:]]*(//|#|[*]|-)'`; read each
+   line against the code (no line numbers, no claim the code does not make). A
+   change under `deploy/`, to daemon start-up, or to a Secret, mount or namespace
+   updates `docs/architecture.md` or the commit body says why not.
+7. Input and secrets (4, 11): each caller or file value that reaches a path, argv
+   or request is validated first; no added error or log line prints captured
+   output, a token or a password.
+8. Workspace (16): for each record type the diff reads for one workspace, make the
+   check rule 16 names.
+9. Scope and tier (9, 17): verify no unintended changes:
 ```bash
 git diff --stat origin/{{base_branch}}...HEAD
 # Only files named in your Constraints for {{issue}} should appear
 ```
+   For each `//go:build integration` file your diff reaches (`grep -rl 'go:build integration' --include='*.go' .`),
+   run `go vet -tags integration ./<pkg>/...` and put one line near the top of the commit body (om reads commit bodies, not bead notes):
+   `integration tier not run: needs a container; the overseer runs it`.
 
 If you accidentally modified unrelated files, remove those changes.
 
