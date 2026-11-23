@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -368,8 +369,9 @@ type LintVerdict struct {
 	// Warnings are advisory lines that change neither the route nor the exit
 	// code: the risk-path warning, the note that its read did not run, the
 	// story-point size gate's unread label, the change-budget warning for
-	// a budget under twenty lines per acceptance box, and the acceptance-count
-	// warning for a bead with five or more items. A work bead's warnings
+	// a budget under twenty lines per acceptance box, the acceptance-count
+	// warning for a bead with five or more items, and the gate-coverage warning
+	// for a package the Gate runs no test for. A work bead's warnings
 	// are populated on every route, so a refused bead still learns its text
 	// names too many risk paths.
 	Warnings []string
@@ -803,8 +805,9 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 // The shape decides the route and nothing else: the risk-path warning is
 // computed beside it and changes neither the route nor the exit code
 // (docs/design/rework-program.md, lever 2), and so are the change-budget
-// warning for a budget under twenty lines per acceptance box (gt-ed0hjd) and
-// the acceptance-count warning for five or more items (gt-7hrz5i).
+// warning for a budget under twenty lines per acceptance box (gt-ed0hjd), the
+// acceptance-count warning for five or more items (gt-7hrz5i) and the
+// gate-coverage warning for a package the Gate runs no test for (gt-ll05i5).
 func Lint(s Spec, t Template) LintVerdict {
 	return LintWith(s, t, LintOptions{})
 }
@@ -843,6 +846,7 @@ func lint(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 			v.Warnings = append(v.Warnings, w)
 		}
 		v.Warnings = append(v.Warnings, acceptanceWarnings(s, sections)...)
+		v.Warnings = append(v.Warnings, gateCoverageWarnings(sections["constraints"], sections["gate"])...)
 	}
 	return v
 }
@@ -1106,6 +1110,92 @@ func changeBudgetWarning(size string, boxes int) string {
 		return ""
 	}
 	return fmt.Sprintf(changeBudgetWarnText, budget.Lines, boxes)
+}
+
+// gateCoverageWarnings returns the one WARN line a bead whose Gate runs no test
+// for a package its Constraints edit gets. The check reads the Constraints
+// paths the way the target check does, keeping only Go files that are not
+// reference-only: a package the bead changes and the Gate never runs leaves
+// the polecat's change untested by the gate the bead states. It is advisory —
+// the landing, not the lint, decides what the branch needed — so the route and
+// exit code are unchanged. A bead with no go test Gate line, or with no
+// editable Go path in Constraints, gets no warning.
+func gateCoverageWarnings(constraints, gate string) []string {
+	dirs, all := gateTestPackageDirs(gate)
+	if len(dirs) == 0 && !all {
+		return nil
+	}
+	var uncovered []string
+	seen := map[string]bool{}
+	for _, p := range constraintFilePaths(constraints) {
+		if !strings.HasSuffix(p, ".go") {
+			continue
+		}
+		if referenceOnly(constraints, p) {
+			continue
+		}
+		dir := path.Dir(p)
+		if seen[dir] || gateCoversDir(dir, dirs, all) {
+			continue
+		}
+		seen[dir] = true
+		uncovered = append(uncovered, dir)
+	}
+	if len(uncovered) == 0 {
+		return nil
+	}
+	sort.Strings(uncovered)
+	noun, each := "package", "it"
+	if len(uncovered) > 1 {
+		noun, each = "packages", "each"
+	}
+	return []string{fmt.Sprintf(
+		"the Gate runs no go test for %s %s, which the Constraints edit: add a narrow -run line for %s to the Gate, such as go test ./%s -run '<TestName>'",
+		noun, strings.Join(uncovered, ", "), each, uncovered[0])}
+}
+
+// gateTestPackageDirs returns the directories the Gate's go test commands run,
+// and whether one runs every package (./...). Only the relative package forms
+// count: ./<dir>, ./<dir>/... and ./...; a bare import path is not matched,
+// the same gap containerSuitePackageArg documents.
+func gateTestPackageDirs(gate string) (dirs []string, all bool) {
+	for _, line := range strings.Split(gate, "\n") {
+		for _, segment := range shellSegments(line) {
+			args, ok := goTestArgs(strings.Fields(segment))
+			if !ok {
+				continue
+			}
+			for _, arg := range args {
+				if arg == "./..." || arg == "..." {
+					all = true
+					continue
+				}
+				arg = strings.TrimSuffix(arg, "/...")
+				if !strings.HasPrefix(arg, "./") {
+					continue
+				}
+				if dir := path.Clean(strings.TrimPrefix(arg, "./")); dir != "." && !strings.HasPrefix(dir, "..") {
+					dirs = append(dirs, dir)
+				}
+			}
+		}
+	}
+	return dirs, all
+}
+
+// gateCoversDir reports whether the Gate's go test commands run dir or a
+// parent directory: a go test ./<dir> line covers every path under that
+// directory (as does ./<dir>/...), and ./... covers them all.
+func gateCoversDir(dir string, dirs []string, all bool) bool {
+	if all {
+		return true
+	}
+	for _, d := range dirs {
+		if dir == d || strings.HasPrefix(dir, d+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // StoryPointsSizeGateWarning is the WARN line a bead whose sp-minutes labels
