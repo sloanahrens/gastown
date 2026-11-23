@@ -193,6 +193,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintf(stderr, "%s: prepare output directory %s: %v\n", name, opts.Out, err)
 		return FailureExit
 	}
+	// An earlier attempt of the same run can have left its result here, which a
+	// run that dies before writing its own would be read as (gt-45j3n8). Remove
+	// it before any work starts; a removal that cannot be made ends the run loud
+	// in part 2 (gt-ev02jt), so this call's error is not acted on here.
+	_ = d.RemoveAll(filepath.Join(opts.Out, sweeprunner.ResultFileName))
 	work, err := workDirectory(d, opts, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: create the work directory: %v\n", name, err)

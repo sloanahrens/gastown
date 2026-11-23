@@ -1780,3 +1780,64 @@ func TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess(t *testing.T) {
 		})
 	}
 }
+
+// TestRunRemovesAStaleResultBeforeItStarts: an output directory a launch reuses
+// can hold an earlier attempt's whole result.json. The run removes it before the
+// clone, so a run that dies before writing its own is never read as that
+// attempt's verdict (gt-45j3n8).
+func TestRunRemovesAStaleResultBeforeItStarts(t *testing.T) {
+	t.Parallel()
+	stale := sweeprunner.Result{
+		Rig: "gastown", SHA: testSHA,
+		Started:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finished: time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
+		Runner:   sweeprunner.Runner{Backend: runnerBackend, Image: runnerImage, CPUs: 1},
+		Tiers:    []sweeprunner.Tier{{Tier: tiersweep.TierIntegration, Summary: "tier-sweep: integration GREEN passed=9 failed=0 skipped=0"}},
+	}
+	// staleHarness is a run that starts with stale in its output directory, and
+	// whose RemoveAll really removes the result file while sparing the harness's
+	// work directory.
+	staleHarness := func(t *testing.T, clone func(string, string, string) error, sweep func([]string, map[string]string, io.Writer, io.Writer) int) *harness {
+		t.Helper()
+		var h *harness
+		h = newHarness(t, func(repo, sha, work string) error {
+			if _, err := os.Stat(filepath.Join(h.out, sweeprunner.ResultFileName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the earlier attempt's result is still there when the clone starts (stat: %v)", err)
+			}
+			return clone(repo, sha, work)
+		}, sweep)
+		h.deps.RemoveAll = func(path string) error {
+			if path == filepath.Join(h.out, sweeprunner.ResultFileName) {
+				return os.RemoveAll(path)
+			}
+			return nil
+		}
+		if err := sweeprunner.Write(h.out, stale); err != nil {
+			t.Fatalf("writing the earlier attempt's result: %v", err)
+		}
+		return h
+	}
+
+	t.Run("a failed clone writes the run's own RED result over the stale one", func(t *testing.T) {
+		t.Parallel()
+		h := staleHarness(t, func(string, string, string) error {
+			return errors.New("fatal: could not read from remote repository")
+		}, nil)
+		if got, _ := runAndRead(t, h, tiersweep.TierIntegration); got.Verdict != "RED" || got.Passed != 0 {
+			t.Errorf("integration = %+v, want the run's own RED, not the earlier attempt's GREEN", got)
+		}
+	})
+
+	t.Run("a run that cannot report a result leaves none behind", func(t *testing.T) {
+		t.Parallel()
+		h := staleHarness(t,
+			func(string, string, string) error { return nil },
+			func([]string, map[string]string, io.Writer, io.Writer) int { return sweepNoExit })
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git"); code != FailureExit {
+			t.Fatalf("exit code = %d, want %d (stderr %q)", code, FailureExit, h.stderr.String())
+		}
+		if h.resultFileExists(t) {
+			t.Fatal("a run that could not report a result left the earlier attempt's result.json in place")
+		}
+	})
+}
