@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -79,11 +80,21 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 // squashDestructiveSent reports whether the server was sent a statement that is
 // not a read. A refused, untakeable or held run may add harmless reads, so the
 // tests assert this instead of an exact count; anything but a SELECT or a SHOW
-// is a statement such a run must never send.
+// is a statement such a run must never send. Each query is split at its
+// semicolons and every statement is judged, so a multi-statement string cannot
+// pass on the word it opens with.
 func squashDestructiveSent(queries []string) bool {
 	for _, q := range queries {
-		if !strings.HasPrefix(q, "SELECT") && !strings.HasPrefix(q, "SHOW") {
-			return true
+		for _, statement := range strings.Split(q, ";") {
+			fields := strings.Fields(statement)
+			if len(fields) == 0 {
+				continue
+			}
+			switch strings.ToUpper(fields[0]) {
+			case "SELECT", "SHOW":
+			default:
+				return true
+			}
 		}
 	}
 	return false
@@ -349,15 +360,16 @@ func TestSquashP95IsNearestRank(t *testing.T) {
 // the trigger and the cut, then hands the database to the engine, which holds
 // the town's run marker for the run. The run's failure is reported rather than
 // read as a day's work done, and the check is due again after the retry delay
-// rather than setting the daily gate. The SquashMarker prefix is what
-// gt-w7g4oa's gate line (-run 'SquashMarker') selects, so a rename back into the
-// TestSquashCheck family hides this test from that filter (gt-4o1ujx).
+// rather than setting the daily gate.
 func TestSquashMarkerTrippedCheckRunsTheDatabase(t *testing.T) {
 	t.Parallel()
 	bigger := int64(100)
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
 		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &bigger,
 	})
+	// The engine times each step on d.clk(); pin it so the run never reads the
+	// wall clock.
+	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	root := squashBackupRoot(t, d)
 	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
 	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
@@ -395,6 +407,10 @@ func squashDueDaemon(t *testing.T) (*Daemon, *squashFakeServer, *bytes.Buffer) {
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
 		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &small,
 	})
+	// The engine times each step on d.clk(), so a daemon these tests drive a
+	// run on pins the clock. The shared helper leaves it real: the tests that
+	// never reach the engine do not read it.
+	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
 	return d, server, logs
 }
@@ -1792,10 +1808,11 @@ func TestSquashRecordDestructiveStatementIsNotARead(t *testing.T) {
 		queries []string
 		want    bool
 	}{
-		"no statements": {nil, false},
-		"readings":      {[]string{"SELECT COUNT(*) FROM dolt_log('main')", "SHOW FULL TABLES"}, false},
-		"an update":     {[]string{"SELECT COUNT(*) FROM dolt_rebase", "UPDATE dolt_rebase SET action = 'squash'"}, true},
-		"a call":        {[]string{"CALL DOLT_CHECKOUT('main')"}, true},
+		"no statements":                   {nil, false},
+		"readings":                        {[]string{"SELECT COUNT(*) FROM dolt_log('main')", "SHOW FULL TABLES"}, false},
+		"an update":                       {[]string{"SELECT COUNT(*) FROM dolt_rebase", "UPDATE dolt_rebase SET action = 'squash'"}, true},
+		"a call":                          {[]string{"CALL DOLT_CHECKOUT('main')"}, true},
+		"a read and a call in one string": {[]string{"SELECT name FROM dolt_branches; CALL DOLT_CHECKOUT('main')"}, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
