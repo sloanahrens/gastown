@@ -45,8 +45,7 @@ func redHoldSweepOf(rig string, st tierSweepState, err error) (redHoldSweep, boo
 }
 
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
-// names in the order to read them, the reader for one name, and the clock a new
-// reason takes its Since from.
+// names in read order, the reader for one name, and the clock for a new Since.
 type redHoldSources struct {
 	Rigs []string
 	Read func(rig string) (tierSweepState, error)
@@ -102,10 +101,9 @@ func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) d
 	return dispatch.RedHoldRecord{Reasons: reasons}
 }
 
-// runRedHold evaluates the sweep sources and publishes the red hold: it writes
-// the record and logs the change line once, only when the kind set changes. A
-// rig whose record cannot be read leaves the file untouched, so an unreadable
-// record never clears a hold.
+// runRedHold evaluates the sweep sources and publishes the red hold, writing the
+// record and logging the change once. An unreadable sweep record leaves the file
+// untouched, so it never clears a hold.
 func runRedHold(townRoot string, src redHoldSources, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)

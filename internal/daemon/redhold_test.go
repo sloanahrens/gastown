@@ -147,83 +147,62 @@ func TestRedHoldChangeLine(t *testing.T) {
 	}
 }
 
-// redHoldLogs collects the lines logf writes.
-type redHoldLogs []string
-
-func (l *redHoldLogs) logf(format string, args ...any) {
-	*l = append(*l, fmt.Sprintf(format, args...))
-}
-
-// sweepStates is a redHoldSources reader serving one state per rig, and an error
-// for the named rig.
-func sweepStates(states map[string]tierSweepState, unread string) func(string) (tierSweepState, error) {
-	return func(rig string) (tierSweepState, error) {
-		if rig == unread {
-			return tierSweepState{}, errors.New("reading the record")
-		}
-		return states[rig], nil
-	}
-}
+// redHoldSentinel is a record already on disk: a run that must not write keeps it.
+var redHoldSentinel = dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Detail: "sentinel"}}}
 
 func TestRedHoldStepSetsThenClears(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	now := time.Unix(1_700_000_000, 0).UTC()
-	states := map[string]tierSweepState{"gastown": {RedCycles: 2}}
-	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(states, ""), Now: func() time.Time { return now }}
-	var logs redHoldLogs
+	state := tierSweepState{RedCycles: 2}
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return state, nil }, Now: func() time.Time { return now }}
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	require.NoError(t, runRedHold(townRoot, src, logs.logf))
+	require.NoError(t, runRedHold(townRoot, src, logf))
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
 	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "gastown: 2 red cycles"}}, rec.Reasons)
 
-	states["gastown"] = tierSweepState{}
-	require.NoError(t, runRedHold(townRoot, src, logs.logf))
-	_, err = os.Stat(dispatch.RedHoldPath(townRoot))
-	require.True(t, os.IsNotExist(err), "a green record removes the file")
-	require.Equal(t, redHoldLogs{"red hold: set: sweep-red", "red hold: cleared"}, logs, "each change logs once")
+	state = tierSweepState{}
+	require.NoError(t, runRedHold(townRoot, src, logf))
+	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "a green record removes the file")
+	require.Equal(t, []string{"red hold: set: sweep-red", "red hold: cleared"}, logs, "each change logs once")
 }
 
+// TestRedHoldStepUnchangedIsSilent pins the runs that leave the file and log alone.
 func TestRedHoldStepUnchangedIsSilent(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	sentinel := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Detail: "sentinel"}}}
-	require.NoError(t, dispatch.WriteRedHold(townRoot, sentinel))
-	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(map[string]tierSweepState{"gastown": {RedCycles: 3}}, "")}
-	var logs redHoldLogs
-
-	require.NoError(t, runRedHold(townRoot, src, logs.logf))
-	rec, err := dispatch.ReadRedHold(townRoot)
-	require.NoError(t, err)
-	require.Equal(t, sentinel, rec, "an unchanged kind set is not rewritten")
-	require.Empty(t, logs, "an unchanged kind set logs nothing")
-}
-
-func TestRedHoldStepUnreadableKeepsState(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	sentinel := dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Detail: "sentinel"}}}
-	require.NoError(t, dispatch.WriteRedHold(townRoot, sentinel))
-	src := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(nil, "gastown")}
-	var logs redHoldLogs
-
-	require.NoError(t, runRedHold(townRoot, src, logs.logf), "an unreadable sweep record is not an error")
-	rec, err := dispatch.ReadRedHold(townRoot)
-	require.NoError(t, err)
-	require.Equal(t, sentinel, rec, "an unreadable sweep record clears nothing")
-	require.Empty(t, logs, "an unreadable sweep record changes nothing")
+	tests := []struct {
+		name string
+		read func(string) (tierSweepState, error)
+	}{
+		{"an unchanged kind set is not rewritten", func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 3}, nil }},
+		{"an unreadable sweep record clears nothing", func(string) (tierSweepState, error) { return tierSweepState{}, errors.New("reading the record") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+			var logs []string
+			logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+			require.NoError(t, runRedHold(townRoot, redHoldSources{Rigs: []string{"gastown"}, Read: tt.read}, logf))
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, redHoldSentinel, rec, tt.name)
+			require.Empty(t, logs, tt.name)
+		})
+	}
 }
 
 func TestRedHoldStepRefusals(t *testing.T) {
 	t.Parallel()
-	red := redHoldSources{Rigs: []string{"gastown"}, Read: sweepStates(map[string]tierSweepState{"gastown": {RedCycles: 2}}, "")}
+	red := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil }}
 	noLog := func(string, ...any) {}
 	t.Run("an unreadable red hold record", func(t *testing.T) {
 		townRoot := t.TempDir()
-		path := dispatch.RedHoldPath(townRoot)
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
-		require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+		require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+		require.NoError(t, os.WriteFile(dispatch.RedHoldPath(townRoot), []byte("{not json"), 0o600))
 		require.ErrorContains(t, runRedHold(townRoot, red, noLog), "read red hold")
 	})
 	t.Run("a red hold record that cannot be written", func(t *testing.T) {
