@@ -59,7 +59,8 @@ var JobListSource func(townRoot string, now time.Time) ([]JobReading, error)
 // outcome is no longer failed.
 // A list that cannot be read raises one item keyed jobOverdueListKey naming
 // the failure, and no error, so the item clears on the next tick the list
-// reads. With no source wired it raises nothing.
+// reads. A job patrolOff reports off raises nothing: it is switched off, not
+// overdue (gt-9r7i8p). With no source wired it raises nothing.
 func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item, error) {
 	if s.jobList == nil {
 		return nil, nil
@@ -75,6 +76,9 @@ func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item,
 	}
 	var out []attention.Item
 	for _, r := range readings {
+		if s.patrolOff != nil && s.patrolOff(r.Name) {
+			continue
+		}
 		if !jobOverdueRaises(r) {
 			continue
 		}
