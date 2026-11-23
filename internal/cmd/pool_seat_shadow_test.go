@@ -310,5 +310,5 @@ func TestPoolHookRetireShadowFromDisposition(t *testing.T) {
 // rosterOverShadowBatch is the seat picture the roster reads, over the batch
 // whose shadow lines a test captures.
 func rosterOverShadowBatch(lister sessionLister, town string, batch *poolSeatBatch) ([]poolSession, int, error) {
-	return poolSeatSessionsProbedWith(lister, town, batch.disposition, nil, nil, seatPool("deepseek-flash", 3))
+	return poolSeatSessionsProbedWith(lister, town, batch.disposition, nil, seatPool("deepseek-flash", 3))
 }

@@ -68,16 +68,15 @@ func sandboxDeadSamples(townRoot string) int {
 // and mid-landing together (gt-xmcyk). Each source skips the seats an earlier
 // one already named, so a seat is one seat however many of them describe it.
 func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
-	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), nil, poolSeatWorkFor(townRoot), pool)
+	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolSeatWorkFor(townRoot), pool)
 }
 
 // poolSeatSessionsWith is poolSeatSessions with the town's reads explicit: the
 // per-seat polecat-state read (listPolecatSessions' disposition) and the
 // batched work-bead read the landing seats are confirmed with. A caller with
-// no town to read (a test) passes nil for both of them. The hook-held seam is
-// accepted and ignored until gt-ujao98 removes it.
-func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, _ polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
-	sessions, _, err := poolSeatSessionsProbedWith(t, townRoot, disposition, nil, work, pool)
+// no town to read (a test) passes nil for both of them.
+func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
+	sessions, _, err := poolSeatSessionsProbedWith(t, townRoot, disposition, work, pool)
 	return sessions, err
 }
 
@@ -85,7 +84,7 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 // its dead-hooked walk ran the full state read (the worktree probe) for. The
 // roster logs it, so a tick that stopped probing worktrees no seat holds shows
 // it next to the tick's timing (gt-gg9hv.73).
-func poolSeatSessionsProbedWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, _ polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, int, error) {
+func poolSeatSessionsProbedWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, int, error) {
 	sessions, probed, err := poolOccupiedSessionsProbed(t, townRoot, disposition, work, pool, time.Now, sandboxSeatDeathsFor(townRoot))
 	if err != nil {
 		return nil, probed, err

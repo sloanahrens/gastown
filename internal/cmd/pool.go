@@ -509,7 +509,7 @@ func poolLiveForBatch(townRoot string, lister sessionLister, storeFor func(dir s
 		return storeFor(townRoot).ShowMultiple(ids)
 	}
 	return poolLiveForWithReconcile(townRoot, func(pool *config.PolecatPool) ([]poolSession, error) {
-		return poolSeatSessionsWith(lister, townRoot, batch.disposition, nil, work, pool)
+		return poolSeatSessionsWith(lister, townRoot, batch.disposition, work, pool)
 	}, poolReconcileTownReads(townRoot))
 }
 
