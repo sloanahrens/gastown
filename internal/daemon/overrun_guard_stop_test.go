@@ -2932,6 +2932,7 @@ func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
 }
 
 func TestIsNonFastForwardPush(t *testing.T) {
+	t.Parallel()
 	// A sandbox seat's push runs through session exec, whose error carries the
 	// refusal as text and never as a *git.GitError (gt-ro8oxj).
 	sandbox := func(gitText string) error {
@@ -2955,6 +2956,7 @@ func TestIsNonFastForwardPush(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := isNonFastForwardPush(tt.err); got != tt.want {
 				t.Errorf("isNonFastForwardPush(%v) = %t, want %t", tt.err, got, tt.want)
 			}
