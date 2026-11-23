@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -29,6 +30,16 @@ func readSeatEndRecord(client beads.Client, rig, polecat, bead string) (seatship
 		return p, true, nil
 	}
 	return seatship.Payload{}, false, nil
+}
+
+// recordOfSeat reports whether p can be the record of the seat that started at
+// start: its usage must end after that start. A SEAT-END comment names its seat
+// only by rig, polecat and bead, and a pool seat takes a later task under those
+// same three, so a predecessor's comment on the bead would otherwise pass for
+// this seat's and skip the pull that holds this seat's transcripts. An unknown
+// start is the zero time, which denies the record, and the pull runs (gt-g73e2q).
+func recordOfSeat(p seatship.Payload, start time.Time) bool {
+	return !start.IsZero() && p.Usage != nil && p.Usage.End.After(start)
 }
 
 // storeSeatEndRecord files a finished seat's usage record with its bead's
