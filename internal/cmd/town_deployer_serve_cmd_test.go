@@ -11,9 +11,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// TestTownDeployerServeCommand: serve is registered under gt town deployer, takes
-// no arguments, marks --as-user, --inbox, --answers and --state required, and
-// hands the run the flag values it was given (gt-p1ej8c).
+// TestTownDeployerServeCommand: serve is registered under gt town deployer, takes no
+// arguments, marks four flags required, and hands the run their values (gt-p1ej8c).
 func TestTownDeployerServeCommand(t *testing.T) {
 	found, _, err := townDeployerCmd.Find([]string{"serve"})
 	if err != nil || found != townDeployerServeCmd || found.Use != "serve" {
