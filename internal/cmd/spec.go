@@ -4858,10 +4858,10 @@ func rigsWithPolecatDirs(townRoot string, rigs []string) (kept []string, first e
 
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
 // seats the disposition releases, so a tick's slings can count them free too.
-func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
+func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, _ polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
 	at := now()
 	recorded, released := releasedSeatRecorder(disposition)
-	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, hookHeld, work, pool)
+	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, nil, work, pool)
 	if err != nil {
 		return poolSeatSnapshot{}, err
 	}
