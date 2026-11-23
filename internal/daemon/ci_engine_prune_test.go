@@ -1984,6 +1984,7 @@ func TestCIEnginePruneRecordsRun(t *testing.T) {
 	counts := map[string]int64{"containers": 1, "images": 1, "volumes": 1}
 	for name, tc := range map[string]struct {
 		mode        string
+		remove      engineRemoveAnswers
 		setup       func(f *ciCacheFixture)
 		wantOutcome string
 		wantStats   map[string]int64
@@ -2004,6 +2005,13 @@ func TestCIEnginePruneRecordsRun(t *testing.T) {
 			},
 			wantOutcome: ciEngineOutcomeFailed,
 			wantStats:   counts,
+		},
+		"a removal docker leaves in place is failed": {
+			mode:        agentconfig.DiskMaintenanceModeApply,
+			remove:      engineRemoveAnswers{short: true},
+			setup:       func(*ciCacheFixture) {},
+			wantOutcome: ciEngineOutcomeFailed,
+			wantStats:   map[string]int64{"containers": 1, "images": 1, "volumes": 1, "build_cache_bytes": 0},
 		},
 		"a build cache step that reclaims nothing over reclaimable cache is the empty outcome": {
 			mode: agentconfig.DiskMaintenanceModeApply,
@@ -2040,7 +2048,7 @@ func TestCIEnginePruneRecordsRun(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newCIEngineFixture(t, tc.mode, engineBuildCacheListing(t), engineRemoveAnswers{})
+			f := newCIEngineFixture(t, tc.mode, engineBuildCacheListing(t), tc.remove)
 			tc.setup(f)
 			f.tick()
 			f.drain()
