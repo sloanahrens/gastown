@@ -1654,6 +1654,14 @@ func (e *overrunPushDivergedError) reason() string {
 // isNonFastForwardPush reports whether err is git's non-fast-forward
 // rejection, worded "non-fast-forward" when git knows the remote ref's history
 // and "fetch first" when it knows only that the ref moved.
+//
+// It differs from the same-named predicate in internal/git/git.go, which reads
+// only a *git.GitError from the local runner. A sandbox seat's push is run
+// through session exec and comes back as text with no GitError
+// (backend_openshell_ops.go), so this predicate also reads the message, one
+// segment at a time: refusalLine (internal/session/branchrelation.go) joins
+// git's output lines with " | ", so a [rejected] segment is only a segment
+// after splitting on that separator too.
 func isNonFastForwardPush(err error) bool {
 	if err == nil {
 		return false
@@ -1662,18 +1670,21 @@ func isNonFastForwardPush(err error) bool {
 	if errors.As(err, &ge) && (strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")) {
 		return true
 	}
-	// A sandbox seat's push comes back from session exec as text, not a
-	// *git.GitError (backend_openshell_ops.go), so the refusal must be read
-	// from the message; only a [rejected] line carries git's own wording
-	// (gt-ro8oxj). A [remote rejected] line is a different refusal: the hook
-	// or the server declined it, and no rescue is due.
-	for _, line := range strings.Split(err.Error(), "\n") {
-		if strings.Contains(line, "[rejected]") &&
-			(strings.Contains(line, "non-fast-forward") || strings.Contains(line, "fetch first")) {
-			return true
+	// Only a plain [rejected] segment carrying git's wording is a moved ref
+	// (gt-ro8oxj). A [remote rejected] segment is a different refusal: the
+	// hook or the server declined it, and no rescue is due, so it wins over
+	// any [rejected] segment beside it.
+	sawRejected := false
+	for _, segment := range strings.Split(strings.ReplaceAll(err.Error(), " | ", "\n"), "\n") {
+		if strings.Contains(segment, "[remote rejected]") {
+			return false
+		}
+		if strings.Contains(segment, "[rejected]") &&
+			(strings.Contains(segment, "non-fast-forward") || strings.Contains(segment, "fetch first")) {
+			sawRejected = true
 		}
 	}
-	return false
+	return sawRejected
 }
 
 // originBranchSHA is the commit origin holds for branch, or "" when origin

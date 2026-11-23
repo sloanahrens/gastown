@@ -2934,7 +2934,8 @@ func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
 func TestIsNonFastForwardPush(t *testing.T) {
 	t.Parallel()
 	// A sandbox seat's push runs through session exec, whose error carries the
-	// refusal as text and never as a *git.GitError (gt-ro8oxj).
+	// refusal as text and never as a *git.GitError (gt-ro8oxj). refusalLine
+	// joins git's output lines with " | ", so the text arrives in that shape.
 	sandbox := func(gitText string) error {
 		return fmt.Errorf("git push: %w", fmt.Errorf("git push in sandbox gt-nux: %s", gitText))
 	}
@@ -2946,10 +2947,13 @@ func TestIsNonFastForwardPush(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "sandbox text non-fast-forward", err: sandbox("exit status 1: error: failed to push some refs\n ! [rejected] 64efa97 -> b (non-fast-forward)"), want: true},
+		{name: "sandbox joined non-fast-forward", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (non-fast-forward) | error: failed to push some refs"), want: true},
+		{name: "sandbox newline non-fast-forward", err: sandbox("exit status 1: error: failed to push some refs\n ! [rejected] 64efa97 -> b (non-fast-forward)"), want: true},
 		{name: "host git error non-fast-forward", err: refused(" ! [rejected] b -> b (non-fast-forward)"), want: true},
-		{name: "sandbox text fetch first", err: sandbox("exit status 1: ! [rejected] main -> main (fetch first)"), want: true},
-		{name: "text mentioning non-fast-forward without a rejected line", err: sandbox("exit status 1: pre-receive hook says non-fast-forward"), want: false},
+		{name: "sandbox joined fetch first", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (fetch first) | error: failed to push some refs"), want: true},
+		{name: "sandbox rejected segment beside a remote rejected decline", err: sandbox("exit status 1: To http://x/r.git | ! [rejected] b -> b (fetch first) | ! [remote rejected] main -> main (pre-receive hook declined)"), want: false},
+		{name: "wording on another segment does not make a rejected segment", err: sandbox("exit status 1: ! [rejected] b -> b (stale info) | error: pre-receive hook says non-fast-forward"), want: false},
+		{name: "text mentioning non-fast-forward without a rejected segment", err: sandbox("exit status 1: pre-receive hook says non-fast-forward"), want: false},
 		{name: "remote rejected pre-receive hook declined", err: sandbox("exit status 1: ! [remote rejected] main -> main (pre-receive hook declined)"), want: false},
 		{name: "permission denied", err: sandbox("exit status 1: fatal: permission denied"), want: false},
 		{name: "nil", err: nil, want: false},
