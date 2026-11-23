@@ -69,8 +69,8 @@ func TestAgentBeadRetireDeadHookedLogsOncePerSeat(t *testing.T) {
 		intent.Record{WorkBead: "gt-intent-bead"})
 
 	for range []int{0, 1} {
-		if _, err := batch.hookHeld("gastown", "ember"); err != nil {
-			t.Fatalf("hookHeld: %v", err)
+		if _, err := batch.disposition("gastown", "ember"); err != nil {
+			t.Fatalf("disposition: %v", err)
 		}
 	}
 	if got := shadowLines(lines); len(got) != 1 {
@@ -212,39 +212,9 @@ func TestAgentBeadRetireDeadHookedLogsAnEmptyWorkBead(t *testing.T) {
 	}
 }
 
-// TestAgentBeadRetireDeadHookedDoesNotReadWithoutATown: a batch built with no
-// town has no record to read, and reading one anyway would resolve a path
-// against the process's working directory. The seat's hook question is still
-// answered, with nothing logged.
-func TestAgentBeadRetireDeadHookedDoesNotReadWithoutATown(t *testing.T) {
-	t.Parallel()
-	db := beadsfake.New()
-	// The id the seat read builds with no town, seeded so the bead's hook is a
-	// value the compare would report against the empty record.
-	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig("", "gastown"), "gastown", "ember")
-	db.Seed(beads.Issue{ID: id, Title: id, Type: "agent", Labels: []string{"gt:agent"},
-		Description: beads.FormatAgentDescription(id, &beads.AgentFields{
-			RoleType: "polecat", Rig: "gastown", AgentState: "idle", HookBead: "gt-bead-hook",
-		})})
-	lines := &bytes.Buffer{}
-	batch := batchOverStore("", db)
-	batch.shadow = lines
-
-	held, err := batch.hookHeld("gastown", "ember")
-	if err != nil {
-		t.Fatalf("hookHeld: %v", err)
-	}
-	if !held {
-		t.Fatal("hookHeld dropped a seat whose hook names an unreadable bead, so the test would not see a compare")
-	}
-	if got := shadowLines(lines); len(got) != 0 {
-		t.Fatalf("shadow lines = %q, want none without a town to read", got)
-	}
-}
-
-// cacheSeatRead fills the batch's seat cache with the read hookHeld makes,
-// without the line hookHeld logs, so a test can drive disposition's cached
-// branch alone.
+// cacheSeatRead fills the batch's seat cache with the batch's own seat read,
+// without the shadow line a disposition call would log, so a test can drive
+// disposition's cached branch alone.
 func cacheSeatRead(t *testing.T, town string, batch *poolSeatBatch, rigName, polecatName string) {
 	t.Helper()
 	seat, _, err := poolReadSeatBeads(town, rigName, polecatName, batch.seatReads(rigName))
@@ -261,7 +231,7 @@ func cacheSeatRead(t *testing.T, town string, batch *poolSeatBatch, rigName, pol
 }
 
 // TestPoolHookRetireShadowFromDisposition is P1.7's evidence surviving the hook
-// read's retirement: with hookHeld never called, disposition alone logs the one
+// read's retirement: with the hook read gone, disposition alone logs the one
 // disagreement line with both values, from the read it makes and from the seat
 // already in the batch's cache (gt-9h7c2n).
 func TestPoolHookRetireShadowFromDisposition(t *testing.T) {
@@ -294,50 +264,8 @@ func TestPoolHookRetireShadowFromDisposition(t *testing.T) {
 	}
 }
 
-// TestPoolHookRetireShadowOnce: a seat asked through both reads logs one line,
-// not two, while the comparison lives in both — and a seat whose two sources
-// agree still logs none (gt-9h7c2n).
-func TestPoolHookRetireShadowOnce(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		hook string
-		rec  intent.Record
-		want []string
-	}{
-		{
-			name: "both readers of a disagreeing seat",
-			hook: "gt-bead-hook",
-			rec:  intent.Record{WorkBead: "gt-intent-bead"},
-			want: []string{"agentbead_shadow: gastown/ember hook intent=gt-intent-bead bead=gt-bead-hook"},
-		},
-		{
-			name: "the two sources agree",
-			hook: "gt-same",
-			rec:  intent.Record{WorkBead: "gt-same"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			town, _, batch, lines := seatShadowTown(t, "ember", tc.hook)
-			writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town, tc.rec)
-
-			if _, err := batch.hookHeld("gastown", "ember"); err != nil {
-				t.Fatalf("hookHeld: %v", err)
-			}
-			if _, err := batch.disposition("gastown", "ember"); err != nil {
-				t.Fatalf("disposition: %v", err)
-			}
-			if got := shadowLines(lines); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("shadow lines = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 // rosterOverShadowBatch is the seat picture the roster reads, over the batch
 // whose shadow lines a test captures.
 func rosterOverShadowBatch(lister sessionLister, town string, batch *poolSeatBatch) ([]poolSession, int, error) {
-	return poolSeatSessionsProbedWith(lister, town, batch.disposition, batch.hookHeld, nil, seatPool("deepseek-flash", 3))
+	return poolSeatSessionsProbedWith(lister, town, batch.disposition, nil, nil, seatPool("deepseek-flash", 3))
 }

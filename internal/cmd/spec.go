@@ -4819,7 +4819,7 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 	if err := batch.readRigs(rigs); err != nil {
 		return poolSeatSnapshot{}, err
 	}
-	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, batch.hookHeld, work, pool, now)
+	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, nil, work, pool, now)
 }
 
 // rosterRigNames names the rigs the seat picture reads: every known rig when
