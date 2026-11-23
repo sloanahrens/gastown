@@ -8,9 +8,11 @@ import (
 )
 
 // TailOf returns the last n bytes of the newest *.jsonl transcript under
-// projectsDir, recursively, from a line boundary when one fits in the window,
-// or "" when there is none. A non-regular entry (a symlink, a FIFO) is refused,
-// never followed; an unwalkable projectsDir is an error. The newest is read whole.
+// projectsDir, recursively, starting at a line boundary: a cut that lands
+// mid-line drops the partial line, so a window with no complete line (a final
+// record longer than n) yields "". It returns "" when there is no transcript,
+// and an error when projectsDir cannot be walked, a *.jsonl entry is not a
+// regular file, or the chosen transcript cannot be read.
 func TailOf(projectsDir string, n int) (string, error) {
 	var newest string
 	var newestInfo os.FileInfo
@@ -35,6 +37,8 @@ func TailOf(projectsDir string, n int) (string, error) {
 	})
 	var b []byte
 	if err == nil && newest != "" {
+		// Read whole so the open and read share the one error return a test can
+		// drive; a seek-and-bound read adds failure branches no fixture reaches.
 		b, err = os.ReadFile(newest)
 	}
 	if err != nil {
@@ -43,10 +47,11 @@ func TailOf(projectsDir string, n int) (string, error) {
 	start := min(max(len(b)-n, 0), len(b))
 	window := b[start:]
 	if start > 0 && b[start-1] != '\n' {
-		// With no complete line in the window (a final record over n), keep it.
-		if i := strings.IndexByte(string(window), '\n'); i >= 0 && i+1 < len(window) {
-			window = window[i+1:]
+		i := strings.IndexByte(string(window), '\n')
+		if i < 0 {
+			return "", nil // one partial record: no line boundary in the window
 		}
+		window = window[i+1:]
 	}
 	return string(window), nil
 }
