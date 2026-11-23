@@ -359,8 +359,6 @@ func TestRedHoldStepRollFeedsInputs(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	green := "0123456789abcdef"
-	failed := func() (string, string, error) { return "failed", green, nil }
-	stuck := func() []string { return []string{green} }
 	tests := []struct {
 		name   string
 		states map[string]tierSweepState
@@ -373,7 +371,8 @@ func TestRedHoldStepRollFeedsInputs(t *testing.T) {
 			map[string]tierSweepState{
 				"alpha": {LastGreenSHA: green, ImagesRetries: 1, ImagesRetrySHA: green},
 				"beta":  {LastGreenSHA: green, ImagesRetries: 3, ImagesRetrySHA: green},
-			}, failed, stuck,
+			},
+			func() (string, string, error) { return "failed", green, nil }, func() []string { return []string{green} },
 			[]dispatch.RedHoldReason{
 				{Kind: dispatch.RedHoldImagesFailed, Since: now, Detail: "images build failed 3 times"},
 				{Kind: dispatch.RedHoldPairStuck, Since: now, Detail: "stuck pair: 0123456789ab"},
@@ -407,14 +406,14 @@ func TestRedHoldStepRollUpdateError(t *testing.T) {
 	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 	const line = "red hold: update state unreadable; keeping the previous state"
 	var update func() (string, string, error)
-	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{}, nil },
-		Update: func() (string, string, error) { return update() }}
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{}, nil }, Update: func() (string, string, error) { return update() }}
 	var logs []string
 	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	unreadLog := map[string]bool{}
 	step := func() { require.NoError(t, runRedHold(townRoot, src, unreadLog, logf)) }
+	boom := func() (string, string, error) { return "", "", errors.New("reading the update state") }
 
-	update = func() (string, string, error) { return "", "", errors.New("reading the update state") }
+	update = boom
 	step()
 	step()
 	rec, err := dispatch.ReadRedHold(townRoot)
@@ -425,9 +424,8 @@ func TestRedHoldStepRollUpdateError(t *testing.T) {
 	update = func() (string, string, error) { return "ok", "", nil }
 	step()
 	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "the recovery evaluates again")
-	require.Equal(t, []string{line, "red hold: cleared"}, logs)
 
-	update = func() (string, string, error) { return "", "", errors.New("reading the update state") }
+	update = boom
 	step()
 	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
 }

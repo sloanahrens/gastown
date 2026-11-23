@@ -79,8 +79,8 @@ const redHoldUpdateKey = "\x00update"
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
 // names in read order, the reader for one name, the waiter for the count of
 // landings not in the installed build, the reader for the update run's outcome
-// and target commit, the stuck pairs, and the clock for a new Since. A nil
-// Waiting, Update or PairStuck contributes nothing.
+// and target commit, the stuck pairs, and the clock. A nil Waiting, Update or
+// PairStuck contributes nothing.
 type redHoldSources struct {
 	Rigs      []string
 	Read      func(rig string) (tierSweepState, error)
