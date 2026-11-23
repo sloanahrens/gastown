@@ -1,6 +1,7 @@
 package scorecard
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -96,7 +97,7 @@ func TestLandedFilesCacheErrors(t *testing.T) {
 	if _, err := openLandedFilesCache(dir); err == nil || !strings.Contains(err.Error(), "reading the landed files cache") {
 		t.Fatalf("open a directory = %v; want a read error", err)
 	}
-	c, err := openLandedFilesCache(asDir)
+	c, err := openLandedFilesCacheOn(asDir, landedFilesFS{lock: noLock, truncate: os.Truncate})
 	if err != nil {
 		t.Fatalf("open missing: %v", err)
 	}
@@ -106,14 +107,87 @@ func TestLandedFilesCacheErrors(t *testing.T) {
 	if err := c.Put("a", "b", []string{"x.go"}); err == nil || !strings.Contains(err.Error(), asDir) {
 		t.Fatalf("put error = %v; want it to name %s", err, asDir)
 	}
-	torn := filepath.Join(dir, "torn-readonly.jsonl")
-	if err := os.WriteFile(torn, []byte(`{"base":"a"`), 0o644); err != nil {
+}
+
+// noLock is a lock that holds nothing, so a test reaches the work after it.
+func noLock(string) (func() error, error) { return func() error { return nil }, nil }
+
+// tornCache writes a cache file whose last line has no newline.
+func tornCache(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "landed.jsonl")
+	if err := os.WriteFile(path, []byte("{\"base\":\"a\",\"head\":\"b\",\"files\":[\"x.go\"]}\n{\"base\":\"torn\""), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(torn, 0o444); err != nil {
-		t.Fatal(err)
+	return path
+}
+
+// TestLandedFilesCacheTornTailErrors drives each failure of the torn tail cut,
+// with the file operations swapped so none depends on the user running the test.
+func TestLandedFilesCacheTornTailErrors(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name string
+		fs   func(path string) landedFilesFS
+		want string
+	}{
+		{"the lock fails", func(string) landedFilesFS {
+			return landedFilesFS{lock: func(string) (func() error, error) { return nil, boom }, truncate: os.Truncate}
+		}, "locking the landed files cache"},
+		{"the file is gone once the lock is held", func(string) landedFilesFS {
+			return landedFilesFS{lock: func(p string) (func() error, error) {
+				return func() error { return nil }, os.Remove(p)
+			}, truncate: os.Truncate}
+		}, "reading the landed files cache"},
+		{"the truncate fails", func(string) landedFilesFS {
+			return landedFilesFS{lock: noLock, truncate: func(string, int64) error { return boom }}
+		}, "dropping the torn last line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := tornCache(t)
+			if _, err := openLandedFilesCacheOn(path, tc.fs(path)); err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("open = %v; want an error naming %s and %q", err, path, tc.want)
+			}
+		})
 	}
-	if _, err := openLandedFilesCache(torn); err == nil || !strings.Contains(err.Error(), torn) {
-		t.Fatalf("open a torn cache it cannot cut = %v; want an error naming %s", err, torn)
+}
+
+func TestLandedFilesCachePutLockError(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	path := filepath.Join(t.TempDir(), "landed.jsonl")
+	c, err := openLandedFilesCacheOn(path, landedFilesFS{lock: func(string) (func() error, error) { return nil, boom }, truncate: os.Truncate})
+	if err != nil {
+		t.Fatalf("open missing: %v", err)
+	}
+	if err := c.Put("a", "b", []string{"x.go"}); !errors.Is(err, boom) || !strings.Contains(err.Error(), "locking the landed files cache") {
+		t.Fatalf("put = %v; want the lock failure", err)
+	}
+	if _, ok := c.Get("a", "b"); ok {
+		t.Fatal("a put that could not lock was remembered")
+	}
+}
+
+// TestLandedFilesCacheKeepsALineAppendedBeforeTheCut: another process cuts the
+// torn tail and appends a whole line between this open's first read and its
+// lock. The cut reads the file again under the lock, so that line survives.
+func TestLandedFilesCacheKeepsALineAppendedBeforeTheCut(t *testing.T) {
+	t.Parallel()
+	path := tornCache(t)
+	other := "{\"base\":\"a\",\"head\":\"b\",\"files\":[\"x.go\"]}\n{\"base\":\"other\",\"head\":\"proc\",\"files\":[\"o.go\"]}\n"
+	fsys := landedFilesFS{lock: func(p string) (func() error, error) {
+		return func() error { return nil }, os.WriteFile(p, []byte(other), 0o644)
+	}, truncate: os.Truncate}
+	c, err := openLandedFilesCacheOn(path, fsys)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if got, ok := c.Get("other", "proc"); !ok || !reflect.DeepEqual(got, []string{"o.go"}) {
+		t.Errorf("get other proc = %v, %v; want [o.go]", got, ok)
+	}
+	if data, _ := os.ReadFile(path); string(data) != other {
+		t.Errorf("file after open = %q; want the other process's lines untouched", data)
 	}
 }
