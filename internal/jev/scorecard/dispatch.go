@@ -122,6 +122,10 @@ type dispatchAdapter struct {
 	latest       map[string]landings.Record
 	latestLoaded bool
 	latestErr    error
+	// warn tells the operator about a failed batch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
 }
 
 // Prefetch reads every placed bead in one batch. A scorecard over an empty log
@@ -138,9 +142,13 @@ func (a *dispatchAdapter) Prefetch(_ context.Context, items []Item) {
 		}
 		a.beads = b
 	}
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
 	shown, err := showAll(a.beads, itemIDs(items))
-	if err != nil {
-		warnf("reading the placed beads in a batch: %v", err)
+	if err := warnShowErr(warn, "", err); err != nil {
+		warn("reading the placed beads in a batch: %v", err)
 	}
 	a.shown = shown
 }

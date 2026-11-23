@@ -50,9 +50,52 @@ const showChunk = 100
 // makes no label, as a one-at-a-time read of it does.
 type GoneError struct{ N int }
 
-// Error is the count alone, so a caller that warns on any error prints one
-// line: "3 beads gone".
+// Error is the count alone, so warnShowErr prints one line: "3 beads gone".
 func (e *GoneError) Error() string { return fmt.Sprintf("%d beads gone", e.N) }
+
+// warnShowErr says through warn that a batched read named beads the store no
+// longer holds: one line for the count, however many are gone, and not the
+// batch warning. subject names the rig the count is of; an empty subject names
+// none. It returns what is left of err for the caller's own warning: nil when
+// the gone beads are all that was wrong, and the residue (err itself when it
+// holds no *GoneError above zero) otherwise.
+//
+// A count is said even when another error wraps it, so an operator always sees
+// how many beads are gone. dropGone can take a count out of a join but not out
+// of a wrapper, so a wrapped count is said once here and carried to the caller
+// as well: the wrapper's own message cannot be dropped without losing it.
+func warnShowErr(warn func(format string, args ...any), subject string, err error) error {
+	var gone *GoneError
+	if !errors.As(err, &gone) || gone.N <= 0 {
+		return err
+	}
+	if subject != "" {
+		warn("%d beads gone in %s", gone.N, subject)
+	} else {
+		warn("%d beads gone", gone.N)
+	}
+	return dropGone(err)
+}
+
+// dropGone returns err without the *GoneError showAll joins into it, so a
+// caller's warning names only what failed for another reason. Every other
+// error stays whole: only a join is taken apart and put back.
+func dropGone(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(*GoneError); ok {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var rest []error
+		for _, e := range joined.Unwrap() {
+			rest = append(rest, dropGone(e))
+		}
+		return errors.Join(rest...)
+	}
+	return err
+}
 
 // showAll reads the beads named ids from r in as few calls as it can: one list
 // query per chunk, then a batched show for what the query did not return (an
