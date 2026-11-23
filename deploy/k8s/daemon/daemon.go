@@ -888,6 +888,13 @@ type Values struct {
 	// entries are mounted read-only in the gateway's token directory. Required with
 	// BdGatewayImage. The Secret is named, never created: the operator creates it.
 	BdGatewayTokenSecret string
+	// BdGatewayDoltCredentialSecret names the Secret that holds the gateway's Dolt
+	// credential file, the user and password bd presents to Dolt. Set, the render
+	// mounts the credential key through a 0600 copy and hands the gateway
+	// --dolt-credential-file. Empty renders the gateway it was without one, byte for
+	// byte. The Secret is named, never created, and it is read only with
+	// BdGatewayImage, which renders the gateway pod.
+	BdGatewayDoltCredentialSecret string
 	// BdGatewayMaxConcurrent is the gateway's concurrency cap across all its pods. Each
 	// pod renders it as --max-concurrent, the total divided by the replica count and
 	// rounded up, so the total is what Dolt serves whatever the replica count. Zero
