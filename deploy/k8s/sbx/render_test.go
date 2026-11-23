@@ -427,6 +427,16 @@ func TestSbxRenderRefusals(t *testing.T) {
 			},
 			want: []string{"does not place", "Service surprise"},
 		},
+		{
+			name: "a static Secret",
+			static: func() ([]k8s.StaticObject, error) {
+				return append(slices.Clone(static), k8s.StaticObject{
+					APIVersion: "v1", Kind: "Secret", Name: "planted", Namespace: openshellName,
+					Doc: []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: planted\n  namespace: openshell\n"),
+				}), nil
+			},
+			want: []string{"Secret/openshell/planted", "never applied"},
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

@@ -191,6 +191,18 @@ func renderSet(ctx context.Context, in Inputs, static func() ([]k8s.StaticObject
 		}
 		objects = append(objects, object)
 	}
+	objects = append(objects, bootstrapConfigMapObject(marker))
+	// The desired set is applied in full, and the Secrets are never applied:
+	// Set.Secrets names them for the existence check. The chart drops and names
+	// its own Secrets and the agent-sandbox manifest refuses the kind, so the
+	// static set is checked beside the composed list, before the apply order
+	// drops its unplaced objects.
+	if err := checkNoSecrets(slices.Concat(objects, staticObjects)); err != nil {
+		return Set{}, err
+	}
+	if err := checkDuplicates(objects); err != nil {
+		return Set{}, err
+	}
 	// A static object this order does not name would otherwise be dropped from
 	// the desired set without a word.
 	for _, object := range staticObjects {
@@ -199,11 +211,20 @@ func renderSet(ctx context.Context, in Inputs, static func() ([]k8s.StaticObject
 		}
 		return Set{}, fmt.Errorf("render the gt-sbx set: the static set holds %s %s, which the desired set does not place", object.Kind, object.Name)
 	}
-	objects = append(objects, bootstrapConfigMapObject(marker))
-	if err := checkDuplicates(objects); err != nil {
-		return Set{}, err
-	}
 	return Set{Objects: objects, Secrets: slices.Clone(chart.Secrets), Runtime: slices.Clone(sbxRuntime)}, nil
+}
+
+// checkNoSecrets refuses an object of kind Secret. The desired set is applied
+// in full, while the Secrets must exist and are never applied, so a Secret in
+// the composed list or in a source feeding it is a refusal rather than an
+// object the applier would create.
+func checkNoSecrets(objects []k8s.StaticObject) error {
+	for _, object := range objects {
+		if object.Kind == "Secret" {
+			return fmt.Errorf("render the gt-sbx set: the desired set holds %s, which is never applied", objectKey(object))
+		}
+	}
+	return nil
 }
 
 // checkDuplicates refuses two objects with the same kind, namespace and name,
