@@ -9,6 +9,7 @@ import (
 )
 
 func TestRedHoldEvalSweepTriggers(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	held := now.Add(-time.Hour)
 	tests := []struct {

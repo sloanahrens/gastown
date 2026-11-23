@@ -24,10 +24,9 @@ type redHoldSweep struct {
 type redHoldInputs struct{ Sweeps []redHoldSweep }
 
 // evalRedHold returns the sweep reasons that hold dispatch: one per kind, sorted
-// by kind, each keeping prev's Since when the kind already held and taking now
-// when it is new. A sweep under redHoldSweepCycles contributes nothing; one at or
-// above it is sweep-no-result when the result was unread and sweep-red otherwise,
-// with Detail naming every rig the kind covers.
+// by kind, each keeping prev's Since when the kind already held and taking now when
+// new. A sweep under redHoldSweepCycles contributes nothing; at or above it is
+// sweep-no-result when unread, sweep-red otherwise, with Detail naming every rig.
 func evalRedHold(in redHoldInputs, now time.Time, prev dispatch.RedHoldRecord) dispatch.RedHoldRecord {
 	details := map[string][]string{}
 	for _, s := range in.Sweeps {
