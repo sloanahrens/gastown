@@ -41,12 +41,9 @@ func newRedHoldCmdWith(findTownRoot func() (string, error)) *cobra.Command {
 				if rec.Reasons == nil {
 					rec.Reasons = []dispatch.RedHoldReason{}
 				}
-				data, err := json.MarshalIndent(rec, "", "  ")
-				if err != nil {
-					return err
-				}
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
-				return err
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(rec)
 			}
 			if len(rec.Reasons) == 0 {
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), "red hold: open")
