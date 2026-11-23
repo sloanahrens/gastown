@@ -72,7 +72,9 @@ func TestPreserveGoEnv_FailsLoudOnGoEnvError(t *testing.T) {
 		t.Error("preserveGoEnv with unparseable `go env -json` = nil")
 	}
 	f = newFakeHarness(t).noTool("go")
-	if err := f.preserveGoEnv(); err != nil || len(f.commands()) != 0 || len(f.env.Environ()) != 0 {
-		t.Errorf("with no go tool: err %v, commands %q, env %q; want a silent no-op", err, f.commands(), f.env.Environ())
+	err := f.preserveGoEnv()
+	env := f.env.Environ()
+	if err != nil || len(f.commands()) != 0 || len(env) != 0 {
+		t.Errorf("with no go tool: err %v, commands %q, %d env entries; want a silent no-op", err, f.commands(), len(env))
 	}
 }

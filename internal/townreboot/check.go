@@ -5,6 +5,7 @@ package townreboot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -47,29 +48,36 @@ type report struct {
 }
 
 // RunAll runs every check in list order and returns one row each; a check that
-// reports a problem does not stop the checks after it, because a reboot leaves
-// several things broken at once and the person needs the whole list.
+// reports a problem or panics does not stop the checks after it, because a
+// reboot breaks several things at once and the person needs the whole list.
 func RunAll(ctx context.Context, checks []Check) []Row {
 	rows := make([]Row, 0, len(checks))
 	for _, c := range checks {
-		var res Result
-		if c.Run == nil {
-			// A check with no Run is a wiring bug. Calling it would panic and
-			// hide every check after it, so the row reports the bug instead.
-			res = Result{Detail: "check has no Run function"}
-		} else {
-			res = c.Run(ctx)
-		}
+		res := runCheck(ctx, c)
 		rows = append(rows, Row{Name: c.Name, OK: res.OK, Detail: res.Detail, Fix: res.Fix})
 	}
 	return rows
 }
 
+// runCheck runs one check and turns a panic into a failed result.
+func runCheck(ctx context.Context, c Check) (res Result) {
+	if c.Run == nil {
+		// A check with no Run is a wiring bug that would hide every check after it.
+		return Result{Detail: "check has no Run function"}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			res = Result{Detail: fmt.Sprintf("check panicked: %v", p)}
+		}
+	}()
+	return c.Run(ctx)
+}
+
 // Format renders the rows for the person: text is one line per row followed by
 // the boot-noise note, and the JSON form is one object carrying the rows and
 // the note.
-func Format(rows []Row, json bool) string {
-	if json {
+func Format(rows []Row, asJSON bool) string {
+	if asJSON {
 		return formatJSON(rows)
 	}
 	return formatText(rows)

@@ -82,8 +82,9 @@ func TestFakeScriptingHelpers(t *testing.T) {
 	if c, _ := s.GetPaneCommand("a"); c != "node" {
 		t.Fatalf("pane command after respawn = %q", c)
 	}
-	if s.Env("a")["K"] != "v" {
-		t.Fatalf("Env = %v", s.Env("a"))
+	env := s.Env("a")
+	if env["K"] != "v" {
+		t.Fatalf("Env[K] = %q, want %q (%d entries)", env["K"], "v", len(env))
 	}
 	ready := make(chan error, 1)
 	rc := &config.RuntimeConfig{Tmux: &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "}}

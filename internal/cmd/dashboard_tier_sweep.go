@@ -45,8 +45,10 @@ var (
 	// tierSweepStageRe matches the daemon's line for a stage that finished:
 	// "tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:". The
 	// duration is captured because the wall trend charts each tier's own time,
-	// which the swept line that closes the cycle does not carry.
-	tierSweepStageRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): (\S+) finished \(exit -?\d+\) in (\S+); last lines:$`)
+	// which the swept line that closes the cycle does not carry. A stage the
+	// runner ran appends the split of its wall time after the duration, as
+	// internal/daemon's tierSweepRunnerTimingNote renders it (gt-qc72jj).
+	tierSweepStageRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): (\S+) finished \(exit -?\d+\) in (\S+)(?: \(start lag [^)]*\))?; last lines:$`)
 	// tierSweepSweptRe matches the line closing a cycle, whose trailing " in
 	// <dur>" is absent on a cycle that ran before gt-iqzr0:
 	// "tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN) in 9m36s".

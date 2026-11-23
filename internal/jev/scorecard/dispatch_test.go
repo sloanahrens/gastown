@@ -37,9 +37,9 @@ func dispatchAnswers(p float64) dispatch.Answers {
 	return dispatch.Answers{
 		LandsFirstTry:      &p,
 		FitsTwentyMinutes:  p,
-		AcceptanceTickable: p,
-		NeedsStrongModel:   p,
-		TouchesDaemon:      p,
+		AcceptanceTickable: &p,
+		NeedsStrongModel:   &p,
+		TouchesDaemon:      &p,
 		Size:               dispatch.SizeAnswer{Score: 1, Confidence: 0.8},
 	}
 }
@@ -278,6 +278,71 @@ func TestScorecardDispatchParseLeavesLandsUnansweredWhenNotLogged(t *testing.T) 
 	}
 }
 
+// A Version 2 line logged while the battery still asked all three optional
+// answers is scored on every one of them.
+func TestScorecardDispatchVersionTwoLineScoresTheThreeAnswers(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeDispatchFixture(t, town, []dispatch.Line{{
+		Bead:            "gt-v2",
+		AttachedAt:      time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC),
+		Answers:         dispatchAnswers(0.6),
+		QuestionVersion: 2,
+		Model:           "model-1",
+	}}, nil, nil, nil)
+
+	rep, err := Build(context.Background(), dispatchAdapterFor(town, dispatchBeadStore{
+		"gt-v2": {ID: "gt-v2", Status: "in_progress"},
+	}), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, id := range []QuestionID{qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon} {
+		if q := question(t, rep, string(id)); q.Logged != 1 {
+			t.Errorf("%s logged %d, want 1: a Version 2 line still scores it", id, q.Logged)
+		}
+	}
+}
+
+// A line that leaves the three answers out reads each as missing: Parse keeps
+// no answer for it, and the scorecard skips the item rather than scoring 0.
+func TestScorecardDispatchParseLeavesTheThreeAnswersUnanswered(t *testing.T) {
+	t.Parallel()
+	a := dispatchAdapterFor(t.TempDir(), dispatchBeadStore{})
+	raw := []byte(`{"bead":"gt-x3","attached_at":"2026-11-23T09:00:00Z",` +
+		`"answers":{"fits_twenty_minutes":0.4,"size":{"score":1,"confidence":0.5}},` +
+		`"question_version":3,"model":"model-1"}`)
+	item, err := a.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, id := range []QuestionID{qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon} {
+		if got, ok := item.Answers[id]; ok {
+			t.Errorf("%s = %+v, want no answer: the line never logged one", id, got)
+		}
+	}
+
+	town := t.TempDir()
+	writeDispatchFixture(t, town, []dispatch.Line{
+		{Bead: "gt-x3", AttachedAt: time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC),
+			Answers: dispatch.Answers{FitsTwentyMinutes: 0.4, Size: dispatch.SizeAnswer{Score: 1, Confidence: 0.5}}, Model: "model-1"},
+		{Bead: "gt-x4", AttachedAt: time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC),
+			Answers: dispatchAnswers(0.5), Model: "model-1"},
+	}, nil, nil, nil)
+	rep, err := Build(context.Background(), dispatchAdapterFor(town, dispatchBeadStore{
+		"gt-x3": {ID: "gt-x3", Status: "in_progress"},
+		"gt-x4": {ID: "gt-x4", Status: "in_progress"},
+	}), time.Time{})
+	if err != nil {
+		t.Fatalf("Build over a line with the answers absent: %v", err)
+	}
+	for _, id := range []QuestionID{qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon} {
+		if q := question(t, rep, string(id)); q.Logged != 1 {
+			t.Errorf("%s logged %d, want 1: the line without an answer is skipped, not scored 0", id, q.Logged)
+		}
+	}
+}
+
 func TestScorecardDispatchParseRejectsUnusableLines(t *testing.T) {
 	t.Parallel()
 	a := dispatchAdapterFor(t.TempDir(), dispatchBeadStore{})
@@ -438,10 +503,18 @@ func TestScorecardDispatchEmptyLogNeverOpensStore(t *testing.T) {
 // The scorecard's question ids must be the keys the log writes, or the
 // battery's answers are read as unlabeled with no error. The keys are the
 // JSON names of the writer's Answers. lands_first_try is left out: the writer
-// no longer logs it, and the scorecard reads it only from older lines.
+// no longer logs it, and the scorecard reads it only from older lines. The
+// three optional answers are set, since a nil pointer is left out of the JSON.
 func TestScorecardDispatchQuestionIDsMatchLogKeys(t *testing.T) {
 	t.Parallel()
-	data, err := json.Marshal(dispatch.Answers{})
+	p := 0.5
+	data, err := json.Marshal(dispatch.Answers{
+		FitsTwentyMinutes:  p,
+		AcceptanceTickable: &p,
+		NeedsStrongModel:   &p,
+		TouchesDaemon:      &p,
+		Size:               dispatch.SizeAnswer{Score: 1, Confidence: 0.8},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

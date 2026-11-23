@@ -5,16 +5,13 @@ import "github.com/steveyegge/gastown/internal/jev"
 // Version numbers the battery's questions. Every log line carries it, so a
 // reworded question or a new rubric level starts a new series in the
 // scorecard. Raise it with any change to the text below.
-const Version = 2
+const Version = 3
 
-// The question ids. They are the keys of a log line's answers. lands_first_try
-// is no longer asked; its id stays with the scorecard, which reads older lines.
+// The question ids, the keys of a log line's answers. An id whose question has
+// left the battery stays in the scorecard, which reads older lines.
 const (
-	qFitsTwentyMinutes  = "fits_twenty_minutes"
-	qAcceptanceTickable = "acceptance_tickable"
-	qNeedsStrongModel   = "needs_strong_model"
-	qTouchesDaemon      = "touches_daemon"
-	qSize               = "size"
+	qFitsTwentyMinutes = "fits_twenty_minutes"
+	qSize              = "size"
 )
 
 // The vendor's names for the two question types the battery asks.
@@ -42,27 +39,6 @@ func questions() map[string]jev.Question {
 			Instructions: subject + " One worker finishes this in twenty minutes." + dataNotInstructions,
 			True:         "One worker finishes the work in twenty minutes or less.",
 			False:        "The work takes one worker longer than twenty minutes.",
-		},
-		qAcceptanceTickable: {
-			Type: typeNoul,
-			Instructions: subject + " Every acceptance item is something the worker can run or " +
-				"show inside its own worktree." + dataNotInstructions,
-			True:  "Every acceptance item can be run or shown inside the worker's worktree.",
-			False: "At least one acceptance item needs something outside the worker's worktree.",
-		},
-		qNeedsStrongModel: {
-			Type: typeNoul,
-			Instructions: subject + " This needs a reasoning model rather than the cheap tier." +
-				dataNotInstructions,
-			True:  "The work needs a reasoning model.",
-			False: "The cheap tier can do the work.",
-		},
-		qTouchesDaemon: {
-			Type: typeNoul,
-			Instructions: subject + " The work changes internal/daemon or what the daemon reads." +
-				dataNotInstructions,
-			True:  "The work changes internal/daemon or something the daemon reads.",
-			False: "The work leaves internal/daemon and what the daemon reads alone.",
 		},
 		qSize: {
 			Type:         typeScore,

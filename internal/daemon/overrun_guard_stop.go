@@ -69,10 +69,10 @@ const (
 //     onto a branch already on origin produced none of it), the finished work
 //     is on origin and the label is rework, not needs-split: the comment names
 //     the commit and tells the next polecat to reuse the branch and run
-//     gt done. Every other stop (a checkpoint that committed or gave up, a
-//     push that was refused or given up, no branch on origin, a head older
-//     than the sling, a head the rig's target already contains, a sling time
-//     the stop could not date) keeps needs-split.
+//     gt done. A branch holding nothing beyond the rig's target is handed back
+//     the same way with no label and a note naming the target, so it is slung
+//     fresh. Every other stop (a checkpoint that committed or gave up, a push
+//     that gave up, no branch on origin, an older or undated head) keeps needs-split.
 //     The molecule the bead carried is ended with the hand-back
 //     (handBackEndingMolecule), so the run leaves none open. The attention
 //     item for the stop is derived from that hand-back
@@ -613,6 +613,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	handed.Bead, handed.Branch = st.Bead, branch
 	if !st.CheckpointGaveUp && !st.PushGaveUp && !sandboxKept && !saveKept {
 		handed.ReworkSHA = st.ReworkSHA
+		// No finished work and nothing held back: the branch may hold nothing
+		// beyond the target, so the hand-back names it, not kept work (gt-vov15d).
+		// A rescue or an unanswered origin read keeps needs-split.
+		if st.ReworkSHA == "" && st.SaveRescue == "" && originReadGaveUp == "" {
+			handed.EmptyBranchTarget = d.overrunEmptyBranchTarget(handed)
+			// The empty-branch answer is also the no-work one: the commit
+			// origin holds for the branch, which the push above made its tip,
+			// is one the target already contains, so the seat committed nothing
+			// of its own (gt-ahzkhx). A checkpoint commit pushed the head beyond
+			// the target, and a failed read answers "", so both keep needs-split
+			// rather than reading as no-work.
+			handed.NoWork = handed.EmptyBranchTarget != ""
+		}
 	}
 	var notes []string
 	if reason := overrunStopReasonSentence(st.StopReason); reason != "" {

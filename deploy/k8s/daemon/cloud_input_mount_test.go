@@ -114,16 +114,18 @@ func TestCloudInputMountSetsTheEnv(t *testing.T) {
 }
 
 // TestPodEnvCloudDropReasonsNameTheMount holds each cloud drop reason to its
-// condition, naming the Values field whose mount makes the pod set the name (gt-9936jc).
+// exact text, so a rewrite that stops naming the Values field whose mount makes
+// the pod set the name, or the condition, fails rather than passing on a
+// substring (gt-9936jc, gt-f9pens).
 func TestPodEnvCloudDropReasonsNameTheMount(t *testing.T) {
 	t.Parallel()
 
-	for name, field := range map[string]string{
-		cloudReportsEnv:  "Values.CloudReportsHostPath",
-		cloudReleasesEnv: "Values.CloudReleasesHostPath",
+	for _, tc := range []struct{ name, want string }{
+		{cloudReportsEnv, "the Mac's GT_CLOUD_REPORTS_DIR names the host wrapper's directory; the pod sets it to the mounted directory only when Values.CloudReportsHostPath mounts it, and otherwise the cloud step selects the Postgres source (gt-nlf1i6, gt-9936jc)"},
+		{cloudReleasesEnv, "the Mac's GT_CLOUD_RELEASES_DIR names the host wrapper's directory; the pod sets it to the mounted directory only when Values.CloudReleasesHostPath mounts it, and otherwise the cloud step selects the Postgres source (gt-nlf1i6, gt-9936jc)"},
 	} {
-		if reason := composeOnlyEnv[name]; !strings.Contains(reason, field) || !strings.Contains(reason, "only when") {
-			t.Errorf("composeOnlyEnv[%s] = %q, want a reason naming %s and 'only when'", name, reason, field)
+		if got := composeOnlyEnv[tc.name]; got != tc.want {
+			t.Errorf("composeOnlyEnv[%s] = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

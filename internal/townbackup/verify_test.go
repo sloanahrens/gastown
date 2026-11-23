@@ -319,6 +319,29 @@ func TestVerifyRefuses(t *testing.T) {
 	}
 }
 
+// TestVerifyRefusesAYAMLCredential pins the YAML credential rule at a caller.
+// The rule widens every FindCredentials caller on purpose, so this row pins the
+// caller where it bites hardest: the daemon's collectTownState caller is pinned
+// by gt-fo85c1 and a follow-up bead pins the export's redactor.
+func TestVerifyRefusesAYAMLCredential(t *testing.T) {
+	t.Parallel()
+	// Built from parts, so no credential literal sits in this file.
+	token := "sk-" + "abcdefghijklmnop1234"
+	got, err := Verify(writeArchive(t, gzipTar(t, identity, arcEntry{name: "settings/config.yaml", data: "api_key: " + token + "\n"})))
+	if err == nil {
+		t.Fatalf("Verify accepted an archive holding a YAML credential (Result %+v)", got)
+	}
+	if got != (Result{}) {
+		t.Errorf("Result = %+v on refusal, want the zero Result", got)
+	}
+	if !strings.Contains(err.Error(), "entry settings/config.yaml: the content holds a credential") {
+		t.Errorf("error %q does not name the entry and the shared rule's phrase", err)
+	}
+	if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), token[:12]) {
+		t.Errorf("error %q prints the credential's value or its first 12 characters", err)
+	}
+}
+
 // TestVerifyRefusesEntryTypes pins that a type an import would refuse is
 // refused here, named with its type, before its content can go unscanned.
 func TestVerifyRefusesEntryTypes(t *testing.T) {

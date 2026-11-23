@@ -194,12 +194,14 @@ func contractCostSamples(t *testing.T, s *scope) {
 	}
 }
 
-// RunUsageRecordsContract checks the usage-record pair, WriteUsageRecord and
-// ReadUsageRecords, that every store with usage records must share: a row read
-// back carries the record and the session ids it was written with, since and
-// limit narrow the read newest built first, and these are each refused — a
-// write with no built at or no bead, a write of a cost JSON cannot carry, and a
-// read with a negative limit — the refused writes leaving no row behind.
+// RunUsageRecordsContract checks the usage-record triple, WriteUsageRecord,
+// CheckUsageRecordRow and ReadUsageRecords, that every store with usage records
+// must share: a row read back carries the record and the session ids it was
+// written with, since and limit narrow the read newest built first, the
+// precheck refuses what the write refuses and writes nothing, and these are each
+// refused — a write with no built at or no bead, a write of a cost JSON cannot
+// carry, and a read with a negative limit — the refused writes leaving no row
+// behind.
 //
 // It is separate from RunAdminContract for the reason RunCostSamplesContract is:
 // a bd that predates the samples table (beads be-1qqu) refuses the write by name
@@ -213,10 +215,11 @@ func RunUsageRecordsContract(t *testing.T, newClient func(t *testing.T) beads.Cl
 	})
 }
 
-// contractUsageRecords pins the usage-record pair; see RunUsageRecordsContract.
-// The case needs a store it writes alone — one the run has not written and no
-// other case shares — so it builds its rows at a fixed base and asserts the
-// exact rows and their order back; the since and limit reads pin those filters.
+// contractUsageRecords pins the usage-record triple; see
+// RunUsageRecordsContract. The case needs a store it writes alone — one the run
+// has not written and no other case shares — so it builds its rows at a fixed
+// base and asserts the exact rows and their order back; the since and limit
+// reads pin those filters.
 func contractUsageRecords(t *testing.T, s *scope) {
 	ctx := context.Background()
 	base := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
@@ -305,8 +308,23 @@ func contractUsageRecords(t *testing.T, s *scope) {
 	nan := math.NaN()
 	badCost := first.Record
 	badCost.EstCostUSD = nan
-	if err := s.WriteUsageRecord(ctx, beads.UsageRecordRow{BuiltAt: base, Record: badCost}); err == nil {
+	badCostRow := beads.UsageRecordRow{BuiltAt: base, Record: badCost}
+	if err := s.WriteUsageRecord(ctx, badCostRow); err == nil {
 		t.Error("WriteUsageRecord(NaN cost) succeeded, want it refused: the payload cannot carry one")
+	}
+	// The precheck refuses what the write refuses and leaves no row behind, so
+	// a dry run's counts are an apply's.
+	for _, row := range []beads.UsageRecordRow{
+		{BuiltAt: base, Record: usagerecord.Record{Kind: dashboard.UsageKindWork}},
+		{Record: first.Record},
+		badCostRow,
+	} {
+		if err := s.CheckUsageRecordRow(ctx, row); err == nil {
+			t.Errorf("CheckUsageRecordRow(%+v) succeeded, want it refused", row)
+		}
+	}
+	if err := s.CheckUsageRecordRow(ctx, first); err != nil {
+		t.Errorf("CheckUsageRecordRow(first) = %v, want nil", err)
 	}
 	if _, err := s.ReadUsageRecords(ctx, floor, -1); err == nil {
 		t.Error("ReadUsageRecords(limit -1) succeeded, want it refused")

@@ -286,11 +286,13 @@ const bdGatewayServiceHost = k8sdaemon.BdGatewayName + "." + updatejob.DefaultNa
 // address instead of the name the daemon's own environment carries. A host that is
 // the gateway's in-cluster Service name is handed on as it is, since the Job reaches
 // that name through cluster DNS. An unset variable stays empty and the Job renders
-// without a gateway; a host that is already an IP is passed through. An https host
-// that is a name is refused: the address would stand in for the name in the TLS
-// server name, and verification fails unless the certificate carries that address.
-// The lookup is bounded by updateJobLookupTimeout. The raw value is never echoed in
-// an error, since a credential may sit in it.
+// without a gateway; a host that is already an IP is passed through. A value that
+// carries userinfo is refused before any lookup: the gateway credential reaches the
+// Job by file, so no valid setup carries one. An https host that is a name is
+// refused: the address would stand in for the name in the TLS server name, and
+// verification fails unless the certificate carries that address. The lookup is
+// bounded by updateJobLookupTimeout. The raw value is never echoed in an error,
+// since a credential may sit in it.
 func (d *Daemon) gatewayURLForJob() (string, error) {
 	raw := d.env(k8sdaemon.BdGatewayURLEnv)
 	if raw == "" {
@@ -299,6 +301,9 @@ func (d *Daemon) gatewayURLForJob() (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" {
 		return "", fmt.Errorf("%s is not a URL with a host", k8sdaemon.BdGatewayURLEnv)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("%s carries userinfo: the update Job takes its gateway credential from a file, so no valid setup needs one", k8sdaemon.BdGatewayURLEnv)
 	}
 	host := u.Hostname()
 	if net.ParseIP(host) != nil || host == bdGatewayServiceHost {

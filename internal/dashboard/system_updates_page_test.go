@@ -13,11 +13,13 @@ import (
 // render function and read back what it drew.
 
 // systemUpdatesSources is the section's account of which source behind the rows
-// could not be read: the whole join, the roll's own record, or the sweep.
+// could not be read: the whole join, the roll's own record, the sweep, or the
+// pipeline read that held no earlier run.
 type systemUpdatesSources struct {
 	unavailable  bool
 	rollUnknown  bool
 	sweepUnknown bool
+	runsUnknown  bool
 }
 
 func systemUpdatesState(src systemUpdatesSources, rows ...any) map[string]any {
@@ -30,6 +32,9 @@ func systemUpdatesState(src systemUpdatesSources, rows ...any) map[string]any {
 	}
 	if src.sweepUnknown {
 		su["sweep_unknown"] = true
+	}
+	if src.runsUnknown {
+		su["runs_unknown"] = true
 	}
 	return map[string]any{"system_updates": su}
 }
@@ -129,10 +134,10 @@ func TestSystemUpdatesPageDrawsAnUnreadableSourceAsUnknown(t *testing.T) {
 	}
 }
 
-// An unreadable roll or sweep source marks its own stages unknown, not absent,
-// without touching the other source's: the section's whole-join flag is not the
-// only signal that a record was lost.
-func TestSystemUpdatesPageDrawsAnUnreadableRollOrSweepAsUnknown(t *testing.T) {
+// An unreadable roll, sweep or pipeline-run source marks its own stages
+// unknown, not absent, without touching the other sources': the section's
+// whole-join flag is not the only signal that a record was lost.
+func TestSystemUpdatesPageDrawsAnUnreadableRecordSourceAsUnknown(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -144,6 +149,8 @@ func TestSystemUpdatesPageDrawsAnUnreadableRollOrSweepAsUnknown(t *testing.T) {
 			"post-land=absent shell=absent integration=absent race=absent images=absent roll=warnc"},
 		{"sweep source", systemUpdatesSources{sweepUnknown: true},
 			"post-land=absent shell=warnc integration=warnc race=warnc images=absent roll=absent"},
+		{"run source", systemUpdatesSources{runsUnknown: true},
+			"post-land=warnc shell=absent integration=absent race=absent images=warnc roll=absent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

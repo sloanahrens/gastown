@@ -403,10 +403,22 @@ func dashboardGatewayReader(getenv func(string) string) tailGatewayReader {
 	return pusher
 }
 
+// dashboardHubSeam lets a test drive the hub's feed without the environment:
+// gateway stands in for the reader dashboardGatewayReader(os.Getenv) builds when
+// it is set, and observe receives the options the feed's sources are built
+// from. The command passes no seam, so production reads the environment and
+// observes nothing.
+type dashboardHubSeam struct {
+	gateway tailGatewayReader
+	observe func(tailOptions)
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
-// when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
+// when the server stops. A test passes at most one seam to give the hub's feed
+// a gateway reader and to see the options it builds (gt-5jz9bs); the command
+// passes none.
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer, seams ...dashboardHubSeam) (*dashboard.Hub, func(), error) {
 	// The cloud step's source comes from these settings, so a file that does
 	// not parse stops the hub here rather than showing a pane read from a step
 	// the town meant to configure differently.
@@ -423,7 +435,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
-	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
+	forgejoFeed, forgejoDeploys, stagingShip, gastownPipeline := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
 	news, err := dashboardNewsReader(townRoot)
 	if err != nil {
 		return nil, nil, err
@@ -436,7 +448,19 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// before the tracker.
 	dispatches := events.NewDispatchReader(townRoot)
 	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog, dispatches)
-	sources, preface, err := buildTailSources(dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys, dashboardGatewayReader(os.Getenv)))
+	var seam dashboardHubSeam
+	if len(seams) > 0 {
+		seam = seams[0]
+	}
+	gateway := seam.gateway
+	if gateway == nil {
+		gateway = dashboardGatewayReader(os.Getenv)
+	}
+	tailOpts := dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys, gateway)
+	if seam.observe != nil {
+		seam.observe(tailOpts)
+	}
+	sources, preface, err := buildTailSources(tailOpts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -526,6 +550,12 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
 	spend, spendReason := resolveSpend(spendCmd, beadReads.costSamples, whyLog)
+	// The System updates section joins the pipeline runs through the same
+	// cadence the Deploys reader uses (Config.DeploysEvery is set from the same
+	// constant), so the section's own faster poll costs no Forgejo calls.
+	systemUpdatesRead := func() *dashboard.SystemUpdates {
+		return systemUpdates(townRoot, tierSweeps, gastownPipeline, time.Now())
+	}
 	return dashboard.NewHub(dashboard.Config{
 		Feed: feed,
 		Summary: func() dashboard.Summary {
@@ -548,10 +578,11 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
-		SystemUpdates:  func() *dashboard.SystemUpdates { return systemUpdates(townRoot, tierSweeps, time.Now()) },
+		SystemUpdates:  systemUpdatesRead,
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
+		DeploysEvery:   systemUpdatesPipelineEvery,
 		Reports:        func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir:     dashboardReportsDir(townRoot),
 		Birds:          func() []dashboard.BirdReport { return birds.Read(time.Now()) },
@@ -1330,7 +1361,14 @@ func dashboardJevCap(townRoot string) func() (*float64, error) {
 // with no spend command. The token is read once, here, and never leaves the
 // client. The client reads the API root the rigs' Forgejo remote names
 // (dashboardForgejoBase), so the panes reach the Forgejo the rigs use.
-func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
+//
+// The function also returns the System updates section's pipeline read: the
+// gastown rig's post-land and images runs, gated to the same cadence the Deploys
+// reader polls at so the section's faster poll costs no Forgejo calls. With no
+// viewer token file the read is nil and the section joins no runs; a gastown rig
+// whose remote is missing, unreadable or unparseable gets a failed read, so the
+// section raises RunsUnknown (systemUpdatesPipelineFor).
+func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging, func() *dashboard.GastownPipeline) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
@@ -1340,10 +1378,17 @@ func dashboardForgejoReaders(townRoot string, repos []string, logf func(format s
 	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	staging := dashboard.NewStagingReader(client, rigShipRepos(townRoot))
-	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship
+	// The System updates pane reads the repository the gastown rig cuts over to; a
+	// town whose rig has another name reads no runs and the section joins none. A
+	// remote that is named but cannot be read or parsed is a failed read, not no runs.
+	remote, remoteErr := rigForgejoRemote(townRoot, "gastown")
+	pipeline := systemUpdatesPipelineFor(remote, remoteErr, func(repo string) func() *dashboard.GastownPipeline {
+		return newSystemUpdatesPipeline(dashboard.NewGastownPipelineReader(client, repo).Read, time.Now, systemUpdatesPipelineEvery)
+	}, logf)
+	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship, pipeline
 }
 
 // dashboardNewsReader wires the News pane's reader, or none when

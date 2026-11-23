@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -92,16 +94,21 @@ const redHoldMainRedKey = "\x00mainred"
 // redHoldSources is where redHoldInputsOf reads the rigs' sweep records: the rig
 // names in read order, the reader for one name, the waiter for the count of
 // landings not in the installed build, the reader for the update run's outcome
-// and target commit, the stuck pairs, the main-red reader, and the clock. A nil
-// Waiting, Update, PairStuck or MainRed contributes nothing.
+// and target commit, the stuck pairs, the main-red readers, and the clock. A nil
+// Waiting, Update, PairStuck or MainState contributes nothing.
+//
+// MainState reads one rig's land-main record; RevertOpen answers whether the
+// revert bead that record names is still open, so a marker left behind after
+// its bead closed never holds dispatch (gt-gqlbm1).
 type redHoldSources struct {
-	Rigs      []string
-	Read      func(rig string) (tierSweepState, error)
-	Waiting   func() (int, error)                        // nil means no count
-	Update    func() (outcome, target string, err error) // nil means no outcome
-	PairStuck func() []string                            // nil means no pairs
-	MainRed   func(rig string) (bool, error)             // nil means no main-red read
-	Now       func() time.Time                           // nil means time.Now
+	Rigs       []string
+	Read       func(rig string) (tierSweepState, error)
+	Waiting    func() (int, error)                            // nil means no count
+	Update     func() (outcome, target string, err error)     // nil means no outcome
+	PairStuck  func() []string                                // nil means no pairs
+	MainState  func(rig string) (landworker.MainState, error) // nil means no main-red read
+	RevertOpen func(rig, beadID string) (bool, error)         // nil means the revert cannot be proven over
+	Now        func() time.Time                               // nil means time.Now
 }
 
 // redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
@@ -209,13 +216,14 @@ func (d *Daemon) checkRedHold() {
 		d.redHoldUnread = map[string]bool{}
 	}
 	src := redHoldSources{
-		Rigs:      tierSweepRigs(d.patrol(), d.getKnownRigs()),
-		Read:      func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
-		Waiting:   d.redHoldWaiting,
-		Update:    d.redHoldUpdate,
-		PairStuck: d.redHoldPairStuck,
-		MainRed:   d.redHoldMainRed,
-		Now:       d.clk().Now,
+		Rigs:       tierSweepRigs(d.patrol(), d.getKnownRigs()),
+		Read:       func(rig string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, rig) },
+		Waiting:    d.redHoldWaiting,
+		Update:     d.redHoldUpdate,
+		PairStuck:  d.redHoldPairStuck,
+		MainState:  d.redHoldMainState,
+		RevertOpen: d.redHoldRevertOpen,
+		Now:        d.clk().Now,
 	}
 	if err := runRedHold(d.config.TownRoot, src, d.redHoldUnread, d.logger.Printf); err != nil {
 		d.logger.Printf("red hold step: %v", err)
@@ -265,15 +273,43 @@ func (d *Daemon) redHoldPairStuck() []string {
 	return shas
 }
 
-// redHoldMainRed reports whether one rig's main is red: its last run differs
-// from the last green, or a revert is in flight. A missing file is the zero
+// redHoldMainState reads one rig's land-main record. A missing file is the zero
 // state (not red); an unreadable one is the error, which keeps the previous hold.
-func (d *Daemon) redHoldMainRed(rig string) (bool, error) {
-	st, err := fileMainState{path: RedMainStatePath(d.config.TownRoot, rig)}.Load()
+func (d *Daemon) redHoldMainState(rig string) (landworker.MainState, error) {
+	return fileMainState{path: RedMainStatePath(d.config.TownRoot, rig)}.Load()
+}
+
+// redHoldMainRedOf reports whether a rig's main reads red: its last run past
+// the last green, or a revert still in flight. A revert is in flight only while
+// it has no bead yet or its bead is open; a closed or missing bead means the
+// revert is over, so a marker left behind never holds dispatch (gt-gqlbm1). A
+// bead that cannot be read is the error, which keeps the previous hold.
+func redHoldMainRedOf(rig string, st landworker.MainState, revertOpen func(rig, beadID string) (bool, error)) (bool, error) {
+	if st.LastRun != "" && st.LastRun != st.LastGreen {
+		return true, nil
+	}
+	if st.Revert == nil {
+		return false, nil
+	}
+	if st.Revert.Bead == "" || revertOpen == nil {
+		return true, nil
+	}
+	return revertOpen(rig, st.Revert.Bead)
+}
+
+// redHoldRevertOpen reports whether the revert bead a rig's record names is
+// still open, read through the rig's work beads as the dispatcher's own
+// revertBeadOpen does (internal/cmd/spec.go). A bead Show cannot find is over;
+// any other read failure is the error, keeping the previous hold.
+func (d *Daemon) redHoldRevertOpen(rig, beadID string) (bool, error) {
+	is, err := d.rigWorkBeads(rig).Show(beadID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return (st.LastRun != "" && st.LastRun != st.LastGreen) || st.Revert != nil, nil
+	return !beads.IssueStatus(strings.TrimSpace(is.Status)).IsTerminal(), nil
 }
 
 // redHoldShort returns the first 12 characters of a commit id, or the whole id
@@ -342,13 +378,21 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	if src.PairStuck != nil {
 		in.PairStuck = src.PairStuck()
 	}
-	if src.MainRed != nil {
+	if src.MainState != nil {
 		for _, rig := range src.Rigs {
-			red, err := src.MainRed(rig)
+			st, err := src.MainState(rig)
 			if err != nil {
 				if !unreadLog[redHoldMainRedKey] {
 					unreadLog[redHoldMainRedKey] = true
-					logf("red hold: main-red state unreadable; keeping the previous state")
+					logf("red hold: main-red read unreadable; keeping the previous state")
+				}
+				return nil
+			}
+			red, err := redHoldMainRedOf(rig, st, src.RevertOpen)
+			if err != nil {
+				if !unreadLog[redHoldMainRedKey] {
+					unreadLog[redHoldMainRedKey] = true
+					logf("red hold: main-red read unreadable; keeping the previous state")
 				}
 				return nil
 			}

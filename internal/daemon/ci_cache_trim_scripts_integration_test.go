@@ -564,8 +564,9 @@ func TestIntegrationCICacheTrimSelection(t *testing.T) {
 // as a set holding the right names. The cap is 0, so the excess is the volume's
 // whole size, more than the past-floor files total, and the cut never stops the
 // read: every past-floor file is printed and the order is the sort's alone.
-// Reversing that sort (sort -n to sort -rn) or shuffling it reorders the
-// selection and turns this test red.
+// Reversing that sort (sort -n to sort -rn) reorders the selection and turns
+// this test red. A shuffle only sometimes does: one that leaves the files in
+// mtime order prints the same selection and the test stays green.
 func TestIntegrationCICacheTrimLRUStrictOrder(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -1703,14 +1704,15 @@ func TestIntegrationCICacheTrimLRUHelpers(t *testing.T) {
 		ciCacheLRUTreeWrite(t, root, now)
 		before := ciCacheLRUBefore(t, root)
 
-		// A file of a whole number of KiB grows the measured volume by exactly
-		// its size: du counts allocation, and every block size divides it.
+		// du counts allocation, which a filesystem that compresses may report as
+		// less than the file's logical size, so the assertion is that the volume
+		// grew, not by how much.
 		const grownKiB = 1024
 		if err := os.WriteFile(filepath.Join(root, "grown"), bytes.Repeat([]byte{'y'}, grownKiB*1024), 0o644); err != nil {
 			t.Fatalf("writing the grown file: %v", err)
 		}
-		if got := ciCacheLRUBefore(t, root) - before; got != grownKiB {
-			t.Errorf("a %d KiB file grew the measured volume by %d KiB", grownKiB, got)
+		if got := ciCacheLRUBefore(t, root) - before; got <= 0 {
+			t.Errorf("writing a %d KiB file left the measured volume at %d KiB, want a larger figure: the helper must read the tree du -sk measures", grownKiB, before)
 		}
 	})
 }

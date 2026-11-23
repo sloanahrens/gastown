@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
@@ -535,33 +536,40 @@ func TestRedHoldStepMainRed(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	read := func(string) (tierSweepState, error) { return tierSweepState{}, nil }
 	quiet := func(string, ...any) {}
-	src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: read, MainRed: func(rig string) (bool, error) { return rig == "beta", nil }, Now: func() time.Time { return now }}
+	src := redHoldSources{Rigs: []string{"alpha", "beta"}, Read: read, MainState: func(rig string) (landworker.MainState, error) {
+		if rig == "beta" {
+			return landworker.MainState{LastGreen: "a", LastRun: "b"}, nil
+		}
+		return landworker.MainState{}, nil
+	}, Now: func() time.Time { return now }}
 	require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, quiet))
 	rec, err := dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
 	require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: beta"}}, rec.Reasons, "a red main for one of two rigs names that rig")
 
 	green := t.TempDir()
-	src.MainRed = nil
+	src.MainState = nil
 	require.NoError(t, runRedHold(green, src, map[string]bool{}, quiet))
 	require.NoFileExists(t, dispatch.RedHoldPath(green), "a nil reader contributes nothing")
 	require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 	var logs []string
 	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	unreadLog := map[string]bool{}
-	boom := func(string) (bool, error) { return false, errors.New("reading main state") }
-	src = redHoldSources{Rigs: []string{"gastown"}, Read: read, MainRed: boom}
+	boom := func(string) (landworker.MainState, error) {
+		return landworker.MainState{}, errors.New("reading main state")
+	}
+	src = redHoldSources{Rigs: []string{"gastown"}, Read: read, MainState: boom}
 	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
 	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
 	rec, err = dispatch.ReadRedHold(townRoot)
 	require.NoError(t, err)
 	require.Equal(t, redHoldSentinel, rec, "an unreadable read keeps the file")
-	line := "red hold: main-red state unreadable; keeping the previous state"
+	line := "red hold: main-red read unreadable; keeping the previous state"
 	require.Equal(t, []string{line}, logs, "two heartbeats log one outage once")
-	src.MainRed = func(string) (bool, error) { return false, nil }
+	src.MainState = func(string) (landworker.MainState, error) { return landworker.MainState{}, nil }
 	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
 	require.NoFileExists(t, dispatch.RedHoldPath(townRoot), "the recovery evaluates again")
-	src.MainRed = boom
+	src.MainState = boom
 	require.NoError(t, runRedHold(townRoot, src, unreadLog, logf))
 	require.Equal(t, []string{line, "red hold: cleared", line}, logs, "a second outage logs again")
 }
@@ -666,24 +674,86 @@ func TestCheckRedHoldRollPairStuck(t *testing.T) {
 		"only the stuck item's commit holds, never the ready pair's")
 }
 
+// TestRedHoldMainRed pins the main-red read against the revert beads it names:
+// a marker is red only while its bead is open, a closed or missing bead is over,
+// and a bead that cannot be read keeps the previous record (gt-gqlbm1).
+func TestRedHoldMainRed(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	green, next := "0123456789abcdef0123456789abcdef01234567", "fedcba9876543210fedcba9876543210fedcba98"
+	red := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: gastown"}}
+	revert := func(bead string) landworker.MainState {
+		return landworker.MainState{LastGreen: green, LastRun: green, Revert: &landworker.PendingRevert{Culprit: next, Bead: bead}}
+	}
+	tests := []struct {
+		name  string
+		state landworker.MainState
+		open  func(string, string) (bool, error)
+		want  []dispatch.RedHoldReason
+	}{
+		{"a marker naming an open revert bead holds", revert("gt-rev"),
+			func(string, string) (bool, error) { return true, nil }, red},
+		{"a marker naming a closed revert bead holds nothing", revert("gt-rev"),
+			func(string, string) (bool, error) { return false, nil }, nil},
+		{"a marker still being built holds", revert(""),
+			func(string, string) (bool, error) { return false, nil }, red},
+		{"an unreadable revert bead keeps the previous record", revert("gt-rev"),
+			func(string, string) (bool, error) { return false, errors.New("reading the bead") }, redHoldSentinel.Reasons},
+		{"a marker with no reader holds", revert("gt-rev"), nil, red},
+		{"no marker and a run equal to the last green holds nothing",
+			landworker.MainState{LastGreen: green, LastRun: green}, nil, nil},
+		{"a last run past the last green holds",
+			landworker.MainState{LastGreen: green, LastRun: next}, nil, red},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+			src := redHoldSources{
+				Rigs:       []string{"gastown"},
+				Read:       func(string) (tierSweepState, error) { return tierSweepState{}, nil },
+				MainState:  func(string) (landworker.MainState, error) { return tc.state, nil },
+				RevertOpen: tc.open,
+				Now:        func() time.Time { return now },
+			}
+			require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, rec.Reasons)
+		})
+	}
+}
+
 // TestCheckRedHoldMainRed pins the step's reader to the rig's landworker state
-// file, including an unreadable one that keeps the previous record.
+// file and to the revert bead the record names: only an open bead holds, and an
+// unreadable file or bead keeps the previous record.
 func TestCheckRedHoldMainRed(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
 	green, next := "0123456789abcdef0123456789abcdef01234567", "fedcba9876543210fedcba9876543210fedcba98"
 	red := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldMainRed, Since: now, Detail: "main red: gastown"}}
+	revert := func(bead string) *landworker.MainState {
+		return &landworker.MainState{LastGreen: green, LastRun: green, Revert: &landworker.PendingRevert{Culprit: next, Bead: bead}}
+	}
 	tests := map[string]struct {
 		state   *landworker.MainState
 		corrupt bool
+		bead    *beads.Issue
+		beadErr error
+		held    bool
 		want    []dispatch.RedHoldReason
 	}{
-		"a last run past the last green holds":               {&landworker.MainState{LastGreen: green, LastRun: next}, false, red},
-		"a last run equal to the last green holds nothing":   {&landworker.MainState{LastGreen: green, LastRun: green}, false, nil},
-		"a last green with no run holds nothing":             {&landworker.MainState{LastGreen: green}, false, nil},
-		"a revert in flight holds on a green run":            {&landworker.MainState{LastGreen: green, LastRun: green, Revert: &landworker.PendingRevert{Culprit: next}}, false, red},
-		"no state file holds nothing":                        {nil, false, nil},
-		"an unreadable state file keeps the previous record": {nil, true, redHoldSentinel.Reasons},
+		"a last run past the last green holds":                {&landworker.MainState{LastGreen: green, LastRun: next}, false, nil, nil, false, red},
+		"a last run equal to the last green holds nothing":    {&landworker.MainState{LastGreen: green, LastRun: green}, false, nil, nil, false, nil},
+		"a last green with no run holds nothing":              {&landworker.MainState{LastGreen: green}, false, nil, nil, false, nil},
+		"a revert bead with no bead yet holds on a green run": {revert(""), false, nil, nil, false, red},
+		"an open revert bead holds":                           {revert("gt-rev"), false, &beads.Issue{ID: "gt-rev", Status: "open"}, nil, false, red},
+		"a closed revert bead is over":                        {revert("gt-rev"), false, &beads.Issue{ID: "gt-rev", Status: "closed"}, nil, false, nil},
+		"a missing revert bead is over":                       {revert("gt-rev"), false, nil, beads.ErrNotFound, false, nil},
+		"an unreadable revert bead keeps the previous record": {revert("gt-rev"), false, nil, errors.New("bd: timed out"), true, redHoldSentinel.Reasons},
+		"no state file holds nothing":                         {nil, false, nil, nil, false, nil},
+		"an unreadable state file keeps the previous record":  {nil, true, nil, nil, true, redHoldSentinel.Reasons},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -691,21 +761,35 @@ func TestCheckRedHoldMainRed(t *testing.T) {
 			townRoot := t.TempDir()
 			writeKnownRigs(t, townRoot, "gastown")
 			path := RedMainStatePath(townRoot, "gastown")
+			if tc.held {
+				require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+			}
 			switch {
 			case tc.corrupt:
-				require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 				require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
 			case tc.state != nil:
 				require.NoError(t, (fileMainState{path: path}).Save(*tc.state))
 			}
 			d := &Daemon{config: DefaultConfig(townRoot), logger: log.New(io.Discard, "", 0), clock: clockwork.NewFakeClockAt(now)}
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader { return redHoldBeadReader{tc.bead, tc.beadErr} }
 			d.checkRedHold()
 			rec, err := dispatch.ReadRedHold(townRoot)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, rec.Reasons)
 		})
 	}
+}
+
+// redHoldBeadReader answers one revert-bead Show: the issue, or the error.
+type redHoldBeadReader struct {
+	issue *beads.Issue
+	err   error
+}
+
+func (r redHoldBeadReader) Show(string) (*beads.Issue, error) { return r.issue, r.err }
+func (redHoldBeadReader) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, nil
 }
 
 // redHoldLedgerRel is the lift ledger the step appends to, under the town root.

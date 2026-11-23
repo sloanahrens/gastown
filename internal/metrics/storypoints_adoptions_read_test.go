@@ -75,6 +75,21 @@ func TestReadStoryPointsAdoptions(t *testing.T) {
 	})
 }
 
+// TestReadStoryPointsAdoptionsKeepsRefusedLines: the reader returns an adoption, a refused
+// line with its reason, and a check in order; this holds on the unchanged reader (gt-f32pgl).
+func TestReadStoryPointsAdoptionsKeepsRefusedLines(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "adoptions.jsonl")
+	writeAt(t, p, `{"event":"adopted","at":"2026-11-10T06:00:00Z","version":"v2","previous":"weights.v1.json"}`+"\n"+
+		`{"event":"refused","at":"2026-11-17T06:00:00Z","reason":"first-round rmse worse"}`+"\n"+
+		`{"event":"checked","at":"2026-11-24T06:00:00Z","adopted_at":"2026-11-10T06:00:00Z","outcome":"kept","reason":"better"}`+"\n")
+	got, err := readStoryPointsAdoptions(Env{ReadFile: os.ReadFile}, p)
+	if err != nil || len(got) != 3 || got[0].Event != "adopted" || got[1].Event != "refused" ||
+		got[1].Reason != "first-round rmse worse" || got[2].Event != "checked" {
+		t.Fatalf("read = %+v, %v; want an adoption, a refused line with its reason, and a check in order", got, err)
+	}
+}
+
 // TestStoryPointsAutoRevertUnreadable: an adoptions log the weekly run cannot read, or whose
 // newest line does not parse, fails the run and names the file in the receipt. No revert runs,
 // the runtime weights and their version stay as they were, nothing is recorded as checked, and

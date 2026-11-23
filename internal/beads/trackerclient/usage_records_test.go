@@ -11,17 +11,21 @@ import (
 	"github.com/steveyegge/gastown/internal/usagerecord"
 )
 
-// TestUsageRecordsRefuseWithNoBd: the tracker client runs no bd, so both
-// usage-record methods refuse by name and send no request. A zero Client has no
-// transport at all, so a method that reached the tracker would panic rather
+// TestUsageRecordsRefuseWithNoBd: the tracker client runs no bd, so each
+// usage-record method refuses by name and sends no request. A zero Client has
+// no transport at all, so a method that reached the tracker would panic rather
 // than answer.
 func TestUsageRecordsRefuseWithNoBd(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
-	err := c.WriteUsageRecord(context.Background(), beads.UsageRecordRow{
+	row := beads.UsageRecordRow{
 		BuiltAt: time.Date(2026, 11, 15, 22, 0, 0, 0, time.UTC),
 		Record:  usagerecord.Record{Bead: "gt-1", Kind: dashboard.UsageKindWork},
-	})
+	}
+	if err := c.CheckUsageRecordRow(context.Background(), row); err == nil || !strings.Contains(err.Error(), "runs no bd") || !strings.Contains(err.Error(), "CheckUsageRecordRow") {
+		t.Fatalf("CheckUsageRecordRow = %v; want an error naming the method and that the tracker client runs no bd", err)
+	}
+	err := c.WriteUsageRecord(context.Background(), row)
 	if err == nil || !strings.Contains(err.Error(), "runs no bd") || !strings.Contains(err.Error(), "WriteUsageRecord") {
 		t.Fatalf("WriteUsageRecord = %v; want an error naming the method and that the tracker client runs no bd", err)
 	}

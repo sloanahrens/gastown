@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -20,15 +20,17 @@ const (
 	polecatDevURL  = imageRegBase + "/v2/gastown-polecat/manifests/dev"
 	polecatAccept  = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
 	imageFix       = "gt town cluster render --polecat-image on the digest the registry answers"
-	bdGatewayFixTx = "gt bd workspace push through the push Service once it exists " +
-		"(bead: bd gateway push Service), else the exec-pod route"
+	bdGatewayFixTx = "gt bd workspace push through the push Service when the render includes it, else the exec-pod route"
 )
 
-// imageAnswer is what the Deployment read and the registry read return.
+// imageAnswer is what the Deployment read and the registry read return; anchor
+// answers the daemon read the gateway check makes when the gateway is absent.
 type imageAnswer struct {
 	deployment string
+	anchor     string
 	headers    string
 	kubectlErr error
+	anchorErr  error
 	curlErr    error
 }
 
@@ -40,6 +42,9 @@ func imageRunner(a imageAnswer) (Runner, func() [][]string) {
 		calls = append(calls, append([]string{name}, args...))
 		switch name {
 		case "kubectl":
+			if !slices.Contains(args, "bd-gateway") && (a.anchor != "" || a.anchorErr != nil) {
+				return []byte(a.anchor), a.anchorErr
+			}
 			return []byte(a.deployment), a.kubectlErr
 		case "curl":
 			return []byte(a.headers), a.curlErr
@@ -117,6 +122,8 @@ func TestRebootCheckImageDigest(t *testing.T) {
 			answer:     imageAnswer{deployment: daemonJSON(polecatRef), headers: curlHeaders("latest")},
 			wantDetail: `the registry answered digest "latest", which is not sha256:<64 hex>`,
 		},
+		{name: "the registry answers 404", answer: imageAnswer{deployment: daemonJSON(polecatRef), headers: "HTTP/1.1 404\r\n\r\n"}, wantDetail: "the registry answered HTTP 404 for the manifest"},
+		{name: "the registry answer carries no status line", answer: imageAnswer{deployment: daemonJSON(polecatRef), headers: "no status line\r\n\r\n"}, wantDetail: "the registry read answered no HTTP status"},
 		{
 			name: "the Deployment read fails",
 			answer: imageAnswer{
@@ -190,8 +197,6 @@ func TestRebootCheckImageDigest(t *testing.T) {
 // manifest path under it (gt-plvm2h).
 func TestRebootCheckImageDigestCommands(t *testing.T) {
 	t.Parallel()
-	getCall := []string{"kubectl", "--context", "colima-gt-control", "-n", "gt", "get", "deployment", "daemon", "-o", "json"}
-	curlCall := []string{"curl", "-sI", "-H", "Accept: " + polecatAccept, polecatDevURL}
 	tests := []struct {
 		name   string
 		answer imageAnswer
@@ -210,11 +215,18 @@ func TestRebootCheckImageDigestCommands(t *testing.T) {
 			t.Parallel()
 			run, calls := imageRunner(tt.answer)
 			imageRow(run, imageRegBase)
-			if want := [][]string{getCall, curlCall}; !reflect.DeepEqual(calls(), want) {
-				t.Fatalf("runner calls = %q, want only %q", calls(), want)
+			got := calls()
+			// get and -sI sit where kubectl and curl read them, and the argv
+			// lengths pin that no flag was added past the read-only set.
+			if len(got) != 2 || slices.Index(got[0], "get") != 5 || slices.Index(got[1], "-sI") != 1 ||
+				len(got[0]) != 10 || len(got[1]) != 5 {
+				t.Fatalf("runner calls = %q, want one kubectl get and one curl -sI, both read-only", got)
 			}
-			if got := calls()[1][len(curlCall)-1]; !strings.HasPrefix(got, imageRegBase) {
-				t.Errorf("curl URL = %q, want it to start with the registry base %q", got, imageRegBase)
+			if got[1][3] != "Accept: "+polecatAccept {
+				t.Errorf("curl header = %q, want %q", got[1][3], "Accept: "+polecatAccept)
+			}
+			if url := got[1][4]; url != polecatDevURL {
+				t.Errorf("curl URL = %q, want %q", url, polecatDevURL)
 			}
 		})
 	}
@@ -270,13 +282,16 @@ func TestRebootCheckImageDigestRegistryBase(t *testing.T) {
 
 // TestRebootCheckImageGateway pins the bd gateway check's findings: OK at one
 // ready replica, a not-OK row at none that names the missing Service endpoint
-// and the push fix, not deployed for a town with no Deployment, and a not-OK
-// row for every read that cannot be made or parsed (gt-plvm2h).
+// and the push fix, not deployed once the daemon answers the same read, and a
+// not-OK row for an answer carrying nothing, a failed anchor read or no
+// Deployment at all (gt-plvm2h, gt-47r2a5).
 func TestRebootCheckImageGateway(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name           string
 		out            string
+		anchor         string
+		anchorErr      error
 		err            error
 		noRunner       bool
 		wantOK         bool
@@ -298,9 +313,15 @@ func TestRebootCheckImageGateway(t *testing.T) {
 		},
 		{
 			name:       "not deployed",
-			out:        "",
+			anchor:     `{"metadata":{"name":"daemon"}}`,
 			wantOK:     true,
 			wantDetail: "not deployed",
+		},
+		{name: "an empty answer", wantDetail: "the deployment read answered nothing"},
+		{
+			name:       "the anchor read fails",
+			anchorErr:  errors.New("kubectl could not reach colima-gt-control"),
+			wantDetail: "the deployment read answered nothing",
 		},
 		{
 			name:       "the Deployment read fails",
@@ -322,7 +343,7 @@ func TestRebootCheckImageGateway(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			run, _ := imageRunner(imageAnswer{deployment: tt.out, kubectlErr: tt.err})
+			run, _ := imageRunner(imageAnswer{deployment: tt.out, anchor: tt.anchor, anchorErr: tt.anchorErr, kubectlErr: tt.err})
 			if tt.noRunner {
 				run = nil
 			}
@@ -348,26 +369,27 @@ func TestRebootCheckImageGateway(t *testing.T) {
 }
 
 // TestRebootCheckImageGatewayCommands pins that the gateway check only reads:
-// the Runner sees the one kubectl get, with no verb that could start or patch
-// the Deployment, whether a replica is ready or not (gt-plvm2h).
+// one named kubectl get whose verb sits where kubectl reads it, with the
+// gateway name and no flag past the read-only set, whether a replica is ready
+// or not (gt-plvm2h, gt-47r2a5).
 func TestRebootCheckImageGatewayCommands(t *testing.T) {
 	t.Parallel()
-	getCall := []string{"kubectl", "--context", "colima-gt-control", "-n", "gt",
-		"get", "deployment", "bd-gateway", "-o", "json", "--ignore-not-found"}
 	tests := []struct {
 		name string
 		out  string
 	}{
-		{name: "one ready replica", out: `{"status":{"readyReplicas":1}}`},
-		{name: "no ready replica", out: `{"status":{}}`},
+		{name: "one ready replica", out: `{"metadata":{"name":"bd-gateway"},"status":{"readyReplicas":1}}`},
+		{name: "no ready replica", out: `{"metadata":{"name":"bd-gateway"},"status":{}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			run, calls := imageRunner(imageAnswer{deployment: tt.out})
 			gatewayRow(run)
-			if want := [][]string{getCall}; !reflect.DeepEqual(calls(), want) {
-				t.Errorf("runner calls = %q, want only %q", calls(), want)
+			got := calls()
+			if len(got) != 1 || slices.Index(got[0], "get") != 5 || len(got[0]) != 11 ||
+				got[0][7] != "bd-gateway" || got[0][10] != "--ignore-not-found" {
+				t.Fatalf("runner calls = %q, want one named kubectl get, read-only", got)
 			}
 		})
 	}

@@ -64,6 +64,10 @@ type attentionAdapter struct {
 	// beadCache holds each bead read by id, so items that share a bead read it
 	// once. A nil entry is a bead that does not exist.
 	beadCache map[string]*beads.Issue
+	// warn tells the operator about a failed batch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
 
 	loaded  bool
 	records map[string][]attention.Record
@@ -197,9 +201,13 @@ func (a *attentionAdapter) Prefetch(_ context.Context, items []Item) {
 	for _, it := range items {
 		ids = append(ids, a.lines[it.ID].Bead)
 	}
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
 	got, err := showAll(a.beads, ids)
-	if err != nil {
-		warnf("reading the attention beads in a batch: %v", err)
+	if err := warnShowErr(warn, "", err); err != nil {
+		warn("reading the attention beads in a batch: %v", err)
 	}
 	for id, issue := range got {
 		if a.beadCache == nil {

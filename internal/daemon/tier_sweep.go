@@ -643,6 +643,10 @@ type tierSweepStageResult struct {
 	// hold, so a stage that sat out a queue reads as its own work alone
 	// (gt-sy14g).
 	slotWait time.Duration
+	// timingNote splits a runner stage's wall time into its start lag, tests and
+	// tail (tierSweepRunnerTimingNote); empty for a host stage, or when the
+	// result's stamps give no split (gt-qc72jj).
+	timingNote string
 }
 
 // tierSweepSeams replace the sweep's outside effects in tests; the zero value
@@ -1690,8 +1694,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		if st.slot && res.slotWait >= time.Second {
 			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
 		}
-		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s; last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output))
+		// The runner's note sits between the elapsed time and any slot wait
+		// (gt-qc72jj).
+		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s%s; last lines:\n%s",
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), res.timingNote, waitNote, lastLines(res.output))
 	}
 
 	if len(results) == 0 {
@@ -2745,7 +2751,7 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	// result reads it here, and the run is not started a second time.
 	if res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err == nil {
 		stop()
-		return d.tierSweepRunnerStageResult(st, spec, res, started)
+		return d.tierSweepRunnerStageResult(st, spec, res, started, stageStart)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		// The file is there and is not a result this run can use, and results
 		// are published by rename: nothing will rewrite it, so the verdict is
@@ -2894,7 +2900,7 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
 		if err == nil {
 			stop()
-			return d.tierSweepRunnerStageResult(st, spec, res, started)
+			return d.tierSweepRunnerStageResult(st, spec, res, started, stageStart)
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			stop()
@@ -2926,7 +2932,7 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			if err != nil {
 				return tierSweepRunnerNoResultStage(started, err, false)
 			}
-			return d.tierSweepRunnerStageResult(st, spec, res, started)
+			return d.tierSweepRunnerStageResult(st, spec, res, started, stageStart)
 		}
 		select {
 		case <-budget:
@@ -3188,7 +3194,10 @@ func tierSweepRunnerNoResultStage(started tierSweepLaunch, why error, timedOut b
 // result that names a tier the stage did not ask for, or names none of them, is
 // refused as a whole: a partial fold would record a wrong verdict, not a
 // smaller one (gt-z4ppb).
-func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.Spec, res sweeprunner.Result, started tierSweepLaunch) tierSweepStageResult {
+//
+// stageStart is when tierSweepRunRunner began the stage; the fold splits its
+// wall time from there with the result's own stamps (gt-qc72jj).
+func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.Spec, res sweeprunner.Result, started tierSweepLaunch, stageStart time.Time) tierSweepStageResult {
 	// A stage that asked for no tier folds nothing, and an empty fold reads to
 	// the cycle as a clean sweep of nothing: it is RED (gt-z4ppb).
 	if len(st.tiers) == 0 {
@@ -3234,7 +3243,8 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		// command's (gt-z4ppb).
 		exitCode = tierSweepRedExit
 	}
-	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true}
+	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true,
+		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now())}
 }
 
 // tierSweepRunnerHostSummary returns a tier's summary line with its "(logs

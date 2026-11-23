@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
@@ -59,7 +60,6 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 		},
 	}
 	backupRoot := t.TempDir()
-	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	d.maint.now = func() time.Time { return squashTestNow }
 	d.maint.dispatch = func(fn func()) { fn() }
 	d.maint.escalate = func(_ *Daemon, source, message string) {
@@ -81,11 +81,21 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 // squashDestructiveSent reports whether the server was sent a statement that is
 // not a read. A refused, untakeable or held run may add harmless reads, so the
 // tests assert this instead of an exact count; anything but a SELECT or a SHOW
-// is a statement such a run must never send.
+// is a statement such a run must never send. Each query is split at its
+// semicolons and every statement is judged, so a multi-statement string cannot
+// pass on the word it opens with.
 func squashDestructiveSent(queries []string) bool {
 	for _, q := range queries {
-		if !strings.HasPrefix(q, "SELECT") && !strings.HasPrefix(q, "SHOW") {
-			return true
+		for _, statement := range strings.Split(q, ";") {
+			fields := strings.Fields(statement)
+			if len(fields) == 0 {
+				continue
+			}
+			switch strings.ToUpper(fields[0]) {
+			case "SELECT", "SHOW":
+			default:
+				return true
+			}
 		}
 	}
 	return false
@@ -347,18 +357,20 @@ func TestSquashP95IsNearestRank(t *testing.T) {
 	}
 }
 
-// TestSquashCheckTrippedRunsTheDatabase: a reading over its threshold logs the
-// trigger and the cut, then hands the database to the engine. The fake answers
-// the run's first branch read with the one column it gives every read, which is
-// not the two a recovery reads, so the run stops there and releases the marker.
-// The check is due again after the retry delay rather than setting the daily
-// gate.
-func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
+// TestSquashMarkerTrippedCheckRunsTheDatabase: a reading over its threshold logs
+// the trigger and the cut, then hands the database to the engine, which holds
+// the town's run marker for the run. The run's failure is reported rather than
+// read as a day's work done, and the check is due again after the retry delay
+// rather than setting the daily gate.
+func TestSquashMarkerTrippedCheckRunsTheDatabase(t *testing.T) {
 	t.Parallel()
 	bigger := int64(100)
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
 		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &bigger,
 	})
+	// The engine times each step on d.clk(); pin it so the run never reads the
+	// wall clock.
+	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	root := squashBackupRoot(t, d)
 	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
 	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
@@ -369,12 +381,13 @@ func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
 	if !strings.Contains(got, "squash: gt: due: backup bytes over the limit, cut 2026-11-09T12:00:00Z") {
 		t.Errorf("the tripped reason or its cut is missing: %q", got)
 	}
-	if !strings.Contains(got, "reading the branches a dead run may have left") {
-		t.Errorf("the due database was not run: %q", got)
+	if !strings.Contains(got, "squash: WARNING: gt: the run failed: doltsquash: reading the branches a dead run may have left") {
+		t.Errorf("the due database was not run, or its failure was not reported: %q", got)
 	}
-	// The readings, then the run's one branch read.
-	if len(server.queries) != squashP95Rounds+2 {
-		t.Errorf("the check sent %d statements, want %d", len(server.queries), squashP95Rounds+2)
+	// Recovery runs before any step that writes, so a run that failed in it
+	// sent no statement that is not a read; one would mean a write came first.
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("the run sent a statement that is not a read before its catalog read: %v", server.queries)
 	}
 	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter-time.Minute), squashCheckInterval); due.due {
 		t.Error("a failed run was due again before the retry delay")
@@ -395,6 +408,10 @@ func squashDueDaemon(t *testing.T) (*Daemon, *squashFakeServer, *bytes.Buffer) {
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
 		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &small,
 	})
+	// The engine times each step on d.clk(), so a daemon these tests drive a
+	// run on pins the clock. The shared helper leaves it real: the tests that
+	// never reach the engine do not read it.
+	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
 	return d, server, logs
 }
@@ -1225,6 +1242,67 @@ func TestSquashRunFreesBothGuardsOnEveryEnd(t *testing.T) {
 	}
 }
 
+// TestSquashRunFreesBothGuardsWhenTheRunPanics is the panic box: a run that
+// panics is recovered by the caller after both defers have run, so neither the
+// gc flag nor doltMaintMu is left held by the unwinding.
+func TestSquashRunFreesBothGuardsWhenTheRunPanics(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	var calls int
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		calls++
+		panic("the engine panicked")
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("the panicking run was not recovered")
+			}
+		}()
+		_, _ = d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
+	}()
+
+	if calls != 1 {
+		t.Fatalf("the call started %d run(s), want 1", calls)
+	}
+	if d.maintenanceGCRunning.Load() {
+		t.Error("a panicking run left the maintenance gc flag held")
+	}
+	assertSquashMaintMuFree(t, d)
+}
+
+// TestSquashRunRefusedByTheGCCycleLeavesTheMutexFree is the flag box: a call
+// refused by a held gc flag returns before doltMaintMu is taken, so the flag's
+// holder takes the mutex itself, and the flag stays the holder's until it
+// releases it.
+func TestSquashRunRefusedByTheGCCycleLeavesTheMutexFree(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	var calls int
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		t.Fatal("the maintenance gc flag was already held")
+	}
+	defer d.maintenanceGCRunning.Store(false)
+
+	_, err := d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
+	if !errors.Is(err, errSquashGCRunning) {
+		t.Fatalf("returned %v, want %v", err, errSquashGCRunning)
+	}
+	if calls != 0 {
+		t.Errorf("the refused call started %d run(s)", calls)
+	}
+
+	if !d.doltMaintMu.TryLock() {
+		t.Fatal("the refused call left doltMaintMu held")
+	}
+	d.doltMaintMu.Unlock()
+	if !d.maintenanceGCRunning.Load() {
+		t.Fatal("the refused call released the gc flag it did not take")
+	}
+}
+
 // TestSquashRunInFlightRefusesAGCCycle is the bead's second box for the other
 // direction: a gc cycle started while a squash run is in flight is refused by
 // its own CompareAndSwap, so nothing is dispatched beside the run and the run
@@ -1792,10 +1870,11 @@ func TestSquashRecordDestructiveStatementIsNotARead(t *testing.T) {
 		queries []string
 		want    bool
 	}{
-		"no statements": {nil, false},
-		"readings":      {[]string{"SELECT COUNT(*) FROM dolt_log('main')", "SHOW FULL TABLES"}, false},
-		"an update":     {[]string{"SELECT COUNT(*) FROM dolt_rebase", "UPDATE dolt_rebase SET action = 'squash'"}, true},
-		"a call":        {[]string{"CALL DOLT_CHECKOUT('main')"}, true},
+		"no statements":                   {nil, false},
+		"readings":                        {[]string{"SELECT COUNT(*) FROM dolt_log('main')", "SHOW FULL TABLES"}, false},
+		"an update":                       {[]string{"SELECT COUNT(*) FROM dolt_rebase", "UPDATE dolt_rebase SET action = 'squash'"}, true},
+		"a call":                          {[]string{"CALL DOLT_CHECKOUT('main')"}, true},
+		"a read and a call in one string": {[]string{"SELECT name FROM dolt_branches; CALL DOLT_CHECKOUT('main')"}, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1978,6 +2057,61 @@ func TestSquashRecordRedactsATokenJoinedToCharacters(t *testing.T) {
 				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
 			}
 		})
+	}
+}
+
+// squashAnthropicToken builds an Anthropic-key-shaped string for the path rows:
+// built the way squashJoinedToken is, so the source holds no literal token.
+func squashAnthropicToken() string {
+	return "sk-ant-api03-" + strings.Repeat("Z9y8X7", 6)
+}
+
+// TestSquashLedgerRedactsAPathEmbeddedToken is the bead's box for the path
+// shapes: a token inside a path keeps the word pass from finding it, because the
+// word begins with "/" and the secret rule refuses a path. land.ScrubText finds
+// the token at its own offset, so neither the token nor its first 12 characters
+// reaches the ledger line; with the scrub replaced by the identity both rows
+// fail.
+func TestSquashLedgerRedactsAPathEmbeddedToken(t *testing.T) {
+	t.Parallel()
+	tok, key := squashJoinedToken(), squashAnthropicToken()
+	cases := []struct{ name, in, token string }{
+		{"a github token in a file name", "open /settings/" + tok + ".json: no such file", tok},
+		{"an sk-ant key in a directory", "open /etc/" + key + "/x: permission denied", key},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(tc.in))
+			if strings.Contains(e.Error, tc.token) || strings.Contains(e.Error, tc.token[:12]) {
+				t.Errorf("the ledger line holds the token or its first 12 characters: %q", e.Error)
+			}
+			if !strings.Contains(e.Error, ledgerRedactedMarker) {
+				t.Errorf("the ledger line holds no redaction marker: %q", e.Error)
+			}
+		})
+	}
+}
+
+// TestSquashLedgerRedactsATokenAcrossTheCut is the bead's box for a token that
+// straddles the rune cut: 243 two-byte runes put the token at rune 243, so it
+// spans rune ledgerErrorLimit. Redaction runs before the cut,
+// so no "ghp_" prefix survives, the line is at most ledgerErrorLimit runes, and
+// cutting by runes keeps it valid UTF-8. A cut taken before the scrub keeps only
+// ten of the token's characters, which with the cut's "..." is still shorter
+// than the secret rule's minimum, so the "ghp_" prefix fails this row.
+func TestSquashLedgerRedactsATokenAcrossTheCut(t *testing.T) {
+	t.Parallel()
+	msg := strings.Repeat("é", 243) + squashJoinedToken() + strings.Repeat("é", 40)
+	e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(msg))
+	if strings.Contains(e.Error, "ghp_") {
+		t.Errorf("the ledger line holds the token's prefix: %q", e.Error)
+	}
+	if n := utf8.RuneCountInString(e.Error); n > ledgerErrorLimit {
+		t.Errorf("the ledger line holds %d runes, want at most %d", n, ledgerErrorLimit)
+	}
+	if !utf8.ValidString(e.Error) {
+		t.Errorf("the ledger line is not valid UTF-8: %q", e.Error)
 	}
 }
 

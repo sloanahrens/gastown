@@ -153,6 +153,10 @@ type Client interface {
 	// series.
 	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
 
+	// CheckUsageRecordRow refuses what WriteUsageRecord refuses before it
+	// writes, and writes nothing: a dry run counts a row this accepts as one
+	// an apply writes.
+	CheckUsageRecordRow(ctx context.Context, row UsageRecordRow) error
 	// WriteUsageRecord appends one usage record row. A zero BuiltAt, a record
 	// with no bead, and a cost JSON cannot carry are each an error with no row
 	// written.
@@ -207,6 +211,9 @@ type Admin interface {
 	// ReadCostSamples returns a kind's cost sample rows; the behavior is
 	// Client's.
 	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
+	// CheckUsageRecordRow refuses what WriteUsageRecord refuses before it
+	// writes; the behavior is Client's.
+	CheckUsageRecordRow(ctx context.Context, row UsageRecordRow) error
 	// WriteUsageRecord appends one usage record row; the behavior is Client's.
 	WriteUsageRecord(ctx context.Context, row UsageRecordRow) error
 	// ReadUsageRecords returns the usage record rows; the behavior is

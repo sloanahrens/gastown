@@ -193,6 +193,30 @@ func TestUsageRecordReadArgvStepsTheFilters(t *testing.T) {
 	}
 }
 
+// TestUsageRecordCheckAnswersTheWrite: the precheck answers the write's
+// refusal and runs no sample add, so a dry run counts what an apply writes.
+func TestUsageRecordCheckAnswersTheWrite(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if argv := strings.Join(args, " "); argv == "--help" {
+			return reply{stdout: bdHelpWithSampleVerb}
+		}
+		return reply{err: fmt.Errorf("unexpected bd call %v", args)}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+	refused := everyFieldUsageRow()
+	refused.Record.Bead = ""
+	if err := b.CheckUsageRecordRow(context.Background(), refused); err == nil {
+		t.Error("CheckUsageRecordRow(no bead) = nil, want the write's refusal")
+	}
+	if err := b.CheckUsageRecordRow(context.Background(), everyFieldUsageRow()); err != nil {
+		t.Errorf("CheckUsageRecordRow(valid row) = %v, want nil", err)
+	}
+	if calls := r.argvs(); len(calls) != 1 || calls[0] != "--help" {
+		t.Errorf("bd calls = %v, want only the accepted row's --help probe: the precheck writes nothing", calls)
+	}
+}
+
 // TestUsageRecordWriteRefusesBdWithoutTheVerb: a bd whose help lists no sample
 // command refuses the write, naming the verb, and never runs sample add.
 func TestUsageRecordWriteRefusesBdWithoutTheVerb(t *testing.T) {

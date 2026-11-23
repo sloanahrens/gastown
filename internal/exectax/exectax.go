@@ -13,10 +13,12 @@ package exectax
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -60,6 +62,9 @@ type Options struct {
 	Dir string
 	// Exec is the exec to time; nil runs the real one.
 	Exec Exec
+	// open opens one sample for writing; nil is openSample. A test substitutes
+	// it to observe the fork lock across the sample's file operations.
+	open sampleOpener
 }
 
 // Probe writes Samples fresh programs into a temporary directory, execs each
@@ -73,6 +78,10 @@ func Probe(ctx context.Context, o Options) (Result, error) {
 	run := o.Exec
 	if run == nil {
 		run = runFile
+	}
+	open := o.open
+	if open == nil {
+		open = openSample
 	}
 	dir := o.Dir
 	if dir == "" {
@@ -89,7 +98,7 @@ func Probe(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 		path := filepath.Join(dir, fmt.Sprintf("sample-%d", i))
-		if err := os.WriteFile(path, []byte(program), 0o755); err != nil {
+		if err := writeSample(path, open); err != nil {
 			return Result{}, err
 		}
 		d, err := run(ctx, path)
@@ -100,6 +109,32 @@ func Probe(ctx context.Context, o Options) (Result, error) {
 	}
 	res.Median = median(res.Samples)
 	return res, nil
+}
+
+// sampleOpener opens one sample for writing; nil in Options.open is
+// openSample. A test substitutes an opener whose file records the fork lock.
+type sampleOpener func(path string) (io.WriteCloser, error)
+
+func openSample(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+}
+
+// writeSample holds the fork lock across the sample's open, write and close,
+// so no fork inherits the write descriptor and makes a concurrent exec of the
+// sample fail as text file busy (gt-drj0g6). The lock is released before the
+// sample runs.
+func writeSample(path string, open sampleOpener) error {
+	syscall.ForkLock.Lock()
+	defer syscall.ForkLock.Unlock()
+	f, err := open(path)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write([]byte(program))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // runFile is the real exec: the sample path is absolute, so the kernel runs
