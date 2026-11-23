@@ -296,6 +296,10 @@ type attentionSources struct {
 	seats func() ([]townhealth.Seat, error)
 	// seatWork reports whether the seat holds assigned open work.
 	seatWork func(rig, name string) (bool, error)
+	// seatEndRecord reports whether a SEAT-END comment naming the seat now
+	// stands on bead: the seat-end-no-record collector's clearing check. nil is
+	// the patrol host's own read (patrolScanHost.seatEndRecord, gt-oa16rk).
+	seatEndRecord func(rig, name, bead string) (bool, error)
 	// gateRunning reports whether the seat is inside its own gate now: a gate
 	// suite running under its pane, or a slot of the town's container-gate
 	// pool. A seat inside its gate is doing what its bead told it to do, so
@@ -818,6 +822,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A seat whose session has not answered the polecat-health check for
 		// five minutes, found by the pass before this tick (gt-q6hafz).
 		{kind: attention.KindSeatUnreachable, collect: s.collectSeatUnreachable},
+		// A seat whose end found no record of its work, until a SEAT-END
+		// comment naming it appears on its bead (gt-oa16rk). The owns predicate
+		// keeps only this kind's items when the marker store cannot be read.
+		{kind: attention.KindSeatEndNoRecord, collect: s.collectSeatEndNoRecords, owns: seatEndNoRecordItemOwned},
 		// The story point estimator's drift over the newest extract's landings,
 		// and the measure that could not be read (gt-my0o23).
 		{kind: attention.KindStoryPointsDrift, collect: s.collectStoryPointsDrift},

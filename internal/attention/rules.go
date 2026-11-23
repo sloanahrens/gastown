@@ -165,6 +165,11 @@ const (
 	// one the overseer has to act on (gt-l38v7r).
 	RuleSandboxSeatKept = "sandbox.seat_kept"
 
+	// RuleSeatEndNoRecord is a seat whose end found no record of its work and
+	// left a marker: the town has no usage record of the seat's time, and the
+	// overseer finds the record or accepts the loss (gt-oa16rk).
+	RuleSeatEndNoRecord = "seat.end_no_record"
+
 	// RuleUpdateRolledBack is an update whose check failed after a swap, so the
 	// daemon was put back on its previous image: the pair the roll named did not
 	// hold, and the town runs the older one until the next roll (gt-9odoqa).
@@ -384,6 +389,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A kept seat past its window holds a pool slot and a worktree while its
 	// reason stands: the overseer is woken to act on the reason (gt-l38v7r).
 	RuleSandboxSeatKept: flagsWake,
+	// A seat with no record of its work is missing from the usage ledger, so
+	// its time is uncounted until someone recovers or accounts for it: the
+	// overseer is woken (gt-oa16rk).
+	RuleSeatEndNoRecord: flagsWake,
 	// A rolled-back update leaves the town on the older pair: the overseer is
 	// woken to read the failed check before the next roll is due (gt-9odoqa).
 	RuleUpdateRolledBack: flagsWake,
@@ -580,6 +589,7 @@ var kindRules = map[Kind]string{
 	KindImagesUnknown:                 RuleImagesUnknown,
 	KindTierSweepImagesRetryExhausted: RuleTierSweepImagesRetryExhausted,
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
+	KindSeatEndNoRecord:               RuleSeatEndNoRecord,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
 	KindStoryPoints:                   RuleStoryPoints,

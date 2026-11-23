@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -343,5 +345,124 @@ func TestSeatEndNoRecordIgnoresATempFile(t *testing.T) {
 	got := markers[0]
 	if got.Rig != endRig || got.Polecat != endPolecat || got.Bead != endBead {
 		t.Errorf("marker = %+v; want %s/%s bead %s", got, endRig, endPolecat, endBead)
+	}
+}
+
+// seatEndNoRecordComment is how the fixture's SEAT-END comment read answers one
+// seat: its record stands on the bead, or the read failed. A seat absent from
+// the fixture's map answers that no record stands.
+type seatEndNoRecordComment int
+
+const (
+	seatEndHasComment seatEndNoRecordComment = iota + 1
+	seatEndCommentUnreadable
+)
+
+// seatEndNoRecordSource is the fixture's sources with the SEAT-END comment read
+// answering each seat as comments says, keyed "rig/polecat/bead".
+func seatEndNoRecordSource(f *attentionFixture, comments map[string]seatEndNoRecordComment) *attentionSources {
+	f.src.seatEndRecord = func(rig, name, bead string) (bool, error) {
+		switch comments[rig+"/"+name+"/"+bead] {
+		case seatEndHasComment:
+			return true, nil
+		case seatEndCommentUnreadable:
+			return false, errors.New("bd did not answer the comment read")
+		}
+		return false, nil
+	}
+	return f.src
+}
+
+// TestSeatEndNoRecordRaised: a seat whose marker says its end found no record
+// raises one high seat-end-no-record item naming the seat and bead; the item
+// clears when its SEAT-END comment appears, and a comment read that does not
+// answer raises it rather than passing as cleared (gt-oa16rk).
+func TestSeatEndNoRecordRaised(t *testing.T) {
+	t.Parallel()
+	seat := endRig + "/" + endPolecat + "/" + endBead
+	other := endRig + "/basalt/gt-b2c3d"
+	tests := []struct {
+		name string
+		// markers are the seats whose end left a marker, "rig/polecat/bead".
+		markers []string
+		// comments is how the SEAT-END comment read answers, by the same key.
+		comments map[string]seatEndNoRecordComment
+		// productionRead leaves the seam nil, so the collector makes its own read
+		// through the daemon's recovery client: the fake holds no bead, so the
+		// read fails.
+		productionRead bool
+		// plant, when set, runs before the collect: a marker the store cannot use.
+		plant func(t *testing.T, town string)
+		// wantLog says the failed comment read is logged by seat.
+		wantLog bool
+		want    int
+		wantErr bool
+	}{
+		{name: "a marked seat with no comment raises one item naming the seat and bead",
+			markers: []string{seat}, want: 1},
+		{name: "the SEAT-END comment clears the item",
+			markers: []string{seat}, comments: map[string]seatEndNoRecordComment{seat: seatEndHasComment}},
+		{name: "an unreadable comment read raises the item",
+			markers: []string{seat}, comments: map[string]seatEndNoRecordComment{seat: seatEndCommentUnreadable}, want: 1, wantLog: true},
+		{name: "the collector's own read fails on a bead the client cannot answer",
+			markers: []string{seat}, productionRead: true, want: 1, wantLog: true},
+		{name: "two seats raise two items",
+			markers: []string{seat, other}, want: 2},
+		{name: "a marker the store cannot use fails the collect",
+			plant: func(t *testing.T, town string) {
+				writeSeatEndNoRecordFile(t, town, endPolecat+".json", "{")
+			}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			town := f.d.config.TownRoot
+			for _, marker := range tt.markers {
+				rig, rest, _ := strings.Cut(marker, "/")
+				name, bead, _ := strings.Cut(rest, "/")
+				if err := recordSeatEndNoRecord(town, rig, name, bead); err != nil {
+					t.Fatalf("recordSeatEndNoRecord(%q): %v", marker, err)
+				}
+			}
+			if tt.plant != nil {
+				tt.plant(t, town)
+			}
+			s := f.src
+			if tt.productionRead {
+				f.d.openRecoveryBeads = func([]string) beads.Client { return beadsfake.New() }
+			} else {
+				s = seatEndNoRecordSource(f, tt.comments)
+			}
+			c := collectorFor(t, s, attention.KindSeatEndNoRecord)
+
+			items, err := c.collect(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("collect err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if items != nil {
+					t.Errorf("items = %+v beside an unusable marker store, want none", items)
+				}
+				return
+			}
+			if len(items) != tt.want {
+				t.Fatalf("items = %+v, want %d", items, tt.want)
+			}
+			if tt.want != 1 {
+				return
+			}
+			it := items[0]
+			if it.Key != "seat-end-no-record:"+endRig+"/"+endPolecat || it.Kind != attention.KindSeatEndNoRecord ||
+				it.Severity != attention.SeverityHigh || it.Rig != endRig || it.Bead != endBead {
+				t.Errorf("item = %+v, want a high seat-end-no-record item on %s/%s and %s", it, endRig, endPolecat, endBead)
+			}
+			if !strings.Contains(it.Summary, endRig+"/"+endPolecat) || !strings.Contains(it.Summary, endBead) {
+				t.Errorf("summary %q does not name the seat and its bead", it.Summary)
+			}
+			if tt.wantLog && !strings.Contains(f.logs.String(), "seat-end-no-record "+endRig+"/"+endPolecat) {
+				t.Errorf("log %q does not name the seat whose comment read failed", f.logs.String())
+			}
+		})
 	}
 }
