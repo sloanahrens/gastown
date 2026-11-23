@@ -699,10 +699,13 @@ type Trend struct {
 // landings counted, the median of their actual over estimated minutes, and
 // the share within 25 percent (gt-mp1rh0). A bound-flagged landing counts in
 // N and not in the figures, since a bound is not a measured time; a day with
-// fewer than five measured landings carries N and no ratio.
+// fewer than five measured landings carries N and no ratio. Skipped counts
+// the day's landings with no usable sp: estimate, which the ratio cannot
+// judge (gt-9sh1bl).
 type EstimateDay struct {
 	Day         string  `json:"day"`
 	N           int     `json:"n"`
+	Skipped     int     `json:"skipped"`
 	MedianRatio float64 `json:"median_ratio"`
 	Within25    float64 `json:"within_25"`
 }
