@@ -396,6 +396,10 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 .mgchart{display:block;width:100%;height:auto;margin-top:4px}
 .mgtcap{color:var(--dim);font-size:11px;margin-top:2px;overflow-wrap:anywhere}
 .sweepico{font-weight:700}
+/* One row per landed commit in the System updates pane: the sha, then its stage
+   chips in pipeline order. A stage that never ran keeps the dim token. */
+.surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+.tag.absent{color:var(--dim)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
 #events{max-height:40vh;overflow:auto;padding:4px 0}
@@ -544,6 +548,7 @@ a.hrow:hover{background:#19212b}
     <section id="activitysec" data-fold="activity" data-default-collapsed><h2>Town activity <span class="r" id="activitynote"></span></h2><div class="body" id="activity"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
+    <section data-fold="systemupdates"><h2>System updates <span class="r" id="systemupdatesnote"></span></h2><div class="body" id="systemupdates"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
@@ -2922,6 +2927,58 @@ function deployStages(r) {
     cell.append(chip);
   }
   return cell;
+}
+
+// The System updates pane (gt-h18aif): the feed's joined section as one row per
+// landed commit, newest first, a chip per stage in pipeline order. A stage the
+// commit never reached is grey; one missing while a source behind the section
+// could not be read is amber "not read", because an unreadable source is not a
+// commit that skipped the stage. An unknown status or outcome is failed, never
+// passed.
+const SYSTEM_UPDATE_STAGES = ["post-land", "shell", "integration", "race", "images", "roll"];
+const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
+
+// systemUpdateStageState folds one stage of a row to its state: a pipeline run
+// is its status, the sweep a verdict per tier, a roll its outcome.
+function systemUpdateStageState(row, stage) {
+  if (stage === "post-land" || stage === "images") {
+    const run = (row.runs || []).find(r => r.workflow === stage + ".yml");
+    return !run ? "absent" : run.status === "success" ? "ok" : (run.status === "running" || run.status === "queued" ? "running" : "failed");
+  }
+  if (stage === "roll") return !row.roll ? "absent" : row.roll.outcome === "ok" ? "ok" : (row.roll.outcome === "running" ? "running" : "failed");
+  const st = ((row.sweep && row.sweep.stages) || []).find(x => x.tier === stage);
+  return st ? (st.verdict === "GREEN" ? "ok" : "failed") : "absent";
+}
+
+// systemUpdateStageUnknown says whether the source behind one stage of a row
+// could not be read, so a stage missing from it is unknown, not absent: the run
+// may have happened and its record been lost. A source the rows join at all
+// marks the whole section unavailable; the roll's own record marks only the roll,
+// and a sweep that answered nil marks only the sweep.
+function systemUpdateStageUnknown(su, stage) {
+  if (stage === "roll") return !!(su.unavailable || su.roll_unknown);
+  if (stage === "post-land" || stage === "images") return !!su.unavailable;
+  return !!(su.unavailable || su.sweep_unknown);
+}
+
+function renderSystemUpdates(s) {
+  if (pushSkip("systemupdates", s)) return;
+  const box = $("systemupdates"), su = s.system_updates, rows = (su && su.rows) || [];
+  box.replaceChildren();
+  if (!rows.length) { box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
+  for (const row of rows) {
+    const line = el("div", "surow");
+    line.append(el("span", "title", row.sha || "–"));
+    for (const stage of SYSTEM_UPDATE_STAGES) {
+      const state = systemUpdateStageState(row, stage);
+      const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state === "absent" && systemUpdateStageUnknown(su, stage) ? "unknown" : state];
+      const chip = el("span", "tag " + cls, stage + " " + glyph);
+      chip.title = stage + ": " + word;
+      line.append(chip);
+    }
+    box.append(line);
+  }
+  $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
 }
 
 // One compact line per sweep: when, which rig and sha, a verdict per tier, and
@@ -5959,6 +6016,7 @@ const PANES = {
   // section's: opening that section draws it, and a closed one leaves it be.
   disk: {sec: "machine", body: ["disk"], read: s => s.disk, draw: s => renderDisk(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
+  systemupdates: {sec: "systemupdates", body: ["systemupdates"], read: s => s.system_updates, draw: s => renderSystemUpdates(s)},
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   dolt: {sec: "dolt", body: ["dolt"], read: s => [s.dolt, readInput(s, "dolt")], draw: s => renderDolt(s)},
@@ -6028,7 +6086,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderSystemUpdates(state); renderTierSweep(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
