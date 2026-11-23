@@ -618,6 +618,13 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		// A rescue or an unanswered origin read keeps needs-split.
 		if st.ReworkSHA == "" && st.SaveRescue == "" && originReadGaveUp == "" {
 			handed.EmptyBranchTarget = d.overrunEmptyBranchTarget(handed)
+			// The empty-branch answer is also the no-work one: the commit
+			// origin holds for the branch, which the push above made its tip,
+			// is one the target already contains, so the seat committed nothing
+			// of its own (gt-ahzkhx). A checkpoint commit pushed the head beyond
+			// the target, and a failed read answers "", so both keep needs-split
+			// rather than reading as no-work.
+			handed.NoWork = handed.EmptyBranchTarget != ""
 		}
 	}
 	var notes []string
