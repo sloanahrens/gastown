@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // TestSlingGiveBackReason pins which sling failures hand back the respawn
@@ -63,6 +65,35 @@ func TestSlingGiveBackReason(t *testing.T) {
 			err:    fmt.Errorf("starting polecat session: %w", polecat.ErrSessionRunning),
 			reason: "session",
 		},
+		// The two seat-branch refusals match by type; the marker they share
+		// does not buy the held-bead or ready-to-land refusal a give-back
+		// (gt-dzqkdw).
+		{
+			name: "a seat whose worktree branch could not be read",
+			err: fmt.Errorf("%s gt-x: the worktree branch of seat gastown/polecats/toast could not be read after 3 attempts, so the hook cannot be checked against another bead's branch; the dispatch is deferred until it can be read: %w",
+				dispatch.SlingRefusalMarker, sling.ErrSeatBranchRefused),
+			reason: "seat-branch",
+		},
+		{
+			name: "a seat that already holds another bead's branch",
+			err: fmt.Errorf("%s gt-x: the seat gastown/polecats/toast already has polecat/toast/gt-other checked out, which carries gt-other's work, so the hook would be written onto another bead's branch: %w",
+				dispatch.SlingRefusalMarker, sling.ErrSeatBranchRefused),
+			reason: "seat-branch",
+		},
+		{
+			name: "a held bead written after the dispatch read it",
+			err: fmt.Errorf("%s gt-x is held (deferred): the hold was written after this dispatch read the bead, so the work is not this dispatch's to take\nRelease the hold (clear the label, or set its status back) to dispatch it, or pass --force to take it anyway",
+				dispatch.SlingRefusalMarker),
+		},
+		{
+			name: "a bead submitted for landing",
+			err: fmt.Errorf("%s gt-x is submitted for landing (ready-to-land); the landing worker owns it.\nRemove the label first to take it back",
+				dispatch.SlingRefusalMarker),
+		},
+		{
+			name: "an error with no refusal",
+			err:  errors.New("instantiating the formula: unknown var"),
+		},
 		{
 			name: "a polecat that died at startup",
 			err:  errors.New("starting polecat session: agent exited with status 1"),
@@ -93,6 +124,21 @@ func TestSlingGiveBackReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSlingGiveBackReasonPreSpawn pins the other half of the seat-branch
+// give-back: giveBackSlingRespawn reaches a spawn only when the engine returned
+// one, so a refusal raised before the spawn has no count to hand back behind
+// it. The classifier does name this refusal, so removing the nil-SpawnInfo
+// early return panics in cmdSpawn rather than passing quietly.
+func TestSlingGiveBackReasonPreSpawn(t *testing.T) {
+	t.Parallel()
+	refusal := fmt.Errorf("%s gt-x: the worktree branch of seat gastown/polecats/toast could not be read after 3 attempts: %w",
+		dispatch.SlingRefusalMarker, sling.ErrSeatBranchRefused)
+	if _, giveBack := slingGiveBackReason(refusal); !giveBack {
+		t.Fatal("the seat-branch refusal must be classified as a give-back, or this test pins nothing")
+	}
+	giveBackSlingRespawn(&SlingResult{}, refusal)
 }
 
 // TestSlingGiveBackReasonAnchored pins gt-uauwit: a message counts for one of
