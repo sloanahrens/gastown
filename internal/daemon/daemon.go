@@ -127,6 +127,13 @@ type Daemon struct {
 	// survives records coming and going between ticks.
 	sandboxRecordCursor string
 
+	// keptDropCursor is the rig/name the last kept-record drop pass ended on, so
+	// the next pass starts after it and a bounded pass cannot starve a record.
+	keptDropCursor string
+	// keptDropLogged is the last keep message logged for each kept record the
+	// drop pass left, so an unchanged keep is logged once and not on every tick.
+	keptDropLogged map[string]string
+
 	// gatewayTallies counts, per kept sandbox seat, the patrol ticks its gateway
 	// has stayed silent, in memory so the alarm does not depend on the kept
 	// record being written (sandbox_gateway_retry.go, gt-7h38pd).
