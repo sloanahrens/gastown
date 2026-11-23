@@ -21,8 +21,10 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 const (
@@ -433,6 +435,44 @@ func TestPolecatImageDevTagEscalatesFailedCopy(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "moved to gt commit") {
 		t.Fatalf("log = %q, want no move line for a refused copy", logs.String())
+	}
+}
+
+// TestPublishPolecatDevTagDropIsLoudInTheFeed: a one-shot copy and its escalation both failing still leave one dropped feed line.
+func TestPublishPolecatDevTagDropIsLoudInTheFeed(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOldCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	reg.status = http.StatusInternalServerError
+	d, _, _ := devTagDaemon(t, reg)
+	rec := notifyfake.New()
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
+	d.notifier = rec
+	// Drive the fake clock so a reintroduced retry ends on its call count, not a hang.
+	d.clock = clockwork.NewFakeClockAt(time.Now())
+	runOnClock(t, d.clock.(*clockwork.FakeClock), time.Second, d.publishPolecatDevTag)
+	calls := rec.Escalations()
+	if len(calls) != 1 {
+		t.Fatalf("Escalate calls = %d, want exactly one", len(calls))
+	}
+	all, err := events.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropped []map[string]any
+	for _, e := range all {
+		if e.Type == events.TypeEscalationDropped {
+			dropped = append(dropped, e.Payload)
+		}
+	}
+	if len(dropped) != 1 {
+		t.Fatalf("escalation_dropped lines = %v, want exactly one", dropped)
+	}
+	if dropped[0]["source"] != polecatDevTagSource || dropped[0]["error"] != calls[0].Err.Error() ||
+		dropped[0]["title"] != escalationTitle(polecatDevTagSource, calls[0].Escalation.Reason) {
+		t.Fatalf("escalation_dropped = %v, want source %q, error %v, title of %q",
+			dropped[0], polecatDevTagSource, calls[0].Err, calls[0].Escalation.Reason)
 	}
 }
 
