@@ -115,6 +115,42 @@ func TestRedHoldEvalSweepTriggers(t *testing.T) {
 	}
 }
 
+func TestRedHoldEvalDriftTriggers(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	behind := dispatch.RedHoldReason{Kind: dispatch.RedHoldBehindMain, Since: now, Detail: "100 landings behind main"}
+	sweepSince, greenSince := now.Add(-time.Hour), now.Add(-2*time.Hour)
+	tests := []struct {
+		name string
+		in   redHoldInputs
+		prev []dispatch.RedHoldReason
+		want []dispatch.RedHoldReason
+	}{
+		{"the threshold number behind main holds", redHoldInputs{Waiting: 100}, nil, []dispatch.RedHoldReason{behind}},
+		{"one landing under the threshold holds nothing", redHoldInputs{Waiting: 99}, nil, nil},
+		{"a green sweep older than the window holds", redHoldInputs{OldestGreenAt: now.Add(-3*time.Hour - time.Minute)}, nil,
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldGreenStale, Since: now, Detail: "no green sweep for 3h"}}},
+		{"a green sweep inside the window holds nothing", redHoldInputs{OldestGreenAt: now.Add(-2*time.Hour - 59*time.Minute)}, nil, nil},
+		{"an unknown green time holds nothing", redHoldInputs{}, nil, nil},
+		{"both drift reasons sort with the sweep reasons and keep their Since",
+			redHoldInputs{Sweeps: []redHoldSweep{{Rig: "gastown", RedCycles: 2}}, Waiting: 100, OldestGreenAt: now.Add(-4 * time.Hour)},
+			[]dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: sweepSince}, {Kind: dispatch.RedHoldGreenStale, Since: greenSince}},
+			[]dispatch.RedHoldReason{
+				behind,
+				{Kind: dispatch.RedHoldGreenStale, Since: greenSince, Detail: "no green sweep for 4h"},
+				{Kind: dispatch.RedHoldSweepRed, Since: sweepSince, Detail: "gastown: 2 red cycles"},
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evalRedHold(tt.in, now, dispatch.RedHoldRecord{Reasons: tt.prev})
+			if !reflect.DeepEqual(got.Reasons, tt.want) {
+				t.Errorf("reasons = %+v, want %+v", got.Reasons, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedHoldChangeLine(t *testing.T) {
 	t.Parallel()
 	at := time.Unix(1_700_000_000, 0).UTC()
