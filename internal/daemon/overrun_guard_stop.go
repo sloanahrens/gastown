@@ -71,7 +71,8 @@ const (
 //     the commit and tells the next polecat to reuse the branch and run
 //     gt done. Every other stop (a checkpoint that committed or gave up, a
 //     push that was refused or given up, no branch on origin, a head older
-//     than the sling, a sling time the stop could not date) keeps needs-split.
+//     than the sling, a head the rig's target already contains, a sling time
+//     the stop could not date) keeps needs-split.
 //     The molecule the bead carried is ended with the hand-back
 //     (handBackEndingMolecule), so the run leaves none open. The attention
 //     item for the stop is derived from that hand-back
@@ -1563,7 +1564,15 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	if branch == "" || branch == "HEAD" {
 		return ""
 	}
-	return originHeadSince(g, branch, seat.SlingAt)
+	// The target the landing worker watches for the rig: the rig's configured
+	// default branch, else main. A rig whose config.json does not decode names
+	// no target, so the stop cannot tell finished work from a branch that
+	// target already holds and answers "": needs-split is the safe path.
+	target, err := rigDefaultBranch(filepath.Join(d.config.TownRoot, seat.Rig))
+	if err != nil {
+		return ""
+	}
+	return originHeadSince(g, branch, target, seat.SlingAt)
 }
 
 // originHeadSince is the finishedOnOrigin read: the commit origin holds for
@@ -1575,6 +1584,14 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 // above the tip: that is the seat's finished work. A tip that is not an
 // ancestor of origin's head is not in origin's history, so the branch is no
 // finished branch (gt-x32qui).
+//
+// A head the target already contains is no work: a branch cut from the target
+// at the spawn holds the target's commit and nothing of its own, so resuming it
+// would run a session on an empty branch (gt-qqoqbo). The target is the branch
+// the landing worker lands onto for the rig; its commit is read from origin and
+// made local with the same destinationless fetch the head uses, then tested as
+// an ancestor of the head's origin commit. A head origin holds above the target
+// still answers as finished work.
 //
 // The head's object may be absent from the worktree, so the branch is fetched
 // into no destination ref — no branch or remote-tracking ref moves and the
@@ -1589,10 +1606,10 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 // run, and a head merely resumed keeps the time it was pushed with.
 //
 // A branch origin lacks, an origin that cannot be asked, a fetch that fails, a
-// head whose committer time cannot be read, and an unknown sling time all
-// answer "": the stop then takes the needs-split path, whose attention item
-// asks for the operator look.
-func originHeadSince(g daemonGit, branch string, slingAt time.Time) string {
+// head whose committer time cannot be read, an unknown sling time and a target
+// ref the stop cannot read all answer "": the stop then takes the needs-split
+// path, whose attention item asks for the operator look.
+func originHeadSince(g daemonGit, branch, target string, slingAt time.Time) string {
 	tip, err := g.Rev("refs/heads/" + branch)
 	if err != nil || tip == "" {
 		return ""
@@ -1620,6 +1637,28 @@ func originHeadSince(g daemonGit, branch string, slingAt time.Time) string {
 		if ancestor, err := g.IsAncestor(tip, origin); err != nil || !ancestor {
 			return ""
 		}
+	}
+	// A head the target already contains is not work this seat produced, and
+	// resuming it would start the next polecat on an empty branch. An
+	// unreadable target is no answer either way, so it takes the same safe
+	// path as a contained head.
+	targetSHA := originBranchSHA(g, target)
+	if targetSHA == "" {
+		return ""
+	}
+	held, err := g.HasObject(targetSHA)
+	if err != nil {
+		return ""
+	}
+	if !held {
+		if err := g.FetchRefspecWithTimeout("origin", "refs/heads/"+target, git.RemoteQueryTimeout); err != nil {
+			return ""
+		}
+	}
+	// Equal is an ancestor here: git's merge-base test is true for a commit
+	// against itself, so a head sitting on the target's tip answers "".
+	if contained, err := g.IsAncestor(origin, targetSHA); err != nil || contained {
+		return ""
 	}
 	at, err := g.CommitTime(origin)
 	if err != nil || !at.After(slingAt) {
