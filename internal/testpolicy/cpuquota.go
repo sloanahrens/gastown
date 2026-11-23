@@ -73,5 +73,9 @@ func quotaCPUs(quota, period string) (int, bool) {
 	if err != nil || p <= 0 {
 		return 0, false
 	}
-	return int((q + p - 1) / p), true
+	cpus := q / p
+	if q%p != 0 {
+		cpus++
+	}
+	return int(cpus), true
 }
