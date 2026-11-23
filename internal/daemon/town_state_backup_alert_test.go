@@ -1,9 +1,14 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
+	"log"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -131,6 +136,72 @@ func TestTownStateBackupAlertRaiseFailureIsRetried(t *testing.T) {
 	if open := rec.OpenEscalations(key); len(open) != 1 {
 		t.Fatalf("after the next tick, the item is open %d time(s), want 1", len(open))
 	}
+}
+
+// townStateNextDaemon is the daemon that starts after d dies: a fresh process
+// over the same town, backup repository, alert recorder and town files.
+func townStateNextDaemon(d *Daemon, rec *notifyfake.Recorder, tree fstest.MapFS) *Daemon {
+	next := &Daemon{
+		logger:       log.New(io.Discard, "", 0),
+		notifier:     rec,
+		clock:        d.clock,
+		config:       &Config{TownRoot: d.config.TownRoot},
+		patrolConfig: d.patrolConfig,
+		openGitFn:    d.openGitFn,
+	}
+	next.townStateRigs = d.townStateRigs
+	next.townStateFS = func(string) fs.FS { return tree }
+	return next
+}
+
+// TestTownStateBackupAlertSurvivesARestart: the refusal set outlives the
+// daemon, so the daemon after a restart clears the item a path's refusal left
+// open, and the file it reads back holds the refused paths and no value.
+func TestTownStateBackupAlertSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	key := townStateRefusedKey(townStateRefusedPath)
+
+	t.Run("the next daemon clears an item the last one raised", func(t *testing.T) {
+		t.Parallel()
+		d, rec, tree := townStateAlertWorld(t)
+		d.syncTownStateBackup()
+		if open := rec.OpenEscalations(key); len(open) != 1 {
+			t.Fatalf("after the first daemon's tick, the item is open %d time(s), want 1", len(open))
+		}
+
+		next := townStateNextDaemon(d, rec, tree)
+		delete(tree, townStateRefusedPath)
+		next.syncTownStateBackup()
+
+		if n := townStateClearsOf(rec, key); n != 1 {
+			t.Fatalf("after the restarted daemon's clean tick, clears of %s = %d, want 1", key, n)
+		}
+		if open := rec.OpenEscalations(key); len(open) != 0 {
+			t.Errorf("after the restarted daemon, the item is still open: %+v", open)
+		}
+	})
+
+	t.Run("the file holds the refused paths and no value", func(t *testing.T) {
+		t.Parallel()
+		d, _, _ := townStateAlertWorld(t)
+		d.syncTownStateBackup()
+
+		data, err := os.ReadFile(townStateRaisedPath(d.config.TownRoot))
+		if err != nil {
+			t.Fatalf("reading the refused-path file: %v", err)
+		}
+		var paths []string
+		if err := json.Unmarshal(data, &paths); err != nil {
+			t.Fatalf("the refused-path file is not a JSON path list: %v (%q)", err, data)
+		}
+		if want := []string{townStateRefusedPath}; !reflect.DeepEqual(paths, want) {
+			t.Errorf("refused paths on disk = %v, want %v", paths, want)
+		}
+		const refusedValue = "PLANTED-123"
+		if strings.Contains(string(data), refusedValue) {
+			t.Errorf("the refused-path file holds the credential: %q", data)
+		}
+	})
 }
 
 // TestTownStateBackupAlertClearFailureIsRetried: an item whose clear the
