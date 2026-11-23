@@ -115,6 +115,8 @@ type Commands struct {
 	// Now is the clock the weekly retrain reads its last run and stamps its own;
 	// nil is the wall clock.
 	Now func() time.Time
+	// Budget bounds the due weekly run; zero is StoryPointsWeeklyBudget.
+	Budget time.Duration
 	// storyPointsStore is the filesystem storypoints-adopt lists, writes and
 	// deletes beside the runtime weights. The zero value is the host's; a test
 	// fills the one function it needs to refuse.
@@ -435,6 +437,15 @@ func extractRanYesterday(env Env, outDir string) (bool, error) {
 // that reached a decision, not the last run that tried.
 const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
 
+// StoryPointsWeeklyBudget is how long a due weekly run may take before it ends
+// itself as a wait that keeps the week open: ten minutes, inside the town-metrics
+// plugin's fifteen-minute timeout (plugins/town-metrics/plugin.md).
+const StoryPointsWeeklyBudget = 10 * time.Minute
+
+// storyPointsWeeklyWait is the weekly run's line when its own budget ends: the
+// cache holds what it embedded, so the next hour continues from it.
+const storyPointsWeeklyWait = "story points weekly: waiting: the %s budget ended; the next hour continues from the embedding cache"
+
 // storyPointsWeeklyStampName is the file beside the runtime weights that holds
 // the time the weekly retrain and adoption last reached a decision.
 const storyPointsWeeklyStampName = "weekly.stamp"
@@ -461,7 +472,9 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
-// for nothing.
+// for nothing. A due run ends itself at Commands.Budget (zero is
+// StoryPointsWeeklyBudget): that end on the retrain or the week-after check is
+// a wait that records no stamp and returns nil, so the week stays open.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -486,6 +499,16 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	if !Due(last, now, StoryPointsWeeklyEvery) {
 		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
 	}
+	// The due run ends itself before the plugin's timeout can kill it. The budget
+	// bounds the retrain and the week-after check, so one that outlives it
+	// reports waiting with the cache intact instead of dying before it can
+	// record anything.
+	budget := c.Budget
+	if budget == 0 {
+		budget = StoryPointsWeeklyBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	if c.AutoAdoptReader != nil {
 		on, err := c.AutoAdoptReader()
 		if err != nil {
@@ -526,6 +549,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	// The week-after check judges the last adoption before this week's proposal can
 	// replace the weights it kept.
 	if err := c.checkStoryPointsAdoption(ctx, real, env, embedder, now); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return c.receipt(storyPointsWeeklyWait, budget)
+		}
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 	}
 	// The retrain's report goes to the day's directory; Out carries the hour's one
@@ -535,7 +561,12 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	train.Embedder = embedder
 	// The progress line goes out after the train returns and before the
 	// adoption, so a run the hour kills after it still says how far it got.
-	if err := errors.Join(train.runStoryPointsTrain(ctx, real, env), c.writeStoryPointsWeeklyProgress(cachePath, cached)); err != nil {
+	trainErr := train.runStoryPointsTrain(ctx, real, env)
+	progressErr := c.writeStoryPointsWeeklyProgress(cachePath, cached)
+	if trainErr != nil && errors.Is(trainErr, context.DeadlineExceeded) {
+		return errors.Join(c.receipt(storyPointsWeeklyWait, budget), progressErr)
+	}
+	if err := errors.Join(trainErr, progressErr); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
 			return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 		}
