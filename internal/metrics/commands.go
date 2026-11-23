@@ -83,6 +83,8 @@ type Commands struct {
 	Mango func(town string) string
 	// Out takes the receipt lines; nil is the process's stdout.
 	Out io.Writer
+	// Progress takes the weekly run's embedding-progress line; nil is stderr.
+	Progress io.Writer
 	// StoryPointsBase is the checked-in story-points weights the retrain keeps from
 	// and compares against; nil is storypoints.Default().
 	StoryPointsBase *storypoints.Weights
@@ -132,6 +134,9 @@ func (c Commands) withDefaults() Commands {
 	}
 	if c.Out == nil {
 		c.Out = os.Stdout
+	}
+	if c.Progress == nil {
+		c.Progress = os.Stderr
 	}
 	return c
 }
@@ -512,8 +517,8 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	// cap keeps what it embedded and the next hour embeds only the rest
 	// (gt-tibj01). A cache that cannot be read is not an empty one, so its
 	// failure goes through weeklyFailure like a step that could not run.
-	cached, err := storypoints.NewCachedEmbedder(embedder,
-		filepath.Join(real.Town, ".runtime", "metrics", "embed-cache.jsonl"), base.EmbeddingModel())
+	cachePath := filepath.Join(real.Town, ".runtime", "metrics", "embed-cache.jsonl")
+	cached, err := storypoints.NewCachedEmbedder(embedder, cachePath, base.EmbeddingModel())
 	if err != nil {
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 	}
@@ -528,7 +533,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	train := c
 	train.Out = io.Discard
 	train.Embedder = embedder
-	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
+	// The progress line goes out after the train returns and before the
+	// adoption, so a run the hour kills after it still says how far it got.
+	if err := errors.Join(train.runStoryPointsTrain(ctx, real, env), c.writeStoryPointsWeeklyProgress(cachePath, cached)); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
 			return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 		}
@@ -568,6 +575,14 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	}
 	return c.receipt("story points weekly: %s",
 		strings.TrimPrefix(strings.TrimSpace(decision.String()), storyPointsAdoptReceipt))
+}
+
+// writeStoryPointsWeeklyProgress writes the cache's hits, misses and path to
+// Progress; the write is the line's only report, so it is an error (gt-tibj01).
+func (c Commands) writeStoryPointsWeeklyProgress(cachePath string, cached *storypoints.CachedEmbedder) error {
+	hits, misses := cached.Stats()
+	_, err := fmt.Fprintf(c.Progress, "story points weekly: embeddings hits=%d misses=%d cache=%s\n", hits, misses, cachePath)
+	return err
 }
 
 // weeklyFailure is the weekly run's line and error for a retrain or adoption that
