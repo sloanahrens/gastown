@@ -1,16 +1,20 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/seatship"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/usageattrib"
@@ -140,6 +144,116 @@ func TestSeatEndRecordStoreOutboxFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if path, err := storeSeatEndRecordWith(t.Context(), beadsfake.New(), t.TempDir(), p, tt.ops); !errors.Is(err, fail) || path == "" {
 				t.Errorf("storeSeatEndRecordWith = %q, %v; want the record path and the %q failure", path, err, tt.name)
+			}
+		})
+	}
+}
+
+// TestSeatEndNoRecordMarker: a seat end with neither a SEAT-END comment nor a
+// transcript copy leaves one marker naming the seat and its bead; a second end
+// of the same seat replaces that one file rather than adding another, and a
+// marker the host cannot write is logged without failing the end (gt-gnxclz).
+func TestSeatEndNoRecordMarker(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		ends int
+		// plant, when set, runs before the first end: a stale marker, or a
+		// path the marker cannot be written under.
+		plant func(t *testing.T, town string)
+		// wantRefused says the marker could not be written and the end said so.
+		wantRefused bool
+	}{
+		{name: "one marker for the seat and bead", ends: 1},
+		{name: "a second end of the same seat adds no file", ends: 2},
+		{name: "a stale marker is replaced, not added to", ends: 1,
+			plant: func(t *testing.T, town string) {
+				writeSeatEndNoRecordFile(t, town, endPolecat+".json", `{"bead":"gt-stale"}`)
+			}},
+		{name: "a marker the host cannot write is logged", ends: 1, wantRefused: true,
+			plant: func(t *testing.T, town string) {
+				if err := os.MkdirAll(seatEndNoRecordsDir(town), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(seatEndNoRecordsDir(town), endRig), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			f.agentDB.Seed(beads.Issue{ID: endBead, Title: "seat"})
+			// No transcripts on the host: the pull finds nothing to copy.
+			f.host.seatUsage = seatUsageHook{list: func(_, _ string) ([]string, error) { return nil, nil }}
+			var logs strings.Builder
+			f.host.d.logger = log.New(&logs, "", 0)
+			if tt.plant != nil {
+				tt.plant(t, f.town)
+			}
+			for i := 0; i < tt.ends; i++ {
+				f.seatDirs()
+				f.writeSeatRecordAt(start)
+				if !f.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding()) {
+					t.Fatalf("end %d did not finish the seat", i)
+				}
+			}
+			if refused := strings.Contains(logs.String(), "cannot record that its end found no record"); refused != tt.wantRefused {
+				t.Fatalf("log %q says the marker was refused = %v, want %v", logs.String(), refused, tt.wantRefused)
+			}
+			if tt.wantRefused {
+				return // the write was refused; the end still finished, checked above
+			}
+			rigDir := filepath.Join(seatEndNoRecordsDir(f.town), endRig)
+			entries, err := os.ReadDir(rigDir)
+			if err != nil || len(entries) != 1 || entries[0].Name() != endPolecat+".json" {
+				t.Fatalf("markers = %v, %v; want one %s.json", entries, err, endPolecat)
+			}
+			data, err := os.ReadFile(filepath.Join(rigDir, endPolecat+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var marker struct{ Bead string }
+			if err := json.Unmarshal(data, &marker); err != nil || marker.Bead != endBead {
+				t.Errorf("marker = %q, %v; want bead %s", data, err, endBead)
+			}
+		})
+	}
+}
+
+// writeSeatEndNoRecordFile plants one marker file under the town's rig.
+func writeSeatEndNoRecordFile(t *testing.T, town, name, body string) {
+	t.Helper()
+	path := filepath.Join(seatEndNoRecordsDir(town), endRig, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSeatEndNoRecordMarkerRefused: a marker with no bead to clear it by, or a
+// rig or polecat name no path holds, is refused rather than left out of the
+// queue (gt-gnxclz).
+func TestSeatEndNoRecordMarkerRefused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, rig, polecat, bead string
+	}{
+		{name: "no bead", rig: endRig, polecat: endPolecat},
+		{name: "a polecat that steps out", rig: endRig, polecat: "../" + endPolecat, bead: endBead},
+		{name: "a rig that steps out", rig: "../" + endRig, polecat: endPolecat, bead: endBead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := recordSeatEndNoRecord(t.TempDir(), tt.rig, tt.polecat, tt.bead); err == nil {
+				t.Error("recordSeatEndNoRecord wrote a marker it should have refused")
 			}
 		})
 	}
