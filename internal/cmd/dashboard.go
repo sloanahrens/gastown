@@ -1357,6 +1357,8 @@ func dashboardForgejoReaders(townRoot string, repos []string, logf func(format s
 	}
 	staging := dashboard.NewStagingReader(client, rigShipRepos(townRoot))
 	var pipeline func() *dashboard.GastownPipeline
+	// The System updates pane reads the repository the gastown rig cuts over to; a
+	// town whose rig has another name reads no runs and the section joins none.
 	if remote, err := rigForgejoRemote(townRoot, "gastown"); err == nil && remote != "" {
 		if owner, repo, err := land.RepoFromRemoteURL(remote); err == nil {
 			pipeline = newSystemUpdatesPipeline(dashboard.NewGastownPipelineReader(client, owner+"/"+repo).Read, time.Now, systemUpdatesPipelineEvery)

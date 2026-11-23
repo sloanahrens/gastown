@@ -69,6 +69,9 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, pipeline func() *da
 	// The update reader answers nil for both no run and a record it cannot read,
 	// so the record is read here to tell the page which one a missing roll is.
 	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))
+	// A pipeline read that failed with no good runs behind it is a reading that
+	// failed: the run stages are unknown, not absent (gt-nhdxkq).
+	su.RunsUnknown = pipelineRead != nil && pipelineRead.Error != "" && len(pipelineRead.Runs) == 0
 	return su
 }
 

@@ -184,12 +184,19 @@ func TestSystemUpdatesPipelineJoinsRunsForASweptCommit(t *testing.T) {
 		{Workflow: "images.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
 		{Workflow: "post-land.yml", SHA: "9f8e7d6c5b4a", Status: "success"},
 	}
-	read := func() *dashboard.GastownPipeline { return &dashboard.GastownPipeline{Runs: runs} }
+	other := dashboard.PipelineRun{Workflow: "images.yml", SHA: "1a2b3c4d5e6f", Status: "success"}
+	read := func() *dashboard.GastownPipeline {
+		return &dashboard.GastownPipeline{Runs: append([]dashboard.PipelineRun{other}, runs...)}
+	}
 
 	got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
 
-	require.Len(t, got.Rows, 1, "the swept commit names one row")
-	assert.Equal(t, runs, got.Rows[0].Runs)
+	byCommit := map[string][]dashboard.PipelineRun{}
+	for _, row := range got.Rows {
+		byCommit[row.SHA] = row.Runs
+	}
+	assert.Equal(t, runs, byCommit["9f8e7d6c5b4a"], "the swept commit's row holds its own two runs and no other commit's")
+	assert.Equal(t, []dashboard.PipelineRun{other}, byCommit["1a2b3c4d5e6f"], "another commit's run sits in that commit's own row")
 }
 
 // A nil pipeline read leaves every row without runs, the section a town with no
@@ -256,6 +263,33 @@ func TestSystemUpdatesPipelineThrottle(t *testing.T) {
 			} else {
 				assert.Same(t, tc.want, got)
 			}
+		})
+	}
+}
+
+// TestSystemUpdatesPipelineUnknown: a pipeline read that failed with no good runs
+// marks the section RunsUnknown; one that failed but holds last good runs keeps
+// them and marks nothing; a healthy empty read marks nothing.
+func TestSystemUpdatesPipelineUnknown(t *testing.T) {
+	t.Parallel()
+	good := []dashboard.PipelineRun{{Workflow: "images.yml", SHA: "9f8e7d6c5b4a", Status: "success"}}
+	tests := []struct {
+		name string
+		read *dashboard.GastownPipeline
+		want bool
+	}{
+		{"a failed read with no runs", &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}, Error: "timeout"}, true},
+		{"a failed read with last good runs", &dashboard.GastownPipeline{Runs: good, Error: "timeout"}, false},
+		{"a healthy read with no runs", &dashboard.GastownPipeline{Runs: []dashboard.PipelineRun{}}, false},
+		{"no pipeline", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			read := func() *dashboard.GastownPipeline { return tt.read }
+			got := systemUpdates(root, newTierSweepReader(root), read, time.Date(2026, 11, 18, 9, 5, 0, 0, time.Local))
+			assert.Equal(t, tt.want, got.RunsUnknown)
 		})
 	}
 }
