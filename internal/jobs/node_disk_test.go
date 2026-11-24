@@ -237,6 +237,33 @@ func TestJobsNodeDiskSandbox(t *testing.T) {
 	}
 }
 
+// The daily bound is the sandbox key's alone. Every other node is refreshed
+// every minute, so its reading keeps the fifteen-minute bound and one two hours
+// old is unknown (gt-cgrzlr).
+func TestNodeDiskOtherNodeKeepsFifteenMinutes(t *testing.T) {
+	t.Parallel()
+	for _, node := range []string{"colima-gt-control", "colima-gt-worker"} {
+		t.Run(node, func(t *testing.T) {
+			t.Parallel()
+			readAt := testNow.Add(-2 * time.Hour)
+			root := t.TempDir()
+			writeNodeDiskRecord(t, root, `{"nodes":{"`+node+`":{"used_percent":50,"read_at":"`+readAt.Format(time.RFC3339)+`"}}}`)
+
+			rows, err := List(root, Options{}, testNow)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			found := nodeDiskRowsNamed(rows, "node_disk:"+node)
+			if len(found) != 1 {
+				t.Fatalf("got %d rows for %q, want one: %+v", len(found), node, rows)
+			}
+			if got := found[0].State; got != StateUnknown {
+				t.Errorf("State = %q, want unknown: a reading two hours old is past the control node's fifteen-minute bound", got)
+			}
+		})
+	}
+}
+
 // The sandbox reading is written only on the daily pass and the interval
 // passes, so it is current for a day, while a control node's reading refreshed
 // every minute keeps the short bound (gt-jx56c6).
