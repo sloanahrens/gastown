@@ -86,6 +86,59 @@ func TestTickEffRigHeads(t *testing.T) {
 	}
 }
 
+// TestTickEffRigHeadsSharedDatabase: two rigs stored in one database name that
+// database once in the statement, and both rigs are answered with its hashes.
+// Naming it once per rig would make beadsql.RigHeads refuse the repeat.
+func TestTickEffRigHeadsSharedDatabase(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeMetadata := func(rig, content string) {
+		t.Helper()
+		dir := filepath.Join(town, rig, ".beads")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMetadata("gastown", `{"dolt_database":"gt"}`)
+	writeMetadata("beads", `{"dolt_database":"gt"}`)
+
+	calls := 0
+	var sent beadsql.Query
+	read := sqlReaderFunc(func(q beadsql.Query) ([][]string, error) {
+		calls++
+		sent = q
+		return [][]string{
+			{"gt_head", "gt_working"},
+			{"g1", "g2"},
+		}, nil
+	})
+
+	got, err := rigHeads(town, []string{"gastown", "beads"}, read)
+	if err != nil {
+		t.Fatalf("rigHeads: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("SQLCSV calls = %d, want one", calls)
+	}
+	wantQuery, err := rigHeadsQuery([]string{"gt"}).Inline()
+	if err != nil {
+		t.Fatalf("rigHeadsQuery: %v", err)
+	}
+	if query, err := sent.Inline(); err != nil || query != wantQuery {
+		t.Errorf("statement = %q, %v, want rigHeadsQuery's %q naming gt once", query, err, wantQuery)
+	}
+	want := map[string]beadsql.RigHash{
+		"gastown": {Head: "g1", Working: "g2"},
+		"beads":   {Head: "g1", Working: "g2"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rigHeads = %v, want %v", got, want)
+	}
+}
+
 // TestTickEffRigHeadsQuery: the statement is beadsql.RigHeads' for the
 // databases in the order given, and a list RigHeads refuses keeps its refusal.
 func TestTickEffRigHeadsQuery(t *testing.T) {
