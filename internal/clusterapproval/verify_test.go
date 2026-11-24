@@ -125,6 +125,29 @@ func TestClusterApprovalVerify(t *testing.T) {
 			wantErr: "not valid until",
 		},
 		{
+			// The declared window is longer than DefaultValidity, but the record
+			// is used at exactly the default, so Verify accepts it: the guard
+			// bounds when the record is used, not the window it names.
+			name: "approved exactly the default ago",
+			rec: withVerifyRecord(func(r *Record) {
+				r.ApprovedAt = verifyNow.Add(-DefaultValidity)
+				r.ExpiresAt = verifyNow.Add(time.Minute)
+			}),
+			plan: verifyPlan(), live: verifyLive(),
+		},
+		{
+			// Not expired, and every other field matches: only the moment is
+			// past DefaultValidity after approved_at, so this row goes red if
+			// the use-window check goes.
+			name: "used more than the default after approval",
+			rec: withVerifyRecord(func(r *Record) {
+				r.ApprovedAt = verifyNow.Add(-DefaultValidity - time.Second)
+				r.ExpiresAt = verifyNow.Add(time.Minute)
+			}),
+			plan: verifyPlan(), live: verifyLive(),
+			wantErr: "approved more than",
+		},
+		{
 			name:    "moved live version",
 			rec:     verifyRecord(),
 			plan:    verifyPlan(),

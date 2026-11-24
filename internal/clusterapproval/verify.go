@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// DefaultValidity is the window a writer should give a record between
-// approved_at and expires_at, so an approval is spent soon after it is given.
+// DefaultValidity is how long after its approved_at an approval record may be
+// used: a writer should give a record that window, and Verify refuses to use
+// one past it, so an approval is spent soon after it is given.
 const DefaultValidity = time.Hour
 
 // Verify reports why rec may not authorize an apply of p to the cluster whose
@@ -33,6 +34,12 @@ func Verify(rec Record, p Plan, live map[string]string, now time.Time) error {
 	}
 	if !now.Before(rec.ExpiresAt) {
 		return fmt.Errorf("clusterapproval: the record expired at %s", rec.ExpiresAt.Format(time.RFC3339))
+	}
+	// An approval is spent soon after it is given: a record may name a longer
+	// expires_at (ParseRecord allows up to MaxValidity), but Verify refuses to
+	// use it more than DefaultValidity after it was approved.
+	if now.After(rec.ApprovedAt.Add(DefaultValidity)) {
+		return fmt.Errorf("clusterapproval: the record was approved more than %s before it was used", DefaultValidity)
 	}
 	// Only the plan's objects are compared: an object the plan does not name
 	// is not part of the apply, so its drift cannot invalidate the approval.
