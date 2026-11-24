@@ -1323,7 +1323,6 @@ func landingWorkerDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	f := newRigStatusFakeFixture(t, rigShowOperational)
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	f.daemon.ctx = ctx
 	f.daemon.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		LandingWorker: &LandingWorkerConfig{Enabled: true},
@@ -1331,7 +1330,14 @@ func landingWorkerDaemon(t *testing.T) *Daemon {
 	if ok, why := f.daemon.isRigOperational(f.rigName); !ok {
 		t.Fatalf("fixture rig is not operational (%s); the worker would skip its pass", why)
 	}
-	return f.daemon
+	// Cancel first, then wait for the loops to stop: a pass in flight writes
+	// patrol_last_run.json, and t.TempDir's cleanup deletes the tree (gt-zv3ndb).
+	d := f.daemon
+	t.Cleanup(func() {
+		cancel()
+		waitLandingLoops(t, d)
+	})
+	return d
 }
 
 // gt-fzwcd: the worker passes at once instead of waiting out an interval, so

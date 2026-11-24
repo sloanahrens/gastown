@@ -88,13 +88,18 @@ func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer) {
 	registerTestRigs(t, townRoot, map[string]string{src: src[:2], other: other[:2]})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	logs := &syncBuffer{}
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: log.New(logs, "", 0),
 		ctx:    ctx,
 	}
+	// Cancel first, then wait for the loops to stop: a pass in flight writes
+	// patrol_last_run.json, and t.TempDir's cleanup deletes the tree (gt-zv3ndb).
+	t.Cleanup(func() {
+		cancel()
+		waitLandingLoops(t, d)
+	})
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		LandingWorker: &LandingWorkerConfig{Enabled: true},
 	}}
