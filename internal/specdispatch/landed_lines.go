@@ -34,8 +34,8 @@ func LandedLines(minutes float64) (LinesBand, bool) {
 	return LinesBand{}, false
 }
 
-// Refuse is the band's P25 added lines.
-func (b LinesBand) Refuse() int { return b.P25 }
+// Refuse is the band's Median added lines.
+func (b LinesBand) Refuse() int { return b.Median }
 
 // Advise is half the band's P90 rounded up: the gate refuses past twice the
 // declared number, so a declaration at Advise is refused only above about P90,

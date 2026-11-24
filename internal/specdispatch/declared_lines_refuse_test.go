@@ -6,11 +6,11 @@ import (
 )
 
 // TestDeclaredLinesRefuse pins the refusal (gt-vb9pi9): a Change line below
-// the estimate band's p25 (38 at 8 minutes) is refused with the declared
-// number, the estimate, the p25 and the declaration that keeps under the gate;
-// a declaration at the p25 is not refused but keeps the advice, and a high
-// declaration or one the band cannot place is neither. A refused bead's advice
-// does not repeat the refusal.
+// the estimate band's median (67 at 8 minutes) is refused with the declared
+// number, the estimate, the median and the declaration that keeps under the
+// gate; a declaration at the median is not refused but keeps the advice, and a
+// high declaration or one the band cannot place is neither. A refused bead's
+// advice does not repeat the refusal.
 func TestDeclaredLinesRefuse(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -20,8 +20,8 @@ func TestDeclaredLinesRefuse(t *testing.T) {
 		wantAdvice bool
 	}{
 		{"30 declared at 8 minutes", workerSizeWithBudget("Change: at most 30 added lines in 2 files."), []string{"sp-minutes:8"},
-			"the Change line declares 30 added lines, below what three in four beads estimated at 8.0 minutes landed with (p25 38); declare at least 118, or split", false},
-		{"38 declared gets the advice", workerSizeWithBudget("Change: at most 38 added lines in 2 files."), []string{"sp-minutes:8"}, "", true},
+			"the Change line declares 30 added lines, below what half of the beads estimated at 8.0 minutes landed with (median 67); declare at least 118, or split", false},
+		{"67 declared gets the advice", workerSizeWithBudget("Change: at most 67 added lines in 2 files."), []string{"sp-minutes:8"}, "", true},
 		{"120 declared is neither", workerSizeWithBudget("Change: at most 120 added lines in 2 files."), []string{"sp-minutes:8"}, "", false},
 		{"no sp-minutes label", workerSizeWithBudget("Change: at most 30 added lines in 2 files."), nil, "", false},
 		{"no Change line", "One worker, one landing.", []string{"sp-minutes:8"}, "", false},
