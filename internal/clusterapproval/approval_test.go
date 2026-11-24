@@ -24,10 +24,8 @@ var goodSHA = strings.Repeat("a1", 32)
 
 const (
 	approvedText = "2026-11-18T12:00:00Z"
-	// goodWindow is the record's window; expiresText is approvedText plus it.
-	goodWindow  = 30 * time.Minute
-	expiresText = "2026-11-18T12:30:00Z"
-	goodID      = "0123456789ab"
+	expiresText  = "2026-11-18T18:00:00Z"
+	goodID       = "0123456789ab"
 )
 
 // recordText is a JSON object of the given keys. A string value is quoted and
@@ -101,10 +99,10 @@ func TestClusterApprovalParse(t *testing.T) {
 		PlanSHA256: goodSHA,
 		ProposalID: goodID,
 		ApprovedAt: approved,
-		ExpiresAt:  approved.Add(goodWindow),
+		ExpiresAt:  approved.Add(6 * time.Hour),
 	}
-	atDefault := accepted
-	atDefault.ExpiresAt = approved.Add(DefaultValidity)
+	longest := accepted
+	longest.ExpiresAt = approved.Add(MaxValidity)
 
 	tests := []struct {
 		name    string
@@ -113,7 +111,7 @@ func TestClusterApprovalParse(t *testing.T) {
 		wantErr string
 	}{
 		{"good", recordText(goodRecord()), &accepted, ""},
-		{"good at the default window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T13:00:00Z"})), &atDefault, ""},
+		{"good at the longest window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-19T12:00:00Z"})), &longest, ""},
 		{"unknown key", recordText(with(goodRecord(), map[string]any{"extra": "1"})), nil, "unknown key"},
 		{"act key in the wrong case", recordText(with(goodRecord(), map[string]any{"Act": ActApplyPlan})), nil, "unknown key"},
 		{"sha key in the wrong case", recordText(with(goodRecord(), map[string]any{"PLAN_SHA256": goodSHA})), nil, "unknown key"},
@@ -143,7 +141,7 @@ func TestClusterApprovalParse(t *testing.T) {
 		{"non-UTC expires_at", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00-07:00"})), nil, "expires_at is not in UTC"},
 		{"zero window", recordText(with(goodRecord(), map[string]any{"expires_at": approvedText})), nil, "not after approved_at"},
 		{"negative window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00Z"})), nil, "not after approved_at"},
-		{"window over the default", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T13:00:01Z"})), nil, "more than"},
+		{"window over the longest", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-19T12:00:01Z"})), nil, "more than"},
 		{"not an object", "[]", nil, "not one JSON object"},
 		{"empty body", "", nil, "not one JSON object"},
 		{"truncated key", `{"act`, nil, "read the approval record"},

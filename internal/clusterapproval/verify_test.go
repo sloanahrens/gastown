@@ -36,9 +36,8 @@ func verifyLive() map[string]string {
 	}
 }
 
-// verifyRecord is a record Verify accepts for verifyPlan at verifyNow; its
-// window is exactly DefaultValidity, so the "matching" row also pins the accept
-// boundary. Each refusal row changes or drops one thing.
+// verifyRecord is a record Verify accepts for verifyPlan at verifyNow; each
+// refusal row changes or drops one thing.
 func verifyRecord() Record {
 	return Record{
 		Act:        ActApplyPlan,
@@ -124,17 +123,6 @@ func TestClusterApprovalVerify(t *testing.T) {
 			plan:    verifyPlan(),
 			live:    verifyLive(),
 			wantErr: "not valid until",
-		},
-		{
-			// The record is used ten minutes into its window, so not-expired,
-			// not-yet-valid and every other check pass: only the window bound
-			// can refuse it, and this row goes red if that guard goes.
-			name: "window over the default",
-			rec: withVerifyRecord(func(r *Record) {
-				r.ExpiresAt = r.ExpiresAt.Add(time.Second)
-			}),
-			plan: verifyPlan(), live: verifyLive(),
-			wantErr: "valid for more than",
 		},
 		{
 			name:    "moved live version",
@@ -242,39 +230,43 @@ func TestClusterApprovalVerifyKeys(t *testing.T) {
 	}
 }
 
-// TestClusterApprovalWindowBound pins that ParseRecord and Verify hold the same
-// window rule: both accept a window at or under DefaultValidity and both refuse
-// one over it. A row goes red if either side drifts, so Verify cannot refuse a
-// record ParseRecord accepts (gt-vr6mst).
-func TestClusterApprovalWindowBound(t *testing.T) {
+// TestClusterApprovalLongWindow pins the deliberate split between the two
+// windows: ParseRecord accepts a six-hour window (up to MaxValidity), and Verify
+// judges only the record's own ExpiresAt, so that record authorizes an apply
+// until it expires and not after (gt-vr6mst).
+func TestClusterApprovalLongWindow(t *testing.T) {
 	t.Parallel()
-	approved, err := time.Parse(time.RFC3339, approvedText)
+	approved := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	body := recordText(with(goodRecord(), map[string]any{
+		"expires_at": approved.Add(6 * time.Hour).Format(time.RFC3339),
+	}))
+	rec, err := ParseRecord([]byte(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ParseRecord refused a six-hour window it must accept: %v", err)
 	}
 	tests := []struct {
-		name   string
-		window time.Duration
+		name    string
+		now     time.Time
+		wantErr string
 	}{
-		{"under the default", goodWindow},
-		{"at the default", DefaultValidity},
-		{"over the default", DefaultValidity + time.Second},
+		{name: "before expiry", now: rec.ExpiresAt.Add(-time.Second)},
+		{name: "at expiry", now: rec.ExpiresAt, wantErr: "expired"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			expires := approved.Add(tt.window)
-			_, parseErr := ParseRecord([]byte(recordText(with(goodRecord(), map[string]any{"expires_at": expires.Format(time.RFC3339)}))))
-			rec := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: expires}
-			// Ten minutes after approval is inside every window these rows
-			// name, so only the window bound can refuse a row.
-			verifyErr := Verify(rec, verifyPlan(), verifyLive(), approved.Add(10*time.Minute))
-			wantRefuse := tt.window > DefaultValidity
-			if got := parseErr != nil; got != wantRefuse {
-				t.Fatalf("ParseRecord on a %s window returned %v, want refuse=%v", tt.window, parseErr, wantRefuse)
+			err := Verify(rec, verifyPlan(), verifyLive(), tt.now)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Verify refused a record it must accept: %v", err)
+				}
+				return
 			}
-			if got := verifyErr != nil; got != wantRefuse {
-				t.Fatalf("Verify on a %s window returned %v, want refuse=%v", tt.window, verifyErr, wantRefuse)
+			if err == nil {
+				t.Fatal("Verify accepted a record it must refuse")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantErr)
 			}
 		})
 	}
