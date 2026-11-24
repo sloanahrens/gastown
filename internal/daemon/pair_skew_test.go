@@ -627,6 +627,44 @@ func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
 	assert.Equal(t, []string{pairBdPin}, readPins, "the level was not read for the bd pin the placeholder expanded to")
 }
 
+// TestPreRollGuardAnOwnerThatFailsToResolveIsUnreadable: a pins file that holds
+// config.ForgeOwnerPlaceholder, read in a town whose forge.owner does not
+// resolve, raises the guard's own per-commit unreadable item naming the failure
+// and no pair-ready item, so a pair whose owner cannot be named is never
+// announced ready. The fixture's town names an owner the loader refuses, so the
+// failure comes through the pass's production owner closure,
+// config.ResolveForgeOwner(townRoot), and not an injected one; the level is
+// never read for a pin the owner never expanded.
+func TestPreRollGuardAnOwnerThatFailsToResolveIsUnreadable(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	pairWriteTownOwner(t, fx.town, "org/team")
+	var readPins []string
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt: func(_ context.Context, commit string) (int, error) {
+			readPins = append(readPins, commit)
+			return pairSchemaLevel, nil
+		},
+		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+	}
+	fx.pins = func(string) (string, error) {
+		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, pairBdPin), nil
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a pins file whose owner does not resolve raised %v; want the unreadable item alone", pairSkewItemKinds(items))
+	it := items[0]
+	assert.Equal(t, attention.KindDeployPairUnreadable, it.Kind)
+	assert.Equal(t, "deploy-pair-unreadable:skew:gastown:"+pairGreen12, it.Key)
+	assert.Equal(t, "gastown", it.Rig)
+	assert.Equal(t, pairGreen, it.SHA)
+	assert.Contains(t, it.Summary, "forge.owner", "the item does not name the setting that failed to resolve")
+	assert.Contains(t, it.Summary, "org/team", "the item does not name the owner value that failed to resolve")
+	assert.Empty(t, readPins, "the level was read for a pin the unresolved owner never expanded")
+}
+
 // TestPreRollGuardAJudgedCommitClearsItsSkewItem: a commit the pass judged
 // drops the skew item it held, even when the same pass broke before reaching
 // another commit, so a skew that has cleared does not linger on a branch the
