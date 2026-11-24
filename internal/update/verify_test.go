@@ -130,6 +130,29 @@ func readyGreenProbes() *fakeReadyProbes {
 	return &fakeReadyProbes{fakeVerifyProbes: greenProbes(), ready: true}
 }
 
+// fakeSweepProbes is fakeVerifyProbes with the sweep extension: the sweep
+// launch answer the run reports.
+type fakeSweepProbes struct {
+	*fakeVerifyProbes
+	started  bool
+	detail   string
+	errSweep error
+}
+
+func (p *fakeSweepProbes) SweepLaunch(context.Context) (bool, string, error) {
+	return p.started, p.detail, p.errSweep
+}
+
+// sweepGreenProbes is every probe matching want and a sweep stage that started,
+// reporting a red test verdict: a red test is not a failure of this check.
+func sweepGreenProbes() *fakeSweepProbes {
+	return &fakeSweepProbes{
+		fakeVerifyProbes: greenProbes(),
+		started:          true,
+		detail:           "stage 1/3 ran and reported RED",
+	}
+}
+
 // fakeVerifyClock is a clock the fake sleep advances, so no test waits.
 type fakeVerifyClock struct{ now time.Time }
 
@@ -1186,6 +1209,75 @@ func TestVerifyWithoutPairProbesChecksFour(t *testing.T) {
 	checks := Verify(context.Background(), greenProbes(), verifyTestWant)
 
 	assertCheckNames(t, checks, verifyFourNames)
+}
+
+// TestVerifySweepLaunchCheck drives Verify on a probe set that implements
+// SweepProbes: the check follows the four base checks, passes when the stage
+// started (a red test verdict is not a failure), and fails with the stage's
+// detail when it did not start or the probe's error when the probe failed. A
+// probe set without SweepProbes gets no such check.
+func TestVerifySweepLaunchCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*fakeSweepProbes)
+		ok     bool
+		detail string
+	}{
+		{
+			name:   "a stage that started passes, even reporting a red test",
+			ok:     true,
+			detail: "stage 1/3 ran and reported RED",
+		},
+		{
+			name:   "a stage that did not start fails with the detail",
+			mutate: func(p *fakeSweepProbes) { p.started, p.detail = false, "no sweep stage could be launched" },
+			ok:     false,
+			detail: "no sweep stage could be launched",
+		},
+		{
+			name:   "a probe error fails naming the error",
+			mutate: func(p *fakeSweepProbes) { p.errSweep = errors.New("gt sweep run failed") },
+			ok:     false,
+			detail: "gt sweep run failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := sweepGreenProbes()
+			if tt.mutate != nil {
+				tt.mutate(probes)
+			}
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertCheckNames(t, checks, []string{
+				checkGTVersion, checkDaemonVersion, checkImageLabel, checkHealth, checkSweepLaunch,
+			})
+			check := findCheck(t, checks, checkSweepLaunch)
+			if check.OK != tt.ok {
+				t.Errorf("check %q OK = %v, want %v", checkSweepLaunch, check.OK, tt.ok)
+			}
+			if check.Detail != tt.detail {
+				t.Errorf("check %q detail = %q, want %q", checkSweepLaunch, check.Detail, tt.detail)
+			}
+			if tt.ok {
+				assertFailedChecks(t, checks)
+			} else {
+				assertFailedChecks(t, checks, checkSweepLaunch)
+			}
+		})
+	}
+
+	t.Run("a probe set without SweepProbes gets no sweep-launch check", func(t *testing.T) {
+		t.Parallel()
+		base := Verify(context.Background(), greenProbes(), verifyTestWant)
+		assertCheckNames(t, base, verifyFourNames)
+
+		pair := Verify(context.Background(), pairGreenProbes(), verifyTestWant)
+		assertCheckNames(t, pair, verifyPairNames)
+	})
 }
 
 func TestSameCommit(t *testing.T) {

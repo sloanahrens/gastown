@@ -16,6 +16,7 @@ const (
 	checkHealth            = "health"
 	checkPolecatAnnotation = "polecat-annotation"
 	checkDevTag            = "dev-tag"
+	checkSweepLaunch       = "sweep-launch"
 )
 
 // shortCommitLen is the shortest commit string treated as authoritative: a
@@ -67,6 +68,17 @@ type ReadyProbes interface {
 	Ready(ctx context.Context) (ready bool, reason string, err error)
 }
 
+// SweepProbes is the optional extension of VerifyProbes a run implements when it
+// can ask whether the new daemon's sweeper can launch a sweep stage against
+// main. A stage that ran and reported a RED test verdict has started, so a red
+// test is not a failure of this check: only a stage that never started is.
+type SweepProbes interface {
+	// SweepLaunch reports whether one sweep stage could be launched against main
+	// and started, and what it reported: the detail a person reads in the
+	// check's detail.
+	SweepLaunch(ctx context.Context) (started bool, detail string, err error)
+}
+
 // CrashLoopError is why a restart wait ended before its bound: the daemon's
 // newest pod is crash-looping, so it cannot report the new build however long
 // the wait lasts. The caller tells it apart from a canceled or failed sleep
@@ -97,6 +109,9 @@ type Check struct {
 // a fixed order; a probe error fails its own check and leaves the others
 // evaluated. Probes that also implement PairProbes add the two checks that make
 // a roll usable for dispatch, polecat-annotation and dev-tag, after the four.
+// Probes that also implement SweepProbes add the sweep-launch check after the
+// others, so a probe set that does not implement it gets exactly the checks it
+// got before.
 func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 	checks := []Check{
 		versionCheck(ctx, checkGTVersion, p.GTVersion, want),
@@ -104,15 +119,30 @@ func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 		versionCheck(ctx, checkImageLabel, p.ImageLabel, want),
 		healthCheck(ctx, p),
 	}
-	pair, ok := p.(PairProbes)
-	if !ok {
-		return checks
+	if pair, ok := p.(PairProbes); ok {
+		wantPolecat := pair.WantPolecat()
+		checks = append(checks,
+			digestCheck(ctx, checkPolecatAnnotation, pair.PolecatAnnotation, wantPolecat),
+			digestCheck(ctx, checkDevTag, pair.DevTagDigest, wantPolecat),
+		)
 	}
-	wantPolecat := pair.WantPolecat()
-	return append(checks,
-		digestCheck(ctx, checkPolecatAnnotation, pair.PolecatAnnotation, wantPolecat),
-		digestCheck(ctx, checkDevTag, pair.DevTagDigest, wantPolecat),
-	)
+	if sweep, ok := p.(SweepProbes); ok {
+		checks = append(checks, sweepLaunchCheck(ctx, sweep.SweepLaunch))
+	}
+	return checks
+}
+
+// sweepLaunchCheck asks whether one sweep stage could be launched against main.
+// A probe error fails the check with the error's text, since a probe that failed
+// is no evidence a stage started. Otherwise the stage's started answer decides
+// the check and its detail is what the probe reported, so a stage that started
+// and reported a red test verdict passes.
+func sweepLaunchCheck(ctx context.Context, probe func(context.Context) (bool, string, error)) Check {
+	started, detail, err := probe(ctx)
+	if err != nil {
+		return Check{Name: checkSweepLaunch, Detail: err.Error()}
+	}
+	return Check{Name: checkSweepLaunch, OK: started, Detail: detail}
 }
 
 // VerifyWithSettle runs Verify once, then re-reads a health line that classifies
