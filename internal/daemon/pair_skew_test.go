@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/bdskew"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -572,6 +575,56 @@ func TestPreRollGuardThePinsReaderRefusesWhatItCannotRead(t *testing.T) {
 
 	_, err = read(pairOther)
 	assert.Error(t, err, "a pins read off the clone's history was answered")
+}
+
+// pairImagePinsOwnedBy is a valid image-pins file with owner in the owner
+// position of every repository URL, where deploy/daemon/image-pins writes
+// config.ForgeOwnerPlaceholder.
+func pairImagePinsOwnedBy(owner, bd string) string {
+	return fmt.Sprintf("bd http://forgejo:3000/%s/beads.git %s\nom http://forgejo:3000/%s/om.git %s\nhm http://forgejo:3000/%s/hm.git %s\ndevops http://forgejo:3000/%s/devops.git %s\n",
+		owner, bd, owner, pairOther, owner, pairOther, owner, pairOther)
+}
+
+// pairWriteTownOwner writes the mayor/town.json whose forge.owner is owner, so
+// the skew pass's production owner closure reads it through
+// config.ResolveForgeOwner.
+func pairWriteTownOwner(t *testing.T, townRoot, owner string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "mayor")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	body := fmt.Sprintf(`{"type":"town","version":2,"name":"town","created_at":"2026-01-01T00:00:00Z","forge":{"owner":%q}}`, owner)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "town.json"), []byte(body), 0o600))
+}
+
+// TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded: a pins file that writes
+// config.ForgeOwnerPlaceholder in each URL's owner position, as the real
+// deploy/daemon/image-pins does, reads the bd pin that follows it and raises the
+// pair-ready item and no unreadable one. The fixture's town names the owner in
+// its own mayor/town.json, so the placeholder is expanded through the pass's
+// production owner closure, config.ResolveForgeOwner(townRoot), and not an
+// injected one.
+func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	pairWriteTownOwner(t, fx.town, "townown")
+	var readPins []string
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt: func(_ context.Context, commit string) (int, error) {
+			readPins = append(readPins, commit)
+			return pairSchemaLevel, nil
+		},
+		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+	}
+	fx.pins = func(string) (string, error) {
+		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, pairBdPin), nil
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a pins file holding the owner placeholder raised %v; want the pair-ready item alone", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Equal(t, []string{pairBdPin}, readPins, "the level was not read for the bd pin the placeholder expanded to")
 }
 
 // TestPreRollGuardAJudgedCommitClearsItsSkewItem: a commit the pass judged
