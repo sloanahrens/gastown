@@ -2757,6 +2757,9 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 	return l.recordBead(w, rec)
 }
 
+// landingCommitScanLimit bounds the walk that counts a landing's commits (gt-dhun8o).
+const landingCommitScanLimit = 1000
+
 // landingSize fills rec's added lines and files changed from the landed
 // change's numstat. A diff that cannot be read leaves both zero and is
 // logged, and the landing stands either way; a landing that changed nothing

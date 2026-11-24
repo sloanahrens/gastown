@@ -1853,6 +1853,49 @@ func TestAttentionRiskPath(t *testing.T) {
 	}
 }
 
+// A record whose file list covers more than one commit names the count and
+// calls the sha the head; one commit, or no count recorded, keeps the old
+// wording, and two landings in a row each report their own head, count and
+// files (gt-dhun8o).
+func TestAttentionRiskPathNamesTheCommitCount(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	head, other := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	rec := func(head string, commits int, path string) land.LandingRecord {
+		return land.LandingRecord{BeadID: "gt-abc", Head: head, Commits: commits,
+			RiskPaths: []string{path}, LandedAt: now}
+	}
+	for _, tc := range []struct {
+		name    string
+		records []land.LandingRecord
+		want    []string
+	}{
+		{"two commits", []land.LandingRecord{rec(head, 2, "internal/land/land.go")},
+			[]string{"gt-abc landed head " + head[:12] + " (2 commits) touching internal/land/land.go; overseer review wanted"}},
+		{"one commit", []land.LandingRecord{rec(head, 1, "internal/land/land.go")},
+			[]string{"gt-abc landed " + head[:12] + " touching internal/land/land.go; overseer review wanted"}},
+		{"no count", []land.LandingRecord{rec(head, 0, "internal/land/land.go")},
+			[]string{"gt-abc landed " + head[:12] + " touching internal/land/land.go; overseer review wanted"}},
+		{"two landings in a row", []land.LandingRecord{rec(head, 2, "internal/land/land.go"), rec(other, 1, "internal/daemon/attention.go")},
+			[]string{"gt-abc landed head " + head[:12] + " (2 commits) touching internal/land/land.go; overseer review wanted",
+				"gt-abc landed " + other[:12] + " touching internal/daemon/attention.go; overseer review wanted"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) { return tc.records, nil }
+			items := f.collect(t, f.src.collectRiskPaths)
+			if len(items) != len(tc.want) {
+				t.Fatalf("items = %+v, want %d", items, len(tc.want))
+			}
+			for i := range tc.want {
+				if items[i].Summary != tc.want[i] {
+					t.Errorf("item %d summary = %q, want %q", i, items[i].Summary, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // gt-691ob: a bead read that reports no issue and no error leaves nothing to
 // judge, so the landing raises no item. Reading its notes anyway would panic
 // the tick on the nil.

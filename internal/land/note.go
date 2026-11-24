@@ -706,6 +706,8 @@ type LandingRecord struct {
 	// is left out of the JSON (gt-8ldz1g).
 	AddedLines   int `json:"added_lines,omitempty"`
 	FilesChanged int `json:"files_changed,omitempty"`
+	// Commits is the non-merge commit count of Base..Head, zero when unrecorded (gt-dhun8o).
+	Commits int `json:"commits,omitempty"`
 }
 
 // PolecatAttempt is one seat's time on the landing's bead, an entry of
