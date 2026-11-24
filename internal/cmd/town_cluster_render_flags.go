@@ -52,6 +52,7 @@ type renderFlagsRecord struct {
 	OpenShellConfigDir            string `json:"openshell_config_dir"`
 	ForgeHost                     string `json:"forge_host"`
 	DoltBackupHostPath            string `json:"dolt_backup_host_path"`
+	TownStateBackupHostPath       string `json:"town_state_backup_host_path,omitempty"`
 	CloudReportsHostPath          string `json:"cloud_reports_host_path,omitempty"`
 	CloudReleasesHostPath         string `json:"cloud_releases_host_path,omitempty"`
 	Dashboard                     bool   `json:"dashboard"`
@@ -102,6 +103,7 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		OpenShellConfigDir:            f.openShellConfigDir,
 		ForgeHost:                     f.forgeHost,
 		DoltBackupHostPath:            f.doltBackupHostPath,
+		TownStateBackupHostPath:       f.townStateBackupHostPath,
 		CloudReportsHostPath:          f.cloudReportsHostPath,
 		CloudReleasesHostPath:         f.cloudReleasesHostPath,
 		Dashboard:                     f.dashboard,
@@ -140,6 +142,7 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		openShellConfigDir:            r.OpenShellConfigDir,
 		forgeHost:                     r.ForgeHost,
 		doltBackupHostPath:            r.DoltBackupHostPath,
+		townStateBackupHostPath:       r.TownStateBackupHostPath,
 		cloudReportsHostPath:          r.CloudReportsHostPath,
 		cloudReleasesHostPath:         r.CloudReleasesHostPath,
 		dashboard:                     r.Dashboard,
