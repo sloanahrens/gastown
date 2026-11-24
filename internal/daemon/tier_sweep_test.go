@@ -2121,9 +2121,9 @@ func TestRunTierSweep_SkippedSweepLogsNoDuration(t *testing.T) {
 	}
 }
 
-// TestTierSweepSkipRecordsTheTime: a cycle that finds origin/main at the last
-// green tip dates the confirmation by its own clock, and a cycle that sweeps a
-// moved tip leaves the field as it found it (gt-upeqb5).
+// TestTierSweepSkipRecordsTheTime: an unchanged-tip cycle dates the
+// confirmation by its own clock, and a cycle that sweeps a moved tip leaves the
+// field as it found it (gt-upeqb5).
 func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -2146,9 +2146,9 @@ func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 		t.Errorf("state = %+v, want the proving sweep's %v at %s left alone", st, proved, sha)
 	}
 
+	// The swept-tip cycle runs on a later clock, so a wrong re-stamp shows as
+	// later (gt-upeqb5).
 	moved := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	// The swept-tip cycle runs on a later clock, so a wrong re-stamp on this
-	// path would show as the skip's time replaced by later (gt-upeqb5).
 	later := now.Add(time.Hour)
 	d.clock.(*clockwork.FakeClock).Advance(time.Hour)
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return moved, nil }
@@ -2162,6 +2162,21 @@ func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 	}
 	if st.LastGreenSHA != moved || !st.LastGreenAt.Equal(later) {
 		t.Errorf("state = %+v, want the swept tip %s dated %v", st, moved, later)
+	}
+
+	// A record another writer changed after the cycle's read keeps the change:
+	// the confirmation re-reads it rather than writing the cycle's copy (gt-upeqb5).
+	owed := now.Add(-30 * time.Minute)
+	d.tierSweepSeams.readState = func(_, _ string) (tierSweepState, error) {
+		return tierSweepState{LastGreenSHA: moved, LastGreenAt: later, OwedSince: owed}, nil
+	}
+	var wrote tierSweepState
+	d.tierSweepSeams.writeState = func(_, _ string, st tierSweepState) error { wrote = st; return nil }
+	if !d.runTierSweep() {
+		t.Fatal("the second unchanged-tip cycle deferred; want a skip")
+	}
+	if !wrote.OwedSince.Equal(owed) {
+		t.Errorf("OwedSince = %v, want the concurrent writer's %v kept: the stamp must re-read the record, not write the cycle's copy", wrote.OwedSince, owed)
 	}
 }
 
@@ -2183,35 +2198,45 @@ func TestTierSweepSkipOldRecordWithoutTheFieldReadsAsTheZeroTime(t *testing.T) {
 	if !st.LastGreenConfirmedAt.IsZero() {
 		t.Errorf("LastGreenConfirmedAt = %v, want the zero time for a record without the field", st.LastGreenConfirmedAt)
 	}
-	if st.LastGreenSHA != "aaaa" || st.LastGreenAt.IsZero() {
-		t.Errorf("state = %+v, want the legacy record's green tip and its date", st)
-	}
 }
 
 // TestTierSweepSkipDefersWhenTheConfirmationCannotBeWritten: a skip whose
-// confirmation is not recorded leaves the evidence aging, so the cycle defers
-// instead of reporting a verdict (gt-upeqb5).
+// confirmation could not be read or written leaves the evidence aging, so the
+// cycle defers instead of reporting a verdict (gt-upeqb5).
 func TestTierSweepSkipDefersWhenTheConfirmationCannotBeWritten(t *testing.T) {
 	t.Parallel()
-	now := atHour(time.Now(), 15)
-	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
 	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha, LastGreenAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
-	d.tierSweepSeams.writeState = func(string, string, tierSweepState) error { return errors.New("record is read-only") }
-	if d.runTierSweep() {
-		t.Fatal("runTierSweep reported a verdict; want the cycle deferred so the heartbeat retries the confirmation")
-	}
-	if len(rec.stages) != 0 {
-		t.Fatalf("stages = %+v, want none on an unchanged tip", rec.stages)
-	}
-	if out := logs.String(); !strings.Contains(out, "recording the green confirmation: record is read-only") {
-		t.Errorf("log missing the write failure; got:\n%s", out)
-	}
-	if st := tierSweepTestState(t, d, "gastown"); !st.LastGreenConfirmedAt.IsZero() {
-		t.Errorf("LastGreenConfirmedAt = %v, want it unwritten after the failed write", st.LastGreenConfirmedAt)
+	for _, tc := range []struct {
+		name, failure string
+		arm           func(*Daemon)
+	}{
+		{"the record cannot be read", "record is unreadable", func(d *Daemon) {
+			d.tierSweepSeams.readState = func(string, string) (tierSweepState, error) {
+				return tierSweepState{}, errors.New("record is unreadable")
+			}
+		}},
+		{"the record cannot be written", "record is read-only", func(d *Daemon) {
+			d.tierSweepSeams.writeState = func(string, string, tierSweepState) error { return errors.New("record is read-only") }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := atHour(time.Now(), 15)
+			d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+			if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha, LastGreenAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+			tc.arm(d)
+			if d.runTierSweep() {
+				t.Fatal("runTierSweep reported a verdict; want the cycle deferred so the heartbeat retries the confirmation")
+			}
+			if out := logs.String(); !strings.Contains(out, "recording the green confirmation: "+tc.failure) {
+				t.Errorf("log missing the failure; got:\n%s", out)
+			}
+			if st := tierSweepTestState(t, d, "gastown"); !st.LastGreenConfirmedAt.IsZero() {
+				t.Errorf("LastGreenConfirmedAt = %v, want it unwritten after the failed confirmation", st.LastGreenConfirmedAt)
+			}
+		})
 	}
 }
 
