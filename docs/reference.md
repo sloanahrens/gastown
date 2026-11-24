@@ -618,7 +618,7 @@ interval that is not a Go duration of at least a minute, or a target name the
 patrol does not know, is refused when the config is read.
 
 `cache_trim_interval` sets how often the shared cache claim is trimmed, in any
-window; it defaults to `2h` when empty. A value that is not a Go duration of at
+window; it defaults to `15m` when empty. A value that is not a Go duration of at
 least a minute is refused when the config is read.
 
 `cache_trim_early_percent` runs the shared cache trim before its interval when
