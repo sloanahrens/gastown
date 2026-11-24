@@ -51,8 +51,9 @@ type RecoverInput struct {
 
 // RecoverOnly recovers the branches a dead or failed run left, without starting
 // a squash: it holds the run marker as Run does, calls Recover with the cut, and
-// returns its Recovery (nil when the database holds nothing to recover) or its
-// error. A held marker returns ErrRunMarkerHeld before any statement is sent, so
+// returns its Recovery or its error, never both — the Recovery is nil when the
+// database holds nothing to recover and nil whenever the error is not nil. A
+// held marker returns ErrRunMarkerHeld before any statement is sent, so
 // a live run's branches are never read as a dead run's. Run recovers only at its
 // own start, and the 24-hour gate keeps a failed run's database from reaching
 // Run, so a caller that must recover without running uses this (gt-an57lb,
@@ -67,6 +68,9 @@ func RecoverOnly(ctx context.Context, in RecoverInput) (recovery *Recovery, err 
 	defer func() {
 		if releaseErr := in.Marker.Release(); releaseErr != nil {
 			err = errors.Join(err, fmt.Errorf("doltsquash: releasing the run marker: %w", releaseErr))
+			// A release failure makes the call fail, and a failed call returns no
+			// Recovery, so a caller's error path never sees a recovery to act on.
+			recovery = nil
 		}
 	}()
 	return Recover(ctx, in.Exec, in.Cut)
