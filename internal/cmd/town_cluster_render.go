@@ -113,6 +113,10 @@ type clusterRenderFlags struct {
 	openShellConfigDir string
 	forgeHost          string
 	doltBackupHostPath string
+	// townStateBackupHostPath is the host directory the pod mounts at the same
+	// path: read-write in a live render and read-only in a rehearsal, which reads
+	// the archives it restores. Empty mounts nothing (gt-3c4ppq).
+	townStateBackupHostPath string
 	// The cloud reports and releases host directories the pod mounts read-only, empty by default (gt-9gcfj3).
 	cloudReportsHostPath  string
 	cloudReleasesHostPath string
@@ -274,6 +278,8 @@ func init() {
 		"the forge's host:port the pod's git asks for a credential (required for a live render, the flag `gt daemon compose write` takes); a rehearsal takes none")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.doltBackupHostPath, "dolt-backup-host-path", "",
 		"the host directory the live pod mounts at the Dolt backup path, read-write, in place of the dolt-backup claim; it must be "+k8sdaemon.DoltBackupPath+" (a live render only)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.townStateBackupHostPath, "town-state-backup-host-path", "",
+		"the host directory the pod mounts at the same path to keep the town-state backups, read-write in a live render and read-only in a rehearsal; empty mounts nothing")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.cloudReportsHostPath, "cloud-reports-host-path", "",
 		"the host directory the cloud patrol writes its reports to, mounted read-only at the same path in the pod; empty mounts nothing, and the cloud step reads the Postgres source")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.cloudReleasesHostPath, "cloud-releases-host-path", "",
@@ -790,6 +796,9 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.ForgeHost = strings.TrimSpace(f.forgeHost)
 		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
+	// The daemon mounts the town-state directory read-write live and read-only in
+	// a rehearsal, so a named flag reaches Values in either render (gt-3c4ppq).
+	v.TownStateBackupHostPath = f.townStateBackupHostPath
 	// The daemon mounts both cloud directories read-only in a rehearsal too, so a
 	// named flag reaches Values in either render (gt-9gcfj3).
 	v.CloudReportsHostPath = f.cloudReportsHostPath

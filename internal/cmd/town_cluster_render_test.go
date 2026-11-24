@@ -3163,6 +3163,9 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case "dashboardClaudeDir", "daemonClaudeDir":
 			// Retired: the flags are refused, so the record holds neither and a
 			// replay leaves both empty (gt-ja7otj).
+		case "townStateBackupHostPath":
+			// gt-3c4ppq adds the flag to the render; gt-6iyjli records and replays
+			// it, so the record holds no field for it until then.
 		default:
 			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
 		}
