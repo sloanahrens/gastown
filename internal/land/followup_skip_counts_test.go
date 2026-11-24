@@ -1,6 +1,7 @@
 package land
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -95,5 +96,34 @@ func TestFollowupSkipCountsNilAndMalformed(t *testing.T) {
 	must(t, os.WriteFile(base, nil, 0o600))
 	if _, err := (&ReviewsFile{Path: filepath.Join(base, ReviewsFileName)}).SkipCounts(since); err == nil || !strings.Contains(err.Error(), "opening reviews file") {
 		t.Errorf("SkipCounts under a file = %v, want the open error", err)
+	}
+}
+
+// TestFollowupSkipCountsLinePastCap: a skips line past maxReviewLineBytes is
+// not counted and raises no error, while the valid lines before and after it
+// are still counted (gt-9ijxjl).
+func TestFollowupSkipCountsLinePastCap(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	f := reviewsFileIn(t)
+	must(t, os.MkdirAll(filepath.Dir(f.Path), 0o700))
+	// AppendSkips refuses an over-cap line, so the file is written by hand.
+	before, err := json.Marshal(ReviewRecord{BeadID: "gt-a", At: since, Skips: &FollowupSkips{
+		Findings: []FollowupSkipped{{Reason: "doc-nit", Class: "comment-claim", Fingerprint: "fp-before"}}}})
+	must(t, err)
+	over, err := json.Marshal(ReviewRecord{BeadID: "gt-over", At: since, Skips: &FollowupSkips{
+		Findings: []FollowupSkipped{{Reason: "doc-nit", Class: "comment-claim", Fingerprint: "fp-over", File: strings.Repeat("x", maxReviewLineBytes)}}}})
+	must(t, err)
+	after, err := json.Marshal(ReviewRecord{BeadID: "gt-b", At: since, Skips: &FollowupSkips{
+		Findings: []FollowupSkipped{{Reason: "protected", Class: "workflow", Fingerprint: "fp-after"}}}})
+	must(t, err)
+	must(t, os.WriteFile(f.Path, []byte(string(before)+"\n"+string(over)+"\n"+string(after)+"\n"), 0o600))
+	got, err := f.SkipCounts(since)
+	if err != nil {
+		t.Fatalf("SkipCounts with an over-cap skips line: %v", err)
+	}
+	want := map[string]int{"doc-nit/comment-claim": 1, "protected/workflow": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SkipCounts = %v, want %v: the over-cap line was counted or the line after it was not", got, want)
 	}
 }
