@@ -157,6 +157,9 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	// second slot frees only the head of the queue may take it. A fresh
 	// admission pass — what any newly arriving caller runs first — is the
 	// deterministic probe: with two tickets ahead of it, it must not grant.
+	// Baseline the fake clock before any of that starts: a baseline read after
+	// a caller is launched cannot bound the whole interval it measures.
+	releasedAt := tg.clk.Now()
 	fourthDone := goAcquireCPU(func() (*CPUHandle, error) {
 		return tg.AcquireCPU(town, "gastown/crew/sable", 20*tg.pollInterval, 2)
 	})
@@ -166,7 +169,6 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	})
 	waitCPUQueued(t, tg, town, 2)
 
-	releasedAt := tg.clk.Now()
 	releaseCPU(t, second)
 	late, _, err := tg.admitCPU(town, "gastown/crew/latecomer", "latecomer", 2)
 	if err != nil {
