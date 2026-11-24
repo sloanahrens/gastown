@@ -8,12 +8,14 @@ package daemon
 //
 // Each run lists, plans, then removes. The list program prints the engine as
 // JSON. The planner, a pure function over that listing, decides what goes, so the
-// keep rule is tested in-process. The remove step is one docker command per kind
-// the plan names (docker rm, docker rmi -f, docker volume rm), each over that
-// kind's ids as argv with no shell between the plan and docker. The listing is
-// older than the remove step, and docker rmi -f removes an image a created
-// container holds, so right before the image command the run re-reads the
-// containers' image ids and drops the planned images a container now references.
+// keep rule is tested in-process. A run removes at most ci_engine_prune_max_per_kind
+// volumes, the oldest created first; the rest wait for a later run. The remove
+// step is one docker command per kind the plan names (docker rm, docker rmi -f,
+// docker volume rm), each over that kind's ids as argv with no shell between the
+// plan and docker. The listing is older than the remove step, and docker rmi -f
+// removes an image a created container holds, so right before the image command
+// the run re-reads the containers' image ids and drops the planned images a
+// container now references.
 // A re-read that fails removes no image this run (gt-vlu7sc). What each command
 // did is read back from docker: the ids it printed removed, and for any it did not
 // print, one docker inspect that names which of them are still in the engine. An
@@ -959,11 +961,13 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // run. Once it removes, every kind and the build cache prune run whatever an
 // earlier one did; a kind docker left in place, or that could not be checked, fails
 // the run after the rest have run, and the next run plans again from what is left.
+// The run removes at most maxPerKind volumes, the oldest created first, and names
+// the rest in its log; a run that leaves volumes is still a verdict.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	started := s.now()
-	every, imageAge, unusedAge, keepBytes, keepRepos, _, err := ciEnginePruneSettings(pc)
+	every, imageAge, unusedAge, keepBytes, keepRepos, maxPerKind, err := ciEnginePruneSettings(pc)
 	stats := map[string]int64{}
 	outcome := ciEngineOutcomeFailed
 	// The run is recorded on every return path below, the refusals included, so
@@ -1049,6 +1053,17 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		// The build cache step did not run, so no build_cache_bytes is recorded.
 		outcome = ciEngineOutcomeOK
 		return true, ""
+	}
+
+	// The per-run cap keeps the volumes created longest ago, and the rest wait for
+	// a later run; a run that leaves some is a verdict, not a failure. The
+	// container and image cuts are beads gt-puhdl9 and gt-ae3jtd, so the cap sees
+	// this plan's volumes alone.
+	volumes, remaining := capCIEnginePlan(ciEnginePlan{volumes: plan.volumes}, maxPerKind)
+	plan.volumes = volumes.volumes
+	if remaining.volumes > 0 {
+		d.logger.Printf("disk_maintenance: ci engine prune: %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
+			remaining.volumes, maxPerKind)
 	}
 
 	// Every kind and the build cache prune run whatever an earlier one did; each

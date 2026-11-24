@@ -2616,3 +2616,59 @@ func TestCapCIEnginePlanCapsBelowOneToNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestCIEnginePruneCapVolumesRemaining: a run removes at most
+// ci_engine_prune_max_per_kind volumes, the ones created longest ago first, and the
+// volumes it leaves are not a failure: the run is recorded ok with the usual next
+// due, raises no item, and its log names how many wait for a later run.
+func TestCIEnginePruneCapVolumesRemaining(t *testing.T) {
+	t.Parallel()
+	// Five anonymous volumes past the unused age, each created a different number
+	// of hours ago, so the cap's oldest-first order is not the plan's name order.
+	listing := engListing(t, nil, nil, []map[string]any{
+		engVol(engHex64('1'), 30*time.Hour),
+		engVol(engHex64('2'), 70*time.Hour),
+		engVol(engHex64('3'), 40*time.Hour),
+		engVol(engHex64('4'), 60*time.Hour),
+		engVol(engHex64('5'), 50*time.Hour),
+	})
+	const every = time.Hour // the default interval the fixture's empty setting takes
+	limit := 2
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+	f.tick()
+	f.drain()
+
+	execs := engineDockerExecs(f, "volume rm")
+	if len(execs) != 1 {
+		t.Fatalf("docker volume rm ran %d time(s), want once:\n%s", len(execs), f.logs.String())
+	}
+	if got, want := engineDockerIDs(execs[0].args), []string{engHex64('2'), engHex64('4')}; !slices.Equal(got, want) {
+		t.Errorf("docker volume rm removed %q, want the two oldest %q", got, want)
+	}
+	logs := f.logs.String()
+	if want := "3 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
+		t.Errorf("the run's log does not name the volumes left behind (%q):\n%s", want, logs)
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("a run that left volumes raised %d item(s): %+v", len(items), items)
+	}
+
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("opening the job ledger: %v", err)
+	}
+	runs, err := ledger.Tail(ciEnginePruneName, 10)
+	if err != nil {
+		t.Fatalf("reading the job ledger: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("the run was recorded %d time(s), want once", len(runs))
+	}
+	if runs[0].Outcome != ciEngineOutcomeOK {
+		t.Errorf("recorded outcome = %q, want %q", runs[0].Outcome, ciEngineOutcomeOK)
+	}
+	if want := ciCacheTestStart.Add(every); runs[0].NextDue == nil || !runs[0].NextDue.Equal(want) {
+		t.Errorf("recorded next due = %v, want the usual %v", runs[0].NextDue, want)
+	}
+}
