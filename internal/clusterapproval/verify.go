@@ -7,8 +7,10 @@ import (
 	"time"
 )
 
-// DefaultValidity is the window a writer should give a record between
-// approved_at and expires_at, so an approval is spent soon after it is given.
+// DefaultValidity is the window a record writer should give between approved_at
+// and expires_at, so an approval is spent soon after it is given. Verify does
+// not enforce it: Verify judges only the record's own ExpiresAt. The hard cap on
+// what a record may name is MaxValidity, enforced by ParseRecord in approval.go.
 const DefaultValidity = time.Hour
 
 // Verify reports why rec may not authorize an apply of p to the cluster whose

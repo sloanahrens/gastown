@@ -230,6 +230,48 @@ func TestClusterApprovalVerifyKeys(t *testing.T) {
 	}
 }
 
+// TestClusterApprovalLongWindow pins the deliberate split between the two
+// windows: ParseRecord accepts a six-hour window (up to MaxValidity), and Verify
+// judges only the record's own ExpiresAt, so that record authorizes an apply
+// until it expires and not after (gt-vr6mst).
+func TestClusterApprovalLongWindow(t *testing.T) {
+	t.Parallel()
+	approved := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	body := recordText(with(goodRecord(), map[string]any{
+		"expires_at": approved.Add(6 * time.Hour).Format(time.RFC3339),
+	}))
+	rec, err := ParseRecord([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseRecord refused a six-hour window it must accept: %v", err)
+	}
+	tests := []struct {
+		name    string
+		now     time.Time
+		wantErr string
+	}{
+		{name: "before expiry", now: rec.ExpiresAt.Add(-time.Second)},
+		{name: "at expiry", now: rec.ExpiresAt, wantErr: "expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := Verify(rec, verifyPlan(), verifyLive(), tt.now)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Verify refused a record it must accept: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Verify accepted a record it must refuse")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func withVerifyRecord(change func(*Record)) Record {
 	rec := verifyRecord()
 	change(&rec)
