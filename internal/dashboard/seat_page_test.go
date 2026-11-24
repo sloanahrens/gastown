@@ -46,6 +46,34 @@ func seatAgeCell(t *testing.T, dom *pageDOM, name string) (string, map[string]st
 	return cell.Text, cell.Subs
 }
 
+// seatRowText reads the whole text of the named seat's row, every element under
+// it included, so a test can assert a label the row used to draw is gone from
+// the row rather than only from the Age cell.
+func seatRowText(t *testing.T, dom *pageDOM, name string) string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`(() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS(name) + `) out = String(c.textContent);
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})()`)
+	if err != nil {
+		t.Fatalf("reading the row of %s: %v", name, err)
+	}
+	if v.String() == "null" {
+		t.Fatalf("seat %s has no row", name)
+	}
+	return v.String()
+}
+
 // TestSeatRowTimes: a seat whose guard charged gate time draws "working Xm, gate
 // Ym" under its since-sling time; a seat with no gate time draws no second line;
 // and a poll that changes only gate_sec redraws the table, so the line appears
@@ -96,10 +124,11 @@ func TestSeatRowUnchanged(t *testing.T) {
 	}
 }
 
-// TestSeatRowStartingAndRound: a seat that is still starting draws a starting
-// badge in place of its working time, a seat refused for review draws "round N"
-// with N one above its reject_count, and a poll that changes only the phase
-// redraws the table (polecatsKey, gt-qjl0ym part 2).
+// TestSeatRowStartingAndRound: a seat still read as starting draws the working
+// and gate split like any other seat that has been charged gate time — the
+// phase draws no badge of its own — and a seat refused for review draws "round
+// N" with N one above its reject_count, redrawn when only the count moves
+// (gt-urycmq, gt-qjl0ym part 2).
 func TestSeatRowStartingAndRound(t *testing.T) {
 	t.Parallel()
 	seatWith := func(fields map[string]any) map[string]any {
@@ -115,7 +144,7 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 		fields map[string]any
 		want   map[string]string
 	}{
-		{"starting draws the badge and not the times", map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
+		{"a starting phase draws the times, no badge", map[string]any{"phase": "starting"}, map[string]string{"wsub": "working 20m, gate 10m"}},
 		{"working draws the times and no badge", map[string]any{"phase": "working"}, map[string]string{"wsub": "working 20m, gate 10m"}},
 		{"one rejection is round 2", map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 		{"no rejection draws no round", map[string]any{"reject_count": 0.0}, map[string]string{"wsub": "working 20m, gate 10m"}},
@@ -130,13 +159,13 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 		})
 	}
 	// Each field the row shows is in polecatsKey on its own: a poll that moves
-	// only that field must redraw.
+	// only that field must redraw. The phase is no longer one of them — nothing
+	// in the row reads it (gt-urycmq).
 	for _, c := range []struct {
 		name         string
 		before, then map[string]any
 		want         map[string]string
 	}{
-		{"phase", map[string]any{"phase": "working"}, map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
 		{"reject_count", map[string]any{"phase": "working"}, map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 	} {
 		t.Run("a change in only the "+c.name+" redraws", func(t *testing.T) {
@@ -148,6 +177,28 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSeatRowStartingDrawsNoBadge: a seat the feed still reads as starting,
+// holding a bead but charged no gate time, draws no second line and no element
+// of its row reads "starting" — the badge that made every sandbox seat read the
+// same is gone (gt-urycmq).
+func TestSeatRowStartingDrawsNoBadge(t *testing.T) {
+	t.Parallel()
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+	s["phase"] = "starting"
+	callWork(t, dom, workState([]any{s}, nil))
+	t.Run("a starting seat with no gate time draws no sub-line", func(t *testing.T) {
+		if text, subs := seatAgeCell(t, dom, "agate"); text != "30m" || len(subs) != 0 {
+			t.Errorf("Age cell = %q with %v, want 30m and no child", text, subs)
+		}
+	})
+	t.Run("no element in the row reads starting", func(t *testing.T) {
+		if row := seatRowText(t, dom, "agate"); strings.Contains(row, "starting") {
+			t.Errorf("the row of seat agate reads %q, want no 'starting' anywhere in it", row)
+		}
+	})
 }
 
 // TestPolecatRowReworkPageDraws: a seat whose bead was refused for review draws
