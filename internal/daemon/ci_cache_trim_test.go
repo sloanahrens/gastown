@@ -506,8 +506,8 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
 				t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
 			}
-			if want := "the volume's program could not be built: "; !strings.Contains(why, want) {
-				t.Errorf("the refusal's reason = %q, want it to carry %q", why, want)
+			if wantReason := "the volume's program could not be built: "; !strings.Contains(why, wantReason) {
+				t.Errorf("the refusal's reason = %q, want it to carry %q", why, wantReason)
 			}
 		})
 	}
