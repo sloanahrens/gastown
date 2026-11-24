@@ -119,7 +119,23 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if len(dropped) > 0 {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
 	}
-	return k.attach(l.pod, call, dir)
+	exit, err := k.attach(l.pod, call, dir)
+	k.noteReplacedPod(l.pod, exit)
+	return exit, err
+}
+
+// noteReplacedPod says when a call's 137 is the daemon pod replaced under it: one
+// bounded read of the pod, made once and never retried.
+func (k Kubectl) noteReplacedPod(pod string, exit int) {
+	if exit != 137 {
+		return
+	}
+	out, readExit, err := k.probe("-n", k.Namespace, "get", "pod", pod, "-o", "name")
+	if err != nil {
+		fmt.Fprintf(k.Note, "gt-wrap: exit 137 and the pod %s's state is unknown: the read after the call did not run, so 137 may be the tool's end or the pod's, and the call's result is unknown\n", pod)
+	} else if readExit != 0 || strings.TrimSpace(out) != "pod/"+pod {
+		fmt.Fprintf(k.Note, "gt-wrap: exit 137 and the pod %s is gone: the pod was replaced while the call ran (a daemon roll), so 137 is the pod's end, not the tool's, and the call's result is unknown\n", pod)
+	}
 }
 
 // attach runs the call in the pod. When the pod's town root and the Mac's differ, a
