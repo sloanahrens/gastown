@@ -99,6 +99,48 @@ func TestSystemUpdatesBannerDrawsNoFromAsADash(t *testing.T) {
 	}
 }
 
+// bannerSweepUnknownState is a reading that names a running sweep in Now while
+// the section says the sweep source could not be read, as a failed poll leaves
+// the previous Now in place.
+func bannerSweepUnknownState(rows ...any) map[string]any {
+	st := systemUpdatesState(systemUpdatesSources{sweepUnknown: true}, rows...)
+	st["system_updates"].(map[string]any)["now"] = map[string]any{"sweep": bannerSweep()}
+	return st
+}
+
+// With a roll and a sweep both running, the roll banner is the pane's first line
+// and the sweep banner its second.
+func TestSystemUpdatesBannerOrdersRollBeforeSweep(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{roll: bannerRoll(), sweep: bannerSweep()}, systemUpdateGoodRow()))
+	if got := dom.element(t, "systemupdates").Kids; got != 3 {
+		t.Fatalf("the pane drew %d lines, want the two banners and the one row", got)
+	}
+	if got := dom.descend(t, "systemupdates", 0, 0).Text; got != "rolling" {
+		t.Errorf("the first line reads %q, want the roll banner", got)
+	}
+	if got := dom.descend(t, "systemupdates", 1, 0).Text; got != "sweeping" {
+		t.Errorf("the second line reads %q, want the sweep banner", got)
+	}
+}
+
+// A section that cannot read the sweep draws no sweep banner, even when an older
+// Now block still carries a running sweep.
+func TestSystemUpdatesBannerSweepUnknown(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", bannerSweepUnknownState(systemUpdateGoodRow()))
+	if got := paneBanner(t, dom); got != "" {
+		t.Fatalf("an unknown sweep drew the banner %q", got)
+	}
+	if got := dom.element(t, "systemupdates").Kids; got != 1 {
+		t.Errorf("the pane drew %d lines, want the one commit row", got)
+	}
+}
+
 // A running tier sweep with no roll draws the pane's first line as its banner:
 // sweeping, the rig it sweeps, the tier and the elapsed time.
 func TestSystemUpdatesBannerShowsTheRunningSweep(t *testing.T) {

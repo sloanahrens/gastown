@@ -3082,8 +3082,8 @@ function systemUpdateBannerLine(b) {
 // systemUpdateBannerSweepLine is a running tier sweep's banner (gt-dln3rq): the
 // rig it sweeps, the tier it is at and the elapsed time. The feed names a sweep
 // only while it runs, so the banner is drawn while Now carries one and a push
-// without one keeps none behind. Telling an unreadable sweep from an idle one
-// is bead 2/2.
+// without one keeps none behind. An unreadable sweep draws none even when an
+// older Now block still carries one (gt-bn5e6c).
 function systemUpdateBannerSweepLine(sweep) {
   const line = el("div", "surow subanner");
   line.append(el("span", "subannerword", "sweeping"));
@@ -3134,11 +3134,14 @@ function paintSystemUpdatesIcon(chips) { paintPaneIcon("systemupdatesico", chips
 function renderSystemUpdates(s) {
   const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
   const sweep = su && su.now && su.now.sweep;
+  // The sweep source may fail while an older Now block still names a running
+  // sweep, so an unknown sweep draws no banner (gt-bn5e6c).
+  const sweepUnknown = !!su && systemUpdateStageUnknown(su, "sweep");
   if (pushSkip("systemupdates", s)) return;
   const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
   if (banner) box.append(systemUpdateBannerLine(banner));
-  if (sweep) box.append(systemUpdateBannerSweepLine(sweep));
+  if (sweep && !sweepUnknown) box.append(systemUpdateBannerSweepLine(sweep));
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
