@@ -185,8 +185,10 @@ func TestTickEffRigHeadsOneCall(t *testing.T) {
 // and the other rigs are answered (gt-a8ak44). The refusal's words are matched
 // case-insensitively; a name that only starts with one of the databases asked
 // for or goes on past its variable, a 1105 that names no database asked for,
-// that same text under another error code, and a failure that is no such
-// refusal keep their error and cost no second call.
+// that same text under another error code or a longer one that starts with
+// 1105, and a failure that is no such refusal keep their error and cost no
+// second call. A refusal that leaves no database to ask is returned too, never
+// an empty answer.
 func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -269,6 +271,7 @@ func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
 		{"a 1105 that is no unknown variable", `Error 1105 (HY000): gc failed: boom`},
 		{"a 1105 naming ours that is no unknown variable", `Error 1105 (HY000): @@gt_head is unreadable: manifest lock`},
 		{"that way of saying it under another code", `Error 1193 (HY000): Unknown system variable '@@gt_head'`},
+		{"a longer code that starts with 1105", `Error 11050 (HY000): Unknown system variable '@@gt_head'`},
 		{"a failure that is no 1105", `dial tcp 127.0.0.1:3307: connect: connection refused`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -284,18 +287,20 @@ func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
 		})
 	}
 
-	t.Run("no database left to ask", func(t *testing.T) {
+	t.Run("every database unknown refuses", func(t *testing.T) {
 		t.Parallel()
-		sent, read := reads(`Error 1105 (HY000): Unknown system variable '@@gt_working'`, "gt", "g1", "g2")
+		refusal := errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_working'`)
+		calls := 0
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+			calls++
+			return nil, refusal
+		})
 		got, err := rigHeads(town, []string{"gastown"}, read)
-		if err != nil {
-			t.Fatalf("rigHeads: %v", err)
+		if !errors.Is(err, refusal) {
+			t.Fatalf("rigHeads = %v, %v, want the read's refusal rather than an empty answer", got, err)
 		}
-		if want := map[string]beadsql.RigHash{}; !reflect.DeepEqual(got, want) {
-			t.Errorf("rigHeads = %v, want no hashes", got)
-		}
-		if len(*sent) != 1 {
-			t.Errorf("SQLCSV calls = %d, want no statement with no database left", len(*sent))
+		if calls != 1 {
+			t.Errorf("SQLCSV calls = %d, want no retry with no database left", calls)
 		}
 	})
 

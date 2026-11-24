@@ -76,8 +76,9 @@ func parseRigHeads(records [][]string) ([]rigHashRow, error) {
 // A database the server does not know — a stale metadata file names one the
 // server has dropped — costs only its own rig its hashes: it is dropped by
 // exact name and the statement sent once more without it, so its rig is absent
-// and every other rig is answered. When no database is left to ask, the answer
-// holds no hashes rather than a statement Dolt would refuse (gt-a8ak44).
+// and every other rig is answered. When every database asked for is unknown
+// the read's refusal is returned, as every other failed read is, rather than an
+// empty answer no rig explains (gt-a8ak44).
 func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsql.RigHash, error) {
 	databases := rigDatabases(townRoot, rigs)
 	names := make([]string, 0, len(databases))
@@ -93,7 +94,7 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsq
 		}
 		names = slices.DeleteFunc(names, func(db string) bool { return db == dropped })
 		if len(names) == 0 {
-			return map[string]beadsql.RigHash{}, nil
+			return nil, fmt.Errorf("rigHeads: every database asked for is unknown to the server: %w", err)
 		}
 		if records, err = read.SQLCSV(rigHeadsQuery(names)); err != nil {
 			return nil, err
@@ -122,6 +123,11 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsq
 // own — @@om_head_ref — does not read as it.
 var unknownSystemVariable = regexp.MustCompile(`(?i)@@([A-Za-z0-9_-]+)_(?:head|working)\b`)
 
+// unknownDatabaseCode finds Dolt's error number in a failed read's text. The
+// number has to end the word (\b), so a longer code that starts with 1105 —
+// 11050 — does not read as 1105.
+var unknownDatabaseCode = regexp.MustCompile(`(?i)\berror 1105\b`)
+
 // unknownDatabase names the database a failed read refused because the server
 // does not know it. Dolt answers an unknown database's head variable with error
 // 1105, "Unknown system variable '@@<database>_head'", which is what a stale
@@ -132,8 +138,7 @@ var unknownSystemVariable = regexp.MustCompile(`(?i)@@([A-Za-z0-9_-]+)_(?:head|w
 // no database asked for, is no unknown database, and the read's error stands.
 func unknownDatabase(err error, databases []string) (string, bool) {
 	text := err.Error()
-	lower := strings.ToLower(text)
-	if !strings.Contains(lower, "error 1105") || !strings.Contains(lower, "unknown system variable") {
+	if !unknownDatabaseCode.MatchString(text) || !strings.Contains(strings.ToLower(text), "unknown system variable") {
 		return "", false
 	}
 	for _, match := range unknownSystemVariable.FindAllStringSubmatch(text, -1) {
