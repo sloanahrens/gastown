@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -70,26 +71,30 @@ func init() {
 // clusterDriftDeps is what a drift run takes from the host: the render's own
 // seams for the town, the values file and the manifests, the gate runner's
 // render, the hand-applied objects' targets from the embedded documents, the
-// embedded static set, the kubectl runner that reads the live objects, and where
-// it prints.
+// embedded static set, the checked-in exceptions file and the run's clock, the
+// kubectl runner that reads the live objects, and where it prints.
 type clusterDriftDeps struct {
 	render        clusterRenderDeps
 	runner        func() ([]driftTarget, error)
 	policyTargets func() ([]driftTarget, error)
 	staticObjects func() ([]k8s.StaticObject, error)
+	exceptions    func() []byte
+	now           func() time.Time
 	kubectl       update.RunFunc
 	out           io.Writer
 }
 
 // realClusterDriftDeps is the host's: the render's seams, the runner's render,
-// the embedded documents' targets, the embedded static set, kubectl, and the
-// command's output.
+// the embedded documents' targets, the embedded static set, the embedded
+// exceptions file, the run's clock, kubectl, and the command's output.
 func realClusterDriftDeps(out io.Writer) clusterDriftDeps {
 	return clusterDriftDeps{
 		render:        realClusterRenderDeps(out),
 		runner:        realRunnerDriftTargets,
 		policyTargets: policyDriftTargets,
 		staticObjects: k8s.Static,
+		exceptions:    func() []byte { return k8s.DriftExceptionsYAML },
+		now:           time.Now,
 		kubectl:       realRunFunc(),
 		out:           out,
 	}
@@ -186,6 +191,14 @@ func runClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 // compareClusterDrift is the run behind runClusterDrift: it returns raw errors,
 // and runClusterDrift gives every one of them the unreadable exit status.
 func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
+	// Read once, before any kubectl read: an expired entry refuses the run.
+	if d.exceptions == nil || d.now == nil {
+		return errors.New("the drift exceptions file and the run's clock are not both wired, so no difference can be judged")
+	}
+	exceptions, err := loadDriftExceptions(d.exceptions(), d.now())
+	if err != nil {
+		return fmt.Errorf("cannot read the drift exceptions to explain differences: %w", err)
+	}
 	root, err := d.render.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace, so the recorded render flags cannot be read: %w", err)
@@ -255,14 +268,21 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	targets = append(targets, staticObjects...)
 	differed := false
 	for _, target := range targets {
-		lines, err := target.differences(ctx, d)
+		lines, absent, err := target.differencesAndAbsence(ctx, d)
 		if err != nil {
 			return err
 		}
-		for _, line := range lines {
+		unexplained, explained := lines, []string(nil)
+		if !absent {
+			unexplained, explained = filterExplained(lines, target.exceptionObject(), exceptions)
+		}
+		for _, line := range unexplained {
 			fmt.Fprintf(d.out, "%s: %s\n", target.resource, line)
 		}
-		differed = differed || len(lines) > 0
+		for _, line := range explained {
+			fmt.Fprintf(d.out, "%s: explained: %s\n", target.resource, line)
+		}
+		differed = differed || absent || len(unexplained) > 0
 	}
 	// The not-compared lines print after every difference, and never count as
 	// one: a Secret whose data the cluster fills is named, not drift.
@@ -308,21 +328,34 @@ type driftTarget struct {
 // cluster does not hold is every field absent when the target says absence is
 // drift, and an unreadable input otherwise.
 func (t driftTarget) differences(ctx context.Context, d clusterDriftDeps) ([]string, error) {
+	lines, _, err := t.differencesAndAbsence(ctx, d)
+	return lines, err
+}
+
+// differencesAndAbsence is differences with whether the cluster does not hold the object.
+func (t driftTarget) differencesAndAbsence(ctx context.Context, d clusterDriftDeps) ([]string, bool, error) {
 	rendered, err := decodeRenderedObject(d, t.object)
 	if err != nil {
-		return nil, fmt.Errorf("the rendered %s cannot be read back: %w", t.resource, err)
+		return nil, false, fmt.Errorf("the rendered %s cannot be read back: %w", t.resource, err)
 	}
 	live, absent, err := readLiveObject(ctx, d, t.resource, t.namespace, t.cluster)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if absent {
 		if !t.absentIsDrift {
-			return nil, fmt.Errorf("the cluster does not hold the %s, so it was not read", t.resource)
+			return nil, false, fmt.Errorf("the cluster does not hold the %s, so it was not read", t.resource)
 		}
-		return objectAbsent(t.kind, rendered)
+		lines, err := objectAbsent(t.kind, rendered)
+		return lines, true, err
 	}
-	return objectDrift(t.kind, rendered, live)
+	lines, err := objectDrift(t.kind, rendered, live)
+	return lines, false, err
+}
+
+func (t driftTarget) exceptionObject() string {
+	_, name, _ := strings.Cut(t.resource, "/")
+	return t.kind + "/" + t.namespace + "/" + name
 }
 
 // decodeRenderedObject decodes the rendered object to the field tree a live

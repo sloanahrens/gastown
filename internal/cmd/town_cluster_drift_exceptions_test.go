@@ -34,9 +34,9 @@ func TestClusterDriftExceptionsLoad(t *testing.T) {
 	t.Parallel()
 	t.Run("the shipped file", func(t *testing.T) {
 		t.Parallel()
-		exceptions, err := loadDriftExceptions(k8s.DriftExceptions, driftExceptionsNow())
+		exceptions, err := loadDriftExceptions(k8s.DriftExceptionsYAML, driftExceptionsNow())
 		if err != nil {
-			t.Fatalf("loadDriftExceptions(DriftExceptions): %v", err)
+			t.Fatalf("loadDriftExceptions(DriftExceptionsYAML): %v", err)
 		}
 		if len(exceptions) != 0 {
 			t.Errorf("exceptions = %+v, want the shipped file to explain nothing yet", exceptions)

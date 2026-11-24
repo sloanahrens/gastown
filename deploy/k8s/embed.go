@@ -28,3 +28,8 @@ var BdGatewayServiceAdmissionYAML []byte
 //
 //go:embed update-rbac.yaml
 var UpdateRBACYAML []byte
+
+// DriftExceptionsYAML is drift-exceptions.yaml's text at the building commit.
+//
+//go:embed drift-exceptions.yaml
+var DriftExceptionsYAML []byte
