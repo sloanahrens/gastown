@@ -1199,11 +1199,12 @@ func TestCacheTrimClaimJobBuildsTheClaimRoute(t *testing.T) {
 	}
 }
 
-// TestCacheTrimClaimJobDeadline pins the deadline on the claim Job alone: the claim route's pod can
-// stall in its plan stage for minutes under load, so the Job carries TrimClaimJobDeadlineSeconds and
-// a wedged pod stops holding the claim's pods for ever. The shard route's Job keeps no deadline, and
-// so its encoded JSON is unchanged (gt-uatljg).
-func TestCacheTrimClaimJobDeadline(t *testing.T) {
+// TestTrimJobCarriesAnActiveDeadline pins the deadline on both trim routes. The shard route's Job
+// takes trimJobDocument's TrimJobDeadline, so a wedged pod stops holding the claim's pods for ever;
+// the claim route's Job keeps its longer TrimClaimJobDeadlineSeconds, which has to outlast the
+// daemon's twenty-minute wait on a claim Job (gt-uatljg). It replaces TestCacheTrimClaimJobDeadline,
+// whose shard leg pinned the absence this changes.
+func TestTrimJobCarriesAnActiveDeadline(t *testing.T) {
 	t.Parallel()
 	claimIn := trimInput()
 	claimIn.Listing, claimIn.CapBytes = nil, 3
@@ -1213,32 +1214,35 @@ func TestCacheTrimClaimJobDeadline(t *testing.T) {
 	}
 	shard := buildTrim(t, trimInput())
 
-	t.Run("the claim Job carries the deadline", func(t *testing.T) {
-		t.Parallel()
-		var job TrimJob
-		if err := json.Unmarshal(claim.jobs()[0].JSON(), &job); err != nil {
-			t.Fatalf("the claim Job is not a Job document: %v", err)
-		}
-		got := job.Spec.ActiveDeadlineSeconds
-		if got == nil || *got != TrimClaimJobDeadlineSeconds {
-			t.Errorf("the claim Job's activeDeadlineSeconds = %v, want %d", got, TrimClaimJobDeadlineSeconds)
-		}
-	})
+	// The bead fixes the shard route's bound at five times the daemon's two-minute wait.
+	if want := 5 * 2 * 60; TrimJobDeadline != want {
+		t.Fatalf("TrimJobDeadline = %d seconds, want %d: five times the daemon's two-minute wait on a trim Job", TrimJobDeadline, want)
+	}
 
-	t.Run("the shard Job carries none", func(t *testing.T) {
-		t.Parallel()
-		var job TrimJob
-		if err := json.Unmarshal(shard.jobs()[0].JSON(), &job); err != nil {
-			t.Fatalf("the shard Job is not a Job document: %v", err)
-		}
-		if job.Spec.ActiveDeadlineSeconds != nil {
-			t.Errorf("the shard Job's activeDeadlineSeconds = %d, want none: the shard route is unchanged",
-				*job.Spec.ActiveDeadlineSeconds)
-		}
-		if doc := string(shard.jobs()[0].JSON()); strings.Contains(doc, "activeDeadlineSeconds") {
-			t.Errorf("the shard Job's encoded spec holds activeDeadlineSeconds: %s", doc)
-		}
-	})
+	tests := []struct {
+		name string
+		m    *TrimManifest
+		want int64
+	}{
+		{"shard route", shard, TrimJobDeadline},
+		{"claim route", claim, TrimClaimJobDeadlineSeconds},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var job TrimJob
+			if err := json.Unmarshal(tc.m.jobs()[0].JSON(), &job); err != nil {
+				t.Fatalf("the %s Job is not a Job document: %v", tc.name, err)
+			}
+			got := "none"
+			if job.Spec.ActiveDeadlineSeconds != nil {
+				got = strconv.FormatInt(*job.Spec.ActiveDeadlineSeconds, 10)
+			}
+			if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != tc.want {
+				t.Errorf("the %s Job's activeDeadlineSeconds = %s, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestCacheTrimClaimJobRefusals pins the inputs the builder refuses, each error naming the field, and
