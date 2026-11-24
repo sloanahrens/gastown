@@ -11,6 +11,11 @@ const (
 	// landingHoldShutdownDrain is the SIGTERM drain's hold (shutdown_drain.go):
 	// the pass in flight finishes and no new one starts while the daemon stops.
 	landingHoldShutdownDrain = "shutdown-drain"
+	// landingHoldMaintenanceGC is the scheduled gc's hold (maintenance_gc.go):
+	// a landing pass is a hard hold for the gc's quiet guard, and the queue
+	// refilled the gap the gc waited for, so the gc stops new passes and waits
+	// out the ones in flight (gt-j5q02z).
+	landingHoldMaintenanceGC = "maintenance-gc"
 )
 
 // landingHolds is the daemon's set of holds on new landing passes: the landing
