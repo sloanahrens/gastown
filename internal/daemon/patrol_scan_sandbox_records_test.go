@@ -34,6 +34,7 @@ type recordReap struct {
 	deleterCalls []string                // sandboxes the record deleter was asked to delete
 	order        []string                // "copy" and "delete", in the order the pass made them
 	copied       []session.SandboxRecord // the records the outbox copy was asked to copy
+	copyErr      error                   // the outbox copy's failure, read on each call: a test may change it between passes
 	logs         strings.Builder
 }
 
@@ -63,7 +64,7 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	if o.liveTmux {
 		tm.addSession(recordReapSession, "claude", clk.Now())
 	}
-	r := &recordReap{t: t, town: town}
+	r := &recordReap{t: t, town: town, copyErr: o.copyErr}
 	rec := session.SandboxRecord{Session: recordReapSession, Rig: "gastown", Polecat: "capable", Gateway: o.gateway}
 	if o.age >= 0 {
 		rec.CreatedAt = clk.Now().Add(-o.age)
@@ -107,8 +108,8 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	r.host.sandboxOutboxCopy = func(town string, rec session.SandboxRecord) error {
 		r.order = append(r.order, "copy")
 		r.copied = append(r.copied, rec)
-		if o.copyErr != nil {
-			return o.copyErr
+		if r.copyErr != nil {
+			return r.copyErr
 		}
 		if o.noOutbox {
 			return nil // the seat wrote no outbox file: nothing to copy, no failure
@@ -340,6 +341,33 @@ func TestPatrolScanSandboxRecordsKeepsASandboxWhoseOutboxCopyFailed(t *testing.T
 	}
 	if !strings.Contains(r.logs.String(), outboxNotCopiedReason) || !strings.Contains(r.logs.String(), "transport error") {
 		t.Errorf("log = %q, want the kept reason and the copy's own error", r.logs.String())
+	}
+}
+
+// A sandbox kept by a failed outbox copy is deleted on a later pass once the copy
+// succeeds: the first pass keeps the sandbox and its record, and the second runs
+// the copy and then the deleter, and removes the record (gt-5ms4cg).
+func TestPatrolScanSandboxRecordsDeletesOnALaterPassOnceTheCopySucceeds(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, copyErr: errors.New("exec: transport error")})
+	r.host.patrolScanSandboxRecords()
+	if !r.recorded() {
+		t.Fatal("the first pass removed the record although the outbox copy failed")
+	}
+	if len(r.deleterCalls) != 0 {
+		t.Fatalf("the first pass ran the deleter (%v) after a failed outbox copy", r.deleterCalls)
+	}
+	r.copyErr = nil
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete over both passes = %q, want %q", got, want)
+	}
+	copied := filepath.Join(session.SandboxOutboxCopyDir(r.town, "gastown", "capable"), "result.json")
+	if _, err := os.Stat(copied); err != nil {
+		t.Errorf("the later pass's outbox copy is not on disk: %v", err)
+	}
+	if r.recorded() {
+		t.Error("the record is still there after the later pass deleted the sandbox")
 	}
 }
 
