@@ -196,6 +196,35 @@ func TestShouldRunMaintenanceCycle(t *testing.T) {
 	}
 }
 
+// TestMaintenanceCycleDeferred: the window tick leaves the nightly cycle to
+// the update job only on a host. In a pod the update plan runs no maintenance
+// step, so the window must start the cycle itself; a request always runs one.
+func TestMaintenanceCycleDeferred(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		requested bool
+		triggerOn bool
+		pod       bool
+		want      bool
+	}{
+		{"a request is never deferred", true, true, false, false},
+		{"a request in a pod is never deferred", true, true, true, false},
+		{"the trigger off runs the cycle", false, false, false, false},
+		{"the trigger on and not a pod defers", false, true, false, true},
+		{"the trigger on in a pod runs the cycle", false, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := maintenanceCycleDeferred(tt.requested, tt.triggerOn, tt.pod); got != tt.want {
+				t.Errorf("maintenanceCycleDeferred(requested=%v, triggerOn=%v, pod=%v) = %v, want %v",
+					tt.requested, tt.triggerOn, tt.pod, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMaintenanceWindow(t *testing.T) {
 	t.Parallel()
 	// Nil config returns empty
@@ -302,21 +331,27 @@ func TestMaintenanceWindowTickDefersWhenUpdateEnabled(t *testing.T) {
 	})
 }
 
-// The roll owns the pod's window too: with the update trigger on, a scheduled
-// tick over an external server takes no backup and runs no gc of its own — the
-// roll's maintenance request is what runs one (gt-lc16x3).
-func TestMaintenanceWindowPodTickDefersWhenUpdateEnabled(t *testing.T) {
+// The window owns the pod's nightly cycle: an update-triggered roll plans no
+// maintenance step for a pod target, so a scheduled tick over an external
+// server with the trigger on takes the night's backup and the gc itself
+// (gt-ihvaja).
+func TestMaintenanceWindowPodTickRunsTheCycleWithUpdateEnabled(t *testing.T) {
 	t.Parallel()
 	d, f := requestDaemon(t, gcTestNow)
+	d.podMode = true
 	f.serverDBs = []string{"hq"}
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = updateOnWindow("03:00")
+	// Without a data dir on this host the week alone makes the gc due.
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
 
-	d.runScheduledMaintenance()
+	requestTickAndCycle(t, d)
 
-	if len(f.gcCalls) != 0 || len(f.backupCalls) != 0 || f.serverCalls != 0 {
-		t.Errorf("gc calls %v, backup calls %v, server listings %d with the update trigger on; want none",
-			f.gcCalls, f.backupCalls, f.serverCalls)
+	if got := strings.Join(f.backupCalls, ","); got != "hq" {
+		t.Errorf("backup calls = %q with the update trigger on in a pod, want hq", got)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %q with the update trigger on in a pod, want hq", got)
 	}
 }
 

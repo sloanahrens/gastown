@@ -143,6 +143,14 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 	return lastRun.IsZero() || now.Sub(lastRun) >= maintenanceCycleGap
 }
 
+// maintenanceCycleDeferred reports whether this tick leaves the nightly cycle
+// to the update job. An update-triggered roll plans no maintenance step for a
+// pod target, so in a pod the window starts the cycle itself; on a host the
+// job does, and the window stands aside.
+func maintenanceCycleDeferred(requested, triggerOn, pod bool) bool {
+	return !requested && triggerOn && !pod
+}
+
 // runScheduledMaintenance checks if we're in the maintenance window and, once
 // per window, dispatches a backup-then-gc cycle over every database in the
 // data dir. The stale-gc alerts are settled before the tick does any window
@@ -228,12 +236,13 @@ func (d *Daemon) runScheduledMaintenance() {
 		return
 	}
 
-	// The update job owns the nightly cycle when its trigger is on: this tick
-	// starts none of its own. A B11 request is an instruction rather than this
-	// tick's decision, so it still runs the cycle; the stale-gc check above
-	// and the catch-up paths outside the window are the safety net and still
-	// run too.
-	cycleDeferred := !requested && d.updateTriggerEnabled()
+	// The update job owns the nightly cycle when its trigger is on, except in
+	// a pod: the update plan runs no maintenance step for a pod target, so the
+	// window itself must start the cycle or none ever does. A B11 request is an
+	// instruction rather than this tick's decision, so it still runs the cycle;
+	// the stale-gc check above and the catch-up paths outside the window are
+	// the safety net and still run too.
+	cycleDeferred := maintenanceCycleDeferred(requested, d.updateTriggerEnabled(), d.podMode)
 
 	window := maintenanceWindow(pc)
 	if window == "" && !requested {
