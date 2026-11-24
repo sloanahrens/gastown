@@ -31,8 +31,9 @@ func assertNoLandingWorkerRun(t *testing.T, d *Daemon) {
 
 // TestPatrolLastRunLandingWorkerRecordsAPass pins the landing_worker row's
 // last-run record: a completed pass, even one that found nothing, is a run,
-// while a pass that does not start — the patrol disabled, a hold held — and a
-// pass cut short by shutdown record none (gt-zv3ndb).
+// while a pass that does not start — the patrol disabled — and a pass cut
+// short by shutdown record none (gt-zv3ndb). A held landing is the negative
+// rows of TestPatrolLastRunLandingWorkerHeldIsNotARun (gt-9jbyfx).
 func TestPatrolLastRunLandingWorkerRecordsAPass(t *testing.T) {
 	t.Parallel()
 
@@ -84,32 +85,6 @@ func TestPatrolLastRunLandingWorkerRecordsAPass(t *testing.T) {
 		assertNoLandingWorkerRun(t, d)
 	})
 
-	t.Run("a held landing is not recorded", func(t *testing.T) {
-		t.Parallel()
-		d, _, _ := landingDrainDaemon(t)
-		d.landingHolds.hold(landingHoldUpgradeRestart)
-		defer d.landingHolds.release(landingHoldUpgradeRestart)
-		// Cancel before the loop starts, so its one iteration takes the hold
-		// branch and then returns from the wait instead of idling an hour.
-		// The pass body runs before the loop checks its context, so a hold
-		// that stopped holding would still run it and fail the counter.
-		d.landingPassWindowFn = func() {
-			t.Error("the loop took a pass slot under a landing hold")
-		}
-		ctx, cancel := context.WithCancel(d.ctx)
-		d.ctx = ctx
-		cancel()
-		var passes atomic.Int32
-		d.landingWorkerLoop("gastown", time.Hour, func(context.Context) landworker.Report {
-			passes.Add(1)
-			return landworker.Report{}
-		})
-		if got := passes.Load(); got != 0 {
-			t.Fatalf("the pass ran %d time(s) under a landing hold, want 0", got)
-		}
-		assertNoLandingWorkerRun(t, d)
-	})
-
 	t.Run("a pass cut short by shutdown is not recorded", func(t *testing.T) {
 		t.Parallel()
 		d, _, _ := landingDrainDaemon(t)
@@ -123,4 +98,57 @@ func TestPatrolLastRunLandingWorkerRecordsAPass(t *testing.T) {
 		})
 		assertNoLandingWorkerRun(t, d)
 	})
+}
+
+// TestPatrolLastRunLandingWorkerHeldIsNotARun pins the hold's negative half of
+// the row: a landing hold stops the pass before it starts, so a held town
+// records no landing_worker completion. Both ways a hold goes on are covered —
+// a job's in-memory hold and the overseer's landing.hold file read by the
+// heartbeat — so the record cannot claim a cadence the worker did not run at
+// (gt-9jbyfx).
+func TestPatrolLastRunLandingWorkerHeldIsNotARun(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		hold func(t *testing.T, d *Daemon)
+	}{
+		{name: "a job's hold", hold: func(_ *testing.T, d *Daemon) {
+			d.landingHolds.hold(landingHoldUpgradeRestart)
+		}},
+		{name: "the landing.hold file", hold: func(t *testing.T, d *Daemon) {
+			writeLandingHoldFile(t, d, "overseer: drain the queue\n")
+			d.checkLandingHoldFile()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := landingDrainDaemon(t)
+			tc.hold(t, d)
+			if !d.landingHolds.held() {
+				t.Fatal("the landing hold is not on; the loop would be free to pass")
+			}
+			// A pass that took a slot under the hold is the failure the hold
+			// stops. The fixture's rigs are operational and its patrol is
+			// enabled, so without the hold nothing else would keep the loop off
+			// a pass.
+			d.landingPassWindowFn = func() {
+				t.Error("the loop took a pass slot under a landing hold")
+			}
+			// Cancel before the loop starts, so its one iteration takes the
+			// hold branch and returns from the wait instead of idling an hour.
+			ctx, cancel := context.WithCancel(d.ctx)
+			d.ctx = ctx
+			cancel()
+			var passes atomic.Int32
+			d.landingWorkerLoop("gastown", time.Hour, func(context.Context) landworker.Report {
+				passes.Add(1)
+				return landworker.Report{}
+			})
+			if got := passes.Load(); got != 0 {
+				t.Fatalf("the pass ran %d time(s) under a landing hold, want 0", got)
+			}
+			assertNoLandingWorkerRun(t, d)
+		})
+	}
 }
