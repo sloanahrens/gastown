@@ -10,8 +10,12 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/deploy/k8s/sbx"
+	"github.com/steveyegge/gastown/internal/secretpreflight"
 	"github.com/steveyegge/gastown/internal/update"
 )
+
+// sbxDriftKubeContext is the name Missing requires; the adapter drops the pair.
+const sbxDriftKubeContext = "gt-sbx"
 
 // sbxDriftGroup is one kind in one namespace, read by one list.
 type sbxDriftGroup struct {
@@ -26,7 +30,8 @@ type sbxDriftGroup struct {
 // reports a live object the set does not name unless set.IsRuntime names it as
 // one the cluster creates itself. Exit 1 is a difference, exit 2 an input it
 // could not read (gt-82a9fz). Only a list read, not a get by name, tells a
-// missing object from an unreadable read.
+// missing object from an unreadable read. Every Secret the set names that the
+// cluster does not hold is reported first, by name (gt-eq3891).
 func compareSbxDrift(ctx context.Context, d clusterDriftDeps, set sbx.Set, kubectl update.RunFunc) error {
 	if kubectl == nil {
 		return sbxDriftUnreadable(errors.New("no kubectl read runner is wired, so the sandbox cluster was not compared"))
@@ -51,7 +56,11 @@ func compareSbxDrift(ctx context.Context, d clusterDriftDeps, set sbx.Set, kubec
 		}
 		bodies[group][object.Name] = doc.body
 	}
-	differed := false
+	// Before the objects, so a missing Secret sits beside their differences.
+	differed, err := compareSbxSecrets(ctx, d, set, kubectl)
+	if err != nil {
+		return sbxDriftUnreadable(err)
+	}
 	for _, group := range order {
 		names := slices.Sorted(maps.Keys(bodies[group]))
 		live, err := readSbxLive(ctx, kubectl, group, names)
@@ -91,6 +100,61 @@ func compareSbxDrift(ctx context.Context, d clusterDriftDeps, set sbx.Set, kubec
 func sbxDriftUnreadable(err error) error {
 	return &ExitCodeError{Code: driftExitUnreadable, Err: err}
 }
+
+// compareSbxSecrets reports, by name, each Secret the set names that the
+// cluster does not hold, through internal/secretpreflight, which reads the table
+// and never a value; a name it could not judge is an error, never clean. The
+// Secrets carry no namespace: they live with the gateway StatefulSet, the one
+// StatefulSet the render requires, so a set with none or several is refused.
+func compareSbxSecrets(ctx context.Context, d clusterDriftDeps, set sbx.Set, kubectl update.RunFunc) (bool, error) {
+	if len(set.Secrets) == 0 {
+		return false, nil
+	}
+	var namespaces []string
+	for _, object := range set.Objects {
+		if object.Kind == "StatefulSet" {
+			namespaces = append(namespaces, object.Namespace)
+		}
+	}
+	if len(namespaces) != 1 {
+		return false, fmt.Errorf("the set's StatefulSets name the namespaces %q, so the one namespace of its Secrets was not found and they were not checked", namespaces)
+	}
+	missing, err := secretpreflight.Missing(ctx, sbxSecretRunner(kubectl), sbxDriftKubeContext, namespaces[0], set.Secrets)
+	if err != nil {
+		return false, fmt.Errorf("checking the gt-sbx Secrets: %w", err)
+	}
+	for _, name := range missing {
+		fmt.Fprintf(d.out, "secret/%s: missing: the rendered set names it and the cluster does not hold it\n", name)
+	}
+	return len(missing) > 0, nil
+}
+
+// sbxSecretRunner turns the guarded read runner into the secretpreflight Runner.
+// It drops the `--context <name>` pair Missing builds (the runner selects the
+// cluster; the guard refuses the flag), and a non-zero exit carries ExitCode()
+// with its output, which Missing reads as absent only for a NotFound.
+func sbxSecretRunner(kubectl update.RunFunc) secretpreflight.Runner {
+	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "--context" {
+			args = args[2:]
+		}
+		out, exit, err := kubectl(ctx, "", nil, name, args...)
+		if err != nil {
+			return nil, err
+		}
+		if exit != 0 {
+			return []byte(out), &sbxSecretExit{code: exit}
+		}
+		return []byte(out), nil
+	}
+}
+
+// sbxSecretExit carries a failed Secret read's status, and never its output.
+type sbxSecretExit struct{ code int }
+
+func (e *sbxSecretExit) Error() string { return fmt.Sprintf("the Secret read exited %d", e.code) }
+
+func (e *sbxSecretExit) ExitCode() int { return e.code }
 
 // readSbxLive lists the group's kind through the guarded runner and returns the
 // objects by name. Every refusal names the set objects the read stood for, so an

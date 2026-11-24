@@ -171,9 +171,10 @@ func TestClusterDriftSbxComparePrintsNoValue(t *testing.T) {
 }
 
 // TestClusterDriftSbxCompareRefusesWhatItCannotRead holds every unreadable
-// answer and every set the compare cannot group to exit 2, and to no line, and
-// a set row's runner fails the row if it reads at all (gt-82a9fz). Every row
-// whose read fails names the rendered object the read stood for (gt-fl4i45).
+// answer, every set the compare cannot group or place its Secrets in, and every
+// Secret read that fails for anything but NotFound to exit 2 and to no line; a
+// set row's runner fails the row if it reads at all, and every row whose read
+// fails names the object it stood for (gt-82a9fz, gt-fl4i45, gt-eq3891).
 func TestClusterDriftSbxCompareRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -196,6 +197,12 @@ func TestClusterDriftSbxCompareRefusesWhatItCannotRead(t *testing.T) {
 		{"no rendered object", sbx.Set{}, driftNoRead, ""},
 		{"a cluster-scoped object in a namespace", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "dashboard", Namespace: "openshell", Cluster: true, Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead, ""},
 		{"a document naming another object", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "other", Namespace: "openshell", Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead, ""},
+		{"a Secret whose namespace no StatefulSet names", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "dashboard", Namespace: "openshell", Doc: []byte(sbxDriftServiceDoc)}}, Secrets: []string{"openshell-server-tls"}}, driftNoRead, "namespace"},
+		{"a Secret beside two StatefulSets", sbx.Set{Objects: []k8s.StaticObject{{Kind: "StatefulSet", Name: "openshell", Namespace: "openshell", Doc: []byte(sbxDriftGatewayDoc)}, {Kind: "StatefulSet", Name: "cache", Namespace: "cache", Doc: []byte(strings.ReplaceAll(sbxDriftGatewayDoc, "openshell", "cache"))}}, Secrets: []string{"openshell-server-tls"}}, driftNoRead, "namespace"},
+		{"a Secret read that failed", sbxDriftSecretsSet("openshell-server-tls"), func(t *testing.T) update.RunFunc { return sbxSecretsReadFails(t, "", 0, errors.New("the exec failed")) }, "openshell-server-tls"},
+		{"a Secret read that is not NotFound", sbxDriftSecretsSet("openshell-server-tls"), func(t *testing.T) update.RunFunc {
+			return sbxSecretsReadFails(t, "Error from server (Forbidden)", 1, nil)
+		}, "openshell-server-tls"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,6 +216,80 @@ func TestClusterDriftSbxCompareRefusesWhatItCannotRead(t *testing.T) {
 			}
 			if lines != nil {
 				t.Errorf("printed %q beside the refusal, want nothing", lines)
+			}
+		})
+	}
+}
+
+// sbxDriftGatewayDoc is the gateway StatefulSet, which names the Secrets' namespace.
+const sbxDriftGatewayDoc = `{"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"openshell","namespace":"openshell"},"spec":{"replicas":1}}`
+
+// sbxDriftSecretsSet is the set the Secret rows compare.
+func sbxDriftSecretsSet(secrets ...string) sbx.Set {
+	return sbx.Set{Objects: []k8s.StaticObject{{Kind: "StatefulSet", Name: "openshell", Namespace: "openshell", Doc: []byte(sbxDriftGatewayDoc)}}, Secrets: secrets}
+}
+
+// sbxSecretsReadFails answers every read as given; the Secret check reads first.
+func sbxSecretsReadFails(t *testing.T, out string, exit int, err error) update.RunFunc {
+	t.Helper()
+	runner, guardErr := clusterKubectl("", "", func(_ context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+		return out, exit, err
+	})
+	if guardErr != nil {
+		t.Fatalf("building the guarded read runner: %v", guardErr)
+	}
+	return runner
+}
+
+// sbxSecretsKubectl is the read runner through the guard clusterKubectl
+// returns: the gateway StatefulSet list, and each Secret get answered with the
+// table for a held name and kubectl's NotFound for any other. Any other read
+// fails the test, so a --context pair or an output flag on a Secret is caught.
+func sbxSecretsKubectl(t *testing.T, held ...string) update.RunFunc {
+	t.Helper()
+	runner, err := clusterKubectl("", "", func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+		read := name + " " + strings.Join(args, " ")
+		if read == "kubectl -n openshell get statefulset -o json" {
+			return `{"kind":"List","items":[` + sbxDriftGatewayDoc + `]}`, 0, nil
+		}
+		if secret, ok := strings.CutPrefix(read, "kubectl -n openshell get secret "); ok {
+			if slices.Contains(held, secret) {
+				return "NAME   TYPE   DATA   AGE\n" + secret + "   kubernetes.io/tls   2   5d\n", 0, nil
+			}
+			return "Error from server (NotFound): secrets " + secret + " not found", 1, nil
+		}
+		t.Errorf("read %q, want the gateway list or one Secret get", read)
+		return "", 0, nil
+	})
+	if err != nil {
+		t.Fatalf("building the guarded read runner: %v", err)
+	}
+	return runner
+}
+
+// TestClusterDriftSbxSecretsReportTheNamesTheClusterLacks holds one named
+// Secret the fake cluster holds, which adds nothing, and one it lacks, which
+// exits 1 with the line naming it (gt-eq3891).
+func TestClusterDriftSbxSecretsReportTheNamesTheClusterLacks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		secrets []string
+		want    int
+		lines   []string
+	}{
+		{"the held name adds nothing", []string{"openshell-server-tls"}, 0, nil},
+		{"the absent name is reported", []string{"openshell-server-tls", "openshell-client-tls"}, 1, []string{"secret/openshell-client-tls: missing: the rendered set names it and the cluster does not hold it"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err, lines := sbxDriftRun(t, sbxDriftSecretsSet(tc.secrets...), sbxSecretsKubectl(t, "openshell-server-tls"))
+			if got := driftExit(err); got != tc.want {
+				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%q", got, tc.want, err, lines)
+			}
+			if !slices.Equal(lines, tc.lines) {
+				t.Errorf("printed\n%q\nwant\n%q", lines, tc.lines)
 			}
 		})
 	}
