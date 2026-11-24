@@ -10,8 +10,9 @@ package daemon
 // this process. The apply lives in package cmd, which starts the daemon, so it
 // arrives through SetSpecSplitDeps rather than the daemon reaching back for it
 // (the SetSchedulerDeps seam, gt-638go.9). A bead with an assignee, the rework
-// label or a hold is never taken. What a refused apply does to its bead is the
-// next bead's (gt-hrbq3v): this tick logs the reason and leaves the bead open.
+// label, a hold or the split-manual label is never taken; a refused apply gets
+// one comment naming the reason and that label; a bead whose mark did not land
+// stays out of this daemon's later ticks, which retry only the mark (gt-hrbq3v).
 //
 // The tick runs on its own goroutine, one at a time: an apply estimates and
 // lints both pieces, so it can take minutes and must not hold the heartbeat. A
@@ -46,6 +47,9 @@ const (
 	// this cap keeps a long list of refusing beads from running an apply, with
 	// its estimate and lint, per bead in one tick.
 	specSplitMaxAttempts = 4
+
+	// specSplitManualLabel marks a bead whose refused split a person must make.
+	specSplitManualLabel = "split-manual"
 )
 
 // SpecSplitDeps are the collaborators the spec_split step runs on.
@@ -54,6 +58,14 @@ type SpecSplitDeps struct {
 	Candidates func() ([]*beads.Issue, error)
 	// Apply splits one bead as `gt spec split --apply` does and returns its report.
 	Apply func(townRoot, beadID string) (report string, err error)
+	// Store opens the store a refused bead is marked in; nil opens the town's.
+	Store func() specSplitManualStore
+}
+
+// specSplitManualStore is the slice of the bead store the refusal mark writes.
+type specSplitManualStore interface {
+	AddComment(id, text string) error
+	Update(id string, opts beads.UpdateOptions) error
 }
 
 // SetSpecSplitDeps installs the apply the spec_split step runs.
@@ -102,9 +114,22 @@ func (d *Daemon) specSplitTick() {
 	}
 	start := d.clk().Now()
 	splits, attempts := 0, 0
+	d.specSplitPrune(issues)
 	for _, issue := range issues {
 		if splits == specSplitMaxPerTick || attempts == specSplitMaxAttempts {
 			break
+		}
+		if issue == nil {
+			continue
+		}
+		// A refused bead whose label landed but whose comment did not wears
+		// split-manual, so the eligibility rule skips it: the retry must run
+		// before that rule, on the takeable test alone.
+		if reason, refused := d.specSplitRefused[issue.ID]; refused && specSplitTakeable(issue) {
+			if d.specSplitMark(issue.ID, reason) {
+				delete(d.specSplitRefused, issue.ID)
+			}
+			continue
 		}
 		if !specSplitEligible(issue) {
 			continue
@@ -112,9 +137,16 @@ func (d *Daemon) specSplitTick() {
 		attempts++
 		report, err := d.specSplitDeps.Apply(d.config.TownRoot, issue.ID)
 		if err != nil {
-			d.logger.Printf("spec_split: %s was not split: %v", issue.ID, err)
-			if line := lastLine(report); line != "" {
-				d.logger.Printf("spec_split: %s: %s", issue.ID, line)
+			reason := lastLine(report)
+			if reason == "" {
+				reason = err.Error()
+			}
+			d.logger.Printf("spec_split: %s was not split: %s", issue.ID, reason)
+			if !d.specSplitMark(issue.ID, reason) {
+				if d.specSplitRefused == nil {
+					d.specSplitRefused = make(map[string]string)
+				}
+				d.specSplitRefused[issue.ID] = reason
 			}
 			continue
 		}
@@ -126,6 +158,49 @@ func (d *Daemon) specSplitTick() {
 	if splits > 0 {
 		d.logger.Printf("spec_split: split %d bead(s) in %s", splits, d.clk().Since(start).Round(time.Second))
 	}
+}
+
+// specSplitMark leaves a refused bead to a person: the split-manual label, so
+// no later tick takes it, and one comment naming reason. The label goes first,
+// so a bead whose label write fails gets no comment to repeat. It reports
+// whether both writes landed; a bead it could not mark is kept in
+// specSplitRefused, so a later tick retries the mark alone and never the apply.
+func (d *Daemon) specSplitMark(beadID, reason string) bool {
+	store := d.specSplitStore()
+	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: []string{specSplitManualLabel}}); err != nil {
+		d.logger.Printf("spec_split: %s: cannot add %s, so this daemon applies it no more: %v", beadID, specSplitManualLabel, err)
+		return false
+	}
+	if err := store.AddComment(beadID, "spec_split could not split this bead automatically: "+reason); err != nil {
+		d.logger.Printf("spec_split: %s: cannot comment the refusal: %v", beadID, err)
+		return false
+	}
+	return true
+}
+
+// specSplitStore opens the store a refused bead is marked in: the Store seam
+// when a test or caller installed one, else the town's bead store.
+func (d *Daemon) specSplitStore() specSplitManualStore {
+	if open := d.specSplitDeps.Store; open != nil {
+		return open()
+	}
+	return beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault()))
+}
+
+// specSplitPrune forgets the refusals whose bead the tick's read no longer
+// returns, or returns no longer eligible: a person marked, closed or assigned
+// it, so its entry has no owner left.
+func (d *Daemon) specSplitPrune(issues []*beads.Issue) {
+	kept := make(map[string]string, len(d.specSplitRefused))
+	for _, issue := range issues {
+		if !specSplitTakeable(issue) {
+			continue
+		}
+		if reason, refused := d.specSplitRefused[issue.ID]; refused {
+			kept[issue.ID] = reason
+		}
+	}
+	d.specSplitRefused = kept
 }
 
 // specSplitCyclesDone returns a channel closed once every tick goroutine the
@@ -166,6 +241,12 @@ func (d *Daemon) specSplitCandidates() ([]*beads.Issue, error) {
 // hold. The hold rule is the shared one, so the hold: prefix, the human hold
 // labels and a hold decision in the bead's prose all keep it out of the tick.
 func specSplitEligible(issue *beads.Issue) bool {
+	return specSplitTakeable(issue) && !dispatch.HasLabel(issue.Labels, specSplitManualLabel)
+}
+
+// specSplitTakeable is specSplitEligible without the split-manual rule: the
+// bead is still the step's own, so a mark that half landed can be finished.
+func specSplitTakeable(issue *beads.Issue) bool {
 	if issue == nil || strings.TrimSpace(issue.Assignee) != "" {
 		return false
 	}
