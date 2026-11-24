@@ -11,18 +11,16 @@ import (
 	"github.com/steveyegge/gastown/internal/reconcile"
 )
 
-// doltArchiveName is the job list's row for the history archive, which the
-// scheduled_maintenance patrol writes one dolt-log-<db>-<date>.csv.gz per
-// database per UTC day.
+// doltArchiveName is the job list's row for the history archive: one
+// dolt-log-<db>-<date>.csv.gz per database per UTC day.
 const doltArchiveName = "dolt_archive"
 
 // doltArchiveRows returns the dolt_archive row for the directory
 // patrols.scheduled_maintenance.archive_dir names, or no row when the config
-// names none: the daemon reads an unset directory as archiving off, so nothing
-// is due. The last run is the newest dolt-log archive file's modification time
-// on the directory's top level. A config value that cannot be read or is not an
-// absolute path is unknown, as is a directory that cannot be read; a directory
-// with no archive file is never_run.
+// names none: the daemon reads an unset directory as archiving off. The last run
+// is the newest dolt-log archive file's modification time on the directory's top
+// level. A config value or directory that cannot be read, or a path that is not
+// absolute, is unknown; a directory with no archive file is never_run.
 func doltArchiveRows(townRoot string, now time.Time) []Job {
 	j := Job{Name: doltArchiveName, Kind: config.DaemonStepPatrol, Cadence: nightlyCadence}
 	dir, named, err := archiveDir(townRoot)
@@ -52,8 +50,8 @@ func doltArchiveRows(townRoot string, now time.Time) []Job {
 // archiveDir returns the history archive's directory as
 // patrols.scheduled_maintenance.archive_dir names it, read the way readCadences
 // reads the patrol config so the two-file section rule applies. named is false
-// when the config names no directory. An error is a config or value this list
-// cannot read, which must never pass as off.
+// when the config names none. An error is a config or value this list cannot
+// read, which must never pass as off.
 func archiveDir(townRoot string) (dir string, named bool, err error) {
 	var doc map[string]json.RawMessage
 	if err := config.CheckJSONFileParses(config.DaemonPatrolConfigPath(townRoot), &doc); err != nil {
