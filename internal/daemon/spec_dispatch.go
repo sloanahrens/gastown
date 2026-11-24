@@ -354,7 +354,7 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 			}
 			return
 		}
-		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
+		d.logger.Printf("spec_dispatch: %s", specDispatchFailureLine(err, elapsed, bound))
 		// A tick that stopped before its report printed one hook line per sling
 		// it made, so those lines are the only record of them. The bead is not
 		// named: the sling's line does not carry it.
@@ -652,7 +652,11 @@ func splitRosterSeats(roster string) []string {
 //
 // On failure the stdout comes back with the error: a tick killed at its bound
 // has printed its progress before the report it never reached, and that
-// progress is the record of the slings it made (gt-bbfpr).
+// progress is the record of the slings it made (gt-bbfpr). The child's last
+// stderr line is the cause only when it exited with a status: a tick a signal
+// ended wrote its progress there, and a reading tick ends on a warning about
+// Dolt, so the signal comes back alone and specDispatchFailureLine names what
+// ended it (gt-17f7kl).
 func (d *Daemon) runSpecDispatchCommand(bound time.Duration, extra ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(d.ctx, bound)
 	defer cancel()
@@ -662,12 +666,38 @@ func (d *Daemon) runSpecDispatchCommand(bound time.Duration, extra ...string) ([
 	cmd.Env = append(daemonGTEnv(os.Environ()), dispatch.SpecDetailOwnerEnv+"="+specDetailOwner)
 	stdout, stderr, err := d.runCmd(cmd)
 	if err != nil {
-		if msg := strings.TrimSpace(string(stderr)); msg != "" {
+		status, exited := specCommandExitStatus(err)
+		if msg := strings.TrimSpace(string(stderr)); msg != "" && exited && status >= 0 {
 			return stdout, fmt.Errorf("%w: %s", err, lastLine(msg))
 		}
 		return stdout, err
 	}
 	return stdout, nil
+}
+
+// specCommandExitStatus reads the exit status a command's error carries: the
+// code for a command that exited, -1 for one a signal killed, and false for one
+// that never started. It is how the tick's log tells a failure with a cause
+// from a tick a signal ended (gt-17f7kl).
+func specCommandExitStatus(err error) (int, bool) {
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), true
+	}
+	return 0, false
+}
+
+// specDispatchFailureLine is the one line a failed tick logs: how long it ran,
+// then why it ended. A child a signal killed carries no cause on stderr, so
+// the line names the end instead: a tick that had already outrun the bound it
+// was given was ended by that bound. A child killed before its bound ran out,
+// and one that exited with a status, get the plain line: it does not claim an
+// ender it cannot know (gt-17f7kl).
+func specDispatchFailureLine(err error, elapsed, bound time.Duration) string {
+	if status, exited := specCommandExitStatus(err); exited && status < 0 && elapsed >= bound {
+		return fmt.Sprintf("tick failed after %s: %v; ended by its %s bound", elapsed, err, bound)
+	}
+	return fmt.Sprintf("tick failed after %s of its %s bound: %v", elapsed, bound, err)
 }
 
 // specDispatchCensusPath is the file a tick writes its bd census rows to,

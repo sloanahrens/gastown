@@ -852,6 +852,120 @@ func TestSpecDispatchKilledTickBeforeAnySlingLogsNoDispatch(t *testing.T) {
 	}
 }
 
+// killedExitError is a command a signal killed as os/exec reports one: an
+// *exec.ExitError that carries no exit code (ExitCode is -1) and the signal's
+// text (gt-17f7kl).
+type killedExitError struct{ sig string }
+
+func (e killedExitError) Error() string { return "signal: " + e.sig }
+func (e killedExitError) ExitCode() int { return -1 }
+
+// A tick a signal ended returns its signal alone: its last stderr line is the
+// warning the reading tick wrote, not the cause of the ending. A tick that
+// exited 1 keeps its stderr line, which is the cause (gt-17f7kl).
+func TestSpecDispatchCommandSignalEndDoesNotAppendStderr(t *testing.T) {
+	t.Parallel()
+	const warning = "spec dispatch: Dolt server host.docker.internal is remote; rig databases are not checked on disk"
+	tests := []struct {
+		name  string
+		reply cliReply
+		want  string
+	}{
+		{
+			name:  "a signal ended it",
+			reply: cliReply{stderr: warning, startErr: killedExitError{sig: "terminated"}},
+			want:  "signal: terminated",
+		},
+		{
+			name:  "it exited 1",
+			reply: cliReply{code: 1, stderr: "error: the board read failed"},
+			want:  "exit status 1: error: the board read failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeCLI(func([]string) cliReply { return tc.reply })
+			d := specDispatchFake(t, fake, log.New(io.Discard, "", 0))
+
+			_, err := d.runSpecDispatchCommand(time.Minute)
+
+			if err == nil {
+				t.Fatal("a command that failed returned no error")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// The failed line names the bound when the bound is what ended the tick, and
+// says nothing of an ender it cannot know: a child killed before its bound ran
+// out (an external kill) and one that exited with a status are not named by
+// the bound (gt-17f7kl).
+func TestSpecDispatchFailureLineNamesTheBoundThatEndedTheTick(t *testing.T) {
+	t.Parallel()
+	bound := specDispatchBound(specDispatchTimeout, 1)
+	const warning = "Warning: duplicate check degraded for /Users/sloan/gt/devops: ..."
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		reply   cliReply
+		want    []string
+		wantNot []string
+	}{
+		{
+			name:    "the bound ended it",
+			elapsed: bound,
+			reply:   cliReply{stderr: warning, startErr: killedExitError{sig: "terminated"}},
+			want:    []string{"tick failed after " + bound.String() + ": signal: terminated; ended by its " + bound.String() + " bound"},
+			wantNot: []string{"duplicate check degraded"},
+		},
+		{
+			name:    "it was killed before its bound",
+			elapsed: 55 * time.Second,
+			reply:   cliReply{stderr: warning, startErr: killedExitError{sig: "killed"}},
+			want:    []string{"tick failed after 55s of its " + bound.String() + " bound: signal: killed"},
+			wantNot: []string{"ended by", "duplicate check degraded"},
+		},
+		{
+			name:    "it exited with a status",
+			elapsed: bound,
+			reply:   cliReply{code: 1, stderr: "error: the board read failed"},
+			want:    []string{"tick failed after " + bound.String() + " of its " + bound.String() + " bound: exit status 1: error: the board read failed"},
+			wantNot: []string{"ended by"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 23, 20, 4, 0, 0, time.UTC))
+			fake := newFakeCLI(func([]string) cliReply {
+				clock.Advance(tc.elapsed)
+				return tc.reply
+			})
+			logger, lines := lineLogger()
+			d := specDispatchFake(t, fake, logger)
+			d.clock = clock
+
+			d.runSpecDispatch()
+
+			got := lines()
+			for _, want := range tc.want {
+				if n := countContaining(got, want); n != 1 {
+					t.Errorf("lines containing %q = %d, want one: %v", want, n, got)
+				}
+			}
+			for _, not := range tc.wantNot {
+				if n := countContaining(got, not); n != 0 {
+					t.Errorf("lines containing %q = %d, want none: %v", not, n, got)
+				}
+			}
+		})
+	}
+}
+
 // A tick in flight when the daemon starts draining did not fail: the shutdown
 // ended it, so it logs the canceled line once, still logs one dispatched line
 // per sling it hooked before it stopped, keeps the failed line out, and leaves
