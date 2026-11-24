@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 func gatePkg(name string, d time.Duration, timed bool) land.PackageResult {
@@ -50,11 +51,28 @@ func TestLocalGateNoteReachesTheReadyNote(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.gate.result = land.GateResult{Passed: true, Steps: []land.StepResult{{Name: "presubmit", Elapsed: 16 * time.Second, Packages: []land.PackageResult{gatePkg("a", 8*time.Second, true), gatePkg("b", 5*time.Second, true), gatePkg("c", time.Second, true)}}}}
-	// A fixed 3s slot wait on the run's clock; the fake gate waits for nothing.
-	t0, calls := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC), 0
-	h.r.now = func() time.Time { calls++; return t0.Add(time.Duration(calls-1) * 3 * time.Second) }
+	// The clock reads 3s later once the run holds a presubmit slot, which is
+	// the wait the note reports. It keys off the slot, not the number of
+	// reads, so runDoneLocalGate may read it any number of times and the wait
+	// stays 3s; the fake gate itself waits for nothing.
+	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	var slotErr error
+	h.r.now = func() time.Time {
+		rep, err := slot.StatusPresubmit(h.townRoot, slot.PresubmitSize(h.townRoot))
+		if err != nil {
+			slotErr = err
+			return t0
+		}
+		if rep.HeldCount > 0 {
+			return t0.Add(3 * time.Second)
+		}
+		return t0
+	}
 	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
+	}
+	if slotErr != nil {
+		t.Fatalf("reading the presubmit pool: %v", slotErr)
 	}
 	w, ok := land.ParseReadyNote(h.source(t).Notes)
 	if !ok {
