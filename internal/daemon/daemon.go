@@ -1484,6 +1484,11 @@ type Daemon struct {
 	doctorDogRun       patrolLastRunMemory
 	overseerReportRun  patrolLastRunMemory
 	hmSyncPatrolRun    patrolLastRunMemory
+	// patrolScanRun and specDispatchRun hold patrol_scan's and spec_dispatch's
+	// last completed pass. gt jobs reads each key as never_run until one is
+	// recorded there (gt-y872pt).
+	patrolScanRun   patrolLastRunMemory
+	specDispatchRun patrolLastRunMemory
 	// landingWorkerRun is the rig workers' last completed pass. They pass every
 	// minute but recorded no run, so gt jobs read the row as never_run
 	// (gt-zv3ndb).
