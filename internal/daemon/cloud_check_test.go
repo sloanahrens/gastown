@@ -441,6 +441,207 @@ func TestCloudCheckUnreadableStatusBeforeTheRunIsNotAWrite(t *testing.T) {
 	}
 }
 
+// cloudCheckStatusAt is a status body stamped at with the given item JSON.
+func cloudCheckStatusAt(at time.Time, items ...string) string {
+	return fmt.Sprintf(`{"at":%d,"items":[%s]}`, at.Unix(), strings.Join(items, ","))
+}
+
+// cloudCheckReleasebotDaemon builds a daemon whose patrol runs inline on the fake clock.
+func cloudCheckReleasebotDaemon(t *testing.T) (*Daemon, *bytes.Buffer, *cloudCheckFakes) {
+	t.Helper()
+	key, stat := cloudCheckPresentKey()
+	return cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
+		func(*agentconfig.CloudCheckConfig) string { return key }, stat)
+}
+
+// TestCloudCheckReleasebotItemRaisesOneAlertAndRefreshesIt: warn and fail items
+// in the "Release bot" section raise one alert naming them; a repeat refreshes it.
+func TestCloudCheckReleasebotItemRaisesOneAlertAndRefreshesIt(t *testing.T) {
+	t.Parallel()
+	const refused, stale = "release bot refused its last run (exit 2)", "no ledger line since 2026-11-14"
+	d, _, f := cloudCheckReleasebotDaemon(t)
+	f.statusBody = cloudCheckStatusAt(f.now,
+		`{"level":"warn","section":"Release bot","text":"`+refused+`"}`,
+		`{"level":"fail","section":"Release bot: ledger","text":"`+stale+`"}`)
+	d.runCloudCheckPatrol()
+
+	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+		t.Fatalf("two matching items escalated under %q, want one under %q", f.escalationKeys, want)
+	}
+	for _, want := range []string{refused, stale} {
+		if !strings.Contains(f.escalations[0], want) {
+			t.Errorf("escalation = %q, want it to name %q", f.escalations[0], want)
+		}
+	}
+	f.now = f.now.Add(10 * time.Minute)
+	d.runCloudCheckPatrol()
+	if want := []string{cloudCheckReleasebotAlertKey, cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+		t.Errorf("a repeat run escalated under %q, want the same key refreshed %q", f.escalationKeys, want)
+	}
+	if len(f.clears) != 0 {
+		t.Errorf("clears = %q while the section holds items, want none", f.clears)
+	}
+}
+
+// TestCloudCheckReleasebotMessageNamesThreeTextsCutTo160: the alert names the
+// first three matching texts, each cut to 160 runes and marked cut.
+func TestCloudCheckReleasebotMessageNamesThreeTextsCutTo160(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 158) + "éééé"
+	cut := strings.Repeat("x", 158) + "é…"
+	d, _, f := cloudCheckReleasebotDaemon(t)
+	item := func(text string) string {
+		return `{"level":"warn","section":"Release bot","text":"` + text + `"}`
+	}
+	f.statusBody = cloudCheckStatusAt(f.now, item("first-item-text"), item(long), item("third-item-text"), item("fourth-item-text"))
+	d.runCloudCheckPatrol()
+
+	if len(f.escalations) != 1 {
+		t.Fatalf("escalated %d times, want one", len(f.escalations))
+	}
+	for _, want := range []string{"first-item-text", "third-item-text", cut} {
+		if !strings.Contains(f.escalations[0], want) {
+			t.Errorf("escalation = %q, want it to name %q", f.escalations[0], want)
+		}
+	}
+	for _, unwanted := range []string{"fourth-item-text", long} {
+		if strings.Contains(f.escalations[0], unwanted) {
+			t.Errorf("escalation = %q, want neither the fourth text nor the long one uncut", f.escalations[0])
+		}
+	}
+}
+
+// TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing:
+// a later clean run clears the alert; another section's item raises nothing.
+func TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing(t *testing.T) {
+	t.Parallel()
+	d, _, f := cloudCheckReleasebotDaemon(t)
+	f.statusBody = cloudCheckStatusAt(f.now,
+		`{"level":"warn","section":"Release bot","text":"refused its last run"}`)
+	d.runCloudCheckPatrol()
+	if len(f.escalations) != 1 {
+		t.Fatalf("the release bot item escalated %d times, want 1", len(f.escalations))
+	}
+
+	f.now = f.now.Add(10 * time.Minute)
+	f.statusBody = cloudCheckStatusAt(f.now,
+		`{"level":"fail","section":"Control cluster","text":"unreachable"}`,
+		`{"level":"ok","section":"Release bot","text":"a run landed"}`)
+	d.runCloudCheckPatrol()
+	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+		t.Errorf("escalations = %q, want only the earlier alert: another section raises nothing", f.escalationKeys)
+	}
+	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.clears, want) {
+		t.Errorf("clears = %q, want %q once the section is clean", f.clears, want)
+	}
+}
+
+// TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs: a status that is
+// not JSON or has no items key says nothing about the release bot, so it raises
+// nothing, clears nothing, and a later clean report still clears the alert.
+func TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{"at":1,"items":[`, `{"at":1,"ok":1}`} {
+		d, logs, f := cloudCheckReleasebotDaemon(t)
+		f.statusBody = cloudCheckStatusAt(f.now,
+			`{"level":"warn","section":"Release bot","text":"refused its last run"}`)
+		d.runCloudCheckPatrol()
+		if len(f.escalations) != 1 {
+			t.Fatalf("%s: the release bot item escalated %d times, want 1", body, len(f.escalations))
+		}
+
+		f.now = f.now.Add(10 * time.Minute)
+		f.statusBody = body
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+			t.Errorf("%s: escalations = %q, want no new alert from a status that is no report", body, f.escalationKeys)
+		}
+		if len(f.clears) != 0 {
+			t.Errorf("%s cleared %q, want the open alert left open", body, f.clears)
+		}
+		if !strings.Contains(logs.String(), "not a report with an items key") {
+			t.Errorf("log = %q, want the unusable status named", logs.String())
+		}
+
+		f.now = f.now.Add(10 * time.Minute)
+		f.statusBody = cloudCheckStatusAt(f.now)
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.clears, want) {
+			t.Errorf("%s: clears = %q after a clean report, want %q: the alert was still open", body, f.clears, want)
+		}
+	}
+}
+
+// TestCloudCheckReleasebotSeamFailures: a refused raise is logged and retried
+// next run; a refused clear keeps the marker for the next clean report to clear.
+func TestCloudCheckReleasebotSeamFailures(t *testing.T) {
+	t.Parallel()
+	const warn = `{"level":"warn","section":"Release bot","text":"refused its last run"}`
+	refused := errors.New("the notifier is unreachable")
+
+	t.Run("raise", func(t *testing.T) {
+		t.Parallel()
+		d, logs, f := cloudCheckReleasebotDaemon(t)
+		var attempts []string
+		d.cloudCheck.escalate = func(key, _ string) error {
+			attempts = append(attempts, key)
+			return refused
+		}
+		f.statusBody = cloudCheckStatusAt(f.now, warn)
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(attempts, want) {
+			t.Fatalf("escalated under %q, want one attempt under %q", attempts, want)
+		}
+		if d.cloudCheckReleasebotAlertRaised.Load() {
+			t.Errorf("the alert marker is set though the escalation did not land")
+		}
+		if !strings.Contains(logs.String(), "did not reach the town") {
+			t.Errorf("log = %q, want the delivery failure named", logs.String())
+		}
+		f.now = f.now.Add(10 * time.Minute)
+		d.runCloudCheckPatrol()
+		if len(attempts) != 2 {
+			t.Errorf("escalation attempts = %d after a repeat run, want 2", len(attempts))
+		}
+	})
+
+	t.Run("clear", func(t *testing.T) {
+		t.Parallel()
+		d, _, f := cloudCheckReleasebotDaemon(t)
+		f.statusBody = cloudCheckStatusAt(f.now, warn)
+		d.runCloudCheckPatrol()
+
+		f.now = f.now.Add(10 * time.Minute)
+		var clears []string
+		d.cloudCheck.clear = func(key string) error {
+			clears = append(clears, key)
+			return refused
+		}
+		f.statusBody = cloudCheckStatusAt(f.now)
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(clears, want) {
+			t.Fatalf("clears = %q, want one attempt under %q", clears, want)
+		}
+		if !d.cloudCheckReleasebotAlertRaised.Load() {
+			t.Fatalf("the alert marker was cleared though the clear failed")
+		}
+
+		f.now = f.now.Add(10 * time.Minute)
+		d.cloudCheck.clear = func(key string) error {
+			clears = append(clears, key)
+			return nil
+		}
+		f.statusBody = cloudCheckStatusAt(f.now)
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey, cloudCheckReleasebotAlertKey}; !slices.Equal(clears, want) {
+			t.Errorf("clears = %q, want the alert cleared on the next clean run", clears)
+		}
+		if d.cloudCheckReleasebotAlertRaised.Load() {
+			t.Errorf("the alert marker is still set after a clear that landed")
+		}
+	})
+}
+
 // cloudCheckExitErr is a child's failure that reports its exit status, as an
 // *exec.ExitError does.
 type cloudCheckExitErr int
