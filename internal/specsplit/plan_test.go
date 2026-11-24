@@ -274,6 +274,25 @@ func TestSplitPlanRefuses(t *testing.T) {
 	}
 }
 
+// TestSplitPlanDuplicateBoxReason: a repeated box names its group, not the lost box.
+func TestSplitPlanDuplicateBoxReason(t *testing.T) {
+	t.Parallel()
+	boxA := Box{Text: "The setting is read. Run: go test ./internal/config -run TestEnv", Run: "go test ./internal/config -run TestEnv"}
+	boxB := Box{Text: "The plan is built. Run: go test ./internal/specsplit -run TestPlan", Run: "go test ./internal/specsplit -run TestPlan"}
+	spec := Spec{Acceptance: acceptanceText(boxA, boxB), Dirs: testDirs, BaseFiles: map[string]bool{}, BaseSymbols: map[string]bool{}}
+	groups := []FileGroup{
+		{Package: "internal/config", Boxes: []Box{boxA, boxA}},
+		{Package: "internal/specsplit", Boxes: []Box{boxB}},
+	}
+	_, err := Plan(spec, groups)
+	if err == nil {
+		t.Fatal("Plan() error = nil, want the repeated box refused")
+	}
+	if got := err.Error(); !strings.Contains(got, "listed twice in group internal/config") || strings.Contains(got, "do not hold") {
+		t.Errorf("Plan() error = %q, want the listed-twice reason naming the group, not the lost box", got)
+	}
+}
+
 // TestSplitPlanCreatedByNeedsACreation: B says a file "is created by bead
 // PIECE_A" only when the file is absent from the base branch. A note on a file
 // that already exists is the spec lint's trap, so an edited file gets none.

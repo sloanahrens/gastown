@@ -69,7 +69,9 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 	for _, box := range boxes(spec.Acceptance) {
 		inSpec[box] = true
 	}
-	seen := map[Box]int{}
+	// listed is the group's boxes, seen every group's: a repeat inside one
+	// group is named for it, a box two groups hold stays a cross-group one.
+	seen := map[Box]bool{}
 	for i, group := range groups {
 		if group.Package == "" {
 			return fmt.Errorf("file group %d names no package", i+1)
@@ -77,6 +79,7 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 		if len(group.Boxes) == 0 {
 			return fmt.Errorf("file group %s has no acceptance boxes, so its piece would have no tests", group.Package)
 		}
+		listed := map[Box]bool{}
 		for _, box := range group.Boxes {
 			if strings.TrimSpace(box.Run) == "" {
 				return fmt.Errorf("file group %s has the box %q with no Run command", group.Package, box.Text)
@@ -87,14 +90,18 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 			if !inSpec[box] {
 				return fmt.Errorf("file group %s holds the box %q, which the spec does not", group.Package, box.Text)
 			}
-			seen[box]++
-			if seen[box] > 1 {
+			if listed[box] {
+				return fmt.Errorf("acceptance box %q is listed twice in group %s", box.Text, group.Package)
+			}
+			listed[box] = true
+			if seen[box] {
 				return fmt.Errorf("the box %q is held by more than one file group", box.Text)
 			}
+			seen[box] = true
 		}
 	}
 	for _, box := range boxes(spec.Acceptance) {
-		if seen[box] == 0 {
+		if !seen[box] {
 			return fmt.Errorf("the file groups do not hold the spec box %q", box.Text)
 		}
 	}
