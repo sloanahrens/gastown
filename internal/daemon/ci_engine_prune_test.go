@@ -1527,6 +1527,37 @@ func TestCIEngineBuildCachePruneKeepsStorage(t *testing.T) {
 	})
 }
 
+// TestCIEngineBuildCacheCapArgv: the cap prune bounds the build cache by its used
+// space: its argv carries no until filter and no reserved-space floor, only the
+// max-used-space flag and the size spelled as ciEngineKeepStorageSize spells it.
+func TestCIEngineBuildCacheCapArgv(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		keepBytes int64
+		want      []string
+	}{
+		{
+			name:      "whole megabytes spell in MB",
+			keepBytes: 10240 * 1024 * 1024,
+			want:      []string{"docker", "builder", "prune", "-af", "--max-used-space", "10240MB"},
+		},
+		{
+			name:      "a size that is not whole megabytes spells in bytes",
+			keepBytes: 1<<20 + 1,
+			want:      []string{"docker", "builder", "prune", "-af", "--max-used-space", "1048577B"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ciEngineBuildCacheCapArgv(tc.keepBytes)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("build cache cap argv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCIEngineBuildCacheZeroReclaimWarn: a build cache prune that reclaims nothing
 // while docker reported reclaimable cache logs one WARN naming the keep size as well
 // as the age filter.

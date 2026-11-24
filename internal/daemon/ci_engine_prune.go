@@ -69,6 +69,12 @@ const (
 	// --keep-storage); this constant is the only place to change the spelling.
 	ciEngineKeepStorageFlag = "--reserved-space"
 
+	// ciEngineMaxUsedSpaceFlag is the builder prune flag that caps the build
+	// cache's used space: docker 29.9.3's help names it "the maximum amount of disk
+	// space allowed to keep for cache". Unlike --reserved-space, which is a floor
+	// the prune never goes below, it bounds the cache from above.
+	ciEngineMaxUsedSpaceFlag = "--max-used-space"
+
 	// ciEngineMegabyte is the byte count ciEngineKeepStorageSize counts a
 	// megabyte in: 1 MiB, the unit the patrol's size settings are read in.
 	ciEngineMegabyte = 1 << 20
@@ -208,6 +214,13 @@ func (r ciEngineRemoval) presenceArgv(ids []string) []string {
 func ciEngineBuildCachePruneArgv(unusedAge time.Duration, keepBytes int64) []string {
 	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + ciEngineUntil(unusedAge),
 		ciEngineKeepStorageFlag, ciEngineKeepStorageSize(keepBytes)}
+}
+
+// ciEngineBuildCacheCapArgv is the build cache cap: the least recently used
+// records go until the cache's used space is at most keepBytes. It has no until
+// filter, so records younger than the age are eligible too.
+func ciEngineBuildCacheCapArgv(keepBytes int64) []string {
+	return []string{"docker", "builder", "prune", "-af", ciEngineMaxUsedSpaceFlag, ciEngineKeepStorageSize(keepBytes)}
 }
 
 // ciEngineKeepStorageSize spells keepBytes as the size docker's builder flags
