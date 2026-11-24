@@ -295,6 +295,7 @@ func init() {
 	doltCmd.AddCommand(doltTopCmd)
 	doltCmd.AddCommand(doltUsersCmd)
 	doltCmd.AddCommand(newDoltCompareCmd(doltCompareRealDeps()))
+	doltCmd.AddCommand(doltRepackPlanCmd)
 
 	doltKillImpostersCmd.Flags().BoolVar(&doltKillImpostersDry, "dry-run", false, "Preview without killing")
 

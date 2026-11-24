@@ -163,6 +163,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/cmd/dashboard.go` `execSpend`
 - `internal/cmd/dashboard_reexec.go` `verifyBinary`
 - `internal/cmd/dolt_compose.go` `runDoltComposeCommand`
+- `internal/cmd/dolt_repack_plan_cmd.go` `<package>`
 - `internal/cmd/editor.go` `openInEditor`
 - `internal/cmd/maint.go` `maintExecRun`
 - `internal/cmd/metrics_questions.go` `questionsExec`
