@@ -145,3 +145,31 @@ func TestIntegrationCPUClassFrontsTheGatesStepsInACrewCheckout(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationCPUClassFrontsPresubmitsIntegrationVet runs presubmit from a
+// crew checkout with the real wrapper: the stub go logs the GOFLAGS the
+// wrapper set for the integration vet, so the vet is seen to run under the
+// class beside the presubmit's other Go steps (gt-51jcto).
+// Mutation: drop $(CPU_CLASS) from the vet line, and the vet's call has no
+// GOFLAGS line.
+func TestIntegrationCPUClassFrontsPresubmitsIntegrationVet(t *testing.T) {
+	g := newGateSandbox(t)
+	dir := g.Checkout(filepath.Join("gastown", "crew", "olive"))
+	g.repo = dir
+	// The town the wrapper walks up to from the crew checkout.
+	g.WriteFile("mayor/town.json", "{}")
+	first := g.Commit(dir, "first", gateScratchFiles(t))
+	g.Commit(dir, "second", map[string]string{"tracker/changed.go": "package tracker\n"})
+
+	r := g.runTarget("presubmit", []string{"-o", "lint"},
+		"CPU_CLASS="+cpuClassBinary(t), "GOFLAGS=", "PRESUBMIT_BASE="+first)
+	if r.Code != 0 {
+		t.Fatalf("the crew presubmit exited %d on green stubs, want 0\nstdout:\n%s\nstderr:\n%s\ncalls:\n%s", r.Code, r.Stdout, r.Stderr, r.callLog())
+	}
+	if !r.hasCall("integrationvet") {
+		t.Fatalf("presubmit never ran the integration vet, so this case asserts nothing\ncalls:\n%s", r.callLog())
+	}
+	if !r.hasCall("go run GOFLAGS=-p=4") {
+		t.Errorf("the integration vet ran outside the CPU class: no %q call\ncalls:\n%s", "go run GOFLAGS=-p=4", r.callLog())
+	}
+}
