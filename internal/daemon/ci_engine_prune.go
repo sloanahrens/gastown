@@ -85,19 +85,37 @@ const (
 )
 
 // ciEngineListScript is the list program. It prints one JSON object: the data
-// root's size in KiB and the three inspected lists. It changes nothing.
+// root's size in KiB and the three inspected lists. It changes nothing. An id CI
+// deletes between the ls and the inspect makes docker exit non-zero after printing
+// the objects it did inspect; the program keeps that array on stdout, hands
+// docker's stderr back on its own stderr, and exits non-zero at the end, so the
+// daemon decides whether the listing is usable (ciEngineListFromExec).
 const ciEngineListScript = `set -euf
 root=$1
 containers=$(docker ps -aq --no-trunc)
 images=$(docker image ls -aq --no-trunc)
 volumes=$(docker volume ls -q)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+failed=0
+inspect_list() {
+kind=$1
+shift
+if [ $# -eq 0 ]; then printf '[]'; return 0; fi
+rc=0
+docker "$kind" inspect "$@" >"$tmp/out" 2>"$tmp/err" || rc=$?
+cat "$tmp/out"
+if [ -s "$tmp/err" ]; then cat "$tmp/err" >&2; fi
+if [ "$rc" -ne 0 ] || [ -s "$tmp/err" ]; then failed=1; fi
+}
 printf '{"data_root_kib":%s,"containers":' "$(du -sk "$root" | cut -f1)"
-if [ -n "$containers" ]; then docker container inspect $containers; else printf '[]'; fi
+inspect_list container $containers
 printf ',"images":'
-if [ -n "$images" ]; then docker image inspect $images; else printf '[]'; fi
+inspect_list image $images
 printf ',"volumes":'
-if [ -n "$volumes" ]; then docker volume inspect $volumes; else printf '[]'; fi
+inspect_list volume $volumes
 printf '}\n'
+exit $failed
 `
 
 // ciEngineInUseImagesScript is the read the run makes right before an image
@@ -1060,14 +1078,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
 		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
 		"sh", "-c", ciEngineListScript, "ci-engine-list", ciEngineRoot)
+	listing, err := ciEngineListFromExec(stdout, stderr, err)
 	if err != nil {
-		d.ciEnginePruneLogf("list failed", "disk_maintenance: ci engine prune: the listing exec into the %s container failed (%s); nothing pruned",
-			ciCacheContainer, ciEngineFailure(err, stderr))
-		return false, fmt.Sprintf("the listing exec into the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
-	}
-	listing, err := parseCIEngineListing(stdout)
-	if err != nil {
-		d.ciEnginePruneLogf("listing unreadable", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		d.ciEnginePruneLogf("listing", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
 	now := s.now()
@@ -1472,6 +1485,58 @@ func ciEngineDuVanished(err error, stderr []byte) bool {
 		lines++
 	}
 	return lines > 0
+}
+
+// ciEngineGoneLine is docker's report that an object it was asked to inspect is
+// gone: the line it prints for one id that CI removed between the list and the
+// inspect. The object word is docker's own, and the message names the id.
+var ciEngineGoneLine = regexp.MustCompile(`(?i)^Error: No such (container|image|volume): \S`)
+
+// ciEngineStderrOnlyGone reports whether a failed list program's stderr is only
+// docker's report of objects gone between the list and the inspect: at least one
+// such line, and no line of any other kind. The report is docker's own, so the
+// line must carry docker's missing-object wording; any other line is a fault, and
+// a bare non-zero status with no report stays a failure. kubectl's own lines are
+// skipped, as ciEngineFailure and ciEngineDuVanished skip them, since kubectl
+// relays the program's stderr on the same stream and reports the status on its
+// own line; err decides which lines are kubectl's. An empty stderr is not this
+// case.
+func ciEngineStderrOnlyGone(err error, stderr []byte) bool {
+	lines := 0
+	for _, raw := range strings.Split(string(stderr), "\n") {
+		if ciEngineKubectlLine(err, raw) {
+			continue
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if !ciEngineGoneLine.MatchString(line) {
+			return false
+		}
+		lines++
+	}
+	return lines > 0
+}
+
+// ciEngineListFromExec reads the list program's output. A run that exited zero
+// must print a listing. A run that exited non-zero still gives its listing when
+// every stderr line is docker's missing-object report and the arrays it did print
+// parse: docker inspected the objects it found, and only the ids that went are
+// missing. Any other stderr line, or no listing, is the exec's failure, named the
+// way every engine exec's is: its exit status and the first bounded stderr line.
+func ciEngineListFromExec(stdout, stderr []byte, runErr error) (ciEngineListing, error) {
+	listing, parseErr := parseCIEngineListing(stdout)
+	if runErr == nil {
+		if parseErr != nil {
+			return ciEngineListing{}, parseErr
+		}
+		return listing, nil
+	}
+	if parseErr != nil || !ciEngineStderrOnlyGone(runErr, stderr) {
+		return ciEngineListing{}, fmt.Errorf("the listing exec into the %s container failed (%s)", ciCacheContainer, ciEngineFailure(runErr, stderr))
+	}
+	return listing, nil
 }
 
 // ciEnginePruneLogf logs one refusal or failure line of the engine prune, at most
