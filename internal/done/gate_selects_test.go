@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,15 +72,17 @@ func TestGateSelectsRefusesAPatternThatNamesNoTest(t *testing.T) {
 		"-run matches test function names; name the tests so the pattern selects them")
 }
 
-// TestGateSelectsRefusesAListThatFailsToBuild: a go test -list that fails to
-// build refuses, carrying the first lines of its output.
-func TestGateSelectsRefusesAListThatFailsToBuild(t *testing.T) {
+// TestGateSelectsRefusesAListThatFails: a go test -list that fails refuses,
+// naming its error and carrying the first lines of its output; the refusal
+// does not call every failure a build failure (gt-hx8f5i).
+func TestGateSelectsRefusesAListThatFails(t *testing.T) {
 	t.Parallel()
 	run := func(_ string, _ ...string) ([]byte, error) {
 		return []byte("./gate_selects_test.go:3:2: undefined: missing\n"), errors.New("exit status 1")
 	}
 	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, gateSelectsDescription),
-		"could not build the test binary", "./gate_selects_test.go:3:2: undefined: missing")
+		"go test -list did not complete (exit status 1)",
+		"./gate_selects_test.go:3:2: undefined: missing")
 }
 
 // TestGateSelectsRefusesNoiseAroundAnEmptyList: go test -list can emit noise
@@ -101,6 +104,49 @@ func TestGateSelectsRefusesAMissingRunner(t *testing.T) {
 	t.Parallel()
 	wantGateRefusal(t, checkGateSelectsForSubmit(t, nil, gateSelectsDescription),
 		"go test ./internal/done -run 'TestGateSelects' -count=1", "no go test runner is configured")
+}
+
+// TestGateSelectsRunnerRunsGoUnderTheICUCgoEnv drives the runner gt done
+// wires, with its environment and command seams faked: go test -list runs in
+// the worktree under the process environment plus the icu4c cgo entries a
+// darwin host needs to compile the dolt dependency (gt-hx8f5i).
+func TestGateSelectsRunnerRunsGoUnderTheICUCgoEnv(t *testing.T) {
+	t.Parallel()
+	var gotDir, gotArgs string
+	var gotEnv []string
+	run := func(dir string, env []string, args ...string) ([]byte, error) {
+		gotDir, gotArgs, gotEnv = dir, strings.Join(args, " "), env
+		return []byte("TestGateSelects\n"), nil
+	}
+	cgoEnv := func([]string) []string { return []string{"CGO_CPPFLAGS=-I/keg/include"} }
+	runner := newGateListRunner(func() []string { return []string{"PATH=/bin"} }, cgoEnv, run)
+	if _, err := runner("/work", "test", "-list", "TestGateSelects", "./internal/done"); err != nil {
+		t.Fatalf("runner() = %v", err)
+	}
+	if gotDir != "/work" {
+		t.Errorf("runner ran in %q, want /work", gotDir)
+	}
+	if gotArgs != "test -list TestGateSelects ./internal/done" {
+		t.Errorf("runner ran go %q, want the -list argv", gotArgs)
+	}
+	for _, want := range []string{"PATH=/bin", "CGO_CPPFLAGS=-I/keg/include"} {
+		if !slices.Contains(gotEnv, want) {
+			t.Errorf("runner environment lacks %q; got %d entries", want, len(gotEnv))
+		}
+	}
+}
+
+// TestGateSelectsWiringConfiguresTheRunner: useRealSubmitDeps wires a list
+// runner, so a submitted Gate line's -run pattern is checked. The wiring
+// stores function values only, so calling it reads no host state
+// (gt-hx8f5i).
+func TestGateSelectsWiringConfiguresTheRunner(t *testing.T) {
+	t.Parallel()
+	r := &doneRun{out: new(bytes.Buffer), env: func(string) string { return "" }}
+	r.useRealSubmitDeps(Options{})
+	if r.deps.listTests == nil {
+		t.Fatal("useRealSubmitDeps wired no Gate -run list runner")
+	}
 }
 
 // TestGateSelectsABeadWithNoCheckedLine: a Gate with no go test -run line the

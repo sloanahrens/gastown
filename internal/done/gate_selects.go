@@ -11,18 +11,36 @@ import (
 // output: a test substitutes a fake, so no test runs a real go test (gt-hx8f5i).
 type gateListRunner func(dir string, args ...string) ([]byte, error)
 
-// runGoTestList is the real gateListRunner: go test with the arguments the
-// Gate line's pattern and packages give.
-func runGoTestList(dir string, args ...string) ([]byte, error) {
+// gateListCommand runs one command under env and returns its combined output.
+// The real one starts a process; a test substitutes a fake so the runner's
+// directory, environment and arguments are read without running go.
+type gateListCommand func(dir string, env []string, args ...string) ([]byte, error)
+
+// execGateListCommand is the real gateListCommand.
+func execGateListCommand(dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
+	cmd.Env = env
 	return cmd.CombinedOutput()
+}
+
+// newGateListRunner is the gateListRunner gt done wires. environ is the base
+// environment and cgoEnv adds the entries a darwin host needs to compile the
+// dolt dependency's icu4c include (AGENTS.md says a bare go test fails
+// without them); both are read when the runner runs, so wiring it reads no
+// host state (gt-hx8f5i).
+func newGateListRunner(environ func() []string, cgoEnv func([]string) []string, run gateListCommand) gateListRunner {
+	return func(dir string, args ...string) ([]byte, error) {
+		base := environ()
+		env := append(append([]string(nil), base...), cgoEnv(base)...)
+		return run(dir, env, args...)
+	}
 }
 
 // checkGateSelects refuses a Gate line whose go test -run pattern selects no
 // test on the branch: -run matches test function names, so a pattern naming
 // none runs the gate green while it tests nothing (gt-hx8f5i). A list that
-// fails to build, or a runner that is not wired, is a refusal, never a pass.
+// fails, or a runner that is not wired, is a refusal, never a pass.
 func checkGateSelects(run gateListRunner, dir, gate string) error {
 	for _, gr := range gateRunLines(gate) {
 		if run == nil {
@@ -30,7 +48,7 @@ func checkGateSelects(run gateListRunner, dir, gate string) error {
 		}
 		out, err := run(dir, append([]string{"test", "-list", gr.Pattern}, gr.Packages...)...)
 		if err != nil {
-			return fmt.Errorf("Gate line %q: go test -list could not build the test binary:\n%s", gr.Line, firstLines(out, 10))
+			return fmt.Errorf("Gate line %q: go test -list did not complete (%v), so its tests cannot be checked:\n%s", gr.Line, err, firstLines(out, 10))
 		}
 		if !listsATest(out) {
 			return fmt.Errorf("Gate line %q selects no test in %s: -run matches test function names; name the tests so the pattern selects them", gr.Line, strings.Join(gr.Packages, " "))
