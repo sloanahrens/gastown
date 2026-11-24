@@ -19,6 +19,9 @@ const (
 	priorityClassKind      = "PriorityClass"
 	namespaceKind          = "Namespace"
 	serviceAccountKind     = "ServiceAccount"
+	// secretKind is the one static kind the compare never reads: the cluster
+	// fills a Secret's data, so the object is named as not compared instead.
+	secretKind = "Secret"
 )
 
 // staticSource names the embedded set in a refusal, where a policy row names the
@@ -45,30 +48,37 @@ var staticTargetKinds = map[string]bool{
 // staticObjectTargets is the drift targets of the static objects the policy rows
 // do not hold: each object covered does not claim, reduced as the policy rows'
 // documents are and read by its kind's scope. covered reports the objects
-// policyTargetSpecs holds, since the compare reads those by their files
-// (gt-cd1iso).
-func staticObjectTargets(objects []k8s.StaticObject, covered func(kind, name, namespace string) bool) ([]driftTarget, error) {
+// policyTargetSpecs holds, since the compare reads those by their files. A
+// Secret builds no target and yields one line saying it is not compared, since
+// the cluster fills its data and the compare never reads it (gt-cd1iso,
+// gt-w6g6ok).
+func staticObjectTargets(objects []k8s.StaticObject, covered func(kind, name, namespace string) bool) ([]driftTarget, []string, error) {
 	if covered == nil {
-		return nil, errors.New("the static objects need a report of the objects the policy rows hold, so none were compared")
+		return nil, nil, errors.New("the static objects need a report of the objects the policy rows hold, so none were compared")
 	}
 	targets := make([]driftTarget, 0, len(objects))
+	var notCompared []string
 	seen := make(map[string]bool, len(objects))
 	for _, object := range objects {
+		if object.Kind == secretKind {
+			notCompared = append(notCompared, "Secret/"+object.Name+": not compared: secret data is never read")
+			continue
+		}
 		if covered(object.Kind, object.Name, object.Namespace) {
 			continue
 		}
 		target, err := staticObjectTarget(object)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		key := target.resource + " " + target.namespace
 		if seen[key] {
-			return nil, fmt.Errorf("the static %s is compared twice, so the set holds it twice", staticObjectLabel(object))
+			return nil, nil, fmt.Errorf("the static %s is compared twice, so the set holds it twice", staticObjectLabel(object))
 		}
 		seen[key] = true
 		targets = append(targets, target)
 	}
-	return targets, nil
+	return targets, notCompared, nil
 }
 
 // staticObjectTarget is the drift target of one static object: its document
@@ -96,10 +106,17 @@ func staticObjectTarget(object k8s.StaticObject) (driftTarget, error) {
 	if err != nil {
 		return driftTarget{}, err
 	}
+	var target driftTarget
 	if cluster {
-		return clusterScopedDriftTarget(object.Kind, object.Name, compared), nil
+		target = clusterScopedDriftTarget(object.Kind, object.Name, compared)
+	} else {
+		target = namespacedDriftTarget(object.Kind, object.Name, object.Namespace, compared)
 	}
-	return namespacedDriftTarget(object.Kind, object.Name, object.Namespace, compared), nil
+	// A hand-applied static object the cluster does not hold is drift, not an
+	// unreadable input: the compare exists to notice that the apply never made
+	// it, so every field the document names is reported absent (gt-w6g6ok).
+	target.absentIsDrift = true
+	return target, nil
 }
 
 // staticObjectDoc decodes an object's document into the document the policy

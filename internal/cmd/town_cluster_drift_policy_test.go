@@ -104,7 +104,12 @@ func TestClusterShapeDriftPolicyReportsADifference(t *testing.T) {
 			if got := driftExit(err); got != 1 {
 				t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 			}
-			lines := driftLines(out)
+			// The compare also prints the not-compared line for the embedded
+			// Secret, which is not a difference.
+			notCompared := driftSecretLines(t)
+			lines := slices.DeleteFunc(driftLines(out), func(line string) bool {
+				return slices.Contains(notCompared, line)
+			})
 			want := tc.resource + ": " + tc.path + ": rendered "
 			if len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
 				t.Fatalf("printed\n%q\nwant one line starting %q", lines, want)
@@ -129,8 +134,8 @@ func TestClusterShapeDriftPolicyHoldsAnObjectInStep(t *testing.T) {
 	if got := driftExit(err); got != 0 {
 		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", got, err, out.String())
 	}
-	if got := driftLines(out); got != nil {
-		t.Errorf("printed %q for objects in step, want nothing", got)
+	if got, want := driftLines(out), driftSecretLines(t); !slices.Equal(got, want) {
+		t.Errorf("printed %q for objects in step, want only the not-compared Secret lines %q", got, want)
 	}
 	if !slices.Contains(reads, "validatingadmissionpolicy/"+updatePolicyName) {
 		t.Errorf("read %q, want the update admission policy among them", reads)

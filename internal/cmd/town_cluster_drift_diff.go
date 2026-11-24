@@ -50,6 +50,22 @@ func objectDrift(kind string, rendered, live map[string]any) ([]string, error) {
 	if len(live) == 0 {
 		return nil, fmt.Errorf("%s drift: the live %s has no fields, so it was not read; an unreadable object is not a cluster in step", strings.ToLower(kind), kind)
 	}
+	return objectDriftLines(rendered, live)
+}
+
+// objectAbsent lists every rendered field of an object the cluster does not
+// hold as absent, one sorted line per top-level field, never either value. It is
+// the drift of a static object the apply never made (gt-w6g6ok).
+func objectAbsent(kind string, rendered map[string]any) ([]string, error) {
+	if len(rendered) == 0 {
+		return nil, fmt.Errorf("%s drift: the rendered %s has no fields, so it was not read; an unreadable render is not a cluster in step", strings.ToLower(kind), kind)
+	}
+	return objectDriftLines(rendered, map[string]any{})
+}
+
+// objectDriftLines walks rendered against live and returns its sorted lines, or
+// the first value it could not fingerprint.
+func objectDriftLines(rendered, live map[string]any) ([]string, error) {
 	w := &driftWalk{}
 	w.object("", rendered, live)
 	if w.err != nil {

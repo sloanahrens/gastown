@@ -43,6 +43,10 @@ var driftGranted = map[string]string{
 	"cronjobs":                          "batch",
 	"validatingadmissionpolicies":       "admissionregistration.k8s.io",
 	"validatingadmissionpolicybindings": "admissionregistration.k8s.io",
+	"clusterroles":                      "rbac.authorization.k8s.io",
+	"clusterrolebindings":               "rbac.authorization.k8s.io",
+	"priorityclasses":                   "scheduling.k8s.io",
+	"namespaces":                        "",
 	"roles":                             "rbac.authorization.k8s.io",
 	"rolebindings":                      "rbac.authorization.k8s.io",
 }

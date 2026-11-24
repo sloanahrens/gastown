@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestTownClusterDriftStaticBuildsTheRBACTargets(t *testing.T) {
 		"RoleBinding/gt-sweeps/sweep-runner",
 		"ValidatingAdmissionPolicy/gt-update-jobs",
 	)
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestTownClusterDriftStaticBuildsTheRBACTargets(t *testing.T) {
 func TestTownClusterDriftStaticReportsAnRBACDifference(t *testing.T) {
 	t.Parallel()
 	objects := driftStaticObjects(t, "ClusterRole/gt-drift-reader", "RoleBinding/gt-sweeps/sweep-runner")
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestTownClusterDriftStaticReportsAnRBACDifference(t *testing.T) {
 func TestTownClusterDriftStaticBuildsThePriorityClassAndNamespaceTargets(t *testing.T) {
 	t.Parallel()
 	objects := append(driftStaticObjects(t, "PriorityClass/gt-control-plane"), driftStaticNamespaceFixture())
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestTownClusterDriftStaticBuildsThePriorityClassAndNamespaceTargets(t *test
 func TestTownClusterDriftStaticReportsAPriorityClassAndNamespaceDifference(t *testing.T) {
 	t.Parallel()
 	objects := append(driftStaticObjects(t, "PriorityClass/gt-control-plane"), driftStaticNamespaceFixture())
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -162,22 +163,22 @@ func TestTownClusterDriftStaticReportsAPriorityClassAndNamespaceDifference(t *te
 	}
 }
 
-// TestTownClusterDriftStaticRefusesASecret holds the set's token Secret to an
-// error naming its kind and the object, since 5a reads no Secret (gt-cd1iso).
-func TestTownClusterDriftStaticRefusesASecret(t *testing.T) {
+// TestTownClusterDriftStaticNamesASecretNotCompared holds the set's token Secret
+// to no target and one line saying it is not compared, since the cluster fills a
+// Secret's data and the compare never reads it (gt-w6g6ok).
+func TestTownClusterDriftStaticNamesASecretNotCompared(t *testing.T) {
 	t.Parallel()
 	objects := driftStaticObjects(t, "Secret/gt-sweeps/sweep-runner-token")
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
-	if err == nil {
-		t.Fatalf("built %d targets for a Secret, want the refusal", len(targets))
+	targets, notCompared, err := staticObjectTargets(objects, policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("staticObjectTargets: %v", err)
 	}
-	if targets != nil {
-		t.Errorf("built %d targets beside the error, want none", len(targets))
+	if len(targets) != 0 {
+		t.Errorf("built %d targets for a Secret, want none", len(targets))
 	}
-	for _, want := range []string{"Secret", "gt-sweeps/sweep-runner-token"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not hold %q", err, want)
-		}
+	want := []string{"Secret/sweep-runner-token: not compared: secret data is never read"}
+	if !slices.Equal(notCompared, want) {
+		t.Errorf("not-compared lines = %q, want %q", notCompared, want)
 	}
 }
 
@@ -186,7 +187,7 @@ func TestTownClusterDriftStaticRefusesASecret(t *testing.T) {
 // policy rows' objects from the rest compares every one twice (gt-cd1iso).
 func TestTownClusterDriftStaticRefusesNoCoveredReport(t *testing.T) {
 	t.Parallel()
-	targets, err := staticObjectTargets(driftStaticObjects(t, "PriorityClass/gt-control-plane"), nil)
+	targets, _, err := staticObjectTargets(driftStaticObjects(t, "PriorityClass/gt-control-plane"), nil)
 	if err == nil {
 		t.Fatalf("built %d targets with no cover report, want the refusal", len(targets))
 	}
@@ -204,7 +205,7 @@ func TestTownClusterDriftStaticRefusesNoCoveredReport(t *testing.T) {
 func TestTownClusterDriftStaticRefusesAnObjectTwice(t *testing.T) {
 	t.Parallel()
 	one := driftStaticObject(roleKind, "gt-mac-watch", "gt", false, "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: gt-mac-watch\n  namespace: gt\nrules: []\n")
-	targets, err := staticObjectTargets([]k8s.StaticObject{one, one}, driftStaticCovered)
+	targets, _, err := staticObjectTargets([]k8s.StaticObject{one, one}, policyTargetsCovered)
 	if err == nil {
 		t.Fatalf("built %d targets for one object named twice, want the refusal", len(targets))
 	}
@@ -225,7 +226,7 @@ func TestTownClusterDriftStaticKeepsSameNamesInDifferentNamespaces(t *testing.T)
 		driftStaticObject(roleKind, "gt-mac-watch", "gt", false, "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: gt-mac-watch\n  namespace: gt\nrules: []\n"),
 		driftStaticObject(roleKind, "gt-mac-watch", "forgejo", false, "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: gt-mac-watch\n  namespace: forgejo\nrules: []\n"),
 	}
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -240,7 +241,7 @@ func TestTownClusterDriftStaticKeepsSameNamesInDifferentNamespaces(t *testing.T)
 func TestTownClusterDriftStaticHasNoDuplicateTargets(t *testing.T) {
 	t.Parallel()
 	objects, want := driftStaticObjectsWithoutSecrets(t)
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -266,7 +267,7 @@ func TestTownClusterDriftStaticHasNoDuplicateTargets(t *testing.T) {
 func TestTownClusterDriftStaticReadsOnlyGets(t *testing.T) {
 	t.Parallel()
 	objects, _ := driftStaticObjectsWithoutSecrets(t)
-	targets, err := staticObjectTargets(objects, driftStaticCovered)
+	targets, _, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
 	}
@@ -384,7 +385,7 @@ func TestTownClusterDriftStaticRefusesABrokenObject(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			targets, err := staticObjectTargets([]k8s.StaticObject{tc.object}, driftStaticCovered)
+			targets, _, err := staticObjectTargets([]k8s.StaticObject{tc.object}, policyTargetsCovered)
 			if err == nil {
 				t.Fatalf("built %d targets, want the refusal", len(targets))
 			}
@@ -396,21 +397,6 @@ func TestTownClusterDriftStaticRefusesABrokenObject(t *testing.T) {
 			}
 		})
 	}
-}
-
-// driftStaticCovered reports the static objects policyTargetSpecs holds, the
-// objects the compare reads by their embedded files.
-func driftStaticCovered(kind, name, namespace string) bool {
-	for _, spec := range policyTargetSpecs {
-		if spec.kind != kind || spec.name != name {
-			continue
-		}
-		if spec.cluster {
-			return namespace == ""
-		}
-		return namespace == updateRBACNamespace
-	}
-	return false
 }
 
 // driftStaticObjects is the embedded set's objects the keys name, each
@@ -448,7 +434,8 @@ func driftStaticObjects(t *testing.T, keys ...string) []k8s.StaticObject {
 
 // driftStaticObjectsWithoutSecrets is the embedded set's objects the build
 // reads, and how many of them the policy rows do not hold. The Secrets are left
-// out because 5a refuses one and the not-compared line is 5b's (gt-w6g6ok).
+// out because they build no target: the tests using this helper read every
+// target, and a Secret prints a not-compared line instead (gt-w6g6ok).
 func driftStaticObjectsWithoutSecrets(t *testing.T) ([]k8s.StaticObject, int) {
 	t.Helper()
 	all, err := k8s.Static()
@@ -462,7 +449,7 @@ func driftStaticObjectsWithoutSecrets(t *testing.T) ([]k8s.StaticObject, int) {
 			continue
 		}
 		objects = append(objects, object)
-		if !driftStaticCovered(object.Kind, object.Name, object.Namespace) {
+		if !policyTargetsCovered(object.Kind, object.Name, object.Namespace) {
 			want++
 		}
 	}

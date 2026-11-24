@@ -84,8 +84,10 @@ var deployerPolicyAllowed = map[string]deployerGrant{
 }
 
 // deployerReaderAllowed is the exact set the read supplement may grant: the
-// cluster-scoped kinds the all-objects drift compare reads that the
-// gt-drift-reader ClusterRole does not already name.
+// cluster-scoped kinds the all-objects drift compare reads, so a deployer
+// certificate can run the same reads. The daemon's own grant, gt-drift-reader,
+// names these kinds too, for a different subject; the two grants may name the
+// same kind and each is held to its own allowlist (gt-w6g6ok).
 var deployerReaderAllowed = map[string]deployerGrant{
 	"clusterroles":        {deployerRBACGroup, deployerReaderVerbs},
 	"clusterrolebindings": {deployerRBACGroup, deployerReaderVerbs},
@@ -238,7 +240,6 @@ const (
 	deployerRemoveVerb
 	deployerPolicyWorkloadKind
 	deployerApplyPrivilegedKind
-	deployerReaderNotSupplement
 )
 
 // deployerViolation is one grant in the file the design does not hold. The
@@ -281,8 +282,6 @@ func (v deployerViolation) String() string {
 		return fmt.Sprintf("%s rule %d grants workload kind %q, which only deployer-apply writes", v.Role, v.Rule, v.Resource)
 	case deployerApplyPrivilegedKind:
 		return fmt.Sprintf("%s rule %d grants %q, which is RBAC, admission or Secret and belongs to deployer-policy", v.Role, v.Rule, v.Resource)
-	case deployerReaderNotSupplement:
-		return fmt.Sprintf("%s rule %d grants %q, which the drift read grant already names", v.Role, v.Rule, v.Resource)
 	}
 	return fmt.Sprintf("%s has an unknown violation", v.Role)
 }
@@ -402,11 +401,12 @@ func deployerGrantProblems(docs []deployerRBACDoc) []string {
 
 // deployerRefusalViolations reports every grant the design forbids whatever role
 // it sits in: a Secret, a wildcard, a removing verb, a workload kind in the
-// policy role, an RBAC, admission or Secret kind in the apply role, and a kind
-// in the supplement the drift read grant already names. It covers the apply
-// role and the plain rules of the policy role, not what that role's escalate and
-// bind can reach; deployer-rbac.yaml's header states that reach and what bounds
-// it.
+// policy role, and an RBAC, admission or Secret kind in the apply role. It
+// covers the apply role and the plain rules of the policy role, not what that
+// role's escalate and bind can reach; deployer-rbac.yaml's header states that
+// reach and what bounds it. The read supplement is held to its own allowlist,
+// deployerReaderAllowed, and may name a kind the daemon's drift read grant also
+// names: the two grants serve different subjects (gt-w6g6ok).
 func deployerRefusalViolations(docs []deployerRBACDoc) []deployerViolation {
 	var refusals []deployerViolation
 	for _, d := range docs {
@@ -433,10 +433,6 @@ func deployerRefusalViolations(docs []deployerRBACDoc) []deployerViolation {
 					refusals = append(refusals, deployerViolation{Role: role, Rule: n, Kind: deployerPolicyWorkloadKind, Resource: resource})
 				case role == deployerApplyRole && slices.Contains(deployerPrivilegedKinds, resource):
 					refusals = append(refusals, deployerViolation{Role: role, Rule: n, Kind: deployerApplyPrivilegedKind, Resource: resource})
-				case role == deployerReaderRole:
-					if _, already := driftGranted[resource]; already {
-						refusals = append(refusals, deployerViolation{Role: role, Rule: n, Kind: deployerReaderNotSupplement, Resource: resource})
-					}
 				}
 				for _, verb := range rule.Verbs {
 					if slices.Contains(deployerRemoveVerbs, verb) {
@@ -629,6 +625,13 @@ func TestDeployerRBACRoles(t *testing.T) {
 			},
 			want: deployerViolation{Role: "deployer-apply-2", Kind: deployerUnlistedRole},
 		},
+		{
+			name: "a resource outside the supplement allowlist",
+			edit: func(docs []deployerRBACDoc) []deployerRBACDoc {
+				return appendDeployerRule(docs, deployerReaderRole, deployerRBACRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}})
+			},
+			want: deployerViolation{Role: deployerReaderRole, Rule: readerRules + 1, Kind: deployerUnknownResource, Resource: "configmaps"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -731,13 +734,6 @@ func TestDeployerRBACRefusals(t *testing.T) {
 				return appendDeployerRule(docs, deployerApplyRole, deployerRBACRule{APIGroups: []string{deployerAdmissionGroup}, Resources: []string{"validatingadmissionpolicies"}, Verbs: []string{"get"}})
 			},
 			want: deployerViolation{Role: deployerApplyRole, Rule: applyRules + 1, Kind: deployerApplyPrivilegedKind, Resource: "validatingadmissionpolicies"},
-		},
-		{
-			name: "a supplement kind the drift read grant already names",
-			edit: func(docs []deployerRBACDoc) []deployerRBACDoc {
-				return appendDeployerRule(docs, deployerReaderRole, deployerRBACRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}})
-			},
-			want: deployerViolation{Role: deployerReaderRole, Rule: readerRules + 1, Kind: deployerReaderNotSupplement, Resource: "configmaps"},
 		},
 	}
 	for _, tc := range tests {
