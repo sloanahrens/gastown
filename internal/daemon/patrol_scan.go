@@ -168,10 +168,14 @@ func (d *Daemon) triggerPatrolScan() bool {
 // runPatrolScan scans every rig the tick covers, one rig at a time: restarts
 // are serialized so a mass death cannot raise a burst of sessions at once.
 func (d *Daemon) runPatrolScan() {
+	d.runPatrolScanOn(&patrolScanHost{d: d})
+}
+
+// runPatrolScanOn is runPatrolScan against env, the host the tick reads through.
+func (d *Daemon) runPatrolScanOn(env *patrolScanHost) {
 	if !d.isPatrolActive("patrol_scan") || d.config == nil {
 		return
 	}
-	env := &patrolScanHost{d: d}
 	ledger := patrolscan.NewFileLedger(patrolscan.LedgerPath(d.config.TownRoot), 7*24*time.Hour)
 	scanner := patrolscan.New(env, ledger, d.patrolScanRunOptions(env))
 	rigs := d.getPatrolRigs("patrol_scan")
@@ -187,18 +191,41 @@ func (d *Daemon) runPatrolScan() {
 		d.reapAlertsIfEnabled(rigName, report, ledger)
 	}
 	d.nudgeClosedEscalations(env, rigs)
-	d.patrolScanTimerGates(env, rigs)
-	d.patrolScanGHGates(env, rigs)
+	checks := d.patrolScanTimerGates(env, rigs)
+	ghChecks := d.patrolScanGHGates(env, rigs)
+	checks.attempted += ghChecks.attempted
+	checks.answered += ghChecks.answered
 	d.patrolScanRogueBD()
 	env.patrolScanSandboxRecords()
+	// The tick reached its end, so record the run: gt jobs reads the row as
+	// never_run until one is (gt-xittvy). The early returns above, and a tick
+	// whose every gate check failed, are not runs.
+	if checks.allFailed() {
+		d.logger.Printf("patrol_scan: every gate check failed; not recording the run")
+		return
+	}
+	d.recordPatrolRun(&d.patrolScanRun, "patrol_scan", d.clk().Now())
 }
+
+// gateCheckTally counts the gate checks one tick attempted and how many
+// databases answered; a tick where none answered is not a run (gt-xittvy).
+type gateCheckTally struct{ attempted, answered int }
+
+func (t *gateCheckTally) add(answered bool) {
+	t.attempted++
+	if answered {
+		t.answered++
+	}
+}
+
+func (t gateCheckTally) allFailed() bool { return t.attempted > 0 && t.answered == 0 }
 
 // patrolScanTimerGates resolves elapsed timer gates in the town database and
 // in each scanned rig's (the deacon's gate-evaluation step and the witness's
 // check-timer-gates step). `bd gate check` resolves a timer gate whose
 // timeout has passed; it never escalates one.
-func (d *Daemon) patrolScanTimerGates(h *patrolScanHost, rigs []string) {
-	d.patrolScanGateCheck(h, rigs, "timer")
+func (d *Daemon) patrolScanTimerGates(h *patrolScanHost, rigs []string) gateCheckTally {
+	return d.patrolScanGateCheck(h, rigs, "timer")
 }
 
 // ghGateInterval is how often the tick evaluates GitHub gates. A check with a
@@ -219,20 +246,24 @@ const ghGateInterval = time.Hour
 // for all of them either held the failed database's gates for the interval or,
 // to avoid that, re-ran every database's `gh` check on each tick for as long
 // as one stayed down (gt-oyrav, gt-kp9fo, gt-96bsu).
-func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
+func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) gateCheckTally {
 	now := d.clk().Now()
+	var checks gateCheckTally
 	for _, rigName := range append([]string{""}, rigs...) {
 		patrol := ghGatesPatrol(rigName)
 		mem := d.ghGatesRunMemory(patrol)
 		if due := evaluatePatrolDue(d.config.TownRoot, patrol, mem.last(), now, ghGateInterval); !due.due {
 			continue
 		}
-		if !d.patrolScanGateCheckDB(h, rigName, "gh") {
+		answered := d.patrolScanGateCheckDB(h, rigName, "gh")
+		checks.add(answered)
+		if !answered {
 			d.logger.Printf("patrol_scan: %s: gh gates: the gate check failed; not recording the run", gateCheckWhere(rigName))
 			continue
 		}
 		d.recordPatrolRun(mem, patrol, now)
 	}
+	return checks
 }
 
 // ghGatesRunMemory returns the in-memory last-run time of one database's gh
@@ -262,11 +293,13 @@ func gateCheckWhere(rigName string) string {
 
 // patrolScanGateCheck runs `bd gate check --type=<gateType>` over the town
 // database and each scanned rig's. Every database is checked even when an
-// earlier one failed.
-func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) {
+// earlier one failed; the tally says which answered.
+func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) gateCheckTally {
+	var checks gateCheckTally
 	for _, rigName := range append([]string{""}, rigs...) {
-		d.patrolScanGateCheckDB(h, rigName, gateType)
+		checks.add(d.patrolScanGateCheckDB(h, rigName, gateType))
 	}
+	return checks
 }
 
 // patrolScanGateCheckDB runs the gate check over one database ("" is the
