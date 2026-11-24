@@ -852,6 +852,77 @@ func TestSpecDispatchKilledTickBeforeAnySlingLogsNoDispatch(t *testing.T) {
 	}
 }
 
+// A tick in flight when the daemon starts draining did not fail: the shutdown
+// ended it, so it logs the canceled line once, still logs one dispatched line
+// per sling it hooked before it stopped, keeps the failed line out, and leaves
+// the idle-streak state the failed path resets alone (gt-qd4wbi).
+func TestSpecDispatchTickCancelledByShutdownIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 23, 20, 4, 0, 0, time.UTC))
+	const idle = `{"roster": "claude-sonnet 0/2", "candidates": 1,
+		"skipped": [{"bead": "gt-a", "rig": "gastown", "line": "gt-a: clean, seats full"}]}`
+	canceled := false
+	fake := newFakeCLI(func([]string) cliReply {
+		clock.Advance(55 * time.Second)
+		if canceled {
+			// Two slings hooked before the shutdown cut the tick, so its
+			// partial output carries two hook lines and no report.
+			return cliReply{stdout: strings.Repeat("  ✓ "+dispatch.SlingHookedLine("p")+"\n", 2), code: 1, stderr: "signal: terminated"}
+		}
+		return cliReply{stdout: string(wireOut(idle))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = clock
+
+	d.runSpecDispatch()
+	streak := d.dispatchIdle.Status().Streak
+	if streak != 1 {
+		t.Fatalf("idle streak after one idle tick = %d, want 1: %v", streak, lines())
+	}
+
+	canceled = true
+	d.draining.Store(true)
+	d.runSpecDispatch()
+
+	got := lines()
+	const want = "spec_dispatch: tick canceled by the shutdown after 55s; its slings, if any, were waited for by the drain"
+	if n := countContaining(got, want); n != 1 {
+		t.Errorf("canceled line = %d, want one %q: %v", n, want, got)
+	}
+	if n := countContaining(got, "spec_dispatch: dispatched:", "hooked before the tick was canceled by the shutdown"); n != 2 {
+		t.Errorf("dispatched lines = %d, want one per sling hooked (2): %v", n, got)
+	}
+	if n := countContaining(got, "spec_dispatch: tick failed"); n != 0 {
+		t.Errorf("failure lines = %d, want none: %v", n, got)
+	}
+	if after := d.dispatchIdle.Status().Streak; after != streak {
+		t.Errorf("idle streak after the canceled tick = %d, want %d: the failure path's reset must not run: %v", after, streak, got)
+	}
+}
+
+// A tick whose command is cut by the daemon context's cancellation is the
+// shutdown ending it, not a failure (gt-qd4wbi).
+func TestSpecDispatchTickCancelledByACancelledContextIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{code: 1, stderr: "signal: killed"} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	cancel()
+
+	d.runSpecDispatch()
+
+	got := lines()
+	if n := countContaining(got, "spec_dispatch: tick canceled by the shutdown after"); n != 1 {
+		t.Errorf("canceled lines = %d, want one: %v", n, got)
+	}
+	if n := countContaining(got, "spec_dispatch: tick failed"); n != 0 {
+		t.Errorf("failure lines = %d, want none: %v", n, got)
+	}
+}
+
 // specDispatchFake is a daemon whose tick runs against fake, in a town with no
 // patrol block, so the bound is the one-sling bound.
 func specDispatchFake(t *testing.T, fake *fakeCLI, logger *log.Logger) *Daemon {
