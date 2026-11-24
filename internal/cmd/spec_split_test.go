@@ -436,7 +436,7 @@ func (splitNoMove) AddTypedDependency(string, string, string) error {
 	return errors.New("dep add refused")
 }
 
-// splitNoRemove is a store whose dependent-move removal fails.
+// splitNoRemove is a store whose dependency removal fails.
 type splitNoRemove struct{ beads.Client }
 
 func (splitNoRemove) RemoveDependency(string, string) error { return errors.New("dep remove refused") }
@@ -736,6 +736,85 @@ func TestSpecSplitApplyNamesTheDependentsItMoved(t *testing.T) {
 			t.Errorf("error = %v, want it to name %q", err, want)
 		}
 	}
+}
+
+// TestSpecSplitUndoRollsBack: a failure at piece B's creation, at the dependency
+// or at a dependent move closes the pieces the apply made, restores a moved
+// dependent, leaves the original open and exits 1; an undo failure is named.
+func TestSpecSplitUndoRollsBack(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		store func(*beadsfake.Fake) beads.Client
+		want  string
+		undo  string // the undo write that fails; "" for a clean undo
+	}{
+		{"piece B's creation", func(db *beadsfake.Fake) beads.Client { return &splitFailingClient{Client: db, refuseCreate: 2} }, "cannot create piece B", ""},
+		{"the dependency", func(db *beadsfake.Fake) beads.Client { return &splitFailingClient{Client: db, refuseDepend: true} }, "cannot wire B after A", ""},
+		{"a dependent move", func(db *beadsfake.Fake) beads.Client { return splitMoveRefuses{Client: db, id: "gt-downstream-2"} }, "moving dependent gt-downstream-2", ""},
+		{"a restore add", func(db *beadsfake.Fake) beads.Client {
+			return splitMoveRefuses{Client: splitRestoreAddRefuses{db}, id: "gt-downstream-2"}
+		}, "moving dependent gt-downstream-2", "restoring gt-downstream on gt-split"},
+		{"a restore remove", func(db *beadsfake.Fake) beads.Client { return splitNoRemove{db} }, "moving dependent gt-downstream off gt-split", "taking gt-downstream off piece B"},
+		{"the close", func(db *beadsfake.Fake) beads.Client { return &splitFailingClient{Client: db, refuseClose: true} }, "cannot close gt-split", "closing the pieces"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := splitApplyFixture(t)
+			mustBead(t, db, beads.CreateOptions{ID: "gt-downstream-2", Title: "gt-downstream-2"})
+			if err := db.AddDependency("gt-downstream-2", "gt-split"); err != nil {
+				t.Fatalf("AddDependency: %v", err)
+			}
+			err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), tc.store(db), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || exitCodeForError(err) != 1 {
+				t.Fatalf("runSpecSplitApplyOn() = %v, want exit 1 naming %q", err, tc.want)
+			}
+			if tc.undo != "" {
+				if !strings.Contains(err.Error(), "the undo failed too") || !strings.Contains(err.Error(), tc.undo) {
+					t.Fatalf("runSpecSplitApplyOn() = %v, want the undo failure %q", err, tc.undo)
+				}
+				return
+			}
+			issues, err := db.List(beads.ListOptions{Status: "all"})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			byID := make(map[string]*beads.Issue, len(issues))
+			pieces, closed := 0, 0
+			for _, issue := range issues {
+				byID[issue.ID] = issue
+				if strings.Contains(issue.Title, "(piece ") {
+					pieces++
+					if issue.Status == "closed" {
+						closed++
+					}
+				}
+			}
+			if pieces == 0 || closed != pieces {
+				t.Errorf("closed pieces = %d of %d after the undo, want every piece the apply made closed", closed, pieces)
+			}
+			if original := byID["gt-split"]; original == nil || original.Status != "open" {
+				t.Errorf("original after the refusal = %+v, want it open", original)
+			}
+			for _, id := range []string{"gt-downstream", "gt-downstream-2"} {
+				if d := byID[id]; d == nil || len(d.Dependencies) != 1 || d.Dependencies[0].ID != "gt-split" {
+					t.Errorf("%s dependencies = %+v after the undo, want the original alone", id, d)
+				}
+			}
+		})
+	}
+}
+
+// splitRestoreAddRefuses refuses the undo's edge back to the original.
+type splitRestoreAddRefuses struct{ beads.Client }
+
+func (s splitRestoreAddRefuses) AddTypedDependency(issue, dependsOn, depType string) error {
+	if dependsOn == "gt-split" {
+		return errors.New("dep add refused")
+	}
+	return s.Client.AddTypedDependency(issue, dependsOn, depType)
 }
 
 // TestSpecSplitApplyFallsBackToThePlainEdge: a dependent whose raw targets name
