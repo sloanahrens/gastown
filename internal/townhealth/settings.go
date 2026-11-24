@@ -31,6 +31,8 @@ type Settings struct {
 	HeartbeatRed        string  `json:"heartbeat_red,omitempty"`
 	TickDegradedFactor  float64 `json:"tick_degraded_factor,omitempty"`
 	TickRedFactor       float64 `json:"tick_red_factor,omitempty"`
+	TickRunDegraded     float64 `json:"tick_run_degraded,omitempty"`
+	TickRunRed          float64 `json:"tick_run_red,omitempty"`
 	LandingDegraded     string  `json:"landing_degraded,omitempty"`
 	LandingRed          string  `json:"landing_red,omitempty"`
 	EscalationDegraded  string  `json:"escalation_degraded,omitempty"`
@@ -67,6 +69,8 @@ func DefaultSettings() *Settings {
 		HeartbeatRed:        th.Heartbeat.Red.String(),
 		TickDegradedFactor:  th.TickDegradedFactor,
 		TickRedFactor:       th.TickRedFactor,
+		TickRunDegraded:     th.TickRunDegraded,
+		TickRunRed:          th.TickRunRed,
 		LandingDegraded:     th.Landing.Degraded.String(),
 		LandingRed:          th.Landing.Red.String(),
 		EscalationDegraded:  th.Escalation.Degraded.String(),
@@ -130,7 +134,7 @@ func (s *Settings) Resolve() (Thresholds, time.Duration, error) {
 		}
 		*d.dst = v
 	}
-	if s.DoltSamples < 0 || s.TickDegradedFactor < 0 || s.TickRedFactor < 0 {
+	if s.DoltSamples < 0 || s.TickDegradedFactor < 0 || s.TickRedFactor < 0 || s.TickRunDegraded < 0 || s.TickRunRed < 0 {
 		return th, stale, fmt.Errorf("operational.health: dolt_samples and tick factors must not be negative")
 	}
 	if s.DoltSamples > 0 {
@@ -141,6 +145,12 @@ func (s *Settings) Resolve() (Thresholds, time.Duration, error) {
 	}
 	if s.TickRedFactor > 0 {
 		th.TickRedFactor = s.TickRedFactor
+	}
+	if s.TickRunDegraded > 0 {
+		th.TickRunDegraded = s.TickRunDegraded
+	}
+	if s.TickRunRed > 0 {
+		th.TickRunRed = s.TickRunRed
 	}
 	if stale <= 0 {
 		return th, stale, fmt.Errorf("operational.health.stale_after must be positive")

@@ -295,7 +295,7 @@ func TestSettingsResolve(t *testing.T) {
 	if th.ExecTax.Red != 120*time.Millisecond || th.ExecTax.Degraded != 60*time.Millisecond {
 		t.Errorf("ExecTax = %+v, want the configured 60ms/120ms (default %+v)", th.ExecTax, DefaultThresholds().ExecTax)
 	}
-	for _, bad := range []Settings{{BackupRed: "soon"}, {SeatEvidence: "-1m"}, {StaleAfter: "0s"}, {DoltSamples: -1}, {ExecTaxRed: "50"}} {
+	for _, bad := range []Settings{{BackupRed: "soon"}, {SeatEvidence: "-1m"}, {StaleAfter: "0s"}, {DoltSamples: -1}, {ExecTaxRed: "50"}, {TickRunDegraded: -1}, {TickRunRed: -1}} {
 		if _, _, err := bad.Resolve(); err == nil {
 			t.Errorf("Resolve(%+v) succeeded, want an error", bad)
 		}
@@ -317,5 +317,43 @@ func TestDefaultSettingsResolveToDefaults(t *testing.T) {
 	}
 	if s.NotifyCommand != "" {
 		t.Errorf("NotifyCommand = %q, want empty (no default pager)", s.NotifyCommand)
+	}
+}
+
+// The running-tick thresholds are the operator's to tune like every other
+// judge limit (gt-daq7br): the health block's own keys resolve over the
+// compiled defaults, so a town that wants a slower in-flight red can set one.
+func TestSettingsResolveTickRunFactors(t *testing.T) {
+	t.Parallel()
+	var s Settings
+	if err := json.Unmarshal([]byte(`{"tick_run_degraded":5,"tick_run_red":9}`), &s); err != nil {
+		t.Fatalf("the health block did not decode: %v", err)
+	}
+	th, _, err := s.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if th.TickRunDegraded != 5 || th.TickRunRed != 9 {
+		t.Errorf("resolved TickRun = %v/%v, want the configured 5/9", th.TickRunDegraded, th.TickRunRed)
+	}
+}
+
+// DefaultSettings is what migrate writes into settings/config.json, so the
+// running-tick keys have to be in that JSON for an operator to find them
+// (gt-daq7br).
+func TestDefaultSettingsWritesTickRunFactors(t *testing.T) {
+	t.Parallel()
+	data, err := json.Marshal(DefaultSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	def := DefaultThresholds()
+	if got["tick_run_degraded"] != def.TickRunDegraded || got["tick_run_red"] != def.TickRunRed {
+		t.Errorf("DefaultSettings JSON has tick_run_degraded=%v tick_run_red=%v, want %v and %v",
+			got["tick_run_degraded"], got["tick_run_red"], def.TickRunDegraded, def.TickRunRed)
 	}
 }
