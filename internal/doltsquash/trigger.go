@@ -175,8 +175,11 @@ func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
 	case !v.Tripped():
 		d.Reason = "no threshold tripped"
 	case !lastRun.IsZero() && now.Sub(lastRun) < RunInterval:
+		// Seconds, not minutes: a lead under a minute that the clamp above did
+		// not fold into now would vanish at minute precision, hiding a negative
+		// age in the log line (gt-wzuwn7).
 		d.Reason = fmt.Sprintf("tripped (%s), but the last run started %s ago, inside the %s gate",
-			joinTriggers(v.TrippedBy), now.Sub(lastRun).Truncate(time.Minute), hours(RunInterval))
+			joinTriggers(v.TrippedBy), now.Sub(lastRun).Truncate(time.Second), hours(RunInterval))
 	default:
 		d.Due = true
 		d.Reason = "due: " + joinTriggers(v.TrippedBy) + " over the limit"

@@ -337,6 +337,8 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 			wantReason: "tripped (backup bytes), but the last run started 23h59m0s ago, inside the 24h gate",
 		},
 		{
+			// The row the acceptance names: without the clamp its age reads
+			// -30s in the reason, so this row fails.
 			name:       "a run 30 seconds ahead counts as now, naming no negative age",
 			in:         backupBytesTrips(),
 			lastRun:    now.Add(30 * time.Second),
