@@ -3,11 +3,16 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/daemonimage"
+	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -242,6 +247,40 @@ func TestImagePinsRefreshBeadNamesTheFilesAndLinesToSetByHand(t *testing.T) {
 	}
 }
 
+// TestImagePinsSeedLinesNameTheSeededPins: the seed-line map is hard-coded, so
+// it is checked against the planner's four pins and the shipped seed file: every
+// key is a pin, every value is a rig deploy/polecat/seed-pins names, and only bd
+// and devops carry a line, since the seed pins no om or hm source (gt-a09nc8).
+func TestImagePinsSeedLinesNameTheSeededPins(t *testing.T) {
+	t.Parallel()
+	seed, err := os.ReadFile(filepath.Join("..", "..", "deploy", "polecat", "seed-pins"))
+	if err != nil {
+		t.Fatalf("reading deploy/polecat/seed-pins: %v", err)
+	}
+	sources, err := polecatseed.Pins(seed)
+	if err != nil {
+		t.Fatalf("deploy/polecat/seed-pins: %v", err)
+	}
+	seeded := make(map[string]bool, len(sources))
+	for _, src := range sources {
+		seeded[src.Rig] = true
+	}
+	for name, line := range imagePinsSeedLines {
+		if !slices.Contains(daemonimage.PinNames, name) {
+			t.Errorf("imagePinsSeedLines names %q, not one of the four pins %s", name, strings.Join(daemonimage.PinNames, ", "))
+		}
+		if !seeded[line] {
+			t.Errorf("imagePinsSeedLines[%q] = %q, which deploy/polecat/seed-pins does not name", name, line)
+		}
+	}
+	for _, name := range daemonimage.PinNames {
+		_, hasLine := imagePinsSeedLines[name]
+		if hasLine != (name == "bd" || name == "devops") {
+			t.Errorf("imagePinsSeedLines covers %q = %t, want a line for bd and devops only: the seed pins no om or hm source", name, hasLine)
+		}
+	}
+}
+
 // TestImagePinsRefreshBeadCarriesTheOverseerAlternative: the apply command sits
 // under the overseer-alternative heading, which says a seat lacks the checkouts,
 // and no text before it tells the seat to run it.
@@ -251,7 +290,7 @@ func TestImagePinsRefreshBeadCarriesTheOverseerAlternative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("imagePinsRefreshBead: %v", err)
 	}
-	heading := "### Overseer alternative: needs the four source checkouts, which a seat does not have, and moves only pins 20 or more commits behind"
+	heading := "### " + imagePinsRefreshOverseerHeading
 	headingAt, blockAt := strings.Index(draft.Description, heading), strings.Index(draft.Description, imagePinsRefreshCommand)
 	if headingAt < 0 || blockAt < 0 {
 		t.Fatalf("description lacks the overseer heading (%d) or the apply command (%d):\n%s", headingAt, blockAt, draft.Description)
