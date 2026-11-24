@@ -236,3 +236,45 @@ func TestJobsNodeDiskSandbox(t *testing.T) {
 		t.Errorf("control used_percent = %d, want 20", got)
 	}
 }
+
+// The sandbox reading is written only on the daily pass and the interval
+// passes, so it is current for a day, while a control node's reading refreshed
+// every minute keeps the short bound (gt-jx56c6).
+func TestNodeDiskSandboxReadingIsFreshForADay(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		node      string
+		ago       time.Duration
+		wantState State
+	}{
+		{name: "sandbox reading two hours old is ok", node: nodeDiskSandboxKey, ago: 2 * time.Hour, wantState: StateOK},
+		{name: "sandbox reading twenty-seven hours old is unknown", node: nodeDiskSandboxKey, ago: 27 * time.Hour, wantState: StateUnknown},
+		{name: "control node reading two hours old is unknown", node: "colima-gt-control", ago: 2 * time.Hour, wantState: StateUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			readAt := testNow.Add(-c.ago)
+			root := t.TempDir()
+			writeNodeDiskRecord(t, root, `{"nodes":{"`+c.node+`":{"used_percent":50,"read_at":"`+readAt.Format(time.RFC3339)+`"}}}`)
+
+			rows, err := List(root, Options{}, testNow)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			name := "node_disk:" + c.node
+			found := nodeDiskRowsNamed(rows, name)
+			if len(found) != 1 {
+				t.Fatalf("got %d rows named %q, want one: %+v", len(found), name, rows)
+			}
+			j := found[0]
+			if j.State != c.wantState {
+				t.Errorf("State = %q, want %q", j.State, c.wantState)
+			}
+			if j.Outcome != OutcomeOK {
+				t.Errorf("Outcome = %q, want ok", j.Outcome)
+			}
+		})
+	}
+}
