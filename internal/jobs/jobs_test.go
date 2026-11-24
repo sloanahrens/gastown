@@ -104,13 +104,23 @@ func TestJobsState(t *testing.T) {
 			want:     StateUnknown,
 		},
 		{
-			name:    "interval that is not a Go duration is unknown",
+			name:    "the daily word on a patrol other than disk_maintenance is unknown",
 			patrols: `{"job":{"interval":"daily"}}`,
+			want:    StateUnknown,
+		},
+		{
+			name:    "interval that is not a Go duration is unknown",
+			patrols: `{"job":{"interval":"banana"}}`,
 			want:    StateUnknown,
 		},
 		{
 			name:    "negative interval is unknown",
 			patrols: `{"job":{"interval":"-1h"}}`,
+			want:    StateUnknown,
+		},
+		{
+			name:    "negative interval under an hour is unknown",
+			patrols: `{"job":{"interval":"-5m"}}`,
 			want:    StateUnknown,
 		},
 		{
@@ -190,6 +200,38 @@ func TestJobsCadenceFromSectionOverFile(t *testing.T) {
 	}
 	if jobs[0].State != StateOK {
 		t.Errorf("State = %q, want ok under the 2h cadence", jobs[0].State)
+	}
+}
+
+func TestJobsCadenceDailyWord(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		lastRun *time.Time
+		want    State
+	}{
+		{name: "no last run is never_run", want: StateNeverRun},
+		{name: "last run 2h ago is ok", lastRun: ptrTime(testNow.Add(-2 * time.Hour)), want: StateOK},
+		// A day's grace is a quarter of it, 6h, so the bound is 30h; the
+		// overdue row sits a minute past it.
+		{name: "last run past the day and its grace is overdue", lastRun: ptrTime(testNow.Add(-(30*time.Hour + time.Minute))), want: StateOverdue},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeMayorDaemon(t, root, `{"disk_maintenance":{"interval":"daily"}}`)
+			if c.lastRun != nil {
+				writeLastRun(t, root, map[string]time.Time{diskMaintenanceName: *c.lastRun})
+			}
+			step := []config.DaemonStep{{Name: diskMaintenanceName, Kind: config.DaemonStepPatrol}}
+			job := jobsRow(t, root, Options{}, step, diskMaintenanceName)
+			if job.Cadence != 24*time.Hour {
+				t.Errorf("Cadence = %v, want 24h for the daily word", job.Cadence)
+			}
+			if job.State != c.want {
+				t.Errorf("State = %q, want %q", job.State, c.want)
+			}
+		})
 	}
 }
 
