@@ -381,6 +381,11 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 			r.seq = d.dispatchTickSeq.Add(1)
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
+			// The tick ran its phases and reached its report, so it is a run:
+			// gt jobs reads the row as never_run until one is recorded
+			// (gt-7f014p). A failed tick returned above and a held tick runs no
+			// phase, so neither records one.
+			d.recordPatrolRun(&d.specDispatchRun, "spec_dispatch", now)
 			took = specDispatchTookLine(r, now.Sub(start), d.specDispatchCPUPSI())
 			// The worktree probes the roster paid for: beside the tick's
 			// timing, so a tick whose roster stopped probing seats no hook
