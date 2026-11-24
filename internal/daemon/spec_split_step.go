@@ -11,8 +11,8 @@ package daemon
 // arrives through SetSpecSplitDeps rather than the daemon reaching back for it
 // (the SetSchedulerDeps seam, gt-638go.9). A bead with an assignee, the rework
 // label, a hold or the split-manual label is never taken; a refused apply gets
-// one comment naming the reason and that label, and a bead whose mark did not
-// land is retried as a mark alone, never as an apply again (gt-hrbq3v).
+// one comment naming the reason and that label; a bead whose mark did not land
+// stays out of this daemon's later ticks, which retry only the mark (gt-hrbq3v).
 //
 // The tick runs on its own goroutine, one at a time: an apply estimates and
 // lints both pieces, so it can take minutes and must not hold the heartbeat. A
