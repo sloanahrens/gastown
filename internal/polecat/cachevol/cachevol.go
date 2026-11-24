@@ -134,7 +134,9 @@ type TrimPlan struct {
 // in fact be older by at most an hour").
 const goCacheTouchInterval = time.Hour
 
-// gateMargin is how long after a gate started the trim still keeps every file the gate uses.
+// gateMargin is the margin the age floor adds over Go's touch interval for a gate still running at
+// the trim: the gate started at most gateMargin ago, and Go's touch lag can date a use it made
+// goCacheTouchInterval older still.
 const gateMargin = 15 * time.Minute
 
 // buildCacheMinAge is the youngest a build-cache file may be and still be planned for removal: a
@@ -222,13 +224,12 @@ func withinAgeFloor(used, now time.Time) bool {
 	return used.IsZero() || now.Sub(used) < buildCacheMinAge
 }
 
-// BuildCacheInUse reports whether the age floor keeps the build-cache file rel, last modified at mtime,
-// as of now. A module-cache or other path, or one not claim-relative, is never in use.
+// BuildCacheInUse reports whether the trim container keeps the build-cache file rel, last modified
+// at mtime, as of now, so a file a seat has used since the listing is kept rather than deleted
+// under a running build; only a claim-relative path under the build cache can be in use.
 func BuildCacheInUse(rel string, mtime, now time.Time) bool {
-	if !claimRelative(rel) || !strings.HasPrefix(rel, SeedBuildCacheDir+"/") {
-		return false
-	}
-	return withinAgeFloor(mtime, now)
+	dir, ok := cacheDir(BuildCache)
+	return ok && claimRelative(rel) && strings.HasPrefix(rel, dir+"/") && withinAgeFloor(mtime, now)
 }
 
 // sortedLRU is the entries of one cache, least recently used first, ties broken by path.
