@@ -27,8 +27,8 @@ var (
 	// reading it as zero would compare equal to a database before its first
 	// migration.
 	ErrEmptyListing = errors.New("bdskew: empty migration listing")
-	// ErrUnnumbered reports a .sql listing entry whose name does not open with a
-	// migration number, the run of digits before the first underscore.
+	// ErrUnnumbered reports a .up.sql listing entry whose name does not open with
+	// a migration number, the run of digits before the first underscore.
 	ErrUnnumbered = errors.New("bdskew: migration name without a leading number")
 	// ErrNumberOutOfRange reports a numbered name whose number is too large for
 	// an int, which is a real number rather than an unnumbered name.
@@ -54,19 +54,21 @@ type Lister interface {
 }
 
 // MaxMigration returns the highest migration number in names, the file names
-// under MigrationsDir such as 0067_create_samples.up.sql. Both halves of a
-// migration carry the same number, so either one sets it.
+// under MigrationsDir such as 0067_create_samples.up.sql. bd embeds its
+// migrations with the pattern migrations/*.up.sql, case-sensitive, and keeps a
+// .down.sql beside each .up.sql, so only the up file sets the level.
 //
-// An entry is a migration file when its name ends in .sql. An entry that does
-// not end in .sql is not a migration (bd keeps README.md, ignored and
-// nondeterminism-allowlist.txt beside them) and is skipped. A .sql entry whose
-// name does not start with a number and an underscore is ErrUnnumbered, and
-// one whose number does not fit an int is ErrNumberOutOfRange. A listing with
-// no .sql entry is ErrEmptyListing, never level zero.
+// An entry is a migration file when its name ends in .up.sql. An entry that
+// does not end in .up.sql is not a migration (bd keeps the .down.sql half,
+// README.md, ignored and nondeterminism-allowlist.txt beside them) and is
+// skipped. A .up.sql entry whose name does not start with a number and an
+// underscore is ErrUnnumbered, and one whose number does not fit an int is
+// ErrNumberOutOfRange. A listing with no .up.sql entry is ErrEmptyListing,
+// never level zero.
 func MaxMigration(names []string) (int, error) {
 	max := -1
 	for _, name := range names {
-		if !strings.HasSuffix(name, ".sql") {
+		if !strings.HasSuffix(name, ".up.sql") {
 			continue
 		}
 		number, err := migrationNumber(name)
