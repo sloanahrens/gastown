@@ -287,6 +287,26 @@ func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
 		})
 	}
 
+	t.Run("a second unknown database fails the one retry", func(t *testing.T) {
+		t.Parallel()
+		second := errors.New(`Error 1105 (HY000): Unknown system variable '@@be_head'`)
+		calls := 0
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_head'`)
+			}
+			return nil, second
+		})
+		got, err := rigHeads(town, rigs, read)
+		if !errors.Is(err, second) {
+			t.Fatalf("rigHeads = %v, %v, want the retry's refusal: one database is dropped, not two", got, err)
+		}
+		if calls != 2 {
+			t.Errorf("SQLCSV calls = %d, want the first read and exactly one retry", calls)
+		}
+	})
+
 	t.Run("every database unknown refuses", func(t *testing.T) {
 		t.Parallel()
 		refusal := errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_working'`)
