@@ -109,7 +109,7 @@ func TestJobsDoltArchiveRow(t *testing.T) {
 	}
 }
 
-func TestJobsDoltArchiveRowUnreadable(t *testing.T) {
+func TestJobsDoltArchiveUnreadable(t *testing.T) {
 	t.Parallel()
 	file := filepath.Join(t.TempDir(), "archive")
 	writeFile(t, file, "archive")
