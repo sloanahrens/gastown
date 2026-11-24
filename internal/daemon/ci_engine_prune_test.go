@@ -2719,6 +2719,137 @@ func TestCIEnginePruneCapVolumesRemaining(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneCapsContainers: a run removes at most
+// ci_engine_prune_max_per_kind containers, the ones stopped longest ago first,
+// and leaves the rest for a later run. The images and volumes the plan names are
+// removed whole: five containers against a cap of two remove the two oldest and
+// report three remaining, while the unused image and unused anonymous volume go
+// in full.
+//
+// A container the cap keeps stays in the engine, so the image it was created
+// from and the volumes it mounts cannot go this run, even though the planner
+// named them: it decides what is in use from the containers it plans to remove.
+// The kept containers here share an image and one of them holds a volume, so a
+// plan that removed them would take an image and a volume out from under a
+// container that is still there.
+func TestCIEnginePruneCapsContainers(t *testing.T) {
+	t.Parallel()
+	listing := engListing(t,
+		[]map[string]any{
+			// Stopped 50h and 40h ago: the two the cap removes.
+			engCtrStopped('1', 'b', "exited", 100*time.Hour, 50*time.Hour),
+			engCtrStopped('2', 'b', "exited", 100*time.Hour, 40*time.Hour),
+			// Stopped 30h, 20h and 10h ago: the three the cap keeps. '5' holds an
+			// anonymous volume.
+			engCtrStopped('3', 'b', "exited", 100*time.Hour, 30*time.Hour),
+			engCtrStopped('4', 'b', "exited", 100*time.Hour, 20*time.Hour),
+			engCtrStopped('5', 'b', "exited", 100*time.Hour, 10*time.Hour, engHex64('5')),
+		},
+		[]map[string]any{
+			// 'a' is unused and goes whole; 'b' is the image every container uses,
+			// so the three the cap keeps still need it.
+			engImg('a', 100*time.Hour, []string{"sha256:layer-a"}, "gastown-daemon:ci-1"),
+			engImg('b', 100*time.Hour, []string{"sha256:layer-b"}, "gastown-daemon:ci-2"),
+		},
+		[]map[string]any{
+			// '5' is held by the kept container; '6' is unused and goes.
+			engVol(engHex64('5'), 30*time.Hour),
+			engVol(engHex64('6'), 30*time.Hour),
+		},
+	)
+	limit := 2
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+	f.tick()
+	f.drain()
+
+	execs := engineDockerExecs(f, "rm")
+	if len(execs) != 1 {
+		t.Fatalf("docker rm ran %d time(s), want once:\n%s", len(execs), f.logs.String())
+	}
+	if got, want := engineDockerIDs(execs[0].args), []string{engHex64('1'), engHex64('2')}; !slices.Equal(got, want) {
+		t.Errorf("docker rm removed %q, want the two stopped longest ago %q", got, want)
+	}
+	if want := "3 container(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(f.logs.String(), want) {
+		t.Errorf("the run's log does not name the containers left behind (%q):\n%s", want, f.logs.String())
+	}
+
+	rmi := engineDockerExecs(f, "rmi")
+	if len(rmi) != 1 {
+		t.Fatalf("docker rmi ran %d time(s), want once:\n%s", len(rmi), f.logs.String())
+	}
+	if got, want := engineDockerIDs(rmi[0].args), []string{engImageID('a')}; !slices.Equal(got, want) {
+		t.Errorf("docker rmi removed %q, want only the unused image %q: the kept containers still use %s",
+			got, want, engImageID('b'))
+	}
+
+	volumeRm := engineDockerExecs(f, "volume rm")
+	if len(volumeRm) != 1 {
+		t.Fatalf("docker volume rm ran %d time(s), want once:\n%s", len(volumeRm), f.logs.String())
+	}
+	if got, want := engineDockerIDs(volumeRm[0].args), []string{engHex64('6')}; !slices.Equal(got, want) {
+		t.Errorf("docker volume rm removed %q, want only the unused volume %q: the kept container still mounts %s",
+			got, want, engHex64('5'))
+	}
+	if !strings.Contains(f.logs.String(), "removed 2 containers, 1 images, 1 volumes") {
+		t.Errorf("the verdict line does not name the capped removal:\n%s", f.logs.String())
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("a run that left containers raised %d item(s): %+v", len(items), items)
+	}
+}
+
+// TestCIEnginePruneCapRemaining: a run that leaves stopped containers for a later
+// run is a verdict, not a failure: it is recorded ok with the usual next due,
+// raises no item, and its log names how many containers wait.
+func TestCIEnginePruneCapRemaining(t *testing.T) {
+	t.Parallel()
+	listing := engListing(t,
+		[]map[string]any{
+			engCtrStopped('1', 'a', "exited", 100*time.Hour, 30*time.Hour),
+			engCtrStopped('2', 'a', "exited", 100*time.Hour, 20*time.Hour),
+			engCtrStopped('3', 'a', "exited", 100*time.Hour, 10*time.Hour),
+		}, nil, nil)
+	const every = time.Hour // the default interval the fixture's empty setting takes
+	limit := 1
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+	f.tick()
+	f.drain()
+
+	execs := engineDockerExecs(f, "rm")
+	if len(execs) != 1 {
+		t.Fatalf("docker rm ran %d time(s), want once:\n%s", len(execs), f.logs.String())
+	}
+	if got, want := engineDockerIDs(execs[0].args), []string{engHex64('1')}; !slices.Equal(got, want) {
+		t.Errorf("docker rm removed %q, want the one stopped longest ago %q", got, want)
+	}
+	if want := "2 container(s) remain for a later run, over ci_engine_prune_max_per_kind 1"; !strings.Contains(f.logs.String(), want) {
+		t.Errorf("the run's log does not name the containers left behind (%q):\n%s", want, f.logs.String())
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("a run that left containers raised %d item(s): %+v", len(items), items)
+	}
+
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("opening the job ledger: %v", err)
+	}
+	runs, err := ledger.Tail(ciEnginePruneName, 10)
+	if err != nil {
+		t.Fatalf("reading the job ledger: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("the run was recorded %d time(s), want once", len(runs))
+	}
+	if runs[0].Outcome != ciEngineOutcomeOK {
+		t.Errorf("recorded outcome = %q, want %q", runs[0].Outcome, ciEngineOutcomeOK)
+	}
+	if want := ciCacheTestStart.Add(every); runs[0].NextDue == nil || !runs[0].NextDue.Equal(want) {
+		t.Errorf("recorded next due = %v, want the usual %v", runs[0].NextDue, want)
+	}
+}
+
 // TestCIEnginePruneCapImagesRemaining: a run removes at most
 // ci_engine_prune_max_per_kind images, the plan's first ones, and the images it
 // leaves are not a failure: the run is recorded ok with the usual next due,

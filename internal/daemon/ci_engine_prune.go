@@ -9,10 +9,12 @@ package daemon
 // Each run lists, plans, then removes. The list program prints the engine as
 // JSON. The planner, a pure function over that listing, decides what goes, so the
 // keep rule is tested in-process. A run removes at most ci_engine_prune_max_per_kind
-// volumes, the oldest created first, and as many images, most layers first; the
-// rest wait for a later run. The remove step is one docker command per kind the
-// plan names (docker rm, docker rmi -f, docker volume rm), each over that kind's
-// ids as argv with no shell between the plan and docker. The listing is older
+// containers, the ones stopped longest ago first, as many volumes, the oldest
+// created first, and as many images, most layers first; the rest wait for a later
+// run. A container the cap keeps also keeps the image it was created from and the
+// volumes it mounts out of the plan. The remove step is one docker command per
+// kind the plan names (docker rm, docker rmi -f, docker volume rm), each over that
+// kind's ids as argv with no shell between the plan and docker. The listing is older
 // than the remove step, and docker rmi -f removes an image a created container
 // holds, so right before the image command the run re-reads the containers'
 // image ids and drops the planned images a container now references.
@@ -548,6 +550,41 @@ func capCIEnginePlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemainin
 	return out, remaining
 }
 
+// ciEngineCappedPlan is capCIEnginePlan with the plan narrowed to what the
+// containers it removes still free. The planner decides what is in use from the
+// containers it plans to remove, so the image a planned container was created
+// from and the volumes it mounts are candidates. A container the cap keeps stays
+// in the engine, and its image and volumes stay with it: those candidates come
+// out of the capped plan, or the run would free an image and a volume that a
+// container still there needs. A plan the cap does not cut is returned as
+// capCIEnginePlan returns it.
+func ciEngineCappedPlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemaining) {
+	capped, remaining := capCIEnginePlan(plan, max)
+	if len(capped.containers) == len(plan.containers) {
+		return capped, remaining
+	}
+	removed := make(map[string]bool, len(capped.containers))
+	for _, c := range capped.containers {
+		removed[c.ID] = true
+	}
+	usedImage := map[string]bool{}
+	usedVolume := map[string]bool{}
+	for _, c := range plan.containers {
+		if removed[c.ID] {
+			continue
+		}
+		usedImage[c.Image] = true
+		for _, m := range c.Mounts {
+			if m.Type == "volume" {
+				usedVolume[m.Name] = true
+			}
+		}
+	}
+	capped.images = slices.DeleteFunc(capped.images, func(img ciEngineImage) bool { return usedImage[img.ID] })
+	capped.volumes = slices.DeleteFunc(capped.volumes, func(v ciEngineVolume) bool { return usedVolume[v.Name] })
+	return capped, remaining
+}
+
 // ciEngineStopKeyOf reads a planned container's stop time, the key the container
 // cap orders by. known is false when the plan's creation or finish time does not
 // read; the cap then orders the container last, so it is kept. The plan the
@@ -867,7 +904,7 @@ func ciEngineExitStatus(err error) string {
 // block, returning the default for each that is empty. A value the patrol cannot
 // act on is an error naming its key; maxPerKind is the cap on candidates of each
 // kind one run may remove.
-func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, maxPerKind int, err error) { //nolint:unparam // the cap is applied to the plan by gt-puhdl9
+func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, maxPerKind int, err error) { //nolint:unparam // inert since the cap is applied; kept so gt done's revert guard does not read the line's removal as undoing 5174bc80
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
@@ -966,9 +1003,10 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // run. Once it removes, every kind and the build cache prune run whatever an
 // earlier one did; a kind docker left in place, or that could not be checked, fails
 // the run after the rest have run, and the next run plans again from what is left.
-// The run removes at most maxPerKind volumes, the oldest created first, and as many
-// images, most layers first; it names the rest in its log, and a run that leaves
-// some is still a verdict.
+// The run removes at most maxPerKind containers, the ones stopped longest ago
+// first, as many volumes, the oldest created first, and as many images, most layers
+// first; a container it keeps also keeps its image and volumes out of the plan. It
+// names the rest in its log, and a run that leaves some is still a verdict.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -1061,13 +1099,17 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		return true, ""
 	}
 
-	// The per-run cap keeps the volumes created longest ago and the plan's first
-	// images, most layers first; the rest wait for a later run, and a run that
-	// leaves some is a verdict, not a failure. The container cut is bead gt-puhdl9,
-	// so the cap sees this plan's images and volumes.
-	capped, remaining := capCIEnginePlan(ciEnginePlan{images: plan.images, volumes: plan.volumes}, maxPerKind)
-	plan.images = capped.images
-	plan.volumes = capped.volumes
+	// The per-run cap keeps the containers stopped longest ago, the volumes
+	// created longest ago and the plan's first images, most layers first; the
+	// rest wait for a later run, and a run that leaves some is a verdict, not a
+	// failure. A container the cap keeps stays in the engine, so the images and
+	// volumes it still references come out of the plan with it.
+	capped, remaining := ciEngineCappedPlan(plan, maxPerKind)
+	plan = capped
+	if remaining.containers > 0 {
+		d.logger.Printf("disk_maintenance: ci engine prune: %d container(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
+			remaining.containers, maxPerKind)
+	}
 	if remaining.images > 0 {
 		d.logger.Printf("disk_maintenance: ci engine prune: %d image(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
 			remaining.images, maxPerKind)
