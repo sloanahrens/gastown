@@ -654,6 +654,123 @@ func TestBuildTrimManifestRefusesAListingUnderAnotherCache(t *testing.T) {
 	}
 }
 
+// claimPathCase is one path handed to the claim-relative rule, and whether a walk of the claim root
+// gives it: the verdict every layer that decides a removal path's shape must reach for it.
+type claimPathCase struct {
+	name string
+	path string
+	ok   bool
+}
+
+// claimPathCases are the paths the claim-relative rule is pinned on: each absolute, unclean or
+// above-the-root path a listing or a plan could name, the claim root and the empty path, and one
+// clean path under a cache that the walk does give.
+func claimPathCases() []claimPathCase {
+	return []claimPathCase{
+		{"an absolute path under a cache", "/gocache/ab/cd", false},
+		{"an absolute path outside the caches", "/etc/passwd", false},
+		{"a doubled separator", "gocache//ab", false},
+		{"a current-directory element", "gocache/./ab", false},
+		{"a parent element after a directory", "gocache/ab/../cd", false},
+		{"a leading parent element", "../x", false},
+		{"the claim root", ".", false},
+		{"the empty path", "", false},
+		{"a clean path under the build cache", "gocache/ab/cdef", true},
+	}
+}
+
+// TestClaimRelative pins the rule that keeps a removal inside the claim. An absolute path is the one
+// that matters most here: checkListing leaves a non-claim-relative entry to removalPaths, so this
+// rule is the layer that stops an absolute path, not the listing's cache-directory check.
+func TestClaimRelative(t *testing.T) {
+	t.Parallel()
+	for _, tc := range claimPathCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := claimRelative(tc.path); got != tc.ok {
+				t.Errorf("claimRelative(%q) = %v, want %v", tc.path, got, tc.ok)
+			}
+		})
+	}
+}
+
+// TestClaimRelativeExported pins that ClaimRelative, the copy the sweep runner applies to a planned
+// path (cmd/sweep-run/cachetrim.go), reaches the same verdict as the plan's own check rather than a
+// second rule: a path the plan refuses must be refused there too.
+func TestClaimRelativeExported(t *testing.T) {
+	t.Parallel()
+	for _, tc := range claimPathCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClaimRelative(tc.path); got != tc.ok {
+				t.Errorf("ClaimRelative(%q) = %v, want %v", tc.path, got, tc.ok)
+			}
+		})
+	}
+}
+
+// TestRemovalPaths pins the refusal that carries a planned path to the container: BuildTrimManifest
+// asks removalPaths for the shard list (trimjob.go), and a path the claim's walk does not give is
+// refused there, before any shard or Job is built, with the path named in the error.
+func TestRemovalPaths(t *testing.T) {
+	t.Parallel()
+	for _, tc := range claimPathCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			paths, err := removalPaths([]Removal{{Path: tc.path, Size: 1}})
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("removalPaths(%q) refused a path the claim gives: %v", tc.path, err)
+				}
+				if len(paths) != 1 || paths[0] != tc.path {
+					t.Errorf("removalPaths(%q) = %v, want [%q]", tc.path, paths, tc.path)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("removalPaths(%q) = %v, want a refusal", tc.path, paths)
+			}
+			// strconv.Quote, not the path itself, so the empty path's row still asserts a named path:
+			// it looks for the two quote marks the message prints for it.
+			if want := strconv.Quote(tc.path); !strings.Contains(err.Error(), want) {
+				t.Errorf("removalPaths(%q) error = %q, want it to name %s", tc.path, err, want)
+			}
+		})
+	}
+}
+
+// TestBuildTrimManifestRefusesAnAbsoluteRemoval drives an absolute path through the production
+// builder: checkListing skips a non-claim-relative entry, so the listing's absolute entry reaches
+// PlanTrim, is planned as a removal, and is refused by removalPaths before trimShardCount or any
+// shard or Job is built. The manifest is nil, and the error names the path.
+func TestBuildTrimManifestRefusesAnAbsoluteRemoval(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"an absolute path under a cache", "/gocache/ab/cd"},
+		{"an absolute path outside the caches", "/etc/passwd"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := trimInput()
+			in.Listing = []Entry{file(tc.path, BuildCache, 100, 8, 8)}
+			m, err := BuildTrimManifest(in)
+			if err == nil {
+				t.Fatalf("BuildTrimManifest(%q) = %+v, want a refusal", tc.path, m)
+			}
+			if m != nil {
+				t.Errorf("BuildTrimManifest(%q) returned a manifest for a refused path, want none", tc.path)
+			}
+			if want := strconv.Quote(tc.path); !strings.Contains(err.Error(), want) {
+				t.Errorf("BuildTrimManifest(%q) error = %q, want it to name %s", tc.path, err, want)
+			}
+		})
+	}
+}
+
 // TestBuildTrimManifestRefusesAClaimThatIsUnderItsCap pins the refusal at the builder, where a caller
 // meets it: a claim already under its cap plans no removals, and no manifest (and so no Job) comes
 // back for it (gt-284u5).
