@@ -340,23 +340,21 @@ func TestCICacheTrimGocacheRunsTheLRUProgram(t *testing.T) {
 
 // TestCICacheTrimGocacheDryRunReadsTheListReply: a dry run of ci-gocache runs
 // the LRU program in list mode, at the setting's cap and the floor, and reads
-// its reply as a selection: the volume is reported with the reply's three
-// figures and the cap, and no file name is logged.
+// its reply as a selection: the volume is reported with the one figure the list
+// mode knows and the cap, its removal logged as changing nothing, and no file
+// name is logged.
 func TestCICacheTrimGocacheDryRunReadsTheListReply(t *testing.T) {
 	t.Parallel()
 	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
-	// The list program reports after equal to before; distinct figures here show
-	// the line prints each figure the reply carries rather than before twice.
-	const (
-		beforeKiB = int64(40 << 10)
-		afterKiB  = int64(39 << 10)
-	)
+	// The list program reports after equal to before, since the list mode knows
+	// only the size it starts from. The line must not print that figure twice.
+	const beforeKiB = int64(40 << 10)
 	f.exec = cliReply{stdout: strings.Join([]string{
 		ciCacheTestGocacheRoot + "/00/old-1",
 		ciCacheTestGocacheRoot + "/ab/old-2",
 		fmt.Sprintf("before_kib=%d", beforeKiB),
 		"removed=2",
-		fmt.Sprintf("after_kib=%d", afterKiB),
+		fmt.Sprintf("after_kib=%d", beforeKiB),
 	}, "\n") + "\n"}
 	f.tick()
 	f.drain()
@@ -374,14 +372,19 @@ func TestCICacheTrimGocacheDryRunReadsTheListReply(t *testing.T) {
 		t.Errorf("ci-gocache dry-run argv = %q\nwant %q", got, want)
 	}
 
-	wantLine := fmt.Sprintf("%s: would remove 2 files, %s to %s, against its cap of %s",
-		ciCacheGocacheVolume, polecatimage.Human(beforeKiB*1024), polecatimage.Human(afterKiB*1024), polecatimage.Human(40<<30))
-	if !strings.Contains(f.logs.String(), wantLine) {
-		t.Errorf("the dry run does not report the three figures and the cap (%q):\n%s", wantLine, f.logs.String())
+	logs := f.logs.String()
+	wantLine := fmt.Sprintf("%s: would remove 2 files of %s, against its cap of %s; nothing removed",
+		ciCacheGocacheVolume, polecatimage.Human(beforeKiB*1024), polecatimage.Human(40<<30))
+	if !strings.Contains(logs, wantLine) {
+		t.Errorf("the dry run does not report the one figure and the cap (%q):\n%s", wantLine, logs)
+	}
+	before := polecatimage.Human(beforeKiB * 1024)
+	if repeated := before + " to " + before; strings.Contains(logs, repeated) {
+		t.Errorf("the dry run says the list changes the volume's size (%q):\n%s", repeated, logs)
 	}
 	for _, name := range []string{"old-1", "old-2"} {
-		if strings.Contains(f.logs.String(), name) {
-			t.Errorf("the dry run logged the file name %q:\n%s", name, f.logs.String())
+		if strings.Contains(logs, name) {
+			t.Errorf("the dry run logged the file name %q:\n%s", name, logs)
 		}
 	}
 }
