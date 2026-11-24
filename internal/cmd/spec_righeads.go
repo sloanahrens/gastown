@@ -68,8 +68,9 @@ func parseRigHeads(records [][]string) ([]rigHashRow, error) {
 // round trip, so a rig costs no call of its own, and parses the answer with
 // ParseRigHeads into one row per database. Each rig is then keyed by its own
 // name with the hashes of the database rigDatabases names for it, so a caller
-// holding a rig asks nothing about databases. The databases are sorted so two
-// runs send the same statement. A rig whose metadata names no database is not
+// holding a rig asks nothing about databases. The databases are sorted and each
+// is named once, so two runs send the same statement and two rigs stored in one
+// database do not name it twice. A rig whose metadata names no database is not
 // asked for and is keyed nowhere, and a set with none refuses rather than
 // answering empty (gt-j3vdg4, gt-ihvt1v, gt-5v8y37).
 //
@@ -86,6 +87,7 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsq
 		names = append(names, db)
 	}
 	slices.Sort(names)
+	names = slices.Compact(names)
 	records, err := read.SQLCSV(rigHeadsQuery(names))
 	if err != nil {
 		dropped, ok := unknownDatabase(err, names)
