@@ -27,9 +27,12 @@ type TestWaitResult struct {
 }
 
 // ReadDiff reads base...HEAD as a context-free, rename-blind Go diff with the prefixes and quotePath
-// pinned, so the operator's git config cannot hide a path (gt-4ndz7z).
+// pinned, so the operator's git config cannot hide a path (gt-4ndz7z). It refuses an empty base,
+// which git would read as HEAD...HEAD and diff clean (gt-whjd81).
 func ReadDiff(run Runner, base string) ([]byte, error) {
-	// An empty base makes git reject the range, so the check fails rather than passes.
+	if base == "" {
+		return nil, fmt.Errorf("read diff: empty base")
+	}
 	revs := base + "...HEAD"
 	out, err := run([]string{"-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
 		"--unified=0", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "--end-of-options", revs, "--", "*.go"})
@@ -40,8 +43,9 @@ func ReadDiff(run Runner, base string) ([]byte, error) {
 }
 
 // JudgeTestWaits reports the lines base...HEAD adds to _test.go files that wait with no bound: a channel receive,
-// a call to a method named Wait, or a for loop with no condition, each outside a select statement with a second
-// clause; a line already on the base is not judged (gt-4ndz7z).
+// a call to a method named Wait on any receiver, a `for` loop with no condition, or a `for range x` loop that names
+// no key or value, each outside a select statement with a second clause; a line already on the base is not judged
+// (gt-4ndz7z, gt-whjd81).
 func JudgeTestWaits(diff io.Reader, read FileReader) (TestWaitResult, error) {
 	var res TestWaitResult
 	added, err := addedLines(diff)
@@ -114,8 +118,11 @@ func judgeTestFile(src []byte, path string, added []addedLine) ([]TestWaitFindin
 	return out, nil
 }
 
-// waitNodeLine reports the line of n when n waits with no bound: a channel receive, a call to a method named Wait, or
-// a for loop with no condition. The judge reads syntax alone, so a Wait it cannot type is judged rather than passed.
+// waitNodeLine reports the line of n when n waits with no bound: a channel receive, a call to a method named Wait,
+// a `for` loop with no condition, or a `for range x` loop that names no key or value. The judge reads syntax alone,
+// so it judges any method named Wait whatever its receiver, since it cannot tell a sync.WaitGroup or exec.Cmd from a
+// type with a Wait that never returns. A range loop that binds the element is left alone: syntax cannot tell a
+// channel, which ends only on close, from a table, which ends on its own, and table loops are the common case.
 func waitNodeLine(fset *token.FileSet, n ast.Node) (int, bool) {
 	switch n := n.(type) {
 	case *ast.UnaryExpr:
@@ -128,6 +135,10 @@ func waitNodeLine(fset *token.FileSet, n ast.Node) (int, bool) {
 		}
 	case *ast.ForStmt:
 		if n.Cond == nil {
+			return fset.Position(n.For).Line, true
+		}
+	case *ast.RangeStmt:
+		if n.Key == nil && n.Value == nil {
 			return fset.Position(n.For).Line, true
 		}
 	}

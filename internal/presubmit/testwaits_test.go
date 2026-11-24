@@ -52,9 +52,12 @@ func TestJudgeTestWaits(t *testing.T) {
 		{"a default clause is a second case", "", src("\tselect {", "\tcase <-ch:", "\tdefault:", "\t}"), []int{5}, nil},
 		{"an added wg.Wait is a finding", "", src("\twg.Wait()"), []int{4}, []int{4}},
 		{"an added cmd.Wait is a finding", "", src("\tcmd.Wait()"), []int{4}, []int{4}},
+		{"an added Wait on a receiver of another type is a finding", "", src("\tserver.Wait()"), []int{4}, []int{4}},
 		{"a Wait already on the base is not judged", "", src("\twg.Wait()", "\twg.Add(1)"), []int{5}, nil},
 		{"a for loop with no condition is a finding", "", src("\tfor {", "\t}"), []int{4}, []int{4}},
 		{"a for loop with a condition is not", "", src("\tfor i := 0; i < 3; i++ {", "\t}"), []int{4}, nil},
+		{"a for range that names no element is a finding", "", src("\tfor range ch {", "\t}"), []int{4}, []int{4}},
+		{"a for range that binds the element is not", "", src("\tfor _, tt := range tests {", "\t\t_ = tt", "\t}"), []int{4}, nil},
 		{"a for loop inside a select with a second case is not", "", src("\tselect {", "\tcase <-ch:", "\tdefault:", "\t\tfor {", "\t\t}", "\t}"), []int{7}, nil},
 		{"a loop and a receive on one line are one finding", "", src("\tfor { <-ch }"), []int{4}, []int{4}},
 		{"an added line that is not a wait is judged but not a finding", "", src("\tx := 1"), []int{4}, nil},
@@ -135,5 +138,18 @@ func TestReadDiffReportsAFailedGit(t *testing.T) {
 	_, err := ReadDiff(func([]string) ([]byte, error) { return nil, boom }, "origin/main")
 	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "origin/main...HEAD") {
 		t.Errorf("error = %v, want it to wrap git's failure and name the range", err)
+	}
+}
+
+// TestReadDiffRefusesAnEmptyBase: an empty base is refused before git runs, rather than diffing HEAD against itself
+// and passing as a clean branch (gt-whjd81).
+func TestReadDiffRefusesAnEmptyBase(t *testing.T) {
+	t.Parallel()
+	_, err := ReadDiff(func([]string) ([]byte, error) {
+		t.Error("git ran for an empty base")
+		return nil, nil
+	}, "")
+	if err == nil || !strings.Contains(err.Error(), "empty base") {
+		t.Errorf("error = %v, want one naming the empty base", err)
 	}
 }
