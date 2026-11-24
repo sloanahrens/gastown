@@ -511,9 +511,8 @@ func TestCloudCheckReleasebotMessageNamesThreeTextsCutTo160(t *testing.T) {
 	}
 }
 
-// TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing: a
-// later good run with no Release bot problem clears the alert, and another
-// section's item or an ok item here raises nothing.
+// TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing:
+// a later clean run clears the alert; another section's item raises nothing.
 func TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing(t *testing.T) {
 	t.Parallel()
 	d, _, f := cloudCheckReleasebotDaemon(t)
@@ -538,9 +537,8 @@ func TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing(
 }
 
 // TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs: a status that is
-// not JSON, or an object with no items key, is no information about the release
-// bot: it raises nothing, clears nothing, and a later clean report still clears
-// the open alert.
+// not JSON or has no items key says nothing about the release bot, so it raises
+// nothing, clears nothing, and a later clean report still clears the alert.
 func TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{`{"at":1,"items":[`, `{"at":1,"ok":1}`} {
@@ -575,8 +573,7 @@ func TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
 }
 
 // TestCloudCheckReleasebotSeamFailures: a refused raise is logged and retried
-// next run, never marked open; a refused clear keeps the marker for that run's
-// later clean report to clear.
+// next run; a refused clear keeps the marker for the next clean report to clear.
 func TestCloudCheckReleasebotSeamFailures(t *testing.T) {
 	t.Parallel()
 	const warn = `{"level":"warn","section":"Release bot","text":"refused its last run"}`

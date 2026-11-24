@@ -217,16 +217,13 @@ type cloudCheckItem struct {
 	Text    string `json:"text"`
 }
 
-// cloudCheckReleasebotTexts returns the texts of the first
-// cloudCheckReleasebotTextCount items in the Release bot section whose level
-// does not say the run passed it; an unknown level counts as not passed.
+// cloudCheckReleasebotTexts returns the first cloudCheckReleasebotTextCount
+// Release bot item texts whose level does not say "ok"; an unknown level counts.
 func cloudCheckReleasebotTexts(items []cloudCheckItem) []string {
 	var texts []string
 	for _, item := range items {
-		if !strings.HasPrefix(item.Section, cloudCheckReleasebotSection) {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(item.Level), "ok") {
+		if !strings.HasPrefix(item.Section, cloudCheckReleasebotSection) ||
+			strings.EqualFold(strings.TrimSpace(item.Level), "ok") {
 			continue
 		}
 		texts = append(texts, cloudCheckTextLine(item.Text))
