@@ -77,8 +77,48 @@ func TestTierSweepRunningFromTheSweepStartedLine(t *testing.T) {
 	if len(run.Tiers) != 3 || run.Tiers[0] != "shell" || run.Tiers[2] != "race" {
 		t.Errorf("running tiers = %+v, want the line's list", run.Tiers)
 	}
+	if run.Tier != "integration" {
+		t.Errorf("running tier = %q, want integration: the shell stage has finished", run.Tier)
+	}
 	if ts := r.read(start.Add(tierSweepStaleAfter + time.Minute)); ts.Running != nil {
 		t.Errorf("a start older than the stage budget is not a live sweep: %+v", ts.Running)
+	}
+}
+
+// TestTierSweepRunningAdvancesPastAFinishedStage: a started cycle's tier follows
+// the stage lines logged since it began, not the first tier of the start line.
+// The shell stage finishing moves the cycle into integration, which the stage
+// line names even though the same stage carries race (gt-5v4da7).
+func TestTierSweepRunningAdvancesPastAFinishedStage(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 14, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name     string
+		tiers    string
+		finished string
+		want     string
+	}{
+		{"no stage finished yet", "shell, integration, race", "", "shell"},
+		{"shell stage finished", "shell, integration, race", "2026/10/04 14:01:05 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:", "integration"},
+		{"integration stage finished", "shell, integration, race", "2026/10/04 14:04:05 tier_sweep: gastown: integration finished (exit 0) in 3m0s; last lines:", "race"},
+		{"a stage the cycle does not run", "shell, integration, race", "2026/10/04 14:01:05 tier_sweep: gastown: compile finished (exit 0) in 1m5s; last lines:", "shell"},
+		{"a start line naming no tiers", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines := []string{"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (" + tc.tiers + ")"}
+			if tc.finished != "" {
+				lines = append(lines, tc.finished)
+			}
+			r, _ := tierSweepTestReader(t, lines...)
+			ts := r.read(start.Add(4 * time.Minute))
+			if ts.Running == nil {
+				t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+			}
+			if ts.Running.Tier != tc.want {
+				t.Errorf("running tier = %q, want %q", ts.Running.Tier, tc.want)
+			}
+		})
 	}
 }
 
@@ -92,8 +132,8 @@ func TestTierSweepRunningShellOnlyCycle(t *testing.T) {
 	if ts.Running == nil {
 		t.Fatalf("a started cycle with no swept line is running: %+v", ts)
 	}
-	if run := ts.Running; len(run.Tiers) != 1 || run.Tiers[0] != "shell" {
-		t.Errorf("running tiers = %+v, want shell alone", run.Tiers)
+	if run := ts.Running; len(run.Tiers) != 1 || run.Tiers[0] != "shell" || run.Tier != "shell" {
+		t.Errorf("running = %+v, want shell alone and in the shell tier", run)
 	}
 }
 

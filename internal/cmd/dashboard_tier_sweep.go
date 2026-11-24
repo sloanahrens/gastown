@@ -393,10 +393,11 @@ func parseTierSweepVerdicts(s string) []dashboard.TierSweepStage {
 // running is the sweep at least one rig is in flight in now. A cycle the log
 // opened with a "sweep started" line and no swept line has closed is running by
 // definition: the line names the tiers the cycle will run, and its timestamp is
-// the cycle's start (gt-rntre). A rig with no open start is read the old way,
-// for a log from a daemon that logs none: the shell stage's finished line is
-// the sign, a cycle whose integration stage (which carries race) is running in
-// the silence that follows.
+// the cycle's start (gt-rntre). The tier it is in follows the stage lines
+// logged since then, not the start line's first tier (gt-5v4da7). A rig with no
+// open start is read the old way, for a log from a daemon that logs none: the
+// shell stage's finished line is the sign, a cycle whose integration stage
+// (which carries race) is running in the silence that follows.
 func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 	var best *dashboard.TierSweepRun
 	consider := func(run *dashboard.TierSweepRun) {
@@ -417,11 +418,7 @@ func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 		if !ok {
 			continue
 		}
-		run := &dashboard.TierSweepRun{Rig: rig, Tiers: s.tiers, Since: s.at, ElapsedSec: elapsed}
-		if len(s.tiers) > 0 {
-			run.Tier = s.tiers[0]
-		}
-		consider(run)
+		consider(&dashboard.TierSweepRun{Rig: rig, Tier: r.runningTier(rig, s), Tiers: s.tiers, Since: s.at, ElapsedSec: elapsed})
 	}
 	for rig, ev := range r.last {
 		if ev.swept || ev.stage != "shell" {
@@ -438,6 +435,31 @@ func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 		consider(&dashboard.TierSweepRun{Rig: rig, Tier: "integration", Since: ev.at, ElapsedSec: elapsed})
 	}
 	return best
+}
+
+// runningTier is the tier a started cycle is in now. A stage's finished line
+// names that stage's first tier, so a shell line logged since the cycle began
+// moves the cycle into the next tier the start line named: the integration
+// stage, which carries race. A line from before the cycle began, one for a stage
+// the cycle does not run, or no line at all leaves the cycle in its first tier.
+func (r *tierSweepReader) runningTier(rig string, s tierSweepStarted) string {
+	if len(s.tiers) == 0 {
+		return ""
+	}
+	ev, ok := r.last[rig]
+	if !ok || ev.stage == "" || ev.at.Before(s.at) {
+		return s.tiers[0]
+	}
+	for i, tier := range s.tiers {
+		if tier != ev.stage {
+			continue
+		}
+		if i+1 < len(s.tiers) {
+			return s.tiers[i+1]
+		}
+		return tier
+	}
+	return s.tiers[0]
 }
 
 // recent is the newest sweeps, newest first, each RED tier given the failing
