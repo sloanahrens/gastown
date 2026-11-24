@@ -1593,6 +1593,42 @@ func TestSweepMirrorStepsLogTheirSeconds(t *testing.T) {
 	}
 }
 
+// TestTierSweepMirrorCloneOfAnExistingMirrorLogsSkipped holds the clone's log
+// line to the outcome the clone step decided: the marker the step skips on logs
+// a skip, another clone failure still logs failed, and a clone that ran logs ok
+// (gt-te7hd1).
+func TestTierSweepMirrorCloneOfAnExistingMirrorLogsSkipped(t *testing.T) {
+	t.Parallel()
+	mirror := "/town/.runtime/sweep-repo/gastown.git"
+	clone := sweeprunner.Step{
+		Argv:     []string{"git", "clone", "--mirror", "--quiet", "/town/gastown/.repo.git", mirror},
+		SkipWhen: sweeprunner.MirrorCloneSkipText,
+	}
+	existing := "fatal: destination path '" + mirror + "' " + sweeprunner.MirrorCloneSkipText + "\n"
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		err    error
+		want   string
+	}{
+		{"the marker is a skip", existing, errors.New("exit status 128"), "tier_sweep: gastown: mirror clone took 0s (skipped: the mirror exists)"},
+		{"another clone failure is failed", "fatal: unable to access '/town/gastown/.repo.git'\n", errors.New("exit status 128"), "tier_sweep: gastown: mirror clone took 0s (failed)"},
+		{"a clone that ran is ok", "", nil, "tier_sweep: gastown: mirror clone took 0s (ok)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+				return nil, []byte(tc.stderr), tc.err
+			}
+			tierSweepRunSteps(context.Background(), d, []sweeprunner.Step{clone})
+			if got := logs.String(); !strings.Contains(got, tc.want) {
+				t.Errorf("the log lacks %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
 // TestSyncPodIsCreatedAtomicallyAndTeardownCountIsExact drives a sync whose pod
 // already exists: the create fails AlreadyExists, so the stage is RED carrying
 // that stderr, no Job is applied, and the teardown's exact four removals run.
