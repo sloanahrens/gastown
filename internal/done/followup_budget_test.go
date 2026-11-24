@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,26 +25,28 @@ func TestFollowupBudget(t *testing.T) {
 		issue    *beads.Issue
 		added    int
 		files    int
+		paths    []string
 		wantErr  bool
 		wantText []string
 	}{
-		{"at the limit passes", followup, 80, 3, false, nil},
-		{"one line over refuses", followup, 81, 1, true, []string{
+		{"at the limit passes", followup, 80, 3, []string{"a.go", "b.go", "c.go"}, false, nil},
+		{"one line over refuses", followup, 81, 1, []string{"a.go"}, true, []string{
 			"81 lines", "over the diff budget of a follow-up bead",
 			"80 added lines", "3 files", "gt done --status ESCALATED",
-			"instead of expanding the change",
+			"instead of expanding the change", "\n  a.go\n",
+			"The overseer splits the bead by file", "no waiver",
 		}},
-		{"one file over refuses", followup, 20, 4, true, []string{
+		{"one file over refuses", followup, 20, 4, []string{"a.go", "b.go", "c.go", "d.go"}, true, []string{
 			"20 lines", "4 file(s)", "80 added lines", "3 files",
-			"gt done --status ESCALATED",
+			"gt done --status ESCALATED", "\n  a.go\n", "\n  d.go\n",
 		}},
-		{"unlabelled bead passes", &beads.Issue{Labels: []string{"other"}}, 800, 30, false, nil},
-		{"nil issue passes", nil, 800, 30, false, nil},
+		{"unlabelled bead passes", &beads.Issue{Labels: []string{"other"}}, 800, 30, nil, false, nil},
+		{"nil issue passes", nil, 800, 30, nil, false, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := followupBudgetError(tc.issue, tc.added, tc.files, maxAdded, maxFiles)
+			err := followupBudgetError(tc.issue, tc.added, tc.files, tc.paths, maxAdded, maxFiles)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("followupBudgetError() = %v, want nil", err)
@@ -57,6 +60,36 @@ func TestFollowupBudget(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("refusal %q does not contain %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// TestFollowupBudgetPaths reads the path column of a numstat diff: a binary
+// file's row counts its path too, a quoted name stays one path, and a line
+// without three fields is an error, not a path that is left out.
+func TestFollowupBudgetPaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		numstat string
+		want    []string
+		wantErr bool
+	}{
+		{"text and binary files", "3\t1\tcmd/a.go\n-\t-\tlogo.png\n", []string{"cmd/a.go", "logo.png"}, false},
+		{"quoted name stays one path", "2\t0\t\"with space.go\"\n", []string{"\"with space.go\""}, false},
+		{"empty diff", "", nil, false},
+		{"line without three fields is an error", "3 1 a.go\n", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := numstatPaths(tt.numstat)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("numstatPaths(%q) error = %v, want error=%v", tt.numstat, err, tt.wantErr)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("numstatPaths(%q) = %q, want %q", tt.numstat, got, tt.want)
 			}
 		})
 	}
@@ -78,10 +111,11 @@ func TestFollowupBudgetRefusesOverBudgetSubmission(t *testing.T) {
 		gitErr   error
 		want     []string
 	}{
-		{"over_added_lines", labelled, "81\t0\ta.go\n", 0, "", nil, []string{"81 lines", "gt done --status ESCALATED"}},
-		{"over_files", labelled, "20\t0\ta.go\n0\t0\tb.go\n0\t0\tc.go\n0\t0\td.go\n", 0, "", nil, []string{"4 file(s)"}},
+		{"over_added_lines", labelled, "81\t0\ta.go\n", 0, "", nil, []string{"81 lines", "gt done --status ESCALATED", "\n  a.go\n"}},
+		{"over_files", labelled, "20\t0\ta.go\n0\t0\tb.go\n0\t0\tc.go\n0\t0\td.go\n", 0, "", nil, []string{"4 file(s)", "\n  a.go\n", "\n  d.go\n"}},
 		{"unlabelled_never_reads", &beads.Issue{Labels: []string{"other"}}, "", 0, "", nil, nil},
 		{"unparsable_numstat", labelled, "not a numstat line\n", 0, "", nil, []string{"cannot check the follow-up bead's diff budget"}},
+		{"non_integer_added_count", labelled, "x\t0\ta.go\n", 0, "", nil, []string{"cannot check the follow-up bead's diff budget", "added count"}},
 		{"config_raises_the_limit", labelled, "150\t0\ta.go\n", 200, "", nil, nil},
 		{"merge_base_fails", labelled, "", 0, "merge-base", errors.New("no merge base"), []string{"merge base", "no merge base"}},
 		{"numstat_fails", labelled, "", 0, "diff", errors.New("bad revision"), []string{"git diff --numstat", "bad revision"}},
