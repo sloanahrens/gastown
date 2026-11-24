@@ -1,0 +1,176 @@
+=== 01-namespace-gt.yaml ===
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+=== 02-persistentvolumeclaim-town-state.yaml ===
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: town-state
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    annotations:
+        gt/size-enforced: "false"
+spec:
+    accessModes:
+        - ReadWriteOnce
+    storageClassName: local-path
+    resources:
+        requests:
+            storage: 20Gi
+=== 03-persistentvolumeclaim-landing-work.yaml ===
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: landing-work
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    annotations:
+        gt/size-enforced: "false"
+spec:
+    accessModes:
+        - ReadWriteOnce
+    storageClassName: local-path
+    resources:
+        requests:
+            storage: 20Gi
+=== 04-persistentvolumeclaim-dolt-backup.yaml ===
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: dolt-backup
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    annotations:
+        gt/size-enforced: "false"
+spec:
+    accessModes:
+        - ReadWriteOnce
+    storageClassName: local-path
+    resources:
+        requests:
+            storage: 20Gi
+=== 05-serviceaccount-daemon.yaml ===
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+    name: daemon
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+=== 06-service-forgejo.yaml ===
+apiVersion: v1
+kind: Service
+metadata:
+    name: forgejo
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+spec:
+    type: ExternalName
+    externalName: forgejo.forgejo.svc.cluster.local
+    ports:
+        - name: http
+          port: 3000
+          protocol: TCP
+=== 07-role-deployer-secret-names.yaml ===
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+    name: deployer-secret-names
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+rules:
+    - apiGroups:
+        - ""
+      resources:
+        - secrets
+      verbs:
+        - get
+      resourceNames:
+        - daemon-forgejo-landing.env
+        - daemon-forgejo-viewer.env
+        - daemon-om-daemon-token
+        - daemon-openshell
+        - daemon-promote-gastown.key
+        - gt-hm-config
+=== 08-rolebinding-deployer-secret-names.yaml ===
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: deployer-secret-names
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: deployer-secret-names
+subjects:
+    - kind: Group
+      name: gt-deployers
+=== 09-rolebinding-daemon-sweep-runner.yaml ===
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: daemon-sweep-runner
+    namespace: gt-sweeps
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: sweep-runner
+subjects:
+    - kind: ServiceAccount
+      name: daemon
+      namespace: gt
+=== 10-rolebinding-daemon-gt-ci-cache-trim.yaml ===
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: daemon-gt-ci-cache-trim
+    namespace: forgejo
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: gt-ci-cache-trim
+subjects:
+    - kind: ServiceAccount
+      name: daemon
+      namespace: gt
+=== 11-clusterrolebinding-daemon-gt-sweep-reader.yaml ===
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+    name: daemon-gt-sweep-reader
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: gt-sweep-reader
+subjects:
+    - kind: ServiceAccount
+      name: daemon
+      namespace: gt
