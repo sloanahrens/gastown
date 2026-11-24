@@ -116,6 +116,60 @@ func TestPatrolLastRunScanDispatchRecordsAScan(t *testing.T) {
 	}
 }
 
+// TestPatrolLastRunScanDispatchRecordsATick pins gt-7f014p: a spec dispatch
+// tick that ran its phases and reached its report records spec_dispatch, so gt
+// jobs stops reading the row as never_run; a held tick, a failed tick, one whose
+// report cannot be read and one that does not run at all record nothing, since
+// none of them did the tick's work and a record would suppress the next tick.
+func TestPatrolLastRunScanDispatchRecordsATick(t *testing.T) {
+	t.Parallel()
+	// The held and completed rows differ only in the report's hold field, so
+	// the held row failing to record is the hold, not a different report.
+	completed := `{}`
+	held := `{"hold": "town parked by the operator"}`
+	for _, tc := range []struct {
+		name      string
+		reply     cliReply
+		patrolOff bool
+		want      bool
+	}{
+		{"completed tick", cliReply{stdout: string(wireOut(completed))}, false, true},
+		{"held tick", cliReply{stdout: string(wireOut(held))}, false, false},
+		{"failed tick", cliReply{code: 1, stderr: "dolt: connection refused"}, false, false},
+		{"unreadable report", cliReply{stdout: "not a report"}, false, false},
+		{"patrol off", cliReply{stdout: string(wireOut(completed))}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logger, _ := lineLogger()
+			d := specDispatchFake(t, newFakeCLI(func([]string) cliReply { return tc.reply }), logger)
+			if tc.patrolOff {
+				d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+					SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(false)},
+				}}
+			}
+
+			before := d.clk().Now()
+			d.runSpecDispatch()
+			after := d.clk().Now()
+
+			at, ok, err := loadPatrolLastRun(d.config.TownRoot, "spec_dispatch")
+			if err != nil {
+				t.Fatalf("loadPatrolLastRun: %v", err)
+			}
+			if ok != tc.want {
+				t.Fatalf("spec_dispatch recorded a run at %v: recorded = %v, want %v", at, ok, tc.want)
+			}
+			if ok && (at.Before(before) || at.After(after)) {
+				t.Errorf("spec_dispatch last run = %v, want a time within the tick (%v..%v)", at, before, after)
+			}
+			if mem := d.specDispatchRun.last(); mem.IsZero() == tc.want {
+				t.Errorf("in-memory last run = %v, want recorded = %v", mem, tc.want)
+			}
+		})
+	}
+}
+
 // TestPatrolLastRunScanDispatchEarlyReturnIsNotARun pins that a runPatrolScan
 // that returns before doing the tick's work records nothing: a skipped tick is
 // not a run.
