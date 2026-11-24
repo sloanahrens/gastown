@@ -9,16 +9,38 @@ import (
 
 // The pane leads with a banner while a gt update roll runs (gt-o8m8ho): its
 // step, elapsed and the builds it moves between; an ended roll stays ten minutes.
+// A tier sweep running now draws its own banner too (gt-dln3rq): the rig, the
+// tier and the elapsed time, with no ended banner left behind.
 
 func bannerRoll() map[string]any {
 	return map[string]any{"run_id": "run-7", "step": "install", "elapsed_sec": 480, "from": "1111aaaa2222", "to": "3333bbbb4444"}
 }
 
-// bannerState is one reading of the section: rows, and Now's roll unless nil.
-func bannerState(roll map[string]any, rows ...any) map[string]any {
+// bannerSweep is a running tier sweep as the feed's Now names it.
+func bannerSweep() map[string]any {
+	return map[string]any{"rig": "gastown", "tier": "race", "elapsed_sec": 300}
+}
+
+// bannerNow is the Now block a reading carries: the roll and the sweep, either
+// of which is nil when it is not running.
+type bannerNow struct {
+	roll  map[string]any
+	sweep map[string]any
+}
+
+// bannerState is one reading of the section: rows, and Now's roll and sweep
+// unless nil.
+func bannerState(now bannerNow, rows ...any) map[string]any {
 	st := systemUpdatesState(systemUpdatesSources{}, rows...)
-	if roll != nil {
-		st["system_updates"].(map[string]any)["now"] = map[string]any{"roll": roll}
+	n := map[string]any{}
+	if now.roll != nil {
+		n["roll"] = now.roll
+	}
+	if now.sweep != nil {
+		n["sweep"] = now.sweep
+	}
+	if len(n) > 0 {
+		st["system_updates"].(map[string]any)["now"] = n
 	}
 	return st
 }
@@ -50,7 +72,7 @@ func TestSystemUpdatesBannerShowsTheRunningRoll(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderSystemUpdates", bannerState(bannerRoll(), systemUpdateGoodRow()))
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{roll: bannerRoll()}, systemUpdateGoodRow()))
 	if got := dom.element(t, "systemupdates").Kids; got != 2 {
 		t.Fatalf("the pane drew %d lines, want the banner and the one row", got)
 	}
@@ -71,9 +93,52 @@ func TestSystemUpdatesBannerDrawsNoFromAsADash(t *testing.T) {
 	roll := bannerRoll()
 	delete(roll, "from")
 	dom := newPageDOM(t)
-	dom.call(t, "renderSystemUpdates", bannerState(roll, systemUpdateGoodRow()))
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{roll: roll}, systemUpdateGoodRow()))
 	if got := dom.descend(t, "systemupdates", 0, 3).Text; got != "– → 3333bbbb4444" {
 		t.Errorf("a roll with no from build reads %q, want a dash", got)
+	}
+}
+
+// A running tier sweep with no roll draws the pane's first line as its banner:
+// sweeping, the rig it sweeps, the tier and the elapsed time.
+func TestSystemUpdatesBannerShowsTheRunningSweep(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: bannerSweep()}, systemUpdateGoodRow()))
+	if got := dom.element(t, "systemupdates").Kids; got != 2 {
+		t.Fatalf("the pane drew %d lines, want the banner and the one row", got)
+	}
+	if got := paneBanner(t, dom); got != "sweeping" {
+		t.Fatalf("the first line reads %q, want a sweep banner", got)
+	}
+	for i, want := range []string{"gastown", "race", "5m"} {
+		if got := dom.descend(t, "systemupdates", 0, i+1).Text; got != want {
+			t.Errorf("banner cell %d reads %q, want %q", i+1, got, want)
+		}
+	}
+	if got := dom.descend(t, "systemupdates", 0, 2).Class; got != "tag warnc" {
+		t.Errorf("the tier chip wears %q, want the running amber", got)
+	}
+}
+
+// A sweep the feed no longer names leaves no banner on the next push: only the
+// commit row is drawn, never an ended sweep's.
+func TestSystemUpdatesBannerDropsTheSweepWhenItEnds(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.press(t, "systemupdates", "click")
+	drawState(t, dom, bannerState(bannerNow{sweep: bannerSweep()}, systemUpdateGoodRow()))
+	if got := paneBanner(t, dom); got != "sweeping" {
+		t.Fatalf("the running sweep drew %q, want the banner", got)
+	}
+	drawState(t, dom, bannerState(bannerNow{}, systemUpdateGoodRow()))
+	if got := paneBanner(t, dom); got != "" {
+		t.Errorf("the ended sweep still drew the banner %q", got)
+	}
+	if got := dom.element(t, "systemupdates").Kids; got != 1 {
+		t.Errorf("the pane drew %d lines, want the one commit row", got)
 	}
 }
 
@@ -85,17 +150,17 @@ func TestSystemUpdatesBannerKeepsAnEndedRollTenMinutes(t *testing.T) {
 
 	dom := newPageDOM(t)
 	dom.press(t, "systemupdates", "click")
-	drawState(t, dom, bannerState(nil, systemUpdateGoodRow()))                           // the pane's recorded key
-	dom.call(t, "renderSystemUpdates", bannerState(bannerRoll(), systemUpdateGoodRow())) // the running roll
-	drawState(t, dom, bannerState(nil, systemUpdateGoodRow()))                           // same key: the push skips, still dating the end
+	drawState(t, dom, bannerState(bannerNow{}, systemUpdateGoodRow()))                                    // the pane's recorded key
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{roll: bannerRoll()}, systemUpdateGoodRow())) // the running roll
+	drawState(t, dom, bannerState(bannerNow{}, systemUpdateGoodRow()))                                    // same key: the push skips, still dating the end
 	stay := pageNumber(t, dom, "SYSTEM_UPDATES_BANNER_STAY_MS")
 	pageExpr(t, dom, "__clock = "+strconv.Itoa(stay))
-	dom.call(t, "renderSystemUpdates", bannerState(nil, systemUpdateGoodRow()))
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{}, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "roll ended" {
 		t.Fatalf("at exactly ten minutes the banner reads %q, want it still there", got)
 	}
 	pageExpr(t, dom, "__clock = "+strconv.Itoa(stay+1))
-	dom.call(t, "renderSystemUpdates", bannerState(nil, systemUpdateGoodRow()))
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{}, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "" {
 		t.Errorf("a millisecond past ten minutes the banner reads %q, want it gone", got)
 	}
@@ -106,7 +171,7 @@ func TestSystemUpdatesBannerDrawsNothingWhenNowIsIdle(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderSystemUpdates", bannerState(nil, systemUpdateGoodRow()))
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{}, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "" {
 		t.Fatalf("an idle Now drew the banner %q", got)
 	}
