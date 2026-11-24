@@ -2308,3 +2308,186 @@ func TestCIEnginePruneAppendFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestCapCIEnginePlanCutsOldestFirst: the container cap keeps the containers that
+// stopped longest ago. The six fixture containers order differently by id, by
+// creation and by stop, so a cut by another key or in the other direction names a
+// different set: the plan comes back with the three oldest by stop time, the other
+// three counted as remaining, and its images and volumes unchanged.
+func TestCapCIEnginePlanCutsOldestFirst(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t,
+		[]map[string]any{
+			engCtrStopped('a', '1', "exited", 100*time.Hour, 30*time.Hour),
+			engCtrStopped('b', '1', "exited", 20*time.Hour, 20*time.Hour),
+			engCtrStopped('c', '1', "exited", 50*time.Hour, 7*time.Hour),
+			engCtrStopped('d', '1', "exited", 300*time.Hour, 40*time.Hour),
+			engCtrStopped('e', '1', "exited", 10*time.Hour, 9*time.Hour),
+			engCtrStopped('f', '1', "exited", 80*time.Hour, 8*time.Hour),
+		},
+		[]map[string]any{engImg('1', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+		[]map[string]any{engVol(engHex64('9'), 30*time.Hour)},
+	))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if len(plan.containers) != 6 || len(plan.images) != 1 || len(plan.volumes) != 1 {
+		t.Fatalf("the fixture planned %d containers, %d images and %d volumes, want 6, 1 and 1",
+			len(plan.containers), len(plan.images), len(plan.volumes))
+	}
+	before := engContainerIDs(plan.containers)
+
+	capped, remaining := capCIEnginePlan(plan, 3)
+
+	// Stop ages: d 40h, a 30h, b 20h, e 9h, f 8h, c 7h. By id the order is a-f, and
+	// by creation it would be d, a, f, c, b, e.
+	if got, want := engContainerIDs(capped.containers), []string{engHex64('d'), engHex64('a'), engHex64('b')}; !slices.Equal(got, want) {
+		t.Errorf("capped containers = %v, want the three oldest by stop time %v", got, want)
+	}
+	if want := (ciEngineRemaining{containers: 3}); remaining != want {
+		t.Errorf("remaining = %+v, want %+v", remaining, want)
+	}
+	if got, want := engImageIDs(capped.images), engImageIDs(plan.images); !slices.Equal(got, want) {
+		t.Errorf("the cap changed the images: %v, want %v", got, want)
+	}
+	if got, want := engVolumeNames(capped.volumes), engVolumeNames(plan.volumes); !slices.Equal(got, want) {
+		t.Errorf("the cap changed the volumes: %v, want %v", got, want)
+	}
+	if got := engContainerIDs(plan.containers); !slices.Equal(got, before) {
+		t.Errorf("the cap modified the plan it was given: %v, want %v", got, before)
+	}
+}
+
+// TestCapCIEnginePlanAtOrAboveTheCountKeepsAll: a cap at or above the container
+// count is not a cut. The plan comes back in the order it was given, nothing is
+// left for a later run, and the plan itself is not modified. The fixture's stop
+// order differs from its id order, so a sort on this path shows up here.
+func TestCapCIEnginePlanAtOrAboveTheCountKeepsAll(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t,
+		[]map[string]any{
+			engCtrStopped('1', 'e', "exited", 10*time.Hour, 10*time.Hour),
+			engCtrStopped('2', 'e', "exited", 30*time.Hour, 30*time.Hour),
+			engCtrStopped('3', 'e', "exited", 20*time.Hour, 20*time.Hour),
+		}, nil, nil))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	before := engContainerIDs(plan.containers)
+	want := []string{engHex64('1'), engHex64('2'), engHex64('3')}
+
+	for _, max := range []int{3, 4} {
+		capped, remaining := capCIEnginePlan(plan, max)
+		if got := engContainerIDs(capped.containers); !slices.Equal(got, want) {
+			t.Errorf("cap %d returned containers %v, want the plan's order %v", max, got, want)
+		}
+		if remaining != (ciEngineRemaining{}) {
+			t.Errorf("cap %d left %+v remaining, want none", max, remaining)
+		}
+	}
+	if got := engContainerIDs(plan.containers); !slices.Equal(got, before) {
+		t.Errorf("the cap modified the plan it was given: %v, want %v", got, before)
+	}
+}
+
+// TestCapCIEnginePlanDefersAContainerWithNoStopTime: the plan comes from
+// planCIEnginePrune, which refused a listing whose times do not read, so this
+// cannot happen for an engine the daemon planned. The cap is total anyway: a
+// container whose created or finish time does not read is ordered last, so it is
+// kept and counted as remaining rather than removed ahead of one whose stop time
+// is known, and the unreadable ones order by id.
+func TestCapCIEnginePlanDefersAContainerWithNoStopTime(t *testing.T) {
+	t.Parallel()
+	for name, corrupt := range map[string]func(*ciEngineContainer){
+		"a creation time that does not read": func(c *ciEngineContainer) { c.Created = "not a time" },
+		"a finish time that does not read":   func(c *ciEngineContainer) { c.State.FinishedAt = "not a time" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			listing := engDecode(t, engListing(t,
+				[]map[string]any{
+					engCtrStopped('2', 'e', "exited", 40*time.Hour, 40*time.Hour),
+					engCtrStopped('1', 'e', "exited", 30*time.Hour, 30*time.Hour),
+					engCtrStopped('4', 'e', "exited", 20*time.Hour, 20*time.Hour),
+					engCtrStopped('3', 'e', "exited", 10*time.Hour, 10*time.Hour),
+				}, nil, nil))
+			plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+			if err != nil {
+				t.Fatalf("planning: %v", err)
+			}
+			// '1' stopped 30h ago and '3' 10h ago; both lose their time.
+			for i := range plan.containers {
+				if id := plan.containers[i].ID; id == engHex64('1') || id == engHex64('3') {
+					corrupt(&plan.containers[i])
+				}
+			}
+
+			capped, remaining := capCIEnginePlan(plan, 3)
+
+			got := engContainerIDs(capped.containers)
+			// The readable ones oldest first: '2' at 40h, '4' at 20h; then the
+			// unreadable ones by id.
+			if want := []string{engHex64('2'), engHex64('4'), engHex64('1')}; !slices.Equal(got, want) {
+				t.Errorf("capped containers = %v, want %v", got, want)
+			}
+			if want := (ciEngineRemaining{containers: 1}); remaining != want {
+				t.Errorf("remaining = %+v, want %+v", remaining, want)
+			}
+		})
+	}
+}
+
+// engContainerIDs is the ids of the given containers, in their order.
+func engContainerIDs(cs []ciEngineContainer) []string {
+	ids := make([]string, 0, len(cs))
+	for _, c := range cs {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+// engImageIDs is the ids of the given images, in their order.
+func engImageIDs(imgs []ciEngineImage) []string {
+	ids := make([]string, 0, len(imgs))
+	for _, img := range imgs {
+		ids = append(ids, img.ID)
+	}
+	return ids
+}
+
+// engVolumeNames is the names of the given volumes, in their order.
+func engVolumeNames(vs []ciEngineVolume) []string {
+	names := make([]string, 0, len(vs))
+	for _, v := range vs {
+		names = append(names, v.Name)
+	}
+	return names
+}
+
+// TestCapCIEnginePlanCapsBelowOneToNothing: a cap of zero or less removes no
+// container and leaves every one of them remaining. The setting refuses a cap
+// below one, so no daemon caller passes this; the function stays total for one
+// that does.
+func TestCapCIEnginePlanCapsBelowOneToNothing(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t,
+		[]map[string]any{
+			engCtrStopped('1', 'e', "exited", 10*time.Hour, 10*time.Hour),
+			engCtrStopped('2', 'e', "exited", 20*time.Hour, 20*time.Hour),
+		}, nil, nil))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	for _, max := range []int{0, -1} {
+		capped, remaining := capCIEnginePlan(plan, max)
+		if len(capped.containers) != 0 {
+			t.Errorf("cap %d returned %v, want no container removed", max, engContainerIDs(capped.containers))
+		}
+		if want := (ciEngineRemaining{containers: 2}); remaining != want {
+			t.Errorf("cap %d left %+v remaining, want %+v", max, remaining, want)
+		}
+	}
+}
