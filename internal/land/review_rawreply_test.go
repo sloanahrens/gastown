@@ -146,3 +146,12 @@ func TestOMRawReplyBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestOMRawReplyMissingFile: with no saved reply the execution error is the text
+// it had before a raw reply was attached (gt-uhrhop).
+func TestOMRawReplyMissingFile(t *testing.T) {
+	t.Parallel()
+	if got := rawReplyError(t, t.TempDir(), nil); got != rawReplyStub {
+		t.Fatalf("error = %q, want unchanged %q", got, rawReplyStub)
+	}
+}
