@@ -48,6 +48,22 @@ func RepackPlanFor(countObjectsOutput string) (RepackPlan, error) {
 	return plan, nil
 }
 
+// ReadRepackPlan reads one archive repository through run with
+// `git -C <repo> count-objects -v` and returns its plan. Args in the plan are
+// returned unchanged: the caller prefixes `git -C <repo>`. A run or parse error
+// is returned naming the repository.
+func ReadRepackPlan(gitRepo string, run func(argv ...string) ([]byte, error)) (RepackPlan, error) {
+	out, err := run("git", "-C", gitRepo, "count-objects", "-v")
+	if err != nil {
+		return RepackPlan{}, fmt.Errorf("read count-objects of repository %q: %w", gitRepo, err)
+	}
+	plan, err := RepackPlanFor(string(out))
+	if err != nil {
+		return RepackPlan{}, fmt.Errorf("repository %q: %w", gitRepo, err)
+	}
+	return plan, nil
+}
+
 // countObjectsValue returns the value of the count-objects line whose key is
 // exactly key, so size-pack does not answer for size.
 func countObjectsValue(output, key string) (int64, error) {
