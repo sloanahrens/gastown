@@ -47,11 +47,12 @@ func (s *landingLoopSet) wait(t *testing.T) {
 	s.mu.Lock()
 	started := append([]chan struct{}(nil), s.done...)
 	s.mu.Unlock()
-	timeout := time.After(landingLoopJoinTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), landingLoopJoinTimeout)
+	defer cancel()
 	for _, done := range started {
 		select {
 		case <-done:
-		case <-timeout:
+		case <-ctx.Done():
 			t.Error("a landing worker loop did not return after its daemon's context was canceled")
 			return
 		}
