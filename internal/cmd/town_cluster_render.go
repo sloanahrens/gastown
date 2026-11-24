@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/deploy/k8s/sbx"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/manifestdata"
@@ -199,12 +201,19 @@ type clusterRenderDeps struct {
 	render                   func(io.Writer, k8sdaemon.Manifests) error
 	buildHelper              func(k8sdaemon.Values) (k8sdaemon.Helper, error)
 	buildTrackerBackupReader func(k8sdaemon.Values) (k8sdaemon.TrackerBackupReader, error)
-	encode                   func(io.Writer, any) error
-	mkdirAll                 func(path string) error
-	writeFile                func(path string, data []byte) error
-	saveRecord               func(path string, f clusterRenderFlags) error
-	record                   clusterRenderRecordOptions
-	out                      io.Writer
+	// renderSbx composes the gt-sbx desired set; the host's is sbx.Render. It
+	// is taken from here so a test answers it without the pinned agent-sandbox
+	// manifest, whose bytes sbx.Render refuses below its release digest.
+	renderSbx func(context.Context, sbx.Inputs) (sbx.Set, error)
+	// runHelm runs the helm binary the gt-sbx render names, so a test answers it
+	// without a helm binary on PATH.
+	runHelm    func(ctx context.Context, name string, args ...string) ([]byte, error)
+	encode     func(io.Writer, any) error
+	mkdirAll   func(path string) error
+	writeFile  func(path string, data []byte) error
+	saveRecord func(path string, f clusterRenderFlags) error
+	record     clusterRenderRecordOptions
+	out        io.Writer
 }
 
 // realClusterRenderDeps is the host's. The environment is the one the compose
@@ -222,6 +231,8 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		render:                   k8sdaemon.Render,
 		buildHelper:              k8sdaemon.BuildHelper,
 		buildTrackerBackupReader: k8sdaemon.BuildTrackerBackupReader,
+		renderSbx:                sbx.Render,
+		runHelm:                  execHelm,
 		encode:                   k8sdaemon.YAML,
 		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
 		writeFile: func(path string, data []byte) error {
