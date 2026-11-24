@@ -116,8 +116,9 @@ func TestBatteryCapKeepsBatterySpendCounted(t *testing.T) {
 	}
 }
 
-// A ledger line that names no caller, or names one no list excludes, is the
-// batteries' spend: it counts toward the cap until someone names it in
+// A ledger line that names no caller is filed under the default caller before
+// the cap sees it, and a line under a name no list excludes is the batteries'
+// spend too: both count toward the cap until someone names them in
 // NonBatteryCallers.
 func TestBatteryCapCountsUnnamedCallers(t *testing.T) {
 	t.Parallel()
@@ -126,15 +127,28 @@ func TestBatteryCapCountsUnnamedCallers(t *testing.T) {
 	tests := []struct {
 		name   string
 		caller string
+		filed  string // the caller name the spend reader reports
 	}{
-		{"no caller name", ""},
-		{"caller no list names", "someone-else"},
+		{"no caller name", "", "jev"}, // jev.defaultCaller
+		{"caller no list names", "someone-else", "someone-else"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			// 1.5 billion tokens at 1 USD per billion.
 			ledger := writeLedger(t, t.TempDir(), ledgerRec(now.Add(-time.Hour), tt.caller, 1_500_000_000, 0))
+
+			rep, err := jev.ReadSpend(ledger, now.Add(-time.Hour), now, 1)
+			if err != nil {
+				t.Fatalf("ReadSpend: %v", err)
+			}
+			if _, ok := rep.ByCaller[tt.filed]; !ok {
+				t.Errorf("ByCaller = %v, want the line filed under %q", rep.ByCaller, tt.filed)
+			}
+			if _, ok := rep.ByCaller[""]; ok {
+				t.Errorf("ByCaller kept the raw empty caller, want the line filed under %q", tt.filed)
+			}
+
 			c := Cap{Ledger: ledger, MaxUSDPerDay: 1, USDPerBillionTokens: 1}
 
 			got, err := c.Spent(clock)
