@@ -74,6 +74,157 @@ func seatRowText(t *testing.T, dom *pageDOM, name string) string {
 	return v.String()
 }
 
+// seatChild is one element the page drew inside the Age cell: its tag, its
+// class and its text, so a test can hold the cell to drawing its readings as
+// inline spans in the order it means them (gt-l2gv8u).
+type seatChild struct {
+	Tag   string `json:"tag"`
+	Class string `json:"class"`
+	Text  string `json:"text"`
+}
+
+// seatAgeChildren reads the Age cell of the named seat's row as its child
+// elements in the order the page appended them.
+func seatAgeChildren(t *testing.T, dom *pageDOM, name string) []seatChild {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS(name) + `) {
+						out = spans[4].children.__arr.map(k => ({tag: String(k.tagName), class: String(k.className), text: String(k.textContent)}));
+					}
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the Age cell children of %s: %v", name, err)
+	}
+	if v.String() == "null" {
+		t.Fatalf("seat %s has no row", name)
+	}
+	var out []seatChild
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the Age cell children of %s: %v", name, err)
+	}
+	return out
+}
+
+// TestSeatRowAgeCellIsOneLine: a seat charged gate time and refused twice draws
+// its readings inline in the Age cell — spans after the duration, in the order
+// split, round, rework — so the seat is one line instead of four; the rework
+// reading is warned from the second refusal on (gt-l2gv8u).
+func TestSeatRowAgeCellIsOneLine(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+	s["gate_sec"], s["working_sec"] = 600.0, 1200.0
+	s["reject_count"] = 2.0
+	callWork(t, dom, workState([]any{s}, nil))
+
+	// The duration stays the cell's own text; the readings follow it as spans.
+	if text, _ := seatAgeCell(t, dom, "agate"); text != "30m" {
+		t.Errorf("Age cell text = %q, want the duration 30m before the readings", text)
+	}
+	kids := seatAgeChildren(t, dom, "agate")
+	want := []seatChild{
+		{Tag: "SPAN", Class: "wsub", Text: "working 20m, gate 10m"},
+		{Tag: "SPAN", Class: "wround", Text: "round 3"},
+		{Tag: "SPAN", Class: "wrework warnc", Text: "rework ×2"},
+	}
+	if len(kids) != len(want) {
+		t.Fatalf("the Age cell drew %d readings (%+v), want %d: the split, the round and the rework", len(kids), kids, len(want))
+	}
+	for i, w := range want {
+		if kids[i] != w {
+			t.Errorf("Age cell child %d = %+v, want %+v", i, kids[i], w)
+		}
+	}
+	for _, k := range kids {
+		if k.Tag != "SPAN" {
+			t.Errorf("the Age cell draws a %s child (%+v); a block of its own makes the seat a line taller", k.Tag, k)
+		}
+	}
+}
+
+// TestSeatRowHoverKeepsTheFullTitle: capping the bead title near 40 characters
+// ellipses the cell but loses nothing — the title span carries the cap class
+// and the bead cell's hover still carries the full id, title and description
+// (gt-l2gv8u).
+func TestSeatRowHoverKeepsTheFullTitle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		id    = "gt-abc"
+		title = "a title long enough that the cap ellipses it"
+		desc  = "the body of the bead, which the hover keeps whole"
+	)
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", id, title, "flash", 30*time.Minute)
+	s["description"] = desc
+	callWork(t, dom, workState([]any{s}, nil))
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS("agate") + `) {
+						const title = spans[2].children.__arr.find(x => String(x.className).split(" ").indexOf("wtitle") >= 0);
+						out = {hover: String(spans[2].title), cls: title ? String(title.className) : "", text: title ? String(title.textContent) : ""};
+					}
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the bead cell of agate: %v", err)
+	}
+	var cell struct {
+		Hover string `json:"hover"`
+		Cls   string `json:"cls"`
+		Text  string `json:"text"`
+	}
+	if v.String() == "null" {
+		t.Fatal("seat agate has no row")
+	}
+	if err := json.Unmarshal([]byte(v.String()), &cell); err != nil {
+		t.Fatalf("reading the bead cell of agate: %v", err)
+	}
+
+	t.Run("the hover keeps the whole bead", func(t *testing.T) {
+		if want := id + " " + title + "\n\n" + desc; cell.Hover != want {
+			t.Errorf("the bead cell hovers %q, want %q", cell.Hover, want)
+		}
+	})
+	t.Run("the title span carries the cap class", func(t *testing.T) {
+		if !slices.Contains(strings.Fields(cell.Cls), "wcap") {
+			t.Errorf("the title span's class = %q, want it to carry wcap", cell.Cls)
+		}
+		if cell.Text != title {
+			t.Errorf("the title span reads %q, want the whole title %q", cell.Text, title)
+		}
+	})
+	t.Run("the cap is a width with an ellipsis", func(t *testing.T) {
+		rule := cssRule(t, ".workrow .wcap")
+		for _, want := range []string{"max-width:40ch", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap"} {
+			if !strings.Contains(rule, want) {
+				t.Errorf("the .wcap rule has no %q: %s", want, rule)
+			}
+		}
+	})
+}
+
 // TestSeatRowTimes: a seat whose guard charged gate time draws "working Xm, gate
 // Ym" under its since-sling time; a seat with no gate time draws no second line;
 // and a poll that changes only gate_sec redraws the table, so the line appears

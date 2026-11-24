@@ -132,7 +132,7 @@ tr.live,.ltrow.live{background:#101a13}
 /* The Polecat and Model tracks in the two tables below take their width from
    these properties, so a width changed here changes both (gt-ultode). */
 .wtable,.ltable{--polecat-w:max-content;--model-w:max-content}
-.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
+.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,max-content) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 /* Below 640 px the four tracks other than the bead hold the width their text
    needs, so their text is not clipped by its own track at 470 px. The floor
    is minmax(max-content,max-content), not a bare max-content: a track's minimum
@@ -151,7 +151,13 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
 .workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
-.workrow .wsub,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap}
+/* The Age cell's readings — how the time splits between work and gate, the
+   round and the rework count — sit inline after the duration, each with a small
+   gap, so a seat is one line however many it carries. The bead title is capped
+   so a long one ellipses near 40 characters instead of taking the row's room
+   (gt-l2gv8u). */
+.workrow .wsub,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap;margin-left:6px}
+.workrow .wcap{display:inline-block;max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -1294,15 +1300,17 @@ function paintAges(r, now) {
   r.age.title = aged ? (stuck || stateTip) + dispatched + silent : "";
   // The guard counts a seat's gate runs apart from its work, so a seat that
   // has been charged gate time says how its age splits (gt-qjl0ym). textContent
-  // above cleared the cell, so the line is drawn again on every pass.
+  // above cleared the cell, so the reading is drawn again on every pass. Each
+  // reading is a span after the duration, not a block of its own, so the cell
+  // stays one line however many it carries (gt-l2gv8u).
   // The split does not wait on the phase: a sandbox seat never gets the
   // activity its phase counts from (gt-urycmq). A seat refused for review says
   // which round it is on, one above its refusals (gt-qjl0ym, gt-k9s5lv).
-  if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
-  if (p.bead && p.reject_count > 0) r.age.append(el("div", "wround", "round " + (p.reject_count + 1)));
+  if (p.bead && p.gate_sec > 0) r.age.append(el("span", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
+  if (p.bead && p.reject_count > 0) r.age.append(el("span", "wround", "round " + (p.reject_count + 1)));
   // The count itself, warned from the second refusal on so a repeat stands out
   // (gt-addb76).
-  if (p.bead && p.reject_count >= 1) r.age.append(el("div", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
+  if (p.bead && p.reject_count >= 1) r.age.append(el("span", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
   // The Points cell reads the bead's estimate, then the elapsed time since
   // dispatch, which moves with the clock like the age does. A seat holding no
   // bead leaves it empty.
@@ -1366,7 +1374,9 @@ function workRow(names, p, now) {
     bd.append(el("span", "bead", p.bead));
     if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
     (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
-    if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle", p.title));
+    // The title is capped near 40 characters so a long one ellipses instead of
+    // taking the row's room; the cell's hover keeps it whole (gt-l2gv8u).
+    if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle wcap", p.title));
     // The hover reads the bead's description under its id and title; a bead
     // with no description hovers as its title alone (gt-kk6gb).
     bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");
