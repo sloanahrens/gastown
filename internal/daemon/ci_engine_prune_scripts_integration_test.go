@@ -2,12 +2,12 @@
 
 package daemon
 
-// What this tier proves, and what it does not. It proves that the list program,
-// the one shell text the prune runs as root inside the runner's dind, runs under a
-// real sh and prints JSON the daemon parses; that each removal and presence argv
-// the daemon builds reaches a docker binary as the verb and the ids with nothing
-// shell-quoted between them; and that a non-zero exit comes back as a non-zero
-// exit. It does not prove docker's output shapes or flags: the fake docker prints
+// What this tier proves, and what it does not. It proves that the list program and
+// the in-use re-read, the two shell texts the prune runs as root inside the
+// runner's dind, run under a real sh and print what the daemon parses; that each
+// removal and presence argv the daemon builds reaches a docker binary as the verb
+// and the ids with nothing shell-quoted between them; and that a non-zero exit
+// comes back as a non-zero exit. It does not prove docker's output shapes or flags: the fake docker prints
 // the text each case writes for it, so a case shows that the parser reads that
 // text, not that docker prints it. The shapes are held by the captures in
 // TestCIEngineRemovedReadsDockersOutput and TestCIEnginePresentReadsInspectOutput,
@@ -250,6 +250,36 @@ func TestIntegrationCIEngineListProgramOnAnEmptyEngine(t *testing.T) {
 	}
 	if l.DataRootKiB == nil || len(l.Containers)+len(l.Images)+len(l.Volumes) != 0 {
 		t.Errorf("the empty listing = %q", stdout)
+	}
+}
+
+// TestIntegrationCIEngineInUseImagesProgramPrintsImageIDs: the in-use re-read runs
+// under a real sh, asks docker for the image id of each container through container
+// inspect, and prints each id on its own line for the daemon's parser.
+func TestIntegrationCIEngineInUseImagesProgramPrintsImageIDs(t *testing.T) {
+	f := newFakeDocker(t)
+	f.canned(t, "ps", engHex64('1')+"\n"+engHex64('2')+"\n")
+	f.canned(t, "container-inspect", engImageID('a')+"\n"+engImageID('b')+"\n")
+
+	stdout, ok := f.runProgram(t, ciEngineInUseImagesScript)
+	if !ok {
+		t.Fatalf("the in-use program failed on an engine with two containers")
+	}
+	inUse, err := ciEngineInUseImageIDs(stdout)
+	if err != nil {
+		t.Fatalf("the in-use output does not parse: %v: %q", err, stdout)
+	}
+	for _, id := range []string{engImageID('a'), engImageID('b')} {
+		if !inUse[id] {
+			t.Errorf("the in-use output does not name %s: %q", id, stdout)
+		}
+	}
+	want := []string{
+		"ps -aq --no-trunc",
+		"container inspect --format {{.Image}} " + engHex64('1') + " " + engHex64('2'),
+	}
+	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("docker calls = %q, want %q", got, want)
 	}
 }
 

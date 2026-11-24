@@ -390,15 +390,19 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 // gone makes that failing removal exit 1 with nothing left (the id was freed by an
 // earlier argument), short makes docker print one id fewer than it was given and
 // leave that id in the engine, garbage makes it print lines naming none, and
-// noInspect makes the presence inspect fail to run. The zero value is an engine
-// that removes everything it is asked to and says so.
+// noInspect makes the presence inspect fail to run. inUse is the image ids the
+// re-read right before an image removal prints, and rereadReply, when set, is that
+// read's answer in full. The zero value is an engine that removes everything it is
+// asked to, says so, and has no container whose image is in use.
 type engineRemoveAnswers struct {
-	fail      bool
-	stderr    string
-	gone      bool
-	short     bool
-	garbage   bool
-	noInspect bool
+	fail        bool
+	stderr      string
+	gone        bool
+	short       bool
+	garbage     bool
+	noInspect   bool
+	inUse       []string
+	rereadReply *cliReply
 	// duOut replaces du's reply when duSet; duFail makes du exit 1; duReply, when
 	// set, is du's answer in full, a total on stdout with a non-zero status and the
 	// stderr that explains it.
@@ -462,6 +466,15 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 			return cliReply{stdout: "Total:\t0B\n"}
 		case strings.Contains(verb, "-- docker system df"):
 			return cliReply{stdout: "Build Cache 0B 0B\n"}
+		case strings.Contains(verb, "ci-engine-in-use"):
+			if remove.rereadReply != nil {
+				return *remove.rereadReply
+			}
+			var out strings.Builder
+			for _, id := range remove.inUse {
+				out.WriteString(id + "\n")
+			}
+			return cliReply{stdout: out.String()}
 		case strings.Contains(verb, " inspect "):
 			if remove.noInspect {
 				return cliReply{startErr: errors.New("kubectl: could not run")}
@@ -527,6 +540,17 @@ func engineDockerExecs(f *ciCacheFixture, verb string) []cliCall {
 		}
 	}
 	return out
+}
+
+// engineExecIndex returns where in the pass's exec calls the first call whose verb
+// contains match ran, and false when it never ran.
+func engineExecIndex(f *ciCacheFixture, match string) (int, bool) {
+	for i, c := range f.execs() {
+		if strings.Contains(cacheTrimVerb(c.args), match) {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // engineExecs returns the exec calls whose program is named name.
@@ -714,6 +738,122 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		f.drain()
 		if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
 			t.Errorf("objects absent from the engine did not reach a verdict:\n%s", f.logs.String())
+		}
+	})
+}
+
+// TestCIEnginePruneRereadsInUseBeforeRemoval: the plan comes from a listing taken
+// earlier, and docker rmi -f refuses an image a running container uses but not one
+// a created, not-yet-started container uses. Right before the image removal the run
+// re-reads the containers' image ids: a planned image a container now references is
+// dropped and its id logged, a re-read that fails or answers with text that is not
+// image ids removes no image and fails the run once, and a re-read that finds
+// nothing new removes every planned image as before.
+func TestCIEnginePruneRereadsInUseBeforeRemoval(t *testing.T) {
+	t.Parallel()
+	listing := engineFailureListing(t)
+	// engImageID('e') is the listing's only planned image.
+	inUseID := engImageID('e')
+
+	t.Run("an image a container now references is skipped and logged", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing,
+			engineRemoveAnswers{inUse: []string{inUseID}})
+		f.tick()
+		f.drain()
+
+		if n := len(engineDockerExecs(f, "rmi")); n != 0 {
+			t.Errorf("the re-read found the planned image in use and docker rmi still ran %d time(s)", n)
+		}
+		// The kinds around the image removal still ran, and the run reached a verdict.
+		for _, verb := range []string{"rm", "volume rm", "builder prune"} {
+			if n := len(engineDockerExecs(f, verb)); n != 1 {
+				t.Errorf("docker %s ran %d time(s) beside a skipped image, want once", verb, n)
+			}
+		}
+		if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); last.IsZero() {
+			t.Errorf("a skipped image did not leave a verdict:\n%s", f.logs.String())
+		}
+		want := strings.TrimPrefix(inUseID, "sha256:")[:12]
+		line := engineLogLine(f.logs.String(), "skipped 1 planned image")
+		if !strings.Contains(line, want) {
+			t.Errorf("the skip line does not name %s:\n%s", want, f.logs.String())
+		}
+		if !strings.Contains(line, "a container now references") {
+			t.Errorf("the skip line does not say why:\n%s", f.logs.String())
+		}
+	})
+
+	// The failed-read cases share their assertions: no image removed, the run failed
+	// and raised its item once, every other step still ran, and the failure is
+	// logged once.
+	for name, tc := range map[string]struct {
+		answers engineRemoveAnswers
+		marker  string
+	}{
+		"a re-read that cannot run removes no image": {
+			answers: engineRemoveAnswers{rereadReply: &cliReply{code: 1, stderr: "Error response from daemon: engine unavailable"}},
+			marker:  "the in-use read failed (exit status 1",
+		},
+		"a re-read whose output is not image ids removes no image": {
+			answers: engineRemoveAnswers{rereadReply: &cliReply{stdout: "not-an-image-id\n"}},
+			marker:  "the in-use read printed a line that is not an image id",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, tc.answers)
+			f.tick()
+			f.drain()
+
+			if n := len(engineDockerExecs(f, "rmi")); n != 0 {
+				t.Errorf("docker rmi ran %d time(s) after a failed re-read, want no image removed", n)
+			}
+			for _, verb := range []string{"rm", "volume rm", "builder prune"} {
+				if n := len(engineDockerExecs(f, verb)); n != 1 {
+					t.Errorf("docker %s ran %d time(s) after a failed re-read, want once", verb, n)
+				}
+			}
+			// A failed run: no verdict, its conclusion at the full interval, and one
+			// attention item.
+			engineConcludedAt(t, f, ciCacheTestStart)
+			logs := f.logs.String()
+			if n := strings.Count(logs, "no image is removed this run"); n != 1 {
+				t.Errorf("the failed re-read is logged %d time(s), want once:\n%s", n, logs)
+			}
+			if line := engineLogLine(logs, tc.marker); line == "" {
+				t.Errorf("no failure line names %q:\n%s", tc.marker, logs)
+			}
+		})
+	}
+
+	t.Run("a re-read that finds nothing new removes every planned image", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+		f.tick()
+		f.drain()
+
+		execs := engineDockerExecs(f, "rmi")
+		if len(execs) != 1 {
+			t.Fatalf("docker rmi ran %d time(s), want once", len(execs))
+		}
+		i := slices.Index(execs[0].args, "docker")
+		if got, want := execs[0].args[i:], []string{"docker", "rmi", "-f", inUseID}; !slices.Equal(got, want) {
+			t.Errorf("docker rmi argv = %q, want %q", got, want)
+		}
+		// The re-read is the step right before the removal: after the container
+		// removal and before docker rmi.
+		rmAt, rmOK := engineExecIndex(f, " -- docker rm ")
+		readAt, readOK := engineExecIndex(f, "ci-engine-in-use")
+		rmiAt, rmiOK := engineExecIndex(f, " -- docker rmi ")
+		if !rmOK || !readOK || !rmiOK {
+			t.Fatalf("an exec is missing: container removal %v, re-read %v, docker rmi %v", rmOK, readOK, rmiOK)
+		}
+		if !(rmAt < readAt && readAt < rmiAt) {
+			t.Errorf("exec order is container removal %d, re-read %d, docker rmi %d; want the re-read right before the removal", rmAt, readAt, rmiAt)
+		}
+		if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); last.IsZero() {
+			t.Errorf("a re-read that found nothing new did not leave a verdict:\n%s", f.logs.String())
 		}
 	})
 }
@@ -941,7 +1081,7 @@ func TestCIEnginePruneFailureItemCarriesTheReason(t *testing.T) {
 // cutoff arrives as argv data.
 func TestCIEnginePruneScriptsHoldNoKeepLogic(t *testing.T) {
 	t.Parallel()
-	for name, script := range map[string]string{"list": ciEngineListScript} {
+	for name, script := range map[string]string{"list": ciEngineListScript, "in-use": ciEngineInUseImagesScript} {
 		for _, rule := range []string{ciEngineBaseRepo, "keep", "24h", "48h", "mtime", "find "} {
 			if strings.Contains(script, rule) {
 				t.Errorf("the %s program holds %q: keep, age and repository logic is decided in Go", name, rule)

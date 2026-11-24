@@ -10,7 +10,11 @@ package daemon
 // JSON. The planner, a pure function over that listing, decides what goes, so the
 // keep rule is tested in-process. The remove step is one docker command per kind
 // the plan names (docker rm, docker rmi -f, docker volume rm), each over that
-// kind's ids as argv with no shell between the plan and docker. What each command
+// kind's ids as argv with no shell between the plan and docker. The listing is
+// older than the remove step, and docker rmi -f removes an image a created
+// container holds, so right before the image command the run re-reads the
+// containers' image ids and drops the planned images a container now references.
+// A re-read that fails removes no image this run (gt-vlu7sc). What each command
 // did is read back from docker: the ids it printed removed, and for any it did not
 // print, one docker inspect that names which of them are still in the engine. An
 // id still there fails the run; an id gone counts as removed, whatever the
@@ -92,6 +96,15 @@ if [ -n "$volumes" ]; then docker volume inspect $volumes; else printf '[]'; fi
 printf '}\n'
 `
 
+// ciEngineInUseImagesScript is the read the run makes right before an image
+// removal: the image id each container in the engine was created from, one per
+// line. docker ps prints an image's name as the container was given it, so the ids
+// come from inspecting the containers instead. It changes nothing.
+const ciEngineInUseImagesScript = `set -euf
+containers=$(docker ps -aq --no-trunc)
+if [ -n "$containers" ]; then docker container inspect --format '{{.Image}}' $containers; fi
+`
+
 // ciEngineRemoval is one docker command of the remove step: the kind it removes,
 // the argv docker runs (the verb and the plan's ids, nothing else) and the ids
 // docker must report removed for the step to count.
@@ -129,6 +142,30 @@ func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
 		out = append(out, ciEngineRemoval{kind: "volume", argv: append([]string{"docker", "volume", "rm"}, names...), ids: names})
 	}
 	return out
+}
+
+// ciEngineRemovalCounts names the ids a set of removals takes, per kind, for the
+// run's log.
+func ciEngineRemovalCounts(removals []ciEngineRemoval) string {
+	counts := map[string]int{}
+	for _, r := range removals {
+		counts[r.kind] = len(r.ids)
+	}
+	return fmt.Sprintf("%d containers, %d images, %d volumes", counts["container"], counts["image"], counts["volume"])
+}
+
+// ciEngineShortImages names image ids for a log line, each as the digest's first 12
+// characters, the prefix docker prints for a short id.
+func ciEngineShortImages(ids []string) string {
+	short := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimPrefix(id, "sha256:")
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		short = append(short, id)
+	}
+	return strings.Join(short, ", ")
 }
 
 // presenceArgv is the docker inspect that prints which of ids the engine still
@@ -292,6 +329,43 @@ func ciEnginePresent(kind string, out []byte) map[string]bool {
 		}
 	}
 	return present
+}
+
+// ciEngineInUseImageIDs reads the in-use read's output: the image id of every
+// container in the engine, one per line. A line that is not an image id means the
+// read cannot be trusted, so it is an error rather than an empty set: an unknown
+// in-use set removes no image.
+func ciEngineInUseImageIDs(out []byte) (map[string]bool, error) {
+	inUse := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !ciEngineImageIDRE.MatchString(line) {
+			return nil, errors.New("the in-use read printed a line that is not an image id")
+		}
+		inUse[line] = true
+	}
+	return inUse, nil
+}
+
+// ciEngineDropInUseImages takes the planned images a container now references out
+// of an image removal, returning the remaining removal and the ids it dropped. A
+// removal left with no ids is not sent.
+func ciEngineDropInUseImages(r ciEngineRemoval, inUse map[string]bool) (ciEngineRemoval, []string) {
+	var ids, dropped []string
+	for _, id := range r.ids {
+		if inUse[id] {
+			dropped = append(dropped, id)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(dropped) == 0 {
+		return r, nil
+	}
+	return ciEngineRemoval{kind: r.kind, argv: append([]string{"docker", "rmi", "-f"}, ids...), ids: ids}, dropped
 }
 
 var (
@@ -746,10 +820,12 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // path it takes, is appended to the job ledger: the plan's counts, the bytes the
 // build cache step reclaimed and how the run ended, with the next due at one
 // interval from its end. A run that cannot list the engine or plan from the
-// listing removes nothing and says why. Once it removes, every kind and the build
-// cache prune run whatever an earlier one did; a kind docker left in place, or
-// that could not be checked, fails the run after the rest have run, and the next
-// run plans again from what is left.
+// listing removes nothing and says why. Right before the image command it re-reads
+// what the containers use and drops the planned images one now references; a
+// re-read that fails removes no image and fails the run after the other kinds have
+// run. Once it removes, every kind and the build cache prune run whatever an
+// earlier one did; a kind docker left in place, or that could not be checked, fails
+// the run after the rest have run, and the next run plans again from what is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -821,7 +897,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	}
 
 	before := polecatimage.Human(*listing.DataRootKiB * 1024)
-	counts := fmt.Sprintf("%d containers, %d images, %d volumes", len(plan.containers), len(plan.images), len(plan.volumes))
+	counts := ciEngineRemovalCounts(ciEngineRemovals(plan))
 	stats["containers"] = int64(len(plan.containers))
 	stats["images"] = int64(len(plan.images))
 	stats["volumes"] = int64(len(plan.volumes))
@@ -846,7 +922,32 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	// failure is logged on its own line and the run fails once they have all run,
 	// on the first failure's sentence.
 	failed := false
-	for _, r := range ciEngineRemovals(plan) {
+	removals := ciEngineRemovals(plan)
+	for i, r := range removals {
+		if r.kind == "image" {
+			// The listing is older than this exec, and docker rmi -f removes an image
+			// a created container holds: re-read what the containers use and drop the
+			// planned images one now references. A re-read that fails sends no image
+			// command and fails the run, once logged.
+			kept, dropped, readErr := d.ciEngineImagesSkipInUse(ctx, kubeconfig, kubeContext, pod, r)
+			if readErr != nil {
+				d.ciEnginePruneLogf("in-use read", "disk_maintenance: ci engine prune: %v; no image is removed this run", readErr)
+				removals[i] = ciEngineRemoval{kind: r.kind}
+				failed = true
+				if reason == "" {
+					reason = ciEngineReasonLine(readErr.Error())
+				}
+				continue
+			}
+			if len(dropped) > 0 {
+				d.logger.Printf("disk_maintenance: ci engine prune: skipped %d planned image(s) a container now references: %s", len(dropped), ciEngineShortImages(dropped))
+			}
+			removals[i] = kept
+			if len(kept.ids) == 0 {
+				continue // every planned image is now in use: no image command is sent
+			}
+			r = kept
+		}
 		ok, why := d.ciEngineRemoveKind(ctx, kubeconfig, kubeContext, pod, r)
 		if !ok {
 			failed = true
@@ -855,6 +956,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			}
 		}
 	}
+	// The verdict line names what the image re-read left to remove, not what the
+	// plan named before it.
+	counts = ciEngineRemovalCounts(removals)
 	// The build cache is sized once, before its prune, through the same exec: the
 	// prune's total is read against what docker said was reclaimable. A failed size
 	// read skips that check and nothing else.
@@ -914,6 +1018,25 @@ func (d *Daemon) recordCIEnginePruneRun(run jobledger.Run) {
 	if err := ledger.Append(run); err != nil {
 		d.ciEnginePruneLogf("job ledger", "disk_maintenance: ci engine prune: the run could not be recorded (%v)", err)
 	}
+}
+
+// ciEngineImagesSkipInUse re-reads the containers' image ids right before an image
+// removal and takes the planned images a container now references out of it, since
+// docker rmi -f removes an image a created, not-yet-started container holds. A
+// re-read that cannot run, or whose output is not image ids, returns an error and
+// no removal: the caller fails the run and sends no image command. The ids dropped
+// are returned for the log.
+func (d *Daemon) ciEngineImagesSkipInUse(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) (ciEngineRemoval, []string, error) {
+	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "sh", "-c", ciEngineInUseImagesScript, "ci-engine-in-use")
+	if err != nil {
+		return ciEngineRemoval{}, nil, fmt.Errorf("the in-use read failed (%s)", ciEngineFailure(err, stderr))
+	}
+	inUse, err := ciEngineInUseImageIDs(out)
+	if err != nil {
+		return ciEngineRemoval{}, nil, err
+	}
+	kept, dropped := ciEngineDropInUseImages(r, inUse)
+	return kept, dropped, nil
 }
 
 // ciEngineRemoveKind runs one kind's removal and reports whether every planned id
