@@ -3,6 +3,8 @@
 # the rig's Forgejo remote, without a credential. {owner} is expanded from forge.owner; see config.ForgeOwnerPlaceholder.
 # The pin-drift guard refuses a pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
+# A pin bump moves only the source revision a pin names. No docs/architecture.md
+# section records a pinned revision, so a bump changes no section.
 bd http://forgejo:3000/{owner}/beads.git c1efb992c9ee42046f9a6188625b11fe88e05f53
 om http://forgejo:3000/{owner}/organic-mechanic.git c5b880ce2ba341209fc17a8a77a3bac089c7e6e4
 hm http://forgejo:3000/{owner}/history-man.git c94ae1d1f6b08685408c311d1ddf0eacdbb3095c
