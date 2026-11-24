@@ -3079,6 +3079,21 @@ function systemUpdateBannerLine(b) {
   return line;
 }
 
+// systemUpdateBannerSweepLine is a running tier sweep's banner (gt-dln3rq): the
+// rig it sweeps, the tier it is at and the elapsed time. The feed names a sweep
+// only while it runs, so the banner is drawn while Now carries one and a push
+// without one keeps none behind. Telling an unreadable sweep from an idle one
+// is bead 2/2.
+function systemUpdateBannerSweepLine(sweep) {
+  const line = el("div", "surow subanner");
+  line.append(el("span", "subannerword", "sweeping"));
+  line.append(el("span", "subannerrig", sweep.rig || "–"));
+  line.append(el("span", "tag warnc", sweep.tier || "starting"));
+  line.append(el("span", "subannertime", fmtDur(sweep.elapsed_sec)));
+  line.title = "tier sweep " + (sweep.rig || "?") + (sweep.tier ? " " + sweep.tier : "");
+  return line;
+}
+
 // The pane header's icon follows the worst chip the pane drew, red above amber.
 // Green and grey earn no colour of their own — a pair is never green, and grey
 // is nothing read — so the icon stays the heading's muted dash unless a red or
@@ -3118,10 +3133,12 @@ function paintSystemUpdatesIcon(chips) { paintPaneIcon("systemupdatesico", chips
 
 function renderSystemUpdates(s) {
   const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
+  const sweep = su && su.now && su.now.sweep;
   if (pushSkip("systemupdates", s)) return;
   const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
   if (banner) box.append(systemUpdateBannerLine(banner));
+  if (sweep) box.append(systemUpdateBannerSweepLine(sweep));
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
