@@ -441,6 +441,92 @@ func (p ciEnginePlan) count() int {
 	return len(p.containers) + len(p.images) + len(p.volumes)
 }
 
+// ciEngineRemaining is the count of each kind a capped plan left for a later
+// run: the candidates the cap kept out of this run's plan.
+type ciEngineRemaining struct {
+	containers, images, volumes int
+}
+
+// ciEngineStopKey is one planned container's place in the cap's order: the
+// instant it stopped, which is what the cap cuts by, and whether that instant
+// reads at all.
+type ciEngineStopKey struct {
+	container ciEngineContainer
+	stoppedAt time.Time
+	known     bool
+}
+
+// capCIEnginePlan returns a copy of plan with its containers cut to max, the
+// ones that stopped longest ago first, and the count of each kind left for a
+// later run. The plan is in id order today, so the copy's containers are sorted
+// by their stop time (ciEngineStoppedAt) before the cut. Images and volumes are
+// copied unchanged and are not capped by this function, so their remaining
+// counts are always 0. A plan with no more containers than max is returned as
+// given, with nothing remaining.
+//
+// Every container in the plan came through planCIEnginePrune, which refused a
+// listing whose creation or finish time does not read, so every stop time here
+// is known. A container whose time does not read anyway is ordered last, so it
+// is kept and counted as remaining, never removed ahead of one whose stop time
+// is known. The input plan is not modified.
+func capCIEnginePlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemaining) {
+	out := ciEnginePlan{
+		containers: slices.Clone(plan.containers),
+		images:     slices.Clone(plan.images),
+		volumes:    slices.Clone(plan.volumes),
+	}
+	if max >= len(out.containers) {
+		return out, ciEngineRemaining{}
+	}
+	if max < 0 {
+		max = 0
+	}
+	keyed := make([]ciEngineStopKey, len(out.containers))
+	for i, c := range out.containers {
+		keyed[i] = ciEngineStopKey{container: c}
+		keyed[i].stoppedAt, keyed[i].known = ciEngineStopKeyOf(c)
+	}
+	slices.SortStableFunc(keyed, func(a, b ciEngineStopKey) int {
+		switch {
+		case a.known && b.known:
+			if d := a.stoppedAt.Compare(b.stoppedAt); d != 0 {
+				return d
+			}
+		case a.known:
+			return -1
+		case b.known:
+			return 1
+		}
+		return strings.Compare(a.container.ID, b.container.ID)
+	})
+	for i := range max {
+		out.containers[i] = keyed[i].container
+	}
+	return ciEnginePlan{
+			containers: out.containers[:max],
+			images:     out.images,
+			volumes:    out.volumes,
+		},
+		ciEngineRemaining{containers: len(keyed) - max}
+}
+
+// ciEngineStopKeyOf reads a planned container's stop time, the key the container
+// cap orders by. known is false when the plan's creation or finish time does not
+// read; the cap then orders the container last, so it is kept. The plan the
+// daemon builds never reaches that case: planCIEnginePrune refuses such a
+// listing.
+func ciEngineStopKeyOf(c ciEngineContainer) (time.Time, bool) {
+	created, err := parseCIEngineTime(c.Created)
+	if err != nil {
+		return time.Time{}, false
+	}
+	stoppedAt, err := ciEngineStoppedAt(c, created)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return stoppedAt, true
+}
+
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
 // now, under the keep rule in docs/guides/disk-maintenance.md. imageAge is how old
 // an unused image must be, and unusedAge how long a stopped container has been
