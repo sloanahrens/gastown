@@ -46,6 +46,37 @@ func TestSecretShape(t *testing.T) {
 	}
 }
 
+// TestBackupSecretEntryRowRoots pins the row-root rule backupSecretEntry keeps:
+// a top-level directory is a row root whatever it is named for, so a row named
+// "token-svc" is walked, while the same name as a file is dropped. A path's
+// first segment is a row root too, so a plain path below a token-named rig is
+// kept and only a later secret-shaped segment drops the path (gt-4kf6kk,
+// gt-dyxlqp).
+func TestBackupSecretEntryRowRoots(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		label string
+		name  string
+		isDir bool
+		want  bool
+	}{
+		{"a top-level directory named for a token is a row root", "token-svc", true, false},
+		{"the same name as a file is dropped", "token-svc", false, true},
+		{"a plain path below a token-named first segment is kept", "token-svc/settings", true, false},
+		{"a plain file path below a token-named first segment is kept", "token-svc/settings/config.json", false, false},
+		{"a secret-shaped later directory drops the path", "token-svc/settings/secrets", true, true},
+		{"a secret-shaped later file drops the path", "token-svc/settings/token.json", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			t.Parallel()
+			if got := backupSecretEntry(tc.name, tc.isDir); got != tc.want {
+				t.Errorf("backupSecretEntry(%q, %v) = %v, want %v", tc.name, tc.isDir, got, tc.want)
+			}
+		})
+	}
+}
+
 // secretsManifestShapeViolations names every mounted secret a backup would
 // carry verbatim because its name does not satisfy SecretShape. It reads the
 // mounted files list alone: an unclaimed name is recorded, never mounted and

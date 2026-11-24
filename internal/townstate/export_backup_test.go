@@ -219,6 +219,46 @@ func TestExportBackupKeepsTheRowsOfARigNamedForAToken(t *testing.T) {
 	}
 }
 
+// TestExportBackupKeepsATopLevelDirectoryRowNamedForAToken: a top-level
+// directory is a row root, so the export walks a row whose own name holds
+// "token" instead of dropping it whole: its plain files reach the archive,
+// while a secret-shaped file and a secret-shaped directory below it are left
+// out and counted under SkipSecret without a name (gt-4kf6kk, gt-dyxlqp).
+func TestExportBackupKeepsATopLevelDirectoryRowNamedForAToken(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeStateFile(t, town, "token-svc/config.json", `{"ok":true}`, 0o644)
+	writeStateFile(t, town, "token-svc/settings/config.json", `{"theme":"dark"}`, 0o644)
+	writeStateFile(t, town, "token-svc/settings/token.json", `{"token":"not a real one"}`, 0o600)
+	writeStateFile(t, town, "token-svc/settings/secrets/session.json", `{"password":"not a real one"}`, 0o600)
+	m := &Manifest{Entries: []Entry{
+		{Path: "token-svc", Owner: OwnerDaemon, Backup: true, Why: "test: a top-level directory named for a token"},
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("the test manifest: %v", err)
+	}
+
+	var stream bytes.Buffer
+	sum, err := Export(&stream, town, m, ExportOptions{Backup: true, AllowNoRigs: true})
+	if err != nil {
+		t.Fatalf("Export with Backup: %v", err)
+	}
+	names := archiveNames(t, stream.Bytes())
+	for _, want := range []string{"token-svc/config.json", "token-svc/settings/config.json"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("the row named for a token lost its plain file %s: %v", want, names)
+		}
+	}
+	for _, gone := range []string{"token-svc/settings/token.json", "token-svc/settings/secrets", "token-svc/settings/secrets/session.json"} {
+		if slices.Contains(names, gone) || slices.Contains(names, gone+"/") {
+			t.Errorf("the backup archive carries %s: %v", gone, names)
+		}
+	}
+	if got := sum.Skipped[SkipSecret]; got != 2 {
+		t.Errorf("summary SkipSecret = %d, want 2 (the token file and the secrets directory)", got)
+	}
+}
+
 // TestExportBackupRefusesATownWithNoRigs drives the backup path's refusal: a
 // backup row carrying the rig placeholder with no registered rig is refused
 // with ErrNoRigs, and AllowNoRigs counts the walked set's rig rows in the
