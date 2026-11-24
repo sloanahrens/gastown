@@ -34,7 +34,7 @@ import (
 // neither tab-indented nor blank. The ordering case reads this source instead
 // of a dry run, because make runs a recipe line that holds $(MAKE) even under
 // -n and presubmit has one, so `make -n presubmit` builds and tests the
-// checkout (gt-digv4n, gt-qax2ta, sweep f213fda4, 398 s).
+// checkout (gt-digv4n).
 func presubmitRecipe(makefile string) (string, error) {
 	lines := strings.Split(makefile, "\n")
 	for i, line := range lines {
