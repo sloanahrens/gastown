@@ -186,7 +186,7 @@ type doltImageCheck struct {
 }
 
 // run makes the check when it is due at now, and does nothing otherwise. It
-// reports each failed read through logf, once per run.
+// reports a failed read through logf, once per run.
 //
 // A failed read with no other source leaves the item as it was: a registry or
 // docker that does not answer says nothing about whether the image is behind,
@@ -194,8 +194,8 @@ type doltImageCheck struct {
 //
 // The container's image is read with docker first, which is what a daemon on
 // the host that runs the container sees. When that read fails (the daemon runs
-// in a container, whose docker is its sweep engine, not the Docker Desktop that
-// runs gt-dolt), the Dolt server itself is asked what version it runs.
+// in a container, whose docker is its sweep engine, not the host's), the Dolt
+// server is asked; the docker error is logged only if that fallback fails too.
 func (c *doltImageCheck) run(ctx context.Context, townRoot string, now time.Time, logf func(string, ...any)) {
 	if now.Before(c.next) {
 		return
@@ -213,10 +213,10 @@ func (c *doltImageCheck) run(ctx context.Context, townRoot string, now time.Time
 	}
 	running, err := c.runningVersion(ctx, container)
 	if err != nil {
-		logf("dolt image check: reading the image of container %s with docker: %v", container, err)
+		dockerErr := err
 		running, err = c.serverRunningVersion(ctx)
 		if err != nil {
-			logf("dolt image check: reading the running version from the Dolt server: %v", err)
+			logf("dolt image check: reading the running version of container %s with docker: %v; from the Dolt server: %v", container, dockerErr, err)
 			return
 		}
 	}
