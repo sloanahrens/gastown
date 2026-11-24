@@ -1612,20 +1612,20 @@ func TestMaintenanceGCWindowWithNothingBackedUpIsNotAFailure(t *testing.T) {
 	}
 }
 
-// A backup root the window's check cannot read proves nothing about the
-// databases, so the gc runs on none of them (gt-gd75is).
-func TestMaintenanceGCWindowSkipsGCWhenBackupRootFails(t *testing.T) {
+// A backup root the window's coverage check cannot read proves nothing about
+// the databases, so the gc runs on none of them and the night fails loudly: a
+// completed outcome would say the databases were checked (gt-gd75is). The root
+// is readable while the night's backup is taken and unreadable once it is on
+// disk, which is the read the coverage check makes.
+func TestMaintenanceGCWindowFailsWhenBackupRootCannotBeRead(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
-	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
-	reads := 0
 	root := f.backupRoot
 	d.maint.backupRoot = func() (string, error) {
-		reads++
-		if reads > 1 {
-			return "", errors.New("injected: no backup root")
+		if doltbackup.Taken(root, gcTestNow) {
+			return "", errors.New("injected: the backup root went away")
 		}
 		return root, nil
 	}
@@ -1635,8 +1635,11 @@ func TestMaintenanceGCWindowSkipsGCWhenBackupRootFails(t *testing.T) {
 	if len(f.gcCalls) != 0 {
 		t.Errorf("gc ran with no readable backup root: %v", f.gcCalls)
 	}
-	if !strings.Contains(logs.String(), "injected: no backup root") {
-		t.Errorf("log does not name the backup root failure:\n%s", logs.String())
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "injected: the backup root went away") {
+		t.Errorf("escalations = %v, want one naming the backup root failure", f.escalations)
+	}
+	if strings.Contains(logs.String(), "cycle completed") {
+		t.Errorf("the night reported completed with no readable backup root:\n%s", logs.String())
 	}
 }
 

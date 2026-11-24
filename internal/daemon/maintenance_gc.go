@@ -1024,13 +1024,19 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 // backs nothing up, so the tick's list can hold a database created after it;
 // gc'ing that one breaks the backup-first rule exactly as the catch-up's reuse
 // of an older backup does (gt-gd75is). A backup root that cannot be read
-// leaves nothing ready: no gc runs without a backup it can prove holds the
-// database, and an empty ready list is a completed night, not a failure.
+// leaves the coverage unknown, so no gc runs and the night fails and escalates,
+// as the same unreadable setting fails the backup step: a completed outcome
+// would report a night the gc never checked. An empty ready list is a
+// completed night, not a failure.
 func (d *Daemon) gcWindowBackedUp(databases []string, dataDir string, localDataDir bool) maintenanceGCResult {
 	root, err := d.maintenance().backupRoot()
 	if err != nil {
-		d.logger.Printf("scheduled_maintenance: gc skipped: cannot read the backup root: %v", err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+		d.logger.Printf("scheduled_maintenance: gc skipped: cannot read the backup root: %v — no gc tonight", err)
+		d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
+			"scheduled_maintenance: cannot read the backup root to check which databases tonight's backup holds: %v\n"+
+				"No gc ran this cycle. Tonight's backup is on disk under the configured root; "+
+				"collect gt dolt status before any Dolt restart.", err))
+		return maintenanceGCResult{outcome: gcOutcomeFailed, reason: "backup root: " + err.Error()}
 	}
 	ready, unbacked := catchUpBackedUp(d.maintenance().now(), root, databases)
 	if len(unbacked) > 0 {
