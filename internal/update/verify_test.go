@@ -153,6 +153,29 @@ func sweepGreenProbes() *fakeSweepProbes {
 	}
 }
 
+// fakePairSweepProbes is fakeVerifyProbes with both extensions: the pair's two
+// records and the sweep launch answer.
+type fakePairSweepProbes struct {
+	*fakePairProbes
+	started  bool
+	detail   string
+	errSweep error
+}
+
+func (p *fakePairSweepProbes) SweepLaunch(context.Context) (bool, string, error) {
+	return p.started, p.detail, p.errSweep
+}
+
+// pairSweepGreenProbes is every probe matching want, the pair on its digest and
+// a sweep stage that started.
+func pairSweepGreenProbes() *fakePairSweepProbes {
+	return &fakePairSweepProbes{
+		fakePairProbes: pairGreenProbes(),
+		started:        true,
+		detail:         "stage 1/3 ran and reported RED",
+	}
+}
+
 // fakeVerifyClock is a clock the fake sleep advances, so no test waits.
 type fakeVerifyClock struct{ now time.Time }
 
@@ -1121,6 +1144,13 @@ var verifyPairNames = []string{
 	checkPolecatAnnotation, checkDevTag,
 }
 
+// verifyPairSweepNames are the checks a probe set implementing both PairProbes
+// and SweepProbes gets, in order: the sweep-launch check follows the pair checks.
+var verifyPairSweepNames = []string{
+	checkGTVersion, checkDaemonVersion, checkImageLabel, checkHealth,
+	checkPolecatAnnotation, checkDevTag, checkSweepLaunch,
+}
+
 func TestVerifyPairProbesAddsTwoChecks(t *testing.T) {
 	t.Parallel()
 	probes := pairGreenProbes()
@@ -1278,6 +1308,60 @@ func TestVerifySweepLaunchCheck(t *testing.T) {
 		pair := Verify(context.Background(), pairGreenProbes(), verifyTestWant)
 		assertCheckNames(t, pair, verifyPairNames)
 	})
+}
+
+// TestVerifySweepLaunchRunsAfterThePairChecks pins where the sweep-launch check
+// sits for a probe set that implements both PairProbes and SweepProbes: last,
+// after the polecat-annotation and dev-tag checks. A failing sweep probe hides
+// nothing, since it fails its own check and leaves every other check with the
+// result it would have had on its own.
+func TestVerifySweepLaunchRunsAfterThePairChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*fakePairSweepProbes)
+		failed []string
+		detail string
+	}{
+		{
+			name:   "every probe green",
+			detail: "stage 1/3 ran and reported RED",
+		},
+		{
+			name:   "a sweep probe error fails only the sweep-launch check",
+			mutate: func(p *fakePairSweepProbes) { p.errSweep = errors.New("gt sweep run failed") },
+			failed: []string{checkSweepLaunch},
+			detail: "gt sweep run failed",
+		},
+		{
+			name:   "a sweep stage that never started fails only the sweep-launch check",
+			mutate: func(p *fakePairSweepProbes) { p.started, p.detail = false, "no sweep stage could be launched" },
+			failed: []string{checkSweepLaunch},
+			detail: "no sweep stage could be launched",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := pairSweepGreenProbes()
+			if tt.mutate != nil {
+				tt.mutate(probes)
+			}
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertCheckNames(t, checks, verifyPairSweepNames)
+			assertFailedChecks(t, checks, tt.failed...)
+			for _, name := range []string{checkPolecatAnnotation, checkDevTag} {
+				if detail := findCheck(t, checks, name).Detail; detail != verifyTestPolecat {
+					t.Errorf("check %q detail = %q, want the pair's digest %q", name, detail, verifyTestPolecat)
+				}
+			}
+			if detail := findCheck(t, checks, checkSweepLaunch).Detail; detail != tt.detail {
+				t.Errorf("check %q detail = %q, want %q", checkSweepLaunch, detail, tt.detail)
+			}
+		})
+	}
 }
 
 func TestSameCommit(t *testing.T) {
