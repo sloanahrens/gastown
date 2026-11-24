@@ -1,6 +1,7 @@
 package land
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -35,6 +36,46 @@ func TestGateRunRotationDecisions(t *testing.T) {
 	}
 	if got := groupGateRunsByMonth(rows); !reflect.DeepEqual(got, want) {
 		t.Errorf("groupGateRunsByMonth() = %+v, want %+v", got, want)
+	}
+}
+
+// TestGroupGateRunsByMonthKeepsInputOrder: rows of one month come out in input
+// order even when every timestamp is equal, and the earlier month's group comes
+// first. An unstable sort keeps a slice of a dozen or fewer equal-key rows in
+// order, so the later month holds 30 rows: replacing sort.SliceStable with
+// sort.Slice reorders them (gt-vlnjyz).
+func TestGroupGateRunsByMonthKeepsInputOrder(t *testing.T) {
+	t.Parallel()
+	laterTS := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	rows := make([]GateRun, 0, 31)
+	for i := 0; i < 30; i++ {
+		rows = append(rows, GateRun{Bead: fmt.Sprintf("%02d", i), TS: laterTS})
+	}
+	rows = append(rows, GateRun{Bead: "early", TS: time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC)})
+
+	groups := groupGateRunsByMonth(rows)
+	if len(groups) != 2 {
+		t.Fatalf("groupGateRunsByMonth(%d rows) returned %d groups, want 2", len(rows), len(groups))
+	}
+	if groups[0].File != "gate-runs-2026-10.jsonl.gz" || len(groups[0].Rows) != 1 || groups[0].Rows[0].Bead != "early" {
+		t.Errorf("first group = %+v, want the earlier month alone holding bead early", groups[0])
+	}
+	if got, want := groups[1].File, "gate-runs-2026-11.jsonl.gz"; got != want {
+		t.Errorf("second group file = %q, want %q", got, want)
+	}
+	var got []string
+	for _, row := range groups[1].Rows {
+		got = append(got, row.Bead)
+	}
+	want := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		want = append(want, fmt.Sprintf("%02d", i))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("later month's beads = %v, want input order %v", got, want)
+	}
+	if got := groupGateRunsByMonth(nil); len(got) != 0 {
+		t.Errorf("groupGateRunsByMonth(nil) = %+v, want no groups", got)
 	}
 }
 
