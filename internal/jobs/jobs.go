@@ -301,14 +301,24 @@ func runDuration(j Job) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// runAllowance is the extra time a row earns on top of its cadence for its
+// newest run: that run's duration, capped at one cadence. The cap keeps a run
+// that reports an absurd duration, from a clock jump or a bad stat, from
+// holding a job out of overdue for ever: at worst the row is one whole cycle
+// late, the same slack a run that took a full cadence gets. A run shorter than
+// the cadence still earns exactly its duration.
+func runAllowance(j Job) time.Duration {
+	return min(runDuration(j), j.Cadence)
+}
+
 // dueOf is when a row is due by its cadence: its last run plus the cadence,
-// the newest run's own duration and the grace. Nil when the row has no last
-// run or no cadence.
+// the newest run's allowance and the grace. Nil when the row has no last run
+// or no cadence.
 func dueOf(j Job) *time.Time {
 	if j.LastRun == nil || j.Cadence <= 0 {
 		return nil
 	}
-	due := j.LastRun.Add(j.Cadence + runDuration(j) + graceOf(j.Cadence))
+	due := j.LastRun.Add(j.Cadence + runAllowance(j) + graceOf(j.Cadence))
 	return &due
 }
 
@@ -354,7 +364,7 @@ func doltGCRows(townRoot string, now time.Time) []Job {
 }
 
 // stateOf judges one job against the same allowance dueOf computes with: the
-// cadence, the newest run's own duration and the grace. An unreadable last-run
+// cadence, the newest run's allowance and the grace. An unreadable last-run
 // record or an unreadable interval makes the row unknown before anything else
 // is tried, so a broken input never shows as a clean state.
 func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State {
@@ -369,7 +379,7 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 		return StateNeverRun
 	}
 	grace := graceOf(j.Cadence)
-	if now.Sub(*j.LastRun) > j.Cadence+runDuration(j)+grace {
+	if now.Sub(*j.LastRun) > j.Cadence+runAllowance(j)+grace {
 		return StateOverdue
 	}
 	return StateOK
