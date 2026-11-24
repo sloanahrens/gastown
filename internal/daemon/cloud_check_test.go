@@ -572,6 +572,38 @@ func TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
 	}
 }
 
+// TestCloudCheckFailedAlertRaisesAndClearsBesideTheReleasebotAlert: the two
+// alerts are independent. A failing run raises cloud_check:failed beside an
+// open release bot alert, and a clean good report clears both.
+func TestCloudCheckFailedAlertRaisesAndClearsBesideTheReleasebotAlert(t *testing.T) {
+	t.Parallel()
+	d, _, f := cloudCheckReleasebotDaemon(t)
+	f.statusBody = cloudCheckStatusAt(f.now,
+		`{"level":"warn","section":"Release bot","text":"refused its last run"}`)
+	d.runCloudCheckPatrol()
+	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+		t.Fatalf("the release bot item escalated under %q, want %q", f.escalationKeys, want)
+	}
+
+	f.now = f.now.Add(10 * time.Minute)
+	f.err = cloudCheckExitErr(2)
+	d.runCloudCheckPatrol()
+	if want := []string{cloudCheckReleasebotAlertKey, cloudCheckAlertKey}; !slices.Equal(f.escalationKeys, want) {
+		t.Fatalf("escalations under keys %q, want %q: the failing run raises its own alert beside the release bot's", f.escalationKeys, want)
+	}
+	if len(f.clears) != 0 {
+		t.Fatalf("clears = %q after a failing run, want none", f.clears)
+	}
+
+	f.now = f.now.Add(10 * time.Minute)
+	f.err = nil
+	f.statusBody = cloudCheckStatusAt(f.now)
+	d.runCloudCheckPatrol()
+	if want := []string{cloudCheckReleasebotAlertKey, cloudCheckAlertKey}; !slices.Equal(f.clears, want) {
+		t.Errorf("clears = %q after a clean good run, want exactly %q", f.clears, want)
+	}
+}
+
 // TestCloudCheckReleasebotSeamFailures: a refused raise is logged and retried
 // next run; a refused clear keeps the marker for the next clean report to clear.
 func TestCloudCheckReleasebotSeamFailures(t *testing.T) {
