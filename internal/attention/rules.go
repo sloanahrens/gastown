@@ -270,6 +270,10 @@ const (
 	// (gt-y705n1).
 	RuleClusterDriftUnreadable = "cluster.drift_unreadable"
 
+	// RuleBDGatewayCapHit is the bd gateway refusing calls at its concurrency
+	// cap (gt-7oy397).
+	RuleBDGatewayCapHit = "bd_gateway.cap_hit"
+
 	// RuleMainUnknown is a rig's red-main check that could not judge main for
 	// several runs in a row: the verdict is unknown, and no red-main bead can
 	// say so (gt-glc2yh).
@@ -501,6 +505,11 @@ var ruleFlags = map[string]RuleFlags{
 	// failure: it queues beside the drift row, and an unread cluster is not
 	// reported as one in step (gt-y705n1).
 	RuleClusterDriftUnreadable: flagsAsk,
+	// Callers turned away at the gateway's cap are work that did not run, so
+	// the operator is woken the way an idle dispatcher wakes it (gt-7oy397).
+	RuleBDGatewayCapHit: flagsWake,
+	// Callers turned away at the gateway's cap are work that did not run, so
+	// the operator is woken the way an idle dispatcher wakes it (gt-7oy397).
 	// A main nobody could judge blocks the landings a red one does: it carries
 	// main.red's class, and the overseer is woken to find what the check could
 	// not read (gt-glc2yh).
@@ -610,6 +619,7 @@ var kindRules = map[Kind]string{
 	KindGateRunLog:                    RuleGateRunLog,
 	KindClusterDrift:                  RuleClusterDrift,
 	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
+	KindBDGatewayCapHit:               RuleBDGatewayCapHit,
 	KindMainUnknown:                   RuleMainUnknown,
 }
 

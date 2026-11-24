@@ -249,6 +249,9 @@ const (
 	// the recorded render flags, so whether the cluster is in step is unknown
 	// (gt-y705n1).
 	KindClusterDriftUnreadable Kind = "cluster-drift-unreadable"
+	// KindBDGatewayCapHit: the bd gateway refused calls at its concurrency cap,
+	// so bd callers were turned away while the cap held (gt-7oy397).
+	KindBDGatewayCapHit Kind = "bd-gateway-cap-hit"
 	// KindMainUnknown: the rig's red-main check could not judge main for
 	// several runs in a row, so whether main is red is unknown (gt-glc2yh).
 	KindMainUnknown Kind = "main-unknown"
@@ -281,6 +284,7 @@ func Kinds() []Kind {
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
+		KindBDGatewayCapHit,
 		KindMainUnknown,
 		KindRedHoldHeld,
 		KindSeatEndNoRecord,
