@@ -174,6 +174,7 @@ func TestSpecSplitStepTick(t *testing.T) {
 				}
 				return "split gt-b into two pieces\n", nil
 			},
+			Store: func() specSplitManualStore { return &specSplitManualWrites{} },
 		}
 		specSplitRunTick(t, d)
 		if want := []string{"gt-a", "gt-b"}; !slices.Equal(applied, want) {
@@ -208,6 +209,7 @@ func TestSpecSplitStepTick(t *testing.T) {
 				}
 				return "split " + id + " into two pieces\n", nil
 			},
+			Store: func() specSplitManualStore { return &specSplitManualWrites{} },
 		}
 		specSplitRunTick(t, d)
 		// gt-c is left for the next tick: the two refusals used two of the
@@ -234,6 +236,7 @@ func TestSpecSplitStepTick(t *testing.T) {
 				refused = append(refused, id)
 				return "verdict: fails: piece B: lint refused\n", errors.New("exit status 1")
 			},
+			Store: func() specSplitManualStore { return &specSplitManualWrites{} },
 		}
 		specSplitRunTick(t, d)
 		if len(refused) != 4 {
@@ -381,4 +384,62 @@ func TestSpecSplitStepTick(t *testing.T) {
 			t.Errorf("log = %q, want the line that says the running tick skipped this one", logged.String())
 		}
 	})
+}
+
+// specSplitManualWrites records the writes the refusal mark makes, failing one
+// when a test says so.
+type specSplitManualWrites struct {
+	labelWrites, commentWrites []string
+	labelErr, commentErr       error
+}
+
+func (w *specSplitManualWrites) Update(_ string, opts beads.UpdateOptions) error {
+	w.labelWrites = append(w.labelWrites, opts.AddLabels...)
+	return w.labelErr
+}
+
+func (w *specSplitManualWrites) AddComment(_, text string) error {
+	w.commentWrites = append(w.commentWrites, text)
+	return w.commentErr
+}
+
+func TestSpecSplitStepRefused(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, report         string
+		writes               specSplitManualWrites
+		ticks, wantComments  int
+		wantComment, wantLog string
+	}{
+		{"a refused split gets one comment and the label and is not taken again", "verdict: fails: piece A: lint refused: too big\n", specSplitManualWrites{}, 2, 1, "lint refused: too big", "was not split"},
+		{"a label write that fails skips the comment", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{labelErr: errors.New("bd is down")}, 1, 0, "", "cannot add split-manual"},
+		{"a comment write that fails leaves the label", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{commentErr: errors.New("bd is down")}, 1, 1, "", "cannot comment the refusal"},
+		{"a refusal with no report names the apply's error", "", specSplitManualWrites{}, 1, 1, "cannot read bead gt-a", "was not split"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, logged := specSplitTestDaemon(t, true)
+			d.specSplitDeps = SpecSplitDeps{
+				Candidates: func() ([]*beads.Issue, error) {
+					return []*beads.Issue{specSplitTestBead("gt-a", "", append([]string{"split"}, tc.writes.labelWrites...)...)}, nil
+				},
+				Apply: func(_, _ string) (string, error) { return tc.report, errors.New("cannot read bead gt-a") },
+				Store: func() specSplitManualStore { return &tc.writes },
+			}
+			for range tc.ticks {
+				specSplitRunTick(t, d)
+			}
+			if got := strings.Join(tc.writes.labelWrites, ","); got != "split-manual" {
+				t.Errorf("label writes = %q, want split-manual", got)
+			}
+			if len(tc.writes.commentWrites) != tc.wantComments {
+				t.Errorf("wrote %d comments, want %d: %v", len(tc.writes.commentWrites), tc.wantComments, tc.writes.commentWrites)
+			} else if tc.wantComments > 0 && !strings.Contains(tc.writes.commentWrites[0], tc.wantComment) {
+				t.Errorf("comment = %q, want it to name %q", tc.writes.commentWrites[0], tc.wantComment)
+			}
+			if !strings.Contains(logged.String(), tc.wantLog) {
+				t.Errorf("log = %q, want it to name %q", logged.String(), tc.wantLog)
+			}
+		})
+	}
 }
