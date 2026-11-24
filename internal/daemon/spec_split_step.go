@@ -128,6 +128,18 @@ func (d *Daemon) specSplitTick() {
 	}
 }
 
+// specSplitCyclesDone returns a channel closed once every tick goroutine the
+// step has started has finished. A test waits on it under a bound: a bare
+// WaitGroup.Wait has none, and a tick that never ended would hang the run.
+func (d *Daemon) specSplitCyclesDone() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		d.specSplitCycles.Wait()
+		close(done)
+	}()
+	return done
+}
+
 // specSplitCandidates reads every open, unassigned bead carrying the split
 // label from each rig's own store. A store that cannot be read fails the
 // whole read, so a tick never splits from a partial town.

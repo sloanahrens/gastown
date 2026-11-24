@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -42,7 +43,7 @@ func specSplitTestDaemon(t *testing.T, enabled bool) (*Daemon, *lockedBuffer) {
 func specSplitRunTick(t *testing.T, d *Daemon) {
 	t.Helper()
 	d.specSplitStep()
-	d.specSplitCycles.Wait()
+	within(t, 5*time.Second, "the tick goroutine", d.specSplitCyclesDone())
 }
 
 // specSplitTestBead is one candidate the fake reader answers.
@@ -350,6 +351,8 @@ func TestSpecSplitStepTick(t *testing.T) {
 		d, logged := specSplitTestDaemon(t, true)
 		entered := make(chan struct{}, 1)
 		release := make(chan struct{})
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelRelease()
 		var applies atomic.Int32
 		d.specSplitDeps = SpecSplitDeps{
 			Candidates: func() ([]*beads.Issue, error) {
@@ -358,7 +361,10 @@ func TestSpecSplitStepTick(t *testing.T) {
 			Apply: func(_, id string) (string, error) {
 				applies.Add(1)
 				entered <- struct{}{}
-				<-release
+				select {
+				case <-release:
+				case <-releaseCtx.Done():
+				}
 				return "split gt-a into two pieces\n", nil
 			},
 		}
@@ -367,7 +373,7 @@ func TestSpecSplitStepTick(t *testing.T) {
 		// A heartbeat while the apply runs starts no second tick.
 		d.specSplitStep()
 		close(release)
-		d.specSplitCycles.Wait()
+		within(t, 5*time.Second, "the tick goroutine", d.specSplitCyclesDone())
 		if got := applies.Load(); got != 1 {
 			t.Errorf("the step applied %d beads, want 1: a second tick started while the first was in its apply", got)
 		}
