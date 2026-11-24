@@ -62,7 +62,7 @@ func TestExportBackupOmitsAndListsAFlaggedFile(t *testing.T) {
 		t.Errorf("Omitted = %v, SkipSecret = %d; want both flagged files listed in order and counted", sum.Omitted, sum.Skipped[SkipSecret])
 	}
 	line := sum.String()
-	if !strings.Contains(line, "omitted 3") || strings.Contains(line, "notes.json") || strings.Contains(line, omittedToken) {
+	if !strings.Contains(line, "omitted 3 files whose content is flagged") || strings.Contains(line, "notes.json") || strings.Contains(line, omittedToken) {
 		t.Errorf("summary = %q, want the omitted count and no name or value", line)
 	}
 	if bytes.Contains(backup.Bytes(), []byte(omittedToken)) {
@@ -75,6 +75,38 @@ func TestExportBackupOmitsAndListsAFlaggedFile(t *testing.T) {
 	}
 	if got := archiveNames(t, plain.Bytes()); !slices.Contains(got, "settings/notes.json") || !slices.Contains(got, "settings/a-notes.json") || !slices.Contains(got, "settings/clean.json") {
 		t.Errorf("non-backup archive = %v, want both files", got)
+	}
+}
+
+// TestExportSummaryPrintsTheOmittedLine: the omitted line says the content is
+// flagged, not that it holds a credential, with the singular noun for one file,
+// and it never names a file.
+func TestExportSummaryPrintsTheOmittedLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		omitted []string
+		want    string
+	}{
+		{name: "one file", omitted: []string{"settings/notes.json"}, want: "omitted 1 file whose content is flagged"},
+		{name: "three files", omitted: []string{"alpha/x.json", "settings/a-notes.json", "settings/notes.json"}, want: "omitted 3 files whose content is flagged"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			line := ExportSummary{Omitted: c.omitted}.String()
+			if !strings.Contains(line, c.want) {
+				t.Errorf("summary = %q, want %q", line, c.want)
+			}
+			for _, name := range c.omitted {
+				if strings.Contains(line, name) {
+					t.Errorf("summary = %q, names %s; want no name", line, name)
+				}
+			}
+			if strings.Contains(line, "credential") {
+				t.Errorf("summary = %q, claims a credential", line)
+			}
+		})
 	}
 }
 
@@ -155,6 +187,57 @@ func TestExportBackupWritesTheBytesItChecked(t *testing.T) {
 	if bytes.Contains(stream.Bytes(), nested.Bytes()) {
 		t.Fatal("the archive holds the bytes of a later read")
 	}
+}
+
+// TestExportBackupReadsAKnownSizeIntoOneBuffer: a file the walk statted is read
+// into a first buffer of its stat size plus one byte, so a large file is not
+// copied through io.ReadAll's doubling.
+func TestExportBackupReadsAKnownSizeIntoOneBuffer(t *testing.T) {
+	t.Parallel()
+	town := omittedTown(t)
+	const size = 8192
+	content := strings.Repeat("a", size)
+	writeStateFile(t, town, "settings/clean.json", content, 0o644)
+
+	reads := &recordReadBuffers{reader: strings.NewReader(content)}
+	open := func(o *townOps) {
+		real := osOps().open
+		o.open = func(p string) (io.ReadCloser, error) {
+			if strings.HasSuffix(filepath.ToSlash(p), "/settings/clean.json") {
+				return io.NopCloser(reads), nil
+			}
+			return real(p)
+		}
+	}
+
+	var stream bytes.Buffer
+	if _, err := Export(&stream, town, omittedManifest(t), ExportOptions{Backup: true, ops: opsWith(open)}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(reads.lengths) == 0 || reads.lengths[0] != size+1 {
+		t.Fatalf("read buffer lengths = %v, want the first to be %d", reads.lengths, size+1)
+	}
+	for _, n := range reads.lengths {
+		if n > size+1 {
+			t.Fatalf("read buffer lengths = %v, want none over %d, so the read never grew", reads.lengths, size+1)
+		}
+	}
+	for _, e := range readArchive(t, stream.Bytes()) {
+		if e.hdr.Name == "settings/clean.json" && string(e.data) != content {
+			t.Fatalf("archived %q, want the file's content", e.data)
+		}
+	}
+}
+
+// recordReadBuffers records the length of each buffer handed to Read.
+type recordReadBuffers struct {
+	reader  io.Reader
+	lengths []int
+}
+
+func (r *recordReadBuffers) Read(p []byte) (int, error) {
+	r.lengths = append(r.lengths, len(p))
+	return r.reader.Read(p)
 }
 
 // TestExportBackupOmitsAFileOverTheBound: a file larger than maxFlaggedBytes is

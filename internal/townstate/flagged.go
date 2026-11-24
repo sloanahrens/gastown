@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/steveyegge/gastown/internal/guard"
 )
@@ -31,20 +32,48 @@ var gzipMagic = []byte{0x1f, 0x8b}
 // Only gzip is read: a credential inside a zip, bzip2, xz or zstd file is not
 // found.
 func FlaggedContent(r io.Reader) guard.Result {
-	_, res := checkedContent(r)
+	_, res := checkedContent(r, 0)
 	return res
 }
 
 // checkedContent is FlaggedContent that also returns the bytes it judged, as
 // read from r and not decompressed: a caller that writes a file out writes
 // these, so what is written is what was checked and no second read can differ.
-// The bytes are meaningful only when the result is Pass.
-func checkedContent(r io.Reader) ([]byte, guard.Result) {
-	data, err := io.ReadAll(io.LimitReader(r, maxFlaggedBytes+1))
+// The bytes are meaningful only when the result is Pass. size is the file's
+// stat size, which sizes the read; zero or an unknown size keeps the growing read.
+func checkedContent(r io.Reader, size int64) ([]byte, guard.Result) {
+	var data []byte
+	var err error
+	if size > 0 && size <= maxFlaggedBytes {
+		data, err = readSized(r, size)
+	} else {
+		data, err = io.ReadAll(io.LimitReader(r, maxFlaggedBytes+1))
+	}
 	if err != nil {
 		return nil, guard.Unknown(fmt.Errorf("townstate: reading content: %w", err))
 	}
 	return data, judgeContent(data)
+}
+
+// readSized reads r into one buffer of the stat's size plus one byte, so a large
+// file is not copied through io.ReadAll's doubling. A file that grew past its
+// stat moves to the doubling read rather than failing.
+func readSized(r io.Reader, size int64) ([]byte, error) {
+	buf := make([]byte, 0, size+1)
+	src := io.LimitReader(r, maxFlaggedBytes+1)
+	for {
+		if len(buf) == cap(buf) {
+			buf = slices.Grow(buf, len(buf))
+		}
+		n, err := src.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if errors.Is(err, io.EOF) {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // judgeContent is the verdict on data already read.
