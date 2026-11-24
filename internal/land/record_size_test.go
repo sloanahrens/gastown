@@ -31,9 +31,7 @@ func (r *numstatRepo) DiffNumstat(base, head string) (string, error) {
 	return r.out, r.err
 }
 
-// CommitLineStatsInRange answers from the test's canned log only: a fake with
-// no log canned fails, so no test reads a repository for a count it did not
-// set (gt-dhun8o).
+// CommitLineStatsInRange answers only the canned log or error; a fake with neither fails (gt-dhun8o).
 func (r *numstatRepo) CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error) {
 	if r.commits == nil && r.commitErr == nil {
 		return nil, errors.New("no commit log canned")
