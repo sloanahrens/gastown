@@ -205,3 +205,28 @@ func poolOccupancyDoc(t *testing.T) string {
 	t.Fatal("poolOccupancy has no declaration in pool_occupancy.go")
 	return ""
 }
+
+// TestNamedClassSplit pins the one rule both readers of a split share
+// (gt-glwmdc): a seat whose read named no class counts under "", and that
+// blank is a name neither reader can print, so the split is dropped.
+func TestNamedClassSplit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		byClass map[string]int
+		want    map[string]int
+	}{
+		{name: "nil map", byClass: nil, want: nil},
+		{name: "all classes named", byClass: map[string]int{"idle-submitted": 2, "unread": 1}, want: map[string]int{"idle-submitted": 2, "unread": 1}},
+		{name: "one seat under the empty class", byClass: map[string]int{"unread": 1, "": 1}, want: nil},
+		{name: "only the empty class", byClass: map[string]int{"": 3}, want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := namedClassSplit(tc.byClass); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("namedClassSplit(%v) = %v, want %v", tc.byClass, got, tc.want)
+			}
+		})
+	}
+}

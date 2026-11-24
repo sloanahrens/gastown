@@ -40,6 +40,17 @@ func (t *poolOccupancyTally) add(s poolSession) {
 	}
 }
 
+// namedClassSplit returns byClass when every dead-hooked seat named its
+// disposition class, and nil when a seat's read named none: such a seat counts
+// under "", and a blank is not a name the pool count or the tick line can
+// print (gt-ueb3g2).
+func namedClassSplit(byClass map[string]int) map[string]int {
+	if byClass[""] > 0 {
+		return nil
+	}
+	return byClass
+}
+
 // poolOccupancy counts the seats in sessions. Every seat counts toward a seat
 // cap except a parkedStale one, whose seat is released (gt-t7k92), so a
 // parkedStale seat counts in no field. The flags are not exclusive, and nothing
