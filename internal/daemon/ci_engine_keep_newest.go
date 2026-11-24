@@ -17,11 +17,17 @@ const (
 // of every gastown-* repository they are tagged in. An image is named only when it is
 // past the cut in each such repository, and never when it is used or protected. A
 // protected image still takes its place in the order, so it counts toward the five.
+// An image whose created time is absent or zero takes no place in the order: it is
+// never named, and the five newest are counted over the images that have a time.
 func ciEngineBuiltExcess(images map[string]ciEngineImage, created map[string]time.Time, used map[string]bool, protected []string) map[string]bool {
 	byRepo := map[string][]string{}
 	for id, img := range images {
+		// An image with no time to order by is spared, not sorted last.
+		if used[id] || created[id].IsZero() {
+			continue
+		}
 		for _, repo := range ciEngineRepoTags(img.RepoTags) {
-			if !used[id] && strings.HasPrefix(repo, ciEngineBuiltRepoPrefix) {
+			if strings.HasPrefix(repo, ciEngineBuiltRepoPrefix) {
 				byRepo[repo] = append(byRepo[repo], id)
 			}
 		}
