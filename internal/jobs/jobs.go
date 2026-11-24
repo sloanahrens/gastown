@@ -4,7 +4,7 @@
 // due time and whether it is overdue. The list is read-only. It reads the
 // daemon's patrol config, last-run record, maintenance state, update history,
 // backup root, node disk record, disk maintenance ledger and run ledger, and
-// writes nothing, calls no daemon and runs no bd.
+// writes nothing, contacts no running daemon and runs no bd.
 package jobs
 
 import (
