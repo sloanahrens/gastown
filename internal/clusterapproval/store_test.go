@@ -231,7 +231,7 @@ func TestClusterApprovalStoreID(t *testing.T) {
 func TestClusterApprovalStoreReadsRecord(t *testing.T) {
 	t.Parallel()
 	approved := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: approved.Add(6 * time.Hour)}
+	want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: approved.Add(goodWindow)}
 	tests := []struct {
 		name   string
 		settle func(*fakeReadFS)
@@ -433,7 +433,8 @@ func TestClusterApprovalStoreSwappedAncestor(t *testing.T) {
 				return os.Symlink(filepath.Join(base, tt.target), swapped)
 			}}
 			got, err := ReadRecord(fsys, os.Getuid(), os.Getgid(), dir, goodID)
-			want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)}
+			approved := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+			want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: approved.Add(goodWindow)}
 			if !fsys.ran || err != nil || got != want {
 				t.Fatalf("swap ran %v: ReadRecord read %+v, %v after the swap, want the record it checked: %+v", fsys.ran, got, err, want)
 			}

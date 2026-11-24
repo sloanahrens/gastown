@@ -22,10 +22,6 @@ const (
 	ClusterGTSbx   = "gt-sbx"
 )
 
-// MaxValidity is the longest window a record may name between approved_at and
-// expires_at; ParseRecord refuses a longer one.
-const MaxValidity = 24 * time.Hour
-
 // ActApplyPlan is the act kind a record approving an apply of a plan carries.
 const ActApplyPlan = "apply-plan"
 
@@ -76,7 +72,7 @@ type Record struct {
 // ParseRecord decodes the approval record the broker writes and refuses it
 // unless every key is exact, the cluster, plan hash and proposal id are valid,
 // the act is the one known act, both times are in UTC and the window is longer
-// than zero and no longer than MaxValidity. It reads no clock: the caller
+// than zero and no longer than DefaultValidity. It reads no clock: the caller
 // decides whether the window covers its moment.
 func ParseRecord(data []byte) (Record, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -160,8 +156,8 @@ func ParseRecord(data []byte) (Record, error) {
 	if !expiresAt.After(approvedAt) {
 		return Record{}, fmt.Errorf("clusterapproval: the record's expires_at %s is not after approved_at %s", expiresAt.Format(time.RFC3339), approvedAt.Format(time.RFC3339))
 	}
-	if expiresAt.After(approvedAt.Add(MaxValidity)) {
-		return Record{}, fmt.Errorf("clusterapproval: the record is valid for more than %s", MaxValidity)
+	if expiresAt.After(approvedAt.Add(DefaultValidity)) {
+		return Record{}, fmt.Errorf("clusterapproval: the record is valid for more than %s", DefaultValidity)
 	}
 	return Record{
 		Act:        act,

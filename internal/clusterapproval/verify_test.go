@@ -36,8 +36,9 @@ func verifyLive() map[string]string {
 	}
 }
 
-// verifyRecord is a record Verify accepts for verifyPlan at verifyNow; each
-// refusal row changes or drops one thing.
+// verifyRecord is a record Verify accepts for verifyPlan at verifyNow; its
+// window is exactly DefaultValidity, so the "matching" row also pins the accept
+// boundary. Each refusal row changes or drops one thing.
 func verifyRecord() Record {
 	return Record{
 		Act:        ActApplyPlan,
@@ -125,27 +126,15 @@ func TestClusterApprovalVerify(t *testing.T) {
 			wantErr: "not valid until",
 		},
 		{
-			// The declared window is longer than DefaultValidity, but the record
-			// is used at exactly the default, so Verify accepts it: the guard
-			// bounds when the record is used, not the window it names.
-			name: "approved exactly the default ago",
+			// The record is used ten minutes into its window, so not-expired,
+			// not-yet-valid and every other check pass: only the window bound
+			// can refuse it, and this row goes red if that guard goes.
+			name: "window over the default",
 			rec: withVerifyRecord(func(r *Record) {
-				r.ApprovedAt = verifyNow.Add(-DefaultValidity)
-				r.ExpiresAt = verifyNow.Add(time.Minute)
+				r.ExpiresAt = r.ExpiresAt.Add(time.Second)
 			}),
 			plan: verifyPlan(), live: verifyLive(),
-		},
-		{
-			// Not expired, and every other field matches: only the moment is
-			// past DefaultValidity after approved_at, so this row goes red if
-			// the use-window check goes.
-			name: "used more than the default after approval",
-			rec: withVerifyRecord(func(r *Record) {
-				r.ApprovedAt = verifyNow.Add(-DefaultValidity - time.Second)
-				r.ExpiresAt = verifyNow.Add(time.Minute)
-			}),
-			plan: verifyPlan(), live: verifyLive(),
-			wantErr: "approved more than",
+			wantErr: "valid for more than",
 		},
 		{
 			name:    "moved live version",
@@ -248,6 +237,44 @@ func TestClusterApprovalVerifyKeys(t *testing.T) {
 				if strings.Contains(err.Error(), secret) {
 					t.Errorf("error = %q, must not carry the value %q", err, secret)
 				}
+			}
+		})
+	}
+}
+
+// TestClusterApprovalWindowBound pins that ParseRecord and Verify hold the same
+// window rule: both accept a window at or under DefaultValidity and both refuse
+// one over it. A row goes red if either side drifts, so Verify cannot refuse a
+// record ParseRecord accepts (gt-vr6mst).
+func TestClusterApprovalWindowBound(t *testing.T) {
+	t.Parallel()
+	approved, err := time.Parse(time.RFC3339, approvedText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		window time.Duration
+	}{
+		{"under the default", goodWindow},
+		{"at the default", DefaultValidity},
+		{"over the default", DefaultValidity + time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			expires := approved.Add(tt.window)
+			_, parseErr := ParseRecord([]byte(recordText(with(goodRecord(), map[string]any{"expires_at": expires.Format(time.RFC3339)}))))
+			rec := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: expires}
+			// Ten minutes after approval is inside every window these rows
+			// name, so only the window bound can refuse a row.
+			verifyErr := Verify(rec, verifyPlan(), verifyLive(), approved.Add(10*time.Minute))
+			wantRefuse := tt.window > DefaultValidity
+			if got := parseErr != nil; got != wantRefuse {
+				t.Fatalf("ParseRecord on a %s window returned %v, want refuse=%v", tt.window, parseErr, wantRefuse)
+			}
+			if got := verifyErr != nil; got != wantRefuse {
+				t.Fatalf("Verify on a %s window returned %v, want refuse=%v", tt.window, verifyErr, wantRefuse)
 			}
 		})
 	}
