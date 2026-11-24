@@ -117,13 +117,67 @@ func TestTickEffRigHeadsOneCall(t *testing.T) {
 	if query, err := sent.Inline(); err != nil || query != wantQuery {
 		t.Errorf("statement = %q, %v, want rigHeadsQuery's %q", query, err, wantQuery)
 	}
-	if want := [][]string{header, row}; !reflect.DeepEqual(got, want) {
-		t.Errorf("rigHeads records = %v, want %v", got, want)
+	if want := []rigHashRow{
+		{Database: "be", Head: "b1", Working: "b2"},
+		{Database: "gt", Head: "g1", Working: "g2"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("rigHeads rows = %v, want %v", got, want)
 	}
 
 	// A rig set naming no database has no statement to send: the refusal is
 	// returned, never an empty answer.
 	if _, err := rigHeads(town, []string{"third"}, read); err == nil {
 		t.Error("no database to ask: err = nil, want beadsql's refusal")
+	}
+}
+
+// TestTickEffRigHeadsParse: the SQLCSV header and row pair by column name into
+// one row per database — the row interleaves two databases, so positional
+// pairing misattributes it — and a result that is not a parseable header and
+// one row is refused (gt-5v8y37).
+func TestTickEffRigHeadsParse(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, "gastown", ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"gt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parse := func(records [][]string) ([]rigHashRow, error) {
+		t.Helper()
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) { return records, nil })
+		return rigHeads(town, []string{"gastown"}, read)
+	}
+
+	got, err := parse([][]string{
+		{"gt_head", "om_head", "gt_working", "om_working"},
+		{"g1", "o1", "g2", "o2"},
+	})
+	if err != nil {
+		t.Fatalf("rigHeads: %v", err)
+	}
+	want := []rigHashRow{
+		{Database: "gt", Head: "g1", Working: "g2"},
+		{Database: "om", Head: "o1", Working: "o2"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rigHeads rows = %v, want %v", got, want)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		records [][]string
+	}{
+		{"no records", nil},
+		{"header only", [][]string{{"gt_head", "gt_working"}}},
+		{"two data rows", [][]string{{"gt_head", "gt_working"}, {"h1", "w1"}, {"h2", "w2"}}},
+		{"head without working", [][]string{{"gt_head", "om_head"}, {"h1", "h2"}}},
+		{"short row", [][]string{{"gt_head", "gt_working"}, {"h1"}}},
+	} {
+		if rows, err := parse(tc.records); err == nil {
+			t.Errorf("%s: rigHeads = %v, nil, want an error", tc.name, rows)
+		}
 	}
 }
