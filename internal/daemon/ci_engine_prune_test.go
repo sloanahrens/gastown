@@ -2447,6 +2447,52 @@ func TestCIEnginePruneCapsVolumes(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneCapsImages: the image cap keeps the plan's first N images, in
+// the plan's order, and counts the rest as remaining. Five images are planned
+// against a cap of two: the two with the most layers come back, the other three
+// are counted as remaining, and the parent image waits while its child goes, so
+// no run removes a parent ahead of a child. The parent's id sorts first, so a
+// cut by id would keep it and drop its child instead.
+func TestCIEnginePruneCapsImages(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t, nil,
+		[]map[string]any{
+			// 'a' is the parent of 'b': b's layers extend a's by one, so b is
+			// planned before a. The other three are three-layer images ordered by id.
+			engImg('a', 100*time.Hour, []string{"sha256:layer-a0", "sha256:layer-a1"}, "gastown-daemon:ci-1"),
+			engImg('b', 100*time.Hour, []string{"sha256:layer-a0", "sha256:layer-a1", "sha256:layer-b2"}, "gastown-daemon:ci-2"),
+			engImg('c', 100*time.Hour, []string{"sha256:layer-c0", "sha256:layer-c1", "sha256:layer-c2"}, "gastown-daemon:ci-3"),
+			engImg('d', 100*time.Hour, []string{"sha256:layer-d0", "sha256:layer-d1", "sha256:layer-d2"}, "gastown-daemon:ci-4"),
+			engImg('e', 100*time.Hour, []string{"sha256:layer-e0", "sha256:layer-e1", "sha256:layer-e2"}, "gastown-daemon:ci-5"),
+		}, nil))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if len(plan.images) != 5 {
+		t.Fatalf("the fixture planned %d images, want 5", len(plan.images))
+	}
+	imagesBefore := engImageIDs(plan.images)
+
+	capped, remaining := capCIEnginePlan(plan, 2)
+
+	// Plan order: b, c, d, e, then the two-layer parent a. By id the order is
+	// a-e, so a cut by id would keep a and its child b.
+	if got, want := engImageIDs(capped.images), []string{engImageID('b'), engImageID('c')}; !slices.Equal(got, want) {
+		t.Errorf("capped images = %v, want the plan's first two %v", got, want)
+	}
+	if want := (ciEngineRemaining{images: 3}); remaining != want {
+		t.Errorf("remaining = %+v, want %+v", remaining, want)
+	}
+	// The parent waits while its child goes: no image comes before its child.
+	if slices.Contains(engImageIDs(capped.images), engImageID('a')) {
+		t.Errorf("the cap kept the parent %s while removing its child", engImageID('a'))
+	}
+	if got := engImageIDs(plan.images); !slices.Equal(got, imagesBefore) {
+		t.Errorf("the cap modified the plan it was given: %v, want %v", got, imagesBefore)
+	}
+}
+
 // TestCapCIEnginePlanDefersAVolumeWithNoCreationTime: the plan comes from
 // planCIEnginePrune, which refused a listing whose times do not read, so this
 // cannot happen for an engine the daemon planned. The cap is total anyway: a
@@ -2652,6 +2698,65 @@ func TestCIEnginePruneCapVolumesRemaining(t *testing.T) {
 	}
 	if items := enginePruneItems(f); len(items) != 0 {
 		t.Errorf("a run that left volumes raised %d item(s): %+v", len(items), items)
+	}
+
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("opening the job ledger: %v", err)
+	}
+	runs, err := ledger.Tail(ciEnginePruneName, 10)
+	if err != nil {
+		t.Fatalf("reading the job ledger: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("the run was recorded %d time(s), want once", len(runs))
+	}
+	if runs[0].Outcome != ciEngineOutcomeOK {
+		t.Errorf("recorded outcome = %q, want %q", runs[0].Outcome, ciEngineOutcomeOK)
+	}
+	if want := ciCacheTestStart.Add(every); runs[0].NextDue == nil || !runs[0].NextDue.Equal(want) {
+		t.Errorf("recorded next due = %v, want the usual %v", runs[0].NextDue, want)
+	}
+}
+
+// TestCIEnginePruneCapImagesRemaining: a run removes at most
+// ci_engine_prune_max_per_kind images, the plan's first ones, and the images it
+// leaves are not a failure: the run is recorded ok with the usual next due,
+// raises no item, and its log names how many wait for a later run.
+func TestCIEnginePruneCapImagesRemaining(t *testing.T) {
+	t.Parallel()
+	// Five images past the image age: the four with three layers order by id, b
+	// to e, then the two-layer parent a.
+	listing := engListing(t, nil, []map[string]any{
+		engImg('a', 100*time.Hour, []string{"sha256:layer-a0", "sha256:layer-a1"}, "gastown-daemon:ci-1"),
+		engImg('b', 100*time.Hour, []string{"sha256:layer-a0", "sha256:layer-a1", "sha256:layer-b2"}, "gastown-daemon:ci-2"),
+		engImg('c', 100*time.Hour, []string{"sha256:layer-c0", "sha256:layer-c1", "sha256:layer-c2"}, "gastown-daemon:ci-3"),
+		engImg('d', 100*time.Hour, []string{"sha256:layer-d0", "sha256:layer-d1", "sha256:layer-d2"}, "gastown-daemon:ci-4"),
+		engImg('e', 100*time.Hour, []string{"sha256:layer-e0", "sha256:layer-e1", "sha256:layer-e2"}, "gastown-daemon:ci-5"),
+	}, nil)
+	const every = time.Hour // the default interval the fixture's empty setting takes
+	limit := 2
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+	f.tick()
+	f.drain()
+
+	execs := engineDockerExecs(f, "rmi")
+	if len(execs) != 1 {
+		t.Fatalf("docker rmi ran %d time(s), want once:\n%s", len(execs), f.logs.String())
+	}
+	if got, want := engineDockerIDs(execs[0].args), []string{engImageID('b'), engImageID('c')}; !slices.Equal(got, want) {
+		t.Errorf("docker rmi removed %q, want the plan's first two %q", got, want)
+	}
+	logs := f.logs.String()
+	if want := "3 image(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
+		t.Errorf("the run's log does not name the images left behind (%q):\n%s", want, logs)
+	}
+	if !strings.Contains(logs, "removed 0 containers, 2 images, 0 volumes") {
+		t.Errorf("the verdict line does not name the capped removal:\n%s", logs)
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("a run that left images raised %d item(s): %+v", len(items), items)
 	}
 
 	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)

@@ -9,13 +9,13 @@ package daemon
 // Each run lists, plans, then removes. The list program prints the engine as
 // JSON. The planner, a pure function over that listing, decides what goes, so the
 // keep rule is tested in-process. A run removes at most ci_engine_prune_max_per_kind
-// volumes, the oldest created first; the rest wait for a later run. The remove
-// step is one docker command per kind the plan names (docker rm, docker rmi -f,
-// docker volume rm), each over that kind's ids as argv with no shell between the
-// plan and docker. The listing is older than the remove step, and docker rmi -f
-// removes an image a created container holds, so right before the image command
-// the run re-reads the containers' image ids and drops the planned images a
-// container now references.
+// volumes, the oldest created first, and as many images, most layers first; the
+// rest wait for a later run. The remove step is one docker command per kind the
+// plan names (docker rm, docker rmi -f, docker volume rm), each over that kind's
+// ids as argv with no shell between the plan and docker. The listing is older
+// than the remove step, and docker rmi -f removes an image a created container
+// holds, so right before the image command the run re-reads the containers'
+// image ids and drops the planned images a container now references.
 // A re-read that fails removes no image this run (gt-vlu7sc). What each command
 // did is read back from docker: the ids it printed removed, and for any it did not
 // print, one docker inspect that names which of them are still in the engine. An
@@ -467,13 +467,14 @@ type ciEngineVolumeKey struct {
 	known   bool
 }
 
-// capCIEnginePlan returns a copy of plan with its containers and volumes cut to
-// max, the oldest first, and the count of each kind left for a later run. The
-// plan is in id order today and its volumes in name order, so the copy's
-// containers are sorted by their stop time (ciEngineStoppedAt) and its volumes by
-// their creation time before the cut. Images are copied unchanged and are not
-// capped by this function, so their remaining count is always 0. A kind with no
-// more candidates than max is returned as given, with nothing remaining.
+// capCIEnginePlan returns a copy of plan with its containers, images and volumes
+// cut to max, and the count of each kind left for a later run. The plan is in id
+// order today and its volumes in name order, so the copy's containers are sorted
+// by their stop time (ciEngineStoppedAt) and its volumes by their creation time
+// before the cut. Its images are cut as they are, most layers first: the planner
+// already orders them so, which puts a child before its parent, and the cut keeps
+// that order. A kind with no more candidates than max is returned as given, with
+// nothing remaining.
 //
 // Every container and volume in the plan came through planCIEnginePrune, which
 // refused a listing whose time does not read, so every stop and creation time
@@ -514,6 +515,10 @@ func capCIEnginePlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemainin
 		}
 		remaining.containers = len(keyed) - max
 		out.containers = out.containers[:max]
+	}
+	if max < len(out.images) {
+		remaining.images = len(out.images) - max
+		out.images = out.images[:max]
 	}
 	if max < len(out.volumes) {
 		keyed := make([]ciEngineVolumeKey, len(out.volumes))
@@ -961,8 +966,9 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // run. Once it removes, every kind and the build cache prune run whatever an
 // earlier one did; a kind docker left in place, or that could not be checked, fails
 // the run after the rest have run, and the next run plans again from what is left.
-// The run removes at most maxPerKind volumes, the oldest created first, and names
-// the rest in its log; a run that leaves volumes is still a verdict.
+// The run removes at most maxPerKind volumes, the oldest created first, and as many
+// images, most layers first; it names the rest in its log, and a run that leaves
+// some is still a verdict.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -1055,12 +1061,17 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		return true, ""
 	}
 
-	// The per-run cap keeps the volumes created longest ago, and the rest wait for
-	// a later run; a run that leaves some is a verdict, not a failure. The
-	// container and image cuts are beads gt-puhdl9 and gt-ae3jtd, so the cap sees
-	// this plan's volumes alone.
-	volumes, remaining := capCIEnginePlan(ciEnginePlan{volumes: plan.volumes}, maxPerKind)
-	plan.volumes = volumes.volumes
+	// The per-run cap keeps the volumes created longest ago and the plan's first
+	// images, most layers first; the rest wait for a later run, and a run that
+	// leaves some is a verdict, not a failure. The container cut is bead gt-puhdl9,
+	// so the cap sees this plan's images and volumes.
+	capped, remaining := capCIEnginePlan(ciEnginePlan{images: plan.images, volumes: plan.volumes}, maxPerKind)
+	plan.images = capped.images
+	plan.volumes = capped.volumes
+	if remaining.images > 0 {
+		d.logger.Printf("disk_maintenance: ci engine prune: %d image(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
+			remaining.images, maxPerKind)
+	}
 	if remaining.volumes > 0 {
 		d.logger.Printf("disk_maintenance: ci engine prune: %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
 			remaining.volumes, maxPerKind)
