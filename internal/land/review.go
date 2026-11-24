@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -300,8 +301,74 @@ var ErrOMTimeout = errors.New("om review timed out")
 
 // ErrOMExecution is an om run that exited with neither verdict om can write (0
 // approve, 1 request_changes): it never judged the diff. Land reports the
-// merged tree's size alongside it, the one cause a reader can act on (gt-hhid7).
+// merged tree's size alongside it, the one cause a reader can act on (gt-hhid7);
+// the error also carries the head of om's saved raw reply (gt-v8ontb).
 var ErrOMExecution = errors.New("om review execution error")
+
+const rawReplyHeadMax = 2048
+
+// omRawDir is where om saves an unparseable reply; OMReviewer.RawDir overrides
+// it per review so a test can use a temp dir and run in parallel.
+var omRawDir = os.TempDir
+
+// controlRun matches a run of control characters, which collapses to one space.
+var controlRun = regexp.MustCompile(`\p{Cc}+`)
+
+// rawReplyText is om's saved head of a reply that failed to parse, by attempt;
+// it rides the error because the pod wipes its temp dir at every roll (gt-v8ontb).
+func rawReplyText(dir string, start time.Time) string {
+	var b strings.Builder
+	if head := rawReplyHead(dir, "raw-stdout.txt", rawReplyHeadMax, start); head != "" {
+		b.WriteString(": raw reply: " + head)
+	}
+	if head := rawReplyHead(dir, "raw-reask.txt", rawReplyHeadMax, start); head != "" {
+		b.WriteString(": raw re-ask reply: " + head)
+	}
+	return b.String()
+}
+
+// rawReplyHead is the first max bytes of dir/name, controls collapsed and
+// token-shaped runs scrubbed so no credential reaches a bead note (gt-v8ontb);
+// a missing, unreadable or non-regular file (a symlink is not followed), or one
+// older than start, yields "".
+func rawReplyHead(dir, name string, max int, start time.Time) string {
+	path := filepath.Join(dir, name)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.ModTime().Before(start) {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	// The file opened must be the regular file Lstat saw: a symlink swapped in
+	// between resolves elsewhere, and SameFile refuses it.
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return ""
+	}
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)))
+	if err != nil {
+		return ""
+	}
+	return scrubClaim(collapseControl(string(b)))
+}
+
+// collapseControl turns each control-character run into one space and drops a
+// partial character the byte cut left, so the head is one valid line of text.
+func collapseControl(s string) string {
+	s = strings.ToValidUTF8(s, "")
+	return strings.TrimSpace(controlRun.ReplaceAllString(s, " "))
+}
+
+// rawReplyDir is where om saves an unparseable reply: RawDir's answer or omRawDir's.
+func (r OMReviewer) rawReplyDir() string {
+	if r.RawDir != nil {
+		return r.RawDir()
+	}
+	return omRawDir()
+}
 
 // OMReviewer runs `om review -C <dir> --base <base> --head <head> --out <file>`.
 // om exits 0 for approve, 1 for request_changes and 2 for an execution error.
@@ -325,6 +392,9 @@ type OMReviewer struct {
 	// reaches, where the summary and finding details the bead notes drop
 	// survive a landing (gt-uxqb9). Nil means off.
 	Verdicts *VerdictStore
+	// RawDir is where om saves an unparseable reply; nil means omRawDir. A
+	// field, not the package variable, so a test uses a temp dir in parallel.
+	RawDir func() string
 
 	run runFunc // nil means realRun
 	// criteriaWriter writes the acceptance text and returns its path; nil
@@ -541,6 +611,10 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if roundFlag {
 		argv = append(argv, "--round", strconv.Itoa(in.Round))
 	}
+	// A raw reply outlives a run, so one older than this attempt is another om's;
+	// the clock is truncated so a coarse mtime cannot push a fresh file back.
+	rawDir := r.rawReplyDir()
+	start := time.Now().Truncate(time.Second)
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 		return Verdict{}, fmt.Errorf("%w after %s", ErrOMTimeout, timeout)
@@ -549,7 +623,8 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 		return Verdict{}, fmt.Errorf("om review did not run: %w", runErr)
 	}
 	if code != 0 && code != 1 {
-		return Verdict{}, fmt.Errorf("%w: exited %d: %s", ErrOMExecution, code, strings.TrimSpace(lastLines(buf.String(), 10)))
+		return Verdict{}, fmt.Errorf("%w: exited %d: %s%s", ErrOMExecution, code,
+			strings.TrimSpace(lastLines(buf.String(), 10)), rawReplyText(rawDir, start))
 	}
 	data, err := os.ReadFile(outPath) //nolint:gosec // G304: path is the temp file created above
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {
