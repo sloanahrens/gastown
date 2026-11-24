@@ -428,7 +428,11 @@ func jevMedian(answers []float64) (float64, bool) {
 // one after another let host load alone cross that line. A failed call or an
 // out-of-range answer is dropped, a cap-reached ask is only its own failure (the
 // others are already asked), and with no answer left the first error, in call
-// order, or the out-of-range answers, names it.
+// order, or the out-of-range answers, names it. The daily spend cap is checked
+// before each ask and counted from the usage ledger after it, town-wide, so it
+// is a check-then-spend line that concurrent callers already cross by one ask
+// each; asking together lets one estimate cross it by at most jevCalls-1 more
+// asks, and once the ledger shows the cap spent every later ask refuses.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, int, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, 0, &Skip{Input: "jev", Reason: "no Jev asker"}

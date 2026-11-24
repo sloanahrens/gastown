@@ -325,7 +325,9 @@ type jevCounter struct {
 }
 
 // ask numbers each call in arrival order under mu: jevInput asks together, so
-// the calls reach it from three goroutines.
+// the calls reach it from three goroutines and fits(call) names the Nth ask to
+// arrive, not the Nth ask jevInput started. Every fits table in these tests is
+// read as a set of answers (the median ignores order), never as a position.
 func (j *jevCounter) ask(context.Context, *beads.Issue) (dispatch.Answers, error) {
 	j.mu.Lock()
 	j.calls++
