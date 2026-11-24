@@ -122,6 +122,29 @@ func TestTierSweepRunningAdvancesPastAFinishedStage(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunningIgnoresAnEarlierCycle: the previous cycle's shell line is
+// still the rig's newest stage line when the next cycle starts and no stage of
+// it has finished yet. That line predates the start line, so it says nothing
+// about the new cycle: the cycle stays in its first tier instead of advancing
+// to integration on the earlier cycle's work (gt-5v4da7).
+func TestTierSweepRunningIgnoresAnEarlierCycle(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 14, 0, 0, 0, time.Local)
+	r, _ := tierSweepTestReader(t,
+		// The earlier cycle's shell stage finished; its swept line never
+		// reached this log (a restart, or a rotation that lost it).
+		"2026/10/04 13:10:00 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:",
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started b7c1d2e3 (shell, integration, race)",
+	)
+	ts := r.read(start.Add(2 * time.Minute))
+	if ts.Running == nil {
+		t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+	}
+	if run := ts.Running; run.Rig != "gastown" || run.Tier != "shell" {
+		t.Errorf("running = %+v, want gastown in shell: the only finished shell line is the earlier cycle's", run)
+	}
+}
+
 // An odd-hour cycle is the shell tier alone, and the pane says so rather than
 // inferring an integration stage that will never run (gt-rntre).
 func TestTierSweepRunningShellOnlyCycle(t *testing.T) {
