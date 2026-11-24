@@ -306,9 +306,12 @@ func TestHookWorktreeIntegrityResolvesLinks(t *testing.T) {
 	}
 }
 
-// TestHookWorktreeIntegrityLinkFailsClosed pins the other side: a link the
-// guard cannot resolve is a FAILURE that names the directory, never a pass.
-func TestHookWorktreeIntegrityLinkFailsClosed(t *testing.T) {
+// TestHookWorktreeIntegrityResolvesLinksFailsClosedOnADanglingLink pins the
+// other side: a link the guard cannot resolve is a FAILURE that names the
+// directory, never a pass. It shares the TestHookWorktreeIntegrityResolvesLinks
+// prefix, so one `-run TestHookWorktreeIntegrityResolvesLinks` filter selects
+// both sides; gt-hn1hgh's gate ran only the other one (gt-xz2m75).
+func TestHookWorktreeIntegrityResolvesLinksFailsClosedOnADanglingLink(t *testing.T) {
 	t.Parallel()
 	dir := resolvedTempDir(t)
 	link := filepath.Join(dir, "work")
