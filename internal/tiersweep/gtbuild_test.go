@@ -152,10 +152,18 @@ func TestBuildGTIsNotInTheLogDirectoryAndIsRemoved(t *testing.T) {
 			t.Parallel()
 			fake := &fakeTier{head: "abc123"}
 			s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
-			var work string
+			var removed []string
+			s.RemoveAll = func(path string) error {
+				removed = append(removed, path)
+				return os.RemoveAll(path)
+			}
+			var work, temp string
 			if tc.runner {
 				work = t.TempDir()
 				s.Opts.WorkDir = work
+			} else {
+				temp = t.TempDir()
+				s.MkdirTemp = func(string, string) (string, error) { return temp, nil }
 			}
 			s.Integration()
 
@@ -170,8 +178,15 @@ func TestBuildGTIsNotInTheLogDirectoryAndIsRemoved(t *testing.T) {
 			if tc.runner && !underDir(bin, work) {
 				t.Errorf("binary %s is not under the work tree %s the runner gave", bin, work)
 			}
-			if _, err := os.Stat(filepath.Dir(bin)); !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("build directory %s is still there after the sweep: %v", filepath.Dir(bin), err)
+			if temp != "" && !underDir(bin, temp) {
+				t.Errorf("binary %s is not under the temporary directory %s the host made", bin, temp)
+			}
+			dir := filepath.Dir(bin)
+			if len(removed) != 1 || removed[0] != dir {
+				t.Errorf("removals = %v, want just the build directory %s", removed, dir)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("build directory %s is still there after the sweep: %v", dir, err)
 			}
 			logPath := filepath.Join(s.Opts.LogDir, buildLogName)
 			if _, err := os.Stat(logPath); err != nil {
@@ -348,6 +363,9 @@ func TestRunLeavesARelativeRootOutOfTheBinaryPath(t *testing.T) {
 	}
 	if strings.HasPrefix(bin, "worktree"+string(filepath.Separator)) {
 		t.Errorf("go build -o %s, want the binary outside the relative --root", bin)
+	}
+	if _, err := os.Stat(filepath.Dir(bin)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("build directory %s is still there after the run: %v", filepath.Dir(bin), err)
 	}
 }
 
