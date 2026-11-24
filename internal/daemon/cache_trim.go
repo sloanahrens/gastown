@@ -1233,7 +1233,7 @@ const cacheTrimJobDeadlineExceeded = "DeadlineExceeded"
 // cacheTrimMaxDeadlineSeconds is the largest activeDeadlineSeconds that reads
 // as a duration: a larger value's multiplication overflows, so the line leaves
 // such a deadline unnamed rather than name a value the Job does not hold.
-const cacheTrimMaxDeadlineSeconds = int64(math.MaxInt64 / int64(time.Second))
+const cacheTrimMaxDeadlineSeconds = int64(math.MaxInt64 / time.Second)
 
 // cacheTrimFailedLine is the wait's line for a Job whose own status says it
 // failed. A Job that passed its deadline names the deadline it carried; a
