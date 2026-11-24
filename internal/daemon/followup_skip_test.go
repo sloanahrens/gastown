@@ -15,10 +15,10 @@ import (
 type followupPolicyCase struct {
 	name, path, title, claim, bead string
 	class, reason                  string // reason is "" for a finding that stays filed
-	// heldOutClass, when set, is the class omlessons.HeldOut is probed with for
-	// the row's bead: it must answer heldOut at the policy's clock.
-	heldOutClass string
-	heldOut      bool
+	// heldOut, asserted for a row that names a bead, is what omlessons.HeldOut
+	// must answer for the row's own class at the policy's clock, so a row whose
+	// expected reason depends on the hold-out cannot pass for the wrong reason.
+	heldOut bool
 }
 
 // TestFollowupSkipPolicy: a comment claim, a typo in a title and a file under
@@ -87,30 +87,38 @@ func TestFollowupSkipPolicyHoldOut(t *testing.T) {
 	runFollowupPolicyCases(t, followupHoldOutInside, []followupPolicyCase{
 		{name: "a held-out bead's doc finding is withheld", bead: "gt-b0000", path: "internal/daemon/landing_worker.go",
 			title: "the doc says the policy is off by default", claim: "the parser reads it as on, so the sentence is no longer true",
-			class: "doc-contradicts-code", reason: "hold-out", heldOutClass: "doc-contradicts-code", heldOut: true},
+			class: "doc-contradicts-code", reason: "hold-out", heldOut: true},
 		{name: "the same finding on a bead outside the hold-out is filed", bead: "gt-b0007", path: "internal/daemon/landing_worker.go",
 			title: "the doc says the policy is off by default", claim: "the parser reads it as on, so the sentence is no longer true",
-			class: "doc-contradicts-code", reason: "", heldOutClass: "doc-contradicts-code", heldOut: false},
+			class: "doc-contradicts-code", reason: "", heldOut: false},
 		{name: "a protected path keeps its reason on a held-out bead", bead: "gt-b0013", path: ".forgejo/workflows/gate.yml",
 			title: "the doc says the gate workflow runs make test", claim: "the workflow runs make test where the Makefile target is gate",
-			class: "doc-contradicts-code", reason: "protected-path", heldOutClass: "doc-contradicts-code", heldOut: true},
+			class: "doc-contradicts-code", reason: "protected-path", heldOut: true},
 	})
 }
 
-// TestFollowupSkipPolicyHoldOutScope: the hold-out withholds two classes only
-// and only inside its window, so a fail-open finding on a held-out bead and a
-// doc finding outside the window are both filed (gt-um10tq, Q37).
+// TestFollowupSkipPolicyHoldOutScope: the hold-out withholds the classes it
+// lists only and only inside its window, so a fail-open finding on a bead the
+// same window withholds for a listed class is filed, and a doc finding after
+// the window is filed (gt-um10tq, Q37).
 func TestFollowupSkipPolicyHoldOutScope(t *testing.T) {
 	t.Parallel()
+	// The same bead withholds the doc finding and files the fail-open one, so
+	// the pair proves the scope is the finding's class, not its bead: a bead
+	// the hold-out leaves alone would make the fail-open row pass for the
+	// wrong reason, and the doc row beside it would fail.
 	runFollowupPolicyCases(t, followupHoldOutInside, []followupPolicyCase{
-		{name: "a fail-open finding on a held-out bead is filed", bead: "gt-b0000", path: "internal/daemon/attention.go",
+		{name: "a doc finding on the bead is withheld", bead: "gt-b0000", path: "internal/daemon/landing_worker.go",
+			title: "the doc says the policy is off by default", claim: "the parser reads it as on, so the sentence is no longer true",
+			class: "doc-contradicts-code", reason: "hold-out", heldOut: true},
+		{name: "a fail-open finding on the same bead is filed", bead: "gt-b0000", path: "internal/daemon/attention.go",
 			title: "unreadable main status suppresses escalation", claim: "the read error is taken as green",
-			class: "fail-open", reason: "", heldOutClass: "doc-contradicts-code", heldOut: true},
+			class: "fail-open", reason: "", heldOut: false},
 	})
 	runFollowupPolicyCases(t, followupHoldOutAfter, []followupPolicyCase{
 		{name: "a doc finding after the window is filed", bead: "gt-b0018", path: "internal/daemon/landing_worker.go",
 			title: "the doc says the policy is off by default", claim: "the parser reads it as on, so the sentence is no longer true",
-			class: "doc-contradicts-code", reason: "", heldOutClass: "doc-contradicts-code", heldOut: false},
+			class: "doc-contradicts-code", reason: "", heldOut: false},
 	})
 }
 
@@ -392,10 +400,10 @@ func runFollowupPolicyCases(t *testing.T, at time.Time, cases []followupPolicyCa
 			if gotClass != tc.class {
 				t.Fatalf("omlessons.Classify(%q, %q) = %q, want %q: the row would judge another rule", tc.title, tc.claim, gotClass, tc.class)
 			}
-			if tc.heldOutClass != "" {
-				if got := omlessons.HeldOut(tc.bead, tc.heldOutClass, at); got != tc.heldOut {
+			if tc.bead != "" {
+				if got := omlessons.HeldOut(tc.bead, tc.class, at); got != tc.heldOut {
 					t.Fatalf("omlessons.HeldOut(%q, %q, %s) = %v, want %v: the row would judge another rule",
-						tc.bead, tc.heldOutClass, at.Format(time.RFC3339), got, tc.heldOut)
+						tc.bead, tc.class, at.Format(time.RFC3339), got, tc.heldOut)
 				}
 			}
 			c := land.FollowupCandidate{Path: tc.path, Title: tc.title, Claim: tc.claim, Severity: "minor"}
