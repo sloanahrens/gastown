@@ -143,8 +143,8 @@ func crictlVerb(args []string) string {
 // withSpares answers a `crictl ps` reply with one container per spare, each using that spare, so the
 // plan reads the spare as in use. The reply is read in the forms the plan understands: JSON null (no
 // containers, which is how crictl prints a node with none), or an object with no key other than containers,
-// whose value is a list or null. Any other reply is refused: one read as no containers would let the plan
-// remove images a container still uses.
+// whose value is a list or null, with nothing after it but whitespace. Any other reply is refused: one read
+// as no containers would let the plan remove images a container still uses.
 func withSpares(ps []byte, spares []string) ([]byte, error) {
 	var reply struct {
 		Containers []json.RawMessage `json:"containers"`
@@ -154,8 +154,12 @@ func withSpares(ps []byte, spares []string) ([]byte, error) {
 	if err := dec.Decode(&reply); err != nil {
 		return nil, fmt.Errorf("crictl ps: the reply is not a containers object: %w", err)
 	}
-	if _, err := dec.Token(); err != io.EOF {
+	// A second JSON value and trailing bytes that are not JSON are different defects: only a value Token
+	// reads is called more than one, and bytes it cannot read are refused with the decoder's reason.
+	if _, err := dec.Token(); err == nil {
 		return nil, errors.New("crictl ps: the reply holds more than one JSON value")
+	} else if err != io.EOF {
+		return nil, fmt.Errorf("crictl ps: the reply has trailing bytes that are not JSON: %w", err)
 	}
 	for _, s := range spares {
 		reply.Containers = append(reply.Containers, fmt.Appendf(nil, `{"image":{"image":%q},"imageRef":%q}`, s, s))
