@@ -987,7 +987,8 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// only the unarchived set.
 		unarchived, _ := d.maintenanceArchive(databases)
 		// Backup next (maintenance_backup.go); the gc only runs once the
-		// night's backup is on disk.
+		// night's backup is on disk, and only over the databases it holds
+		// (gcWindowBackedUp).
 		res := d.maintenanceBackup(databases)
 		// The town-state night is a second, independent copy
 		// (scheduled_maintenance.go): it runs whether or not the Dolt backup
@@ -995,7 +996,8 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// with no other off-pod copy (gt-5dgbcy).
 		d.runTownStateBackupStep(d.maintenance().now())
 		if res.outcome == gcOutcomeCompleted {
-			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir, localDataDir)
+			gcDatabases := d.gcDatabasesAfterArchive(databases, unarchived)
+			res = d.gcWindowBackedUp(gcDatabases, dataDir, localDataDir)
 		}
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
@@ -1015,6 +1017,30 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 			d.answerRequest(*request, res.outcome, res.reason)
 		}
 	})
+}
+
+// gcWindowBackedUp runs the window's gc over the databases a backup holds.
+// maintenanceBackup returns Completed at once for a night already on disk and
+// backs nothing up, so the tick's list can hold a database created after it;
+// gc'ing that one breaks the backup-first rule exactly as the catch-up's reuse
+// of an older backup does (gt-gd75is). A backup root that cannot be read
+// leaves nothing ready: no gc runs without a backup it can prove holds the
+// database, and an empty ready list is a completed night, not a failure.
+func (d *Daemon) gcWindowBackedUp(databases []string, dataDir string, localDataDir bool) maintenanceGCResult {
+	root, err := d.maintenance().backupRoot()
+	if err != nil {
+		d.logger.Printf("scheduled_maintenance: gc skipped: cannot read the backup root: %v", err)
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	}
+	ready, unbacked := catchUpBackedUp(d.maintenance().now(), root, databases)
+	if len(unbacked) > 0 {
+		d.logger.Printf("scheduled_maintenance: gc skips %d database(s) no backup younger than %v holds: %s",
+			len(unbacked), maintenanceCatchUpAge, strings.Join(unbacked, ", "))
+	}
+	if len(ready) == 0 {
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	}
+	return d.maintenanceGCCycle(ready, dataDir, localDataDir)
 }
 
 // maintenanceGCUpgradeHold reports whether a maintenance gc cycle is in flight

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -1536,6 +1537,106 @@ func TestMaintenanceGCCycleShutdownNoEscalation(t *testing.T) {
 	}
 	if f.marker != nil {
 		t.Errorf("pause marker left behind: %+v", f.marker)
+	}
+}
+
+// writeWindowNightBackup leaves a complete night on disk holding databases, as
+// a tick earlier tonight left it for the Taken shortcut to find.
+func writeWindowNightBackup(t *testing.T, root string, started time.Time, databases ...string) {
+	t.Helper()
+	if err := os.MkdirAll(doltbackup.PartialDir(root, started), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doltbackup.Commit(root, doltbackup.Manifest{
+		Started: started, Finished: started, Databases: databases,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A retried tick whose night is already on disk backs nothing up, so a database
+// created after that backup is in no backup at all; the gc skips it and runs
+// over the database the manifest holds (gt-gd75is).
+func TestMaintenanceGCSkipsADatabaseTheNightsBackupLacks(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "newdb": {10 * mib, 0}}
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+
+	d.startMaintenanceGC([]string{"hq", "newdb"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %s, want hq only — newdb is in no backup tonight", got)
+	}
+	if !strings.Contains(logs.String(), "newdb") {
+		t.Errorf("log does not name newdb as unbacked:\n%s", logs.String())
+	}
+}
+
+// A night whose backup holds the database still gc's it: filtering the window's
+// list leaves a normal night unchanged (gt-gd75is).
+func TestMaintenanceGCWindowRunsADatabaseTheBackupHolds(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+
+	d.startMaintenanceGC([]string{"hq"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %s, want hq", got)
+	}
+}
+
+// A night that backs up nothing the tick lists leaves nothing to gc: that is a
+// completed night, not a failed one, so nothing escalates (gt-gd75is).
+func TestMaintenanceGCWindowWithNothingBackedUpIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"newdb": {10 * mib, 0}}
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+
+	d.startMaintenanceGC([]string{"newdb"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none — no backup holds newdb", f.gcCalls)
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("skipping an unbacked database escalated: %v", f.escalations)
+	}
+	if !strings.Contains(logs.String(), "cycle completed") {
+		t.Errorf("the night did not complete without a gc:\n%s", logs.String())
+	}
+}
+
+// A backup root the window's check cannot read proves nothing about the
+// databases, so the gc runs on none of them (gt-gd75is).
+func TestMaintenanceGCWindowSkipsGCWhenBackupRootFails(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+	reads := 0
+	root := f.backupRoot
+	d.maint.backupRoot = func() (string, error) {
+		reads++
+		if reads > 1 {
+			return "", errors.New("injected: no backup root")
+		}
+		return root, nil
+	}
+
+	d.startMaintenanceGC([]string{"hq"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran with no readable backup root: %v", f.gcCalls)
+	}
+	if !strings.Contains(logs.String(), "injected: no backup root") {
+		t.Errorf("log does not name the backup root failure:\n%s", logs.String())
 	}
 }
 
