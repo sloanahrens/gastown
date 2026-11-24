@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -991,7 +992,7 @@ func TestCIEnginePruneFailureRaisesOnce(t *testing.T) {
 	t.Parallel()
 	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
 	f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
-	every, _, _, _, _, err := ciEnginePruneSettings(f.d.patrol())
+	every, _, _, _, _, _, err := ciEnginePruneSettings(f.d.patrol())
 	if err != nil {
 		t.Fatalf("reading the engine prune's interval: %v", err)
 	}
@@ -1894,6 +1895,34 @@ func TestCIEnginePruneRefusesASettingItCannotActOn(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneRefusesWhenTheCapSettingFails: a per-kind cap below one is a
+// setting the patrol cannot act on. The settings read fails with an error naming
+// the setting, so the run refuses at the tick: the engine is not listed, nothing
+// is pruned, and the refusal says so.
+func TestCIEnginePruneRefusesWhenTheCapSettingFails(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{0, -3} {
+		t.Run("ci_engine_prune_max_per_kind="+strconv.Itoa(limit), func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
+			f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+			f.tick()
+			f.drain()
+
+			if n := len(engineExecs(f, "ci-engine-list")) + len(engineExecs(f, "ci-engine-remove")); n != 0 {
+				t.Fatalf("a refused cap ran %d engine exec(s), want none", n)
+			}
+			logs := f.logs.String()
+			if !strings.Contains(logs, "ci_engine_prune_max_per_kind") {
+				t.Errorf("the refusal does not name the setting:\n%s", logs)
+			}
+			if !strings.Contains(logs, "not running") {
+				t.Errorf("the refused cap is not logged as a refusal:\n%s", logs)
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneSettingsNameTheSettingTheyRefuse: a setting the patrol cannot act
 // on makes the settings read fail with an error naming that setting, never a default.
 func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
@@ -1914,13 +1943,20 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 			set:     func(c *DiskMaintenanceConfig) { c.CIEngineUnusedAge = "30m" },
 			wantKey: "ci_engine_unused_age",
 		},
+		"a per-kind cap below one": {
+			set: func(c *DiskMaintenanceConfig) {
+				zero := 0
+				c.CIEnginePruneMaxPerKind = &zero
+			},
+			wantKey: "ci_engine_prune_max_per_kind",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			cfg := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
 			tc.set(cfg.Patrols.DiskMaintenance)
-			_, _, _, _, _, err := ciEnginePruneSettings(cfg)
+			_, _, _, _, _, _, err := ciEnginePruneSettings(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
 				t.Errorf("ciEnginePruneSettings() error = %v, want one naming %s", err, tc.wantKey)
 			}
