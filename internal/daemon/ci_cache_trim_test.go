@@ -1512,8 +1512,8 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 // that writes more than its cap within the floor therefore ends every trim over
 // the cap with files removed, and that reading raises the volume's item exactly
 // as a run that removed nothing does: over the cap raises it whatever the removed
-// count, at or under the cap clears it, and the summary is the item's existing
-// one.
+// count, at or under the cap clears it, and the summary is the one a run that
+// removed nothing raises.
 func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1572,6 +1572,61 @@ func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
 					t.Errorf("a later reading %s left %+v, want none", tt.name, items)
 				}
 			})
+		}
+	})
+}
+
+// TestCICacheTrimGocacheNoopSummaryNamesTheFloor: the ci-gocache volume is
+// trimmed by the LRU program, which never selects a file younger than
+// ciCacheLRUFloorMinutes. A volume still over its cap after a trim therefore
+// holds only writes from inside that floor, and its no-op item's summary says
+// so: it names the figure left, the cap and the floor in minutes. A volume that
+// is not lru keeps the summary that names the max age instead.
+func TestCICacheTrimGocacheNoopSummaryNamesTheFloor(t *testing.T) {
+	t.Parallel()
+	const (
+		capKiB  = 40 << 20 // KiB: the default ci_gocache_cap_bytes
+		overCap = 45 << 20
+	)
+
+	t.Run("the raised item names the figure left, the cap and the floor", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = ciCacheReply(overCap, 0, overCap)
+		f.tick()
+		f.drain()
+
+		items := f.d.cacheTrimNoOp.observed()
+		if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKey}) {
+			t.Fatalf("items = %v, want one item keyed %q for ci-gocache", got, ciCacheNoOpKey)
+		}
+		want := fmt.Sprintf("%s holds %s, over its cap of %s: what is left was written inside the last %d minutes, which the trim keeps",
+			ciCacheGocacheVolume, polecatimage.Human(overCap*1024), polecatimage.Human(capKiB*1024), ciCacheLRUFloorMinutes)
+		if items[0].Summary != want {
+			t.Errorf("summary = %q, want %q", items[0].Summary, want)
+		}
+	})
+
+	t.Run("a volume that is not lru keeps its old summary", func(t *testing.T) {
+		t.Parallel()
+		const (
+			npmCapKiB  = 1 << 20 // KiB: the npm volume's cap
+			overNpmCap = 2 << 20
+		)
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.npmExec = ciCacheReply(overNpmCap, 0, overNpmCap)
+		f.tick()
+		f.drain()
+
+		npmKey := ciCacheNoOpKey + "-" + ciCacheNpmVolume
+		items := f.d.cacheTrimNoOp.observed()
+		if got := noopKeys(items); !slices.Equal(got, []string{npmKey}) {
+			t.Fatalf("items = %v, want one item keyed %q for ci-npm", got, npmKey)
+		}
+		want := fmt.Sprintf("CI cache trim of %s removed no files while the volume holds %s, over its cap of %s: nothing there is older than the max age, or the trim is not reaching it",
+			ciCacheNpmVolume, polecatimage.Human(overNpmCap*1024), polecatimage.Human(npmCapKiB*1024))
+		if items[0].Summary != want {
+			t.Errorf("summary = %q, want the old text %q", items[0].Summary, want)
 		}
 	})
 }
