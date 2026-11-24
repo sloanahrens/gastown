@@ -1793,22 +1793,25 @@ func TestCICacheTrimFloorIsInTheArgv(t *testing.T) {
 
 // TestCICacheTrimLRUArgv: the LRU program's argv is built from integers, so the
 // numbers the script computes with are digits; a negative number, an empty root
-// and a mode the program does not have are refused rather than passed on.
+// and a mode the program does not have are refused rather than passed on. The
+// valid root in the negative-number rows leaves the number check as the one
+// their names claim to exercise.
 func TestCICacheTrimLRUArgv(t *testing.T) {
 	t.Parallel()
-	good, err := ciCacheLRUArgv("list", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	root := ciCacheVolumeRoot(ciCacheGocacheVolume)
+	good, err := ciCacheLRUArgv("list", root, 120, 41943040, ciCacheLRUFloorMinutes)
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv = %v, want nil", err)
 	}
-	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", "/vol/ci-gocache/_data", "120", "41943040", "75"}
+	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", root, "120", "41943040", "75"}
 	if !slices.Equal(good, want) {
 		t.Errorf("argv = %q, want %q", good, want)
 	}
-	apply, err := ciCacheLRUArgv("apply", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	apply, err := ciCacheLRUArgv("apply", root, 120, 41943040, ciCacheLRUFloorMinutes)
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv(apply) = %v, want nil", err)
 	}
-	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", "/vol/ci-gocache/_data", "120", "41943040", "75"}
+	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", root, "120", "41943040", "75"}
 	if !slices.Equal(apply, wantApply) {
 		t.Errorf("apply argv = %q, want %q", apply, wantApply)
 	}
@@ -1820,15 +1823,67 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 		cap   int64
 		floor int64
 	}{
-		{name: "a negative age", mode: "list", root: "/v", age: -1, cap: 1, floor: 60},
-		{name: "a negative cap", mode: "list", root: "/v", age: 120, cap: -1, floor: 60},
-		{name: "a negative floor", mode: "list", root: "/v", age: 120, cap: 1, floor: -60},
+		{name: "a negative age", mode: "list", root: root, age: -1, cap: 1, floor: 60},
+		{name: "a negative cap", mode: "list", root: root, age: 120, cap: -1, floor: 60},
+		{name: "a negative floor", mode: "list", root: root, age: 120, cap: 1, floor: -60},
 		{name: "an empty root", mode: "list", root: "", age: 120, cap: 1, floor: 60},
-		{name: "a mode the program does not have", mode: "delete", root: "/v", age: 120, cap: 1, floor: 60},
+		{name: "a mode the program does not have", mode: "delete", root: root, age: 120, cap: 1, floor: 60},
 	}
 	for _, tc := range cases {
 		if argv, err := ciCacheLRUArgv(tc.mode, tc.root, tc.age, tc.cap, tc.floor); err == nil {
 			t.Errorf("%s: argv %q, want an error", tc.name, argv)
+		}
+	}
+}
+
+// TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot: the program's root is the one
+// path its find reads and removes under, so the argv builder accepts only a
+// volume's own data path and refuses every other root, naming the rule. The
+// refusal includes the dind data root and its volumes directory, a relative
+// path, a name that is not plain, and paths that only look like a volume root
+// (gt-vbtu0m).
+func TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot(t *testing.T) {
+	t.Parallel()
+	root := ciCacheVolumeRoot(ciCacheGocacheVolume)
+	argv, err := ciCacheLRUArgv("list", root, 120, 41943040, ciCacheLRUFloorMinutes)
+	if err != nil {
+		t.Fatalf("ciCacheLRUArgv(list, %q) = %v, want nil", root, err)
+	}
+	if !slices.Contains(argv, root) {
+		t.Errorf("argv %q does not carry the accepted root %q", argv, root)
+	}
+	cases := []struct{ name, root string }{
+		{name: "the root itself", root: "/"},
+		{name: "the dind data root", root: ciCacheDindMount},
+		{name: "the volumes directory", root: ciCacheDindMount + "/volumes"},
+		{name: "the volumes directory with a trailing slash", root: ciCacheDindMount + "/volumes/"},
+		{name: "the volume mount without its data directory", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume},
+		{name: "a volume directory with another leaf", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume + "/data"},
+		{name: "a relative path", root: "x/_data"},
+		{name: "a volume root with a trailing slash", root: root + "/"},
+		{name: "a name with a double dot inside", root: ciCacheDindMount + "/volumes/a..b/_data"},
+		{name: "a name that is a double dot", root: ciCacheDindMount + "/volumes/../_data"},
+		{name: "a name that is a single dot", root: ciCacheDindMount + "/volumes/./_data"},
+		{name: "a name with a slash", root: ciCacheDindMount + "/volumes/a/b/_data"},
+		{name: "a double slash before the name", root: ciCacheDindMount + "/volumes//ci-gocache/_data"},
+		{name: "a name with a space", root: ciCacheDindMount + "/volumes/ci gocache/_data"},
+		{name: "a root with a newline", root: root + "\n"},
+		{name: "a path that steps above the volumes directory", root: ciCacheDindMount + "/../docker/volumes/ci-gocache/_data"},
+		{name: "a prefix longer than the path between prefix and suffix", root: ciCacheDindMount + "/volumes/_data"},
+		{name: "a sibling of the volumes directory", root: "/var/lib/docker2/volumes/ci-gocache/_data"},
+		{name: "a path of the right shape under another root", root: "/" + strings.Repeat("x", 23) + ciCacheGocacheVolume + "/_data"},
+	}
+	for _, tc := range cases {
+		argv, err := ciCacheLRUArgv("list", tc.root, 120, 41943040, ciCacheLRUFloorMinutes)
+		if err == nil {
+			t.Errorf("%s (%q): argv %q, want an error", tc.name, tc.root, argv)
+			continue
+		}
+		if argv != nil {
+			t.Errorf("%s (%q): argv %q returned with the error, want no argv", tc.name, tc.root, argv)
+		}
+		if !strings.Contains(err.Error(), "volume root") {
+			t.Errorf("%s (%q): error %q does not name the volume-root rule", tc.name, tc.root, err)
 		}
 	}
 }
