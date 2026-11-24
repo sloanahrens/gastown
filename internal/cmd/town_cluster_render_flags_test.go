@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -469,9 +471,10 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 	// notRecorded names the flag-struct fields the file does not hold, each
 	// with the reason it need not.
 	notRecorded := map[string]string{
-		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
-		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
-		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"daemonBdGatewayURLSet":   "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
+		"dashboardClaudeDir":      "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"daemonClaudeDir":         "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"townStateBackupHostPath": "not yet: gt-3c4ppq adds the flag, and gt-6iyjli records and replays it",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})
@@ -644,4 +647,96 @@ func TestTownClusterRenderFlagsCarryTheCloudHostPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClusterRenderTownStateBackupHostPath holds --town-state-backup-host-path
+// to the daemon's own town-state-backup volume: the flag is registered empty by
+// default, its value reaches Values.TownStateBackupHostPath, the rendered
+// Deployment carries the Directory hostPath volume and its mount at that path
+// (read-write live, read-only in a rehearsal), a render without the flag is the
+// same Deployment with that volume and mount taken out, and a relative path is
+// refused through the render by the daemon's own
+// validateTownStateBackupHostPath (gt-3c4ppq).
+func TestClusterRenderTownStateBackupHostPath(t *testing.T) {
+	t.Parallel()
+	const path = "/Users/Shared/gt-backups/town-state"
+
+	// render draws a Deployment with f changed by mutate; a rehearsal names its
+	// own namespace and carries no forge host.
+	render := func(t *testing.T, mutate func(*clusterRenderFlags)) k8sdaemon.Deployment {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		mutate(&f)
+		if f.rehearsal {
+			f.forgeHost, f.confirmStopped = "", false
+			f.namespace = "gt-rehearsal-test"
+		}
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return renderedDeployment(t, f.out, "-deployment-daemon.yaml")
+	}
+	// hasMount asserts d carries the volume and the mount at path, read-only when
+	// wantReadOnly.
+	hasMount := func(t *testing.T, d k8sdaemon.Deployment, wantReadOnly bool) {
+		t.Helper()
+		pod := d.Spec.Template.Spec
+		if len(pod.Containers) == 0 {
+			t.Fatalf("the render has no container: %+v", d)
+		}
+		i := slices.IndexFunc(pod.Volumes, func(v k8sdaemon.Volume) bool { return v.Name == k8sdaemon.TownStateBackupVolume })
+		if i < 0 || pod.Volumes[i].HostPath == nil || pod.Volumes[i].HostPath.Path != path || pod.Volumes[i].HostPath.Type != "Directory" {
+			t.Errorf("volume %s = %+v, want a Directory hostPath %s", k8sdaemon.TownStateBackupVolume, pod.Volumes, path)
+		}
+		j := slices.IndexFunc(pod.Containers[0].VolumeMounts, func(m k8sdaemon.VolumeMount) bool { return m.MountPath == path })
+		if j < 0 || pod.Containers[0].VolumeMounts[j].Name != k8sdaemon.TownStateBackupVolume || pod.Containers[0].VolumeMounts[j].ReadOnly != wantReadOnly {
+			t.Errorf("the mount at %s = %+v, want volume %s readOnly %t", path, pod.Containers[0].VolumeMounts, k8sdaemon.TownStateBackupVolume, wantReadOnly)
+		}
+	}
+
+	t.Run("the flag is registered, empty by default", func(t *testing.T) {
+		t.Parallel()
+		if flag := townClusterRenderCmd.Flags().Lookup("town-state-backup-host-path"); flag == nil || flag.DefValue != "" {
+			t.Errorf("--town-state-backup-host-path = %v, want a flag whose default is the empty string", flag)
+		}
+	})
+
+	t.Run("a live render mounts the host directory read-write", func(t *testing.T) {
+		t.Parallel()
+		hasMount(t, render(t, func(f *clusterRenderFlags) { f.townStateBackupHostPath = path }), false)
+	})
+
+	t.Run("a rehearsal mounts it read-only", func(t *testing.T) {
+		t.Parallel()
+		hasMount(t, render(t, func(f *clusterRenderFlags) { f.rehearsal, f.townStateBackupHostPath = true, path }), true)
+	})
+
+	t.Run("a render without the flag is unchanged", func(t *testing.T) {
+		t.Parallel()
+		live, flagless := render(t, func(f *clusterRenderFlags) { f.townStateBackupHostPath = path }), render(t, func(*clusterRenderFlags) {})
+		// hasMount makes the comparison meaningful: without the flagged render's
+		// volume there would be nothing to take out, and both would match.
+		hasMount(t, live, false)
+		pod := &live.Spec.Template.Spec
+		pod.Volumes = slices.DeleteFunc(pod.Volumes, func(v k8sdaemon.Volume) bool { return v.Name == k8sdaemon.TownStateBackupVolume })
+		pod.Containers[0].VolumeMounts = slices.DeleteFunc(pod.Containers[0].VolumeMounts, func(m k8sdaemon.VolumeMount) bool { return m.MountPath == path })
+		if !reflect.DeepEqual(live, flagless) {
+			t.Errorf("a render without the flag differs from the flagged render minus its town-state entries:\nflagless: %+v\nflagged, town-state entries removed: %+v", flagless, live)
+		}
+	})
+
+	t.Run("a relative path is refused through the render", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		f.townStateBackupHostPath = "gt-backups/town-state"
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
+		if err == nil || !strings.Contains(err.Error(), "Values.TownStateBackupHostPath") {
+			t.Fatalf("a render of the relative path %q = %v, want a refusal naming Values.TownStateBackupHostPath", f.townStateBackupHostPath, err)
+		}
+		if names := dirNames(t, f.out); len(names) != 0 {
+			t.Errorf("the refused render wrote %v", names)
+		}
+	})
 }
