@@ -45,8 +45,10 @@ type redHoldInputs struct {
 	// WaitingUnread marks the count unread: behind-main keeps its previous
 	// reason and every other trigger still reads.
 	WaitingUnread bool
-	// OldestGreenAt is the oldest LastGreenAt across the swept rigs; the zero
-	// time means unknown and triggers nothing.
+	// OldestGreenAt is the oldest green date across the swept rigs, where a rig's
+	// green date is the newer of LastGreenAt and LastGreenConfirmedAt so a skip on
+	// an unchanged green tip refreshes it; the zero time means unknown and
+	// triggers nothing.
 	OldestGreenAt time.Time
 	// UpdateOutcome is the last update run's outcome; "", "ok" and "running"
 	// are healthy and anything else holds as roll-failed.
@@ -114,8 +116,9 @@ type redHoldSources struct {
 // redHoldInputsOf converts every rig's sweep record into the evaluator's inputs.
 // A rig whose record could not be read is left out of the inputs, keeping its
 // prior state, and named in the second value in Rigs order so the caller can log
-// it. OldestGreenAt is the oldest LastGreenAt across the known rigs, zero when any
-// has none; ImagesRetries is the largest count across the known rigs.
+// it. OldestGreenAt is the oldest of each rig's newer LastGreenAt and
+// LastGreenConfirmedAt, zero when any rig has neither; ImagesRetries is the
+// largest count across the known rigs.
 func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 	var in redHoldInputs
 	var unknown []string
@@ -135,10 +138,18 @@ func redHoldInputsOf(src redHoldSources) (redHoldInputs, []string) {
 			retries = st.ImagesRetries
 		}
 		in.ImagesRetries = max(in.ImagesRetries, retries)
-		if st.LastGreenAt.IsZero() {
+		// LastGreenAt dates the cycle that proved the tip, so it never moves while
+		// main idles; LastGreenConfirmedAt dates the last skip that found the tip
+		// unchanged. The newer of the two is when the green tip was last proven or
+		// re-confirmed, so a run of skips keeps the evidence fresh (gt-fxb1id).
+		greenAt := st.LastGreenAt
+		if st.LastGreenConfirmedAt.After(greenAt) {
+			greenAt = st.LastGreenConfirmedAt
+		}
+		if greenAt.IsZero() {
 			oldest, noGreen = time.Time{}, true
-		} else if !noGreen && (oldest.IsZero() || st.LastGreenAt.Before(oldest)) {
-			oldest = st.LastGreenAt
+		} else if !noGreen && (oldest.IsZero() || greenAt.Before(oldest)) {
+			oldest = greenAt
 		}
 	}
 	in.OldestGreenAt = oldest
