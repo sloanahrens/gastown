@@ -37,12 +37,6 @@ var staticManifests embed.FS
 // for it, and the accounting test names it as embedded rather than excluded.
 const driftExceptionsFile = "drift-exceptions.yaml"
 
-// DriftExceptions is drift-exceptions.yaml's text at the building commit, so a
-// run reads the exceptions of the build it runs.
-//
-//go:embed drift-exceptions.yaml
-var DriftExceptions []byte
-
 // StaticObject is one Kubernetes object from the static manifests, with its
 // document kept so a renderer applies the text that was reviewed.
 type StaticObject struct {

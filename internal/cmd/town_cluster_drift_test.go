@@ -42,6 +42,8 @@ func driftTestSeams(t *testing.T, adjust func(*clusterRenderFlags)) (clusterDrif
 		runner:        realRunnerDriftTargets,
 		policyTargets: policyDriftTargets,
 		staticObjects: k8s.Static,
+		exceptions:    func() []byte { return k8s.DriftExceptionsYAML },
+		now:           driftExceptionsNow,
 		out:           out,
 	}, out, town
 }
