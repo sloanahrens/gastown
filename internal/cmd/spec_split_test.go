@@ -683,7 +683,8 @@ func (s splitRelationRefuses) AddTypedDependency(issue, dependsOn, depType strin
 
 // TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails: a dependent
 // holding blocks and tracks whose tracks add fails keeps both edges to the
-// original, and the error does not list it as moved.
+// original, the undo takes off the B edge the blocks add made, and the error
+// does not list it as moved.
 func TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
@@ -710,6 +711,16 @@ func TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails(t *testing.T
 	for _, want := range []string{"gt-split blocks", "gt-split tracks"} {
 		if !got[want] {
 			t.Errorf("dependent dependencies = %+v, want the original edge %q kept", dependent.Dependencies, want)
+		}
+	}
+	issues, listErr := db.List(beads.ListOptions{Status: "all"})
+	if listErr != nil {
+		t.Fatalf("list: %v", listErr)
+	}
+	b := splitCreatedPiece(t, issues, "B")
+	for _, dep := range dependent.Dependencies {
+		if dep.ID == b.ID {
+			t.Errorf("dependent dependencies = %+v, want no edge to piece B %s after the undo", dependent.Dependencies, b.ID)
 		}
 	}
 }
@@ -756,7 +767,8 @@ func TestSpecSplitUndoRollsBack(t *testing.T) {
 			return splitMoveRefuses{Client: splitRestoreAddRefuses{db}, id: "gt-downstream-2"}
 		}, "moving dependent gt-downstream-2", "restoring gt-downstream on gt-split"},
 		{"a restore remove", func(db *beadsfake.Fake) beads.Client { return splitNoRemove{db} }, "moving dependent gt-downstream off gt-split", "taking gt-downstream off piece B"},
-		{"the close", func(db *beadsfake.Fake) beads.Client { return &splitFailingClient{Client: db, refuseClose: true} }, "cannot close gt-split", "closing the pieces"},
+		{"the close", func(db *beadsfake.Fake) beads.Client { return splitOriginalCloseRefuses{db} }, "cannot close gt-split", ""},
+		{"the undo close", func(db *beadsfake.Fake) beads.Client { return &splitFailingClient{Client: db, refuseClose: true} }, "cannot close gt-split", "closing piece "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -815,6 +827,19 @@ func (s splitRestoreAddRefuses) AddTypedDependency(issue, dependsOn, depType str
 		return errors.New("dep add refused")
 	}
 	return s.Client.AddTypedDependency(issue, dependsOn, depType)
+}
+
+// splitOriginalCloseRefuses refuses only the original's close, so the undo's
+// piece closes run clean.
+type splitOriginalCloseRefuses struct{ beads.Client }
+
+func (s splitOriginalCloseRefuses) CloseWithReason(reason string, ids ...string) error {
+	for _, id := range ids {
+		if id == "gt-split" {
+			return errors.New("close refused")
+		}
+	}
+	return s.Client.CloseWithReason(reason, ids...)
 }
 
 // TestSpecSplitApplyFallsBackToThePlainEdge: a dependent whose raw targets name

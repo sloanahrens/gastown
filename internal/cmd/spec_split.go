@@ -268,11 +268,13 @@ func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, 
 	moved, err := specSplitMoveDependents(db, raw, rig, beadID, b.ID, dependents)
 	if err != nil {
 		movedText := "none"
-		if len(moved) > 0 {
-			ids := make([]string, len(moved))
-			for i, m := range moved {
-				ids[i] = m.id
+		var ids []string
+		for _, m := range moved {
+			if !m.partial {
+				ids = append(ids, m.id)
 			}
+		}
+		if len(ids) > 0 {
 			movedText = strings.Join(ids, ", ")
 		}
 		return specSplitUndoOn(db, created, moved, beadID, b.ID, fmt.Errorf("created piece A as %s and piece B as %s, but cannot move the dependents of %s (moved: %s): %w",
@@ -439,18 +441,25 @@ func specSplitDependents(db beads.Client, raw specSplitRawDeps, rig, beadID stri
 	return dependents, nil
 }
 
-// splitMoved is a dependent a failed apply puts back on the original.
+// splitMoved is a dependent a failed apply touched. rels are the relations it
+// held on the original, which the undo puts back; a partial move, whose add
+// failed after an earlier relation reached piece B, has none, because its edges
+// to the original were never removed, so the undo only takes its B edges off.
+// partial keeps it out of the apply's list of dependents moved.
 type splitMoved struct {
-	id   string
-	rels []string
+	id      string
+	rels    []string
+	partial bool
 }
 
 // specSplitMoveDependents moves each dependent off beadID and onto piece B,
 // keeping its relation. Every relation a dependent holds gets its B edge before
 // any edge to the original is removed, so a failed add, on the first relation or
 // a later one, leaves the dependent on the still-open original rather than on
-// nothing. The dependents whose B edges are in place are returned with their
-// relations, so the undo puts them back and a failure names them.
+// nothing; a dependent that reached B at an earlier relation is returned as a
+// partial move, so the undo takes those B edges off. The dependents whose B
+// edges are in place are returned with their relations, so the undo puts them
+// back and a failure names them.
 func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, rig, beadID, bID string, dependents []beads.IssueDep) ([]splitMoved, error) {
 	var order []string
 	relations := make(map[string][]string, len(dependents))
@@ -462,10 +471,15 @@ func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, rig, beadID,
 	}
 	var moved []splitMoved
 	for _, id := range order {
+		added := 0
 		for _, rel := range relations[id] {
 			if err := db.AddTypedDependency(id, bID, rel); err != nil {
+				if added > 0 {
+					moved = append(moved, splitMoved{id: id, partial: true})
+				}
 				return moved, fmt.Errorf("moving dependent %s onto piece B %s: %w", id, bID, err)
 			}
+			added++
 		}
 		moved = append(moved, splitMoved{id: id, rels: relations[id]})
 		if err := specSplitRemoveEdgesTo(db, raw, rig, id, beadID); err != nil {
@@ -477,10 +491,12 @@ func specSplitMoveDependents(db beads.Client, raw specSplitRawDeps, rig, beadID,
 
 // specSplitUndoOn undoes a failed apply: it puts each moved dependent back on
 // the original with the relations it held, before its piece B edges go, so it is
-// never left on nothing; then it closes the pieces created, A before B so B is
-// no longer blocked by an open A. The original stays open, since only the last
-// step closes it. cause comes back naming any undo write that failed, so a
-// half-done undo never reads as clean.
+// never left on nothing; a partial move holds no relations, since it never left
+// the original, so only its B edges go. It then closes the pieces created, each
+// on its own in created order, which closes A before B so B is no longer blocked
+// by an open A. The original stays open, since only the last step closes it.
+// cause comes back naming any undo write that failed, so a half-done undo never
+// reads as clean.
 func specSplitUndoOn(db beads.Client, created []string, moved []splitMoved, beadID, bID string, cause error) error {
 	var errs []error
 	for _, m := range moved {
@@ -497,8 +513,10 @@ func specSplitUndoOn(db beads.Client, created []string, moved []splitMoved, bead
 			}
 		}
 	}
-	if err := db.CloseWithReason("split undone", created...); err != nil {
-		errs = append(errs, fmt.Errorf("closing the pieces: %w", err))
+	for _, id := range created {
+		if err := db.CloseWithReason("split undone", id); err != nil {
+			errs = append(errs, fmt.Errorf("closing piece %s: %w", id, err))
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("%w; the undo failed too: %w", cause, err)
