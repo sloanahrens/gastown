@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestPatrolLastRunScanDispatchFieldsRecord pins gt-y872pt: Daemon carries a
@@ -172,16 +176,25 @@ func TestPatrolLastRunScanDispatchRecordsATick(t *testing.T) {
 
 // TestPatrolLastRunScanDispatchEarlyReturnIsNotARun pins that a runPatrolScan
 // that returns before doing the tick's work records nothing: a skipped tick is
-// not a run.
+// not a run. The cancelled-context row is the return inside the rig loop: the
+// town registers a rig whose identity bead answers as active, so the tick has
+// work in front of it and the cancelled context is what stops it.
 func TestPatrolLastRunScanDispatchEarlyReturnIsNotARun(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
 		config *Config
 		patrol *DaemonPatrolConfig
+		// rigs registers these rigs (name -> beads prefix) as active in the
+		// town, so the tick's rig list is not empty; nil leaves it empty.
+		rigs map[string]string
+		// cancelCtx cancels d.ctx before the tick, so the rig loop's first
+		// iteration hits its early return.
+		cancelCtx bool
 	}{
-		{"patrol off", &Config{}, &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: false}}}},
-		{"no town config", nil, &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: true}}}},
+		{"patrol off", &Config{}, &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: false}}}, nil, false},
+		{"no town config", nil, &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: true}}}, nil, false},
+		{"cancelled context before the first rig", &Config{}, &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"alpha"}}}}, map[string]string{"alpha": "al"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,6 +204,23 @@ func TestPatrolLastRunScanDispatchEarlyReturnIsNotARun(t *testing.T) {
 				tc.config.TownRoot = town
 			}
 			d := &Daemon{config: tc.config, logger: log.New(io.Discard, "", 0), patrolConfig: tc.patrol}
+			if len(tc.rigs) > 0 {
+				registerTestRigs(t, town, tc.rigs)
+				d.rigBeadShowFn = func(_, id string) (*beads.Issue, error) {
+					return &beads.Issue{ID: id}, nil
+				}
+			}
+			if tc.cancelCtx {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.ctx = ctx
+				// The ctx return is only reachable when the rig survives the
+				// operational filter; without this the row would pass on an
+				// empty rig list.
+				if rigs := d.getPatrolRigs("patrol_scan"); !slices.Equal(rigs, []string{"alpha"}) {
+					t.Fatalf("fixture: getPatrolRigs = %v, want [alpha]", rigs)
+				}
+			}
 
 			d.runPatrolScanOn(hostWith(d, nil))
 
