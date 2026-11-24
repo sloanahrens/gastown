@@ -483,14 +483,13 @@ func TestDoltImageCheckBothReadsFailRaisesNothing(t *testing.T) {
 			if got := check.observed(); len(got) != 0 {
 				t.Errorf("observed = %+v, want none", got)
 			}
-			if len(logs) != 2 {
-				t.Fatalf("logs = %v, want one line per failed read", logs)
+			if len(logs) != 1 {
+				t.Fatalf("logs = %v, want one line naming both failed reads", logs)
 			}
-			if !strings.Contains(logs[0], "docker") {
-				t.Errorf("first log line %q does not name docker", logs[0])
-			}
-			if !strings.Contains(logs[1], "Dolt server") {
-				t.Errorf("second log line %q does not name the Dolt server", logs[1])
+			for _, want := range []string{"docker", "Dolt server"} {
+				if !strings.Contains(logs[0], want) {
+					t.Errorf("log line %q does not name %q", logs[0], want)
+				}
 			}
 			wantServer := int32(1)
 			if tc.noServer {
@@ -503,6 +502,38 @@ func TestDoltImageCheckBothReadsFailRaisesNothing(t *testing.T) {
 				t.Errorf("registry was asked %d times after both reads failed, want 0", reg.requests.Load())
 			}
 		})
+	}
+}
+
+func TestDoltImageCheckContainerReadMissWithServerFallbackLogsNothing(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	docker.err = errors.New("exit status 1")
+	server := &doltFakeServer{version: "2.6.0"}
+	check.serverVersion = server.read
+	var logs doltLogs
+	check.run(context.Background(), "/town", doltCheckStart, logs.logf)
+
+	if got := server.calls.Load(); got != 1 {
+		t.Fatalf("the Dolt server was asked %d times, want 1: the docker read failed", got)
+	}
+	if len(logs) != 0 {
+		t.Errorf("logs = %v, want none when the server fallback answered", logs)
+	}
+
+	// Both reads failing is still reported, joined in the one line.
+	check.serverVersion = (&doltFakeServer{err: errors.New("dial tcp: connection refused")}).read
+	clock := clockwork.NewFakeClockAt(doltCheckStart.Add(2 * time.Hour))
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+
+	if len(logs) != 1 {
+		t.Fatalf("logs = %v, want one line when both reads fail", logs)
+	}
+	for _, want := range []string{"docker", "Dolt server", "exit status 1", "connection refused"} {
+		if !strings.Contains(logs[0], want) {
+			t.Errorf("log line %q does not name %q", logs[0], want)
+		}
 	}
 }
 
@@ -528,8 +559,8 @@ func TestDoltImageCheckServerAnswersBehind(t *testing.T) {
 	if got := server.calls.Load(); got != 1 {
 		t.Errorf("the Dolt server was asked %d times, want 1", got)
 	}
-	if len(logs) != 1 || !strings.Contains(logs[0], "docker") {
-		t.Errorf("logs = %v, want one line naming the failed docker read", logs)
+	if len(logs) != 0 {
+		t.Errorf("logs = %v, want none when the server fallback answered", logs)
 	}
 }
 
@@ -581,11 +612,11 @@ func TestDoltImageCheckBothReadsFailKeepsHeldItem(t *testing.T) {
 	if got := check.observed(); len(got) != 1 || got[0] != held[0] {
 		t.Errorf("after both reads failed, observed = %+v, want the held item %+v unchanged", got, held)
 	}
-	if len(logs) != 2 {
-		t.Fatalf("logs = %v, want one line per failed read", logs)
+	if len(logs) != 1 {
+		t.Fatalf("logs = %v, want one line naming both failed reads", logs)
 	}
-	if !strings.Contains(logs[0], "docker") || !strings.Contains(logs[1], "Dolt server") {
-		t.Errorf("logs = %v, want one line naming docker and one the Dolt server", logs)
+	if !strings.Contains(logs[0], "docker") || !strings.Contains(logs[0], "Dolt server") {
+		t.Errorf("log line %q does not name both the docker and Dolt server failures", logs[0])
 	}
 }
 
@@ -610,8 +641,8 @@ func TestDoltImageCheckServerReportsNonVersionKeepsItem(t *testing.T) {
 	if got := check.observed(); len(got) != 1 || got[0] != held[0] {
 		t.Errorf("after the server answered a non-release, observed = %+v, want the held item %+v unchanged", got, held)
 	}
-	if len(logs) != 2 || !strings.Contains(logs[1], "not a release") {
-		t.Errorf("logs = %v, want a docker failure and a server line naming the non-release", logs)
+	if len(logs) != 1 || !strings.Contains(logs[0], "not a release") {
+		t.Errorf("logs = %v, want one line naming the docker failure and the non-release the server reported", logs)
 	}
 }
 
