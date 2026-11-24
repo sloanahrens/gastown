@@ -4,9 +4,50 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const cutRecord = `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection"}`
+
+func TestStreamCutAt(t *testing.T) {
+	t.Parallel()
+	stamp := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	cutAt := `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection","timestamp":"2026-11-24T10:00:00Z"}`
+	ordinary := `{"type":"assistant","timestamp":"2026-11-24T10:00:00Z"}`
+	for _, tc := range []struct {
+		name string
+		tail string
+		cut  bool
+		at   time.Time
+	}{
+		{"cut record gives its timestamp", cutAt + "\n", true, stamp},
+		{"cut record keeps fractional seconds", `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection","timestamp":"2026-11-24T10:00:00.250Z"}` + "\n", true, stamp.Add(250 * time.Millisecond)},
+		{"cut record followed by a system record gives its timestamp", cutAt + "\n" + `{"type":"system","timestamp":"2026-11-24T10:05:00Z"}` + "\n", true, stamp},
+		{"cut record with an unparseable timestamp is cut at zero time", `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection","timestamp":"yesterday"}` + "\n", true, time.Time{}},
+		{"cut record with a numeric timestamp is cut at zero time", `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection","timestamp":1790000000}` + "\n", true, time.Time{}},
+		{"cut record without a timestamp is cut at zero time", cutRecord + "\n", true, time.Time{}},
+		{"intact stream reads not cut at zero time", ordinary + "\n", false, time.Time{}},
+		{"user record after a cut reads not cut at zero time", cutAt + "\n" + `{"type":"user","timestamp":"2026-11-24T10:01:00Z"}` + "\n", false, time.Time{}},
+		{"empty tail reads not cut at zero time", "", false, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cut, at := StreamCutAt([]byte(tc.tail))
+			if cut != tc.cut || !at.Equal(tc.at) {
+				t.Fatalf("StreamCutAt(%q) = (%v, %v), want (%v, %v)", tc.tail, cut, at, tc.cut, tc.at)
+			}
+		})
+	}
+}
+
+func TestStreamCutAtRealRecord(t *testing.T) {
+	t.Parallel()
+	cut, at := StreamCutAt(readFixture(t, "stream_cut_real.jsonl"))
+	want := time.Date(2026, 11, 22, 5, 8, 57, 602000000, time.UTC)
+	if !cut || !at.Equal(want) {
+		t.Fatalf("the real cut record read as (%v, %v), want (true, %v)", cut, at, want)
+	}
+}
 
 func TestStreamCutTail(t *testing.T) {
 	t.Parallel()
