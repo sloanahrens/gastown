@@ -10,7 +10,9 @@ import (
 // The pane leads with a banner while a gt update roll runs (gt-o8m8ho): its
 // step, elapsed and the builds it moves between; an ended roll stays ten minutes.
 // A tier sweep running now draws its own banner too (gt-dln3rq): the rig, the
-// tier and the elapsed time, with no ended banner left behind.
+// tier and the elapsed time, with no ended banner left behind. An ended roll's
+// pill names the outcome its row records, and its time is that roll's own
+// (gt-avxdbf).
 
 func bannerRoll() map[string]any {
 	return map[string]any{"run_id": "run-7", "step": "install", "elapsed_sec": 480, "from": "1111aaaa2222", "to": "3333bbbb4444"}
@@ -205,6 +207,127 @@ func TestSystemUpdatesBannerKeepsAnEndedRollTenMinutes(t *testing.T) {
 	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{}, systemUpdateGoodRow()))
 	if got := paneBanner(t, dom); got != "" {
 		t.Errorf("a millisecond past ten minutes the banner reads %q, want it gone", got)
+	}
+}
+
+// bannerRolledRow is the row the feed draws for the commit a roll rolled to:
+// its outcome and its own start and end, 164 seconds apart on 2026-11-23.
+func bannerRolledRow(outcome string) map[string]any {
+	return map[string]any{
+		"sha":  "3333bbbb4444",
+		"roll": map[string]any{"outcome": outcome, "started_at": "2026-11-23T10:00:00Z", "ended_at": "2026-11-23T10:02:44Z"},
+	}
+}
+
+// drawEndedRoll draws a pane that saw the roll run, then a push that no longer
+// names it, as the feed ends a roll; the push's state is the pane's recorded
+// key, so it skips the redraw and the end is drawn by the next render.
+func drawEndedRoll(t *testing.T, dom *pageDOM, rows ...any) {
+	t.Helper()
+	dom.press(t, "systemupdates", "click")
+	drawState(t, dom, bannerState(bannerNow{}, rows...))                                    // the pane's recorded key
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{roll: bannerRoll()}, rows...)) // the running roll
+	drawState(t, dom, bannerState(bannerNow{}, rows...))                                    // same key: the push skips, still dating the end
+	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{}, rows...))                   // the ended roll
+}
+
+// An ended roll's pill names the outcome the row for the commit it rolled to
+// records, in the class that outcome's stage chip wears, never the step the
+// browser last saw (gt-avxdbf).
+func TestSystemUpdatesBannerEndedRollNamesItsOutcome(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ outcome, word, class string }{
+		{"ok", "ok", "good"},
+		{"partial", "partial", "warnc"},
+		{"failed", "failed", "badc"},
+		// An outcome the page does not know is no outcome to draw: the pill
+		// still reads the end, never the step.
+		{"running", "ended", ""},
+	} {
+		t.Run(tc.outcome, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			drawEndedRoll(t, dom, bannerRolledRow(tc.outcome))
+			if got := paneBanner(t, dom); got != "roll ended" {
+				t.Fatalf("the first line reads %q, want the ended banner", got)
+			}
+			pill := dom.descend(t, "systemupdates", 0, 1)
+			if got := pill.Text; got != tc.word {
+				t.Errorf("the pill reads %q, want %q", got, tc.word)
+			}
+			wantClass := "tag"
+			if tc.class != "" {
+				wantClass += " " + tc.class
+			}
+			if got := pill.Class; got != wantClass {
+				t.Errorf("the pill wears %q, want %q", got, wantClass)
+			}
+			for i := 0; i < 4; i++ {
+				if got := dom.descend(t, "systemupdates", 0, i).Text; got == "install" {
+					t.Errorf("banner cell %d draws the step name %q, which an ended roll never names", i, got)
+				}
+			}
+		})
+	}
+}
+
+// An ended roll's time is its own row's started_at to ended_at — 164 seconds
+// for the 2026-11-23 roll — not the last push's 480 (gt-avxdbf).
+func TestSystemUpdatesBannerEndedRollUsesTheRollsOwnTimes(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	drawEndedRoll(t, dom, bannerRolledRow("ok"))
+	if got := dom.descend(t, "systemupdates", 0, 2).Text; got != "3m" {
+		t.Errorf("the ended banner reads %q for the time, want the roll's own 164s (3m), not the last push's 8m", got)
+	}
+}
+
+// A matched row whose own end is not a real time keeps its outcome and the last
+// push's elapsed time, never a NaN (gt-avxdbf).
+func TestSystemUpdatesBannerEndedRollWithoutItsOwnEndKeepsTheLastPushTime(t *testing.T) {
+	t.Parallel()
+
+	row := map[string]any{"sha": "3333bbbb4444", "roll": map[string]any{"outcome": "ok", "started_at": "2026-11-23T10:00:00Z"}}
+	dom := newPageDOM(t)
+	drawEndedRoll(t, dom, row)
+	if got := dom.descend(t, "systemupdates", 0, 1).Text; got != "ok" {
+		t.Errorf("the pill reads %q, want the row's ok outcome", got)
+	}
+	if got := dom.descend(t, "systemupdates", 0, 2).Text; got != "8m" {
+		t.Errorf("the time reads %q, want the last push's 8m when the row has no own end", got)
+	}
+}
+
+// An ended roll no row carries yet reads "ended" in the pill, never a step
+// name: no rows at all, a row for another commit, and a stub sha too short to
+// be a commit (gt-avxdbf).
+func TestSystemUpdatesBannerEndedRollWithNoRowReadsEnded(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		rows []any
+	}{
+		{"no rows", nil},
+		{"another commit", []any{systemUpdateGoodRow()}},
+		{"a stub sha", []any{map[string]any{"sha": "3333", "roll": map[string]any{"outcome": "ok"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			drawEndedRoll(t, dom, tc.rows...)
+			pill := dom.descend(t, "systemupdates", 0, 1)
+			if got := pill.Text; got != "ended" {
+				t.Errorf("the pill reads %q, want ended", got)
+			}
+			if got := pill.Class; got != "tag" {
+				t.Errorf("the pill wears %q, want no outcome class", got)
+			}
+		})
 	}
 }
 
