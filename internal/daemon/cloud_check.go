@@ -3,7 +3,8 @@ package daemon
 // cloud_check is the town's interval cloud check: the devops `cloudcheck`
 // binary runs in the daemon's process tree, writes the status file the
 // dashboard's Cloud pane reads, and raises one attention item while it fails
-// (gt-c57pax).
+// (gt-c57pax). A warn or fail item the status file records for the release bot
+// is raised as its own attention item on a run that passed (gt-ai62q7).
 //
 // The patrol is opt-in. It runs a program on a timer, so only an explicit
 // daemon.patrols.cloud_check.enabled turns it on. The GCP service-account key
@@ -14,12 +15,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
@@ -52,6 +55,18 @@ const (
 	// cloudCheckAlertKey is the one escalation a failing run raises. A repeated
 	// failure refreshes it, not a second one; a run exiting 0 that wrote clears it.
 	cloudCheckAlertKey = "cloud_check:failed"
+
+	// cloudCheckReleasebotAlertKey is the one escalation a good run raises for a
+	// Release bot warn or fail; a later clean report clears it.
+	cloudCheckReleasebotAlertKey = "cloud_check:releasebot"
+
+	// cloudCheckReleasebotSection is the only section prefix matched: other
+	// sections' warns are routine.
+	cloudCheckReleasebotSection = "Release bot"
+
+	// cloudCheckReleasebotTextCount and TextMax bound the message's texts.
+	cloudCheckReleasebotTextCount = 3
+	cloudCheckReleasebotTextMax   = 160
 )
 
 // cloudCheckSeams are the patrol's clock, runner and side effects, replaceable
@@ -195,6 +210,43 @@ func cloudCheckStatusPath(townRoot string) string {
 	return filepath.Join(townRoot, filepath.FromSlash(cloudCheckStatusRelPath))
 }
 
+// cloudCheckItem is one entry of the status file's items array.
+type cloudCheckItem struct {
+	Level   string `json:"level"`
+	Section string `json:"section"`
+	Text    string `json:"text"`
+}
+
+// cloudCheckReleasebotTexts returns the texts of the first
+// cloudCheckReleasebotTextCount items in the Release bot section whose level
+// does not say the run passed it; an unknown level counts as not passed.
+func cloudCheckReleasebotTexts(items []cloudCheckItem) []string {
+	var texts []string
+	for _, item := range items {
+		if !strings.HasPrefix(item.Section, cloudCheckReleasebotSection) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(item.Level), "ok") {
+			continue
+		}
+		texts = append(texts, cloudCheckTextLine(item.Text))
+		if len(texts) == cloudCheckReleasebotTextCount {
+			break
+		}
+	}
+	return texts
+}
+
+// cloudCheckTextLine makes one item's text one line, cut to
+// cloudCheckReleasebotTextMax runes with the cut marked.
+func cloudCheckTextLine(text string) string {
+	line := strings.Join(strings.Fields(text), " ")
+	if runes := []rune(line); len(runes) > cloudCheckReleasebotTextMax {
+		line = string(runes[:cloudCheckReleasebotTextMax-1]) + "…"
+	}
+	return line
+}
+
 // startCloudCheckTicker starts the patrol's check ticker, or returns nil for a
 // setting it cannot schedule. The ticker only asks whether a check is due, so
 // its cadence is a fraction of the run interval. A refused setting starts no
@@ -280,9 +332,13 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	}
 
 	status := runExitStatus(err)
-	if err == nil && !cloudCheckWritten(before, cloudCheckStatusFileOf(statusPath)) {
-		err = errCloudCheckNoStatus
-		status = "exit 0 without a new status"
+	var after cloudCheckStatusFile
+	if err == nil {
+		after = cloudCheckStatusFileOf(statusPath)
+		if !cloudCheckWritten(before, after) {
+			err = errCloudCheckNoStatus
+			status = "exit 0 without a new status"
+		}
 	}
 	if err != nil {
 		// The message names the command, its exit status and the status file.
@@ -296,6 +352,8 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 		return
 	}
 	d.logger.Printf("cloud_check: %s: %s in %v", command, status, elapsed)
+	// The run passed, so the status just written is this run's own report.
+	d.cloudCheckReleasebotStatus(s, statusPath, after.body)
 	if d.cloudCheckAlertRaised.CompareAndSwap(true, false) {
 		if clearErr := s.clear(cloudCheckAlertKey); clearErr != nil {
 			// The alert is still open; keep the marker so the next good run
@@ -303,6 +361,39 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 			d.cloudCheckAlertRaised.Store(true)
 		}
 	}
+}
+
+// cloudCheckReleasebotStatus raises or clears the release bot alert from the
+// status file a good run just wrote: one alert however many items match, a
+// repeat refreshing the same key; a report with none clears it when open. A
+// report that cannot be parsed leaves the alert as it is.
+func (d *Daemon) cloudCheckReleasebotStatus(s cloudCheckSeams, statusPath, body string) {
+	var report struct {
+		Items []cloudCheckItem `json:"items"`
+	}
+	// The body is another process's: one that is not its JSON is no new
+	// information, so the alert is left as it is.
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		d.logger.Printf("cloud_check: %s: not the check's JSON; the release bot alert is left as it is", statusPath)
+		return
+	}
+	texts := cloudCheckReleasebotTexts(report.Items)
+	if len(texts) == 0 {
+		if d.cloudCheckReleasebotAlertRaised.CompareAndSwap(true, false) {
+			if clearErr := s.clear(cloudCheckReleasebotAlertKey); clearErr != nil {
+				// Still open; keep the marker so a later good run clears it.
+				d.cloudCheckReleasebotAlertRaised.Store(true)
+			}
+		}
+		return
+	}
+	message := fmt.Sprintf("cloud_check: release bot in %s: %s", statusPath, strings.Join(texts, "; "))
+	if raiseErr := s.escalate(cloudCheckReleasebotAlertKey, message); raiseErr != nil {
+		// The seam logs why; the marker stays unset, so the next run raises again.
+		d.logger.Printf("cloud_check: the release bot alert %s did not reach the town; raising it again next run", cloudCheckReleasebotAlertKey)
+		return
+	}
+	d.cloudCheckReleasebotAlertRaised.Store(true)
 }
 
 // cloudCheckUnconfigured logs the unconfigured line once per daemon run, so a

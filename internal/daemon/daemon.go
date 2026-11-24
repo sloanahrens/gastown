@@ -594,6 +594,9 @@ type Daemon struct {
 	// cloudCheckAlertRaised is set while the patrol's one failure item is open,
 	// so a good run clears it and a key that was never raised clears nothing.
 	cloudCheckAlertRaised atomic.Bool
+	// cloudCheckReleasebotAlertRaised is set while the good run's release bot
+	// item is open, so a report without one clears it.
+	cloudCheckReleasebotAlertRaised atomic.Bool
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
