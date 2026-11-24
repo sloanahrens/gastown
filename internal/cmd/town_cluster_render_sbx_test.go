@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -213,6 +214,116 @@ func TestClusterRenderSbxEngineReturnsTheRenderAndWriteErrors(t *testing.T) {
 			}
 			if len(entries) != 0 {
 				t.Errorf("%d files written, want none", len(entries))
+			}
+		})
+	}
+}
+
+// refuseSbxRender runs runSbxRender over the fakes with in, failing if the
+// render ran or the error does not name want, and returns the error.
+func refuseSbxRender(t *testing.T, in sbxRenderInputs, want string) error {
+	t.Helper()
+	d := sbxEngineDeps(t, sbx.Set{Objects: sbxEngineObjects}, &sbx.Inputs{})
+	d.renderSbx = func(context.Context, sbx.Inputs) (sbx.Set, error) {
+		t.Error("the render ran, want the refusal first")
+		return sbx.Set{}, nil
+	}
+	err := runSbxRender(d, in)
+	if err == nil {
+		t.Fatalf("runSbxRender() = nil, want an error naming %q", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name %q", err, want)
+	}
+	return err
+}
+
+// A missing input is refused by name before the render runs, and the refusal writes nothing.
+func TestClusterRenderSbxEngineRefusesAMissingInput(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		drop func(*sbxRenderInputs)
+		want string
+	}{
+		{"manifests", func(in *sbxRenderInputs) { in.Manifests = "" }, "no manifests input"},
+		{"chart", func(in *sbxRenderInputs) { in.Chart = "" }, "no chart input"},
+		{"values", func(in *sbxRenderInputs) { in.Values = "" }, "no values input"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := t.TempDir()
+			in := sbxRenderInputs{OutDir: out, Manifests: "m", Chart: "c", Values: "v"}
+			tc.drop(&in)
+			refuseSbxRender(t, in, tc.want)
+			if names := dirNames(t, out); len(names) != 0 {
+				t.Errorf("%d files written, want none", len(names))
+			}
+		})
+	}
+}
+
+// A bad out directory is refused by name before the render runs, and the refusal writes nothing.
+func TestClusterRenderSbxEngineRefusesABadOutDir(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T) string
+		want   string
+		verify func(t *testing.T, out string)
+	}{
+		{
+			name: "not empty",
+			setup: func(t *testing.T) string {
+				out := t.TempDir()
+				if err := os.WriteFile(filepath.Join(out, "other.yaml"), []byte("another apply set\n"), 0o644); err != nil {
+					t.Fatalf("planting a file: %v", err)
+				}
+				return out
+			},
+			want: "is not empty",
+			verify: func(t *testing.T, out string) {
+				if names := dirNames(t, out); !slices.Equal(names, []string{"other.yaml"}) {
+					t.Errorf("files in %s = %q, want only the planted file", out, names)
+				}
+			},
+		},
+		{
+			name:  "does not exist",
+			setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") },
+			want:  "does not exist",
+			verify: func(t *testing.T, out string) {
+				if _, err := os.Stat(out); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("out directory %s = %v, want it still absent: the refusal creates no directory", out, err)
+				}
+			},
+		},
+		{
+			name: "is a file",
+			setup: func(t *testing.T) string {
+				out := filepath.Join(t.TempDir(), "out")
+				if err := os.WriteFile(out, []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatalf("writing the file: %v", err)
+				}
+				return out
+			},
+			want: "cannot be read as a directory",
+		},
+		{
+			name:  "unnamed",
+			setup: func(t *testing.T) string { return "" },
+			want:  "no out directory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := tc.setup(t)
+			err := refuseSbxRender(t, sbxRenderInputs{OutDir: out, Manifests: "m", Chart: "c", Values: "v"}, tc.want)
+			if out != "" && !strings.Contains(err.Error(), out) {
+				t.Errorf("error %q does not name the out directory %s", err, out)
+			}
+			if tc.verify != nil {
+				tc.verify(t, out)
 			}
 		})
 	}
