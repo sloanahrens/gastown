@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-// TestIntegrationDialRetryClassifyClosedPort dials a loopback port held by no
+// TestIntegrationDialRetryRealClosedPort dials a loopback port held by no
 // listener and checks the operating system's refusal is one RetryableDial
 // accepts. The unit tier scripts this shape instead: a real dial carries a
 // wall-clock deadline and blocks in a socket syscall, which no-network forbids
 // there.
-func TestIntegrationDialRetryClassifyClosedPort(t *testing.T) {
+func TestIntegrationDialRetryRealClosedPort(t *testing.T) {
 	// Port 1 on loopback is never an ephemeral port and nothing listens on it,
 	// so a dial reaches it and is refused. Binding then releasing an ephemeral
 	// port instead would race another process for the freed port.

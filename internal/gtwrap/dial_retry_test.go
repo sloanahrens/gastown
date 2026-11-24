@@ -114,24 +114,20 @@ func TestDialRetrySchedule(t *testing.T) {
 	})
 }
 
-// TestDialRetryScheduleBounded pins the schedule's cap: an effectively
-// unlimited total returns the capped schedule at once, so the slice cannot grow
-// with total. The input is math.MaxInt64, the one the bead names. A regression
-// that drops the cap appends about 1.8 billion waits instead, which the gate's
-// -timeout ends as a hang (docs/testing.md, "the -timeout 20m in make gate
-// remains the hang detector").
+// TestDialRetryScheduleBounded pins the schedule's documented cap of 32 waits
+// (RetrySchedule's doc): a total past the point the cap binds returns exactly
+// that many waits, so the slice cannot grow with total. The 200s check runs
+// first because it fails fast if the cap is dropped (uncapped, 200s yields 42
+// waits); the math.MaxInt64 call, the input the bead names, would otherwise run
+// the uncapped loop over about 1.8 billion waits before any assertion ran.
 func TestDialRetryScheduleBounded(t *testing.T) {
 	t.Parallel()
-	got := RetrySchedule(math.MaxInt64)
-	if len(got) != maxRetryDelays {
-		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d waits, want the cap of %d", len(got), maxRetryDelays)
+	if got := len(RetrySchedule(200 * time.Second)); got != 32 {
+		t.Fatalf("RetrySchedule(200s) returned %d waits, want the documented cap of 32", got)
 	}
-	// A total far past the point the cap binds returns no more waits than a
-	// huge one: the cap, not the total, ends the schedule. This also catches a
-	// cap raised past what this finite total yields, which the equality above
-	// alone would follow.
-	if want := RetrySchedule(200 * time.Second); len(got) != len(want) {
-		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d waits, want the %d returned at 200s", len(got), len(want))
+	got := RetrySchedule(math.MaxInt64)
+	if len(got) != 32 {
+		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d waits, want the documented cap of 32", len(got))
 	}
 }
 
