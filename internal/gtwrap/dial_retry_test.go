@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -61,10 +62,9 @@ func TestDialRetrySchedule(t *testing.T) {
 			time.Second,
 			2 * time.Second,
 			3 * time.Second,
-			5 * time.Second,
 		}
-		if len(got) < len(wantStart) {
-			t.Fatalf("RetrySchedule(%v) = %v, want at least %d delays", total, got, len(wantStart))
+		if len(got) <= len(wantStart) {
+			t.Fatalf("RetrySchedule(%v) = %v, want more than the %d ladder delays", total, got, len(wantStart))
 		}
 		for i, want := range wantStart {
 			if got[i] != want {
@@ -72,13 +72,19 @@ func TestDialRetrySchedule(t *testing.T) {
 			}
 		}
 		var sum time.Duration
-		for _, d := range got[4:] {
-			if d != 5*time.Second {
-				t.Fatalf("delay %v after the ladder = %v, want 5s", d, d)
-			}
+		for _, d := range got {
 			sum += d
 		}
-		sum += 500*time.Millisecond + time.Second + 2*time.Second + 3*time.Second
+		for i, d := range got[len(wantStart):] {
+			if d != 5*time.Second {
+				t.Fatalf("delay %d after the ladder = %v, want 5s", len(wantStart)+i, d)
+			}
+		}
+		steady := len(got) - len(wantStart)
+		const wantSteady = 7
+		if steady != wantSteady {
+			t.Fatalf("the schedule has %d steady 5s steps after the ladder, want %d", steady, wantSteady)
+		}
 		if sum > total {
 			t.Fatalf("the delays sum to %v, past the %v total", sum, total)
 		}
@@ -106,6 +112,23 @@ func TestDialRetrySchedule(t *testing.T) {
 			t.Fatalf("RetrySchedule(0) = %v, want no delays", got)
 		}
 	})
+}
+
+// TestDialRetryScheduleBounded pins the schedule's documented cap of 32 waits
+// (RetrySchedule's doc): a total past the point the cap binds returns exactly
+// that many waits, so the slice cannot grow with total. The 200s check runs
+// first because it fails fast if the cap is dropped (uncapped, 200s yields 42
+// waits); the math.MaxInt64 call, the input the bead names, would otherwise run
+// the uncapped loop over about 1.8 billion waits before any assertion ran.
+func TestDialRetryScheduleBounded(t *testing.T) {
+	t.Parallel()
+	if got := len(RetrySchedule(200 * time.Second)); got != 32 {
+		t.Fatalf("RetrySchedule(200s) returned %d waits, want the documented cap of 32", got)
+	}
+	got := RetrySchedule(math.MaxInt64)
+	if len(got) != 32 {
+		t.Fatalf("RetrySchedule(math.MaxInt64) returned %d waits, want the documented cap of 32", len(got))
+	}
 }
 
 func TestRetryableReadTable(t *testing.T) {
