@@ -295,6 +295,54 @@ func TestClusterDriftSbxSecretsReportTheNamesTheClusterLacks(t *testing.T) {
 	}
 }
 
+// TestClusterDriftSbxSecretsReadCarriesNoContextOrOutputFlag holds the exec
+// call the adapter gives the guarded runner to the one shape the guard admits:
+// the Secret read carries no --context pair (the adapter drops the one Missing
+// builds) and no output flag, so it reads the default table and never a value
+// (gt-f3kw4a).
+func TestClusterDriftSbxSecretsReadCarriesNoContextOrOutputFlag(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	runner, err := clusterKubectl("", "", func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		read := strings.Join(call, " ")
+		if read == "kubectl -n openshell get statefulset -o json" {
+			return `{"kind":"List","items":[` + sbxDriftGatewayDoc + `]}`, 0, nil
+		}
+		if read == "kubectl -n openshell get secret openshell-server-tls" {
+			return "NAME   TYPE   DATA   AGE\nopenshell-server-tls   kubernetes.io/tls   2   5d\n", 0, nil
+		}
+		t.Errorf("read %q, want the gateway list or the one Secret get", read)
+		return "", 0, nil
+	})
+	if err != nil {
+		t.Fatalf("building the guarded read runner: %v", err)
+	}
+	driftErr, lines := sbxDriftRun(t, sbxDriftSecretsSet("openshell-server-tls"), runner)
+	var secret []string
+	for _, call := range calls {
+		if slices.Contains(call, "secret") {
+			secret = call
+			break
+		}
+	}
+	if secret == nil {
+		t.Fatalf("the compare made no Secret exec call (exit %d, err: %v); exec calls:\n%q; printed:\n%q", driftExit(driftErr), driftErr, calls, lines)
+	}
+	for _, arg := range secret {
+		if arg == "--context" {
+			t.Errorf("the Secret exec call %q carries --context, want the adapter to drop the pair Missing builds", secret)
+		}
+		if arg == "-o" || arg == "--output" || strings.HasPrefix(arg, "--output=") || (strings.HasPrefix(arg, "-o") && !strings.HasPrefix(arg, "--")) {
+			t.Errorf("the Secret exec call %q carries the output flag %q, want the default table", secret, arg)
+		}
+	}
+	if got := driftExit(driftErr); got != 0 {
+		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%q", got, driftErr, lines)
+	}
+}
+
 // TestReadSbxLiveRefusesNoNamedObject holds the guard that keeps an empty read
 // from formatting a refusal naming nothing, and from reading the kind blind.
 // compareSbxDrift only asks for a group it built from at least one object, so
