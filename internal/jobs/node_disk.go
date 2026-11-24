@@ -29,9 +29,15 @@ const (
 	// disk: the highest-used node of the cluster, the only node the reading
 	// keeps (internal/daemon/node_disk_record.go).
 	nodeDiskSandboxKey = "sandbox"
-	// nodeDiskStaleAfter is the age past which a reading no longer describes
-	// the node's disk as it is now.
+	// nodeDiskStaleAfter is the age past which a control node's reading no
+	// longer describes its disk as it is now; the daemon refreshes it every
+	// minute.
 	nodeDiskStaleAfter = 15 * time.Minute
+	// nodeDiskSandboxStaleAfter is the staleness bound for the sandbox
+	// cluster's reading, which the daemon writes only on the daily pass and
+	// the interval passes: the 15-minute bound above would call a healthy
+	// reading unknown all day (gt-jx56c6). This is a daily pass plus slack.
+	nodeDiskSandboxStaleAfter = 26 * time.Hour
 	// nodeDiskSandboxNote says which node the sandbox row's figure is, since a
 	// cluster with several nodes shows only its busiest node.
 	nodeDiskSandboxNote = " (highest-used node of the sandbox cluster only)"
@@ -124,9 +130,13 @@ func nodeDiskRow(key string, rec nodeDiskRecord, now time.Time) Job {
 	}
 	// A reading dated after now has no age this list can vouch for (clock
 	// skew or a bad write), so it is unknown like a stale one.
+	staleAfter := nodeDiskStaleAfter
+	if key == nodeDiskSandboxKey {
+		staleAfter = nodeDiskSandboxStaleAfter
+	}
 	if rec.ReadAt == nil {
 		j.State = StateUnknown
-	} else if age := now.Sub(*rec.ReadAt); age < 0 || age > nodeDiskStaleAfter {
+	} else if age := now.Sub(*rec.ReadAt); age < 0 || age > staleAfter {
 		j.State = StateUnknown
 	} else {
 		j.State = StateOK
