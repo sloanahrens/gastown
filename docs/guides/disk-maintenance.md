@@ -301,6 +301,10 @@ rest wait for the next run.
     runner builds a `gastown-polecat`, `gastown-daemon` and `gastown-bd` image
     about every 50 minutes, so the age rule alone does not bound how many
     accumulate;
+    - an image tagged in more than one `gastown-*` repository goes only when it is
+      past the cut in each of them; an image tagged in a `ci_engine_keep_repos`
+      repository other than `ci-base` stays, and still takes its place among the
+      newest 5;
   - `ci-base` images other than the one `ci-base:latest` names, and the id created
     just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
     newest `ci-base` id is the latest. The others wait out `ci_engine_prune_age`
