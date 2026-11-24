@@ -61,8 +61,8 @@ func TestClusterShapeDriftObjectsHoldsAClusterInStep(t *testing.T) {
 			if got := driftExit(err); got != 0 {
 				t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", got, err, out.String())
 			}
-			if got := driftLines(out); got != nil {
-				t.Errorf("printed %q for a cluster in step, want nothing", got)
+			if got, want := driftLines(out), driftSecretLines(t); !slices.Equal(got, want) {
+				t.Errorf("printed %q for a cluster in step, want only the not-compared Secret lines %q", got, want)
 			}
 			if tc.read != "" && !slices.Contains(reads, tc.read) {
 				t.Errorf("read %q, want the row's %q among them", reads, tc.read)
@@ -151,6 +151,7 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 				t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 			}
 			wantLines := []string{tc.resource + ": " + driftWantDifference(t, tc.path, tc.rendered(m), tc.observed(m))}
+			wantLines = append(wantLines, driftSecretLines(t)...)
 			if got := driftLines(out); !slices.Equal(got, wantLines) {
 				t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 			}
@@ -220,7 +221,12 @@ func TestClusterShapeDriftObjectsNeverPrintsAValue(t *testing.T) {
 	if got := driftExit(err); got != 1 {
 		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 	}
-	lines := driftLines(out)
+	// The compare also prints the not-compared line for the embedded Secret,
+	// which is not a difference.
+	notCompared := driftSecretLines(t)
+	lines := slices.DeleteFunc(driftLines(out), func(line string) bool {
+		return slices.Contains(notCompared, line)
+	})
 	if len(lines) != 2 {
 		t.Fatalf("printed %d lines, want the two differences:\n%s", len(lines), out.String())
 	}

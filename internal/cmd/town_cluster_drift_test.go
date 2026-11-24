@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -40,6 +41,7 @@ func driftTestSeams(t *testing.T, adjust func(*clusterRenderFlags)) (clusterDrif
 		render:        clusterRenderDepsAt(t, town, io.Discard),
 		runner:        realRunnerDriftTargets,
 		policyTargets: policyDriftTargets,
+		staticObjects: k8s.Static,
 		out:           out,
 	}, out, town
 }
@@ -128,6 +130,15 @@ func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T,
 		t.Fatalf("reading the embedded admission and RBAC documents: %v", err)
 	}
 	for _, target := range policyTargets {
+		objects[target.resource] = target.object
+	}
+	// Every other static object is answered from its embedded document too, so
+	// a case starts from a cluster in step (gt-w6g6ok).
+	staticTargets, _, err := staticObjectTargets(driftStaticSet(t), policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("building the static objects' targets: %v", err)
+	}
+	for _, target := range staticTargets {
 		objects[target.resource] = target.object
 	}
 
@@ -451,6 +462,7 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
 	wantReads = append(wantReads, driftPolicyReads(t)...)
+	wantReads = append(wantReads, driftStaticReads(t)...)
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
@@ -460,9 +472,72 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		gateway + driftWantAbsent(t, "spec.strategy.rollingUpdate", map[string]any{"maxUnavailable": 0, "maxSurge": 1}),
 		gateway + driftWantDifference(t, "spec.strategy.type", "RollingUpdate", "Recreate"),
 	}
+	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
 		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 	}
+}
+
+// TestTownClusterDriftStaticComparesAPriorityClassThroughTheCompare holds the
+// embedded static set through the whole compare: a PriorityClass whose live
+// value differs is reported by kind, name and path with exit 1, and one the
+// cluster does not hold reports every field its document names as absent with
+// exit 1, since the compare exists to notice that the apply never made it
+// (gt-w6g6ok).
+func TestTownClusterDriftStaticComparesAPriorityClassThroughTheCompare(t *testing.T) {
+	t.Parallel()
+	const resource = "priorityclass/gt-control-plane"
+	t.Run("a live value that differs", func(t *testing.T) {
+		t.Parallel()
+		d, out, town := driftTestSeams(t, nil)
+		m := driftTestRendered(t, d, driftTestFlags(t, town))
+		d.kubectl = driftAnswering(t, m, func(t *testing.T, live map[string]any) {
+			t.Helper()
+			if live["kind"] != "PriorityClass" || driftObjectAt(live, "metadata")["name"] != "gt-control-plane" {
+				return
+			}
+			live["value"] = float64(1)
+		})
+		err := runClusterDrift(context.Background(), d)
+		if got := driftExit(err); got != 1 {
+			t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
+		}
+		wantLines := []string{resource + ": " + driftWantDifference(t, "value", 1000000, float64(1))}
+		wantLines = append(wantLines, driftSecretLines(t)...)
+		if got := driftLines(out); !slices.Equal(got, wantLines) {
+			t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
+		}
+	})
+	t.Run("a live object the cluster does not hold", func(t *testing.T) {
+		t.Parallel()
+		d, out, town := driftTestSeams(t, nil)
+		answer := driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil)
+		d.kubectl = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+			if len(args) > 1 && args[1] == resource {
+				// kubectl's --ignore-not-found answer for an object it does not hold.
+				return "", 0, nil
+			}
+			return answer(ctx, dir, env, name, args...)
+		}
+		err := runClusterDrift(context.Background(), d)
+		if got := driftExit(err); got != 1 {
+			t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
+		}
+		notCompared := driftSecretLines(t)
+		absent := 0
+		for _, line := range driftLines(out) {
+			if slices.Contains(notCompared, line) {
+				continue
+			}
+			if !strings.HasPrefix(line, resource+": ") || !strings.HasSuffix(line, "observed absent") {
+				t.Errorf("line %q does not name %s's field as absent", line, resource)
+			}
+			absent++
+		}
+		if absent == 0 {
+			t.Errorf("printed %q, want a line for each field the PriorityClass names", driftLines(out))
+		}
+	})
 }
 
 // TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold holds a
@@ -531,6 +606,7 @@ func TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender(t *testing.T) {
 		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
 	wantReads = append(wantReads, driftPolicyReads(t)...)
+	wantReads = append(wantReads, driftStaticReads(t)...)
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
@@ -600,8 +676,9 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 			if got := driftExit(err); got != tc.wantExit {
 				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, tc.wantExit, err, out.String())
 			}
-			if got := driftLines(out); !slices.Equal(got, tc.wantLines) {
-				t.Errorf("printed\n%q\nwant\n%q", got, tc.wantLines)
+			want := append(slices.Clone(tc.wantLines), driftSecretLines(t)...)
+			if got := driftLines(out); !slices.Equal(got, want) {
+				t.Errorf("printed\n%q\nwant\n%q", got, want)
 			}
 		})
 	}
@@ -815,6 +892,15 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			wantExit: driftExitUnreadable,
 			want:     "the live Deployment has no fields",
 		},
+		{
+			name: "the cluster does not hold it",
+			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
+				// kubectl's --ignore-not-found answer for an object it does not hold.
+				return "", 0, nil
+			},
+			wantExit: driftExitUnreadable,
+			want:     "the cluster does not hold the deployment/daemon",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -894,6 +980,24 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 				}
 			},
 			want: "cannot render the Deployments to compare",
+		},
+		{
+			name: "the static set cannot be read",
+			prepare: func(t *testing.T, d *clusterDriftDeps, _ string) {
+				t.Helper()
+				d.staticObjects = func() ([]k8s.StaticObject, error) {
+					return nil, errors.New("the embedded set is missing a document")
+				}
+			},
+			want: "cannot read the embedded static set to compare",
+		},
+		{
+			name: "no static objects are wired",
+			prepare: func(t *testing.T, d *clusterDriftDeps, _ string) {
+				t.Helper()
+				d.staticObjects = nil
+			},
+			want: "no embedded static objects are wired",
 		},
 		{
 			name: "the live Deployment cannot be read",
@@ -1010,8 +1114,8 @@ func TestTownClusterDriftHoldsARunnerInStep(t *testing.T) {
 	if got := driftExit(err); got != 0 {
 		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", got, err, out.String())
 	}
-	if got := driftLines(out); got != nil {
-		t.Errorf("printed %q for a cluster in step, want nothing", got)
+	if got, want := driftLines(out), driftSecretLines(t); !slices.Equal(got, want) {
+		t.Errorf("printed %q for a cluster in step, want only the not-compared Secret lines %q", got, want)
 	}
 }
 
@@ -1042,6 +1146,7 @@ func TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota(t *testing.T)
 		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "6", "8"),
 		"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", sixManifests.ConfigMap.Data["config.yml"], recordedConfig),
 	}
+	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
 		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 	}
@@ -1128,6 +1233,7 @@ func TestTownClusterDriftReportsEachRunnerDifference(t *testing.T) {
 				t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 			}
 			wantLines := []string{"deployment/" + forgejorunner.Name + ": " + driftWantDifference(t, tc.path, tc.rendered, tc.observed(t, live))}
+			wantLines = append(wantLines, driftSecretLines(t)...)
 			if got := driftLines(out); !slices.Equal(got, wantLines) {
 				t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 			}
@@ -1169,13 +1275,18 @@ func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 	}
 	wantLines := []string{"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", renderedConfig, liveConfig)}
+	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
 		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 	}
 	if strings.Contains(out.String(), "capacity") {
 		t.Errorf("printed the config.yml text, want paths and fingerprints only:\n%s", out.String())
 	}
+	notCompared := driftSecretLines(t)
 	for _, line := range driftLines(out) {
+		if slices.Contains(notCompared, line) {
+			continue
+		}
 		if !driftLineShape.MatchString(line) {
 			t.Errorf("line %q is not a path and two fingerprints", line)
 		}
@@ -1321,6 +1432,46 @@ func driftPolicyReads(t *testing.T) []string {
 	return reads
 }
 
+// driftStaticSet is the embedded static set the compare reads.
+func driftStaticSet(t *testing.T) []k8s.StaticObject {
+	t.Helper()
+	objects, err := k8s.Static()
+	if err != nil {
+		t.Fatalf("reading the embedded static set: %v", err)
+	}
+	return objects
+}
+
+// driftStaticReads is every static object the compare reads after the
+// hand-applied policy rows, in the order staticObjectTargets lists them, derived
+// from that one list (gt-w6g6ok).
+func driftStaticReads(t *testing.T) []string {
+	t.Helper()
+	targets, _, err := staticObjectTargets(driftStaticSet(t), policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("building the static objects' targets: %v", err)
+	}
+	reads := make([]string, 0, len(targets))
+	for _, target := range targets {
+		reads = append(reads, target.resource)
+	}
+	return reads
+}
+
+// driftSecretLines is the not-compared line each static Secret prints, derived
+// from the same walk the compare uses (gt-w6g6ok).
+func driftSecretLines(t *testing.T) []string {
+	t.Helper()
+	_, notCompared, err := staticObjectTargets(driftStaticSet(t), policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("building the static objects' targets: %v", err)
+	}
+	if len(notCompared) == 0 {
+		t.Fatal("the embedded static set holds no Secret, so this fixture is stale")
+	}
+	return notCompared
+}
+
 // driftReadPlurals maps a drift read's kind, before the slash, to its granted resource.
 var driftReadPlurals = map[string]string{
 	"deployment":                       "deployments",
@@ -1331,6 +1482,10 @@ var driftReadPlurals = map[string]string{
 	"cronjob":                          "cronjobs",
 	"validatingadmissionpolicy":        "validatingadmissionpolicies",
 	"validatingadmissionpolicybinding": "validatingadmissionpolicybindings",
+	"clusterrole":                      "clusterroles",
+	"clusterrolebinding":               "clusterrolebindings",
+	"priorityclass":                    "priorityclasses",
+	"namespace":                        "namespaces",
 	"role":                             "roles",
 	"rolebinding":                      "rolebindings",
 }

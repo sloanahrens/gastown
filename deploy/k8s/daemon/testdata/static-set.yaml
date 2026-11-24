@@ -556,10 +556,16 @@ description: "CI runners and their jobs: the first workload shed under pressure.
 # daemon's service account in gt reads the rendered control-cluster objects
 # through, and its binding. The compare reads a Deployment, a Service, a claim,
 # the ServiceAccount, the tracker backup CronJob and the gate runner's ConfigMap
-# by name, and the hand-applied admission policies, their bindings and the update
-# Job's Roles and RoleBindings, so the grant is get and list on those kinds and
-# nothing else: no Secret, no write verb, no wildcard. A kind the compare comes to
-# read joins this file and internal/cmd/testdata/drift-reads.golden together.
+# by name, the hand-applied admission policies, their bindings and the update
+# Job's Roles and RoleBindings, and every other object the static manifests hold:
+# the static ClusterRoles and ClusterRoleBindings, their Roles and RoleBindings,
+# the PriorityClasses and the Namespace, so the grant is get and list on those
+# kinds and nothing else: no Secret, no write verb, no wildcard. A kind the
+# compare comes to read joins this file and internal/cmd/testdata/drift-reads.golden
+# together. The deployer read supplement, gt-deployer-reader-extra in
+# deployer-rbac.yaml, names the same cluster-scoped kinds for the gt-deployers
+# group; the two grants name the same kinds for different subjects, and each is
+# held to its own allowlist.
 #
 # This file is not applied by the daemon: the overseer applies it with the admin
 # credential and turns the drift patrol on (gt-p2katm). TestDriftRBAC* in
@@ -572,10 +578,10 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list"]
-  # The gate runner's ConfigMap, the Services, the claims and the ServiceAccount
-  # are all core-group objects.
+  # The gate runner's ConfigMap, the Services, the claims, the ServiceAccounts
+  # and the static Namespace are all core-group objects.
   - apiGroups: [""]
-    resources: ["configmaps", "services", "persistentvolumeclaims", "serviceaccounts"]
+    resources: ["configmaps", "services", "persistentvolumeclaims", "serviceaccounts", "namespaces"]
     verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
@@ -584,9 +590,14 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
     verbs: ["get", "list"]
-  # The update Job's Roles and RoleBindings in gt.
+  # The static PriorityClasses.
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+  # The update Job's and the static manifests' Roles, RoleBindings, ClusterRoles
+  # and ClusterRoleBindings.
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

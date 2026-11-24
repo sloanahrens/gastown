@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 	"github.com/steveyegge/gastown/internal/update"
@@ -45,7 +47,12 @@ The admission policies and their bindings, and the update Job's Roles and
 RoleBindings, are applied by hand, so no render names them. They are compared with
 the documents embedded in this binary from deploy/k8s at the commit it was built
 from, so a match means the live object equals the running build's file, not the
-working tree's.
+working tree's. Every other object the static manifests hold is compared the same
+way, read by its kind's scope; a Secret is never read, and each one prints one
+line saying it is not compared, since the cluster fills its data. A static object
+the cluster does not hold is drift, and every field its document names prints as
+absent with exit 1, since the compare exists to notice that the apply never made
+it.
 
 Nothing is applied and no file is written; the only cluster calls are the reads.
 The flags come from the recorded file, so a live render must have run with
@@ -63,22 +70,26 @@ func init() {
 // clusterDriftDeps is what a drift run takes from the host: the render's own
 // seams for the town, the values file and the manifests, the gate runner's
 // render, the hand-applied objects' targets from the embedded documents, the
-// kubectl runner that reads the live objects, and where it prints.
+// embedded static set, the kubectl runner that reads the live objects, and where
+// it prints.
 type clusterDriftDeps struct {
 	render        clusterRenderDeps
 	runner        func() ([]driftTarget, error)
 	policyTargets func() ([]driftTarget, error)
+	staticObjects func() ([]k8s.StaticObject, error)
 	kubectl       update.RunFunc
 	out           io.Writer
 }
 
 // realClusterDriftDeps is the host's: the render's seams, the runner's render,
-// the embedded documents' targets, kubectl, and the command's output.
+// the embedded documents' targets, the embedded static set, kubectl, and the
+// command's output.
 func realClusterDriftDeps(out io.Writer) clusterDriftDeps {
 	return clusterDriftDeps{
 		render:        realClusterRenderDeps(out),
 		runner:        realRunnerDriftTargets,
 		policyTargets: policyDriftTargets,
+		staticObjects: k8s.Static,
 		kubectl:       realRunFunc(),
 		out:           out,
 	}
@@ -92,6 +103,16 @@ func (d clusterDriftDeps) staticPolicyTargets() ([]driftTarget, error) {
 		return nil, errors.New("no embedded admission and RBAC targets are wired, so the hand-applied objects cannot be compared")
 	}
 	return d.policyTargets()
+}
+
+// staticSet is the embedded static objects through the seam. A deps value built
+// without one fails the run instead of skipping them: a run that cannot read the
+// static set must not report a cluster in step.
+func (d clusterDriftDeps) staticSet() ([]k8s.StaticObject, error) {
+	if d.staticObjects == nil {
+		return nil, errors.New("no embedded static objects are wired, so the static set cannot be compared")
+	}
+	return d.staticObjects()
 }
 
 // runnerTargets is the gate runner's targets through the seam. A deps value built
@@ -220,6 +241,18 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 		return fmt.Errorf("cannot read the embedded admission and RBAC documents to compare: %w", err)
 	}
 	targets = append(targets, staticTargets...)
+	// Every other static object is compared beside the policy rows' documents,
+	// read by its kind's scope; a Secret builds no target and is named as not
+	// compared instead (gt-w6g6ok).
+	objects, err := d.staticSet()
+	if err != nil {
+		return fmt.Errorf("cannot read the embedded static set to compare: %w", err)
+	}
+	staticObjects, notCompared, err := staticObjectTargets(objects, policyTargetsCovered)
+	if err != nil {
+		return fmt.Errorf("cannot build the static objects' targets to compare: %w", err)
+	}
+	targets = append(targets, staticObjects...)
 	differed := false
 	for _, target := range targets {
 		lines, err := target.differences(ctx, d)
@@ -230,6 +263,11 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 			fmt.Fprintf(d.out, "%s: %s\n", target.resource, line)
 		}
 		differed = differed || len(lines) > 0
+	}
+	// The not-compared lines print after every difference, and never count as
+	// one: a Secret whose data the cluster fills is named, not drift.
+	for _, line := range notCompared {
+		fmt.Fprintln(d.out, line)
 	}
 	if differed {
 		return NewSilentExit(1)
@@ -250,25 +288,39 @@ func deploymentTarget(name string, deployment k8sdaemon.Deployment) driftTarget 
 
 // driftTarget is one object a drift run compares: what kind it is, so a refusal
 // names it, the resource kubectl reads it by, its namespace, whether it is
-// cluster-scoped, and the object the render or the embedded file produced for it.
+// cluster-scoped, whether the cluster not holding it is drift rather than an
+// unreadable input, and the object the render or the embedded file produced for
+// it.
 type driftTarget struct {
 	kind      string
 	resource  string
 	namespace string
 	cluster   bool
-	object    any
+	// absentIsDrift reports that a live object the cluster does not hold is a
+	// difference to report, not an input that could not be read. A hand-applied
+	// static object sets it; a rendered workload does not.
+	absentIsDrift bool
+	object        any
 }
 
 // differences is every rendered field of the target the live object carries
-// differently, or the reason either side could not be read.
+// differently, or the reason either side could not be read. A live object the
+// cluster does not hold is every field absent when the target says absence is
+// drift, and an unreadable input otherwise.
 func (t driftTarget) differences(ctx context.Context, d clusterDriftDeps) ([]string, error) {
 	rendered, err := decodeRenderedObject(d, t.object)
 	if err != nil {
 		return nil, fmt.Errorf("the rendered %s cannot be read back: %w", t.resource, err)
 	}
-	live, err := readLiveObject(ctx, d, t.resource, t.namespace, t.cluster)
+	live, absent, err := readLiveObject(ctx, d, t.resource, t.namespace, t.cluster)
 	if err != nil {
 		return nil, err
+	}
+	if absent {
+		if !t.absentIsDrift {
+			return nil, fmt.Errorf("the cluster does not hold the %s, so it was not read", t.resource)
+		}
+		return objectAbsent(t.kind, rendered)
 	}
 	return objectDrift(t.kind, rendered, live)
 }
@@ -291,33 +343,39 @@ func decodeRenderedObject(d clusterDriftDeps, object any) (map[string]any, error
 // its namespace when the target is namespaced, with no namespace when it is
 // cluster-scoped. A target that is namespaced with no namespace, or cluster-scoped
 // with one, is refused rather than read against a namespace the target never
-// named. An answer that is not one JSON object is refused, since an unread object
-// must not read as a cluster in step. The output stays out of the errors: a
-// Deployment's spec can carry a value that is a secret. The render's builders
-// validated its namespace as a DNS-1123 label, and the policy targets read the
-// constant, so the namespace reaches kubectl as a name it cannot read as a flag.
-func readLiveObject(ctx context.Context, d clusterDriftDeps, resource, namespace string, cluster bool) (map[string]any, error) {
+// named. The read passes --ignore-not-found, so an object the cluster does not
+// hold is an empty answer with exit 0 and reports absent, while a read that
+// failed still exits nonzero. An answer that is neither empty nor one JSON object
+// is refused, since an unread object must not read as a cluster in step. The
+// output stays out of the errors: a Deployment's spec can carry a value that is a
+// secret. The render's builders validated its namespace as a DNS-1123 label, and
+// the policy targets read the constant, so the namespace reaches kubectl as a
+// name it cannot read as a flag.
+func readLiveObject(ctx context.Context, d clusterDriftDeps, resource, namespace string, cluster bool) (map[string]any, bool, error) {
 	var args []string
 	switch {
 	case cluster && namespace != "":
-		return nil, fmt.Errorf("the cluster-scoped %s is named in namespace %q, so it was not read", resource, namespace)
+		return nil, false, fmt.Errorf("the cluster-scoped %s is named in namespace %q, so it was not read", resource, namespace)
 	case !cluster && namespace == "":
-		return nil, fmt.Errorf("the namespaced %s names no namespace, so it was not read", resource)
+		return nil, false, fmt.Errorf("the namespaced %s names no namespace, so it was not read", resource)
 	case cluster:
-		args = []string{"get", resource, "-o", "json"}
+		args = []string{"get", resource, "--ignore-not-found", "-o", "json"}
 	default:
-		args = []string{"get", resource, "-n", namespace, "-o", "json"}
+		args = []string{"get", resource, "-n", namespace, "--ignore-not-found", "-o", "json"}
 	}
 	out, exit, err := d.kubectl(ctx, "", nil, "kubectl", args...)
 	if err != nil {
-		return nil, fmt.Errorf("reading the live %s: %w", resource, err)
+		return nil, false, fmt.Errorf("reading the live %s: %w", resource, err)
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("the live %s could not be read: kubectl exited %d", resource, exit)
+		return nil, false, fmt.Errorf("the live %s could not be read: kubectl exited %d", resource, exit)
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, true, nil
 	}
 	var live map[string]any
 	if err := json.Unmarshal([]byte(out), &live); err != nil {
-		return nil, fmt.Errorf("the live %s answer is not a JSON object: %w", resource, err)
+		return nil, false, fmt.Errorf("the live %s answer is not a JSON object: %w", resource, err)
 	}
-	return live, nil
+	return live, false, nil
 }

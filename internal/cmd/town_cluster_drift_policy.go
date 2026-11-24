@@ -65,6 +65,31 @@ func policyDriftTargets() ([]driftTarget, error) {
 	return policyDriftTargetsFrom(policyTargetSpecs)
 }
 
+// policyTargetsCovered reports whether a policy row reads the static object, by
+// the kind, name and namespace the row reads, so the static walk leaves it to
+// that row's file rather than comparing the embedded document twice
+// (gt-w6g6ok).
+func policyTargetsCovered(kind, name, namespace string) bool {
+	for _, spec := range policyTargetSpecs {
+		if spec.kind != kind || spec.name != name {
+			continue
+		}
+		// The rows read a namespaced object in the constant namespace, never one
+		// the document names, so the same name in another namespace is a
+		// different object the rows do not hold.
+		if spec.cluster {
+			if namespace == "" {
+				return true
+			}
+			continue
+		}
+		if namespace == updateRBACNamespace {
+			return true
+		}
+	}
+	return false
+}
+
 // policyDriftTargetsFrom reads each spec's embedded bytes, reduces the document
 // it names to the fields the compare reads, and pairs it with the live object it
 // must equal. A spec whose document the bytes do not hold, or hold twice, is an
