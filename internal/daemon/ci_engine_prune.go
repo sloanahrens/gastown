@@ -817,7 +817,7 @@ func ciEngineExitStatus(err error) string {
 // block, returning the default for each that is empty. A value the patrol cannot
 // act on is an error naming its key; maxPerKind is the cap on candidates of each
 // kind one run may remove.
-func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, maxPerKind int, err error) {
+func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, maxPerKind int, err error) { //nolint:unparam // the cap is applied to the plan by gt-puhdl9
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
