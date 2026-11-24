@@ -809,3 +809,88 @@ func TestJobDueAllowsTheRunDuration(t *testing.T) {
 		})
 	}
 }
+
+// TestJobDueCapsTheRunDurationAtTheCadence is bead gt-utcevt: the extra time a
+// row earns for its newest run is that run's duration, capped at one cadence.
+// A run reporting ten cadences earns one cadence, so an absurd duration cannot
+// hold the job out of overdue for ever; a run shorter than the cadence still
+// earns exactly its duration.
+func TestJobDueCapsTheRunDurationAtTheCadence(t *testing.T) {
+	t.Parallel()
+	const (
+		cadence = 30 * time.Minute
+		grace   = 10 * time.Minute // max(cadence/4, 10m)
+	)
+	end := testNow.Add(-time.Hour)
+	cases := []struct {
+		name    string
+		run     time.Duration // the newest run's reported duration
+		after   time.Duration // how long after the run's end the row is judged
+		wantDue time.Duration // allowance past the run's end
+		want    State
+	}{
+		{
+			name:    "a run of ten cadences earns one cadence",
+			run:     10 * cadence,
+			after:   cadence + cadence + grace,
+			wantDue: cadence + cadence + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a run of ten cadences is overdue one cadence past the cap",
+			run:     10 * cadence,
+			after:   cadence + cadence + grace + time.Minute,
+			wantDue: cadence + cadence + grace,
+			want:    StateOverdue,
+		},
+		{
+			name:    "a run just over the cadence earns one cadence",
+			run:     cadence + time.Minute,
+			after:   cadence + cadence + grace,
+			wantDue: cadence + cadence + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a run shorter than the cadence earns exactly its duration",
+			run:     19 * time.Minute,
+			after:   cadence + 19*time.Minute + grace,
+			wantDue: cadence + 19*time.Minute + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a run shorter than the cadence is overdue past its duration",
+			run:     19 * time.Minute,
+			after:   cadence + 19*time.Minute + grace + time.Minute,
+			wantDue: cadence + 19*time.Minute + grace,
+			want:    StateOverdue,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeMayorDaemon(t, root, `{"job":{"interval":"30m"}}`)
+			appendLedgerRuns(t, root, jobledger.Run{
+				Job:       "job",
+				StartedAt: end.Add(-c.run),
+				EndedAt:   end,
+				Outcome:   "ok",
+				Stats:     map[string]int64{"duration_ms": c.run.Milliseconds()},
+			})
+
+			jobs, err := list(root, Options{}, []config.DaemonStep{
+				{Name: "job", Kind: config.DaemonStepPatrol},
+			}, end.Add(c.after))
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			row := jobs[0]
+			if want := end.Add(c.wantDue); row.Due == nil || !row.Due.Equal(want) {
+				t.Errorf("Due = %v, want %v", row.Due, want)
+			}
+			if row.State != c.want {
+				t.Errorf("State = %q, want %q", row.State, c.want)
+			}
+		})
+	}
+}
