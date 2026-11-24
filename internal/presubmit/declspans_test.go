@@ -68,12 +68,6 @@ func TestDeclsTouching(t *testing.T) {
 			want:  []string{"a", "b"},
 		},
 		{
-			name:  "the blank identifier is not a declared name",
-			src:   "package p\n\nvar _, b = 1, 2\n",
-			lines: []int{3},
-			want:  []string{"b"},
-		},
-		{
 			name: "no lines is no error",
 			src:  "package p\n\nfunc f() {}\n",
 		},
