@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -293,18 +294,90 @@ func TestTownClusterDriftStaticReadsOnlyGets(t *testing.T) {
 	}
 }
 
-// TestTownClusterDriftStaticGuardsAccountForEveryObject walks the embedded set
-// and holds every object to exactly one way the compare accounts for it: a
-// policy row reads it, it builds a static target, or it prints a Secret's
-// not-compared line. An object none of the three names is dropped from the
-// compare with nothing said, so a new static object forces a decision
-// (gt-im6aei).
+// TestTownClusterDriftStaticGuardsAccountForEveryObject fails unless every
+// embedded object is a policy row, a static target or a Secret's not-compared
+// line, so an object none of the three names drops silently (gt-im6aei).
 func TestTownClusterDriftStaticGuardsAccountForEveryObject(t *testing.T) {
 	t.Parallel()
 	objects := driftStaticSet(t)
 	targets, notCompared, err := staticObjectTargets(objects, policyTargetsCovered)
 	if err != nil {
 		t.Fatalf("staticObjectTargets: %v", err)
+	}
+	if findings := staticAccountingFindings(objects, targets, notCompared, staticPolicyRowKeys()); len(findings) != 0 {
+		t.Errorf("the embedded static set is not accounted for:\n%s", strings.Join(findings, "\n"))
+	}
+}
+
+// TestTownClusterDriftStaticGuardsDriveEveryAccountingBranch drives each way
+// staticAccountingFindings can fail (gt-im6aei).
+func TestTownClusterDriftStaticGuardsDriveEveryAccountingBranch(t *testing.T) {
+	t.Parallel()
+	objects := driftStaticSet(t)
+	targets, notCompared, err := staticObjectTargets(objects, policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("staticObjectTargets: %v", err)
+	}
+	rows := staticPolicyRowKeys()
+	t.Run("an empty set", func(t *testing.T) {
+		t.Parallel()
+		if findings := staticAccountingFindings(nil, nil, nil, nil); len(findings) == 0 {
+			t.Error("an empty set passed the walk, so a missing embed would go unreported")
+		}
+	})
+	policyTarget := driftTarget{resource: strings.ToLower(policyTargetSpecs[0].kind) + "/" + policyTargetSpecs[0].name}
+	cases := []struct {
+		name    string
+		targets []driftTarget
+		lines   []string
+		want    string
+	}{
+		{"an object whose target the compare drops", targets[1:], notCompared, targets[0].resource + " " + targets[0].namespace},
+		{"a Secret with no not-compared line", targets, nil, "printed 0 not-compared lines, want one"},
+		{"a Secret line no object names", targets, append(slices.Clone(notCompared), "Secret/gt-ghost: not compared: secret data is never read"), "printed 2 not-compared lines for 1 static Secrets"},
+		{"a Secret compared anyway", append(slices.Clone(targets), driftTarget{resource: "secret/sweep-runner-token", namespace: "gt-sweeps"}), notCompared, "is a Secret and is compared"},
+		{"a policy row's object compared again", append(slices.Clone(targets), policyTarget), notCompared, "is read by a policy row and compared"},
+		{"a target no object names", append(slices.Clone(targets), driftTarget{resource: "configmap/gt-ghost", namespace: "gt"}), notCompared, `the compare reads "configmap/gt-ghost gt", which no embedded static object names`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			findings := staticAccountingFindings(objects, tc.targets, tc.lines, rows)
+			if !slices.ContainsFunc(findings, func(f string) bool { return strings.Contains(f, tc.want) }) {
+				t.Errorf("findings %q do not name %q", findings, tc.want)
+			}
+		})
+	}
+}
+
+// TestTownClusterDriftStaticGuardsWholeCompareReadsOnlyGets runs the whole
+// compare against the fake kubectl runner, which fails the test on any verb
+// other than get, so a mutating read is refused. A run that read nothing fails
+// too, since an empty read list would otherwise pass as read-only (gt-im6aei).
+func TestTownClusterDriftStaticGuardsWholeCompareReadsOnlyGets(t *testing.T) {
+	t.Parallel()
+	d, out, town := driftTestSeams(t, nil)
+	reads := 0
+	answer := driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil)
+	d.kubectl = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		reads++
+		return answer(ctx, dir, env, name, args...)
+	}
+	if err := runClusterDrift(context.Background(), d); driftExit(err) != 0 {
+		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", driftExit(err), err, out.String())
+	}
+	if reads == 0 {
+		t.Fatal("the whole compare read nothing, so it never asked the runner for a verb")
+	}
+}
+
+// staticAccountingFindings returns one finding per object the compare does not
+// account for exactly once, from the targets it built and the not-compared lines
+// it printed. policyRows comes from policyTargetSpecs, not policyTargetsCovered,
+// so a bug there shows as an unaccounted object (gt-im6aei).
+func staticAccountingFindings(objects []k8s.StaticObject, targets []driftTarget, notCompared []string, policyRows map[string]bool) []string {
+	if len(objects) == 0 {
+		return []string{"the embedded static set holds no objects to account for"}
 	}
 	targetCount := make(map[string]int, len(targets))
 	for _, target := range targets {
@@ -314,39 +387,60 @@ func TestTownClusterDriftStaticGuardsAccountForEveryObject(t *testing.T) {
 	for _, line := range notCompared {
 		lineCount[line]++
 	}
+	var findings []string
 	known := make(map[string]bool, len(objects))
 	secrets := 0
 	for _, object := range objects {
-		key := strings.ToLower(object.Kind) + "/" + object.Name + " " + object.Namespace
+		key := staticObjectKey(object.Kind, object.Name, object.Namespace)
 		known[key] = true
 		switch {
 		case object.Kind == secretKind:
 			secrets++
 			want := "Secret/" + object.Name + ": not compared: secret data is never read"
 			if lineCount[want] != 1 {
-				t.Errorf("the static %s printed %d not-compared lines, want one", key, lineCount[want])
+				findings = append(findings, fmt.Sprintf("the static %s printed %d not-compared lines, want one", key, lineCount[want]))
 			}
 			if targetCount[key] != 0 {
-				t.Errorf("the static %s is a Secret and is compared %d times anyway", key, targetCount[key])
+				findings = append(findings, fmt.Sprintf("the static %s is a Secret and is compared %d times anyway", key, targetCount[key]))
 			}
-		case policyTargetsCovered(object.Kind, object.Name, object.Namespace):
+		case policyRows[key]:
 			if targetCount[key] != 0 {
-				t.Errorf("the static %s is read by a policy row and compared %d times again", key, targetCount[key])
+				findings = append(findings, fmt.Sprintf("the static %s is read by a policy row and compared %d times again", key, targetCount[key]))
 			}
 		default:
 			if targetCount[key] != 1 {
-				t.Errorf("the static %s is not a policy row, a static target or a Secret line, and is compared %d times", key, targetCount[key])
+				findings = append(findings, fmt.Sprintf("the static %s is not a policy row, a static target or a Secret line, and is compared %d times", key, targetCount[key]))
 			}
 		}
 	}
 	if len(notCompared) != secrets {
-		t.Errorf("printed %d not-compared lines for %d static Secrets", len(notCompared), secrets)
+		findings = append(findings, fmt.Sprintf("printed %d not-compared lines for %d static Secrets", len(notCompared), secrets))
 	}
 	for key := range targetCount {
 		if !known[key] {
-			t.Errorf("the compare reads %q, which no embedded static object names", key)
+			findings = append(findings, fmt.Sprintf("the compare reads %q, which no embedded static object names", key))
 		}
 	}
+	slices.Sort(findings)
+	return findings
+}
+
+// staticObjectKey names an object the way the walk counts it.
+func staticObjectKey(kind, name, namespace string) string {
+	return strings.ToLower(kind) + "/" + name + " " + namespace
+}
+
+// staticPolicyRowKeys is the objects the policy rows hold, from policyTargetSpecs.
+func staticPolicyRowKeys() map[string]bool {
+	keys := make(map[string]bool, len(policyTargetSpecs))
+	for _, spec := range policyTargetSpecs {
+		namespace := ""
+		if !spec.cluster {
+			namespace = updateRBACNamespace
+		}
+		keys[staticObjectKey(spec.kind, spec.name, namespace)] = true
+	}
+	return keys
 }
 
 // TestTownClusterDriftStaticRefusesABrokenObject drives every way a static
