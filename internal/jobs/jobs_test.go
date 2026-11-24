@@ -148,6 +148,82 @@ func TestJobsState(t *testing.T) {
 	}
 }
 
+// TestJobsDisabledPatrolIsNotOverdue is bead gt-378vji: a patrol whose config
+// entry says enabled false has nothing due, however old its last run, and keeps
+// that run on the row; the same entry with enabled true or with no enabled key
+// is judged by its cadence as before.
+func TestJobsDisabledPatrolIsNotOverdue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		patrols string
+		want    State
+	}{
+		{
+			name:    "enabled false with a 19-day-old run is no_cadence",
+			patrols: `{"job":{"interval":"1h","enabled":false}}`,
+			want:    StateNoCadence,
+		},
+		{
+			name:    "enabled true with a 19-day-old run is overdue",
+			patrols: `{"job":{"interval":"1h","enabled":true}}`,
+			want:    StateOverdue,
+		},
+		{
+			name:    "no enabled key with a 19-day-old run is overdue",
+			patrols: `{"job":{"interval":"1h"}}`,
+			want:    StateOverdue,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeMayorDaemon(t, root, c.patrols)
+			lastRun := testNow.Add(-19 * 24 * time.Hour)
+			writeLastRun(t, root, map[string]time.Time{"job": lastRun})
+
+			job := jobsRow(t, root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, "job")
+			if job.State != c.want {
+				t.Errorf("State = %q, want %q", job.State, c.want)
+			}
+			if job.LastRun == nil || !job.LastRun.Equal(lastRun) {
+				t.Errorf("LastRun = %v, want the recorded run %v kept on the row", job.LastRun, lastRun)
+			}
+			if c.want == StateNoCadence && job.Due != nil {
+				t.Errorf("Due = %v, want none: nothing is due for a patrol turned off", *job.Due)
+			}
+		})
+	}
+}
+
+// TestJobsDisabledPatrolIgnoresRunDue is bead gt-378vji: a run the ledger holds
+// for a patrol turned off supplies the row's last run, but its own next-due time
+// does not judge the row, which stays no_cadence with nothing due.
+func TestJobsDisabledPatrolIgnoresRunDue(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeMayorDaemon(t, root, `{"job":{"interval":"1h","enabled":false}}`)
+	due := testNow.Add(-5 * time.Minute)
+	appendLedgerRuns(t, root, jobledger.Run{
+		Job:       "job",
+		StartedAt: testNow.Add(-11 * time.Minute),
+		EndedAt:   testNow.Add(-10 * time.Minute),
+		Outcome:   "ok",
+		NextDue:   &due,
+	})
+
+	job := jobsRow(t, root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, "job")
+	if job.State != StateNoCadence {
+		t.Errorf("State = %q, want no_cadence: the patrol is off, so the run's next-due time does not judge it", job.State)
+	}
+	if job.Due != nil {
+		t.Errorf("Due = %v, want none for a patrol turned off", *job.Due)
+	}
+	if job.LastRun == nil || !job.LastRun.Equal(testNow.Add(-10*time.Minute)) {
+		t.Errorf("LastRun = %v, want the ledger run's end kept on the row", job.LastRun)
+	}
+}
+
 func TestJobsRowPerStep(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

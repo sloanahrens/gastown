@@ -31,8 +31,8 @@ const (
 	StateOverdue State = "overdue"
 	// StateOK: the last run is within the cadence plus its grace.
 	StateOK State = "ok"
-	// StateNoCadence: the job has no interval, so nothing says when it is due.
-	// It is shown amber, never green.
+	// StateNoCadence: nothing is due, because the job has no interval or its
+	// patrol's config turns it off. It is shown amber, never green.
 	StateNoCadence State = "no_cadence"
 	// StateUnknown: the job's inputs cannot be read, the last-run record is
 	// unreadable or corrupt, or its interval is not a Go duration. It is an
@@ -89,6 +89,11 @@ type Job struct {
 	// Source names the config the cadence was read from, empty when the
 	// cadence is not read from a config file.
 	Source string `json:"source,omitempty"`
+	// off is the patrol's config entry saying enabled false: nothing is due,
+	// whatever the interval says, so the row reads no_cadence and no due time
+	// unless a broken input makes it unknown. It is not printed: the state
+	// carries it.
+	off bool
 }
 
 // Options are the list's inputs that do not come from the town root.
@@ -138,7 +143,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 
 	jobs := make([]Job, 0, len(steps)+2)
 	for _, s := range steps {
-		j := Job{Name: s.Name, Kind: s.Kind, Source: source}
+		j := Job{Name: s.Name, Kind: s.Kind, Source: source, off: patrolOff(cadences, s.Name)}
 		cadence, cadErr := cadenceOf(cadences, s.Name)
 		j.Cadence = cadence
 		if s.Name == updateJobName {
@@ -195,7 +200,9 @@ func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
 		return j
 	}
 	if len(runs) == 0 {
-		j.Due = dueOf(j)
+		if !j.off {
+			j.Due = dueOf(j)
+		}
 		return j
 	}
 	// Tail returns the runs oldest first, so the newest is the last.
@@ -210,6 +217,15 @@ func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
 		j.Outcome = ledgerOutcome(newest.Outcome)
 	}
 	j.Stats = mergeStats(j.Stats, newest.Stats)
+	if j.off {
+		// The patrol is turned off in its config, so nothing is due whatever
+		// the run recorded; the run still supplies the last run and its outcome.
+		j.Due = nil
+		if j.State != StateUnknown {
+			j.State = StateNoCadence
+		}
+		return j
+	}
 	if newest.NextDue != nil {
 		due := *newest.NextDue
 		j.Due = &due
@@ -331,7 +347,9 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 	switch {
 	case runsUnreadable, cadenceUnreadable:
 		return StateUnknown
-	case j.Cadence == 0:
+	case j.off, j.Cadence == 0:
+		// A patrol turned off in its config has nothing due, however long ago
+		// it last ran: the row reads no_cadence and keeps that run.
 		return StateNoCadence
 	case j.LastRun == nil:
 		return StateNeverRun
@@ -344,10 +362,22 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 }
 
 // cadenceEntry is one patrol's entry in the patrol config: its interval as
-// the file wrote it, or bad when the entry is not an object.
+// the file wrote it, its enabled flag, or bad when the entry does not parse.
 type cadenceEntry struct {
 	interval *string
-	bad      bool
+	// enabled is the entry's enabled value: nil when the entry writes none,
+	// which the daemon reads as on.
+	enabled *bool
+	bad     bool
+}
+
+// patrolOff reports whether a patrol's entry turns it off: an enabled key that
+// says false. An entry with no enabled key, one that says true, or one that
+// does not parse is not off here; a broken entry's row reads unknown from its
+// unreadable interval.
+func patrolOff(cadences map[string]cadenceEntry, name string) bool {
+	e, ok := cadences[name]
+	return ok && e.enabled != nil && !*e.enabled
 }
 
 // diskMaintenanceName is the patrol whose interval may be the word
@@ -407,12 +437,13 @@ func readCadences(townRoot string) (cadences map[string]cadenceEntry, source str
 	for name, raw := range patrols {
 		var entry struct {
 			Interval *string `json:"interval"`
+			Enabled  *bool   `json:"enabled"`
 		}
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			cadences[name] = cadenceEntry{bad: true}
 			continue
 		}
-		cadences[name] = cadenceEntry{interval: entry.Interval}
+		cadences[name] = cadenceEntry{interval: entry.Interval, enabled: entry.Enabled}
 	}
 	return cadences, source, nil
 }
