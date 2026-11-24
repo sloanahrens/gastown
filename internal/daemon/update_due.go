@@ -40,6 +40,10 @@ type UpdateFacts struct {
 	// MainSHA is main's current sha, the target a new run would set out to
 	// install; empty when it could not be read.
 	MainSHA string
+	// RunningBehindLastTarget reports the running commit is a strict ancestor
+	// of the last run's target: a deliberate rollback. The caller gathers it;
+	// updateDue only reads it.
+	RunningBehindLastTarget bool
 	// RefusedCommit is the pair commit the image ledger records as refused by
 	// a pre-swap check, with the failure the check named; both empty when the
 	// record names none. When the record cannot be read, the pair the last
@@ -93,6 +97,15 @@ func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool,
 	if f.RefusedCommit != "" && f.MainSHA == f.RefusedCommit {
 		return false, fmt.Sprintf("pair %s was refused by %s",
 			greenRefShortSHA(f.RefusedCommit), reasonOr(f.RefusedReason, "the pre-swap check"))
+	}
+
+	// A rollback leaves the running commit behind the target the last run set
+	// out to install. Rolling forward again would undo it, so hold while main
+	// still equals that target: the next roll must install something newer,
+	// which is what main moving past it makes due.
+	if f.RunningBehindLastTarget && f.MainSHA == f.LastTarget {
+		return false, fmt.Sprintf("the running commit is behind the last roll's target %s: a rollback holds until main moves past it",
+			greenRefShortSHA(f.LastTarget))
 	}
 
 	// The nightly rule: one run per day, and only inside the hour that opens
