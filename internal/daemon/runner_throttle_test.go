@@ -63,3 +63,26 @@ func TestRunnerThrottleErrors(t *testing.T) {
 		}
 	}
 }
+
+// A seam that edits the argv it is handed must not change what the next read
+// sends: ReadRunnerThrottle passes a copy of the package's argv, not the slice.
+func TestReadRunnerThrottleArgvIsCopied(t *testing.T) {
+	t.Parallel()
+	want := "-n forgejo exec deploy/forgejo-runner -c dind -- cat /sys/fs/cgroup/cpu.stat"
+	var sent []string
+	exec := func(_ context.Context, args ...string) (string, error) {
+		sent = append(sent, strings.Join(args, " "))
+		args[0] = "-n corrupted"
+		return throttledCPUStat, nil
+	}
+	for range 2 {
+		if _, err := ReadRunnerThrottle(context.Background(), exec); err != nil {
+			t.Fatalf("ReadRunnerThrottle: %v", err)
+		}
+	}
+	for i, got := range sent {
+		if got != want {
+			t.Errorf("read %d sent %q, want %q", i+1, got, want)
+		}
+	}
+}
