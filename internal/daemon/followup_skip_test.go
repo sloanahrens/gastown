@@ -375,9 +375,9 @@ func TestFollowupSkipPolicyIsPureAndTotal(t *testing.T) {
 
 // The hold-out clocks: inside the window, and after it ends.
 var (
-	followupHoldOutInside = omlessons.HoldOutStart.Add(24 * time.Hour)
-	followupBeforeHoldOut = omlessons.HoldOutStart.Add(-24 * time.Hour)
-	followupHoldOutAfter  = omlessons.HoldOutStart.AddDate(0, 0, omlessons.HoldOutDays)
+	followupHoldOutInside = omlessons.HoldOutStart().Add(24 * time.Hour)
+	followupBeforeHoldOut = omlessons.HoldOutStart().Add(-24 * time.Hour)
+	followupHoldOutAfter  = omlessons.HoldOutStart().AddDate(0, 0, omlessons.HoldOutDays)
 )
 
 // runFollowupPolicyCases judges every row with the production policy at a fixed
