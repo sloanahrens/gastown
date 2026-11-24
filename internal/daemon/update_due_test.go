@@ -244,6 +244,108 @@ func TestUpdateDueHoldsAFailedRunOnMainsTarget(t *testing.T) {
 	}
 }
 
+// A running commit behind the last roll's target is a deliberate rollback: it
+// holds while main still equals that target, under either rule, and is due as
+// before once main moves past it or when the fact is false.
+func TestUpdateDueRollbackHolds(t *testing.T) {
+	t.Parallel()
+
+	const target = "0123456789abcdef0123456789abcdef01234567"
+	const moved = "fedcba9876543210fedcba9876543210fedcba98"
+	const holdReason = "the running commit is behind the last roll's target 0123456789ab: a rollback holds until main moves past it"
+	nightly := time.Date(2026, 3, 10, 3, 30, 0, 0, time.UTC)
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	endedLongAgo := noon.Add(-4 * time.Hour)
+
+	tests := []struct {
+		name       string
+		now        time.Time
+		facts      UpdateFacts
+		wantDue    bool
+		wantReason string
+	}{
+		{
+			name: "behind, main on the target, a landing waiting: not due",
+			now:  noon,
+			facts: UpdateFacts{
+				RunningBehindLastTarget: true, LastTarget: target, MainSHA: target,
+				MainMoved: true, Waiting: 2, LastEnded: endedLongAgo,
+			},
+			wantDue:    false,
+			wantReason: holdReason,
+		},
+		{
+			name: "behind, main on the target, nightly window open: not due",
+			now:  nightly,
+			facts: UpdateFacts{
+				RunningBehindLastTarget: true, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    false,
+			wantReason: holdReason,
+		},
+		{
+			name: "behind, main moved past the target, nightly window open: due",
+			now:  nightly,
+			facts: UpdateFacts{
+				RunningBehindLastTarget: true, LastTarget: target, MainSHA: moved,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+		{
+			name: "behind, main moved past the target, a landing waiting: due",
+			now:  noon,
+			facts: UpdateFacts{
+				RunningBehindLastTarget: true, LastTarget: target, MainSHA: moved,
+				MainMoved: true, Waiting: 1, LastEnded: endedLongAgo,
+			},
+			wantDue:    true,
+			wantReason: "main moved",
+		},
+		{
+			name: "not behind, main on the target, nightly window open: due",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastTarget: target, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+		{
+			name: "not behind, main on the target, a landing waiting: due",
+			now:  noon,
+			facts: UpdateFacts{
+				LastTarget: target, MainSHA: target,
+				MainMoved: true, Waiting: 1, LastEnded: endedLongAgo,
+			},
+			wantDue:    true,
+			wantReason: "main moved",
+		},
+		{
+			name: "behind, main's sha unknown: due as before",
+			now:  nightly,
+			facts: UpdateFacts{
+				RunningBehindLastTarget: true, LastTarget: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			due, reason := updateDue(tt.now, testUpdateSettings, tt.facts)
+			if due != tt.wantDue {
+				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("updateDue() reason = %q, want it to contain %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 // A town with no gt source checkout cannot read main or install, so no rule
 // makes an update due there; the reason names the checkout rather than a hold
 // the town could never leave.
