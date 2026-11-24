@@ -167,3 +167,52 @@ func TestNukeSafetyClearsAFinishedSeatWithAMissingCleanupStatus(t *testing.T) {
 		t.Fatalf("nuke refused a finished seat with a missing cleanup_status: blocked=%v reasons=%q", result.Blocked, strings.Join(result.Reasons, " | "))
 	}
 }
+
+// The same missing cleanup_status on a seat whose git state is not safe is a
+// refusal, not a pass: with a terminal source and a closed hook the only thing
+// standing between this seat and a nuke is the live git answer, and a sandbox
+// the gateway still reports running cannot give one (gt-pojsio, om finding
+// c957ede0ba41).
+func TestNukeSafetyRefusesAMissingCleanupStatusWhenGitIsNotSafe(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+	fake := mrlessBeads{beadsfake.New()}
+	agentID := polecatBeadIDForRig(r, "gastown", "ember")
+	if _, err := fake.Create(beads.CreateOptions{
+		ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+			RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateSpawning),
+			Agent: sandboxSeatAgent, Branch: "polecat/ember/gt-a+x", LastSourceIssue: "gt-work", HookBead: "gt-work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := fake.Update("gt-work", beads.UpdateOptions{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	env := sandboxSeatEnv{
+		probe: func(string, string) (polecat.LiveGitState, bool) {
+			// A running sandbox: its git state cannot be measured from the host.
+			return polecat.SandboxSeatGitState("", true, nil, "gt-ember"), true
+		},
+		hostGitState: gatewayOnlySeat,
+		remoteBranch: func(string, string) (bool, error) { return false, nil },
+	}
+	get := func(string) (*polecat.Polecat, error) {
+		return &polecat.Polecat{Name: "ember", Branch: "polecat/ember/gt-a+x", ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}, nil
+	}
+
+	result := checkPolecatSafetyWith("gastown", "ember", r, get, fake, env)
+
+	if !result.Blocked {
+		t.Fatalf("nuke allowed a seat with a missing cleanup_status and unmeasured git state: reasons=%q", strings.Join(result.Reasons, " | "))
+	}
+	if len(result.Reasons) != 1 || result.Reasons[0] != "cleanup_status=<missing>" {
+		t.Errorf("refusal reasons = %q, want exactly [cleanup_status=<missing>]", strings.Join(result.Reasons, " | "))
+	}
+}
