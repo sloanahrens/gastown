@@ -341,6 +341,56 @@ func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
 	})
 }
 
+// TestTickEffRigHeadsFailedQuery: a failed read that is not Dolt's unknown-
+// database 1105 is returned as the read's error with no map, and the statement
+// is not sent again. A failure that names no unknown database, or names one
+// under another code, must not read as an answer with some rigs missing.
+func TestTickEffRigHeadsFailedQuery(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeMetadata := func(rig, content string) {
+		t.Helper()
+		dir := filepath.Join(town, rig, ".beads")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMetadata("gastown", `{"dolt_database":"gt"}`)
+	writeMetadata("second", `{"dolt_database":"be"}`)
+	rigs := []string{"gastown", "second"}
+
+	for _, tc := range []struct {
+		name    string
+		failure error
+	}{
+		{"a failure that is no 1105", errors.New(`dial tcp 127.0.0.1:3307: connect: connection refused`)},
+		{"the unknown variable under another code", errors.New(`Error 1193 (HY000): Unknown system variable '@@gt_head'`)},
+		{"a longer code that starts with 1105", errors.New(`Error 11050 (HY000): Unknown system variable '@@gt_head'`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+				calls++
+				return nil, tc.failure
+			})
+			got, err := rigHeads(town, rigs, read)
+			if !errors.Is(err, tc.failure) {
+				t.Errorf("rigHeads error = %v, want the read's error %v", err, tc.failure)
+			}
+			if got != nil {
+				t.Errorf("rigHeads = %v, want no map with a failed read", got)
+			}
+			if calls != 1 {
+				t.Errorf("SQLCSV calls = %d, want no retry for a failure that is no unknown database", calls)
+			}
+		})
+	}
+}
+
 // TestTickEffRigHeadsParse: the SQLCSV header and row pair by column name into
 // one rig per database — the row interleaves two databases, so positional
 // pairing misattributes it — and a result that is not a parseable header and
