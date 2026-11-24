@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -183,5 +186,61 @@ func TestClusterRenderSbxEngineReturnsTheRenderAndWriteErrors(t *testing.T) {
 				t.Errorf("%d files written, want none", len(entries))
 			}
 		})
+	}
+}
+
+// fileNameNumber splits a rendered file name into the number it is prefixed
+// with and the width that number is padded to.
+func fileNameNumber(t *testing.T, name string) (number, width int) {
+	t.Helper()
+	width = len(name) - len(strings.TrimLeft(name, "0123456789"))
+	number, err := strconv.Atoi(name[:width])
+	if err != nil {
+		t.Fatalf("file %q does not start with a file number: %v", name, err)
+	}
+	return number, width
+}
+
+// The gt-sbx files are numbered in sbx.Render's order and padded to the width
+// the control render pads its own, so the two apply sets read alike. The width
+// is read from a control render, not restated here: a width change in either
+// render alone leaves this red.
+func TestClusterRenderSbxEngineNumbersWithTheControlRenderWidth(t *testing.T) {
+	t.Parallel()
+	control := clusterRenderFixture(t)
+	if err := runClusterRender(clusterRenderTestDeps(t, io.Discard), control); err != nil {
+		t.Fatalf("control render: %v", err)
+	}
+	controlNames := dirNames(t, control.out)
+	if len(controlNames) == 0 {
+		t.Fatal("the control render wrote no file, so this test cannot read its number width")
+	}
+	_, wantWidth := fileNameNumber(t, controlNames[0])
+
+	out := t.TempDir()
+	var received sbx.Inputs
+	d := sbxEngineDeps(t, sbx.Set{Objects: sbxEngineObjects}, &received)
+	if err := runSbxRender(d, sbxRenderInputs{OutDir: out, Manifests: "m", Chart: "c", Values: "v"}); err != nil {
+		t.Fatalf("runSbxRender(): %v", err)
+	}
+	names := dirNames(t, out)
+	if len(names) != len(sbxEngineObjects) {
+		t.Fatalf("%d files in %s, want %d", len(names), out, len(sbxEngineObjects))
+	}
+	for _, name := range names {
+		number, width := fileNameNumber(t, name)
+		if width != wantWidth {
+			t.Errorf("file %q is numbered with %d digits, want the control render's %d", name, width, wantWidth)
+		}
+		if number < 1 || number > len(sbxEngineObjects) {
+			t.Errorf("file %q is numbered %d, outside the set's %d objects", name, number, len(sbxEngineObjects))
+			continue
+		}
+		object := sbxEngineObjects[number-1]
+		want := fmt.Sprintf("%0*d-%s-%s.yaml", wantWidth, number, strings.ToLower(object.Kind), object.Name)
+		if name != want {
+			t.Errorf("file %q is numbered %d, but sbx.Render returns %s %s at that position, so the name wants to be %q",
+				name, number, object.Kind, object.Name, want)
+		}
 	}
 }
