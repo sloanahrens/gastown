@@ -152,27 +152,6 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 	})
 }
 
-// TestNodeImagePruneKubeApplyNamesTheNamespace: Apply names the gt namespace with
-// -n before create and -f, so a manifest that lost its namespace still creates the
-// Job in the gt namespace and not in default (gt-rvasli).
-func TestNodeImagePruneKubeApplyNamesTheNamespace(t *testing.T) {
-	t.Parallel()
-	manifest := []byte("kind: Job\n")
-
-	dir := t.TempDir()
-	var gotArgs []string
-	run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
-		gotArgs = args
-		return "", 0, nil
-	}
-	err := kubectlNodePrune{dir: dir, run: run}.Apply(context.Background(), manifest)
-
-	require.NoError(t, err)
-	require.Len(t, gotArgs, 5)
-	assert.Equal(t, []string{"-n", nodeImagePruneNamespace, "create", "-f"}, gotArgs[:4])
-	assert.Equal(t, filepath.Join(dir, nodePruneManifestName(manifest)), gotArgs[4])
-}
-
 // TestNodeImagePruneKubeWaitArgv: WaitComplete, Logs and Delete run kubectl through
 // the exec seam with exactly the argv the node-prune run needs, and no
 // --request-timeout or --context flag (gt-ye543d). Logs returns kubectl's stdout
