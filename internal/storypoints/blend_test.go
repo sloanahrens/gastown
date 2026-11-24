@@ -195,6 +195,32 @@ func TestBlendRefusals(t *testing.T) {
 	}
 }
 
+// TestValidMinutes pins the one rule the blend, SizeFlag and the estimator's
+// prior reuse share: finite and positive.
+func TestValidMinutes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		m    float64
+		want bool
+	}{
+		{"zero", 0, false},
+		{"negative", -1, false},
+		{"positive infinity", math.Inf(1), false},
+		{"NaN", math.NaN(), false},
+		{"fraction", 0.5, true},
+		{"whole", 10, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ValidMinutes(tt.m); got != tt.want {
+				t.Errorf("ValidMinutes(%v) = %v, want %v", tt.m, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBlendRefusesAverageWithNoPoint(t *testing.T) {
 	t.Parallel()
 	noPoint := func(float64) (int, error) { return 0, ErrNoMinutes }

@@ -91,7 +91,7 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 	names := make([]string, 0, len(terms))
 	var logSum float64
 	for _, t := range terms {
-		if !validMinutes(t.minutes) {
+		if !ValidMinutes(t.minutes) {
 			return Blended{}, fmt.Errorf("%w: %s input is %v", ErrNoMinutes, t.name, t.minutes)
 		}
 		logSum += math.Log(t.minutes)
@@ -125,8 +125,10 @@ func rungFor(embed, jev bool) string {
 	return "shape"
 }
 
-// validMinutes reports whether m is a finite, positive number of minutes.
-func validMinutes(m float64) bool {
+// ValidMinutes reports whether m is a finite, positive number of minutes. The
+// blend, SizeFlag and the estimator's prior reuse (estimate.reusablePrior) all
+// share this one rule, so a value one accepts is accepted by all of them.
+func ValidMinutes(m float64) bool {
 	return m > 0 && !math.IsInf(m, 1)
 }
 
