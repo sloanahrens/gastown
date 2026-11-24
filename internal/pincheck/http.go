@@ -85,6 +85,9 @@ func (h HTTP) Manifest(ctx context.Context, repo, ref string) ([]byte, string, e
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, "", fmt.Errorf("pincheck: the registry answered HTTP 404 for the manifest at %s: %w", name, ErrManifestGone)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("pincheck: the registry answered HTTP %d for the manifest at %s", resp.StatusCode, name)
 	}

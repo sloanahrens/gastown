@@ -6,11 +6,17 @@ package pincheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
+
+// ErrManifestGone is the condition of a registry that answered HTTP 404 for a
+// manifest: it no longer serves that manifest, which is not the same as a
+// registry that could not be asked. Manifest wraps it for a 404 only.
+var ErrManifestGone = errors.New("the registry no longer serves the manifest")
 
 // The four manifest media types a registry answers with for an image or an
 // index.
