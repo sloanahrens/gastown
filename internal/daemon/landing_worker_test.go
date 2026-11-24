@@ -1319,29 +1319,37 @@ func TestLandingLogDirIsPerLanding(t *testing.T) {
 // landingWorkerDaemon is a daemon whose landing worker runs without a rig on
 // disk: the identity-bead read is answered in process for the fixture's
 // "testrig" (rig_status_test.go).
-func landingWorkerDaemon(t *testing.T) *Daemon {
+func landingWorkerDaemon(t *testing.T) (*Daemon, *landingLoopSet) {
 	t.Helper()
 	f := newRigStatusFakeFixture(t, rigShowOperational)
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	f.daemon.ctx = ctx
+	loops := &landingLoopSet{d: f.daemon}
+	// Registered before the fixture check below, so a Fatal there still stops
+	// the context. It also runs last: the tests' own cleanups release the
+	// channel a pass may be blocked on before the loops are joined, and the
+	// join finishes before t.TempDir deletes the tree (gt-zv3ndb).
+	t.Cleanup(func() {
+		cancel()
+		loops.wait(t)
+	})
 	f.daemon.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		LandingWorker: &LandingWorkerConfig{Enabled: true},
 	}}
 	if ok, why := f.daemon.isRigOperational(f.rigName); !ok {
 		t.Fatalf("fixture rig is not operational (%s); the worker would skip its pass", why)
 	}
-	return f.daemon
+	return f.daemon, loops
 }
 
 // gt-fzwcd: the worker passes at once instead of waiting out an interval, so
 // a daemon restarted for an upgrade resumes landing the moment it is up.
 func TestLandingWorkerPassesAtStart(t *testing.T) {
 	t.Parallel()
-	d := landingWorkerDaemon(t)
+	_, loops := landingWorkerDaemon(t)
 	passed := make(chan struct{})
 	pass := func(context.Context) landworker.Report { close(passed); return landworker.Report{} }
-	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	loops.start("testrig", time.Hour, pass)
 	// The interval is an hour: a worker that waited it out would never pass,
 	// and the test binary's timeout reports that with every stack.
 	<-passed
@@ -1352,14 +1360,14 @@ func TestLandingWorkerPassesAtStart(t *testing.T) {
 // rather than at the next heartbeat (up to 3 min).
 func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
 	t.Parallel()
-	d := landingWorkerDaemon(t)
+	d, loops := landingWorkerDaemon(t)
 	started, release := make(chan struct{}), make(chan struct{})
 	pass := func(context.Context) landworker.Report {
 		close(started)
 		<-release
 		return landworker.Report{Landed: 1}
 	}
-	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	loops.start("testrig", time.Hour, pass)
 	<-started
 	// The heartbeat drains the workers while this pass is in flight.
 	d.landingHolds.hold(landingHoldUpgradeRestart)
@@ -1373,7 +1381,7 @@ func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
 // would run the run loop's restart check over and over.
 func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) {
 	t.Parallel()
-	d := landingWorkerDaemon(t)
+	d, loops := landingWorkerDaemon(t)
 	// The loop handles one pass's end before it starts the next, so once the
 	// second pass has started, a wake for the first would already be sent.
 	second, hold := make(chan struct{}), make(chan struct{})
@@ -1386,7 +1394,7 @@ func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) 
 		}
 		return landworker.Report{}
 	}
-	go d.landingWorkerLoop("testrig", time.Nanosecond, pass)
+	loops.start("testrig", time.Nanosecond, pass)
 	<-second
 	select {
 	case <-d.landingDrained():
@@ -1399,7 +1407,7 @@ func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) 
 // submitted while it ran is not idled for a whole interval.
 func TestLandingWorkerPassesAgainAtOnceAfterABusyPass(t *testing.T) {
 	t.Parallel()
-	d := landingWorkerDaemon(t)
+	_, loops := landingWorkerDaemon(t)
 	second, hold := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(hold) })
 	var calls atomic.Int32
@@ -1414,7 +1422,7 @@ func TestLandingWorkerPassesAgainAtOnceAfterABusyPass(t *testing.T) {
 	// The interval is an hour: a worker that waited it out after the busy
 	// first pass would never start the second, and the test binary's timeout
 	// reports that with every stack.
-	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	loops.start("testrig", time.Hour, pass)
 	<-second
 }
 
@@ -1422,7 +1430,7 @@ func TestLandingWorkerPassesAgainAtOnceAfterABusyPass(t *testing.T) {
 // would spin on a queue that cannot land.
 func TestLandingWorkerWaitsAfterAFailedOnlyPass(t *testing.T) {
 	t.Parallel()
-	d := landingWorkerDaemon(t)
+	_, loops := landingWorkerDaemon(t)
 	first := make(chan struct{})
 	var calls atomic.Int32
 	pass := func(context.Context) landworker.Report {
@@ -1431,7 +1439,7 @@ func TestLandingWorkerWaitsAfterAFailedOnlyPass(t *testing.T) {
 		}
 		return landworker.Report{Failed: 1, Skipped: 1}
 	}
-	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	loops.start("testrig", time.Hour, pass)
 	<-first
 	// The loop is now in its hour-long wait or about to enter it; it can only
 	// pass again if it skipped the wait, which it does within one scheduling
@@ -2131,26 +2139,10 @@ func TestNeedsOverseerLandingPersonKeyNamesThePersonLabel(t *testing.T) {
 // releases it.
 func startRefusedLoop(t *testing.T) (*Daemon, *atomic.Int32, <-chan struct{}, *passDone) {
 	t.Helper()
-	// The loop leaves through its select on d.ctx.Done(), so the fixture's
-	// cancel is its stop path; this wait has to run after that cancel, and
-	// cleanups run last-registered first, so it is registered before the
-	// fixture builds the context. A loop that still has not returned 10s after
-	// the cancel fails the test rather than hanging the package (gt-n3yyz).
-	loopDone := make(chan struct{})
-	started := false
-	t.Cleanup(func() {
-		if !started {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		select {
-		case <-loopDone:
-		case <-ctx.Done():
-			t.Error("the landing loop kept running after the daemon's context was canceled")
-		}
-	})
-	d, _ := landingDrainDaemon(t)
+	// The loop leaves through its select on d.ctx.Done(); the fixture cancels
+	// that context and joins the loop in its own cleanup, which runs after the
+	// test's (gt-zv3ndb).
+	d, _, loops := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(context.Context) landworker.Report {
 		passes.Add(1)
@@ -2165,15 +2157,8 @@ func startRefusedLoop(t *testing.T) (*Daemon, *atomic.Int32, <-chan struct{}, *p
 	}
 	done := countPasses(d)
 	// A nanosecond interval lets the loop come round again once the hold is
-	// released; the default hour would end the test after the refusal. The
-	// interval is also the longest the loop ever waits: once canceled it
-	// returns from the pass start or from the select below it, so the join
-	// above is a signal that it returned, not a wait for work.
-	started = true
-	go func() {
-		defer close(loopDone)
-		d.landingWorkerLoop("gastown", time.Nanosecond, pass)
-	}()
+	// released; the default hour would end the test after the refusal.
+	loops.start("gastown", time.Nanosecond, pass)
 	return d, &passes, <-taken, done
 }
 

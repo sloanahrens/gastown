@@ -441,7 +441,7 @@ func TestStandbyExceptions(t *testing.T) {
 	t.Run("landing worker passes run under a waned Ring", func(t *testing.T) {
 		t.Parallel()
 		now := standbyTestNow
-		d, _ := landingDrainDaemon(t)
+		d, _, _ := landingDrainDaemon(t)
 		d.clock = clockwork.NewFakeClockAt(now)
 		withStandbyRingKey(t, d)
 		ringtest.Waned(t, d.config.TownRoot, standbyKey, now)

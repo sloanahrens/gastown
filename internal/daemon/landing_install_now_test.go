@@ -17,7 +17,7 @@ const installNowLine = "rebuild_gt: install requested: a gt:install-now bead lan
 // still queued behind it, so no drain is waited for (gt-3qmv4.2).
 func TestLandingInstallNowRequestsAnInstallAtOnce(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(context.Context) landworker.Report {
 		passes.Add(1)
@@ -25,7 +25,7 @@ func TestLandingInstallNowRequestsAnInstallAtOnce(t *testing.T) {
 		// the label can arm the request.
 		return landworker.Report{Landed: 1, InstallRequested: true}
 	}
-	go d.landingWorkerLoop("gastown", time.Hour, pass)
+	loops.start("gastown", time.Hour, pass)
 
 	awaitLog(t, logs, installNowLine)
 	if !d.rebuildGTRequested.Load() {
@@ -44,12 +44,12 @@ func TestLandingInstallNowRequestsAnInstallAtOnce(t *testing.T) {
 // main, not the main the installed binary is built from (gt-3qmv4.2).
 func TestLandingInstallNowOnAnotherRigRequestsNoInstall(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	done := countPasses(d)
 	pass := func(context.Context) landworker.Report {
 		return landworker.Report{Landed: 1, InstallRequested: true}
 	}
-	go d.landingWorkerLoop("agate", time.Hour, pass)
+	loops.start("agate", time.Hour, pass)
 
 	// Three finished passes, so the gate has been through the label's request
 	// three times: the rig, not an unfinished pass, is what held the install.

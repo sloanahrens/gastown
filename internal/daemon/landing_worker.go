@@ -378,6 +378,14 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
 			}
+			// A completed pass is a run of the landing_worker job whatever it
+			// found, so gt jobs does not read never_run while the workers pass
+			// every minute. A pass that did not start — the patrol disabled, a
+			// hold held — never reaches here, and a pass cut short by shutdown
+			// is not a completed run (gt-zv3ndb).
+			if d.ctx.Err() == nil {
+				d.recordPatrolRun(&d.landingWorkerRun, "landing_worker", d.clk().Now())
+			}
 			// A gt:install-now bead asks for the install in the pass that
 			// landed it, while beads are still queued behind it: the drain
 			// below is the ordinary quiet point, and this label is the

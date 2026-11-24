@@ -1482,7 +1482,11 @@ type Daemon struct {
 	gitHygieneRun      patrolLastRunMemory
 	checkpointDogRun   patrolLastRunMemory
 	doctorDogRun       patrolLastRunMemory
-	rogueBDRun         patrolLastRunMemory
+	// landingWorkerRun is the rig workers' last completed pass. They pass every
+	// minute but recorded no run, so gt jobs read the row as never_run
+	// (gt-zv3ndb).
+	landingWorkerRun patrolLastRunMemory
+	rogueBDRun       patrolLastRunMemory
 	// ghGatesRun holds one *patrolLastRunMemory per database's gh gate check,
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
