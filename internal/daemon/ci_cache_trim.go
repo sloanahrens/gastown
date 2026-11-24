@@ -832,11 +832,14 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
 // reading. The threshold is the volume's cap: the table's constant for a capped
 // volume, and the setting the pass copies into the row for ci-gocache. Only a
-// volume with no cap at all is measured against the warn figure. A trim that
-// removed no file while the volume is over the threshold raises the item, and a
-// reading at or under it clears the item. A reading over the threshold after
-// removals leaves the item as it is. A dry run measures nothing, since it removes
-// nothing by design.
+// volume with no cap at all is measured against the warn figure. A reading at or
+// under the threshold clears the item. Over it, the lru volume raises the item
+// whatever the trim removed: its program never selects a file younger than the
+// floor, so a volume written faster than its cap ends every trim over the cap
+// with files removed, and that reading is the one that says so. Every other
+// volume raises the item only when the trim removed no file; a reading over the
+// threshold after removals leaves the item as it is. A dry run measures nothing,
+// since it removes nothing by design.
 func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply, warn int64) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
@@ -852,7 +855,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 		d.cacheTrimNoOp.clear(key)
 		return
 	}
-	if reply.removed != 0 {
+	if !v.lru && reply.removed != 0 {
 		return
 	}
 	holder := "CI cache trim removed no file while the Go build cache holds"
