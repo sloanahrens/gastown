@@ -2121,6 +2121,95 @@ func TestRunTierSweep_SkippedSweepLogsNoDuration(t *testing.T) {
 	}
 }
 
+// TestTierSweepSkipRecordsTheTime: a cycle that finds origin/main at the last
+// green tip dates the confirmation by its own clock, and a cycle that sweeps a
+// moved tip leaves the field as it found it (gt-upeqb5).
+func TestTierSweepSkipRecordsTheTime(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	rec.green()
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	proved := now.Add(-time.Hour)
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha, LastGreenAt: proved}); err != nil {
+		t.Fatal(err)
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	if !d.runTierSweep() {
+		t.Fatal("the unchanged-tip cycle deferred; want a skip")
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	if !st.LastGreenConfirmedAt.Equal(now) {
+		t.Errorf("LastGreenConfirmedAt = %v, want the skip's clock %v", st.LastGreenConfirmedAt, now)
+	}
+	if !st.LastGreenAt.Equal(proved) || st.LastGreenSHA != sha {
+		t.Errorf("state = %+v, want the proving sweep's %v at %s left alone", st, proved, sha)
+	}
+
+	moved := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return moved, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if !d.runTierSweep() {
+		t.Fatal("the moved-tip cycle deferred; want a verdict")
+	}
+	st = tierSweepTestState(t, d, "gastown")
+	if !st.LastGreenConfirmedAt.Equal(now) {
+		t.Errorf("LastGreenConfirmedAt = %v, want %v untouched by a cycle that swept a new tip", st.LastGreenConfirmedAt, now)
+	}
+	if st.LastGreenSHA != moved {
+		t.Errorf("LastGreenSHA = %q, want the swept tip %q", st.LastGreenSHA, moved)
+	}
+}
+
+// TestTierSweepSkipOldRecordWithoutTheFieldReadsAsTheZeroTime: a record an
+// older daemon wrote reads the absent confirmation as the zero time (gt-upeqb5).
+func TestTierSweepSkipOldRecordWithoutTheFieldReadsAsTheZeroTime(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := writeTierSweepState(town, "gastown", tierSweepState{}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"last_green_sha":"aaaa","last_green_at":"2026-11-24T06:40:00Z","tiers":{}}`
+	writeFile(t, tierSweepStatePath(town, "gastown"), legacy)
+	st, err := readTierSweepState(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.LastGreenConfirmedAt.IsZero() {
+		t.Errorf("LastGreenConfirmedAt = %v, want the zero time for a record without the field", st.LastGreenConfirmedAt)
+	}
+	if st.LastGreenSHA != "aaaa" || st.LastGreenAt.IsZero() {
+		t.Errorf("state = %+v, want the legacy record's green tip and its date", st)
+	}
+}
+
+// TestTierSweepSkipDefersWhenTheConfirmationCannotBeWritten: a skip whose
+// confirmation is not recorded leaves the evidence aging, so the cycle defers
+// instead of reporting a verdict (gt-upeqb5).
+func TestTierSweepSkipDefersWhenTheConfirmationCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha, LastGreenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	d.tierSweepSeams.writeState = func(string, string, tierSweepState) error { return errors.New("record is read-only") }
+	if d.runTierSweep() {
+		t.Fatal("runTierSweep reported a verdict; want the cycle deferred so the heartbeat retries the confirmation")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none on an unchanged tip", rec.stages)
+	}
+	if out := logs.String(); !strings.Contains(out, "recording the green confirmation: record is read-only") {
+		t.Errorf("log missing the write failure; got:\n%s", out)
+	}
+	if st := tierSweepTestState(t, d, "gastown"); !st.LastGreenConfirmedAt.IsZero() {
+		t.Errorf("LastGreenConfirmedAt = %v, want it unwritten after the failed write", st.LastGreenConfirmedAt)
+	}
+}
+
 // TestRunTierSweep_DeferredSweepLogsNoDuration: no stage ran, so the cycle is
 // deferred and its line carries no elapsed time (gt-iqzr0).
 func TestRunTierSweep_DeferredSweepLogsNoDuration(t *testing.T) {

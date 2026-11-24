@@ -252,6 +252,13 @@ type tierSweepState struct {
 	// can date the green tip. It moves exactly when LastGreenSHA does, and a
 	// record written before the field existed reads as the zero time (gt-igrpge).
 	LastGreenAt time.Time `json:"last_green_at,omitempty"`
+	// LastGreenConfirmedAt is when a cycle last found origin/main still at
+	// LastGreenSHA and skipped: the time the green tip was last re-confirmed
+	// without a sweep. LastGreenAt dates the cycle that proved the tip and never
+	// moves while main idles, so this field carries the age of the evidence
+	// where LastGreenAt carries the age of the proof; a record written before
+	// the field existed reads as the zero time (gt-upeqb5).
+	LastGreenConfirmedAt time.Time `json:"last_green_confirmed_at,omitempty"`
 	// RedCycles counts the consecutive finished cycles that came back with a
 	// RED tier: a fully green cycle resets it, and a cycle that judged no RED
 	// tier leaves it (gt-9duu8b).
@@ -714,6 +721,10 @@ type tierSweepSeams struct {
 	// it. A commit the answer's source holds nothing for is
 	// tierSweepImagesUnanswered, never a success (gt-ogt6jh, gt-opkfch).
 	imagesAnswer func(rig, sha string) tierSweepImagesAnswer
+	// writeState writes one rig's sweep record. Nil is writeTierSweepState; a
+	// test replaces it to drive a failed write, which the real filesystem will
+	// not produce on demand (gt-upeqb5).
+	writeState func(townRoot, rig string, st tierSweepState) error
 }
 
 // tierSweepImagesAnswer is what the sweep knows about the images run for a
@@ -1322,6 +1333,15 @@ func (d *Daemon) tierSweepStampOwed(rig string, since time.Time) {
 	}
 }
 
+// tierSweepWriteState writes one rig's sweep record, through the seam a test
+// replaces to drive a failed write (tierSweepSeams.writeState).
+func (d *Daemon) tierSweepWriteState(rig string, st tierSweepState) error {
+	if w := d.tierSweepSeams.writeState; w != nil {
+		return w(d.config.TownRoot, rig, st)
+	}
+	return writeTierSweepState(d.config.TownRoot, rig, st)
+}
+
 // runTierSweep is one cycle over every configured rig. It reports whether the
 // cycle reached a verdict, as opposed to deferring with nothing accomplished.
 // A pending upgrade restart defers the cycle, unless the last sweep is already
@@ -1407,6 +1427,17 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		// (gt-gg9hv.61). The publish lists the ref first, so a ref already at
 		// the commit costs no push.
 		d.tierSweepPublishGreenRef(rig, state.LastGreenSHA)
+		// The tip is still the green one, so this cycle confirms it rather than
+		// repeating it, and the confirmation is dated here: LastGreenAt dates the
+		// sweep that proved the tip and does not move while main idles, so
+		// without this write the evidence of a healthy quiet main only ages
+		// (gt-upeqb5). The record written is the one read above; the two calls
+		// between do not write it (tierSweepState, gt-o3hb4).
+		state.LastGreenConfirmedAt = d.clk().Now()
+		if err := d.tierSweepWriteState(rig, state); err != nil {
+			d.logger.Printf("tier_sweep: %s: recording the green confirmation: %v", rig, err)
+			return false
+		}
 		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" unchanged since the last green sweep")
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
