@@ -307,6 +307,9 @@ func jsonHits(data []byte) ([]hit, error) {
 	var stack []*jsonFrame
 	var out []hit
 	dec := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber keeps a number literal outside float64's range (9e99999) as a token
+	// instead of failing the decode, which would send FindCredentials to the text scan.
+	dec.UseNumber()
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -352,8 +355,8 @@ func jsonHits(data []byte) ([]hit, error) {
 			continue
 		}
 		s, isString := tok.(string)
-		// The decoder is built without UseNumber, so a JSON number decodes to a float64.
-		_, isNumber := tok.(float64)
+		// The decoder is built with UseNumber, so a JSON number is a json.Number.
+		_, isNumber := tok.(json.Number)
 		switch {
 		case top == nil || !top.object:
 			owner, owned := top.ownerKey()

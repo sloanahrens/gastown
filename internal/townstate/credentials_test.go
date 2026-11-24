@@ -617,6 +617,75 @@ func TestFindCredentialsLivetownSettings(t *testing.T) {
 	}
 }
 
+// A number literal outside float64's range (9e99999) must not hide the document: the
+// decoder reads it as a number token, so a secret nested under a credential key is
+// still a finding, and the literal under a plain key is not one (gt-xctije).
+func TestFindCredentialsOutOfRangeNumber(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a secret in a nested object survives an out-of-range literal elsewhere",
+			`{"x":9e99999,"password":{"v":"hunter2hunter2"}}`, []string{"json:password"}},
+		{"a secret in an array under api_key survives an out-of-range literal elsewhere",
+			`{"x":9e99999,"api_key":["hunter2hunter2"]}`, []string{"json:api_key"}},
+		{"an out-of-range literal under a credential key is a finding",
+			`{"password":9e99999}`, []string{"json:password"}},
+		{"an out-of-range literal under a plain key is not a finding",
+			`{"x":9e99999,"y":1}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// RedactJSON on a document with an out-of-range literal replaces the secret and the
+// literal under a credential key, leaves the literal under a plain key, and returns
+// valid JSON that no longer holds a finding (gt-xctije).
+func TestRedactJSONOutOfRangeNumber(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		in    string
+		want  string
+		wantN int
+	}{
+		{"the nested secret is replaced and the plain literal kept",
+			`{"x":9e99999,"password":{"v":"hunter2hunter2"}}`,
+			`{"x":9e99999,"password":{"v":"<redacted>"}}`, 1},
+		{"the array secret under api_key is replaced",
+			`{"x":9e99999,"api_key":["hunter2hunter2"]}`,
+			`{"x":9e99999,"api_key":["<redacted>"]}`, 1},
+		{"the out-of-range literal under a credential key is replaced",
+			`{"password":9e99999}`,
+			`{"password":"<redacted>"}`, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, n, err := RedactJSON([]byte(c.in))
+			if err != nil {
+				t.Fatalf("RedactJSON(%q): %v", c.in, err)
+			}
+			if string(out) != c.want || n != c.wantN {
+				t.Fatalf("RedactJSON(%q) = %q, %d; want %q, %d", c.in, out, n, c.want, c.wantN)
+			}
+			if !json.Valid(out) {
+				t.Fatalf("output %q is not valid JSON", out)
+			}
+			if got := FindCredentials(out); len(got) != 0 {
+				t.Fatalf("output %q still holds credentials: %q", out, got)
+			}
+		})
+	}
+}
+
 // TestFindCredentialsDeepNestingIsLinear: a document nested to the decoder's
 // limit with a few hundred thousand empty arrays at that depth (about 1 MB) is
 // scanned in time proportional to its size: the walk keeps a parent link and a
