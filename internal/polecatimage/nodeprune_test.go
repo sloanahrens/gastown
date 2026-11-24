@@ -270,6 +270,44 @@ func TestNodePruneRefusesAnUnreadablePsReply(t *testing.T) {
 	}
 }
 
+// TestNodePruneNamesWhatFollowsThePsReply: bytes after the containers object are refused for what they
+// are. A second JSON value is named as more than one, and bytes that are not JSON are named as such, never
+// as a second value: they are different defects.
+func TestNodePruneNamesWhatFollowsThePsReply(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		ps      string
+		want    string
+		notWant string
+	}{
+		{"trailing bytes that are not JSON", `{"containers":[]} not-json`, "not JSON", "more than one JSON value"},
+		{"a second JSON value", `{"containers":[]} {}`, "more than one JSON value", "not JSON"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			node := newFakeNode(t, tc.ps, false)
+			code, out, errOut := runNodePrune(node, "--endpoint", nodeEndpoint)
+			if code != 3 {
+				t.Fatalf("exit %d, want 3; stderr %q", code, errOut)
+			}
+			if out != "" {
+				t.Errorf("stdout %q, want nothing", out)
+			}
+			if !strings.Contains(errOut, tc.want) {
+				t.Errorf("stderr %q, want it to say %q", errOut, tc.want)
+			}
+			if strings.Contains(errOut, tc.notWant) {
+				t.Errorf("stderr %q says %q, which is not what the bytes are", errOut, tc.notWant)
+			}
+			if n := node.removals(); n != 0 {
+				t.Errorf("made %d rmi calls, want 0", n)
+			}
+		})
+	}
+}
+
 // TestNodePruneRunsCrictlThroughTheProgram: crictl runs through --crictl-bin and its --crictl-arg lead,
 // with the CRI socket as --runtime-endpoint, before the call's own arguments.
 func TestNodePruneRunsCrictlThroughTheProgram(t *testing.T) {
