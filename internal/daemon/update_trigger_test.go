@@ -265,6 +265,144 @@ func TestUpdateFactsReadTheState(t *testing.T) {
 	}
 }
 
+// A rollback leaves the running commit a strict ancestor of the target the
+// last run set out to install. updateFacts fills RunningBehindLastTarget only
+// for that case after an ok run; a same commit, a descendant, a failed run and
+// an ancestry it cannot read all leave the fact false, and an unreadable
+// ancestry logs one line naming the two commits.
+func TestUpdateFactsRunningBehind(t *testing.T) {
+	t.Parallel()
+
+	const unknown = "ffffffffffffffffffffffffffffffffffffffff"
+
+	tests := []struct {
+		name    string
+		outcome update.Outcome
+		// installed and target pick the commits the staleness read and the
+		// state file report, from the fake repository's ancestor→descendant
+		// pair.
+		installed func(ancestor, descendant string) string
+		target    func(ancestor, descendant string) string
+		want      bool
+		// wantLog is a phrase the one log line must hold; empty means no
+		// running-behind line at all. A non-empty phrase also asserts the line
+		// names both commits.
+		wantLog string
+	}{
+		{
+			name:      "a strict ancestor after an ok run",
+			outcome:   update.OutcomeOK,
+			installed: func(ancestor, _ string) string { return ancestor },
+			target:    func(_, descendant string) string { return descendant },
+			want:      true,
+		},
+		{
+			name:      "the same commit is not behind",
+			outcome:   update.OutcomeOK,
+			installed: func(ancestor, _ string) string { return ancestor },
+			target:    func(ancestor, _ string) string { return ancestor },
+			want:      false,
+		},
+		{
+			name:      "a descendant is not behind",
+			outcome:   update.OutcomeOK,
+			installed: func(_, descendant string) string { return descendant },
+			target:    func(ancestor, _ string) string { return ancestor },
+			want:      false,
+		},
+		{
+			name:      "a failed run is never a rollback",
+			outcome:   update.OutcomeFailed,
+			installed: func(ancestor, _ string) string { return ancestor },
+			target:    func(_, descendant string) string { return descendant },
+			want:      false,
+		},
+		{
+			name:      "an unreadable ancestry is false and names both commits",
+			outcome:   update.OutcomeOK,
+			installed: func(_, _ string) string { return unknown },
+			target:    func(_, descendant string) string { return descendant },
+			want:      false,
+			wantLog:   "cannot compare",
+		},
+		{
+			name:      "a blank installed commit is named",
+			outcome:   update.OutcomeOK,
+			installed: func(_, _ string) string { return "" },
+			target:    func(_, descendant string) string { return descendant },
+			want:      false,
+			wantLog:   "cannot tell",
+		},
+		{
+			name:      "a blank target commit is named",
+			outcome:   update.OutcomeOK,
+			installed: func(ancestor, _ string) string { return ancestor },
+			target:    func(_, _ string) string { return "" },
+			want:      false,
+			wantLog:   "cannot tell",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+			source := createUpdateSource(t, d.config.TownRoot)
+			f := useGitfake(t, d)
+			f.InitRepo(t, source)
+			ancestor := f.Commit(t, source, "main", "base", nil)
+			descendant := f.Commit(t, source, "main", "next", nil)
+
+			installed, target := tt.installed(ancestor, descendant), tt.target(ancestor, descendant)
+			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+				return &version.StaleBinaryInfo{BinaryCommit: installed, RepoCommit: target}
+			}
+			// The failed-run row reads main's tip from origin; answer it from
+			// the fake so no real git runs.
+			d.updateRemoteRun = (&updateRemoteFake{output: "\n"}).run
+			store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+			if err := store.Write(update.State{
+				RunID:   "run-1",
+				EndedAt: updateTriggerTestTime.Add(-time.Hour),
+				Outcome: tt.outcome,
+				Target:  update.Target{SHA: target},
+			}); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+
+			facts, err := d.updateFacts(updateTriggerTestTime)
+			if err != nil {
+				t.Fatalf("updateFacts: %v", err)
+			}
+			if facts.RunningBehindLastTarget != tt.want {
+				t.Errorf("RunningBehindLastTarget = %v, want %v", facts.RunningBehindLastTarget, tt.want)
+			}
+			got := logs.String()
+			if tt.wantLog == "" {
+				if strings.Contains(got, "running commit") {
+					t.Errorf("log = %q, want no running-behind line", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantLog) {
+				t.Errorf("log = %q, want it to contain %q", got, tt.wantLog)
+			}
+			for _, name := range []struct{ field, commit string }{
+				{"installed", installed},
+				{"target", target},
+			} {
+				want := name.commit
+				if want == "" {
+					want = name.field + ` ""`
+				}
+				if !strings.Contains(got, want) {
+					t.Errorf("log = %q, want it to name %s %q in one line", got, name.field, name.commit)
+				}
+			}
+		})
+	}
+}
+
 // A state file whose outcome names no run outcome is an unreadable fact: the
 // facts are refused, so no run is launched on a value it cannot read.
 func TestUpdateFactsRefusesAnUnknownOutcome(t *testing.T) {
