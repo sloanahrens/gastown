@@ -1162,15 +1162,6 @@ type Daemon struct {
 	// production.
 	landingPassWindowFn func()
 
-	// landingLoopMu and the two fields below count the per-rig worker loops
-	// running in this process, and give a test a channel closed when none is:
-	// a completed pass writes patrol_last_run.json, and a pass still in flight
-	// while t.TempDir deletes the tree fails the test (gt-zv3ndb). Nothing in
-	// production waits on it.
-	landingLoopMu    sync.Mutex
-	landingLoopCount int
-	landingLoopDone  chan struct{}
-
 	// landingHolds is the set of holds on new landing passes (landing_hold.go).
 	// The upgrade restart takes one while a marker the daemon must act on
 	// exists, so it finds an idle moment (gt-nxvpe); rebuild_om takes one when

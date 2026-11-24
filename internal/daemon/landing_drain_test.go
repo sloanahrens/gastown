@@ -72,7 +72,7 @@ const drainRequestLine = "rebuild_gt: install requested: queue drained after lan
 // rig's own directory, with a second rig beside it, so a test can tell a drain
 // of the source rig from a drain of any other. Both rigs are operational, so
 // the landing worker passes rather than skipping (gt-3qmv4.1).
-func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer) {
+func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer, *landingLoopSet) {
 	t.Helper()
 	townRoot := t.TempDir()
 	const src, other = "gastown", "agate"
@@ -94,11 +94,15 @@ func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer) {
 		logger: log.New(logs, "", 0),
 		ctx:    ctx,
 	}
-	// Cancel first, then wait for the loops to stop: a pass in flight writes
-	// patrol_last_run.json, and t.TempDir's cleanup deletes the tree (gt-zv3ndb).
+	loops := &landingLoopSet{d: d}
+	// Cancel first, then wait for the loops this fixture's tests start: a pass
+	// in flight writes patrol_last_run.json, and t.TempDir's cleanup deletes
+	// the tree. This cleanup is registered before the tests' own, so their
+	// channel releases run first and a pass blocked on one can return
+	// (gt-zv3ndb).
 	t.Cleanup(func() {
 		cancel()
-		waitLandingLoops(t, d)
+		loops.wait(t)
 	})
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		LandingWorker: &LandingWorkerConfig{Enabled: true},
@@ -109,7 +113,7 @@ func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer) {
 			t.Fatalf("fixture rig %s is not operational (%s); the worker would skip its pass", rigName, why)
 		}
 	}
-	return d, logs
+	return d, logs, loops
 }
 
 // awaitLog blocks until the loop goroutine has written want, so a test reads
@@ -199,7 +203,7 @@ func settlePasses(t *testing.T, passes *passDone, want int32) {
 // hour it would otherwise wait (gt-3qmv4.1).
 func TestLandingDrainRequestsAnInstall(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(context.Context) landworker.Report {
 		if passes.Add(1) == 1 {
@@ -209,7 +213,7 @@ func TestLandingDrainRequestsAnInstall(t *testing.T) {
 	}
 	// The interval is an hour: only the drain arms the request, and an idle
 	// pass after it waits, so the loop makes no further request.
-	go d.landingWorkerLoop("gastown", time.Hour, pass)
+	loops.start("gastown", time.Hour, pass)
 
 	awaitLog(t, logs, drainRequestLine)
 	if !d.rebuildGTRequested.Load() {
@@ -238,7 +242,7 @@ func TestLandingDrainSurvivesANonLandingPass(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d, logs := landingDrainDaemon(t)
+			d, logs, loops := landingDrainDaemon(t)
 			var passes atomic.Int32
 			pass := func(context.Context) landworker.Report {
 				switch passes.Add(1) {
@@ -249,7 +253,7 @@ func TestLandingDrainSurvivesANonLandingPass(t *testing.T) {
 				}
 				return landworker.Report{}
 			}
-			go d.landingWorkerLoop("gastown", tc.interval, pass)
+			loops.start("gastown", tc.interval, pass)
 
 			awaitLog(t, logs, drainRequestLine)
 			if !d.rebuildGTRequested.Load() {
@@ -268,7 +272,7 @@ func TestLandingDrainSurvivesANonLandingPass(t *testing.T) {
 // that actually empties it (gt-3qmv4.4).
 func TestLandingRejectWithWorkQueuedNeverRequestsAnInstall(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(ctx context.Context) landworker.Report {
 		switch passes.Add(1) {
@@ -282,7 +286,7 @@ func TestLandingRejectWithWorkQueuedNeverRequestsAnInstall(t *testing.T) {
 		return landworker.Report{}
 	}
 	done := countPasses(d)
-	go d.landingWorkerLoop("gastown", time.Hour, pass)
+	loops.start("gastown", time.Hour, pass)
 
 	// Three finished passes: the loop held the fourth, the one it would have
 	// drained on, so no idle pass has drained the queue.
@@ -300,7 +304,7 @@ func TestLandingRejectWithWorkQueuedNeverRequestsAnInstall(t *testing.T) {
 // built from.
 func TestLandingDrainOnAnotherRigNeverRequestsAnInstall(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(context.Context) landworker.Report {
 		if passes.Add(1) == 1 {
@@ -309,7 +313,7 @@ func TestLandingDrainOnAnotherRigNeverRequestsAnInstall(t *testing.T) {
 		return landworker.Report{}
 	}
 	done := countPasses(d)
-	go d.landingWorkerLoop("agate", time.Hour, pass)
+	loops.start("agate", time.Hour, pass)
 
 	// Two finished passes, so the idle second pass has been through the drain
 	// check: the rig gate, not an unfinished pass, is what held the request.
@@ -327,12 +331,12 @@ func TestLandingDrainOnAnotherRigNeverRequestsAnInstall(t *testing.T) {
 // idle passes alone must not install.
 func TestLandingIdleAfterIdleNeverRequestsAnInstall(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, loops := landingDrainDaemon(t)
 	done := countPasses(d)
 	pass := func(context.Context) landworker.Report { return landworker.Report{} }
 	// A nanosecond interval lets the idle passes recur; the default hour would
 	// end the test after one.
-	go d.landingWorkerLoop("gastown", time.Nanosecond, pass)
+	loops.start("gastown", time.Nanosecond, pass)
 
 	settlePasses(t, done, 3)
 	if d.rebuildGTRequested.Load() {
@@ -348,7 +352,7 @@ func TestLandingIdleAfterIdleNeverRequestsAnInstall(t *testing.T) {
 // checkout, and no other rig owns it.
 func TestLandingOwnsGTSourceOnlyMatchesTheSourceRig(t *testing.T) {
 	t.Parallel()
-	d, _ := landingDrainDaemon(t)
+	d, _, _ := landingDrainDaemon(t)
 	if !d.landingOwnsGTSource("gastown") {
 		t.Error("the gastown rig's directory is the town's gt source")
 	}
@@ -362,7 +366,7 @@ func TestLandingOwnsGTSourceOnlyMatchesTheSourceRig(t *testing.T) {
 // drains rather than heartbeats (gt-3qmv4.1).
 func TestRebuildGTInstallRequestIsArmedOnce(t *testing.T) {
 	t.Parallel()
-	d, logs := landingDrainDaemon(t)
+	d, logs, _ := landingDrainDaemon(t)
 	d.requestRebuildGTInstall()
 	d.requestRebuildGTInstall()
 	if !d.rebuildGTRequested.Load() {

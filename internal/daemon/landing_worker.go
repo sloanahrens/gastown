@@ -346,8 +346,6 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 // daemon restarted for an upgrade resumes landing without waiting out an
 // interval (gt-fzwcd).
 func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass func(context.Context) landworker.Report) {
-	d.landingLoopStarted()
-	defer d.landingLoopStopped()
 	skipLogged := ""
 	// landedSinceQuiet makes an idle pass readable as the drain: main moved
 	// under the installed binary and the queue has now emptied, the quiet
@@ -383,8 +381,11 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			// A completed pass is a run of the landing_worker job whatever it
 			// found, so gt jobs does not read never_run while the workers pass
 			// every minute. A pass that did not start — the patrol disabled, a
-			// hold held — never reaches here (gt-zv3ndb).
-			d.recordPatrolRun(&d.landingWorkerRun, "landing_worker", time.Now())
+			// hold held — never reaches here, and a pass cut short by shutdown
+			// is not a completed run (gt-zv3ndb).
+			if d.ctx.Err() == nil {
+				d.recordPatrolRun(&d.landingWorkerRun, "landing_worker", d.clk().Now())
+			}
 			// A gt:install-now bead asks for the install in the pass that
 			// landed it, while beads are still queued behind it: the drain
 			// below is the ordinary quiet point, and this label is the
@@ -429,41 +430,6 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 		case <-time.After(interval):
 		}
 	}
-}
-
-// landingLoopStarted and landingLoopStopped count the per-rig worker loops, and
-// landingLoopsIdle returns the channel closed once none is running. A test uses
-// it to stop the loops before its temp town is removed (gt-zv3ndb).
-func (d *Daemon) landingLoopStarted() {
-	d.landingLoopMu.Lock()
-	defer d.landingLoopMu.Unlock()
-	if d.landingLoopCount == 0 {
-		d.landingLoopDone = make(chan struct{})
-	}
-	d.landingLoopCount++
-}
-
-func (d *Daemon) landingLoopStopped() {
-	d.landingLoopMu.Lock()
-	defer d.landingLoopMu.Unlock()
-	d.landingLoopCount--
-	if d.landingLoopCount == 0 {
-		close(d.landingLoopDone)
-	}
-}
-
-// landingLoopsIdle is the channel closed once every per-rig worker loop
-// running now has stopped. A loop started later makes a fresh one, so a caller
-// that waits on the channel it read sees the loops it asked about.
-func (d *Daemon) landingLoopsIdle() <-chan struct{} {
-	d.landingLoopMu.Lock()
-	defer d.landingLoopMu.Unlock()
-	if d.landingLoopCount == 0 {
-		done := make(chan struct{})
-		close(done)
-		return done
-	}
-	return d.landingLoopDone
 }
 
 // landingDrained is the run loop's wake channel for drained landing passes,
