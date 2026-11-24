@@ -3,12 +3,12 @@ package done
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
 // gateListRunner runs one command in the worktree and returns its combined
-// output. It is a seam: a unit test substitutes a fake, so no test runs a real
-// go test (gt-hx8f5i).
+// output: a test substitutes a fake, so no test runs a real go test (gt-hx8f5i).
 type gateListRunner func(dir string, args ...string) ([]byte, error)
 
 // runGoTestList is the real gateListRunner: go test with the arguments the
@@ -22,13 +22,12 @@ func runGoTestList(dir string, args ...string) ([]byte, error) {
 // checkGateSelects refuses a Gate line whose go test -run pattern selects no
 // test on the branch: -run matches test function names, so a pattern naming
 // none runs the gate green while it tests nothing (gt-hx8f5i). A list that
-// fails to build is a refusal carrying the first lines of its output, never a
-// pass.
+// fails to build, or a runner that is not wired, is a refusal, never a pass.
 func checkGateSelects(run gateListRunner, dir, gate string) error {
-	if run == nil {
-		run = runGoTestList
-	}
 	for _, gr := range gateRunLines(gate) {
+		if run == nil {
+			return fmt.Errorf("Gate line %q: no go test runner is configured, so its tests cannot be listed", gr.Line)
+		}
 		out, err := run(dir, append([]string{"test", "-list", gr.Pattern}, gr.Packages...)...)
 		if err != nil {
 			return fmt.Errorf("Gate line %q: go test -list could not build the test binary:\n%s", gr.Line, firstLines(out, 10))
@@ -40,16 +39,18 @@ func checkGateSelects(run gateListRunner, dir, gate string) error {
 	return nil
 }
 
-// listsATest reports whether go test -list output names a test. The only
-// lines that are not names are a package's result line ("ok pkg 0.002s") and
-// its no-test-files line ("? pkg [no test files]").
+// testNameRE matches the names go test -list prints: tests, benchmarks, examples, fuzz.
+var testNameRE = regexp.MustCompile(`^(Test|Benchmark|Example|Fuzz)[\p{L}\p{N}_]*$`)
+
+// listsATest reports whether go test -list output names a test. The runners
+// combine stdout and stderr, so the output also holds go test's own lines and
+// anything a package's init prints; only a name-shaped line counts, so that
+// noise cannot stand in for a test (gt-hx8f5i).
 func listsATest(out []byte) bool {
 	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] == "ok" || fields[0] == "?" {
-			continue
+		if testNameRE.MatchString(strings.TrimSpace(line)) {
+			return true
 		}
-		return true
 	}
 	return false
 }
