@@ -380,6 +380,61 @@ func TestTownStateNightlyWireRefusedRoots(t *testing.T) {
 	}
 }
 
+// TestTownStateNightlyWireStepErrorCallsOnceAndAlerts is the step's own failure
+// branch at the seam: a step that returns an error is called exactly once and
+// its alert under town_state_backup:nightly names that error.
+func TestTownStateNightlyWireStepErrorCallsOnceAndAlerts(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot(filepath.Join(t.TempDir(), "town-state"))},
+	}}, &logs)
+	stepErr := errors.New("injected: the night failed")
+	var calls int
+	d.townStateNightlyStep = func(string, time.Time) error {
+		calls++
+		return stepErr
+	}
+
+	if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyFailed {
+		t.Fatalf("outcome = %v, want failed", got)
+	}
+	if calls != 1 {
+		t.Fatalf("seam calls = %d, want exactly 1", calls)
+	}
+	open := rec.OpenEscalations(alertKeyTownStateNightly)
+	if len(open) != 1 || !strings.Contains(open[0].Reason, stepErr.Error()) {
+		t.Fatalf("open escalations under %s = %+v, want one naming the step's error", alertKeyTownStateNightly, open)
+	}
+}
+
+// TestTownStateNightlyWireFailedRootReadSkipsTheStep is the root read's own
+// failure branch: a relative root is refused by townStateNightlyRoot, so the
+// seam is never called and the alert names the refusal.
+func TestTownStateNightlyWireFailedRootReadSkipsTheStep(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot("backups/town-state")},
+	}}, &logs)
+	var calls int
+	d.townStateNightlyStep = func(string, time.Time) error {
+		calls++
+		return nil
+	}
+
+	if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyFailed {
+		t.Fatalf("outcome = %v, want failed: the root read must refuse a relative root", got)
+	}
+	if calls != 0 {
+		t.Errorf("seam calls = %d, want 0: a failed root read must not reach the step", calls)
+	}
+	open := rec.OpenEscalations(alertKeyTownStateNightly)
+	if len(open) != 1 || !strings.Contains(open[0].Reason, "absolute path") {
+		t.Errorf("open escalations = %+v, want one naming the absolute-path refusal", open)
+	}
+}
+
 // TestTownStateNightlyWireDoltBackupFailureStillTakesTheNight is the fourth
 // acceptance box: the Dolt backup's failure does not stop the town-state step,
 // which runs straight after it in the maintenance cycle.
