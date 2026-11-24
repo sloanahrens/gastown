@@ -350,6 +350,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
 	d.Register(doctor.NewEventsLogCheck())
+	d.Register(doctor.NewReviewsLogCheck())
 	// bd call budgets: a caller whose average passes its row in
 	// internal/beads/census_budgets.go fails the check (gt-gojo0).
 	d.Register(doctor.NewCensusBudgetCheck())
