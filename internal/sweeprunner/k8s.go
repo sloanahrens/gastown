@@ -26,6 +26,12 @@ var _ Backend = Kubernetes{}
 // Name is the backend's name in the daemon's config and its logs.
 func (Kubernetes) Name() string { return "kubernetes" }
 
+// MirrorCloneSkipText is git's own text when the mirror directory to clone into
+// already exists, and the text the clone step skips on instead of failing
+// (gt-4dx0su). Exported so a caller judging the step's output shares the marker
+// rather than restating it (gt-kvm5lp).
+const MirrorCloneSkipText = "already exists and is not an empty directory"
+
 const (
 	// PriorityClass is the class every sweep Job runs at: the town's CI class,
 	// the first workload the cluster sheds under pressure, so a sweep yields to
