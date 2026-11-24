@@ -645,6 +645,11 @@ type PatrolsConfig struct {
 	Witness        json.RawMessage `json:"witness,omitempty"`
 	Deacon         json.RawMessage `json:"deacon,omitempty"`
 	PatrolWatchdog json.RawMessage `json:"patrol_watchdog,omitempty"`
+
+	// Reconciler judges every maintenance duty by the age of its last good
+	// result against a freshness limit (gt-709ssw). Read ReconcilerConfig for
+	// the block, which is off when absent and ships in shadow when set.
+	Reconciler *ReconcilerConfig `json:"reconciler,omitempty"`
 }
 
 // Daemon config keys for the update block, so every refusal names the key the
@@ -1416,6 +1421,177 @@ func parseArchiveLimit(key string, v *int, def int) (int, error) {
 		return 0, fmt.Errorf("%s = %d: want 0 (the default) or a value from 1 to %d", key, *v, MaxArchiveLimit)
 	}
 	return *v, nil
+}
+
+// ReconcilerConfig is the daemon.patrols.reconciler block: how often the
+// reconciler patrol runs and the freshness limits it judges each maintenance
+// duty by (gt-709ssw). The patrol replaces each duty's hidden schedule — the
+// 03:00 maintenance window, the weekly gc's 164 hours, the backup's 25-hour
+// catch-up — with one rule: a duty is due when the age of its last good result
+// passes its limit, and overdue once its grace has passed too. An absent block
+// leaves the patrol off; an unset key reads the DefaultReconciler constant
+// below, and a key out of range is refused rather than clamped.
+type ReconcilerConfig struct {
+	// Enabled turns the patrol on. Absent means off: a pass reads Dolt over
+	// SQL and the town's files, so a town asks for it.
+	Enabled bool `json:"enabled"`
+
+	// Shadow makes a pass judge and log its duties without acting on them.
+	// Nil reads true, so the reconciler ships observing; only an explicit
+	// false is live (gt-pwuv30). Read it through ParseShadow.
+	Shadow *bool `json:"shadow,omitempty"`
+
+	// Interval is how often a pass runs, as a Go duration. Empty means
+	// DefaultReconcilerInterval; ParseInterval refuses one out of range.
+	Interval string `json:"interval,omitempty"`
+
+	// Grace is how long a duty may sit past its limit before a pass calls it
+	// overdue rather than due, as a Go duration. Empty means
+	// DefaultReconcilerGrace; ParseGrace refuses one out of range.
+	Grace string `json:"grace,omitempty"`
+
+	// BackupLimit is how old the newest complete backup night may be before
+	// the backup duty is due, as a Go duration. Empty means
+	// DefaultReconcilerBackupLimit; ParseLimit(ReconcilerDutyBackup) refuses
+	// one out of range.
+	BackupLimit string `json:"backup_limit,omitempty"`
+
+	// ArchiveLimit is how old the newest dolt-log archive file may be before
+	// the archive duty is due, as a Go duration. Empty means
+	// DefaultReconcilerArchiveLimit; ParseLimit(ReconcilerDutyArchive) refuses
+	// one out of range.
+	ArchiveLimit string `json:"archive_limit,omitempty"`
+
+	// GCLimit is how old a database's last full gc may be before its gc duty
+	// is due, as a Go duration. Empty means DefaultReconcilerGCLimit;
+	// ParseLimit(ReconcilerDutyGC) refuses one out of range.
+	GCLimit string `json:"gc_limit,omitempty"`
+
+	// TownStateLimit is how old the newest town-state night may be before the
+	// town-state duty is due, as a Go duration. Empty means
+	// DefaultReconcilerTownStateLimit; ParseLimit(ReconcilerDutyTownState)
+	// refuses one out of range.
+	TownStateLimit string `json:"town_state_limit,omitempty"`
+}
+
+// The reconciler duty names ParseLimit reads a limit for, and the daemon.json
+// keys its refusals name (gt-709ssw).
+const (
+	ReconcilerDutyBackup    = "backup"
+	ReconcilerDutyArchive   = "archive"
+	ReconcilerDutyGC        = "gc"
+	ReconcilerDutyTownState = "town_state"
+
+	ReconcilerIntervalKey       = "patrols.reconciler.interval"
+	ReconcilerGraceKey          = "patrols.reconciler.grace"
+	ReconcilerBackupLimitKey    = "patrols.reconciler.backup_limit"
+	ReconcilerArchiveLimitKey   = "patrols.reconciler.archive_limit"
+	ReconcilerGCLimitKey        = "patrols.reconciler.gc_limit"
+	ReconcilerTownStateLimitKey = "patrols.reconciler.town_state_limit"
+)
+
+// The reconciler's defaults when a key is unset. The limits sit just above the
+// cadence each duty shipped with: the nightly runs are daily, so 24 hours; the
+// gc is the weekly maintenanceGCWeekly (7 days minus its 4-hour catch-up
+// margin), so 164 hours (gt-709ssw).
+const (
+	DefaultReconcilerInterval       = 5 * time.Minute
+	DefaultReconcilerGrace          = 2 * time.Hour
+	DefaultReconcilerBackupLimit    = 24 * time.Hour
+	DefaultReconcilerArchiveLimit   = 24 * time.Hour
+	DefaultReconcilerGCLimit        = 164 * time.Hour
+	DefaultReconcilerTownStateLimit = 24 * time.Hour
+)
+
+// The reconciler's bounds: a pass under a minute reads Dolt more often than any
+// duty can change, and one over an hour lets a stalled pass hide from the
+// health check that judges it by this interval; a grace under a minute is a
+// window no scheduled duty can land in, and over a week delays the alarm past
+// several nightly runs; a limit under an hour calls a nightly duty overdue
+// between passes, and over 30 days hides a duty dead for a month (gt-709ssw).
+const (
+	MinReconcilerInterval = time.Minute
+	MaxReconcilerInterval = time.Hour
+	MinReconcilerGrace    = time.Minute
+	MaxReconcilerGrace    = 7 * 24 * time.Hour
+	MinReconcilerLimit    = time.Hour
+	MaxReconcilerLimit    = 30 * 24 * time.Hour
+)
+
+// ParseShadow reports whether a pass only judges and logs its duties. A nil
+// receiver, an absent block, and an unset key all read true; only an explicit
+// false is live (gt-709ssw).
+func (c *ReconcilerConfig) ParseShadow() bool {
+	return c == nil || c.Shadow == nil || *c.Shadow
+}
+
+// ParseInterval returns how often a pass runs. A nil receiver or empty setting
+// reads DefaultReconcilerInterval; a duration that does not parse, or one
+// outside MinReconcilerInterval to MaxReconcilerInterval, is refused rather
+// than clamped, and the error names the daemon.json key (gt-709ssw).
+func (c *ReconcilerConfig) ParseInterval() (time.Duration, error) {
+	if c == nil {
+		return DefaultReconcilerInterval, nil
+	}
+	return parseReconcilerDuration(ReconcilerIntervalKey, c.Interval,
+		DefaultReconcilerInterval, MinReconcilerInterval, MaxReconcilerInterval)
+}
+
+// ParseGrace returns how long a duty may sit past its limit before a pass calls
+// it overdue. A nil receiver or empty setting reads DefaultReconcilerGrace; a
+// duration out of range or unparseable is refused, naming the key (gt-709ssw).
+func (c *ReconcilerConfig) ParseGrace() (time.Duration, error) {
+	if c == nil {
+		return DefaultReconcilerGrace, nil
+	}
+	return parseReconcilerDuration(ReconcilerGraceKey, c.Grace,
+		DefaultReconcilerGrace, MinReconcilerGrace, MaxReconcilerGrace)
+}
+
+// ParseLimit returns how old duty's last good result may be before that duty is
+// due. duty is one of the ReconcilerDuty names; any other name is refused,
+// since a duty no pass grades has no limit to read. A nil receiver or empty
+// setting reads that duty's default; a duration out of range or unparseable is
+// refused, naming the duty's daemon.json key (gt-709ssw).
+func (c *ReconcilerConfig) ParseLimit(duty string) (time.Duration, error) {
+	if c == nil {
+		c = &ReconcilerConfig{}
+	}
+	var key, setting string
+	var def time.Duration
+	switch duty {
+	case ReconcilerDutyBackup:
+		key, setting, def = ReconcilerBackupLimitKey, c.BackupLimit, DefaultReconcilerBackupLimit
+	case ReconcilerDutyArchive:
+		key, setting, def = ReconcilerArchiveLimitKey, c.ArchiveLimit, DefaultReconcilerArchiveLimit
+	case ReconcilerDutyGC:
+		key, setting, def = ReconcilerGCLimitKey, c.GCLimit, DefaultReconcilerGCLimit
+	case ReconcilerDutyTownState:
+		key, setting, def = ReconcilerTownStateLimitKey, c.TownStateLimit, DefaultReconcilerTownStateLimit
+	default:
+		return 0, fmt.Errorf("%q: unknown reconciler duty: want %s, %s, %s or %s",
+			duty, ReconcilerDutyBackup, ReconcilerDutyArchive, ReconcilerDutyGC, ReconcilerDutyTownState)
+	}
+	return parseReconcilerDuration(key, setting, def, MinReconcilerLimit, MaxReconcilerLimit)
+}
+
+// parseReconcilerDuration reads one reconciler duration setting. An empty
+// setting keeps def; one that does not parse, or falls outside min to max, is
+// refused rather than clamped, and the error names the daemon.json key
+// (gt-709ssw).
+func parseReconcilerDuration(key, setting string, def, min, max time.Duration) (time.Duration, error) {
+	setting = strings.TrimSpace(setting)
+	if setting == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(setting)
+	if err != nil {
+		return 0, fmt.Errorf("%s = %q: want a Go duration such as %s: %w", key, setting, def, err)
+	}
+	if d < min || d > max {
+		return 0, fmt.Errorf("%s = %q: want a duration from %s to %s", key, setting, min, max)
+	}
+	return d, nil
 }
 
 // SquashConfig is the daemon.patrols.scheduled_maintenance.squash block: the
