@@ -916,3 +916,110 @@ func TestRedHoldStepRefusals(t *testing.T) {
 		require.ErrorContains(t, runRedHold(townRoot, red, map[string]bool{}, noLog), "write red hold")
 	})
 }
+
+// TestRedHoldStepRefuseLiftRecordsKinds pins a lift request that a holding trigger
+// refuses: the hold file stays as the evaluator says, the refusal names the kinds
+// still holding, the refusal is logged and the request is cleared.
+func TestRedHoldStepRefuseLiftRecordsKinds(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil }, Now: func() time.Time { return now }}
+	request := func(t *testing.T, root string) {
+		require.NoError(t, dispatch.WriteLift(root, dispatch.LiftRequest{Reason: "main fixed", By: "overseer", At: now}))
+	}
+
+	t.Run("a new hold is kept, refused and logged", func(t *testing.T) {
+		townRoot := t.TempDir()
+		request(t, townRoot)
+		var logs []string
+		require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }))
+		rec, err := dispatch.ReadRedHold(townRoot)
+		require.NoError(t, err)
+		require.Equal(t, []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "gastown: 2 red cycles"}}, rec.Reasons, "the hold stays as the evaluator says")
+		refusal, ok, err := dispatch.ReadRefusal(townRoot)
+		require.NoError(t, err)
+		require.True(t, ok, "a refused request is recorded")
+		require.Equal(t, dispatch.LiftRefusal{At: now, Still: []string{dispatch.RedHoldSweepRed}}, refusal)
+		require.Equal(t, []string{"red hold: set: sweep-red", "red hold: lift refused, still: sweep-red"}, logs)
+		require.NoFileExists(t, dispatch.RedHoldLiftPath(townRoot), "the refused request is cleared")
+	})
+
+	t.Run("an unchanged hold is kept as it was and logs only the refusal", func(t *testing.T) {
+		townRoot := t.TempDir()
+		require.NoError(t, dispatch.WriteRedHold(townRoot, redHoldSentinel))
+		request(t, townRoot)
+		var logs []string
+		require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }))
+		rec, err := dispatch.ReadRedHold(townRoot)
+		require.NoError(t, err)
+		require.Equal(t, redHoldSentinel, rec, "an unchanged kind set leaves the file untouched")
+		_, ok, err := dispatch.ReadRefusal(townRoot)
+		require.NoError(t, err)
+		require.True(t, ok, "a refused request is recorded")
+		require.Equal(t, []string{"red hold: lift refused, still: sweep-red"}, logs)
+		require.NoFileExists(t, dispatch.RedHoldLiftPath(townRoot), "the refused request is cleared")
+	})
+}
+
+// TestRedHoldStepRefuseLiftStillSorted pins the refusal's Still: every kind still
+// holding, sorted, when two triggers hold at once.
+func TestRedHoldStepRefuseLiftStillSorted(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	require.NoError(t, dispatch.WriteLift(townRoot, dispatch.LiftRequest{Reason: "main fixed", By: "overseer", At: now}))
+	src := redHoldSources{
+		Rigs: []string{"gastown"},
+		Read: func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil },
+		MainState: func(string) (landworker.MainState, error) {
+			return landworker.MainState{LastGreen: "a", LastRun: "b"}, nil
+		},
+		Now: func() time.Time { return now },
+	}
+	require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
+	refusal, ok, err := dispatch.ReadRefusal(townRoot)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []string{dispatch.RedHoldMainRed, dispatch.RedHoldSweepRed}, refusal.Still, "every kind still holding, sorted")
+}
+
+// TestRedHoldStepRefuseLiftUnrecorded pins a refusal that cannot be written: the
+// step fails with the request in place, and no refusal is logged.
+func TestRedHoldStepRefuseLiftUnrecorded(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	require.NoError(t, dispatch.WriteLift(townRoot, dispatch.LiftRequest{Reason: "main fixed", By: "overseer", At: now}))
+	require.NoError(t, os.MkdirAll(dispatch.RedHoldRefusalPath(townRoot), 0o755))
+	src := redHoldSources{Rigs: []string{"gastown"}, Read: func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil }, Now: func() time.Time { return now }}
+	var logs []string
+	err := runRedHold(townRoot, src, map[string]bool{}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	require.ErrorContains(t, err, "record lift refusal")
+	require.FileExists(t, dispatch.RedHoldLiftPath(townRoot), "a refusal that is not recorded keeps the request")
+	require.Equal(t, []string{"red hold: set: sweep-red"}, logs, "no refusal is logged")
+}
+
+// TestRedHoldStepRefuseLiftUncleared pins a refusal whose request cannot be
+// cleared: the refusal is recorded and logged first, the step fails, and the
+// request stays so the next heartbeat refuses again.
+func TestRedHoldStepRefuseLiftUncleared(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	require.NoError(t, dispatch.WriteLift(townRoot, dispatch.LiftRequest{Reason: "main fixed", By: "overseer", At: now}))
+	src := redHoldSources{
+		Rigs:      []string{"gastown"},
+		Read:      func(string) (tierSweepState, error) { return tierSweepState{RedCycles: 2}, nil },
+		ClearLift: func(string) error { return errors.New("removing the request") },
+		Now:       func() time.Time { return now },
+	}
+	var logs []string
+	err := runRedHold(townRoot, src, map[string]bool{}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	require.ErrorContains(t, err, "clear lift request")
+	require.FileExists(t, dispatch.RedHoldLiftPath(townRoot), "an uncleared request stays for the next heartbeat")
+	refusal, ok, err := dispatch.ReadRefusal(townRoot)
+	require.NoError(t, err)
+	require.True(t, ok, "the refusal is recorded before the clear")
+	require.Equal(t, []string{dispatch.RedHoldSweepRed}, refusal.Still)
+	require.Equal(t, []string{"red hold: set: sweep-red", "red hold: lift refused, still: sweep-red"}, logs)
+}

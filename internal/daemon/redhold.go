@@ -110,6 +110,7 @@ type redHoldSources struct {
 	PairStuck  func() []string                                // nil means no pairs
 	MainState  func(rig string) (landworker.MainState, error) // nil means no main-red read
 	RevertOpen func(rig, beadID string) (bool, error)         // nil means the revert cannot be proven over
+	ClearLift  func(townRoot string) error                    // nil means dispatch.ClearLift
 	Now        func() time.Time                               // nil means time.Now
 }
 
@@ -338,7 +339,8 @@ func redHoldShort(id string) string {
 // hold; an unread waiting count keeps only its behind-main reason and every
 // other trigger still reads. Each outage is logged once until it reads again;
 // unreadLog holds those across heartbeats and is non-nil. A lift request lifts
-// the hold and is recorded when the evaluation is clear.
+// the hold and is recorded when the evaluation is clear; otherwise it is refused,
+// with the kinds still holding recorded and logged.
 func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, logf func(format string, args ...any)) error {
 	in, unknown := redHoldInputsOf(src)
 	prev, err := dispatch.ReadRedHold(townRoot)
@@ -426,14 +428,19 @@ func runRedHold(townRoot string, src redHoldSources, unreadLog map[string]bool, 
 	if requested && len(next.Reasons) == 0 {
 		return liftRedHold(townRoot, req, at, logf)
 	}
-	line := redHoldChangeLine(prev, next)
-	if line == "" {
-		return nil
+	if line := redHoldChangeLine(prev, next); line != "" {
+		if err := dispatch.WriteRedHold(townRoot, next); err != nil {
+			return fmt.Errorf("write red hold: %w", err)
+		}
+		logf("%s", line)
 	}
-	if err := dispatch.WriteRedHold(townRoot, next); err != nil {
-		return fmt.Errorf("write red hold: %w", err)
+	if requested {
+		clearLift := src.ClearLift
+		if clearLift == nil {
+			clearLift = dispatch.ClearLift
+		}
+		return refuseRedHoldLift(townRoot, next, at, clearLift, logf)
 	}
-	logf("%s", line)
 	return nil
 }
 
@@ -451,6 +458,22 @@ func liftRedHold(townRoot string, req dispatch.LiftRequest, at time.Time, logf f
 	}
 	if err != nil {
 		return fmt.Errorf("lift red hold: %s: %w", step, err)
+	}
+	return nil
+}
+
+// refuseRedHoldLift answers a request the evaluation did not grant: it publishes
+// the refusal with the kinds still holding, logs it and clears the request. A
+// refusal that cannot be published, or a request that cannot be cleared, returns
+// with the request in place, so the next heartbeat refuses again.
+func refuseRedHoldLift(townRoot string, next dispatch.RedHoldRecord, at time.Time, clearLift func(townRoot string) error, logf func(format string, args ...any)) error {
+	still := redHoldKinds(next)
+	if err := dispatch.WriteRefusal(townRoot, dispatch.LiftRefusal{At: at, Still: still}); err != nil {
+		return fmt.Errorf("record lift refusal: %w", err)
+	}
+	logf("red hold: lift refused, still: %s", strings.Join(still, ", "))
+	if err := clearLift(townRoot); err != nil {
+		return fmt.Errorf("clear lift request: %w", err)
 	}
 	return nil
 }
