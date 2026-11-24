@@ -984,6 +984,98 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 	}
 }
 
+// TestCIEngineListToleratesAGoneObject: a container, image or volume CI deletes
+// between the list and the inspect makes docker exit 1 after printing the JSON of
+// the objects it did inspect. The list program prints that array and hands its
+// stderr back; the run uses the listing when every stderr line is docker's
+// missing-object report, so an object that went no longer makes the pass prune
+// nothing.
+func TestCIEngineListToleratesAGoneObject(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"container", "image", "volume"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			listing := engineFailureListing(t)
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+			replaceEngineReply(f, "ci-engine-list", cliReply{
+				stdout: string(listing),
+				stderr: "Error: No such " + kind + ": gone",
+				code:   1,
+			})
+			f.tick()
+			f.drain()
+			// The listed objects reached the plan: every kind was removed.
+			for _, verb := range []string{"rm", "rmi", "volume rm"} {
+				if n := len(engineDockerExecs(f, verb)); n != 1 {
+					t.Errorf("the listing with a gone %s ran docker %s %d time(s), want once", kind, verb, n)
+				}
+			}
+			if items := enginePruneItems(f); len(items) != 0 {
+				t.Errorf("a listing with a gone %s raised %d failure item(s):\n%s", kind, len(items), f.logs.String())
+			}
+		})
+	}
+}
+
+// TestCIEngineListFailsOnOtherInspectStderr: a list exec that exits non-zero is a
+// failed run unless its stderr is only docker's missing-object report and its
+// stdout is a complete listing. A line of any other kind, no array, an empty
+// stderr, or only kubectl's own lines fails the run, which prunes nothing and
+// names its stderr.
+func TestCIEngineListFailsOnOtherInspectStderr(t *testing.T) {
+	t.Parallel()
+	const unrelated = "Cannot connect to the Docker daemon"
+	for name, tc := range map[string]struct {
+		stderr      string
+		withListing bool
+		wantInLog   string
+	}{
+		"an unrelated stderr line": {
+			stderr:    unrelated,
+			wantInLog: unrelated,
+		},
+		"a gone line with another stderr line": {
+			stderr:      "Error: No such container: gone\nError response from daemon: conflict",
+			withListing: true,
+			wantInLog:   "the listing exec into the " + ciCacheContainer + " container failed",
+		},
+		"no JSON array on stdout": {
+			stderr:    "Error: No such container: gone",
+			wantInLog: "the listing exec into the " + ciCacheContainer + " container failed",
+		},
+		"an empty stderr": {
+			withListing: true,
+			wantInLog:   "the listing exec into the " + ciCacheContainer + " container failed",
+		},
+		"kubectl's own line only": {
+			stderr:      "command terminated with exit code 1",
+			withListing: true,
+			wantInLog:   "the listing exec into the " + ciCacheContainer + " container failed",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineFailureListing(t), engineRemoveAnswers{})
+			reply := cliReply{stderr: tc.stderr, code: 1}
+			// A row that carries the listing can only be refused over its stderr,
+			// which pins the classifier rather than the parser.
+			if tc.withListing {
+				reply.stdout = string(engineFailureListing(t))
+			}
+			replaceEngineReply(f, "ci-engine-list", reply)
+			f.tick()
+			f.drain()
+			if n := len(engineExecs(f, "ci-engine-remove")); n != 0 {
+				t.Fatalf("a refused listing ran the remove program %d time(s)", n)
+			}
+			engineConcludedAt(t, f, ciCacheTestStart)
+			if logs := f.logs.String(); !strings.Contains(logs, tc.wantInLog) {
+				t.Errorf("the refused listing's log lacks %q:\n%s", tc.wantInLog, logs)
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneFailureRaisesOnce pins gt-3e23rz: a failed engine prune records
 // the full interval with no retry time and raises one attention item, so the next
 // attempt is the patrol's normal cadence; a second consecutive failure keeps the one
