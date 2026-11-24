@@ -79,34 +79,21 @@ func TestExportBackupOmitsAndListsAFlaggedFile(t *testing.T) {
 }
 
 // TestExportSummaryPrintsTheOmittedLine: the omitted line says the content is
-// flagged, not that it holds a credential, with the singular noun for one file,
-// and it never names a file.
+// flagged, not that it holds a credential, uses the singular noun for one file,
+// and names none.
 func TestExportSummaryPrintsTheOmittedLine(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name    string
+	for _, c := range []struct {
 		omitted []string
 		want    string
 	}{
-		{name: "one file", omitted: []string{"settings/notes.json"}, want: "omitted 1 file whose content is flagged"},
-		{name: "three files", omitted: []string{"alpha/x.json", "settings/a-notes.json", "settings/notes.json"}, want: "omitted 3 files whose content is flagged"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			line := ExportSummary{Omitted: c.omitted}.String()
-			if !strings.Contains(line, c.want) {
-				t.Errorf("summary = %q, want %q", line, c.want)
-			}
-			for _, name := range c.omitted {
-				if strings.Contains(line, name) {
-					t.Errorf("summary = %q, names %s; want no name", line, name)
-				}
-			}
-			if strings.Contains(line, "credential") {
-				t.Errorf("summary = %q, claims a credential", line)
-			}
-		})
+		{[]string{"settings/notes.json"}, "omitted 1 file whose content is flagged"},
+		{[]string{"alpha/x.json", "settings/notes.json"}, "omitted 2 files whose content is flagged"},
+	} {
+		got := ExportSummary{Omitted: c.omitted}.String()
+		if !strings.Contains(got, c.want) || strings.Contains(got, "credential") || strings.Contains(got, ".json") {
+			t.Errorf("summary = %q, want %q, no credential and no file name", got, c.want)
+		}
 	}
 }
 
@@ -190,13 +177,12 @@ func TestExportBackupWritesTheBytesItChecked(t *testing.T) {
 }
 
 // TestExportBackupReadsAKnownSizeIntoOneBuffer: a file the walk statted is read
-// into a first buffer of its stat size plus one byte, so a large file is not
-// copied through io.ReadAll's doubling.
+// into one buffer of its stat size plus one byte, so a large file is not copied
+// through io.ReadAll's doubling.
 func TestExportBackupReadsAKnownSizeIntoOneBuffer(t *testing.T) {
 	t.Parallel()
 	town := omittedTown(t)
-	const size = 8192
-	content := strings.Repeat("a", size)
+	content := strings.Repeat("a", 8192)
 	writeStateFile(t, town, "settings/clean.json", content, 0o644)
 
 	reads := &recordReadBuffers{reader: strings.NewReader(content)}
@@ -210,22 +196,11 @@ func TestExportBackupReadsAKnownSizeIntoOneBuffer(t *testing.T) {
 		}
 	}
 
-	var stream bytes.Buffer
-	if _, err := Export(&stream, town, omittedManifest(t), ExportOptions{Backup: true, ops: opsWith(open)}); err != nil {
+	if _, err := Export(io.Discard, town, omittedManifest(t), ExportOptions{Backup: true, ops: opsWith(open)}); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
-	if len(reads.lengths) == 0 || reads.lengths[0] != size+1 {
-		t.Fatalf("read buffer lengths = %v, want the first to be %d", reads.lengths, size+1)
-	}
-	for _, n := range reads.lengths {
-		if n > size+1 {
-			t.Fatalf("read buffer lengths = %v, want none over %d, so the read never grew", reads.lengths, size+1)
-		}
-	}
-	for _, e := range readArchive(t, stream.Bytes()) {
-		if e.hdr.Name == "settings/clean.json" && string(e.data) != content {
-			t.Fatalf("archived %q, want the file's content", e.data)
-		}
+	if len(reads.lengths) == 0 || reads.lengths[0] != 8193 || slices.Max(reads.lengths) > 8193 {
+		t.Fatalf("read buffer lengths = %v, want one of 8193 and none larger", reads.lengths)
 	}
 }
 

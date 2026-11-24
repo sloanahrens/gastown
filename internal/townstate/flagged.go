@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 
 	"github.com/steveyegge/gastown/internal/guard"
 )
@@ -56,24 +55,22 @@ func checkedContent(r io.Reader, size int64) ([]byte, guard.Result) {
 }
 
 // readSized reads r into one buffer of the stat's size plus one byte, so a large
-// file is not copied through io.ReadAll's doubling. A file that grew past its
-// stat moves to the doubling read rather than failing.
+// file is not copied through io.ReadAll's doubling. Only a file that grew past
+// its stat reads again, and the bytes past the stat are appended.
 func readSized(r io.Reader, size int64) ([]byte, error) {
-	buf := make([]byte, 0, size+1)
-	src := io.LimitReader(r, maxFlaggedBytes+1)
-	for {
-		if len(buf) == cap(buf) {
-			buf = slices.Grow(buf, len(buf))
-		}
-		n, err := src.Read(buf[len(buf):cap(buf)])
-		buf = buf[:len(buf)+n]
-		if errors.Is(err, io.EOF) {
-			return buf, nil
-		}
-		if err != nil {
-			return nil, err
-		}
+	buf := make([]byte, size+1)
+	n, err := io.ReadFull(r, buf)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return buf[:n], nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	rest, err := io.ReadAll(io.LimitReader(r, maxFlaggedBytes-size))
+	if err != nil {
+		return nil, err
+	}
+	return append(buf, rest...), nil
 }
 
 // judgeContent is the verdict on data already read.
