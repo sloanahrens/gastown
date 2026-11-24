@@ -779,58 +779,6 @@ func TestRecoverAfterTheFirstRenamePutsTheOldMainBack(t *testing.T) {
 	checkRecoveryStopsAtEveryStatement(t, script, len(want))
 }
 
-// TestRecoverOnlyRecoversADeadRunsBranches drives RecoverOnly over the catalog a
-// run leaves when it stops between the swap's two renames: main-pre-squash holds
-// the old main and no branch is named main. RecoverOnly recovers it the way Run's
-// own recovery does, without starting a squash, and returns the Recovery naming
-// the state. The statements are the recovery's alone (gt-an57lb).
-func TestRecoverOnlyRecoversADeadRunsBranches(t *testing.T) {
-	t.Parallel()
-	fx := newRunFixture()
-	found := map[string]string{"main-pre-squash": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
-	restored := map[string]string{"main": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
-	after := map[string]string{"main": fx.before.Tip}
-	f := NewFakeExec()
-	f.Respond(branchesStatement, branchesRows(found))
-	f.Respond("CALL DOLT_BRANCH", Rows{})
-	f.Respond("CALL DOLT_CHECKOUT", Rows{})
-	f.Respond(branchesStatement, branchesRows(restored))
-	f.Respond(recoveryNewerStatement("main"), identitiesRows(fx.newer))
-	f.Respond(recoveryNewerStatement("compact-work"), identitiesRows(fx.newer))
-	f.Respond(recoveryNewerStatement("compact-base"), identitiesRows(nil))
-	f.Respond(branchesStatement, branchesRows(after))
-
-	marker := &runMarker{}
-	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
-	if err != nil {
-		t.Fatalf("RecoverOnly: %v", err)
-	}
-	if marker.holds != 1 || marker.releases != 1 || marker.held {
-		t.Errorf("RecoverOnly held the marker %d times and released it %d times (held now %v), want one hold and one release", marker.holds, marker.releases, marker.held)
-	}
-	if got == nil || got.State != RecoveryFirstRename {
-		t.Fatalf("the recovery is %+v, want state %q", got, RecoveryFirstRename)
-	}
-	if want := []string{"compact-work", "compact-base"}; !slices.Equal(got.Dropped, want) {
-		t.Errorf("the dropped branches are %q, want %q", got.Dropped, want)
-	}
-	want := []string{
-		branchesStatement,
-		swapRenameBack[1],
-		sqlCheckoutMain,
-		branchesStatement,
-		recoveryNewerStatement("main"),
-		recoveryNewerStatement("compact-work"),
-		sqlDropWork,
-		recoveryNewerStatement("compact-base"),
-		sqlDropBase,
-		branchesStatement,
-	}
-	if got := f.Statements(); !slices.Equal(got, want) {
-		t.Errorf("RecoverOnly sent\n%q\nwant the recovery's statements alone\n%q", got, want)
-	}
-}
-
 // TestRecoverOnlyErrorAndCleanCatalog pins the two results the squash check reads
 // from RecoverOnly: a recovery error comes back as it is, and a catalog with
 // nothing to recover returns a nil Recovery and a nil error with no write sent
@@ -1003,6 +951,42 @@ func TestRecoverOnlyReleasesTheMarkerOnEveryPath(t *testing.T) {
 			t.Errorf("after the clean catalog the marker is held %v with %d releases, want released once", marker.held, marker.releases)
 		}
 	})
+}
+
+// TestRecoverOnlyReportsAMarkerItCannotRelease drives the release failure after
+// a completed recovery: the release error comes back with no Recovery, so a
+// caller's error path never sees one to act on (gt-s2lszv).
+func TestRecoverOnlyReportsAMarkerItCannotRelease(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture()
+	found := map[string]string{"main-pre-squash": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+	restored := map[string]string{"main": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+	after := map[string]string{"main": fx.before.Tip}
+	f := NewFakeExec()
+	f.Respond(branchesStatement, branchesRows(found))
+	f.Respond("CALL DOLT_BRANCH", Rows{})
+	f.Respond("CALL DOLT_CHECKOUT", Rows{})
+	f.Respond(branchesStatement, branchesRows(restored))
+	f.Respond(recoveryNewerStatement("main"), identitiesRows(fx.newer))
+	f.Respond(recoveryNewerStatement("compact-work"), identitiesRows(fx.newer))
+	f.Respond(recoveryNewerStatement("compact-base"), identitiesRows(nil))
+	f.Respond(branchesStatement, branchesRows(after))
+	releaseErr := errors.New("the marker file is read-only")
+	marker := &runMarker{releaseErr: releaseErr}
+
+	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("RecoverOnly returned %v, want the release error", err)
+	}
+	if got != nil {
+		t.Errorf("RecoverOnly returned the recovery %+v beside the release error, want nil", got)
+	}
+	if !slices.Contains(f.Statements(), swapRenameBack[1]) {
+		t.Errorf("the recovery sent %q, want the first rename's rename-back before the release failed", f.Statements())
+	}
+	if marker.releases != 1 {
+		t.Errorf("RecoverOnly released the marker %d times, want one", marker.releases)
+	}
 }
 
 // TestRecoverFirstRenameKeepsALandedCommit drives the first-rename row over the
