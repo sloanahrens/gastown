@@ -751,6 +751,9 @@ func TestSplitLabelStale(t *testing.T) {
 		{"unreadable rung", []string{"split", "sp-minutes:9.3", "sp-rung:bogus"}, 10, false},
 		{"trigger off", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, 0, false},
 		{"no split label", []string{"sp-minutes:9.3", "sp-rung:all"}, 10, false},
+		{"two minutes labels, the larger over the trigger", []string{"split", "sp-minutes:9.3", "sp-minutes:12.8", "sp-rung:all"}, 10, false},
+		{"two minutes labels, both under the trigger", []string{"split", "sp-minutes:9.3", "sp-minutes:9.5", "sp-rung:all"}, 10, true},
+		{"two disagreeing acting rungs", []string{"split", "sp-minutes:9.3", "sp-rung:all", "sp-rung:shape-jev"}, 10, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
