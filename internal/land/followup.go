@@ -484,7 +484,13 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	// therefore holds the feed rather than filing every plan through it
 	// (gt-5hyv80).
 	cutoff := l.now().Add(-FollowupBudgetWindow)
-	filedThisWeek := FiledSince(existing, cutoff)
+	filedThisWeek, undated := FiledSince(existing, cutoff)
+	// A bead whose filed stamp did not parse cannot be placed in a week, so the
+	// count leaves it out and the feed says so: a parse failure reads as a bead
+	// the count could not date, never as one that was not filed (gt-ytgo9c).
+	if undated > 0 {
+		lines = append(lines, fmt.Sprintf("%d %s bead(s) have no readable filed stamp and are outside the week's count of %d; they still count against the open-bead bound", undated, FollowUpLabel, filedThisWeek))
+	}
 	landedThisWeek := 0
 	budget := l.FollowupBudgetPercent
 	if l.Landings == nil {

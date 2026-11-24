@@ -19,7 +19,9 @@ func TestFollowupBudgetDecision(t *testing.T) {
 	}{
 		{"24 of 100 is under 25 percent", 24, 100, 25, true},
 		{"25 of 100 is over 25 percent", 25, 100, 25, false},
+		{"8 of 32 is exactly at 25 percent so the ninth is refused", 8, 32, 25, false},
 		{"zero percent is the 25 default", 24, 100, 0, true},
+		{"zero percent refuses what 25 percent refuses", 25, 100, 0, false},
 		{"the first five beads are allowed with no landings", 4, 0, 25, true},
 		{"the sixth bead with no landings is refused", 5, 0, 25, false},
 		{"a negative percent is no budget", 1000, 0, -5, true},
@@ -36,27 +38,59 @@ func TestFollowupBudgetDecision(t *testing.T) {
 func TestFollowupBudgetFiledSince(t *testing.T) {
 	t.Parallel()
 	cutoff := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
-	undated := ExistingFollowup{ID: "gt-undated"}
+	noStamp := ExistingFollowup{ID: "gt-undated"}
 	cases := []struct {
-		name     string
-		existing []ExistingFollowup
-		since    time.Time
-		want     int
+		name                   string
+		existing               []ExistingFollowup
+		since                  time.Time
+		wantFiled, wantUndated int
 	}{
-		{"at or after the cutoff counts and an undated bead does not", []ExistingFollowup{
+		{"beads at or after the cutoff count and the undated one is reported", []ExistingFollowup{
 			{ID: "gt-before", CreatedAt: cutoff.Add(-time.Hour)},
 			{ID: "gt-at", CreatedAt: cutoff},
 			{ID: "gt-after", CreatedAt: cutoff.Add(time.Minute)},
-			undated,
-		}, cutoff, 2},
-		{"an undated bead is not counted from the zero cutoff", []ExistingFollowup{{ID: "gt-dated", CreatedAt: cutoff}, undated}, time.Time{}, 1},
+			noStamp,
+		}, cutoff, 2, 1},
+		{"the undated bead is reported from the zero cutoff too", []ExistingFollowup{{ID: "gt-dated", CreatedAt: cutoff}, noStamp}, time.Time{}, 1, 1},
+		{"nothing is reported when every bead has a stamp", []ExistingFollowup{{ID: "gt-at", CreatedAt: cutoff}}, cutoff, 1, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := FiledSince(c.existing, c.since); got != c.want {
-				t.Errorf("FiledSince(%d bead(s), %v) = %d, want %d", len(c.existing), c.since, got, c.want)
+			filed, undated := FiledSince(c.existing, c.since)
+			if filed != c.wantFiled || undated != c.wantUndated {
+				t.Errorf("FiledSince(%d bead(s), %v) = %d filed, %d undated; want %d and %d",
+					len(c.existing), c.since, filed, undated, c.wantFiled, c.wantUndated)
 			}
 		})
+	}
+}
+
+// TestFollowupBudgetReportsAnUndatedBead: the feed says how many beads it could
+// not date, so a filed stamp that did not parse is not read as a bead that was
+// never filed (gt-ytgo9c).
+func TestFollowupBudgetReportsAnUndatedBead(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	f.fake.existing = []ExistingFollowup{{ID: "gt-undated", Title: "an older finding", Status: "open"}}
+	log := f.run()
+	if !strings.Contains(log, "no readable filed stamp") {
+		t.Errorf("log = %q, want the undated bead reported", log)
+	}
+}
+
+// TestFollowupBudgetIgnoresTheUndatedBeadInTheCount: a bead with no readable
+// filed stamp is left out of the week's count, so one parse failure is not a
+// cut to every later week's budget (gt-ytgo9c). Twenty-four dated beads and 100
+// landings leave room for one more bead at 25 percent; counting the undated bead
+// as filed too would hold it.
+func TestFollowupBudgetIgnoresTheUndatedBeadInTheCount(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	f.lander.Landings = budgetWeek(t, 100)
+	f.fake.existing = append(filedThisWeek(24), ExistingFollowup{ID: "gt-undated", Title: "an older finding", Status: "open"})
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads with 24 dated and one undated in the week, want 1:\n%s", len(f.fake.created), log)
 	}
 }
 
