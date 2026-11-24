@@ -53,6 +53,36 @@ func TestRoundsOMRulesRefusesAnIdlessFinding(t *testing.T) {
 	}
 }
 
+// TestRoundsOMRulesRefusesAnIdlessFindingOverTheCap: Render checks finding ids
+// at its cap-exceeded return too. A lane holding one round has nothing to drop,
+// so an id-less finding in a ledger too big for the cap would otherwise reach om
+// unchecked; it is refused instead, and the landing degrades to no rounds
+// (gt-2rvuze, gt-vd31vi).
+func TestRoundsOMRulesRefusesAnIdlessFindingOverTheCap(t *testing.T) {
+	t.Parallel()
+	findings := []Finding{
+		{ID: "F1", Path: "a.go", Title: "not atomic"},
+		{Path: "b.go", Title: strings.Repeat("x", DefaultRoundsCap)},
+	}
+	l := ledgerIn(t, "gt-abc")
+	must(t, l.Append(1, "head1", findings))
+	if _, err := l.Render(1); !errors.Is(err, ErrRoundsCorrupt) || !strings.Contains(err.Error(), "round 1") || !strings.Contains(err.Error(), "finding 1") {
+		t.Fatalf("Render over a cap no round can meet = %v, want ErrRoundsCorrupt naming round 1, finding 1", err)
+	}
+
+	// Through roundsText the same over-the-cap ledger hands om nothing, and
+	// the landing still completes.
+	f := newLandFixture(t)
+	lander := f.lander()
+	lander.RoundsDir = l.OutDir
+	if got := lander.roundsText(f.work.BeadID); got != "" {
+		t.Errorf("roundsText over a corrupt ledger = %q, want no rounds", got)
+	}
+	if _, err := lander.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land over a refused ledger: %v", err)
+	}
+}
+
 // TestRoundsOMRulesDegradesTheLanding: a ledger Render refuses costs the
 // landing its rounds, not its review: no text, one log line for the bead, and
 // the review still runs (gt-2rvuze).
