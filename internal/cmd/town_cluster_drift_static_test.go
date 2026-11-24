@@ -293,6 +293,62 @@ func TestTownClusterDriftStaticReadsOnlyGets(t *testing.T) {
 	}
 }
 
+// TestTownClusterDriftStaticGuardsAccountForEveryObject walks the embedded set
+// and holds every object to exactly one way the compare accounts for it: a
+// policy row reads it, it builds a static target, or it prints a Secret's
+// not-compared line. An object none of the three names is dropped from the
+// compare with nothing said, so a new static object forces a decision
+// (gt-im6aei).
+func TestTownClusterDriftStaticGuardsAccountForEveryObject(t *testing.T) {
+	t.Parallel()
+	objects := driftStaticSet(t)
+	targets, notCompared, err := staticObjectTargets(objects, policyTargetsCovered)
+	if err != nil {
+		t.Fatalf("staticObjectTargets: %v", err)
+	}
+	targetCount := make(map[string]int, len(targets))
+	for _, target := range targets {
+		targetCount[target.resource+" "+target.namespace]++
+	}
+	lineCount := make(map[string]int, len(notCompared))
+	for _, line := range notCompared {
+		lineCount[line]++
+	}
+	known := make(map[string]bool, len(objects))
+	secrets := 0
+	for _, object := range objects {
+		key := strings.ToLower(object.Kind) + "/" + object.Name + " " + object.Namespace
+		known[key] = true
+		switch {
+		case object.Kind == secretKind:
+			secrets++
+			want := "Secret/" + object.Name + ": not compared: secret data is never read"
+			if lineCount[want] != 1 {
+				t.Errorf("the static %s printed %d not-compared lines, want one", key, lineCount[want])
+			}
+			if targetCount[key] != 0 {
+				t.Errorf("the static %s is a Secret and is compared %d times anyway", key, targetCount[key])
+			}
+		case policyTargetsCovered(object.Kind, object.Name, object.Namespace):
+			if targetCount[key] != 0 {
+				t.Errorf("the static %s is read by a policy row and compared %d times again", key, targetCount[key])
+			}
+		default:
+			if targetCount[key] != 1 {
+				t.Errorf("the static %s is not a policy row, a static target or a Secret line, and is compared %d times", key, targetCount[key])
+			}
+		}
+	}
+	if len(notCompared) != secrets {
+		t.Errorf("printed %d not-compared lines for %d static Secrets", len(notCompared), secrets)
+	}
+	for key := range targetCount {
+		if !known[key] {
+			t.Errorf("the compare reads %q, which no embedded static object names", key)
+		}
+	}
+}
+
 // TestTownClusterDriftStaticRefusesABrokenObject drives every way a static
 // object's document can fail the build: a document that is not YAML, none, more
 // than one, one naming another object, a namespace the object does not name, an
