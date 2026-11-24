@@ -1481,10 +1481,15 @@ type Daemon struct {
 	eventsPruneRun     patrolLastRunMemory
 	gitHygieneRun      patrolLastRunMemory
 	checkpointDogRun   patrolLastRunMemory
+	doctorDogRun       patrolLastRunMemory
 	rogueBDRun         patrolLastRunMemory
 	// ghGatesRun holds one *patrolLastRunMemory per database's gh gate check,
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
+
+	// doctorDogProbesFn, when a test sets it, supplies doctor_dog's
+	// measurements in place of the live town probes; nil is production.
+	doctorDogProbesFn func() doctorProbes
 
 	// jsonlRepoLogOnce logs the resolved offsite backup repo path on the first cycle only.
 	jsonlRepoLogOnce sync.Once

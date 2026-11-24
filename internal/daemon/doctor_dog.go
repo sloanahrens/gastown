@@ -297,8 +297,18 @@ func (d *Daemon) runDoctorDog() {
 	}
 	defer release()
 
+	// A tick that takes the Dolt-task lock is a run, whether it ends clean or
+	// with findings, so gt jobs reads doctor_dog's last run instead of
+	// never_run (gt-nhz95j). The record sits below the lock: a tick skipped
+	// for a gc made no run and records none.
+	defer d.recordPatrolRun(&d.doctorDogRun, "doctor_dog", time.Now())
+
+	probes := doctorDogProbes(d.config.TownRoot, slot.Reap)
+	if d.doctorDogProbesFn != nil {
+		probes = d.doctorDogProbesFn()
+	}
 	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrol())
-	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot, slot.Reap), doctorLimits{
+	r := doctorDogFindings(probes, doctorLimits{
 		latency:     time.Duration(latencyMs) * time.Millisecond,
 		orphans:     orphanCount,
 		backupStale: time.Duration(backupStaleSec) * time.Second,
