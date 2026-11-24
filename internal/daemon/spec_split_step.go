@@ -119,13 +119,19 @@ func (d *Daemon) specSplitTick() {
 		if splits == specSplitMaxPerTick || attempts == specSplitMaxAttempts {
 			break
 		}
-		if !specSplitEligible(issue) {
+		if issue == nil {
 			continue
 		}
-		if reason, refused := d.specSplitRefused[issue.ID]; refused {
+		// A refused bead whose label landed but whose comment did not wears
+		// split-manual, so the eligibility rule skips it: the retry must run
+		// before that rule, on the takeable test alone.
+		if reason, refused := d.specSplitRefused[issue.ID]; refused && specSplitTakeable(issue) {
 			if d.specSplitMark(issue.ID, reason) {
 				delete(d.specSplitRefused, issue.ID)
 			}
+			continue
+		}
+		if !specSplitEligible(issue) {
 			continue
 		}
 		attempts++
@@ -184,7 +190,7 @@ func (d *Daemon) specSplitMark(beadID, reason string) bool {
 func (d *Daemon) specSplitPrune(issues []*beads.Issue) {
 	kept := make(map[string]string, len(d.specSplitRefused))
 	for _, issue := range issues {
-		if issue == nil || !specSplitEligible(issue) {
+		if !specSplitTakeable(issue) {
 			continue
 		}
 		if reason, refused := d.specSplitRefused[issue.ID]; refused {
@@ -232,6 +238,12 @@ func (d *Daemon) specSplitCandidates() ([]*beads.Issue, error) {
 // hold. The hold rule is the shared one, so the hold: prefix, the human hold
 // labels and a hold decision in the bead's prose all keep it out of the tick.
 func specSplitEligible(issue *beads.Issue) bool {
+	return specSplitTakeable(issue) && !dispatch.HasLabel(issue.Labels, specSplitManualLabel)
+}
+
+// specSplitTakeable is specSplitEligible without the split-manual rule: the
+// bead is still the step's own, so a mark that half landed can be finished.
+func specSplitTakeable(issue *beads.Issue) bool {
 	if issue == nil || strings.TrimSpace(issue.Assignee) != "" {
 		return false
 	}
@@ -239,9 +251,6 @@ func specSplitEligible(issue *beads.Issue) bool {
 		return false
 	}
 	if dispatch.HasLabel(issue.Labels, land.LabelRework) {
-		return false
-	}
-	if dispatch.HasLabel(issue.Labels, specSplitManualLabel) {
 		return false
 	}
 	return dispatch.SlingHoldFields(issue.Labels, issue.Assignee, issue.Design, issue.Notes, nil) == ""

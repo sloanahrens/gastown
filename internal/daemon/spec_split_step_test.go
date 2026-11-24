@@ -392,7 +392,7 @@ func TestSpecSplitStepTick(t *testing.T) {
 type specSplitManualWrites struct {
 	labelTries, marked, commentWrites []string
 	labelErr, commentErr              error
-	labelErrs                         []error
+	labelErrs, commentErrs            []error
 }
 
 func (w *specSplitManualWrites) Update(_ string, opts beads.UpdateOptions) error {
@@ -411,6 +411,11 @@ func (w *specSplitManualWrites) Update(_ string, opts beads.UpdateOptions) error
 
 func (w *specSplitManualWrites) AddComment(_, text string) error {
 	w.commentWrites = append(w.commentWrites, text)
+	if len(w.commentErrs) > 0 {
+		err := w.commentErrs[0]
+		w.commentErrs = w.commentErrs[1:]
+		return err
+	}
 	return w.commentErr
 }
 
@@ -427,6 +432,7 @@ func TestSpecSplitStepRefused(t *testing.T) {
 		{"a failed label write is retried as a mark, never as an apply", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{labelErrs: []error{errors.New("bd is down")}}, 2, 1, 2, 1, "piece B: lint refused", "cannot add split-manual"},
 		{"a label write that keeps failing leaves no comment and no second apply", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{labelErr: errors.New("bd is down")}, 2, 1, 2, 0, "", "cannot add split-manual"},
 		{"a comment write that fails leaves the label", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{commentErr: errors.New("bd is down")}, 1, 1, 1, 1, "", "cannot comment the refusal"},
+		{"a comment that fails after the label landed is retried on the next tick, with no second apply", "verdict: fails: piece B: lint refused\n", specSplitManualWrites{commentErrs: []error{errors.New("bd is down")}}, 2, 1, 2, 2, "piece B: lint refused", "cannot comment the refusal"},
 		{"a refusal with no report names the apply's error", "", specSplitManualWrites{}, 1, 1, 1, 1, "cannot read bead gt-a", "was not split"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
