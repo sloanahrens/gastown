@@ -7,21 +7,36 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // numstatRepo is the fixture's repository handle with the landed diff's
-// numstat canned: every other read of the landing goes to the in-memory fake,
-// so the landing path itself is the one under test.
+// numstat and the commit log canned: every other read of the landing goes to
+// the in-memory fake, so the landing path itself is the one under test.
 type numstatRepo struct {
 	Repo
 	out   string
 	err   error
 	calls []string
+
+	commits   []git.CommitLineStats // the commit-log read; nil asks the fake
+	commitErr error
 }
 
 func (r *numstatRepo) DiffNumstat(base, head string) (string, error) {
 	r.calls = append(r.calls, base+".."+head)
 	return r.out, r.err
+}
+
+// CommitLineStatsInRange answers only the canned log or error; a fake with neither fails (gt-dhun8o).
+func (r *numstatRepo) CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error) {
+	if r.commits == nil && r.commitErr == nil {
+		return nil, errors.New("no commit log canned")
+	}
+	return r.commits, r.commitErr
 }
 
 // sizeLander is the fixture's lander with its repository reads wrapped, so the
@@ -86,6 +101,9 @@ func TestRunawayBeadLandingRecordsItsSize(t *testing.T) {
 				t.Errorf("record size = %d added lines, %d files; want %d and %d",
 					rec.AddedLines, rec.FilesChanged, tc.added, tc.files)
 			}
+			if rec.Commits != 0 {
+				t.Errorf("record commits = %d, want none: the fake canned no log", rec.Commits)
+			}
 			// The size is the landed diff's, read from the base the record
 			// holds to the commit that landed — never the submitted head.
 			if want := []string{rec.Base + ".." + rec.LandedCommit}; len(repo.calls) != 1 || repo.calls[0] != want[0] {
@@ -123,6 +141,81 @@ func TestRunawayBeadUnreadableDiffLeavesSizeZero(t *testing.T) {
 			}
 			if !strings.Contains(log.String(), "landing size not recorded") {
 				t.Errorf("landing log = %q; want it to name the size it could not record", log.String())
+			}
+		})
+	}
+}
+
+// TestLandingRecordCountsItsRangeCommits: the record carries how many commits
+// the risk-path file list covers, base..head; two landings in a row each
+// record their own head, count and files (gt-dhun8o).
+func TestLandingRecordCountsItsRangeCommits(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// The tip auto-save commit squashes the landing: base..landed reads 1
+	// where base..head, the file list's range, reads 2.
+	f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+	f.git.Commit(t, f.origin, fixtureBranch, "feat: add b", map[string]string{"b.txt": "work\n"})
+	two := f.git.Commit(t, f.origin, fixtureBranch, checkpoint.WIPCommitPrefix+" 2026-09-30", map[string]string{"c.txt": "more\n"})
+	f.ready(two)
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("first Land: %v", err)
+	}
+	second := Work{BeadID: "gt-def", Rig: "gastown", Branch: "polecat/opal/gt-def+x2", Target: "main", Worker: "opal"}
+	f.git.SetRef(t, f.origin, "refs/heads/"+second.Branch, f.originMain())
+	second.Head = f.git.Commit(t, f.origin, second.Branch, "feat: add d", map[string]string{"d.txt": "d\n"})
+	f.bd.Seed(beads.Issue{ID: "gt-def", Status: "hooked", Type: "task", Labels: []string{LabelReadyToLand},
+		Assignee: "gastown/polecats/opal", Notes: FormatReadyNote(second)})
+	f.base = f.originMain()
+	if _, err := f.lander().Land(context.Background(), second); err != nil {
+		t.Fatalf("second Land: %v", err)
+	}
+	lines := f.landingLines()
+	if len(lines) != 2 {
+		t.Fatalf("landings file holds %d records, want 2", len(lines))
+	}
+	for i, want := range []struct {
+		head           string
+		commits, files int
+	}{{two, 2, 2}, {second.Head, 1, 1}} {
+		var rec LandingRecord
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+		if i == 0 && rec.LandedCommit == rec.Head {
+			t.Fatalf("the first landing did not squash, so the test cannot tell base..head from base..landed")
+		}
+		if rec.Head != want.head || rec.Commits != want.commits || rec.FilesChanged != want.files {
+			t.Errorf("record %d = %s, %d commits, %d files; want %s, %d and %d",
+				i, rec.Head, rec.Commits, rec.FilesChanged, want.head, want.commits, want.files)
+		}
+	}
+}
+
+// TestLandingRecordHasNoCommitCountWhenTheRangeIsUncountable: a failed log
+// read, and a walk its limit stops, record no count and the landing stands
+// (gt-dhun8o).
+func TestLandingRecordHasNoCommitCountWhenTheRangeIsUncountable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		repo *numstatRepo
+	}{
+		{"the log fails", &numstatRepo{commitErr: errors.New("bad revision")}},
+		{"the limit stops the walk", &numstatRepo{commits: make([]git.CommitLineStats, landingCommitScanLimit)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			var log bytes.Buffer
+			if _, err := f.sizeLander(t, tc.repo, &log).Land(context.Background(), f.work); err != nil {
+				t.Fatalf("Land: %v; an uncountable range must not fail the landing", err)
+			}
+			if rec := f.recordSize(t); rec.Commits != 0 {
+				t.Errorf("record commits = %d, want none", rec.Commits)
+			}
+			if tc.repo.commitErr != nil && !strings.Contains(log.String(), "landing commit count not recorded") {
+				t.Errorf("landing log = %q; want the failed count", log.String())
 			}
 		})
 	}

@@ -2757,11 +2757,22 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 	return l.recordBead(w, rec)
 }
 
+// landingCommitScanLimit bounds the walk that counts a landing's commits (gt-dhun8o).
+const landingCommitScanLimit = 1000
+
 // landingSize fills rec's added lines and files changed from the landed
 // change's numstat. A diff that cannot be read leaves both zero and is
 // logged, and the landing stands either way; a landing that changed nothing
 // records the same zeros (gt-8ldz1g).
 func (l *Lander) landingSize(g Repo, rec *LandingRecord, base, landed string) {
+	// The count covers rec.Base..rec.Head, the range the risk paths were read
+	// from; a failed read is logged, and a walk that fills the limit records none.
+	stats, err := g.CommitLineStatsInRange(rec.Base+".."+rec.Head, landingCommitScanLimit)
+	if err == nil && len(stats) < landingCommitScanLimit {
+		rec.Commits = len(stats)
+	} else if err != nil {
+		l.logf("%s: landing commit count not recorded: %v", rec.BeadID, err)
+	}
 	out, err := g.DiffNumstat(base, landed)
 	if err != nil {
 		l.logf("%s: landing size not recorded: %v", rec.BeadID, err)

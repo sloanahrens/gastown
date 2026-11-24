@@ -2221,7 +2221,7 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				Bead:     rec.BeadID,
 				SHA:      rec.Head,
 				LandedAt: rec.LandedAt,
-				Summary:  fmt.Sprintf("%s landed %s touching %s; %s", rec.BeadID, sha12(rec.Head), riskPathList(rec.RiskPaths), wanted),
+				Summary:  riskPathSummary(rec, riskPathList(rec.RiskPaths), wanted),
 			})
 		}
 	}
@@ -2236,6 +2236,14 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 	// backlog rule may clear a standing item on (gt-8mm0g).
 	s.riskOpen, s.riskCounted = len(out), beadFails == 0
 	return out, nil
+}
+
+// riskPathSummary words a risk-path item, naming the commit count when its paths cover more than one (gt-dhun8o).
+func riskPathSummary(rec land.LandingRecord, paths, wanted string) string {
+	if rec.Commits > 1 {
+		return fmt.Sprintf("%s landed head %s (%d commits) touching %s; %s", rec.BeadID, sha12(rec.Head), rec.Commits, paths, wanted)
+	}
+	return fmt.Sprintf("%s landed %s touching %s; %s", rec.BeadID, sha12(rec.Head), paths, wanted)
 }
 
 // riskReads reads rig's qualifying landing beads for the collector: each
