@@ -1482,6 +1482,8 @@ type Daemon struct {
 	gitHygieneRun      patrolLastRunMemory
 	checkpointDogRun   patrolLastRunMemory
 	doctorDogRun       patrolLastRunMemory
+	overseerReportRun  patrolLastRunMemory
+	hmSyncPatrolRun    patrolLastRunMemory
 	// landingWorkerRun is the rig workers' last completed pass. They pass every
 	// minute but recorded no run, so gt jobs read the row as never_run
 	// (gt-zv3ndb).

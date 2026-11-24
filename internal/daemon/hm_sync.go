@@ -146,6 +146,12 @@ func (d *Daemon) runHMSync() {
 // sync succeeded or not, so a failing command is retried at the next interval
 // rather than on every check tick.
 func (d *Daemon) hmSyncPass(s hmSyncSeams, started time.Time) {
+	// A pass that completed is a run whether the sync succeeded or failed, so
+	// gt jobs reads hm_sync's last run instead of never_run (gt-x5dwpe). The
+	// closure stamps the completion time, as the hmSyncLastRun store below does.
+	defer func() {
+		d.recordPatrolRun(&d.hmSyncPatrolRun, "hm_sync", s.now())
+	}()
 	ctx, cancel := d.hmSyncContext()
 	defer cancel()
 	// The status is read however the sync ended: a failed sync is exactly when

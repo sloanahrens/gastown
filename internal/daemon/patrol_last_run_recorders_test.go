@@ -76,3 +76,102 @@ func TestPatrolLastRunRecordersDoctorDog(t *testing.T) {
 		}
 	})
 }
+
+// overseerRecorderDaemon is a daemon on the package's fixture town whose
+// overseer_report patrol is as given, with the fixture's report sources: no
+// live store, seat or health read is made.
+func overseerRecorderDaemon(t *testing.T, enabled bool) *Daemon {
+	t.Helper()
+	w := newOverseerWorld(t, "2026-10-14T20:15:00Z")
+	return &Daemon{
+		config: &Config{TownRoot: w.town},
+		logger: log.New(io.Discard, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			OverseerReport: &OverseerReportConfig{Enabled: enabled},
+		}},
+		overseerReportSeams: w.seams(),
+	}
+}
+
+// TestPatrolLastRunRecordersOverseerReportAndHMSync pins gt-x5dwpe: one run of
+// each patrol leaves its entry in patrol_last_run.json, so gt jobs reads the
+// row as run-at-last instead of never_run; a disabled patrol records none.
+func TestPatrolLastRunRecordersOverseerReportAndHMSync(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an overseer_report run records a run", func(t *testing.T) {
+		t.Parallel()
+		d := overseerRecorderDaemon(t, true)
+
+		before := time.Now()
+		d.runOverseerReport()
+		after := time.Now()
+
+		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("ReadPatrolLastRuns: %v", err)
+		}
+		got, ok := runs["overseer_report"]
+		if !ok {
+			t.Fatal("overseer_report recorded no run; gt jobs reads it as never_run")
+		}
+		if got.Before(before) || got.After(after) {
+			t.Errorf("overseer_report last run = %v, want a time within the run (%v..%v)", got, before, after)
+		}
+	})
+
+	t.Run("a disabled overseer_report records no run", func(t *testing.T) {
+		t.Parallel()
+		d := overseerRecorderDaemon(t, false)
+
+		d.runOverseerReport()
+
+		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("ReadPatrolLastRuns: %v", err)
+		}
+		if got, ok := runs["overseer_report"]; ok {
+			t.Errorf("a disabled patrol recorded a run at %v; it made no run", got)
+		}
+	})
+
+	t.Run("an hm_sync pass records a run", func(t *testing.T) {
+		t.Parallel()
+		d, _, f := hmSyncTestDaemon(t, hmSyncConfig(true, "", ""))
+
+		d.runHMSync()
+
+		if len(f.calls) != 1 {
+			t.Fatalf("ran %v, want one sync before the record proves anything", f.calls)
+		}
+		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("ReadPatrolLastRuns: %v", err)
+		}
+		got, ok := runs["hm_sync"]
+		if !ok {
+			t.Fatal("hm_sync recorded no run; gt jobs reads it as never_run")
+		}
+		if !got.Equal(hmSyncNow) {
+			t.Errorf("hm_sync last run = %v, want the pass's completion on its clock (%v)", got, hmSyncNow)
+		}
+	})
+
+	t.Run("a disabled hm_sync records no run", func(t *testing.T) {
+		t.Parallel()
+		d, _, f := hmSyncTestDaemon(t, hmSyncConfig(false, "", ""))
+
+		d.runHMSync()
+
+		if len(f.calls) != 0 {
+			t.Fatalf("ran %v with the patrol off, so this row proves nothing", f.calls)
+		}
+		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("ReadPatrolLastRuns: %v", err)
+		}
+		if got, ok := runs["hm_sync"]; ok {
+			t.Errorf("a disabled patrol recorded a run at %v; it made no run", got)
+		}
+	})
+}

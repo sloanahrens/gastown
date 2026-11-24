@@ -159,6 +159,12 @@ func (d *Daemon) runOverseerReport() {
 	if !d.isPatrolActive("overseer_report") || d.config == nil {
 		return
 	}
+	// A tick that runs is a run whether it wrote a report or failed to, so gt
+	// jobs reads overseer_report's last run instead of never_run (gt-x5dwpe).
+	// The record sits below the guard: a disabled patrol makes no run.
+	defer func() {
+		d.recordPatrolRun(&d.overseerReportRun, "overseer_report", d.clk().Now())
+	}()
 	seams := d.overseerReportSeams
 	if seams == nil {
 		seams = d.overseerReportProdSeams()
