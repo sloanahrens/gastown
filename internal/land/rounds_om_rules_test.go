@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // omAcceptsFindingIDs restates om's id rule for a --rounds-file
@@ -83,6 +85,33 @@ func TestRoundsOMRulesRefusesAnIdlessFindingOverTheCap(t *testing.T) {
 	}
 }
 
+// TestRoundsOMRulesDropsAnIdlessFindingOverTheCap: the id check runs on the
+// rounds Render emits, so a round the byte cap drops takes its id-less finding
+// with it. The same ledger is refused while both rounds fit; at a cap only
+// round 2 meets it renders round 2 alone, every finding with an id
+// (gt-2rvuze).
+func TestRoundsOMRulesDropsAnIdlessFindingOverTheCap(t *testing.T) {
+	t.Parallel()
+	kept := []Finding{{ID: "F1", Path: "b.go", Title: "kept"}}
+	only := ledgerIn(t, "gt-only")
+	must(t, only.Append(2, "head2", kept))
+	round2, err := only.Render(0)
+	must(t, err)
+
+	l := ledgerIn(t, "gt-abc")
+	must(t, l.Append(1, "head1", []Finding{{Path: "a.go", Title: "id lost"}}))
+	must(t, l.Append(2, "head2", kept))
+
+	if _, err := l.Render(DefaultRoundsCap); !errors.Is(err, ErrRoundsCorrupt) || !strings.Contains(err.Error(), "round 1") {
+		t.Fatalf("Render with both rounds kept = %v, want ErrRoundsCorrupt naming round 1", err)
+	}
+
+	rounds := renderedOf(t, l, len(round2))
+	if len(rounds) != 1 || rounds[0].Round != 2 || !omAcceptsFindingIDs(rounds) {
+		t.Fatalf("rendered rounds at a cap that drops round 1 = %+v, want only round 2 with its id", rounds)
+	}
+}
+
 // TestRoundsOMRulesDegradesTheLanding: a ledger Render refuses costs the
 // landing its rounds, not its review: no text, one log line for the bead, and
 // the review still runs (gt-2rvuze).
@@ -90,7 +119,7 @@ func TestRoundsOMRulesDegradesTheLanding(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	l.RoundsDir = t.TempDir()
+	l.RoundsDir = testutil.PrivateTempDir(t)
 	must(t, (&RoundsLedger{OutDir: l.RoundsDir, Bead: f.work.BeadID, Now: l.now}).Append(1, "earlier", []Finding{
 		{ID: "F1", Path: "b.txt", Title: "broken"}, {Path: "b.txt", Title: "id lost"}}))
 	var out strings.Builder
