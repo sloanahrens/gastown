@@ -1,0 +1,192 @@
+=== 12-deployment-daemon.yaml ===
+# no hostAliases: this pod has no gateway alias, so host.docker.internal does not resolve in it
+# no proxy sidecars: Values.ProxyImage is empty, so 127.0.0.1:5001 and 127.0.0.1:28443 have no listener in this pod
+# no /Users/sloan/.claude/.beads mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: daemon
+    namespace: gt
+    labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    annotations:
+        gt/town-owner: pod
+spec:
+    replicas: 1
+    strategy:
+        type: Recreate
+    selector:
+        matchLabels:
+            app.kubernetes.io/name: daemon
+    template:
+        metadata:
+            labels:
+                app.kubernetes.io/managed-by: gt
+                app.kubernetes.io/name: daemon
+        spec:
+            serviceAccountName: daemon
+            terminationGracePeriodSeconds: 185
+            containers:
+                - name: daemon
+                  image: registry.example.test/gastown/daemon@sha256:0000000000000000000000000000000000000000000000000000000000000001
+                  args:
+                    - --om-token-file
+                    - /run/secrets/om-token
+                    - --forge-host
+                    - forgejo:3000
+                    - --forge-token-file
+                    - /run/secrets/forge-token
+                  workingDir: /Users/sloan/gt
+                  env:
+                    - name: GT_TOWN_ROOT
+                      value: /Users/sloan/gt
+                    - name: XDG_CONFIG_HOME
+                      value: /run/gt/xdg
+                    - name: GT_DAEMON_CONTAINER_NAME
+                      value: daemon
+                    - name: GT_DAEMON_SUPERVISOR
+                      value: container
+                    - name: TZ
+                      value: America/Chicago
+                    - name: FORGEJO_API_URL
+                      value: http://forgejo:3000/api/v1
+                    - name: GT_DOLT_BACKUP_ROOT
+                      value: /Users/sloan/gt-backups/dolt
+                    - name: HM_CONFIG
+                      value: /var/run/secrets/gt-hm/hm-config.json
+                  resources:
+                    requests:
+                        cpu: "2"
+                        memory: 4Gi
+                    limits:
+                        cpu: "2"
+                        memory: 4Gi
+                  volumeMounts:
+                    - name: town-state
+                      mountPath: /Users/sloan/gt
+                    - name: landing-work
+                      mountPath: /Users/sloan/gt-landing.noindex
+                    - name: dolt-backup
+                      mountPath: /Users/sloan/gt-backups/dolt
+                    - name: gotmp
+                      mountPath: /Users/Shared/gt-gotmp.noindex
+                    - name: daemon-om-daemon-token
+                      mountPath: /run/gt/xdg/gt/om-daemon-token
+                      subPath: om-daemon-token
+                      readOnly: true
+                    - name: daemon-forgejo-landing-env
+                      mountPath: /run/gt/xdg/gt/forgejo-landing.env
+                      subPath: forgejo-landing.env
+                      readOnly: true
+                    - name: daemon-promote-gastown-key
+                      mountPath: /run/gt/xdg/gt/promote-gastown.key
+                      subPath: promote-gastown.key
+                      readOnly: true
+                    - name: daemon-forgejo-viewer-env
+                      mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+                      subPath: forgejo-viewer.env
+                      readOnly: true
+                    - name: daemon-om-daemon-token
+                      mountPath: /run/secrets/om-token
+                      subPath: om-daemon-token
+                      readOnly: true
+                    - name: daemon-forgejo-landing-env
+                      mountPath: /run/secrets/forge-token
+                      subPath: forgejo-landing.env
+                      readOnly: true
+                    - name: daemon-openshell
+                      mountPath: /run/gt/xdg/openshell
+                      readOnly: true
+                    - name: gt-hm-config
+                      mountPath: /var/run/secrets/gt-hm/hm-config.json
+                      subPath: hm-config.json
+                      readOnly: true
+                    - name: town-state
+                      mountPath: /run/gt/xdg/om/config.json
+                      subPath: .runtime/container/om-config.json
+                      readOnly: true
+                  readinessProbe:
+                    exec:
+                        command:
+                            - gt
+                            - status
+                            - --line
+                            - --ready
+                    initialDelaySeconds: 30
+                    periodSeconds: 30
+                    timeoutSeconds: 10
+                    failureThreshold: 3
+                  livenessProbe:
+                    exec:
+                        command:
+                            - gt
+                            - daemon
+                            - status
+                    initialDelaySeconds: 60
+                    periodSeconds: 60
+                    timeoutSeconds: 15
+                    failureThreshold: 5
+            volumes:
+                - name: town-state
+                  persistentVolumeClaim:
+                    claimName: town-state
+                - name: landing-work
+                  persistentVolumeClaim:
+                    claimName: landing-work
+                - name: dolt-backup
+                  persistentVolumeClaim:
+                    claimName: dolt-backup
+                - name: gotmp
+                  emptyDir: {}
+                - name: daemon-om-daemon-token
+                  secret:
+                    secretName: daemon-om-daemon-token
+                    defaultMode: 384
+                - name: daemon-forgejo-landing-env
+                  secret:
+                    secretName: daemon-forgejo-landing.env
+                    defaultMode: 384
+                - name: daemon-promote-gastown-key
+                  secret:
+                    secretName: daemon-promote-gastown.key
+                    defaultMode: 384
+                - name: daemon-forgejo-viewer-env
+                  secret:
+                    secretName: daemon-forgejo-viewer.env
+                    defaultMode: 384
+                - name: daemon-openshell
+                  secret:
+                    secretName: daemon-openshell
+                    defaultMode: 256
+                    items:
+                        - key: gateway.toml
+                          path: gateway.toml
+                        - key: active_gateway
+                          path: active_gateway
+                        - key: gateways__k8s__metadata.json
+                          path: gateways/k8s/metadata.json
+                        - key: gateways__k8s__last_sandbox
+                          path: gateways/k8s/last_sandbox
+                        - key: gateways__k8s__mtls__ca.crt
+                          path: gateways/k8s/mtls/ca.crt
+                        - key: gateways__k8s__mtls__tls.crt
+                          path: gateways/k8s/mtls/tls.crt
+                        - key: gateways__k8s__mtls__tls.key
+                          path: gateways/k8s/mtls/tls.key
+                        - key: gateways__openshell__metadata.json
+                          path: gateways/openshell/metadata.json
+                        - key: gateways__openshell__mtls__ca.crt
+                          path: gateways/openshell/mtls/ca.crt
+                        - key: gateways__openshell__mtls__tls.crt
+                          path: gateways/openshell/mtls/tls.crt
+                        - key: gateways__openshell__mtls__tls.key
+                          path: gateways/openshell/mtls/tls.key
+                - name: gt-hm-config
+                  secret:
+                    secretName: gt-hm-config
+                    defaultMode: 256
+                    items:
+                        - key: hm-config.json
+                          path: hm-config.json
+            shareProcessNamespace: true

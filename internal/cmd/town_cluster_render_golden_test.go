@@ -62,3 +62,14 @@ func TestTownClusterRenderControlGoldenObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The control render's Deployment (file 12) is pinned byte for byte, under the
+// name the render writes it at, so a change to any of its fields fails here.
+func TestTownClusterRenderControlGoldenDeployment(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	got := renderedFiles(t, f, []string{"12-deployment-daemon.yaml"})
+	if err := compareGolden(filepath.Join("testdata", "cluster_render_control_deployment.golden"), got); err != nil {
+		t.Fatal(err)
+	}
+}
