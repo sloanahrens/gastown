@@ -268,14 +268,18 @@ stopped containers, build cache and anonymous volumes, on a claim that nothing
 bounds. The engine prune keeps the rest of the engine in check on its own
 interval (`ci_engine_prune_interval`), under the same patrol, the same exec into
 the `dind` container and the same `dry_run` default as the cache trim above.
+Each run removes at most `ci_engine_prune_max_per_kind` of each kind, and the
+rest wait for the next run.
 
 - The settings sit under `patrols.disk_maintenance`: `ci_engine_prune_interval`
   (default `1h`), `ci_engine_prune_age` (default `48h`), `ci_engine_cache_keep_bytes`
-  (default `10GB`) and `ci_engine_keep_repos` (default `["ci-base"]`). An empty
-  setting is the default. A zero or negative
-  interval or age is refused, and an explicit empty keep list is refused, since it
-  would leave the base images unprotected. A keep name that is not a repository
-  name is refused. Each error names its setting.
+  (default `10GB`), `ci_engine_keep_repos` (default `["ci-base"]`) and
+  `ci_engine_prune_max_per_kind` (default `50`, the most candidates of each kind
+  one run may remove). An empty setting is the default. A zero or negative
+  interval, age or `ci_engine_prune_max_per_kind` is refused, and an explicit
+  empty keep list is refused, since it would leave the base images unprotected.
+  A keep name that is not a repository name is refused. Each error names its
+  setting.
 - Each run lists, plans, then removes. The first exec lists the engine as JSON and
   changes nothing. The planner decides what goes from that listing alone. The
   remove step is skipped in `dry_run`; in an apply it is one docker command per

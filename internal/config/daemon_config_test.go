@@ -1741,6 +1741,97 @@ func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
 	})
 }
 
+// TestDiskMaintenanceCIEnginePruneCap: the engine prune's per-kind candidate cap
+// is 50 when the setting is absent and the explicit value otherwise, at the
+// accessor and at config load alike, so an absent key is never an error
+// (gt-ul5n4r).
+func TestDiskMaintenanceCIEnginePruneCap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value *int
+		doc   string
+		want  int
+	}{
+		{name: "absent is the 50 default", value: nil, doc: `{"disk_maintenance": {}}`, want: 50},
+		{name: "one is read", value: intPtr(1), doc: `{"disk_maintenance": {"ci_engine_prune_max_per_kind": 1}}`, want: 1},
+		{name: "200 is read", value: intPtr(200), doc: `{"disk_maintenance": {"ci_engine_prune_max_per_kind": 200}}`, want: 200},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (DiskMaintenanceConfig{CIEnginePruneMaxPerKind: tt.value}).CIEnginePruneCap()
+			if err != nil {
+				t.Fatalf("CIEnginePruneCap(%v): %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("CIEnginePruneCap(%v) = %d, want %d", tt.value, got, tt.want)
+			}
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(tt.doc), &p); err != nil {
+				t.Fatalf("config load %s: %v", tt.doc, err)
+			}
+			got, err = p.DiskMaintenance.CIEnginePruneCap()
+			if err != nil {
+				t.Fatalf("config load %s: CIEnginePruneCap: %v", tt.doc, err)
+			}
+			if got != tt.want {
+				t.Errorf("config load %s = %d, want %d", tt.doc, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceCIEnginePruneCapRefuses: a per-kind cap of zero or less is
+// refused with an error naming its key, from the accessor and at config load,
+// and a JSON object holding an explicit 0 is refused rather than read as absent
+// (gt-ul5n4r).
+func TestDiskMaintenanceCIEnginePruneCapRefuses(t *testing.T) {
+	t.Parallel()
+	t.Run("accessor refuses zero and negative naming its key", func(t *testing.T) {
+		t.Parallel()
+		for _, value := range []int{0, -1} {
+			_, err := (DiskMaintenanceConfig{CIEnginePruneMaxPerKind: intPtr(value)}).CIEnginePruneCap()
+			if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_prune_max_per_kind") {
+				t.Errorf("CIEnginePruneCap(%d) = %v; want an error naming the key", value, err)
+			}
+		}
+	})
+	t.Run("config load refuses an explicit zero or negative and accepts an absent key", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			doc     string
+			refused bool
+			want    int
+		}{
+			{name: "explicit zero", doc: `{"disk_maintenance": {"ci_engine_prune_max_per_kind": 0}}`, refused: true},
+			{name: "negative", doc: `{"disk_maintenance": {"ci_engine_prune_max_per_kind": -1}}`, refused: true},
+			{name: "absent key is the default, not a refusal", doc: `{"disk_maintenance": {}}`, want: 50},
+		}
+		for _, tt := range cases {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				var p PatrolsConfig
+				err := json.Unmarshal([]byte(tt.doc), &p)
+				if tt.refused {
+					if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_prune_max_per_kind") {
+						t.Errorf("config load %s = %v; want a refusal naming the key", tt.doc, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("config load %s: %v", tt.doc, err)
+				}
+				got, err := p.DiskMaintenance.CIEnginePruneCap()
+				if err != nil || got != tt.want {
+					t.Errorf("config load %s: CIEnginePruneCap = %d, %v; want %d", tt.doc, got, err, tt.want)
+				}
+			})
+		}
+	})
+}
+
 // TestDiskMaintenanceSweepRunsPruneSettings: the three sweep-runs prune settings
 // read their defaults when empty, read an override, and refuse a value the patrol
 // cannot use, each error naming its key.
