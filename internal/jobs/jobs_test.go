@@ -718,3 +718,94 @@ func TestJobsDoltGC(t *testing.T) {
 		})
 	}
 }
+
+// TestJobDueAllowsTheRunDuration is bead gt-sn4eru: a job is due only after its
+// cadence, its newest run's own duration and the grace, so a 30-minute job
+// whose run takes 19 minutes is not overdue while that run's next cycle is
+// still running. A row that records no duration keeps the cadence-plus-grace
+// allowance it had before.
+func TestJobDueAllowsTheRunDuration(t *testing.T) {
+	t.Parallel()
+	const (
+		cadence = 30 * time.Minute
+		run     = 19 * time.Minute
+		grace   = 10 * time.Minute // max(cadence/4, 10m)
+	)
+	end := testNow.Add(-time.Hour)
+	cases := []struct {
+		name    string
+		stats   map[string]int64 // the newest run's stats
+		after   time.Duration    // how long after the run's end the row is judged
+		wantDue time.Duration    // allowance past the run's end
+		want    State
+	}{
+		{
+			name:    "a 19-minute run is ok at the cadence plus the run duration",
+			stats:   map[string]int64{"duration_ms": run.Milliseconds()},
+			after:   cadence + run,
+			wantDue: cadence + run + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a 19-minute run is ok just before the allowance ends",
+			stats:   map[string]int64{"duration_ms": run.Milliseconds()},
+			after:   cadence + run + grace - time.Minute,
+			wantDue: cadence + run + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a 19-minute run is overdue past the allowance",
+			stats:   map[string]int64{"duration_ms": run.Milliseconds()},
+			after:   cadence + run + grace + time.Minute,
+			wantDue: cadence + run + grace,
+			want:    StateOverdue,
+		},
+		{
+			name:    "no duration stat is ok within the cadence plus grace",
+			after:   cadence + grace,
+			wantDue: cadence + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "no duration stat is overdue past the cadence plus grace",
+			after:   cadence + grace + time.Minute,
+			wantDue: cadence + grace,
+			want:    StateOverdue,
+		},
+		{
+			name:    "a negative duration stat is no allowance, never a shorter one",
+			stats:   map[string]int64{"duration_ms": -run.Milliseconds()},
+			after:   cadence + grace + time.Minute,
+			wantDue: cadence + grace,
+			want:    StateOverdue,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeMayorDaemon(t, root, `{"job":{"interval":"30m"}}`)
+			appendLedgerRuns(t, root, jobledger.Run{
+				Job:       "job",
+				StartedAt: end.Add(-run),
+				EndedAt:   end,
+				Outcome:   "ok",
+				Stats:     c.stats,
+			})
+
+			jobs, err := list(root, Options{}, []config.DaemonStep{
+				{Name: "job", Kind: config.DaemonStepPatrol},
+			}, end.Add(c.after))
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			row := jobs[0]
+			if want := end.Add(c.wantDue); row.Due == nil || !row.Due.Equal(want) {
+				t.Errorf("Due = %v, want %v", row.Due, want)
+			}
+			if row.State != c.want {
+				t.Errorf("State = %q, want %q", row.State, c.want)
+			}
+		})
+	}
+}
