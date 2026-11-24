@@ -1445,17 +1445,21 @@ func doltLogContainer(config *doltserver.Config) string {
 
 // doltLogReads is what the dolt log commands and the dump take from outside the
 // process: the clock that dates the stale-log notice, the tail that prints the
-// lines, and the container dump's session reader.
+// lines, the reader of a container town's lines, and the container dump's
+// session reader.
 type doltLogReads struct {
 	now  func() time.Time
 	tail func(args []string, out, errw io.Writer) error
+	// containerLog prints a container town's last lines from the container,
+	// since its Dolt writes there and not to the host dolt.log (gt-rpoii1).
+	containerLog func(container string, lines int, out, errw io.Writer) error
 	// sessions lists a container town's live sessions. A nil reader makes the
 	// dump say it cannot list them, never that there are none (gt-f4uyom).
 	sessions func() ([]string, error)
 }
 
 func liveDoltLogReads() doltLogReads {
-	return doltLogReads{now: time.Now, tail: execDoltLogTail}
+	return doltLogReads{now: time.Now, tail: execDoltLogTail, containerLog: execDoltLogContainerTail}
 }
 
 // execDoltLogTail runs the system tail with args, its stdout to out and its stderr to errw.
@@ -1466,22 +1470,38 @@ func execDoltLogTail(args []string, out, errw io.Writer) error {
 	return tailCmd.Run()
 }
 
+// execDoltLogContainerTail prints the last lines of container's log, which
+// holds a container town's Dolt output in place of the stale host dolt.log
+// (gt-rpoii1).
+func execDoltLogContainerTail(container string, lines int, out, errw io.Writer) error {
+	logsCmd := exec.Command("docker", "logs", "--tail", strconv.Itoa(lines), container)
+	logsCmd.Stdout = out
+	logsCmd.Stderr = errw
+	return logsCmd.Run()
+}
+
 // doltLogsTo writes the stale-log notice for the town's dolt.log to errw, then
-// its last lines (or follows it) to out.
+// its last lines (or follows it) to out. A container town's lines are read from
+// the container: its host dolt.log is the stale file the notice names (gt-rpoii1).
 func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines int, follow bool) error {
 	config := doltserver.DefaultConfig(townRoot)
+	container := doltLogContainer(config)
 
 	if _, err := os.Stat(config.LogFile); os.IsNotExist(err) {
 		return fmt.Errorf("no log file found at %s", config.LogFile)
 	}
 
-	if err := writeDoltLogStaleNotice(errw, config.LogFile, reads.now(), doltLogContainer(config)); err != nil {
+	if err := writeDoltLogStaleNotice(errw, config.LogFile, reads.now(), container); err != nil {
 		return err
 	}
 
 	if follow {
 		// Use tail -f for following
 		return reads.tail([]string{"-f", config.LogFile}, out, errw)
+	}
+
+	if container != "" {
+		return reads.containerLog(container, lines, out, errw)
 	}
 
 	// Use tail -n for last N lines
