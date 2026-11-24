@@ -53,11 +53,12 @@ func compareSbxDrift(ctx context.Context, d clusterDriftDeps, set sbx.Set, kubec
 	}
 	differed := false
 	for _, group := range order {
-		live, err := readSbxLive(ctx, kubectl, group)
+		names := slices.Sorted(maps.Keys(bodies[group]))
+		live, err := readSbxLive(ctx, kubectl, group, names)
 		if err != nil {
 			return sbxDriftUnreadable(err)
 		}
-		for _, name := range slices.Sorted(maps.Keys(bodies[group])) {
+		for _, name := range names {
 			var lines []string
 			if body, ok := live[name]; ok {
 				lines, err = objectDrift(group.kind, bodies[group][name], body)
@@ -92,29 +93,40 @@ func sbxDriftUnreadable(err error) error {
 }
 
 // readSbxLive lists the group's kind through the guarded runner and returns the
-// objects by name. A non-List answer or an item with no printable name is
-// unreadable rather than clean (gt-82a9fz).
-func readSbxLive(ctx context.Context, kubectl update.RunFunc, group sbxDriftGroup) (map[string]map[string]any, error) {
+// objects by name. Every refusal names the set objects the read stood for, so an
+// unreadable read says which objects were not compared. A non-List answer or an
+// item with no printable name is unreadable rather than clean (gt-82a9fz,
+// gt-fl4i45).
+func readSbxLive(ctx context.Context, kubectl update.RunFunc, group sbxDriftGroup, names []string) (map[string]map[string]any, error) {
 	resource := strings.ToLower(group.kind)
+	// No name means no object to read; refuse before the list joined below
+	// collapses to an empty phrase and the refusal names nothing (gt-fl4i45).
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no %s object was named to read, so none was compared", resource)
+	}
 	args := []string{"get", resource, "-o", "json"}
-	where := resource
+	where := make([]string, len(names))
+	for i, name := range names {
+		where[i] = resource + "/" + name
+	}
+	reading := strings.Join(where, ", ")
 	if !group.cluster {
 		args = append([]string{"-n", group.namespace}, args...)
-		where += " in namespace " + group.namespace
+		reading += " in namespace " + group.namespace
 	}
 	out, exit, err := kubectl(ctx, "", nil, "kubectl", args...)
 	if err != nil {
-		return nil, fmt.Errorf("reading the live %s: %w", where, err)
+		return nil, fmt.Errorf("reading the live %s: %w", reading, err)
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("the live %s could not be read: kubectl exited %d", where, exit)
+		return nil, fmt.Errorf("the live %s could not be read: kubectl exited %d", reading, exit)
 	}
 	var list struct {
 		Kind  string           `json:"kind"`
 		Items []map[string]any `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(out), &list); err != nil || list.Kind != "List" {
-		return nil, fmt.Errorf("the live %s answer is not a JSON List, so it was not read", where)
+		return nil, fmt.Errorf("the live %s answer is not a JSON List, so it was not read", reading)
 	}
 	live := make(map[string]map[string]any, len(list.Items))
 	for _, item := range list.Items {
@@ -123,7 +135,7 @@ func readSbxLive(ctx context.Context, kubectl update.RunFunc, group sbxDriftGrou
 		// A live name is printed, so an empty or control-character one is
 		// refused rather than allowed to forge a line.
 		if name == "" || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			return nil, fmt.Errorf("the live %s holds an object whose name cannot be printed, so it was not read", where)
+			return nil, fmt.Errorf("the live %s holds an object whose name cannot be printed, so it was not read", reading)
 		}
 		live[name] = item
 	}

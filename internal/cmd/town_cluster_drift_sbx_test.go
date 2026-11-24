@@ -34,6 +34,20 @@ func sbxDriftSet() sbx.Set {
 	}
 }
 
+// sbxDriftTokenDoc is a rendered Service whose label names a value the compare
+// must never print.
+const sbxDriftTokenDoc = `apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: openshell
+  labels:
+    gt/token: rendered-token-of-the-town
+spec:
+  ports:
+  - port: 8080
+`
+
 // sbxDriftService is a live Service carrying the helm labels and annotations
 // the chart stamps on it, which the rendered document does not name.
 func sbxDriftService(name string, port int) string {
@@ -101,7 +115,8 @@ func TestClusterDriftSbxCompareIgnoresHelmMetadata(t *testing.T) {
 }
 
 // TestClusterDriftSbxCompareReportsAMissingObject holds a set object the cluster
-// lacks to exit 1 with its rendered fields reported absent (gt-82a9fz).
+// lacks to exit 1 with its rendered fields reported absent, under the object's
+// kind and name (gt-82a9fz).
 func TestClusterDriftSbxCompareReportsAMissingObject(t *testing.T) {
 	t.Parallel()
 	err, lines := sbxDriftRun(t, sbxDriftSet(), sbxDriftKubectl(t, `{"kind":"List","items":[]}`, 0, nil))
@@ -113,30 +128,74 @@ func TestClusterDriftSbxCompareReportsAMissingObject(t *testing.T) {
 	}
 }
 
+// TestClusterDriftSbxCompareNamesAnUnreadableObject holds a read the cluster
+// fails to exit 2 naming the rendered object it could not compare, never 0 or 1,
+// with no line printed (gt-fl4i45).
+func TestClusterDriftSbxCompareNamesAnUnreadableObject(t *testing.T) {
+	t.Parallel()
+	err, lines := sbxDriftRun(t, sbxDriftSet(), sbxDriftKubectl(t, "", 1, nil))
+	if got := driftExit(err); got != driftExitUnreadable {
+		t.Fatalf("exit = %d, want %d (err: %v)", got, driftExitUnreadable, err)
+	}
+	if want := "service/dashboard"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name %q", err, want)
+	}
+	if lines != nil {
+		t.Errorf("printed %q beside the refusal, want nothing", lines)
+	}
+}
+
+// TestClusterDriftSbxComparePrintsNoValue holds a rendered label that differs
+// from the live one to one line naming the path and a fingerprint of each side,
+// with neither value in the output or the returned error (gt-fl4i45).
+func TestClusterDriftSbxComparePrintsNoValue(t *testing.T) {
+	t.Parallel()
+	set := sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "dashboard", Namespace: "openshell", Doc: []byte(sbxDriftTokenDoc)}}}
+	live := `{"kind":"List","items":[{"apiVersion":"v1","kind":"Service","metadata":{"name":"dashboard","namespace":"openshell","labels":{"gt/token":"live-token-of-the-town"}},"spec":{"ports":[{"port":8080}]}}]}`
+	err, lines := sbxDriftRun(t, set, sbxDriftKubectl(t, live, 0, nil))
+	if got := driftExit(err); got != 1 {
+		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%q", got, err, lines)
+	}
+	want := []string{"service/dashboard: " + driftWantDifference(t, "metadata.labels.gt/token", "rendered-token-of-the-town", "live-token-of-the-town")}
+	if !slices.Equal(lines, want) {
+		t.Errorf("printed\n%q\nwant\n%q", lines, want)
+	}
+	for _, value := range []string{"rendered-token-of-the-town", "live-token-of-the-town"} {
+		if strings.Contains(strings.Join(lines, "\n"), value) {
+			t.Errorf("printed the value %q, want paths and fingerprints only", value)
+		}
+		if err != nil && strings.Contains(err.Error(), value) {
+			t.Errorf("the returned error %q holds the value %q, want paths and fingerprints only", err, value)
+		}
+	}
+}
+
 // TestClusterDriftSbxCompareRefusesWhatItCannotRead holds every unreadable
 // answer and every set the compare cannot group to exit 2, and to no line, and
-// a set row's runner fails the row if it reads at all (gt-82a9fz).
+// a set row's runner fails the row if it reads at all (gt-82a9fz). Every row
+// whose read fails names the rendered object the read stood for (gt-fl4i45).
 func TestClusterDriftSbxCompareRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name   string
-		set    sbx.Set
-		runner func(*testing.T) update.RunFunc
+		name     string
+		set      sbx.Set
+		runner   func(*testing.T) update.RunFunc
+		wantName string
 	}{
-		{"an exec that failed", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "", 0, errors.New("docker exec failed")) }},
-		{"a nonzero exit", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "", 1, nil) }},
-		{"an answer that is not JSON", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "not json", 0, nil) }},
-		{"an answer that is not a List", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, `{"kind":"Service"}`, 0, nil) }},
+		{"an exec that failed", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "", 0, errors.New("docker exec failed")) }, "service/dashboard"},
+		{"a nonzero exit", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "", 1, nil) }, "service/dashboard"},
+		{"an answer that is not JSON", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, "not json", 0, nil) }, "service/dashboard"},
+		{"an answer that is not a List", sbxDriftSet(), func(t *testing.T) update.RunFunc { return sbxDriftKubectl(t, `{"kind":"Service"}`, 0, nil) }, "service/dashboard"},
 		{"an item that names no object", sbxDriftSet(), func(t *testing.T) update.RunFunc {
 			return sbxDriftKubectl(t, `{"kind":"List","items":[{"metadata":{}}]}`, 0, nil)
-		}},
+		}, "service/dashboard"},
 		{"an item whose name carries a control character", sbxDriftSet(), func(t *testing.T) update.RunFunc {
 			return sbxDriftKubectl(t, `{"kind":"List","items":[{"metadata":{"name":"bad\nname"}}]}`, 0, nil)
-		}},
-		{"no read runner", sbxDriftSet(), func(*testing.T) update.RunFunc { return nil }},
-		{"no rendered object", sbx.Set{}, driftNoRead},
-		{"a cluster-scoped object in a namespace", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "dashboard", Namespace: "openshell", Cluster: true, Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead},
-		{"a document naming another object", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "other", Namespace: "openshell", Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead},
+		}, "service/dashboard"},
+		{"no read runner", sbxDriftSet(), func(*testing.T) update.RunFunc { return nil }, ""},
+		{"no rendered object", sbx.Set{}, driftNoRead, ""},
+		{"a cluster-scoped object in a namespace", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "dashboard", Namespace: "openshell", Cluster: true, Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead, ""},
+		{"a document naming another object", sbx.Set{Objects: []k8s.StaticObject{{Kind: "Service", Name: "other", Namespace: "openshell", Doc: []byte(sbxDriftServiceDoc)}}}, driftNoRead, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,9 +204,27 @@ func TestClusterDriftSbxCompareRefusesWhatItCannotRead(t *testing.T) {
 			if got := driftExit(err); got != driftExitUnreadable {
 				t.Fatalf("exit = %d, want %d (err: %v)", got, driftExitUnreadable, err)
 			}
+			if tc.wantName != "" && !strings.Contains(err.Error(), tc.wantName) {
+				t.Errorf("error %q does not name %q", err, tc.wantName)
+			}
 			if lines != nil {
 				t.Errorf("printed %q beside the refusal, want nothing", lines)
 			}
 		})
+	}
+}
+
+// TestReadSbxLiveRefusesNoNamedObject holds the guard that keeps an empty read
+// from formatting a refusal naming nothing, and from reading the kind blind.
+// compareSbxDrift only asks for a group it built from at least one object, so
+// this is the one seam that drives the guard (gt-fl4i45).
+func TestReadSbxLiveRefusesNoNamedObject(t *testing.T) {
+	t.Parallel()
+	_, err := readSbxLive(context.Background(), driftNoRead(t), sbxDriftGroup{kind: "Service", namespace: "openshell"}, nil)
+	if err == nil {
+		t.Fatal("read with no named object, want a refusal")
+	}
+	if strings.Contains(err.Error(), "the live  in") {
+		t.Errorf("refusal %q names nothing, want a well-formed message", err)
 	}
 }
