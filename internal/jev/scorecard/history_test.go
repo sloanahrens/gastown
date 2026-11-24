@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -248,35 +247,50 @@ func TestHistoryLockFailureLeavesHistory(t *testing.T) {
 	}
 }
 
-// The default lock cannot be taken when its lock file is a directory: the
-// append costs one log line and writes no history.
-func TestHistoryDefaultLockFailureIsLogged(t *testing.T) {
+// An injected lock failure is logged with the operation and its cause, and the
+// append writes no history: the lock is taken before anything is written.
+func TestHistoryLockFailureNamesTheLock(t *testing.T) {
 	t.Parallel()
 	path := HistoryPath(t.TempDir())
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// A link to itself fails an O_CREATE open with ELOOP on unix. A directory
-	// fails it only on Linux (EISDIR); macOS takes the flock on it instead.
-	if err := os.Symlink(filepath.Base(path)+".lock", path+".lock"); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDONLY, 0o600)
-	if f != nil {
-		f.Close()
-	}
-	if !errors.Is(err, syscall.ELOOP) {
-		t.Fatalf("opening the lock path: %v, want ELOOP so the default lock fails here", err)
+	cache := Cache{
+		Lock: func(string) (func() error, error) { return nil, errors.New("lock refused") },
+		WriteFile: func(string, []byte, os.FileMode) error {
+			t.Error("history written after the lock failed")
+			return nil
+		},
 	}
 	var log bytes.Buffer
 
-	(Cache{}).AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
+	cache.AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
 
-	if !strings.Contains(log.String(), "locking the scorecard history") {
-		t.Errorf("log %q does not name the lock failure", log.String())
+	if got := strings.Count(log.String(), "\n"); got != 1 {
+		t.Fatalf("log has %d lines, want one: %q", got, log.String())
+	}
+	if !strings.Contains(log.String(), "locking the scorecard history") || !strings.Contains(log.String(), "lock refused") {
+		t.Errorf("log %q does not name the lock failure and its cause", log.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("history file exists after a lock failure: %v", err)
+	}
+}
+
+// The default lock fails on every host when the lock file's parent directory
+// is missing: the open cannot create the file. Unlike a directory standing
+// where the lock file goes, which macOS takes the flock on.
+func TestHistoryLockFailureFlockFileMissingDirectory(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "missing", "x.lock")
+
+	unlock, err := flockFile(path)
+
+	if err == nil {
+		t.Fatal("flockFile took a lock whose parent directory is missing")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the lock path %s", err, path)
+	}
+	if unlock != nil {
+		t.Error("flockFile returned an unlock func with its error")
 	}
 }
 
