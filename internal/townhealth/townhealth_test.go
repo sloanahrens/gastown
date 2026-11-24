@@ -577,15 +577,15 @@ func TestOverrunPassHealthStaleLastRun(t *testing.T) {
 	}
 }
 
-// gt-6gugus: a pass that has run ten minutes is red however recent its last
-// end, so a wedged pass never reads green.
+// gt-6gugus: a wedged pass stays red when its last end is stale too, and the
+// field names both the running time and the age of the last end.
 func TestOverrunPassHealthWedged(t *testing.T) {
 	t.Parallel()
 	f := healthy()
-	f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: ago(10 * time.Second), RunningSince: ago(10 * time.Minute)}}
+	f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: ago(10 * time.Minute), RunningSince: ago(10 * time.Minute)}}
 	got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
-	if got.Verdict != Red || got.Value != "running 10m/1m" || got.Detail != "pass running for 10m" {
-		t.Errorf("tick:overrun_guard = %+v, want RED running 10m/1m pass running for 10m", got)
+	if got.Verdict != Red || got.Value != "running 10m/1m" || got.Detail != "pass running for 10m; last pass ended 10m ago" {
+		t.Errorf("tick:overrun_guard = %+v, want RED running 10m/1m pass running for 10m; last pass ended 10m ago", got)
 	}
 }
 
