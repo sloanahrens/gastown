@@ -338,6 +338,15 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	d.logSpecDispatchCensus(census, err == nil)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
+		// The shutdown ends a tick in flight: the drain sets draining before it
+		// cancels the context the command runs under. Such a tick did not fail,
+		// so it logs as the shutdown ending it and the failure path does not
+		// run: that path's idle-streak reset is an input to the dispatch-idle
+		// alert, and a shutdown cancel must not move it (gt-qd4wbi).
+		if d.draining.Load() || d.shuttingDown() {
+			d.logger.Printf("spec_dispatch: tick canceled by the shutdown after %s; its slings, if any, were waited for by the drain", elapsed)
+			return
+		}
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
 		// A tick that stopped before its report printed one hook line per sling
 		// it made, so those lines are the only record of them. The bead is not
