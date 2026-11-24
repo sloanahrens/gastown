@@ -93,6 +93,40 @@ func TestPreRollGuardASkewedPinRaisesTheSkewItem(t *testing.T) {
 	assert.Equal(t, pairBdPin, readPin, "the level was read for a commit other than the bd pin")
 }
 
+// TestPreRollGuardALowerPinRaisesTheSkewItem: a green commit whose published
+// pair names a bd pin at schema level 66, against a database at 67, raises one
+// deploy-pair-skew item naming the pin and both levels and no pair-ready item
+// beside it, since the startup handshake refuses a lower pin as well as a newer
+// one. Once the database is at the pin's level the item clears and the
+// pair-ready item stands alone.
+func TestPreRollGuardALowerPinRaisesTheSkewItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	database := 67
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt:  func(context.Context, string) (int, error) { return 66, nil },
+		Database: func(context.Context) (int, error) { return database, nil },
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a lower pin must raise its own item and no pair-ready item beside it: %v", pairSkewItemKinds(items))
+	it := items[0]
+	assert.Equal(t, attention.KindDeployPairSkew, it.Kind)
+	assert.Equal(t, "deploy-pair-skew:gastown:"+pairGreen12, it.Key)
+	assert.Equal(t, attention.SeverityHigh, it.Severity)
+	assert.Contains(t, it.Summary, "schema level 66")
+	assert.Contains(t, it.Summary, "database is at 67")
+
+	database = 66
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items = fx.check.observed()
+	require.Len(t, items, 1, "the skew item did not clear when the levels agreed: %v", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+}
+
 // TestPreRollGuardAgreeingLevelsLeaveThePairReadyItem: a pin and a database at
 // the same level raise no skew item and leave the pair-ready item as it was.
 func TestPreRollGuardAgreeingLevelsLeaveThePairReadyItem(t *testing.T) {
