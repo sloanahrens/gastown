@@ -856,30 +856,34 @@ func ciEngineExitStatus(err error) string {
 	return "no exit status"
 }
 
-// ciEnginePruneSettings reads the engine prune's five settings from the patrol's
+// ciEnginePruneSettings reads the engine prune's six settings from the patrol's
 // block, returning the default for each that is empty. A value the patrol cannot
-// act on is an error naming its key.
-func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, err error) {
+// act on is an error naming its key; maxPerKind is the cap on candidates of each
+// kind one run may remove.
+func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, maxPerKind int, err error) { //nolint:unparam // the cap is applied to the plan by gt-puhdl9
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
 	}
 	if every, err = settings.CIEnginePruneEvery(); err != nil {
-		return 0, 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, 0, err
 	}
 	if imageAge, err = settings.CIEnginePruneAgeDuration(); err != nil {
-		return 0, 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, 0, err
 	}
 	if unusedAge, err = settings.CIEngineUnusedAgeDuration(); err != nil {
-		return 0, 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, 0, err
 	}
 	if keepBytes, err = settings.CIEngineCacheKeepLimit(); err != nil {
-		return 0, 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, 0, err
 	}
 	if repoList, err = settings.CIEngineKeepRepoList(); err != nil {
-		return 0, 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, 0, err
 	}
-	return every, imageAge, unusedAge, keepBytes, repoList, nil
+	if maxPerKind, err = settings.CIEnginePruneCap(); err != nil {
+		return 0, 0, 0, 0, nil, 0, err
+	}
+	return every, imageAge, unusedAge, keepBytes, repoList, maxPerKind, nil
 }
 
 // runCIEnginePruneTick is the engine prune's own tick. It runs before the quiet
@@ -898,7 +902,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	every, _, _, _, _, err := ciEnginePruneSettings(pc)
+	every, _, _, _, _, _, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -926,7 +930,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
-	every, _, _, _, _, err := ciEnginePruneSettings(d.patrol())
+	every, _, _, _, _, _, err := ciEnginePruneSettings(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -959,7 +963,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	started := s.now()
-	every, imageAge, unusedAge, keepBytes, keepRepos, err := ciEnginePruneSettings(pc)
+	every, imageAge, unusedAge, keepBytes, keepRepos, _, err := ciEnginePruneSettings(pc)
 	stats := map[string]int64{}
 	outcome := ciEngineOutcomeFailed
 	// The run is recorded on every return path below, the refusals included, so

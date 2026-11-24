@@ -129,42 +129,56 @@ func parseRequest(t *testing.T, request string) *x509.CertificateRequest {
 
 func TestDeployerCredRequestSubject(t *testing.T) {
 	t.Parallel()
-	// The reader is counted so the refusal tests' "read nothing" assertion is
-	// known to be a real measurement: a success reads its entropy here.
-	counter := &countingReader{r: &detRand{}}
-	keyPEM, csrYAML, err := deployercred.NewRequest(deployercred.IdentityApply, applyMax, counter)
-	if err != nil {
-		t.Fatalf("NewRequest refused the maximum apply lifetime: %v", err)
+	// The cluster binds its roles to these exact common names, so each is
+	// pinned as a literal rather than read back from the identity constant.
+	cases := []struct {
+		name     string
+		id       deployercred.Identity
+		lifetime time.Duration
+		wantCN   string
+	}{
+		{name: "the apply identity", id: deployercred.IdentityApply, lifetime: applyMax, wantCN: "gt-deployer-apply"},
+		{name: "the policy identity", id: deployercred.IdentityPolicy, lifetime: policyMax, wantCN: "gt-deployer-policy"},
 	}
-	if counter.n == 0 {
-		t.Fatal("the key was not generated from the random reader passed in")
-	}
-	key := parseKey(t, keyPEM)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The reader is counted so the refusal tests' "read nothing" assertion is
+			// known to be a real measurement: a success reads its entropy here.
+			counter := &countingReader{r: &detRand{}}
+			keyPEM, csrYAML, err := deployercred.NewRequest(tc.id, tc.lifetime, counter)
+			if err != nil {
+				t.Fatalf("NewRequest refused the maximum lifetime: %v", err)
+			}
+			if counter.n == 0 {
+				t.Fatal("the key was not generated from the random reader passed in")
+			}
+			key := parseKey(t, keyPEM)
 
-	var doc csrDoc
-	if err := yaml.Unmarshal(csrYAML, &doc); err != nil {
-		t.Fatalf("the object does not parse: %v", err)
-	}
-	csr := parseRequest(t, doc.Spec.Request)
-	if csr.Subject.CommonName != string(deployercred.IdentityApply) {
-		t.Fatalf("the subject common name is %q, want %q", csr.Subject.CommonName, deployercred.IdentityApply)
-	}
-	if len(csr.Subject.Organization) != 1 || csr.Subject.Organization[0] != "gt-deployers" {
-		t.Fatalf("the subject organization is %q, want [gt-deployers]", csr.Subject.Organization)
-	}
-	if !key.PublicKey.Equal(csr.PublicKey) {
-		t.Fatalf("the request's public key is not the generated key's")
+			var doc csrDoc
+			if err := yaml.Unmarshal(csrYAML, &doc); err != nil {
+				t.Fatalf("the object does not parse: %v", err)
+			}
+			csr := parseRequest(t, doc.Spec.Request)
+			if csr.Subject.CommonName != tc.wantCN {
+				t.Fatalf("the subject common name is %q, want %q", csr.Subject.CommonName, tc.wantCN)
+			}
+			if len(csr.Subject.Organization) != 1 || csr.Subject.Organization[0] != "gt-deployers" {
+				t.Fatalf("the subject organization is %q, want [gt-deployers]", csr.Subject.Organization)
+			}
+			if !key.PublicKey.Equal(csr.PublicKey) {
+				t.Fatalf("the request's public key is not the generated key's")
+			}
+		})
 	}
 }
 
 func TestDeployerCredRequestRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		id        deployercred.Identity
-		lifetime  time.Duration
-		nilReader bool
-		wantErr   string
+		name     string
+		id       deployercred.Identity
+		lifetime time.Duration
+		wantErr  string
 	}{
 		{name: "an unknown identity", id: "gt-deployer-admin", lifetime: applyMax, wantErr: "the deployer identity is"},
 		{name: "a lifetime over the apply maximum", id: deployercred.IdentityApply, lifetime: applyMax + time.Second, wantErr: "at most"},
@@ -173,16 +187,11 @@ func TestDeployerCredRequestRefusals(t *testing.T) {
 		{name: "a zero lifetime", id: deployercred.IdentityApply, lifetime: 0, wantErr: "at least"},
 		{name: "a negative lifetime", id: deployercred.IdentityPolicy, lifetime: -time.Hour, wantErr: "at least"},
 		{name: "a sub-second lifetime", id: deployercred.IdentityApply, lifetime: time.Hour + 500*time.Millisecond, wantErr: "whole number"},
-		{name: "a nil random reader", id: deployercred.IdentityApply, lifetime: applyMax, nilReader: true, wantErr: "random reader is nil"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			counter := &countingReader{r: &detRand{}}
-			var source io.Reader = counter
-			if tc.nilReader {
-				source = nil
-			}
-			keyPEM, csrYAML, err := deployercred.NewRequest(tc.id, tc.lifetime, source)
+			keyPEM, csrYAML, err := deployercred.NewRequest(tc.id, tc.lifetime, counter)
 			if err == nil {
 				t.Fatalf("NewRequest accepted %s", tc.name)
 			}
@@ -197,6 +206,27 @@ func TestDeployerCredRequestRefusals(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a nil random reader", func(t *testing.T) {
+		// A nil reader offers no bytes to count, so measure the no-entropy
+		// property by the panic a read would raise: reading a nil io.Reader can
+		// only panic, never return bytes, so a refusal that returns without
+		// panicking read nothing.
+		var panicked any
+		keyPEM, csrYAML, err := func() (key, object []byte, err error) {
+			defer func() { panicked = recover() }()
+			return deployercred.NewRequest(deployercred.IdentityApply, applyMax, nil)
+		}()
+		if panicked != nil {
+			t.Fatalf("the refusal read the nil random reader and panicked: %v", panicked)
+		}
+		if err == nil || !strings.Contains(err.Error(), "random reader is nil") {
+			t.Fatalf("the error is %v, want one that says %q", err, "random reader is nil")
+		}
+		if keyPEM != nil || csrYAML != nil {
+			t.Fatalf("the refusal returned output: key %q, object %q", keyPEM, csrYAML)
+		}
+	})
 
 	t.Run("a random reader that fails", func(t *testing.T) {
 		keyPEM, csrYAML, err := deployercred.NewRequest(deployercred.IdentityApply, applyMax, failingReader{})

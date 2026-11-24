@@ -151,16 +151,17 @@ func catchUpGCDue(now time.Time, databases []string, st maintenanceGCState) []st
 	return due
 }
 
-// catchUpBackedUp splits the due databases into the ones a catch-up gc may run
-// and the ones it may not. A database is ready only when a backup holds it and
-// that backup is younger than maintenanceCatchUpAge: the age applied to the
-// newest backup says a backup ran, not that it holds the database in question.
-// Only the catch-up has that gap — the window takes its backup from the
-// databases it is about to gc — and the catch-up reuses a backup that may
-// predate a database created since, so gc'ing one with no backup of it is
-// exactly what the backup-first rule exists to prevent (gt-i95fv). A backup
-// that is absent, one past the age and one holding something else all land in
-// unbacked: skip that database and let the rest of the pass run.
+// catchUpBackedUp splits the databases a catch-up gc is about to take into the
+// ones a backup covers and the ones it does not. A database is ready only when
+// a backup holds it and that backup is younger than maintenanceCatchUpAge: the
+// age applied to the newest backup says a backup ran, not that it holds the
+// database in question. The catch-up reuses a backup that may predate a
+// database created since, so gc'ing one with no backup of it is exactly what
+// the backup-first rule exists to prevent (gt-i95fv). The window has no such
+// gap: it gc's over the databases tonight's backup reports holding
+// (gcWindowBackedUp, gt-gd75is). A backup that is absent, one past the age and
+// one holding something else all land in unbacked: skip that database and let
+// the rest of the pass run.
 func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked []string) {
 	for _, db := range due {
 		b, ok, err := doltbackup.LastFor(root, db)

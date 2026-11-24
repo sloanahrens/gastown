@@ -44,7 +44,10 @@ const (
 
 // maintenanceBackup takes tonight's backup unless it is already on disk. The
 // outcome reads like a gc cycle's: deferred retries on the next tick, failed
-// escalates and ends the night's maintenance.
+// escalates and ends the night's maintenance. A completed result carries the
+// databases tonight's backup holds — the manifest's list when the night was
+// already on disk, else the databases copied — which is what the window's gc
+// runs over (gcWindowBackedUp).
 func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 	s := d.maintenance()
 	root, err := s.backupRoot()
@@ -52,8 +55,8 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		return d.maintenanceBackupFailed(fmt.Errorf("backup root: %w", err), "")
 	}
 	started := s.now()
-	if doltbackup.Taken(root, started) {
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	if held, taken := doltbackup.Held(root, started); taken {
+		return maintenanceGCResult{outcome: gcOutcomeCompleted, backedUp: held}
 	}
 
 	// Someone else's deliberate outage (an operator) is not ours to
@@ -119,7 +122,7 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		// The night's backup is on disk; a rotation failure only costs space.
 		d.logger.Printf("scheduled_maintenance: WARNING: backup rotation: %v", err)
 	}
-	return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	return maintenanceGCResult{outcome: gcOutcomeCompleted, backedUp: databases}
 }
 
 // backupVisible confirms that the copy sync-url reported as written is in this

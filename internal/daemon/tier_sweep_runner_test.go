@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2301,19 +2302,21 @@ func TestTierSweepRunnerSpecCarriesTheSweepNamespace(t *testing.T) {
 }
 
 // TestTierSweepRunnerSpecCarriesDindCPUs: the Spec carries
-// tier_sweep.runner.dind_cpus, and a block that names none leaves it zero, which
-// the render reads as the default share (gt-esfo9p).
+// tier_sweep.runner.dind_cpus, and the Kubernetes render gives the dind sidecar
+// that share: the setting when it names one, the default share when it names
+// none (gt-esfo9p).
 func TestTierSweepRunnerSpecCarriesDindCPUs(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name          string
 		setting, want int
 	}{
-		{"unset is the render's default", 0, 0},
+		{"unset is the render's default", 0, config.SweepDindCPUs},
 		{"the setting", 3, 3},
 	} {
 		d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 		cfg := runnerTestConfig(t)
+		cfg.Backend = config.TierSweepRunnerKubernetes
 		cfg.DindCPUs = tc.setting
 		d.patrolConfig.Patrols.TierSweep.Runner = cfg
 
@@ -2321,8 +2324,29 @@ func TestTierSweepRunnerSpecCarriesDindCPUs(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("%s: spec = %+v, ok = %v, err = %v", tc.name, spec, ok, err)
 		}
-		if spec.DindCPUs != tc.want {
-			t.Errorf("%s: Spec.DindCPUs = %d, want %d", tc.name, spec.DindCPUs, tc.want)
+		if spec.DindCPUs != tc.setting {
+			t.Errorf("%s: Spec.DindCPUs = %d, want the setting %d", tc.name, spec.DindCPUs, tc.setting)
+		}
+
+		plan, err := sweeprunner.Kubernetes{}.Render(spec)
+		if err != nil {
+			t.Fatalf("%s: rendering the spec: %v", tc.name, err)
+		}
+		pod := plan.Job.Spec.Template.Spec
+		var dind *sweeprunner.Container
+		for i := range pod.InitContainers {
+			if pod.InitContainers[i].Name == "dind" {
+				dind = &pod.InitContainers[i]
+			}
+		}
+		if dind == nil {
+			t.Fatalf("%s: the rendered Job's initContainers %+v hold no dind sidecar", tc.name, pod.InitContainers)
+		}
+		if dind.Resources == nil {
+			t.Fatalf("%s: the dind sidecar renders no resources, so its CPU share is unbounded", tc.name)
+		}
+		if got, want := dind.Resources.Requests.CPU, strconv.Itoa(tc.want); got != want {
+			t.Errorf("%s: the rendered dind sidecar requests %s CPUs, want %s: the render must give the sidecar the configured share, or the default when the block names none", tc.name, got, want)
 		}
 	}
 }

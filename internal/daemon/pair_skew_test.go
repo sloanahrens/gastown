@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/bdskew"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -91,6 +94,40 @@ func TestPreRollGuardASkewedPinRaisesTheSkewItem(t *testing.T) {
 	assert.Contains(t, it.Summary, "schema level 67")
 	assert.Contains(t, it.Summary, "database is at 66")
 	assert.Equal(t, pairBdPin, readPin, "the level was read for a commit other than the bd pin")
+}
+
+// TestPreRollGuardALowerPinRaisesTheSkewItem: a green commit whose published
+// pair names a bd pin at schema level 66, against a database at 67, raises one
+// deploy-pair-skew item naming the pin and both levels and no pair-ready item
+// beside it, since the startup handshake refuses a lower pin as well as a newer
+// one. Once the database is at the pin's level the item clears and the
+// pair-ready item stands alone.
+func TestPreRollGuardALowerPinRaisesTheSkewItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	database := 67
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt:  func(context.Context, string) (int, error) { return 66, nil },
+		Database: func(context.Context) (int, error) { return database, nil },
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a lower pin must raise its own item and no pair-ready item beside it: %v", pairSkewItemKinds(items))
+	it := items[0]
+	assert.Equal(t, attention.KindDeployPairSkew, it.Kind)
+	assert.Equal(t, "deploy-pair-skew:gastown:"+pairGreen12, it.Key)
+	assert.Equal(t, attention.SeverityHigh, it.Severity)
+	assert.Contains(t, it.Summary, "schema level 66")
+	assert.Contains(t, it.Summary, "database is at 67")
+
+	database = 66
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items = fx.check.observed()
+	require.Len(t, items, 1, "the skew item did not clear when the levels agreed: %v", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
 }
 
 // TestPreRollGuardAgreeingLevelsLeaveThePairReadyItem: a pin and a database at
@@ -538,6 +575,94 @@ func TestPreRollGuardThePinsReaderRefusesWhatItCannotRead(t *testing.T) {
 
 	_, err = read(pairOther)
 	assert.Error(t, err, "a pins read off the clone's history was answered")
+}
+
+// pairImagePinsOwnedBy is a valid image-pins file with owner in the owner
+// position of every repository URL, where deploy/daemon/image-pins writes
+// config.ForgeOwnerPlaceholder.
+func pairImagePinsOwnedBy(owner, bd string) string {
+	return fmt.Sprintf("bd http://forgejo:3000/%s/beads.git %s\nom http://forgejo:3000/%s/om.git %s\nhm http://forgejo:3000/%s/hm.git %s\ndevops http://forgejo:3000/%s/devops.git %s\n",
+		owner, bd, owner, pairOther, owner, pairOther, owner, pairOther)
+}
+
+// pairWriteTownOwner writes the mayor/town.json whose forge.owner is owner, so
+// the skew pass's production owner closure reads it through
+// config.ResolveForgeOwner.
+func pairWriteTownOwner(t *testing.T, townRoot, owner string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "mayor")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	body := fmt.Sprintf(`{"type":"town","version":2,"name":"town","created_at":"2026-01-01T00:00:00Z","forge":{"owner":%q}}`, owner)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "town.json"), []byte(body), 0o600))
+}
+
+// TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded: a pins file that writes
+// config.ForgeOwnerPlaceholder in each URL's owner position, as the real
+// deploy/daemon/image-pins does, reads the bd pin that follows it and raises the
+// pair-ready item and no unreadable one. The fixture's town names the owner in
+// its own mayor/town.json, so the placeholder is expanded through the pass's
+// production owner closure, config.ResolveForgeOwner(townRoot), and not an
+// injected one.
+func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	pairWriteTownOwner(t, fx.town, "townown")
+	var readPins []string
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt: func(_ context.Context, commit string) (int, error) {
+			readPins = append(readPins, commit)
+			return pairSchemaLevel, nil
+		},
+		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+	}
+	fx.pins = func(string) (string, error) {
+		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, pairBdPin), nil
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a pins file holding the owner placeholder raised %v; want the pair-ready item alone", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Equal(t, []string{pairBdPin}, readPins, "the level was not read for the bd pin the placeholder expanded to")
+}
+
+// TestPreRollGuardAnOwnerThatFailsToResolveIsUnreadable: a pins file that holds
+// config.ForgeOwnerPlaceholder, read in a town whose forge.owner does not
+// resolve, raises the guard's own per-commit unreadable item naming the failure
+// and no pair-ready item, so a pair whose owner cannot be named is never
+// announced ready. The fixture's town names an owner the loader refuses, so the
+// failure comes through the pass's production owner closure,
+// config.ResolveForgeOwner(townRoot), and not an injected one; the level is
+// never read for a pin the owner never expanded.
+func TestPreRollGuardAnOwnerThatFailsToResolveIsUnreadable(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	pairWriteTownOwner(t, fx.town, "org/team")
+	var readPins []string
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt: func(_ context.Context, commit string) (int, error) {
+			readPins = append(readPins, commit)
+			return pairSchemaLevel, nil
+		},
+		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+	}
+	fx.pins = func(string) (string, error) {
+		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, pairBdPin), nil
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a pins file whose owner does not resolve raised %v; want the unreadable item alone", pairSkewItemKinds(items))
+	it := items[0]
+	assert.Equal(t, attention.KindDeployPairUnreadable, it.Kind)
+	assert.Equal(t, "deploy-pair-unreadable:skew:gastown:"+pairGreen12, it.Key)
+	assert.Equal(t, "gastown", it.Rig)
+	assert.Equal(t, pairGreen, it.SHA)
+	assert.Contains(t, it.Summary, "forge.owner", "the item does not name the setting that failed to resolve")
+	assert.Contains(t, it.Summary, "org/team", "the item does not name the owner value that failed to resolve")
+	assert.Empty(t, readPins, "the level was read for a pin the unresolved owner never expanded")
 }
 
 // TestPreRollGuardAJudgedCommitClearsItsSkewItem: a commit the pass judged

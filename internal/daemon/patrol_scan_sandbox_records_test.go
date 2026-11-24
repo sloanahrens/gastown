@@ -1141,6 +1141,84 @@ func TestPatrolScanSeatEndFailureDoesNotStopThePass(t *testing.T) {
 	}
 }
 
+// A re-run of a kept seat's end rewrites the kept record with the reason it
+// decided on now, so the completion logs the reason the record holds after the
+// run, never the stale one read before it. A record the re-run removed or left
+// unreadable is named as such, with no reason (gt-z5ou4p).
+func TestCompleteKeptSeatEndLogsTheReasonTheRerunLeft(t *testing.T) {
+	t.Parallel()
+	const (
+		rig, name = "gastown", "capable"
+		oldReason = "the seat works polecat/capable/gt-old+m1, not the landed polecat/capable/gt-landed+m2"
+		newReason = "the seat works polecat/capable/gt-new+m3, not the landed polecat/capable/gt-landed+m2"
+	)
+	landing := sandboxSeatLanding{BeadID: "gt-landed", Branch: "polecat/capable/gt-landed+m2", Landed: true}
+	tests := []struct {
+		name string
+		// rerun leaves the kept record the way the re-run's end leaves it.
+		rerun   func(t *testing.T, town string, h *patrolScanHost)
+		wantLog string
+	}{
+		{
+			name: "a re-run that keeps the seat with a new reason",
+			rerun: func(_ *testing.T, _ string, h *patrolScanHost) {
+				h.recordKeptSeat(rig, name, landing, newReason)
+			},
+			wantLog: "its seat end did not complete after its sandbox was deleted; the keep stands (" + newReason + ")",
+		},
+		{
+			name: "a re-run that removed the record",
+			rerun: func(t *testing.T, town string, _ *patrolScanHost) {
+				if err := removeKeptSandboxSeat(town, rig, name); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantLog: "its keep is gone",
+		},
+		{
+			name: "a re-run that left an unreadable record",
+			rerun: func(t *testing.T, town string, _ *patrolScanHost) {
+				path, err := keptSandboxSeatPath(town, rig, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantLog: "its kept record cannot be read",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			clk := newFixedClock()
+			if err := writeKeptSandboxSeat(town, rig, name, keptSandboxSeatRecord{
+				Bead: landing.BeadID, Reason: oldReason, Since: clk.Now(), Landing: &landing,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var logs strings.Builder
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), clock: clk}
+			h := &patrolScanHost{d: d}
+			d.endSandboxSeat = func(string, string, sandboxSeatLanding) bool {
+				tt.rerun(t, town, h)
+				return false
+			}
+
+			h.completeKeptSeatEnd(session.SandboxRecord{Session: "gt-capable", Rig: rig, Polecat: name})
+
+			if got := logs.String(); !strings.Contains(got, tt.wantLog) {
+				t.Errorf("log lacks %q:\n%s", tt.wantLog, got)
+			}
+			if got := logs.String(); strings.Contains(got, oldReason) {
+				t.Errorf("log names the stale reason %q:\n%s", oldReason, got)
+			}
+		})
+	}
+}
+
 // TestSandboxSeatEndCompletionsAskOutsideTheTickBudget drives the production
 // seat end the pass completes a kept seat with, over a fake gateway at its
 // exec boundary: each record the walk checks costs the walk one gateway

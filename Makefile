@@ -30,16 +30,12 @@
 #                          container-gate slot: the recipe writes
 #                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
 #                          turn containers on. Do not wrap it in `gt slot run`.
-#   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
-#                          ./...`, then the integration vet when the branch
-#                          changed a .go file (gt-w3aby, gt-edlvvt), then `go
-#                          test` of only the packages the branch
-#                          changed against origin/main and of the tree-wide guard
-#                          tests its changed paths trigger (gt-ydzwb), then the
-#                          error returns the branch adds with no unit test
-#                          behind them (gt-b9j3o.5). The landing worker runs
-#                          `make gate` on the merged tree, so this is the cheap
-#                          first look, not the gate. No containers, no slot.
+#   make presubmit         gt done's pre-submit check (gt-ssyxd). Before
+#                          changing presubmit, read the comment above its
+#                          target: it lists the steps in order and why each
+#                          runs. The landing worker runs `make gate` on the
+#                          merged tree, so this is the cheap first look, not
+#                          the gate. No containers, no slot.
 #   make test-slow         the post-landing check: the gate, then the shell
 #                          tests (the shelltier Go runner, which `make
 #                          test-makefile` also runs alone), with
@@ -482,7 +478,8 @@ SHELL_TESTS ?= go run ./internal/shelltier/cmd/shelltier --all
 # drive the warning path with a stub.
 EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
 
-# CPU_CLASS fronts a go build, vet or test step with the town's CPU-class slot
+# CPU_CLASS fronts a go build, vet or test step, and the presubmit's
+# integration vet (a compile-heavy `go run`), with the town's CPU-class slot
 # when make runs from a crew checkout (<town>/<rig>/crew/...), so a burst of
 # crew worktrees building at once queues instead of starving the daemon, bd and
 # the dispatcher (gt-bq68w). It is empty everywhere else, so a polecat, the
@@ -633,7 +630,7 @@ presubmit: lint
 	@echo "presubmit: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@$(CPU_CLASS) go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do $(CPU_CLASS) go -C "$$m" build -o "$$out/" ./... || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
-	@if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- '*.go'; then echo "presubmit: integration vet (go run ./internal/testpolicy/cmd/integrationvet)" >&2; go run ./internal/testpolicy/cmd/integrationvet || { echo "presubmit: FAILED at integration vet" >&2; exit 1; }; fi
+	@if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- '*.go'; then echo "presubmit: integration vet (go run ./internal/testpolicy/cmd/integrationvet)" >&2; $(CPU_CLASS) go run ./internal/testpolicy/cmd/integrationvet || { echo "presubmit: FAILED at integration vet" >&2; exit 1; }; fi
 	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \

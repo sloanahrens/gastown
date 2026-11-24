@@ -730,6 +730,10 @@ type maintenanceGCResult struct {
 	outcome maintenanceGCOutcome
 	reason  string
 	pending []gcCandidate
+	// backedUp is the databases a Completed backup holds: tonight's manifest
+	// list when the night was already on disk, else the databases copied. The
+	// window's gc runs over this set alone (gcWindowBackedUp).
+	backedUp []string
 }
 
 // maintenanceGCCycle measures every database, gc's the due ones largest
@@ -987,7 +991,8 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// only the unarchived set.
 		unarchived, _ := d.maintenanceArchive(databases)
 		// Backup next (maintenance_backup.go); the gc only runs once the
-		// night's backup is on disk.
+		// night's backup is on disk, and only over the databases it holds
+		// (gcWindowBackedUp).
 		res := d.maintenanceBackup(databases)
 		// The town-state night is a second, independent copy
 		// (scheduled_maintenance.go): it runs whether or not the Dolt backup
@@ -995,7 +1000,8 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// with no other off-pod copy (gt-5dgbcy).
 		d.runTownStateBackupStep(d.maintenance().now())
 		if res.outcome == gcOutcomeCompleted {
-			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir, localDataDir)
+			gcDatabases := d.gcDatabasesAfterArchive(databases, unarchived)
+			res = d.gcWindowBackedUp(gcDatabases, res.backedUp, dataDir, localDataDir)
 		}
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
@@ -1015,6 +1021,38 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 			d.answerRequest(*request, res.outcome, res.reason)
 		}
 	})
+}
+
+// gcWindowBackedUp runs the window's gc over the databases tonight's backup
+// holds. maintenanceBackup returns Completed at once for a night already on
+// disk and copies nothing, so the tick's list can hold a database created
+// after it; gc'ing that one breaks the backup-first rule (gt-gd75is). The
+// backup step reports the databases it certified, so the check is over that
+// night's list alone: a backup from an earlier night is no coverage tonight,
+// and the catch-up's age rule (catchUpBackedUp) must not be applied here. A
+// database tonight's backup does not hold is logged and skipped; an empty list
+// to gc is a completed night, not a failure.
+func (d *Daemon) gcWindowBackedUp(databases, backedUp []string, dataDir string, localDataDir bool) maintenanceGCResult {
+	held := make(map[string]bool, len(backedUp))
+	for _, db := range backedUp {
+		held[db] = true
+	}
+	var ready, unbacked []string
+	for _, db := range databases {
+		if held[db] {
+			ready = append(ready, db)
+			continue
+		}
+		unbacked = append(unbacked, db)
+	}
+	if len(unbacked) > 0 {
+		d.logger.Printf("scheduled_maintenance: gc skips %d database(s) tonight's backup does not hold: %s",
+			len(unbacked), strings.Join(unbacked, ", "))
+	}
+	if len(ready) == 0 {
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	}
+	return d.maintenanceGCCycle(ready, dataDir, localDataDir)
 }
 
 // maintenanceGCUpgradeHold reports whether a maintenance gc cycle is in flight

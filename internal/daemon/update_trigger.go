@@ -391,6 +391,16 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	facts.RefusedCommit, facts.RefusedReason = d.imageRefusal()
 
 	facts.MainMoved = info.IsStale
+
+	// A manual rollback leaves the running commit an ancestor of the target
+	// the last run set out to install, and the held roll must wait until main
+	// moves past that target (gt-6tn87m). The fact is gathered before the stale
+	// early return so a not-stale pair still gets it; only an ok outcome fills
+	// it, since a failed or aborted run is never a rollback.
+	if facts.LastOutcome == update.OutcomeOK {
+		facts.RunningBehindLastTarget = d.updateRunningBehindLastTarget(repoRoot, info.BinaryCommit, facts.LastTarget)
+	}
+
 	if !info.IsStale {
 		return facts, nil
 	}
@@ -401,6 +411,29 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	}
 	facts.Waiting = waiting
 	return facts, nil
+}
+
+// updateRunningBehindLastTarget reports whether installed is a strict ancestor
+// of target, the commit the last run set out to install: a manual rollback
+// leaves the running build behind that target. A blank commit and an ancestry
+// read that fails each mean the fact cannot be filled; both log one line
+// naming the two commits and read false, so an unreadable check is never
+// silent. The read goes through the daemon's git seam, so a unit test runs no
+// git.
+func (d *Daemon) updateRunningBehindLastTarget(repoRoot, installed, target string) bool {
+	if installed == "" || target == "" {
+		d.logger.Printf("update: cannot tell whether the running commit is behind the last roll's target: installed %q, target %q", installed, target)
+		return false
+	}
+	if installed == target {
+		return false
+	}
+	behind, err := d.gitAt(repoRoot).IsAncestor(installed, target)
+	if err != nil {
+		d.logger.Printf("update: cannot compare the running commit %s with the last roll's target %s: %v; the rollback hold is off", installed, target, err)
+		return false
+	}
+	return behind
 }
 
 // updateRemoteMainSHA reads main's tip from origin the way the run does, through

@@ -71,10 +71,10 @@ type landOmStatsRecurrenceClass struct {
 // counted finding is followed when a later evidence record of another bead
 // restates it (gt-o5uvti).
 func recurrence(records []land.ReviewRecord, now time.Time) []landOmStatsRecurrenceClass {
-	start, end := omlessons.HoldOutStart, omlessons.HoldOutStart.AddDate(0, 0, omlessons.HoldOutDays)
+	start, end := omlessons.HoldOutStart(), omlessons.HoldOutStart().AddDate(0, 0, omlessons.HoldOutDays)
 	index := landOmStatsRecurrenceIndex(records, now)
-	rows := make([]landOmStatsRecurrenceClass, 0, len(omlessons.HoldOutClasses))
-	for _, class := range omlessons.HoldOutClasses {
+	rows := make([]landOmStatsRecurrenceClass, 0, len(omlessons.HoldOutClasses()))
+	for _, class := range omlessons.HoldOutClasses() {
 		row := landOmStatsRecurrenceClass{ID: class}
 		for _, rec := range records {
 			if rec.Queue != nil || rec.BeadID == "" || rec.At.After(now) || rec.At.Before(start) || !rec.At.Before(end) {

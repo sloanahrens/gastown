@@ -195,14 +195,14 @@ func TestParseChangeBudgetReadsTheGateForms(t *testing.T) {
 }
 
 // The lint's declared-lines advice reads the same forms the gate does
-// (gt-hc43nx): a same-line budget at 9.8 minutes declaring 60 gets the band's
-// advice, a declaration at the band's Advise or above gets none, and a Size
-// section with no number is neither advised nor refused. The 9.8 band's p90 is
-// 454, so its Advise is (454+1)/2 = 227.
+// (gt-hc43nx): a same-line budget at 9.8 minutes declaring the band's median
+// (109) gets the band's advice, a declaration at the band's Advise or above
+// gets none, and a Size section with no number is neither advised nor refused.
+// The 9.8 band's p90 is 454, so its Advise is (454+1)/2 = 227.
 func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 	t.Parallel()
 
-	const advice60 = "the Change line declares 60 added lines, but beads estimated at 9.8 minutes landed with a median of 109 (p75 216, p90 454) and the gate refuses past twice the declared number: declare at least 227, or split"
+	const advice109 = "the Change line declares 109 added lines, but beads estimated at 9.8 minutes landed with a median of 109 (p75 216, p90 454) and the gate refuses past twice the declared number: declare at least 227, or split"
 
 	for _, tc := range []struct {
 		name   string
@@ -210,8 +210,8 @@ func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{"a same-line budget", "One worker, one landing. Change: at most 60 added lines in 2 files.", []string{"sp-minutes:9.8"}, advice60},
-		{"a lead-in", "One worker, one landing. About 60 added lines.", []string{"sp-minutes:9.8"}, advice60},
+		{"a same-line budget", "One worker, one landing. Change: at most 109 added lines in 2 files.", []string{"sp-minutes:9.8"}, advice109},
+		{"a lead-in", "One worker, one landing. About 109 added lines.", []string{"sp-minutes:9.8"}, advice109},
 		{"at the band's Advise", "One worker, one landing. Change: at most 227 added lines.", []string{"sp-minutes:9.8"}, ""},
 		{"above the band's Advise", "One worker, one landing. Change: at most 228 added lines.", []string{"sp-minutes:9.8"}, ""},
 		{"no number", "One worker, one landing.", []string{"sp-minutes:9.8"}, ""},
@@ -234,15 +234,15 @@ func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 	}
 }
 
-// The lint's p25 refusal reads the same forms the gate does (gt-hc43nx): a
+// The lint's median refusal reads the same forms the gate does (gt-hc43nx): a
 // same-line budget and a lead-in that declare 30 added lines at 9.8 minutes are
-// both refused, naming the band's p25 (58), while a 60-line declaration in
-// either form is not refused. The rows are driven through Lint so deleting the
-// Size-section fallback turns them red.
+// both refused, naming the band's median (109), while a declaration at the
+// median in either form is not refused. The rows are driven through Lint so
+// deleting the Size-section fallback turns them red.
 func TestDeclaredLinesRefuseReadsTheGateForms(t *testing.T) {
 	t.Parallel()
 
-	const wantReason = "the Change line declares 30 added lines, below what three in four beads estimated at 9.8 minutes landed with (p25 58); declare at least 227, or split"
+	const wantReason = "the Change line declares 30 added lines, below what half of the beads estimated at 9.8 minutes landed with (median 109); declare at least 227, or split"
 
 	for _, tc := range []struct {
 		name       string
@@ -251,8 +251,8 @@ func TestDeclaredLinesRefuseReadsTheGateForms(t *testing.T) {
 	}{
 		{"a same-line 30", "One worker, one landing. Change: at most 30 added lines in 2 files.", wantReason},
 		{"a lead-in 30", "One worker, one landing. About 30 added lines.", wantReason},
-		{"a same-line 60", "One worker, one landing. Change: at most 60 added lines in 2 files.", ""},
-		{"a lead-in 60", "One worker, one landing. About 60 added lines.", ""},
+		{"a same-line 109", "One worker, one landing. Change: at most 109 added lines in 2 files.", ""},
+		{"a lead-in 109", "One worker, one landing. About 109 added lines.", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

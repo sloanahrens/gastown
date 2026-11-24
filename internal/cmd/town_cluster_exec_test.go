@@ -455,9 +455,9 @@ func TestClusterExecViaHeaderNamesTheRebuild(t *testing.T) {
 	}
 }
 
-// TestClusterExecViaLeavesTheOutputFormToTheNextRule holds that this guard now
-// decides the output value: yaml is refused before any exec and json passes.
-func TestClusterExecViaLeavesTheOutputFormToTheNextRule(t *testing.T) {
+// TestClusterExecViaRefusesYAMLOutputAndPassesJSON holds that the guard refuses
+// a yaml read before any exec and passes a json read.
+func TestClusterExecViaRefusesYAMLOutputAndPassesJSON(t *testing.T) {
 	t.Parallel()
 	_, _, err, calls := clusterExecRead(t, "", "", "-n", "openshell", "get", "deployment/daemon", "-o", "yaml")
 	if err == nil {

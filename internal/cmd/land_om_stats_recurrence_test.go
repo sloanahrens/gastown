@@ -37,7 +37,7 @@ func (landOmStatsWireFS) Open(name string) (io.ReadCloser, error) {
 // bead, so each side tallies two findings and follows both.
 func TestLandOmStatsRecurrenceFollowCounts(t *testing.T) {
 	t.Parallel()
-	class, in := omlessons.HoldOutClasses[0], omlessons.HoldOutStart.Add(time.Hour)
+	class, in := omlessons.HoldOutClasses()[0], omlessons.HoldOutStart().Add(time.Hour)
 	now := in.Add(2 * time.Hour)
 	doc := land.ReviewFindingText{Severity: "minor", File: "docs/a.md", Title: "the documentation says the flag defaults to true"}
 	restated := land.ReviewFindingText{Severity: "major", File: "docs/a.md", Title: "the documentation says the flag defaults to true"}
@@ -76,7 +76,7 @@ func TestLandOmStatsRecurrenceFollowCounts(t *testing.T) {
 // comes from a missing base or a file mismatch.
 func TestLandOmStatsRecurrenceFollowExcludes(t *testing.T) {
 	t.Parallel()
-	class, in := omlessons.HoldOutClasses[0], omlessons.HoldOutStart.Add(time.Hour)
+	class, in := omlessons.HoldOutClasses()[0], omlessons.HoldOutStart().Add(time.Hour)
 	const held, other = "gt-rec-0004", "gt-rec-0009"
 	if !omlessons.HeldOut(held, class, in) || held == other {
 		t.Fatalf("fixture beads %s and %s are not distinct with %s held out", held, other, held)
@@ -118,7 +118,7 @@ func TestLandOmStatsRecurrenceFollowExcludes(t *testing.T) {
 func TestLandOmStatsRecurrenceTalliesCounts(t *testing.T) {
 	t.Parallel()
 	const held, filed = "gt-rec-0004", "gt-rec-0000"
-	class, in := omlessons.HoldOutClasses[0], omlessons.HoldOutStart.Add(time.Hour)
+	class, in := omlessons.HoldOutClasses()[0], omlessons.HoldOutStart().Add(time.Hour)
 	if !omlessons.HeldOut(held, class, in) || omlessons.HeldOut(filed, class, in) {
 		t.Fatalf("fixture beads %s and %s are not on the sides their names say", held, filed)
 	}
@@ -144,7 +144,7 @@ func TestLandOmStatsRecurrenceTalliesCounts(t *testing.T) {
 func TestLandOmStatsRecurrenceClock(t *testing.T) {
 	t.Parallel()
 	doc := land.ReviewFindingText{Severity: "minor", Title: "the documentation says the flag defaults to true"}
-	now := omlessons.HoldOutStart.Add(48 * time.Hour)
+	now := omlessons.HoldOutStart().Add(48 * time.Hour)
 	records := []land.ReviewRecord{
 		{BeadID: "gt-rec-0000", At: now.Add(-49 * time.Hour), FindingText: []land.ReviewFindingText{doc}}, // before the window
 		{BeadID: "gt-rec-0000", At: now.Add(-time.Hour), FindingText: []land.ReviewFindingText{doc}},      // before now
@@ -170,7 +170,7 @@ func TestLandOmStatsRecurrenceClock(t *testing.T) {
 // first instant up to but not including its end.
 func TestLandOmStatsRecurrenceTalliesWindow(t *testing.T) {
 	t.Parallel()
-	class, start := omlessons.HoldOutClasses[0], omlessons.HoldOutStart
+	class, start := omlessons.HoldOutClasses()[0], omlessons.HoldOutStart()
 	end := start.AddDate(0, 0, omlessons.HoldOutDays)
 	doc := land.ReviewFindingText{Severity: "minor", Title: "the documentation says the flag defaults to true"}
 	for _, c := range []struct {
@@ -192,7 +192,7 @@ func TestLandOmStatsRecurrenceTalliesWindow(t *testing.T) {
 // The fixed now is the only clock; the report is returned as text and as JSON.
 func landOmStatsRecurrenceOutputs(t *testing.T) (text, raw string) {
 	t.Helper()
-	in := omlessons.HoldOutStart.Add(time.Hour)
+	in := omlessons.HoldOutStart().Add(time.Hour)
 	doc := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/foo.go", Title: "the documentation says the flag defaults to true"}
 	alone := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/bar.go", Title: "the documentation says the flag is required"}
 	later := land.ReviewFindingText{Severity: "major", File: doc.File, Title: doc.Title}
@@ -251,7 +251,7 @@ func TestLandOmStatsRecurrenceJSONCarriesTheRows(t *testing.T) {
 	}
 	first := doc.Recurrence[0]
 	one, two := landOmStatsRecurrenceSide{Findings: 1, Followed: 1, Rate: 1, TooSmall: true}, landOmStatsRecurrenceSide{Findings: 2, Followed: 1, Rate: 0.5, TooSmall: true}
-	if len(doc.Recurrence) != len(omlessons.HoldOutClasses) || !((first.HeldOut == one && first.Filed == two) || (first.HeldOut == two && first.Filed == one)) {
+	if len(doc.Recurrence) != len(omlessons.HoldOutClasses()) || !((first.HeldOut == one && first.Filed == two) || (first.HeldOut == two && first.Filed == one)) {
 		t.Errorf("recurrence rows = %+v, want one per class and, on the first, one side with %+v and the other with %+v", doc.Recurrence, one, two)
 	}
 }
@@ -381,7 +381,7 @@ func TestLandOmStatsRecurrenceSmallSample(t *testing.T) {
 	}
 	// The first class with heldN findings held out and filedN filed: one finding
 	// per bead, beads taken until each side holds its count.
-	in, class := omlessons.HoldOutStart.Add(time.Hour), omlessons.HoldOutClasses[0]
+	in, class := omlessons.HoldOutStart().Add(time.Hour), omlessons.HoldOutClasses()[0]
 	f := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/foo.go", Title: "the documentation says the flag defaults to true"}
 	sides := func(heldN, filedN int) (string, landOmStatsRecurrenceClass) {
 		held, filed, ok := landOmStatsRecurrenceBeads(heldN, filedN, func(bead string) bool { return omlessons.HeldOut(bead, class, in) })

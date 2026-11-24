@@ -261,8 +261,7 @@ func checkClusterOutput(args []string) error {
 }
 
 // clusterOutputValue reports whether value is the one output format the drift
-// compare reads: json, so a flag read as a value, another format and a template
-// spelling are all refused.
+// compare reads: json.
 func clusterOutputValue(value string) bool {
 	return value == "json"
 }

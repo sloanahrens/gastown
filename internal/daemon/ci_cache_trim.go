@@ -374,22 +374,56 @@ echo "removed=$removed"
 echo "after_kib=$after"
 `
 
+// ciCacheRootIsVolumeRoot reports whether root is exactly a volume's data path
+// under the dind data root: <dind>/volumes/<name>/_data, with name plain. The
+// program's find reads and, in apply mode, removes under root, so no other path
+// is accepted: a root of / or of the dind data root would remove files from
+// everywhere below it (gt-vbtu0m).
+func ciCacheRootIsVolumeRoot(root string) bool {
+	prefix := ciCacheDindMount + "/volumes/"
+	suffix := "/_data"
+	// The length guard comes before slicing: a root like <dind>/volumes/_data
+	// has the prefix and the suffix overlapping at the slash, so the name's end
+	// would fall before its start.
+	if !strings.HasPrefix(root, prefix) || !strings.HasSuffix(root, suffix) ||
+		len(root) < len(prefix)+len(suffix) {
+		return false
+	}
+	name := root[len(prefix) : len(root)-len(suffix)]
+	// A volume name is letters, digits, '.', '_' and '-', and not dots alone.
+	// The check is on the whole name, so no slash, newline or space gets in.
+	if strings.Trim(name, ".") == "" || strings.Contains(name, "..") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ciCacheLRUArgv is the argv the LRU program runs with: sh -c, the script and
 // its arguments (the mode, the root, the age in minutes, the cap in KiB and the
 // floor in minutes), the numbers formatted from integers so the script's shell
-// arithmetic can only ever read digits. A negative number, an empty root and a
-// mode the program does not have are refused, never passed on.
+// arithmetic can only ever read digits. A negative number, a mode the program
+// does not have and a root that is not a volume's own data path are refused,
+// never passed on.
 func ciCacheLRUArgv(mode, root string, ageMin, capKiB, floorMin int64) ([]string, error) {
 	if mode != "list" && mode != agentconfig.DiskMaintenanceModeApply {
 		return nil, fmt.Errorf("the LRU program has no mode %q: only list and apply", mode)
-	}
-	if root == "" {
-		return nil, errors.New("the LRU program needs a volume root")
 	}
 	for name, n := range map[string]int64{"age": ageMin, "cap": capKiB, "floor": floorMin} {
 		if n < 0 {
 			return nil, fmt.Errorf("the LRU program's %s is %d: a negative number is refused", name, n)
 		}
+	}
+	if !ciCacheRootIsVolumeRoot(root) {
+		return nil, fmt.Errorf("the LRU program's root %q is not a volume root: it must be %s/volumes/<name>/_data with a plain volume name",
+			root, ciCacheDindMount)
 	}
 	return []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", mode, root,
 		strconv.FormatInt(ageMin, 10), strconv.FormatInt(capKiB, 10), strconv.FormatInt(floorMin, 10)}, nil
@@ -816,8 +850,11 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	case v.lru:
 		// The list selects past the age and then, while the volume is over its
 		// cap, down to the floor, so the line names the cap, not the age alone.
-		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, %s to %s, against its cap of %s; nothing removed",
-			v.name, reply.removed, v.unit(), before, after, polecatimage.Human(v.capKiB*1024))
+		// The list mode reports after equal to before: it knows only the size it
+		// starts from, so the line prints that one figure rather than claim the
+		// removal changes the volume's size.
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s of %s, against its cap of %s; nothing removed",
+			v.name, reply.removed, v.unit(), before, polecatimage.Human(v.capKiB*1024))
 	case v.capped():
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s) while it is over its cap of %s; nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText, polecatimage.Human(v.capKiB*1024))
@@ -832,11 +869,14 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
 // reading. The threshold is the volume's cap: the table's constant for a capped
 // volume, and the setting the pass copies into the row for ci-gocache. Only a
-// volume with no cap at all is measured against the warn figure. A trim that
-// removed no file while the volume is over the threshold raises the item, and a
-// reading at or under it clears the item. A reading over the threshold after
-// removals leaves the item as it is. A dry run measures nothing, since it removes
-// nothing by design.
+// volume with no cap at all is measured against the warn figure. A reading at or
+// under the threshold clears the item. Over it, the lru volume raises the item
+// whatever the trim removed: its program never selects a file younger than the
+// floor, so a volume written faster than its cap ends every trim over the cap
+// with files removed, and that reading is the one that says so. Every other
+// volume raises the item only when the trim removed no file; a reading over the
+// threshold after removals leaves the item as it is. A dry run measures nothing,
+// since it removes nothing by design.
 func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply, warn int64) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
@@ -852,7 +892,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 		d.cacheTrimNoOp.clear(key)
 		return
 	}
-	if reply.removed != 0 {
+	if !v.lru && reply.removed != 0 {
 		return
 	}
 	holder := "CI cache trim removed no file while the Go build cache holds"

@@ -37,18 +37,22 @@ func BudgetAllows(filedThisWeek, landedThisWeek, percent int) bool {
 	return (filedThisWeek+1)*100 <= percent*landedThisWeek
 }
 
-// FiledSince counts the beads in existing created at or after since, so the feed
-// knows how many follow-up beads the week has already filed; a zero CreatedAt is
-// a bead whose filed stamp did not parse, and is not counted (gt-wwpfo7).
-func FiledSince(existing []ExistingFollowup, since time.Time) int {
-	n := 0
+// FiledSince counts the beads in existing created at or after since: the
+// follow-up beads the week has already filed. A zero CreatedAt is a bead whose
+// filed stamp did not parse. Its week is unknown, so it is left out of the count
+// rather than counted in every week from then on, which would cut the budget for
+// good, and it is returned as undated so the feed can report it; it still counts
+// against the backpressure bound, which never reads a date (gt-wwpfo7, gt-ytgo9c).
+func FiledSince(existing []ExistingFollowup, since time.Time) (filed, undated int) {
 	for _, e := range existing {
-		if e.CreatedAt.IsZero() || e.CreatedAt.Before(since) {
-			continue
+		switch {
+		case e.CreatedAt.IsZero():
+			undated++
+		case !e.CreatedAt.Before(since):
+			filed++
 		}
-		n++
 	}
-	return n
+	return filed, undated
 }
 
 // LandedSince counts the landings at or after since, the week's landings the

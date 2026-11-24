@@ -340,23 +340,21 @@ func TestCICacheTrimGocacheRunsTheLRUProgram(t *testing.T) {
 
 // TestCICacheTrimGocacheDryRunReadsTheListReply: a dry run of ci-gocache runs
 // the LRU program in list mode, at the setting's cap and the floor, and reads
-// its reply as a selection: the volume is reported with the reply's three
-// figures and the cap, and no file name is logged.
+// its reply as a selection: the volume is reported with the one figure the list
+// mode knows and the cap, its removal logged as changing nothing, and no file
+// name is logged.
 func TestCICacheTrimGocacheDryRunReadsTheListReply(t *testing.T) {
 	t.Parallel()
 	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
-	// The list program reports after equal to before; distinct figures here show
-	// the line prints each figure the reply carries rather than before twice.
-	const (
-		beforeKiB = int64(40 << 10)
-		afterKiB  = int64(39 << 10)
-	)
+	// The list program reports after equal to before, since the list mode knows
+	// only the size it starts from. The line must not print that figure twice.
+	const beforeKiB = int64(40 << 10)
 	f.exec = cliReply{stdout: strings.Join([]string{
 		ciCacheTestGocacheRoot + "/00/old-1",
 		ciCacheTestGocacheRoot + "/ab/old-2",
 		fmt.Sprintf("before_kib=%d", beforeKiB),
 		"removed=2",
-		fmt.Sprintf("after_kib=%d", afterKiB),
+		fmt.Sprintf("after_kib=%d", beforeKiB),
 	}, "\n") + "\n"}
 	f.tick()
 	f.drain()
@@ -374,14 +372,19 @@ func TestCICacheTrimGocacheDryRunReadsTheListReply(t *testing.T) {
 		t.Errorf("ci-gocache dry-run argv = %q\nwant %q", got, want)
 	}
 
-	wantLine := fmt.Sprintf("%s: would remove 2 files, %s to %s, against its cap of %s",
-		ciCacheGocacheVolume, polecatimage.Human(beforeKiB*1024), polecatimage.Human(afterKiB*1024), polecatimage.Human(40<<30))
-	if !strings.Contains(f.logs.String(), wantLine) {
-		t.Errorf("the dry run does not report the three figures and the cap (%q):\n%s", wantLine, f.logs.String())
+	logs := f.logs.String()
+	wantLine := fmt.Sprintf("%s: would remove 2 files of %s, against its cap of %s; nothing removed",
+		ciCacheGocacheVolume, polecatimage.Human(beforeKiB*1024), polecatimage.Human(40<<30))
+	if !strings.Contains(logs, wantLine) {
+		t.Errorf("the dry run does not report the one figure and the cap (%q):\n%s", wantLine, logs)
+	}
+	before := polecatimage.Human(beforeKiB * 1024)
+	if repeated := before + " to " + before; strings.Contains(logs, repeated) {
+		t.Errorf("the dry run says the list changes the volume's size (%q):\n%s", repeated, logs)
 	}
 	for _, name := range []string{"old-1", "old-2"} {
-		if strings.Contains(f.logs.String(), name) {
-			t.Errorf("the dry run logged the file name %q:\n%s", name, f.logs.String())
+		if strings.Contains(logs, name) {
+			t.Errorf("the dry run logged the file name %q:\n%s", name, logs)
 		}
 	}
 }
@@ -1048,8 +1051,9 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 
 // TestCICacheTrimNoopItem: a trim that removed no file while ci-gocache stays
 // over its cap raises one low attention item; a repeat keeps that one item; a
-// later reading under the cap clears it; a trim that removed files, and a dry
-// run, raise nothing.
+// later reading under the cap clears it; a trim that removed files over the cap
+// raises it too, since the LRU floor leaves a fast-written volume over its cap
+// whatever it removed; and a dry run raises nothing.
 func TestCICacheTrimNoopItem(t *testing.T) {
 	t.Parallel()
 	const overCap = 45 << 20 // KiB: 45 GiB, over the default 40 GiB ci_gocache_cap_bytes
@@ -1087,14 +1091,14 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		}
 	})
 
-	t.Run("a trim that removed files raises nothing", func(t *testing.T) {
+	t.Run("a trim that removed files over the cap raises the item", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.exec = ciCacheReply(overCap, 7, overCap)
 		f.tick()
 		f.drain()
-		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
-			t.Errorf("a trim that removed files raised %+v", items)
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey}) {
+			t.Errorf("a trim that removed files and ended over the cap raised %v, want one item keyed %q", got, ciCacheNoOpKey)
 		}
 	})
 
@@ -1428,9 +1432,10 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 
 // TestCICacheTrimGocacheNoopOverCap: the ci-gocache volume's no-op item is
 // measured against its cap, the setting the pass copies into the row, not the
-// warn figure. A run that removed nothing while the volume is over the cap raises
-// the item; a reading at or under the cap clears it, even between the warn figure
-// and the cap; and a run that removed files raises nothing.
+// warn figure. A run over the cap raises the item, whether it removed no file or
+// removed files, since the LRU floor leaves a fast-written volume over its cap;
+// a reading at or under the cap clears it, even between the warn figure and the
+// cap.
 func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1450,7 +1455,7 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 		{name: "a run that removed nothing over the cap raises the item", afterKiB: overCap, raised: true},
 		{name: "a reading at the cap", afterKiB: capKiB},
 		{name: "a reading under the cap and over the warn figure", afterKiB: betweenWarnAndCap},
-		{name: "a run that removed files while over the cap", afterKiB: overCap, removed: 7},
+		{name: "a run that removed files while over the cap", afterKiB: overCap, removed: 7, raised: true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1498,6 +1503,75 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
 			t.Errorf("items after a reading under the cap = %+v, want none", items)
+		}
+	})
+}
+
+// TestCICacheTrimGocacheOverCapAfterRemovals: the ci-gocache volume is trimmed by
+// the LRU program, which never selects a file younger than its floor. A volume
+// that writes more than its cap within the floor therefore ends every trim over
+// the cap with files removed, and that reading raises the volume's item exactly
+// as a run that removed nothing does: over the cap raises it whatever the removed
+// count, at or under the cap clears it, and the summary is the item's existing
+// one.
+func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
+	t.Parallel()
+	const (
+		capKiB  = 40 << 20 // KiB: the default ci_gocache_cap_bytes
+		overCap = 55 << 20
+	)
+
+	// raiseOverCap runs one apply pass whose reply removed removed files and ended
+	// over the cap, and returns the item it raised.
+	raiseOverCap := func(t *testing.T, f *ciCacheFixture, removed int64) attention.Item {
+		t.Helper()
+		f.exec = ciCacheReply(overCap, removed, overCap)
+		f.tick()
+		f.drain()
+		items := f.d.cacheTrimNoOp.observed()
+		if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKey}) {
+			t.Fatalf("a run that removed %d files and ended over the cap raised %v, want one item keyed %q",
+				removed, got, ciCacheNoOpKey)
+		}
+		return items[0]
+	}
+
+	t.Run("a run that removed files over the cap raises the item's existing summary", func(t *testing.T) {
+		t.Parallel()
+		withoutFiles := raiseOverCap(t, newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply), 0)
+		withFiles := raiseOverCap(t, newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply), 19000)
+		if withFiles.Kind != withoutFiles.Kind || withFiles.Severity != withoutFiles.Severity {
+			t.Errorf("the item for a run that removed files is kind %q severity %q, want the kind %q severity %q a run that removed nothing raises",
+				withFiles.Kind, withFiles.Severity, withoutFiles.Kind, withoutFiles.Severity)
+		}
+		if withFiles.Summary != withoutFiles.Summary {
+			t.Errorf("the summary for a run that removed files = %q, want the item's existing summary %q",
+				withFiles.Summary, withoutFiles.Summary)
+		}
+	})
+
+	t.Run("a later reading at or under the cap clears the item", func(t *testing.T) {
+		t.Parallel()
+		for _, tt := range []struct {
+			name     string
+			afterKiB int64
+		}{
+			{name: "at the cap", afterKiB: capKiB},
+			{name: "under the cap", afterKiB: capKiB - 1024},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+				raiseOverCap(t, f, 19000)
+
+				f.at(time.Hour)
+				f.exec = ciCacheReply(tt.afterKiB, 19000, tt.afterKiB)
+				f.tick()
+				f.drain()
+				if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
+					t.Errorf("a later reading %s left %+v, want none", tt.name, items)
+				}
+			})
 		}
 	})
 }
@@ -1719,22 +1793,25 @@ func TestCICacheTrimFloorIsInTheArgv(t *testing.T) {
 
 // TestCICacheTrimLRUArgv: the LRU program's argv is built from integers, so the
 // numbers the script computes with are digits; a negative number, an empty root
-// and a mode the program does not have are refused rather than passed on.
+// and a mode the program does not have are refused rather than passed on. The
+// valid root in the negative-number rows leaves the number check as the one
+// their names claim to exercise.
 func TestCICacheTrimLRUArgv(t *testing.T) {
 	t.Parallel()
-	good, err := ciCacheLRUArgv("list", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	root := ciCacheVolumeRoot(ciCacheGocacheVolume)
+	good, err := ciCacheLRUArgv("list", root, 120, 41943040, ciCacheLRUFloorMinutes)
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv = %v, want nil", err)
 	}
-	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", "/vol/ci-gocache/_data", "120", "41943040", "75"}
+	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", root, "120", "41943040", "75"}
 	if !slices.Equal(good, want) {
 		t.Errorf("argv = %q, want %q", good, want)
 	}
-	apply, err := ciCacheLRUArgv("apply", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	apply, err := ciCacheLRUArgv("apply", root, 120, 41943040, ciCacheLRUFloorMinutes)
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv(apply) = %v, want nil", err)
 	}
-	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", "/vol/ci-gocache/_data", "120", "41943040", "75"}
+	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", root, "120", "41943040", "75"}
 	if !slices.Equal(apply, wantApply) {
 		t.Errorf("apply argv = %q, want %q", apply, wantApply)
 	}
@@ -1746,15 +1823,67 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 		cap   int64
 		floor int64
 	}{
-		{name: "a negative age", mode: "list", root: "/v", age: -1, cap: 1, floor: 60},
-		{name: "a negative cap", mode: "list", root: "/v", age: 120, cap: -1, floor: 60},
-		{name: "a negative floor", mode: "list", root: "/v", age: 120, cap: 1, floor: -60},
+		{name: "a negative age", mode: "list", root: root, age: -1, cap: 1, floor: 60},
+		{name: "a negative cap", mode: "list", root: root, age: 120, cap: -1, floor: 60},
+		{name: "a negative floor", mode: "list", root: root, age: 120, cap: 1, floor: -60},
 		{name: "an empty root", mode: "list", root: "", age: 120, cap: 1, floor: 60},
-		{name: "a mode the program does not have", mode: "delete", root: "/v", age: 120, cap: 1, floor: 60},
+		{name: "a mode the program does not have", mode: "delete", root: root, age: 120, cap: 1, floor: 60},
 	}
 	for _, tc := range cases {
 		if argv, err := ciCacheLRUArgv(tc.mode, tc.root, tc.age, tc.cap, tc.floor); err == nil {
 			t.Errorf("%s: argv %q, want an error", tc.name, argv)
+		}
+	}
+}
+
+// TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot: the program's root is the one
+// path its find reads and removes under, so the argv builder accepts only a
+// volume's own data path and refuses every other root, naming the rule. The
+// refusal includes the dind data root and its volumes directory, a relative
+// path, a name that is not plain, and paths that only look like a volume root
+// (gt-vbtu0m).
+func TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot(t *testing.T) {
+	t.Parallel()
+	root := ciCacheVolumeRoot(ciCacheGocacheVolume)
+	argv, err := ciCacheLRUArgv("list", root, 120, 41943040, ciCacheLRUFloorMinutes)
+	if err != nil {
+		t.Fatalf("ciCacheLRUArgv(list, %q) = %v, want nil", root, err)
+	}
+	if !slices.Contains(argv, root) {
+		t.Errorf("argv %q does not carry the accepted root %q", argv, root)
+	}
+	cases := []struct{ name, root string }{
+		{name: "the root itself", root: "/"},
+		{name: "the dind data root", root: ciCacheDindMount},
+		{name: "the volumes directory", root: ciCacheDindMount + "/volumes"},
+		{name: "the volumes directory with a trailing slash", root: ciCacheDindMount + "/volumes/"},
+		{name: "the volume mount without its data directory", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume},
+		{name: "a volume directory with another leaf", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume + "/data"},
+		{name: "a relative path", root: "x/_data"},
+		{name: "a volume root with a trailing slash", root: root + "/"},
+		{name: "a name with a double dot inside", root: ciCacheDindMount + "/volumes/a..b/_data"},
+		{name: "a name that is a double dot", root: ciCacheDindMount + "/volumes/../_data"},
+		{name: "a name that is a single dot", root: ciCacheDindMount + "/volumes/./_data"},
+		{name: "a name with a slash", root: ciCacheDindMount + "/volumes/a/b/_data"},
+		{name: "a double slash before the name", root: ciCacheDindMount + "/volumes//ci-gocache/_data"},
+		{name: "a name with a space", root: ciCacheDindMount + "/volumes/ci gocache/_data"},
+		{name: "a root with a newline", root: root + "\n"},
+		{name: "a path that steps above the volumes directory", root: ciCacheDindMount + "/../docker/volumes/ci-gocache/_data"},
+		{name: "a prefix longer than the path between prefix and suffix", root: ciCacheDindMount + "/volumes/_data"},
+		{name: "a sibling of the volumes directory", root: "/var/lib/docker2/volumes/ci-gocache/_data"},
+		{name: "a path of the right shape under another root", root: "/" + strings.Repeat("x", 23) + ciCacheGocacheVolume + "/_data"},
+	}
+	for _, tc := range cases {
+		argv, err := ciCacheLRUArgv("list", tc.root, 120, 41943040, ciCacheLRUFloorMinutes)
+		if err == nil {
+			t.Errorf("%s (%q): argv %q, want an error", tc.name, tc.root, argv)
+			continue
+		}
+		if argv != nil {
+			t.Errorf("%s (%q): argv %q returned with the error, want no argv", tc.name, tc.root, argv)
+		}
+		if !strings.Contains(err.Error(), "volume root") {
+			t.Errorf("%s (%q): error %q does not name the volume-root rule", tc.name, tc.root, err)
 		}
 	}
 }

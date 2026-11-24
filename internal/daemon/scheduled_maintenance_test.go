@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltbackup"
 )
 
 func TestParseWindowTime(t *testing.T) {
@@ -352,6 +354,85 @@ func TestMaintenanceWindowPodTickRunsTheCycleWithUpdateEnabled(t *testing.T) {
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %q with the update trigger on in a pod, want hq", got)
+	}
+}
+
+// TestScheduledMaintenancePodWindowStartsOnce pins the pod's night through the
+// real tick: inside the window, with the update trigger on and no request, one
+// tick starts one cycle, and the night's backup is committed before the gc runs
+// (gt-yoyddm). The second tick and the non-pod row are gt-oqf8e0.
+func TestScheduledMaintenancePodWindowStartsOnce(t *testing.T) {
+	t.Parallel()
+	d, f, logs := requestDaemonWithLogs(t, gcTestNow)
+	d.podMode = true
+	f.serverDBs = []string{"hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = updateOnWindow("03:00")
+	// Without a data dir on this host the week alone makes the gc due.
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+
+	// The cycle's gc recorder runs this check itself: a gc that runs before the
+	// night's backup is committed is the one ordering the cycle exists to keep.
+	gcExec := d.maint.gcExec
+	d.maint.gcExec = func(ctx context.Context, daemon *Daemon, db string) error {
+		if !doltbackup.Taken(f.backupRoot, gcTestNow) {
+			t.Errorf("gc of %s ran before this night's backup was committed", db)
+		}
+		return gcExec(ctx, daemon, db)
+	}
+
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.backupCalls, ","); got != "hq" {
+		t.Fatalf("backup calls = %q for a window tick in a pod with the update trigger on, want hq once", got)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %q after the backup, want hq once", got)
+	}
+	if want := "in window 03:00, 1 database(s) discovered"; !strings.Contains(logs.String(), want) {
+		t.Errorf("the cycle did not start from the window: log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// TestScheduledMaintenancePodWindowOncePerWindow pins the window's second half:
+// the tick that starts a pod's night consumes the window, so a later tick in
+// the same window starts no second cycle (gt-oqf8e0). The first tick is
+// gt-yoyddm's; this pins what the next one must not do.
+func TestScheduledMaintenancePodWindowOncePerWindow(t *testing.T) {
+	t.Parallel()
+	d, f, logs := requestDaemonWithLogs(t, gcTestNow)
+	d.podMode = true
+	f.serverDBs = []string{"hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = updateOnWindow("03:00")
+	// Without a data dir on this host the week alone makes the gc due.
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+
+	// The first tick must genuinely consume the window — one backup, then one
+	// gc — or the second tick's silence would prove nothing.
+	d.runScheduledMaintenance()
+	if got := strings.Join(f.backupCalls, ","); got != "hq" {
+		t.Fatalf("the first tick's backup calls = %q, want hq once", got)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("the first tick's gc calls = %q, want hq once", got)
+	}
+
+	// A later poll in the same window: the window is spent, so no second cycle
+	// starts. Clearing lastMaintenanceRun between the ticks makes this tick start
+	// the night again and is the mutation this test catches.
+	d.maint.now = func() time.Time { return gcTestNow.Add(30 * time.Minute) }
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.backupCalls, ","); got != "hq" {
+		t.Errorf("the second tick in the same window ran another backup: backup calls = %q, want hq once", got)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("the second tick in the same window ran another gc: gc calls = %q, want hq once", got)
+	}
+	// A fresh cycle announces itself with this line; a second one would repeat it.
+	if got := strings.Count(logs.String(), "in window 03:00, 1 database(s) discovered"); got != 1 {
+		t.Errorf("the second tick in the same window started another cycle: the cycle-start line appears %d times, want once", got)
 	}
 }
 
