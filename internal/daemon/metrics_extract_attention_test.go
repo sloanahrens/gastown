@@ -795,3 +795,48 @@ func TestMetricsExtractNoEstimatesNotRaisedOnAFailedRead(t *testing.T) {
 		t.Fatalf("items = %+v, want only the unreadable item", items)
 	}
 }
+
+// TestMetricsExtractRunningDayReadsThePreviousFooter: a newest day with no
+// footer is a run still in flight, so the read takes the newest earlier day;
+// a footer that exists but is unreadable stays the unreadable item (gt-u5pvds).
+func TestMetricsExtractRunningDayReadsThePreviousFooter(t *testing.T) {
+	t.Parallel()
+	f := metricsExtractRig(t, metricsExtractTick)
+	writeExtractDay(t, f.d.config.TownRoot, "2026-11-18", cleanFooter)
+	writeExtractDay(t, f.d.config.TownRoot, "2026-11-19", "")
+	items := f.collect(t, f.src.collectMetricsExtract)
+	if len(items) != 1 || items[0].Key != metricsExtractStaleKey || !strings.Contains(items[0].Summary, "2026-11-18") {
+		t.Fatalf("items = %+v, want the stale item naming the earlier day", items)
+	}
+	// A footer that exists but cannot be statted is not a running day to skip.
+	footer := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", "2026-11-19", metrics.FooterName)
+	if err := os.Symlink(metrics.FooterName, footer); err != nil {
+		t.Fatal(err)
+	}
+	if items := f.collect(t, f.src.collectMetricsExtract); len(items) != 1 || items[0].Key != metricsExtractUnreadableKey {
+		t.Fatalf("items = %+v, want the unreadable item for the unstattable footer", items)
+	}
+	if err := os.Remove(footer); err != nil {
+		t.Fatal(err)
+	}
+	writeExtractDay(t, f.d.config.TownRoot, "2026-11-19", "{not json")
+	if items := f.collect(t, f.src.collectMetricsExtract); len(items) != 1 || items[0].Key != metricsExtractUnreadableKey {
+		t.Fatalf("items = %+v, want the unreadable item for the parseless footer", items)
+	}
+}
+
+// TestMetricsExtractNoFooterAnywhereIsAnError: with no footer on any day, the read fails as before, naming the metrics root (gt-u5pvds).
+func TestMetricsExtractNoFooterAnywhereIsAnError(t *testing.T) {
+	t.Parallel()
+	f := metricsExtractRig(t, metricsExtractTick)
+	writeExtractDay(t, f.d.config.TownRoot, "2026-11-18", "")
+	writeExtractDay(t, f.d.config.TownRoot, "2026-11-19", "")
+	_, err := readMetricsExtract(f.d.config.TownRoot, metricsExtractTick)
+	missing := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", "2026-11-19", metrics.FooterName)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("err = %v, want the newest day's missing footer %s", err, missing)
+	}
+	if items := f.collect(t, f.src.collectMetricsExtract); len(items) != 1 || items[0].Key != metricsExtractUnreadableKey {
+		t.Fatalf("items = %+v, want the one unreadable item", items)
+	}
+}

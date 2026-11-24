@@ -208,7 +208,7 @@ func readMetricsExtract(townRoot string, now time.Time) (metricsExtractRead, err
 	if err != nil {
 		return metricsExtractRead{}, fmt.Errorf("listing %s: %w", root, err)
 	}
-	day, ok := newestExtractDay(entries, now.Location())
+	day, ok := newestExtractDay(entries, root, now.Location())
 	if !ok {
 		return metricsExtractRead{}, fmt.Errorf("%s holds no day directory", root)
 	}
@@ -376,13 +376,14 @@ func readEstimateLogLine(r *bufio.Reader, limit int) (line []byte, overlong bool
 	}
 }
 
-// newestExtractDay is the newest canonical YYYY-MM-DD directory among entries,
-// as midnight of that day in loc. Only a canonical day is an extract's day: the
-// metrics root's cache and latest entries are not. ok is false when entries
-// holds no day.
-func newestExtractDay(entries []os.DirEntry, loc *time.Location) (time.Time, bool) {
-	var newest time.Time
-	found := false
+// newestExtractDay is the newest canonical YYYY-MM-DD directory among entries
+// whose footer exists, as midnight of that day in loc; an entry that is not a
+// canonical day was never an extract's. The extract writes a day's footer last,
+// so a run still in flight has none: the newest earlier day with one is read
+// instead, as if the newer directory did not exist (gt-u5pvds). ok is false
+// when entries holds no day.
+func newestExtractDay(entries []os.DirEntry, root string, loc *time.Location) (time.Time, bool) {
+	var newest, finished time.Time
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -391,9 +392,19 @@ func newestExtractDay(entries []os.DirEntry, loc *time.Location) (time.Time, boo
 		if err != nil {
 			continue
 		}
-		if !found || day.After(newest) {
-			newest, found = day, true
+		if newest.IsZero() || day.After(newest) {
+			newest = day
+		}
+		if _, err := os.Stat(filepath.Join(root, entry.Name(), metrics.FooterName)); err != nil && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if finished.IsZero() || day.After(finished) {
+			finished = day
 		}
 	}
-	return newest, found
+	if !finished.IsZero() {
+		return finished, true
+	}
+	// No day has a footer: name the newest directory for the read's error.
+	return newest, !newest.IsZero()
 }
