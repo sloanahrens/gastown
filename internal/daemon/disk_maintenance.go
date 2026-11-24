@@ -843,9 +843,13 @@ func (d *Daemon) refuseDiskMaintenance(err error) {
 }
 
 // settleDiskMaintenanceWindow records that this window's pass is over, so the
-// next tick does not repeat it; the once-a-day gap is measured from here.
+// next tick does not repeat it; the once-a-day gap is measured from here. It
+// also records the daily pass as a last run, so gt jobs reads its row as run
+// rather than never_run (gt-27erxa). A pass that deferred never settles, so it
+// records nothing: the retry is the run.
 func (d *Daemon) settleDiskMaintenanceWindow(now time.Time) {
 	d.diskMaintSettled.Store(now.UnixNano())
+	d.recordPatrolRun(&d.diskMaintenanceRun, "disk_maintenance", now)
 }
 
 // diskMaintenanceSettledAt is when the patrol last settled a window; the zero
