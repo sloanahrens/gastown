@@ -312,6 +312,45 @@ func TestOverrunPassTicksWithoutDaemonStart(t *testing.T) {
 		}
 	})
 
+	t.Run("a read that fails clears the set, so the next UNKNOWN is logged again", func(t *testing.T) {
+		t.Parallel()
+		d := passDaemon(t)
+		var logs bytes.Buffer
+		d.logger = log.New(&logs, "", 0)
+		path := filepath.Join(d.config.TownRoot, "daemon", "patrol_last_run.json")
+		want := "health ticks: overrun_guard: a pass is in flight and the daemon start is unknown; its tick is UNKNOWN"
+		var failErr error
+		d.runOverrunGuardPass(func() {
+			if _, err := (&healthSources{d: d}).Ticks(); err != nil {
+				t.Errorf("first Ticks in the pass: %v", err)
+				return
+			}
+			held, err := os.ReadFile(path)
+			if err != nil {
+				t.Errorf("reading the record the pass wrote: %v", err)
+				return
+			}
+			if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+				t.Errorf("write corrupt record: %v", err)
+				return
+			}
+			_, failErr = (&healthSources{d: d}).Ticks()
+			if err := os.WriteFile(path, held, 0o644); err != nil {
+				t.Errorf("restoring the record: %v", err)
+				return
+			}
+			if _, err := (&healthSources{d: d}).Ticks(); err != nil {
+				t.Errorf("Ticks after the record was restored: %v", err)
+			}
+		})
+		if !errors.Is(failErr, ErrPatrolLastRunCorrupt) {
+			t.Fatalf("Ticks on the corrupt record: err = %v, want ErrPatrolLastRunCorrupt", failErr)
+		}
+		if got := strings.Count(logs.String(), want); got != 2 {
+			t.Errorf("log carries the overrun_guard UNKNOWN line %d times, want twice (once before the failed read, once after it recovered):\n%s", got, logs.String())
+		}
+	})
+
 	t.Run("a corrupt record is an error, not an empty read", func(t *testing.T) {
 		t.Parallel()
 		d := passDaemon(t)
