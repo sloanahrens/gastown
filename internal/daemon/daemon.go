@@ -1048,6 +1048,12 @@ type Daemon struct {
 	specSplitRunning atomic.Bool
 	specSplitCycles  sync.WaitGroup
 
+	// specSplitRefused is the beads a tick refused whose mark did not land,
+	// with the reason, so this daemon applies none of them again; the tick
+	// goroutine is its only writer, and the single-flight guard above keeps
+	// that one goroutine (spec_split_step.go, gt-hrbq3v).
+	specSplitRefused map[string]string
+
 	// specCensusRemove removes the spec dispatcher's census file before a tick
 	// (spec_dispatch.go); nil removes the real file. A test whose clear fails
 	// sets it (gt-139dp).

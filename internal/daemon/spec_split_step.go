@@ -11,7 +11,8 @@ package daemon
 // arrives through SetSpecSplitDeps rather than the daemon reaching back for it
 // (the SetSchedulerDeps seam, gt-638go.9). A bead with an assignee, the rework
 // label, a hold or the split-manual label is never taken; a refused apply gets
-// one comment naming the reason and that label (gt-hrbq3v).
+// one comment naming the reason and that label, and a bead whose mark did not
+// land is retried as a mark alone, never as an apply again (gt-hrbq3v).
 //
 // The tick runs on its own goroutine, one at a time: an apply estimates and
 // lints both pieces, so it can take minutes and must not hold the heartbeat. A
@@ -113,11 +114,18 @@ func (d *Daemon) specSplitTick() {
 	}
 	start := d.clk().Now()
 	splits, attempts := 0, 0
+	d.specSplitPrune(issues)
 	for _, issue := range issues {
 		if splits == specSplitMaxPerTick || attempts == specSplitMaxAttempts {
 			break
 		}
 		if !specSplitEligible(issue) {
+			continue
+		}
+		if reason, refused := d.specSplitRefused[issue.ID]; refused {
+			if d.specSplitMark(issue.ID, reason) {
+				delete(d.specSplitRefused, issue.ID)
+			}
 			continue
 		}
 		attempts++
@@ -128,7 +136,12 @@ func (d *Daemon) specSplitTick() {
 				reason = err.Error()
 			}
 			d.logger.Printf("spec_split: %s was not split: %s", issue.ID, reason)
-			d.specSplitMarkManual(issue.ID, reason)
+			if !d.specSplitMark(issue.ID, reason) {
+				if d.specSplitRefused == nil {
+					d.specSplitRefused = make(map[string]string)
+				}
+				d.specSplitRefused[issue.ID] = reason
+			}
 			continue
 		}
 		splits++
@@ -141,21 +154,44 @@ func (d *Daemon) specSplitTick() {
 	}
 }
 
-// specSplitMarkManual leaves a refused bead to a person: the split-manual
-// label, so no later tick takes it, and one comment naming reason. The label
-// goes first, so a bead whose label write fails gets no comment to repeat.
-func (d *Daemon) specSplitMarkManual(beadID, reason string) {
-	store := specSplitManualStore(beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault())))
-	if open := d.specSplitDeps.Store; open != nil {
+// specSplitMark leaves a refused bead to a person: the split-manual label, so
+// no later tick takes it, and one comment naming reason. The label goes first,
+// so a bead whose label write fails gets no comment to repeat. It reports
+// whether both writes landed; a bead it could not mark is kept in
+// specSplitRefused, so a later tick retries the mark alone and never the apply.
+func (d *Daemon) specSplitMark(beadID, reason string) bool {
+	open := d.specSplitDeps.Store
+	var store specSplitManualStore
+	if open != nil {
 		store = open()
+	} else {
+		store = beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault()))
 	}
 	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: []string{specSplitManualLabel}}); err != nil {
-		d.logger.Printf("spec_split: %s: cannot add %s, so the next tick retries it: %v", beadID, specSplitManualLabel, err)
-		return
+		d.logger.Printf("spec_split: %s: cannot add %s, so this daemon applies it no more: %v", beadID, specSplitManualLabel, err)
+		return false
 	}
 	if err := store.AddComment(beadID, "spec_split could not split this bead automatically: "+reason); err != nil {
 		d.logger.Printf("spec_split: %s: cannot comment the refusal: %v", beadID, err)
+		return false
 	}
+	return true
+}
+
+// specSplitPrune forgets the refusals whose bead the tick's read no longer
+// returns, or returns no longer eligible: a person marked, closed or assigned
+// it, so its entry has no owner left.
+func (d *Daemon) specSplitPrune(issues []*beads.Issue) {
+	kept := make(map[string]string, len(d.specSplitRefused))
+	for _, issue := range issues {
+		if issue == nil || !specSplitEligible(issue) {
+			continue
+		}
+		if reason, refused := d.specSplitRefused[issue.ID]; refused {
+			kept[issue.ID] = reason
+		}
+	}
+	d.specSplitRefused = kept
 }
 
 // specSplitCyclesDone returns a channel closed once every tick goroutine the
