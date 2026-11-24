@@ -660,6 +660,11 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	// so the one construction site hands them over.
 	d.SetSchedulerDeps(schedulerDeps())
 
+	// The spec_split step runs the same apply gt spec split --apply runs, in
+	// process; the split command lives in this package, so it hands the apply
+	// over here (gt-tal4li).
+	d.SetSpecSplitDeps(daemon.SpecSplitDeps{Apply: specSplitApplyForDaemon})
+
 	return daemonRunExit(d.Run(), os.Exit)
 }
 

@@ -128,6 +128,16 @@ func runSpecSplitFrom(out, errw io.Writer, beadID string, dryRun, apply bool, fi
 	return runSpecSplitOn(out, beadID, dryRun, read, target, check)
 }
 
+// specSplitApplyForDaemon is the apply the daemon's spec_split step runs: the
+// same runSpecSplitFrom the command calls, in the daemon's process, with the
+// town root the daemon names instead of one found from the working directory.
+// The report is what the apply printed, so a refusal's reason reaches the step.
+func specSplitApplyForDaemon(townRoot, beadID string) (string, error) {
+	var report strings.Builder
+	err := runSpecSplitFrom(&report, &report, beadID, false, true, func() (string, error) { return townRoot, nil })
+	return report.String(), err
+}
+
 // runSpecSplitOn prints the two piece drafts of beadID to out, then each
 // piece's minutes and lint, then the verdict. A failed verdict returns a silent
 // exit of 1 after the report. The read, the target inventory and the check are

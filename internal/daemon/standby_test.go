@@ -415,7 +415,7 @@ func TestStandbyExceptions(t *testing.T) {
 	t.Parallel()
 	wantLifecycle := []string{
 		"ghost-sessions", "plugins", "polecat-health", "idle-reap", "orphan-processes",
-		"dispatch", "rebuild-gt", "update", "rebuild-om", "rebuild-hm", "jev-dedupe", "jev-attention",
+		"dispatch", "spec-split", "rebuild-gt", "update", "rebuild-om", "rebuild-hm", "jev-dedupe", "jev-attention",
 		"jev-landing", "jev-submission", "jev-drift", "jev-logtriage", "jev-rework", "jev-omclass",
 		"jev-dispatch", "jev-thrash", "jev-rules", "jev-conflict", "jev-progress",
 		"jev-stale", "jev-notes", "jev-scorecard",
