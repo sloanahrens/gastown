@@ -816,8 +816,11 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	case v.lru:
 		// The list selects past the age and then, while the volume is over its
 		// cap, down to the floor, so the line names the cap, not the age alone.
-		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, %s to %s, against its cap of %s; nothing removed",
-			v.name, reply.removed, v.unit(), before, after, polecatimage.Human(v.capKiB*1024))
+		// The list mode reports after equal to before: it knows only the size it
+		// starts from, so the line prints that one figure rather than claim the
+		// removal changes the volume's size.
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s of %s, against its cap of %s; nothing removed",
+			v.name, reply.removed, v.unit(), before, polecatimage.Human(v.capKiB*1024))
 	case v.capped():
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s) while it is over its cap of %s; nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText, polecatimage.Human(v.capKiB*1024))
