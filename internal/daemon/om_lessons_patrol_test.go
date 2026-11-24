@@ -1291,24 +1291,6 @@ func TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead(t *testing.T) {
 	}
 }
 
-// omLessonsShapedSectionLine returns the first line of text that opens a
-// shaped spec section: a "## " heading, or a required section's name followed
-// by a colon, the form omlessons.ProposalDraft uses. Empty means prose only.
-func omLessonsShapedSectionLine(text string, sections []string) string {
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
-			return trimmed
-		}
-		for _, name := range sections {
-			if strings.HasPrefix(trimmed, name+":") {
-				return trimmed
-			}
-		}
-	}
-	return ""
-}
-
 // TestReworkProgramOmLessonsFiledBeadIsUnshapedAndHeld: the filed bead wears
 // exactly overseer-only and hold:decision, and its text opens no shaped
 // section, so the shape lint refuses it and the dispatcher never slings the
@@ -1343,11 +1325,6 @@ func TestReworkProgramOmLessonsFiledBeadIsUnshapedAndHeld(t *testing.T) {
 		t.Errorf("the proposal bead wears labels %v, want exactly %v", issue.Labels, wantLabels)
 	}
 
-	sections := append(append([]string(nil), specdispatch.DefaultSections...), "Acceptance")
-	if line := omLessonsShapedSectionLine(issue.Description, sections); line != "" {
-		t.Errorf("the filed text opens the shaped section %q, want prose only", line)
-	}
-
 	spec := specdispatch.Spec{
 		ID:          issue.ID,
 		Title:       issue.Title,
@@ -1360,8 +1337,19 @@ func TestReworkProgramOmLessonsFiledBeadIsUnshapedAndHeld(t *testing.T) {
 	if verdict.Clean() {
 		t.Fatalf("the filed bead lints clean, so a dispatcher would sling the lesson to a seat; text:\n%s", issue.Description)
 	}
-	if reason := verdict.UnshapedReason(); !strings.Contains(reason, "## Goal") {
-		t.Errorf("the lint refuses the filed bead as %q, want the missing shaped sections named", reason)
+	// The lint is the only judge of shape: it names each required section it
+	// finds missing. A section the filed text opens drops its refusal here.
+	refused := map[string]bool{}
+	for _, r := range verdict.Refusals {
+		refused[r.Field] = true
+	}
+	for _, name := range specdispatch.DefaultSections {
+		if field := "## " + name; !refused[field] {
+			t.Errorf("the lint does not refuse the filed bead for %q, so the text opens that shaped section; text:\n%s", field, issue.Description)
+		}
+	}
+	if !refused["acceptance"] {
+		t.Errorf("the lint does not refuse the filed bead for acceptance, so the text opens an acceptance list; text:\n%s", issue.Description)
 	}
 }
 
