@@ -586,8 +586,10 @@ func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 	return out
 }
 
-// specChildrenRead is the children read of one rig's candidates: one ChildrenOf
-// for the ids, then one ShowMultiple for the ids ChildrenOf left out.
+// specChildrenRead is the children read of one rig's candidates for a store
+// that answers no SQL: one ChildrenOf for the ids, then one ShowMultiple for the
+// ids ChildrenOf left out. specChildrenReader is what the tick calls; it takes
+// the SQL read for a store that has one.
 // ChildrenOf drops a childless parent (beads.parseChildrenMapJSON), so an id it
 // leaves out is either childless or unresolved; ShowMultiple tells them apart,
 // since it returns exactly the ids that exist. A childless id that exists is
@@ -652,11 +654,18 @@ func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]*beads.Issue, 
 }
 
 // specChildrenReader is the default children read of specCandidateChildren: the
-// rig's database at dir, read through stores. The tick passes the zero value,
-// which opens bd; a test passes a store that counts its reads.
+// rig's database at dir, read through stores. A store that answers SQLCSV is
+// read through specChildrenFromSQL, one call per chunk at about 100 to 200 ms;
+// one without it is read through specChildrenRead, whose per-bead bd show costs
+// 350 to 923 ms (gt-ci4bf3). The tick passes the zero value, which opens bd; a
+// test passes a store that counts its reads.
 func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[string][]*beads.Issue, error) {
 	return func(dir string, ids []string) (map[string][]*beads.Issue, error) {
-		return specChildrenRead(stores.pinnedAt(dir), ids)
+		store := stores.pinnedAt(dir)
+		if reader, ok := store.(sqlReader); ok {
+			return specChildrenFromSQL(reader, ids)
+		}
+		return specChildrenRead(store, ids)
 	}
 }
 
@@ -740,7 +749,8 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			}
 			if err == nil {
 				// The grouped read keys a childless parent that exists with an
-				// empty list (specChildrenRead), so a parent missing from a
+				// empty list (specChildrenRead and specChildrenFromSQL both
+				// key it empty), so a parent missing from a
 				// successful answer is one bd did not resolve. It is read
 				// alone: a read of the one parent that succeeds and still has no
 				// entry for it means bd has no children for it, and a failed

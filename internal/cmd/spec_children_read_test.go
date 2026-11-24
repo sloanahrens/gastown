@@ -138,6 +138,90 @@ type sqlReaderFunc func(beadsql.Query) ([][]string, error)
 
 func (f sqlReaderFunc) SQLCSV(q beadsql.Query) ([][]string, error) { return f(q) }
 
+// sqlChildrenClient is a store that answers SQLCSV as a bd database would, and
+// counts both children reads, so a wiring test holds the default read to the
+// one store's kind takes (gt-ci4bf3).
+type sqlChildrenClient struct {
+	beads.Client
+	records                [][]string
+	sql, childrenOf, shows int
+}
+
+func (c *sqlChildrenClient) SQLCSV(beadsql.Query) ([][]string, error) {
+	c.sql++
+	return c.records, nil
+}
+
+func (c *sqlChildrenClient) ChildrenOf(ids ...string) (map[string][]*beads.Issue, error) {
+	c.childrenOf++
+	return c.Client.ChildrenOf(ids...)
+}
+
+func (c *sqlChildrenClient) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	c.shows++
+	return c.Client.ShowMultiple(ids)
+}
+
+// sqlChildrenCandidates creates n childless candidates in db and answers them
+// with cands, the way the tick's loop passes them.
+func sqlChildrenCandidates(t *testing.T, db *beadsfake.Fake, n int) (ids []string, cands []specCandidate) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		is, err := db.Create(beads.CreateOptions{Title: fmt.Sprintf("candidate %d", i), Priority: -1})
+		if err != nil {
+			t.Fatalf("create candidate %d: %v", i, err)
+		}
+		ids = append(ids, is.ID)
+		cands = append(cands, specCandidate{Spec: specdispatch.Spec{ID: is.ID}})
+	}
+	return ids, cands
+}
+
+// TestTickEffSQLChildrenWiring: the default children read specCandidateChildren
+// installs, specChildrenReader, takes one SQL call and no bd read for a store
+// that answers SQLCSV, and the ChildrenOf read for a store that does not.
+// Mutation: dropping the sqlReader assertion sends the SQLCSV store through
+// ChildrenOf and turns the first leg red (gt-ci4bf3).
+func TestTickEffSQLChildrenWiring(t *testing.T) {
+	t.Parallel()
+	t.Run("a store with SQLCSV reads one SQL call and no ChildrenOf", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		ids, cands := sqlChildrenCandidates(t, db, 3)
+		records := [][]string{{"p.id", "c.id", "status"}}
+		for _, id := range ids {
+			records = append(records, []string{id, "", ""})
+		}
+		client := &sqlChildrenClient{Client: db, records: records}
+		children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil,
+			specChildrenReader(slingStores{pinned: func(string) slingStore { return client }}))
+		for _, c := range cands {
+			if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
+				t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)
+			}
+		}
+		if client.sql != 1 || client.childrenOf != 0 || client.shows != 0 {
+			t.Errorf("reads = %d SQLCSV, %d ChildrenOf, %d ShowMultiple; want one SQL call and no bd read", client.sql, client.childrenOf, client.shows)
+		}
+	})
+	t.Run("a store without SQLCSV reads ChildrenOf", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		_, cands := sqlChildrenCandidates(t, db, 3)
+		client := &childrenReadCounter{Client: db}
+		children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil,
+			specChildrenReader(slingStores{pinned: func(string) slingStore { return client }}))
+		for _, c := range cands {
+			if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
+				t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)
+			}
+		}
+		if client.childrenOf != 1 || client.showMultiple != 1 {
+			t.Errorf("reads = %d ChildrenOf, %d ShowMultiple; want one of each", client.childrenOf, client.showMultiple)
+		}
+	})
+}
+
 // TestTickEffSQLChildren: one chunk of three ids is one SQL call, its records
 // parsed per parent. Mutation: a per-id read costs three calls, reading the
 // header record as data keys a third parent, and dropping the parse empties the
