@@ -352,6 +352,93 @@ func TestClusterRenderSbxEngineRefusesABadOutDir(t *testing.T) {
 	}
 }
 
+// sbxEngineHelmOutput is the chart output production sbx.OpenShell parses: the
+// gateway StatefulSet it sizes Guaranteed and the certgen hook Job that names
+// the three certificate Secrets. It is not the pulled chart, so the test stays
+// hermetic, while the helm call and its arguments are production's.
+const sbxEngineHelmOutput = `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openshell
+  namespace: openshell
+spec:
+  template:
+    spec:
+      containers:
+        - name: openshell
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openshell-certgen
+  namespace: openshell
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+spec:
+  template:
+    spec:
+      containers:
+        - name: certgen
+          args:
+            - --server-secret-name
+            - openshell-server-tls
+            - --client-secret-name
+            - openshell-client-tls
+            - --jwt-secret-name
+            - openshell-jwt-keys
+`
+
+// sbxEngineCall is one program the render ran, with its arguments.
+type sbxEngineCall struct {
+	name string
+	args []string
+}
+
+// The render runs exactly one program, the helm binary it was given, and hands
+// it the chart directory and the values file. The render step is production
+// sbx.OpenShell over the recorded runner, so the arguments are the ones
+// production names and not ones the test restates.
+func TestClusterRenderSbxEngineRunsOnlyTheNamedHelmCall(t *testing.T) {
+	t.Parallel()
+	var calls []sbxEngineCall
+	d := sbxEngineDeps(t, sbx.Set{}, &sbx.Inputs{})
+	d.renderSbx = func(ctx context.Context, in sbx.Inputs) (sbx.Set, error) {
+		chart, err := sbx.OpenShell(ctx, in.Run, in.ChartDir, in.ValuesPath)
+		if err != nil {
+			return sbx.Set{}, err
+		}
+		return sbx.Set{Objects: chart.Objects}, nil
+	}
+	d.runHelm = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, sbxEngineCall{name: name, args: slices.Clone(args)})
+		return []byte(sbxEngineHelmOutput), nil
+	}
+	err := runSbxRender(d, sbxRenderInputs{
+		OutDir:    t.TempDir(),
+		Manifests: "m",
+		Chart:     "/chart",
+		Values:    "/values.yaml",
+		Helm:      "/opt/helm",
+	})
+	if err != nil {
+		t.Fatalf("runSbxRender(): %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("%d programs run, want only the helm call: %v", len(calls), calls)
+	}
+	call := calls[0]
+	if want := "/opt/helm"; call.name != want {
+		t.Errorf("the render ran %q, want the helm binary it was given, %q", call.name, want)
+	}
+	if want := "/chart"; !slices.Contains(call.args, want) {
+		t.Errorf("helm args = %q, want the chart directory %q", call.args, want)
+	}
+	at := slices.Index(call.args, "-f")
+	if at < 0 || at+1 >= len(call.args) || call.args[at+1] != "/values.yaml" {
+		t.Errorf("helm args = %q, want -f followed by the values file %q", call.args, "/values.yaml")
+	}
+}
+
 // fileNameNumber splits a rendered file name into the number it is prefixed
 // with and the width that number is padded to.
 func fileNameNumber(t *testing.T, name string) (number, width int) {
