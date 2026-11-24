@@ -1605,6 +1605,11 @@ type DiskMaintenanceConfig struct {
 	// removes them. Empty means DiskMaintenanceDefaultCIEngineUnusedAge; a value
 	// under DiskMaintenanceMinCIEngineUnusedAge is refused, never read as the age.
 	CIEngineUnusedAge string `json:"ci_engine_unused_age,omitempty"` // Go duration such as "6h"
+	// CIEnginePruneMaxPerKind bounds how many candidates of each kind one engine
+	// prune run may remove; the rest wait for the next run. Nil means
+	// DiskMaintenanceDefaultCIEnginePruneMaxPerKind; zero or less is refused,
+	// never read as the cap.
+	CIEnginePruneMaxPerKind *int `json:"ci_engine_prune_max_per_kind,omitempty"` // count such as 50
 	// CIEngineCacheKeepBytes is the size the engine prune's build cache step
 	// keeps at most, least recently used records going first, besides the
 	// unused age above. Empty means DiskMaintenanceDefaultCIEngineCacheKeepBytes.
@@ -1864,6 +1869,19 @@ func (c DiskMaintenanceConfig) CIEngineUnusedAgeDuration() (time.Duration, error
 	return age, nil
 }
 
+// CIEnginePruneCap returns how many candidates of each kind one engine prune
+// run may remove: the default when the setting is nil, and an error naming the
+// setting for zero or less. It never falls back to the default on an error.
+func (c DiskMaintenanceConfig) CIEnginePruneCap() (int, error) {
+	if c.CIEnginePruneMaxPerKind == nil {
+		return DiskMaintenanceDefaultCIEnginePruneMaxPerKind, nil
+	}
+	if *c.CIEnginePruneMaxPerKind < 1 {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_prune_max_per_kind = %d: want at least 1", *c.CIEnginePruneMaxPerKind)
+	}
+	return *c.CIEnginePruneMaxPerKind, nil
+}
+
 // CIEngineCacheKeepLimit returns the size the engine prune's build cache step
 // keeps at most: the default when the setting is empty, and an error naming the
 // setting for a value that is not a positive size. It never falls back to the
@@ -2066,6 +2084,10 @@ const (
 	// DiskMaintenanceMinCIEngineUnusedAge is the lowest accepted unused age: below
 	// it a job that just stopped would lose what it could resume from (gt-w9nv86).
 	DiskMaintenanceMinCIEngineUnusedAge = time.Hour
+	// DiskMaintenanceDefaultCIEnginePruneMaxPerKind is how many candidates of
+	// each kind one engine prune run may remove when the setting is absent
+	// (gt-ul5n4r).
+	DiskMaintenanceDefaultCIEnginePruneMaxPerKind = 50
 	// DiskMaintenanceDefaultCIEngineCacheKeepBytes is the size the engine prune's
 	// build cache step keeps at most when the setting is empty: the age filter
 	// alone does not bound the cache, since the gates keep re-using its records
@@ -2164,6 +2186,9 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CIEngineUnusedAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.CIEnginePruneCap(); err != nil {
 		return err
 	}
 	if _, err := c.CIEngineCacheKeepLimit(); err != nil {
