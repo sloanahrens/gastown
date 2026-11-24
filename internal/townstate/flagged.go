@@ -31,20 +31,46 @@ var gzipMagic = []byte{0x1f, 0x8b}
 // Only gzip is read: a credential inside a zip, bzip2, xz or zstd file is not
 // found.
 func FlaggedContent(r io.Reader) guard.Result {
-	_, res := checkedContent(r)
+	_, res := checkedContent(r, 0)
 	return res
 }
 
 // checkedContent is FlaggedContent that also returns the bytes it judged, as
 // read from r and not decompressed: a caller that writes a file out writes
 // these, so what is written is what was checked and no second read can differ.
-// The bytes are meaningful only when the result is Pass.
-func checkedContent(r io.Reader) ([]byte, guard.Result) {
-	data, err := io.ReadAll(io.LimitReader(r, maxFlaggedBytes+1))
+// The bytes are meaningful only when the result is Pass. size is the file's
+// stat size, which sizes the read; zero or an unknown size keeps the growing read.
+func checkedContent(r io.Reader, size int64) ([]byte, guard.Result) {
+	var data []byte
+	var err error
+	if size > 0 && size <= maxFlaggedBytes {
+		data, err = readSized(r, size)
+	} else {
+		data, err = io.ReadAll(io.LimitReader(r, maxFlaggedBytes+1))
+	}
 	if err != nil {
 		return nil, guard.Unknown(fmt.Errorf("townstate: reading content: %w", err))
 	}
 	return data, judgeContent(data)
+}
+
+// readSized reads r into one buffer of the stat's size plus one byte, so a large
+// file is not copied through io.ReadAll's doubling. Only a file that grew past
+// its stat reads again, and the bytes past the stat are appended.
+func readSized(r io.Reader, size int64) ([]byte, error) {
+	buf := make([]byte, size+1)
+	n, err := io.ReadFull(r, buf)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return buf[:n], nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	rest, err := io.ReadAll(io.LimitReader(r, maxFlaggedBytes-size))
+	if err != nil {
+		return nil, err
+	}
+	return append(buf, rest...), nil
 }
 
 // judgeContent is the verdict on data already read.

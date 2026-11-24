@@ -62,7 +62,7 @@ func TestExportBackupOmitsAndListsAFlaggedFile(t *testing.T) {
 		t.Errorf("Omitted = %v, SkipSecret = %d; want both flagged files listed in order and counted", sum.Omitted, sum.Skipped[SkipSecret])
 	}
 	line := sum.String()
-	if !strings.Contains(line, "omitted 3") || strings.Contains(line, "notes.json") || strings.Contains(line, omittedToken) {
+	if !strings.Contains(line, "omitted 3 files whose content is flagged") || strings.Contains(line, "notes.json") || strings.Contains(line, omittedToken) {
 		t.Errorf("summary = %q, want the omitted count and no name or value", line)
 	}
 	if bytes.Contains(backup.Bytes(), []byte(omittedToken)) {
@@ -75,6 +75,25 @@ func TestExportBackupOmitsAndListsAFlaggedFile(t *testing.T) {
 	}
 	if got := archiveNames(t, plain.Bytes()); !slices.Contains(got, "settings/notes.json") || !slices.Contains(got, "settings/a-notes.json") || !slices.Contains(got, "settings/clean.json") {
 		t.Errorf("non-backup archive = %v, want both files", got)
+	}
+}
+
+// TestExportSummaryPrintsTheOmittedLine: the omitted line says the content is
+// flagged, not that it holds a credential, uses the singular noun for one file,
+// and names none.
+func TestExportSummaryPrintsTheOmittedLine(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		omitted []string
+		want    string
+	}{
+		{[]string{"settings/notes.json"}, "omitted 1 file whose content is flagged"},
+		{[]string{"alpha/x.json", "settings/notes.json"}, "omitted 2 files whose content is flagged"},
+	} {
+		got := ExportSummary{Omitted: c.omitted}.String()
+		if !strings.Contains(got, c.want) || strings.Contains(got, "credential") || strings.Contains(got, ".json") {
+			t.Errorf("summary = %q, want %q, no credential and no file name", got, c.want)
+		}
 	}
 }
 
@@ -155,6 +174,45 @@ func TestExportBackupWritesTheBytesItChecked(t *testing.T) {
 	if bytes.Contains(stream.Bytes(), nested.Bytes()) {
 		t.Fatal("the archive holds the bytes of a later read")
 	}
+}
+
+// TestExportBackupReadsAKnownSizeIntoOneBuffer: a file the walk statted is read
+// into one buffer of its stat size plus one byte, so a large file is not copied
+// through io.ReadAll's doubling.
+func TestExportBackupReadsAKnownSizeIntoOneBuffer(t *testing.T) {
+	t.Parallel()
+	town := omittedTown(t)
+	content := strings.Repeat("a", 8192)
+	writeStateFile(t, town, "settings/clean.json", content, 0o644)
+
+	reads := &recordReadBuffers{reader: strings.NewReader(content)}
+	open := func(o *townOps) {
+		real := osOps().open
+		o.open = func(p string) (io.ReadCloser, error) {
+			if strings.HasSuffix(filepath.ToSlash(p), "/settings/clean.json") {
+				return io.NopCloser(reads), nil
+			}
+			return real(p)
+		}
+	}
+
+	if _, err := Export(io.Discard, town, omittedManifest(t), ExportOptions{Backup: true, ops: opsWith(open)}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(reads.lengths) == 0 || reads.lengths[0] != 8193 || slices.Max(reads.lengths) > 8193 {
+		t.Fatalf("read buffer lengths = %v, want one of 8193 and none larger", reads.lengths)
+	}
+}
+
+// recordReadBuffers records the length of each buffer handed to Read.
+type recordReadBuffers struct {
+	reader  io.Reader
+	lengths []int
+}
+
+func (r *recordReadBuffers) Read(p []byte) (int, error) {
+	r.lengths = append(r.lengths, len(p))
+	return r.reader.Read(p)
 }
 
 // TestExportBackupOmitsAFileOverTheBound: a file larger than maxFlaggedBytes is

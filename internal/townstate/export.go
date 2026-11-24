@@ -84,9 +84,10 @@ type ExportSummary struct {
 	// town with rigs; non-zero only under ExportOptions.AllowNoRigs.
 	RigRowsDropped int
 	// Omitted are the town-root-relative names of the files a backup export left
-	// out because FlaggedContent flags their content, sorted when the export ends.
-	// String prints their count and never their names; the names are for the
-	// caller's log and alert.
+	// out because FlaggedContent failed their content, sorted when the export
+	// ends. A fail is not always a credential: the content may be over the bound
+	// or not decompress cleanly. String prints their count and never their names;
+	// the names are for the caller's log and alert.
 	Omitted []string
 }
 
@@ -102,7 +103,11 @@ func (s ExportSummary) String() string {
 		fmt.Fprintf(&b, "\nskipped link %s", line)
 	}
 	if len(s.Omitted) > 0 {
-		fmt.Fprintf(&b, "\nomitted %d files whose content holds a credential", len(s.Omitted))
+		noun := "files"
+		if len(s.Omitted) == 1 {
+			noun = "file"
+		}
+		fmt.Fprintf(&b, "\nomitted %d %s whose content is flagged", len(s.Omitted), noun)
 	}
 	if s.RigRowsDropped > 0 {
 		fmt.Fprintf(&b, "\nWARNING: the town registers no rigs, so %d rig-scoped rows are NOT in this archive", s.RigRowsDropped)
@@ -363,7 +368,7 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 		// left out and listed, and one that cannot be read to the end is an error,
 		// never an unchecked copy. The header size is the checked length, so a file
 		// that grew or shrank meanwhile is still consistent.
-		data, res := checkedContent(f)
+		data, res := checkedContent(f, info.Size())
 		_ = f.Close()
 		switch {
 		case res.IsFail():
