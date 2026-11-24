@@ -94,3 +94,62 @@ func TestDashboardTrendEstimateDayEmpty(t *testing.T) {
 		t.Errorf("empty window estimate days = %+v, want none", empty.EstimateDays)
 	}
 }
+
+// TestDashboardTrendEstimateDayEvenAndBounds: an even count of measured ratios
+// has the median of its two middle values, and a bound-flagged landing, either
+// bound, counts in N and not in the ratios it would otherwise shift (gt-j3wle4).
+func TestDashboardTrendEstimateDayEvenAndBounds(t *testing.T) {
+	t.Parallel()
+	loc := time.FixedZone("test", -5*60*60)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, loc)
+	day := time.Date(2026, 11, 22, 15, 0, 0, 0, loc)
+	m := func(v float64) *float64 { return &v }
+	// ratio is a landing whose polecat time is ratio times its estimate of 10 minutes.
+	ratio := func(bead string, ratio float64) omRecord {
+		return omRecord{
+			Record:    landings.Record{Bead: bead, LandedAt: day, PolecatSecs: ratio * 10 * 60},
+			SPMinutes: m(10),
+		}
+	}
+	upper := ratio("gt-u1", 5)
+	upper.PolecatUpperBound = true
+	lower := ratio("gt-l1", 0.1)
+	lower.PolecatLowerBound = true
+	tests := []struct {
+		name       string
+		recs       []omRecord
+		wantN      int
+		wantMedian float64
+		wantWithin float64
+	}{
+		{
+			name:       "even count takes the mean of the two middle ratios",
+			recs:       []omRecord{ratio("gt-e1", 0.5), ratio("gt-e2", 1), ratio("gt-e3", 1.2), ratio("gt-e4", 2), ratio("gt-e5", 0.8), ratio("gt-e6", 1.4)},
+			wantN:      6,
+			wantMedian: 1.1,
+			wantWithin: 0.5,
+		},
+		{
+			name:       "bound-flagged landings count in N and stay out of the ratios",
+			recs:       []omRecord{ratio("gt-b1", 0.5), ratio("gt-b2", 1), ratio("gt-b3", 1.2), ratio("gt-b4", 0.8), ratio("gt-b5", 1.4), upper, lower},
+			wantN:      7,
+			wantMedian: 1,
+			wantWithin: 0.6,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := buildTrendIn(now, tc.recs, nil, nil, nil, loc)
+			if len(tr.EstimateDays) != 1 {
+				t.Fatalf("estimate days = %+v, want one day", tr.EstimateDays)
+			}
+			got := tr.EstimateDays[0]
+			if got.Day != "2026-11-22" || got.N != tc.wantN {
+				t.Errorf("day = %+v, want 2026-11-22 with N %d", got, tc.wantN)
+			}
+			if math.Abs(got.MedianRatio-tc.wantMedian) > 1e-9 || math.Abs(got.Within25-tc.wantWithin) > 1e-9 {
+				t.Errorf("ratio = %v, within 25 = %v, want %v and %v", got.MedianRatio, got.Within25, tc.wantMedian, tc.wantWithin)
+			}
+		})
+	}
+}
