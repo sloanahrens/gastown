@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/hmhints"
@@ -420,28 +421,38 @@ func jevMedian(answers []float64) (float64, bool) {
 	return (valid[(n-1)/2] + valid[n/2]) / 2, true
 }
 
-// jevInput asks the battery jevCalls times and returns the median of the
-// answers with the count it used, or the skip that says why not. A failed call
-// or an out-of-range answer is dropped, a cap-reached ask ends the calls, and
-// with no answer left the first error, or the out-of-range answers, names it.
+// jevInput asks the battery jevCalls times, all at once, and returns the median
+// of the answers with the count it used, or the skip that says why not. The asks
+// run together so the wait is the slowest ask, not the sum of three: the lint
+// cuts the whole estimate off at 20 s and a clean one takes about 18 s, so asking
+// one after another let host load alone cross that line. A failed call or an
+// out-of-range answer is dropped, a cap-reached ask is only its own failure (the
+// others are already asked), and with no answer left the first error, in call
+// order, or the out-of-range answers, names it.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, int, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, 0, &Skip{Input: "jev", Reason: "no Jev asker"}
 	}
+	type reply struct {
+		ans dispatch.Answers
+		err error
+	}
+	replies := make([]reply, jevCalls)
+	var wg sync.WaitGroup
+	for i := range jevCalls {
+		wg.Go(func() { replies[i].ans, replies[i].err = deps.JevAsk(ctx, issue) })
+	}
+	wg.Wait()
 	answers := make([]float64, 0, jevCalls)
 	used := 0
 	var firstErr error
-	for range jevCalls {
-		ans, err := deps.JevAsk(ctx, issue)
-		if err != nil {
-			firstErr = cmp.Or(firstErr, err)
-			if errors.Is(err, dispatch.ErrCapReached) {
-				break
-			}
+	for _, r := range replies {
+		if r.err != nil {
+			firstErr = cmp.Or(firstErr, r.err)
 			continue
 		}
-		answers = append(answers, ans.FitsTwentyMinutes)
-		if ans.FitsTwentyMinutes >= 0 && ans.FitsTwentyMinutes <= 1 {
+		answers = append(answers, r.ans.FitsTwentyMinutes)
+		if r.ans.FitsTwentyMinutes >= 0 && r.ans.FitsTwentyMinutes <= 1 {
 			used++
 		}
 	}
