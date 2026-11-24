@@ -113,6 +113,29 @@ func TestClusterRenderSbxEnginePrintsTheExpectedSecretNames(t *testing.T) {
 	}
 }
 
+// A set that names no Secrets prints no expected Secret line: the render says
+// nothing about Secrets it does not expect, and reads neither their values nor
+// the cluster. The deps plant a failing reader and helm runner, so a read along
+// the render's inputs surfaces, and the files the set does hold are still
+// written, so an empty output cannot come from a render that did nothing.
+func TestClusterRenderSbxEnginePrintsNoLineForAnEmptySecretSet(t *testing.T) {
+	t.Parallel()
+	out := t.TempDir()
+	var printed bytes.Buffer
+	var received sbx.Inputs
+	d := sbxEngineDeps(t, sbx.Set{Objects: sbxEngineObjects}, &received)
+	d.out = &printed
+	if err := runSbxRender(d, sbxRenderInputs{OutDir: out, Manifests: "m", Chart: "c", Values: "v"}); err != nil {
+		t.Fatalf("runSbxRender(): %v", err)
+	}
+	if names := dirNames(t, out); len(names) != len(sbxEngineObjects) {
+		t.Fatalf("%d files in %s, want the set's %d objects, so the empty output is the render's", len(names), out, len(sbxEngineObjects))
+	}
+	if got := printed.String(); got != "" {
+		t.Fatalf("printed %q for a set with no Secrets, want no line and no Secret value", got)
+	}
+}
+
 // The three pinned paths and the helm binary reach sbx.Render through the
 // inputs: the render reads the manifest path it was given, and its helm call
 // runs the binary in.Helm with the arguments it was handed.
