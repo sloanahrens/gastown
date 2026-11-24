@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
@@ -56,7 +57,7 @@ func TestEstimateJevFailedCalls(t *testing.T) {
 
 // TestEstimateJevAsksRunTogether: every ask blocks until all jevCalls asks are in
 // flight, so asking one after another leaves the first ask waiting for the others
-// and the bubble reports a deadlock, which fails the test without a clock. The
+// until the bubble's fake deadline ends it, which fails the test with no real wait. The
 // median and the answer count are the same as when the asks ran in turn.
 func TestEstimateJevAsksRunTogether(t *testing.T) {
 	t.Parallel()
@@ -64,17 +65,25 @@ func TestEstimateJevAsksRunTogether(t *testing.T) {
 		var mu sync.Mutex
 		arrived := 0
 		allInFlight := make(chan struct{})
-		ask := func(context.Context, *beads.Issue) (dispatch.Answers, error) {
+		ask := func(ctx context.Context, _ *beads.Issue) (dispatch.Answers, error) {
 			mu.Lock()
 			arrived++
 			if arrived == jevCalls {
 				close(allInFlight)
 			}
 			mu.Unlock()
-			<-allInFlight
-			return dispatch.Answers{FitsTwentyMinutes: 0.4}, nil
+			select {
+			case <-allInFlight:
+				return dispatch.Answers{FitsTwentyMinutes: 0.4}, nil
+			case <-ctx.Done():
+				return dispatch.Answers{}, ctx.Err()
+			}
 		}
-		got, used, skip := jevInput(context.Background(), Deps{JevAsk: ask}, sampleBead())
+		// The bubble's clock is fake: when every goroutine waits, the deadline
+		// passes at once, so asks run in turn fail here instead of hanging.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		got, used, skip := jevInput(ctx, Deps{JevAsk: ask}, sampleBead())
 		if skip != nil || used != jevCalls || math.Abs(got-0.4) > 1e-9 {
 			t.Fatalf("jevInput = %v, %d answers, skip %v; want the median 0.4 from %d answers", got, used, skip, jevCalls)
 		}
