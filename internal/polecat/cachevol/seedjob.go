@@ -405,9 +405,10 @@ func cloneContainer(image, pins, tokenSecret string) Container {
 }
 
 // seedContainer runs the PlanSeed steps per rig, hands the claim to SeedUserID, and writes the
-// marker. Its image carries the Go toolchain. GOFLAGS is the Dockerfile seed RUN's flags plus
-// GoCompileFlags: the compile flags are part of Go's cache key, so an entry the seed writes without
-// them is one no seat with the flag can reuse (gt-pk7noy).
+// marker. Its image carries the Go toolchain. GOFLAGS is -p=4 and -modcacherw plus GoCompileFlags:
+// the compile flags are part of Go's cache key, so an entry the seed writes without them is one no
+// seat with the flag can reuse (gt-pk7noy). The polecat image's ENV GOFLAGS carries the same
+// compile flag; TestPolecatImageGOFLAGSMatchesSeedJob holds the two equal.
 func seedContainer(image, pins string) Container {
 	return Container{
 		Name:            "seed",
