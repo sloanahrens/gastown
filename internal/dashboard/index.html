@@ -3078,14 +3078,52 @@ function systemUpdateBannerRoll(su, now) {
   return {roll: systemUpdateBanner.roll, ended: true};
 }
 
-// systemUpdateBannerLine is the banner: what the roll is doing, the step, the
-// elapsed time and the short shas it moves from and to.
-function systemUpdateBannerLine(b) {
+// The shortest sha a roll joins a row by: the join's own floor, so a blank or
+// stubbed value never pairs a roll with a commit (system_updates.go).
+const SYSTEM_UPDATES_BANNER_SHA_MIN = 7;
+
+// systemUpdateBannerRolledRow answers the row for the commit an ended roll
+// rolled to, or null when no row carries it yet. A row's sha is cut to twelve
+// and the roll's is as the run recorded it, so either may be the head of the
+// other; a value under the join's floor is no sha at all.
+function systemUpdateBannerRolledRow(roll, rows) {
+  const to = String((roll && roll.to) || "");
+  if (to.length < SYSTEM_UPDATES_BANNER_SHA_MIN) return null;
+  return (rows || []).find(r => {
+    const sha = String((r && r.sha) || "");
+    if (sha.length < SYSTEM_UPDATES_BANNER_SHA_MIN) return false;
+    return to.startsWith(sha) || sha.startsWith(to);
+  }) || null;
+}
+
+// systemUpdateBannerEnded answers how an ended roll ended: the outcome the row
+// for the commit it rolled to records, in the class the stage chips wear, and
+// the elapsed time from that roll's started_at and ended_at rather than the
+// last push's. A roll no row carries yet, and a row naming no known outcome,
+// read "ended", never the step the browser last saw; a row whose own stamps
+// are unusable keeps the outcome and the last push's time (gt-avxdbf).
+function systemUpdateBannerEnded(roll, rows) {
+  const row = systemUpdateBannerRolledRow(roll, rows), rec = row && row.roll, outcome = rec && rec.outcome;
+  if (outcome !== "ok" && outcome !== "partial" && outcome !== "failed") return {word: "ended", cls: "", sec: roll.elapsed_sec};
+  const own = systemUpdateTimeSet(rec.started_at) && systemUpdateTimeSet(rec.ended_at);
+  const sec = own ? (new Date(rec.ended_at).getTime() - new Date(rec.started_at).getTime()) / 1000 : roll.elapsed_sec;
+  return {word: outcome, cls: SYSTEM_UPDATE_CHIPS[outcome][0], sec: sec};
+}
+
+// systemUpdateBannerLine is the banner: what the roll is doing, the step or its
+// outcome once it ends, the elapsed time and the short shas it moves from and to.
+function systemUpdateBannerLine(b, rows) {
   const roll = b.roll, sha = x => String(x || "").slice(0, 12) || "–";
   const line = el("div", "surow subanner" + (b.ended ? " ended" : ""));
   line.append(el("span", "subannerword", b.ended ? "roll ended" : "rolling"));
-  line.append(el("span", "tag" + (b.ended ? "" : " warnc"), roll.step || "starting"));
-  line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  if (b.ended) {
+    const ended = systemUpdateBannerEnded(roll, rows);
+    line.append(el("span", "tag" + (ended.cls ? " " + ended.cls : ""), ended.word));
+    line.append(el("span", "subannertime", fmtDur(ended.sec)));
+  } else {
+    line.append(el("span", "tag warnc", roll.step || "starting"));
+    line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  }
   line.append(el("span", "subannercommits", sha(roll.from) + " → " + sha(roll.to)));
   line.title = "gt update run " + (roll.run_id || "?") + (b.ended ? ", ended" : "");
   return line;
@@ -3202,7 +3240,7 @@ function renderSystemUpdates(s) {
   if (pushSkip("systemupdates", s)) return;
   const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
-  if (banner) box.append(systemUpdateBannerLine(banner));
+  if (banner) box.append(systemUpdateBannerLine(banner, (su && su.rows) || []));
   if (sweep && !sweepUnknown) box.append(systemUpdateBannerSweepLine(sweep));
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
