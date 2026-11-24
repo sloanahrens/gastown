@@ -102,10 +102,18 @@ func cannedTail(_ []string, out, _ io.Writer) error {
 	return err
 }
 
-// fixedDoltLogReads is the clock and tail the dolt log commands read, with the
-// clock held at now.
+// cannedContainerLog is the container reader of a town whose Dolt runs in a
+// container: it prints the container's two lines, to out.
+func cannedContainerLog(_ string, _ int, out, _ io.Writer) error {
+	_, err := io.WriteString(out, "serving line one\nserving line two\n")
+	return err
+}
+
+// fixedDoltLogReads is the clock, tail and container reader the dolt log
+// commands read, with the clock held at now. Both line readers print the
+// fixture's lines, so a test that needs to tell them apart builds its own.
 func fixedDoltLogReads(now time.Time) doltLogReads {
-	return doltLogReads{now: func() time.Time { return now }, tail: cannedTail}
+	return doltLogReads{now: func() time.Time { return now }, tail: cannedTail, containerLog: cannedContainerLog}
 }
 
 // TestDoltLogStaleNoticeWrite: the notice writer prints a stale log's notice,
@@ -216,6 +224,49 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDoltLogsContainerModeReadsTheContainer: with dolt.external_container set
+// and follow false, gt dolt logs prints the container's last lines through the
+// container reader, called with the container name and the line count, and
+// never tails the stale host dolt.log (gt-rpoii1).
+func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	writeDoltLogStaleFixture(t, townRoot, now.Add(-15*24*time.Hour))
+
+	var gotContainer string
+	var gotLines int
+	tailed := false
+	reads := doltLogReads{
+		now:  func() time.Time { return now },
+		tail: func([]string, io.Writer, io.Writer) error { tailed = true; return nil },
+		containerLog: func(container string, lines int, out, _ io.Writer) error {
+			gotContainer, gotLines = container, lines
+			_, err := io.WriteString(out, "container line one\ncontainer line two\n")
+			return err
+		},
+	}
+
+	var out bytes.Buffer
+	if err := doltLogsTo(townRoot, &out, &out, reads, 60, false); err != nil {
+		t.Fatalf("doltLogsTo: %v", err)
+	}
+
+	if gotContainer != "gt-dolt" || gotLines != 60 {
+		t.Errorf("container reader called with (%q, %d), want (\"gt-dolt\", 60)", gotContainer, gotLines)
+	}
+	if tailed {
+		t.Error("the stale host dolt.log was tailed")
+	}
+	got := out.String()
+	if !strings.Contains(got, "container line one") {
+		t.Errorf("output %q does not hold the container's lines", got)
+	}
+	if strings.Contains(got, "serving line one") {
+		t.Errorf("output %q holds the host dolt.log's lines", got)
 	}
 }
 
