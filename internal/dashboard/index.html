@@ -3229,7 +3229,11 @@ function renderSystemUpdates(s) {
     box.append(line);
   }
   paintSystemUpdatesIcon(chips);
-  $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
+  // The header says what the pane holds and, when the row cap cut commits, how
+  // many older ones it does not show. The count is of commits the join knows,
+  // so it reads "older not shown", never "undeployed" (gt-3bhxmy).
+  const more = (su && su.more) || 0;
+  $("systemupdatesnote").textContent = (rows.length === 1 ? "1 commit" : rows.length + " commits") + (more ? " · " + more + " older not shown" : "");
 }
 
 // The Maintenance jobs pane (gt-6yof7o): one row per job from the Jobs section

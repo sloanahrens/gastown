@@ -246,6 +246,44 @@ func TestSystemUpdatesPageDrawsTheEmptyStateAndCountNote(t *testing.T) {
 	}
 }
 
+// The header says what the pane holds: the rows it drew, and when the row cap
+// cut commits, how many older ones are not shown. The count is of commits the
+// join knows, so it reads "older not shown", never "undeployed" (gt-3bhxmy).
+func TestSystemUpdatesPageDrawsTheCutCount(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		rows int
+		more int
+		set  bool
+		want string
+	}{
+		{name: "three cut", rows: 6, more: 3, set: true, want: "6 commits · 3 older not shown"},
+		{name: "one older not shown", rows: 1, more: 1, set: true, want: "1 commit · 1 older not shown"},
+		{name: "nothing cut", rows: 6, more: 0, set: true, want: "6 commits"},
+		{name: "more absent", rows: 6, want: "6 commits"},
+		{name: "one row", rows: 1, want: "1 commit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := make([]any, tc.rows)
+			for i := range rows {
+				rows[i] = map[string]any{"sha": "abcdef123456"}
+			}
+			state := systemUpdatesState(systemUpdatesSources{}, rows...)
+			if tc.set {
+				state["system_updates"].(map[string]any)["more"] = tc.more
+			}
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", state)
+			if got := dom.element(t, "systemupdatesnote").Text; got != tc.want {
+				t.Errorf("%s: the header reads %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 // The pane is a fold in the left column, directly above Beads
 // (TestBeadsPaneSitsDirectlyUnderSystemUpdates reads that pair). The page's
 // push table points the section at the pane, and its redraw draws it.
