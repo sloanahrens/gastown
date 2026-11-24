@@ -894,3 +894,57 @@ func TestJobDueCapsTheRunDurationAtTheCadence(t *testing.T) {
 		})
 	}
 }
+
+// TestJobDueKeepsALedgerNextDue is bead gt-4i2sdl: a run that records its own
+// next-due time is judged on that time, exactly, so the run-duration allowance
+// never moves it. The run below takes 19 minutes and states next due five
+// minutes after it ends, while its 30-minute cadence would put the row due 54
+// minutes later and the allowance on top of the recorded time 19 minutes later.
+// The row is due at the recorded time and nowhere else.
+func TestJobDueKeepsALedgerNextDue(t *testing.T) {
+	t.Parallel()
+	const run = 19 * time.Minute
+	end := testNow.Add(-time.Hour)
+	nextDue := end.Add(5 * time.Minute)
+	cases := []struct {
+		name string
+		// after is how long past the recorded next-due time the row is judged:
+		// negative before it, zero at it, positive after it.
+		after time.Duration
+		want  State
+	}{
+		{name: "ok before the run's own next due time", after: -time.Minute, want: StateOK},
+		{name: "ok at the run's own next due time", after: 0, want: StateOK},
+		{name: "overdue a minute after the run's own next due time", after: time.Minute, want: StateOverdue},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeMayorDaemon(t, root, `{"job":{"interval":"30m"}}`)
+			due := nextDue
+			appendLedgerRuns(t, root, jobledger.Run{
+				Job:       "job",
+				StartedAt: end.Add(-run),
+				EndedAt:   end,
+				Outcome:   "ok",
+				Stats:     map[string]int64{"duration_ms": run.Milliseconds()},
+				NextDue:   &due,
+			})
+
+			jobs, err := list(root, Options{}, []config.DaemonStep{
+				{Name: "job", Kind: config.DaemonStepPatrol},
+			}, nextDue.Add(c.after))
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			row := jobs[0]
+			if row.Due == nil || !row.Due.Equal(nextDue) {
+				t.Errorf("Due = %v, want the run's recorded next due %v: the allowance does not move a recorded time", row.Due, nextDue)
+			}
+			if row.State != c.want {
+				t.Errorf("State = %q, want %q", row.State, c.want)
+			}
+		})
+	}
+}
