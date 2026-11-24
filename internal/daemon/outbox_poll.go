@@ -344,11 +344,12 @@ func (p *outboxPoll) readAndFile(ctx context.Context, rec session.SandboxRecord,
 	}
 	// The request is filed; recording it is what keeps the next tick, and a
 	// restarted daemon, from filing it again. A record that cannot be written is
-	// logged and the request counts as filed for this process: the file is
-	// rewritten whole on the next record, and until then the seat end's
-	// fingerprint leaves the open escalation alone.
+	// logged, and the request still counts as filed for the daemon's life: the
+	// daemon's record holds it in memory across ticks, and the file is rewritten
+	// whole on the next record. A restarted daemon, whose file was never written,
+	// files it again.
 	if err := p.filed.record(hash); err != nil {
-		logf("outbox_poll: seat %s: its request is filed, but the poll could not record it, so a restarted poll files it again: %v", rec.Session, err)
+		logf("outbox_poll: seat %s: its request is filed and counts as filed for the daemon's life, but the poll could not record it, so a restarted daemon files it again: %v", rec.Session, err)
 	}
 }
 
