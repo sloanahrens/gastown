@@ -73,11 +73,6 @@ const (
 	// to a full plugin run (gt-gg9hv.41).
 	cacheTrimFreeVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- df -Pk " + cacheTrimMountPath
 
-	// cacheTrimDuVerb is the pass's read of the claim's own size after a
-	// completed trim: du in the pod the listing came from, since df reports the
-	// whole node filesystem for a local-path claim (gt-eyjgal).
-	cacheTrimDuVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- du -sk " + cacheTrimMountPath
-
 	// cacheTrimWaitVerb is the wait for the trim Job this pass applied to
 	// complete, the call that ends a run.
 	cacheTrimWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s"
@@ -172,8 +167,6 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: "removed 2 absent 0 kept 0\n"}
 		case strings.Contains(verb, " df -Pk "):
 			return cliReply{stdout: cacheTrimDfReply(t, 1<<30)}
-		case verb == cacheTrimDuVerb:
-			return cliReply{stdout: cacheTrimDuReply(t, 1<<10)}
 		case strings.HasPrefix(verb, "get job,configmap "):
 			return cliReply{stdout: cacheTrimExistingJSON}
 		}
@@ -2649,20 +2642,9 @@ const cacheTrimNoOpListingJSON = `[` +
 	`{"path":"gocache/bb/b","cache":"build","size":5368709120,"atime":"2026-10-29T02:00:00Z","mtime":"2026-10-29T02:00:00Z"},` +
 	`{"path":"gocache/cc/c","cache":"build","size":5368709120,"atime":"2026-10-29T03:00:00Z","mtime":"2026-10-29T03:00:00Z"}]`
 
-// cacheTrimDuReply is du -sk's reply for a claim holding used bytes: the size
-// in whole KiB and the path du measured.
-func cacheTrimDuReply(t *testing.T, used int64) string {
-	t.Helper()
-	if used%1024 != 0 {
-		t.Fatalf("cacheTrimDuReply(%d): du -sk reports whole KiB", used)
-	}
-	return fmt.Sprintf("%d\t%s\n", used/1024, cacheTrimMountPath)
-}
-
 // newCacheTrimNoOpFixture builds the fixture in mode under the plugin's 10GB
-// cap, with a listing the cap has something to trim, answering the pass's du
-// read -- the claim's size after the trim -- with reply.
-func newCacheTrimNoOpFixture(t *testing.T, mode string, reply cliReply) *cacheTrimFixture {
+// cap, with a listing the cap has something to trim.
+func newCacheTrimNoOpFixture(t *testing.T, mode string) *cacheTrimFixture {
 	t.Helper()
 	f := newCacheTrimFixture(t, mode, map[string]cliReply{
 		cacheTrimListVerb: {stdout: cacheTrimNoOpListingJSON},
@@ -2673,7 +2655,6 @@ func newCacheTrimNoOpFixture(t *testing.T, mode string, reply cliReply) *cacheTr
 		}
 		return ""
 	}
-	f.setDuReply(reply)
 	return f
 }
 
@@ -2717,12 +2698,6 @@ func (f *cacheTrimFixture) setDfReply(reply cliReply) {
 	f.prependAnswer(func(c cliCall) bool { return strings.Contains(cacheTrimVerb(c.args), " df -Pk ") }, reply)
 }
 
-// setDuReply answers the pass's du read -- the claim's size after a trim --
-// with reply, in place of the fixture's default.
-func (f *cacheTrimFixture) setDuReply(reply cliReply) {
-	f.prependAnswer(func(c cliCall) bool { return cacheTrimVerb(c.args) == cacheTrimDuVerb }, reply)
-}
-
 // answerFrom makes reply the answer for every later call whose verb starts with
 // prefix, so a test changes one kind of call between passes.
 func (f *cacheTrimFixture) answerFrom(prefix string, reply cliReply) {
@@ -2760,7 +2735,7 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 	// disk does.
 	raised := func(t *testing.T) *cacheTrimFixture {
 		t.Helper()
-		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{})
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.d.cacheTrimNoOp.raise(attention.Item{Key: cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)})
 		return f
 	}
@@ -2895,7 +2870,7 @@ func TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim(t *testing.T) {
 	t.Parallel()
 	raised := func(t *testing.T) *cacheTrimFixture {
 		t.Helper()
-		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{})
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.d.cacheTrimNoOp.raise(attention.Item{Key: cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)})
 		return f
 	}

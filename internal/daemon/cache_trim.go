@@ -1595,63 +1595,6 @@ func cacheTrimPodSource(pod cacheTrimPod, volume string) (cacheTrimSource, bool)
 	return cacheTrimSource{}, false
 }
 
-// cacheTrimDu reads the claim's own used space, in bytes, with du in the pod
-// that mounts it. du is the claim's size where df's Used is the node's whole
-// filesystem on a local-path claim, so a trim that removes the claim's files
-// moves only du's figure (gt-eyjgal). The command runs as a separate
-// binary in the pod and container that mount the claim, never a helper
-// subcommand an older image would send to a full plugin run
-// (gt-gg9hv.41), and with only `du -sk`, which busybox and GNU/BSD du accept.
-//
-// A du that fails, is absent, prints anything but one line, or whose size is
-// not a whole number of KiB returns an error. The caller reads that as an
-// unknown reading, names the error, and raises nothing.
-func (d *Daemon) cacheTrimDu(ctx context.Context, kubeconfig string, source cacheTrimSource) (int64, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
-		"--", "du", "-sk", source.Root)
-	if err != nil {
-		return 0, err
-	}
-	return cacheTrimParseDu(out)
-}
-
-// cacheTrimParseDu turns du -sk's reply into the claim's used bytes: one line
-// naming the size in whole KiB and the path du measured, and nothing else. A
-// reply that is not that shape is an error naming the rule, never a zero
-// figure: a zero would drop the item for a claim nobody read.
-func cacheTrimParseDu(out []byte) (int64, error) {
-	var lines []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
-		}
-	}
-	if len(lines) != 1 {
-		return 0, fmt.Errorf("du printed %d non-empty line(s), want one", len(lines))
-	}
-	fields := strings.Fields(lines[0])
-	if len(fields) < 2 {
-		return 0, errors.New("du's line names no path")
-	}
-	return cacheTrimKiB("du", "size", fields[0])
-}
-
-// cacheTrimKiB reads one whole-KiB column of command's output as bytes: the
-// figure is never negative and small enough that its byte count fits an int64.
-func cacheTrimKiB(command, column, field string) (int64, error) {
-	kib, err := strconv.ParseInt(field, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s's %s column is not a whole number of KiB", command, column)
-	}
-	if kib < 0 {
-		return 0, fmt.Errorf("%s names %d KiB %s", command, kib, strings.ToLower(column))
-	}
-	if kib > math.MaxInt64/1024 {
-		return 0, fmt.Errorf("%s's %s column is too large to read as bytes", command, column)
-	}
-	return kib * 1024, nil
-}
-
 // cacheTrimListingEntry is one entry of the JSON `polecat-image trim-list`
 // prints.
 type cacheTrimListingEntry struct {
