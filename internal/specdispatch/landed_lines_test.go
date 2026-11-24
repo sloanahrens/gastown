@@ -36,10 +36,10 @@ func TestLandedLinesOutsideTheTable(t *testing.T) {
 	}
 }
 
-// Refuse is the band's P25.
+// Refuse is the band's Median.
 func TestLandedLinesRefuse(t *testing.T) {
 	t.Parallel()
-	for minutes, want := range map[float64]int{7: 38, 9: 58} {
+	for minutes, want := range map[float64]int{7: 67, 9: 109, 10: 246} {
 		band, found := LandedLines(minutes)
 		if !found || band.Refuse() != want {
 			t.Errorf("LandedLines(%v).Refuse() = %d, found %v, want %d", minutes, band.Refuse(), found, want)
