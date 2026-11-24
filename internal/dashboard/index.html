@@ -404,6 +404,9 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 /* One row per landed commit in the System updates pane: the sha, then its stage
    chips in pipeline order. A stage that never ran keeps the dim token. */
 .surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+/* The time a row last changed, drawn after its sha: dim like the sha, so the
+   row's stage colours stay the loudest thing on it (gt-okg1kq). */
+.sutime{color:var(--dim)}
 /* The header's worst-state glyph. A class of its own because the retired Tier
    sweeps icon's class must stay gone (gt-gfglv0, gt-jug4e0). */
 .suico{font-weight:700}
@@ -3110,11 +3113,61 @@ function systemUpdateBannerSweepLine(sweep) {
 // (gt-jug4e0).
 const SYSTEM_UPDATE_CHIP_RANK = {badc: 2, warnc: 1};
 
+// systemUpdateTimeSet says whether a stamp the feed may send is a time the
+// commit changed: it sends the zero time (0001-01-01T00:00:00Z) for a time no
+// stage reported and 1970-01-01T00:00:00Z for an ended time a run has not
+// reached, and neither is drawn. An unparseable stamp is not a time either, so
+// it draws nothing rather than a NaN (gt-okg1kq).
+const SYSTEM_UPDATE_EPOCH_MS = Date.UTC(1970, 0, 1);
+function systemUpdateTimeSet(at) {
+  if (!at) return false;
+  return new Date(at).getTime() > SYSTEM_UPDATE_EPOCH_MS;
+}
+
+// systemUpdateAtWords is a row's at drawn after its sha: the viewer's own
+// 24-hour clock, titled with the feed's full RFC 3339 stamp and how long ago it
+// changed. A row with no real time draws nothing (gt-okg1kq).
+function systemUpdateAtWords(at) {
+  if (!systemUpdateTimeSet(at)) return null;
+  const span = el("span", "sutime", clock(at).slice(0, 5));
+  span.title = at + " · " + age(at) + " ago";
+  return span;
+}
+
+// systemUpdateRunTime is a run's own stamp: when it ended, or when it started
+// while its end is not a real time — a running post-land run reports the epoch
+// as its end (gt-okg1kq).
+function systemUpdateRunTime(run) {
+  if (!run) return "";
+  return systemUpdateTimeSet(run.ended) ? run.ended : run.started;
+}
+
+// systemUpdateRollTime is a roll's own stamp: when it ended, or when it started
+// while it still runs (an unended roll sends no ended_at) (gt-okg1kq).
+function systemUpdateRollTime(roll) {
+  if (!roll) return "";
+  return systemUpdateTimeSet(roll.ended_at) ? roll.ended_at : roll.started_at;
+}
+
+// systemUpdateStageTime is the stamp one stage chip names: the run that ran its
+// stage, the sweep's at for a tier that sweep recorded, and the roll's own end
+// (its start while it runs). A stage the row holds no record for has no time
+// (gt-okg1kq).
+function systemUpdateStageTime(row, stage) {
+  if (stage === "post-land" || stage === "images") {
+    return systemUpdateRunTime((row.runs || []).find(r => r.workflow === stage + ".yml"));
+  }
+  if (stage === "roll") return systemUpdateRollTime(row.roll);
+  const swept = ((row.sweep && row.sweep.stages) || []).some(x => x.tier === stage);
+  return swept ? row.sweep.at : "";
+}
+
 // systemUpdateChip draws one chip: its colour class, the glyph its state
-// carries, and a title naming the state.
-function systemUpdateChip(name, cls, glyph, word) {
+// carries, and a title naming the state and, when the stage has one, that
+// stage's own time (gt-okg1kq).
+function systemUpdateChip(name, cls, glyph, word, at) {
   const chip = el("span", "tag " + cls, name + " " + glyph);
-  chip.title = name + ": " + word;
+  chip.title = name + ": " + word + (systemUpdateTimeSet(at) ? " · " + at + " · " + age(at) + " ago" : "");
   return chip;
 }
 
@@ -3155,12 +3208,14 @@ function renderSystemUpdates(s) {
   for (const row of rows) {
     const line = el("div", "surow");
     line.append(el("span", "title", row.sha || "–"));
+    const at = systemUpdateAtWords(row.at);
+    if (at) line.append(at);
     for (const stage of SYSTEM_UPDATE_STAGES) {
       let state = systemUpdateStageState(row, stage);
       if (state === "absent" && systemUpdateStageUnknown(su, stage)) state = "unknown";
       const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state];
       const said = state === "partial" ? systemUpdatePartialWord(row.roll) : word;
-      line.append(systemUpdateChip(stage, cls, glyph, said));
+      line.append(systemUpdateChip(stage, cls, glyph, said, systemUpdateStageTime(row, stage)));
       chips.push({name: stage, cls: cls, word: said});
       // The pair chip goes between the stages that build the images and the
       // roll that consumes them, and reads the row's Pair rather than its roll:
