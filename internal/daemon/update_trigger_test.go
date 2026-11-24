@@ -276,8 +276,8 @@ func TestUpdateFactsRunningBehind(t *testing.T) {
 	const unknown = "ffffffffffffffffffffffffffffffffffffffff"
 
 	tests := []struct {
-		name     string
-		outcome  update.Outcome
+		name    string
+		outcome update.Outcome
 		// installed and target pick the commits the staleness read and the
 		// state file report, from the fake repository's ancestor→descendant
 		// pair.
