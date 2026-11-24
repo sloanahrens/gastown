@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -57,6 +58,7 @@ func TestSystemUpdatesRowsJoinsStagesBySHA(t *testing.T) {
 			rolls:    []SystemUpdateRoll{staleRoll, rolled, midRoll},
 			want: []SystemUpdateRow{{
 				SHA:   all[:12],
+				At:    rolled.EndedAt,
 				Sweep: &newSweep,
 				Runs:  []PipelineRun{images, postLand},
 				Roll:  &rolled,
@@ -65,7 +67,7 @@ func TestSystemUpdatesRowsJoinsStagesBySHA(t *testing.T) {
 		{
 			name:   "only a sweep",
 			sweeps: []TierSweepRow{sweepOnly},
-			want:   []SystemUpdateRow{{SHA: only[:8], Sweep: &sweepOnly}},
+			want:   []SystemUpdateRow{{SHA: only[:8], At: sweepOnly.At, Sweep: &sweepOnly}},
 		},
 	}
 	for _, tt := range cases {
@@ -78,27 +80,68 @@ func TestSystemUpdatesRowsJoinsStagesBySHA(t *testing.T) {
 }
 
 // Rows are newest first by the latest stage the commit reached and never more
-// than the cap, so an extra commit is dropped from the old end.
+// than the cap, so an extra commit is dropped from the old end. Each row carries
+// that latest stamp as At — the roll ends after its sweep here, so At is the
+// roll's end, never the sweep's — and the section's JSON names it 'at'.
 func TestSystemUpdatesRowsNewestFirstAndCapped(t *testing.T) {
 	t.Parallel()
 
 	var sweeps []TierSweepRow
+	var rolls []SystemUpdateRoll
 	for i := 0; i < systemUpdatesRowCap+1; i++ {
-		sweeps = append(sweeps, TierSweepRow{
-			At:  sysTestClock.Add(time.Duration(i) * time.Minute),
-			Rig: "gastown",
-			SHA: sysTestSHA(i)[:8],
-		})
+		sha := sysTestSHA(i)
+		swept := sysTestClock.Add(time.Duration(i) * time.Minute)
+		sweeps = append(sweeps, TierSweepRow{At: swept, Rig: "gastown", SHA: sha[:8]})
+		rolls = append(rolls, sysTestRoll(sha, swept, swept.Add(30*time.Second)))
 	}
 	// Hand the join its commits oldest first, so the newest-first order must
 	// come from the stamps, not the input order.
-	got := SystemUpdateRows(sweeps, nil, nil, systemUpdatesRowCap)
+	got := SystemUpdateRows(sweeps, nil, rolls, systemUpdatesRowCap)
 
 	require.Len(t, got, systemUpdatesRowCap, "one commit over the cap is dropped")
 	for k := range got {
 		newest := len(sweeps) - 1 - k
-		assert.Equal(t, sysTestSHA(newest)[:8], got[k].SHA, "row %d is not the %dth-newest commit", k, k)
+		// The roll records the full sha, so the row is named by twelve.
+		sha := sysTestSHA(newest)[:12]
+		assert.Equal(t, sha, got[k].SHA, "row %d is not the %dth-newest commit", k, k)
+		assert.Equal(t, rolls[newest].EndedAt, got[k].At,
+			"row %d (%s) does not carry the newest time its stages reported", k, sha)
 	}
+
+	section, err := json.Marshal(SystemUpdates{Rows: got})
+	require.NoError(t, err)
+	var decoded struct {
+		Rows []map[string]json.RawMessage `json:"rows"`
+	}
+	require.NoError(t, json.Unmarshal(section, &decoded))
+	require.Len(t, decoded.Rows, len(got))
+	for k := range decoded.Rows {
+		raw, ok := decoded.Rows[k]["at"]
+		require.True(t, ok, "row %d (%s) JSON has no 'at'", k, got[k].SHA)
+		want, err := json.Marshal(got[k].At)
+		require.NoError(t, err)
+		assert.Equal(t, string(want), string(raw), "row %d (%s) JSON at", k, got[k].SHA)
+	}
+}
+
+// A row whose stages reported no time has a zero At, which the row's JSON omits
+// rather than drawing the year-1 zero instant.
+func TestSystemUpdatesRowsAtIsZeroWhenNoStageHasATime(t *testing.T) {
+	t.Parallel()
+
+	sha := sysTestSHA(1)
+	queued := PipelineRun{Workflow: imagesWorkflow, SHA: sha[:12], Status: pipelineQueued}
+	got := SystemUpdateRows(nil, &GastownPipeline{Runs: []PipelineRun{queued}}, nil, systemUpdatesRowCap)
+
+	require.Len(t, got, 1)
+	assert.True(t, got[0].At.IsZero(), "a row with no stage time has no At")
+
+	payload, err := json.Marshal(got[0])
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload, &fields))
+	_, ok := fields["at"]
+	assert.False(t, ok, "a zero At is omitted from the row's JSON")
 }
 
 // A record with no sha a join trusts names no commit: a blank roll target, a

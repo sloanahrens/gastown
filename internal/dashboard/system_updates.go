@@ -53,10 +53,14 @@ const (
 )
 
 // SystemUpdateRow is one landed commit as the System updates section draws it:
-// its sha cut to twelve characters, whichever of the three stages have run, and
-// the state of its image pair.
+// its sha cut to twelve characters, when it last changed, whichever of the three
+// stages have run, and the state of its image pair.
 type SystemUpdateRow struct {
-	SHA   string            `json:"sha"`
+	SHA string `json:"sha"`
+	// At is the newest time any stage of the commit reported, the same stamp the
+	// section orders rows by, so the drawn order can be read against it. Zero
+	// when no stage reported a time.
+	At    time.Time         `json:"at,omitzero"`
 	Sweep *TierSweepRow     `json:"sweep,omitempty"`
 	Runs  []PipelineRun     `json:"runs,omitempty"`
 	Roll  *SystemUpdateRoll `json:"roll,omitempty"`
@@ -78,7 +82,7 @@ func SystemUpdateRows(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []
 	}
 	rows := make([]SystemUpdateRow, 0, len(commits))
 	for _, c := range commits {
-		rows = append(rows, SystemUpdateRow{SHA: pipelineSHA(c.sha), Sweep: c.sweep, Runs: c.runs, Roll: c.roll})
+		rows = append(rows, SystemUpdateRow{SHA: pipelineSHA(c.sha), At: c.at, Sweep: c.sweep, Runs: c.runs, Roll: c.roll})
 	}
 	return rows
 }
