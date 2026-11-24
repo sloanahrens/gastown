@@ -444,6 +444,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"openshell-config-dir", &f.openShellConfigDir, r.openShellConfigDir},
 		{"forge-host", &f.forgeHost, r.forgeHost},
 		{"dolt-backup-host-path", &f.doltBackupHostPath, r.doltBackupHostPath},
+		{"town-state-backup-host-path", &f.townStateBackupHostPath, r.townStateBackupHostPath},
 		{"cloud-reports-host-path", &f.cloudReportsHostPath, r.cloudReportsHostPath},
 		{"cloud-releases-host-path", &f.cloudReleasesHostPath, r.cloudReleasesHostPath},
 		{"bd-gateway-url", &f.bdGatewayURL, r.bdGatewayURL},

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,32 +22,33 @@ import (
 // so TestRenderFlagsBooleansRoundTripDistinctly gives each its own run.
 func renderFlagsFixture() clusterRenderFlags {
 	return clusterRenderFlags{
-		dir:                   "/repo/gastown",
-		out:                   "/repo/manifests",
-		namespace:             "gt-control",
-		rehearsal:             false,
-		cpu:                   "4",
-		memory:                "8Gi",
-		hostGateway:           "192.168.64.1",
-		confirmStopped:        true,
-		withHelper:            true,
-		proxyImage:            "registry.example.test/gastown/proxy@sha256:" + strings.Repeat("1", 64),
-		polecatImage:          "registry.example.test/gastown/polecat@sha256:" + strings.Repeat("2", 64),
-		configDir:             "/host/.config/gt",
-		openShellConfigDir:    "/host/.config/openshell",
-		forgeHost:             "forge.internal.test:3000",
-		doltBackupHostPath:    "/host/dolt-backup",
-		cloudReportsHostPath:  "/host/gt-cloud/reports",
-		cloudReleasesHostPath: "/host/gt-cloud/releases",
-		dashboard:             true,
-		bdGatewayURL:          "http://127.0.0.1:8080",
-		bdGatewayReplicas:     2,
-		tracker:               true,
-		trackerDSNSecret:      "tracker-dsn",
-		trackerBackup:         true,
-		trackerBackupImage:    "pg@sha256:" + strings.Repeat("3", 64),
-		daemonBdGatewayURL:    "http://127.0.0.1:8081",
-		daemonBdGatewayURLSet: true,
+		dir:                     "/repo/gastown",
+		out:                     "/repo/manifests",
+		namespace:               "gt-control",
+		rehearsal:               false,
+		cpu:                     "4",
+		memory:                  "8Gi",
+		hostGateway:             "192.168.64.1",
+		confirmStopped:          true,
+		withHelper:              true,
+		proxyImage:              "registry.example.test/gastown/proxy@sha256:" + strings.Repeat("1", 64),
+		polecatImage:            "registry.example.test/gastown/polecat@sha256:" + strings.Repeat("2", 64),
+		configDir:               "/host/.config/gt",
+		openShellConfigDir:      "/host/.config/openshell",
+		forgeHost:               "forge.internal.test:3000",
+		doltBackupHostPath:      "/host/dolt-backup",
+		townStateBackupHostPath: "/host/gt-backups/town-state",
+		cloudReportsHostPath:    "/host/gt-cloud/reports",
+		cloudReleasesHostPath:   "/host/gt-cloud/releases",
+		dashboard:               true,
+		bdGatewayURL:            "http://127.0.0.1:8080",
+		bdGatewayReplicas:       2,
+		tracker:                 true,
+		trackerDSNSecret:        "tracker-dsn",
+		trackerBackup:           true,
+		trackerBackupImage:      "pg@sha256:" + strings.Repeat("3", 64),
+		daemonBdGatewayURL:      "http://127.0.0.1:8081",
+		daemonBdGatewayURLSet:   true,
 	}
 }
 
@@ -445,6 +447,7 @@ var renderFlagRecordNames = map[string]string{
 	"openShellConfigDir":            "OpenShellConfigDir",
 	"forgeHost":                     "ForgeHost",
 	"doltBackupHostPath":            "DoltBackupHostPath",
+	"townStateBackupHostPath":       "TownStateBackupHostPath",
 	"cloudReportsHostPath":          "CloudReportsHostPath",
 	"cloudReleasesHostPath":         "CloudReleasesHostPath",
 	"dashboard":                     "Dashboard",
@@ -471,10 +474,9 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 	// notRecorded names the flag-struct fields the file does not hold, each
 	// with the reason it need not.
 	notRecorded := map[string]string{
-		"daemonBdGatewayURLSet":   "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
-		"dashboardClaudeDir":      "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
-		"daemonClaudeDir":         "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
-		"townStateBackupHostPath": "not yet: gt-3c4ppq adds the flag, and gt-6iyjli records and replays it",
+		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
+		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})
@@ -739,4 +741,49 @@ func TestClusterRenderTownStateBackupHostPath(t *testing.T) {
 			t.Errorf("the refused render wrote %v", names)
 		}
 	})
+}
+
+// TestClusterRenderRecordedFlagsTownStateBackupHostPath holds
+// --town-state-backup-host-path to the recorded flags: --record-flags writes
+// the path into the file, and a later --use-recorded render of that town, with
+// the flag unnamed, mounts the recorded host directory (gt-6iyjli).
+func TestClusterRenderRecordedFlagsTownStateBackupHostPath(t *testing.T) {
+	t.Parallel()
+	const path = "/Users/Shared/gt-backups/town-state"
+	f := clusterRenderFixture(t)
+	f.townStateBackupHostPath = path
+	town := clusterRenderTestTown(t)
+	d := clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{record: true}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("the recording render: %v", err)
+	}
+
+	// The save: the file carries the key, rather than the loader answering empty
+	// from a default no file holds.
+	recordPath := renderFlagsPathIn(town)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(renderedText(t, recordPath)), &raw); err != nil {
+		t.Fatalf("decoding the recorded flags: %v", err)
+	}
+	if got, want := string(raw["town_state_backup_host_path"]), `"`+path+`"`; got != want {
+		t.Fatalf("the record's town_state_backup_host_path = %s, want %s: --record-flags dropped --town-state-backup-host-path", got, want)
+	}
+
+	// The replay names only a fresh --out; the path is the record's, and the
+	// rendered Deployment mounts the recorded host directory.
+	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay")}
+	d = clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{
+		use:   true,
+		named: func(flag string) bool { return flag == "out" },
+	}
+	if err := runClusterRender(d, replay); err != nil {
+		t.Fatalf("the replay: %v", err)
+	}
+	pod := renderedDeployment(t, replay.out, "-deployment-daemon.yaml").Spec.Template.Spec
+	i := slices.IndexFunc(pod.Volumes, func(v k8sdaemon.Volume) bool { return v.Name == k8sdaemon.TownStateBackupVolume })
+	if i < 0 || pod.Volumes[i].HostPath == nil || pod.Volumes[i].HostPath.Path != path {
+		t.Fatalf("the replay's %s volume is not a hostPath %s: --use-recorded dropped the recorded path", k8sdaemon.TownStateBackupVolume, path)
+	}
 }
