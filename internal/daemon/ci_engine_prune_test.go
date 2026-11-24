@@ -2395,6 +2395,95 @@ func TestCapCIEnginePlanCutsOldestFirst(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneCapsVolumes: the volume cap keeps the volumes created longest
+// ago. Five volumes are planned against a cap of three: the three oldest by
+// creation come back, the other two are counted as remaining, and the images are
+// removed whole. The fixture's names and creation times order differently, so a
+// cut by name names a different set.
+func TestCIEnginePruneCapsVolumes(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t,
+		nil,
+		[]map[string]any{
+			engImg('1', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1"),
+			engImg('2', 90*time.Hour, []string{"sha256:layer-i"}, "gastown-daemon:ci-2"),
+		},
+		[]map[string]any{
+			engVol(engHex64('a'), 40*time.Hour),
+			engVol(engHex64('b'), 20*time.Hour),
+			engVol(engHex64('c'), 30*time.Hour),
+			engVol(engHex64('d'), 10*time.Hour),
+			engVol(engHex64('e'), 7*time.Hour),
+		},
+	))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if len(plan.volumes) != 5 || len(plan.images) != 2 {
+		t.Fatalf("the fixture planned %d volumes and %d images, want 5 and 2", len(plan.volumes), len(plan.images))
+	}
+	volumesBefore := engVolumeNames(plan.volumes)
+	imagesBefore := engImageIDs(plan.images)
+
+	capped, remaining := capCIEnginePlan(plan, 3)
+
+	// Creation ages: a 40h, c 30h, b 20h, d 10h, e 7h. By name the order is a-e,
+	// so a cut by name would return a, b and c.
+	if got, want := engVolumeNames(capped.volumes), []string{engHex64('a'), engHex64('c'), engHex64('b')}; !slices.Equal(got, want) {
+		t.Errorf("capped volumes = %v, want the three oldest by creation time %v", got, want)
+	}
+	if want := (ciEngineRemaining{volumes: 2}); remaining != want {
+		t.Errorf("remaining = %+v, want %+v", remaining, want)
+	}
+	if got, want := engImageIDs(capped.images), imagesBefore; !slices.Equal(got, want) {
+		t.Errorf("the cap changed the images: %v, want them whole %v", got, want)
+	}
+	if len(capped.containers) != 0 {
+		t.Errorf("the cap returned containers %v, want none", engContainerIDs(capped.containers))
+	}
+	if got := engVolumeNames(plan.volumes); !slices.Equal(got, volumesBefore) {
+		t.Errorf("the cap modified the plan it was given: %v, want %v", got, volumesBefore)
+	}
+}
+
+// TestCapCIEnginePlanDefersAVolumeWithNoCreationTime: the plan comes from
+// planCIEnginePrune, which refused a listing whose times do not read, so this
+// cannot happen for an engine the daemon planned. The cap is total anyway: a
+// volume whose creation time does not read is ordered last, so it is kept and
+// counted as remaining rather than removed ahead of one whose time is known.
+func TestCapCIEnginePlanDefersAVolumeWithNoCreationTime(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t, nil, nil,
+		[]map[string]any{
+			engVol(engHex64('a'), 40*time.Hour),
+			engVol(engHex64('b'), 30*time.Hour),
+			engVol(engHex64('c'), 20*time.Hour),
+			engVol(engHex64('d'), 10*time.Hour),
+		},
+	))
+	plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	// 'b' was created 30h ago; it loses its time.
+	for i := range plan.volumes {
+		if plan.volumes[i].Name == engHex64('b') {
+			plan.volumes[i].CreatedAt = "not a time"
+		}
+	}
+
+	capped, remaining := capCIEnginePlan(plan, 3)
+
+	// The readable ones oldest first: a at 40h, c at 20h, d at 10h; then 'b'.
+	if got, want := engVolumeNames(capped.volumes), []string{engHex64('a'), engHex64('c'), engHex64('d')}; !slices.Equal(got, want) {
+		t.Errorf("capped volumes = %v, want %v", got, want)
+	}
+	if want := (ciEngineRemaining{volumes: 1}); remaining != want {
+		t.Errorf("remaining = %+v, want %+v", remaining, want)
+	}
+}
+
 // TestCapCIEnginePlanAtOrAboveTheCountKeepsAll: a cap at or above the container
 // count is not a cut. The plan comes back in the order it was given, nothing is
 // left for a later run, and the plan itself is not modified. The fixture's stop

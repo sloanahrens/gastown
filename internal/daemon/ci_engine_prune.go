@@ -456,58 +456,89 @@ type ciEngineStopKey struct {
 	known     bool
 }
 
-// capCIEnginePlan returns a copy of plan with its containers cut to max, the
-// ones that stopped longest ago first, and the count of each kind left for a
-// later run. The plan is in id order today, so the copy's containers are sorted
-// by their stop time (ciEngineStoppedAt) before the cut. Images and volumes are
-// copied unchanged and are not capped by this function, so their remaining
-// counts are always 0. A plan with no more containers than max is returned as
-// given, with nothing remaining.
+// ciEngineVolumeKey is one planned volume's place in the cap's order: the
+// instant it was created, which is what the cap cuts by, and whether that
+// instant reads at all.
+type ciEngineVolumeKey struct {
+	volume  ciEngineVolume
+	created time.Time
+	known   bool
+}
+
+// capCIEnginePlan returns a copy of plan with its containers and volumes cut to
+// max, the oldest first, and the count of each kind left for a later run. The
+// plan is in id order today and its volumes in name order, so the copy's
+// containers are sorted by their stop time (ciEngineStoppedAt) and its volumes by
+// their creation time before the cut. Images are copied unchanged and are not
+// capped by this function, so their remaining count is always 0. A kind with no
+// more candidates than max is returned as given, with nothing remaining.
 //
-// Every container in the plan came through planCIEnginePrune, which refused a
-// listing whose creation or finish time does not read, so every stop time here
-// is known. A container whose time does not read anyway is ordered last, so it
-// is kept and counted as remaining, never removed ahead of one whose stop time
-// is known. The input plan is not modified.
+// Every container and volume in the plan came through planCIEnginePrune, which
+// refused a listing whose time does not read, so every stop and creation time
+// here is known. One that does not read anyway is ordered last, so it is kept and
+// counted as remaining, never removed ahead of one whose time is known. The input
+// plan is not modified.
 func capCIEnginePlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemaining) {
+	if max < 0 {
+		max = 0
+	}
 	out := ciEnginePlan{
 		containers: slices.Clone(plan.containers),
 		images:     slices.Clone(plan.images),
 		volumes:    slices.Clone(plan.volumes),
 	}
-	if max >= len(out.containers) {
-		return out, ciEngineRemaining{}
-	}
-	if max < 0 {
-		max = 0
-	}
-	keyed := make([]ciEngineStopKey, len(out.containers))
-	for i, c := range out.containers {
-		keyed[i] = ciEngineStopKey{container: c}
-		keyed[i].stoppedAt, keyed[i].known = ciEngineStopKeyOf(c)
-	}
-	slices.SortStableFunc(keyed, func(a, b ciEngineStopKey) int {
-		switch {
-		case a.known && b.known:
-			if d := a.stoppedAt.Compare(b.stoppedAt); d != 0 {
-				return d
-			}
-		case a.known:
-			return -1
-		case b.known:
-			return 1
+	var remaining ciEngineRemaining
+	if max < len(out.containers) {
+		keyed := make([]ciEngineStopKey, len(out.containers))
+		for i, c := range out.containers {
+			keyed[i] = ciEngineStopKey{container: c}
+			keyed[i].stoppedAt, keyed[i].known = ciEngineStopKeyOf(c)
 		}
-		return strings.Compare(a.container.ID, b.container.ID)
-	})
-	for i := range max {
-		out.containers[i] = keyed[i].container
+		slices.SortStableFunc(keyed, func(a, b ciEngineStopKey) int {
+			switch {
+			case a.known && b.known:
+				if d := a.stoppedAt.Compare(b.stoppedAt); d != 0 {
+					return d
+				}
+			case a.known:
+				return -1
+			case b.known:
+				return 1
+			}
+			return strings.Compare(a.container.ID, b.container.ID)
+		})
+		for i := range max {
+			out.containers[i] = keyed[i].container
+		}
+		remaining.containers = len(keyed) - max
+		out.containers = out.containers[:max]
 	}
-	return ciEnginePlan{
-			containers: out.containers[:max],
-			images:     out.images,
-			volumes:    out.volumes,
-		},
-		ciEngineRemaining{containers: len(keyed) - max}
+	if max < len(out.volumes) {
+		keyed := make([]ciEngineVolumeKey, len(out.volumes))
+		for i, v := range out.volumes {
+			keyed[i] = ciEngineVolumeKey{volume: v}
+			keyed[i].created, keyed[i].known = ciEngineVolumeKeyOf(v)
+		}
+		slices.SortStableFunc(keyed, func(a, b ciEngineVolumeKey) int {
+			switch {
+			case a.known && b.known:
+				if d := a.created.Compare(b.created); d != 0 {
+					return d
+				}
+			case a.known:
+				return -1
+			case b.known:
+				return 1
+			}
+			return strings.Compare(a.volume.Name, b.volume.Name)
+		})
+		for i := range max {
+			out.volumes[i] = keyed[i].volume
+		}
+		remaining.volumes = len(keyed) - max
+		out.volumes = out.volumes[:max]
+	}
+	return out, remaining
 }
 
 // ciEngineStopKeyOf reads a planned container's stop time, the key the container
@@ -525,6 +556,18 @@ func ciEngineStopKeyOf(c ciEngineContainer) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return stoppedAt, true
+}
+
+// ciEngineVolumeKeyOf reads a planned volume's creation time, the key the volume
+// cap orders by. known is false when the time does not read; the cap then orders
+// the volume last, so it is kept. The plan the daemon builds never reaches that
+// case: planCIEnginePrune refuses such a listing.
+func ciEngineVolumeKeyOf(v ciEngineVolume) (time.Time, bool) {
+	created, err := parseCIEngineTime(v.CreatedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return created, true
 }
 
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
