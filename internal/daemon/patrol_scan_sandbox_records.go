@@ -170,9 +170,11 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 // The patrol never clears the record or releases the seat itself.
 //
 // A record without landing facts, one that cannot be read, and an end that does
-// not complete are each logged with the seat's name, and the keep stands: the
-// pass goes on to the next record. The gateway questions the end asks are
-// outside the walk's record budget (see patrolScanSandboxRecords).
+// not complete are each logged with the seat's name, and the pass goes on to the
+// next record. An end that does not complete is logged with the reason its kept
+// record holds after it: a record the end rewrote, removed or made unreadable is
+// read again, never the reason read before it. The gateway questions the end
+// asks are outside the walk's record budget (see patrolScanSandboxRecords).
 func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return // a record that names no seat has no kept record to complete
@@ -194,7 +196,19 @@ func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
 		return
 	}
 	if !h.d.sandboxSeatEnder()(rec.Rig, rec.Polecat, *kept.Landing) {
-		h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its seat end did not complete after its sandbox was deleted; the keep stands (%s)", rec.Rig, rec.Polecat, kept.Reason)
+		// The re-run rewrites the kept record with the reason it decided on now
+		// (recordKeptSeat), so the reason read before it is stale: read the
+		// record again, and a record the re-run removed or left unreadable is
+		// named instead of printing a reason it no longer holds.
+		kept, err = readKeptSandboxSeatRecord(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its seat end did not complete after its sandbox was deleted; its keep is gone (its kept record is not there)", rec.Rig, rec.Polecat)
+		case err != nil:
+			h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its seat end did not complete after its sandbox was deleted, and its kept record cannot be read: %v", rec.Rig, rec.Polecat, err)
+		default:
+			h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its seat end did not complete after its sandbox was deleted; the keep stands (%s)", rec.Rig, rec.Polecat, kept.Reason)
+		}
 	}
 }
 
