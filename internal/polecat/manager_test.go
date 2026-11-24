@@ -1739,6 +1739,46 @@ func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 	}
 }
 
+// TestReuseIdlePolecatRefusesAClaimedSeat pins gt-x1xqqp: a seat that a first
+// sling claimed through ReuseIdlePolecat for bead A (its agent bead spawning,
+// hook_bead=A, the work bead open and not yet hooked) is refused to a second
+// sling for bead B with ErrPolecatNeedsRecovery, so the second sling moves on
+// to another seat instead of resetting the claimed one. The gate is not
+// relaxed here; this test keeps the refusal from changing silently.
+func TestReuseIdlePolecatRefusesAClaimedSeat(t *testing.T) {
+	t.Parallel()
+	const (
+		seat  = "alpha"
+		workA = "gt-claim-a"
+		workB = "gt-claim-b"
+	)
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, seat)
+	mgr.spawnGraceWindow = 5 * time.Minute
+	bd.Seed(
+		beads.Issue{ID: workA, Title: "claimed by the first sling", Status: string(beads.StatusOpen)},
+		beads.Issue{ID: workB, Title: "the second sling's bead", Status: string(beads.StatusOpen)},
+	)
+
+	if _, err := mgr.ReuseIdlePolecat(seat, AddOptions{HookBead: workA}); err != nil {
+		t.Fatalf("first ReuseIdlePolecat(%s) for %s: %v: the claim must succeed on a settled idle seat", seat, workA, err)
+	}
+	// The fake store stamps updated_at on its own clock, which starts at
+	// beadsfake.Epoch and ticks per write, so the claim the first call just
+	// wrote reads as older than the spawn grace. A real sling's claim is stamped
+	// now: restamp the same agent bead 30 s ago, as the other spawning cases do,
+	// and keep every field the claim wrote.
+	claim, err := bd.Show(mgr.agentBeadID(seat))
+	if err != nil {
+		t.Fatalf("read the claim on %s: %v", seat, err)
+	}
+	claim.UpdatedAt = time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	bd.Seed(*claim)
+	_, err = mgr.ReuseIdlePolecat(seat, AddOptions{HookBead: workB})
+	if !errors.Is(err, ErrPolecatNeedsRecovery) {
+		t.Fatalf("second ReuseIdlePolecat(%s) for %s err = %v, want ErrPolecatNeedsRecovery: the seat is claimed for %s and not yet hooked", seat, workB, err, workA)
+	}
+}
+
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	t.Parallel()
 	mgr, mayorRig, _, w := canonicalRig(t)
