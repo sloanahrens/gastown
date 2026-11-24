@@ -90,6 +90,15 @@ const (
 	maintenancePolecatFreshness = 15 * time.Minute
 
 	maintenanceGCStateFileName = "maintenance_state.json"
+
+	// maintenanceGCLockWait bounds one database's gc wait for the daemon's
+	// Dolt tasks to release doltMaintMu's read side, in maintenanceGCLockPoll
+	// steps; the jsonl export (~23 s, on a schedule that lands on ticks)
+	// finishes inside it (gt-u15nxv). maintenanceGCLockPolls caps the attempts
+	// too, so a clock that does not advance still ends the wait.
+	maintenanceGCLockWait  = 60 * time.Second
+	maintenanceGCLockPoll  = time.Second
+	maintenanceGCLockPolls = int(maintenanceGCLockWait / maintenanceGCLockPoll)
 )
 
 // gcMeasure is one database's sizes before or after a gc.
@@ -736,6 +745,25 @@ type maintenanceGCResult struct {
 	backedUp []string
 }
 
+// lockWithin takes doltMaintMu's write side for one database's gc, polling
+// maintenanceGCLockPoll apart until the daemon's Dolt tasks release the read
+// side or maintenanceGCLockWait passes; true means the caller must unlock. A
+// task that shares the tick's schedule no longer costs the tick its only
+// attempt (gt-u15nxv), and the seams let a test run the wait on a fake clock.
+func (d *Daemon) lockWithin(now func() time.Time, sleep func(time.Duration)) bool {
+	deadline := now().Add(maintenanceGCLockWait)
+	for polls := 0; polls <= maintenanceGCLockPolls; polls++ {
+		if d.doltMaintMu.TryLock() {
+			return true
+		}
+		if !now().Before(deadline) {
+			return false
+		}
+		sleep(maintenanceGCLockPoll)
+	}
+	return false
+}
+
 // maintenanceGCCycle measures every database, gc's the due ones largest
 // first, and re-checks the quiet-window guard and the pause marker before
 // each.
@@ -751,7 +779,8 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, localDat
 		d.logger.Printf("scheduled_maintenance: WARNING: %v — treating every database as never gc'd", err)
 	}
 
-	now := d.maintenance().now()
+	maint := d.maintenance()
+	now := maint.now()
 	var eligible []gcCandidate
 	for _, db := range databases {
 		var m gcMeasure
@@ -810,18 +839,22 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, localDat
 	}
 
 	for i, c := range eligible {
-		if quiet, why := d.maintenance().quiet(d); !quiet {
+		// Exclusive against the daemon's own Dolt tasks (backups, wisp
+		// reaper, JSONL export, compactor), which hold the read side.
+		if !d.lockWithin(maint.now, maint.sleep) {
+			return defer_(i, "daemon Dolt task in flight")
+		}
+		// The guards are read under the lock: the wait above can last a
+		// minute, and a landing pass or an operator's pause may start in it.
+		if quiet, why := maint.quiet(d); !quiet {
+			d.doltMaintMu.Unlock()
 			return defer_(i, why)
 		}
 		// Someone else's deliberate outage (the backup, an operator) is not
 		// ours to overwrite or end.
-		if m := d.maintenance().pauseCurrent(d.config.TownRoot, d.maintenance().now()); m != nil {
+		if m := maint.pauseCurrent(d.config.TownRoot, maint.now()); m != nil {
+			d.doltMaintMu.Unlock()
 			return defer_(i, m.Message())
-		}
-		// Exclusive against the daemon's own Dolt tasks (backups, wisp
-		// reaper, JSONL export, compactor), which hold the read side.
-		if !d.doltMaintMu.TryLock() {
-			return defer_(i, "daemon Dolt task in flight")
 		}
 
 		err := d.maintenanceGCOne(parent, dataDir, localDataDir, c)
