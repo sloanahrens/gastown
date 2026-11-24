@@ -120,7 +120,11 @@ func ForwardCheck(run Runner) Check {
 				// would hide every check after it.
 				return Result{Detail: "no runner configured"}
 			}
-			out, err := run(ctx, "curl", "--max-time", "5", "-s", "-o", "/dev/null",
+			// The bound exceeds the dashboard's own /api/state wait
+			// (internal/dashboard/hub.go, apiStateBound), so a cold dashboard
+			// with no page subscribed still answers before curl gives up; an
+			// error after it is a forward that is not answering (gt-8e94ah).
+			out, err := run(ctx, "curl", "--max-time", "8", "-s", "-o", "/dev/null",
 				"-w", "%{http_code}", forwardProbeURL)
 			status := strings.TrimSpace(string(out))
 			switch {

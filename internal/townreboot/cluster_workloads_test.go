@@ -187,7 +187,7 @@ func TestRebootCheckClusterReplicasCommands(t *testing.T) {
 
 // forwardProbeCall is the one read the forward check makes: curl prints the
 // dashboard's status code and nothing else.
-const forwardProbeCall = `curl --max-time 5 -s -o /dev/null -w %{http_code} http://127.0.0.1:8787/api/state`
+const forwardProbeCall = `curl --max-time 8 -s -o /dev/null -w %{http_code} http://127.0.0.1:8787/api/state`
 
 // wantForwardFix is the Fix text the row carries, written out rather than read
 // from the package's constant so a changed Fix fails here.
@@ -284,7 +284,7 @@ func TestRebootCheckClusterForwardRows(t *testing.T) {
 // dashboard answers or not (gt-nxv4vr).
 func TestRebootCheckClusterForwardCommands(t *testing.T) {
 	t.Parallel()
-	want := []string{"curl", "--max-time", "5", "-s", "-o", "/dev/null",
+	want := []string{"curl", "--max-time", "8", "-s", "-o", "/dev/null",
 		"-w", "%{http_code}", "http://127.0.0.1:8787/api/state"}
 	if got := strings.Join(want, " "); got != forwardProbeCall {
 		t.Fatalf("test fixture command = %q, want %q", got, forwardProbeCall)
@@ -355,7 +355,7 @@ func TestRebootCheckClusterOrder(t *testing.T) {
 		{"kubectl", "--context", "colima-gt-control", "-n", "forgejo", "get", "pods", "-o", "json"},
 		{"kubectl", "--context", "colima-gt-control", "-n", "gt",
 			"get", "deploy", "daemon", "dashboard", "-o", "json"},
-		{"curl", "--max-time", "5", "-s", "-o", "/dev/null",
+		{"curl", "--max-time", "8", "-s", "-o", "/dev/null",
 			"-w", "%{http_code}", "http://127.0.0.1:8787/api/state"},
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {
