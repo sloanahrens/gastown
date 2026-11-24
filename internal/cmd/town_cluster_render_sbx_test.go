@@ -43,6 +43,7 @@ func sbxEngineDeps(t *testing.T, set sbx.Set, received *sbx.Inputs) clusterRende
 			return nil, errors.New("planted helm")
 		},
 		writeFile: func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:       io.Discard,
 	}
 }
 
@@ -81,6 +82,34 @@ func TestClusterRenderSbxEngineWritesTheDesiredSetInApplyOrder(t *testing.T) {
 		if !bytes.Equal(body, sbxEngineObjects[i].Doc) {
 			t.Errorf("%s = %q, want the object's document %q", name, body, sbxEngineObjects[i].Doc)
 		}
+	}
+}
+
+// After the files, the render prints one expected Secret line per name in the
+// set's Secrets, in the set's order, and nothing else about them.
+func TestClusterRenderSbxEnginePrintsTheExpectedSecretNames(t *testing.T) {
+	t.Parallel()
+	var printed bytes.Buffer
+	var received sbx.Inputs
+	d := sbxEngineDeps(t, sbx.Set{
+		Objects: sbxEngineObjects,
+		Secrets: []string{"openshell-server-tls", "openshell-jwt-keys"},
+	}, &received)
+	d.out = &printed
+	d.writeFile = func(path string, data []byte) error {
+		if printed.Len() > 0 {
+			t.Errorf("runSbxRender wrote %s after it printed %q; the Secret names follow the files",
+				filepath.Base(path), printed.String())
+		}
+		return os.WriteFile(path, data, 0o644)
+	}
+	err := runSbxRender(d, sbxRenderInputs{OutDir: t.TempDir(), Manifests: "m", Chart: "c", Values: "v"})
+	if err != nil {
+		t.Fatalf("runSbxRender(): %v", err)
+	}
+	want := "expected Secret: openshell-server-tls\nexpected Secret: openshell-jwt-keys\n"
+	if got := printed.String(); got != want {
+		t.Fatalf("printed %q, want %q", got, want)
 	}
 }
 

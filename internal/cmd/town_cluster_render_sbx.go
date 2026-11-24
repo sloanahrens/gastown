@@ -19,8 +19,10 @@ type sbxRenderInputs struct {
 
 // runSbxRender composes the gt-sbx desired set with sbx.Render and writes it to
 // in.OutDir, one numbered file per object in the set's apply order. A file is
-// named as the control render names its own, so the two apply sets read alike;
-// nothing is applied and no cluster is read.
+// named as the control render names its own, so the two apply sets read alike.
+// After the files it prints one expected Secret line per name in the set's
+// Secrets, in their order, and never a value; nothing is applied and no cluster
+// is read.
 func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
 	set, err := d.renderSbx(context.Background(), sbx.Inputs{
 		Read:             d.readFile,
@@ -38,6 +40,9 @@ func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
 		if err := d.writeFile(path, object.Doc); err != nil {
 			return fmt.Errorf("cannot write %s: %w", path, err)
 		}
+	}
+	for _, name := range set.Secrets {
+		fmt.Fprintf(d.out, "expected Secret: %s\n", name)
 	}
 	return nil
 }
