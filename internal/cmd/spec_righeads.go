@@ -65,11 +65,13 @@ func parseRigHeads(records [][]string) ([]rigHashRow, error) {
 
 // rigHeads asks every named rig's database for its two hashes in one SQLCSV
 // round trip, so a rig costs no call of its own, and parses the answer with
-// ParseRigHeads into one row per database. The databases are the ones
-// rigDatabases names, sorted so two runs send the same statement. A rig whose
-// metadata names no database is not asked for, and a set with none refuses
-// rather than answering empty (gt-ihvt1v, gt-5v8y37).
-func rigHeads(townRoot string, rigs []string, read sqlReader) ([]rigHashRow, error) {
+// ParseRigHeads into one row per database. Each rig is then keyed by its own
+// name with the hashes of the database rigDatabases names for it, so a caller
+// holding a rig asks nothing about databases. The databases are sorted so two
+// runs send the same statement. A rig whose metadata names no database is not
+// asked for and is keyed nowhere, and a set with none refuses rather than
+// answering empty (gt-j3vdg4, gt-ihvt1v, gt-5v8y37).
+func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsql.RigHash, error) {
 	databases := rigDatabases(townRoot, rigs)
 	names := make([]string, 0, len(databases))
 	for _, db := range databases {
@@ -80,5 +82,19 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) ([]rigHashRow, err
 	if err != nil {
 		return nil, err
 	}
-	return parseRigHeads(records)
+	rows, err := parseRigHeads(records)
+	if err != nil {
+		return nil, err
+	}
+	byDatabase := make(map[string]beadsql.RigHash, len(rows))
+	for _, row := range rows {
+		byDatabase[row.Database] = beadsql.RigHash{Head: row.Head, Working: row.Working}
+	}
+	heads := make(map[string]beadsql.RigHash, len(rigs))
+	for rig, db := range databases {
+		if hash, ok := byDatabase[db]; ok {
+			heads[rig] = hash
+		}
+	}
+	return heads, nil
 }
