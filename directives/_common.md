@@ -33,11 +33,11 @@ Applies to every agent working this rig, whatever formula is running.
   implementation details.
 - While you work, run only the one test or file that covers what you just
   changed. Never run the same command twice without an edit in between.
-- Run `gt done` once work is done: it runs the presubmit gate, lint included,
-  and refuses on red; fix what it names, rerun it. Never run `make test`,
-  `make lint` or `make gate` yourself. An acceptance box saying lint passes is
-  ticked once `go vet` and the Gate's tests pass; the landing lints again. Never
-  leave it unticked to wait for a human.
+- Run `gt done` last: runs presubmit (`docs/testing.md`), lint included;
+  fix what it names, rerun. Never run `make test`, `make lint` or
+  `make gate`: the landing runs the full gate; om weighs tests by `.om.json`.
+  Tick a lint passes box once `go vet` and the Gate pass; untick it if the
+  landing's lint fails. Never leave it unticked for a human.
 - A failing test your diff does not touch has a cause. Do not file a bead: run
   `gt done --status DEFERRED --finding "<test name, full output, how you ran it>"`
   and the town files the Found bead. Do not retry it, and do not add retries,
