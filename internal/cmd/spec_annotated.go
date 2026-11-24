@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
@@ -41,6 +43,15 @@ type specAnnotatedFile struct {
 	Owner    string                          `json:"owner"`
 	Beads    map[string]map[string]int       `json:"beads"`
 	Verdicts map[string]specCandidateVerdict `json:"verdicts,omitempty"`
+	Rigs     map[string]specRigRead          `json:"rigs,omitempty"`
+}
+
+// specRigRead is one rig's last board read.
+type specRigRead struct {
+	Head       string    `json:"head"`
+	Working    string    `json:"working"`
+	At         time.Time `json:"at"`
+	Candidates int       `json:"candidates"`
 }
 
 type specAnnotated struct {
@@ -56,6 +67,8 @@ type specAnnotated struct {
 	// verdicts is each candidate's shape-and-label verdict as the tick that
 	// read it decided, keyed by bead id.
 	verdicts map[string]specCandidateVerdict
+	// rigs is each rig's last board read, never pruned: the board lists beads.
+	rigs map[string]specRigRead
 	// counts is this tick's board comment_count for each candidate; a bead
 	// absent from it is not remembered or skipped.
 	counts map[string]int
@@ -72,6 +85,7 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 		owner:    owner,
 		seen:     map[string]map[string]int{},
 		verdicts: map[string]specCandidateVerdict{},
+		rigs:     map[string]specRigRead{},
 		counts:   map[string]int{},
 	}
 	if owner == "" {
@@ -89,6 +103,9 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 	a.seen = f.Beads
 	if f.Verdicts != nil {
 		a.verdicts = f.Verdicts
+	}
+	if f.Rigs != nil {
+		a.rigs = f.Rigs
 	}
 	return a
 }
@@ -199,13 +216,36 @@ func (a *specAnnotated) save() {
 	}
 	err := os.MkdirAll(filepath.Dir(a.path), 0o700)
 	if err == nil {
-		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts}, 0o600)
+		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts, Rigs: a.rigs}, 0o600)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: spec annotated set not saved: %v\n", err)
 		return
 	}
 	a.dirty = false
+}
+
+// noteRigRead remembers a rig's board read at the time it ran.
+func (a *specAnnotated) noteRigRead(rig string, hash beadsql.RigHash, at time.Time, candidates int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rigs[rig] = specRigRead{Head: hash.Head, Working: hash.Working, At: at, Candidates: candidates}
+	a.dirty = true
+}
+
+// rigQuiet answers whether rig's hashes in heads equal its last read, which listed
+// no candidate and is under five minutes old at now. Unknown, empty or future reads the board.
+func (a *specAnnotated) rigQuiet(rig string, heads map[string]beadsql.RigHash, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	hash, inHeads := heads[rig]
+	last, known := a.rigs[rig]
+	if !inHeads || !known || hash.Head == "" || hash.Working == "" {
+		return false
+	}
+	age := now.Sub(last.At)
+	return hash.Head == last.Head && hash.Working == last.Working &&
+		last.Candidates == 0 && age >= 0 && age < 5*time.Minute
 }
 
 // specKeyDigest is a note key's short digest, so the file stays small however

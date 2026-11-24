@@ -6,9 +6,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -314,4 +316,70 @@ func TestSpecAnnotatedFailedReadIsNotRemembered(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("annotate ran %d times, want 2: a failed read must be retried", calls)
 	}
+}
+
+// TestTickEffQuietRigMemory: a rig answers quiet only when its hashes equal the
+// stored read, which listed no candidate and ran under five minutes before now.
+func TestTickEffQuietRigMemory(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	stored := beadsql.RigHash{Head: "h1", Working: "w1"}
+	cases := []struct {
+		name       string
+		query      string
+		heads      map[string]beadsql.RigHash
+		candidates int
+		now        time.Time
+		want       bool
+	}{
+		{"unchanged and quiet", "gt", map[string]beadsql.RigHash{"gt": stored}, 0, base.Add(time.Minute), true},
+		{"just under five minutes old", "gt", map[string]beadsql.RigHash{"gt": stored}, 0, base.Add(5*time.Minute - time.Second), true},
+		{"five minutes old", "gt", map[string]beadsql.RigHash{"gt": stored}, 0, base.Add(5 * time.Minute), false},
+		{"read stamped after now", "gt", map[string]beadsql.RigHash{"gt": stored}, 0, base.Add(-time.Second), false},
+		{"head moved", "gt", map[string]beadsql.RigHash{"gt": {Head: "h2", Working: "w1"}}, 0, base.Add(time.Minute), false},
+		{"working moved", "gt", map[string]beadsql.RigHash{"gt": {Head: "h1", Working: "w2"}}, 0, base.Add(time.Minute), false},
+		{"candidate listed", "gt", map[string]beadsql.RigHash{"gt": stored}, 1, base.Add(time.Minute), false},
+		{"empty hash", "gt", map[string]beadsql.RigHash{"gt": {}}, 0, base.Add(time.Minute), false},
+		{"rig absent from hashes", "gt", map[string]beadsql.RigHash{"be": stored}, 0, base.Add(time.Minute), false},
+		{"rig absent from memory", "be", map[string]beadsql.RigHash{"be": stored}, 0, base.Add(time.Minute), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+			a.noteRigRead("gt", stored, base, tc.candidates)
+			if got := a.rigQuiet(tc.query, tc.heads, tc.now); got != tc.want {
+				t.Errorf("rigQuiet(%q) = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+// quietRigSaved saves gt's unchanged, quiet read under owner and returns the file.
+func quietRigSaved(t *testing.T, owner string, base time.Time) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "spec_annotated.json")
+	a := loadSpecAnnotated(path, owner)
+	a.noteRigRead("gt", beadsql.RigHash{Head: "h1", Working: "w1"}, base, 0)
+	a.save()
+	return path
+}
+
+// TestTickEffQuietRigMemoryAcrossDaemons: the next tick under the same daemon
+// loads the saved read, and a restarted daemon, with a new owner, loads cold
+// (gt-wduoe3).
+func TestTickEffQuietRigMemoryAcrossDaemons(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	path := quietRigSaved(t, "daemon-1", base)
+	heads := map[string]beadsql.RigHash{"gt": {Head: "h1", Working: "w1"}}
+	t.Run("same owner keeps the read", func(t *testing.T) {
+		if !loadSpecAnnotated(path, "daemon-1").rigQuiet("gt", heads, base.Add(time.Minute)) {
+			t.Error("the next tick under the same daemon reads gt as not quiet, want the saved read kept")
+		}
+	})
+	t.Run("new owner starts cold", func(t *testing.T) {
+		if loadSpecAnnotated(path, "daemon-2").rigQuiet("gt", heads, base.Add(time.Minute)) {
+			t.Error("a restarted daemon reads gt as quiet, want a cold start")
+		}
+	})
 }
