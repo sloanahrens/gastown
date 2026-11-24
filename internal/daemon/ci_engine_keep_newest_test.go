@@ -6,12 +6,23 @@ import (
 	"time"
 )
 
-// keepSpec is one image of a fixture: its id byte, tags, age, and whether it is used.
+// keepCreated says how a fixture records an image's created time.
+type keepCreated int
+
+const (
+	keepCreatedSet    keepCreated = iota // an entry, ciCacheTestStart minus the age
+	keepCreatedAbsent                    // no entry in the created map
+	keepCreatedZero                      // an entry holding the zero time
+)
+
+// keepSpec is one image of a fixture: its id byte, tags, age, whether it is used,
+// and whether its created time is missing.
 type keepSpec struct {
-	id   byte
-	tags []string
-	ago  time.Duration
-	used bool
+	id      byte
+	tags    []string
+	ago     time.Duration
+	used    bool
+	created keepCreated
 }
 
 // keepRun fails unless ciEngineBuiltExcess names exactly the want ids over specs.
@@ -20,7 +31,14 @@ func keepRun(t *testing.T, protected []string, want []byte, specs ...keepSpec) {
 	images, created, used := map[string]ciEngineImage{}, map[string]time.Time{}, map[string]bool{}
 	for _, s := range specs {
 		id := engImageID(s.id)
-		images[id], created[id], used[id] = ciEngineImage{ID: id, RepoTags: s.tags}, ciCacheTestStart.Add(-s.ago), s.used
+		images[id], used[id] = ciEngineImage{ID: id, RepoTags: s.tags}, s.used
+		switch s.created {
+		case keepCreatedAbsent:
+		case keepCreatedZero:
+			created[id] = time.Time{}
+		default:
+			created[id] = ciCacheTestStart.Add(-s.ago)
+		}
 	}
 	wantSet := map[string]bool{}
 	for _, b := range want {
@@ -57,6 +75,20 @@ func TestCIEngineBuiltExcessSparesWhatItMust(t *testing.T) {
 		keepSpec{id: 0x50, tags: []string{"gastown-daemon:p", "ci-base:latest"}, ago: 100 * time.Hour},
 	)
 	keepRun(t, []string{ciEngineBaseRepo}, []byte{0x15}, specs...)
+}
+
+func TestCIEngineBuiltExcessSparesAnImageWithNoCreatedTime(t *testing.T) {
+	t.Parallel()
+	// Six timed images of one repository take the five newest places, so only the
+	// oldest timed one, 0x25, is past the cut. The seventh image has no created
+	// entry: it takes no place in the order and is never named.
+	specs := append(keepRepo("gastown-polecat", 0x20, 6, time.Hour),
+		keepSpec{id: 0x27, tags: []string{"gastown-polecat:t"}, created: keepCreatedAbsent})
+	keepRun(t, nil, []byte{0x25}, specs...)
+	// The same seventh image with an explicit zero time is spared the same way.
+	zero := append(keepRepo("gastown-polecat", 0x20, 6, time.Hour),
+		keepSpec{id: 0x27, tags: []string{"gastown-polecat:t"}, created: keepCreatedZero})
+	keepRun(t, nil, []byte{0x25}, zero...)
 }
 
 func TestCIEngineBuiltExcessTiesAndSharedTags(t *testing.T) {
