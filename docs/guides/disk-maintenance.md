@@ -246,8 +246,12 @@ trim does, so a landing pass in flight does not hold it off.
   and does not recreate. `ci-gomod` and `ci-npm` are not touched. The cap is
   `ci_gocache_cap_bytes`: the trim that enforces it (gt-wwx09z) removes the least
   recently used files, oldest last write first, once the age rule has run, until
-  the volume is back under the cap, and never a file written within the last
-  hour, whatever the cap.
+  the volume is back under the cap. It never selects a file whose last write is
+  within the 75-minute floor, whatever the cap. The floor is Go's one-hour cache
+  touch interval plus a 15-minute margin: Go resets a reused entry's mtime at
+  most once an hour, so a file's mtime can be almost an hour older than its last
+  use, and the margin keeps every file a CI job used in the last 15 minutes out
+  of the selection.
 - The mode applies as it does to the rest of the patrol. `dry_run` lists what
   would be removed and removes nothing; `apply` removes. An applied run logs one
   line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
@@ -297,6 +301,10 @@ rest wait for the next run.
     runner builds a `gastown-polecat`, `gastown-daemon` and `gastown-bd` image
     about every 50 minutes, so the age rule alone does not bound how many
     accumulate;
+    - an image tagged in more than one `gastown-*` repository goes only when it is
+      past the cut in each of them; an image tagged in a `ci_engine_keep_repos`
+      repository other than `ci-base` stays, and still takes its place among the
+      newest 5;
   - `ci-base` images other than the one `ci-base:latest` names, and the id created
     just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
     newest `ci-base` id is the latest. The others wait out `ci_engine_prune_age`

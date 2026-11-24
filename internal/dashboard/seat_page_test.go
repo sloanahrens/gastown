@@ -46,6 +46,185 @@ func seatAgeCell(t *testing.T, dom *pageDOM, name string) (string, map[string]st
 	return cell.Text, cell.Subs
 }
 
+// seatRowText reads the whole text of the named seat's row, every element under
+// it included, so a test can assert a label the row used to draw is gone from
+// the row rather than only from the Age cell.
+func seatRowText(t *testing.T, dom *pageDOM, name string) string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`(() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS(name) + `) out = String(c.textContent);
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})()`)
+	if err != nil {
+		t.Fatalf("reading the row of %s: %v", name, err)
+	}
+	if v.String() == "null" {
+		t.Fatalf("seat %s has no row", name)
+	}
+	return v.String()
+}
+
+// seatChild is one element the page drew inside the Age cell: its tag, its
+// class and its text, so a test can hold the cell to drawing its readings as
+// inline spans in the order it means them (gt-l2gv8u).
+type seatChild struct {
+	Tag   string `json:"tag"`
+	Class string `json:"class"`
+	Text  string `json:"text"`
+}
+
+// seatAgeChildren reads the Age cell of the named seat's row as its child
+// elements in the order the page appended them.
+func seatAgeChildren(t *testing.T, dom *pageDOM, name string) []seatChild {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS(name) + `) {
+						out = spans[4].children.__arr.map(k => ({tag: String(k.tagName), class: String(k.className), text: String(k.textContent)}));
+					}
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the Age cell children of %s: %v", name, err)
+	}
+	if v.String() == "null" {
+		t.Fatalf("seat %s has no row", name)
+	}
+	var out []seatChild
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the Age cell children of %s: %v", name, err)
+	}
+	return out
+}
+
+// TestSeatRowAgeCellIsOneLine: a seat charged gate time and refused twice draws
+// its readings inline in the Age cell — spans after the duration, in the order
+// split, round, rework — so the seat is one line instead of four; the rework
+// reading is warned from the second refusal on (gt-l2gv8u).
+func TestSeatRowAgeCellIsOneLine(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+	s["gate_sec"], s["working_sec"] = 600.0, 1200.0
+	s["reject_count"] = 2.0
+	callWork(t, dom, workState([]any{s}, nil))
+
+	// The duration stays the cell's own text; the readings follow it as spans.
+	if text, _ := seatAgeCell(t, dom, "agate"); text != "30m" {
+		t.Errorf("Age cell text = %q, want the duration 30m before the readings", text)
+	}
+	kids := seatAgeChildren(t, dom, "agate")
+	want := []seatChild{
+		{Tag: "SPAN", Class: "wsub", Text: "working 20m, gate 10m"},
+		{Tag: "SPAN", Class: "wround", Text: "round 3"},
+		{Tag: "SPAN", Class: "wrework warnc", Text: "rework ×2"},
+	}
+	if len(kids) != len(want) {
+		t.Fatalf("the Age cell drew %d readings (%+v), want %d: the split, the round and the rework", len(kids), kids, len(want))
+	}
+	for i, w := range want {
+		if kids[i] != w {
+			t.Errorf("Age cell child %d = %+v, want %+v", i, kids[i], w)
+		}
+	}
+	for _, k := range kids {
+		if k.Tag != "SPAN" {
+			t.Errorf("the Age cell draws a %s child (%+v); a block of its own makes the seat a line taller", k.Tag, k)
+		}
+	}
+}
+
+// TestSeatRowHoverKeepsTheFullTitle: capping the bead title near 40 characters
+// ellipses the cell but loses nothing — the title span carries the cap class
+// and the bead cell's hover still carries the full id, title and description
+// (gt-l2gv8u).
+func TestSeatRowHoverKeepsTheFullTitle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		id    = "gt-abc"
+		title = "a title long enough that the cap ellipses it"
+		desc  = "the body of the bead, which the hover keeps whole"
+	)
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", id, title, "flash", 30*time.Minute)
+	s["description"] = desc
+	callWork(t, dom, workState([]any{s}, nil))
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN");
+					if (!out && spans[0] && spans[0].textContent === ` + quoteJS("agate") + `) {
+						const title = spans[2].children.__arr.find(x => String(x.className).split(" ").indexOf("wtitle") >= 0);
+						out = {hover: String(spans[2].title), cls: title ? String(title.className) : "", text: title ? String(title.textContent) : ""};
+					}
+				}
+				walk(c);
+			}
+		})(__byId["polecats"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the bead cell of agate: %v", err)
+	}
+	var cell struct {
+		Hover string `json:"hover"`
+		Cls   string `json:"cls"`
+		Text  string `json:"text"`
+	}
+	if v.String() == "null" {
+		t.Fatal("seat agate has no row")
+	}
+	if err := json.Unmarshal([]byte(v.String()), &cell); err != nil {
+		t.Fatalf("reading the bead cell of agate: %v", err)
+	}
+
+	t.Run("the hover keeps the whole bead", func(t *testing.T) {
+		if want := id + " " + title + "\n\n" + desc; cell.Hover != want {
+			t.Errorf("the bead cell hovers %q, want %q", cell.Hover, want)
+		}
+	})
+	t.Run("the title span carries the cap class", func(t *testing.T) {
+		if !slices.Contains(strings.Fields(cell.Cls), "wcap") {
+			t.Errorf("the title span's class = %q, want it to carry wcap", cell.Cls)
+		}
+		if cell.Text != title {
+			t.Errorf("the title span reads %q, want the whole title %q", cell.Text, title)
+		}
+	})
+	t.Run("the cap is a width with an ellipsis", func(t *testing.T) {
+		rule := cssRule(t, ".workrow .wcap")
+		for _, want := range []string{"max-width:40ch", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap"} {
+			if !strings.Contains(rule, want) {
+				t.Errorf("the .wcap rule has no %q: %s", want, rule)
+			}
+		}
+	})
+}
+
 // TestSeatRowTimes: a seat whose guard charged gate time draws "working Xm, gate
 // Ym" under its since-sling time; a seat with no gate time draws no second line;
 // and a poll that changes only gate_sec redraws the table, so the line appears
@@ -96,10 +275,11 @@ func TestSeatRowUnchanged(t *testing.T) {
 	}
 }
 
-// TestSeatRowStartingAndRound: a seat that is still starting draws a starting
-// badge in place of its working time, a seat refused for review draws "round N"
-// with N one above its reject_count, and a poll that changes only the phase
-// redraws the table (polecatsKey, gt-qjl0ym part 2).
+// TestSeatRowStartingAndRound: a seat still read as starting draws the working
+// and gate split like any other seat that has been charged gate time — the
+// phase draws no badge of its own — and a seat refused for review draws "round
+// N" with N one above its reject_count, redrawn when only the count moves
+// (gt-urycmq, gt-qjl0ym part 2).
 func TestSeatRowStartingAndRound(t *testing.T) {
 	t.Parallel()
 	seatWith := func(fields map[string]any) map[string]any {
@@ -115,7 +295,7 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 		fields map[string]any
 		want   map[string]string
 	}{
-		{"starting draws the badge and not the times", map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
+		{"a starting phase draws the times, no badge", map[string]any{"phase": "starting"}, map[string]string{"wsub": "working 20m, gate 10m"}},
 		{"working draws the times and no badge", map[string]any{"phase": "working"}, map[string]string{"wsub": "working 20m, gate 10m"}},
 		{"one rejection is round 2", map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 		{"no rejection draws no round", map[string]any{"reject_count": 0.0}, map[string]string{"wsub": "working 20m, gate 10m"}},
@@ -130,13 +310,13 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 		})
 	}
 	// Each field the row shows is in polecatsKey on its own: a poll that moves
-	// only that field must redraw.
+	// only that field must redraw. The phase is no longer one of them — nothing
+	// in the row reads it (gt-urycmq).
 	for _, c := range []struct {
 		name         string
 		before, then map[string]any
 		want         map[string]string
 	}{
-		{"phase", map[string]any{"phase": "working"}, map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
 		{"reject_count", map[string]any{"phase": "working"}, map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2", "wrework": "rework ×1"}},
 	} {
 		t.Run("a change in only the "+c.name+" redraws", func(t *testing.T) {
@@ -148,6 +328,28 @@ func TestSeatRowStartingAndRound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSeatRowStartingDrawsNoBadge: a seat the feed still reads as starting,
+// holding a bead but charged no gate time, draws no second line and no element
+// of its row reads "starting" — the badge that made every sandbox seat read the
+// same is gone (gt-urycmq).
+func TestSeatRowStartingDrawsNoBadge(t *testing.T) {
+	t.Parallel()
+	dom := newPageDOM(t)
+	s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+	s["phase"] = "starting"
+	callWork(t, dom, workState([]any{s}, nil))
+	t.Run("a starting seat with no gate time draws no sub-line", func(t *testing.T) {
+		if text, subs := seatAgeCell(t, dom, "agate"); text != "30m" || len(subs) != 0 {
+			t.Errorf("Age cell = %q with %v, want 30m and no child", text, subs)
+		}
+	})
+	t.Run("no element in the row reads starting", func(t *testing.T) {
+		if row := seatRowText(t, dom, "agate"); strings.Contains(row, "starting") {
+			t.Errorf("the row of seat agate reads %q, want no 'starting' anywhere in it", row)
+		}
+	})
 }
 
 // TestPolecatRowReworkPageDraws: a seat whose bead was refused for review draws

@@ -116,22 +116,62 @@ func TestPlanLeavesOtherImagesAlone(t *testing.T) {
 }
 
 // TestPlanReposSparesTheNeverCandidates pairs each image PlanRepos must spare
-// with one old unused control that must be returned, so an empty plan cannot pass.
+// with the old unused control that must be returned, so an empty plan cannot
+// pass, in a subtest of its own so each exception fails alone.
 func TestPlanReposSparesTheNeverCandidates(t *testing.T) {
 	t.Parallel()
 	const digest = "localhost:5001/gastown-polecat@sha256:beef"
-	images := []Image{
-		img("used-by-id", 10, []string{"localhost:5001/gastown-polecat:aaa"}, nil),
-		img("used-by-digest", 11, nil, []string{digest}),
-		{ID: "no-age", Tags: []string{"localhost:5001/gastown-polecat:bbb"}, Unknown: true},
-		img("mixed", 12, []string{"localhost:5001/gastown-polecat:ccc", "localhost:5001/gastown-daemon:ccc"}, nil),
-		img("dev", 13, []string{"localhost:5001/gastown-polecat:dev"}, nil),
-		img("old", 100, []string{"localhost:5001/gastown-polecat:ddd"}, nil),
+	control := img("old", 100, []string{"localhost:5001/gastown-polecat:ddd"}, nil)
+	cases := []struct {
+		name   string
+		spared Image
+		inUse  map[string]bool
+	}{
+		{
+			name:   "in use by its id",
+			spared: img("used-by-id", 10, []string{"localhost:5001/gastown-polecat:aaa"}, nil),
+			inUse:  map[string]bool{"used-by-id": true},
+		},
+		{
+			name:   "in use by its digest",
+			spared: img("used-by-digest", 11, nil, []string{digest}),
+			inUse:  map[string]bool{digest: true},
+		},
+		{
+			name:   "unknown age",
+			spared: Image{ID: "no-age", Tags: []string{"localhost:5001/gastown-polecat:bbb"}, Unknown: true},
+		},
+		{
+			name:   "mixed repository",
+			spared: img("mixed", 12, []string{"localhost:5001/gastown-polecat:ccc", "localhost:5001/gastown-daemon:ccc"}, nil),
+		},
+		{
+			name:   "dev tag",
+			spared: img("dev", 13, []string{"localhost:5001/gastown-polecat:dev"}, nil),
+		},
 	}
-	inUse := map[string]bool{"used-by-id": true, digest: true}
-	got := ids(PlanRepos(images, inUse, 0, []string{"gastown-polecat", "gastown-daemon"}))
-	if want := []string{"old"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("PlanRepos removed %v, want only %v: an in-use, unknown-age, mixed-repository or dev image is never returned", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ids(PlanRepos([]Image{tc.spared, control}, tc.inUse, 0, []string{"gastown-polecat", "gastown-daemon"}))
+			if want := []string{"old"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("PlanRepos removed %v, want only %v: an image %s is never returned", got, want, tc.name)
+			}
+		})
+	}
+}
+
+// TestPlanReposPlansADuplicateRepositoryOnce: a repository named twice plans its
+// images once, so RemoveAll does not remove an image twice.
+func TestPlanReposPlansADuplicateRepositoryOnce(t *testing.T) {
+	t.Parallel()
+	images := []Image{
+		img("new", 1, []string{"localhost:5001/gastown-polecat:aaa"}, nil),
+		img("old", 2, []string{"localhost:5001/gastown-polecat:bbb"}, nil),
+	}
+	got := ids(PlanRepos(images, map[string]bool{}, 0, []string{"gastown-polecat", "gastown-polecat"}))
+	if want := []string{"new", "old"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("PlanRepos with the repository twice removed %v, want each image once: %v", got, want)
 	}
 }
 

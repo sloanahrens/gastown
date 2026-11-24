@@ -132,7 +132,7 @@ tr.live,.ltrow.live{background:#101a13}
 /* The Polecat and Model tracks in the two tables below take their width from
    these properties, so a width changed here changes both (gt-ultode). */
 .wtable,.ltable{--polecat-w:max-content;--model-w:max-content}
-.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
+.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,max-content) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 /* Below 640 px the four tracks other than the bead hold the width their text
    needs, so their text is not clipped by its own track at 470 px. The floor
    is minmax(max-content,max-content), not a bare max-content: a track's minimum
@@ -151,7 +151,13 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
 .workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
-.workrow .wsub,.workrow .wstart,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap}
+/* The Age cell's readings — how the time splits between work and gate, the
+   round and the rework count — sit inline after the duration, each with a small
+   gap, so a seat is one line however many it carries. The bead title is capped
+   so a long one ellipses near 40 characters instead of taking the row's room
+   (gt-l2gv8u). */
+.workrow .wsub,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap;margin-left:6px}
+.workrow .wcap{display:inline-block;max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -398,6 +404,9 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 /* One row per landed commit in the System updates pane: the sha, then its stage
    chips in pipeline order. A stage that never ran keeps the dim token. */
 .surow{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:2px 0}
+/* The time a row last changed, drawn after its sha: dim like the sha, so the
+   row's stage colours stay the loudest thing on it (gt-okg1kq). */
+.sutime{color:var(--dim)}
 /* The header's worst-state glyph. A class of its own because the retired Tier
    sweeps icon's class must stay gone (gt-gfglv0, gt-jug4e0). */
 .suico{font-weight:700}
@@ -1294,16 +1303,17 @@ function paintAges(r, now) {
   r.age.title = aged ? (stuck || stateTip) + dispatched + silent : "";
   // The guard counts a seat's gate runs apart from its work, so a seat that
   // has been charged gate time says how its age splits (gt-qjl0ym). textContent
-  // above cleared the cell, so the line is drawn again on every pass.
-  // A seat still starting has no counted work yet, so its badge stands in place
-  // of the times; a seat refused for review says which round it is on, one above
-  // its refusals (gt-qjl0ym, gt-k9s5lv).
-  if (p.bead && p.phase === "starting") r.age.append(el("div", "wstart", "starting"));
-  else if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
-  if (p.bead && p.reject_count > 0) r.age.append(el("div", "wround", "round " + (p.reject_count + 1)));
+  // above cleared the cell, so the reading is drawn again on every pass. Each
+  // reading is a span after the duration, not a block of its own, so the cell
+  // stays one line however many it carries (gt-l2gv8u).
+  // The split does not wait on the phase: a sandbox seat never gets the
+  // activity its phase counts from (gt-urycmq). A seat refused for review says
+  // which round it is on, one above its refusals (gt-qjl0ym, gt-k9s5lv).
+  if (p.bead && p.gate_sec > 0) r.age.append(el("span", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
+  if (p.bead && p.reject_count > 0) r.age.append(el("span", "wround", "round " + (p.reject_count + 1)));
   // The count itself, warned from the second refusal on so a repeat stands out
   // (gt-addb76).
-  if (p.bead && p.reject_count >= 1) r.age.append(el("div", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
+  if (p.bead && p.reject_count >= 1) r.age.append(el("span", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
   // The Points cell reads the bead's estimate, then the elapsed time since
   // dispatch, which moves with the clock like the age does. A seat holding no
   // bead leaves it empty.
@@ -1367,7 +1377,9 @@ function workRow(names, p, now) {
     bd.append(el("span", "bead", p.bead));
     if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
     (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
-    if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle", p.title));
+    // The title is capped near 40 characters so a long one ellipses instead of
+    // taking the row's room; the cell's hover keeps it whole (gt-l2gv8u).
+    if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle wcap", p.title));
     // The hover reads the bead's description under its id and title; a bead
     // with no description hovers as its title alone (gt-kk6gb).
     bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");
@@ -1536,7 +1548,7 @@ function workQueue(box, s, q, r) {
 // JSON so a comma inside a title or description cannot make two seats read as one
 // key.
 function polecatsKey(s) {
-  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h, p.gate_sec || 0, p.working_sec || 0, p.phase || "", p.reject_count || 0])).join(";");
+  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h, p.gate_sec || 0, p.working_sec || 0, p.reject_count || 0])).join(";");
   return [s.summary_at, seats].join("|");
 }
 function beadsKey(s) {
@@ -3066,14 +3078,52 @@ function systemUpdateBannerRoll(su, now) {
   return {roll: systemUpdateBanner.roll, ended: true};
 }
 
-// systemUpdateBannerLine is the banner: what the roll is doing, the step, the
-// elapsed time and the short shas it moves from and to.
-function systemUpdateBannerLine(b) {
+// The shortest sha a roll joins a row by: the join's own floor, so a blank or
+// stubbed value never pairs a roll with a commit (system_updates.go).
+const SYSTEM_UPDATES_BANNER_SHA_MIN = 7;
+
+// systemUpdateBannerRolledRow answers the row for the commit an ended roll
+// rolled to, or null when no row carries it yet. A row's sha is cut to twelve
+// and the roll's is as the run recorded it, so either may be the head of the
+// other; a value under the join's floor is no sha at all.
+function systemUpdateBannerRolledRow(roll, rows) {
+  const to = String((roll && roll.to) || "");
+  if (to.length < SYSTEM_UPDATES_BANNER_SHA_MIN) return null;
+  return (rows || []).find(r => {
+    const sha = String((r && r.sha) || "");
+    if (sha.length < SYSTEM_UPDATES_BANNER_SHA_MIN) return false;
+    return to.startsWith(sha) || sha.startsWith(to);
+  }) || null;
+}
+
+// systemUpdateBannerEnded answers how an ended roll ended: the outcome the row
+// for the commit it rolled to records, in the class the stage chips wear, and
+// the elapsed time from that roll's started_at and ended_at rather than the
+// last push's. A roll no row carries yet, and a row naming no known outcome,
+// read "ended", never the step the browser last saw; a row whose own stamps
+// are unusable keeps the outcome and the last push's time (gt-avxdbf).
+function systemUpdateBannerEnded(roll, rows) {
+  const row = systemUpdateBannerRolledRow(roll, rows), rec = row && row.roll, outcome = rec && rec.outcome;
+  if (outcome !== "ok" && outcome !== "partial" && outcome !== "failed") return {word: "ended", cls: "", sec: roll.elapsed_sec};
+  const own = systemUpdateTimeSet(rec.started_at) && systemUpdateTimeSet(rec.ended_at);
+  const sec = own ? (new Date(rec.ended_at).getTime() - new Date(rec.started_at).getTime()) / 1000 : roll.elapsed_sec;
+  return {word: outcome, cls: SYSTEM_UPDATE_CHIPS[outcome][0], sec: sec};
+}
+
+// systemUpdateBannerLine is the banner: what the roll is doing, the step or its
+// outcome once it ends, the elapsed time and the short shas it moves from and to.
+function systemUpdateBannerLine(b, rows) {
   const roll = b.roll, sha = x => String(x || "").slice(0, 12) || "–";
   const line = el("div", "surow subanner" + (b.ended ? " ended" : ""));
   line.append(el("span", "subannerword", b.ended ? "roll ended" : "rolling"));
-  line.append(el("span", "tag" + (b.ended ? "" : " warnc"), roll.step || "starting"));
-  line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  if (b.ended) {
+    const ended = systemUpdateBannerEnded(roll, rows);
+    line.append(el("span", "tag" + (ended.cls ? " " + ended.cls : ""), ended.word));
+    line.append(el("span", "subannertime", fmtDur(ended.sec)));
+  } else {
+    line.append(el("span", "tag warnc", roll.step || "starting"));
+    line.append(el("span", "subannertime", fmtDur(roll.elapsed_sec)));
+  }
   line.append(el("span", "subannercommits", sha(roll.from) + " → " + sha(roll.to)));
   line.title = "gt update run " + (roll.run_id || "?") + (b.ended ? ", ended" : "");
   return line;
@@ -3101,11 +3151,61 @@ function systemUpdateBannerSweepLine(sweep) {
 // (gt-jug4e0).
 const SYSTEM_UPDATE_CHIP_RANK = {badc: 2, warnc: 1};
 
+// systemUpdateTimeSet says whether a stamp the feed may send is a time the
+// commit changed: it sends the zero time (0001-01-01T00:00:00Z) for a time no
+// stage reported and 1970-01-01T00:00:00Z for an ended time a run has not
+// reached, and neither is drawn. An unparseable stamp is not a time either, so
+// it draws nothing rather than a NaN (gt-okg1kq).
+const SYSTEM_UPDATE_EPOCH_MS = Date.UTC(1970, 0, 1);
+function systemUpdateTimeSet(at) {
+  if (!at) return false;
+  return new Date(at).getTime() > SYSTEM_UPDATE_EPOCH_MS;
+}
+
+// systemUpdateAtWords is a row's at drawn after its sha: the viewer's own
+// 24-hour clock, titled with the feed's full RFC 3339 stamp and how long ago it
+// changed. A row with no real time draws nothing (gt-okg1kq).
+function systemUpdateAtWords(at) {
+  if (!systemUpdateTimeSet(at)) return null;
+  const span = el("span", "sutime", clock(at).slice(0, 5));
+  span.title = at + " · " + age(at) + " ago";
+  return span;
+}
+
+// systemUpdateRunTime is a run's own stamp: when it ended, or when it started
+// while its end is not a real time — a running post-land run reports the epoch
+// as its end (gt-okg1kq).
+function systemUpdateRunTime(run) {
+  if (!run) return "";
+  return systemUpdateTimeSet(run.ended) ? run.ended : run.started;
+}
+
+// systemUpdateRollTime is a roll's own stamp: when it ended, or when it started
+// while it still runs (an unended roll sends no ended_at) (gt-okg1kq).
+function systemUpdateRollTime(roll) {
+  if (!roll) return "";
+  return systemUpdateTimeSet(roll.ended_at) ? roll.ended_at : roll.started_at;
+}
+
+// systemUpdateStageTime is the stamp one stage chip names: the run that ran its
+// stage, the sweep's at for a tier that sweep recorded, and the roll's own end
+// (its start while it runs). A stage the row holds no record for has no time
+// (gt-okg1kq).
+function systemUpdateStageTime(row, stage) {
+  if (stage === "post-land" || stage === "images") {
+    return systemUpdateRunTime((row.runs || []).find(r => r.workflow === stage + ".yml"));
+  }
+  if (stage === "roll") return systemUpdateRollTime(row.roll);
+  const swept = ((row.sweep && row.sweep.stages) || []).some(x => x.tier === stage);
+  return swept ? row.sweep.at : "";
+}
+
 // systemUpdateChip draws one chip: its colour class, the glyph its state
-// carries, and a title naming the state.
-function systemUpdateChip(name, cls, glyph, word) {
+// carries, and a title naming the state and, when the stage has one, that
+// stage's own time (gt-okg1kq).
+function systemUpdateChip(name, cls, glyph, word, at) {
   const chip = el("span", "tag " + cls, name + " " + glyph);
-  chip.title = name + ": " + word;
+  chip.title = name + ": " + word + (systemUpdateTimeSet(at) ? " · " + at + " · " + age(at) + " ago" : "");
   return chip;
 }
 
@@ -3140,18 +3240,20 @@ function renderSystemUpdates(s) {
   if (pushSkip("systemupdates", s)) return;
   const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
-  if (banner) box.append(systemUpdateBannerLine(banner));
+  if (banner) box.append(systemUpdateBannerLine(banner, (su && su.rows) || []));
   if (sweep && !sweepUnknown) box.append(systemUpdateBannerSweepLine(sweep));
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
     line.append(el("span", "title", row.sha || "–"));
+    const at = systemUpdateAtWords(row.at);
+    if (at) line.append(at);
     for (const stage of SYSTEM_UPDATE_STAGES) {
       let state = systemUpdateStageState(row, stage);
       if (state === "absent" && systemUpdateStageUnknown(su, stage)) state = "unknown";
       const [cls, glyph, word] = SYSTEM_UPDATE_CHIPS[state];
       const said = state === "partial" ? systemUpdatePartialWord(row.roll) : word;
-      line.append(systemUpdateChip(stage, cls, glyph, said));
+      line.append(systemUpdateChip(stage, cls, glyph, said, systemUpdateStageTime(row, stage)));
       chips.push({name: stage, cls: cls, word: said});
       // The pair chip goes between the stages that build the images and the
       // roll that consumes them, and reads the row's Pair rather than its roll:
@@ -3165,7 +3267,11 @@ function renderSystemUpdates(s) {
     box.append(line);
   }
   paintSystemUpdatesIcon(chips);
-  $("systemupdatesnote").textContent = rows.length === 1 ? "1 commit" : rows.length + " commits";
+  // The header says what the pane holds and, when the row cap cut commits, how
+  // many older ones it does not show. The count is of commits the join knows,
+  // so it reads "older not shown", never "undeployed" (gt-3bhxmy).
+  const more = (su && su.more) || 0;
+  $("systemupdatesnote").textContent = (rows.length === 1 ? "1 commit" : rows.length + " commits") + (more ? " · " + more + " older not shown" : "");
 }
 
 // The Maintenance jobs pane (gt-6yof7o): one row per job from the Jobs section

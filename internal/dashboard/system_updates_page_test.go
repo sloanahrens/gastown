@@ -246,6 +246,44 @@ func TestSystemUpdatesPageDrawsTheEmptyStateAndCountNote(t *testing.T) {
 	}
 }
 
+// The header says what the pane holds: the rows it drew, and when the row cap
+// cut commits, how many older ones are not shown. The count is of commits the
+// join knows, so it reads "older not shown", never "undeployed" (gt-3bhxmy).
+func TestSystemUpdatesPageDrawsTheCutCount(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		rows int
+		more int
+		set  bool
+		want string
+	}{
+		{name: "three cut", rows: 6, more: 3, set: true, want: "6 commits · 3 older not shown"},
+		{name: "one older not shown", rows: 1, more: 1, set: true, want: "1 commit · 1 older not shown"},
+		{name: "nothing cut", rows: 6, more: 0, set: true, want: "6 commits"},
+		{name: "more absent", rows: 6, want: "6 commits"},
+		{name: "one row", rows: 1, want: "1 commit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := make([]any, tc.rows)
+			for i := range rows {
+				rows[i] = map[string]any{"sha": "abcdef123456"}
+			}
+			state := systemUpdatesState(systemUpdatesSources{}, rows...)
+			if tc.set {
+				state["system_updates"].(map[string]any)["more"] = tc.more
+			}
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", state)
+			if got := dom.element(t, "systemupdatesnote").Text; got != tc.want {
+				t.Errorf("%s: the header reads %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 // The pane is a fold in the left column, directly above Beads
 // (TestBeadsPaneSitsDirectlyUnderSystemUpdates reads that pair). The page's
 // push table points the section at the pane, and its redraw draws it.
@@ -276,5 +314,148 @@ func TestSystemUpdatesPageIsALeftColumnFold(t *testing.T) {
 	}
 	if got := dom.element(t, "systemupdates").Kids; got != 1 {
 		t.Errorf("the redraw drew %d rows, want the one row of the reading", got)
+	}
+}
+
+// systemUpdateRowLeaf reads back a row's leaf whose text names the given stage,
+// so a test is not tied to where the row's own time sits among the chips.
+func systemUpdateRowLeaf(t *testing.T, dom *pageDOM, row int, stage string) drawn {
+	t.Helper()
+
+	n := dom.descend(t, "systemupdates", row).Kids
+	for i := 0; i < n; i++ {
+		leaf := dom.descend(t, "systemupdates", row, i)
+		if strings.HasPrefix(leaf.Text, stage+" ") {
+			return leaf
+		}
+	}
+	t.Fatalf("row %d draws no %s chip", row, stage)
+	return drawn{}
+}
+
+// Each row draws when it last changed right after its sha — the viewer's own
+// 24-hour clock, with the feed's full stamp and its age in the title — and every
+// stage chip's title names that stage's own time, not the row's, so a row whose
+// order looks wrong can be read against the times its stages reported
+// (gt-okg1kq).
+func TestSystemUpdatesPageDrawsEachRowsTime(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	const (
+		rowAt     = "2026-11-24T18:50:00Z"
+		sweepAt   = "2026-11-24T18:47:00Z"
+		postLand  = "2026-11-24T18:44:00Z"
+		imagesEnd = "2026-11-24T18:49:00Z"
+		rollEnd   = "2026-11-24T18:50:00Z"
+	)
+	dom.call(t, "renderSystemUpdates", systemUpdatesState(systemUpdatesSources{},
+		map[string]any{
+			"sha":   "ee9028c0c814",
+			"at":    rowAt,
+			"sweep": map[string]any{"at": sweepAt, "stages": []any{systemUpdateStage("shell", "GREEN"), systemUpdateStage("integration", "GREEN"), systemUpdateStage("race", "GREEN")}},
+			"runs": []any{
+				map[string]any{"workflow": "post-land.yml", "status": "success", "started": "2026-11-24T18:43:00Z", "ended": postLand},
+				map[string]any{"workflow": "images.yml", "status": "success", "started": "2026-11-24T18:48:00Z", "ended": imagesEnd},
+			},
+			"roll": map[string]any{"outcome": "ok", "started_at": "2026-11-24T18:48:30Z", "ended_at": rollEnd},
+		}))
+
+	// The row is the sha, its time, the six stage chips and the pair chip.
+	row := dom.descend(t, "systemupdates", 0)
+	if row.Kids != 9 {
+		t.Fatalf("the row drew %d children, want the sha, its time, six stage chips and the pair chip", row.Kids)
+	}
+	at := dom.descend(t, "systemupdates", 0, 1)
+	wantClock := pageExpr(t, dom, "clock("+quoteJS(rowAt)+").slice(0, 5)")
+	if at.Text != wantClock {
+		t.Errorf("the row's time reads %q, want the viewer's local %q", at.Text, wantClock)
+	}
+	if !strings.Contains(at.Title, rowAt) {
+		t.Errorf("the row's time is titled %q, want the feed's full stamp %q in it", at.Title, rowAt)
+	}
+	if wantAge := pageExpr(t, dom, "age("+quoteJS(rowAt)+")"); !strings.Contains(at.Title, wantAge+" ago") {
+		t.Errorf("the row's time is titled %q, want how long ago it changed (%q) in it", at.Title, wantAge+" ago")
+	}
+
+	for stage, want := range map[string]string{
+		"post-land":   postLand,
+		"shell":       sweepAt,
+		"integration": sweepAt,
+		"race":        sweepAt,
+		"images":      imagesEnd,
+		"roll":        rollEnd,
+	} {
+		chip := systemUpdateRowLeaf(t, dom, 0, stage)
+		if !strings.Contains(chip.Title, want) {
+			t.Errorf("the %s chip is titled %q, want that stage's own time %q in it", stage, chip.Title, want)
+		}
+	}
+}
+
+// A time the feed uses for "not yet" draws nothing: a running run reports the
+// epoch as its end, so its chip names when it started and never 1970, and a row
+// whose at is the zero time or missing draws no time at all (gt-okg1kq).
+func TestSystemUpdatesPageDrawsNoEpochTime(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	const started = "2026-11-24T18:44:00Z"
+	dom.call(t, "renderSystemUpdates", systemUpdatesState(systemUpdatesSources{},
+		map[string]any{
+			"sha":  "ee9028c0c814",
+			"runs": []any{map[string]any{"workflow": "post-land.yml", "status": "running", "started": started, "ended": "1970-01-01T00:00:00Z"}},
+		},
+		map[string]any{"sha": "aaaaaaaaaaaa", "at": "0001-01-01T00:00:00Z"},
+		map[string]any{"sha": "123456789abc"}))
+
+	chip := systemUpdateRowLeaf(t, dom, 0, "post-land")
+	if !strings.Contains(chip.Title, started) {
+		t.Errorf("row 0: the post-land chip is titled %q, want the running run's start %q in it", chip.Title, started)
+	}
+	n := dom.descend(t, "systemupdates", 0).Kids
+	for i := 0; i < n; i++ {
+		leaf := dom.descend(t, "systemupdates", 0, i)
+		if strings.Contains(leaf.Text, "1970") || strings.Contains(leaf.Title, "1970") {
+			t.Errorf("row 0: leaf %d reads %q titled %q, want the epoch time never drawn", i, leaf.Text, leaf.Title)
+		}
+	}
+	// Rows 1 and 2 carry the zero time and no at, so their first chip follows
+	// their sha directly and no leaf names year 1.
+	for _, row := range []int{1, 2} {
+		if second := dom.descend(t, "systemupdates", row, 1); !strings.HasPrefix(second.Text, "post-land ") {
+			t.Errorf("row %d has no real at, so its first chip should follow its sha; leaf 1 reads %q", row, second.Text)
+		}
+		for i := 0; i < dom.descend(t, "systemupdates", row).Kids; i++ {
+			leaf := dom.descend(t, "systemupdates", row, i)
+			if strings.Contains(leaf.Text, "0001") || strings.Contains(leaf.Title, "0001") {
+				t.Errorf("row %d: leaf %d reads %q titled %q, want the zero time never drawn", row, i, leaf.Text, leaf.Title)
+			}
+		}
+	}
+}
+
+// A stage the row holds no record for names no time, and a sweep's at belongs
+// only to the tiers that sweep recorded: a chip for a stage that never ran is
+// not dated by another stage's clock (gt-okg1kq).
+func TestSystemUpdatesPageDrawsNoTimeForAStageWithoutARecord(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	const sweepAt = "2026-11-24T18:47:00Z"
+	dom.call(t, "renderSystemUpdates", systemUpdatesState(systemUpdatesSources{},
+		map[string]any{
+			"sha":   "ee9028c0c814",
+			"sweep": map[string]any{"at": sweepAt, "stages": []any{systemUpdateStage("shell", "GREEN")}},
+		}))
+
+	if chip := systemUpdateRowLeaf(t, dom, 0, "shell"); !strings.Contains(chip.Title, sweepAt) {
+		t.Errorf("the shell chip is titled %q, want the sweep's time %q in it", chip.Title, sweepAt)
+	}
+	for _, stage := range []string{"integration", "race", "post-land", "images", "roll"} {
+		chip := systemUpdateRowLeaf(t, dom, 0, stage)
+		if strings.Contains(chip.Title, sweepAt) || strings.Contains(chip.Title, " ago") {
+			t.Errorf("the %s chip is titled %q, want no time for a stage the row holds no record of", stage, chip.Title)
+		}
 	}
 }

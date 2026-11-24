@@ -556,15 +556,14 @@ func liveGitRiskBlockers(in WorkstateInput) []string {
 	return blockers
 }
 
-// CanIgnoreStaleCleanupStatus returns true when a dirty persisted
+// CanIgnoreStaleCleanupStatus returns true when a dirty or missing persisted
 // cleanup_status is older than the direct predicates proving no work is at risk.
 // The status remains unsafe globally; callers must opt into this reconciliation
 // path only after gathering live git, hook, work, and active-MR facts.
 //
-// A missing status (the agent bead never recorded one because the seat never
-// ran gt done) is waived on the same evidence (gt-pojsio). An unknown status is
-// not: it says the state could not be determined, not that the seat never
-// recorded one.
+// A missing status means the seat never recorded one because it never ran
+// gt done (gt-pojsio). An unknown status is not waived: it says the state could
+// not be determined, not that the seat never recorded one.
 //
 // claude-41j.1 D9: for the reuse verdict this is no longer the reconciliation
 // path — RecordedCleanupBlocks supersedes a git-derived recorded status on
@@ -758,8 +757,9 @@ func (f WorkstateFacts) ActiveMRSafe() bool {
 }
 
 // CanIgnoreStaleCleanupStatusForNuke reports whether the nuke preflight may
-// waive a dirty recorded cleanup_status, deriving the work-terminal, hook, and
-// active-MR predicates from the same facts NewWorkstateInput reads (gt-ef9).
+// waive a dirty or missing recorded cleanup_status, deriving the work-terminal,
+// hook, and active-MR predicates from the same facts NewWorkstateInput reads
+// (gt-ef9).
 //
 // gitSafe is passed in because the nuke gate also requires the branch pushed to
 // origin, which GitSafe does not measure. It skips ResolveIgnoreCleanupStatus

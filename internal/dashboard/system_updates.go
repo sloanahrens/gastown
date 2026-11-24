@@ -53,10 +53,14 @@ const (
 )
 
 // SystemUpdateRow is one landed commit as the System updates section draws it:
-// its sha cut to twelve characters, whichever of the three stages have run, and
-// the state of its image pair.
+// its sha cut to twelve characters, when it last changed, whichever of the three
+// stages have run, and the state of its image pair.
 type SystemUpdateRow struct {
-	SHA   string            `json:"sha"`
+	SHA string `json:"sha"`
+	// At is the newest time any stage of the commit reported, the same stamp the
+	// section orders rows by, so the drawn order can be read against it. Zero
+	// when no stage reported a time.
+	At    time.Time         `json:"at,omitzero"`
 	Sweep *TierSweepRow     `json:"sweep,omitempty"`
 	Runs  []PipelineRun     `json:"runs,omitempty"`
 	Roll  *SystemUpdateRoll `json:"roll,omitempty"`
@@ -68,19 +72,28 @@ type SystemUpdateRow struct {
 // SystemUpdateRows joins sweeps, pipeline runs and rolls into at most limit rows,
 // newest first; limit six draws the section.
 func SystemUpdateRows(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, limit int) []SystemUpdateRow {
-	if limit <= 0 {
-		return []SystemUpdateRow{}
-	}
+	rows, _ := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, limit)
+	return rows
+}
+
+// SystemUpdateRowsWithMore is SystemUpdateRows and how many joined commits the
+// limit left out, so the section can say how many older commits it does not show
+// (gt-71xpmh). A limit of zero or less draws no row, so every joined commit is
+// reported left out.
+func SystemUpdateRowsWithMore(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, limit int) ([]SystemUpdateRow, int) {
 	commits := joinSystemUpdates(sweeps, pipeline, rolls)
 	sort.SliceStable(commits, func(i, j int) bool { return commits[i].at.After(commits[j].at) })
-	if len(commits) > limit {
-		commits = commits[:limit]
+	shown := len(commits)
+	if limit <= 0 {
+		shown = 0
+	} else if shown > limit {
+		shown = limit
 	}
-	rows := make([]SystemUpdateRow, 0, len(commits))
-	for _, c := range commits {
-		rows = append(rows, SystemUpdateRow{SHA: pipelineSHA(c.sha), Sweep: c.sweep, Runs: c.runs, Roll: c.roll})
+	rows := make([]SystemUpdateRow, 0, shown)
+	for _, c := range commits[:shown] {
+		rows = append(rows, SystemUpdateRow{SHA: pipelineSHA(c.sha), At: c.at, Sweep: c.sweep, Runs: c.runs, Roll: c.roll})
 	}
-	return rows
+	return rows, len(commits) - shown
 }
 
 // systemCommit is one commit while the inputs are folded together: the longest

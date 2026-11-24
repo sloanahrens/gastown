@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// TestRoundsOMNumbersRefusesARepeat: om's ParseRounds refuses a round number
+// TestRoundsOMNumbersRefusesABreak: om's ParseRounds refuses a round number
 // below 1 or repeated; the checker Render calls refuses the same and passes 1
 // to n, so such a break degrades the landing instead of blocking it at om
 // (gt-smmlw4).
-func TestRoundsOMNumbersRefusesARepeat(t *testing.T) {
+func TestRoundsOMNumbersRefusesABreak(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
@@ -24,7 +24,7 @@ func TestRoundsOMNumbersRefusesARepeat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := checkOMRounds([]byte("[]"), tc.rounds)
-			ok := errors.Is(err, ErrRoundsCorrupt) && strings.Contains(err.Error(), tc.want)
+			ok := got == nil && errors.Is(err, ErrRoundsCorrupt) && strings.Contains(err.Error(), tc.want)
 			if tc.want == "" {
 				ok = err == nil && string(got) == "[]"
 			}

@@ -72,8 +72,8 @@ type Job struct {
 	// array reads it.
 	Cadence time.Duration `json:"-"`
 	// Due is when the job is next due: the newest run's own next-due time when
-	// the ledger recorded one, else LastRun plus the cadence and its grace. Nil
-	// when nothing says when the job is due.
+	// the ledger recorded one, else LastRun plus the cadence, the newest run's
+	// own duration and the grace. Nil when nothing says when the job is due.
 	Due   *time.Time `json:"due,omitempty"`
 	State State      `json:"state"`
 	// Outcome is how the last run ended, empty when no run is recorded or the
@@ -290,13 +290,35 @@ func graceOf(cadence time.Duration) time.Duration {
 	return max(cadence/4, minGrace)
 }
 
-// dueOf is when a row is due by its cadence: its last run plus the cadence and
-// its grace. Nil when the row has no last run or no cadence.
+// runDuration is how long the row's newest run took, from its duration_ms
+// stat. Zero when the row records no duration or a value that is not positive:
+// a duration that is absent or negative is no allowance, never a shorter one.
+func runDuration(j Job) time.Duration {
+	ms := j.Stats["duration_ms"]
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// runAllowance is the extra time a row earns on top of its cadence for its
+// newest run: that run's duration, capped at one cadence. The cap keeps a run
+// that reports an absurd duration, from a clock jump or a bad stat, from
+// holding a job out of overdue for ever: at worst the row is one whole cycle
+// late, the same slack a run that took a full cadence gets. A run shorter than
+// the cadence still earns exactly its duration.
+func runAllowance(j Job) time.Duration {
+	return min(runDuration(j), j.Cadence)
+}
+
+// dueOf is when a row is due by its cadence: its last run plus the cadence,
+// the newest run's allowance and the grace. Nil when the row has no last run
+// or no cadence.
 func dueOf(j Job) *time.Time {
 	if j.LastRun == nil || j.Cadence <= 0 {
 		return nil
 	}
-	due := j.LastRun.Add(j.Cadence + graceOf(j.Cadence))
+	due := j.LastRun.Add(j.Cadence + runAllowance(j) + graceOf(j.Cadence))
 	return &due
 }
 
@@ -341,9 +363,10 @@ func doltGCRows(townRoot string, now time.Time) []Job {
 	return []Job{j}
 }
 
-// stateOf judges one job. An unreadable last-run record or an unreadable
-// interval makes the row unknown before anything else is tried, so a broken
-// input never shows as a clean state.
+// stateOf judges one job against the same allowance dueOf computes with: the
+// cadence, the newest run's allowance and the grace. An unreadable last-run
+// record or an unreadable interval makes the row unknown before anything else
+// is tried, so a broken input never shows as a clean state.
 func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State {
 	switch {
 	case runsUnreadable, cadenceUnreadable:
@@ -356,7 +379,7 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 		return StateNeverRun
 	}
 	grace := graceOf(j.Cadence)
-	if now.Sub(*j.LastRun) > j.Cadence+grace {
+	if now.Sub(*j.LastRun) > j.Cadence+runAllowance(j)+grace {
 		return StateOverdue
 	}
 	return StateOK

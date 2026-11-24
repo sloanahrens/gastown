@@ -20,8 +20,10 @@ import (
 // whole, keeping every lane's newest even over the cap (gt-yphcl, gt-sp439m).
 const DefaultRoundsCap = 16 << 10
 
-// ErrRoundsCorrupt reports a ledger file that does not parse: a caller treats
-// it as a landing with no history and leaves the file for a human (gt-yphcl).
+// ErrRoundsCorrupt reports a ledger that cannot be read or rendered: a file
+// that does not parse or breaks the ledger's own rules, or emitted rounds that
+// break om's ParseRounds rules. A caller treats it as a landing with no history,
+// and a corrupt file is left for a human (gt-yphcl, gt-2rvuze).
 var ErrRoundsCorrupt = errors.New("rounds ledger is unreadable")
 
 // Outcome is what became of one finding a review raised.
@@ -307,8 +309,9 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 // lane's rounds together and ascending. Over maxBytes it drops the
 // lowest-numbered round among the lanes that still hold more than one (ties:
 // the lane that appeared first) until the output fits, so every lane keeps its
-// newest round, returned even over the cap; maxBytes <= 0 means DefaultRoundsCap
-// and an unparseable ledger is ErrRoundsCorrupt.
+// newest round, returned even over the cap; maxBytes <= 0 means DefaultRoundsCap.
+// Errors wrap ErrRoundsCorrupt when the ledger cannot be read or the emitted
+// rounds break om's ParseRounds rules (checkOMRounds).
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap

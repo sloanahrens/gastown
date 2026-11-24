@@ -12,9 +12,13 @@ package dashboard
 // could not be read, so a row missing its sweep or roll is not taken for a
 // commit that never reached that stage.
 type SystemUpdates struct {
-	Now         *SystemUpdatesNow `json:"now,omitempty"`
-	Rows        []SystemUpdateRow `json:"rows"`
-	Unavailable bool              `json:"unavailable,omitempty"`
+	Now  *SystemUpdatesNow `json:"now,omitempty"`
+	Rows []SystemUpdateRow `json:"rows"`
+	// More is how many joined commits the row cap left out. It counts only the
+	// commits the join knows (sweeps, pipeline runs, rolls), so the pane says
+	// 'older not shown', never 'undeployed' (gt-71xpmh). Omitted at zero.
+	More        int  `json:"more,omitempty"`
+	Unavailable bool `json:"unavailable,omitempty"`
 	// RollUnknown and SweepUnknown say the source behind one half of Now could
 	// not be read, so a missing half is a reading that failed, never a town with
 	// nothing running.
@@ -55,8 +59,10 @@ type NowSweep struct {
 // the readers read. The row cap is the section's own, so a caller never picks
 // it. A nil pipeline joins no runs into the rows.
 func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, unavailable bool) *SystemUpdates {
+	rows, more := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, systemUpdatesRowCap)
 	return &SystemUpdates{
-		Rows:        SystemUpdateRows(sweeps, pipeline, rolls, systemUpdatesRowCap),
+		Rows:        rows,
+		More:        more,
 		Unavailable: unavailable,
 	}
 }
