@@ -372,6 +372,13 @@ type PatrolsConfig struct {
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 	TownStateBackup      *TownStateBackupConfig      `json:"town_state_backup,omitempty"`
+
+	// SpecSplit runs the daemon step that splits the beads carrying the split
+	// label (internal/daemon/spec_split_step.go, gt-tal4li). Off when absent:
+	// a split rewrites the bead's scope into two new beads, so the operator
+	// turns the route on rather than an upgrade.
+	SpecSplit *PatrolConfig `json:"spec_split,omitempty"`
+
 	// WorkspaceReconcile sets how often the daemon re-pushes the town's
 	// workspace to the bd gateway. It acts only when BD_GATEWAY_URL is set
 	// (internal/daemon/workspace_reconcile.go). It is classified in the audit

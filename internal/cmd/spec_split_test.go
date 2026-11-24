@@ -1253,3 +1253,28 @@ func TestSpecSplitVerdictRefuses(t *testing.T) {
 		})
 	}
 }
+
+// specSplitApplyForDaemon hands the daemon's spec_split step both what the
+// apply printed and its error, so a refusal's reason reaches the log. A town
+// whose patrol config cannot be read is refused before anything is printed:
+// the error names the config and the report is empty.
+func TestSpecSplitApplyForDaemonReturnsTheRefusal(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := specSplitApplyForDaemon(town, "gt-x")
+	if err == nil {
+		t.Fatalf("specSplitApplyForDaemon with an unreadable patrol config returned nil, report %q", report)
+	}
+	if !strings.Contains(err.Error(), "cannot read patrols.spec_dispatch") {
+		t.Errorf("error = %q, want it to name patrols.spec_dispatch", err)
+	}
+	if report != "" {
+		t.Errorf("report = %q, want nothing printed before the refusal", report)
+	}
+}

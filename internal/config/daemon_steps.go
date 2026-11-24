@@ -89,6 +89,7 @@ var daemonSteps = []DaemonStep{
 	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
 	{"spec_dispatch", DaemonStepPatrol, DaemonStepRuns, []string{"openshell", "kubectl"}, "gt sling through the gateway and the cluster"},
+	{"spec_split", DaemonStepPatrol, DaemonStepRuns, []string{"bd", "git"}, "in process: the tick lists the split-labeled beads through each rig's store and calls the split apply the command runs, which execs bd and git (gt-tal4li)"},
 	{"jsonl_git_backup", DaemonStepPatrol, DaemonStepRuns, []string{"dolt", "git"}, "dolt and git"},
 	{"town_state_backup", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git in the JSONL backup repository; reads the town's files through io/fs"},
 	{"patrol_scan", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git and gt"},

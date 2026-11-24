@@ -145,6 +145,14 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 		// always has, with the 30m escalation as its only bound.
 		holds = append(holds, &daemonWork{name: "a scheduled slings cycle", hard: true})
 	}
+	if d.specSplitRunning.Load() {
+		// A split apply creates its two pieces before it closes the original,
+		// and its undo runs on a returned error, not on a killed process: a
+		// cut leaves them behind with nothing to redo it, so the tick holds a
+		// restart the way a scheduled slings cycle does (spec_split_step.go,
+		// gt-tal4li).
+		holds = append(holds, &daemonWork{name: "a spec split tick", hard: true})
+	}
 	if d.specDispatchRunning.Load() {
 		holds = append(holds, &daemonWork{name: specDispatchHoldLabel})
 	}

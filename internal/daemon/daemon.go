@@ -334,6 +334,12 @@ type Daemon struct {
 	// SetSchedulerDeps; empty means this daemon does not dispatch.
 	schedulerDeps schedulerrun.Deps
 
+	// specSplitDeps are the collaborators the spec_split step runs on. The
+	// apply lives in package cmd, which starts this daemon, so it arrives
+	// through SetSpecSplitDeps rather than the daemon reaching back for it
+	// (gt-tal4li). A test also replaces the candidate reader here.
+	specSplitDeps SpecSplitDeps
+
 	// lastTownHealth is the previous health report, the baseline for the
 	// heartbeat advance check. Heartbeat goroutine only.
 	lastTownHealth *townhealth.Report
@@ -1034,6 +1040,13 @@ type Daemon struct {
 	specDispatchRunning atomic.Bool
 	specDispatchCycles  sync.WaitGroup
 	specDispatchHold    dispatch.HoldLatch
+
+	// specSplitRunning / specSplitCycles are the spec_split step's single-flight
+	// guard and cycle count (spec_split_step.go, gt-tal4li): the step runs its
+	// tick on its own goroutine so an apply never holds the heartbeat, and the
+	// guard keeps one tick at a time.
+	specSplitRunning atomic.Bool
+	specSplitCycles  sync.WaitGroup
 
 	// specCensusRemove removes the spec dispatcher's census file before a tick
 	// (spec_dispatch.go); nil removes the real file. A test whose clear fails
@@ -3121,6 +3134,11 @@ var heartbeatSteps = []heartbeatStep{
 		}
 		d.dispatchQueuedWork()
 	}},
+
+	// Split the beads labeled split (default off; the config block says why,
+	// gt-tal4li). lifecycle: a split creates and links beads, which the town
+	// E-stop holds.
+	{name: "spec-split", lifecycle: true, run: (*Daemon).specSplitStep},
 
 	// Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.

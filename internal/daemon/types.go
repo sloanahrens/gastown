@@ -624,6 +624,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.OutboxPoll.Enabled
 	}
+	// spec_split is opt-in and off unless enabled:true; its config block says
+	// why (gt-tal4li).
+	if patrol == "spec_split" {
+		if config == nil || config.Patrols == nil || config.Patrols.SpecSplit == nil {
+			return false
+		}
+		return config.Patrols.SpecSplit.Enabled
+	}
 	// deepseek_balance is opt-in; its config block says why (gt-whaxw7).
 	if patrol == "deepseek_balance" {
 		if config == nil || config.Patrols == nil || config.Patrols.DeepSeekBalance == nil {
