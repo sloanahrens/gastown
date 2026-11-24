@@ -246,8 +246,12 @@ trim does, so a landing pass in flight does not hold it off.
   and does not recreate. `ci-gomod` and `ci-npm` are not touched. The cap is
   `ci_gocache_cap_bytes`: the trim that enforces it (gt-wwx09z) removes the least
   recently used files, oldest last write first, once the age rule has run, until
-  the volume is back under the cap, and never a file written within the last
-  hour, whatever the cap.
+  the volume is back under the cap. It never selects a file whose last write is
+  within the 75-minute floor, whatever the cap. The floor is Go's one-hour cache
+  touch interval plus a 15-minute margin: Go resets a reused entry's mtime at
+  most once an hour, so a file's mtime can be almost an hour older than its last
+  use, and the margin keeps every file a CI job used in the last 15 minutes out
+  of the selection.
 - The mode applies as it does to the rest of the patrol. `dry_run` lists what
   would be removed and removes nothing; `apply` removes. An applied run logs one
   line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
