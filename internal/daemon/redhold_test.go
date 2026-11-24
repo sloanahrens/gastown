@@ -121,6 +121,53 @@ func TestRedHoldInputsOf(t *testing.T) {
 	}
 }
 
+// TestRedHoldInputsCountsASkipAsGreen pins that a rig's green date is the newer
+// of the sweep's last green and its skip confirmation, so a green tip that idles
+// while the sweep skips it keeps reading green; a rig with neither date reads
+// no-green, and a red tip keeps its sweep reason whatever the confirmation
+// (gt-fxb1id).
+func TestRedHoldInputsCountsASkipAsGreen(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	sweepRed := []dispatch.RedHoldReason{{Kind: dispatch.RedHoldSweepRed, Since: now, Detail: "gastown: 2 red cycles"}}
+	stale := func(hours string) []dispatch.RedHoldReason {
+		return []dispatch.RedHoldReason{{Kind: dispatch.RedHoldGreenStale, Since: now, Detail: "no green sweep for " + hours}}
+	}
+	tests := []struct {
+		name   string
+		rigs   []string
+		states map[string]tierSweepState
+		want   []dispatch.RedHoldReason
+	}{
+		{"a skip re-confirms a green tip older than the window", []string{"gastown"},
+			map[string]tierSweepState{"gastown": {LastGreenAt: now.Add(-4 * time.Hour), LastGreenConfirmedAt: now.Add(-5 * time.Minute)}}, nil},
+		{"a confirmation alone dates the green tip", []string{"gastown"},
+			map[string]tierSweepState{"gastown": {LastGreenConfirmedAt: now.Add(-5 * time.Minute)}}, nil},
+		{"neither date reads no-green", []string{"gastown"},
+			map[string]tierSweepState{"gastown": {}}, nil},
+		{"a confirmation older than the green tip does not freshen it", []string{"gastown"},
+			map[string]tierSweepState{"gastown": {LastGreenAt: now.Add(-4 * time.Hour), LastGreenConfirmedAt: now.Add(-5 * time.Hour)}}, stale("4h")},
+		{"a red tip keeps its sweep reason however fresh the confirmation", []string{"gastown"},
+			map[string]tierSweepState{"gastown": {RedCycles: 2, LastGreenAt: now.Add(-4 * time.Hour), LastGreenConfirmedAt: now.Add(-5 * time.Minute)}}, sweepRed},
+		{"the oldest rig still dates a hold through its confirmation", []string{"alpha", "beta"},
+			map[string]tierSweepState{
+				"alpha": {LastGreenAt: now.Add(-4 * time.Hour), LastGreenConfirmedAt: now.Add(-5 * time.Minute)},
+				"beta":  {LastGreenAt: now.Add(-4 * time.Hour)},
+			}, stale("4h")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			src := redHoldSources{Rigs: tt.rigs, Read: func(rig string) (tierSweepState, error) { return tt.states[rig], nil }, Now: func() time.Time { return now }}
+			require.NoError(t, runRedHold(townRoot, src, map[string]bool{}, func(string, ...any) {}))
+			rec, err := dispatch.ReadRedHold(townRoot)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, rec.Reasons)
+		})
+	}
+}
+
 func TestRedHoldEvalSweepTriggers(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
