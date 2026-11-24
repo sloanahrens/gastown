@@ -2147,6 +2147,10 @@ func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 	}
 
 	moved := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// The swept-tip cycle runs on a later clock, so a wrong re-stamp on this
+	// path would show as the skip's time replaced by later (gt-upeqb5).
+	later := now.Add(time.Hour)
+	d.clock.(*clockwork.FakeClock).Advance(time.Hour)
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return moved, nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	if !d.runTierSweep() {
@@ -2154,10 +2158,10 @@ func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 	}
 	st = tierSweepTestState(t, d, "gastown")
 	if !st.LastGreenConfirmedAt.Equal(now) {
-		t.Errorf("LastGreenConfirmedAt = %v, want %v untouched by a cycle that swept a new tip", st.LastGreenConfirmedAt, now)
+		t.Errorf("LastGreenConfirmedAt = %v, want the earlier skip's %v: a cycle that swept a new tip must not re-stamp it", st.LastGreenConfirmedAt, now)
 	}
-	if st.LastGreenSHA != moved {
-		t.Errorf("LastGreenSHA = %q, want the swept tip %q", st.LastGreenSHA, moved)
+	if st.LastGreenSHA != moved || !st.LastGreenAt.Equal(later) {
+		t.Errorf("state = %+v, want the swept tip %s dated %v", st, moved, later)
 	}
 }
 
@@ -2166,11 +2170,12 @@ func TestTierSweepSkipRecordsTheTime(t *testing.T) {
 func TestTierSweepSkipOldRecordWithoutTheFieldReadsAsTheZeroTime(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	if err := writeTierSweepState(town, "gastown", tierSweepState{}); err != nil {
+	path := tierSweepStatePath(town, "gastown")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	legacy := `{"last_green_sha":"aaaa","last_green_at":"2026-11-24T06:40:00Z","tiers":{}}`
-	writeFile(t, tierSweepStatePath(town, "gastown"), legacy)
+	writeFile(t, path, legacy)
 	st, err := readTierSweepState(town, "gastown")
 	if err != nil {
 		t.Fatal(err)

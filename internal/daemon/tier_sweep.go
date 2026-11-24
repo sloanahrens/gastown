@@ -258,7 +258,7 @@ type tierSweepState struct {
 	// moves while main idles, so this field carries the age of the evidence
 	// where LastGreenAt carries the age of the proof; a record written before
 	// the field existed reads as the zero time (gt-upeqb5).
-	LastGreenConfirmedAt time.Time `json:"last_green_confirmed_at,omitempty"`
+	LastGreenConfirmedAt time.Time `json:"last_green_confirmed_at"`
 	// RedCycles counts the consecutive finished cycles that came back with a
 	// RED tier: a fully green cycle resets it, and a cycle that judged no RED
 	// tier leaves it (gt-9duu8b).
