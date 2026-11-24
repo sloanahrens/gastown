@@ -52,10 +52,20 @@ const (
 	// full name.
 	trimCacheVolume = "cache"
 	trimShardVolume = "trim-list-"
+	// TrimJobDeadline is the trim Job's activeDeadlineSeconds, ten minutes: five times the daemon's
+	// wait on a trim Job (cacheTrimWaitTimeout, two minutes, in internal/daemon's cache_trim.go), so a
+	// slow but healthy removal has room while a wedged pod stops holding the claim's pods for ever.
+	// Kubernetes fails a Job that passes it with the reason DeadlineExceeded; the daemon reads that
+	// as a failed Job (cacheTrimJobFailed), and its next pass deletes the stale Job (cacheTrimExisting,
+	// TrimStale) before applying a fresh one.
+	TrimJobDeadline = 600
 	// TrimClaimJobDeadlineSeconds is the claim trim Job's activeDeadlineSeconds: the hand-run Jobs
 	// took about 2 minutes on a 53 GB claim and 5m25s on a 70 GB claim under five seats compiling on
 	// the same disk (gt-xwer1l). 30 minutes leaves better than five times the longest run, so a
-	// healthy run is never cut off while a wedged pod stops holding the claim's pods for ever.
+	// healthy run is never cut off while a wedged pod stops holding the claim's pods for ever. It
+	// overrides TrimJobDeadline, whose ten minutes is sized for the shard route: the daemon waits
+	// twenty minutes on a claim Job (cacheTrimClaimWaitTimeout), so the claim's deadline has to
+	// outlast that wait.
 	TrimClaimJobDeadlineSeconds = 1800
 )
 
@@ -301,7 +311,7 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 // plans the removal list from the claim and writes it into the claim, and the trim container then
 // reads it from there. The init container runs first and the Job's pod stops if it fails, so the trim
 // container never runs without a list of its own pod's writing. Its plan stage is the long one, so
-// the Job carries TrimClaimJobDeadlineSeconds.
+// the Job lifts trimJobDocument's TrimJobDeadline to TrimClaimJobDeadlineSeconds.
 func claimTrimJob(in TrimJobInput, name string, annotations map[string]string) *TrimJob {
 	volumes := []Volume{
 		{Name: trimCacheVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
@@ -326,6 +336,9 @@ func trimJobDocument(in TrimJobInput, name string, annotations map[string]string
 			Annotations: annotations,
 		},
 		Spec: JobSpec{
+			// The bound is trimJobDocument's, so both routes carry one; the claim route raises it to
+			// TrimClaimJobDeadlineSeconds, which outlasts the daemon's longer wait on a claim Job.
+			ActiveDeadlineSeconds: int64Ptr(TrimJobDeadline),
 			// A failed trim reports itself: the removal list is the run's whole input, so a retry
 			// re-runs the same failure.
 			BackoffLimit: int32Ptr(0),
