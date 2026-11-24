@@ -600,6 +600,60 @@ func TestImagePinDurabilityHTTPRefusals(t *testing.T) {
 	}
 }
 
+// TestImagePinDurabilityManifestGone: a 404 for a manifest is ErrManifestGone, so
+// a caller tells a registry that no longer serves the manifest from one it
+// could not ask. Every other failure of the read is not ErrManifestGone.
+func TestImagePinDurabilityManifestGone(t *testing.T) {
+	t.Parallel()
+	digest := digestFor(0x57)
+	manifestPath := "/v2/oci/docker/manifests/" + digest
+	tests := []struct {
+		name     string
+		answer   hAnswer
+		want     string
+		wantGone bool
+	}{
+		{
+			name:     "404 for the manifest",
+			answer:   hAnswer{status: http.StatusNotFound},
+			want:     "answered HTTP 404 for the manifest",
+			wantGone: true,
+		},
+		{
+			name:   "500 from the registry",
+			answer: hAnswer{status: http.StatusInternalServerError},
+			want:   "answered HTTP 500 for the manifest",
+		},
+		{
+			name:   "403 from the registry",
+			answer: hAnswer{status: http.StatusForbidden},
+			want:   "answered HTTP 403 for the manifest",
+		},
+		{
+			name:   "refused connection",
+			answer: hAnswer{err: errors.New("connect: connection refused")},
+			want:   "the GET request to example.test",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeHttp()
+			fake.answer(http.MethodGet, manifestPath, tc.answer)
+			_, _, err := httpRegistry(fake).Manifest(context.Background(), httpRepo, digest)
+			if err == nil {
+				t.Fatal("Manifest = nil error, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Manifest error = %q, want it to carry %q", err, tc.want)
+			}
+			if got := errors.Is(err, ErrManifestGone); got != tc.wantGone {
+				t.Errorf("errors.Is(err, ErrManifestGone) = %v, want %v for error %q", got, tc.wantGone, err)
+			}
+		})
+	}
+}
+
 // TestImagePinDurabilityHTTPRedirect: a redirect that changes the scheme or the
 // host is refused on the retry that carries the token and on the token request
 // itself, so the token never follows a Location to another endpoint.
