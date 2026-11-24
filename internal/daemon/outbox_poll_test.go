@@ -1057,11 +1057,12 @@ func TestNoBeadAccessOutboxPollRestartedPollDoesNotRefile(t *testing.T) {
 
 // TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks: the daemon
 // builds a new poll for every tick, so a request whose record cannot be written
-// (a read-only .runtime/outbox-poll) must still count as filed for the daemon's
-// life, not for one tick's poll. Three ticks over one read-only record directory,
-// with the overseer closing the escalation between ticks, file it once (gt-93p10b);
-// the write failure is logged with its consequence, and a restarted daemon, whose
-// record file was never written, files the request again (gt-k19lql).
+// must still count as filed for the daemon's life, not for one tick's poll.
+// Three ticks over a record directory that cannot be created, with the overseer
+// closing the escalation between ticks, file it once; a restarted daemon, whose
+// record file was never written, files the request again (gt-93p10b). The
+// failed record's log line is asserted by
+// TestNoBeadAccessOutboxPollFailedRecordLogLine (gt-lkh1yo).
 func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1070,25 +1071,22 @@ func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T
 		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
 	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
 	bd := beadsfake.New()
-	var logged bytes.Buffer
-	d := outboxPollTestDaemon(t, true, &logged)
+	d := outboxPollTestDaemon(t, true, io.Discard)
 	d.config.TownRoot = town
 	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
 	d.prefixRegistryFn = rigPrefixes("gastown")
 	d.openRecoveryBeads = func([]string) beads.Client { return bd }
 
+	// The record directory is a dangling symlink, so the read finds no record
+	// and the write cannot be made under any uid: a 0500 directory does not
+	// stop root.
 	dir := filepath.Dir(outboxPollFiledPath(town))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("creating the record directory: %v", err)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatalf("creating the record directory's parent: %v", err)
 	}
-	//testpolicy:allow no-exec-files — the target is the record directory: a read-only dir needs its search bit
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("making the record directory read-only: %v", err)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "no-such-record-directory"), dir); err != nil {
+		t.Fatalf("replacing the record directory with a dangling symlink: %v", err)
 	}
-	t.Cleanup(func() {
-		//testpolicy:allow no-exec-files — the target is the record directory: t.TempDir's cleanup needs its write and search bits back
-		_ = os.Chmod(dir, 0o700)
-	})
 
 	for tick := 1; tick <= 3; tick++ {
 		poll := d.liveOutboxPoll()
@@ -1107,10 +1105,7 @@ func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T
 		}
 	}
 	if got := outboxPollEscalations(t, bd); len(got) != 1 {
-		t.Errorf("three ticks over a read-only record directory filed %d escalation beads, want one: %+v", len(got), got)
-	}
-	if want := "could not record it, so a restarted poll files it again"; !strings.Contains(logged.String(), want) {
-		t.Errorf("the failed record write was logged as %q, want it to carry %q", logged.String(), want)
+		t.Errorf("three ticks over a record directory that cannot be created filed %d escalation beads, want one: %+v", len(got), got)
 	}
 	// A restart is a new daemon with a fresh record, and the file was never
 	// written: it files the request again, which is the loss the log line names.
@@ -1125,6 +1120,40 @@ func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T
 	}
 	if got := outboxPollEscalations(t, bd); len(got) != 2 {
 		t.Errorf("after a restart the request was filed %d times in all, want two: %+v", len(got), got)
+	}
+}
+
+// TestNoBeadAccessOutboxPollFailedRecordLogLine: a record write that fails is
+// not a request the daemon gave up on, and the log line says so. The record
+// directory is a dangling symlink, so the read finds no record and the write
+// cannot be made under any uid — a 0500 directory does not stop root
+// (gt-lkh1yo).
+func TestNoBeadAccessOutboxPollFailedRecordLogLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	recordDir := filepath.Dir(outboxPollFiledPath(town))
+	if err := os.MkdirAll(filepath.Dir(recordDir), 0o700); err != nil {
+		t.Fatalf("creating the poll's runtime directory: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "no-such-record-directory"), recordDir); err != nil {
+		t.Fatalf("replacing the poll's record directory with a dangling symlink: %v", err)
+	}
+	filed := &fakeOutboxPollFile{}
+	var logged bytes.Buffer
+	poll := outboxPollTestPoll(t, town, exec, filed.file, &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("the tick over a record that cannot be written: %v", err)
+	}
+	if len(filed.requests) != 1 {
+		t.Fatalf("the tick filed %d requests, want the one it read: %+v", len(filed.requests), filed.requests)
+	}
+	if want := "its request is filed and counts as filed for the daemon's life"; !strings.Contains(logged.String(), want) {
+		t.Errorf("the failed record write was logged as %q, want it to carry %q", logged.String(), want)
 	}
 }
 
