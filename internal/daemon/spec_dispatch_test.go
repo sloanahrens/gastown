@@ -853,8 +853,9 @@ func TestSpecDispatchKilledTickBeforeAnySlingLogsNoDispatch(t *testing.T) {
 }
 
 // A tick in flight when the daemon starts draining did not fail: the shutdown
-// ended it, so it logs the canceled line once, keeps the failed line out, and
-// leaves the idle-streak state the failed path resets alone (gt-qd4wbi).
+// ended it, so it logs the canceled line once, still logs one dispatched line
+// per sling it hooked before it stopped, keeps the failed line out, and leaves
+// the idle-streak state the failed path resets alone (gt-qd4wbi).
 func TestSpecDispatchTickCancelledByShutdownIsNotAFailure(t *testing.T) {
 	t.Parallel()
 	clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 23, 20, 4, 0, 0, time.UTC))
@@ -864,7 +865,9 @@ func TestSpecDispatchTickCancelledByShutdownIsNotAFailure(t *testing.T) {
 	fake := newFakeCLI(func([]string) cliReply {
 		clock.Advance(55 * time.Second)
 		if canceled {
-			return cliReply{code: 1, stderr: "signal: terminated"}
+			// Two slings hooked before the shutdown cut the tick, so its
+			// partial output carries two hook lines and no report.
+			return cliReply{stdout: strings.Repeat("  ✓ "+dispatch.SlingHookedLine("p")+"\n", 2), code: 1, stderr: "signal: terminated"}
 		}
 		return cliReply{stdout: string(wireOut(idle))}
 	})
@@ -886,6 +889,9 @@ func TestSpecDispatchTickCancelledByShutdownIsNotAFailure(t *testing.T) {
 	const want = "spec_dispatch: tick canceled by the shutdown after 55s; its slings, if any, were waited for by the drain"
 	if n := countContaining(got, want); n != 1 {
 		t.Errorf("canceled line = %d, want one %q: %v", n, want, got)
+	}
+	if n := countContaining(got, "spec_dispatch: dispatched:", "hooked before the tick was canceled by the shutdown"); n != 2 {
+		t.Errorf("dispatched lines = %d, want one per sling hooked (2): %v", n, got)
 	}
 	if n := countContaining(got, "spec_dispatch: tick failed"); n != 0 {
 		t.Errorf("failure lines = %d, want none: %v", n, got)

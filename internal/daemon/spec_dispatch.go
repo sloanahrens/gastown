@@ -345,6 +345,13 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 		// alert, and a shutdown cancel must not move it (gt-qd4wbi).
 		if d.draining.Load() || d.shuttingDown() {
 			d.logger.Printf("spec_dispatch: tick canceled by the shutdown after %s; its slings, if any, were waited for by the drain", elapsed)
+			// A canceled tick stopped before its report too, so its hooked
+			// lines are still the only record of the slings it made: log them
+			// here as the failed path does, then return without its
+			// idle-streak reset (gt-qd4wbi).
+			for range specSlingsHooked(out) {
+				d.logger.Printf("spec_dispatch: dispatched: a sling hooked before the tick was canceled by the shutdown; its bead is not named in the partial output")
+			}
 			return
 		}
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
