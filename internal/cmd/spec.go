@@ -657,15 +657,23 @@ func specChildrenFromSQL(c sqlReader, ids []string) (map[string][]*beads.Issue, 
 // rig's database at dir, read through stores. A store that answers SQLCSV is
 // read through specChildrenFromSQL, one call per chunk at about 100 to 200 ms;
 // one without it is read through specChildrenRead, whose per-bead bd show costs
-// 350 to 923 ms (gt-ci4bf3). The tick passes the zero value, which opens bd; a
-// test passes a store that counts its reads.
+// 350 to 923 ms (gt-ci4bf3). A SQL read that fails for any reason but the
+// deadline falls back to specChildrenRead for the same chunk, so a schema
+// change slows the tick rather than stopping it; a timed-out chunk makes no
+// second call and waits for the next tick (gt-jvv9do, gt-qrz8rm). The tick
+// passes the zero value; a test passes a store that counts its reads.
 func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[string][]*beads.Issue, error) {
 	return func(dir string, ids []string) (map[string][]*beads.Issue, error) {
 		store := stores.pinnedAt(dir)
-		if reader, ok := store.(sqlReader); ok {
-			return specChildrenFromSQL(reader, ids)
+		reader, ok := store.(sqlReader)
+		if !ok {
+			return specChildrenRead(store, ids)
 		}
-		return specChildrenRead(store, ids)
+		kids, err := specChildrenFromSQL(reader, ids)
+		if err != nil && !isBDTimeout(err) {
+			return specChildrenRead(store, ids)
+		}
+		return kids, err
 	}
 }
 

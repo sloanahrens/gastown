@@ -138,17 +138,21 @@ type sqlReaderFunc func(beadsql.Query) ([][]string, error)
 
 func (f sqlReaderFunc) SQLCSV(q beadsql.Query) ([][]string, error) { return f(q) }
 
-// sqlChildrenClient is a store that answers SQLCSV as a bd database would, and
-// counts both children reads, so a wiring test holds the default read to the
-// one store's kind takes (gt-ci4bf3).
+// sqlChildrenClient is a store that answers SQLCSV as a bd database would, or
+// fails with sqlErr, and counts both children reads, so a wiring test holds the
+// default read to the one store's kind takes (gt-ci4bf3, gt-jvv9do).
 type sqlChildrenClient struct {
 	beads.Client
 	records                [][]string
+	sqlErr                 error
 	sql, childrenOf, shows int
 }
 
 func (c *sqlChildrenClient) SQLCSV(beadsql.Query) ([][]string, error) {
 	c.sql++
+	if c.sqlErr != nil {
+		return nil, c.sqlErr
+	}
 	return c.records, nil
 }
 
@@ -220,6 +224,94 @@ func TestTickEffSQLChildrenWiring(t *testing.T) {
 			t.Errorf("reads = %d ChildrenOf, %d ShowMultiple; want one of each", client.childrenOf, client.showMultiple)
 		}
 	})
+}
+
+// TestTickEffSQLChildrenFallback: a SQL children read that fails for any
+// reason but the deadline is answered by specChildrenRead for its chunk, with
+// the children the SQL read gives; a timed-out chunk makes no second call
+// (gt-jvv9do). Mutation: dropping the fallback fails the chunk's ids, and
+// applying it to a timeout calls ChildrenOf and hides the timeout.
+func TestTickEffSQLChildrenFallback(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	create := func(opts beads.CreateOptions) *beads.Issue {
+		t.Helper()
+		is, err := db.Create(opts)
+		if err != nil {
+			t.Fatalf("create %q: %v", opts.Title, err)
+		}
+		return is
+	}
+	childless := create(beads.CreateOptions{Title: "childless", Priority: -1})
+	parent := create(beads.CreateOptions{Title: "parent", Priority: -1})
+	child := create(beads.CreateOptions{Title: "child", Parent: parent.ID, Priority: -1})
+	cands := []specCandidate{{Spec: specdispatch.Spec{ID: parent.ID}},
+		{Spec: specdispatch.Spec{ID: childless.ID}}}
+	records := [][]string{
+		{"p.id", "c.id", "status"},
+		{parent.ID, child.ID, "open"},
+		{childless.ID, "", ""},
+	}
+	readChildren := func(client slingStore) map[string][]specdispatch.Child {
+		t.Helper()
+		children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil,
+			specChildrenReader(slingStores{pinned: func(string) slingStore { return client }}))
+		got := make(map[string][]specdispatch.Child, len(cands))
+		for _, c := range cands {
+			kids, err := children(c.Spec.ID)
+			if err != nil {
+				t.Fatalf("children(%s): %v", c.Spec.ID, err)
+			}
+			got[c.Spec.ID] = kids
+		}
+		return got
+	}
+
+	sqlClient := &sqlChildrenClient{Client: db, records: records}
+	want := readChildren(sqlClient)
+	if sqlClient.sql != 1 || sqlClient.childrenOf != 0 || sqlClient.shows != 0 {
+		t.Fatalf("the SQL read took %d SQLCSV, %d ChildrenOf, %d ShowMultiple calls; want one SQL call and no bd read",
+			sqlClient.sql, sqlClient.childrenOf, sqlClient.shows)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		sqlErr  error
+		records [][]string
+	}{
+		{"a refused SQL read", errors.New("SQLCSV: refused"), nil},
+		{"a SQL answer that does not parse", nil, [][]string{{"p.id", "c.id", "status"}, {parent.ID}}},
+	} {
+		client := &sqlChildrenClient{Client: db, records: tc.records, sqlErr: tc.sqlErr}
+		if got := readChildren(client); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: children = %#v, want the SQL answer %#v", tc.name, got, want)
+		}
+		if client.sql != 1 || client.childrenOf != 1 || client.shows != 1 {
+			t.Errorf("%s: reads = %d SQLCSV, %d ChildrenOf, %d ShowMultiple; want one SQL attempt and one bd read of the chunk",
+				tc.name, client.sql, client.childrenOf, client.shows)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"a deadline", fmt.Errorf("SQLCSV: %w", context.DeadlineExceeded)},
+		{"the gateway's kill", fakeExit(124)},
+	} {
+		client := &sqlChildrenClient{Client: db, sqlErr: tc.err}
+		children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil,
+			specChildrenReader(slingStores{pinned: func(string) slingStore { return client }}))
+		for _, c := range cands {
+			if _, err := children(c.Spec.ID); !errors.Is(err, errSpecChildrenTimeout) {
+				t.Errorf("%s: children(%s) = %v; want the timeout left for the next tick", tc.name, c.Spec.ID, err)
+			}
+		}
+		if client.sql != 1 || client.childrenOf != 0 || client.shows != 0 {
+			t.Errorf("%s: reads = %d SQLCSV, %d ChildrenOf, %d ShowMultiple; want one SQL call and no fallback",
+				tc.name, client.sql, client.childrenOf, client.shows)
+		}
+	}
 }
 
 // TestTickEffSQLChildren: one chunk of three ids is one SQL call, its records
