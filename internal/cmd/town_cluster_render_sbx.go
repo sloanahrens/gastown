@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -22,8 +25,11 @@ type sbxRenderInputs struct {
 // named as the control render names its own, so the two apply sets read alike.
 // After the files it prints one expected Secret line per name in the set's
 // Secrets, in their order, and never a value; nothing is applied and no cluster
-// is read.
+// is read. Every refusal happens before helm runs and before the first write.
 func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
+	if err := checkSbxRenderInputs(in); err != nil {
+		return err
+	}
 	set, err := d.renderSbx(context.Background(), sbx.Inputs{
 		Read:             d.readFile,
 		Run:              sbxHelmRunner(d.runHelm, in.Helm),
@@ -43,6 +49,35 @@ func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
 	}
 	for _, name := range set.Secrets {
 		fmt.Fprintf(d.out, "expected Secret: %s\n", name)
+	}
+	return nil
+}
+
+// checkSbxRenderInputs refuses an unnamed input and an out directory that is
+// absent, unreadable or not empty. The render writes into a directory that
+// exists and is empty and never creates one, so a refusal leaves the tree as it
+// was.
+func checkSbxRenderInputs(in sbxRenderInputs) error {
+	for _, input := range []struct{ what, value, why string }{
+		{"manifests", in.Manifests, "so the agent-sandbox manifest has no path to read"},
+		{"chart", in.Chart, "so there is no chart to template"},
+		{"values", in.Values, "so there are no values to render the chart with"},
+	} {
+		if input.value == "" {
+			return fmt.Errorf("cannot render the gt-sbx desired set: no %s input, %s; no file was written", input.what, input.why)
+		}
+	}
+	if in.OutDir == "" {
+		return errors.New("cannot render the gt-sbx desired set: no out directory, so the set has nowhere to be written; no file was written")
+	}
+	entries, err := os.ReadDir(in.OutDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("cannot render the gt-sbx desired set: out directory %s does not exist, and the render creates none; no file was written", in.OutDir)
+	case err != nil:
+		return fmt.Errorf("cannot render the gt-sbx desired set: out directory %s cannot be read as a directory: %w; no file was written", in.OutDir, err)
+	case len(entries) > 0:
+		return fmt.Errorf("cannot render the gt-sbx desired set: out directory %s is not empty, and the render refuses to mix its files with another apply set; no file was written", in.OutDir)
 	}
 	return nil
 }
