@@ -3709,7 +3709,9 @@ func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step)
 
 // timedMirrorCmd is runCmd, and for the sweep mirror's clone and fetch it logs one
 // line each naming the rig and the seconds the command took, so the cost of a
-// delta fetch is read from the daemon log (gt-4dx0su).
+// delta fetch is read from the daemon log (gt-4dx0su). A clone of an existing
+// mirror, which the clone step skips rather than fails, logs the skip, so a
+// real failure stays visible (gt-te7hd1).
 func (d *Daemon) timedMirrorCmd(cmd *exec.Cmd) ([]byte, []byte, error) {
 	kind, mirror := tierSweepMirrorStep(cmd.Args)
 	if kind == "" {
@@ -3718,11 +3720,21 @@ func (d *Daemon) timedMirrorCmd(cmd *exec.Cmd) ([]byte, []byte, error) {
 	start := d.clk().Now()
 	stdout, stderr, err := d.runCmd(cmd)
 	outcome := "ok"
-	if err != nil {
+	switch {
+	case err != nil && kind == "clone" && mirrorCloneSkipped(stderr):
+		outcome = "skipped: the mirror exists"
+	case err != nil:
 		outcome = "failed"
 	}
 	d.logger.Printf("tier_sweep: %s: mirror %s took %s (%s)", strings.TrimSuffix(filepath.Base(mirror), ".git"), kind, d.clk().Now().Sub(start).Round(100*time.Millisecond), outcome)
 	return stdout, stderr, err
+}
+
+// mirrorCloneSkipped reports whether a failed clone's stderr holds the text the
+// clone step's SkipWhen declares is an existing mirror. It asks the step itself,
+// so the log line and the step's skip decision share one comparison (gt-te7hd1).
+func mirrorCloneSkipped(stderr []byte) bool {
+	return sweeprunner.Step{SkipWhen: sweeprunner.MirrorCloneSkipText}.SkippedFailure(stderr)
 }
 
 // tierSweepMirrorStep names a mirror command, "clone" or "fetch", and the mirror
