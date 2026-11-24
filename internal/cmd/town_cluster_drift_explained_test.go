@@ -9,7 +9,6 @@ import (
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 )
 
-// driftExceptionsFor is the run's exceptions seam: one entry for object path.
 func driftExceptionsFor(object, path, expires string) func() []byte {
 	return func() []byte {
 		return []byte(driftExceptionsYAML(driftExceptionEntryYAML(object, path, "explained for the test", "overseer", expires)))
@@ -18,6 +17,7 @@ func driftExceptionsFor(object, path, expires string) func() []byte {
 
 // TestTownClusterDriftExplained holds the exceptions file through the compare.
 func TestTownClusterDriftExplained(t *testing.T) {
+	t.Parallel()
 	const tz = "spec.template.spec.containers[name=daemon].env[name=TZ].value"
 	d, out, town := driftTestSeams(t, nil)
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
@@ -38,7 +38,6 @@ func TestTownClusterDriftExplained(t *testing.T) {
 			t.Errorf("printed\n%s, want %q", out, want)
 		}
 	})
-
 	t.Run("an absent object stays drift", func(t *testing.T) {
 		out.Reset()
 		answer := driftAnswering(t, m, nil)
@@ -56,7 +55,6 @@ func TestTownClusterDriftExplained(t *testing.T) {
 			t.Errorf("printed an explained line for an absent object:\n%s", out)
 		}
 	})
-
 	t.Run("an expired entry exits 2 naming it", func(t *testing.T) {
 		out.Reset()
 		d.kubectl = driftNoRead(t)
@@ -92,6 +90,7 @@ func TestTownClusterDriftExplained(t *testing.T) {
 
 // TestTownClusterDriftExceptionsWiring refuses a run with no file or clock.
 func TestTownClusterDriftExceptionsWiring(t *testing.T) {
+	t.Parallel()
 	for _, drop := range []func(*clusterDriftDeps){func(d *clusterDriftDeps) { d.exceptions = nil }, func(d *clusterDriftDeps) { d.now = nil }} {
 		d, _, _ := driftTestSeams(t, nil)
 		d.kubectl = driftNoRead(t)
