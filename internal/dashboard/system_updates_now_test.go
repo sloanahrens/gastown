@@ -181,6 +181,55 @@ func TestSystemUpdatesNowSectionReachesTheHubFeed(t *testing.T) {
 	assert.True(t, got.SystemUpdates.SweepUnknown, "no tier sweep reader, so the sweep half is unknown")
 }
 
+// The section reaches the hub feed with how many joined commits its cap left
+// out: three over a cap of six, and no field at all when nothing was cut.
+func TestSystemUpdatesNowSectionCarriesMore(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		joined   int
+		wantMore int
+	}{
+		{name: "three more commits than the cap", joined: systemUpdatesRowCap + 3, wantMore: 3},
+		{name: "fewer commits than the cap", joined: systemUpdatesRowCap - 2, wantMore: 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var sweeps []TierSweepRow
+			for i := 0; i < tt.joined; i++ {
+				sweeps = append(sweeps, TierSweepRow{
+					At:  sysTestClock.Add(time.Duration(i) * time.Minute),
+					Rig: "gastown",
+					SHA: sysTestSHA(i)[:8],
+				})
+			}
+			h := NewHub(Config{
+				SystemUpdates: func() *SystemUpdates { return NewSystemUpdates(sweeps, nil, nil, false) },
+			})
+			h.pollSystemUpdates()
+
+			b, err := json.Marshal(h.State())
+			require.NoError(t, err)
+			var got struct {
+				SystemUpdates map[string]json.RawMessage `json:"system_updates"`
+			}
+			require.NoError(t, json.Unmarshal(b, &got), "the state is not the feed's JSON")
+			raw, ok := got.SystemUpdates["more"]
+			if tt.wantMore == 0 {
+				assert.False(t, ok, "a section that cut nothing still carries 'more'")
+				return
+			}
+			require.True(t, ok, "the section did not carry how many commits the cap left out")
+			var more int
+			require.NoError(t, json.Unmarshal(raw, &more))
+			assert.Equal(t, tt.wantMore, more, "%s: commits reported left out", tt.name)
+		})
+	}
+}
+
 // Run starts the section's poller when the reader is wired. The interval is an
 // hour, so the ticker cannot be what reads: the page's connect wakes the parked
 // worker, and the test wakes the hub again until that one read lands. The read

@@ -146,7 +146,8 @@ func TestSystemUpdatesRowsAtIsZeroWhenNoStageHasATime(t *testing.T) {
 
 // A record with no sha a join trusts names no commit: a blank roll target, a
 // blank run sha and a too-short sweep are dropped rather than shown as a row
-// with no name. A cap of zero or less draws nothing.
+// with no name. A cap of zero or less draws nothing, and every joined commit is
+// reported left out.
 func TestSystemUpdatesRowsSkipsCommitlessRecords(t *testing.T) {
 	t.Parallel()
 
@@ -156,6 +157,7 @@ func TestSystemUpdatesRowsSkipsCommitlessRecords(t *testing.T) {
 		pipeline *GastownPipeline
 		rolls    []SystemUpdateRoll
 		limit    int
+		wantCut  int
 	}{
 		{
 			name:     "blank and short shas",
@@ -163,22 +165,69 @@ func TestSystemUpdatesRowsSkipsCommitlessRecords(t *testing.T) {
 			pipeline: &GastownPipeline{Runs: []PipelineRun{{SHA: "", Status: pipelineQueued}}},
 			rolls:    []SystemUpdateRoll{{StartedAt: sysTestClock}},
 			limit:    systemUpdatesRowCap,
+			wantCut:  0,
 		},
 		{
-			name:   "zero cap",
-			sweeps: []TierSweepRow{{At: sysTestClock, SHA: sysTestSHA(3)[:8]}},
-			limit:  0,
+			name:    "zero cap",
+			sweeps:  []TierSweepRow{{At: sysTestClock, SHA: sysTestSHA(3)[:8]}},
+			limit:   0,
+			wantCut: 1,
 		},
 		{
-			name:   "negative cap",
-			sweeps: []TierSweepRow{{At: sysTestClock, SHA: sysTestSHA(4)[:8]}},
-			limit:  -1,
+			name:    "negative cap",
+			sweeps:  []TierSweepRow{{At: sysTestClock, SHA: sysTestSHA(4)[:8]}},
+			limit:   -1,
+			wantCut: 1,
 		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Empty(t, SystemUpdateRows(tt.sweeps, tt.pipeline, tt.rolls, tt.limit))
+			rows, cut := SystemUpdateRowsWithMore(tt.sweeps, tt.pipeline, tt.rolls, tt.limit)
+			assert.Empty(t, rows, "%s: rows drawn", tt.name)
+			assert.Equal(t, tt.wantCut, cut, "%s: commits reported left out", tt.name)
+		})
+	}
+}
+
+// A section whose cap cut joined commits carries how many it left out: nine
+// joined under a cap of six cut three, and four joined cut none. The rows are
+// still the newest ones, so the cut count names the older commits missing from
+// the drawn end.
+func TestSystemUpdatesRowsReportsHowManyWereCut(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		joined  int
+		limit   int
+		wantCut int
+	}{
+		{name: "nine joined under a cap of six", joined: 9, limit: 6, wantCut: 3},
+		{name: "four joined under a cap of six", joined: 4, limit: 6, wantCut: 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var sweeps []TierSweepRow
+			for i := 0; i < tt.joined; i++ {
+				sweeps = append(sweeps, TierSweepRow{
+					At:  sysTestClock.Add(time.Duration(i) * time.Minute),
+					Rig: "gastown",
+					SHA: sysTestSHA(i)[:8],
+				})
+			}
+			rows, cut := SystemUpdateRowsWithMore(sweeps, nil, nil, tt.limit)
+
+			assert.Equal(t, tt.wantCut, cut, "%s: commits reported left out", tt.name)
+			wantShown := min(tt.joined, tt.limit)
+			require.Len(t, rows, wantShown, "%s: rows drawn", tt.name)
+			for k := range rows {
+				newest := tt.joined - 1 - k
+				assert.Equal(t, sysTestSHA(newest)[:8], rows[k].SHA,
+					"%s: row %d is not the %dth-newest commit", tt.name, k, k)
+			}
 		})
 	}
 }
