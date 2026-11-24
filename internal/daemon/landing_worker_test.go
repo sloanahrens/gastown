@@ -602,8 +602,61 @@ func TestRigFollowupBudgetPercentReadsRigSettingsOnly(t *testing.T) {
 			if tc.body != "" {
 				write(t, rigPath, tc.body)
 			}
-			if got := rigFollowupBudgetPercent(rigPath); got != tc.want {
+			got, err := rigFollowupBudgetPercent(rigPath)
+			if err != nil {
+				t.Fatalf("rigFollowupBudgetPercent() error = %v; want nil", err)
+			}
+			if got != tc.want {
 				t.Errorf("rigFollowupBudgetPercent() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewRigLandingWorker_WiresTheFollowupBudget drives the budget through
+// worker construction; a share the loader refuses leaves the feed off with one
+// escalation naming the settings file (gt-sgy4a9).
+func TestNewRigLandingWorker_WiresTheFollowupBudget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, settings string
+		want           int // 0 means the loader refuses the share
+	}{
+		{"a configured share", `{"type":"rig-settings","version":1,"landing":{"followups":true},"merge_queue":{"followup_budget_percent":12}}`, 12},
+		{"a share the loader refuses", `{"type":"rig-settings","version":1,"landing":{"followups":true},"merge_queue":{"followup_budget_percent":101}}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			promoteRigConfig(t, townRoot, "gastown", filepath.Join(t.TempDir(), "promote-gastown.key"))
+			writeRigsJSON(t, townRoot, []string{"gastown"})
+			settingsPath := writeRigSettingsFile(t, townRoot, "gastown", tc.settings)
+			d := newForgejoPromoteDaemon(t, townRoot, "")
+			w, err := d.newRigLandingWorker("gastown")
+			if err != nil {
+				t.Fatalf("newRigLandingWorker: %v; the budget governs only the feed, so landing keeps running", err)
+			}
+			lander, ok := w.Lander.(*land.Lander)
+			if !ok {
+				t.Fatalf("worker Lander = %T, want *land.Lander", w.Lander)
+			}
+			if tc.want != 0 {
+				if lander.FollowupBudgetPercent != tc.want {
+					t.Errorf("worker Lander FollowupBudgetPercent = %d, want the rig's configured %d", lander.FollowupBudgetPercent, tc.want)
+				}
+				return
+			}
+			if lander.Followups != nil {
+				t.Fatal("the feed is wired on a budget the loader refused; it would file under the default share")
+			}
+			rec, ok := d.notifier.(*notifyfake.Recorder)
+			if !ok {
+				t.Fatalf("daemon notifier = %T, want *notifyfake.Recorder", d.notifier)
+			}
+			if esc := rec.Escalations(); len(esc) != 1 {
+				t.Fatalf("escalations = %+v, want exactly one naming the unreadable settings file", esc)
+			} else if !strings.Contains(esc[0].Escalation.Reason, settingsPath) {
+				t.Errorf("escalation reason %q does not name %s", esc[0].Escalation.Reason, settingsPath)
 			}
 		})
 	}

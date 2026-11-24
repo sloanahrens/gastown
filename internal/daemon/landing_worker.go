@@ -707,11 +707,21 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	lander.Candidate = d.jevFailcauseCandidate(rigName, d.jevTestselCandidate(rigName, candidate))
 	lander.Merger = merger
 	// The follow-up feed files beads nobody is waiting on, so it runs only for
-	// a rig whose own settings turn it on (gt-s01pn).
+	// a rig whose own settings turn it on (gt-s01pn). Its budget is read before
+	// that gate: an unloadable settings file must not read as the feed's default
+	// share, so its error is escalated and the gate below leaves the feed off
+	// (gt-sgy4a9).
+	budget, budgetErr := rigFollowupBudgetPercent(rigPath)
+	if budgetErr != nil {
+		// A dropped alert is recorded on the escalation_dropped feed; the wiring has no next action.
+		_ = d.escalateAlertSeverity("low", "landing-followup-budget:"+rigName, "landing_worker",
+			fmt.Sprintf("rig %s: followup_budget_percent is unknown, so its feed is off: %s does not load: %v",
+				rigName, config.RigSettingsPath(rigPath), budgetErr))
+	}
 	if rigFollowupsEnabled(rigPath) {
 		lander.Followups = followupBeads{client: bd}
 		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
-		lander.FollowupBudgetPercent = rigFollowupBudgetPercent(rigPath)
+		lander.FollowupBudgetPercent = budget
 		applyFollowupPolicy(lander)
 		// The backpressure holds findings back silently otherwise, so the day
 		// it does, the loss reaches a human as a low attention item (gt-4ty22).
@@ -1515,13 +1525,21 @@ func rigFollowupBackpressure(rigPath string) int {
 // rig's own settings/config.json, and 0 when it names none — the share the
 // feed reads as its own default of 25. It is read from there for the reason
 // rigFollowupsEnabled reads its file: it is the weekly budget for beads
-// nobody is waiting on (gt-wwpfo7).
-func rigFollowupBudgetPercent(rigPath string) int {
+// nobody is waiting on (gt-wwpfo7). A present file that does not load is an
+// error, not the default share: that would file under a budget the operator
+// never set (gt-sgy4a9).
+func rigFollowupBudgetPercent(rigPath string) (int, error) {
 	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
-	if err != nil || settings == nil || settings.MergeQueue == nil {
-		return 0
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading merge_queue.followup_budget_percent: %w", err)
 	}
-	return settings.MergeQueue.FollowupBudgetPercent
+	if settings == nil || settings.MergeQueue == nil {
+		return 0, nil
+	}
+	return settings.MergeQueue.FollowupBudgetPercent, nil
 }
 
 // followupBackpressureAlertEvery is how often the feed's backpressure item may
