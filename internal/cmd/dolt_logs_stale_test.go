@@ -103,15 +103,15 @@ func cannedTail(_ []string, out, _ io.Writer) error {
 }
 
 // cannedContainerLog is the container reader of a town whose Dolt runs in a
-// container: it prints the container's two lines, to out.
+// container: it prints the container's two lines, to out. The text differs
+// from cannedTail's so a test tells a container read from a host tail.
 func cannedContainerLog(_ string, _ int, out, _ io.Writer) error {
-	_, err := io.WriteString(out, "serving line one\nserving line two\n")
+	_, err := io.WriteString(out, "container line one\ncontainer line two\n")
 	return err
 }
 
 // fixedDoltLogReads is the clock, tail and container reader the dolt log
-// commands read, with the clock held at now. Both line readers print the
-// fixture's lines, so a test that needs to tell them apart builds its own.
+// commands read, with the clock held at now.
 func fixedDoltLogReads(now time.Time) doltLogReads {
 	return doltLogReads{now: func() time.Time { return now }, tail: cannedTail, containerLog: cannedContainerLog}
 }
@@ -159,8 +159,9 @@ func TestDoltLogStaleNoticeWrite(t *testing.T) {
 }
 
 // TestDoltLogStaleNoticeOnLogsCommand: gt dolt logs prints the stale notice
-// before the log's lines, and prints no notice for a fresh log. An unusable
-// dolt.external_container names the setting rather than a docker command.
+// before the log's lines, and prints no notice for a fresh log. A container
+// town's lines come from the container, never the host dolt.log; an unusable
+// dolt.external_container names the setting and keeps the host read.
 func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
@@ -170,6 +171,8 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 		age        time.Duration
 		wantNotice bool
 		want       []string
+		lines      string // substring of the lines the command must print
+		refuse     string // substring of the other reader's lines it must not print
 	}{
 		{
 			name:       "fifteen day old log prints the container notice before its lines",
@@ -177,12 +180,16 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 			age:        15 * 24 * time.Hour,
 			wantNotice: true,
 			want:       []string{"15 days ago", "docker logs gt-dolt"},
+			lines:      "container line one",
+			refuse:     "serving line one",
 		},
 		{
 			name:       "five minute old log prints no notice",
 			container:  "gt-dolt",
 			age:        5 * time.Minute,
 			wantNotice: false,
+			lines:      "container line one",
+			refuse:     "serving line one",
 		},
 		{
 			name:       "unusable container setting names the setting",
@@ -190,6 +197,8 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 			age:        15 * 24 * time.Hour,
 			wantNotice: true,
 			want:       []string{"15 days ago", "dolt.external_container"},
+			lines:      "serving line one",
+			refuse:     "container line one",
 		},
 	}
 	for _, tc := range tests {
@@ -204,9 +213,12 @@ func TestDoltLogStaleNoticeOnLogsCommand(t *testing.T) {
 				t.Fatalf("doltLogsTo: %v", err)
 			}
 			got := out.String()
-			lines := strings.Index(got, "serving line one")
+			lines := strings.Index(got, tc.lines)
 			if lines < 0 {
 				t.Fatalf("log lines missing from output %q", got)
+			}
+			if strings.Contains(got, tc.refuse) {
+				t.Fatalf("output %q holds %q, the other reader's lines", got, tc.refuse)
 			}
 			notice := strings.Index(got, "dolt.log is stale")
 			if !tc.wantNotice {
