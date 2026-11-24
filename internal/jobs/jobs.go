@@ -363,19 +363,34 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 }
 
 // cadenceEntry is one patrol's entry in the patrol config: its interval as
-// the file wrote it, its enabled flag, or bad when the entry does not parse.
+// the file wrote it, its enabled flag, or bad when the entry does not parse or
+// its enabled value is not a JSON boolean.
 type cadenceEntry struct {
 	interval *string
-	// enabled is the entry's enabled value: nil when the entry writes none,
-	// which the daemon reads as on.
+	// enabled is the entry's enabled value: nil when the entry writes no
+	// enabled key, which the daemon reads as on.
 	enabled *bool
 	bad     bool
 }
 
+// parseEnabled reads a patrol entry's enabled value. No value at all means the
+// entry writes no enabled key: nil, which the daemon reads as on. true or false
+// is that boolean. Any other JSON value, null included, is not a boolean and
+// reports the value as unreadable.
+func parseEnabled(raw json.RawMessage) (*bool, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	var on *bool
+	if err := json.Unmarshal(raw, &on); err != nil || on == nil {
+		return nil, false
+	}
+	return on, true
+}
+
 // patrolOff reports whether a patrol's entry turns it off: an enabled key that
-// says false. An entry with no enabled key, one that says true, or one that
-// does not parse is not off here; a broken entry's row reads unknown from its
-// unreadable interval.
+// says false. An entry with no enabled key, one that says true, or a bad entry
+// is not off here; a bad entry's row reads unknown.
 func patrolOff(cadences map[string]cadenceEntry, name string) bool {
 	e, ok := cadences[name]
 	return ok && e.enabled != nil && !*e.enabled
@@ -437,14 +452,21 @@ func readCadences(townRoot string) (cadences map[string]cadenceEntry, source str
 	cadences = make(map[string]cadenceEntry, len(patrols))
 	for name, raw := range patrols {
 		var entry struct {
-			Interval *string `json:"interval"`
-			Enabled  *bool   `json:"enabled"`
+			Interval *string         `json:"interval"`
+			Enabled  json.RawMessage `json:"enabled"`
 		}
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			cadences[name] = cadenceEntry{bad: true}
 			continue
 		}
-		cadences[name] = cadenceEntry{interval: entry.Interval, enabled: entry.Enabled}
+		enabled, ok := parseEnabled(entry.Enabled)
+		if !ok {
+			// An enabled value that is not a JSON boolean leaves the row's
+			// on/off state unreadable, so the entry is bad and its row unknown.
+			cadences[name] = cadenceEntry{bad: true}
+			continue
+		}
+		cadences[name] = cadenceEntry{interval: entry.Interval, enabled: enabled}
 	}
 	return cadences, source, nil
 }

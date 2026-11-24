@@ -128,6 +128,36 @@ func TestJobsState(t *testing.T) {
 			patrols: `{"job":"1h"}`,
 			want:    StateUnknown,
 		},
+		{
+			name:    "enabled null is unknown, never ok",
+			patrols: `{"job":{"interval":"1h","enabled":null}}`,
+			lastRun: ptrTime(testNow.Add(-time.Minute)),
+			want:    StateUnknown,
+		},
+		{
+			name:    "enabled that is a string is unknown",
+			patrols: `{"job":{"interval":"1h","enabled":"false"}}`,
+			lastRun: ptrTime(testNow.Add(-time.Minute)),
+			want:    StateUnknown,
+		},
+		{
+			name:    "enabled that is a number is unknown",
+			patrols: `{"job":{"interval":"1h","enabled":1}}`,
+			lastRun: ptrTime(testNow.Add(-time.Minute)),
+			want:    StateUnknown,
+		},
+		{
+			name:    "enabled that is an object is unknown",
+			patrols: `{"job":{"interval":"1h","enabled":{}}}`,
+			lastRun: ptrTime(testNow.Add(-time.Minute)),
+			want:    StateUnknown,
+		},
+		{
+			name:    "enabled that is an array is unknown",
+			patrols: `{"job":{"interval":"1h","enabled":[]}}`,
+			lastRun: ptrTime(testNow.Add(-time.Minute)),
+			want:    StateUnknown,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
