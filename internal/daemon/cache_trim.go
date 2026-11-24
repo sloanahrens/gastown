@@ -1209,13 +1209,16 @@ func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace
 
 // cacheTrimWaitFailure says why the wait ended without the Job completing: the
 // Job failed, the wait timed out, or kubectl could not watch the Job. Each is a
-// different repair, so each is a different line.
+// different repair, so each is a different line. A Job Kubernetes failed for
+// passing its activeDeadlineSeconds names the deadline it carried, which the
+// two trim routes set differently; a Job that failed for another reason keeps
+// the plain line.
 //
 // Every outcome leaves the shards in place, so a status that cannot be read
 // only costs the line its precision; it does not change what the pass does.
 func (d *Daemon) cacheTrimWaitFailure(ctx context.Context, kubeconfig, namespace, jobName string, stderr []byte) string {
-	if d.cacheTrimJobFailed(ctx, kubeconfig, namespace, jobName) {
-		return "the Job failed"
+	if failed, reason, deadline := d.cacheTrimJobFailed(ctx, kubeconfig, namespace, jobName); failed {
+		return cacheTrimFailedLine(reason, deadline)
 	}
 	if bytes.Contains(stderr, []byte("timed out waiting for the condition")) {
 		return "the Job has not finished within the wait (timed out)"
@@ -1223,34 +1226,70 @@ func (d *Daemon) cacheTrimWaitFailure(ctx context.Context, kubeconfig, namespace
 	return "the wait on the Job failed"
 }
 
+// cacheTrimJobDeadlineExceeded is the Failed condition's reason on a Job that
+// passed its activeDeadlineSeconds.
+const cacheTrimJobDeadlineExceeded = "DeadlineExceeded"
+
+// cacheTrimMaxDeadlineSeconds is the largest activeDeadlineSeconds that reads
+// as a duration: a larger value's multiplication overflows, so the line leaves
+// such a deadline unnamed rather than name a value the Job does not hold.
+const cacheTrimMaxDeadlineSeconds = int64(math.MaxInt64 / time.Second)
+
+// cacheTrimFailedLine is the wait's line for a Job whose own status says it
+// failed. A Job that passed its deadline names the deadline it carried; a
+// deadline that reads as no duration still says the deadline passed rather
+// than name a value the Job does not hold.
+func cacheTrimFailedLine(reason string, deadline time.Duration) string {
+	const failed = "the Job failed"
+	if reason != cacheTrimJobDeadlineExceeded {
+		return failed
+	}
+	if deadline <= 0 {
+		return failed + ": it passed its activeDeadlineSeconds"
+	}
+	return failed + ": it passed its activeDeadlineSeconds of " + deadline.String()
+}
+
 // cacheTrimJobFailed reports whether the Job's own status says it failed: a
-// failed count, or a Failed condition set true.
-func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, jobName string) bool {
+// failed count, or a Failed condition set true. It also returns the Failed
+// condition's reason, and the Job's spec.activeDeadlineSeconds as a duration,
+// or 0 when the spec names none or a value a duration cannot hold. The
+// condition is read before the count, since a Job that passes its deadline
+// carries both, and only the condition names the reason.
+func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, jobName string) (bool, string, time.Duration) {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "job", jobName, "-n", namespace, "-o", "json")
 	if err != nil {
-		return false
+		return false, "", 0
 	}
 	var job struct {
+		Spec struct {
+			ActiveDeadlineSeconds int64 `json:"activeDeadlineSeconds"`
+		} `json:"spec"`
 		Status struct {
 			Failed     int `json:"failed"`
 			Conditions []struct {
 				Type   string `json:"type"`
 				Status string `json:"status"`
+				Reason string `json:"reason"`
 			} `json:"conditions"`
 		} `json:"status"`
 	}
 	if json.Unmarshal(out, &job) != nil {
-		return false
+		return false, "", 0
 	}
-	if job.Status.Failed > 0 {
-		return true
+	deadline := time.Duration(0)
+	if seconds := job.Spec.ActiveDeadlineSeconds; seconds > 0 && seconds <= cacheTrimMaxDeadlineSeconds {
+		deadline = time.Duration(seconds) * time.Second
 	}
 	for _, condition := range job.Status.Conditions {
 		if condition.Type == "Failed" && condition.Status == "True" {
-			return true
+			return true, condition.Reason, deadline
 		}
 	}
-	return false
+	if job.Status.Failed > 0 {
+		return true, "", deadline
+	}
+	return false, "", 0
 }
 
 // cacheTrimJobStateKind is what a trim Job's status says: complete, failed or
