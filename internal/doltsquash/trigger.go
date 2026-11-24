@@ -2,6 +2,7 @@
 package doltsquash
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -123,6 +124,10 @@ const maxKeepDays = int(time.Duration(1<<63-1) / (24 * time.Hour))
 // not a timestamp, so it carries no stored value.
 const lastRunSkew = time.Minute
 
+// ErrLastRunInFuture reports a recorded last run more than lastRunSkew after
+// the check's clock, wrapped by Decide so callers test it with errors.Is.
+var ErrLastRunInFuture = errors.New("doltsquash: the last run is in the future")
+
 // Decision is a daily check's answer for one database.
 type Decision struct {
 	// Due reports whether a squash run may start now.
@@ -143,8 +148,9 @@ type Decision struct {
 // zero when none is recorded; a run started inside RunInterval holds the check
 // back even when a threshold trips. A lastRun more than lastRunSkew after now
 // is an error: a run cannot have started in the future, and reading it as no
-// run would open the gate for as long as the stamp stays ahead. One within the
-// skew counts as now. A KeepDays below 1 is an error, not a decision.
+// run would open the gate for as long as the stamp stays ahead; that refusal
+// wraps ErrLastRunInFuture. One within the skew counts as now. A KeepDays
+// below 1 is an error, not a decision.
 // A KeepDays above maxKeepDays is an error too: the window would wrap and the
 // cut would no longer be then minus the window.
 func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
@@ -155,7 +161,7 @@ func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
 		return Decision{}, fmt.Errorf("doltsquash: keep_days %d is above %d, the longest window the cut can reach", cfg.KeepDays, maxKeepDays)
 	}
 	if lastRun.After(now.Add(lastRunSkew)) {
-		return Decision{}, fmt.Errorf("doltsquash: the last run is in the future, %s after the check's clock and past the %s skew allowed, so the gate cannot be judged", lastRun.Sub(now).Truncate(time.Second), lastRunSkew)
+		return Decision{}, fmt.Errorf("%w, %s after the check's clock and past the %s skew allowed, so the gate cannot be judged", ErrLastRunInFuture, lastRun.Sub(now).Truncate(time.Second), lastRunSkew)
 	}
 	if lastRun.After(now) {
 		lastRun = now
