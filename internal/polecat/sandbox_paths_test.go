@@ -138,10 +138,11 @@ type launchRig struct {
 
 func newLaunchRig(t *testing.T) *launchRig {
 	t.Helper()
-	return newLaunchRigAt(t, "w")
+	workDir, _, w := setupSessionBranchTestRepo(t)
+	return newLaunchRigIn(t, filepath.Dir(workDir), workDir, w)
 }
 
-// newLaunchRigAt is newLaunchRig with the worktree at tail under the town:
+// newLaunchRigAt is a launch rig whose worktree sits at tail under the town:
 // "gastown/polecats/p/gastown" is the shape a backend's in-sandbox
 // GT_POLECAT_PATH has, and the tail the sandbox town root is cut at.
 func newLaunchRigAt(t *testing.T, tail string) *launchRig {
@@ -154,6 +155,13 @@ func newLaunchRigAt(t *testing.T, tail string) *launchRig {
 	w.checkout(t, workDir)
 	w.AddRemote(t, workDir, "origin", workDir)
 	w.SetRef(t, workDir, "refs/remotes/origin/main", head)
+	return newLaunchRigIn(t, town, workDir, w)
+}
+
+// newLaunchRigIn is the rig both fixtures share once their worktree and world
+// exist: the town tree the startup command names and the prompt file it reads.
+func newLaunchRigIn(t *testing.T, town, workDir string, w *world) *launchRig {
+	t.Helper()
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
 	rigPath := filepath.Join(town, "gastown")
@@ -288,42 +296,26 @@ func TestSandboxTownRootFromPolecatPath(t *testing.T) {
 	}
 }
 
-// The launch the link bead's gate has to cover (gt-f80lq2): every seat's
-// Prepared.WorkDir is the one link /sandbox/gt/work, and the real worktree is
-// named only in GT_POLECAT_PATH. The town root mapping reads the real path, so
-// the launch starts the session in the link and rewrites the startup command's
-// host town root to the sandbox's.
+// The rule has no fallback: when GT_POLECAT_PATH does not map onto the town,
+// a prepared work dir that would map does not stand in for it. The work dir
+// may be a link every seat shares, so only the real worktree names the root,
+// and a launch that cannot read it refuses before starting a session.
 //
 //testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestSandboxLaunchCommonWork(t *testing.T) {
-	const linkPath = "/sandbox/gt/work"
-	r := newLaunchRigAt(t, "gastown/polecats/box/gastown")
+func TestSandboxTownRootFromPolecatPathRefusesAnUnmappablePolecatPath(t *testing.T) {
+	r := newLaunchRigAt(t, "gastown/polecats/p/gastown")
 
 	err := r.launch(&pathBackend{
 		preparingBackend: preparingBackend{town: r.town},
-		workDir:          linkPath,
-		env:              map[string]string{"GT_POLECAT_PATH": "/sandbox/gt/gastown/polecats/box/gastown"},
+		workDir:          "/sandbox/gt/gastown/polecats/p/gastown",
+		env:              map[string]string{"GT_POLECAT_PATH": "/sandbox/elsewhere/q"},
 	})
 
-	// The capturing tmux stops the launch on purpose, but only after the town
-	// root mapping succeeded: any error from that mapping ends the launch
-	// before a session starts.
-	if err == nil || !strings.Contains(err.Error(), "stop after capturing the command") {
-		t.Fatalf("launch error = %v, want only the tmux stop after the town root mapping", err)
+	if err == nil || !strings.Contains(err.Error(), "no sandbox town root") {
+		t.Fatalf("launch error = %v, want one naming the missing sandbox town root", err)
 	}
-	if r.tm.startIn != linkPath {
-		t.Errorf("the session starts in %q, want the link work dir %q", r.tm.startIn, linkPath)
-	}
-	if strings.Contains(r.tm.command, r.town) {
-		t.Errorf("the startup command still names the host town root %s:\n%s", r.town, r.tm.command)
-	}
-	for _, want := range []string{
-		"--settings /sandbox/gt/gastown/polecats/.claude/settings.json",
-		"--append-system-prompt-file /sandbox/gt/gastown/polecats/.claude/system-prompt-box.md",
-	} {
-		if !strings.Contains(r.tm.command, want) {
-			t.Errorf("the startup command lacks %q:\n%s", want, r.tm.command)
-		}
+	if r.tm.command != "" {
+		t.Errorf("the session was started despite the unmappable GT_POLECAT_PATH:\n%s", r.tm.command)
 	}
 }
 
