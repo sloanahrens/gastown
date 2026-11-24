@@ -166,13 +166,7 @@ func (d *Daemon) specSplitTick() {
 // whether both writes landed; a bead it could not mark is kept in
 // specSplitRefused, so a later tick retries the mark alone and never the apply.
 func (d *Daemon) specSplitMark(beadID, reason string) bool {
-	open := d.specSplitDeps.Store
-	var store specSplitManualStore
-	if open != nil {
-		store = open()
-	} else {
-		store = beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault()))
-	}
+	store := d.specSplitStore()
 	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: []string{specSplitManualLabel}}); err != nil {
 		d.logger.Printf("spec_split: %s: cannot add %s, so this daemon applies it no more: %v", beadID, specSplitManualLabel, err)
 		return false
@@ -182,6 +176,15 @@ func (d *Daemon) specSplitMark(beadID, reason string) bool {
 		return false
 	}
 	return true
+}
+
+// specSplitStore opens the store a refused bead is marked in: the Store seam
+// when a test or caller installed one, else the town's bead store.
+func (d *Daemon) specSplitStore() specSplitManualStore {
+	if open := d.specSplitDeps.Store; open != nil {
+		return open()
+	}
+	return beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault()))
 }
 
 // specSplitPrune forgets the refusals whose bead the tick's read no longer

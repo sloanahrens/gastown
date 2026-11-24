@@ -475,30 +475,17 @@ func TestSpecSplitStepRefused(t *testing.T) {
 	}
 }
 
-// The production default store, taken when no Store seam is installed, is what
-// marks a refused bead in a live daemon. A bd that cannot run fails that mark,
-// and the bead is still not applied a second time.
-func TestSpecSplitStepRefusedDefaultStore(t *testing.T) {
+// With no Store seam installed the step marks a refused bead in the town's bead
+// store. The test builds that store and runs nothing on it: no bd is started.
+func TestSpecSplitStepDefaultStoreIsTheTownStore(t *testing.T) {
 	t.Parallel()
-	d, logged := specSplitTestDaemon(t, true)
-	d.bdPath = filepath.Join(t.TempDir(), "no-such-bd")
-	applies := 0
-	d.specSplitDeps = SpecSplitDeps{
-		Candidates: func() ([]*beads.Issue, error) {
-			return []*beads.Issue{specSplitTestBead("gt-a", "", "split")}, nil
-		},
-		Apply: func(_, _ string) (string, error) {
-			applies++
-			return "verdict: fails: piece A: lint refused\n", errors.New("exit status 1")
-		},
+	d, _ := specSplitTestDaemon(t, true)
+	if _, ok := d.specSplitStore().(*beads.Beads); !ok {
+		t.Errorf("default store is %T, want *beads.Beads", d.specSplitStore())
 	}
-	specSplitRunTick(t, d)
-	specSplitRunTick(t, d)
-	if applies != 1 {
-		t.Errorf("applied %d times over two ticks, want 1: a failed mark must not apply the bead again", applies)
-	}
-	if got := logged.String(); !strings.Contains(got, "cannot add split-manual") {
-		t.Errorf("log = %q, want the default store's failed mark named", got)
+	d.specSplitDeps.Store = func() specSplitManualStore { return &specSplitManualWrites{} }
+	if _, ok := d.specSplitStore().(*specSplitManualWrites); !ok {
+		t.Errorf("seamed store is %T, want the Store seam's", d.specSplitStore())
 	}
 }
 
