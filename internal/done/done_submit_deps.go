@@ -54,6 +54,9 @@ type doneSubmitDeps struct {
 	// checkBranch refuses a rebased branch that reverts merged work, adds
 	// throwaway files, or repeats a rejected attempt byte for byte.
 	checkBranch func(baseRef string, sub doneSubmission) error
+	// listTests runs go test -list in the worktree for the Gate -run check;
+	// nil runs the real go test (gt-hx8f5i).
+	listTests gateListRunner
 	// rewriteBranch squashes auto-save commits and strips attribution
 	// trailers and the Gas Town overlay before the gate sees the branch.
 	rewriteBranch func(baseRef string, sub doneSubmission) error
@@ -149,6 +152,7 @@ func (r *doneRun) useRealSubmitDeps(o Options) {
 			return info.Issue, info.BD, nil
 		},
 		localGate:      localGate,
+		listTests:      runGoTestList,
 		checkBranch:    func(baseRef string, sub doneSubmission) error { return checkBranchForSubmit(r, sub, baseRef) },
 		rewriteBranch:  func(baseRef string, sub doneSubmission) error { return rewriteBranchForSubmit(r, sub, baseRef) },
 		pushSubmodules: func(baseRef string) error { return pushSubmoduleChanges(r.g, baseRef) },
