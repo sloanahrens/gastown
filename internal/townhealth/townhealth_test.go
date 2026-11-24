@@ -623,6 +623,33 @@ func TestTicksOneErroredTickDoesNotBlankTheOthers(t *testing.T) {
 	}
 }
 
+// gt-05kp1s: a tick's own error outranks its interval and its last firing.
+// Each row would be judged GREEN or RED without the error, and each has only
+// the error making it UNKNOWN, so moving the error check below either field
+// turns a row red.
+func TestTickErrOutranksIntervalAndLastFired(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		tick Tick
+	}{
+		{"usable interval and fresh last fire", Tick{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(time.Minute), Err: errors.New("tick read failed")}},
+		{"usable interval and no last fire", Tick{Name: "wisp_reaper", Interval: 30 * time.Minute, Err: errors.New("tick read failed")}},
+		{"no interval and fresh last fire", Tick{Name: "wisp_reaper", LastFired: ago(time.Minute), Err: errors.New("tick read failed")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.ticks = []Tick{tc.tick}
+			got := field(t, Compute(context.Background(), inputs(f)), "tick:wisp_reaper")
+			if got.Tag != Unknown || got.Verdict != VerdictUnknown || got.Detail != "tick read failed" {
+				t.Errorf("tick:wisp_reaper = %+v, want UNKNOWN naming the tick error", got)
+			}
+		})
+	}
+}
+
 // gt-m36as: the landing field judges the oldest pending submission's own age,
 // not the time since the rig last landed. A submission made after hours of
 // quiet is green, one that has outlived a whole gate plus a pass is red
