@@ -218,6 +218,23 @@ func TestActivityOddLinesDrawWithoutGuessing(t *testing.T) {
 		t.Errorf("a line classed %q wears %q, want the plain colour and not the class itself", "bogus", got)
 	}
 
+	// A name whose lookup reaches Object.prototype is not a class the page has
+	// seen: the row draws plain, never the member it resolved.
+	for _, name := range []string{"constructor", "toString", "__proto__"} {
+		t.Run(name, func(t *testing.T) {
+			dom := newPageDOM(t)
+			now := pageNow(t, dom)
+			deliverStream(t, dom, "entry", mustJSONString(t, activityEntry(1, now, "gastown", "bead", "an inherited key", name)))
+			rows := activityRows(t, dom)
+			if len(rows) != 1 {
+				t.Fatalf("a line classed %q drew %d rows, want 1", name, len(rows))
+			}
+			if got := rows[0].Cls; got != "atrow at-plain" {
+				t.Errorf("a line classed %q wears %q, want the plain row class and no function source", name, got)
+			}
+		})
+	}
+
 	odd := map[string]any{"seq": 2, "at": "not a stamp", "rig": "gastown", "kind": "bead", "text": "undated", "class": "plain"}
 	deliverStream(t, dom, "entry", mustJSONString(t, odd))
 	rows = activityRows(t, dom)
@@ -239,6 +256,40 @@ func TestActivityOddLinesDrawWithoutGuessing(t *testing.T) {
 	deliverStream(t, dom, "backlog", mustJSONString(t, []any{nil}))
 	if n := len(activityRows(t, dom)); n != 0 {
 		t.Errorf("a backlog holding only a null left %d rows, want none", n)
+	}
+}
+
+// The comment above ACTIVITY_KEPT is the contract a reader of the page gets:
+// which frames fill the feed and how many lines it holds, cited to gt-l98ykr.
+// It never reads as history, so the page's past is not mistaken for its rules.
+func TestNeverReadHistoryInTheActivityComment(t *testing.T) {
+	t.Parallel()
+
+	const marker = "const ACTIVITY_KEPT = 200;"
+	src := string(indexHTML)
+	at := strings.Index(src, marker)
+	if at < 0 {
+		t.Fatalf("index.html declares no %q", marker)
+	}
+	lines := strings.Split(strings.TrimRight(src[:at], "\n"), "\n")
+	var block []string
+	for i := len(lines) - 1; i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "//"); i-- {
+		block = append([]string{lines[i]}, block...)
+	}
+	if len(block) == 0 {
+		t.Fatalf("index.html has no comment above %q", marker)
+	}
+	comment := strings.Join(block, "\n")
+
+	for _, want := range []string{"gt-l98ykr", "entry frame", "backlog frame"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("the comment above ACTIVITY_KEPT does not state %q: %q", want, comment)
+		}
+	}
+	for _, history := range []string{"has always", "until this pane"} {
+		if strings.Contains(comment, history) {
+			t.Errorf("the comment above ACTIVITY_KEPT narrates history (%q): %q", history, comment)
+		}
 	}
 }
 
