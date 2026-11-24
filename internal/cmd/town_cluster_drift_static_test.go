@@ -333,6 +333,7 @@ func TestTownClusterDriftStaticGuardsDriveEveryAccountingBranch(t *testing.T) {
 		want    string
 	}{
 		{"an object whose target the compare drops", targets[1:], notCompared, targets[0].resource + " " + targets[0].namespace},
+		{"an object compared twice", append(slices.Clone(targets), targets[0]), notCompared, targets[0].resource + " " + targets[0].namespace + " is not a policy row, a static target or a Secret line, and is compared 2 times"},
 		{"a Secret with no not-compared line", targets, nil, "printed 0 not-compared lines, want one"},
 		{"a Secret line no object names", targets, append(slices.Clone(notCompared), "Secret/gt-ghost: not compared: secret data is never read"), "printed 2 not-compared lines for 1 static Secrets"},
 		{"a Secret compared anyway", append(slices.Clone(targets), driftTarget{resource: "secret/sweep-runner-token", namespace: "gt-sweeps"}), notCompared, "is a Secret and is compared"},
@@ -351,24 +352,77 @@ func TestTownClusterDriftStaticGuardsDriveEveryAccountingBranch(t *testing.T) {
 }
 
 // TestTownClusterDriftStaticGuardsWholeCompareReadsOnlyGets runs the whole
-// compare against the fake kubectl runner, which fails the test on any verb
-// other than get, so a mutating read is refused. A run that read nothing fails
-// too, since an empty read list would otherwise pass as read-only (gt-im6aei).
+// compare against the fake kubectl runner, and holds every verb it asked the
+// runner for to a get, so a mutating read is refused. A run that read nothing
+// fails too, since an empty read list would otherwise pass as read-only
+// (gt-im6aei).
 func TestTownClusterDriftStaticGuardsWholeCompareReadsOnlyGets(t *testing.T) {
 	t.Parallel()
 	d, out, town := driftTestSeams(t, nil)
-	reads := 0
+	var verbs []string
 	answer := driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil)
 	d.kubectl = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
-		reads++
+		verb := ""
+		if len(args) > 0 {
+			verb = args[0]
+		}
+		verbs = append(verbs, verb)
 		return answer(ctx, dir, env, name, args...)
 	}
 	if err := runClusterDrift(context.Background(), d); driftExit(err) != 0 {
 		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", driftExit(err), err, out.String())
 	}
-	if reads == 0 {
-		t.Fatal("the whole compare read nothing, so it never asked the runner for a verb")
+	if findings := staticReadFindings(verbs); len(findings) != 0 {
+		t.Errorf("the whole compare did not read only gets:\n%s", strings.Join(findings, "\n"))
 	}
+}
+
+// TestTownClusterDriftStaticGuardsDriveTheReadChecks drives both ways the
+// whole-compare guard can fail: a verb that is not get, and a run that read
+// nothing at all (gt-im6aei).
+func TestTownClusterDriftStaticGuardsDriveTheReadChecks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		verbs []string
+		want  string
+	}{
+		{"no reads", nil, "read nothing"},
+		{"a delete", []string{"delete"}, "want a get"},
+		{"only gets", []string{"get", "get"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			findings := staticReadFindings(tc.verbs)
+			if tc.want == "" {
+				if len(findings) != 0 {
+					t.Errorf("findings %q for a run of gets, want none", findings)
+				}
+				return
+			}
+			if !slices.ContainsFunc(findings, func(f string) bool { return strings.Contains(f, tc.want) }) {
+				t.Errorf("findings %q do not name %q", findings, tc.want)
+			}
+		})
+	}
+}
+
+// staticReadFindings returns one finding per whole-compare read whose verb is
+// not get, and one when the compare read nothing, since an empty read list
+// would otherwise pass as read-only. It is a function so a table drives every
+// failing branch, which a runner that calls t.Fatalf cannot (gt-im6aei).
+func staticReadFindings(verbs []string) []string {
+	if len(verbs) == 0 {
+		return []string{"the whole compare read nothing, so it never asked the runner for a verb"}
+	}
+	var findings []string
+	for _, verb := range verbs {
+		if verb != "get" {
+			findings = append(findings, fmt.Sprintf("ran kubectl %q, want a get", verb))
+		}
+	}
+	return findings
 }
 
 // staticAccountingFindings returns one finding per object the compare does not
