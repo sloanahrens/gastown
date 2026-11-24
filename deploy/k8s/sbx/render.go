@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -78,6 +79,34 @@ type Set struct {
 	// fixed name, so the drift compare never reports them as extra. It is a copy
 	// of the package list; a test asserts it shares no object with Objects.
 	Runtime []ObjectRef
+	// RuntimeNamespaces names the namespaces in which every object is one the
+	// cluster creates itself, so the drift compare does not report those as
+	// extra. It is a copy of the package list.
+	RuntimeNamespaces []string
+	// RuntimeClusterPrefixes names the name prefixes of the cluster-scoped
+	// ClusterRoles and ClusterRoleBindings the cluster creates itself, so the
+	// drift compare does not report those as extra. It is a copy of the package
+	// list.
+	RuntimeClusterPrefixes []string
+}
+
+// IsRuntime reports whether the object is one the sandbox cluster creates
+// itself, so the drift compare never reports it as extra.
+func (s Set) IsRuntime(ref ObjectRef) bool {
+	if slices.Contains(s.Runtime, ref) {
+		return true
+	}
+	if ref.Namespace != "" && slices.Contains(s.RuntimeNamespaces, ref.Namespace) {
+		return true
+	}
+	if ref.Namespace == "" && (ref.Kind == "ClusterRole" || ref.Kind == "ClusterRoleBinding") {
+		for _, prefix := range s.RuntimeClusterPrefixes {
+			if strings.HasPrefix(ref.Name, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sbxRuntime is every fixed-name object the sandbox cluster creates itself,
@@ -133,6 +162,21 @@ var sbxRuntime = []ObjectRef{
 	{Kind: "ClusterRoleBinding", Name: "system:metrics-server"},
 	{Kind: "APIService", Name: "v1beta1.metrics.k8s.io"},
 }
+
+// sbxRuntimeNamespaces names the namespaces kubeadm and kind create themselves
+// and fill with their own objects, which have no fixed name to list: the
+// control plane's ConfigMaps, ServiceAccounts, Roles, RoleBindings, the coredns
+// Deployment, the kube-dns Service, the kindnet and kube-proxy DaemonSets, and
+// the metrics-server objects up.sh installs into kube-system. It is the source
+// Render fills Set.RuntimeNamespaces from; a miss shows as an "extra" in the
+// drift compare, and the fix is one more row.
+var sbxRuntimeNamespaces = []string{"kube-system", "kube-public", "kube-node-lease"}
+
+// sbxRuntimeClusterPrefixes names the prefixes the control plane gives its own
+// cluster-scoped ClusterRoles and ClusterRoleBindings. It is the source Render
+// fills Set.RuntimeClusterPrefixes from; a miss shows as an "extra" in the drift
+// compare, and the fix is one more row.
+var sbxRuntimeClusterPrefixes = []string{"system:", "kubeadm:"}
 
 // Render composes the gt-sbx cluster's desired set in apply order from the
 // pinned agent-sandbox manifest, the pinned OpenShell chart and the embedded
@@ -211,7 +255,13 @@ func renderSet(ctx context.Context, in Inputs, static func() ([]k8s.StaticObject
 		}
 		return Set{}, fmt.Errorf("render the gt-sbx set: the static set holds %s %s, which the desired set does not place", object.Kind, object.Name)
 	}
-	return Set{Objects: objects, Secrets: slices.Clone(chart.Secrets), Runtime: slices.Clone(sbxRuntime)}, nil
+	return Set{
+		Objects:                objects,
+		Secrets:                slices.Clone(chart.Secrets),
+		Runtime:                slices.Clone(sbxRuntime),
+		RuntimeNamespaces:      slices.Clone(sbxRuntimeNamespaces),
+		RuntimeClusterPrefixes: slices.Clone(sbxRuntimeClusterPrefixes),
+	}, nil
 }
 
 // checkNoSecrets refuses an object of kind Secret. The desired set is applied

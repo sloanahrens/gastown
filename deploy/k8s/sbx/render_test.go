@@ -333,6 +333,96 @@ func TestSbxRuntimeIsACopy(t *testing.T) {
 	}
 }
 
+// IsRuntime is true for a member of each rule — an exact Runtime ref, an object
+// in a system namespace, and a cluster-scoped ClusterRole or ClusterRoleBinding
+// under a system: or kubeadm: prefix — and false for a lookalike outside them.
+func TestSbxRuntimeIsRuntimeRules(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	var calls []runnerCall
+	set, err := renderSet(context.Background(), renderInputs(sandbox, readChartFixture(t), &calls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("renderSet(): %v", err)
+	}
+	exact := ObjectRef{Kind: "Deployment", Namespace: "local-path-storage", Name: "local-path-provisioner"}
+	if !hasRef(set.Runtime, exact.Kind, exact.Namespace, exact.Name) {
+		t.Fatalf("Runtime holds no %+v, so the exact-ref row cannot be tested", exact)
+	}
+	rows := []struct {
+		name string
+		ref  ObjectRef
+		want bool
+	}{
+		{"a coredns Deployment in kube-system", ObjectRef{Kind: "Deployment", Namespace: "kube-system", Name: "coredns"}, true},
+		{"a ConfigMap in kube-public", ObjectRef{Kind: "ConfigMap", Namespace: "kube-public", Name: "cluster-info"}, true},
+		{"a Lease in kube-node-lease", ObjectRef{Kind: "Lease", Namespace: "kube-node-lease", Name: "kind-control-plane"}, true},
+		{"a system: ClusterRole", ObjectRef{Kind: "ClusterRole", Name: "system:coredns"}, true},
+		{"a kubeadm: ClusterRoleBinding", ObjectRef{Kind: "ClusterRoleBinding", Name: "kubeadm:node-proxier"}, true},
+		{"an exact ref from Runtime", exact, true},
+		{"the rendered openshell Namespace", ObjectRef{Kind: "Namespace", Name: openshellName}, false},
+		{"a rendered Service", ObjectRef{Kind: "Service", Namespace: openshellName, Name: "openshell-nodeport"}, false},
+		{"an extra object in the rendered namespace", ObjectRef{Kind: "Deployment", Namespace: openshellName, Name: "openshell-sandbox-extra"}, false},
+		{"a ClusterRole outside the prefixes", ObjectRef{Kind: "ClusterRole", Name: "admin-reader"}, false},
+		{"a Role with a system: name outside a system namespace", ObjectRef{Kind: "Role", Namespace: openshellName, Name: "system:reader"}, false},
+		{"a ClusterRole given a namespace", ObjectRef{Kind: "ClusterRole", Namespace: openshellName, Name: "system:reader"}, false},
+		{"a ConfigMap whose name starts with a prefix", ObjectRef{Kind: "ConfigMap", Name: "system:reader"}, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			if got := set.IsRuntime(row.ref); got != row.want {
+				t.Errorf("IsRuntime(%+v) = %t, want %t", row.ref, got, row.want)
+			}
+		})
+	}
+}
+
+// No object the render places is IsRuntime, so one placed in a system namespace
+// or given a system: name fails here rather than disappearing from the compare.
+func TestSbxRuntimeNoRenderedObjectIsRuntime(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	var calls []runnerCall
+	set, err := renderSet(context.Background(), renderInputs(sandbox, readChartFixture(t), &calls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("renderSet(): %v", err)
+	}
+	for _, object := range set.Objects {
+		ref := ObjectRef{Kind: object.Kind, Namespace: object.Namespace, Name: object.Name}
+		if set.IsRuntime(ref) {
+			t.Errorf("IsRuntime(%+v) = true for a rendered object", ref)
+		}
+	}
+}
+
+// A caller that changes the runtime namespace or prefix lists it got does not
+// change the next render.
+func TestSbxRuntimeListsAreCopies(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	chartRaw := readChartFixture(t)
+	var firstCalls, secondCalls []runnerCall
+	first, err := renderSet(context.Background(), renderInputs(sandbox, chartRaw, &firstCalls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("first renderSet(): %v", err)
+	}
+	if len(first.RuntimeNamespaces) == 0 || len(first.RuntimeClusterPrefixes) == 0 {
+		t.Fatal("RuntimeNamespaces or RuntimeClusterPrefixes is empty")
+	}
+	first.RuntimeNamespaces[0] = "planted"
+	first.RuntimeClusterPrefixes[0] = "planted:"
+	second, err := renderSet(context.Background(), renderInputs(sandbox, chartRaw, &secondCalls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("second renderSet(): %v", err)
+	}
+	if !second.IsRuntime(ObjectRef{Kind: "ConfigMap", Namespace: "kube-system", Name: "planted"}) {
+		t.Errorf("a change to one render's RuntimeNamespaces changed the next render's")
+	}
+	if !second.IsRuntime(ObjectRef{Kind: "ClusterRole", Name: "system:planted"}) {
+		t.Errorf("a change to one render's RuntimeClusterPrefixes changed the next render's")
+	}
+}
+
 // Every input the render cannot read, and every static set it cannot place, is
 // refused with no set returned.
 func TestSbxRenderRefusals(t *testing.T) {
