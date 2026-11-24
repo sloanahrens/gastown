@@ -350,9 +350,17 @@ type cadenceEntry struct {
 	bad      bool
 }
 
+// diskMaintenanceName is the patrol whose interval may be the word
+// config.DiskMaintenanceIntervalDaily: the daemon reads that word only for this
+// patrol, and parses every other patrol's interval as a Go duration.
+const diskMaintenanceName = "disk_maintenance"
+
 // cadenceOf returns a name's cadence. An entry with no interval, or with an
-// interval of zero, has cadence zero. An interval that is not a Go duration,
-// or is negative, reports unreadable.
+// interval of zero, has cadence zero. The disk_maintenance patrol's interval
+// may be the word config.DiskMaintenanceIntervalDaily, which the daemon reads
+// as a day, so it is 24h here. Any other interval that is not a Go duration, or
+// is negative, reports unreadable; the daily word on any other patrol is one of
+// those, because the daemon parses that patrol's interval as a duration.
 func cadenceOf(cadences map[string]cadenceEntry, name string) (time.Duration, bool) {
 	e, ok := cadences[name]
 	switch {
@@ -362,6 +370,8 @@ func cadenceOf(cadences map[string]cadenceEntry, name string) (time.Duration, bo
 		return 0, true
 	case e.interval == nil || *e.interval == "":
 		return 0, false
+	case name == diskMaintenanceName && *e.interval == config.DiskMaintenanceIntervalDaily:
+		return 24 * time.Hour, false
 	}
 	d, err := time.ParseDuration(*e.interval)
 	if err != nil || d < 0 {
