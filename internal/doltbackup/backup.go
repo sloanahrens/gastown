@@ -125,6 +125,16 @@ func Taken(root string, t time.Time) bool {
 	return err == nil
 }
 
+// Held reports whether the night containing t already has a complete backup,
+// and the databases its manifest lists. It reads the same manifest Taken does.
+func Held(root string, t time.Time) (databases []string, ok bool) {
+	m, err := readManifest(Dir(root, t))
+	if err != nil {
+		return nil, false
+	}
+	return m.Databases, true
+}
+
 // List returns the complete backups under root, oldest first. A missing root
 // has none. A dated directory without a readable manifest is not a backup.
 func List(root string) ([]Backup, error) {

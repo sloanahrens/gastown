@@ -119,6 +119,24 @@ func TestDefaultRootPropagatesAHomeError(t *testing.T) {
 	}
 }
 
+func TestHeldReportsTheNightsDatabases(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if dbs, ok := Held(root, night); ok || len(dbs) != 0 {
+		t.Fatalf("Held on an empty root = %v, %v, want no night", dbs, ok)
+	}
+
+	commitNight(t, root, 0, "gt", "hq")
+
+	dbs, ok := Held(root, night)
+	if !ok {
+		t.Fatal("Held = false after Commit")
+	}
+	if got := strings.Join(dbs, ","); got != "gt,hq" {
+		t.Errorf("Held = %s, want gt,hq", got)
+	}
+}
+
 func TestCommitRenamesPartialAndWritesManifest(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

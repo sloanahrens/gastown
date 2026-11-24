@@ -1574,6 +1574,29 @@ func TestMaintenanceGCSkipsADatabaseTheNightsBackupLacks(t *testing.T) {
 	}
 }
 
+// A database the previous night's backup holds is still unbacked tonight: the
+// night already on disk is the one that counts, and only its manifest may
+// decide what this gc runs over. The catch-up's age rule accepts yesterday's
+// backup, so applying it here would gc newdb with no backup of it tonight
+// (gt-gd75is).
+func TestMaintenanceGCWindowIgnoresAPreviousNightsBackup(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "newdb": {10 * mib, 0}}
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow.AddDate(0, 0, -1), "newdb")
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+
+	d.startMaintenanceGC([]string{"hq", "newdb"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %s, want hq only — newdb is in yesterday's backup, not tonight's", got)
+	}
+	if !strings.Contains(logs.String(), "newdb") {
+		t.Errorf("log does not name newdb as unbacked tonight:\n%s", logs.String())
+	}
+}
+
 // A night whose backup holds the database still gc's it: filtering the window's
 // list leaves a normal night unchanged (gt-gd75is).
 func TestMaintenanceGCWindowRunsADatabaseTheBackupHolds(t *testing.T) {
@@ -1612,22 +1635,17 @@ func TestMaintenanceGCWindowWithNothingBackedUpIsNotAFailure(t *testing.T) {
 	}
 }
 
-// A backup root the window's coverage check cannot read proves nothing about
-// the databases, so the gc runs on none of them and the night fails loudly: a
-// completed outcome would say the databases were checked (gt-gd75is). The root
-// is readable while the night's backup is taken and unreadable once it is on
-// disk, which is the read the coverage check makes.
-func TestMaintenanceGCWindowFailsWhenBackupRootCannotBeRead(t *testing.T) {
+// A backup root the window cannot read fails the night before any gc: the
+// backup step itself reads the root, so there is no list of databases tonight's
+// backup holds to gc over, and a completed outcome would report a night the gc
+// never checked (gt-gd75is).
+func TestMaintenanceGCWindowRunsNoGCWhenTheBackupRootCannotBeRead(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
-	root := f.backupRoot
 	d.maint.backupRoot = func() (string, error) {
-		if doltbackup.Taken(root, gcTestNow) {
-			return "", errors.New("injected: the backup root went away")
-		}
-		return root, nil
+		return "", errors.New("injected: the backup root went away")
 	}
 
 	d.startMaintenanceGC([]string{"hq"}, gcTestNow.Add(time.Hour), nil, true)
@@ -1640,6 +1658,25 @@ func TestMaintenanceGCWindowFailsWhenBackupRootCannotBeRead(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "cycle completed") {
 		t.Errorf("the night reported completed with no readable backup root:\n%s", logs.String())
+	}
+}
+
+// A normal night takes its own backup and then gc's every database in it: the
+// databases the backup copied are the ones the gc certifies it may run over
+// (gt-gd75is).
+func TestMaintenanceGCWindowTakesItsOwnBackupThenRunsGC(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+
+	d.startMaintenanceGC([]string{"hq"}, gcTestNow.Add(time.Hour), nil, true)
+
+	if got := strings.Join(f.backupCalls, ","); got != "hq" {
+		t.Errorf("backup calls = %s, want hq", got)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %s, want hq", got)
 	}
 }
 

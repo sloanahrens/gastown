@@ -177,6 +177,27 @@ func TestMaintenanceBackupTakenOncePerNight(t *testing.T) {
 	}
 }
 
+// A night already on disk reports the databases its manifest holds, not the
+// tick's list: the window's gc runs over the manifest's set alone (gt-gd75is).
+func TestMaintenanceBackupReportsTheNightOnDisk(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	writeWindowNightBackup(t, f.backupRoot, gcTestNow, "hq")
+
+	res := d.maintenanceBackup([]string{"hq", "newdb"})
+
+	if res.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v (%s), want completed", res.outcome, res.reason)
+	}
+	if got := strings.Join(res.backedUp, ","); got != "hq" {
+		t.Errorf("backedUp = %s, want hq — the manifest's list, not the tick's", got)
+	}
+	if len(f.backupCalls) != 0 {
+		t.Errorf("backup calls = %v, want none for a night already on disk", f.backupCalls)
+	}
+}
+
 func TestMaintenanceBackupRestartsAStalePartial(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
