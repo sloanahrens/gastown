@@ -495,3 +495,35 @@ func TestSpecSplitStepRefusedDefaultStore(t *testing.T) {
 		t.Errorf("log = %q, want the default store's failed mark named", got)
 	}
 }
+
+// A refusal the read stops returning is forgotten: that prune is what ends the
+// entry, so a bead the read brings back is taken on its merits again.
+func TestSpecSplitStepRefusedForgetsABeadTheReadNoLongerReturns(t *testing.T) {
+	t.Parallel()
+	d, _ := specSplitTestDaemon(t, true)
+	writes := &specSplitManualWrites{labelErr: errors.New("bd is down")}
+	pages := [][]*beads.Issue{
+		{specSplitTestBead("gt-a", "", "split")},
+		nil,
+		{specSplitTestBead("gt-a", "", "split")},
+	}
+	page, applies := 0, 0
+	d.specSplitDeps = SpecSplitDeps{
+		Candidates: func() ([]*beads.Issue, error) {
+			out := pages[page]
+			page++
+			return out, nil
+		},
+		Apply: func(_, _ string) (string, error) {
+			applies++
+			return "verdict: fails: piece A: lint refused\n", errors.New("exit status 1")
+		},
+		Store: func() specSplitManualStore { return writes },
+	}
+	for range pages {
+		specSplitRunTick(t, d)
+	}
+	if applies != 2 {
+		t.Errorf("applied %d times over three ticks, want 2: the middle read forgot gt-a", applies)
+	}
+}
