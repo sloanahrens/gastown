@@ -529,21 +529,30 @@ func parseTranscriptStat(out string) (string, time.Time, int64, error) {
 // the harness cut short (liveness.StreamCutTail): the seat is alive but cannot
 // answer until restarted. No transcript answers false; a failed read is an error.
 func (b *openshellBackend) StreamCut(session string) (bool, error) {
+	cut, _, err := b.StreamCutAt(session)
+	return cut, err
+}
+
+// StreamCutAt is StreamCut that also returns the timestamp of the cut record
+// (liveness.StreamCutAt). A cut whose timestamp is unreadable is a cut with a
+// zero time; no transcript and an intact tail answer false with a zero time.
+func (b *openshellBackend) StreamCutAt(session string) (bool, time.Time, error) {
 	path, _, _, err := b.transcript(session)
 	if err != nil {
-		return false, fmt.Errorf("sandbox %s: finding its newest transcript: %w", session, err)
+		return false, time.Time{}, fmt.Errorf("sandbox %s: finding its newest transcript: %w", session, err)
 	}
 	if path == "" {
-		return false, nil
+		return false, time.Time{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
 	defer cancel()
 	tail, err := b.transcriptTail(ctx, session, path)
 	if err != nil {
 		// transcriptTail's read error names the session.
-		return false, err
+		return false, time.Time{}, err
 	}
-	return liveness.StreamCutTail(tail), nil
+	cut, at := liveness.StreamCutAt(tail)
+	return cut, at, nil
 }
 
 // endedMarkerScript prints "present" when the ended marker is under the sandbox
