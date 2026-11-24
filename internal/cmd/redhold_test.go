@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestRedHoldCmdStatusBadFile(t *testing.T) {
 
 func TestRedHoldCmdStatusNoTown(t *testing.T) {
 	t.Parallel()
-	c := newRedHoldCmdWith(func() (string, error) { return "", errors.New("no town") })
+	c := newRedHoldCmdWith(func() (string, error) { return "", errors.New("no town") }, func(string) string { return "" })
 	c.SetArgs([]string{"status"})
 	c.SetOut(io.Discard)
 	c.SetErr(io.Discard)
@@ -209,5 +210,43 @@ func TestRedHoldCmdLift(t *testing.T) {
 		if err := redHoldTestLiftRun(t, find(root), redHoldTestFailingWriter{}, "--reason", "fixed"); err == nil {
 			t.Errorf("a failing writer over %s exited 0; want an error", root)
 		}
+	}
+}
+
+func TestRedHoldLiftRefusesAnEmptyActor(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, actor string }{{"empty", ""}, {"spaces only", "   "}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := redHoldTestHeldTown(t)
+			c := newRedHoldCmdWith(func() (string, error) { return root, nil }, func(string) string { return tc.actor })
+			c.SetArgs([]string{"lift", "--reason", "fixed"})
+			c.SetOut(io.Discard)
+			c.SetErr(io.Discard)
+			err := c.Execute()
+			if err == nil || !strings.Contains(err.Error(), "BEADS_ACTOR") {
+				t.Fatalf("err = %v, want an error naming BEADS_ACTOR", err)
+			}
+			if _, ok, err := dispatch.ReadLift(root); err != nil || ok {
+				t.Errorf("lift request present %v, err %v; want none written", ok, err)
+			}
+		})
+	}
+}
+
+func TestRedHoldLiftNothingToLiftKeepsItsAnswerWithoutActor(t *testing.T) {
+	t.Parallel()
+	open := t.TempDir()
+	var out bytes.Buffer
+	c := newRedHoldCmdWith(func() (string, error) { return open, nil }, func(string) string { return "" })
+	c.SetArgs([]string{"lift", "--reason", "fixed"})
+	c.SetOut(&out)
+	c.SetErr(io.Discard)
+	err := c.Execute()
+	if exitCodeForError(err) != 1 {
+		t.Fatalf("err = %v, want exit 1", err)
+	}
+	if out.String() != "nothing to lift\n" {
+		t.Errorf("output = %q, want %q", out.String(), "nothing to lift\n")
 	}
 }

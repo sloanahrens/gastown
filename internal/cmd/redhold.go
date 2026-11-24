@@ -15,15 +15,11 @@ import (
 
 // newRedHoldCmd builds `gt red-hold`; a test builds a fresh one so its flag state is its own.
 func newRedHoldCmd() *cobra.Command {
-	return newRedHoldCmdWith(workspace.FindFromCwdOrError)
+	return newRedHoldCmdWith(workspace.FindFromCwdOrError, os.Getenv)
 }
 
 // newRedHoldCmdWith takes the town finder and environment as seams for a test.
-func newRedHoldCmdWith(findTownRoot func() (string, error), getenv ...func(string) string) *cobra.Command {
-	env := os.Getenv
-	if len(getenv) > 0 {
-		env = getenv[0]
-	}
+func newRedHoldCmdWith(findTownRoot func() (string, error), env func(string) string) *cobra.Command {
 	var townRoot string
 	var asJSON bool
 	status := &cobra.Command{
@@ -97,6 +93,9 @@ func newRedHoldCmdWith(findTownRoot func() (string, error), getenv ...func(strin
 				return NewSilentExit(1)
 			}
 			by := env("BEADS_ACTOR")
+			if strings.TrimSpace(by) == "" {
+				return fmt.Errorf("BEADS_ACTOR is empty: the lift request must name who asked for it")
+			}
 			if err := dispatch.WriteLift(root, dispatch.LiftRequest{Reason: reason, By: by, At: time.Now()}); err != nil {
 				return fmt.Errorf("writing the lift request: %w", err)
 			}
