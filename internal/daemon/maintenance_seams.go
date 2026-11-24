@@ -19,6 +19,10 @@ import (
 type maintenanceSeams struct {
 	// now is the clock the gc triggers and the pause marker read.
 	now func() time.Time
+	// sleep pauses the gc's wait for doltMaintMu between attempts. A test
+	// supplies a fake that advances the fake now it set, so the wait's bound
+	// runs without real time passing.
+	sleep func(time.Duration)
 	// escalate raises maintenance findings as an escalation bead.
 	escalate func(d *Daemon, source, message string)
 	// pauseCurrent, pauseWrite and pauseRemove read, write and remove the
@@ -105,6 +109,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	s := d.maint
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.sleep == nil {
+		s.sleep = time.Sleep
 	}
 	if s.pauseCurrent == nil {
 		s.pauseCurrent = doltpause.Current

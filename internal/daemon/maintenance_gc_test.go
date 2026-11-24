@@ -678,6 +678,9 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 		return f.serverDBs, f.serverErr
 	}
 	d.maint.now = func() time.Time { return gcTestNow }
+	// The lock wait's polls: the constant fake clock never reaches the bound,
+	// so its attempt cap ends a poll loop with no real time passing.
+	d.maint.sleep = func(time.Duration) {}
 	d.maint.pauseCurrent = func(string, time.Time) *doltpause.Marker { return f.foreignPause }
 	d.maint.pauseWrite = func(_ string, m doltpause.Marker) error {
 		if f.writeErr != nil {
