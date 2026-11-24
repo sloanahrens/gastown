@@ -630,6 +630,26 @@ func TestK8sPlanSyncsAMirrorNotTheLiveRepository(t *testing.T) {
 	}
 }
 
+// TestMirrorCloneStepSkipsOnTheSharedMarker holds the clone step's skip text and
+// the exported marker together: a caller judging the step's output tells an
+// existing mirror's expected skip from a failed clone by matching
+// MirrorCloneSkipText, so the step must skip on the same text (gt-kvm5lp,
+// gt-gcz3g7).
+func TestMirrorCloneStepSkipsOnTheSharedMarker(t *testing.T) {
+	t.Parallel()
+	const want = "already exists and is not an empty directory"
+	if MirrorCloneSkipText != want {
+		t.Errorf("MirrorCloneSkipText is %q, want git's text %q", MirrorCloneSkipText, want)
+	}
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if got := plan.Apply[0].SkipWhen; got != MirrorCloneSkipText {
+		t.Errorf("the clone step's SkipWhen is %q, want the shared MirrorCloneSkipText %q", got, MirrorCloneSkipText)
+	}
+}
+
 // TestK8sOutputClaimIsLabelledAndStaleOnesAreDeleted holds the output claim to a
 // label a later launch can find it by, and the launch to removing the rig's other
 // output claims: a run abandoned by a replaced daemon never tears its claim down

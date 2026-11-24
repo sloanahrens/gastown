@@ -397,7 +397,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// --prune drops refs the live repository deleted; --update-shallow because
 			// the repository is shallow. A full fetch into an EMPTY repository is what
 			// the daemon's 6 GiB cgroup killed (gt-2sylta), so the first copy is a clone.
-			{Argv: []string{"git", "clone", "--mirror", "--quiet", spec.RepoDir, spec.Snapshot}, SkipWhen: "already exists and is not an empty directory"},
+			{Argv: []string{"git", "clone", "--mirror", "--quiet", spec.RepoDir, spec.Snapshot}, SkipWhen: MirrorCloneSkipText},
 			// The detector: a clone killed part-way leaves a directory with no refs, the
 			// clone then reports 'already exists' and is skipped, and the fetch below would
 			// be a full fetch into a repository with no history, the OOM again. HEAD of a
@@ -1129,3 +1129,9 @@ var (
 	dindCPU    = strconv.Itoa(config.SweepDindCPUs)
 	dindMemory = strconv.Itoa(config.SweepDindMemoryGB) + "Gi"
 )
+
+// MirrorCloneSkipText is git's own text when the mirror directory to clone into
+// already exists, and the text the clone step skips on instead of failing
+// (gt-4dx0su). Exported so any caller that judges the step's output can match
+// the same text rather than restate it (gt-kvm5lp).
+const MirrorCloneSkipText = "already exists and is not an empty directory"
