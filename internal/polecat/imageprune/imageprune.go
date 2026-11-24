@@ -38,10 +38,16 @@ func Plan(images []Image, inUse map[string]bool, keep int) []Image {
 	return PlanRepos(images, inUse, keep, []string{Repo})
 }
 
-// PlanRepos is Plan run over each repository in repos, in order.
+// PlanRepos is Plan run over each repository in repos, in order. A repository
+// named more than once is planned once, so its images are not removed twice.
 func PlanRepos(images []Image, inUse map[string]bool, keep int, repos []string) []Image {
 	var remove []Image
+	planned := make(map[string]bool, len(repos))
 	for _, repo := range repos {
+		if planned[repo] {
+			continue
+		}
+		planned[repo] = true
 		var candidates []Image
 		for _, im := range images {
 			if !im.Unknown && onlyRepoRefs(im, repo) {

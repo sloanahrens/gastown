@@ -240,18 +240,20 @@ func TestPruneNodeReposSelectsTheUnusedBeyondNewest(t *testing.T) {
 	}
 }
 
-// PruneNodeRepos reads the node as PruneNode does: a failed read, or a dry run,
-// removes nothing.
+// PruneNodeRepos reads the node as PruneNode does: a failed read leaves the node
+// alone and plans nothing; a dry run plans the image and removes nothing.
 func TestPruneNodeReposFailsClosed(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
 		fail, images string
-		dry, wantErr bool
+		dry          bool
+		wantErr      bool
+		wantPlanned  int
 	}{
 		"image list fails":     {fail: "images", wantErr: true},
 		"image list unparsed":  {images: "crictl: not json", wantErr: true},
 		"container list fails": {fail: "ps", wantErr: true},
-		"dry run":              {dry: true},
+		"dry run":              {dry: true, wantPlanned: 1},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -261,8 +263,14 @@ func TestPruneNodeReposFailsClosed(t *testing.T) {
 				f.images = tc.images
 			}
 			res := PruneNodeRepos("gt-control", timedFake(t, f.crictl), 0, []string{Repo}, tc.dry)
-			if (res.Err != nil) != tc.wantErr || len(f.rmis) != 0 || (len(res.Planned) == 1) == tc.wantErr {
-				t.Errorf("PruneNodeRepos = %+v rmis=%v, want error %v, the image planned only on a dry run, and no removal", res, f.rmis, tc.wantErr)
+			if (res.Err != nil) != tc.wantErr {
+				t.Errorf("PruneNodeRepos error = %v, want an error: %v", res.Err, tc.wantErr)
+			}
+			if len(res.Planned) != tc.wantPlanned {
+				t.Errorf("PruneNodeRepos planned %d images, want %d", len(res.Planned), tc.wantPlanned)
+			}
+			if len(f.rmis) != 0 {
+				t.Errorf("PruneNodeRepos removed %v, want no removal", f.rmis)
 			}
 		})
 	}
