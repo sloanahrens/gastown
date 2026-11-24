@@ -225,6 +225,13 @@ var ruleOwners = map[string]Owner{
 	// finds the grant or the object the compare could not read before a person
 	// is woken (gt-y705n1).
 	RuleClusterDriftUnreadable: OwnerOverseer,
+	// A gateway at its cap is the town's own bd load to look at: the overseer
+	// finds the caller that held the slots before a person is woken (gt-7oy397).
+	RuleBDGatewayCapHit: OwnerOverseer,
+	// A gateway at its cap is the town's own bd load to look at: the overseer
+	// finds the caller that held the slots before a person is woken (gt-7oy397).
+	// A gateway at its cap is the town's own bd load to look at: the overseer
+	// finds the caller that held the slots before a person is woken (gt-7oy397).
 	// An unjudged main is the town's own check to unblock: the overseer finds
 	// what the red-main run could not read before a person is woken
 	// (gt-glc2yh).
