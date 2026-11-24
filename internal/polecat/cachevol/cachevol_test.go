@@ -252,28 +252,35 @@ func TestPlanTrimKeepsBuildFilesYoungerThanTheMinimumAge(t *testing.T) {
 	}
 }
 
-// TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin: the floor protects a file a gate used, which Go's
-// hourly mtime touch can leave almost an hour older than the use. With the claim over its cap, a
-// file used 74 minutes before the trim is kept and one used 76 minutes before is planned.
+// TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin drives the shape Go's touch interval leaves: a gate
+// reads a build-cache file, and the file's last mtime touch stays goCacheTouchInterval older than
+// that read, because Go refreshes a reused entry's mtime only once it is at least the interval old.
+// The mount records no atime here, so Go's lagged touch is all the trim has to judge by. With the
+// claim over its cap, a file read inside the gate margin is kept and one read past it is planned.
 func TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin(t *testing.T) {
 	t.Parallel()
 	now := at(24)
 	tests := []struct {
 		name     string
-		used     time.Time
+		read     time.Duration // how long before the trim the gate read the file
 		wantGone bool
 	}{
-		{name: "74 minutes old is inside the floor", used: now.Add(-74 * time.Minute), wantGone: false},
-		{name: "76 minutes old is past the floor", used: now.Add(-76 * time.Minute), wantGone: true},
+		{name: "read inside the gate margin is kept", read: gateMargin - time.Minute, wantGone: false},
+		{name: "read past the gate margin is planned", read: gateMargin + time.Minute, wantGone: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			listing := []Entry{{Path: "gocache/tested", Cache: BuildCache, Size: 60, Atime: tc.used, Mtime: tc.used}}
+			listing := []Entry{{
+				Path:  "gocache/tested",
+				Cache: BuildCache,
+				Size:  60,
+				Mtime: now.Add(-tc.read - goCacheTouchInterval),
+			}}
 			plan := planTrim(t, listing, 50, false, now)
-			got := removedPaths(plan)
-			if removed := len(got) == 1; removed != tc.wantGone {
-				t.Errorf("removed = %v, want the file removed = %v (used %v before the trim)", got, tc.wantGone, now.Sub(tc.used))
+			if got := removedPaths(plan); (len(got) == 1) != tc.wantGone {
+				t.Errorf("removals = %v, want the file removed = %v (read %v before the trim, last touched %v before)",
+					got, tc.wantGone, tc.read, tc.read+goCacheTouchInterval)
 			}
 			wantOverBytes := int64(10)
 			if tc.wantGone {
@@ -286,15 +293,24 @@ func TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin(t *testing.T) {
 	}
 }
 
-// TestBuildCacheMinAgeCoversTheGoTouchInterval: the floor is Go's touch interval plus the gate
-// margin, and the margin keeps every file a gate that started within the last fifteen minutes uses.
+// TestBuildCacheMinAgeCoversTheGoTouchInterval: the floor reaches past Go's touch interval, so a use
+// recorded well inside the margin, past what the interval alone would cover, is kept. A floor of the
+// interval alone would plan the file.
 func TestBuildCacheMinAgeCoversTheGoTouchInterval(t *testing.T) {
 	t.Parallel()
-	if buildCacheMinAge != goCacheTouchInterval+gateMargin {
-		t.Errorf("buildCacheMinAge = %v, want goCacheTouchInterval %v plus gateMargin %v", buildCacheMinAge, goCacheTouchInterval, gateMargin)
+	now := at(24)
+	listing := []Entry{{
+		Path:  "gocache/tested",
+		Cache: BuildCache,
+		Size:  60,
+		Mtime: now.Add(-(goCacheTouchInterval + 10*time.Minute)),
+	}}
+	plan := planTrim(t, listing, 50, false, now)
+	if got := removedPaths(plan); len(got) != 0 {
+		t.Errorf("removals = %v, want none: a use recorded %v before the trim is inside the floor the margin sets", got, goCacheTouchInterval+10*time.Minute)
 	}
-	if gateMargin < 15*time.Minute {
-		t.Errorf("gateMargin = %v, want at least 15 minutes", gateMargin)
+	if !plan.Overflow || plan.OverBytes != 10 {
+		t.Errorf("overflow = %v over %d, want true over 10 (60 bytes against a 50-byte cap)", plan.Overflow, plan.OverBytes)
 	}
 }
 
