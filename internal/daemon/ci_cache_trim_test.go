@@ -1786,6 +1786,8 @@ func TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot(t *testing.T) {
 		{name: "the dind data root", root: ciCacheDindMount},
 		{name: "the volumes directory", root: ciCacheDindMount + "/volumes"},
 		{name: "the volumes directory with a trailing slash", root: ciCacheDindMount + "/volumes/"},
+		{name: "the volume mount without its data directory", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume},
+		{name: "a volume directory with another leaf", root: ciCacheDindMount + "/volumes/" + ciCacheGocacheVolume + "/data"},
 		{name: "a relative path", root: "x/_data"},
 		{name: "a volume root with a trailing slash", root: root + "/"},
 		{name: "a name with a double dot inside", root: ciCacheDindMount + "/volumes/a..b/_data"},
@@ -1798,6 +1800,7 @@ func TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot(t *testing.T) {
 		{name: "a path that steps above the volumes directory", root: ciCacheDindMount + "/../docker/volumes/ci-gocache/_data"},
 		{name: "a prefix longer than the path between prefix and suffix", root: ciCacheDindMount + "/volumes/_data"},
 		{name: "a sibling of the volumes directory", root: "/var/lib/docker2/volumes/ci-gocache/_data"},
+		{name: "a path of the right shape under another root", root: "/" + strings.Repeat("x", 23) + ciCacheGocacheVolume + "/_data"},
 	}
 	for _, tc := range cases {
 		argv, err := ciCacheLRUArgv("list", tc.root, 120, 41943040, ciCacheLRUFloorMinutes)
