@@ -384,16 +384,16 @@ func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
 	return out, nil
 }
 
-// drainQueue files the findings earlier landings' backpressure bound held back,
-// oldest line first, while the bound leaves room. A line whose findings a bead
+// drainQueue files the findings earlier landings held back in the queue, oldest
+// line first, while the bound leaves room. A line whose findings a bead
 // already carries — filed by an earlier drain or by the landing that raised
 // them, and whether that bead is open or closed — is left alone: the queue line
 // is the feed's own bookkeeping, so there is nothing to comment and nothing to
-// file again (gt-3arxj). A line the bound holds back again stays where it is
-// rather than being queued twice. It returns the lines it wants logged, the
-// beads the drain filed so the caller de-duplicates against them too, and how
-// many queue lines are now consumed: every finding on them is covered, so the
-// compaction may drop them (gt-3arxj).
+// file again (gt-3arxj). A line the feed holds back again — by the bound, the
+// week's budget, or a write — stays where it is rather than being queued twice.
+// It returns the lines it wants logged, the beads the drain filed so the caller
+// de-duplicates against them too, and how many queue lines are now consumed:
+// every finding on them is covered, so the compaction may drop them (gt-3arxj).
 func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips) ([]string, []ExistingFollowup, int) {
 	bound := l.followupBackpressure()
 	consumed := 0
@@ -414,7 +414,10 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 		lines = append(lines, more...)
 		existing = append(existing, filed...)
 		if len(held) > 0 {
-			lines = append(lines, fmt.Sprintf("the bound held %s of the queue on %s back again; the queue line stays for a landing with room", findingsPhrase(len(held)), q.Bead))
+			// fileFollowupBeads logged the actual hold above: the bound, the
+			// week's budget, or a failed write, so the line names no cause
+			// (gt-9r0owg).
+			lines = append(lines, fmt.Sprintf("the feed held %s of the queue on %s back again; the queue line stays for a landing with room", findingsPhrase(len(held)), q.Bead))
 		}
 		// A line is consumed only once every finding on it is covered: a bead
 		// that could not be filed leaves its line waiting, whatever the feed
