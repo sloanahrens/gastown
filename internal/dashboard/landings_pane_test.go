@@ -628,10 +628,20 @@ func TestLandingsPaneShowsFollowupFlow(t *testing.T) {
 }
 
 // A reading with no follow-up flow draws no line, rather than a zero flow.
+// drawnFollowupLine answers "" for a pane that drew no line and for a walk that
+// reached nothing, so this reading draws a flow first: the same walk must find
+// that line, and only then does "" from the nil reading mean the pane is silent
+// (gt-0tbkct).
 func TestLandingsPaneOmitsFollowupFlowWhenNil(t *testing.T) {
 	t.Parallel()
 
 	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsPaneWithFollowups(t, map[string]any{
+		"open": 37, "filed_week": 351, "landed_week": 1000, "share_pct": 36,
+	}))
+	if line := drawnFollowupLine(t, p); line == "" {
+		t.Fatalf("the DOM walk found no follow-up line in a reading that has one, so it cannot show that a nil flow draws none")
+	}
 	p.call(t, "renderTrend", landingsPaneWithFollowups(t, nil))
 	if line := drawnFollowupLine(t, p); line != "" {
 		t.Errorf("the pane drew %q with no follow-up flow in the state", line)
