@@ -11,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // testEpoch dates every lock fixture; staleness is decided by the process the
@@ -34,45 +32,39 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// TestLockInfo_IsStale covers the locks this host settles without a scripted
-// table: a pid with no process behind it, and the two ways a live pid is or is
-// not the lock's writer. The rule is tabled against a scripted process table
-// in TestLockInfoHolder.
+// TestLockInfo_IsStale covers the lock rule through a scripted process table:
+// a pid with no process behind it, and the two ways a live pid is or is not
+// the lock's writer. IsStale reads the real table, pinned on the hosts that
+// provide start tokens (gt-dj2lv4); the rule itself is decided here by what
+// the lock recorded.
 func TestLockInfo_IsStale(t *testing.T) {
 	t.Parallel()
-	live, ok := procid.StartToken(os.Getpid())
-	if !ok {
-		t.Fatalf("no start token for this process (pid %d)", os.Getpid())
-	}
-	// A start time this process does not have: what the pid carries once the
-	// kernel has handed it to somebody else.
-	const stranger = "1700000000.12"
-	if live == stranger {
-		t.Fatalf("this process's start token is the fixture for a stranger (%q)", live)
-	}
+	const pid = 4242
+	const recorded = "1700000000.12"
 
 	tests := []struct {
 		name      string
 		info      LockInfo
+		table     scriptedProcesses
 		wantStale bool
 	}{
-		{"invalid pid zero", LockInfo{PID: 0}, true},
-		{"invalid pid negative", LockInfo{PID: -1}, true},
-		{"non-existent pid", LockInfo{PID: 999999999}, true},
-		{"live pid carrying its recorded token", LockInfo{PID: os.Getpid(), Start: live}, false},
+		{"invalid pid zero", LockInfo{PID: 0}, scriptedProcesses{}, true},
+		{"invalid pid negative", LockInfo{PID: -1}, scriptedProcesses{}, true},
+		{"non-existent pid", LockInfo{PID: pid}, scriptedProcesses{}, true},
+		{"live pid carrying its recorded token", LockInfo{PID: pid, Start: recorded}, scriptedProcesses{pid: recorded}, false},
 		// The case a bare pid gets wrong: the number is in use again, by a
 		// process that started at another time.
-		{"live pid carrying another token", LockInfo{PID: os.Getpid(), Start: stranger}, true},
+		{"live pid carrying another token", LockInfo{PID: pid, Start: recorded}, scriptedProcesses{pid: "1700000999.5"}, true},
 		// A lock written before the token was recorded names no process a
 		// reader can confirm, and none it can rule out either, so its live pid
 		// still holds it; only that pid's death makes it stale.
-		{"live pid, no recorded token", LockInfo{PID: os.Getpid()}, false},
+		{"live pid, no recorded token", LockInfo{PID: pid}, scriptedProcesses{pid: recorded}, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.info.IsStale(); got != tt.wantStale {
-				t.Errorf("IsStale() = %v, want %v", got, tt.wantStale)
+			if got := tt.info.holderGone(tt.table.read); got != tt.wantStale {
+				t.Errorf("holderGone() = %v, want %v", got, tt.wantStale)
 			}
 		})
 	}
@@ -253,29 +245,20 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 // stranger, which returns ErrLocked and delivers no role context in that
 // worktree (gt-xa65s). Acquire has to take such a lock.
 //
-// The pid named is the test binary's parent, which is live and is not this
-// process, so the pid rule this replaces called the lock held and the case
-// fails without the token; the start time recorded is not the one that pid
-// carries.
+// The process table is scripted: the pid the lock names is live there and
+// carries a token other than the one the lock recorded, so the pid rule this
+// replaces called the lock held and the case fails without the token.
 func TestAcquireIgnoresLockHeldByRecycledPid(t *testing.T) {
 	t.Parallel()
-	pid := os.Getppid()
-	if pid <= 0 || pid == os.Getpid() {
-		t.Fatalf("$PPID %d is no other process to name", pid)
-	}
-	const stranger = "1700000000.12"
-	if live, ok := procid.StartToken(pid); !ok {
-		t.Fatalf("no start token for pid %d, so the case cannot tell a reused pid", pid)
-	} else if live == stranger {
-		t.Fatalf("pid %d carries the fixture for a stranger (%q)", pid, live)
-	}
+	const pid = 4242
+	const recorded = "1700000000.12"
 
-	l := New(writeLockFixture(t, LockInfo{
+	l := NewWithLiveness(writeLockFixture(t, LockInfo{
 		PID:        pid,
-		Start:      stranger,
+		Start:      recorded,
 		AcquiredAt: testEpoch,
 		SessionID:  "gone-session",
-	}))
+	}), scriptedProcesses{pid: "1700000999.5"}.read)
 
 	if err := l.Acquire("new-session"); err != nil {
 		t.Fatalf("Acquire() over a lock held by a recycled pid: %v", err)
@@ -478,10 +461,7 @@ func TestLock_Check(t *testing.T) {
 func TestLock_Status(t *testing.T) {
 	t.Parallel()
 	const livePid = 4242
-	mine, ok := procid.StartToken(os.Getpid())
-	if !ok {
-		t.Fatalf("no start token for this process (pid %d)", os.Getpid())
-	}
+	const mine = "1700000000.04"
 
 	tests := []struct {
 		name    string
@@ -492,10 +472,11 @@ func TestLock_Status(t *testing.T) {
 		prefix  bool // want is a prefix: the error text carries the detail
 	}{
 		{name: "unlocked", want: "unlocked"},
-		{name: "locked by us", fixture: &LockInfo{PID: os.Getpid(), Start: mine, AcquiredAt: testEpoch, SessionID: "ours"}, want: "locked (by us)"},
+		{name: "locked by us", fixture: &LockInfo{PID: os.Getpid(), Start: mine, AcquiredAt: testEpoch, SessionID: "ours"}, table: scriptedProcesses{os.Getpid(): mine}, want: "locked (by us)"},
 		{
 			name:    "stale, process gone",
 			fixture: &LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "dead"},
+			table:   scriptedProcesses{},
 			want:    "stale (dead PID 999999999)",
 		},
 		{
