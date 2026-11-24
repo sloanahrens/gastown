@@ -337,6 +337,24 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 			wantReason: "tripped (backup bytes), but the last run started 23h59m0s ago, inside the 24h gate",
 		},
 		{
+			// The row the acceptance names: without the clamp its age reads
+			// -30s in the reason, so this row fails.
+			name:       "a run 30 seconds ahead counts as now, naming no negative age",
+			in:         backupBytesTrips(),
+			lastRun:    now.Add(30 * time.Second),
+			wantDue:    false,
+			wantReason: "tripped (backup bytes), but the last run started 0s ago, inside the 24h gate",
+		},
+		{
+			// The largest lead the skew accepts; without the clamp its age
+			// truncates to a negative -1m0s in the reason.
+			name:       "a run exactly a minute ahead counts as now, naming no negative age",
+			in:         backupBytesTrips(),
+			lastRun:    now.Add(time.Minute),
+			wantDue:    false,
+			wantReason: "tripped (backup bytes), but the last run started 0s ago, inside the 24h gate",
+		},
+		{
 			name: "nothing tripped and never run is not due",
 			in: Inputs{
 				BackupBytes:    Read[int64](5 << 30),
@@ -471,11 +489,40 @@ func TestDecideLastRunInTheFuture(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Decide error = %v, want error %v", err, tc.wantErr)
 			}
-			if err != nil && !strings.Contains(err.Error(), "the last run is in the future") {
-				t.Errorf("Decide error %q lacks the words \"the last run is in the future\"", err)
+			if err != nil && !errors.Is(err, ErrLastRunInFuture) {
+				t.Errorf("Decide error %v does not match ErrLastRunInFuture", err)
 			}
 			if got.Due != tc.wantDue {
 				t.Errorf("Due = %v, want %v (reason %q)", got.Due, tc.wantDue, got.Reason)
+			}
+		})
+	}
+}
+
+// TestDecideOtherErrorsAreNotTheFutureRefusal: only the future-last-run
+// refusal matches ErrLastRunInFuture. The KeepDays refusals are decisions
+// about the settings, so a caller's errors.Is cannot mistake one for a stamp
+// that needs an alert (gt-wzuwn7).
+func TestDecideOtherErrorsAreNotTheFutureRefusal(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		keepDays int
+	}{
+		{"keep_days below 1", 0},
+		{"keep_days past the duration range", maxKeepDays + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := designSettings()
+			cfg.KeepDays = tc.keepDays
+			_, err := Decide(now, time.Time{}, backupBytesTrips(), cfg)
+			if err == nil {
+				t.Fatalf("Decide accepted keep_days %d", tc.keepDays)
+			}
+			if errors.Is(err, ErrLastRunInFuture) {
+				t.Errorf("Decide error %v matches ErrLastRunInFuture", err)
 			}
 		})
 	}
