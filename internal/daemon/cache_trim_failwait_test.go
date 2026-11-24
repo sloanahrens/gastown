@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -405,5 +406,100 @@ func TestCacheTrimFailWaitCancelsTheFailedLegWhenTheJobCompletes(t *testing.T) {
 		if leg.Err() == nil {
 			t.Errorf("wait leg %d is live once the wait returned; want it canceled", i)
 		}
+	}
+}
+
+// cacheTrimDeadlineJobJSON is the Job status the wait's failure line reads,
+// built from the Job's spec deadline in seconds (0 names none), its failed
+// count, and the reason of its Failed condition ("" for no condition).
+func cacheTrimDeadlineJobJSON(deadlineSeconds, failed int, reason string) string {
+	spec := ""
+	if deadlineSeconds > 0 {
+		spec = `"spec":{"activeDeadlineSeconds":` + strconv.Itoa(deadlineSeconds) + `},`
+	}
+	status := `"status":{"failed":` + strconv.Itoa(failed) + `}`
+	if reason != "" {
+		status = `"status":{"failed":` + strconv.Itoa(failed) + `,` +
+			`"conditions":[{"type":"Failed","status":"True","reason":"` + reason + `"}]}`
+	}
+	return `{` + spec + status + `}`
+}
+
+// TestCacheTrimWaitFailureNamesTheDeadline pins that a Job Kubernetes failed for
+// passing its activeDeadlineSeconds says so in the line the wait logs, naming
+// the deadline the Job carried: the two trim routes carry different ones, and a
+// line that says only "the Job failed" hides that the Job was cut off rather
+// than failing on its own. A Job that failed for another reason keeps the
+// plain line.
+func TestCacheTrimWaitFailureNamesTheDeadline(t *testing.T) {
+	t.Parallel()
+	const (
+		failed  = "the Job failed"
+		jobRead = "get job " + cacheTrimJob + " -n " + cacheTrimNamespace + " -o json"
+	)
+	for _, tc := range []struct {
+		name string
+		job  string
+		want string
+	}{
+		{
+			"the shard route's deadline",
+			cacheTrimDeadlineJobJSON(600, 1, "DeadlineExceeded"),
+			failed + ": it passed its activeDeadlineSeconds of 10m0s",
+		},
+		{
+			"the claim route's longer deadline",
+			cacheTrimDeadlineJobJSON(1800, 1, "DeadlineExceeded"),
+			failed + ": it passed its activeDeadlineSeconds of 30m0s",
+		},
+		{
+			// A deadline failure sets the failed count beside the condition;
+			// the condition's reason is what names the deadline, so the count
+			// must not end the read first.
+			"a failed count beside the condition",
+			cacheTrimDeadlineJobJSON(600, 2, "DeadlineExceeded"),
+			failed + ": it passed its activeDeadlineSeconds of 10m0s",
+		},
+		{
+			"a spec that names no deadline",
+			cacheTrimDeadlineJobJSON(0, 1, "DeadlineExceeded"),
+			failed + ": it passed its activeDeadlineSeconds",
+		},
+		{
+			// Kubernetes bounds the field far below this. Read as a duration,
+			// this value overflows to under a second, and a spec that names no
+			// value a duration holds must not reach the line as one.
+			"a deadline beyond a duration's range",
+			`{"spec":{"activeDeadlineSeconds":18446744074},` +
+				`"status":{"failed":1,"conditions":[{"type":"Failed","status":"True","reason":"DeadlineExceeded"}]}}`,
+			failed + ": it passed its activeDeadlineSeconds",
+		},
+		{
+			"a Job that failed for another reason",
+			cacheTrimDeadlineJobJSON(600, 1, "BackoffLimitExceeded"),
+			failed,
+		},
+		{
+			"a failed count with no condition",
+			cacheTrimDeadlineJobJSON(600, 1, ""),
+			failed,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimFailWaitCompleteVerb: {stderr: "error: timed out waiting for the condition\n", code: 1},
+				cacheTrimFailWaitFailedVerb:   {stderr: "error: timed out waiting for the condition\n", code: 1},
+				jobRead:                       {stdout: tc.job},
+			})
+			finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+			if finished || err != nil {
+				t.Fatalf("cacheTrimWaitJob = %v, %v; want the pass to carry on", finished, err)
+			}
+			want := "cache trim " + cacheTrimJob + ": " + tc.want + "; the trim is left for the next run"
+			if logged := f.log.String(); !strings.Contains(logged, want) {
+				t.Errorf("the log = %q; want it to hold %q", logged, want)
+			}
+		})
 	}
 }
