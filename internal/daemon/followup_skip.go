@@ -3,9 +3,10 @@ package daemon
 // The follow-up skip policy (gt-4qbe1w, Q34): the feed files beads for the
 // minor findings of an approved landing, and a finding that asks for a doc or
 // wording fix, or names a file no agent push may change, is a bead nobody can
-// act on. The lessons hold-out withholds two classes for some beads instead, so
-// the report can compare those findings with the ones filed (Q37). It lives
-// here rather than in internal/land because it reads the lessons table, and
+// act on. The lessons hold-out withholds findings in the classes
+// internal/omlessons/holdout.go lists for a share of beads instead, so the
+// report can compare those findings with the ones filed (Q37). It lives here
+// rather than in internal/land because it reads the lessons table, and
 // omlessons imports land.
 
 import (
