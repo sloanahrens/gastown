@@ -475,6 +475,35 @@ func TestFollowupBudgetFeedHoldsAPlanAndQueuesIt(t *testing.T) {
 	}
 }
 
+// TestFollowupBudgetFeedDrainDoesNotNameTheBound: a queue line the weekly budget
+// holds back again is not read as backpressure. fileFollowupBeads names the
+// budget, and the drain's line about the queue names no cause (gt-9r0owg).
+func TestFollowupBudgetFeedDrainDoesNotNameTheBound(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, nil) // nothing of its own to file
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	// Five beads filed for eight landings: the drain's bead would be the sixth,
+	// over 25 percent.
+	f.lander.Landings = budgetWeek(t, 8)
+	f.fake.existing = filedThisWeek(5)
+	log := f.run()
+	if len(f.fake.created) != 0 {
+		t.Fatalf("filed %d beads over the weekly budget:\n%s", len(f.fake.created), log)
+	}
+	if !strings.Contains(log, "weekly budget") {
+		t.Fatalf("log = %q, want the budget hold named", log)
+	}
+	if strings.Contains(log, "the bound held") {
+		t.Errorf("log = %q, want the budget hold not named as the bound", log)
+	}
+	if !strings.Contains(log, "the feed held 1 finding of the queue on gt-held back again") {
+		t.Errorf("log = %q, want the queue line's hold named", log)
+	}
+}
+
 // TestFollowupBudgetFeedDrainsWhenThereIsRoom: the queue waits for the week to
 // have room again, and the landing that finds it files the held findings
 // (gt-y5wvum).
