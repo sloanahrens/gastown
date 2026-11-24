@@ -1014,7 +1014,8 @@ func TestPodAttachesStdinWithoutTTY(t *testing.T) {
 func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 	t.Parallel()
 	gone := "gt-wrap: exit 137 and the pod " + kubePod + " is gone: the pod was replaced while the call ran (a daemon roll), so 137 is the pod's end, not the tool's, and the call's result is unknown\n"
-	unknown := "gt-wrap: exit 137 and the pod " + kubePod + "'s state is unknown: the read after the call did not run, so 137 may be the tool's end or the pod's, and the call's result is unknown\n"
+	unknown := "gt-wrap: exit 137 and the pod " + kubePod + "'s state is unknown: the read of the pod after the call did not answer, so 137 may be the tool's end or the pod's, and the call's result is unknown\n"
+	read := []string{"kubectl", "--context", kubeContext, "-n", kubeNamespace, "get", "pod", kubePod, "--ignore-not-found", "-o", `jsonpath={.metadata.name}{" "}{.metadata.deletionTimestamp}`}
 	cases := []struct {
 		name     string
 		attach   int
@@ -1024,11 +1025,13 @@ func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 		wantNote string
 		probes   int
 	}{
-		{name: "137 and the pod is gone", attach: 137, readExit: 1, wantNote: gone, probes: 4},
-		{name: "137 and the pod is still there", attach: 137, readOut: "pod/" + kubePod + "\n", probes: 4},
-		{name: "137 and the read does not name the pod", attach: 137, wantNote: gone, probes: 4},
+		{name: "137 and the pod is gone", attach: 137, wantNote: gone, probes: 4},
+		{name: "137 and the pod is terminating", attach: 137, readOut: kubePod + " 2026-11-21T12:00:00Z", wantNote: gone, probes: 4},
+		{name: "137 and the pod is still there", attach: 137, readOut: kubePod + " ", probes: 4},
+		{name: "137 and the read names another pod", attach: 137, readOut: "gt-other", wantNote: gone, probes: 4},
 		{name: "another exit makes no read", attach: 1, probes: 3},
-		{name: "137 and the read itself fails", attach: 137, readErr: errors.New("exec: refused"), wantNote: unknown, probes: 4},
+		{name: "137 and the read does not run", attach: 137, readErr: errors.New("exec: refused"), wantNote: unknown, probes: 4},
+		{name: "137 and the read fails", attach: 137, readOut: kubePod, readExit: 1, wantNote: unknown, probes: 4},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1042,7 +1045,7 @@ func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 			if got := note.String(); got != tt.wantNote {
 				t.Fatalf("the note = %q, want %q", got, tt.wantNote)
 			}
-			if len(f.captured) != tt.probes || (tt.probes == 4 && !slices.Equal(f.captured[3], []string{"kubectl", "--context", kubeContext, "-n", kubeNamespace, "get", "pod", kubePod, "-o", "name"})) {
+			if len(f.captured) != tt.probes || (tt.probes == 4 && !slices.Equal(f.captured[3], read)) {
 				t.Fatalf("probes = %q, want %d ending in the read of the pod", f.captured, tt.probes)
 			}
 		})

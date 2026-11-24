@@ -125,15 +125,20 @@ func (k Kubectl) Launch(call Call) (int, error) {
 }
 
 // noteReplacedPod says when a call's 137 is the daemon pod replaced under it: one
-// bounded read of the pod, made once and never retried.
+// bounded read of the pod, made once and never retried. The read asks for the
+// deletion timestamp as well as the name, since a terminating pod still names
+// itself; --ignore-not-found makes a missing pod a successful empty answer, so a
+// read that fails is reported as unknown and never as the pod being gone.
 func (k Kubectl) noteReplacedPod(pod string, exit int) {
 	if exit != 137 {
 		return
 	}
-	out, readExit, err := k.probe("-n", k.Namespace, "get", "pod", pod, "-o", "name")
-	if err != nil {
-		fmt.Fprintf(k.Note, "gt-wrap: exit 137 and the pod %s's state is unknown: the read after the call did not run, so 137 may be the tool's end or the pod's, and the call's result is unknown\n", pod)
-	} else if readExit != 0 || strings.TrimSpace(out) != "pod/"+pod {
+	out, readExit, err := k.probe("-n", k.Namespace, "get", "pod", pod, "--ignore-not-found", "-o", "jsonpath={.metadata.name}{\" \"}{.metadata.deletionTimestamp}")
+	fields := strings.Fields(out)
+	switch {
+	case err != nil || readExit != 0:
+		fmt.Fprintf(k.Note, "gt-wrap: exit 137 and the pod %s's state is unknown: the read of the pod after the call did not answer, so 137 may be the tool's end or the pod's, and the call's result is unknown\n", pod)
+	case len(fields) != 1 || fields[0] != pod:
 		fmt.Fprintf(k.Note, "gt-wrap: exit 137 and the pod %s is gone: the pod was replaced while the call ran (a daemon roll), so 137 is the pod's end, not the tool's, and the call's result is unknown\n", pod)
 	}
 }
