@@ -154,7 +154,7 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 			}
 			// The apply refuses a split the dry run refuses, writing nothing.
 			before := splitJournalLen(t, db)
-			err = runSpecSplitApplyOn(&out, row.beadID, "gastown", db.Show, func(string) *specdispatch.TargetTree { return row.tree }, splitPassingCheck(), db)
+			err = runSpecSplitApplyOn(&out, row.beadID, "gastown", db.Show, func(string) *specdispatch.TargetTree { return row.tree }, splitPassingCheck(), db, nil)
 			if err == nil {
 				t.Errorf("runSpecSplitApplyOn() error = nil, want a refusal")
 			}
@@ -253,7 +253,7 @@ func TestSpecSplitApplyCreates(t *testing.T) {
 
 	var out bytes.Buffer
 	err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
-		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db)
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db, nil)
 	if err != nil {
 		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
 	}
@@ -346,7 +346,7 @@ func TestSpecSplitApplyNamesAFailedWrite(t *testing.T) {
 
 			var out bytes.Buffer
 			err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
-				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), &failing)
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), &failing, nil)
 			if err == nil {
 				t.Fatalf("runSpecSplitApplyOn() error = nil, want the failed write reported")
 			}
@@ -367,7 +367,7 @@ func TestSpecSplitApplyReportsAFailedOutput(t *testing.T) {
 	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
 
 	err := runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
-		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db)
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot report the split of gt-split") {
 		t.Errorf("runSpecSplitApplyOn() error = %v on a refused report, want the report failure", err)
 	}
@@ -396,7 +396,7 @@ func TestSpecSplitApplyStops(t *testing.T) {
 
 			var out bytes.Buffer
 			err := runSpecSplitApplyOn(&out, "gt-split", "gastown", db.Show,
-				func(string) *specdispatch.TargetTree { return splitTree() }, tc.check, db)
+				func(string) *specdispatch.TargetTree { return splitTree() }, tc.check, db, nil)
 			if code := exitCodeForError(err); err == nil || code != 1 {
 				t.Fatalf("runSpecSplitApplyOn() error = %v, want exit 1", err)
 			}
@@ -405,6 +405,459 @@ func TestSpecSplitApplyStops(t *testing.T) {
 			}
 			if got := out.String() + err.Error(); !strings.Contains(got, tc.want) {
 				t.Errorf("refusal = %q, want it to name %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// splitApplyFixture is a bead to split and one downstream bead blocked by it.
+func splitApplyFixture(t *testing.T) *beadsfake.Fake {
+	t.Helper()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddDependency("gt-downstream", "gt-split"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	return db
+}
+
+// splitNoDependents is a store whose dependents read fails.
+type splitNoDependents struct{ beads.Client }
+
+func (splitNoDependents) DepListUp(string, string) ([]beads.IssueDep, error) {
+	return nil, errors.New("dep list refused")
+}
+
+// splitNoMove is a store whose dependent-move add fails.
+type splitNoMove struct{ beads.Client }
+
+func (splitNoMove) AddTypedDependency(string, string, string) error {
+	return errors.New("dep add refused")
+}
+
+// splitNoRemove is a store whose dependent-move removal fails.
+type splitNoRemove struct{ beads.Client }
+
+func (splitNoRemove) RemoveDependency(string, string) error { return errors.New("dep remove refused") }
+
+// splitApplyAndShow runs the apply against store, then returns piece B and the
+// downstream dependent as db reads them.
+func splitApplyAndShow(t *testing.T, store beads.Client, db *beadsfake.Fake, raw specSplitRawDeps) (*beads.Issue, *beads.Issue) {
+	t.Helper()
+	if err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), store, raw); err != nil {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
+	}
+	issues, err := db.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	dependent, err := db.Show("gt-downstream")
+	if err != nil {
+		t.Fatalf("show dependent: %v", err)
+	}
+	return splitCreatedPiece(t, issues, "B"), dependent
+}
+
+// splitWantBAlone asserts that dependent depends on piece B at blocks and on
+// nothing else.
+func splitWantBAlone(t *testing.T, dependent, b *beads.Issue) {
+	t.Helper()
+	if len(dependent.Dependencies) != 1 || dependent.Dependencies[0].ID != b.ID || dependent.Dependencies[0].DependencyType != "blocks" {
+		t.Errorf("dependent dependencies = %+v, want B %s alone at blocks", dependent.Dependencies, b.ID)
+	}
+}
+
+// TestSpecSplitApplyMovesDependents: --apply moves a dependent of the original
+// onto piece B, so it depends on B afterward and no longer on the original.
+func TestSpecSplitApplyMovesDependents(t *testing.T) {
+	t.Parallel()
+	db := splitApplyFixture(t)
+	b, dependent := splitApplyAndShow(t, db, db, nil)
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyMovesEveryRelation: a dependent holding two relations to
+// the original gets both on piece B, and both its edges to the original go.
+func TestSpecSplitApplyMovesEveryRelation(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	for _, rel := range []string{"blocks", "tracks"} {
+		if err := db.AddTypedDependency("gt-downstream", "gt-split", rel); err != nil {
+			t.Fatalf("AddTypedDependency(%s): %v", rel, err)
+		}
+	}
+	b, dependent := splitApplyAndShow(t, db, db, nil)
+	got := make(map[string]bool, len(dependent.Dependencies))
+	for _, dep := range dependent.Dependencies {
+		got[dep.ID+" "+dep.DependencyType] = true
+	}
+	if len(dependent.Dependencies) != 2 {
+		t.Errorf("dependent dependencies = %+v, want the two B edges alone", dependent.Dependencies)
+	}
+	for _, want := range []string{b.ID + " blocks", b.ID + " tracks"} {
+		if !got[want] {
+			t.Errorf("dependent dependencies = %+v, want %q", dependent.Dependencies, want)
+		}
+	}
+}
+
+// splitRecordingRemove is a store that records each dependency it removes, so
+// a test sees the form an external:<rig>:<id> edge is removed in.
+type splitRecordingRemove struct {
+	beads.Client
+	removed []string
+}
+
+func (s *splitRecordingRemove) RemoveDependency(issue, dependsOn string) error {
+	s.removed = append(s.removed, issue+" off "+dependsOn)
+	return s.Client.RemoveDependency(issue, dependsOn)
+}
+
+// splitRawScript is a raw dependency read a test scripts: the dependents and
+// targets each call answers, or the error it returns.
+type splitRawScript struct {
+	dependents []beads.IssueDep
+	targets    []string
+	depErr     error
+	targetErr  error
+}
+
+// splitListsNone is a store whose own dependents list leaves everything out,
+// so only the raw read can find a dependent.
+type splitListsNone struct{ beads.Client }
+
+func (splitListsNone) DepListUp(string, string) ([]beads.IssueDep, error) { return nil, nil }
+
+func (s splitRawScript) Dependents(string) ([]beads.IssueDep, error) {
+	if s.depErr != nil {
+		return nil, s.depErr
+	}
+	return s.dependents, nil
+}
+
+func (s splitRawScript) Targets(string) ([]string, error) {
+	if s.targetErr != nil {
+		return nil, s.targetErr
+	}
+	return s.targets, nil
+}
+
+// TestSpecSplitApplyMovesAnExternalEdge: a dependent whose edge names the
+// original as external:<rig>:<id> gets the edge to piece B, and the edge to the
+// original is removed in the form the table stores it.
+func TestSpecSplitApplyMovesAnExternalEdge(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddTypedDependency("gt-downstream", "external:gt:gt-split", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	store := &splitRecordingRemove{Client: db}
+	raw := splitRawScript{targets: []string{"external:gt:gt-split"}}
+	b, dependent := splitApplyAndShow(t, store, db, raw)
+	if want := "gt-downstream off external:gt:gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want the stored external ref alone (%q)", store.removed, want)
+	}
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyFindsADependentOnlyTheRawReadSees: a dependent the store's
+// list leaves out, whose stored edge names the original as external:<prefix>:<id>,
+// is found by the raw read, moved onto B, and loses that edge in its stored form.
+func TestSpecSplitApplyFindsADependentOnlyTheRawReadSees(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddTypedDependency("gt-downstream", "external:gt:gt-split", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	store := &splitRecordingRemove{Client: splitListsNone{db}}
+	raw := splitRawScript{dependents: []beads.IssueDep{{ID: "gt-downstream", DependencyType: "blocks"}}, targets: []string{"external:gt:gt-split"}}
+	b, dependent := splitApplyAndShow(t, store, db, raw)
+	if want := "gt-downstream off external:gt:gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want %q", store.removed, want)
+	}
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyLeavesAnotherRigsEdgeAlone: the raw read matches an
+// external edge by its id, so a dependent whose edge is external:om:gt-split
+// names another rig's gt-split. It gets no edge to piece B and no edge is removed.
+func TestSpecSplitApplyLeavesAnotherRigsEdgeAlone(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	if err := db.AddTypedDependency("gt-downstream", "external:om:gt-split", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	store := &splitRecordingRemove{Client: splitListsNone{db}}
+	raw := splitRawScript{dependents: []beads.IssueDep{{ID: "gt-downstream", DependencyType: "blocks"}}, targets: []string{"external:om:gt-split"}}
+	if err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), store, raw); err != nil {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
+	}
+	dependent, err := db.Show("gt-downstream")
+	if err != nil {
+		t.Fatalf("show dependent: %v", err)
+	}
+	if len(dependent.Dependencies) != 0 {
+		t.Errorf("dependent dependencies = %+v, want no edge to piece B for another rig's bead", dependent.Dependencies)
+	}
+	if len(store.removed) != 0 {
+		t.Errorf("removed = %v, want no edge removed", store.removed)
+	}
+}
+
+// TestSpecSplitApplyKeepsAnotherRigsEdgeOnARealDependent: a dependent of the
+// original that also holds external:om:gt-split, another rig's bead of the same
+// id, is moved off the original alone and keeps that other edge.
+func TestSpecSplitApplyKeepsAnotherRigsEdgeOnARealDependent(t *testing.T) {
+	t.Parallel()
+	db := splitApplyFixture(t)
+	store := &splitRecordingRemove{Client: db}
+	raw := splitRawScript{targets: []string{"gt-split", "external:om:gt-split"}}
+	b, dependent := splitApplyAndShow(t, store, db, raw)
+	if want := "gt-downstream off gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want only %q", store.removed, want)
+	}
+	splitWantBAlone(t, dependent, b)
+}
+
+// TestSpecSplitApplyReadsDependentsBDLeavesOut: a dependent whose edge bd's own
+// list leaves out is read from the dependency table and moved.
+func TestSpecSplitApplyReadsDependentsBDLeavesOut(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	db.OnSQL(func(q string) ([][]string, error) {
+		switch {
+		case strings.Contains(q, "AS depends_on_id"):
+			return [][]string{{"depends_on_id"}, {"gt-split"}}, nil
+		case strings.Contains(q, "type = 'blocks'"):
+			return [][]string{{"issue_id"}, {"gt-downstream"}}, nil
+		case strings.Contains(q, "type ="):
+			return [][]string{{"issue_id"}}, nil
+		default:
+			return [][]string{{"issue_id"}, {"gt-downstream"}}, nil
+		}
+	})
+	b, dependent := splitApplyAndShow(t, db, db, specSplitSQLDeps{db})
+	splitWantBAlone(t, dependent, b)
+}
+
+// splitMoveRefuses is a store whose dependency add fails for one dependent.
+type splitMoveRefuses struct {
+	beads.Client
+	id string
+}
+
+func (s splitMoveRefuses) AddTypedDependency(issue, dependsOn, depType string) error {
+	if issue == s.id {
+		return errors.New("dep add refused")
+	}
+	return s.Client.AddTypedDependency(issue, dependsOn, depType)
+}
+
+// splitRelationRefuses is a store whose dependency add fails for one relation of
+// one dependent, so a test drives a failure after that dependent's earlier
+// relation already reached piece B.
+type splitRelationRefuses struct {
+	beads.Client
+	id, rel string
+}
+
+func (s splitRelationRefuses) AddTypedDependency(issue, dependsOn, depType string) error {
+	if issue == s.id && depType == s.rel {
+		return errors.New("dep add refused")
+	}
+	return s.Client.AddTypedDependency(issue, dependsOn, depType)
+}
+
+// TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails: a dependent
+// holding blocks and tracks whose tracks add fails keeps both edges to the
+// original, and the error does not list it as moved.
+func TestSpecSplitApplyKeepsTheOriginalEdgesWhenALaterRelationFails(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-downstream", Title: "downstream"})
+	for _, rel := range []string{"blocks", "tracks"} {
+		if err := db.AddTypedDependency("gt-downstream", "gt-split", rel); err != nil {
+			t.Fatalf("AddTypedDependency(%s): %v", rel, err)
+		}
+	}
+	err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), splitRelationRefuses{Client: db, id: "gt-downstream", rel: "tracks"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "moved: none") {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want a refusal that lists no dependent as moved", err)
+	}
+	dependent, showErr := db.Show("gt-downstream")
+	if showErr != nil {
+		t.Fatalf("Show(gt-downstream): %v", showErr)
+	}
+	got := make(map[string]bool, len(dependent.Dependencies))
+	for _, dep := range dependent.Dependencies {
+		got[dep.ID+" "+dep.DependencyType] = true
+	}
+	for _, want := range []string{"gt-split blocks", "gt-split tracks"} {
+		if !got[want] {
+			t.Errorf("dependent dependencies = %+v, want the original edge %q kept", dependent.Dependencies, want)
+		}
+	}
+}
+
+// TestSpecSplitApplyNamesTheDependentsItMoved: a move that fails partway names
+// the dependents already moved and the one that did not.
+func TestSpecSplitApplyNamesTheDependentsItMoved(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+	for _, id := range []string{"gt-downstream-1", "gt-downstream-2"} {
+		mustBead(t, db, beads.CreateOptions{ID: id, Title: id})
+		if err := db.AddDependency(id, "gt-split"); err != nil {
+			t.Fatalf("AddDependency(%s): %v", id, err)
+		}
+	}
+	err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), splitMoveRefuses{Client: db, id: "gt-downstream-2"}, nil)
+	if err == nil {
+		t.Fatalf("runSpecSplitApplyOn() error = nil, want a refusal")
+	}
+	for _, want := range []string{"moved: gt-downstream-1", "moving dependent gt-downstream-2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+}
+
+// TestSpecSplitApplyFallsBackToThePlainEdge: a dependent whose raw targets name
+// no edge to the original is moved off it by the plain id, the form bd's own
+// removal takes for an edge the raw table does not hold.
+func TestSpecSplitApplyFallsBackToThePlainEdge(t *testing.T) {
+	t.Parallel()
+	db := splitApplyFixture(t)
+	store := &splitRecordingRemove{Client: db}
+	raw := splitRawScript{targets: []string{"gt-other"}}
+	if err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+		func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), store, raw); err != nil {
+		t.Fatalf("runSpecSplitApplyOn() error = %v, want none", err)
+	}
+	if want := "gt-downstream off gt-split"; len(store.removed) != 1 || store.removed[0] != want {
+		t.Errorf("removed = %v, want %q", store.removed, want)
+	}
+}
+
+// TestSpecSplitApplyRefusesWhatTheRawReadCannotMove: a raw read that fails and
+// a dependent whose relation is unknown each refuse the apply, with the
+// original left open.
+func TestSpecSplitApplyRefusesWhatTheRawReadCannotMove(t *testing.T) {
+	t.Parallel()
+	bare := func(t *testing.T) *beadsfake.Fake {
+		db := beadsfake.New()
+		mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitBeadDescription})
+		return db
+	}
+	tests := []struct {
+		name    string
+		db      func(*testing.T) *beadsfake.Fake
+		raw     func(*beadsfake.Fake) specSplitRawDeps
+		wantErr string
+		issues  int
+	}{
+		{
+			name:    "raw dependents read fails",
+			db:      splitApplyFixture,
+			raw:     func(*beadsfake.Fake) specSplitRawDeps { return splitRawScript{depErr: errors.New("raw refused")} },
+			wantErr: "cannot read the dependents",
+			issues:  2,
+		},
+		{
+			name:    "raw targets read fails",
+			db:      splitApplyFixture,
+			raw:     func(*beadsfake.Fake) specSplitRawDeps { return splitRawScript{targetErr: errors.New("raw refused")} },
+			wantErr: "reading the dependencies of gt-downstream",
+			issues:  4,
+		},
+		{
+			name: "raw relation is unknown",
+			db:   bare,
+			raw: func(db *beadsfake.Fake) specSplitRawDeps {
+				db.OnSQL(func(q string) ([][]string, error) {
+					if strings.Contains(q, "type =") || strings.Contains(q, "AS depends_on_id") {
+						return [][]string{{"issue_id"}}, nil
+					}
+					return [][]string{{"issue_id"}, {"gt-downstream"}}, nil
+				})
+				return specSplitSQLDeps{db}
+			},
+			wantErr: "does not know",
+			issues:  1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := tc.db(t)
+			err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), db, tc.raw(db))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("runSpecSplitApplyOn() error = %v, want a refusal naming %q", err, tc.wantErr)
+			}
+			issues, err := db.List(beads.ListOptions{Status: "all"})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if len(issues) != tc.issues {
+				t.Errorf("issues = %d after the refusal, want %d", len(issues), tc.issues)
+			}
+			if original, err := db.Show("gt-split"); err != nil || original.Status != "open" {
+				t.Errorf("original after the refusal = %+v, %v; want it open", original, err)
+			}
+		})
+	}
+}
+
+// TestSpecSplitApplyRefusesABadDependentsPath: a dependents read that fails
+// creates nothing; a dependent the move cannot write fails the apply after the
+// pieces exist. Every refusal leaves the original open.
+func TestSpecSplitApplyRefusesABadDependentsPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		store   func(beads.Client) beads.Client
+		wantErr string
+		issues  int
+	}{
+		{"dependents read fails", func(c beads.Client) beads.Client { return splitNoDependents{c} }, "cannot read the dependents", 2},
+		{"dependent add fails", func(c beads.Client) beads.Client { return splitNoMove{c} }, "cannot move the dependents", 4},
+		{"dependent remove fails", func(c beads.Client) beads.Client { return splitNoRemove{c} }, "cannot move the dependents", 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := splitApplyFixture(t)
+			err := runSpecSplitApplyOn(&bytes.Buffer{}, "gt-split", "gastown", db.Show,
+				func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck(), tc.store(db), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("runSpecSplitApplyOn() error = %v, want a refusal naming %q", err, tc.wantErr)
+			}
+			issues, err := db.List(beads.ListOptions{Status: "all"})
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if len(issues) != tc.issues {
+				t.Errorf("issues = %d after the refusal, want %d", len(issues), tc.issues)
+			}
+			if original, err := db.Show("gt-split"); err != nil || original.Status != "open" {
+				t.Errorf("original after the refusal = %+v, %v; want it open", original, err)
 			}
 		})
 	}
@@ -444,7 +897,7 @@ func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 	}
 	check := splitCheckFor(10, map[string]splitPieceFake{"A": {minutes: 6}, "B": {minutes: 10}})
 	err = runSpecSplitApplyOn(splitRefusingWriter{}, "gt-split", "gastown", db.Show,
-		func(string) *specdispatch.TargetTree { return splitTree() }, check, db)
+		func(string) *specdispatch.TargetTree { return splitTree() }, check, db, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot report the failed checks") {
 		t.Errorf("runSpecSplitApplyOn() error = %v on a refused write, want the report failure", err)
 	}
