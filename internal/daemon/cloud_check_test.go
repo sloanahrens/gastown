@@ -537,36 +537,40 @@ func TestCloudCheckNoReleasebotItemClearsTheAlertAndAnotherSectionRaisesNothing(
 	}
 }
 
-// TestCloudCheckUnparseableStatusLeavesTheReleasebotAlertAsItIs: a status the
-// patrol cannot parse raises and clears nothing, so the open alert stays open.
-func TestCloudCheckUnparseableStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
+// TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs: a status that is
+// not JSON, or an object with no items key, is no information about the release
+// bot: it raises nothing, clears nothing, and a later clean report still clears
+// the open alert.
+func TestCloudCheckUnknownStatusLeavesTheReleasebotAlertAsItIs(t *testing.T) {
 	t.Parallel()
-	d, logs, f := cloudCheckReleasebotDaemon(t)
-	f.statusBody = cloudCheckStatusAt(f.now,
-		`{"level":"warn","section":"Release bot","text":"refused its last run"}`)
-	d.runCloudCheckPatrol()
-	if len(f.escalations) != 1 {
-		t.Fatalf("the release bot item escalated %d times, want 1", len(f.escalations))
-	}
+	for _, body := range []string{`{"at":1,"items":[`, `{"at":1,"ok":1}`} {
+		d, logs, f := cloudCheckReleasebotDaemon(t)
+		f.statusBody = cloudCheckStatusAt(f.now,
+			`{"level":"warn","section":"Release bot","text":"refused its last run"}`)
+		d.runCloudCheckPatrol()
+		if len(f.escalations) != 1 {
+			t.Fatalf("%s: the release bot item escalated %d times, want 1", body, len(f.escalations))
+		}
 
-	f.now = f.now.Add(10 * time.Minute)
-	f.statusBody = `{"at":1,"items":[{"level":"warn","section":"Release bot"`
-	d.runCloudCheckPatrol()
-	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
-		t.Errorf("escalations = %q, want no new alert from an unparseable status", f.escalationKeys)
-	}
-	if len(f.clears) != 0 {
-		t.Errorf("an unparseable status cleared %q, want the open alert left open", f.clears)
-	}
-	if !strings.Contains(logs.String(), "not the check's JSON") {
-		t.Errorf("log = %q, want the unparseable status named", logs.String())
-	}
+		f.now = f.now.Add(10 * time.Minute)
+		f.statusBody = body
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.escalationKeys, want) {
+			t.Errorf("%s: escalations = %q, want no new alert from a status that is no report", body, f.escalationKeys)
+		}
+		if len(f.clears) != 0 {
+			t.Errorf("%s cleared %q, want the open alert left open", body, f.clears)
+		}
+		if !strings.Contains(logs.String(), "not a report with an items key") {
+			t.Errorf("log = %q, want the unusable status named", logs.String())
+		}
 
-	f.now = f.now.Add(10 * time.Minute)
-	f.statusBody = cloudCheckStatusAt(f.now)
-	d.runCloudCheckPatrol()
-	if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.clears, want) {
-		t.Errorf("clears = %q after a clean report, want %q: the alert was still open", f.clears, want)
+		f.now = f.now.Add(10 * time.Minute)
+		f.statusBody = cloudCheckStatusAt(f.now)
+		d.runCloudCheckPatrol()
+		if want := []string{cloudCheckReleasebotAlertKey}; !slices.Equal(f.clears, want) {
+			t.Errorf("%s: clears = %q after a clean report, want %q: the alert was still open", body, f.clears, want)
+		}
 	}
 }
 

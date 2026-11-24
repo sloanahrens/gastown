@@ -366,18 +366,20 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 // cloudCheckReleasebotStatus raises or clears the release bot alert from the
 // status file a good run just wrote: one alert however many items match, a
 // repeat refreshing the same key; a report with none clears it when open. A
-// report that cannot be parsed leaves the alert as it is.
+// report that cannot be parsed, or holds no items key, leaves the alert as it
+// is: it says nothing about the release bot.
 func (d *Daemon) cloudCheckReleasebotStatus(s cloudCheckSeams, statusPath, body string) {
 	var report struct {
-		Items []cloudCheckItem `json:"items"`
+		Items *[]cloudCheckItem `json:"items"`
 	}
-	// The body is another process's: one that is not its JSON is no new
-	// information, so the alert is left as it is.
-	if err := json.Unmarshal([]byte(body), &report); err != nil {
-		d.logger.Printf("cloud_check: %s: not the check's JSON; the release bot alert is left as it is", statusPath)
+	// The body is another process's: one that is not its JSON, or has no items
+	// key, is no information, so the alert is left as it is.
+	err := json.Unmarshal([]byte(body), &report)
+	if err != nil || report.Items == nil {
+		d.logger.Printf("cloud_check: %s: not a report with an items key; the release bot alert is left as it is", statusPath)
 		return
 	}
-	texts := cloudCheckReleasebotTexts(report.Items)
+	texts := cloudCheckReleasebotTexts(*report.Items)
 	if len(texts) == 0 {
 		if d.cloudCheckReleasebotAlertRaised.CompareAndSwap(true, false) {
 			if clearErr := s.clear(cloudCheckReleasebotAlertKey); clearErr != nil {
