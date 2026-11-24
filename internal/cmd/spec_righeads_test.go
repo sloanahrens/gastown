@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -176,6 +177,168 @@ func TestTickEffRigHeadsOneCall(t *testing.T) {
 	if _, err := rigHeads(town, []string{"third"}, read); err == nil {
 		t.Error("no database to ask: err = nil, want beadsql's refusal")
 	}
+}
+
+// TestTickEffRigHeadsUnknownDatabase: a database the server does not know —
+// Dolt's 1105 "Unknown system variable '@@<database>_head'" — is dropped by its
+// exact name and the statement sent once more without it, so its rig is absent
+// and the other rigs are answered (gt-a8ak44). The refusal's words are matched
+// case-insensitively; a name that only starts with one of the databases asked
+// for or goes on past its variable, a 1105 that names no database asked for,
+// that same text under another error code or a longer one that starts with
+// 1105, and a failure that is no such refusal keep their error and cost no
+// second call. A refusal that leaves no database to ask is returned too, never
+// an empty answer.
+func TestTickEffRigHeadsUnknownDatabase(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeMetadata := func(rig, content string) {
+		t.Helper()
+		dir := filepath.Join(town, rig, ".beads")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMetadata("gastown", `{"dolt_database":"gt"}`)
+	writeMetadata("second", `{"dolt_database":"be"}`)
+	rigs := []string{"gastown", "second"}
+
+	// reads refuses the first SQLCSV call with refusal and answers any later one
+	// with database's two hashes, keeping every statement sent.
+	reads := func(refusal, database, head, working string) (*[]beadsql.Query, sqlReaderFunc) {
+		sent := []beadsql.Query{}
+		return &sent, func(q beadsql.Query) ([][]string, error) {
+			sent = append(sent, q)
+			if len(sent) == 1 {
+				return nil, errors.New(refusal)
+			}
+			return [][]string{
+				{database + "_head", database + "_working"},
+				{head, working},
+			}, nil
+		}
+	}
+
+	t.Run("dropped by exact name", func(t *testing.T) {
+		t.Parallel()
+		sent, read := reads(`Error 1105 (HY000): Unknown system variable '@@gt_head'`, "be", "b1", "b2")
+		got, err := rigHeads(town, rigs, read)
+		if err != nil {
+			t.Fatalf("rigHeads: %v", err)
+		}
+		want := map[string]beadsql.RigHash{"second": {Head: "b1", Working: "b2"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("rigHeads = %v, want %v", got, want)
+		}
+		if _, ok := got["gastown"]; ok {
+			t.Error("rigHeads keyed the rig whose database the server does not know")
+		}
+		if len(*sent) != 2 {
+			t.Fatalf("SQLCSV calls = %d, want the first read and one retry without gt", len(*sent))
+		}
+		wantQuery, err := rigHeadsQuery([]string{"be"}).Inline()
+		if err != nil {
+			t.Fatalf("rigHeadsQuery: %v", err)
+		}
+		if retry, err := (*sent)[1].Inline(); err != nil || retry != wantQuery {
+			t.Errorf("retry statement = %q, %v, want %q without the dropped database", retry, err, wantQuery)
+		}
+	})
+
+	t.Run("refusal in another case", func(t *testing.T) {
+		t.Parallel()
+		_, read := reads(`error 1105 (hy000): unknown system variable '@@be_working'`, "gt", "g1", "g2")
+		got, err := rigHeads(town, rigs, read)
+		if err != nil {
+			t.Fatalf("rigHeads: %v", err)
+		}
+		want := map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("rigHeads = %v, want %v", got, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		refusal string
+	}{
+		{"a name that only starts with ours", `Error 1105 (HY000): Unknown system variable '@@gtx_head'`},
+		{"a longer variable name", `Error 1105 (HY000): Unknown system variable '@@gt_head_ref'`},
+		{"a database never asked for", `Error 1105 (HY000): Unknown system variable '@@om_head'`},
+		{"a 1105 that is no unknown variable", `Error 1105 (HY000): gc failed: boom`},
+		{"a 1105 naming ours that is no unknown variable", `Error 1105 (HY000): @@gt_head is unreadable: manifest lock`},
+		{"that way of saying it under another code", `Error 1193 (HY000): Unknown system variable '@@gt_head'`},
+		{"a longer code that starts with 1105", `Error 11050 (HY000): Unknown system variable '@@gt_head'`},
+		{"a failure that is no 1105", `dial tcp 127.0.0.1:3307: connect: connection refused`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sent, read := reads(tc.refusal, "be", "b1", "b2")
+			got, err := rigHeads(town, rigs, read)
+			if err == nil {
+				t.Fatalf("rigHeads = %v, nil, want the read's error", got)
+			}
+			if len(*sent) != 1 {
+				t.Errorf("SQLCSV calls = %d, want no retry when no database asked for is unknown", len(*sent))
+			}
+		})
+	}
+
+	t.Run("a second unknown database fails the one retry", func(t *testing.T) {
+		t.Parallel()
+		second := errors.New(`Error 1105 (HY000): Unknown system variable '@@be_head'`)
+		calls := 0
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_head'`)
+			}
+			return nil, second
+		})
+		got, err := rigHeads(town, rigs, read)
+		if !errors.Is(err, second) {
+			t.Fatalf("rigHeads = %v, %v, want the retry's refusal: one database is dropped, not two", got, err)
+		}
+		if calls != 2 {
+			t.Errorf("SQLCSV calls = %d, want the first read and exactly one retry", calls)
+		}
+	})
+
+	t.Run("every database unknown refuses", func(t *testing.T) {
+		t.Parallel()
+		refusal := errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_working'`)
+		calls := 0
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+			calls++
+			return nil, refusal
+		})
+		got, err := rigHeads(town, []string{"gastown"}, read)
+		if !errors.Is(err, refusal) {
+			t.Fatalf("rigHeads = %v, %v, want the read's refusal rather than an empty answer", got, err)
+		}
+		if calls != 1 {
+			t.Errorf("SQLCSV calls = %d, want no retry with no database left", calls)
+		}
+	})
+
+	t.Run("the retry fails", func(t *testing.T) {
+		t.Parallel()
+		retryErr := errors.New("connection reset by peer")
+		calls := 0
+		read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New(`Error 1105 (HY000): Unknown system variable '@@gt_head'`)
+			}
+			return nil, retryErr
+		})
+		if got, err := rigHeads(town, rigs, read); !errors.Is(err, retryErr) {
+			t.Errorf("rigHeads = %v, %v, want the retry's error", got, err)
+		}
+	})
 }
 
 // TestTickEffRigHeadsParse: the SQLCSV header and row pair by column name into

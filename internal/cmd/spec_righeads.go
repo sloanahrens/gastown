@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -71,6 +72,13 @@ func parseRigHeads(records [][]string) ([]rigHashRow, error) {
 // runs send the same statement. A rig whose metadata names no database is not
 // asked for and is keyed nowhere, and a set with none refuses rather than
 // answering empty (gt-j3vdg4, gt-ihvt1v, gt-5v8y37).
+//
+// A database the server does not know — a stale metadata file names one the
+// server has dropped — costs only its own rig its hashes: it is dropped by
+// exact name and the statement sent once more without it, so its rig is absent
+// and every other rig is answered. When every database asked for is unknown
+// the read's refusal is returned, as every other failed read is, rather than an
+// empty answer no rig explains (gt-a8ak44).
 func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsql.RigHash, error) {
 	databases := rigDatabases(townRoot, rigs)
 	names := make([]string, 0, len(databases))
@@ -80,7 +88,17 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsq
 	slices.Sort(names)
 	records, err := read.SQLCSV(rigHeadsQuery(names))
 	if err != nil {
-		return nil, err
+		dropped, ok := unknownDatabase(err, names)
+		if !ok {
+			return nil, err
+		}
+		names = slices.DeleteFunc(names, func(db string) bool { return db == dropped })
+		if len(names) == 0 {
+			return nil, fmt.Errorf("rigHeads: every database asked for is unknown to the server: %w", err)
+		}
+		if records, err = read.SQLCSV(rigHeadsQuery(names)); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := parseRigHeads(records)
 	if err != nil {
@@ -97,4 +115,36 @@ func rigHeads(townRoot string, rigs []string, read sqlReader) (map[string]beadsq
 		}
 	}
 	return heads, nil
+}
+
+// unknownSystemVariable finds the database an unknown-variable refusal names in
+// its '@@<database>_head' or '@@<database>_working' variable. The suffix has to
+// end the name (\b), so a variable that only starts with one of the statement's
+// own — @@om_head_ref — does not read as it.
+var unknownSystemVariable = regexp.MustCompile(`(?i)@@([A-Za-z0-9_-]+)_(?:head|working)\b`)
+
+// unknownDatabaseCode finds Dolt's error number in a failed read's text. The
+// number has to end the word (\b), so a longer code that starts with 1105 —
+// 11050 — does not read as 1105.
+var unknownDatabaseCode = regexp.MustCompile(`(?i)\berror 1105\b`)
+
+// unknownDatabase names the database a failed read refused because the server
+// does not know it. Dolt answers an unknown database's head variable with error
+// 1105, "Unknown system variable '@@<database>_head'", which is what a stale
+// metadata file naming a dropped database gets. The refusal's words are matched
+// case-insensitively, and the name it gives is matched exactly against the
+// databases the statement asked for: a name that only starts with one of them
+// (om for om2) is no match. A failure that is not that refusal, or that names
+// no database asked for, is no unknown database, and the read's error stands.
+func unknownDatabase(err error, databases []string) (string, bool) {
+	text := err.Error()
+	if !unknownDatabaseCode.MatchString(text) || !strings.Contains(strings.ToLower(text), "unknown system variable") {
+		return "", false
+	}
+	for _, match := range unknownSystemVariable.FindAllStringSubmatch(text, -1) {
+		if slices.Contains(databases, match[1]) {
+			return match[1], true
+		}
+	}
+	return "", false
 }
