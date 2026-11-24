@@ -895,16 +895,25 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	if !v.lru && reply.removed != 0 {
 		return
 	}
-	holder := "CI cache trim removed no file while the Go build cache holds"
-	if capMeasured {
-		holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
+	// The lru volume's floor is what stops its trim: over the cap, every file
+	// older than the floor was already selected, so what is left was written
+	// inside the last floor minutes. The summary names the floor rather than the
+	// max age, which does not apply to that program.
+	summary := fmt.Sprintf("%s holds %s, over %s%s: what is left was written inside the last %d minutes, which the trim keeps",
+		v.name, polecatimage.Human(after), limit, polecatimage.Human(threshold), ciCacheLRUFloorMinutes)
+	if !v.lru {
+		holder := "CI cache trim removed no file while the Go build cache holds"
+		if capMeasured {
+			holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
+		}
+		summary = fmt.Sprintf("%s %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
+			holder, polecatimage.Human(after), limit, polecatimage.Human(threshold))
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
-		Summary: fmt.Sprintf("%s %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
-			holder, polecatimage.Human(after), limit, polecatimage.Human(threshold)),
+		Summary:  summary,
 	})
 }
 
