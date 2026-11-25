@@ -1136,21 +1136,31 @@ func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 }
 
 // streamKube writes the bytes it holds through the writers the wrapper passes;
-// fakeKube itself writes nothing.
+// fakeKube itself writes nothing. Both streams are written whatever the other
+// returns, as the child's two copies are, and the first write error is returned.
+// gotStdout, when set, records the stdout writer it was given.
 type streamKube struct {
 	*fakeKube
 	stdout, stderr string
+	gotStdout      *io.Writer
 }
 
 func (s streamKube) AttachStreams(argv []string, env []string, _ io.Reader, stdout, stderr io.Writer) (int, error) {
-	if _, err := io.WriteString(stdout, s.stdout); err != nil {
-		return 1, err
+	if s.gotStdout != nil {
+		*s.gotStdout = stdout
 	}
-	if _, err := io.WriteString(stderr, s.stderr); err != nil {
-		return 1, err
-	}
-	return s.fakeKube.Attach(argv, env)
+	_, outErr := io.WriteString(stdout, s.stdout)
+	_, errErr := io.WriteString(stderr, s.stderr)
+	exit, err := s.fakeKube.Attach(argv, env)
+	return exit, errors.Join(err, outErr, errErr)
 }
+
+// failWriter is a caller's stream that refuses every write.
+type failWriter struct{}
+
+var errWriterClosed = errors.New("the caller's stream is closed")
+
+func (failWriter) Write([]byte) (int, error) { return 0, errWriterClosed }
 
 // kubeBdCallArgs is the call the wrapper makes for bd with args from dir.
 func kubeBdCallArgs(t *testing.T, dir string, args ...string) Call {
@@ -1189,6 +1199,86 @@ func TestExecLostReplyNote(t *testing.T) {
 			}
 			if stdout.String() != out || stderr.String() != execStreamBreak {
 				t.Fatalf("streams = %q, %q; want %q, %q", stdout.String(), stderr.String(), out, execStreamBreak)
+			}
+			if got := note.String(); got != want {
+				t.Fatalf("note = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestExecLostReplyNoteNilStreams: a Kube with no Stdout and no Stderr still
+// notes a broken stream on a bd write; the detector has no off switch. The fake
+// writes to the process's own streams, which the Kube defaults to.
+func TestExecLostReplyNoteNilStreams(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.Shell = streamKube{fakeKube: f, stderr: execStreamBreak}
+	k.Stdout, k.Stderr = nil, nil
+	if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+		t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+	}
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	if got := note.String(); got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+}
+
+// TestExecStdoutIsTheCallersWriter: at equal roots a bd call's stdout goes to the
+// caller's own writer, not a wrapper around it (an *os.File is then the child's
+// descriptor), and the two streams reach one shared writer in the order written.
+func TestExecStdoutIsTheCallersWriter(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note, both bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	var got io.Writer
+	k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak, gotStdout: &got}
+	k.Stdout, k.Stderr = &both, &both
+	if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+		t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+	}
+	if got != io.Writer(&both) {
+		t.Fatalf("stdout given to the shell is %T, want the caller's own writer", got)
+	}
+	if want := "out\n" + execStreamBreak; both.String() != want {
+		t.Fatalf("shared stream = %q, want %q", both.String(), want)
+	}
+}
+
+// TestExecLostReplyNoteSurvivesAFailingStream: a caller's stderr or stdout that
+// fails cannot hide the note, and the call keeps its status.
+func TestExecLostReplyNoteSurvivesAFailingStream(t *testing.T) {
+	t.Parallel()
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	for _, tc := range []struct {
+		name           string
+		stdout, stderr io.Writer
+	}{
+		{"stderr fails", io.Discard, failWriter{}},
+		{"stdout fails", failWriter{}, io.Discard},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = 1
+			var note bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak}
+			k.Stdout, k.Stderr = tc.stdout, tc.stderr
+			exit, err := k.Launch(kubeBdCallArgs(t, town, "create"))
+			if exit != 1 || !errors.Is(err, errWriterClosed) {
+				t.Fatalf("Launch = %d, %v; want the call's status 1 and the stream's error", exit, err)
 			}
 			if got := note.String(); got != want {
 				t.Fatalf("note = %q, want %q", got, want)

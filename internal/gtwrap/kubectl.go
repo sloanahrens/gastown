@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -67,9 +68,11 @@ type Kubectl struct {
 	ReadFile func(string) ([]byte, error)
 	// Stdout and Stderr are the wrapper's own streams. They receive the tool's
 	// output when the pod town root and the Mac town differ: the tool prints pod
-	// paths, and the wrapper rewrites them to the Mac's. When the roots are equal,
-	// the output goes through the Shell unchanged, and a bd call's stderr is read
-	// through them for its note. Nil refuses a rewriting call, so its output is never lost.
+	// paths, and the wrapper rewrites them to the Mac's. A rewriting call with
+	// either nil is refused, so its output is never lost. When the roots are equal
+	// the tool's stdout goes to Stdout unchanged, and a bd call's stderr is copied
+	// to Stderr and into a tail for its lost-reply note. A nil Stdout or Stderr
+	// there is the process's own os.Stdout or os.Stderr, so the note has no off switch.
 	Stdout io.Writer
 	Stderr io.Writer
 	// ProbeTimeout bounds each probe. Zero means probeTimeout.
@@ -141,7 +144,7 @@ type tailBuffer struct {
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.buf = append(b.buf, p...)
 	if len(b.buf) > b.max {
-		b.buf = b.buf[len(b.buf)-b.max:]
+		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
 	}
 	return len(p), nil
 }
@@ -173,31 +176,63 @@ func (k Kubectl) noteReplacedPod(pod string, exit int) {
 // change it; without one the line is held until it ends, since the stream may be
 // binary. The exit status, the standard input and the walk-up script are the same
 // either way. A bd call's stderr is also copied into tail, so a broken exec stream
-// is noted after the call.
+// is noted after the call; that copy is the one change to what the caller sees,
+// since kubectl's stderr is then a pipe, not the terminal.
 func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (int, error) {
 	argv := k.execArgv(pod, call, dir)
-	// A bd call's tail needs the stderr the wrapper writes, or the shell keeps its own.
-	bd := call.Argv[0] == nativeBdTool
+	stdout, stderr := k.outputs()
 	if !k.rewrites() {
-		if !bd || k.Stdout == nil || k.Stderr == nil {
+		if call.Argv[0] != nativeBdTool {
 			if call.Stdin != nil {
 				return k.Shell.AttachStdin(argv, nil, call.Stdin)
 			}
 			return k.Shell.Attach(argv, nil)
 		}
-		return k.Shell.AttachStreams(argv, nil, call.Stdin, k.Stdout, io.MultiWriter(k.Stderr, tail))
+		// Only a bd call's stderr is copied, for the tail: its stdout is the
+		// caller's own writer, which an *os.File hands to the child as the
+		// descriptor itself. Its stderr becomes a pipe the tail and the caller's
+		// stderr share. bd runs in the pod, where its stderr is the exec stream
+		// whatever the Mac's is, so only kubectl's own stderr sees the pipe.
+		return k.Shell.AttachStreams(argv, nil, call.Stdin, stdout, tailFirst(tail, stderr))
 	}
 	// The same condition stdioFlags uses for a terminal: -t is passed only when the
 	// tool's stdin is the caller's terminal.
 	prompt := call.TTY && call.Stdin == nil
-	out := newOutputRewriter(k.Stdout, k.podRoot(), k.Town, prompt)
-	errOut := newOutputRewriter(k.Stderr, k.podRoot(), k.Town, prompt)
-	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, io.MultiWriter(errOut, tail))
+	out := newOutputRewriter(stdout, k.podRoot(), k.Town, prompt)
+	errOut := newOutputRewriter(stderr, k.podRoot(), k.Town, prompt)
+	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, tailFirst(tail, errOut))
 	// The tool's last line need not end in a newline, so the two streams are
 	// flushed before the call returns. A failure to write the output is reported
 	// with the tool's own status, so the caller keeps it.
 	return exit, errors.Join(err, out.Flush(), errOut.Flush())
 }
+
+// outputs is the writers the call's output goes to: the wrapper's own streams,
+// else the process's, so a bd call's stderr is always read for its note.
+func (k Kubectl) outputs() (stdout, stderr io.Writer) {
+	stdout, stderr = k.Stdout, k.Stderr
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	return stdout, stderr
+}
+
+// tailFirst writes each chunk to the tail and then to w. The tail never fails,
+// so a caller's writer that does cannot hide the break text; io.MultiWriter
+// would stop at the first error and leave the tail empty.
+func tailFirst(tail *tailBuffer, w io.Writer) io.Writer {
+	return writerFunc(func(p []byte) (int, error) {
+		_, _ = tail.Write(p)
+		return w.Write(p)
+	})
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // rewrites reports whether the pod's town root and the Mac's differ, and so
 // whether a path the tool prints must be rewritten to work on the Mac.
