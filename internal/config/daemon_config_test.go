@@ -684,6 +684,69 @@ func TestForgejoTokenDirDefault(t *testing.T) {
 // written, and an interval or key the patrol cannot schedule is an error when
 // the document is decoded rather than the default later. A mistyped interval
 // must not read as 30m.
+// review_pool is the landing worker's review switch (gt-i6giwl). The daemon
+// document is decoded strictly, so the key must be declared for config set and
+// validation to accept it, and a key under it that the struct does not name is
+// refused.
+func TestReviewPoolConfigStrictDecode(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"landing_worker":{"review_pool":{` +
+		`"rigs":["gastown","longeye"],"max_concurrent":2,"reuse_expiry":"30m"}}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("review_pool = %v", err)
+	}
+	lw := cfg.Patrols.LandingWorker
+	if lw == nil || lw.ReviewPool == nil {
+		t.Fatalf("review_pool decoded as %+v", lw)
+	}
+	got := lw.ReviewPool
+	if !slices.Equal(got.Rigs, []string{"gastown", "longeye"}) ||
+		got.MaxConcurrent != 2 || got.ReuseExpiryStr != "30m" {
+		t.Errorf("decoded %+v", got)
+	}
+
+	// An empty block decodes to a non-nil struct with zero values. The block
+	// was written, so it is not nil; its zero values are the off reading.
+	var empty DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json",
+		[]byte(`{"patrols":{"landing_worker":{"review_pool":{}}}}`), &empty); err != nil {
+		t.Fatalf("empty review_pool = %v", err)
+	}
+	if rp := empty.Patrols.LandingWorker.ReviewPool; rp == nil || len(rp.Rigs) != 0 ||
+		rp.MaxConcurrent != 0 || rp.ReuseExpiryStr != "" {
+		t.Errorf("empty review_pool decoded as %+v, want a non-nil zero struct", rp)
+	}
+
+	for _, body := range []string{
+		`{"patrols":{"landing_worker":{"review_pool":{"rigs":["gastown"],"bogus":1}}}}`,
+		`{"patrols":{"landing_worker":{"review_pool":{"max_concurrency":2}}}}`,
+	} {
+		err := DecodeJSONFile("daemon.json", []byte(body), &DaemonPatrolConfig{})
+		if !errors.Is(err, ErrUnparseable) {
+			t.Errorf("%s = %v, want ErrUnparseable", body, err)
+		}
+	}
+}
+
+// A landing_worker block without review_pool leaves the field nil: nil is the
+// pool off, and the rest of the block decodes as before.
+func TestReviewPoolConfigAbsentIsNil(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	body := `{"patrols":{"landing_worker":{"enabled":true,"interval":"60s"}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("landing_worker without review_pool = %v", err)
+	}
+	lw := cfg.Patrols.LandingWorker
+	if lw == nil || !lw.Enabled || lw.IntervalStr != "60s" {
+		t.Fatalf("landing_worker decoded as %+v", lw)
+	}
+	if lw.ReviewPool != nil {
+		t.Errorf("an absent review_pool decoded as %+v, want nil", lw.ReviewPool)
+	}
+}
+
 func TestHMSyncConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	t.Parallel()
 
