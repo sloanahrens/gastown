@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -170,6 +171,26 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 	return revision, resourceVersion, false, nil
 }
 
+// planStaticTargets is the drift target of every static object of the render, in
+// the render's order, each built by the drift walk's own builder so no rule is
+// copied here. A Secret builds no target and is skipped, as the drift walk skips
+// it: the cluster fills its data. runTownClusterPlan does not compare the targets
+// yet; only a target that cannot be built refuses the plan.
+func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
+	targets := make([]driftTarget, 0, len(objects))
+	for _, object := range objects {
+		if object.Kind == secretKind {
+			continue
+		}
+		target, err := staticObjectTarget(object)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
 // runTownClusterPlan renders the recorded flags' desired set with
 // runClusterRender, reads each rendered Deployment's revision and resourceVersion
 // through kube, writes plan.json into outDir with writeJSON, and prints the phases
@@ -198,13 +219,18 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	// The static documents are the render's static set, which the render writes as
 	// their reviewed bytes, so a file is phase P exactly when its bytes are one of them.
 	staticDocs := map[string]bool{}
+	var staticObjects []k8s.StaticObject
 	build := d.build
 	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
 		m, err := build(v)
+		if err != nil {
+			return m, err
+		}
+		staticObjects = m.Static
 		for _, object := range m.Static {
 			staticDocs[string(object.Doc)] = true
 		}
-		return m, err
+		return m, nil
 	}
 	d.findTown = func() (string, error) { return root, nil }
 	// The town's running values file is the live render's to settle: a plan is a
@@ -230,6 +256,12 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 		counts[phase]++
 		record.Files[i] = planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent}
+	}
+	// Every static object builds its target through the drift walk's builder, so a
+	// static document that names another object refuses the plan here, before
+	// plan.json is written. The targets are not compared yet.
+	if _, err := planStaticTargets(staticObjects); err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
 	full, short := planID(files)
 	record.ID = full
