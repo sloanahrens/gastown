@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -138,6 +139,82 @@ func TestVerdictReusePredicateFutureDated(t *testing.T) {
 			rec.ReviewedAt = tc.reviewedAt
 			if got := ReuseMiss(nil, rec, cur, "", nil, reuseTestNow(), time.Hour); got != tc.want {
 				t.Errorf("ReuseMiss = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ancestorRepo is a Repo that answers IsAncestor and records its arguments. The
+// other methods come from the nil embedded Repo, so a predicate that calls one panics.
+type ancestorRepo struct {
+	Repo
+	ancestor   bool
+	err        error
+	calls      int
+	from, into string
+}
+
+func (r *ancestorRepo) IsAncestor(ancestor, descendant string) (bool, error) {
+	r.calls++
+	r.from, r.into = ancestor, descendant
+	return r.ancestor, r.err
+}
+
+// TestVerdictReusePredicateVetoNotAncestor: a record on another base is reusable only when
+// that base is an ancestor of the target, and it is asked as IsAncestor(recorded base, target).
+// A record on the same base is reusable with no git call.
+func TestVerdictReusePredicateVetoNotAncestor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		recBase  string
+		base     string
+		ancestor bool
+		want     string
+		calls    int
+	}{
+		{"not an ancestor", "old-base", "new-base", false, missBaseNotAncestor, 1},
+		{"an ancestor", "old-base", "new-base", true, "", 1},
+		{"same base", "same-base", "same-base", false, "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec, cur := reuseTestRecord(), reuseTestKey()
+			rec.Base = tc.recBase
+			g := &ancestorRepo{ancestor: tc.ancestor}
+			if got := ReuseMiss(g, rec, cur, tc.base, nil, reuseTestNow(), time.Hour); got != tc.want {
+				t.Errorf("ReuseMiss = %q, want %q", got, tc.want)
+			}
+			if g.calls != tc.calls {
+				t.Fatalf("IsAncestor calls = %d, want %d", g.calls, tc.calls)
+			}
+			if tc.calls == 1 && (g.from != tc.recBase || g.into != tc.base) {
+				t.Errorf("IsAncestor(%q, %q), want IsAncestor(%q, %q)", g.from, g.into, tc.recBase, tc.base)
+			}
+		})
+	}
+}
+
+// TestVerdictReusePredicateAncestorReadFails: an IsAncestor error is a miss, even when the
+// call also returns true, so a failed read never reads as an ancestor.
+func TestVerdictReusePredicateAncestorReadFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		ancestor bool
+	}{
+		{"error with ancestor reported true", true},
+		{"error with ancestor reported false", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec, cur := reuseTestRecord(), reuseTestKey()
+			rec.Base = "old-base"
+			g := &ancestorRepo{ancestor: tc.ancestor, err: errors.New("ancestry unreadable")}
+			if got := ReuseMiss(g, rec, cur, "new-base", nil, reuseTestNow(), time.Hour); got != missBaseUnreadable {
+				t.Errorf("ReuseMiss = %q, want %q", got, missBaseUnreadable)
 			}
 		})
 	}
