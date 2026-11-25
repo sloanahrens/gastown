@@ -617,3 +617,118 @@ func TestLandOmStatsAuthorTable(t *testing.T) {
 		}
 	})
 }
+
+// TestLandOmStatsCrewBirdTable is gt-kg8rha's command acceptance: the text
+// form prints the crew records per bird in the Agent table's layout and after
+// the Author table, a range with no crew record prints no such table, and
+// --json carries the same rows under "crew_birds". The no-crew row is what a
+// mutation that prints the table without a crew record turns red.
+func TestLandOmStatsCrewBirdTable(t *testing.T) {
+	t.Parallel()
+	day := func(hour int) time.Time { return time.Date(2026, 10, 16, hour, 0, 0, 0, time.Local) }
+	polecatRec := land.ReviewRecord{
+		BeadID: "gt-p1", Rig: "gastown", Attempt: 1, Score: 0.90, Verdict: land.VerdictApprove,
+		Agent: "opus", Branch: "polecat/dag/gt-p1", AuthorKind: authorkind.Polecat, At: day(13),
+	}
+	crewRecs := []land.ReviewRecord{
+		{BeadID: "gt-c1", Rig: "gastown", Attempt: 1, Score: 0.90, Verdict: land.VerdictApprove,
+			Agent: "sonnet", Branch: "crew/nux/gt-c1", AuthorKind: authorkind.Crew, At: day(10)},
+		{BeadID: "gt-c2", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: land.VerdictRequestChanges,
+			Agent: "sonnet", Branch: "crew/nux/gt-c2", AuthorKind: authorkind.Crew, Findings: 1, At: day(11)},
+		{BeadID: "gt-c3", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: land.VerdictRequestChanges,
+			Agent: "haiku", Branch: "crew/dag/gt-c3", AuthorKind: authorkind.Crew, Findings: 2, At: day(12)},
+		// A polecat record in the same range has no bird and is in no bird row.
+		polecatRec,
+	}
+	report := func(t *testing.T, recs []land.ReviewRecord, asJSON bool) string {
+		t.Helper()
+		var lines []string
+		for _, rec := range recs {
+			line, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal %+v: %v", rec, err)
+			}
+			lines = append(lines, string(line))
+		}
+		fake := &landOmStatsFakeFS{files: map[string]string{
+			"/town/reviews.jsonl": strings.Join(lines, "\n") + "\n",
+			"/town/daemon.log":    "",
+		}}
+		var out bytes.Buffer
+		if err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, "", "/town/reviews.jsonl", "/town/daemon.log", asJSON, false); err != nil {
+			t.Fatalf("landOmStatsReportFrom: %v", err)
+		}
+		return out.String()
+	}
+
+	t.Run("the Crew bird table follows the Author table", func(t *testing.T) {
+		t.Parallel()
+		text := report(t, crewRecs, false)
+		author, crewBird := omStatsTableStart(text, "Author"), omStatsTableStart(text, "Crew bird")
+		if author < 0 || crewBird < 0 {
+			t.Fatalf("Author table at %d, Crew bird table at %d, want both:\n%s", author, crewBird, text)
+		}
+		if crewBird < author {
+			t.Errorf("the Crew bird table at %d precedes the Author table at %d:\n%s", crewBird, author, text)
+		}
+	})
+
+	t.Run("each bird's counts", func(t *testing.T) {
+		t.Parallel()
+		text := report(t, crewRecs, false)
+		for _, want := range []struct {
+			bird               string
+			approvals, rejects int
+			rate               string
+		}{
+			{"nux", 1, 1, "50.0%"},
+			{"dag", 0, 1, "100.0%"},
+		} {
+			row := omStatsTableRow(text, "Crew bird", want.bird)
+			if row == nil {
+				t.Fatalf("Crew bird table lacks the %s row:\n%s", want.bird, text)
+			}
+			if len(row) != 4 || row[1] != strconv.Itoa(want.approvals) || row[2] != strconv.Itoa(want.rejects) || row[3] != want.rate {
+				t.Errorf("%s row = %v, want %d approvals, %d rejections at %s", want.bird, row, want.approvals, want.rejects, want.rate)
+			}
+		}
+		if row := omStatsTableRow(text, "Crew bird", authorkind.Polecat); row != nil {
+			t.Errorf("the Crew bird table carries the polecat row %v, want crew records only:\n%s", row, text)
+		}
+	})
+
+	t.Run("no crew record prints no Crew bird table", func(t *testing.T) {
+		t.Parallel()
+		text := report(t, []land.ReviewRecord{polecatRec}, false)
+		if omStatsTableStart(text, "Author") < 0 {
+			t.Fatalf("the fixture lost its Author table:\n%s", text)
+		}
+		if start := omStatsTableStart(text, "Crew bird"); start >= 0 {
+			t.Errorf("a range without a crew record printed a Crew bird table at %d:\n%s", start, text)
+		}
+	})
+
+	t.Run("--json carries crew_birds", func(t *testing.T) {
+		t.Parallel()
+		raw := report(t, crewRecs, true)
+		if !strings.Contains(raw, `"crew_birds"`) {
+			t.Fatalf("--json output does not name crew_birds:\n%s", raw)
+		}
+		var stats land.OmStats
+		if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+			t.Fatalf("--json output does not decode: %v\n%s", err, raw)
+		}
+		want := []land.OmStatsGroup{
+			{Name: "nux", Approvals: 1, Rejections: 1, Rate: 0.5},
+			{Name: "dag", Approvals: 0, Rejections: 1, Rate: 1},
+		}
+		if len(stats.CrewBirds) != len(want) {
+			t.Fatalf("crew birds = %+v, want %+v", stats.CrewBirds, want)
+		}
+		for i, w := range want {
+			if stats.CrewBirds[i] != w {
+				t.Errorf("crew bird %d = %+v, want %+v", i, stats.CrewBirds[i], w)
+			}
+		}
+	})
+}
