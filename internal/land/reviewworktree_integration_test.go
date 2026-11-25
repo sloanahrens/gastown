@@ -69,8 +69,9 @@ func TestIntegrationVerdictReuseWorktreeRealCheckout(t *testing.T) {
 // make the merge commit a landing makes, through the Repo addReviewWorktree
 // returns. mergeWork of the fixture's clean head onto the base neither
 // rejects nor fails: HEAD becomes a new merge commit whose parents are the
-// base and the head, carrying the head's change. An integration file's tests
-// carry the TestIntegration prefix (docs/testing.md).
+// base and the head, carrying the head's change, and git records the landing
+// identity as its committer, the values CommittingEnv sets. An integration
+// file's tests carry the TestIntegration prefix (docs/testing.md).
 func TestIntegrationVerdictReuseWorktreeCanCommit(t *testing.T) {
 	t.Parallel()
 
@@ -95,5 +96,12 @@ func TestIntegrationVerdictReuseWorktreeCanCommit(t *testing.T) {
 	}
 	if got := gitT(t, dir, "show", out.Commit+":b.txt"); got != "work" {
 		t.Fatalf("merge commit b.txt = %q, want the head's change", got)
+	}
+	// The committer is the landing's own identity, which CommittingEnv sets on
+	// every call through the handle: the clone's git config cannot reach the
+	// commit (gt-dc4y3, gt-vuv2n).
+	if got, want := gitT(t, dir, "show", "-s", "--format=%cn%n%ce", out.Commit),
+		LandingCommitterName+"\n"+LandingCommitterEmail; got != want {
+		t.Fatalf("merge commit committer = %q, want the landing identity %q", got, want)
 	}
 }
