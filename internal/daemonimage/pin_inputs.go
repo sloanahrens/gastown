@@ -5,7 +5,7 @@ package daemonimage
 // cloud-check file staged beside cloudcheck, and the module files. A change
 // outside this list cannot reach the image (gt-f3rjtl).
 var devopsInputPaths = []string{
-	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/ledgerdb",
+	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/forgeowner", "internal/ledgerdb",
 	"pkg/manifest", "pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
 }
 

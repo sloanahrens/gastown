@@ -354,7 +354,7 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 // independently of PinInputPaths so a drifted list leaves the fake git with no
 // answer for the path-limited count.
 var devopsInputs = []string{
-	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/ledgerdb",
+	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/forgeowner", "internal/ledgerdb",
 	"pkg/manifest", "pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
 }
 
