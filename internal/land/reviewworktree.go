@@ -2,8 +2,11 @@ package land
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -60,4 +63,44 @@ func (l *Lander) addReviewWorktree(g Repo, w Work, base string) (wt Repo, dir st
 		})
 	}
 	return l.openLanding(dir, env), dir, cleanup, nil
+}
+
+// SweepReviewDirs removes the review-* entries a killed daemon left under workRoot and prunes the worktree registrations behind them, returning every failure joined once all entries and the prune have been tried. A missing workRoot holds no leftover and returns nil.
+//
+// It runs at daemon boot, before any review or landing starts in that daemon. It takes no gitMu, being a package function, so the caller is the daemon that holds the town's daemon.lock: that lock is what keeps a second daemon from starting a review under workRoot while this sweeps (gt-sqy9ss).
+//
+// The sweep decides by name alone, never by stat, so it never follows a symlink: every entry named reviewDirPrefix goes whatever its type, because no live review owns a review-* leftover, and WorkRoot/wt, the landing's own directory, and every other entry are kept. A WorkRoot with no review-* entry makes no git call.
+func SweepReviewDirs(workRoot string, g Repo) error {
+	return sweepReviewDirs(workRoot, g, os.RemoveAll)
+}
+
+// sweepReviewDirs is SweepReviewDirs with the removal injected, so a unit test can make one entry's removal fail: a file mode cannot refuse under root.
+func sweepReviewDirs(workRoot string, g Repo, removeAll func(string) error) error {
+	entries, err := os.ReadDir(workRoot)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read review directories under %s: %w", workRoot, err)
+	}
+	var errs []error
+	var found bool
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), reviewDirPrefix) {
+			continue
+		}
+		found = true
+		path := filepath.Join(workRoot, entry.Name())
+		if err := removeAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove review directory %s: %w", path, err))
+		}
+	}
+	if !found {
+		return nil
+	}
+	// Every directory the sweep touched is gone, so its registration is stale and one prune clears them all. A prune that fails is reported beside the removals, which have already run.
+	if err := g.WorktreePrune(); err != nil {
+		errs = append(errs, fmt.Errorf("prune worktrees after sweeping %s: %w", workRoot, err))
+	}
+	return errors.Join(errs...)
 }
