@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
@@ -410,6 +413,9 @@ type specTickReads struct {
 	// a phase costs in bd calls as well as in time (gt-139dp).
 	phase      string
 	phaseCalls map[string]int
+	// late is the ids an earlier tick's chunk left unread because its read timed
+	// out, kept in a file across ticks (gt-6f2yal). Nil keeps none.
+	late *specLateIDs
 }
 
 // The phases a tick counts its reads under, named as the 'tick took' line
@@ -419,6 +425,91 @@ const (
 	specPhaseBoard      = "board"
 	specPhaseCandidates = "candidates"
 )
+
+// specLateIDs is the ids whose chunk read timed out in an earlier tick. Every
+// tick is its own process, so they are kept in a file; the next tick reads them
+// after the ids that are not late (specChildrenChunk). A path of "" keeps no
+// file, as a dry run must write nothing.
+type specLateIDs struct {
+	path  string
+	ids   map[string]bool
+	dirty bool
+	err   error
+}
+
+// specLateChildrenPath is where the ticks keep the late ids, beside the other
+// state a tick keeps across ticks.
+func specLateChildrenPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "spec_children_late.json")
+}
+
+// loadSpecLateIDs reads the file at path. A missing file holds no ids; one that
+// cannot be read or parsed holds none either and says why in err, so the tick
+// reads in list order and reports the file rather than reading it as clean.
+func loadSpecLateIDs(path string) *specLateIDs {
+	l := &specLateIDs{path: path, ids: map[string]bool{}}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return l
+	}
+	var file struct {
+		IDs []string `json:"ids"`
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &file)
+	}
+	if err != nil {
+		l.err = fmt.Errorf("spec children late ids %s: %w", path, err)
+		return l
+	}
+	for _, id := range file.IDs {
+		l.ids[id] = true
+	}
+	return l
+}
+
+// save writes the ids when they changed, and does nothing with no path.
+func (l *specLateIDs) save() error {
+	if l == nil || l.path == "" || !l.dirty {
+		return nil
+	}
+	if err := atomicfile.EnsureDirAndWriteJSON(l.path, map[string][]string{"ids": slices.Sorted(maps.Keys(l.ids))}); err != nil {
+		return fmt.Errorf("spec children late ids %s: %w", l.path, err)
+	}
+	l.dirty = false
+	return nil
+}
+
+// lateIDs is a copy of the late ids, for specChildrenChunk to read.
+func (r *specTickReads) lateIDs() map[string]bool {
+	if r == nil || r.late == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.late.ids)
+}
+
+// leaveLate records that a chunk read's answer for ids was a timeout (true) or
+// an answer, a failure included (false): the first leaves them for the next
+// tick, the second takes them off the late list.
+func (r *specTickReads) leaveLate(ids []string, timedOut bool) {
+	if r == nil || r.late == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range ids {
+		if r.late.ids[id] != timedOut {
+			r.late.dirty = true
+		}
+		if timedOut {
+			r.late.ids[id] = true
+		} else {
+			delete(r.late.ids, id)
+		}
+	}
+}
 
 func newSpecTickReads() *specTickReads {
 	return &specTickReads{shows: map[string]*beads.Issue{}, phaseCalls: map[string]int{}}
@@ -721,12 +812,13 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 		if !readIDs[beadID] {
 			// The read is the chunk the loop's request opens, not the whole rig:
 			// the loop usually stops after a few candidates (gt-0kwle3).
-			ids := specChildrenChunk(byDir[dir], beadID, readIDs, specChildrenChunkSize)
+			ids := specChildrenChunk(byDir[dir], beadID, readIDs, specChildrenChunkSize, reads.lateIDs())
 			for _, id := range ids {
 				readIDs[id] = true
 			}
 			reads.call()
 			group, err := read(dir, ids)
+			reads.leaveLate(ids, isBDTimeout(err))
 			switch {
 			case isBDTimeout(err):
 				// A timed-out chunk read is the gateway's cap, not one bad
@@ -4610,6 +4702,12 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	}
 	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
 	reads := newSpecTickReads()
+	// The ids a chunk read timed out on in an earlier tick, read after the
+	// others; a dry run keeps no file (gt-6f2yal).
+	reads.late = loadSpecLateIDs(specLateChildrenPath(townRoot))
+	if dryRun {
+		reads.late.path = ""
+	}
 	// The consecutive assignee-lock-timeout count, read on the bead's fresh
 	// read and written back when a timeout defers it (gt-a4cdcd).
 	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
@@ -4844,6 +4942,14 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()
+	// A late-ids file the tick could not read or keep is reported here, as the
+	// detail cache's is: stderr is discarded on a successful tick.
+	if err := reads.late.err; err != nil {
+		report.Errors = append(report.Errors, err.Error())
+	}
+	if err := reads.late.save(); err != nil {
+		report.Errors = append(report.Errors, err.Error())
+	}
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	// A cache the tick could not read or keep is reported here, not on stderr:
 	// the daemon discards a successful tick's stderr, and a cache that silently

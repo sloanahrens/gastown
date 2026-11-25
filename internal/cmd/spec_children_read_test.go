@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -556,5 +559,115 @@ func TestSpecChildrenChunk(t *testing.T) {
 				t.Errorf("specChildrenChunk(asked %s, late %v) = %q, want %q", tc.asked, tc.late, got, tc.want)
 			}
 		})
+	}
+}
+
+// lateTickRead runs one tick's read of the first candidate's chunk against the
+// late-ids file at path, the way a tick that is its own process does: load the
+// file, read through specCandidateChildren, save. It returns the ids the read
+// was asked for.
+func lateTickRead(t *testing.T, root, path string, cands []specCandidate, timeout bool) []string {
+	t.Helper()
+	reads := newSpecTickReads()
+	reads.late = loadSpecLateIDs(path)
+	var asked []string
+	children := specCandidateChildren(root, reads, cands, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+		asked = append(asked, ids...)
+		if timeout {
+			return nil, fmt.Errorf("bd show --children: %w", context.DeadlineExceeded)
+		}
+		got := map[string][]*beads.Issue{}
+		for _, id := range ids {
+			got[id] = nil
+		}
+		return got, nil
+	})
+	if _, err := children(cands[0].Spec.ID); timeout != errors.Is(err, errSpecChildrenTimeout) {
+		t.Fatalf("children(%s) = %v, want the timeout %v", cands[0].Spec.ID, err, timeout)
+	}
+	if err := reads.late.save(); err != nil {
+		t.Fatalf("saving the late ids: %v", err)
+	}
+	return asked
+}
+
+// The ids of a chunk the deadline ended are kept in a file, and the next tick,
+// which is its own process, fills its chunk with the ids that are not late
+// first, so a chunk that keeps timing out cannot hold the front of every tick
+// (gt-6f2yal).
+func TestTickEffTimeoutLeavesTheIdsLateForTheNextTick(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := specLateChildrenPath(root)
+	cands := specCandidateBoardRead(t, specCandidateFixture()).Candidates
+	ids := func(cs []specCandidate) []string {
+		out := make([]string, 0, len(cs))
+		for _, c := range cs {
+			out = append(out, c.Spec.ID)
+		}
+		return out
+	}
+	size := specChildrenChunkSize
+
+	if first := lateTickRead(t, root, path, cands, true); !slices.Equal(first, ids(cands[:size])) {
+		t.Fatalf("the first tick asked for %v, want the first %d candidates", first, size)
+	}
+	want := append(ids(cands[:1]), ids(cands[size:2*size-1])...)
+	if second := lateTickRead(t, root, path, cands, false); !slices.Equal(second, want) {
+		t.Errorf("the second tick asked for %v, want %v: the late ids after the others", second, want)
+	}
+	// The second tick read candidate 0 and the seven that are not late; the
+	// seven it left are still late and the one it read is not.
+	left := loadSpecLateIDs(path)
+	if left.err != nil || !slices.Equal(slices.Sorted(maps.Keys(left.ids)), ids(cands[1:size])) {
+		t.Errorf("late ids after the second tick = %v (err %v), want %v", slices.Sorted(maps.Keys(left.ids)), left.err, ids(cands[1:size]))
+	}
+}
+
+// A late-ids file the tick cannot read or keep is an error it reports and a
+// tick that reads in list order, never a clean read (gt-6f2yal).
+func TestSpecLateIDsRefusals(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	corrupt := filepath.Join(dir, "corrupt.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if l := loadSpecLateIDs(corrupt); l.err == nil || len(l.ids) != 0 {
+		t.Errorf("a corrupt file loaded as ids=%v err=%v, want no ids and the parse error", l.ids, l.err)
+	}
+	if l := loadSpecLateIDs(filepath.Join(dir, "missing.json")); l.err != nil || len(l.ids) != 0 {
+		t.Errorf("a missing file loaded as ids=%v err=%v, want none and no error", l.ids, l.err)
+	}
+	blocked := &specLateIDs{path: filepath.Join(corrupt, "late.json"), ids: map[string]bool{"gt-a": true}, dirty: true}
+	if err := blocked.save(); err == nil {
+		t.Errorf("saving under a file returned no error")
+	}
+	dry := &specLateIDs{ids: map[string]bool{"gt-a": true}, dirty: true}
+	if err := dry.save(); err != nil {
+		t.Errorf("a dry run's save returned %v, want nil and no file", err)
+	}
+}
+
+// A late-ids file the tick cannot parse is an error in its report: the daemon
+// discards a successful tick's stderr, so the report is the one path by which
+// the operator learns the tick is reading in list order for want of it
+// (gt-6f2yal).
+func TestSpecDispatchAtReportsALateIDsFileItCouldNotRead(t *testing.T) {
+	t.Parallel()
+	root := specTickTownWithHold(t)
+	path := specLateChildrenPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := runSpecTickForTest(t, root, "123.456", false)
+	if err != nil {
+		t.Fatalf("runSpecDispatchAtWith: %v", err)
+	}
+	if want := "spec children late ids " + path; !strings.Contains(strings.Join(report.Errors, "\n"), want) {
+		t.Errorf("report errors = %v, want one naming %s", report.Errors, path)
 	}
 }
