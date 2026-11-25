@@ -844,11 +844,18 @@ func (d *Daemon) refuseDiskMaintenance(err error) {
 
 // settleDiskMaintenanceWindow records that this window's pass is over, so the
 // next tick does not repeat it; the once-a-day gap is measured from here. It
-// also records the daily pass as a last run, so gt jobs reads its row as run
-// rather than never_run (gt-27erxa). A pass that deferred never settles, so it
-// records nothing: the retry is the run.
+// records no last run: a pass that refused whole (concludeDiskMaintenance) was
+// settled without running, and gt jobs must not read it as run.
 func (d *Daemon) settleDiskMaintenanceWindow(now time.Time) {
 	d.diskMaintSettled.Store(now.UnixNano())
+}
+
+// recordDiskMaintenanceRun records the daily pass as a last run, so gt jobs
+// reads its row as run rather than never_run (gt-27erxa). It is called only
+// where the pass reached its end and ran its targets; a pass that deferred
+// never settles and a pass that refused whole records nothing, so a refusal is
+// never read as a run.
+func (d *Daemon) recordDiskMaintenanceRun(now time.Time) {
 	d.recordPatrolRun(&d.diskMaintenanceRun, "disk_maintenance", now)
 }
 
@@ -960,7 +967,9 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		// have concluded. A deferred pass returns above and leaves it to the
 		// retry, so a held lock never repeats the listing (gt-573420).
 		d.runActionsRetention(s.now(), apply)
-		d.settleDiskMaintenanceWindow(s.now())
+		concluded := s.now()
+		d.settleDiskMaintenanceWindow(concluded)
+		d.recordDiskMaintenanceRun(concluded)
 	}
 }
 

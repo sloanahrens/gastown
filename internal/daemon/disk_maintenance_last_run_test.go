@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +79,50 @@ func TestDiskMaintenanceLastRunSkipsADeferredPass(t *testing.T) {
 
 	d.runDiskMaintenance()
 
+	if !strings.Contains(logs.String(), "apply deferred") {
+		t.Fatalf("the pass did not defer, so this row proves nothing: %q", logs.String())
+	}
 	if at, ok := diskMaintRecordedRun(t, d); ok {
 		t.Errorf("recorded a daily run at %v from a pass that deferred: %q", at, logs.String())
+	}
+}
+
+// TestDiskMaintenanceLastRunSkipsAPassRefusedWhole: a daily pass that refused
+// whole (here its targets could not be built) concluded without running, so the
+// window settles and gt jobs reads no last run: a refusal is not a run (om
+// finding f75b5ca1f0e7). The next tick does not retry it.
+func TestDiskMaintenanceLastRunSkipsAPassRefusedWhole(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.targetsErr = errors.New("the registry could not be read")
+
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "the targets could not be built") {
+		t.Fatalf("the pass was not refused, so this row proves nothing: %q", logs.String())
+	}
+	if at, ok := diskMaintRecordedRun(t, d); ok {
+		t.Errorf("recorded a daily run at %v from a pass that refused whole: %q", at, logs.String())
+	}
+	if d.diskMaintenanceSettledAt().IsZero() {
+		t.Error("the refused pass did not settle its window: it would retry every tick")
+	}
+}
+
+// TestDiskMaintenanceLastRunRecordsAPassWhoseTargetRefused: a target whose plan
+// refused (it could not check its inputs) was still run by the pass: the window
+// settles and the run is recorded, as the pass reached its end.
+func TestDiskMaintenanceLastRunRecordsAPassWhoseTargetRefused(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.target.plan = diskmaint.Plan{Refused: "the registry listing was unreadable"}
+
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "refused: the registry listing was unreadable") {
+		t.Fatalf("the target did not refuse, so this row proves nothing: %q", logs.String())
+	}
+	if _, ok := diskMaintRecordedRun(t, d); !ok {
+		t.Errorf("a pass that ran to its end left no last run: %q", logs.String())
 	}
 }
