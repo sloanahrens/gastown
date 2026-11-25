@@ -74,6 +74,11 @@ type updateRequest struct {
 	Force      bool
 	JSON       bool
 	FromDaemon bool
+	// AllowRollback permits an install of an older commit than the running
+	// one. The automatic update Job never passes it — the admission policy
+	// fixes that Job's arguments — so it is for the overseer's by-hand
+	// rollback.
+	AllowRollback bool
 	// Images is the values file the install takes the daemon image from by
 	// digest; empty runs the install as it always has.
 	Images string
@@ -444,7 +449,12 @@ func newUpdateCmd() *cobra.Command {
 
 // newUpdateCmdWith builds the command over seams.
 func newUpdateCmdWith(seams updateSeams) *cobra.Command {
-	var req updateRequest
+	return newUpdateCmdOn(&updateRequest{}, seams)
+}
+
+// newUpdateCmdOn builds the command over seams, reading its flags into req so
+// the request a run gets is the one the command line wrote.
+func newUpdateCmdOn(req *updateRequest, seams updateSeams) *cobra.Command {
 	c := &cobra.Command{
 		Use:     "update",
 		GroupID: GroupConfig,
@@ -477,7 +487,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdate(cmd, req, seams)
+			return runUpdate(cmd, *req, seams)
 		},
 	}
 	c.Flags().BoolVar(&req.DryRun, "dry-run", false, "Print the plan and change nothing")
@@ -486,6 +496,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	c.Flags().BoolVar(&req.Force, "force", false, "Plan an install even when the installed build is main")
 	c.Flags().BoolVar(&req.JSON, "json", false, "Print the final state as JSON instead of the text report")
 	c.Flags().BoolVar(&req.FromDaemon, "from-daemon", false, "Record the run's source as daemon instead of manual")
+	c.Flags().BoolVar(&req.AllowRollback, "allow-rollback", false, "Allow an install of an older commit than the running one")
 	c.Flags().StringVar(&req.Images, "images", "", "Install the daemon image by digest from this values file (gt update images writes it)")
 	c.Flags().StringVar(&req.PodContext, "pod-context", "", podContextUsage)
 	c.Flags().StringVar(&req.PodNamespace, "pod-namespace", "", podNamespaceUsage)

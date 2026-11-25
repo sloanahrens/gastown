@@ -481,6 +481,38 @@ func TestUpdateFromDaemonSetsSource(t *testing.T) {
 	}
 }
 
+// TestUpdateAllowRollbackFlag proves gt update registers --allow-rollback as a
+// bool that defaults to false and describes it as permitting an older commit
+// than the running one, and that parsing it reaches the run's request.
+func TestUpdateAllowRollbackFlag(t *testing.T) {
+	t.Parallel()
+	f := newUpdateCmdWith(updateTestSeams(t.TempDir(), updateTestDeps(t), nil)).Flags().Lookup("allow-rollback")
+	if f == nil {
+		t.Fatal("gt update has no --allow-rollback flag")
+	}
+	if got := f.Value.Type(); got != "bool" {
+		t.Errorf("--allow-rollback is a %q, want a bool", got)
+	}
+	if got := f.DefValue; got != "false" {
+		t.Errorf("--allow-rollback defaults to %q, want false", got)
+	}
+	if !strings.Contains(f.Usage, "older commit than the running one") {
+		t.Errorf("--allow-rollback's description = %q, want it to permit an older commit than the running one", f.Usage)
+	}
+
+	req := &updateRequest{}
+	c := newUpdateCmdOn(req, updateTestSeams(t.TempDir(), updateTestDeps(t), nil))
+	if req.AllowRollback {
+		t.Fatal("AllowRollback is true before any flag is parsed")
+	}
+	if err := c.ParseFlags([]string{"--allow-rollback"}); err != nil {
+		t.Fatalf("parsing --allow-rollback = %v", err)
+	}
+	if !req.AllowRollback {
+		t.Error("--allow-rollback parsed but the run's request has AllowRollback false")
+	}
+}
+
 // TestUpdateHealthWaitAndPollAreSetForRuns proves a run's Options carry the
 // verify settle bound and poll, on the manual and the daemon-run path alike: a
 // settling health line is waited for, not read once.
