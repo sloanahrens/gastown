@@ -5215,8 +5215,10 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 //
 // skip is the quiet-rig seam (gt-w2xa0f): the last parameter, with exactly this
 // type. nil means every rig is read, as before. A rig skip answers true for gets
-// no ready read at all, so the board is not asked for its beads (gt-svzybb).
-// The split-held and duplicate reads are not skipped here (gt-rd87eq).
+// no board read at all, so the board is not asked for its beads (gt-svzybb). The
+// board read carries that rig's split-held list, and a rig with no candidate is
+// never re-read for its full beads, so such a rig gets no split-held or duplicate
+// read either (gt-rd87eq).
 func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip func(rig string) bool) specBoardRead { //nolint:unparam // no production caller passes a non-nil skip yet; the quiet-rig memory connects it
 	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil, skip)
 }
