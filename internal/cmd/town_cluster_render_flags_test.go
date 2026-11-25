@@ -463,6 +463,10 @@ var renderFlagRecordNames = map[string]string{
 	"trackerBackupImage":            "TrackerBackupImage",
 	"daemonBdGatewayURL":            "DaemonBdGatewayURL",
 	"includeStatic":                 "IncludeStatic",
+	"cluster":                       "Cluster",
+	"sbxManifests":                  "SbxManifests",
+	"sbxChart":                      "SbxChart",
+	"sbxValues":                     "SbxValues",
 }
 
 // TestRenderFlagsRecordCoversTheFlagStruct: every field of the render's flag
@@ -477,10 +481,6 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
 		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
-		"cluster":               "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
-		"sbxManifests":          "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
-		"sbxChart":              "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
-		"sbxValues":             "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
 		"helm":                  "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
@@ -790,5 +790,86 @@ func TestClusterRenderRecordedFlagsTownStateBackupHostPath(t *testing.T) {
 	i := slices.IndexFunc(pod.Volumes, func(v k8sdaemon.Volume) bool { return v.Name == k8sdaemon.TownStateBackupVolume })
 	if i < 0 || pod.Volumes[i].HostPath == nil || pod.Volumes[i].HostPath.Path != path {
 		t.Fatalf("the replay's %s volume is not a hostPath %s: --use-recorded dropped the recorded path", k8sdaemon.TownStateBackupVolume, path)
+	}
+}
+
+// TestClusterRenderFlagsRecordTheSbxClusterAndPaths holds the gt-sbx cluster and
+// its three paths to the record: --record-flags saves them under their keys, and
+// a replay that names none of them restores them, so a later drift or plan run
+// reads the same sandbox render back (gt-u4q8if).
+func TestClusterRenderFlagsRecordTheSbxClusterAndPaths(t *testing.T) {
+	t.Parallel()
+	want := renderFlagsFixture()
+	want.cluster = clusterSbx
+	want.sbxManifests = "/host/agent-sandbox/manifest.yaml"
+	want.sbxChart = "/host/charts/agent-sandbox"
+	want.sbxValues = "/host/gt-sbx/values.yaml"
+	path := filepath.Join(t.TempDir(), "render-flags.json")
+	if err := saveRenderFlags(path, want); err != nil {
+		t.Fatalf("saveRenderFlags: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the recorded flags: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("decoding the recorded flags: %v", err)
+	}
+	for key, value := range map[string]string{
+		"cluster":       clusterSbx,
+		"sbx_manifests": want.sbxManifests,
+		"sbx_chart":     want.sbxChart,
+		"sbx_values":    want.sbxValues,
+	} {
+		if got, wantJSON := string(raw[key]), `"`+value+`"`; got != wantJSON {
+			t.Errorf("the record's %s = %s, want %s: --record-flags dropped it", key, got, wantJSON)
+		}
+	}
+
+	got, ok, err := loadRenderFlags(path)
+	if err != nil || !ok {
+		t.Fatalf("loadRenderFlags = (%t, %v), want the record", ok, err)
+	}
+	none := func(string) bool { return false }
+	replay, err := clusterRenderFlags{}.withRecorded(got, none)
+	if err != nil {
+		t.Fatalf("withRecorded: %v", err)
+	}
+	if replay.cluster != want.cluster || replay.sbxManifests != want.sbxManifests ||
+		replay.sbxChart != want.sbxChart || replay.sbxValues != want.sbxValues {
+		t.Errorf("replay restored cluster %q and paths %q %q %q, want %q and %q %q %q",
+			replay.cluster, replay.sbxManifests, replay.sbxChart, replay.sbxValues,
+			want.cluster, want.sbxManifests, want.sbxChart, want.sbxValues)
+	}
+}
+
+// TestClusterRenderFlagsOldRecordLoadsAsControl: a record written before the
+// cluster and the sandbox paths were recorded loads, its own flags keep their
+// meaning, and it reads as the control render with no sandbox paths, so an old
+// file cannot restore a gt-sbx run (gt-u4q8if).
+func TestClusterRenderFlagsOldRecordLoadsAsControl(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "render-flags.json")
+	oldShape := `{"dir": "/repo/gastown", "out": "/repo/manifests", "include_static": true}`
+	if err := os.WriteFile(path, []byte(oldShape), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := loadRenderFlags(path)
+	if err != nil {
+		t.Fatalf("loadRenderFlags on a record of the old shape: %v", err)
+	}
+	if !ok {
+		t.Fatal("loadRenderFlags reported no record for a file that exists")
+	}
+	if got.dir != "/repo/gastown" || got.out != "/repo/manifests" || !got.includeStatic {
+		t.Errorf("the old record's flags = dir %q out %q includeStatic %t, want the values it holds", got.dir, got.out, got.includeStatic)
+	}
+	if got.cluster != clusterControl {
+		t.Errorf("cluster = %q, want %q: a record with no cluster key is the control render", got.cluster, clusterControl)
+	}
+	if got.sbxManifests != "" || got.sbxChart != "" || got.sbxValues != "" {
+		t.Errorf("sandbox paths = %q %q %q, want none", got.sbxManifests, got.sbxChart, got.sbxValues)
 	}
 }

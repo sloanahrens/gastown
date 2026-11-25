@@ -490,6 +490,10 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
 		{"daemon-bd-gateway-url", &f.daemonBdGatewayURL, r.daemonBdGatewayURL},
 		{"bd-gateway-cpu-request", &f.bdGatewayCPURequest, r.bdGatewayCPURequest},
+		{"cluster", &f.cluster, r.cluster},
+		{"sbx-manifests", &f.sbxManifests, r.sbxManifests},
+		{"sbx-chart", &f.sbxChart, r.sbxChart},
+		{"sbx-values", &f.sbxValues, r.sbxValues},
 	}
 	for _, p := range texts {
 		if !named(p.flag) {
@@ -598,10 +602,11 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// town and no control-cluster flag, so it is dispatched before any of the
 	// control-only defaults and checks below.
 	if f.cluster == clusterSbx {
-		// The recorded-flags file carries neither the cluster nor the sandbox paths yet,
-		// so a gt-sbx run that recorded would write nothing and report success: refused.
+		// The gt-sbx run does not save the recorded-flags file, though the file now
+		// holds its cluster and paths, so a gt-sbx run that recorded would write
+		// nothing and report success: refused.
 		if d.record.record {
-			return errors.New("--record-flags is for the control render: the recorded flags carry no --cluster or gt-sbx path yet, so a gt-sbx run would write no record and report success; drop --record-flags")
+			return errors.New("--record-flags is for the control render: a gt-sbx run does not write the recorded flags yet, so it would write no record and report success; drop --record-flags")
 		}
 		return runSbxRender(d, sbxRenderInputs{OutDir: f.out, Manifests: f.sbxManifests, Chart: f.sbxChart, Values: f.sbxValues, Helm: f.helm})
 	}
