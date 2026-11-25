@@ -3,6 +3,7 @@ package specdispatch
 import (
 	"maps"
 	"testing"
+	"time"
 )
 
 func TestEffectivePriorities(t *testing.T) {
@@ -83,9 +84,13 @@ func TestEffectivePrioritiesCycleTerminates(t *testing.T) {
 	blockedBy := map[string][]string{"a": {"b"}, "b": {"a"}}
 	done := make(chan map[string]Inherited)
 	go func() { done <- EffectivePriorities(own, blockedBy) }()
-	got := <-done
 	want := map[string]Inherited{"a": {Priority: 0, From: "b"}}
-	if !maps.Equal(got, want) {
-		t.Errorf("cycle: EffectivePriorities = %v, want %v", got, want)
+	select {
+	case got := <-done:
+		if !maps.Equal(got, want) {
+			t.Errorf("cycle: EffectivePriorities = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cycle: EffectivePriorities did not return; a cycle must terminate")
 	}
 }
