@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/deploy/k8s/sbx"
 )
@@ -189,6 +192,119 @@ func TestClusterDriftSbxCompareRefusesBeforeAnyRead(t *testing.T) {
 			}
 			if len(seam.reads) != 0 {
 				t.Errorf("read %q, want nothing", seam.reads)
+			}
+		})
+	}
+}
+
+// TestClusterDriftSbxFlagsRegisterAndRoute holds the two flags to their defaults on
+// the real command, and each --cluster value the parsed flags carry to the compare
+// it selects: the default and control run the control compare, which reads the
+// Deployments before it renders anything, and gt-sbx renders the recorded gt-sbx
+// set and reads the sandbox cluster's Service. Each row parses its arguments into
+// its own flag set, so no package variable is written and the rows run in parallel.
+func TestClusterDriftSbxFlagsRegisterAndRoute(t *testing.T) {
+	t.Parallel()
+	for _, f := range []struct{ name, def string }{{"cluster", clusterControl}, {"exec-via", ""}} {
+		flag := townClusterDriftCmd.Flags().Lookup(f.name)
+		if flag == nil {
+			t.Fatalf("--%s is not registered on the drift command", f.name)
+		}
+		if flag.DefValue != f.def {
+			t.Errorf("--%s defaults to %q, want %q", f.name, flag.DefValue, f.def)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		cluster string
+		execVia string
+		sbx     bool
+	}{
+		{name: "the default routes to the control compare", cluster: clusterControl},
+		{name: "--cluster control routes to the control compare", args: []string{"--cluster", clusterControl}, cluster: clusterControl},
+		{name: "--cluster gt-sbx routes to the sbx compare", args: []string{"--cluster", clusterSbx, "--exec-via", "docker-exec:gt-sbx-ctx:sandbox-node"}, cluster: clusterSbx, execVia: "docker-exec:gt-sbx-ctx:sandbox-node", sbx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var parsed clusterDriftFlags
+			cmd := &cobra.Command{Use: "drift"}
+			registerClusterDriftFlags(cmd, &parsed)
+			if err := cmd.ParseFlags(tc.args); err != nil {
+				t.Fatalf("parsing %q: %v", tc.args, err)
+			}
+			flags := driftDepsFor(io.Discard, parsed)
+			if flags.cluster != tc.cluster || flags.execVia != tc.execVia {
+				t.Fatalf("the flags reached the run as cluster %q and exec-via %q, want %q and %q", flags.cluster, flags.execVia, tc.cluster, tc.execVia)
+			}
+			if tc.sbx {
+				d, seam, out := sbxCompareDeps(t, sbxCompareRecord())
+				d.cluster, d.execVia = flags.cluster, flags.execVia
+				// The route is judged by the render and the read it makes, not by
+				// the compare's status, which the sandbox tests above already hold.
+				_ = compareDriftForCluster(context.Background(), d)
+				if len(seam.renders) != 1 {
+					t.Fatalf("rendered the gt-sbx set %d times, want once; printed:\n%s", len(seam.renders), out)
+				}
+				if want := "docker --context gt-sbx-ctx exec sandbox-node kubectl --kubeconfig /etc/kubernetes/admin.conf -n openshell get service -o json"; len(seam.reads) != 1 || seam.reads[0] != want {
+					t.Errorf("reads %q, want one sandbox read through --exec-via %q", seam.reads, want)
+				}
+				return
+			}
+			d, out, _ := driftTestSeams(t, nil)
+			d.cluster, d.execVia = flags.cluster, flags.execVia
+			var reads []string
+			d.kubectl = driftRecordReads(func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "", 1, nil
+			}, &reads)
+			// The read fails on purpose: the route is the first read the control
+			// compare makes, and its unreadable status is not what this row holds.
+			_ = compareDriftForCluster(context.Background(), d)
+			if len(reads) == 0 || !strings.HasPrefix(reads[0], "deployment/") {
+				t.Fatalf("reads %q, want the control compare's Deployment reads first; printed:\n%s", reads, out)
+			}
+		})
+	}
+}
+
+// TestClusterDriftSbxFlagsUnknownCluster holds a --cluster name the compare does
+// not know to a refusal, exit 2, that names both clusters it knows. The refusal
+// comes before the exceptions file, the town, any render and any read, so a typo
+// never touches the control cluster.
+func TestClusterDriftSbxFlagsUnknownCluster(t *testing.T) {
+	t.Parallel()
+	for _, cluster := range []string{"gt-prod", "GT-SBX", "sbx"} {
+		t.Run(cluster, func(t *testing.T) {
+			t.Parallel()
+			d, seam, out := sbxCompareDeps(t, sbxCompareRecord())
+			d.cluster = cluster
+			d.execVia = "docker-exec:gt-sbx-ctx:sandbox-node"
+			var touched []string
+			d.render.findTown = func() (string, error) {
+				touched = append(touched, "findTown")
+				return "", errors.New("the town was read")
+			}
+			d.exceptions = func() []byte {
+				touched = append(touched, "exceptions")
+				return nil
+			}
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != driftExitUnreadable {
+				t.Fatalf("exit = %d, want %d; error %v", got, driftExitUnreadable, err)
+			}
+			for _, want := range []string{clusterControl, clusterSbx} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("error %v, want one naming %q", err, want)
+				}
+			}
+			if len(touched) != 0 {
+				t.Errorf("read %q before refusing, want nothing", touched)
+			}
+			if len(seam.reads) != 0 || len(seam.renders) != 0 {
+				t.Errorf("read %q and rendered %d times, want nothing", seam.reads, len(seam.renders))
+			}
+			if out.Len() != 0 {
+				t.Errorf("printed %q, want nothing", out)
 			}
 		})
 	}

@@ -61,12 +61,39 @@ The flags come from the recorded file, so a live render must have run with
 --record-flags first.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		return runClusterDrift(cmd.Context(), realClusterDriftDeps(cmd.OutOrStdout()))
+		return runClusterDrift(cmd.Context(), driftDepsFor(cmd.OutOrStdout(), clusterDrift))
 	},
 }
 
+// clusterDriftFlags is what the drift command's flags set: the cluster the run
+// compares and the form its reads take to reach kubectl.
+type clusterDriftFlags struct {
+	cluster string
+	execVia string
+}
+
+var clusterDrift clusterDriftFlags
+
+// registerClusterDriftFlags binds the drift command's flags to f, with their
+// defaults: control for --cluster, and no --exec-via.
+func registerClusterDriftFlags(cmd *cobra.Command, f *clusterDriftFlags) {
+	cmd.Flags().StringVar(&f.cluster, "cluster", clusterControl,
+		"the cluster the drift compare reads: "+clusterControl+", the default, or "+clusterSbx+" for the gt-sbx sandbox cluster")
+	cmd.Flags().StringVar(&f.execVia, "exec-via", "",
+		"the form the "+clusterSbx+" compare reads kubectl through: empty for a plain kubectl, or docker-exec:<context>:<container> for a sandbox node's kubectl; the "+clusterControl+" compare does not read through it")
+}
+
 func init() {
+	registerClusterDriftFlags(townClusterDriftCmd, &clusterDrift)
 	townClusterCmd.AddCommand(townClusterDriftCmd)
+}
+
+// driftDepsFor is the host's drift deps with the run's flags copied onto them.
+func driftDepsFor(out io.Writer, f clusterDriftFlags) clusterDriftDeps {
+	d := realClusterDriftDeps(out)
+	d.cluster = f.cluster
+	d.execVia = f.execVia
+	return d
 }
 
 // clusterDriftDeps is what a drift run takes from the host: the render's own
@@ -83,8 +110,8 @@ type clusterDriftDeps struct {
 	now           func() time.Time
 	kubectl       update.RunFunc
 	out           io.Writer
-	// cluster is the cluster the run compares and execVia the form the sandbox
-	// reads take to reach kubectl; the flags that set them are a later bead's.
+	// cluster is the cluster the run compares, empty or clusterControl for the
+	// control cluster, and execVia the form the gt-sbx reads take to reach kubectl.
 	cluster string
 	execVia string
 }
@@ -181,7 +208,7 @@ const driftExitUnreadable = 2
 // cannot read ends the run with driftExitUnreadable and an error naming what it
 // could not read, never 0, since an unread object is not one in step.
 func runClusterDrift(ctx context.Context, d clusterDriftDeps) error {
-	err := compareClusterDrift(ctx, d)
+	err := compareDriftForCluster(ctx, d)
 	if err == nil {
 		return nil
 	}
@@ -191,6 +218,21 @@ func runClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 		return err
 	}
 	return &ExitCodeError{Code: driftExitUnreadable, Err: err}
+}
+
+// compareDriftForCluster routes the run to the compare of d.cluster before any
+// input is read: the empty value and clusterControl run compareClusterDrift, and
+// clusterSbx runs compareSbxClusterDrift. Any other name is refused, naming both
+// clusters it knows, so a typo never reads the control cluster.
+func compareDriftForCluster(ctx context.Context, d clusterDriftDeps) error {
+	switch d.cluster {
+	case "", clusterControl:
+		return compareClusterDrift(ctx, d)
+	case clusterSbx:
+		return compareSbxClusterDrift(ctx, d)
+	default:
+		return fmt.Errorf("--cluster %q is not a cluster the drift compare knows: want %s, the default, or %s; nothing was read", d.cluster, clusterControl, clusterSbx)
+	}
 }
 
 // compareClusterDrift is the run behind runClusterDrift: it returns raw errors,
