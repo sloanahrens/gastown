@@ -518,6 +518,53 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanStaticRefuses: a static object the plan cannot build into a
+// target refuses the plan, which prints no id and writes no plan.json.
+func TestClusterShapePlanStaticRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (clusterRenderDeps, update.RunFunc)
+		want  string
+	}{
+		{"a static document that names another object", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			build := d.build
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				m, err := build(v)
+				if err != nil {
+					return m, err
+				}
+				for i := range m.Static {
+					if m.Static[i].Kind == namespaceKind {
+						m.Static[i].Name = "planted"
+						break
+					}
+				}
+				return m, nil
+			}
+			return d, planKubectl(t)
+		}, "holds a document named"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, kube := tc.setup(t)
+			dir, out := planOut(t), &bytes.Buffer{}
+			err := runTownClusterPlan(context.Background(), d, kube, out, dir, atomicfile.WriteJSON)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+			}
+		})
+	}
+}
+
 // planLiveAnswer is the live Deployment kubectl prints, with revision annotated
 // and resourceVersion set to rv-<revision>, which planWantResourceVersion expects.
 func planLiveAnswer(t *testing.T, resource, revision string) string {
