@@ -259,6 +259,18 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 	// (gt-dibnm). The script writes through the same writers, so the same
 	// captured tails and summary parsing read its output.
 	captured, sweepErrs := newTail(maxCaptureBytes), newTail(maxStderrCapture)
+	// The progress record is written before the sweep starts, with the first tier
+	// running, and again whenever a summary line on the sweep's stdout changes it,
+	// so the dashboard can name the tier running now (gt-58mdg5). One goroutine
+	// writes the sweep's stdout (runTiers prints each summary line in turn, and a
+	// script's stdout is copied by one goroutine), so the record needs no lock.
+	progress := NewProgress(opts.Rig, opts.SHA, opts.Tiers)
+	recordProgress(opts.Out, progress, stderr)
+	lines := &lineFeeder{feed: func(line string) {
+		if progress.Feed(line) {
+			recordProgress(opts.Out, progress, stderr)
+		}
+	}}
 	var code int
 	if choice == sweepScript {
 		// The rig's own script takes the tiers as arguments, in the work tree, as
@@ -275,7 +287,7 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 				tiersweep.EnvNoSlot:  "1",
 				tiersweep.EnvTrigger: "0",
 			}),
-			io.MultiWriter(stdout, captured),
+			io.MultiWriter(stdout, captured, lines),
 			io.MultiWriter(stderr, sweepErrs))
 	} else {
 		overrides := map[string]string{
@@ -290,9 +302,12 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 			tiersweep.EnvTrigger: "0",
 		}
 		code = d.Sweep(sweepArgs(work, opts.Tiers), overrides,
-			io.MultiWriter(stdout, captured),
+			io.MultiWriter(stdout, captured, lines),
 			io.MultiWriter(stderr, sweepErrs))
 	}
+	// A final summary line the sweep wrote without its newline is fed here, once
+	// the sweep has returned and no more of its stdout can arrive.
+	lines.Flush()
 	// No exit status is no verdict: a sweep that was killed or never started did
 	// not produce one, so the run reports that it could not produce a result
 	// rather than recording a tier it does not know about (gt-dibnm).
@@ -301,6 +316,16 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 		return nil, false
 	}
 	return tiersFrom(opts.Tiers, reportOf(captured, sweepErrs), code, opts.logDir()), true
+}
+
+// recordProgress writes the progress record into dir. A write that fails is
+// printed to stderr and changes nothing else: the run's verdicts never depend on
+// the progress file (gt-58mdg5). writeProgress's error already names the runner,
+// so it is printed as it is rather than with the runner's name in front again.
+func recordProgress(dir string, p *Progress, stderr io.Writer) {
+	if err := writeProgress(dir, *p); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+	}
 }
 
 // sweepChoice is how one work tree's tiers run.
