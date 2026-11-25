@@ -3706,6 +3706,40 @@ func (r *tierSweepGuardReads) get(rig string) *sweeprunner.GuardUnreadable {
 	return r.byRig[rig]
 }
 
+// tierSweepRunnerProgress stores the progress record a running run keeps. It
+// renders the Spec through the configured backend again, runs the plan's
+// Progress step, and writes that step's stdout as progress.json in spec.OutDir.
+// A plan with no Progress step, which is every plan the Docker backend renders,
+// has nothing to copy: it returns nil and writes nothing. A failed step, or
+// stdout that is not a JSON object, is returned wrapped and leaves the record
+// the last poll stored as it was.
+func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.Spec) error {
+	cfg := tierSweepRunnerConfig(d.patrol())
+	if cfg == nil {
+		return errors.New("no runner is configured")
+	}
+	backend, err := tierSweepRunnerBackend(cfg.Backend)
+	if err != nil {
+		return err
+	}
+	plan, err := backend.Render(spec)
+	if err != nil {
+		return err
+	}
+	if plan.Poll == nil || plan.Poll.Progress == nil {
+		return nil
+	}
+	step := plan.Poll.Progress
+	stdout, _, err := d.runCmd(exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	if err != nil {
+		return fmt.Errorf("reading run %s's progress: %w", spec.RunID, err)
+	}
+	if err := writeRunProgress(spec.OutDir, stdout); err != nil {
+		return fmt.Errorf("storing run %s's progress: %w", spec.RunID, err)
+	}
+	return nil
+}
+
 // tierSweepRunnerStop takes the run in spec.OutDir down: it renders the Spec
 // through the configured backend again and runs the plan's teardown, then
 // removes the launch record so no later cycle adopts a run that is gone. It
