@@ -478,6 +478,28 @@ func compareSbxClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	if !ok {
 		return fmt.Errorf("no live render has recorded its flags at %s, so there is no gt-sbx render to compare the sandbox cluster with; nothing was read", recordPath)
 	}
+	// The record must be the gt-sbx render's: a control record names no sandbox
+	// paths, so replaying it would render an empty set nothing can compare. It is
+	// refused before the render and before any read.
+	if flags.cluster != clusterSbx {
+		return fmt.Errorf("the recorded render flags %s are for cluster %q, not %s, so there is no gt-sbx render to compare the sandbox cluster with; nothing was read", recordPath, flags.cluster, clusterSbx)
+	}
+	// Each sandbox path the gt-sbx render read is checked before the render: a
+	// record missing one cannot render the set, so the compare refuses it rather
+	// than rendering from an empty path.
+	var missing []string
+	for _, in := range []struct{ flag, value string }{
+		{"--sbx-manifests", flags.sbxManifests},
+		{"--sbx-chart", flags.sbxChart},
+		{"--sbx-values", flags.sbxValues},
+	} {
+		if in.value == "" {
+			missing = append(missing, in.flag)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the recorded render flags %s name no %s, so there is no gt-sbx set to compare the sandbox cluster with; nothing was read", recordPath, strings.Join(missing, ", "))
+	}
 	runner, err := clusterKubectl(d.execVia, "", d.kubectl)
 	if err != nil {
 		return err
