@@ -378,6 +378,54 @@ func TestAgentBeadsExistCheck_FixLabelsLegacyOpenBeadInsteadOfCreating(t *testin
 	}
 }
 
+// TestAgentBeadsFixShowError verifies that Fix creates an agent bead only
+// when the store says it is missing. A show that fails for any reason other
+// than not-found (an unavailable or stalled store) is returned naming the
+// bead, and nothing is created: a failed read is not evidence the bead is
+// absent (gt-xhoxrk).
+func TestAgentBeadsFixShowError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unavailable show is returned and creates nothing", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := setupTownDuplicateFixture(t)
+		bd := townDuplicateBD(tmpDir)
+		rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+		storeErr := errors.New("store unavailable")
+		bd.db(rigDir).FailWith("show", storeErr)
+
+		check := NewAgentBeadsCheck()
+		err := check.Fix(bd.ctx(tmpDir, "gastown"))
+
+		if !errors.Is(err, storeErr) {
+			t.Fatalf("Fix() error = %v, want the store error %v", err, storeErr)
+		}
+		if !strings.Contains(err.Error(), "reading agent bead gs-gastown-crew-alice") {
+			t.Errorf("Fix() error = %q, want it to name the bead it could not read", err)
+		}
+		if creates := bd.creates(); len(creates) != 0 {
+			t.Errorf("Fix() created %v after a failed read, want no creates", creates)
+		}
+	})
+
+	t.Run("not-found show still creates", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := setupTownDuplicateFixture(t)
+		bd := townDuplicateBD(tmpDir)
+		rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+
+		check := NewAgentBeadsCheck()
+		if err := check.Fix(bd.ctx(tmpDir, "gastown")); err != nil {
+			t.Fatalf("Fix() returned error: %v", err)
+		}
+
+		want := "create gs-gastown-crew-alice dir=" + rigDir
+		if log := writeLog(bd); !strings.Contains(log, want) {
+			t.Errorf("Fix() did not create the missing bead: want %q in log %q", want, log)
+		}
+	})
+}
+
 // TestListCrewWorkers_FiltersWorktrees verifies that listCrewWorkers skips
 // git worktrees (directories where .git is a file) and only returns canonical
 // crew workers (where .git is a directory). This is the fix for GH#2767.
