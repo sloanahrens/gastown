@@ -5560,3 +5560,28 @@ func TestTickEffRecordRigRead(t *testing.T) {
 		t.Error("a rig that was not recorded appears in the memory")
 	}
 }
+
+// TestTickEffRecordRigReadNilGuards: recordRigRead writes nothing, and does not
+// panic, for a nil memory and for nil hashes: noteRigRead would store an empty hash
+// for a rig the tick holds none for, and a nil memory has nowhere to write
+// (gt-mr74gi).
+func TestTickEffRecordRigReadNilGuards(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	heads := map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}}
+
+	t.Run("nil memory", func(t *testing.T) {
+		t.Parallel()
+		recordRigRead(nil, heads, "gastown", 1, at)
+	})
+	t.Run("nil hashes", func(t *testing.T) {
+		t.Parallel()
+		memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+		recordRigRead(memory, nil, "gastown", 1, at)
+		memory.mu.Lock()
+		defer memory.mu.Unlock()
+		if got, ok := memory.rigs["gastown"]; ok {
+			t.Errorf("recorded %+v for a rig the tick held no hashes for, want nothing", got)
+		}
+	})
+}

@@ -5223,10 +5223,15 @@ func quietSkip(memory *specAnnotated, heads map[string]beadsql.RigHash, now time
 
 // recordRigRead writes one rig's board read into the quiet-rig memory: the hashes
 // the tick held for the rig, the time of the read and the number of candidates it
-// listed, so the next tick can ask memory.rigQuiet (gt-pa5zu3). The caller passes
-// a non-nil memory and a heads that holds the rig; the guards for any other case
-// are the next parts of the recording. Nothing calls it yet.
+// listed, so the next tick can ask memory.rigQuiet (gt-pa5zu3). It writes nothing
+// for a nil memory, which has nowhere to write, and for nil hashes, where
+// noteRigRead would store an empty hash for a rig the tick holds none for
+// (gt-mr74gi); a rig absent from a non-nil heads is the next part of the
+// recording. Nothing calls it yet.
 func recordRigRead(memory *specAnnotated, heads map[string]beadsql.RigHash, rig string, candidates int, at time.Time) {
+	if memory == nil || heads == nil {
+		return
+	}
 	memory.noteRigRead(rig, heads[rig], at, candidates)
 }
 
