@@ -33,7 +33,12 @@ func callLogPolicy(t *testing.T) *Policy {
 			{"path": "create", "class": "write"},
 			{"path": "update", "class": "write"},
 			{"path": "dep", "class": "write"},
-			{"path": "dep add", "class": "write"}
+			{"path": "dep add", "class": "write"},
+			{"path": "dep remove", "class": "write"},
+			{"path": "comments", "class": "read"},
+			{"path": "comments add", "class": "write"},
+			{"path": "label", "class": "write"},
+			{"path": "label list", "class": "read"}
 		]
 	}`))
 	if err != nil {
@@ -1369,6 +1374,75 @@ func TestCallLogArgvParse(t *testing.T) {
 					tt.argv, got["verb"], got["flags"], got["beads"], tt.verb, tt.flags, tt.beads)
 			}
 		})
+	}
+}
+
+// TestCallLogSubcommand is acceptance box 1: a verb with a subcommand table
+// logs the second command word, and only a word the table lists. A second word
+// the table does not hold, a flag in that position and a verb with no table row
+// log no subcommand, so no argument value reaches the line through this field.
+func TestCallLogSubcommand(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "dep remove", argv: []string{"dep", "remove", "gt-a"}, want: "remove"},
+		{name: "comments add", argv: []string{"comments", "add", "gt-a", "--text", "a note"}, want: "add"},
+		{name: "label list", argv: []string{"label", "list"}, want: "list"},
+		{name: "an unknown second word", argv: []string{"dep", "frobnicate", "gt-a"}},
+		{name: "a flag value is not a subcommand", argv: []string{"dep", "--format", "remove"}},
+		{name: "a boolean root flag leaves no second word", argv: []string{"dep", "--json"}},
+		{name: "a verb with no table row", argv: []string{"show", "gt-a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := testOptions(t)
+			l, err := NewCallLog(opts)
+			if err != nil {
+				t.Fatalf("NewCallLog: %v", err)
+			}
+			l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: tt.argv})
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := decodeLine(t, readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))[0])
+			sub, ok := got["subcommand"]
+			if tt.want == "" {
+				if ok {
+					t.Errorf("argv %q logged subcommand %v, want none", tt.argv, sub)
+				}
+				return
+			}
+			if sub != tt.want {
+				t.Errorf("argv %q logged subcommand %v, want %q", tt.argv, sub, tt.want)
+			}
+		})
+	}
+}
+
+// TestCallLogSubcommandOldLine is acceptance box 2: a line written before the
+// subcommand key existed still decodes, and its subcommand is empty.
+func TestCallLogSubcommandOldLine(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A literal line, not one marshaled through the entry type: a fixture that
+	// carried the key would not exercise the line this test is about.
+	line := `{"ts":"2026-11-18T10:00:00Z","class":"write","caller":"pre-change","verb":"dep","flags":[],"beads":["gt-a"],"exit_code":0,"duration_ms":5}`
+	if err := os.WriteFile(filepath.Join(dir, DefaultCallLogName), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatalf("write call log: %v", err)
+	}
+	got, err := ReadCalls(dir, time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("ReadCalls: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %d, want 1", len(got))
+	}
+	if got[0].Subcommand != "" {
+		t.Errorf("Subcommand = %q, want empty", got[0].Subcommand)
 	}
 }
 
