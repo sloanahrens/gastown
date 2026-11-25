@@ -5350,3 +5350,61 @@ func TestTickEffQuietSkip(t *testing.T) {
 		})
 	}
 }
+
+// TestTickEffHeadsRead: specTickHeads reads the rigs' hashes once through a
+// store that answers SQLCSV. A readable store gives the hashes with no log line.
+// A failing read gives nil and the unreadable line, so the tick reads every rig.
+// A store without SQLCSV gives nil with no line (gt-mery73).
+func TestTickEffHeadsRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, "gastown", ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"gt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rigs := []string{"gastown"}
+
+	cases := []struct {
+		name     string
+		store    any
+		want     map[string]beadsql.RigHash
+		wantLogs []string
+	}{
+		{
+			name: "readable store gives the hashes",
+			store: sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+				return [][]string{{"gt_head", "gt_working"}, {"g1", "g2"}}, nil
+			}),
+			want: map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}},
+		},
+		{
+			name: "failing read gives nil and the unreadable line",
+			store: sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+				return nil, errors.New("connection refused")
+			}),
+			wantLogs: []string{"rig heads unreadable: connection refused; reading every rig"},
+		},
+		{
+			name:  "store without SQLCSV gives nil and no line",
+			store: struct{}{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			logf := func(format string, args ...any) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}
+			got := specTickHeads(town, rigs, tc.store, logf)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("specTickHeads = %v, want %v", got, tc.want)
+			}
+			if !reflect.DeepEqual(logs, tc.wantLogs) {
+				t.Errorf("log lines = %q, want %q", logs, tc.wantLogs)
+			}
+		})
+	}
+}
