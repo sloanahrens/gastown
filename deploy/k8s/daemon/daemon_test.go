@@ -3475,6 +3475,39 @@ func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 	}
 }
 
+// TestDaemonHoldsNoRegistryToken holds the daemon pod to no write-capable
+// registry token: the shipped manifest records forgejo-registry.env as unclaimed,
+// with the search that found no reader, so the render carries no volume, mount
+// or Secret for it (gt-3mvtyk).
+func TestDaemonHoldsNoRegistryToken(t *testing.T) {
+	t.Parallel()
+	assertNoRegistryToken(t, mustBuild(t, goldenValues(t)))
+
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "..", "..", "daemon", "secrets.yaml"))
+	if err != nil {
+		t.Fatalf("reading the secrets manifest: %v", err)
+	}
+	manifest, err := templates.ParseSecretsManifest(data)
+	if err != nil {
+		t.Fatalf("parsing the secrets manifest: %v", err)
+	}
+	if filesHold(manifest.Files, RegistryTokenFile) {
+		t.Errorf("the secrets manifest still lists %s under files, so the render mounts it", RegistryTokenFile)
+	}
+	var recorded *templates.UnclaimedSecret
+	for i := range manifest.Unclaimed {
+		if manifest.Unclaimed[i].Name == RegistryTokenFile {
+			recorded = &manifest.Unclaimed[i]
+		}
+	}
+	if recorded == nil {
+		t.Fatalf("the secrets manifest does not record %s under unclaimed", RegistryTokenFile)
+	}
+	if strings.TrimSpace(recorded.Search) == "" {
+		t.Errorf("the unclaimed entry for %s has no search, so nothing records why no daemon code reads it", RegistryTokenFile)
+	}
+}
+
 // TestSecretModeRefusalSeparatesTheEntryFromTheReason holds the wording of a
 // Secret entry's mode refusal: the index and name are followed by a colon before
 // the reason, as the other Secret refusals are written (gt-4si2b0).

@@ -199,7 +199,7 @@ The claim carries each rig's bare repository (`<rig>/.repo.git`), not a canonica
 
 Each credential is a Kubernetes Secret created from a file named in a manifest (`deploy/daemon/secrets.yaml`). The kinds of credential are:
 
-- the Forgejo bot tokens (landing, viewer and registry);
+- the Forgejo bot tokens (landing and viewer; the registry bot's token is not a pod Secret);
 - one deploy key per rig that publishes to GitHub;
 - the review (om) daemon token;
 - the OpenShell gateway material;
@@ -207,7 +207,7 @@ Each credential is a Kubernetes Secret created from a file named in a manifest (
 - the read-only cloud auditor key used by the cloud check;
 - the DeepSeek balance key the `deepseek_balance` patrol reads.
 
-The registry bot's token mounts read-only at owner-read only, because that token can write the registry's packages where the viewer's cannot.
+The registry bot's token is not mounted in the daemon pod: it can write the registry's packages where the viewer's cannot, so one compromise of the pod must not be enough to roll images. The manifest records it as unclaimed, and its only planned reader is the by-hand `gt update images prune --apply`, run on the host.
 
 The DeepSeek balance key is created from `deepseek.env` in the operator's config directory rather than from a `deploy/daemon/secrets.yaml` entry: `gt town cluster render` mounts it at the patrol's default key file, and prints its create line, only when that file is present, so a town without the key runs the patrol unconfigured.
 
@@ -489,7 +489,7 @@ flowchart TB
 
 **Sandboxes.** A polecat runs in a pod whose policy denies everything by default. Its system paths are read-only and its working directory is writable. Its network reaches only the named Services (Dolt, Forgejo, the tracker, the control-plane host) and the model provider attached to its seat. The policy file says plainly what is still wide: a polecat's Forgejo access reaches any repository, and the Dolt user it holds can open any database. Narrowing those (a Dolt user per polecat, a push rule limited to the polecat's own branch) is open hardening work. The patrol deletes a sandbox the gateway reports Stopped only when its seat's landing record proves the work landed and the seat still holds that bead and branch, and it asks a silent gateway again on each tick, raising the seat to the overseer after six silent ticks (gt-7h38pd). The patrol copies an ended held sandbox's outbox to the host before it deletes the sandbox, from the record it holds, and keeps the sandbox with the copy's reason when the copy fails (gt-qem69c). A seat that ends having posted its record as a SEAT-END comment on its bead has that record stored and both pulls skipped; a comment whose usage ends before the seat started is a predecessor's on the same bead, and a seat with no comment, an unreadable bead, or a predecessor's comment takes the pulls the end always ran (gt-g73e2q). A seat's result leaves as an outbox: it writes `result.json` and `notes.md`, and after the seat ends the host validates them and applies the title, notes, ticks, findings, escalation and submission to the bead through its own bead store. A `result.json` that reports a submission also names the branch, head and target, and the host writes the READY TO LAND block and the ready label from it, naming the seat — never the outbox — as the worker, so the landing worker finds the bead (gt-qk3ppr).
 
-**Bot identities.** Each automated actor has its own Forgejo account with the narrowest token that works: the landing bot pushes `land/**` and merges; polecats push work branches; a viewer reads; a registry bot pushes images. The daemon holds the bot tokens and the per-rig GitHub deploy keys as Secrets, and agents never see a raw secret in their prompts or files.
+**Bot identities.** Each automated actor has its own Forgejo account with the narrowest token that works: the landing bot pushes `land/**` and merges; polecats push work branches; a viewer reads; a registry bot pushes images (the prune of old tags, which needs its write token, runs by hand outside the daemon pod). The daemon holds the bot tokens and the per-rig GitHub deploy keys as Secrets, and agents never see a raw secret in their prompts or files.
 
 **The workflow-protect hook.** A workflow file decides what runs on a runner, and some runners hold powerful keys. Forgejo's branch rules do not cover a new branch that adds a workflow file, so the town installs a pre-receive hook, `20-gt-protect-workflows`, in Forgejo itself. It reads lists that sit beside it: the repositories it protects, the accounts allowed to change workflow files (the human), the landing bot (which may fast-forward `main` with a workflow change, so a reviewed branch can land), the account that publishes `green/**` refs, and the polecat account (which may push workflow edits only to `polecat/` and `land/` refs). For any other pusher, it refuses any push that touches `.forgejo/workflows/`, `.gitea/workflows/` or `.github/workflows/` in a protected repository. A pusher it cannot identify counts as not on the list.
 
