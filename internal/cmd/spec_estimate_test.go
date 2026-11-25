@@ -1206,8 +1206,14 @@ func TestSpecEstimateForceReusesLoggedMinutes(t *testing.T) {
 	if err := estlog.Append(town, estlog.Record{BeadID: "gt-est", DescriptionHash: hash, Minutes: estlog.Minutes{Embed: &embed, Jev: &jev}, BlendedMinutes: 6.3}); err != nil {
 		t.Fatalf("append the logged estimate: %v", err)
 	}
+	prior := func(beadID, h string) (estimate.PriorMinutes, bool) {
+		if beadID != "gt-est" || h != hash {
+			return estimate.PriorMinutes{}, false
+		}
+		return estimate.PriorMinutes{Embed: embed, Jev: jev}, true
+	}
 	stub := &specEstimatePriorStub{}
-	run := specEstimateRunner{Estimate: stub.run, Deps: func() (estimate.Deps, error) { return estimate.Deps{TownRoot: town}, nil }}
+	run := specEstimateRunner{Estimate: stub.run, Deps: func() (estimate.Deps, error) { return estimate.Deps{TownRoot: town, Prior: prior}, nil }}
 	var out bytes.Buffer
 	if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{Force: true}, run); err != nil {
 		t.Fatalf("runSpecEstimateOn: %v", err)
