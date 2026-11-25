@@ -231,3 +231,205 @@ func TestSystemUpdatesRowsReportsHowManyWereCut(t *testing.T) {
 		})
 	}
 }
+
+// sweepAt is a sweep of the rig at minute min of the test clock, one stage per
+// verdict, so a test reads its verdicts in order.
+func sweepAt(min int, rig, sha string, verdicts ...string) TierSweepRow {
+	stages := make([]TierSweepStage, 0, len(verdicts))
+	for i, v := range verdicts {
+		stages = append(stages, TierSweepStage{Tier: fmt.Sprintf("tier-%d", i), Verdict: v})
+	}
+	return TierSweepRow{At: sysTestClock.Add(time.Duration(min) * time.Minute), Rig: rig, SHA: sha, Stages: stages}
+}
+
+// The section draws the gastown rig's newest five sweeps, newest first, and
+// leaves out the other rigs' sweeps.
+func TestSystemUpdatesSweepsKeepsTheNewestFiveOfTheRig(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(3, "gastown", sysTestSHA(3)[:8], "GREEN"),
+		sweepAt(7, "gastown", sysTestSHA(7)[:8], "GREEN"),
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(9, "other", sysTestSHA(9)[:8], "GREEN"),
+		sweepAt(5, "gastown", sysTestSHA(5)[:8], "RED"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN"),
+		sweepAt(6, "gastown", sysTestSHA(6)[:8], "GREEN"),
+		sweepAt(4, "gastown", sysTestSHA(4)[:8], "GREEN"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	var got []string
+	for _, s := range su.Sweeps {
+		got = append(got, s.SHA)
+	}
+	assert.Equal(t, []string{sysTestSHA(7)[:8], sysTestSHA(6)[:8], sysTestSHA(5)[:8], sysTestSHA(4)[:8], sysTestSHA(3)[:8]}, got)
+}
+
+// The section's sweeps are a copy: the caller's slice keeps the order it came in.
+func TestSystemUpdatesSweepsLeaveTheCallersSliceInItsOrder(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN"),
+	}
+	NewSystemUpdates(sweeps, nil, nil, false)
+
+	assert.Equal(t, sysTestSHA(1)[:8], sweeps[0].SHA)
+	assert.Equal(t, sysTestSHA(2)[:8], sweeps[1].SHA)
+}
+
+// Each sweep passes its wall time through as written, nil for an old line.
+func TestSystemUpdatesSweepsPassSecsThrough(t *testing.T) {
+	t.Parallel()
+
+	took := 12.5
+	timed := sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN")
+	timed.Secs = &took
+	untimed := sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN")
+	su := NewSystemUpdates([]TierSweepRow{untimed, timed}, nil, nil, false)
+
+	require.Len(t, su.Sweeps, 2)
+	require.NotNil(t, su.Sweeps[0].Secs)
+	assert.Equal(t, 12.5, *su.Sweeps[0].Secs)
+	assert.Nil(t, su.Sweeps[1].Secs)
+}
+
+// LastGreen is the newest gastown sweep whose every stage is GREEN, so a newer
+// sweep that ran red does not hide the green one behind it.
+func TestSystemUpdatesSweepsLastGreenIsTheNewestAllGreenSweep(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN", "GREEN"),
+		sweepAt(3, "gastown", sysTestSHA(3)[:8], "GREEN", "RED"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(2)[:8], su.LastGreen.SHA)
+}
+
+// LastGreen carries the green sweep's sha as written and the time it ran.
+func TestSystemUpdatesSweepsLastGreenCarriesItsShaAndTime(t *testing.T) {
+	t.Parallel()
+
+	green := sweepAt(4, "gastown", sysTestSHA(4)[:8], "GREEN")
+	su := NewSystemUpdates([]TierSweepRow{green}, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, green.SHA, su.LastGreen.SHA)
+	assert.Equal(t, green.At, su.LastGreen.At)
+}
+
+// LastGreen is searched over every gastown sweep the reader holds, not only the
+// five the section draws.
+func TestSystemUpdatesSweepsLastGreenReadsEveryRowNotOnlyTheFive(t *testing.T) {
+	t.Parallel()
+
+	var sweeps []TierSweepRow
+	sweeps = append(sweeps, sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"))
+	for i := 2; i <= 7; i++ {
+		sweeps = append(sweeps, sweepAt(i, "gastown", sysTestSHA(i)[:8], "RED"))
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.Len(t, su.Sweeps, 5)
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+}
+
+// A newer GREEN sweep of another rig is ignored: LastGreen stays with the gastown
+// sweep, and the other rig's row does not draw in Sweeps.
+func TestSystemUpdatesSweepsLastGreenIgnoresOtherRigs(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(5, "other", sysTestSHA(5)[:8], "GREEN", "GREEN"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+	require.Len(t, su.Sweeps, 1)
+	assert.Equal(t, sysTestSHA(1)[:8], su.Sweeps[0].SHA)
+}
+
+// A RED newest sweep leaves LastGreen at the older green one.
+func TestSystemUpdatesSweepsARedNewestLeavesLastGreenAtTheOlderGreen(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "RED"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+}
+
+// No green sweep in the rig leaves LastGreen nil, so the page draws no last-green line.
+func TestSystemUpdatesSweepsNoGreenSweepLeavesLastGreenNil(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN", "RED"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "RED"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	assert.Nil(t, su.LastGreen)
+}
+
+// A sweep whose stage list is empty is not green, so the older green one stands.
+func TestSystemUpdatesSweepsAnEmptyStageListIsNotGreen(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8]),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+}
+
+// A stage whose verdict is blank, or anything but GREEN exactly, is not green.
+func TestSystemUpdatesSweepsANonGreenVerdictIsNotGreen(t *testing.T) {
+	t.Parallel()
+
+	for _, verdict := range []string{"", "green", "SKIPPED"} {
+		t.Run("verdict "+verdict, func(t *testing.T) {
+			t.Parallel()
+			sweeps := []TierSweepRow{
+				sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+				sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN", verdict),
+			}
+			su := NewSystemUpdates(sweeps, nil, nil, false)
+
+			require.NotNil(t, su.LastGreen)
+			assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+		})
+	}
+}
+
+// A commit's newest sweep decides it: a newer red sweep of a commit hides the
+// green sweep that commit had earlier, so the older green commit stands.
+func TestSystemUpdatesSweepsANewerRedSweepOfTheCommitHidesItsGreen(t *testing.T) {
+	t.Parallel()
+
+	sweeps := []TierSweepRow{
+		sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN"),
+		sweepAt(2, "gastown", sysTestSHA(2)[:8], "GREEN"),
+		sweepAt(3, "gastown", sysTestSHA(2)[:8], "RED"),
+	}
+	su := NewSystemUpdates(sweeps, nil, nil, false)
+
+	require.NotNil(t, su.LastGreen)
+	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
+}

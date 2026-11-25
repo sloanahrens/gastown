@@ -28,6 +28,11 @@ type SystemUpdates struct {
 	// good runs, so the rows' post-land and images stages are readings that
 	// failed, never commits with no runs. Last good runs are shown, not flagged.
 	RunsUnknown bool `json:"runs_unknown,omitempty"`
+	// Sweeps are the gastown rig's newest sweeps, newest first, at most five.
+	Sweeps []TierSweepRow `json:"sweeps,omitempty"`
+	// LastGreen is the newest gastown sweep that was all GREEN, found among every
+	// sweep the reader holds, not only the five Sweeps draws. Nil when none is.
+	LastGreen *SweepGreen `json:"last_green,omitempty"`
 }
 
 // SystemUpdatesNow is what runs right now: a roll, a sweep, or both.
@@ -57,13 +62,21 @@ type NowSweep struct {
 
 // NewSystemUpdates builds the section from the sweeps, pipeline runs and rolls
 // the readers read. The row cap is the section's own, so a caller never picks
-// it. A nil pipeline joins no runs into the rows.
+// it. A nil pipeline joins no runs into the rows. Sweeps and LastGreen read only
+// the gastown rig's sweeps.
 func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, unavailable bool) *SystemUpdates {
 	rows, more := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, systemUpdatesRowCap)
+	rig := rigSweeps(sweeps)
+	lastGreen := lastGreenSweep(rig)
+	if len(rig) > systemUpdatesSweepCap {
+		rig = rig[:systemUpdatesSweepCap]
+	}
 	return &SystemUpdates{
 		Rows:        rows,
 		More:        more,
 		Unavailable: unavailable,
+		Sweeps:      rig,
+		LastGreen:   lastGreen,
 	}
 }
 

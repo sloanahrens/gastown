@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,7 +22,24 @@ const (
 	// systemUpdateMinSHA is the shortest sha a join trusts, the floor
 	// update.verify.go uses, so a blank or stubbed value never joins a commit.
 	systemUpdateMinSHA = 7
+
+	// systemUpdatesSweepCap is how many of the gastown rig's newest sweeps the
+	// section draws.
+	systemUpdatesSweepCap = 5
+
+	// systemUpdatesRig is the rig the section's sweeps are read for. Its pipeline
+	// and rolls are the gastown repository's, and the feed names the same rig
+	// when it reads them (dashboard.go, rigForgejoRemote). Other rigs' sweeps are
+	// left out of Sweeps and LastGreen.
+	systemUpdatesRig = "gastown"
 )
+
+// SweepGreen is the newest sweep of the gastown rig that was all GREEN: the sha
+// as the sweep wrote it, eight characters, and when the sweep ran.
+type SweepGreen struct {
+	SHA string    `json:"sha"`
+	At  time.Time `json:"at,omitzero"`
+}
 
 // SystemUpdateRoll is one finished gt update run as the System updates section
 // draws it: the build it moved from and to, its outcome and step, and its wall
@@ -179,6 +197,53 @@ func sameCommit(a, b string) bool {
 		a, b = b, a
 	}
 	return len(b) >= systemUpdateMinSHA && strings.HasPrefix(a, b)
+}
+
+// rigSweeps is the systemUpdatesRig's sweeps, newest first. It is a copy, so the
+// caller's slice keeps its order.
+func rigSweeps(sweeps []TierSweepRow) []TierSweepRow {
+	var rig []TierSweepRow
+	for _, s := range sweeps {
+		if s.Rig == systemUpdatesRig {
+			rig = append(rig, s)
+		}
+	}
+	sort.SliceStable(rig, func(i, j int) bool { return rig[i].At.After(rig[j].At) })
+	return rig
+}
+
+// lastGreenSweep is the newest sweep that was all GREEN. A commit is judged by its
+// newest sweep: an older green sweep of a commit that a newer sweep reran red is
+// not green. The row's stages are the ones its swept line named, so a tier the
+// cycle should have run but the line omitted cannot be seen here. Nil when no
+// sweep is green. rig must be newest first.
+func lastGreenSweep(rig []TierSweepRow) *SweepGreen {
+	var judged []string
+	for _, s := range rig {
+		if slices.ContainsFunc(judged, func(sha string) bool { return sameCommit(sha, s.SHA) }) {
+			continue
+		}
+		judged = append(judged, s.SHA)
+		if sweepGreen(s) {
+			return &SweepGreen{SHA: s.SHA, At: s.At}
+		}
+	}
+	return nil
+}
+
+// sweepGreen is whether every stage of the sweep reported GREEN exactly. A sweep
+// with no stage is not green, and neither is a stage whose verdict is blank or
+// anything but GREEN.
+func sweepGreen(s TierSweepRow) bool {
+	if len(s.Stages) == 0 {
+		return false
+	}
+	for _, st := range s.Stages {
+		if st.Verdict != "GREEN" {
+			return false
+		}
+	}
+	return true
 }
 
 // rollTime is when a roll last showed progress: its end once it ended, else its
