@@ -633,6 +633,42 @@ func TestJobsEmptyTownRoot(t *testing.T) {
 	}
 }
 
+// TestJobsNoPatrolConfig is a town with neither mayor/daemon.json nor
+// settings/config.json: no step reads a cadence from a file, so each step row
+// has an empty Source and reads no_cadence. The update patrol is the one
+// exception: its nightly cadence is built in, so with no run recorded it reads
+// never_run.
+func TestJobsNoPatrolConfig(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	jobs, err := List(root, Options{}, testNow)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, s := range config.DaemonSteps() {
+		j, ok := findJob(jobs, s.Name)
+		if !ok {
+			t.Errorf("no %q row", s.Name)
+			continue
+		}
+		if j.Source != "" {
+			t.Errorf("%s: Source = %q, want empty", s.Name, j.Source)
+		}
+		if s.Name == updateJobName {
+			if j.Cadence != nightlyCadence {
+				t.Errorf("%s: Cadence = %v, want built-in %v", s.Name, j.Cadence, nightlyCadence)
+			}
+			if j.State != StateNeverRun {
+				t.Errorf("%s: State = %q, want never_run", s.Name, j.State)
+			}
+			continue
+		}
+		if j.State != StateNoCadence {
+			t.Errorf("%s: State = %q, want no_cadence", s.Name, j.State)
+		}
+	}
+}
+
 func TestJobsDoltGC(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
