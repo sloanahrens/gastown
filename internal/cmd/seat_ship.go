@@ -29,6 +29,10 @@ type seatShipDeps struct {
 	Outbox   string
 	Deadline time.Duration
 	Stderr   io.Writer
+	// Expire makes the run's deadline context from the caller's. A nil Expire is
+	// context.WithTimeout; a test injects one whose deadline it fires itself, so
+	// no test waits on real time.
+	Expire func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc)
 }
 
 // runSeatShip is gt seat ship: a finished seat posts its record as one SEAT-END
@@ -37,6 +41,11 @@ type seatShipDeps struct {
 // the comment is posted, 1 with one `seat ship: <reason>` line on d.Stderr for
 // any failure. Nothing is retried. The whole run, reads and post, must finish
 // within d.Deadline.
+//
+// A failure line at the deadline does not say the record was not posted: the
+// bead store's calls take no context and cannot be canceled, so a post that was
+// in flight when the deadline passed may still land after this returns. A caller
+// that must know reads the bead's comments.
 func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string) int {
 	fail := func(err error) int {
 		reason := strings.Join(strings.Fields(err.Error()), " ")
@@ -54,7 +63,11 @@ func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string)
 	// the deadline instead. The channel holds one outcome, so a run that
 	// finishes after the deadline sends and exits with no reader. Only the
 	// calling goroutine writes to d.Stderr.
-	runCtx, cancel := context.WithTimeout(ctx, d.Deadline)
+	expire := d.Expire
+	if expire == nil {
+		expire = context.WithTimeout
+	}
+	runCtx, cancel := expire(ctx, d.Deadline)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- seatShipRecord(d, rig, polecat, bead) }()
@@ -69,14 +82,18 @@ func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string)
 	}
 }
 
-// seatShipStopped is why a run ended before its record was posted. A canceled
-// parent context is reported as canceled; only an expired deadline names the
-// deadline.
+// seatShipStopped is why a run ended before its record was posted, and whose
+// deadline it was: a canceled parent is reported as canceled, a parent whose own
+// deadline passed as the caller's deadline, and only the run's own expiry names
+// d.Deadline and says the post may still complete.
 func seatShipStopped(ctx context.Context, deadline time.Duration) error {
-	if errors.Is(ctx.Err(), context.Canceled) {
+	switch err := ctx.Err(); {
+	case errors.Is(err, context.Canceled):
 		return errors.New("canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New("the caller's deadline passed before the record was posted")
 	}
-	return fmt.Errorf("deadline %s passed before the record was posted", deadline)
+	return fmt.Errorf("deadline %s passed before the record was posted; the post may still complete", deadline)
 }
 
 // seatShipRecord reads the seat's record and posts it as the bead's SEAT-END
