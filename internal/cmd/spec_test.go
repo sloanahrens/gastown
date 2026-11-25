@@ -5807,3 +5807,79 @@ func TestTickEffRecordedRigQuiet(t *testing.T) {
 		})
 	}
 }
+
+// TestInheritedBlockedReader: the reader maps each rig to the beads directory
+// ResolveBeadsDir names under the town root and keeps each rig's read its own,
+// and a failed read comes back with its error unchanged and no issues
+// (gt-dypas4).
+func TestInheritedBlockedReader(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	wantErr := errors.New("blocked read failed")
+	dirOf := func(rig string) string { return beads.ResolveBeadsDir(filepath.Join(townRoot, rig)) }
+	cases := []struct {
+		name    string
+		blocked func(beadsDir string) ([]*beads.Issue, error)
+		rigs    []string
+		// want maps each rig to the issue ids its read returns, each id being
+		// the directory the blocked func was called with.
+		want    map[string][]string
+		wantErr error
+	}{
+		{
+			name: "a rig reads its resolved beads directory",
+			blocked: func(dir string) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: dir}}, nil
+			},
+			rigs: []string{"gastown"},
+			want: map[string][]string{"gastown": {dirOf("gastown")}},
+		},
+		{
+			name: "two rigs read their own two directories",
+			blocked: func(dir string) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: dir}}, nil
+			},
+			rigs: []string{"gastown", "om"},
+			want: map[string][]string{
+				"gastown": {dirOf("gastown")},
+				"om":      {dirOf("om")},
+			},
+		},
+		{
+			name: "a failed read comes back unchanged with no issues",
+			blocked: func(string) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: "partial"}}, wantErr
+			},
+			rigs:    []string{"gastown"},
+			wantErr: wantErr,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			read := inheritedBlockedReader(townRoot, tc.blocked)
+			for _, rig := range tc.rigs {
+				issues, err := read(rig)
+				if tc.wantErr != nil {
+					if !errors.Is(err, tc.wantErr) {
+						t.Fatalf("read(%q) error = %v, want %v", rig, err, tc.wantErr)
+					}
+					if issues != nil {
+						t.Errorf("read(%q) issues = %+v on error, want nil", rig, issues)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("read(%q) error = %v, want nil", rig, err)
+				}
+				var gotIDs []string
+				for _, issue := range issues {
+					gotIDs = append(gotIDs, issue.ID)
+				}
+				if !slices.Equal(gotIDs, tc.want[rig]) {
+					t.Errorf("read(%q) issue ids = %v, want %v", rig, gotIDs, tc.want[rig])
+				}
+			}
+		})
+	}
+}
