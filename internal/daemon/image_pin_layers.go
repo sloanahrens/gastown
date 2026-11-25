@@ -264,6 +264,10 @@ func (d *Daemon) startImagePinLayersTicker() (<-chan time.Time, func()) {
 		}
 	}
 	d.logger.Printf("Image pin layers ticker started (check interval %v)", imagePinLayersCheckTick)
+	// The start check: a one-hour ticker never reaches its first tick in a town
+	// that restarts oftener, so the day's check is asked once here. The record
+	// decides, so a start inside a day that already ran logs it and runs nothing.
+	d.startImagePinLayersTick()
 	return ticks, stop
 }
 

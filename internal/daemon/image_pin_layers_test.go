@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
@@ -77,6 +78,9 @@ func TestImagePinDurabilityImagePinLayersPatrolStartsOnlyWhenEnabled(t *testing.
 		intervals = append(intervals, interval)
 		return ticks, func() { stops++ }
 	}
+	// The start check runs a tick when the ticker starts, so the enabled case
+	// needs a seam that reads no registry.
+	d.imagePinLayersRun = func(context.Context, time.Time) error { return nil }
 
 	for _, tt := range []struct {
 		name       string
@@ -111,6 +115,7 @@ func TestImagePinDurabilityImagePinLayersPatrolStartsOnlyWhenEnabled(t *testing.
 				t.Errorf("%s asked for tickers at %v, want one at the %v check cadence", tt.name, intervals[before:], imagePinLayersCheckTick)
 			}
 			stop()
+			d.imagePinLayersCycles.Wait()
 			if stops != 1 {
 				t.Errorf("%s ran the stop func %d times, want the ticker stopped once", tt.name, stops)
 			}
@@ -755,11 +760,20 @@ func TestImagePinDurabilityAnUnreachableRegistryRaisesNothingAndIsLogged(t *test
 func TestImagePinDurabilityTheStartedTickerInstallsTheProductionRun(t *testing.T) {
 	t.Parallel()
 	newTicker := func(time.Duration) (<-chan time.Time, func()) { return make(chan time.Time), func() {} }
-	on := imagePinDurabilityTestDaemon(t, t.TempDir(), io.Discard)
+	// The start check reads today's record first: a town that ran today starts
+	// with nothing run, so no production seam reads a registry here.
+	now := imagePinDurabilityNoon(t, "2026-11-16")
+	town := t.TempDir()
+	if err := writeImagePinLayersLastRun(imagePinLayersLastRunPath(town), now); err != nil {
+		t.Fatalf("seeding today's record: %v", err)
+	}
+	on := imagePinDurabilityTestDaemon(t, town, io.Discard)
+	on.clock = clockwork.NewFakeClockAt(now)
 	on.newImagePinLayersTicker = newTicker
 	if _, stop := on.startImagePinLayersTicker(); stop == nil {
 		t.Fatal("the enabled patrol started no ticker")
 	}
+	on.imagePinLayersCycles.Wait()
 	if on.imagePinLayersRun == nil {
 		t.Error("the started ticker left no run seam, so a tick would run nothing")
 	}
@@ -767,5 +781,39 @@ func TestImagePinDurabilityTheStartedTickerInstallsTheProductionRun(t *testing.T
 	off.newImagePinLayersTicker, off.patrolConfig = newTicker, &DaemonPatrolConfig{}
 	if _, stop := off.startImagePinLayersTicker(); stop != nil || off.imagePinLayersRun != nil {
 		t.Error("a patrol the town turned off started a ticker or installed a run")
+	}
+}
+
+// TestImagePinLayersStartCheckRunsOnce: starting the ticker with the patrol
+// enabled and no last-run record runs the day's check once at start, and the
+// record names that day afterwards, so the daemon's restart cadence cannot
+// starve the daily check.
+func TestImagePinLayersStartCheckRunsOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var logged bytes.Buffer
+	var calls atomic.Int32
+	d := imagePinDurabilityCountingDaemon(t, town, &calls, &logged)
+	d.clock = clockwork.NewFakeClockAt(imagePinDurabilityNoon(t, "2026-11-16"))
+	d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+		return make(chan time.Time), func() {}
+	}
+
+	_, stop := d.startImagePinLayersTicker()
+	if stop == nil {
+		t.Fatal("the enabled patrol started no ticker")
+	}
+	defer stop()
+	d.imagePinLayersCycles.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("starting the ticker called the run seam %d times, want the day's check once", got)
+	}
+	last, found, err := readImagePinLayersLastRun(imagePinLayersLastRunPath(town))
+	if err != nil || !found {
+		t.Fatalf("the start check left no last-run record: found %v, %v", found, err)
+	}
+	if got := imagePinLayersDay(last); got != "2026-11-16" {
+		t.Errorf("the last-run record names %s, want the day the start check ran", got)
 	}
 }
