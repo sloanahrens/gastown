@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // isolatedApprove is the verdict every isolated review in these rows reaches.
@@ -340,6 +342,64 @@ func TestVerdictReuseIsolatedOriginalHasNoTMPDIR(t *testing.T) {
 			}
 		}
 	}
+}
+
+// omProbeFile writes an empty file in a fresh directory and returns its path: a
+// stand-in for one row's installed om, so the version that row probes is cached
+// under an identity its own test directory makes unique.
+func omProbeFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "om")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestVerdictReuseOMVersionUsesTheProbe: OMVersion answers with the version
+// ReviewBead stamps on Verdict.Version, because it asks the same cached probe,
+// so a caller deciding whether a stored verdict may be reused reads the version
+// that review would record (gt-jtdmp4). A probe that fails reports
+// omVersionUnknown, as the verdict does.
+func TestVerdictReuseOMVersionUsesTheProbe(t *testing.T) {
+	t.Parallel()
+	// input builds a row's ReviewInput the one way a landing review's inputs are
+	// assembled, which is the construction TestReviewInputGuard allows.
+	input := func() ReviewInput {
+		return BuildReviewInput(&beads.Issue{ID: "gt-jtdmp4"}, nil, nil, "", "", "aaa", "bbb", "", "/wt", baseRepo{})
+	}
+
+	t.Run("the version is the one the review stamps", func(t *testing.T) {
+		t.Parallel()
+		var argv []string
+		r := OMReviewer{OutDir: t.TempDir(), Path: omProbeFile(t)}
+		r.run = fakeOM(t, isolatedApprove, 0, nil, &argv)
+		in := input()
+		v, err := r.ReviewBead(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Version != stubOMVersion {
+			t.Fatalf("the review stamped version %q, want the stub's %q", v.Version, stubOMVersion)
+		}
+		if got := r.OMVersion(context.Background(), in); got != v.Version {
+			t.Fatalf("OMVersion = %q, want the version the review stamped, %q", got, v.Version)
+		}
+	})
+
+	t.Run("a failing probe reports unknown", func(t *testing.T) {
+		t.Parallel()
+		r := OMReviewer{OutDir: t.TempDir(), Path: omProbeFile(t)}
+		r.run = func(_ context.Context, _ string, _ []string, argv []string, _ io.Writer) (int, error) {
+			if omSubcommand(argv) == "version" {
+				return 1, nil
+			}
+			return 0, nil
+		}
+		if got := r.OMVersion(context.Background(), input()); got != omVersionUnknown {
+			t.Fatalf("OMVersion = %q, want %q for a probe that exits with no version line", got, omVersionUnknown)
+		}
+	})
 }
 
 // TestVerdictReuseIsolatedReadsItsOwnRawDir: a pool review that exits without a
