@@ -309,14 +309,15 @@ func raisePeak(peak *atomic.Uint64, n uint64) {
 // in-flight peak and returns the release that frees it. A free slot is taken at
 // once. A full executor waits for one to free, up to slotWait on the timer the
 // after seam starts, and a wait that ends unanswered counts one refusal and
-// returns ErrTooManyCalls with no release.
+// returns ErrTooManyCalls with no release. Every return stops the timer.
 func (e *Executor) acquireSlot(_ context.Context) (release func(), err error) {
 	select {
 	case e.slots <- struct{}{}:
 		return e.slotHeld(), nil
 	default:
 	}
-	expired, _ := e.after(e.slotWait)
+	expired, stop := e.after(e.slotWait)
+	defer stop()
 	select {
 	case e.slots <- struct{}{}:
 		return e.slotHeld(), nil
