@@ -62,6 +62,12 @@ const (
 	// lookup opens a new one beside it. Six findings never fit the budget gt done
 	// enforces (gt-hp9ce8).
 	followupFindingsPerBead = 3
+
+	// followupQueueAlertOver is the queued-finding count the feed's alert is
+	// raised over: the backpressure bound counts open beads, so a queue longer
+	// than this is the signal that held findings are piling up with no bead
+	// (gt-7nbxgw, gt-rkew3w).
+	followupQueueAlertOver = 40
 )
 
 // FollowupSpec is one follow-up bead to file.
@@ -406,6 +412,28 @@ func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
 		}
 	}
 	return out, nil
+}
+
+// queuedFindingCount is how many findings the rig's queue still holds, each
+// finding once however many queue lines name it: a line is read more than once
+// while the feed decides whether it is covered, so the count is of findings, not
+// of reads (gt-7nbxgw). A finding om gave no id cannot be matched to another, so
+// each such finding counts on its own.
+func queuedFindingCount(queued []QueuedFollowup) int {
+	seen := make(map[string]bool)
+	n := 0
+	for _, q := range queued {
+		for _, f := range q.Findings {
+			if id := strings.TrimSpace(f.ID); id != "" {
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+			}
+			n++
+		}
+	}
+	return n
 }
 
 // drainQueue files the findings earlier landings held back in the queue, oldest
