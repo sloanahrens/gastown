@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -388,6 +389,39 @@ func TestWithoutLocalHooksCoversTimedStdinMergeCheck(t *testing.T) {
 				if strings.Contains(call, "push ") || tt.prefix == "" {
 					t.Errorf("ran with hooks off although it must not: %q", call)
 				}
+			}
+		})
+	}
+}
+
+// TestNoHooksTimeoutNamesTheSubcommand: a call killed at its deadline on a
+// hooks-off handle reports the subcommand it ran, not the
+// `-c core.hooksPath=/dev/null` option the argv carries. Each row drives a
+// production call site of a run path whose comment asserts it — runOutput,
+// runWithTimeout and runWithEnvAndTimeout (om 233c0c3f3d55, gt-hsyekl).
+func TestNoHooksTimeoutNamesTheSubcommand(t *testing.T) {
+	t.Parallel()
+	g := (&Git{workDir: t.TempDir(), exec: func(gitCall) (string, string, error) {
+		return "", "", errTimedOut
+	}}).WithoutLocalHooks().WithTimeout(time.Second)
+	for _, tt := range []struct {
+		name, command string
+		call          func() error
+	}{
+		{"runOutput", "add", func() error { return g.Add("-A") }},
+		{"runWithTimeout", "fetch", func() error { return g.FetchRefspecWithTimeout("origin", "main", time.Second) }},
+		{"runWithEnvAndTimeout", "fetch", func() error { return g.FetchRefspecWithEnv("origin", "main", nil) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if !errors.Is(err, ErrTimedOut) {
+				t.Fatalf("error = %v, want one matching ErrTimedOut", err)
+			}
+			if want := "git " + tt.command + " timed out"; !strings.Contains(err.Error(), want) {
+				t.Errorf("timeout error %q does not say %q", err, want)
+			}
+			if strings.Contains(err.Error(), "core.hooksPath") {
+				t.Errorf("timeout error %q names the hook option, not the command", err)
 			}
 		})
 	}
