@@ -1552,7 +1552,7 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 	// new tests exists: a pattern the spec lint could not judge on main
 	// (gt-hx8f5i).
 	if sub.sourceIssue != nil {
-		if err := checkGateSelects(r.deps.listTests, r.cwd, specdispatch.Sections(sub.sourceIssue.Description)["gate"]); err != nil {
+		if err := checkGateStaticSelects(r.deps.listTests, r.cwd, specdispatch.Sections(sub.sourceIssue.Description)["gate"]); err != nil {
 			return err
 		}
 	}
