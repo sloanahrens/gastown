@@ -85,6 +85,10 @@ share. A live render also reads the derived hm config the compose write leaves
 under the town root, and refuses when it is absent: the pod's hm would read its
 defaults, which name its own loopback, so run gt daemon compose write first.
 
+--cluster gt-sbx names the gt-sbx sandbox cluster instead of the control cluster.
+Its inputs are --sbx-manifests, --sbx-chart, --sbx-values and --helm; the control
+render does not read them.
+
 Examples:
   gt town cluster render --dir ~/gt/gastown --out ./manifests \
     --cpu 4 --memory 8Gi --host-gateway 192.168.64.1 \
@@ -156,7 +160,26 @@ type clusterRenderFlags struct {
 	// includeStatic renders the static control-cluster set with the daemon's
 	// desired set. The record carries it, so a replay renders the same set.
 	includeStatic bool
+	// cluster is the cluster the render is for: clusterControl by default, or
+	// clusterSbx. Nothing reads it yet.
+	cluster string
+	// sbxManifests, sbxChart and sbxValues are the gt-sbx render's inputs: the
+	// pinned agent-sandbox manifest, the pulled chart directory and the values
+	// file. They belong to clusterSbx only. Nothing reads them yet.
+	sbxManifests string
+	sbxChart     string
+	sbxValues    string
+	// helm is the helm binary the gt-sbx render runs; empty and "helm" both mean
+	// helm on PATH. It belongs to clusterSbx only. Nothing reads it yet.
+	helm string
 }
+
+// clusterControl and clusterSbx are the values --cluster takes: the control
+// cluster the daemon runs on, and the gt-sbx sandbox cluster.
+const (
+	clusterControl = "control"
+	clusterSbx     = "gt-sbx"
+)
 
 var clusterRender clusterRenderFlags
 
@@ -323,6 +346,16 @@ func init() {
 		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
 		"take the flags recorded under the town root as this run's defaults; a flag named on the command line wins over its recorded value, and a run with nothing recorded is refused")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.cluster, "cluster", clusterControl,
+		"the cluster the render is for: "+clusterControl+", the default, or "+clusterSbx+" for the gt-sbx sandbox cluster; the --sbx-* and --helm flags are for "+clusterSbx+" only")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.sbxManifests, "sbx-manifests", "",
+		"the pinned agent-sandbox manifest the "+clusterSbx+" render reads; for --cluster "+clusterSbx+" only")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.sbxChart, "sbx-chart", "",
+		"the pulled chart directory the "+clusterSbx+" render templates; for --cluster "+clusterSbx+" only")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.sbxValues, "sbx-values", "",
+		"the values file the "+clusterSbx+" render templates the chart with; for --cluster "+clusterSbx+" only")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.helm, "helm", "helm",
+		"the helm binary the "+clusterSbx+" render runs; for --cluster "+clusterSbx+" only")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)

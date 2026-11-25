@@ -477,6 +477,11 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
 		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"cluster":               "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
+		"sbxManifests":          "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
+		"sbxChart":              "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
+		"sbxValues":             "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
+		"helm":                  "gt-sbx input: the record holds it once the gt-sbx record bead lands (gt-2bj447)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})

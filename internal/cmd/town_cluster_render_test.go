@@ -3232,6 +3232,9 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case "townStateBackupHostPath":
 			// gt-3c4ppq adds the flag to the render; gt-6iyjli records and replays
 			// it, so the record holds no field for it until then.
+		case "cluster", "sbxManifests", "sbxChart", "sbxValues", "helm":
+			// The gt-sbx inputs: the record holds no field for them until gt-2bj447
+			// records and replays them.
 		default:
 			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
 		}
