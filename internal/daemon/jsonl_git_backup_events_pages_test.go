@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -96,7 +97,7 @@ func TestExportEventsPages(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		fake := &eventsPagedRows{lines: rows}
-		written, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", dir, 2, fake.readPage)
+		written, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", dir, 2, fake.readPage)
 		if err != nil {
 			t.Fatalf("export: %v", err)
 		}
@@ -118,7 +119,7 @@ func TestExportEventsPages(t *testing.T) {
 		writeEventsShard(t, dir, "events.jsonl", `{"id":"old1","created_at":"2026-10-30 10:00:00"}`)
 		writeEventsShard(t, dir, "events.2.jsonl", `{"id":"old2","created_at":"2026-10-30 10:00:01"}`)
 		fake := &eventsPagedRows{lines: rows}
-		if _, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", dir, 2, fake.readPage); err != nil {
+		if _, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", dir, 2, fake.readPage); err != nil {
 			t.Fatalf("export: %v", err)
 		}
 		if got := strings.Join(eventsExportLines(t, dir), "\n"); got != unwanted {
@@ -129,7 +130,7 @@ func TestExportEventsPages(t *testing.T) {
 	t.Run("a page of no rows is refused", func(t *testing.T) {
 		t.Parallel()
 		fake := &eventsPagedRows{lines: rows}
-		if _, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", t.TempDir(), 0, fake.readPage); err == nil {
+		if _, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", t.TempDir(), 0, fake.readPage); err == nil {
 			t.Error("a page of 0 rows was read")
 		}
 		if len(fake.calls) != 0 {
@@ -140,7 +141,7 @@ func TestExportEventsPages(t *testing.T) {
 	t.Run("an export that cannot be listed", func(t *testing.T) {
 		t.Parallel()
 		fake := &eventsPagedRows{lines: rows}
-		if _, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", filepath.Join(t.TempDir(), "missing"), 2, fake.readPage); err == nil {
+		if _, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", filepath.Join(t.TempDir(), "missing"), 2, fake.readPage); err == nil {
 			t.Error("an export that cannot be listed was written")
 		}
 	})
@@ -148,7 +149,7 @@ func TestExportEventsPages(t *testing.T) {
 	t.Run("a page cannot be read", func(t *testing.T) {
 		t.Parallel()
 		fake := &eventsPagedRows{err: errors.New("the read failed")}
-		written, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", t.TempDir(), 2, fake.readPage)
+		written, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", t.TempDir(), 2, fake.readPage)
 		if err == nil {
 			t.Error("a failed page read reported success")
 		}
@@ -161,7 +162,7 @@ func TestExportEventsPages(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		fake := &eventsPagedRows{lines: []string{`{"id":"e1"}`}}
-		written, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", dir, 2, fake.readPage)
+		written, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", dir, 2, fake.readPage)
 		if err == nil {
 			t.Error("a page whose last row has no created_at was written")
 		}
@@ -176,7 +177,7 @@ func TestExportEventsPages(t *testing.T) {
 	t.Run("a page that does not move the keyset stops", func(t *testing.T) {
 		t.Parallel()
 		fake := &eventsPagedRows{lines: rows, stuck: true}
-		written, err := (&Daemon{}).exportEventsPagesWith(osEventsExportOps(), "gt", t.TempDir(), 2, fake.readPage)
+		written, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", t.TempDir(), 2, fake.readPage)
 		if err == nil {
 			t.Error("a page that repeats its keyset was read again")
 		}
@@ -214,10 +215,75 @@ func TestExportEventsPages(t *testing.T) {
 				dir := t.TempDir()
 				writeEventsShard(t, dir, "events.jsonl", `{"id":"old","created_at":"2026-10-30 10:00:00"}`)
 				fake := &eventsPagedRows{lines: rows}
-				if _, err := (&Daemon{}).exportEventsPagesWith(tc.ops, "gt", dir, 2, fake.readPage); err == nil {
+				if _, err := (&Daemon{}).exportEventsPagesWith(context.Background(), tc.ops, "gt", dir, 2, fake.readPage); err == nil {
 					t.Error("the export reported success")
 				}
 			})
+		}
+	})
+}
+
+// TestExportEventsPagesStops: the paged read stops before a page when its ctx
+// is done, returning the rows already written with no boundary recorded, so
+// the next cycle reads the table again (gt-lnz787).
+func TestExportEventsPagesStops(t *testing.T) {
+	t.Parallel()
+	rows := []string{
+		`{"id":"e1","created_at":"2026-10-31 10:00:00","type":"created"}`,
+		`{"id":"e2","created_at":"2026-10-31 10:00:01","type":"created"}`,
+		`{"id":"e3","created_at":"2026-10-31 10:00:01","type":"updated"}`,
+		`{"id":"e4","created_at":"2026-10-31 10:00:02","type":"created"}`,
+		`{"id":"e5","created_at":"2026-10-31 10:00:03","type":"deleted"}`,
+	}
+
+	t.Run("a cancel after the first page", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		ctx, cancel := context.WithCancel(context.Background())
+		fake := &eventsPagedRows{lines: rows}
+		readPage := func(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error) {
+			page, err := fake.readPage(afterCreatedAt, afterID, limit)
+			cancel()
+			return page, err
+		}
+		written, err := (&Daemon{}).exportEventsPagesWith(ctx, osEventsExportOps(), "gt", dir, 2, readPage)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("export error = %v, want context.Canceled", err)
+		}
+		for _, want := range []string{"events", "2 rows"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+		if written != 2 {
+			t.Errorf("written = %d, want 2", written)
+		}
+		if len(fake.calls) != 1 {
+			t.Errorf("page reads = %d, want 1", len(fake.calls))
+		}
+		if _, err := os.Stat(eventsExportStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the state file was written: %v", err)
+		}
+	})
+
+	t.Run("a ctx that is already done", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		fake := &eventsPagedRows{lines: rows}
+		written, err := (&Daemon{}).exportEventsPagesWith(ctx, osEventsExportOps(), "gt", dir, 2, fake.readPage)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("export error = %v, want context.Canceled", err)
+		}
+		if written != 0 {
+			t.Errorf("written = %d, want 0", written)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("page reads = %d, want none", len(fake.calls))
+		}
+		if _, err := os.Stat(eventsExportStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the state file was written: %v", err)
 		}
 	})
 }

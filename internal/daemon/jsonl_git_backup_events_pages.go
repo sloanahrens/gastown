@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -11,9 +12,13 @@ import (
 // last row, and the read stops after a page shorter than pageRows. It returns
 // the rows written, and on an error the rows written before it.
 //
+// A ctx that is done before a page stops the read there, returning ctx.Err()
+// with the rows written so far: no boundary is recorded for the partial file,
+// so the next cycle reads the table again rather than append from it.
+//
 // The paged read replaces the export dir holds: a shard an older export left
 // would otherwise be appended to, and the file would hold the rows of both.
-func (d *Daemon) exportEventsPagesWith(ops eventsExportOps, db, dir string, pageRows int, readPage func(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error)) (int, error) {
+func (d *Daemon) exportEventsPagesWith(ctx context.Context, ops eventsExportOps, db, dir string, pageRows int, readPage func(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error)) (int, error) {
 	if pageRows < 1 {
 		return 0, fmt.Errorf("%s: an events page of %d rows cannot be read", db, pageRows)
 	}
@@ -37,6 +42,9 @@ func (d *Daemon) exportEventsPagesWith(ops eventsExportOps, db, dir string, page
 	written := 0
 	afterCreatedAt, afterID := "", ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return written, fmt.Errorf("%s: events: the paged read stopped after %d rows: %w", db, written, err)
+		}
 		rows, err := readPage(afterCreatedAt, afterID, pageRows)
 		if err != nil {
 			return written, fmt.Errorf("%s: reading the events page after %q: %w", db, afterID, err)
