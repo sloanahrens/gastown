@@ -93,6 +93,39 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 	return p.verifyWrite(rule, repo, resp, body)
 }
 
+// EnsureClosedRule creates the main rule of repo as ClosedMainRule(opts) describes it, when no
+// rule is named for the main branch. A run that fails after it leaves the repository protected
+// with nobody on the merge whitelist. A rule already named is refused, not judged: this call
+// reads no field of it, so it never reports an existing rule as set.
+func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/branch_protections"
+	rule := opts.MainBranch
+	rules, err := p.listRules(base)
+	if err != nil {
+		return err
+	}
+	if findRule(rules, rule) != nil {
+		return fmt.Errorf("branch protection %s on %s already exists: EnsureClosedRule does not judge an existing rule", rule, repo)
+	}
+	if p.Client.DryRun {
+		p.logf("would create branch protection %s on %s", rule, repo)
+		return nil
+	}
+	status, resp, err := p.Client.Do(http.MethodPost, base, ClosedMainRule(opts))
+	if err != nil {
+		return err
+	}
+	if status != http.StatusCreated {
+		return p.Client.Unexpected(http.MethodPost, base, status, resp)
+	}
+	p.logf("created branch protection %s on %s", rule, repo)
+	return nil
+}
+
 // EnsureNoRule leaves no protection rule named rule on repo: it removes the rule when
 // one is present and reports one already absent, so a run converges either way.
 // Forgejo refuses to delete a branch that a protection rule matches, so a rule on the
