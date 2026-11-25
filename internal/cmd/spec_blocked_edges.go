@@ -77,6 +77,24 @@ func inheritedFromRigs(perRig map[string][]*beads.Issue) map[string]specdispatch
 	return specdispatch.EffectivePriorities(merged.Own, merged.BlockedBy)
 }
 
+// readBlockedByRig calls blocked once for each rig. A rig whose read fails is
+// left out of perRig and named in failed with the error it returned, so an
+// unreadable rig is not mistaken for one with no blocked issues. With no rigs
+// both maps are empty and non-nil.
+func readBlockedByRig(rigs []string, blocked func(rig string) ([]*beads.Issue, error)) (perRig map[string][]*beads.Issue, failed map[string]error) {
+	perRig = make(map[string][]*beads.Issue, len(rigs))
+	failed = make(map[string]error)
+	for _, rig := range rigs {
+		issues, err := blocked(rig)
+		if err != nil {
+			failed[rig] = err
+			continue
+		}
+		perRig[rig] = issues
+	}
+	return perRig, failed
+}
+
 // appendNewIDs appends each id in ids that list does not already hold. Appending
 // to a nil list allocates, so the result never shares a backing array with ids.
 func appendNewIDs(list, ids []string) []string {
