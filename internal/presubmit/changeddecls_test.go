@@ -154,6 +154,13 @@ func TestChangedDecls(t *testing.T) {
 			head: map[string]string{"pkg/a_test.go": "package p\n\nfunc T() {\n\t_ = 1\n}\n"},
 			want: map[string][]string{},
 		},
+		{
+			name:  "a file a build constraint excludes is read",
+			diff:  unifiedDiff(addition{path: "pkg/a_windows.go", start: 3, lines: []string{"func Open() {}"}}),
+			head:  map[string]string{"pkg/a_windows.go": "package p\n\nfunc Open() {}\n"},
+			want:  map[string][]string{"pkg": {"Open"}},
+			total: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -32,10 +32,12 @@ type ChangedDeclsResult struct {
 // function names both the one it removed and the one it added. A file the diff
 // deletes outright names every top-level declaration it had at the merge base.
 // The diff runs without rename detection, so a renamed file reads as a deletion and
-// an addition. A test file is not read, and a file the go tool skips is not read
-// either. A git-quoted changed path is an error rather than a skipped file,
-// because a declaration in it would go unjudged. A file that does not parse, a
-// failed git command and an empty base are errors too.
+// an addition. A test file is not read, and neither is a file whose name the go
+// tool ignores: one beginning with `_` or `.`, or one under a `testdata`, `_` or
+// `.` directory. A file a build constraint excludes is read, since the check does
+// not evaluate constraints. A git-quoted changed path is an error rather than a
+// skipped file, because a declaration in it would go unjudged. A file that does
+// not parse, a failed git command and an empty base are errors too.
 func ChangedDecls(run Runner, base string) (ChangedDeclsResult, error) {
 	res := ChangedDeclsResult{Names: map[string][]string{}}
 	if base == "" {
