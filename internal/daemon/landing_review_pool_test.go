@@ -189,3 +189,73 @@ func TestReviewPoolWiringBadConfigStaysOff(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		pool       *config.ReviewPoolConfig
+		wantOn     bool
+		wantExpiry time.Duration
+	}{
+		{
+			name:       "listed rig gets the default expiry",
+			pool:       &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			wantOn:     true,
+			wantExpiry: 45 * time.Minute,
+		},
+		{
+			name:       "listed rig gets its configured expiry",
+			pool:       &config.ReviewPoolConfig{Rigs: []string{"other", "gastown"}, ReuseExpiryStr: "20m"},
+			wantOn:     true,
+			wantExpiry: 20 * time.Minute,
+		},
+		{
+			name: "rig not listed gets neither",
+			pool: &config.ReviewPoolConfig{Rigs: []string{"other"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+
+			d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews")
+
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
+			}
+			if !tc.wantOn {
+				if lander.Ahead != nil {
+					t.Fatalf("rig not listed got Ahead %+v; want nil", lander.Ahead)
+				}
+				if lander.ReuseExpiry != 0 {
+					t.Fatalf("rig not listed got ReuseExpiry %v; want 0", lander.ReuseExpiry)
+				}
+			} else {
+				wantAhead := land.TownAheadStore("/sentinel/town", "gastown")
+				if !reflect.DeepEqual(lander.Ahead, wantAhead) {
+					t.Fatalf("Ahead = %+v; want the gastown store under the Lander's town %+v", lander.Ahead, wantAhead)
+				}
+				if lander.ReuseExpiry != tc.wantExpiry {
+					t.Fatalf("ReuseExpiry = %v; want %v", lander.ReuseExpiry, tc.wantExpiry)
+				}
+				// Only the two pool fields may move: with them cleared, the
+				// Lander must be the one the daemon built. Lander holds a mutex,
+				// so the reset happens in place rather than on a copy.
+				lander.Ahead = nil
+				lander.ReuseExpiry = 0
+				if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
+					t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", lander, want)
+				}
+			}
+			// The Worker is a later bead's wiring target; this one leaves it alone.
+			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+				t.Fatalf("wiring changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
