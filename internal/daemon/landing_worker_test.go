@@ -909,8 +909,8 @@ func TestFollowupFindingsReachTheStoredAcceptanceField(t *testing.T) {
 	findings := []land.FollowupCandidate{
 		{ID: "3", Severity: "minor", Path: "internal/land/note.go", Line: 230, Title: "swap the nil check",
 			Detail: "internal/land/note.go:230 swap the nil check"},
-		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook",
-			Detail: "internal/land/hook.go document the hook"},
+		{ID: "4", Severity: "minor", Path: "internal/land/note_test.go", Title: "document the hook",
+			Detail: "internal/land/note_test.go document the hook"},
 	}
 	plans := land.FollowupPlans(work, res, time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC), findings)
 	if len(plans) != 1 {
