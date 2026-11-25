@@ -33,3 +33,40 @@ func TestHubRunStartsJobsPoller(t *testing.T) {
 
 	wantSignal(t, read, "Run never started the jobs poller: the wired reader was not read")
 }
+
+// Run starts no jobs poller for a hub with no jobs reader, and Run still returns
+// when ctx ends. The feed poller is the control: its read shows the hub's workers
+// ran with a page watching, so a jobs source left unread is one no worker was
+// started for rather than one the hub had no chance to read. Deleting the nil
+// check in Run starts the jobs worker, which calls the missing reader and panics
+// (gt-b0dk1a).
+func TestHubRunNilJobsStartsNoPoller(t *testing.T) {
+	t.Parallel()
+
+	feedRead := make(chan struct{}, 1)
+	h := NewHub(Config{
+		Feed: func() []Entry {
+			// Later ticks must not wedge Run's shutdown on a full channel.
+			select {
+			case feedRead <- struct{}{}:
+			default:
+			}
+			return []Entry{{Text: "jobs pane has no reader"}}
+		},
+		FeedEvery: time.Millisecond,
+	})
+	runHub(t, h)
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	wantSignal(t, feedRead, "the hub's pollers never ran: the control feed was not read")
+
+	st := h.State()
+	if st.Jobs != nil {
+		t.Fatalf("a hub with no jobs reader was sent a job list: %+v", st.Jobs)
+	}
+	if r, ok := st.Reads[SourceJobs]; ok {
+		t.Fatalf("a hub with no jobs reader read the jobs source: %+v", r)
+	}
+}
