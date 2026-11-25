@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/notify"
 )
 
 // TestEscalateStaleReescalationCarriesThreadID: a re-escalation mail must
@@ -113,5 +114,34 @@ func TestEscalateStaleDryRunJSON(t *testing.T) {
 		if got != want[i] {
 			t.Errorf("plan[%d] = %+v, want %+v", i, got, want[i])
 		}
+	}
+}
+
+// TestPrintCreatedEscalationRoutedTo: the text "Routed to:" line lists every
+// route action, not only the mail targets, so a HIGH escalation routed to a
+// bead and email:human does not read as if nobody was told. An empty route
+// prints "none".
+func TestPrintCreatedEscalationRoutedTo(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		actions []string
+		want    string
+	}{
+		{"bead and email", []string{"bead", "email:human"}, "  Routed to: bead, email:human"},
+		{"empty route", nil, "  Routed to: none"},
+		{"mail target kept", []string{"bead", "mail:gastown/witness", "email:human"},
+			"  Routed to: bead, mail:gastown/witness, email:human"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			r := escalateRun{out: &out}
+			res := &notify.RaiseResult{ID: "hq-esc1", Actions: tc.actions, Targets: notify.MailTargets(tc.actions)}
+			r.printCreatedEscalation(res, "high")
+			if !strings.Contains(out.String(), tc.want+"\n") {
+				t.Errorf("output has no line %q:\n%s", tc.want, out.String())
+			}
+		})
 	}
 }
