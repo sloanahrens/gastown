@@ -5408,3 +5408,69 @@ func TestTickEffHeadsRead(t *testing.T) {
 		})
 	}
 }
+
+// TestTickEffQuietWiring drives the board closure the tick builds (specTickBoard,
+// the one runSpecDispatchAtWith calls) over a counting hashes store and a counting
+// ready board: two board reads in one tick read the hashes once, and a rig the
+// memory calls quiet under those hashes gets no ready read while the other rig is
+// read each time (gt-wdpcy8).
+func TestTickEffQuietWiring(t *testing.T) {
+	t.Parallel()
+	town := specTown(t)
+	rigs := map[string]config.RigEntry{"gastown": {}, "beads": {}}
+	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: rigs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for rig, db := range map[string]string{"gastown": "gt", "beads": "be"} {
+		dir := filepath.Join(town, rig, ".beads")
+		if err := os.MkdirAll(filepath.Join(dir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"`+db+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	memory.noteRigRead("gastown", beadsql.RigHash{Head: "g1", Working: "g2"}, now.Add(-time.Minute), 0)
+	store := &sqlChildrenClient{records: [][]string{{"be_head", "be_working", "gt_head", "gt_working"}, {"b1", "b2", "g1", "g2"}}}
+	var mu sync.Mutex
+	ready := map[string]int{}
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    town,
+		maxPriority: 2,
+		reads:       newSpecTickReads(),
+		ready: func(rigPath string) ([]*beads.Issue, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			ready[filepath.Base(rigPath)]++
+			return nil, nil
+		},
+		rigStatus:   func(string, string) (bool, string) { return false, "" },
+		heads:       specTickHeadsHold(town, []string{"beads", "gastown"}, slingStores{pinned: func(string) slingStore { return store }}, func(string, ...any) {}),
+		memory:      memory,
+		now:         func() time.Time { return now },
+		detailStore: func(string) beads.Client { return nil },
+	})
+
+	for i := 0; i < 2; i++ {
+		if got := board(nil, nil, nil); len(got.Errors) != 0 {
+			t.Fatalf("board read %d: Errors = %v, want none", i+1, got.Errors)
+		}
+	}
+	if store.sql != 1 {
+		t.Errorf("the tick read the hashes %d times across two board reads, want 1", store.sql)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ready["gastown"] != 0 {
+		t.Errorf("the quiet rig gastown got %d ready read(s), want 0 (reads = %v)", ready["gastown"], ready)
+	}
+	if ready["beads"] != 2 {
+		t.Errorf("the live rig beads got %d ready read(s) over two board reads, want 2 (reads = %v)", ready["beads"], ready)
+	}
+}
