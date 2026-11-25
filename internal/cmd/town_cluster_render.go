@@ -161,16 +161,16 @@ type clusterRenderFlags struct {
 	// desired set. The record carries it, so a replay renders the same set.
 	includeStatic bool
 	// cluster is the cluster the render is for: clusterControl by default, or
-	// clusterSbx. Nothing reads it yet.
+	// clusterSbx, which runs runSbxRender instead of the control render.
 	cluster string
 	// sbxManifests, sbxChart and sbxValues are the gt-sbx render's inputs: the
 	// pinned agent-sandbox manifest, the pulled chart directory and the values
-	// file. They belong to clusterSbx only. Nothing reads them yet.
+	// file. They belong to clusterSbx only.
 	sbxManifests string
 	sbxChart     string
 	sbxValues    string
 	// helm is the helm binary the gt-sbx render runs; empty and "helm" both mean
-	// helm on PATH. It belongs to clusterSbx only. Nothing reads it yet.
+	// helm on PATH. It belongs to clusterSbx only.
 	helm string
 }
 
@@ -554,6 +554,12 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// flags answer this alone, so it is refused before the town is looked up.
 	if d.record.record && f.rehearsal {
 		return errors.New("--record-flags is for a live render: the recorded flags describe the pair that is running, so drop --rehearsal, or drop --record-flags")
+	}
+	// The gt-sbx render takes its own three paths and the helm binary, and reads no
+	// town and no control-cluster flag, so it is dispatched before any of the
+	// control-only defaults and checks below.
+	if f.cluster == clusterSbx {
+		return runSbxRender(d, sbxRenderInputs{OutDir: f.out, Manifests: f.sbxManifests, Chart: f.sbxChart, Values: f.sbxValues, Helm: f.helm})
 	}
 	// A run with either record flag needs the town before its flags resolve: the
 	// record is under the town root, and --use-recorded fills --dir, --out and the
