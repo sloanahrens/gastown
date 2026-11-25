@@ -745,3 +745,50 @@ func TestSpecClaimsMemoKeysOnTheRoutedBeadsDirectory(t *testing.T) {
 		t.Fatalf("reads = %v, want one for the gastown rig (gt-a) and one for devops (dv-a)", reads)
 	}
 }
+
+// TestClaimOfCarriesWhatThePeerWaitsOn is gt-s9p5z8's acceptance: a pool row for
+// a bead that depends on the candidate yields a Claimant whose WaitsOn names the
+// candidate, so the target-claim rule does not hold the candidate for a peer
+// that cannot close until the candidate lands. The control holds the same peer
+// with its wait cleared, which shows the scenario is a real hold.
+func TestClaimOfCarriesWhatThePeerWaitsOn(t *testing.T) {
+	t.Parallel()
+	const claimFile = "internal/landing/landing_worker_test.go"
+	desc := "- `" + claimFile + "` only."
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-2je6on", Title: "landing worker test", Status: "open", Priority: 1,
+			CreatedAt: "2026-11-24T09:00:00Z", Description: desc},
+		beads.Issue{ID: "gt-zfwsgg", Title: "landing worker follow-up", Status: "in_progress",
+			Assignee: "gastown/polecats/ace", Priority: 1,
+			CreatedAt: "2026-11-24T10:00:00Z", Description: desc},
+	)
+	if err := db.AddDependency("gt-zfwsgg", "gt-2je6on"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	warn := func(dir string, err error) { t.Errorf("enrichment of %s failed: %v", dir, err) }
+	pool, err := fetchDuplicatePoolFrom(dependencyShapedBD{listLikeBD{Client: db}}, warn, t.TempDir())
+	if err != nil {
+		t.Fatalf("fetchDuplicatePoolFrom: %v", err)
+	}
+	claims := map[string]specdispatch.Claimant{}
+	for _, row := range pool {
+		claims[row.ID] = claimOf(row)
+	}
+	candidate, peer := claims["gt-2je6on"], claims["gt-zfwsgg"]
+	if candidate.ID == "" || peer.ID == "" {
+		t.Fatalf("pool holds %d beads, want gt-2je6on and gt-zfwsgg", len(pool))
+	}
+	if got := strings.Join(peer.WaitsOn, ","); got != "gt-2je6on" {
+		t.Fatalf("peer WaitsOn = %q, want gt-2je6on", got)
+	}
+	if reason, held := specdispatch.TargetClaimHold(candidate, []specdispatch.Claimant{peer}, nil, time.Time{}); held {
+		t.Errorf("candidate held for a peer that waits on it: %s", reason)
+	}
+
+	unwaited := peer
+	unwaited.WaitsOn = nil
+	if _, held := specdispatch.TargetClaimHold(candidate, []specdispatch.Claimant{unwaited}, nil, time.Time{}); !held {
+		t.Fatal("control: the same in-flight peer with no wait should hold the candidate")
+	}
+}

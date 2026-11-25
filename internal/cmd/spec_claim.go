@@ -48,8 +48,11 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 		// holds nothing (gt-dnp9c); UnreadClaimPeers reads the flag so the
 		// tick can report the peer rather than treat it as idle.
 		ClaimUnread: c.ClaimsUnread,
-		Paths:       specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
-		Tests:       c.Refs.Tests,
+		// The open beads the peer waits on. A peer that waits on the candidate
+		// holds nothing for it (gt-353gam).
+		WaitsOn: c.Ready.WaitsOn,
+		Paths:   specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
+		Tests:   c.Refs.Tests,
 	}
 }
 
