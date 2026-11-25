@@ -17,5 +17,5 @@ const (
 // behind it predict size too weakly (gt-uyt12d), and a time that is not finite
 // and positive is not an estimate at all.
 func SizeFlag(minutes float64, rung string) bool {
-	return rung != "shape" && validMinutes(minutes) && minutes >= SizeFlagMinutes
+	return rung != "shape" && ValidMinutes(minutes) && minutes >= SizeFlagMinutes
 }

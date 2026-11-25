@@ -370,16 +370,10 @@ func reusablePrior(deps Deps, issue *beads.Issue, hash string) (PriorMinutes, bo
 		return PriorMinutes{}, false
 	}
 	prior, ok := deps.Prior(issue.ID, hash)
-	if !ok || !usableMinutes(prior.Embed) || !usableMinutes(prior.Jev) {
+	if !ok || !storypoints.ValidMinutes(prior.Embed) || !storypoints.ValidMinutes(prior.Jev) {
 		return PriorMinutes{}, false
 	}
 	return prior, true
-}
-
-// usableMinutes reports whether m is a finite, positive number of minutes, the
-// same test storypoints.Blend applies to each input.
-func usableMinutes(m float64) bool {
-	return m > 0 && !math.IsInf(m, 1)
 }
 
 // embedInput builds the embedding minutes and the vector the ridge read, or the
