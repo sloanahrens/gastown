@@ -704,3 +704,40 @@ func BackupEvents(database, since string) Query {
 	}
 	return declared(text + " ORDER BY created_at, id")
 }
+
+// maxEventsPage caps one page, so a read is never the whole table at once.
+const maxEventsPage = 100000
+
+// eventsID matches the 36-character UUID form of an events id. A page's last
+// id is compared as a literal of that shape only.
+var eventsID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// BackupEventsPage reads one page of database's events table in the order
+// BackupEvents appends in, at most limit rows (1 to 100000). With
+// afterCreatedAt set, the page starts after that row: the rows created later,
+// or created at the same instant with a later id. A bound that is not a
+// timestamp, or an id that is not a UUID, is refused for the reason
+// BackupEvents refuses its bound.
+func BackupEventsPage(database, afterCreatedAt, afterID string, limit int) Query {
+	if err := ident(database); err != nil {
+		return Query{err: err}
+	}
+	if limit < 1 || limit > maxEventsPage {
+		return Query{err: fmt.Errorf("beadsql: events page limit %d is outside 1 to %d", limit, maxEventsPage)}
+	}
+	text := "SELECT * FROM `" + database + "`.events"
+	switch {
+	case afterCreatedAt != "":
+		if !TimestampLiteral(afterCreatedAt) {
+			return Query{err: fmt.Errorf("beadsql: invalid events page bound %q", afterCreatedAt)}
+		}
+		if !eventsID.MatchString(afterID) {
+			return Query{err: fmt.Errorf("beadsql: invalid events page id %q", afterID)}
+		}
+		ts := quote(afterCreatedAt)
+		text += " WHERE (created_at > " + ts + " OR (created_at = " + ts + " AND id > " + quote(afterID) + "))"
+	case afterID != "":
+		return Query{err: fmt.Errorf("beadsql: events page id %q has no created_at bound", afterID)}
+	}
+	return declared(text + " ORDER BY created_at, id LIMIT " + strconv.Itoa(limit))
+}
