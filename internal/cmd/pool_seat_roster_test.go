@@ -486,3 +486,63 @@ func TestRosterRefusesARigRegistryItCannotRead(t *testing.T) {
 		t.Errorf("roster error = %q, want the unreadable rig registry", err)
 	}
 }
+
+// TestTickEffRosterPictureUnchanged is gt-vegba1: the seat picture read over
+// only the rigs with polecat directories (rosterSnapshotOn) is the picture read
+// over every rig in the registry, field by field. The filter is a prefetch
+// schedule only: poolSeatBatch.disposition reads a rig the prefetch missed, so
+// the picture is the same with or without the filter, and dropping a rig that
+// holds a seat from rosterRigNames alone does not turn this red (the test
+// TestTickEffRosterRigsWithSeats does). This test pins that invariance. It goes
+// red when a rig that holds a seat is dropped from the filter AND the lazy read
+// in disposition is removed: the mutation shown at gt-vegba1 made disposition
+// fail for a rig the prefetch skipped, and the filtered read then failed with
+// "reading the state of arig/p02".
+func TestTickEffRosterPictureUnchanged(t *testing.T) {
+	t.Parallel()
+	town, dbs, lister := rosterTown(t, map[string][]string{
+		"arig": {"p01", "p02"}, "brig": {"p01"}, "crig": {}, "drig": {},
+	})
+	lister.sessions["ar-p01"] = map[string]string{"GT_ROLE": "arig/polecats/p01", "GT_AGENT": "deepseek-flash"}
+	lister.sessions["br-p01"] = map[string]string{"GT_ROLE": "brig/polecats/p01", "GT_AGENT": "deepseek-flash"}
+	lister.created = map[string]time.Time{
+		"ar-p01": time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC),
+		"br-p01": time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC),
+	}
+	seedPolecatAgentBead(dbs["arig"], town, "arig", "p02", "ar-hooked")
+	dbs["arig"].Seed(beads.Issue{ID: "ar-hooked", Status: beads.StatusHooked, Assignee: "arig/polecats/p02"})
+	pool := seatPool("deepseek-flash", 10)
+	at := func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }
+	store := func(rigName string) beads.Client { return dbs[rigName] }
+
+	filtered, err := rosterSnapshotOn(rosterBatch(town, store, 4), nil, town, pool, lister, at)
+	if err != nil {
+		t.Fatalf("filtered roster read: %v", err)
+	}
+	every := rosterBatch(town, store, 4)
+	if err := every.readRigs([]string{"arig", "brig", "crig", "drig"}); err != nil {
+		t.Fatalf("every-rig batch read: %v", err)
+	}
+	all, err := poolSeatSnapshotWith(lister, town, every.disposition, nil, pool, at)
+	if err != nil {
+		t.Fatalf("all-rigs roster read: %v", err)
+	}
+
+	sorted := func(sessions []poolSession) []poolSession {
+		out := append([]poolSession(nil), sessions...)
+		sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+		return out
+	}
+	if len(filtered.sessions) == 0 {
+		t.Fatalf("the fixture's seat picture is empty, so equality proves nothing")
+	}
+	if !reflect.DeepEqual(sorted(filtered.sessions), sorted(all.sessions)) {
+		t.Errorf("filtered seats = %+v, want the all-rigs seats %+v", filtered.sessions, all.sessions)
+	}
+	if !reflect.DeepEqual(filtered.released, all.released) {
+		t.Errorf("filtered released seats = %v, want %v", filtered.released, all.released)
+	}
+	if !filtered.at.Equal(all.at) {
+		t.Errorf("filtered snapshot read at %s, all-rigs at %s", filtered.at, all.at)
+	}
+}
