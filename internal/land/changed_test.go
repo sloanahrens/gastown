@@ -229,6 +229,7 @@ var guardTriggers = []struct {
 	// internal/ outside internal/ring, so a change to any of them is its input
 	// (gt-amxhex).
 	{"internal/ring", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/hosttools", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/rig", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/tmux", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
@@ -951,6 +952,65 @@ func TestGuardSelectsRing(t *testing.T) {
 				if !contains(got, name) {
 					t.Errorf("GuardSelects(%q) internal/ring tests = %v, want %s among them", tt.diff, got, name)
 				}
+			}
+		})
+	}
+}
+
+// TestGuardSelectsHostTools: TestRepoHostTools and TestRepoDarwinFiles walk every
+// non-test Go file in the module and read the host-tools allowlist, so a change
+// or deletion of a non-test Go file, and a change to the allowlist, select both.
+// A test file and a doc select neither (gt-b2n8r3).
+func TestGuardSelectsHostTools(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	hostTools := []string{"TestRepoDarwinFiles", "TestRepoHostTools"}
+
+	tests := []struct {
+		name string
+		diff string
+		want []string // the internal/hosttools tests that must be selected, nil for none
+	}{
+		{
+			"a changed non-test Go file selects both guards",
+			"M\x00internal/daemon/patrol.go\x00",
+			hostTools,
+		},
+		{
+			"a deleted non-test Go file selects both guards",
+			"D\x00internal/dispatch/hold.go\x00",
+			hostTools,
+		},
+		{
+			"a changed allowlist selects both guards",
+			"M\x00internal/hosttools/testdata/host-tools-allow.txt\x00",
+			hostTools,
+		},
+		{
+			"a changed test file selects no host-tools guard",
+			"M\x00internal/hosttools/host_tools_guard_test.go\x00",
+			nil,
+		},
+		{
+			"a changed test file elsewhere selects no host-tools guard",
+			"M\x00internal/daemon/standby_test.go\x00",
+			nil,
+		},
+		{
+			"a docs-only change selects no host-tools guard",
+			"M\x00docs/architecture.md\x00",
+			nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			if got := selection(sel, "internal/hosttools"); !slices.Equal(got, tt.want) {
+				t.Errorf("GuardSelects(%q) internal/hosttools tests = %v, want %v", tt.diff, got, tt.want)
 			}
 		})
 	}
