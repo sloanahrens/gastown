@@ -98,6 +98,11 @@ func (l *seatCallLog) run(_ context.Context, _ string, args []string) ([]byte, [
 	if l.refuseAll || (l.refuse != nil && sameBDCall(args, l.refuse)) {
 		return nil, []byte("bd shim: the call is refused on this rig"), os.ErrInvalid
 	}
+	// bd answers the wisp list with a wrapper object, never a bare array; a fake
+	// that answers anything else makes the wisp read fail (gt-c07xhh).
+	if slices.Contains(args, "wisp") && slices.Contains(args, "list") {
+		return []byte(`{"wisps": [], "count": 0}`), nil, nil
+	}
 	return []byte("[]"), nil, nil
 }
 

@@ -563,10 +563,10 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil when bd answers that there are no wisps (its not_found
-// answer) and when the body cannot be parsed.
+// answer).
 //
-// Every other failed read is returned wrapped by markUnavailable, because the
-// answer is unknown and never none. A missing wisps table is not one of them:
+// Every other failed read, and a body that cannot be parsed, is returned
+// wrapped by markUnavailable, because the answer is unknown and never none. A missing wisps table is not one of them:
 // bd answers it with exit 0 and an empty list, so the only "no wisps" failure
 // is not_found (gt-c07xhh).
 //
@@ -599,7 +599,10 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 			Wisps []*Issue `json:"wisps"`
 		}
 		if err := json.Unmarshal(out, &wrapper); err != nil {
-			return nil, nil
+			// A body that does not parse is an unknown answer, never none: bd
+			// answered something this reader cannot read, so a caller must not
+			// take it for "no wisp-backed agent beads" (gt-c07xhh).
+			return nil, markUnavailable(fmt.Errorf("reading the wisp list: %w", err))
 		}
 		wisps = wrapper.Wisps
 	}

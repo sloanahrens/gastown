@@ -694,6 +694,10 @@ case "$cmd" in
     printf '%%s\n' '[]'
     exit 0
     ;;
+  mol)
+    printf '%%s\n' '{"wisps": [], "count": 0}'
+    exit 0
+    ;;
   *)
     exit 0
     ;;
@@ -1124,6 +1128,9 @@ func TestListAgentBeadsPassesNoLimit(t *testing.T) {
 	t.Parallel()
 	const total = 60 // past bd list's default page of 50
 	rec := newRecorder(func(args []string) reply {
+		if len(args) >= 3 && args[0] == "mol" && args[1] == "wisp" && args[2] == "list" {
+			return reply{stdout: `{"wisps": [], "count": 0}`}
+		}
 		if len(args) == 0 || args[0] != "list" {
 			return reply{}
 		}
@@ -1184,6 +1191,16 @@ func TestListAgentBeadsWispReadFailure(t *testing.T) {
 		{
 			name:    "untyped failure exit 1 with stderr",
 			wisps:   reply{stderr: "Error: something broke", err: exitError{code: 1}},
+			wantErr: true,
+		},
+		{
+			name:    "stdout that is not json",
+			wisps:   reply{stdout: "Error: the wisps table is locked, try again"},
+			wantErr: true,
+		},
+		{
+			name:    "empty stdout",
+			wisps:   reply{stdout: ""},
 			wantErr: true,
 		},
 		{
