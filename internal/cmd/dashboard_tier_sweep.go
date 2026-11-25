@@ -86,6 +86,10 @@ type tierSweepStarted struct {
 type tierSweepReader struct {
 	logPath  string
 	stateDir string
+	// sweepRunsRoot holds one directory per rig, each with the run directories the
+	// sweep runs write their progress.json into. It is the root the sweep-runs prune
+	// assumes; a custom patrol output_root is not followed.
+	sweepRunsRoot string
 	// rigs lists the town's known rig names. A rig the log names is used in a
 	// path under stateDir only when this names it (gt-2czgm).
 	rigs func() ([]string, error)
@@ -113,11 +117,12 @@ type tierSweepReader struct {
 
 func newTierSweepReader(townRoot string) *tierSweepReader {
 	return &tierSweepReader{
-		logPath:  filepath.Join(townRoot, "daemon", "daemon.log"),
-		stateDir: filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep"),
-		rigs:     func() ([]string, error) { return knownRigNames(townRoot) },
-		last:     map[string]tierSweepEvent{},
-		start:    map[string]tierSweepStarted{},
+		logPath:       filepath.Join(townRoot, "daemon", "daemon.log"),
+		stateDir:      filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep"),
+		sweepRunsRoot: filepath.Join(constants.TownRuntimePath(townRoot), "sweep-runs"),
+		rigs:          func() ([]string, error) { return knownRigNames(townRoot) },
+		last:          map[string]tierSweepEvent{},
+		start:         map[string]tierSweepStarted{},
 	}
 }
 
