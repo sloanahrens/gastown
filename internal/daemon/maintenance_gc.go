@@ -81,6 +81,14 @@ const (
 	// (maintenanceGCUpgradeHold).
 	maintenanceGCRestartCap = maintenanceGCTimeout + maintenancePauseSlack
 
+	// maintenanceGCHoldBound bounds only the wait for the landing passes in
+	// flight to end after the gc has taken its landing hold (gt-j5q02z). The
+	// hold itself lasts the whole cycle: it is taken once the cycle has a
+	// database due and released on every exit, so a gc that runs holds new
+	// passes off for its run too. A pass that outlasts the bound defers the gc to
+	// a later tick rather than parking the landing queue behind a stuck pass.
+	maintenanceGCHoldBound = 15 * time.Minute
+
 	// maintenancePauseActor is the actor the gc's pause marker names.
 	maintenancePauseActor = "daemon/scheduled_maintenance"
 
@@ -588,6 +596,23 @@ func (d *Daemon) maintenanceQuiet() (bool, string) {
 	return true, ""
 }
 
+// maintenanceGCWaitIdle waits for the landing passes in flight to end, and
+// reports false when maintenanceGCHoldBound elapsed first. The caller holds the
+// gc's landing hold, so a zero count means every pass has ended.
+func (d *Daemon) maintenanceGCWaitIdle(idle <-chan struct{}) bool {
+	if d.landingPasses.Load() == 0 {
+		return true
+	}
+	expired, stop := d.maintenance().holdTimer(maintenanceGCHoldBound)
+	defer stop()
+	select {
+	case <-idle:
+		return true
+	case <-expired:
+		return false
+	}
+}
+
 // maintenanceGCDemand describes the town the gc ran beside: how many polecats
 // had a fresh "working" heartbeat and which soft daemon work was in flight.
 // Both used to defer the gc and no longer do (gt-mdejo), so this line is the
@@ -823,6 +848,20 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, localDat
 		return eligible[i].name < eligible[j].name
 	})
 
+	// The gc takes its own landing hold, and it takes it BEFORE the quiet guard
+	// below: the guard counts a landing pass in flight as a hard hold, so the
+	// gc has to drain the passes (a held pass stops claiming beads, see
+	// landingPassDraining) and wait for them before the guard can say it is
+	// quiet. The hold is taken once the cycle has a database due (a cycle with
+	// nothing due returned above) and released on every exit. While it is held
+	// no new landing pass starts, and it covers the wait for the passes in
+	// flight (bounded by maintenanceGCHoldBound), the Dolt lock wait
+	// (maintenanceGCLockWait), the quiet guard and the pause check, and then
+	// each database's gc run itself (maintenanceGCTimeout). The idle wait comes
+	// before the Dolt lock so a long wait never holds that lock.
+	idle := d.landingHolds.hold(landingHoldMaintenanceGC)
+	defer d.landingHolds.release(landingHoldMaintenanceGC)
+
 	parent := d.ctx
 	if parent == nil {
 		parent = context.Background()
@@ -839,6 +878,12 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, localDat
 	}
 
 	for i, c := range eligible {
+		// Bounded: a pass that outlasts maintenanceGCHoldBound gives the gc up
+		// for this tick instead of parking the landing queue behind it. The
+		// wait comes before the Dolt lock so a long wait never holds it.
+		if !maint.waitIdle(d, idle) {
+			return defer_(i, "landing pass did not end within "+maintenanceGCHoldBound.String())
+		}
 		// Exclusive against the daemon's own Dolt tasks (backups, wisp
 		// reaper, JSONL export, compactor), which hold the read side.
 		if !d.lockWithin(maint.now, maint.sleep) {

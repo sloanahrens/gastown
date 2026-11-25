@@ -91,6 +91,15 @@ type maintenanceSeams struct {
 	archiveMaxBatches int
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
+	// waitIdle waits for the landing passes in flight to end, with the gc's own
+	// hold already taken, and reports whether they did within
+	// maintenanceGCHoldBound. A fake answers without a wait.
+	waitIdle func(d *Daemon, idle <-chan struct{}) bool
+	// holdTimer starts the bound of waitIdle: the channel fires once after the
+	// duration and the func stops it. A test returns a channel that is already
+	// fired, or one that never fires, so the wait's timeout branch runs with no
+	// real time passing.
+	holdTimer func(time.Duration) (<-chan time.Time, func())
 	// slotHolders lists the roles holding a container-gate slot.
 	slotHolders func(townRoot string) ([]string, error)
 	// workingPolecats lists polecats with a fresh "working" heartbeat. It
@@ -196,6 +205,15 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet
+	}
+	if s.waitIdle == nil {
+		s.waitIdle = (*Daemon).maintenanceGCWaitIdle
+	}
+	if s.holdTimer == nil {
+		s.holdTimer = func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTimer(d)
+			return t.C, func() { t.Stop() }
+		}
 	}
 	if s.slotHolders == nil {
 		s.slotHolders = maintenanceSlotHolders
