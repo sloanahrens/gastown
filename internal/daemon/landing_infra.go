@@ -53,6 +53,10 @@ const (
 // landingInfraSource names this patrol in its escalations and log lines.
 const landingInfraSource = "landing_infra"
 
+// landingInfraExtraRunnerRedAfter is how long an extra_repos app repository's
+// run may wait on a runner before its escalation raises (gt-9mr11b).
+const landingInfraExtraRunnerRedAfter = 5 * time.Minute
+
 // landingInfraInterval is the wait between probe passes. Default 60s.
 func landingInfraInterval(config *DaemonPatrolConfig) time.Duration {
 	if c := landingInfraConfig(config); c != nil && c.IntervalStr != "" {
@@ -544,7 +548,8 @@ func probeRunPickup(prober infraProber, t landingInfraTarget, token string, toke
 // record folds one pass into the state and returns the escalation changes:
 // the forgejo condition is red while any covered rig's instance has failed for
 // InfraRedAfter, the runner condition while any rig has had a run waiting on a
-// runner for InfraRunnerRedAfter. Each raises once and stays raised until the
+// runner for InfraRunnerRedAfter, or any extra repository for
+// landingInfraExtraRunnerRedAfter. Each raises once and stays raised until the
 // covered rigs all read green again.
 func (st *landingInfraState) record(now time.Time, tgts []landingInfraTarget, forgejoObs, runnerObs map[string]infraResult) []infraAlertAction {
 	st.mu.Lock()
@@ -557,8 +562,8 @@ func (st *landingInfraState) record(now time.Time, tgts []landingInfraTarget, fo
 	st.runner = advance(st.runner, st.rigs, runnerObs, now)
 
 	var actions []infraAlertAction
-	actions = append(actions, st.judge(now, forgejoCondition, st.forgejo, &st.alertedForgejo)...)
-	actions = append(actions, st.judge(now, runPickupCondition, st.runner, &st.alertedRunner)...)
+	actions = append(actions, st.judge(now, forgejoCondition, st.forgejo, tgts, &st.alertedForgejo)...)
+	actions = append(actions, st.judge(now, runPickupCondition, st.runner, tgts, &st.alertedRunner)...)
 	return actions
 }
 
@@ -568,9 +573,11 @@ func (st *landingInfraState) record(now time.Time, tgts []landingInfraTarget, fo
 type infraConditionSpec struct {
 	field   string
 	verdict func(townhealth.InfraProbe, time.Time) townhealth.Verdict
-	key     string
-	failing string
-	back    string
+	// extraVerdict, when set, judges an extra_repos target in place of verdict.
+	extraVerdict func(townhealth.InfraProbe, time.Time) townhealth.Verdict
+	key          string
+	failing      string
+	back         string
 }
 
 // The two conditions. The wording names the failing run's age from the same
@@ -584,11 +591,12 @@ var (
 		back:    "the Forgejo instance answers again",
 	}
 	runPickupCondition = infraConditionSpec{
-		field:   townhealth.FieldRunner,
-		verdict: townhealth.InfraRunnerVerdict,
-		key:     alertKeyRunnerOffline,
-		failing: "no CI run has been picked up for over " + townhealth.Short(townhealth.InfraRunnerRedAfter),
-		back:    "CI is picking runs up again",
+		field:        townhealth.FieldRunner,
+		verdict:      townhealth.InfraRunnerVerdict,
+		extraVerdict: extraRunnerVerdict,
+		key:          alertKeyRunnerOffline,
+		failing:      "a CI run has waited too long for a runner",
+		back:         "CI is picking runs up again",
 	}
 )
 
@@ -618,8 +626,8 @@ func (st *landingInfraState) observeNothing() []infraAlertAction {
 // open, and otherwise leave it alone. A degraded or unanswerable probe is
 // neither: clearing on it would close an outage on evidence that does not say
 // the outage ended.
-func (st *landingInfraState) judge(now time.Time, c infraConditionSpec, obs map[string]infraObservation, open *bool) []infraAlertAction {
-	red, green, reds := infraCondition(obs, st.rigs, now, c)
+func (st *landingInfraState) judge(now time.Time, c infraConditionSpec, obs map[string]infraObservation, tgts []landingInfraTarget, open *bool) []infraAlertAction {
+	red, green, reds := infraCondition(obs, tgts, now, c)
 	switch {
 	case red && !*open:
 		*open = true
@@ -641,24 +649,39 @@ func infraRedText(reds []infraRedRig) string {
 	return strings.Join(lines, "; ")
 }
 
-// infraCondition judges every covered rig's probe: red when some rig is red,
-// green when every rig is green, and the red rigs' reasons for the alert to
-// name. The reason is the field's own detail, so the escalation says what the
-// health line says.
-func infraCondition(obs map[string]infraObservation, rigs []string, now time.Time, c infraConditionSpec) (red, green bool, reds []infraRedRig) {
+// infraCondition judges every covered target's probe: red when some target is
+// red, green when every target is green, and the red targets' reasons for the
+// alert to name. The reason is the field's own detail, so the escalation says
+// what the health line says.
+func infraCondition(obs map[string]infraObservation, tgts []landingInfraTarget, now time.Time, c infraConditionSpec) (red, green bool, reds []infraRedRig) {
 	green = true
-	for _, rig := range rigs {
-		p := obs[rig].probe()
-		switch c.verdict(p, now) {
+	for _, t := range tgts {
+		p := obs[t.Rig].probe()
+		verdict := c.verdict
+		if t.Extra && c.extraVerdict != nil {
+			verdict = c.extraVerdict
+		}
+		switch verdict(p, now) {
 		case townhealth.Red:
 			red, green = true, false
-			reds = append(reds, infraRedRig{Rig: rig, Detail: firstLine(townhealth.InfraField(c.field, rig, p, now).Detail)})
+			reds = append(reds, infraRedRig{Rig: t.Rig, Detail: firstLine(townhealth.InfraField(c.field, t.Rig, p, now).Detail)})
 		case townhealth.Green:
 		default:
 			green = false
 		}
 	}
 	return red, green, reds
+}
+
+// extraRunnerVerdict is the runner verdict for an extra_repos app repository:
+// the rig rule, with RED at landingInfraExtraRunnerRedAfter. It judges only the
+// escalation; the health line still reads each runner field by the rig rule, so
+// an app repository is red there at townhealth.InfraRunnerRedAfter (gt-9mr11b).
+func extraRunnerVerdict(p townhealth.InfraProbe, now time.Time) townhealth.Verdict {
+	if p.Unavailable == "" && !p.WaitingSince.IsZero() && now.Sub(p.WaitingSince) >= landingInfraExtraRunnerRedAfter {
+		return townhealth.Red
+	}
+	return townhealth.InfraRunnerVerdict(p, now)
 }
 
 // firstLine keeps one client error's first line. A Forgejo error carries the

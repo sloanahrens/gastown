@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // extraRepoDaemon is a daemon whose rigs land through Forgejo, with extra_repos given.
@@ -85,5 +86,77 @@ func TestLandingInfraExtraTargetsRefuseMalformedEntry(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "\n"); n != 1 || !strings.Contains(logs.String(), "not-a-repo") {
 		t.Errorf("malformed entry logged %q over two passes, want one line naming it", logs.String())
+	}
+}
+
+// infraExtraTarget is an extra_repos app repository on rig's instance.
+func infraExtraTarget(rig landingInfraTarget, owner, repo string) landingInfraTarget {
+	t := rig
+	t.Rig = "app:" + owner + "/" + repo
+	t.Owner, t.Repo, t.Extra = owner, repo, true
+	return t
+}
+
+// TestLandingInfraExtraRunnerRed: an app repository's run waiting 7 minutes is
+// red and the rig's is not; 4 minutes is red for neither (gt-9mr11b).
+func TestLandingInfraExtraRunnerRed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		rigWait, appWait time.Duration
+		wantRed, notRed  string // the run text that must and must not appear; "" when nothing raises
+	}{
+		{"app 7 minutes, rig 7 minutes", 7 * time.Minute, 7 * time.Minute, "app:acme/app: run 92", "gastown: run 91"},
+		{"app 4 minutes, rig 4 minutes", 4 * time.Minute, 4 * time.Minute, "", ""},
+		{"app 4 minutes, rig 10 minutes", 10 * time.Minute, 4 * time.Minute, "gastown: run 91", "app:acme/app: run 92"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rig := infraTargets(t)[0]
+			prober := &fakeProber{versions: map[string]error{}, pickups: map[string]fakeRunPickup{
+				"gastown/gastown": {waiting: true, since: infraNow.Add(-tc.rigWait), runID: 91},
+				"acme/app":        {waiting: true, since: infraNow.Add(-tc.appWait), runID: 92},
+			}}
+			d, _, rec := infraDaemon(t, []landingInfraTarget{rig, infraExtraTarget(rig, "acme", "app")}, prober)
+			d.runLandingInfraProbe(infraNow)
+
+			got := rec.Escalations()
+			if tc.wantRed == "" {
+				if len(got) != 0 {
+					t.Fatalf("escalations = %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Escalation.Fingerprint != alertKeyRunnerOffline {
+				t.Fatalf("escalations = %+v, want one keyed %s", got, alertKeyRunnerOffline)
+			}
+			reason := got[0].Escalation.Reason
+			if !strings.Contains(reason, tc.wantRed) || strings.Contains(reason, tc.notRed) {
+				t.Errorf("escalation reason = %q, want %q and not %q", reason, tc.wantRed, tc.notRed)
+			}
+		})
+	}
+}
+
+// TestLandingInfraExtraRunnerRedClears: a stalled app repository's escalation
+// names it, and the escalation clears once it reads green (gt-9mr11b).
+func TestLandingInfraExtraRunnerRedClears(t *testing.T) {
+	t.Parallel()
+	rig := infraTargets(t)[0]
+	prober := &fakeProber{versions: map[string]error{}, pickups: map[string]fakeRunPickup{
+		"acme/app": {waiting: true, since: infraNow.Add(-7 * time.Minute), runID: 92},
+	}}
+	d, _, rec := infraDaemon(t, []landingInfraTarget{rig, infraExtraTarget(rig, "acme", "app")}, prober)
+
+	d.runLandingInfraProbe(infraNow)
+	got := rec.Escalations()
+	if len(got) != 1 || !strings.Contains(got[0].Escalation.Reason, "app:acme/app") {
+		t.Fatalf("escalations = %+v, want one that names app:acme/app", got)
+	}
+
+	prober.pickups["acme/app"] = fakeRunPickup{}
+	d.runLandingInfraProbe(infraNow.Add(time.Minute))
+	if clears := rec.Clears(); len(clears) != 1 || clears[0].Fingerprints[0] != alertKeyRunnerOffline {
+		t.Fatalf("clears = %+v, want one for %s", clears, alertKeyRunnerOffline)
 	}
 }
