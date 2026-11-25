@@ -873,3 +873,117 @@ func TestClusterRenderFlagsOldRecordLoadsAsControl(t *testing.T) {
 		t.Errorf("sandbox paths = %q %q %q, want none", got.sbxManifests, got.sbxChart, got.sbxValues)
 	}
 }
+
+// TestClusterRenderFlagsOldRecordReplaysTheControlRender: a record written before
+// the cluster was recorded replays through --use-recorded as the control render:
+// its own flags come back, and no sandbox path rides along (gt-2bj447).
+func TestClusterRenderFlagsOldRecordReplaysTheControlRender(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "render-flags.json")
+	oldShape := `{"dir": "/repo/gastown", "out": "/repo/manifests", "cpu": "4", "include_static": true}`
+	if err := os.WriteFile(path, []byte(oldShape), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recorded, ok, err := loadRenderFlags(path)
+	if err != nil || !ok {
+		t.Fatalf("loadRenderFlags = (%t, %v), want the old record", ok, err)
+	}
+	none := func(string) bool { return false }
+	replay, err := clusterRenderFlags{}.withRecorded(recorded, none)
+	if err != nil {
+		t.Fatalf("withRecorded on the old record: %v", err)
+	}
+	if replay.cluster != clusterControl {
+		t.Errorf("replay cluster = %q, want %q: a record with no cluster key replays the control render", replay.cluster, clusterControl)
+	}
+	if replay.sbxManifests != "" || replay.sbxChart != "" || replay.sbxValues != "" {
+		t.Errorf("replay sandbox paths = %q %q %q, want none", replay.sbxManifests, replay.sbxChart, replay.sbxValues)
+	}
+	if replay.dir != "/repo/gastown" || replay.out != "/repo/manifests" || replay.cpu != "4" || !replay.includeStatic {
+		t.Errorf("replay flags = dir %q out %q cpu %q includeStatic %t, want the values the old record holds",
+			replay.dir, replay.out, replay.cpu, replay.includeStatic)
+	}
+}
+
+// TestClusterRenderFlagsCommandLineOverridesTheRecordedSbx: a flag named on the
+// command line wins over the recorded cluster and sandbox paths, and each flag
+// not named is still replayed from the record, one by one (gt-2bj447).
+func TestClusterRenderFlagsCommandLineOverridesTheRecordedSbx(t *testing.T) {
+	t.Parallel()
+	recorded := renderFlagsFixture()
+	recorded.cluster = clusterSbx
+	recorded.sbxManifests = "/host/recorded/manifest.yaml"
+	recorded.sbxChart = "/host/recorded/chart"
+	recorded.sbxValues = "/host/recorded/values.yaml"
+	path := filepath.Join(t.TempDir(), "render-flags.json")
+	if err := saveRenderFlags(path, recorded); err != nil {
+		t.Fatalf("saveRenderFlags: %v", err)
+	}
+	loaded, ok, err := loadRenderFlags(path)
+	if err != nil || !ok {
+		t.Fatalf("loadRenderFlags = (%t, %v), want the record", ok, err)
+	}
+	// The values the command line parsed: each differs from the record, so a
+	// replay that takes the wrong side of a flag fails on that field.
+	given := clusterRenderFlags{
+		cluster:      clusterControl,
+		sbxManifests: "/cli/manifest.yaml",
+		sbxChart:     "/cli/chart",
+		sbxValues:    "/cli/values.yaml",
+	}
+	cases := []struct {
+		name                                  string
+		named                                 []string
+		wantCluster, wantManifests, wantChart string
+		wantValues                            string
+	}{
+		{
+			name:          "nothing named replays the record",
+			named:         nil,
+			wantCluster:   recorded.cluster,
+			wantManifests: recorded.sbxManifests,
+			wantChart:     recorded.sbxChart,
+			wantValues:    recorded.sbxValues,
+		},
+		{
+			name:          "cluster named keeps the command line's cluster",
+			named:         []string{"cluster"},
+			wantCluster:   given.cluster,
+			wantManifests: recorded.sbxManifests,
+			wantChart:     recorded.sbxChart,
+			wantValues:    recorded.sbxValues,
+		},
+		{
+			name:          "one path named keeps its command line value and not the others",
+			named:         []string{"sbx-chart"},
+			wantCluster:   recorded.cluster,
+			wantManifests: recorded.sbxManifests,
+			wantChart:     given.sbxChart,
+			wantValues:    recorded.sbxValues,
+		},
+		{
+			name:          "every sandbox flag named keeps the command line",
+			named:         []string{"cluster", "sbx-manifests", "sbx-chart", "sbx-values"},
+			wantCluster:   given.cluster,
+			wantManifests: given.sbxManifests,
+			wantChart:     given.sbxChart,
+			wantValues:    given.sbxValues,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			named := func(flag string) bool { return slices.Contains(tc.named, flag) }
+			replay, err := given.withRecorded(loaded, named)
+			if err != nil {
+				t.Fatalf("withRecorded: %v", err)
+			}
+			if replay.cluster != tc.wantCluster || replay.sbxManifests != tc.wantManifests ||
+				replay.sbxChart != tc.wantChart || replay.sbxValues != tc.wantValues {
+				t.Errorf("replay cluster %q paths %q %q %q, want %q and %q %q %q",
+					replay.cluster, replay.sbxManifests, replay.sbxChart, replay.sbxValues,
+					tc.wantCluster, tc.wantManifests, tc.wantChart, tc.wantValues)
+			}
+		})
+	}
+}
