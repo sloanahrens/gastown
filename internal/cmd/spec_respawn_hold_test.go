@@ -42,7 +42,7 @@ func TestTimeoutRetrySkipsABeadAtItsRespawnLimit(t *testing.T) {
 		respawnGate: func(string) (bool, []string) { return true, nil },
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry)
+	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry, nil)
 
 	if len(cleared) != 0 {
 		t.Errorf("cleared %v, want the label left on a bead at its respawn limit", cleared)
@@ -75,7 +75,7 @@ func TestTimeoutRetryStillRetriesBelowTheLimit(t *testing.T) {
 		respawnGate: func(string) (bool, []string) { return false, nil },
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry)
+	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry, nil)
 
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
 		t.Fatalf("candidates = %+v, want the retried bead", got.Candidates)
@@ -105,7 +105,7 @@ func TestThreeRefusalsProduceNoFourthSling(t *testing.T) {
 
 	var planned []int
 	for tick := 1; tick <= 4; tick++ {
-		got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry)
+		got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry, nil)
 		planned = append(planned, len(got.Candidates))
 		if len(got.Candidates) == 1 {
 			// The sling the tick planned spawns a polecat, which spends one
@@ -196,7 +196,7 @@ func TestTimeoutRetryClearsABeadWhoseLastRoundSubmitted(t *testing.T) {
 	var cleared []string
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked,
-		respawnLimitedRetry(townRoot, stores, &cleared))
+		respawnLimitedRetry(townRoot, stores, &cleared), nil)
 
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
 		t.Fatalf("candidates = %+v, want the submitted-round bead slung again", got.Candidates)
@@ -218,7 +218,7 @@ func TestTimeoutRetryHoldsABeadWhoseSubmissionIsOlderThanItsLastSpawn(t *testing
 	var cleared []string
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked,
-		respawnLimitedRetry(townRoot, stores, &cleared))
+		respawnLimitedRetry(townRoot, stores, &cleared), nil)
 
 	if len(got.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none", got.Candidates)
@@ -239,7 +239,7 @@ func TestTimeoutRetryHoldsABeadWithNoReadableSubmission(t *testing.T) {
 	var cleared []string
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked,
-		respawnLimitedRetry(townRoot, stores, &cleared))
+		respawnLimitedRetry(townRoot, stores, &cleared), nil)
 
 	if len(got.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none", got.Candidates)
@@ -268,7 +268,7 @@ func TestTimeoutRetryReportsAFailedCommentReadOnTheTick(t *testing.T) {
 	var cleared []string
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked,
-		respawnLimitedRetry(townRoot, unreadable, &cleared))
+		respawnLimitedRetry(townRoot, unreadable, &cleared), nil)
 
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
 		t.Fatalf("candidates = %+v, want the bead slung: its stamp dates the round", got.Candidates)

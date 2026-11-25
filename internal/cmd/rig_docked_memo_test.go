@@ -69,7 +69,7 @@ func TestTickReadsRigDockedStateOncePerRig(t *testing.T) {
 	board := func(string) ([]*beads.Issue, error) { return nil, nil }
 
 	// The board scan checks each rig.
-	specCandidatesRetrying(town, 2, board, docked.parkedOrDocked, nil)
+	specCandidatesRetrying(town, 2, board, docked.parkedOrDocked, nil, nil)
 	// These stand in for the repeated checks a sling makes after the scan (the
 	// sling's own guard and its spawn's guard): each must be answered by the
 	// scan's read, not by another one.

@@ -5206,17 +5206,19 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 // passed in, so a test can hand the read a verdict bd cannot be made to give
 // (gt-6d06g).
 func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string)) specBoardRead {
-	return specCandidatesRetrying(townRoot, maxPriority, board, rigStatus, nil)
+	return specCandidatesRetrying(townRoot, maxPriority, board, rigStatus, nil, nil)
 }
 
 // specCandidatesRetrying is specCandidatesWith plus retry, the read of a rig's
 // beads a killed-at-its-bound sling left labeled and whose retries remain: the
 // tick slings such a bead again instead of waiting for a person (gt-vaivp).
 //
-// skip is the quiet-rig seam (gt-w2xa0f). It is variadic so the existing
-// callers keep compiling. The rig loop does not consult it yet, so every rig
-// is read; gt-svzybb wires the skip answer into the loop.
-func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip ...func(rig string) bool) specBoardRead { //nolint:unparam // skip is the seam gt-svzybb consumes; part 1 of gt-w2xa0f only adds it
+// skip is the quiet-rig seam (gt-w2xa0f): the last parameter, with exactly this
+// type. nil means every rig is read, as before. This part only declares it, so a
+// non-nil skip is accepted and NOT consulted yet: gt-svzybb makes a rig it
+// answers true for get no ready read, and gt-rd87eq no split-held or duplicate
+// read either.
+func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip func(rig string) bool) specBoardRead { //nolint:unparam // skip is the seam gt-svzybb consumes; this part only declares it
 	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil)
 }
 

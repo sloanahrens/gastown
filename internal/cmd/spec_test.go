@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3682,7 +3683,7 @@ func TestSpecCandidatesRetriesASlingKilledAtItsBound(t *testing.T) {
 		},
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry, nil)
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
 		t.Fatalf("candidates = %+v, want the retried bead alone", got.Candidates)
 	}
@@ -3715,7 +3716,7 @@ func TestSpecCandidatesReportsAFailedRetryProbe(t *testing.T) {
 		clear: func(string, string) error { cleared++; return nil },
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry, nil)
 	if len(got.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none for a bead whose retry set could not be read", got.Candidates)
 	}
@@ -3743,7 +3744,7 @@ func TestSpecCandidatesReportsAFailedClear(t *testing.T) {
 		clear: func(string, string) error { return errors.New("dolt: connection refused") },
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry, nil)
 	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
 		t.Errorf("candidates = %+v, LabeledFailed = %d; want the bead held", got.Candidates, got.LabeledFailed)
 	}
@@ -5139,12 +5140,12 @@ func TestSpecSlingParamsDriveSlingRunPastAContentOverlap(t *testing.T) {
 	}
 }
 
-// TestTickEffSkipNilReadsAllRigs: with skip nil the read still reads every rig
-// in the registry, as it did before the quiet-rig seam (gt-w2xa0f).
-func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
-	t.Parallel()
-	townRoot := specTown(t)
-	rigs := map[string]config.RigEntry{"gastown": {}, "beads": {}, "gorge": {}, "longeye": {}}
+// skipSeamRigs builds a town with four rigs and returns it with a board that
+// counts each rig's read, safe if the rigs are ever read concurrently (gt-w2xa0f).
+func skipSeamRigs(t *testing.T) (townRoot string, rigs map[string]config.RigEntry, board specBoard, reads func() map[string]int) {
+	t.Helper()
+	townRoot = specTown(t)
+	rigs = map[string]config.RigEntry{"gastown": {}, "beads": {}, "gorge": {}, "longeye": {}}
 	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: rigs})
 	if err != nil {
 		t.Fatal(err)
@@ -5157,17 +5158,66 @@ func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var mu sync.Mutex
 	read := map[string]int{}
-	board := func(rigPath string) ([]*beads.Issue, error) {
+	board = func(rigPath string) ([]*beads.Issue, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		read[filepath.Base(rigPath)]++
 		return nil, nil
 	}
+	reads = func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(read))
+		for k, v := range read {
+			out[k] = v
+		}
+		return out
+	}
+	return townRoot, rigs, board, reads
+}
+
+// TestTickEffSkipNilReadsAllRigs: with skip nil the read still reads every rig
+// in the registry, as it did before the quiet-rig seam (gt-w2xa0f).
+func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
+	t.Parallel()
+	townRoot, rigs, board, reads := skipSeamRigs(t)
 	notDocked := func(string, string) (bool, string) { return false, "" }
 
 	got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, nil)
 	if len(got.Errors) != 0 {
 		t.Fatalf("Errors = %v, want none", got.Errors)
 	}
+	read := reads()
+	for name := range rigs {
+		if read[name] != 1 {
+			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", name, read[name], read)
+		}
+	}
+}
+
+// TestTickEffSkipNonNilIsNotConsulted pins the seam of this part: a non-nil skip
+// that answers true for two rigs is accepted and never called, so every rig is
+// still read. gt-svzybb makes it skip the ready read (gt-w2xa0f).
+func TestTickEffSkipNonNilIsNotConsulted(t *testing.T) {
+	t.Parallel()
+	townRoot, rigs, board, reads := skipSeamRigs(t)
+	notDocked := func(string, string) (bool, string) { return false, "" }
+	var asked atomic.Int32
+	skip := func(rig string) bool {
+		asked.Add(1)
+		return rig == "gastown" || rig == "beads"
+	}
+
+	got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, skip)
+	if len(got.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", got.Errors)
+	}
+	if n := asked.Load(); n != 0 {
+		t.Errorf("skip was called %d time(s), want 0 in this part", n)
+	}
+	read := reads()
 	for name := range rigs {
 		if read[name] != 1 {
 			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", name, read[name], read)
