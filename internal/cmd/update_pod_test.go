@@ -193,8 +193,10 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 	}
 	clock := &rollbackTestClock{now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
 	// The state-file probe reads the daemon the compose swap moved, so the swap's
-	// wait sees the commit it applied; a separate fake would never report it.
-	compose := &rollbackTestSwap{}
+	// wait sees the commit it applied; a separate fake would never report it. The
+	// daemon runs the previous build before the install, so the pre-swap gate
+	// reads a running commit rather than an empty one.
+	compose := &rollbackTestSwap{running: rollbackOldCommit}
 	got := wiredInstall{
 		townRoot: townRoot,
 		compose:  compose,

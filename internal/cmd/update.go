@@ -968,17 +968,21 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	if pod != nil {
 		inner = update.SkippedInstaller{Reason: podHostInstallReason}
 	}
+	// The town's pre-roll checks gate the install: they run before anything is
+	// installed or swapped, in this process, which is the new image's own gt and
+	// bd. The running commit is read through the install's verify probes, so a
+	// build the gate cannot read is refused before anything changes. The
+	// pair-level check reads the bd pin the pair installs, which the preflight's
+	// own checks, run by the image that is running now, do not. The registry
+	// match re-derives the pair for the file's commit, so a file the registry
+	// does not publish is refused before anything changes. The install holds the
+	// gate, so the commit it records has one owner.
+	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify)
 	install := &update.DigestInstaller{
-		Inner:  inner,
-		Path:   path,
-		Images: images,
-		// The town's pre-roll checks gate the install: they run before anything is
-		// installed or swapped, in this process, which is the new image's own gt
-		// and bd. The pair-level check reads the bd pin the pair installs, which
-		// the preflight's own checks, run by the image that is running now, do not.
-		// The registry match re-derives the pair for the file's commit, so a file
-		// the registry does not publish is refused before anything changes.
-		PreSwap: preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive),
+		Inner:   inner,
+		Path:    path,
+		Images:  images,
+		PreSwap: gate.check,
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
@@ -1007,35 +1011,63 @@ type pairLevelReads struct {
 	Database func(ctx context.Context, townRoot string) (int, error)
 }
 
-// preSwapPreflight is a digest install's pre-swap gate: it runs the daemon's
+// preSwapGate is a digest install's pre-swap gate: the seams a pair is checked
+// against, the daemon probe the running commit is read through, and the commit
+// that read returned. One gate belongs to one install's PreSwap.
+type preSwapGate struct {
+	townRoot string
+	run      func(context.Context, string) []PreflightResult
+	reads    pairLevelReads
+	derive   deriveFunc
+	verify   update.VerifyProbes
+	running  string
+}
+
+// preSwapPreflight builds a digest install's pre-swap gate: it runs the daemon's
 // pre-roll checks over townRoot through run and refuses the pair when any check
-// failed, naming every failed check and its message; then refuses a pair whose
-// bd pin carries another schema level than the live database; and finally
+// failed, naming every failed check and its message; reads the running daemon's
+// commit through verify and refuses a build it cannot read; then refuses a pair
+// whose bd pin carries another schema level than the live database; and finally
 // refuses a pair the registry does not derive for its commit, through
-// pairMatchesRegistry, so the file must name the pair the registry publishes.
-// A gate that cannot run — no town root, no check seam, or a seam that reports
-// no results — is a failure, never a pass: an install nothing checked is not an
-// install the checks passed. A nil derive is refused by pairMatchesRegistry
-// itself: a missing derivation is never a match.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc) func(context.Context, update.ImagePair) error {
-	return func(ctx context.Context, pair update.ImagePair) error {
-		switch {
-		case townRoot == "":
-			return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no town root to check")}
-		case run == nil:
-			return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no checks wired")}
-		}
-		if err := preflightFailure(run(ctx, townRoot)); err != nil {
-			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
-		}
-		if err := pairLevelSkew(ctx, townRoot, pair, reads); err != nil {
-			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
-		}
-		if err := pairMatchesRegistry(ctx, derive, pairValues(pair)); err != nil {
-			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
-		}
-		return nil
+// pairMatchesRegistry. A gate that cannot run — no town root, no check seam, no
+// daemon probe, or a seam that reports no results — is a failure, never a pass:
+// an install nothing checked is not an install the checks passed. A nil derive
+// is refused by pairMatchesRegistry itself.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes) *preSwapGate {
+	return &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify}
+}
+
+// check refuses a pair the gate cannot pass, as the preflight check, and records
+// the running commit it read. A run that cannot read the commit records none, so
+// the gate never reports a commit that run did not read.
+func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
+	g.running = ""
+	switch {
+	case g.townRoot == "":
+		return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no town root to check")}
+	case g.run == nil:
+		return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no checks wired")}
+	case g.verify == nil:
+		return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no daemon probe to read the running commit")}
 	}
+	if err := preflightFailure(g.run(ctx, g.townRoot)); err != nil {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+	}
+	running, err := g.verify.DaemonVersion(ctx)
+	if err != nil {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: fmt.Errorf("reading the running daemon's commit: %w", err)}
+	}
+	if running == "" {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the running daemon reported no commit")}
+	}
+	g.running = running
+	if err := pairLevelSkew(ctx, g.townRoot, pair, g.reads); err != nil {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+	}
+	if err := pairMatchesRegistry(ctx, g.derive, pairValues(pair)); err != nil {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+	}
+	return nil
 }
 
 // pairValues is the values file a pair names: its commit and images, the triple

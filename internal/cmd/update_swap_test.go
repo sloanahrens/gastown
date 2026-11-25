@@ -541,7 +541,9 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 
 	start := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	clock := &rollbackTestClock{now: start}
-	daemon := &lateDaemon{clock: clock, delay: 10 * time.Minute}
+	// The daemon runs the previous build until the swap puts the new pair on it,
+	// so the pre-swap gate reads a running commit rather than an empty one.
+	daemon := &lateDaemon{clock: clock, delay: 10 * time.Minute, commit: rollbackOldCommit}
 	ran := false
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) { return townRoot, nil },
