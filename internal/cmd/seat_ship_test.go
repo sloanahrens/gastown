@@ -90,8 +90,6 @@ func TestSeatShipFailuresExitOneAndPostNothingMore(t *testing.T) {
 		setup func(t *testing.T) (seatShipDeps, string)
 		want  string
 		posts int
-		// cancelled runs the command with a context that is already done.
-		cancelled bool
 	}{
 		{
 			name: "the post is refused",
@@ -125,14 +123,22 @@ func TestSeatShipFailuresExitOneAndPostNothingMore(t *testing.T) {
 			posts: 0,
 		},
 		{
-			name: "the context is already done",
+			name: "the record is too large for one comment",
 			setup: func(t *testing.T) (seatShipDeps, string) {
 				deps, _ := seatShipDepsOf(t, &seatShipFailingPost{Client: seatShipFixture(t)})
+				// Each outbox file is under its cap, but the two together are
+				// over the comment cap, and with no transcript there is no tail
+				// to drop.
+				big := bytes.Repeat([]byte("x"), 60<<10)
+				for _, name := range []string{outbox.ResultFile, outbox.NotesFile} {
+					if err := os.WriteFile(filepath.Join(deps.Outbox, name), big, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				return deps, "gt-seat"
 			},
-			want:      "context canceled",
-			posts:     0,
-			cancelled: true,
+			want:  "too large",
+			posts: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -141,12 +147,7 @@ func TestSeatShipFailuresExitOneAndPostNothingMore(t *testing.T) {
 			deps, bead := tc.setup(t)
 			var stderr bytes.Buffer
 			deps.Stderr = &stderr
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.cancelled {
-				cancel()
-			}
-			if code := runSeatShip(ctx, deps, "gastown", "nux", bead); code != 1 {
+			if code := runSeatShip(context.Background(), deps, "gastown", "nux", bead); code != 1 {
 				t.Fatalf("runSeatShip = %d, want 1", code)
 			}
 			line := stderr.String()
@@ -158,4 +159,118 @@ func TestSeatShipFailuresExitOneAndPostNothingMore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// seatShipBlockingPost is a beads client whose AddComment holds the post until
+// release is closed, the way a hung bead store holds it. The hold also ends
+// when the test's context does, so a post nothing releases cannot outlive the
+// test.
+type seatShipBlockingPost struct {
+	beads.Client
+	ctx     context.Context
+	release chan struct{}
+}
+
+func (c *seatShipBlockingPost) AddComment(id, comment string) error {
+	select {
+	case <-c.release:
+	case <-c.ctx.Done():
+	}
+	return errors.New("the bead store released the held post")
+}
+
+// TestSeatShipDeadlineRefusesANonPositiveBudget: a zero or negative deadline is
+// refused before anything is read or posted.
+func TestSeatShipDeadlineRefusesANonPositiveBudget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		deadline time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := &seatShipFailingPost{Client: seatShipFixture(t)}
+			deps, stderr := seatShipDepsOf(t, client)
+			deps.Deadline = tc.deadline
+			if code := runSeatShip(context.Background(), deps, "gastown", "nux", "gt-seat"); code != 1 {
+				t.Fatalf("runSeatShip = %d, want 1", code)
+			}
+			line := stderr.String()
+			want := "deadline " + tc.deadline.String()
+			if !strings.HasPrefix(line, "seat ship: ") || !strings.Contains(line, want) || strings.Count(line, "\n") != 1 {
+				t.Errorf("stderr = %q, want one seat ship line naming %q", line, want)
+			}
+			if client.calls != 0 {
+				t.Errorf("AddComment calls = %d, want 0", client.calls)
+			}
+		})
+	}
+}
+
+// TestSeatShipDeadlineStopsABlockedPost: a post the bead store holds past the
+// deadline returns 1 with the deadline named, and the run does not wait on the
+// store. The held post is released in cleanup, so its goroutine ends.
+func TestSeatShipDeadlineStopsABlockedPost(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	deps, stderr := seatShipDepsOf(t, &seatShipBlockingPost{Client: seatShipFixture(t), ctx: t.Context(), release: release})
+	deps.Deadline = time.Millisecond
+
+	got := make(chan int, 1)
+	go func() { got <- runSeatShip(context.Background(), deps, "gastown", "nux", "gt-seat") }()
+	code := awaitEventWithin(t, got, "runSeatShip")
+	if code != 1 {
+		t.Fatalf("runSeatShip = %d, want 1", code)
+	}
+	line := stderr.String()
+	want := "deadline " + deps.Deadline.String()
+	if !strings.HasPrefix(line, "seat ship: ") || !strings.Contains(line, want) || strings.Count(line, "\n") != 1 {
+		t.Errorf("stderr = %q, want one seat ship line naming %q", line, want)
+	}
+}
+
+// TestSeatShipCancelIsNotADeadline: a parent context that is canceled, before
+// the run or while the post is held, is reported as `seat ship: canceled` and
+// never as the deadline, and a refused run posts nothing.
+func TestSeatShipCancelIsNotADeadline(t *testing.T) {
+	t.Parallel()
+	t.Run("canceled before the run", func(t *testing.T) {
+		t.Parallel()
+		client := &seatShipFailingPost{Client: seatShipFixture(t)}
+		deps, stderr := seatShipDepsOf(t, client)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if code := runSeatShip(ctx, deps, "gastown", "nux", "gt-seat"); code != 1 {
+			t.Fatalf("runSeatShip = %d, want 1", code)
+		}
+		if got, want := stderr.String(), "seat ship: canceled\n"; got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+		if client.calls != 0 {
+			t.Errorf("AddComment calls = %d, want 0", client.calls)
+		}
+	})
+	t.Run("canceled while the post is held", func(t *testing.T) {
+		t.Parallel()
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		deps, stderr := seatShipDepsOf(t, &seatShipBlockingPost{Client: seatShipFixture(t), ctx: t.Context(), release: release})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		got := make(chan int, 1)
+		go func() { got <- runSeatShip(ctx, deps, "gastown", "nux", "gt-seat") }()
+		cancel()
+		if code := awaitEventWithin(t, got, "runSeatShip"); code != 1 {
+			t.Fatalf("runSeatShip = %d, want 1", code)
+		}
+		if got, want := stderr.String(), "seat ship: canceled\n"; got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
 }

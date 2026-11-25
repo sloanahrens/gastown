@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -34,19 +35,56 @@ type seatShipDeps struct {
 // comment on its bead, and the sandbox can exit instead of waiting for the
 // daemon to pull the record out (gt-7h8s5r). It returns the exit code: 0 once
 // the comment is posted, 1 with one `seat ship: <reason>` line on d.Stderr for
-// any failure. Nothing is retried.
+// any failure. Nothing is retried. The whole run, reads and post, must finish
+// within d.Deadline.
 func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string) int {
 	fail := func(err error) int {
 		reason := strings.Join(strings.Fields(err.Error()), " ")
 		_, _ = fmt.Fprintf(d.Stderr, "seat ship: %s\n", reason)
 		return 1
 	}
-	if err := ctx.Err(); err != nil {
-		return fail(err)
+	if d.Deadline <= 0 {
+		return fail(fmt.Errorf("deadline %s is not positive", d.Deadline))
 	}
+	if err := ctx.Err(); err != nil {
+		return fail(seatShipStopped(ctx, d.Deadline))
+	}
+	// The bead store's calls take no context, so a call that hangs cannot be
+	// canceled. The run goes in its own goroutine and this function waits on
+	// the deadline instead. The channel holds one outcome, so a run that
+	// finishes after the deadline sends and exits with no reader. Only the
+	// calling goroutine writes to d.Stderr.
+	runCtx, cancel := context.WithTimeout(ctx, d.Deadline)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- seatShipRecord(d, rig, polecat, bead) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fail(err)
+		}
+		return 0
+	case <-runCtx.Done():
+		return fail(seatShipStopped(ctx, d.Deadline))
+	}
+}
+
+// seatShipStopped is why a run ended before its record was posted. A canceled
+// parent context is reported as canceled; only an expired deadline names the
+// deadline.
+func seatShipStopped(ctx context.Context, deadline time.Duration) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return errors.New("canceled")
+	}
+	return fmt.Errorf("deadline %s passed before the record was posted", deadline)
+}
+
+// seatShipRecord reads the seat's record and posts it as the bead's SEAT-END
+// comment. It returns the first failure, wrapped with the step it came from.
+func seatShipRecord(d seatShipDeps, rig, polecat, bead string) error {
 	submitted, err := seatSubmitted(d.Beads, bead)
 	if err != nil {
-		return fail(fmt.Errorf("reading %s: %w", bead, err))
+		return fmt.Errorf("reading %s: %w", bead, err)
 	}
 	payload, err := seatship.Collect(seatship.CollectInput{
 		Rig:         rig,
@@ -59,14 +97,14 @@ func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string)
 		TailBytes:   seatShipTailBytes,
 	})
 	if err != nil {
-		return fail(err)
+		return fmt.Errorf("collecting %s: %w", bead, err)
 	}
 	comment, err := seatship.Encode(payload)
 	if err != nil {
-		return fail(err)
+		return fmt.Errorf("encoding %s: %w", bead, err)
 	}
 	if err := d.Beads.AddComment(bead, comment); err != nil {
-		return fail(fmt.Errorf("posting the record on %s: %w", bead, err))
+		return fmt.Errorf("posting the record on %s: %w", bead, err)
 	}
-	return 0
+	return nil
 }
