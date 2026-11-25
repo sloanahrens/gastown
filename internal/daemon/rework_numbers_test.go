@@ -1092,3 +1092,124 @@ func TestReworkNumbersStartCheckHonorsTheShutdownLock(t *testing.T) {
 		t.Errorf("the start check read the town's records %d times under shutdown.lock, want none", read)
 	}
 }
+
+// reworkNumbersStartAndJoin starts the patrol as Run does and joins the start
+// check it begins, so the test reads what that check left behind.
+func reworkNumbersStartAndJoin(t *testing.T, d *Daemon) {
+	t.Helper()
+	channel, stop := d.startReworkNumbersTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("an enabled rework_numbers started no ticker")
+	}
+	d.stopReworkNumbersPatrol(stop)
+}
+
+// reworkNumbersLastRunAt reads the last-run record the town holds.
+func reworkNumbersLastRunAt(t *testing.T, town string) time.Time {
+	t.Helper()
+	at, found, err := readReworkNumbersLastRun(reworkNumbersLastRunPath(town))
+	if err != nil || !found {
+		t.Fatalf("the last-run record = %v, found %v; want a record", err, found)
+	}
+	return at
+}
+
+// TestReworkNumbersStartRecordThisWeekRunsNothing: a daemon that starts with a
+// record naming this week runs no step, logs that the week already ran, and
+// leaves the record as it was.
+func TestReworkNumbersStartRecordThisWeekRunsNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	var logged bytes.Buffer
+	d := reworkNumbersTestDaemon(t, town, &logged)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+	recorded := reworkProgramNow().Add(-time.Hour)
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), recorded); err != nil {
+		t.Fatalf("the last-run record: %v", err)
+	}
+
+	reworkNumbersStartAndJoin(t, d)
+
+	if read != 0 {
+		t.Errorf("a start inside the recorded week read the town's records %d times, want none", read)
+	}
+	if !strings.Contains(logged.String(), "already ran") {
+		t.Errorf("a start inside the recorded week logged %q, want the week named as already run", logged.String())
+	}
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(recorded) {
+		t.Errorf("the record moved to %s, want it kept at %s", got, recorded)
+	}
+}
+
+// TestReworkNumbersStartRecordEarlierWeekRunsOnce: a daemon that starts with a
+// record naming an earlier week runs the step once, and the record then names
+// this week, so the next start in the week runs nothing.
+func TestReworkNumbersStartRecordEarlierWeekRunsOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	var logged bytes.Buffer
+	d := reworkNumbersTestDaemon(t, town, &logged)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), reworkProgramNow().AddDate(0, 0, -7)); err != nil {
+		t.Fatalf("the last-run record: %v", err)
+	}
+
+	reworkNumbersStartAndJoin(t, d)
+
+	if read != 1 {
+		t.Errorf("a start after an earlier week's run read the town's records %d times, want once", read)
+	}
+	if !strings.Contains(logged.String(), "is due") {
+		t.Errorf("a start after an earlier week logged %q, want this week named as due", logged.String())
+	}
+	reworkProgramRead(t, town)
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(reworkProgramNow()) {
+		t.Errorf("the record names %s after the run, want this week's clock %s", got, reworkProgramNow())
+	}
+}
+
+// TestReworkNumbersStartRecordFailedStepKeepsRecord: a start whose step fails
+// logs the error and leaves the record at the earlier week, so the next start
+// finds that week still due and tries the run again.
+func TestReworkNumbersStartRecordFailedStepKeepsRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var logged bytes.Buffer
+	d := reworkNumbersTestDaemon(t, town, &logged)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	earlier := reworkProgramNow().AddDate(0, 0, -7)
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), earlier); err != nil {
+		t.Fatalf("the last-run record: %v", err)
+	}
+	d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+		step := newReworkNumbersStep(town, now)
+		step.read = func() (reworkNumbersRecord, error) {
+			return reworkNumbersRecord{}, errors.New("the landing ledger is unreadable")
+		}
+		return step
+	}
+
+	reworkNumbersStartAndJoin(t, d)
+
+	if !strings.Contains(logged.String(), "the landing ledger is unreadable") {
+		t.Errorf("a failed start logged %q, want the error named", logged.String())
+	}
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(earlier) {
+		t.Fatalf("a failed step moved the record to %s, want it kept at %s", got, earlier)
+	}
+
+	read := 0
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+	reworkNumbersStartAndJoin(t, d)
+
+	if read != 1 {
+		t.Errorf("the next start read the town's records %d times, want the retry once", read)
+	}
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(reworkProgramNow()) {
+		t.Errorf("the retry left the record at %s, want this week's clock %s", got, reworkProgramNow())
+	}
+}
