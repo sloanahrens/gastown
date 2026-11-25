@@ -38,27 +38,7 @@ var fetchValueFlags = map[string]bool{
 // depth-1 checkout does not have (gt-ebco0).
 func TestGateWorkflowFetchesMainNotAllBranches(t *testing.T) {
 	t.Parallel()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(root, GateWorkflowPath("gate")))
-	if err != nil {
-		t.Fatalf("reading this repo's gate workflow: %v", err)
-	}
-	var doc struct {
-		Jobs map[string]struct {
-			Steps []gateStep `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("parsing this repo's gate workflow: %v", err)
-	}
-	job, ok := doc.Jobs["gate"]
-	if !ok {
-		t.Fatal("this repo's gate workflow has no gate job")
-	}
-	problems, deepensMain := gateFetchProblems(job.Steps)
+	problems, deepensMain := gateFetchProblems(gateWorkflowSteps(t))
 	for _, p := range problems {
 		t.Error(p)
 	}
@@ -372,24 +352,56 @@ func gateWorkflowSteps(t *testing.T) []gateStep {
 	return job.Steps
 }
 
-// TestGateWorkflowHeadFetchIsBlobless holds the gate's history fetch to a
-// blobless one: the gate reads the candidate's commits (git describe, the
-// landing's ancestry) and the working tree comes from the checkout, so the
-// fetch has no use for file contents of old history, and fetching them costs
-// 10 to 17 seconds of every gate run (gt-gyrhgu).
-func TestGateWorkflowHeadFetchIsBlobless(t *testing.T) {
-	t.Parallel()
+// blobFilterProblem names what is wrong with the gate's history fetch: no step
+// deepens main, or the fetch that does lacks --filter=blob:none. It returns ""
+// when the fetch is blobless.
+func blobFilterProblem(steps []gateStep) string {
 	const want = "--filter=blob:none"
-	for _, step := range gateWorkflowSteps(t) {
+	for _, step := range steps {
 		for _, words := range gitFetchWords(step.Run) {
 			if !slices.Contains(words, gateDeepenMainRef) {
 				continue
 			}
 			if !slices.Contains(words, want) {
-				t.Errorf("the fetch that deepens main does not pass %s: %q", want, words)
+				return fmt.Sprintf("the fetch that deepens main does not pass %s: %q", want, words)
 			}
-			return
+			return ""
 		}
 	}
-	t.Fatal("no step fetches origin/main with full history")
+	return "no step fetches origin/main with full history"
+}
+
+// TestBlobFilterProblem drives blobFilterProblem with synthetic steps, so its
+// refusing branches run and not only the committed workflow's passing one.
+func TestBlobFilterProblem(t *testing.T) {
+	t.Parallel()
+	const deepen = "git fetch --no-tags --depth=2147483647 origin " + gateDeepenMainRef
+	tests := []struct {
+		name string
+		run  string
+		want bool
+	}{
+		{name: "blobless deepen passes", run: "git fetch --filter=blob:none --depth=2147483647 origin " + gateDeepenMainRef},
+		{name: "deepen without the filter is refused", run: deepen, want: true},
+		{name: "the filter on another fetch does not count", run: "git fetch --filter=blob:none origin +refs/tags/*:refs/tags/*\n" + deepen, want: true},
+		{name: "no fetch of main is refused", run: "git fetch origin +refs/tags/*:refs/tags/*", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := blobFilterProblem([]gateStep{{Run: tc.run}})
+			if (got != "") != tc.want {
+				t.Errorf("blobFilterProblem = %q, want a problem = %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGateWorkflowHeadFetchIsBlobless holds the committed gate workflow's
+// history fetch to a blobless one (gt-gyrhgu).
+func TestGateWorkflowHeadFetchIsBlobless(t *testing.T) {
+	t.Parallel()
+	if problem := blobFilterProblem(gateWorkflowSteps(t)); problem != "" {
+		t.Error(problem)
+	}
 }

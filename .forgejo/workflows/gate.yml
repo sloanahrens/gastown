@@ -22,10 +22,8 @@
 # tag, which a depth-1 checkout alone does not have, and the tags step below
 # fetches the tags. main is the base the candidate is built on, so the
 # candidate's history reaches it. `fetch-depth: 0` would fetch every head
-# instead of these two (gt-ebco0). The fetch is blobless (--filter=blob:none):
-# the gate reads the candidate's commits and tags, and the checkout supplies
-# the working tree, so old history's file contents are not fetched, which saves
-# 10 to 17 seconds of every gate run (gt-gyrhgu).
+# instead of these two (gt-ebco0). The fetch is blobless (--filter=blob:none): the
+# gate reads history, never old file contents (gt-gyrhgu).
 name: ci
 on:
   push:
