@@ -117,6 +117,11 @@ type Readiness struct {
 	// however eligible the bead is, the dispatcher never reaches it
 	// (gt-mknmb).
 	OpenBlockers []string
+	// WaitsOn names the open beads this bead depends on: the same ids as
+	// OpenBlockers. The claim rule reads a peer's wait from
+	// specdispatch.Claimant.WaitsOn (gt-353gam); claimOf passes this field on
+	// as that (gt-s9p5z8), so nothing reads it yet.
+	WaitsOn []string
 }
 
 // DuplicateMatch records one existing bead whose content overlaps the

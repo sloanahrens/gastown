@@ -881,11 +881,13 @@ func (p *duplicatePools) enrichOverlapping(stores slingStores, beadsDir string, 
 // overlap guard can ask that of a pool row instead of a bd read per peer
 // (gt-mknmb).
 //
-// The list row carries most of it. The two fields it does not are the ones the
+// The list row carries most of it. The fields it does not are the ones the
 // batched show is for: the design, and the blocking dependencies with the
-// statuses that say which of them are still open. A row the show did not
-// answer leaves those two unread, which reads as the dispatcher's to sling —
-// the guard keeps refusing, and the pool warns that its comparison is degraded.
+// statuses that say which of them are still open. bd list's dependency entries
+// carry no ids (depends_on_id, not id), so WaitsOn is read off the show too
+// (gt-77ivaj). A row the show did not answer leaves those unread, which reads as
+// the dispatcher's to sling — the guard keeps refusing, and the pool warns that
+// its comparison is degraded.
 func readinessOf(row *beads.Issue, detail duplicateDetail) sling.Readiness {
 	return sling.Readiness{
 		Assignee:     row.Assignee,
@@ -895,6 +897,7 @@ func readinessOf(row *beads.Issue, detail duplicateDetail) sling.Readiness {
 		Description:  row.Description,
 		Acceptance:   row.AcceptanceCriteria,
 		OpenBlockers: detail.OpenBlockers,
+		WaitsOn:      detail.OpenBlockers,
 	}
 }
 
@@ -905,6 +908,7 @@ func readinessOf(row *beads.Issue, detail duplicateDetail) sling.Readiness {
 // record does — the halved row a pool fetch degrades to is not the one to
 // answer it from (gt-mknmb).
 func readinessOfBeadInfo(info *beadInfo) sling.Readiness {
+	open := beads.UnresolvedBlockerIDs(info.Dependencies)
 	return sling.Readiness{
 		Assignee:     info.Assignee,
 		Labels:       info.Labels,
@@ -912,7 +916,8 @@ func readinessOfBeadInfo(info *beadInfo) sling.Readiness {
 		Notes:        info.Notes,
 		Description:  info.Description,
 		Acceptance:   info.Acceptance,
-		OpenBlockers: beads.UnresolvedBlockerIDs(info.Dependencies),
+		OpenBlockers: open,
+		WaitsOn:      open,
 	}
 }
 

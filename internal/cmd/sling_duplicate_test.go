@@ -808,6 +808,86 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 	}
 }
 
+// dependencyShapedBD is a store whose List rows carry each dependency as bd
+// lists it: a bare relation record with no id and no status, which IssueDep
+// decodes with an empty ID. Show carries the ids and statuses.
+type dependencyShapedBD struct{ listLikeBD }
+
+func (s dependencyShapedBD) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	rows, err := s.listLikeBD.List(opts)
+	for _, row := range rows {
+		for i := range row.Dependencies {
+			row.Dependencies[i] = beads.IssueDep{DependencyType: row.Dependencies[i].DependencyType}
+		}
+	}
+	return rows, err
+}
+
+// TestReadinessCarriesWhatTheBeadWaitsOn is gt-77ivaj's acceptance: the readiness
+// a pool row and the sling-time candidate carry name the open beads the bead
+// depends on, and not a closed one.
+func TestReadinessCarriesWhatTheBeadWaitsOn(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-open", Title: "open prerequisite", Status: "open"},
+		beads.Issue{ID: "gt-done", Title: "closed prerequisite", Status: "closed"},
+		beads.Issue{ID: "gt-waiter", Title: "waits on both", Status: "open", Priority: 2,
+			Description: "TestSharedStep fails for the waiter."},
+	)
+	for _, dep := range []string{"gt-open", "gt-done"} {
+		if err := db.AddDependency("gt-waiter", dep); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+	}
+	townRoot := duplicateTown(t)
+	warn := func(dir string, err error) { t.Errorf("enrichment of %s failed: %v", dir, err) }
+	store := dependencyShapedBD{listLikeBD{Client: db}}
+
+	t.Run("a pool row names its open dependency only", func(t *testing.T) {
+		pool, err := fetchDuplicatePoolFrom(store, warn, duplicateBeadsDir(townRoot, "gt-waiter"))
+		if err != nil {
+			t.Fatalf("fetchDuplicatePoolFrom: %v", err)
+		}
+		for _, c := range pool {
+			if c.ID != "gt-waiter" {
+				continue
+			}
+			if got := strings.Join(c.Ready.WaitsOn, ","); got != "gt-open" {
+				t.Errorf("pool row WaitsOn = %q, want gt-open", got)
+			}
+			return
+		}
+		t.Fatal("the pool has no row for gt-waiter")
+	})
+
+	t.Run("the sling-time candidate names its open dependency only", func(t *testing.T) {
+		pools := newDuplicatePools(func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
+			return fetchDuplicatePoolFrom(store, warn, beadsDir)
+		}, noPeerHolds)
+		info := &beadInfo{
+			Title:       "waits on both",
+			Status:      "open",
+			Priority:    2,
+			Description: "TestSharedStep fails for the waiter.",
+			Dependencies: []beads.IssueDep{
+				{ID: "gt-open", DependencyType: "blocks", Status: "open"},
+				{ID: "gt-done", DependencyType: "blocks", Status: "closed"},
+			},
+		}
+		candidate, _, err := pools.check(slingStores{}, townRoot, "gt-waiter", info)
+		if err != nil {
+			t.Fatalf("checkSlingDuplicates: %v", err)
+		}
+		if candidate == nil {
+			t.Fatal("the bead names TestSharedStep, so the check has to inspect it")
+		}
+		if got := strings.Join(candidate.Ready.WaitsOn, ","); got != "gt-open" {
+			t.Errorf("candidate WaitsOn = %q, want gt-open", got)
+		}
+	})
+}
+
 // duplicateTown is a temp town whose gt- prefix routes to the gastown rig,
 // where the duplicate check reads its pool.
 func duplicateTown(t *testing.T) string {
