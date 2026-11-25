@@ -250,6 +250,64 @@ func TestClusterDriftSbxCompareRefusesBeforeAnyRead(t *testing.T) {
 	}
 }
 
+// TestClusterDriftSbxWiring holds the compare's seams and its two other error
+// sources: a nil render seam and a nil read runner are each refused before
+// anything is rendered or read, an --exec-via form the guard does not accept is
+// returned as the guard's own error, and a refusing render's error is returned
+// as its own. Every row reads nothing from the cluster.
+func TestClusterDriftSbxWiring(t *testing.T) {
+	t.Parallel()
+	renderErr := errors.New("helm failed")
+	for _, tc := range []struct {
+		name    string
+		adjust  func(*clusterDriftDeps, *sbxCompareSeam)
+		wantErr string
+		// wantNothingReadText holds the two unwired seams to the message saying
+		// no input was read; the guard and render errors keep their own words.
+		wantNothingReadText bool
+		wantErrIs           error
+		wantRenders         int
+	}{
+		{name: "no render seam is wired", adjust: func(d *clusterDriftDeps, _ *sbxCompareSeam) {
+			d.render.renderSbx = nil
+		}, wantErr: "no gt-sbx set render is wired", wantNothingReadText: true},
+		{name: "no read runner is wired", adjust: func(d *clusterDriftDeps, _ *sbxCompareSeam) {
+			d.kubectl = nil
+		}, wantErr: "no kubectl read runner is wired", wantNothingReadText: true},
+		{name: "the exec-via form is refused", adjust: func(d *clusterDriftDeps, _ *sbxCompareSeam) {
+			d.execVia = "ssh:gt-sbx-ctx:sandbox-node"
+		}, wantErr: "is not accepted"},
+		{name: "the render refuses", adjust: func(d *clusterDriftDeps, seam *sbxCompareSeam) {
+			d.render.renderSbx = func(_ context.Context, in sbx.Inputs) (sbx.Set, error) {
+				seam.renders = append(seam.renders, in)
+				return sbx.Set{}, renderErr
+			}
+		}, wantErr: "cannot render the gt-sbx desired set to compare", wantErrIs: renderErr, wantRenders: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, seam, out := sbxCompareDeps(t, sbxCompareRecord())
+			tc.adjust(&d, seam)
+			err := compareSbxClusterDrift(context.Background(), d)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %v, want one naming %q; printed:\n%s", err, tc.wantErr, out)
+			}
+			if tc.wantNothingReadText && !strings.Contains(err.Error(), "nothing was read") {
+				t.Errorf("error %q, want it to say nothing was read", err)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Errorf("error %v, want it to keep %v", err, tc.wantErrIs)
+			}
+			if len(seam.reads) != 0 {
+				t.Errorf("read %q, want nothing", seam.reads)
+			}
+			if len(seam.renders) != tc.wantRenders {
+				t.Errorf("rendered %d times, want %d", len(seam.renders), tc.wantRenders)
+			}
+		})
+	}
+}
+
 // TestClusterDriftSbxFlagsRegisterAndRoute holds the two flags to their defaults on
 // the real command, and each --cluster value the parsed flags carry to the compare
 // it selects: the default and control run the control compare, which reads the
