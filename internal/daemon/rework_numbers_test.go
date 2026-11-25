@@ -1093,6 +1093,52 @@ func TestReworkNumbersStartCheckHonorsTheShutdownLock(t *testing.T) {
 	}
 }
 
+// TestReworkNumbersStartCheckOffRunsNothing is the patrol-off row of the start
+// check: a daemon whose rework_numbers patrol is off starts no ticker, builds no
+// step, reads no records, writes neither the document nor the last-run record,
+// and logs nothing for the patrol.
+func TestReworkNumbersStartCheckOffRunsNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	built := 0
+	var logged bytes.Buffer
+	d := reworkNumbersTestDaemon(t, town, &logged)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ReworkNumbers: &agentconfig.ReworkNumbersConfig{Enabled: false},
+	}}
+	source := reworkProgramSource(t, &read)
+	d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+		built++
+		return source(town, now)
+	}
+
+	channel, stop := d.startReworkNumbersTicker()
+	// The production join, bounded by the patrol's own wait: with nothing started
+	// it returns at once, and a run that never ends cannot hang the test.
+	d.stopReworkNumbersPatrol(stop)
+	if channel != nil || stop != nil {
+		t.Fatal("a disabled rework_numbers started its ticker")
+	}
+
+	if built != 0 {
+		t.Errorf("the start check built %d step(s) with the patrol off, want none", built)
+	}
+	if read != 0 {
+		t.Errorf("the start check read the town's records %d times with the patrol off, want none", read)
+	}
+	if _, err := os.Stat(reworkNumbersLastRunPath(town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the start check wrote a last-run record with the patrol off: stat error %v, want not exist", err)
+	}
+	if _, err := os.Stat(reworkProgramOut(t, town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the start check wrote the document with the patrol off: stat error %v, want not exist", err)
+	}
+	if logged.Len() != 0 {
+		t.Errorf("the start check logged %q with the patrol off, want nothing", logged.String())
+	}
+}
+
 // reworkNumbersStartAndJoin starts the patrol as Run does and joins the start
 // check it begins, so the test reads what that check left behind.
 func reworkNumbersStartAndJoin(t *testing.T, d *Daemon) {
