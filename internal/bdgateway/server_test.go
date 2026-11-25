@@ -1228,6 +1228,109 @@ func TestBdgwBrokenClientStream(t *testing.T) {
 	}
 }
 
+// lostReplyText is the fixed text the call log carries for a call that started
+// but whose exit frame never reached the caller.
+const lostReplyText = "the exit frame did not reach the caller: it stopped reading; the call may have run to its end, check before repeating"
+
+// lostExitReply writes output and bd's stderr then the exit frame. The broken
+// response stops reading at its second write, so no exit frame reaches the
+// caller. Like the executor, it hands the frames sink bd's stderr start.
+type lostExitReply struct{}
+
+func (lostExitReply) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
+	if sink, ok := frames.(StderrHeadSink); ok {
+		sink.SetStderrHead("bd: half a reply\n")
+	}
+	if err := WriteFrame(frames, Frame{Kind: FrameStdout, Payload: []byte("out\n")}); err != nil {
+		return err
+	}
+	return WriteFrame(frames, Frame{Kind: FrameStderr, Payload: []byte("bd: half a reply\n")})
+}
+
+// TestServeLostExitFrame: a call that started but whose exit frame never reached
+// the caller is logged as ExitRefused with the fixed lost-reply text, so the
+// operator knows the call may have done its work before it is repeated. bd's
+// stderr does not replace the text.
+func TestServeLostExitFrame(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	log := newTestCallLogWithDir(t, dir)
+	g := newTestGateway(t, mustStore(t), log, lostExitReply{})
+	g.ServeHTTP(&brokenResponse{}, execRequest(t, testReadToken, Request{Argv: []string{"show", "gt-abc"}}, ""))
+
+	lines := closedCallLines(t, log, dir)
+	if len(lines) != 1 {
+		t.Fatalf("call log lines = %d, want 1", len(lines))
+	}
+	e := decodeEntry(t, lines[0])
+	if e.ExitCode != ExitRefused {
+		t.Errorf("exit_code = %d, want %d: no exit frame reached the caller", e.ExitCode, ExitRefused)
+	}
+	if e.Error != lostReplyText {
+		t.Errorf("error = %q, want the fixed lost-reply text %q", e.Error, lostReplyText)
+	}
+}
+
+// stderrThenExit writes bd's stderr then the status bd chose, as a call bd
+// itself failed does. Like the executor, it hands the frames sink the start of
+// bd's stderr.
+type stderrThenExit struct {
+	stderr string
+	exit   int
+}
+
+func (s stderrThenExit) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
+	if sink, ok := frames.(StderrHeadSink); ok {
+		sink.SetStderrHead(s.stderr)
+	}
+	if err := WriteFrame(frames, Frame{Kind: FrameStderr, Payload: []byte(s.stderr)}); err != nil {
+		return err
+	}
+	return WriteFrame(frames, ExitFrame(s.exit))
+}
+
+// TestServeLostExitFrameNone: a call with an exit frame, and a call the gateway
+// refused before it started, keep their own error text and never carry the
+// lost-reply text that says the exit frame went missing.
+func TestServeLostExitFrameNone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		runner    CallRunner
+		exitCode  int
+		wantError string
+	}{
+		{name: "exit frame", runner: stderrThenExit{exit: 2}, exitCode: 2},
+		{name: "exit frame with bd stderr", runner: stderrThenExit{stderr: "bd: no such bead\ndetail", exit: 1}, exitCode: 1, wantError: "bd: no such bead"},
+		{name: "pre-start refusal", runner: &stubRunner{err: errors.New("no bd binary at /opt/x/bd")}, exitCode: ExitRefused, wantError: "no bd binary at /opt/x/bd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			log := newTestCallLogWithDir(t, dir)
+			g := newTestGateway(t, mustStore(t), log, tc.runner)
+			rec := httptest.NewRecorder()
+			g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show", "gt-abc"}}, ""))
+
+			lines := closedCallLines(t, log, dir)
+			if len(lines) != 1 {
+				t.Fatalf("call log lines = %d, want 1", len(lines))
+			}
+			e := decodeEntry(t, lines[0])
+			if e.ExitCode != tc.exitCode {
+				t.Errorf("exit_code = %d, want %d", e.ExitCode, tc.exitCode)
+			}
+			if strings.Contains(e.Error, lostReplyText) {
+				t.Errorf("error = %q carries the lost-reply text, want this call's own text", e.Error)
+			}
+			if e.Error != tc.wantError {
+				t.Errorf("error = %q, want %q", e.Error, tc.wantError)
+			}
+		})
+	}
+}
+
 // garbageRunner writes bytes that are not a frame, standing in for a runner
 // that broke the frame contract.
 type garbageRunner struct{}
