@@ -761,6 +761,17 @@ type StreamCutter interface {
 	StreamCut(rig, polecat string) (bool, error)
 }
 
+// StreamCutDater is the optional StreamCutter extension that also answers when
+// the cut was written: the timestamp of the cut record. A caller can age a cut
+// from its first sight instead of waiting for a second sample. A host that
+// implements StreamCutter without this has no such answer.
+type StreamCutDater interface {
+	// StreamCutAt reports whether the seat's newest transcript ends in a cut
+	// model stream, as StreamCut does, and the timestamp of that cut record.
+	// An error means the read could not answer, and the time is not to be used.
+	StreamCutAt(rig, name string) (bool, time.Time, error)
+}
+
 // UnnamedEscalationFiler is the optional Env extension that tells the overseer about a seat
 // that stopped on ESCALATED without filing an escalation that names its bead: it files one on the
 // seat's behalf, idempotently by its own key. A host without it files nothing.

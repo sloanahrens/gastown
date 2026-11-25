@@ -324,6 +324,11 @@ type Daemon struct {
 	// Tests answer from a fake.
 	sandboxStreamCutFn func(townRoot string, rec session.SandboxRecord) (bool, error)
 
+	// sandboxStreamCutAtFn answers whether a sandbox seat's newest transcript
+	// ends in a cut stream and when that cut was written (see
+	// sandboxStreamCutAtFor); nil asks the sandbox backend. Tests answer from a fake.
+	sandboxStreamCutAtFn func(townRoot string, rec session.SandboxRecord) (bool, time.Time, error)
+
 	// sandboxExists asks a gateway whether it has a sandbox of that name (see
 	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
 	// answer from a stub.
