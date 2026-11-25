@@ -520,6 +520,23 @@ func (m *Manager) lockPool() (*flock.Flock, error) {
 	return fl, nil
 }
 
+// LockSeatPick takes the rig's seat-pick lock, blocking while another process holds it.
+func (m *Manager) LockSeatPick() (unlock func(), err error) {
+	lockDir := filepath.Join(m.rig.Path, ".runtime", "locks")
+	if err = os.MkdirAll(lockDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating lock dir: %w", err)
+	}
+	fl := flock.New(filepath.Join(lockDir, "seat-pick.lock"))
+	if err = fl.Lock(); err != nil {
+		return nil, fmt.Errorf("acquiring seat-pick lock: %w", err)
+	}
+	return func() {
+		if err := fl.Unlock(); err != nil {
+			m.warnf("releasing seat-pick lock: %v", err)
+		}
+	}, nil
+}
+
 // CheckDoltHealth verifies that the Dolt database is reachable before spawning.
 // Returns an error if Dolt exists but is unhealthy after retries.
 // Returns nil if beads is not configured (test/setup environments).
