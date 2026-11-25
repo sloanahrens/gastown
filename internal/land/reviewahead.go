@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -55,8 +56,50 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	if OverseerReviewed(issue, w.Head) {
 		return AheadSkipped, nil
 	}
-	// NEXT BEAD: here ReviewAhead fetches the target and the branch under the
-	// shared git lock and runs om on the head. Until that lands, every
-	// submission that reaches this point is AheadSkipped and ctx is unused.
+	// started is when this review began: the land log dates it now, and a later
+	// bead stores it as the record's started_at. Nothing stores a record yet.
+	started := l.aheadNow()
+	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
+	if err := l.aheadFetches(l.open(l.Repo), w); err != nil {
+		return "", err
+	}
+	// NEXT BEAD: here ReviewAhead takes its own worktree at base and runs om on
+	// the head. Until that lands, every submission that reaches this point is
+	// AheadSkipped and ctx is unused.
 	return AheadSkipped, nil
+}
+
+// aheadNow is the clock a review is dated by: the store's clock when it sets
+// one, the wall clock otherwise, as AheadStore documents.
+func (l *Lander) aheadNow() time.Time {
+	if l.Ahead != nil && l.Ahead.Now != nil {
+		return l.Ahead.Now()
+	}
+	return time.Now()
+}
+
+// aheadFetches brings the target and the work branch into the lander's clone,
+// the two fetches Land makes before it checks the head out. They run under the
+// shared git lock, which the deferred unlock releases on every return path and
+// on a panic's unwind. The lock lives here, not in ReviewAhead, because it is
+// not reentrant and the worktree add a later bead makes after the fetches takes
+// it for itself.
+//
+// A submission the landing would refuse as not pushed has no head to review, so
+// its rejection is returned as an error: the pool writes no bead and rejects
+// nothing, and the serial landing's own check runs the rejection for real.
+func (l *Lander) aheadFetches(g Repo, w Work) error {
+	l.gitMu.Lock()
+	defer l.gitMu.Unlock()
+	if err := l.fetchTarget(g, w.Target); err != nil {
+		return &InfraError{Stage: "fetch target", Err: err}
+	}
+	rej, err := l.checkHeadPushed(g, w)
+	if err != nil {
+		return err
+	}
+	if rej != nil {
+		return rej
+	}
+	return nil
 }
