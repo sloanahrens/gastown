@@ -859,6 +859,40 @@ func TestGuardSelectsGetwd(t *testing.T) {
 	}
 }
 
+// TestGuardSelectsCallercwdReaders: the row's judge is true for every file
+// TestGuardPackagesDoNotReadTheVariable reads, the guard sources it names, the
+// tap_guard files directly under internal/cmd, and the guardlint package with
+// its baseline, and false for an unrelated file or a test file. The package
+// fan-out that selects this test for any Go file is by design and is not
+// asserted here (gt-wxvfzd).
+func TestGuardSelectsCallercwdReaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		rel  string
+		want bool // whether the row's judge must select the file
+	}{
+		{"internal/cmd/hook.go", true},
+		{"internal/cmd/role.go", true},
+		{"internal/cmd/signal_stop.go", true},
+		{"internal/workspace/find.go", true},
+		{"internal/cmd/tap_guard_dangerous.go", true},
+		{"internal/guardlint/guardlint.go", true},
+		{"internal/guardlint/baseline.txt", true},
+		{"internal/cmd/seat_ship_cmd.go", false},
+		{"internal/cmd/tap_guard_dangerous_test.go", false},
+		{"internal/guardlint/guardlint_test.go", false},
+		{"internal/cmdtree/cmdtree.go", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.rel, func(t *testing.T) {
+			t.Parallel()
+			if got := callerReaderInput(tt.rel); got != tt.want {
+				t.Errorf("callerReaderInput(%q) = %v, want %v", tt.rel, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestGuardSelectsRing: TestHoldSitesAreTheOnlyReaders walks every non-test Go
 // file under internal/ except internal/ring, so a change to any of them selects
 // it, and a deleted hold site fails its one-call-per-site check. A change to a

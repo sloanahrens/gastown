@@ -565,6 +565,18 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestGuardPackagesDoNotReadTheVariable reads the guard sources it
+		// names, the tap_guard files directly under internal/cmd and the
+		// guardlint package with its baseline, and fails when one of them
+		// imports callercwd or names GT_CALLER_CWD. The list is not a tree
+		// walk, so only those files select it. A deleted input fails its read,
+		// so a deletion is its input too (gt-wxvfzd).
+		pkg:     "internal/callercwd",
+		tests:   []string{"TestGuardPackagesDoNotReadTheVariable"},
+		judges:  callerReaderInput,
+		removal: true,
+	},
+	{
 		// TestHoldSitesAreTheOnlyReaders walks every non-test Go file under
 		// internal/ except internal/ring, which it skips, so any such file is
 		// its input. A deleted hold site fails its one-call-per-site check, so
@@ -891,4 +903,29 @@ func underInternal(rel string) bool {
 
 func underInternalOrCmd(rel string) bool {
 	return nonTestGo(rel) && (strings.HasPrefix(rel, "internal/") || strings.HasPrefix(rel, "cmd/"))
+}
+
+// callerReaderSources are the guard sources TestGuardPackagesDoNotReadTheVariable
+// reads by path: the list its guardSourceFiles names.
+var callerReaderSources = map[string]bool{
+	"internal/cmd/hook.go":        true,
+	"internal/cmd/role.go":        true,
+	"internal/cmd/signal_stop.go": true,
+	"internal/workspace/find.go":  true,
+}
+
+// callerReaderInput reports whether TestGuardPackagesDoNotReadTheVariable reads
+// rel: a listed guard source, a tap_guard file directly under internal/cmd, or
+// a non-test Go file directly under internal/guardlint with its baseline.
+func callerReaderInput(rel string) bool {
+	if callerReaderSources[rel] {
+		return true
+	}
+	switch path.Dir(rel) {
+	case "internal/cmd":
+		return strings.HasPrefix(path.Base(rel), "tap_guard") && nonTestGo(rel)
+	case "internal/guardlint":
+		return nonTestGo(rel) || rel == "internal/guardlint/baseline.txt"
+	}
+	return false
 }
