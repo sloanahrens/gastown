@@ -412,3 +412,105 @@ func TestDoltGatewaySectionConflictGapAddsNothing(t *testing.T) {
 		t.Errorf("the bucket after the new baseline = %v, want 3 in the conflicts column", last)
 	}
 }
+
+// withLanes is a stats answer carrying the cap counters and the lane counters;
+// a nil cap hit count leaves that field out of the answer.
+func withLanes(refusals, waits uint64, capHits *uint64) bdgateway.GatewayStats {
+	s := gatewayCaps(1, 2, refusals)
+	s.LaneWaits, s.LaneCapHits = uint64p(waits), capHits
+	return s
+}
+
+// TestDoltGatewaySectionCountsLanes: the lane wait and lane cap hit counters are
+// counted like the refusals, each in its own column.
+func TestDoltGatewaySectionCountsLanes(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{withLanes(5, 1, uint64p(0)), withLanes(6, 4, uint64p(1))}}
+	section := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440")
+
+	got, err := section.read(context.Background(), start)
+	if err != nil {
+		t.Fatalf("the first read: %v", err)
+	}
+	if want := []string{"ten minutes", "429 refusals", "lane waits", "lane cap hits"}; !slices.Equal(got.Head, want) {
+		t.Errorf("Head = %v, want %v", got.Head, want)
+	}
+	got, err = section.read(context.Background(), start.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("the second read: %v", err)
+	}
+	if last, want := got.Rows[len(got.Rows)-1], []string{"15:30-15:40", "1", "3", "1"}; !slices.Equal(last, want) {
+		t.Errorf("the bucket the deltas fell in = %v, want %v", last, want)
+	}
+}
+
+// TestDoltGatewaySectionOmitsTheLaneColumns: an answer without lane waits leaves
+// both lane columns out, one with lane waits and no cap hits leaves only the cap
+// hit column out, and the note names each.
+func TestDoltGatewaySectionOmitsTheLaneColumns(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		with bdgateway.GatewayStats
+		head []string
+		note string
+	}{
+		{"no lane waits", gatewayCaps(1, 2, 3), []string{"ten minutes", "429 refusals"}, "no lane counts"},
+		{"no cap hits", withLanes(3, 1, nil), []string{"ten minutes", "429 refusals", "lane waits"}, "no lane cap hits"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{tc.with}}
+			got, err := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440").read(context.Background(), now)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if !slices.Equal(got.Head, tc.head) {
+				t.Errorf("Head = %v, want %v", got.Head, tc.head)
+			}
+			for _, row := range got.Rows {
+				if len(row) != len(tc.head) {
+					t.Errorf("row %v has %d cells, want %d for the head", row, len(row), len(tc.head))
+				}
+			}
+			if !strings.Contains(got.Note, tc.note) {
+				t.Errorf("Note = %q, want it to say %q", got.Note, tc.note)
+			}
+		})
+	}
+}
+
+// TestDoltGatewaySectionLaneGapAddsNothing: an answer that drops the lane counters
+// clears their baseline, so the read after the gap adds nothing to them and the
+// read after that counts the delta again.
+func TestDoltGatewaySectionLaneGapAddsNothing(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{
+		withLanes(1, 5, uint64p(5)), gatewayCaps(1, 2, 1), withLanes(1, 9, uint64p(9)), withLanes(1, 12, uint64p(12))}}
+	section := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440")
+	var got dashboard.DoltSection
+	for i := range 3 {
+		var err error
+		if got, err = section.read(context.Background(), start.Add(time.Duration(i)*10*time.Minute)); err != nil {
+			t.Fatalf("read %d: %v", i+1, err)
+		}
+	}
+	for _, row := range got.Rows {
+		if row[2] != "0" || row[3] != "0" {
+			t.Errorf("the read after a gap in the lane counters added %v; it is a new baseline and adds nothing", row)
+		}
+	}
+	got, err := section.read(context.Background(), start.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("read 4: %v", err)
+	}
+	if last := got.Rows[len(got.Rows)-1]; last[2] != "3" || last[3] != "3" {
+		t.Errorf("the bucket after the new baseline = %v, want 3 in both lane columns", last)
+	}
+}
