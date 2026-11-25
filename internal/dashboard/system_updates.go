@@ -98,7 +98,15 @@ func SystemUpdateRows(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []
 // limit left out, so the section can say how many older commits it does not show
 // (gt-71xpmh). A limit of zero or less draws no row, so every joined commit is
 // reported left out.
-func SystemUpdateRowsWithMore(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, limit int) ([]SystemUpdateRow, int) {
+//
+// Each keep is a sha the section draws even when the limit cut its commit: the
+// commit under a sweep in flight, and the last green sweep's (gt-hueeyb). A keep
+// that no joined commit names gets a row with the sha and no stages, so the
+// panel shows it while the join has nothing for it. Kept rows follow the newest
+// rows, newest first among themselves; a keep the drawn rows or an earlier keep
+// already name is not repeated. More counts only joined commits, so a row with
+// no join is not counted as left out. A limit of zero or less adds no keep.
+func SystemUpdateRowsWithMore(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, limit int, keeps ...string) ([]SystemUpdateRow, int) {
 	commits := joinSystemUpdates(sweeps, pipeline, rolls)
 	sort.SliceStable(commits, func(i, j int) bool { return commits[i].at.After(commits[j].at) })
 	shown := len(commits)
@@ -109,9 +117,55 @@ func SystemUpdateRowsWithMore(sweeps []TierSweepRow, pipeline *GastownPipeline, 
 	}
 	rows := make([]SystemUpdateRow, 0, shown)
 	for _, c := range commits[:shown] {
-		rows = append(rows, SystemUpdateRow{SHA: pipelineSHA(c.sha), At: c.at, Sweep: c.sweep, Runs: c.runs, Roll: c.roll})
+		rows = append(rows, systemUpdateRow(c))
 	}
-	return rows, len(commits) - shown
+	if limit <= 0 {
+		return rows, len(commits)
+	}
+	kept, keptJoined := keptSystemUpdateRows(commits[:shown], commits[shown:], keeps)
+	return append(rows, kept...), len(commits) - shown - keptJoined
+}
+
+// systemUpdateRow is the row a commit draws as; a commit no stage joined has no stages.
+func systemUpdateRow(c *systemCommit) SystemUpdateRow {
+	return SystemUpdateRow{SHA: pipelineSHA(c.sha), At: c.at, Sweep: c.sweep, Runs: c.runs, Roll: c.roll}
+}
+
+// keptSystemUpdateRows is the row each keep adds beyond the drawn commits. A keep
+// names a cut commit when one matches it, and otherwise a commit with no stages.
+// It returns the rows newest first, and how many of them name a joined commit.
+func keptSystemUpdateRows(drawn, cut []*systemCommit, keeps []string) ([]SystemUpdateRow, int) {
+	var picked []*systemCommit
+	joined := 0
+	for _, keep := range keeps {
+		sha := strings.TrimSpace(keep)
+		if len(sha) < systemUpdateMinSHA || commitNamed(drawn, sha) != nil || commitNamed(picked, sha) != nil {
+			continue
+		}
+		c := commitNamed(cut, sha)
+		if c != nil {
+			joined++
+		} else {
+			c = &systemCommit{sha: sha}
+		}
+		picked = append(picked, c)
+	}
+	sort.SliceStable(picked, func(i, j int) bool { return picked[i].at.After(picked[j].at) })
+	rows := make([]SystemUpdateRow, 0, len(picked))
+	for _, c := range picked {
+		rows = append(rows, systemUpdateRow(c))
+	}
+	return rows, joined
+}
+
+// commitNamed is the commit in commits that sha names, or nil when none does.
+func commitNamed(commits []*systemCommit, sha string) *systemCommit {
+	for _, c := range commits {
+		if sameCommit(c.sha, sha) {
+			return c
+		}
+	}
+	return nil
 }
 
 // systemCommit is one commit while the inputs are folded together: the longest

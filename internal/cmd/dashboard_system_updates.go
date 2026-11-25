@@ -64,7 +64,13 @@ func systemUpdates(townRoot string, sweeps *tierSweepReader, pipeline func() *da
 	if pipeline != nil {
 		pipelineRead = pipeline()
 	}
-	su := dashboard.NewSystemUpdates(ts.Sweeps, pipelineRead, rolls, ts.Unavailable || err != nil)
+	// The commit under a gastown sweep in flight is kept beside the rows, so the
+	// panel shows it before its sweep finishes (gt-hueeyb).
+	var swept string
+	if ts.Running != nil && ts.Running.Rig == "gastown" {
+		swept = ts.Running.SHA
+	}
+	su := dashboard.NewSystemUpdates(ts.Sweeps, pipelineRead, rolls, ts.Unavailable || err != nil, swept)
 	// The update reader answers nil for both no run and a record it cannot read,
 	// so the record is read here to tell the page which one a missing roll is.
 	su.RollUnknown = updateRecordUnreadable(update.Dir(townRoot))
