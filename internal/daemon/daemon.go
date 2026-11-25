@@ -1510,6 +1510,10 @@ type Daemon struct {
 	// (gt-zv3ndb).
 	landingWorkerRun patrolLastRunMemory
 	rogueBDRun       patrolLastRunMemory
+	// diskMaintenanceRun is the daily disk maintenance pass's in-memory
+	// completion time, recorded when the window settles so gt jobs shows the
+	// row as run rather than never_run (gt-27erxa).
+	diskMaintenanceRun patrolLastRunMemory
 	// ghGatesRun holds one *patrolLastRunMemory per database's gh gate check,
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
