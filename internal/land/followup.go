@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -245,12 +246,20 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 	if len(findings) == 0 && len(noted) == 0 && l.Reviews == nil && skips.count == 0 {
 		return
 	}
+	// The pod-engine doc is read once for the whole feed run, at the base the
+	// threshold was read at, and every group the run files is checked against
+	// that one read (gt-nlw44e). A doc that cannot be read pins nothing, and the
+	// line says so once.
+	pinDoc, err := readPodEngineDoc(repo, base)
+	if err != nil {
+		l.logf("%s: could not read %s at %s to see which files it pins (%v); no follow-up group is marked pinned", w.BeadID, podEngineDocFile, base, err)
+	}
 	// The feed runs on its own goroutine so its timeout can abandon it, and it
 	// hands its log lines back rather than writing them, so a feed that
 	// outlives the timeout cannot interleave with the next landing's log
 	// (gt-s01pn).
 	done := make(chan []string, 1)
-	go func() { done <- l.followupFeed(w, res, findings, noted, skips) }()
+	go func() { done <- l.followupFeed(w, res, findings, noted, skips, pinDoc) }()
 	select {
 	case lines := <-done:
 		for _, line := range lines {
@@ -265,7 +274,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 // comments a repeat earns, and the beads the new findings earn. It returns the
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
-func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips) (lines []string) {
+func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips, pinDoc string) (lines []string) {
 	// Logged on every path, including a feed that files nothing (gt-3v8jno), and
 	// through these lines rather than written directly, so a feed the landing
 	// abandons on its timeout cannot interleave with the next landing's log
@@ -330,7 +339,7 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	// landing's findings, so it goes out first, while the bound leaves it room
 	// (gt-3arxj).
 	var consumed int
-	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips)
+	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips, pinDoc)
 	if consumed > 0 {
 		lines = append(lines, l.compactQueue(w.Rig, existing, skips)...)
 	}
@@ -361,7 +370,7 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	if len(fresh) == 0 {
 		return lines
 	}
-	_, held, filed := l.fileFollowupBeads(w, res, fresh, existing)
+	_, held, filed := l.fileFollowupBeads(w, res, fresh, existing, pinDoc)
 	lines = append(lines, filed...)
 	return append(lines, l.queueHeld(w, res, held)...)
 }
@@ -394,7 +403,7 @@ func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
 // It returns the lines it wants logged, the beads the drain filed so the caller
 // de-duplicates against them too, and how many queue lines are now consumed:
 // every finding on them is covered, so the compaction may drop them (gt-3arxj).
-func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips) ([]string, []ExistingFollowup, int) {
+func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips, pinDoc string) ([]string, []ExistingFollowup, int) {
 	bound := l.followupBackpressure()
 	consumed := 0
 	for _, q := range queued {
@@ -410,7 +419,7 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 		}
 		w := Work{BeadID: q.Bead, Rig: q.Rig}
 		res := Result{LandedCommit: q.Landed, Verdict: Verdict{Verdict: VerdictApprove, Score: q.Score}}
-		filed, held, more := l.fileFollowupBeads(w, res, fresh, existing)
+		filed, held, more := l.fileFollowupBeads(w, res, fresh, existing, pinDoc)
 		lines = append(lines, more...)
 		existing = append(existing, filed...)
 		if len(held) > 0 {
@@ -469,7 +478,7 @@ func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *fo
 // way: a plan that would carry the feed past its share of the week's landings
 // is held back with the findings below it (gt-y5wvum). It returns the beads it
 // filed, the findings the bound held back, and the lines it wants logged.
-func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
+func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup, pinDoc string) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
 	day := l.now().UTC()
 	plans := FollowupPlans(w, res, day, fresh)
 	bound := l.followupBackpressure()
@@ -510,6 +519,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	// the stop that have an open bundle still append (gt-n9v7r7).
 	var stop func(held int) string
 	groups := followupGroups(fresh)
+	markPinnedGroups(groups, pinDoc)
 	for i, p := range plans {
 		g := groups[i]
 		// A bundle that refuses an append (ErrBundleFull: no room, or a body
@@ -530,7 +540,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			// findings each (gt-ntkwh0).
 			take, rest := g, []FollowupCandidate(nil)
 			if room := specdispatch.MaxAcceptance - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
-				take = followupGroup{Package: g.Package, Findings: g.Findings[:room]}
+				take = followupGroup{Package: g.Package, Pinned: g.Pinned, Findings: g.Findings[:room]}
 				rest = g.Findings[room:]
 			}
 			add := bundleAddition(w, res, take)
@@ -595,7 +605,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 				held = append(held, remaining[from:]...)
 				break
 			}
-			spec := bundleSpec(w, res, day, followupGroup{Package: g.Package, Findings: chunk})
+			spec := bundleSpec(w, res, day, followupGroup{Package: g.Package, Pinned: g.Pinned, Findings: chunk})
 			id, err := l.Followups.CreateFollowup(spec)
 			if err != nil {
 				held = append(held, remaining[from:]...)
@@ -714,8 +724,45 @@ func (l *Lander) followupBackpressure() int {
 // package the bead was filed for, and "" for a finding om named no path for or
 // one in a file at the repository root.
 type followupGroup struct {
-	Package  string
+	Package string
+	// Pinned is true when the pod-engine doc pins the file the work of one of
+	// the group's findings belongs to (markPinnedGroups, gt-nlw44e).
+	Pinned   bool
 	Findings []FollowupCandidate
+}
+
+// podEngineDocFile is the doc that pins source files to file:line. The feed
+// reads it at the landing's base and asks podEnginePinned which of the files
+// its groups' work belongs to the doc pins (gt-nlw44e).
+const podEngineDocFile = "docs/design/pod-engine.md"
+
+// readPodEngineDoc is the pod-engine doc's text at base. A doc absent at base
+// is no pins and no error. Any other read failure returns an empty text with
+// the error, so a partial read can never pin a file.
+func readPodEngineDoc(repo Repo, base string) (string, error) {
+	text, err := repo.ShowFileAtRev(base, podEngineDocFile)
+	switch {
+	case errors.Is(err, git.ErrNotAtRef):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	return text, nil
+}
+
+// markPinnedGroups sets Pinned on each group whose findings' work the doc
+// pins. A finding's work belongs to the source file it is keyed to, so a test
+// file counts as its source (followupCutKey). A group is one bead, so it pins
+// when any one of its findings' files is pinned. An empty doc pins nothing.
+func markPinnedGroups(groups []followupGroup, doc string) {
+	for i := range groups {
+		for _, c := range groups[i].Findings {
+			if podEnginePinned(doc, followupCutKey(c.Path)) {
+				groups[i].Pinned = true
+				break
+			}
+		}
+	}
 }
 
 // followupGroups splits a landing's findings into the beads they file: one bead
