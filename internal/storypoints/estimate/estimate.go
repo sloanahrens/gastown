@@ -101,6 +101,10 @@ type ComponentMinutes struct {
 	// Embed is the embedding ridge's minutes; nil when the estimate had no
 	// embedding input.
 	Embed *float64
+	// Declared is the declared-lines curve's minutes; nil when the bead
+	// declares no Change line, declares one outside the curve's fitted range,
+	// or the blend could not average it.
+	Declared *float64
 	// Jev is the minutes the fits_twenty_minutes probability maps to. Estimate
 	// builds no Jev input, so it is nil and the log row omits minutes.jev.
 	Jev *float64
@@ -115,16 +119,17 @@ type Result struct {
 	// Shape is the twelve shape features the estimate read.
 	Shape storypoints.Shape
 	// DeclaredLines is the added-line count the Size section's Change line
-	// declares, 0 when it declares none. The blend never reads it, so it does
-	// not change the estimate.
+	// declares, 0 when it declares none. The blend reads it through
+	// storypoints.DeclaredMinutes, so within the curve's fitted range and with
+	// an embedding input it changes the estimate.
 	DeclaredLines float64
 	// Embedding is the vector the embedding ridge read; nil when the estimate
 	// had no embedding input.
 	Embedding []float32
 	// ComponentMinutes is each input's predicted minutes.
 	ComponentMinutes ComponentMinutes
-	// Inputs names the inputs the blend averaged, in the blend's names: shape
-	// and embed, and size when it capped the blend.
+	// Inputs names the inputs the blend averaged, in the blend's names: shape,
+	// embed and declared, and size when it capped the blend.
 	Inputs []string
 	// Skipped names each input that was not built, and why, in build order.
 	Skipped []Skip
@@ -183,10 +188,16 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	var vector []float32
 	hash := SectionHash(issue)
 	// A Size section with no readable Change line declares no count, so the
-	// field stays 0 and the log omits it.
+	// field stays 0 and the log omits it. A declared count outside the curve's
+	// fitted range has no minutes, so it is recorded but never averaged.
 	var declaredLines float64
+	var declaredMinutes *float64
 	if n, ok := storypoints.DeclaredLines(issue.Description); ok {
 		declaredLines = float64(n)
+		if m, ok := storypoints.DeclaredMinutes(n); ok {
+			declaredMinutes = &m
+			in.DeclaredMinutes = declaredMinutes
+		}
 	}
 
 	// An unchanged bead reuses the embed minutes its earlier estimate recorded,
@@ -212,6 +223,11 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	// The log records the minutes the blend mapped the probability to, so the
 	// line cannot disagree with the number the average used.
 	componentMinutes.Jev = blended.JevMinutes
+	// A declared count with no embedding input is not averaged (storypoints.Blend
+	// needs both), so it is recorded only when the blend's inputs name it.
+	if declaredMinutes != nil && slices.Contains(blended.Inputs, "declared") {
+		componentMinutes.Declared = declaredMinutes
+	}
 
 	// The size input caps the blend: a bead that lists the work it asks for in a
 	// fenced list is no larger than that list says, whatever the three averaged
@@ -289,9 +305,9 @@ func Note(r Result) string {
 }
 
 // inputsLine renders the inputs the blend averaged, each component followed by
-// the minutes it contributed: "shape 11.0, embed 7.5". An input that has no
-// minutes of its own, as size caps the blend without one, is named alone; so is
-// every input of a result built without component minutes.
+// the minutes it contributed: "shape 11.0, embed 7.5, declared 12.1". An input
+// that has no minutes of its own, as size caps the blend without one, is named
+// alone; so is every input of a result built without component minutes.
 func inputsLine(r Result) string {
 	parts := make([]string, 0, len(r.Inputs))
 	for _, input := range r.Inputs {
@@ -312,6 +328,8 @@ func minutesForInput(c ComponentMinutes, input string) *float64 {
 		return c.Shape
 	case "embed":
 		return c.Embed
+	case "declared":
+		return c.Declared
 	case "jev":
 		return c.Jev
 	default:

@@ -1509,6 +1509,58 @@ func TestSpecEstimateNeighborMinutesNoTime(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateLogCarriesDeclaredMinutes: the estimate-log row carries the
+// declared-lines curve's minutes when the estimate averaged them, and the row
+// omits the field when the estimate had no declared term.
+func TestSpecEstimateLogCarriesDeclaredMinutes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		minutes *float64
+	}{
+		{"declared term", ptr(12.14)},
+		{"no declared term", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			stub := specEstimateWithFeatures()
+			stub.result.ComponentMinutes.Declared = tc.minutes
+
+			if err := runSpecEstimateOn(io.Discard, "gt-est", specEstimateSeed(), specEstimateOpts{}, specEstimateLogRunner(stub, town)); err != nil {
+				t.Fatalf("runSpecEstimateOn: %v", err)
+			}
+
+			records, malformed, err := estlog.Read(town)
+			if err != nil {
+				t.Fatalf("read the estimate log: %v", err)
+			}
+			if malformed != 0 {
+				t.Fatalf("malformed lines = %d, want none", malformed)
+			}
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want the one estimate", len(records))
+			}
+			got := records[0].Minutes.Declared
+			switch {
+			case tc.minutes == nil && got != nil:
+				t.Errorf("Minutes.Declared = %v, want it omitted", *got)
+			case tc.minutes != nil && (got == nil || *got != *tc.minutes):
+				t.Errorf("Minutes.Declared = %v, want %v", got, *tc.minutes)
+			}
+
+			line, err := os.ReadFile(estlog.Path(town))
+			if err != nil {
+				t.Fatalf("read %s: %v", estlog.Path(town), err)
+			}
+			if hasKey := strings.Contains(string(line), `"declared":`); hasKey != (tc.minutes != nil) {
+				t.Errorf("log line %q carries a declared key = %v, want %v", line, hasKey, tc.minutes != nil)
+			}
+		})
+	}
+}
+
 // writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.
 func writeSpecEstimateRuntimeWeights(t *testing.T, town string, f map[string]any) {
 	t.Helper()

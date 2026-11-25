@@ -1282,3 +1282,83 @@ func TestDeclaredLinesReadsOnlyTheSizeSection(t *testing.T) {
 		t.Errorf("DeclaredLines = %v from a Goal line, want 0", got.DeclaredLines)
 	}
 }
+
+// TestEstimateDeclaredInput: a bead whose Size section declares a Change line
+// estimates at rung all from shape, embed and the declared-lines curve, and the
+// note's inputs line names declared with its minutes. A bead that declares no
+// count, or one outside the curve's fitted range, stays at rung shape-embed.
+func TestEstimateDeclaredInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		size             string
+		wantRung         string
+		wantInputs       []string
+		wantDeclared     float64 // the added-line count the bead declares
+		wantDeclaredLine string  // the inputs entry for declared, "" when the blend has none
+	}{
+		{"100 added lines", "Change: at most 100 added lines in 2 files.", "all", []string{"shape", "embed", "declared"}, 100, "declared 12.1"},
+		{"no Change line", "One worker.", "shape-embed", []string{"shape", "embed"}, 0, ""},
+		{"below the fitted range", "Change: at most 5 added lines.", "shape-embed", []string{"shape", "embed"}, 5, ""},
+		{"above the fitted range", "Change: at most 500 added lines.", "shape-embed", []string{"shape", "embed"}, 500, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			issue := beadWithSize(tt.size)
+			got, err := Estimate(context.Background(), workingDeps(), issue)
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			if got.Rung != tt.wantRung {
+				t.Errorf("rung = %q, want %q", got.Rung, tt.wantRung)
+			}
+			if !slices.Equal(got.Inputs, tt.wantInputs) {
+				t.Errorf("inputs = %v, want %v", got.Inputs, tt.wantInputs)
+			}
+			if got.DeclaredLines != tt.wantDeclared {
+				t.Errorf("DeclaredLines = %v, want %v", got.DeclaredLines, tt.wantDeclared)
+			}
+
+			if tt.wantDeclaredLine == "" {
+				if strings.Contains(Note(got), "declared") {
+					t.Errorf("note %q names declared though the blend has no declared term", Note(got))
+				}
+				if got.ComponentMinutes.Declared != nil {
+					t.Errorf("ComponentMinutes.Declared = %v, want nil", *got.ComponentMinutes.Declared)
+				}
+				return
+			}
+			if !strings.Contains(Note(got), ", "+tt.wantDeclaredLine) {
+				t.Errorf("note %q does not name %q in its inputs line", Note(got), tt.wantDeclaredLine)
+			}
+
+			// The minutes are the three-term blend of shape, embed and the
+			// declared curve, so a wiring error that feeds any other value
+			// fails here.
+			w := storypoints.Default()
+			shape, err := w.ShapeMinutes(storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown, w))
+			if err != nil {
+				t.Fatalf("shape minutes: %v", err)
+			}
+			embed, err := w.EmbeddingMinutes(make([]float32, w.EmbeddingDimension()))
+			if err != nil {
+				t.Fatalf("embedding minutes: %v", err)
+			}
+			declared, ok := storypoints.DeclaredMinutes(int(tt.wantDeclared))
+			if !ok {
+				t.Fatalf("DeclaredMinutes(%v) is refused, so this row proves nothing", tt.wantDeclared)
+			}
+			want, err := storypoints.Blend(storypoints.Inputs{ShapeMinutes: &shape, EmbedMinutes: &embed, DeclaredMinutes: &declared, Weights: w})
+			if err != nil {
+				t.Fatalf("blend: %v", err)
+			}
+			if math.Abs(got.Minutes-want.Minutes) > 1e-9 {
+				t.Errorf("minutes = %v, want %v", got.Minutes, want.Minutes)
+			}
+			if got.ComponentMinutes.Declared == nil || math.Abs(*got.ComponentMinutes.Declared-declared) > 1e-9 {
+				t.Errorf("ComponentMinutes.Declared = %v, want %v", got.ComponentMinutes.Declared, declared)
+			}
+		})
+	}
+}
