@@ -35,12 +35,13 @@ type planRecord struct {
 // planRecordFile is one file of a plan record: its name and the hex SHA-256 of
 // its bytes. A rendered Deployment also records the revision the cluster holds
 // for it, as the annotation reads, and the object's resourceVersion, beside that
-// hash.
+// hash. A Deployment the cluster does not hold is marked absent with neither.
 type planRecordFile struct {
 	Name            string `json:"name"`
 	SHA256          string `json:"sha256"`
 	Revision        string `json:"revision,omitempty"`
 	ResourceVersion string `json:"resourceVersion,omitempty"`
+	Absent          bool   `json:"absent,omitempty"`
 }
 
 // planRecordedFlags is the render flags a plan replays: the flags the last live
@@ -83,8 +84,9 @@ to any cluster.
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
 plan writes plan.json into --out with the full id, each file's name and SHA-256,
-and the revision the cluster holds for each Deployment; a plan that fails before
-that leaves no plan.json.`,
+and the revision the cluster holds for each Deployment; a Deployment the cluster
+does not hold is recorded absent, with no revision. A plan that fails before that
+leaves no plan.json.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runTownClusterPlan(cmd.Context(), realClusterRenderDeps(io.Discard), realRunFunc(), cmd.OutOrStdout(), clusterPlanOut, atomicfile.WriteJSON)
@@ -112,36 +114,37 @@ type planDocument struct {
 // planLiveVersions returns the revision and the resourceVersion the cluster holds
 // for the Deployment a rendered file names, read with one get through the drift
 // command's read, as the annotation and the metadata read. A file that is not a
-// Deployment reads nothing. A Deployment the cluster does not hold, or with no
-// revision annotation or no resourceVersion, is an error: an empty value would
-// let a later apply pass as unchanged.
-func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (string, string, error) {
+// Deployment reads nothing. A Deployment the cluster does not hold is a normal
+// plan: it returns absent with no revision and no resourceVersion. A Deployment
+// that is held with no revision annotation or no resourceVersion, or a get that
+// failed, is an error: an empty value would let a later apply pass as unchanged.
+func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (string, string, bool, error) {
 	var doc planDocument
 	if err := yaml.Unmarshal(body, &doc); err != nil {
-		return "", "", fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
+		return "", "", false, fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
 	}
 	if doc.Kind != "Deployment" {
-		return "", "", nil
+		return "", "", false, nil
 	}
 	resource := "deployment/" + doc.Metadata.Name
 	live, absent, err := readLiveObject(ctx, clusterDriftDeps{kubectl: kube}, resource, doc.Metadata.Namespace, false)
 	if err != nil {
-		return "", "", fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+		return "", "", false, fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
 	if absent {
-		return "", "", fmt.Errorf("gt town cluster plan: the cluster does not hold %s in %s, so its revision cannot be recorded and no plan was written", resource, doc.Metadata.Namespace)
+		return "", "", true, nil
 	}
 	metadata, _ := live["metadata"].(map[string]any)
 	annotations, _ := metadata["annotations"].(map[string]any)
 	revision, _ := annotations[planRevisionAnnotation].(string)
 	if revision == "" {
-		return "", "", fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, doc.Metadata.Namespace)
+		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, doc.Metadata.Namespace)
 	}
 	resourceVersion, _ := metadata["resourceVersion"].(string)
 	if resourceVersion == "" {
-		return "", "", fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, doc.Metadata.Namespace)
+		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, doc.Metadata.Namespace)
 	}
-	return revision, resourceVersion, nil
+	return revision, resourceVersion, false, nil
 }
 
 // runTownClusterPlan renders the recorded flags' desired set with
@@ -181,11 +184,11 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	for i, name := range names {
 		files[i] = planFile{Name: name, Data: bodies[i]}
 		sum := sha256.Sum256(bodies[i])
-		revision, resourceVersion, err := planLiveVersions(ctx, kube, bodies[i])
+		revision, resourceVersion, absent, err := planLiveVersions(ctx, kube, bodies[i])
 		if err != nil {
 			return err
 		}
-		record.Files[i] = planRecordFile{Name: name, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion}
+		record.Files[i] = planRecordFile{Name: name, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent}
 	}
 	full, short := planID(files)
 	record.ID = full
