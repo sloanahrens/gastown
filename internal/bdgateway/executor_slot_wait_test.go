@@ -244,3 +244,163 @@ func TestExecutorSlotWaitStopsItsTimer(t *testing.T) {
 		drain(t, first)
 	})
 }
+
+// firingAfter is the timer seam of the expiry and ending rows: each wait's timer
+// is a channel the test fires by sending on it, and the channel reaches the test
+// through started, so no row waits on a real timer.
+type firingAfter struct {
+	started chan chan time.Time
+}
+
+func (f *firingAfter) after(time.Duration) (<-chan time.Time, func() bool) {
+	fired := make(chan time.Time, 1)
+	f.started <- fired
+	return fired, func() bool { return true }
+}
+
+// waitingCall is a one-slot executor whose slot a first call holds, with a second
+// call waiting for it on a timer and a context the test owns.
+type waitingCall struct {
+	e      *Executor
+	runner *fakeRunner
+	proc   *fakeProcess
+	timer  chan time.Time
+	cancel context.CancelFunc
+	first  chan error
+	second chan error
+}
+
+// startWaitingCall starts the first call, then the second, and returns once the
+// second call's wait has started its timer.
+func startWaitingCall(t *testing.T) *waitingCall {
+	t.Helper()
+	proc := newBlockingFake("")
+	runner := &fakeRunner{queue: []Process{proc}, started: make(chan struct{}), bound: waitCtx(t)}
+	timer := &firingAfter{started: make(chan chan time.Time, 1)}
+	e, err := New(Options{
+		Binary:        "/opt/bd/bd",
+		WorkspaceRoot: testWorkspace(t),
+		Home:          "/home/bdgw",
+		Path:          "/usr/bin:/bin",
+		DoltHost:      "gt-dolt",
+		DoltPort:      "3307",
+		MaxConcurrent: 1,
+		SlotWait:      7 * time.Second,
+		runner:        runner,
+		after:         timer.after,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	w := &waitingCall{e: e, runner: runner, proc: proc, first: make(chan error, 1), second: make(chan error, 1)}
+	request := Request{Argv: []string{"list"}, Rig: "gastown"}
+	go func() {
+		w.first <- e.Exec(context.Background(), request, nil, &bytes.Buffer{})
+	}()
+	select {
+	case <-runner.started:
+	case <-waitCtx(t).Done():
+		t.Fatal("bd was not started within the test's bound")
+	}
+
+	var ctx context.Context
+	ctx, w.cancel = context.WithCancel(context.Background())
+	t.Cleanup(w.cancel)
+	go func() {
+		w.second <- e.Exec(ctx, request, nil, &bytes.Buffer{})
+	}()
+	select {
+	case w.timer = <-timer.started:
+	case err := <-w.second:
+		t.Fatalf("the second call returned %v while the slot was held, want it waiting", err)
+	case <-waitCtx(t).Done():
+		t.Fatal("the second call did not start waiting within the test's bound")
+	}
+	return w
+}
+
+// awaitCall returns one call's result, failing the test if the call does not end
+// within the test's bound.
+func awaitCall(t *testing.T, done chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-waitCtx(t).Done():
+		t.Fatal("a call did not end within the test's bound")
+		return nil
+	}
+}
+
+// TestExecutorSlotWaitExpiresOrEnds: a second call that waits for a slot ends in
+// one of two ways. The timer expiring with the slot still held refuses it and
+// counts one refusal; its context ending first returns ErrClientGone and counts
+// nothing. When the timer fires as the slot frees, either outcome is right, but
+// the call must be exactly one of run or refused and counted.
+func TestExecutorSlotWaitExpiresOrEnds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// end ends the second call's wait; the slot is still held unless end frees it.
+		end func(w *waitingCall)
+		// want is the error the second call must return; invariant instead checks
+		// only that the call ran or was refused and counted, never both or neither.
+		want      error
+		counted   uint64
+		invariant bool
+	}{
+		{
+			name:    "the timer expires with the slot held: refused and counted once",
+			end:     func(w *waitingCall) { w.timer <- time.Time{} },
+			want:    ErrTooManyCalls,
+			counted: 1,
+		},
+		{
+			name:    "the context ends first: client gone and not counted",
+			end:     func(w *waitingCall) { w.cancel() },
+			want:    ErrClientGone,
+			counted: 0,
+		},
+		{
+			name: "the timer fires as the slot frees: run or refused, never both or neither",
+			end: func(w *waitingCall) {
+				w.timer <- time.Time{}
+				w.proc.finish(0)
+			},
+			invariant: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := startWaitingCall(t)
+			tc.end(w)
+			err := awaitCall(t, w.second)
+			w.proc.finish(0)
+			if first := awaitCall(t, w.first); first != nil {
+				t.Errorf("the first call ended with %v, want nil", first)
+			}
+
+			counted := w.e.CapStats().TooManyCalls
+			runs := len(w.runner.records()) - 1
+			if tc.invariant {
+				switch {
+				case err == nil && runs == 1 && counted == 0:
+				case errors.Is(err, ErrTooManyCalls) && runs == 0 && counted == 1:
+				default:
+					t.Fatalf("second call ended with %v, %d run(s) and %d refusal(s) counted: want it run or refused and counted, never both or neither", err, runs, counted)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Errorf("second call = %v, want %v", err, tc.want)
+			}
+			if counted != tc.counted {
+				t.Errorf("too_many_calls = %d, want %d", counted, tc.counted)
+			}
+			if runs != 0 {
+				t.Errorf("bd was started %d time(s) for the waiting call, want 0", runs)
+			}
+		})
+	}
+}
