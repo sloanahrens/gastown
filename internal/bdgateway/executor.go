@@ -288,6 +288,20 @@ func raisePeak(peak *atomic.Uint64, n uint64) {
 	}
 }
 
+// acquireSlot takes a concurrency slot for one call. A taken slot records the
+// in-flight peak and returns the release that frees it. A full executor refuses
+// at once with ErrTooManyCalls, counts one refusal, and returns no release.
+func (e *Executor) acquireSlot(_ context.Context) (release func(), err error) {
+	select {
+	case e.slots <- struct{}{}:
+		e.recordInFlight()
+		return func() { <-e.slots }, nil
+	default:
+		e.capRefusals.Add(1)
+		return nil, ErrTooManyCalls
+	}
+}
+
 // Exec runs one bd call: it maps the head to the workspace, builds bd's
 // environment, streams stdin up to the cap, frames bd's output and exit status
 // on frames, and kills the whole process group when the call times out or the
@@ -332,14 +346,11 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("%w: %v", ErrClientGone, err)
 	}
-	select {
-	case e.slots <- struct{}{}:
-		defer func() { <-e.slots }()
-		e.recordInFlight()
-	default:
-		e.capRefusals.Add(1)
-		return ErrTooManyCalls
+	release, err := e.acquireSlot(ctx)
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	runCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
