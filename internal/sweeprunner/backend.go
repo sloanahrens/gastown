@@ -181,6 +181,10 @@ type Poll struct {
 	// engine, into the output directory. A caller runs it once Ended reports
 	// true, in order, and stops at the first failure a Step does not tolerate.
 	Collect []Step
+	// Progress is the step that reads the run's progress record out of the run
+	// while it works. Its stdout is the progress.json file; nil when the plan
+	// keeps none.
+	Progress *Step
 }
 
 // Teardown returns the steps that take the run down, in the order to run them:

@@ -1105,6 +1105,35 @@ func TestK8sPollEndedIsTrueOnlyOnAnEndedJob(t *testing.T) {
 	}
 }
 
+// TestKubernetesProgress holds the progress read to the Job's runner container:
+// the exec names the Job from the plan's own name, cats progress.json out of the
+// runner's output directory, and runs with no shell. A plan with no poll has no
+// progress step.
+func TestKubernetesProgress(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	spec.Namespace = "gt-sweeps"
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Poll == nil || plan.Poll.Progress == nil {
+		t.Fatal("the Kubernetes plan renders no progress step; the tier running now cannot be read while the Job runs")
+	}
+	want := []string{"kubectl", "--context", spec.Context, "-n", spec.Namespace, "exec", "job/" + plan.Job.Metadata.Name, "-c", "runner", "--", "cat", "/out/progress.json"}
+	if got := plan.Poll.Progress.Argv; !slices.Equal(got, want) {
+		t.Errorf("the progress step runs %v, want %v", got, want)
+	}
+
+	docker, err := Docker{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec on docker: %v", err)
+	}
+	if docker.Poll != nil && docker.Poll.Progress != nil {
+		t.Errorf("a plan with no poll renders a progress step %v; it must render none", docker.Poll.Progress.Argv)
+	}
+}
+
 // containerNamed returns the pod's container called name, init container or
 // regular one.
 func containerNamed(job *Job, name string) (Container, bool) {
