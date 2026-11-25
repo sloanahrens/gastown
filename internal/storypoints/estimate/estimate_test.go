@@ -88,17 +88,10 @@ func workingDeps() Deps {
 	}
 }
 
-// geoMean is the geometric mean of the three expected minutes, computed as a
-// product root so the assertion does not repeat the blend's log-space sum.
-func geoMean(xs ...float64) float64 {
-	prod := 1.0
-	for _, x := range xs {
-		prod *= x
-	}
-	return math.Pow(prod, 1/float64(len(xs)))
-}
-
-func TestEstimateAllInputs(t *testing.T) {
+// TestEstimateShapeAndEmbedInputs: with every dependency wired, the estimate is
+// the shape-embed rung, built from shape and embed alone, and its minutes are
+// the shape-embed blend of those two inputs.
+func TestEstimateShapeAndEmbedInputs(t *testing.T) {
 	t.Parallel()
 	issue := sampleBead()
 	got, err := Estimate(context.Background(), workingDeps(), issue)
@@ -106,10 +99,10 @@ func TestEstimateAllInputs(t *testing.T) {
 		t.Fatalf("Estimate: %v", err)
 	}
 
-	if got.Rung != "all" {
-		t.Fatalf("rung = %q, want all", got.Rung)
+	if got.Rung != "shape-embed" {
+		t.Fatalf("rung = %q, want shape-embed", got.Rung)
 	}
-	if want := []string{"shape", "embed", "jev"}; !slices.Equal(got.Inputs, want) {
+	if want := []string{"shape", "embed"}; !slices.Equal(got.Inputs, want) {
 		t.Fatalf("inputs = %v, want %v", got.Inputs, want)
 	}
 	if len(got.Skipped) != 0 {
@@ -122,7 +115,7 @@ func TestEstimateAllInputs(t *testing.T) {
 		t.Fatalf("neighbors = %+v, want gt-a then dv-b", got.Neighbors)
 	}
 
-	// The minutes are the geometric mean of the three inputs the estimate
+	// The minutes are the shape-embed blend of the two inputs the estimate
 	// builds itself, so a wiring error that feeds the wrong value fails here.
 	w := storypoints.Default()
 	shape, err := w.ShapeMinutes(storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown, w))
@@ -133,13 +126,12 @@ func TestEstimateAllInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedding minutes: %v", err)
 	}
-	jev, err := w.JevMinutes(0.5)
+	wantBlend, err := storypoints.Blend(storypoints.Inputs{ShapeMinutes: &shape, EmbedMinutes: &embed, Weights: w})
 	if err != nil {
-		t.Fatalf("jev minutes: %v", err)
+		t.Fatalf("blend: %v", err)
 	}
-	wantMinutes := geoMean(shape, embed, jev)
-	if math.Abs(got.Minutes-wantMinutes) > 1e-9 {
-		t.Fatalf("minutes = %v, want %v", got.Minutes, wantMinutes)
+	if math.Abs(got.Minutes-wantBlend.Minutes) > 1e-9 {
+		t.Fatalf("minutes = %v, want %v", got.Minutes, wantBlend.Minutes)
 	}
 	if want, err := storypoints.FromMinutes(got.Minutes); err != nil || got.Points != want {
 		t.Fatalf("points = %d, want %d (%v)", got.Points, want, err)
@@ -150,14 +142,14 @@ func TestEstimateAllInputs(t *testing.T) {
 
 	note := Note(got)
 	first, _, _ := strings.Cut(note, "\n")
-	wantFirst := fmt.Sprintf("SP ESTIMATE v1 sp:%d rung:all hash:%s", got.Points, got.Hash)
+	wantFirst := fmt.Sprintf("SP ESTIMATE v1 sp:%d rung:shape-embed hash:%s", got.Points, got.Hash)
 	if first != wantFirst {
 		t.Fatalf("first line = %q, want %q", first, wantFirst)
 	}
 	if !regexp.MustCompile(`^SP ESTIMATE v1 sp:\d+ rung:[a-z-]+ hash:[0-9a-f]{64}$`).MatchString(first) {
 		t.Fatalf("first line %q is not the note's format", first)
 	}
-	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f, jev %.1f (median of %d)", shape, embed, jev, jevCalls)
+	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f", shape, embed)
 	for _, line := range []string{
 		wantInputs,
 		"nearest beads: gt-a (gastown) first neighbor (no time recorded); dv-b (devops) second neighbor (no time recorded)",
@@ -173,6 +165,51 @@ func TestEstimateAllInputs(t *testing.T) {
 		if !strings.Contains(note, "skipped "+skip.Input+": ") {
 			t.Fatalf("note %q has no line for skipped %s", note, skip.Input)
 		}
+	}
+}
+
+// TestEstimateDoesNotAskJev: with a Jev asker wired, an estimate never calls it.
+// The result is the shape-embed rung, built from shape and embed alone, with no
+// Jev minutes, and its minutes are the shape-embed blend of those two inputs.
+func TestEstimateDoesNotAskJev(t *testing.T) {
+	t.Parallel()
+	issue := sampleBead()
+	jev := &jevCounter{fits: func(int) float64 { return 0.5 }}
+	deps := workingDeps()
+	deps.JevAsk = jev.ask
+
+	got, err := Estimate(context.Background(), deps, issue)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if jev.calls != 0 {
+		t.Fatalf("Jev calls = %d, want none", jev.calls)
+	}
+	if got.Rung != "shape-embed" {
+		t.Fatalf("rung = %q, want shape-embed", got.Rung)
+	}
+	if want := []string{"shape", "embed"}; !slices.Equal(got.Inputs, want) {
+		t.Fatalf("inputs = %v, want %v", got.Inputs, want)
+	}
+	if got.ComponentMinutes.Jev != nil {
+		t.Fatalf("component jev minutes = %v, want none", *got.ComponentMinutes.Jev)
+	}
+
+	w := storypoints.Default()
+	shape, err := w.ShapeMinutes(storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown, w))
+	if err != nil {
+		t.Fatalf("shape minutes: %v", err)
+	}
+	embed, err := w.EmbeddingMinutes(make([]float32, w.EmbeddingDimension()))
+	if err != nil {
+		t.Fatalf("embedding minutes: %v", err)
+	}
+	want, err := storypoints.Blend(storypoints.Inputs{ShapeMinutes: &shape, EmbedMinutes: &embed, Weights: w})
+	if err != nil {
+		t.Fatalf("blend: %v", err)
+	}
+	if math.Abs(got.Minutes-want.Minutes) > 1e-9 {
+		t.Fatalf("minutes = %v, want the shape-embed blend %v", got.Minutes, want.Minutes)
 	}
 }
 
@@ -207,25 +244,21 @@ func TestEstimateResultCarriesTheFeaturesTheEstimatorRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedding minutes: %v", err)
 	}
-	wantJevMinutes, err := w.JevMinutes(0.5)
-	if err != nil {
-		t.Fatalf("jev minutes: %v", err)
-	}
 	if got.ComponentMinutes.Shape == nil || *got.ComponentMinutes.Shape != wantShapeMinutes {
 		t.Fatalf("component shape minutes = %v, want %v", got.ComponentMinutes.Shape, wantShapeMinutes)
 	}
 	if got.ComponentMinutes.Embed == nil || *got.ComponentMinutes.Embed != wantEmbedMinutes {
 		t.Fatalf("component embed minutes = %v, want %v", got.ComponentMinutes.Embed, wantEmbedMinutes)
 	}
-	if got.ComponentMinutes.Jev == nil || *got.ComponentMinutes.Jev != wantJevMinutes {
-		t.Fatalf("component jev minutes = %v, want %v", got.ComponentMinutes.Jev, wantJevMinutes)
+	if got.ComponentMinutes.Jev != nil {
+		t.Fatalf("component jev minutes = %v, want none: the estimate asks no Jev", *got.ComponentMinutes.Jev)
 	}
 }
 
-// TestEstimateComponentsResult: a result carries the shape, embed and Jev
-// minutes the inputs contributed, and a component the estimate did not have
-// leaves its minutes nil and its embedding absent, so the log cannot record a
-// number the estimate never made.
+// TestEstimateComponentsResult: a result carries the shape and embed minutes the
+// inputs contributed, and a component the estimate did not have leaves its
+// minutes nil and its embedding absent, so the log cannot record a number the
+// estimate never made.
 func TestEstimateComponentsResult(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -233,24 +266,18 @@ func TestEstimateComponentsResult(t *testing.T) {
 		deps          func() Deps
 		wantEmbedding bool
 		wantEmbed     bool
-		wantJev       bool
 	}{
-		{"every input", workingDeps, true, true, true},
+		{"every input", workingDeps, true, true},
 		{"no embedder", func() Deps {
 			d := workingDeps()
 			d.Embedder = nil
 			return d
-		}, false, false, true},
+		}, false, false},
 		{"the ridge refuses the vector", func() Deps {
 			d := workingDeps()
 			d.Embedder = fakeEmbedder{vec: []float32{1, 2, 3}}
 			return d
-		}, false, false, true},
-		{"no Jev asker", func() Deps {
-			d := workingDeps()
-			d.JevAsk = nil
-			return d
-		}, true, true, false},
+		}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -268,8 +295,8 @@ func TestEstimateComponentsResult(t *testing.T) {
 			if (got.ComponentMinutes.Embed != nil) != tt.wantEmbed {
 				t.Fatalf("component embed minutes = %v, want present = %v", got.ComponentMinutes.Embed, tt.wantEmbed)
 			}
-			if (got.ComponentMinutes.Jev != nil) != tt.wantJev {
-				t.Fatalf("component jev minutes = %v, want present = %v", got.ComponentMinutes.Jev, tt.wantJev)
+			if got.ComponentMinutes.Jev != nil {
+				t.Fatalf("component jev minutes = %v, want none", *got.ComponentMinutes.Jev)
 			}
 		})
 	}
@@ -344,9 +371,9 @@ func (j *jevCounter) ask(context.Context, *beads.Issue) (dispatch.Answers, error
 }
 
 // TestEstimateReusesPriorMinutes: a bead whose text an earlier estimate priced
-// re-estimates to the same minutes, and neither the embedder nor the Jev asker
-// is called again. The Jev asker answers differently on each call, so a call
-// would move the minutes.
+// re-estimates to the same minutes, and the embedder is not called again. The
+// prior's Jev minutes are not read: a Jev minutes value in the prior does not
+// bring a Jev input into the blend.
 func TestEstimateReusesPriorMinutes(t *testing.T) {
 	t.Parallel()
 	issue := sampleBead()
@@ -381,17 +408,17 @@ func TestEstimateReusesPriorMinutes(t *testing.T) {
 	if second.ComponentMinutes.Embed == nil || *second.ComponentMinutes.Embed != 12 {
 		t.Fatalf("component embed minutes = %v, want the prior 12", second.ComponentMinutes.Embed)
 	}
-	if second.ComponentMinutes.Jev == nil || *second.ComponentMinutes.Jev != 8 {
-		t.Fatalf("component jev minutes = %v, want the prior 8", second.ComponentMinutes.Jev)
+	if second.ComponentMinutes.Jev != nil {
+		t.Fatalf("component jev minutes = %v, want none: the prior's Jev is not read", *second.ComponentMinutes.Jev)
 	}
-	if second.Rung != "all" || !slices.Equal(second.Inputs, []string{"shape", "embed", "jev"}) {
-		t.Fatalf("rung = %q inputs = %v, want all with shape, embed, jev", second.Rung, second.Inputs)
+	if second.Rung != "shape-embed" || !slices.Equal(second.Inputs, []string{"shape", "embed"}) {
+		t.Fatalf("rung = %q inputs = %v, want shape-embed with shape, embed", second.Rung, second.Inputs)
 	}
 }
 
-// TestEstimateIgnoresAbsentPrior: without prior minutes to reuse, the estimate
-// builds both inputs as before, and the prior values it was not given are not
-// read. A Prior with only one valid minutes value is absent too.
+// TestEstimateIgnoresAbsentPrior: without a usable prior, the estimate builds the
+// embed input as before, and the prior values it was not given are not read. A
+// prior whose embed value is not valid is no prior, whatever its Jev value.
 func TestEstimateIgnoresAbsentPrior(t *testing.T) {
 	t.Parallel()
 	base := estimateCounted(t, nil)
@@ -401,7 +428,7 @@ func TestEstimateIgnoresAbsentPrior(t *testing.T) {
 	}{
 		{"nil prior", nil},
 		{"not ok", func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 1e6, Jev: 1e6}, false }},
-		{"embed only", func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 1e6}, true }},
+		{"embed not valid", func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 0, Jev: 8}, true }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -409,8 +436,8 @@ func TestEstimateIgnoresAbsentPrior(t *testing.T) {
 			if got.res.Minutes != base.res.Minutes {
 				t.Fatalf("minutes = %v, want %v as with no prior", got.res.Minutes, base.res.Minutes)
 			}
-			if got.embedCalls != 1 || got.jevCalls != jevCalls {
-				t.Fatalf("embedder calls = %d, Jev calls = %d, want one embed and %d Jev", got.embedCalls, got.jevCalls, jevCalls)
+			if got.embedCalls != 1 || got.jevCalls != 0 {
+				t.Fatalf("embedder calls = %d, Jev calls = %d, want one embed and no Jev", got.embedCalls, got.jevCalls)
 			}
 			if got.res.Embedding == nil {
 				t.Fatal("Embedding is nil; the estimate built its embed input")
@@ -462,7 +489,7 @@ func TestEstimateSkippedInputs(t *testing.T) {
 				d.Embedder = fakeEmbedder{err: errors.New("ollama is down")}
 				return d
 			},
-			wantRung:    "shape-jev",
+			wantRung:    "shape",
 			wantSkipped: []string{"embed"},
 			wantReason:  map[string]string{"embed": "ollama is down"},
 		},
@@ -473,55 +500,20 @@ func TestEstimateSkippedInputs(t *testing.T) {
 				d.Embedder = fakeEmbedder{vec: []float32{1, 2, 3}}
 				return d
 			},
-			wantRung:    "shape-jev",
+			wantRung:    "shape",
 			wantSkipped: []string{"embed"},
 			wantReason:  map[string]string{"embed": "embedding has 3 numbers"},
 		},
 		{
-			name: "Jev fails",
-			deps: func() Deps {
-				d := workingDeps()
-				d.JevAsk = fakeJev(0, dispatch.ErrCapReached)
-				return d
-			},
-			wantRung:    "shape-embed",
-			wantSkipped: []string{"jev"},
-			wantReason:  map[string]string{"jev": "spend cap"},
-		},
-		{
-			name: "Jev answers a probability outside 0 to 1",
-			deps: func() Deps {
-				d := workingDeps()
-				d.JevAsk = fakeJev(1.5, nil)
-				return d
-			},
-			wantRung:    "shape-embed",
-			wantSkipped: []string{"jev"},
-			wantReason:  map[string]string{"jev": "outside 0 to 1"},
-		},
-		{
-			name: "both fail",
-			deps: func() Deps {
-				d := workingDeps()
-				d.Embedder = fakeEmbedder{err: errors.New("ollama is down")}
-				d.JevAsk = fakeJev(0, dispatch.ErrCapReached)
-				return d
-			},
-			wantRung:    "shape",
-			wantSkipped: []string{"embed", "jev"},
-			wantReason:  map[string]string{"embed": "ollama is down", "jev": "spend cap"},
-		},
-		{
-			name: "no embedder and no Jev asker",
+			name: "no embedder",
 			deps: func() Deps {
 				d := workingDeps()
 				d.Embedder = nil
-				d.JevAsk = nil
 				return d
 			},
 			wantRung:    "shape",
-			wantSkipped: []string{"embed", "jev"},
-			wantReason:  map[string]string{"embed": "no embedder", "jev": "no Jev asker"},
+			wantSkipped: []string{"embed"},
+			wantReason:  map[string]string{"embed": "no embedder"},
 		},
 	}
 	for _, tt := range tests {
@@ -560,15 +552,11 @@ func TestEstimateSkippedInputs(t *testing.T) {
 	}
 }
 
-// TestEstimateJevCallCount: a new text makes exactly jevCalls calls, all asked
+// TestJevInputCallCount: jevInput makes exactly jevCalls calls, all asked
 // together, so a cap-reached ask fails only itself and the answer the first ask
-// gave still stands; TestEstimateReusesPriorMinutes covers the none a
-// Prior-served text makes.
-func TestEstimateJevCallCount(t *testing.T) {
+// gave still stands. Estimate never calls it (TestEstimateDoesNotAskJev).
+func TestJevInputCallCount(t *testing.T) {
 	t.Parallel()
-	if got := estimateCounted(t, nil); got.jevCalls != jevCalls {
-		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, jevCalls)
-	}
 	// Only the first ask to arrive is answered (0.3); the two after it report the
 	// cap, so the median is that one answer and the capped asks add none.
 	jev := &jevCounter{fits: func(int) float64 { return 0.3 }, capFrom: 2}
@@ -616,38 +604,19 @@ func TestEstimateJevMedianDrops(t *testing.T) {
 	}
 }
 
-// TestEstimateNoteNamesJevAnswers: the result counts the answers the Jev median
-// used, not the calls made, and the inputs line names the count.
-func TestEstimateNoteNamesJevAnswers(t *testing.T) {
+// TestEstimateNoteNamesNoJev: the note names no Jev input and no median, for a
+// new text and for a Prior-served one.
+func TestEstimateNoteNamesNoJev(t *testing.T) {
 	t.Parallel()
-	for _, c := range []struct {
-		fits func(int) float64
-		want int
-	}{
-		{func(int) float64 { return 0.5 }, jevCalls},
-		{func(call int) float64 { return []float64{0.5, -1, 0.5}[call-1] }, 2},
-		{func(call int) float64 { return []float64{0.5, 0.5, 1.5}[call-1] }, 2},
-	} {
-		deps := workingDeps()
-		deps.JevAsk = (&jevCounter{fits: c.fits}).ask
-		got, err := Estimate(context.Background(), deps, sampleBead())
-		if err != nil || got.JevAnswers != c.want || !regexp.MustCompile(fmt.Sprintf(`jev [0-9.]+ \(median of %d\)`, c.want)).MatchString(Note(got)) {
-			t.Fatalf("err %v, JevAnswers %d, note %q; want %d answers named", err, got.JevAnswers, Note(got), c.want)
-		}
-	}
-}
-
-// TestEstimateNoteNoJevAnswers: a Prior-served estimate and one with Jev skipped
-// report no answers and no median.
-func TestEstimateNoteNoJevAnswers(t *testing.T) {
-	t.Parallel()
-	prior, skipped := workingDeps(), workingDeps()
+	prior, fresh := workingDeps(), workingDeps()
 	prior.Prior = func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 12, Jev: 8}, true }
-	skipped.JevAsk = nil
-	for _, deps := range []Deps{prior, skipped} {
+	for _, deps := range []Deps{prior, fresh} {
 		got, err := Estimate(context.Background(), deps, sampleBead())
-		if err != nil || got.JevAnswers != 0 || strings.Contains(Note(got), "median of") {
-			t.Fatalf("err %v, JevAnswers %d, note %q; want none", err, got.JevAnswers, Note(got))
+		if err != nil {
+			t.Fatalf("Estimate: %v", err)
+		}
+		if note := Note(got); strings.Contains(note, "jev") || strings.Contains(note, "median of") {
+			t.Fatalf("note %q names a Jev input or median", note)
 		}
 	}
 }
@@ -678,8 +647,8 @@ func TestEstimateNeighborsSkipped(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Estimate: %v", err)
 			}
-			if got.Rung != "all" {
-				t.Fatalf("rung = %q, want all; hm must not change the number", got.Rung)
+			if got.Rung != "shape-embed" {
+				t.Fatalf("rung = %q, want shape-embed; hm must not change the number", got.Rung)
 			}
 			if len(got.Neighbors) != 0 {
 				t.Fatalf("neighbors = %+v, want none", got.Neighbors)

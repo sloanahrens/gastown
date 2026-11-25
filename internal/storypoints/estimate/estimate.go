@@ -38,7 +38,8 @@ var ErrNoBead = errors.New("storypoints/estimate: estimate needs a bead")
 var ErrNoBeadText = errors.New("storypoints/estimate: bead has no text to estimate")
 
 // JevAsker asks the dispatch battery about a bead before it has a seat.
-// *dispatch.Pass's Ask method fits it: Deps.JevAsk = pass.Ask.
+// *dispatch.Pass's Ask method fits it: Deps.JevAsk = pass.Ask. Estimate never
+// calls it (gt-xzzbgv).
 type JevAsker func(ctx context.Context, issue *beads.Issue) (dispatch.Answers, error)
 
 // Deps are the estimate's inputs. Every dependency is optional: a nil one is
@@ -57,7 +58,9 @@ type Deps struct {
 	TownRoot string
 	// Embedder turns the section text into the vector the embedding ridge reads.
 	Embedder storypoints.Embedder
-	// JevAsk asks the battery; wrap a *dispatch.Pass's Ask method.
+	// JevAsk is the battery's asker. Estimate does not call it, so the estimate
+	// is built from shape and embed alone (gt-xzzbgv). The field stays so the
+	// callers that wire it still compile.
 	JevAsk JevAsker
 	// HMRunner runs hm for the nearest past beads. It only names them; it never
 	// changes the number.
@@ -77,7 +80,8 @@ type Deps struct {
 }
 
 // PriorMinutes are the component minutes an earlier estimate of one bead text
-// recorded: the embedding ridge's minutes and the Jev minutes.
+// recorded: the embedding ridge's minutes and the Jev minutes. Only Embed is
+// reused; Jev is never read, since no estimate asks Jev any more.
 type PriorMinutes struct {
 	Embed float64
 	Jev   float64
@@ -97,8 +101,8 @@ type ComponentMinutes struct {
 	// Embed is the embedding ridge's minutes; nil when the estimate had no
 	// embedding input.
 	Embed *float64
-	// Jev is the minutes the fits_twenty_minutes probability maps to; nil when
-	// the estimate had no Jev input.
+	// Jev is the minutes the fits_twenty_minutes probability maps to. Estimate
+	// builds no Jev input, so it is nil and the log row omits minutes.jev.
 	Jev *float64
 }
 
@@ -119,11 +123,8 @@ type Result struct {
 	Embedding []float32
 	// ComponentMinutes is each input's predicted minutes.
 	ComponentMinutes ComponentMinutes
-	// JevAnswers is the number of answers the Jev median was taken over; 0 when
-	// the input was skipped or its minutes came from a Prior.
-	JevAnswers int
-	// Inputs names the inputs the blend averaged, in the blend's names:
-	// shape, embed, jev.
+	// Inputs names the inputs the blend averaged, in the blend's names: shape
+	// and embed, and size when it capped the blend.
 	Inputs []string
 	// Skipped names each input that was not built, and why, in build order.
 	Skipped []Skip
@@ -144,11 +145,12 @@ type Result struct {
 	WeightsVersion string
 }
 
-// Estimate builds every input it can, blends them into one estimate, and names
-// the nearest past beads. An input whose dependency is nil or fails is left
-// out of the blend and its reason recorded in the result, so a missing
-// dependency lowers the rung instead of failing the estimate. A bead with no
-// text, or a canceled context, is an error and no result.
+// Estimate builds the shape and embed inputs, blends them into one estimate, and
+// names the nearest past beads. It never asks the Jev battery (gt-xzzbgv). An
+// input whose dependency is nil or fails is left out of the blend and its
+// reason recorded in the result, so a missing dependency lowers the rung instead
+// of failing the estimate. A bead with no text, or a canceled context, is an
+// error and no result.
 func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error) {
 	return estimateWith(ctx, deps, issue, storypoints.Blend)
 }
@@ -179,7 +181,6 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	in := storypoints.Inputs{ShapeMinutes: &shapeMinutes, Weights: weights}
 	var skipped []Skip
 	var vector []float32
-	var jevAnswers int
 	hash := SectionHash(issue)
 	// A Size section with no readable Change line declares no count, so the
 	// field stays 0 and the log omits it.
@@ -188,10 +189,10 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		declaredLines = float64(n)
 	}
 
-	// An unchanged bead reuses the embed and Jev minutes its earlier estimate
-	// recorded, so the embedder and the Jev battery are not asked again.
+	// An unchanged bead reuses the embed minutes its earlier estimate recorded,
+	// so the embedder is not asked again.
 	if prior, ok := reusablePrior(deps, issue, hash); ok {
-		in.EmbedMinutes, in.JevMinutes = &prior.Embed, &prior.Jev
+		in.EmbedMinutes = &prior.Embed
 		componentMinutes.Embed = &prior.Embed
 	} else {
 		embedMinutes, v, skip := embedInput(ctx, deps, weights, issue)
@@ -201,14 +202,6 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 			vector = v
 			in.EmbedMinutes = &embedMinutes
 			componentMinutes.Embed = &embedMinutes
-		}
-
-		jevFits, answers, skip := jevInput(ctx, deps, issue)
-		if skip != nil {
-			skipped = append(skipped, *skip)
-		} else {
-			jevAnswers = answers
-			in.JevFits = &jevFits
 		}
 	}
 
@@ -250,7 +243,6 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		DeclaredLines:    declaredLines,
 		Embedding:        vector,
 		ComponentMinutes: componentMinutes,
-		JevAnswers:       jevAnswers,
 		Inputs:           blended.Inputs,
 		Skipped:          skipped,
 		Rung:             blended.Rung,
@@ -297,19 +289,15 @@ func Note(r Result) string {
 }
 
 // inputsLine renders the inputs the blend averaged, each component followed by
-// the minutes it contributed: "shape 11.0, embed 7.5, jev 5.5 (median of 3)",
-// where the Jev entry also names the answers its median used. An input that has
-// no minutes of its own, as size caps the blend without one, is named alone; so
-// is every input of a result built without component minutes.
+// the minutes it contributed: "shape 11.0, embed 7.5". An input that has no
+// minutes of its own, as size caps the blend without one, is named alone; so is
+// every input of a result built without component minutes.
 func inputsLine(r Result) string {
 	parts := make([]string, 0, len(r.Inputs))
 	for _, input := range r.Inputs {
 		part := input
 		if m := minutesForInput(r.ComponentMinutes, input); m != nil {
 			part += " " + strconv.FormatFloat(*m, 'f', 1, 64)
-		}
-		if input == "jev" && r.JevAnswers > 0 {
-			part += fmt.Sprintf(" (median of %d)", r.JevAnswers)
 		}
 		parts = append(parts, part)
 	}
@@ -374,15 +362,16 @@ func writeHashField(h hash.Hash, name, value string) {
 	fmt.Fprintf(h, "%d:%s%d:%s", len(name), name, len(value), value)
 }
 
-// reusablePrior returns the component minutes an earlier estimate recorded for
-// this bead text, when deps.Prior answers ok with both values valid minutes. A
-// nil Prior, a miss, or a single valid value estimates as usual.
+// reusablePrior returns the embed minutes an earlier estimate recorded for this
+// bead text, when deps.Prior answers ok with a valid embed value. A nil Prior, a
+// miss, or an invalid embed value estimates as usual. The Jev minutes in the
+// prior are not read: the estimate does not ask Jev (gt-xzzbgv).
 func reusablePrior(deps Deps, issue *beads.Issue, hash string) (PriorMinutes, bool) {
 	if deps.Prior == nil {
 		return PriorMinutes{}, false
 	}
 	prior, ok := deps.Prior(issue.ID, hash)
-	if !ok || !storypoints.ValidMinutes(prior.Embed) || !storypoints.ValidMinutes(prior.Jev) {
+	if !ok || !storypoints.ValidMinutes(prior.Embed) {
 		return PriorMinutes{}, false
 	}
 	return prior, true
