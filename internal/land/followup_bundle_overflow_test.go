@@ -6,7 +6,37 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
+
+const (
+	// feedRoomCap is the most om-fp findings an open bundle carries once the feed
+	// has appended to it: the room an append may take is what this leaves after
+	// the findings the bundle already holds (gt-ghrt3e). The overflow tests read
+	// the room from it, so moving the room (gt-fpfw9y) changes it here and
+	// nothing else.
+	feedRoomCap = specdispatch.MaxAcceptance
+
+	// feedChunkCap is the most findings the feed files in one new bundle: what
+	// is left of a group is filed in bundles of at most this many findings
+	// (gt-ghrt3e). The overflow tests read the chunk from it, so moving the chunk
+	// (gt-z8ygdr) changes it here and nothing else.
+	feedChunkCap = specdispatch.MaxAcceptance
+)
+
+// chunkSizes is how n findings are filed as new bundles: sizes of at most
+// feedChunkCap findings, in filing order, the last carrying what is left
+// (gt-ghrt3e).
+func chunkSizes(n int) []int {
+	var sizes []int
+	for n > 0 {
+		size := min(n, feedChunkCap)
+		sizes = append(sizes, size)
+		n -= size
+	}
+	return sizes
+}
 
 // bundleWithFindings is an open bundle of internal/land/note.go for followupDay
 // that carries n om-fp findings: its labels carry n fingerprints.
@@ -41,10 +71,10 @@ func fingerprints(labels []string) int {
 // TestFeedOverflowsIntoANewBundle: a group is appended to the open bundle only
 // while that bundle has fewer than followupFindingsPerBead findings (gt-hp9ce8).
 // Five findings with a bundle of three open, which is full, append nothing and
-// file one bundle of five. Twelve with a bundle of one append five, the room the
-// feed still counts in MaxAcceptance, and create 6 and 1, each at most
-// MaxAcceptance findings (gt-ntkwh0). The landing's comment names the appended
-// bead.
+// are filed as one bundle. Twelve with a bundle of one append feedRoomCap-1
+// findings, all the room a bundle of one has, and file the rest in bundles of
+// at most feedChunkCap findings (gt-ntkwh0). The landing's comment names the
+// appended bead.
 func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -54,8 +84,8 @@ func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 		appended     int
 		createdSizes []int
 	}{
-		{"five findings with a full bundle open", 5, 3, 0, 0, []int{5}},
-		{"twelve findings with a bundle of one open", 12, 1, 1, 5, []int{6, 1}},
+		{"five findings with a full bundle open", 5, 3, 0, 0, chunkSizes(5)},
+		{"twelve findings with a bundle of one open", 12, 1, 1, feedRoomCap - 1, chunkSizes(12 - (feedRoomCap - 1))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -112,7 +142,7 @@ func TestFeedQueuesWhenTheBundleWriteFails(t *testing.T) {
 	}{
 		{"a create that fails", 5, nil, 0, 0, titles(1, 5)},
 		{"a full bundle open and a create that fails", 5, []ExistingFollowup{bundleWithFindings(3)}, 0, 0, titles(1, 5)},
-		{"a second chunk that fails", 13, nil, 2, 1, titles(7, 13)},
+		{"a second chunk that fails", 2*feedChunkCap + 1, nil, 2, 1, titles(feedChunkCap+1, 2*feedChunkCap+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
