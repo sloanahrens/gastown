@@ -55,7 +55,29 @@ func TestRefuseDowngradeRefuses(t *testing.T) {
 		{name: "an empty running commit is refused", target: target, isAncestor: always(true, nil), wantErr: "the running commit is unknown"},
 		{name: "an empty running commit is refused with allowRollback", target: target, allowRollback: true, wantErr: "the running commit is unknown"},
 		{name: "an empty target is refused", running: running, isAncestor: always(true, nil), wantErr: "the target commit is empty"},
+		{name: "an empty target is refused with allowRollback", running: running, allowRollback: true, wantErr: "the target commit is empty"},
 		{name: "an unwired ancestry reader is refused", running: running, target: target, wantErr: "no ancestry reader is wired"},
 		{name: "a read error is refused", running: running, target: target, isAncestor: always(true, errors.New("git merge-base failed")), wantErr: "git merge-base failed"},
 	})
+}
+
+// TestRefuseDowngradeAsksRunningThenTarget holds the argument order: the reader is
+// asked whether running is an ancestor of target, so a swap to (target, running)
+// would invert the guard and pass every other row.
+func TestRefuseDowngradeAsksRunningThenTarget(t *testing.T) {
+	t.Parallel()
+	const running, target = "aaa111", "bbb222"
+	var gotA, gotB string
+	calls := 0
+	record := func(a, b string) (bool, error) {
+		calls++
+		gotA, gotB = a, b
+		return true, nil
+	}
+	if err := refuseDowngrade(running, target, false, record); err != nil {
+		t.Fatalf("refuseDowngrade = %v, want nil for a reader that reports an ancestor", err)
+	}
+	if calls != 1 || gotA != running || gotB != target {
+		t.Fatalf("isAncestor called %d times with (%q, %q), want once with (%q, %q)", calls, gotA, gotB, running, target)
+	}
 }
