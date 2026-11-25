@@ -71,6 +71,9 @@ type AheadStore struct {
 	// readFile is the test seam for the reads Put and Get make; nil means
 	// os.ReadFile.
 	readFile func(path string) ([]byte, error)
+	// removeFile is the test seam for the remove Delete makes; nil means
+	// os.Remove.
+	removeFile func(path string) error
 }
 
 // TownAheadStore is the review-ahead store for one rig's landings.
@@ -158,6 +161,65 @@ func (s AheadStore) Get(bead string) (AheadRecord, bool, error) {
 		return AheadRecord{}, false, fmt.Errorf("review-ahead store: unusable record for %q: %w", bead, err)
 	}
 	return rec, true, nil
+}
+
+// Hint answers, without running a review, whether bead has a stored review and
+// whether that review refuses the work. head is the head the record judged, ""
+// when there is no record. rejecting is true for a conflict, a request_changes,
+// or an approval whose findings block the landing: the three stored answers that
+// refuse the work. A record Get cannot trust is an error, never a miss.
+//
+// rejecting judges the head the record names and is not a decision on its own:
+// the caller compares head with the head it is about to land, so a rejection
+// stored at an older head never rejects a newer one.
+func (s AheadStore) Hint(bead string) (head string, rejecting bool, err error) {
+	rec, ok, err := s.Get(bead)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	return rec.Head, rec.rejecting(), nil
+}
+
+// Delete removes the record the store keeps for bead. Nothing stored is not a
+// failure: Delete answers "leave nothing stored", and a miss already does. A path
+// that is not a regular file is refused and left alone: the store writes only
+// files here, so anything else is state Delete must not remove.
+func (s AheadStore) Delete(bead string) error {
+	path, err := s.path(bead)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking review-ahead record for %q: %w", bead, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("review-ahead store: refusing to delete %q: path is %s, not a regular file", bead, info.Mode().Type())
+	}
+	remove := s.removeFile
+	if remove == nil {
+		remove = os.Remove
+	}
+	// A record that vanished since the check is already gone, the outcome wanted.
+	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("deleting review-ahead record for %q: %w", bead, err)
+	}
+	return nil
+}
+
+// rejecting reports whether rec's review refuses the head it judged: a
+// conflict, a request_changes, or an approval its findings block.
+func (rec AheadRecord) rejecting() bool {
+	if rec.Outcome == aheadOutcomeConflict || rec.Verdict.Verdict == VerdictRequestChanges {
+		return true
+	}
+	return findingsRejection(rec.Verdict) != nil
 }
 
 // recordAt returns the record stored at path. A nil record with a nil error
