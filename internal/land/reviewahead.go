@@ -60,12 +60,30 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	// bead stores it as the record's started_at. Nothing stores a record yet.
 	started := l.aheadNow()
 	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
-	if err := l.aheadFetches(l.open(l.Repo), w); err != nil {
+	g := l.open(l.Repo)
+	if err := l.aheadFetches(g, w); err != nil {
 		return "", err
 	}
-	// NEXT BEAD: here ReviewAhead takes its own worktree at base and runs om on
-	// the head. Until that lands, every submission that reaches this point is
-	// AheadSkipped and ctx is unused.
+	// The base is the target tip the fetch just brought in, resolved the way
+	// Land resolves it before it cuts its own worktree.
+	base, err := g.Rev(l.remote() + "/" + w.Target)
+	if err != nil {
+		return "", &InfraError{Stage: "resolve target", Err: err}
+	}
+	// addReviewWorktree takes gitMu for the git calls it makes, and the lock is
+	// not reentrant: aheadFetches has released it, so this call takes it
+	// itself. Holding it here would deadlock the add.
+	_, dir, cleanup, err := l.addReviewWorktree(g, w, base)
+	if err != nil {
+		return "", &InfraError{Stage: "review worktree", Err: err}
+	}
+	// Every return below this line, and a panic's unwind, removes the worktree
+	// and the review directory that holds it.
+	defer cleanup()
+	l.logf("%s: ahead review worktree at %s", w.BeadID, dir)
+	// NEXT BEAD: here the review merges the candidate into the worktree and
+	// runs om on the merged tree. Until that lands, every submission that
+	// reaches this point is AheadSkipped and ctx is unused.
 	return AheadSkipped, nil
 }
 
