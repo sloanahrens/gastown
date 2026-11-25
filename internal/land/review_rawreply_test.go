@@ -155,3 +155,42 @@ func TestOMRawReplyMissingFile(t *testing.T) {
 		t.Fatalf("error = %q, want unchanged %q", got, rawReplyStub)
 	}
 }
+
+// TestOMRawReplyBoundary: the injected clock sets the attempt's start, so a reply
+// stamped a millisecond before it is another run's and one a millisecond after it
+// is this run's, with no wall clock in the boundary (gt-tjuc75). The instant is a
+// whole second, the precision the start is truncated to.
+func TestOMRawReplyBoundary(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		mod  time.Time
+		want string
+	}{
+		{name: "a reply stamped 1ms before the start is stale", mod: at.Add(-time.Millisecond), want: ""},
+		{name: "a reply stamped 1ms after the start is attached", mod: at.Add(time.Millisecond), want: ": raw reply: this run's reply"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			r := OMReviewer{
+				OutDir: t.TempDir(),
+				RawDir: func() string { return dir },
+				now:    func() time.Time { return at },
+			}
+			r.run = func(_ context.Context, _ string, _ []string, _ []string, out io.Writer) (int, error) {
+				writeRaw(t, dir, "raw-stdout.txt", "this run's reply", tc.mod)
+				_, _ = io.WriteString(out, "om: reviewing\n")
+				return 2, nil
+			}
+			_, err := reviewAt(context.Background(), r, "", t.TempDir(), "aaa", "bbb")
+			if !errors.Is(err, ErrOMExecution) {
+				t.Fatalf("error = %v, want it to wrap ErrOMExecution", err)
+			}
+			if want := rawReplyStub + tc.want; err.Error() != want {
+				t.Fatalf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
