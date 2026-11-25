@@ -1,6 +1,7 @@
 package gtwrap
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,6 +76,9 @@ type Kubectl struct {
 	// there is the process's own os.Stdout or os.Stderr, so the note has no off switch.
 	Stdout io.Writer
 	Stderr io.Writer
+	// processOut and processErr stand in for os.Stdout and os.Stderr when Stdout
+	// or Stderr is nil; a test sets them so nothing reaches the real streams.
+	processOut, processErr io.Writer
 	// ProbeTimeout bounds each probe. Zero means probeTimeout.
 	ProbeTimeout time.Duration
 }
@@ -193,18 +197,21 @@ func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (in
 		// descriptor itself. Its stderr becomes a pipe the tail and the caller's
 		// stderr share. bd runs in the pod, where its stderr is the exec stream
 		// whatever the Mac's is, so only kubectl's own stderr sees the pipe.
-		return k.Shell.AttachStreams(argv, nil, call.Stdin, stdout, tailFirst(tail, stderr))
+		errs := &tailFirst{tail: tail, w: stderr}
+		exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, stdout, errs)
+		return exit, errors.Join(err, errs.err)
 	}
 	// The same condition stdioFlags uses for a terminal: -t is passed only when the
 	// tool's stdin is the caller's terminal.
 	prompt := call.TTY && call.Stdin == nil
 	out := newOutputRewriter(stdout, k.podRoot(), k.Town, prompt)
 	errOut := newOutputRewriter(stderr, k.podRoot(), k.Town, prompt)
-	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, tailFirst(tail, errOut))
+	errs := &tailFirst{tail: tail, w: errOut}
+	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errs)
 	// The tool's last line need not end in a newline, so the two streams are
 	// flushed before the call returns. A failure to write the output is reported
 	// with the tool's own status, so the caller keeps it.
-	return exit, errors.Join(err, out.Flush(), errOut.Flush())
+	return exit, errors.Join(err, out.Flush(), errOut.Flush(), errs.err)
 }
 
 // outputs is the writers the call's output goes to: the wrapper's own streams,
@@ -212,27 +219,36 @@ func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (in
 func (k Kubectl) outputs() (stdout, stderr io.Writer) {
 	stdout, stderr = k.Stdout, k.Stderr
 	if stdout == nil {
-		stdout = os.Stdout
+		stdout = cmp.Or(k.processOut, io.Writer(os.Stdout))
 	}
 	if stderr == nil {
-		stderr = os.Stderr
+		stderr = cmp.Or(k.processErr, io.Writer(os.Stderr))
 	}
 	return stdout, stderr
 }
 
-// tailFirst writes each chunk to the tail and then to w. The tail never fails,
-// so a caller's writer that does cannot hide the break text; io.MultiWriter
-// would stop at the first error and leave the tail empty.
-func tailFirst(tail *tailBuffer, w io.Writer) io.Writer {
-	return writerFunc(func(p []byte) (int, error) {
-		_, _ = tail.Write(p)
-		return w.Write(p)
-	})
+// tailFirst is the writer a bd call's stderr is handed to. os/exec copies a
+// writer that is not an *os.File in a goroutine that stops at the first error,
+// leaving the pipe unread, and a child that then writes past the pipe buffer
+// blocks, so Wait never returns. So Write never fails: it writes the tail (which
+// cannot fail), then w; on w's first error it keeps that error in err, stops
+// writing to w, and keeps feeding the tail. The caller returns err after the
+// process has exited.
+type tailFirst struct {
+	tail *tailBuffer
+	w    io.Writer
+	err  error
 }
 
-type writerFunc func([]byte) (int, error)
-
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+func (t *tailFirst) Write(p []byte) (int, error) {
+	_, _ = t.tail.Write(p)
+	if t.err == nil {
+		if _, err := t.w.Write(p); err != nil {
+			t.err = err
+		}
+	}
+	return len(p), nil
+}
 
 // rewrites reports whether the pod's town root and the Mac's differ, and so
 // whether a path the tool prints must be rewritten to work on the Mac.
