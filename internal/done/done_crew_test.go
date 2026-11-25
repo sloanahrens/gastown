@@ -155,6 +155,76 @@ func TestCrewSubmitRefusals(t *testing.T) {
 	}
 }
 
+// TestCrewDoneClaimsUnassignedBead: a crew submission of a bead nobody holds
+// leaves it in progress under the submitter, so a rejection keeps it with the
+// bird instead of releasing it to dispatch (gt-sa0bna).
+func TestCrewDoneClaimsUnassignedBead(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	if err := submitCrewForLanding(h.r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	issue := h.source(t)
+	if issue.Assignee != h.r.sender || issue.Status != string(beads.StatusInProgress) {
+		t.Errorf("after the submission the bead is %q held by %q, want in_progress held by %q", issue.Status, issue.Assignee, h.r.sender)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("labels %v lack %s: the claim must not cost the submission", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
+// TestCrewDoneClaimsFailureWritesNoRecords: a claim the beads store refuses
+// ends the submission with the ready-failed exit before any record is written,
+// so no comment and no ready label announce a bead nobody holds.
+func TestCrewDoneClaimsFailureWritesNoRecords(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	h.client = &failingBD{Client: h.bd, updateErr: errors.New("store refused the write")}
+	err := submitCrewForLanding(h.r)
+	if err == nil {
+		t.Fatal("crew submit succeeded although the claim failed")
+	}
+	wantDoneExit(t, err, doneExitReadyFailed, "could not claim")
+	issue := h.source(t)
+	if issue.Assignee != "" || beads.HasLabel(issue, land.LabelReadyToLand) || strings.Contains(issue.Notes, land.ReadyNoteMarker) {
+		t.Errorf("a failed claim left the bead held by %q, labels %v, notes %q", issue.Assignee, issue.Labels, issue.Notes)
+	}
+	if comments, cerr := h.bd.Comments("bd-source"); cerr != nil || len(comments) != 0 {
+		t.Errorf("comments = %v (%v), want none: the claim comes before the submission comment", comments, cerr)
+	}
+}
+
+// failCommentBD fails the submission comment and passes the rest to the
+// wrapped fake.
+type failCommentBD struct {
+	beads.Client
+}
+
+func (failCommentBD) AddCommentAs(string, string, string) error {
+	return errors.New("store refused the comment")
+}
+
+// TestCrewDoneClaimsKeepsTheClaimWhenALaterWriteFails: the claim comes first,
+// so a submission whose comment write fails ends with the ready-failed exit
+// and no ready label, but the bird still holds the bead and can submit again.
+func TestCrewDoneClaimsKeepsTheClaimWhenALaterWriteFails(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	h.client = failCommentBD{Client: h.bd}
+	err := submitCrewForLanding(h.r)
+	if err == nil {
+		t.Fatal("crew submit succeeded although the comment write failed")
+	}
+	wantDoneExit(t, err, doneExitReadyFailed, "could not record the submission")
+	issue := h.source(t)
+	if issue.Assignee != h.r.sender || issue.Status != string(beads.StatusInProgress) {
+		t.Errorf("after the failed submission the bead is %q held by %q, want in_progress still held by %q", issue.Status, issue.Assignee, h.r.sender)
+	}
+	if beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("labels %v carry %s although the comment write failed", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
 // crewEnv is a getenv over a fixed map.
 func crewEnv(env map[string]string) func(string) string {
 	return func(k string) string { return env[k] }

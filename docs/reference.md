@@ -292,9 +292,10 @@ crew branch, push it (`git push origin HEAD:<branch>`), then run `gt done --bead
 The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `crew/<user>/<slug>` usually carries none, so pass `--bead`. `gt done` refuses unless
 `origin/<branch>` is at HEAD and HEAD is ahead of the target, runs `make presubmit`
-(skip it with `--pre-verified` when you already ran it), then writes the comment
-`Submitted for landing: <branch> @ <sha> onto <target>`, the READY TO LAND block and the
-`gt:ready-to-land` label. It pushes nothing and rebases nothing.
+(skip it with `--pre-verified` when you already ran it), then claims the bead for you when
+nobody or a polecat holds it (status in_progress, assignee you, so a rejection keeps it with
+you), and writes the comment `Submitted for landing: <branch> @ <sha> onto <target>`, the
+READY TO LAND block and the `gt:ready-to-land` label. It pushes nothing and rebases nothing.
 The flags apply only when the caller's directory is absent from the process (a pod): then
 `gt done --bead <id> --branch <b> --head <sha>` names the submission instead of the worktree,
 both flags or neither. The town is the one above the process's own directory and the rig comes from the
