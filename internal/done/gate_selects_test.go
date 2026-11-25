@@ -127,57 +127,12 @@ func TestGateSelectsRefusesAListThatFails(t *testing.T) {
 		"its tests cannot be listed: go list: exit status 1")
 }
 
-// TestGateSelectsRefusesNoiseAroundAnEmptyList: the old check's go test -list
-// output can carry noise (a package's init logging, a warning) around an empty
-// list; none of it names a test, so checkGateSelects refuses. The static lister
-// parses names instead of output, so the branch check no longer reaches this
-// (gt-hx8f5i).
-func TestGateSelectsRefusesNoiseAroundAnEmptyList(t *testing.T) {
-	t.Parallel()
-	run := func(_ string, _ ...string) ([]byte, error) {
-		return []byte("2026/11/24 12:00:00 warning: no tests to run\nPASS\nok  \tgithub.com/x/internal/done\t0.002s\n"), nil
-	}
-	wantGateRefusal(t, checkGateSelects(run, t.TempDir(), gateSelectsDescription),
-		"go test ./internal/done -run 'TestGateSelects' -count=1",
-		"-run matches test function names; name the tests so the pattern selects them")
-}
-
 // TestGateSelectsRefusesAMissingRunner: a check with no lister refuses a Gate
 // that has a pattern to check, instead of reaching for the real go test.
 func TestGateSelectsRefusesAMissingRunner(t *testing.T) {
 	t.Parallel()
 	wantGateRefusal(t, checkGateSelectsForSubmit(t, nil, gateSelectsDescription),
 		"go test ./internal/done -run 'TestGateSelects' -count=1", "no go test runner is configured")
-}
-
-// TestGateSelectsRunnerRunsGoUnderTheICUCgoEnv drives the runner gt done
-// wires, with its environment and command seams faked: go test -list runs in
-// the worktree under the process environment plus the icu4c cgo entries a
-// darwin host needs to compile the dolt dependency (gt-hx8f5i).
-func TestGateSelectsRunnerRunsGoUnderTheICUCgoEnv(t *testing.T) {
-	t.Parallel()
-	var gotDir, gotArgs string
-	var gotEnv []string
-	run := func(dir string, env []string, args ...string) ([]byte, error) {
-		gotDir, gotArgs, gotEnv = dir, strings.Join(args, " "), env
-		return []byte("TestGateSelects\n"), nil
-	}
-	cgoEnv := func([]string) []string { return []string{"CGO_CPPFLAGS=-I/keg/include"} }
-	runner := newGateListRunner(func() []string { return []string{"PATH=/bin"} }, cgoEnv, run)
-	if _, err := runner("/work", "test", "-list", "TestGateSelects", "./internal/done"); err != nil {
-		t.Fatalf("runner() = %v", err)
-	}
-	if gotDir != "/work" {
-		t.Errorf("runner ran in %q, want /work", gotDir)
-	}
-	if gotArgs != "test -list TestGateSelects ./internal/done" {
-		t.Errorf("runner ran go %q, want the -list argv", gotArgs)
-	}
-	for _, want := range []string{"PATH=/bin", "CGO_CPPFLAGS=-I/keg/include"} {
-		if !slices.Contains(gotEnv, want) {
-			t.Errorf("runner environment lacks %q; got %d entries", want, len(gotEnv))
-		}
-	}
 }
 
 // TestGateSelectsWiringConfiguresTheLister: useRealSubmitDeps wires the static
@@ -188,8 +143,8 @@ func TestGateSelectsWiringConfiguresTheLister(t *testing.T) {
 	t.Parallel()
 	r := &doneRun{out: new(bytes.Buffer), env: func(string) string { return "" }}
 	r.useRealSubmitDeps(Options{})
-	// The typed assignment is the assertion: on the old gateListRunner field
-	// this line does not compile.
+	// The typed assignment is the assertion: a field of any other type does not
+	// compile.
 	var list gateTestLister = r.deps.listTests
 	if list == nil {
 		t.Fatal("useRealSubmitDeps wired no Gate -run lister")
