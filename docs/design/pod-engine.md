@@ -207,6 +207,7 @@ These files hold the literal `docker` without running the CLI as a program of a 
 - `internal/daemon/boot_probes.go` — the boot gate's engine probe, named `docker` (`Name: "docker"`). It runs no docker command: its check calls the `docker ps` read behind `systemHostProbes.Containers` (`internal/daemon/attention_host.go:170`, its row in the table above). The probe is left out of the set when `inContainer` holds (`internal/daemon/boot_probes.go:66`, `if !inContainer {`), which is `getenv(config.ContainerModeEnv) == config.SupervisorContainer` at line 64; the pod and the compose daemon set `GT_DAEMON_SUPERVISOR` to container (`deploy/k8s/daemon/daemon.go:428`).
 - `internal/polecatimage/program.go` — the default program name the image build runs.
 - `internal/polecatimage/registryprune.go` — `if name == "docker"` (line 201) gives the garbage collect its own context. The garbage collect is the `Target.gc` row above, run by `PruneRegistry` (`internal/polecatimage/program.go:31`); the file's comment (line 139) says it inherits this process's `DOCKER_HOST`, which is left empty on purpose.
+- `internal/sbxcreds/request.go` — `Request.Argv` returns the docker exec argv for the caller's runner; this package runs no process itself (gt-16pu5p).
 - `internal/scratchtown/scratchtown.go` — a key of the map of programs a scratch town allows.
 - `internal/specdispatch/boxcheck.go` — the word a dispatcher box is scanned for.
 - `internal/sweeprunner/docker.go` — the Docker backend's `program` constant, which every step it renders runs (the `dockerStep` row).
