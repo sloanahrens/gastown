@@ -905,6 +905,57 @@ func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 	}
 }
 
+// TestRunnerRollDepsForWiresThePodHoldStore: the production deps carry a hold
+// store, and a Create through the pod store reaches the pod runner with the hold
+// path under the town root and the content on stdin.
+func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
+	t.Parallel()
+	deps := runnerRollDepsFor("/town", &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	if deps.err != nil {
+		t.Fatalf("deps error = %v, want none", deps.err)
+	}
+	if deps.store == nil {
+		t.Fatal("the production deps have no landing hold store")
+	}
+
+	var argv []string
+	var stdin []byte
+	fakePodExec := func(_ context.Context, got []string, in []byte) ([]byte, int, error) {
+		argv, stdin = got, in
+		return []byte("created\n"), 0, nil
+	}
+	store, err := podHoldStore("/town", fakePodExec)
+	if err != nil {
+		t.Fatalf("podHoldStore: %v", err)
+	}
+	if err := store.Create(t.Context(), "owner furiosa\n"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !slices.Contains(argv, filepath.Join("/town", runnerroll.LandingHoldName)) {
+		t.Errorf("argv %q does not name the hold path under the town root", argv)
+	}
+	if string(stdin) != "owner furiosa\n" {
+		t.Errorf("stdin = %q, want the hold content", stdin)
+	}
+}
+
+// TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold: a town root with no hold
+// store is carried as the deps error, and a real roll refuses on it before it
+// takes the hold or runs any step.
+func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
+	t.Parallel()
+	deps := runnerRollDepsFor("", &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	if deps.err == nil {
+		t.Fatal("deps for an empty town root carry no error")
+	}
+
+	err := runTownRunnerRoll(deps)
+
+	if !errors.Is(err, deps.err) {
+		t.Fatalf("error = %v, want the store error wrapped", err)
+	}
+}
+
 // changeHoldDuringRuns makes the runs read write the store, as another process
 // would between the take and the release.
 func changeHoldDuringRuns(f *rollFixture, content string, present bool) {
