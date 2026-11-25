@@ -77,7 +77,14 @@ var acceptanceBoxPhrases = []boxPhrase{
 	{text: "colima"},
 	{text: "live town"},
 	{text: "the live"},
-	{text: "gate's lint", re: regexp.MustCompile(`(?i)\bgate'?s lint\b`), hint: "the landing worker runs the gate's lint after the seat submits, so leave it out of the boxes; the seat's own check is the narrow go vet or go test -run command"},
+	{
+		text: "gate's lint",
+		// The class takes the typographic apostrophe (U+2019) a keyboard
+		// writes for the possessive, not only the ASCII one (gt-8cwcen).
+		re: regexp.MustCompile(`(?i)\bgate['\x{2019}]?s lint\b`),
+		hint: "the landing worker runs the gate's lint after the seat submits, so leave it out " +
+			"of the boxes; the seat's own check is the narrow go vet or go test -run command",
+	},
 }
 
 // findingResolvedPrefix opens an acceptance item that names a finding. It is
