@@ -223,11 +223,23 @@ func ReportableRefusal(s Spec) bool {
 
 // Order sorts candidates deterministically: priority (P0 first), then
 // created_at (oldest first), then id.
-func Order(specs []Spec) {
+func Order(specs []Spec) { OrderWith(specs, nil) }
+
+// OrderWith is Order with each candidate ranked at the better of its own
+// priority and the inherited priority eff gives its id (gt-bqdwtb). A candidate
+// with no entry in eff keeps its own priority, so a nil map is Order, and a
+// spec is never ranked below its own priority.
+func OrderWith(specs []Spec, eff map[string]Inherited) {
+	rank := func(s Spec) int {
+		if e, ok := eff[s.ID]; ok && e.Priority < s.Priority {
+			return e.Priority
+		}
+		return s.Priority
+	}
 	sort.SliceStable(specs, func(i, j int) bool {
 		a, b := specs[i], specs[j]
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
+		if pa, pb := rank(a), rank(b); pa != pb {
+			return pa < pb
 		}
 		ta, tb := parseTime(a.CreatedAt), parseTime(b.CreatedAt)
 		if !ta.Equal(tb) {
