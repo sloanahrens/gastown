@@ -724,10 +724,12 @@ func (l *Lander) followupBackpressure() int {
 	return FollowupBackpressureOrDefault(l.FollowupBackpressure)
 }
 
-// followupGroup is one bead's worth of a landing's findings. Package is the
-// package the bead was filed for, and "" for a finding om named no path for or
-// one in a file at the repository root.
+// followupGroup is one bead's worth of a landing's findings. Key is the source
+// file the bead's work belongs to (followupCutKey). Package is the package the
+// bead was filed for, and is "" for a finding om named no path for or one in a
+// file at the repository root.
 type followupGroup struct {
+	Key     string
 	Package string
 	// Pinned is true when the pod-engine doc pins the file the work of one of
 	// the group's findings belongs to (markPinnedGroups, gt-nlw44e).
@@ -770,22 +772,23 @@ func markPinnedGroups(groups []followupGroup, doc string) {
 }
 
 // followupGroups splits a landing's findings into the beads they file: one bead
-// per package, in sorted package order. A package's findings are work one
-// worker takes; a landing spread across three packages is not (gt-mew3vm).
+// per cut key (the source file a finding's work belongs to), in sorted key
+// order. A file's findings are work one worker takes; a package spread across
+// two files is two pieces of work, not one (gt-mew3vm, gt-zfwsgg).
 func followupGroups(findings []FollowupCandidate) []followupGroup {
-	byPackage := map[string][]FollowupCandidate{}
+	byKey := map[string][]FollowupCandidate{}
 	var order []string
 	for _, c := range findings {
-		pkg := followupPackage(c.Path)
-		if _, seen := byPackage[pkg]; !seen {
-			order = append(order, pkg)
+		key := followupCutKey(c.Path)
+		if _, seen := byKey[key]; !seen {
+			order = append(order, key)
 		}
-		byPackage[pkg] = append(byPackage[pkg], c)
+		byKey[key] = append(byKey[key], c)
 	}
 	sort.Strings(order)
 	var out []followupGroup
-	for _, pkg := range order {
-		out = append(out, followupGroup{Package: pkg, Findings: byPackage[pkg]})
+	for _, key := range order {
+		out = append(out, followupGroup{Key: key, Package: followupPackage(key), Findings: byKey[key]})
 	}
 	return out
 }
