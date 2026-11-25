@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,6 +36,23 @@ func reviewPoolTestWorker() *landworker.Worker {
 		TownRoot:    "/sentinel/town",
 		WatchTarget: "main",
 		LandTimeout: 7 * time.Minute,
+	}
+}
+
+// reviewPoolTestEnv is an environment the off paths must not read: a read
+// fails the test, so a wiring that resolved om's config with the pool off
+// would be caught here (gt-aovgi3).
+func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
+	t.Helper()
+	return reviewPoolEnv{
+		lookup: func(key string) (string, bool) {
+			t.Fatalf("the pool-off path read the environment variable %q", key)
+			return "", false
+		},
+		home: func() (string, error) {
+			t.Fatal("the pool-off path read the home directory")
+			return "", nil
+		},
 	}
 }
 
@@ -132,7 +152,9 @@ func TestReviewPoolWiringOff(t *testing.T) {
 			lander := reviewPoolTestLander()
 			worker := reviewPoolTestWorker()
 
-			d.wireReviewPool("gastown", tc.cfg, lander, worker, "/sentinel/reviews")
+			if err := d.wireReviewPool("gastown", tc.cfg, lander, worker, "/sentinel/reviews", reviewPoolTestEnv(t)); err != nil {
+				t.Fatalf("pool off for the rig returned %v; want nil", err)
+			}
 
 			if got := logs.String(); got != "" {
 				t.Fatalf("pool off for the rig logged %q; want nothing", got)
@@ -171,7 +193,9 @@ func TestReviewPoolWiringBadConfigStaysOff(t *testing.T) {
 			lander := reviewPoolTestLander()
 			worker := reviewPoolTestWorker()
 
-			d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews")
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews", reviewPoolTestEnv(t)); err != nil {
+				t.Fatalf("bad config returned %v; want nil, the pool off", err)
+			}
 
 			got := logs.String()
 			if n := strings.Count(got, "\n"); n != 1 {
@@ -223,7 +247,23 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 			lander := reviewPoolTestLander()
 			worker := reviewPoolTestWorker()
 
-			d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews")
+			// An unlisted rig must not read the environment at all, so its
+			// rows use the env that fails the test on a read.
+			env := reviewPoolTestEnv(t)
+			if tc.wantOn {
+				env = reviewPoolEnv{
+					lookup: func(key string) (string, bool) {
+						if key == "XDG_CONFIG_HOME" {
+							return "/sentinel/xdg", true
+						}
+						return "", false
+					},
+					home: func() (string, error) { return "/sentinel/home", nil },
+				}
+			}
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
 
 			if got := logs.String(); got != "" {
 				t.Fatalf("wiring logged %q; want nothing", got)
@@ -235,6 +275,9 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 				if lander.ReuseExpiry != 0 {
 					t.Fatalf("rig not listed got ReuseExpiry %v; want 0", lander.ReuseExpiry)
 				}
+				if lander.OMConfigPath != "" {
+					t.Fatalf("rig not listed got OMConfigPath %q; want empty", lander.OMConfigPath)
+				}
 			} else {
 				wantAhead := land.TownAheadStore("/sentinel/town", "gastown")
 				if !reflect.DeepEqual(lander.Ahead, wantAhead) {
@@ -243,11 +286,15 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 				if lander.ReuseExpiry != tc.wantExpiry {
 					t.Fatalf("ReuseExpiry = %v; want %v", lander.ReuseExpiry, tc.wantExpiry)
 				}
-				// Only the two pool fields may move: with them cleared, the
+				if want := "/sentinel/xdg/om/config.json"; lander.OMConfigPath != want {
+					t.Fatalf("OMConfigPath = %q; want %q", lander.OMConfigPath, want)
+				}
+				// Only the pool fields may move: with them cleared, the
 				// Lander must be the one the daemon built. Lander holds a mutex,
 				// so the reset happens in place rather than on a copy.
 				lander.Ahead = nil
 				lander.ReuseExpiry = 0
+				lander.OMConfigPath = ""
 				if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
 					t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", lander, want)
 				}
@@ -255,6 +302,132 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 			// The Worker is a later bead's wiring target; this one leaves it alone.
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
 				t.Fatalf("wiring changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringSetsOMConfigPath pins that a listed rig's Lander is
+// given om's own config file under the XDG directory the environment names,
+// which is where the review key reads its config from. A home directory om
+// would not need is not required when XDG_CONFIG_HOME names the file
+// (gt-aovgi3).
+func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		home func() (string, error)
+	}{
+		{
+			name: "home directory available",
+			home: func() (string, error) { return "/fixture/home", nil },
+		},
+		{
+			// om reads XDG_CONFIG_HOME first and never needs the home
+			// directory when it is set (gt-3fr65j).
+			name: "home directory unreadable, XDG names the file",
+			home: func() (string, error) { return "", errors.New("no home for this process") },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			configHome := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(configHome, "om"), 0o700); err != nil {
+				t.Fatalf("make the om config directory: %v", err)
+			}
+			omConfig := filepath.Join(configHome, "om", "config.json")
+			if err := os.WriteFile(omConfig, []byte("{}\n"), 0o600); err != nil {
+				t.Fatalf("write om's config file: %v", err)
+			}
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+			env := reviewPoolEnv{
+				lookup: func(key string) (string, bool) {
+					if key == "XDG_CONFIG_HOME" {
+						return configHome, true
+					}
+					return "", false
+				},
+				home: tc.home,
+			}
+
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
+
+			if lander.OMConfigPath != omConfig {
+				t.Fatalf("OMConfigPath = %q; want om's config file %q under the injected XDG directory", lander.OMConfigPath, omConfig)
+			}
+			if lander.Ahead == nil {
+				t.Fatal("the pool is on but the Lander got no Ahead store")
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringOMConfigErrorStaysOff pins that a pool the config lists
+// stays off when om's config file cannot be located: the error comes back, the
+// Lander and the Worker are the ones the daemon built, and nothing is logged
+// in the pool's own voice (gt-aovgi3).
+func TestReviewPoolWiringOMConfigErrorStaysOff(t *testing.T) {
+	t.Parallel()
+	noXDG := func(string) (string, bool) { return "", false }
+	cases := []struct {
+		name    string
+		env     reviewPoolEnv
+		wantErr string
+	}{
+		{
+			name: "home directory read fails",
+			env: reviewPoolEnv{
+				lookup: noXDG,
+				home:   func() (string, error) { return "", errors.New("no home for this process") },
+			},
+			wantErr: "no home for this process",
+		},
+		{
+			name: "no XDG and no home",
+			env: reviewPoolEnv{
+				lookup: noXDG,
+				home:   func() (string, error) { return "", nil },
+			},
+			wantErr: "XDG_CONFIG_HOME",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+
+			err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", tc.env)
+
+			if err == nil {
+				t.Fatal("wireReviewPool returned nil with no om config location; want the error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not name %q", err, tc.wantErr)
+			}
+			if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
+				t.Fatalf("an unresolved config location changed the Lander:\ngot  %+v\nwant %+v", lander, want)
+			}
+			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+				t.Fatalf("an unresolved config location changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("an unresolved config location logged %q; want the returned error only", got)
 			}
 		})
 	}
