@@ -16,7 +16,7 @@ const (
 	// the findings the bundle already holds (gt-ghrt3e). The overflow tests read
 	// the room from it, so moving the room (gt-fpfw9y) changes it here and
 	// nothing else.
-	feedRoomCap = specdispatch.MaxAcceptance
+	feedRoomCap = followupFindingsPerBead
 
 	// feedChunkCap is the most findings the feed files in one new bundle: what
 	// is left of a group is filed in bundles of at most this many findings
@@ -114,6 +114,32 @@ func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 				t.Errorf("comments = %v (%v), want one naming the appended bundle", commentTexts(comments), err)
 			}
 		})
+	}
+}
+
+// TestFollowupFeedRoomStopsAtTheFindingsPerBeadCap: the room left in an open
+// bundle is feedRoomCap minus the findings it carries, not the larger budget one
+// worker's landing carries (gt-fpfw9y): a group of three with a bundle one
+// finding short of full appends one finding and files the other two as a new
+// bundle.
+func TestFollowupFeedRoomStopsAtTheFindingsPerBeadCap(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, numberedFindings(3))
+	f.fake.existing = []ExistingFollowup{bundleWithFindings(followupFindingsPerBead - 1)}
+	log := f.run()
+	appended := 0
+	for _, a := range f.fake.appended {
+		appended += len(a.Add.Labels)
+	}
+	if len(f.fake.appended) != 1 || appended != 1 {
+		t.Fatalf("appended %+v, want one append of 1 finding:\n%s", f.fake.appended, log)
+	}
+	var sizes []int
+	for _, spec := range f.fake.created {
+		sizes = append(sizes, fingerprints(spec.Labels))
+	}
+	if want := []int{2}; !slices.Equal(sizes, want) {
+		t.Errorf("created bundles carry %v findings, want %v:\n%s", sizes, want, log)
 	}
 }
 
