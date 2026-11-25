@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // podPinDoc is the pod-engine doc's text for these tests: one row cites
@@ -84,6 +85,57 @@ func TestFollowupGroupPinnedReadsDocOnce(t *testing.T) {
 	}
 	if len(f.fake.created) != 2 {
 		t.Fatalf("filed %d beads for findings in two packages, want two", len(f.fake.created))
+	}
+}
+
+// TestFollowupBodyPinned: a group whose file the pod-engine doc pins files a
+// body whose Constraints name the doc as the third file its fix edits, with the
+// -update-lines command that rewrites a drifted line; a group the doc does not
+// pin files a body without that sentence (gt-w1dc6n).
+func TestFollowupBodyPinned(t *testing.T) {
+	t.Parallel()
+	const pinned = "docs/design/pod-engine.md pins this file by line: edit it too, line numbers only, by running go test ./internal/podengine -update-lines; it is the third file this bead may touch, with the source file and its test file"
+	cases := []struct {
+		name    string
+		finding Finding
+		files   []string // the target branch's files the body is linted against
+		want    bool
+	}{
+		{
+			name:    "pinned file",
+			finding: minorAt("internal/daemon/dolt.go", 205, "swap the nil check"),
+			// The doc the Constraints now name is a file the branch holds, so the
+			// body is linted as the dispatcher will read it (target.go).
+			files: []string{"internal/daemon/dolt.go", "internal/daemon/dolt_test.go", podEngineDocFile},
+			want:  true,
+		},
+		{
+			name:    "unpinned file",
+			finding: minorAt("internal/daemon/other.go", 9, "name the error"),
+			files:   []string{"internal/daemon/other.go", "internal/daemon/other_test.go"},
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFollowupFixture(t, 0.8, []Finding{tc.finding})
+			f.repo = &podDocRepo{baseRepo: baseRepo{omJSON: `{"threshold": 0.6}`}, doc: podPinDoc}
+			f.run()
+			if len(f.fake.created) != 1 {
+				t.Fatalf("filed %d beads, want one", len(f.fake.created))
+			}
+			created := f.fake.created[0]
+			constraints := specdispatch.Sections(created.Body)["constraints"]
+			if got := strings.Contains(constraints, pinned); got != tc.want {
+				t.Errorf("the Constraints carry the pod-engine sentence = %v, want %v:\n%s", got, tc.want, constraints)
+			}
+			spec := specdispatch.Spec{ID: "gt-filed-0", Title: created.Title, Type: "task", Status: "open",
+				Description: created.Body, Target: followupLintTarget(tc.files...)}
+			if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); !v.Clean() {
+				t.Errorf("the body does not lint clean against %v: %s\n%s", tc.files, v.Line(spec.ID), created.Body)
+			}
+		})
 	}
 }
 

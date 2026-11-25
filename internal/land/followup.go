@@ -926,6 +926,9 @@ func followupBody(w Work, res Result, g followupGroup, acceptance string) string
 	b.WriteString(followupCheckMainNote)
 	b.WriteString("\n## Constraints\n")
 	b.WriteString(followupEditsNote(g.Key))
+	if g.Pinned {
+		b.WriteString(followupPinnedNote)
+	}
 	b.WriteString(followupRevertNote)
 	b.WriteString("\n## Out of scope\nAnything the findings do not name.\n")
 	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
@@ -973,6 +976,14 @@ func followupEditsNote(key string) string {
 	}
 	return "Edit only " + key + "." + rest
 }
+
+// followupPinnedNote is the Constraints sentence a group whose file the
+// pod-engine doc pins carries: the doc is a third file the fix edits, and its
+// pinned line numbers are rewritten from the quoted text rather than by hand
+// (gt-w1dc6n). An unpinned group carries no sentence.
+const followupPinnedNote = "\n" + podEngineDocFile + " pins this file by line: edit it too, line numbers only, " +
+	"by running go test ./internal/podengine -update-lines; it is the third file this bead may touch, " +
+	"with the source file and its test file\n\n"
 
 // followupRevertNote is the paragraph every generated bead carries in its
 // Constraints. It names no override, because agents read it and bypass the
