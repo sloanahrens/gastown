@@ -687,9 +687,12 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 		Notifier: func(string) notify.Notifier { return notifyfake.New() },
 		PodRun:   kube.run,
 		// The pre-swap gate is not what this test drives: its checks pass, the
-		// pair-level check included.
+		// pair-level check and the registry match included.
 		Preflight: preflightPassing,
 		PairLevel: agreeingPairLevels(),
+		// The derivation answers the values file's pair, so the gate reaches the
+		// swap and the pair check this test drives.
+		PairDerive: pairHeldDerive(update.ImagePair{Daemon: podPairPair.Daemon, Polecat: podPairPair.Polecat, Bd: podSwapBdRef, Commit: podPairPair.Commit}),
 	}
 	target := podPairTarget()
 	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
