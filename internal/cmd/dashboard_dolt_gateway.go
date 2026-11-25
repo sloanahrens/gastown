@@ -36,6 +36,8 @@ const (
 	// from the other.
 	doltGatewayRefusalsKey  = "429 refusals"
 	doltGatewayConflictsKey = "conflicts"
+	doltGatewayLaneWaitsKey = "lane waits"
+	doltGatewayLaneCapsKey  = "lane cap hits"
 )
 
 func init() {
@@ -96,6 +98,8 @@ type doltGatewaySection struct {
 	seq, applied uint64
 	refusals     doltGatewayCounter
 	conflicts    doltGatewayCounter
+	laneWaits    doltGatewayCounter
+	laneCaps     doltGatewayCounter
 	buckets      dashboard.Buckets
 	// restarted is whether the read now drawn saw a counter below its
 	// previous value: the gateway began again, so that read counts nothing.
@@ -117,6 +121,8 @@ func (s *doltGatewaySection) series(stats bdgateway.GatewayStats) []doltGatewayS
 	return []doltGatewaySeries{
 		refusals,
 		{key: doltGatewayConflictsKey, cur: stats.Conflicts, last: &s.conflicts},
+		{key: doltGatewayLaneWaitsKey, cur: stats.LaneWaits, last: &s.laneWaits},
+		{key: doltGatewayLaneCapsKey, cur: stats.LaneCapHits, last: &s.laneCaps},
 	}
 }
 
@@ -222,6 +228,12 @@ func doltGatewayNote(stats bdgateway.GatewayStats, restarted bool) string {
 	}
 	if stats.Conflicts == nil {
 		note.WriteString("; the stats carry no conflict count, so that column is left out")
+	}
+	switch {
+	case stats.LaneWaits == nil:
+		note.WriteString("; the stats carry no lane counts, so those columns are left out")
+	case stats.LaneCapHits == nil:
+		note.WriteString("; the stats carry no lane cap hits, so that column is left out")
 	}
 	note.WriteString(".")
 	return note.String()
