@@ -1260,6 +1260,7 @@ func TestExecLostReplyNoteText(t *testing.T) {
 // writes return, as Wait does.
 type pipeKube struct {
 	*fakeKube
+	ctx   context.Context
 	flood int
 }
 
@@ -1273,7 +1274,10 @@ func (p pipeKube) AttachStreams(argv []string, env []string, _ io.Reader, _, std
 	_, _ = pw.Write(bytes.Repeat([]byte("x"), p.flood))
 	_, _ = io.WriteString(pw, execStreamBreak)
 	_ = pw.Close()
-	<-copied
+	select {
+	case <-copied:
+	case <-p.ctx.Done():
+	}
 	return p.fakeKube.Attach(argv, env)
 }
 
@@ -1289,10 +1293,10 @@ func TestExecFailingStderrDoesNotStopTheChild(t *testing.T) {
 	f.attachExit = 1
 	var note bytes.Buffer
 	k := beadsTownKube(t, f, &note, town)
-	k.Shell = pipeKube{fakeKube: f, flood: 1 << 20}
-	k.Stdout, k.Stderr = io.Discard, failWriter{}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	k.Shell = pipeKube{fakeKube: f, ctx: ctx, flood: 1 << 20}
+	k.Stdout, k.Stderr = io.Discard, failWriter{}
 	type result struct {
 		exit int
 		err  error
