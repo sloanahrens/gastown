@@ -116,6 +116,35 @@ func TestClusterDriftSbxCompareReadsThroughExecVia(t *testing.T) {
 	}
 }
 
+// TestClusterDriftSbxCompareInterimHeaderFollowsTheExecViaForm holds the interim
+// header to the docker-exec form: printed for a context and a container, and not
+// printed for the empty form, which reads with a plain kubectl.
+func TestClusterDriftSbxCompareInterimHeaderFollowsTheExecViaForm(t *testing.T) {
+	t.Parallel()
+	inStep := `{"kind":"List","items":[` + sbxDriftService("dashboard", 8080) + "," + sbxDriftService("dashboard-runtime", 8080) + `]}`
+	for _, tc := range []struct {
+		name    string
+		execVia string
+		want    bool
+	}{
+		{name: "the docker-exec form prints the header", execVia: "docker-exec:gt-sbx-ctx:sandbox-node", want: true},
+		{name: "the empty form prints no header", execVia: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, seam, out := sbxCompareDeps(t, sbxCompareRecord())
+			d.execVia = tc.execVia
+			seam.answer = inStep
+			if err := compareSbxClusterDrift(context.Background(), d); err != nil {
+				t.Fatalf("compare = %v, want a cluster in step; printed:\n%s", err, out)
+			}
+			if got := strings.Contains(out.String(), ClusterExecViaInterimHeader); got != tc.want {
+				t.Errorf("header printed = %t, want %t; printed:\n%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
 // TestClusterDriftSbxCompareRefusesBeforeAnyRead holds each input the compare
 // cannot use to a refusal with nothing read: no town, a record that does
 // not decode, no record, an exec-via form the guard does not accept, and a render
