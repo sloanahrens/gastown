@@ -442,3 +442,33 @@ func TestVerdictReuseIsolatedReadsItsOwnRawDir(t *testing.T) {
 		t.Fatalf("error quotes another review's reply: %s", got)
 	}
 }
+
+// TestVerdictReuseVersionProberAssertion: a Reviewer value that holds an
+// OMReviewer type-asserts to VersionProber, so a pool can ask it for om's
+// version, while a Reviewer that only reviews is refused and the pool can skip
+// the question (gt-spfj2z).
+func TestVerdictReuseVersionProberAssertion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an OMReviewer reviewer answers", func(t *testing.T) {
+		t.Parallel()
+		var r Reviewer = OMReviewer{}
+		p, ok := r.(VersionProber)
+		if !ok {
+			t.Fatalf("%T does not type-assert to VersionProber", r)
+		}
+		if p == nil {
+			t.Fatal("the assertion returned a nil VersionProber")
+		}
+	})
+
+	t.Run("a plain fake reviewer is refused", func(t *testing.T) {
+		t.Parallel()
+		var r Reviewer = &fakeReviewer{fn: func(string) (Verdict, error) {
+			return Verdict{Verdict: VerdictApprove}, nil
+		}}
+		if p, ok := r.(VersionProber); ok {
+			t.Fatalf("a plain fake Reviewer type-asserts to VersionProber: %T", p)
+		}
+	})
+}
