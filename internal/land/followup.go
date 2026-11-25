@@ -616,6 +616,10 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			// CreatedAt is the feed's clock, so a later call in this same feed
 			// counts this bead in the week's filed total (gt-y5wvum).
 			filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
+			// A bundle filed here is one the later groups of this landing look
+			// up, so the next group of the same package appends to it rather
+			// than filing a second bead (gt-v7dolf).
+			existing = append(existing, filed[len(filed)-1])
 			lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(chunk)), res.Verdict.Score))
 		}
 	}

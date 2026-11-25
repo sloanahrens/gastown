@@ -375,6 +375,22 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 	}
 }
 
+// TestFollowupFeedFilesOneBeadForTwoFilesOfOnePackage: two files of one package
+// in one landing file one bead. A bundle filed earlier in the landing is one the
+// later lookups see, so the second file's group appends to it rather than filing
+// a second bead (gt-v7dolf).
+func TestFollowupFeedFilesOneBeadForTwoFilesOfOnePackage(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{
+		minorAt("internal/land/note.go", 1, "name the error"),
+		minorAt("internal/land/hook.go", 2, "swap the nil check"),
+	})
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads for two files of one package, want one:\n%s", len(f.fake.created), log)
+	}
+}
+
 // TestFollowupFeedTreatsARootFileAsHavingNoPackage: a finding in a file at the
 // repository root has no package — path.Dir spells that "." — so its bead names
 // the finding alone rather than a package called "." (gt-4ty22).
