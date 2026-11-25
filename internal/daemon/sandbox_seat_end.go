@@ -440,10 +440,15 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		return false
 	case kept != "":
 		// A seat whose branch guard keep rests on a bead the seat no longer
-		// works has moved on: no later pass can satisfy the keep, so it leaves
-		// no record to re-alert for a seat that is gone (gt-qrzhot).
+		// works has moved on: no later pass can satisfy the keep, so the
+		// record an earlier pass left goes and this pass leaves none to
+		// re-alert for a seat that is gone (gt-qrzhot). A record that cannot
+		// be removed stays, and the log names it rather than claiming it gone.
 		if strings.HasPrefix(kept, branchGuardReasonPrefix) && seatMovedOn(seatBranch, landing.BeadID) {
-			h.clearKeptSeat(rig, name)
+			if err := h.forgetKeptSeat(rig, name); err != nil {
+				log("kept: %s (the seat has moved on to another bead, but its kept record could not be removed: %v)", kept, err)
+				return false
+			}
 			log("kept: %s (the seat has moved on to another bead; no record is kept)", kept)
 			return false
 		}
@@ -516,10 +521,17 @@ func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLan
 // clearKeptSeat forgets the kept record of a seat the end has decided is no
 // longer kept. A removal that fails is logged, and the decision stands.
 func (h *patrolScanHost) clearKeptSeat(rig, name string) {
-	h.d.clearGatewayTally(rig, name)
-	if err := removeKeptSandboxSeat(h.town(), rig, name); err != nil {
+	if err := h.forgetKeptSeat(rig, name); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its kept record: %v", rig, name, err)
 	}
+}
+
+// forgetKeptSeat drops the seat's gateway tally and its kept record, and
+// returns a removal that failed so a caller's log can say whether a record
+// stays (gt-qrzhot).
+func (h *patrolScanHost) forgetKeptSeat(rig, name string) error {
+	h.d.clearGatewayTally(rig, name)
+	return h.removeKeptSeatRecord(rig, name)
 }
 
 // expirePendingSeatEnd forgets a record once its one-hour window has closed. An

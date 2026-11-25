@@ -154,6 +154,21 @@ func (f *seatEndFake) setAgent() {
 	}
 }
 
+// seedKeptRecord writes the kept record an earlier pass of the end left, so a
+// row can assert that this pass removes it.
+func (f *seatEndFake) seedKeptRecord() {
+	f.t.Helper()
+	rec := keptSandboxSeatRecord{
+		Bead:    endBead,
+		Reason:  "the seat works polecat/agate/gt-other+x1, not the landed " + endBranch,
+		Since:   time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		Landing: &sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true},
+	}
+	if err := writeKeptSandboxSeat(f.town, endRig, endPolecat, rec); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 // retire records the seat as submitted for landing and then retired to stop,
 // the state gt done and the landing leave behind.
 func (f *seatEndFake) retire(desired intent.Desired) {
@@ -263,6 +278,11 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		wantKeptRecord *bool
 		// wantLog asserts a substring of the end's log; "" does not check it.
 		wantLog string
+		// seedKeptRecord writes the kept record an earlier pass of the end
+		// left, so a row can assert this pass removes it or says it stays.
+		seedKeptRecord bool
+		// removeKeptErr makes the removal of the kept record fail.
+		removeKeptErr error
 	}{
 		{
 			name: "a finished seat goes", landing: finished, desired: intent.DesiredStop,
@@ -330,9 +350,15 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			// A takeover: the seat works its own branch of the bead that landed
-			// through another branch, so its keep still records (gt-qrzhot).
-			name:           "another branch keeps it",
+			name:    "another branch keeps it",
+			fields:  func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
+			landing: finished, desired: intent.DesiredStop, wantAsked: true,
+		},
+		{
+			// A takeover: the agent bead's branch names the bead that landed
+			// through another branch, so the seat's own work never landed and
+			// its keep still records (gt-qrzhot).
+			name:           "a takeover keeps it and records the keep",
 			fields:         func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-n4xq8+x2" },
 			landing:        finished,
 			desired:        intent.DesiredStop,
@@ -341,15 +367,30 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		},
 		{
 			// The seat was slung to another bead before this landing's end ran,
-			// so its keep can never be satisfied and no record is kept
-			// (gt-qrzhot).
-			name:           "a branch naming another bead keeps it and records no keep",
+			// so its keep can never be satisfied: the record an earlier pass
+			// left goes and this pass leaves none (gt-qrzhot).
+			name:           "a branch naming another bead keeps it and drops the record of an earlier pass",
 			fields:         func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
 			landing:        finished,
 			desired:        intent.DesiredStop,
 			wantAsked:      true,
+			seedKeptRecord: true,
 			wantKeptRecord: &keptRecordAbsent,
 			wantLog:        "(the seat has moved on to another bead; no record is kept)",
+		},
+		{
+			// The clear of a moved-on seat whose record cannot be removed keeps
+			// the record and says so, rather than claiming none is kept
+			// (gt-qrzhot).
+			name:           "a moved-on seat whose kept record cannot be removed logs that it stays",
+			fields:         func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
+			landing:        finished,
+			desired:        intent.DesiredStop,
+			wantAsked:      true,
+			seedKeptRecord: true,
+			removeKeptErr:  errors.New("record is not removable"),
+			wantKeptRecord: &keptRecordWritten,
+			wantLog:        "its kept record could not be removed",
 		},
 		{
 			name:    "a seat something still wants keeps it",
@@ -404,6 +445,12 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 				f.retire(tt.desired)
 			}
 			f.removeErr = tt.removeErr
+			if tt.seedKeptRecord {
+				f.seedKeptRecord()
+			}
+			if tt.removeKeptErr != nil {
+				f.host.removeKeptSeat = func(string, string, string) error { return tt.removeKeptErr }
+			}
 			dirs := f.seatDirs()
 
 			removed := f.host.endFinishedSandboxSeat(endRig, endPolecat, tt.landing)
