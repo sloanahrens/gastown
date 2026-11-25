@@ -10,10 +10,10 @@ import (
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// The follow-up bundle's identity: the minor findings for one package filed on one
-// UTC day share a bead, and the bundle is named by its labels, so the lookup reads
-// only what a bead carries and never a title or a body (gt-vuy738). The feed that
-// files and appends is a later change.
+// The follow-up bundle's identity: the minor findings for one source file (its cut
+// key) filed on one UTC day share a bead, and the bundle is named by its labels, so
+// the lookup reads only what a bead carries and never a title or a body (gt-vuy738,
+// gt-841oj0).
 
 const (
 	// FollowUpDayLabelPrefix prefixes the UTC day a bundle was opened on.

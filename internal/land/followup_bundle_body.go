@@ -13,13 +13,13 @@ import (
 // FollowupAddition is one landing's append to an open bundle.
 type FollowupAddition struct{ Lines, Boxes, Labels []string }
 
-// bundleSpec is the bead a landing's group opens for its package and UTC day.
+// bundleSpec is the bead a landing's group opens for its cut key and UTC day.
 func bundleSpec(w Work, res Result, day time.Time, g followupGroup) FollowupSpec {
 	labels := []string{FollowUpLabel}
 	for _, c := range g.Findings {
 		labels = append(labels, Fingerprint(c.Path, c.Title))
 	}
-	labels = append(labels, BundleLabels(day, g.Package)...)
+	labels = append(labels, BundleLabels(day, g.Key)...)
 	acceptance := followupAcceptance(g.Findings)
 	in := "the repository root"
 	if g.Package != "" {

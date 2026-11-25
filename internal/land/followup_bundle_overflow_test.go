@@ -10,10 +10,11 @@ import (
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// bundleWithRoom is an open bundle of internal/land for followupDay that has room
-// for room more findings: its labels carry MaxAcceptance-room fingerprints.
+// bundleWithRoom is an open bundle of internal/land/note.go for followupDay that
+// has room for room more findings: its labels carry MaxAcceptance-room
+// fingerprints.
 func bundleWithRoom(room int) ExistingFollowup {
-	b := openBundleFor(followupDay, "internal/land", "open")
+	b := openBundleFor(followupDay, "internal/land/note.go", "open")
 	for i := 1; i < specdispatch.MaxAcceptance-room; i++ {
 		b.Labels = append(b.Labels, fmt.Sprintf("%sfill%d", FingerprintPrefix, i))
 	}
