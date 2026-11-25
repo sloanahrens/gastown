@@ -157,6 +157,10 @@ func TestDiskMaintenanceLastRunRecordsAPassWhereOneTargetRan(t *testing.T) {
 	if strings.Contains(logs.String(), diskMaintNotRecorded) {
 		t.Errorf("the log says the pass was not recorded though a target ran: %q", logs.String())
 	}
+	// The row says the pass ran; the line says how many targets did not.
+	if want := "daily pass recorded: 1 ran, 1 refused, 0 plans could not be built, 0 applies failed"; !strings.Contains(logs.String(), want) {
+		t.Errorf("the log lacks %q: a target that refuses every day would be hidden by its neighbor: %q", want, logs.String())
+	}
 }
 
 // TestDiskMaintenanceLastRunSkipsAPassWhosePlanCannotBeBuilt: a target whose plan

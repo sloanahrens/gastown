@@ -982,8 +982,13 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		d.runActionsRetention(s.now(), apply)
 		concluded := s.now()
 		d.settleDiskMaintenanceWindow(concluded)
-		if results[diskMaintTargetRan] > 0 {
+		if ran := results[diskMaintTargetRan]; ran > 0 {
 			d.recordDiskMaintenanceRun(concluded)
+			// The row says the pass ran; the counts say how many targets did not,
+			// so a target that refuses every day shows while its neighbor keeps
+			// the row fresh.
+			d.logger.Printf("disk_maintenance: daily pass recorded: %d ran, %d refused, %d plans could not be built, %d applies failed",
+				ran, results[diskMaintTargetRefused], results[diskMaintTargetPlanFailed], results[diskMaintTargetFailed])
 		} else {
 			d.logger.Printf("disk_maintenance: daily pass not recorded as a run: no target completed its work (%d refused, %d plans could not be built, %d applies failed)",
 				results[diskMaintTargetRefused], results[diskMaintTargetPlanFailed], results[diskMaintTargetFailed])
