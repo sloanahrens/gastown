@@ -51,16 +51,28 @@ func TestSpecEstimatePriorNewest(t *testing.T) {
 	}
 }
 
+// TestSpecEstimatePriorWithoutJev: a record with embed minutes and no jev, as
+// every record written after the estimate stopped asking Jev is, is a prior
+// with the logged embed minutes and Jev 0.
+func TestSpecEstimatePriorWithoutJev(t *testing.T) {
+	t.Parallel()
+	embed := 12.0
+	townRoot := specPriorLog(t, specPriorRecord(time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC), &embed, nil))
+	got, ok := specEstimatePrior(townRoot, io.Discard)("gt-prior", "hash-a")
+	if want := (estimate.PriorMinutes{Embed: 12}); !ok || got != want {
+		t.Fatalf("prior = %+v, ok = %v, want %+v: embed without jev is a prior", got, ok, want)
+	}
+}
+
 func TestSpecEstimatePriorAbsent(t *testing.T) {
 	t.Parallel()
-	embed, jev := 12.0, 8.0
+	jev := 8.0
 	unreadable := t.TempDir() // a directory at the log file's path cannot be read
 	if err := os.MkdirAll(estlog.Path(unreadable), 0o755); err != nil {
 		t.Fatalf("building the unreadable log: %v", err)
 	}
 	cases := map[string]string{
 		"no record":      specPriorLog(t),
-		"nil jev":        specPriorLog(t, specPriorRecord(time.Time{}, &embed, nil)),
 		"nil embed":      specPriorLog(t, specPriorRecord(time.Time{}, nil, &jev)),
 		"unreadable log": unreadable,
 	}
