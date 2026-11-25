@@ -121,11 +121,15 @@ const cleanFooter = `{"gaps":[]}`
 // shape a working extract writes.
 const healthyLandings = "bead,rig,sp_minutes\nb1,gastown,8.0\n"
 
-// TestMetricsExtractAttentionStale: the newest day directory older than the
-// stale window raises one item naming that day, and a day within the window
+// TestMetricsExtractStaleAttention: the stale item ages the newest extract from
+// its footer's write time, so a newest extract written more than the stale
+// window ago raises one item naming its day, and one written within the window
 // raises none. writeExtractDay stamps each footer at its day's own midnight, so
-// the bound is four rows: old, within, exactly at it, and a minute past it.
-func TestMetricsExtractAttentionStale(t *testing.T) {
+// the newest day's write age is its age from midnight, and the bound is four
+// rows: old, within, exactly at it, and a minute past it. The name keeps the
+// TestMetricsExtractStale prefix, so a Gate line narrowing to the stale rule
+// selects this existing case too (gt-3v0f8e).
+func TestMetricsExtractStaleAttention(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
