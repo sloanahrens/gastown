@@ -565,6 +565,15 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// The os.Getwd ratchet reads every non-test Go file in the repo and the
+		// allowlist it checks against. A removed file can leave an entry that no
+		// longer calls os.Getwd, so a deletion is its input too (gt-s6icgn).
+		pkg:     "internal/callercwd",
+		tests:   []string{"TestNoDirectGetwd", "TestGetwdAllowlistCanOnlyShrink"},
+		judges:  func(rel string) bool { return nonTestGo(rel) || rel == "internal/callercwd/testdata/getwd-allow.txt" },
+		removal: true,
+	},
+	{
 		pkg:    "internal/rig",
 		tests:  []string{"TestNoMergeSettingsCommandCallsOutsideResolver"},
 		judges: underInternal,
