@@ -440,6 +440,11 @@ func compareSbxClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	if err != nil {
 		return err
 	}
+	// A form clusterKubectl accepted is either empty or the docker-exec form, so
+	// a non-empty one is the interim path, and its header is printed before any read.
+	if d.execVia != "" {
+		fmt.Fprintln(d.out, ClusterExecViaInterimHeader)
+	}
 	set, err := d.render.renderSbx(ctx, sbx.Inputs{
 		Read:             d.render.readFile,
 		Run:              sbxHelmRunner(d.render.runHelm, ""),
