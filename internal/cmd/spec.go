@@ -6279,3 +6279,18 @@ func (e specDispatchEnv) imageDriftSkip(bead, agent string) (held bool, line, no
 	return true, fmt.Sprintf("%s: not tried, the sandbox image lags the installed gt (a sling to %s was refused for it %s ago)",
 		bead, agent, e.Now().Sub(m.At).Round(time.Second)), ""
 }
+
+// inheritedBlockedReader adapts a blocked read keyed by beads directory to the
+// one keyed by rig name that inheritedSeam takes (gt-dypas4). A rig is read
+// from the directory ResolveBeadsDir names under townRoot, the view bd gives
+// that rig. A failed read returns the blocked func's error unchanged with no
+// issues, so a partial list never passes as that rig's blocked set.
+func inheritedBlockedReader(townRoot string, blocked func(beadsDir string) ([]*beads.Issue, error)) func(rig string) ([]*beads.Issue, error) {
+	return func(rig string) ([]*beads.Issue, error) {
+		issues, err := blocked(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
+		if err != nil {
+			return nil, err
+		}
+		return issues, nil
+	}
+}
