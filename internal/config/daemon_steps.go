@@ -85,6 +85,7 @@ var daemonSteps = []DaemonStep{
 	{"om_lessons", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the tick calls the patrol's run seam and execs no program (gt-vdy9do)"},
 	{"rework_numbers", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the step reads the town's landing ledgers and review log and writes the document and its last-run record under .runtime, so it execs no program (gt-2232t4)"},
 	{"outbox_poll", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the ticker starts and each tick calls one seam, which is a no-op until the outbox read lands (gt-dq4ce6); no program is exec'd yet, and the row gains openshell when that bead's read arrives (gt-0hkj0c)"},
+	{"cluster_drift", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the collector calls an injected compare answer, so it execs no program yet; the row gains gt when the real compare, which runs the daemon's own binary, is wired (gt-b6j1k5, gt-jokegc)"},
 
 	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},

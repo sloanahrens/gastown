@@ -440,6 +440,13 @@ type PatrolsConfig struct {
 	// upgrade.
 	OutboxPoll *OutboxPollConfig `json:"outbox_poll,omitempty"`
 
+	// ClusterDrift is the cluster_drift patrol's block: whether the daemon
+	// compares the live control cluster with a render of the green commit and
+	// raises cluster.drift when they differ (gt-b6j1k5). Off when absent: the
+	// compare reads the cluster, so the operator turns it on rather than an
+	// upgrade.
+	ClusterDrift *ClusterDriftPatrolConfig `json:"cluster_drift,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
@@ -2660,6 +2667,15 @@ type OutboxPollConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+// ClusterDriftPatrolConfig configures the cluster_drift patrol: whether the
+// daemon compares the live control cluster with a render of the green commit
+// and raises cluster.drift when they differ (gt-b6j1k5).
+//
+// The patrol is opt-in; the PatrolsConfig.ClusterDrift field says why.
+type ClusterDriftPatrolConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 // OmLessonsConfig configures the om_lessons patrol: the interval between its
 // passes over the week's om review records
 // (internal/daemon/om_lessons_patrol.go, docs/design/rework-program.md lever 3).
@@ -4352,6 +4368,13 @@ func (c *LandingInfraConfig) ExtraRepoRefs() ([]ExtraRepo, error) {
 // extraRepoPart and is not a dot segment.
 func validExtraRepoPart(part string) bool {
 	return extraRepoPart.MatchString(part) && part != "." && part != ".."
+}
+
+// ClusterDriftEnabled reports whether the cluster_drift patrol runs, and
+// answers false for a nil receiver, an absent block or an unset enabled, so a
+// caller holding no patrol config needs no nil check of its own.
+func (p *PatrolsConfig) ClusterDriftEnabled() bool {
+	return p != nil && p.ClusterDrift != nil && p.ClusterDrift.Enabled
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),

@@ -2913,3 +2913,44 @@ func TestNoBeadAccessOutboxPollConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestClusterDriftSetting: patrols.cluster_drift.enabled fills
+// PatrolsConfig.ClusterDrift, and ClusterDriftEnabled answers false for a nil
+// receiver, an absent block, an unset enabled and enabled:false, so the patrol
+// is off unless a town names it (gt-be6pep).
+func TestClusterDriftSetting(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		doc  string
+		want bool
+	}{
+		{"enabled true", `{"patrols":{"cluster_drift":{"enabled":true}}}`, true},
+		{"enabled false", `{"patrols":{"cluster_drift":{"enabled":false}}}`, false},
+		{"enabled unset", `{"patrols":{"cluster_drift":{}}}`, false},
+		{"no cluster_drift block", `{"patrols":{"handler":{"enabled":true}}}`, false},
+		{"no patrols block", `{}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.doc), &cfg); err != nil {
+				t.Fatalf("%s does not decode: %v", tc.doc, err)
+			}
+			if got := cfg.Patrols.ClusterDriftEnabled(); got != tc.want {
+				t.Errorf("ClusterDriftEnabled() = %v for %s, want %v", got, tc.doc, tc.want)
+			}
+		})
+	}
+
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+		var none *PatrolsConfig
+		if none.ClusterDriftEnabled() {
+			t.Error("a nil PatrolsConfig reports the patrol on, want off")
+		}
+	})
+}
