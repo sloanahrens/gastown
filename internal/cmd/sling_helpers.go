@@ -917,7 +917,7 @@ func (f formulaBD) beadEngine(beadID, formulaWorkDir, townRoot string) formulaEn
 // file means off, so a sling in a town without the setting bonds every step as
 // it always has rather than failing the dispatch. A file that is there but does
 // not load is off too, but warns through warn: dropping it silently would hide
-// a broken bond_root_only behind the old bond-every-step behaviour (gt-e345vg).
+// a broken bond_root_only behind the old bond-every-step behavior (gt-e345vg).
 func bondRootOnlySetting(townRoot string, warn io.Writer) bool {
 	cfg, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(townRoot))
 	if err != nil {
