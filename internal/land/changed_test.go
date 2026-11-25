@@ -223,6 +223,7 @@ var guardTriggers = []struct {
 	{"internal/config", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/manifestdata", "M\x00deploy/k8s/daemon/daemon.go\x00"},
 	{"internal/doctor", "M\x00internal/daemon/patrol.go\x00"},
 	// Any non-test Go file is the os.Getwd ratchet's input (gt-s6icgn).
 	{"internal/callercwd", "M\x00internal/cmd/seat_ship_cmd.go\x00"},
