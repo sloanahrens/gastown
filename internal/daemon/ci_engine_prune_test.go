@@ -1719,7 +1719,7 @@ func TestCIEngineBuildCacheZeroReclaimWarn(t *testing.T) {
 	if line == "" {
 		t.Fatalf("a zero reclaim logged no WARN:\n%s", f.logs.String())
 	}
-	for _, want := range []string{"until=6h", "keep size was 10240MB"} {
+	for _, want := range []string{"until=6h", "10240MB"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the zero-reclaim WARN lacks %q:\n%s", want, line)
 		}
@@ -2013,9 +2013,68 @@ func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 			if len(warns) != 1 {
 				t.Fatalf("logged %d WARN line(s), want one:\n%s", len(warns), logs)
 			}
-			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=6h", "keep size was 10240MB", "cache younger than the filter or inside the keep size is not removed"} {
+			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "--filter until=6h", ciEngineMaxUsedSpaceFlag + " 10240MB", "so the cache stayed over the keep size"} {
 				if !strings.Contains(warns[0], want) {
 					t.Errorf("the WARN line lacks %q:\n%s", want, warns[0])
+				}
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneCapPassWarnOnlyWhenTheCapPassReclaimsNothing: the zero-reclaim WARN
+// is raised only when the age prune and the cap prune both reclaimed 0 bytes, the cap
+// prune ran over the keep size, and both totals were read. The WARN names the age
+// filter and the cap flag. Any reclaim, an unread total, or a cache under the keep size
+// logs no WARN.
+func TestCIEnginePruneCapPassWarnOnlyWhenTheCapPassReclaimsNothing(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		df, age, cap cliReply
+		warn         bool
+	}{
+		"the cap prune reclaims nothing over the keep size": {
+			df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, age: cliReply{stdout: "Total:\t0B\n"}, cap: cliReply{stdout: "Total:\t0B\n"}, warn: true,
+		},
+		"the cap prune reclaims some": {
+			df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, age: cliReply{stdout: "Total:\t0B\n"}, cap: cliReply{stdout: "Total:\t1GB\n"},
+		},
+		"the age prune reclaims some and the cap prune nothing": {
+			df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, age: cliReply{stdout: "Total:\t1GB\n"}, cap: cliReply{stdout: "Total:\t0B\n"},
+		},
+		"the cap prune's total is unreadable": {
+			df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, age: cliReply{stdout: "Total:\t0B\n"}, cap: cliReply{stdout: "Total: lots\n"},
+		},
+		"the cache is under the keep size so no cap prune runs": {
+			df: cliReply{stdout: "Build Cache 8GB 8GB (100%)\n"}, age: cliReply{stdout: "Total:\t0B\n"}, cap: cliReply{stdout: "Total:\t0B\n"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, "-- docker system df", tc.df)
+			replaceEngineReply(f, "-- docker builder prune", tc.age)
+			replaceEngineReply(f, ciEngineMaxUsedSpaceFlag, tc.cap)
+			f.tick()
+			f.drain()
+
+			logs := f.logs.String()
+			if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+				t.Errorf("the run did not reach its verdict:\n%s", logs)
+			}
+			line := engineLogLine(logs, "WARN: the build cache prune reclaimed")
+			if !tc.warn {
+				if line != "" {
+					t.Errorf("a WARN was raised though the cap prune did not reclaim nothing over the keep size:\n%s", line)
+				}
+				return
+			}
+			if line == "" {
+				t.Fatalf("the cap prune reclaimed nothing over the keep size and no WARN was logged:\n%s", logs)
+			}
+			for _, want := range []string{"--filter until=6h", ciEngineMaxUsedSpaceFlag + " 10240MB", "the cap prune reclaimed " + polecatimage.Human(0)} {
+				if !strings.Contains(line, want) {
+					t.Errorf("the zero-reclaim WARN lacks %q:\n%s", want, line)
 				}
 			}
 		})
