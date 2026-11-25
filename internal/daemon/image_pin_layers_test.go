@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/pincheck"
 )
 
 // imagePinDurabilityNoon is noon UTC on day, so a record's day is that date in
@@ -556,6 +558,11 @@ type imagePinDurabilityRegistry struct {
 	asked []string
 	dead  map[string]string
 	fail  error
+	// refused names the digests whose manifest the registry answers with an
+	// error other than a gone manifest: the pin is undecided.
+	refused map[string]error
+	// gone names the digests whose manifest the registry no longer serves.
+	gone map[string]bool
 }
 
 func (r *imagePinDurabilityRegistry) Manifest(_ context.Context, _, ref string) ([]byte, string, error) {
@@ -564,7 +571,13 @@ func (r *imagePinDurabilityRegistry) Manifest(_ context.Context, _, ref string) 
 		return nil, "", r.fail
 	}
 	// pincheck asks for a manifest by the pinned digest, which is the key
-	// dead names.
+	// dead, refused and gone are keyed by.
+	if err := r.refused[ref]; err != nil {
+		return nil, "", err
+	}
+	if r.gone[ref] {
+		return nil, "", fmt.Errorf("the test registry no longer serves %s: %w", ref, pincheck.ErrManifestGone)
+	}
 	layer := imagePinDurabilityDigest("served")
 	if dead, ok := r.dead[ref]; ok {
 		layer = dead
@@ -916,5 +929,124 @@ func TestImagePinLayersStartFailureOffInstallsNothing(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestImagePinLayersUndecidedADeadPinIsRecordedPastAnUndecidedPin: a pin the
+// check cannot decide does not stop the run reading the pins after it. The dead
+// pin's finding is recorded, the run fails naming the undecided pin, and no day
+// is recorded, so the next start tries again.
+func TestImagePinLayersUndecidedADeadPinIsRecordedPastAnUndecidedPin(t *testing.T) {
+	t.Parallel()
+	pins := imagePinDurabilityPins()
+	town := t.TempDir()
+	record := imagePinLayersFindingsPath(town)
+	dead := imagePinDurabilityDigest("dead layer")
+	reg := &imagePinDurabilityRegistry{
+		refused: map[string]error{imagePinDurabilityPinDigest(pins[0]): errors.New("the registry refused the manifest")},
+		dead:    map[string]string{imagePinDurabilityPinDigest(pins[1]): dead},
+	}
+	d := imagePinDurabilityTestDaemon(t, town, io.Discard)
+	d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
+		return runImagePinLayers(ctx, record, pins, reg)
+	}
+
+	ran, _, err := d.runImagePinLayersTick(imagePinDurabilityNoon(t, "2026-11-16"))
+	if ran || err == nil || !strings.Contains(err.Error(), pins[0]) {
+		t.Fatalf("the run = ran %v, err %v; want no day recorded and an error naming the undecided pin %s", ran, err, pins[0])
+	}
+	if _, statErr := os.Stat(imagePinLayersLastRunPath(town)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("an undecided pin recorded a day (%v), want the day left due", statErr)
+	}
+	items, err := imagePinLayersObserved(record)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("the record holds %d items (%v), want the dead pin's finding alone", len(items), err)
+	}
+	if !strings.Contains(items[0].Key, pins[1]) || !strings.Contains(items[0].Summary, dead) {
+		t.Errorf("the item = %+v, want the dead pin %s with %s named", items[0], pins[1], dead)
+	}
+}
+
+// TestImagePinLayersUndecidedKeepsTheEarlierFindingAndClearsAWholePin: an
+// undecided pin keeps the finding the earlier record held for it, and a pin
+// found whole in the same run clears its earlier finding.
+func TestImagePinLayersUndecidedKeepsTheEarlierFindingAndClearsAWholePin(t *testing.T) {
+	t.Parallel()
+	pins := imagePinDurabilityPins()
+	record := imagePinLayersFindingsPath(t.TempDir())
+	deadA := imagePinDurabilityDigest("dead layer a")
+	deadB := imagePinDurabilityDigest("dead layer b")
+	both := &imagePinDurabilityRegistry{dead: map[string]string{
+		imagePinDurabilityPinDigest(pins[0]): deadA,
+		imagePinDurabilityPinDigest(pins[1]): deadB,
+	}}
+	if err := runImagePinLayers(context.Background(), record, pins, both); err != nil {
+		t.Fatalf("the earlier run: %v", err)
+	}
+
+	// pins[0] is now undecided and pins[1] is found whole.
+	later := &imagePinDurabilityRegistry{refused: map[string]error{
+		imagePinDurabilityPinDigest(pins[0]): errors.New("the registry refused the manifest"),
+	}}
+	if err := runImagePinLayers(context.Background(), record, pins, later); err == nil || !strings.Contains(err.Error(), pins[0]) {
+		t.Fatalf("the later run = %v, want an error naming the undecided pin %s", err, pins[0])
+	}
+	items, err := imagePinLayersObserved(record)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("the record holds %d items (%v), want the undecided pin's earlier finding alone", len(items), err)
+	}
+	if !strings.Contains(items[0].Key, pins[0]) || !strings.Contains(items[0].Summary, deadA) {
+		t.Errorf("the item = %+v, want the earlier finding for %s kept with %s named", items[0], pins[0], deadA)
+	}
+}
+
+// TestImagePinLayersUndecidedAnUnreadableRecordCountsAsNoFinding: an earlier
+// record that will not parse gives an undecided pin no finding, and the run
+// rewrites the record so the next read is clean.
+func TestImagePinLayersUndecidedAnUnreadableRecordCountsAsNoFinding(t *testing.T) {
+	t.Parallel()
+	pins := imagePinDurabilityPins()
+	record := imagePinLayersFindingsPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatalf("make the record's directory: %v", err)
+	}
+	if err := os.WriteFile(record, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write a corrupt record: %v", err)
+	}
+	refused := &imagePinDurabilityRegistry{refused: map[string]error{
+		imagePinDurabilityPinDigest(pins[0]): errors.New("the registry refused the manifest"),
+	}}
+	err := runImagePinLayers(context.Background(), record, pins, refused)
+	if err == nil || !strings.Contains(err.Error(), pins[0]) {
+		t.Fatalf("the run = %v, want an error naming the undecided pin %s", err, pins[0])
+	}
+	if !strings.Contains(err.Error(), "parsing the dead-layer record") {
+		t.Errorf("the run = %v, want the unreadable earlier record named as the reason the pin kept no finding", err)
+	}
+	items, err := imagePinLayersObserved(record)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("the record after the run holds %d items (%v), want none: the undecided pin had no earlier finding", len(items), err)
+	}
+}
+
+// TestImagePinLayersUndecidedAGoneManifestNamesTheDigest: a pin whose index
+// manifest is gone is decided, not undecided, and its item names the pin's
+// digest as no longer served.
+func TestImagePinLayersUndecidedAGoneManifestNamesTheDigest(t *testing.T) {
+	t.Parallel()
+	pins := imagePinDurabilityPins()
+	record := imagePinLayersFindingsPath(t.TempDir())
+	digest := imagePinDurabilityPinDigest(pins[0])
+	gone := &imagePinDurabilityRegistry{gone: map[string]bool{digest: true}}
+	if err := runImagePinLayers(context.Background(), record, pins, gone); err != nil {
+		t.Fatalf("a gone manifest is decided, so the run = %v, want no error", err)
+	}
+	items, err := imagePinLayersObserved(record)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("the record holds %d items (%v), want the gone manifest's item", len(items), err)
+	}
+	want := pins[0] + ": the registry no longer serves " + digest + " (manifest)"
+	if items[0].Summary != want {
+		t.Errorf("the item's summary = %q, want %q", items[0].Summary, want)
 	}
 }

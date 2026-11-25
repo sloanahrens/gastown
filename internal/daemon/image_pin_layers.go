@@ -129,11 +129,12 @@ func imagePinLayersFindingsPath(townRoot string) string {
 // check found unserved, by pin; an empty record is every pin whole.
 type imagePinLayersFindings map[string][]string
 
-// imagePinLayersObserved is the dead-layer items the record names, keyed by pin.
-func imagePinLayersObserved(path string) ([]attention.Item, error) {
+// readImagePinLayersFindings is the dead-layer record's findings: none when the
+// record does not exist yet, and an error when it will not open or parse.
+func readImagePinLayersFindings(path string) (imagePinLayersFindings, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return imagePinLayersFindings{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading the dead-layer record %s: %w", path, err)
@@ -141,6 +142,15 @@ func imagePinLayersObserved(path string) ([]attention.Item, error) {
 	var f imagePinLayersFindings
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parsing the dead-layer record %s: %w", path, err)
+	}
+	return f, nil
+}
+
+// imagePinLayersObserved is the dead-layer items the record names, keyed by pin.
+func imagePinLayersObserved(path string) ([]attention.Item, error) {
+	f, err := readImagePinLayersFindings(path)
+	if err != nil {
+		return nil, err
 	}
 	items := make([]attention.Item, 0, len(f))
 	for ref, dead := range f {
@@ -183,13 +193,29 @@ func imagePinLayersRegistryRef(pinned string) string {
 
 // runImagePinLayers is one day's check: every digest-pinned image is asked of
 // its registry at linux/arm64 and the dead digests replace the record, so a pin
-// found whole clears. A check that cannot decide writes nothing and fails.
+// found whole clears. A pin the check cannot decide keeps the finding the
+// record held for it, because a registry error says nothing about its layers.
+// Every pin is checked and the record written before the run fails naming the
+// undecided pins, so one pin cannot hide another's dead layer; the failed run
+// records no day, and the next start tries again.
 func runImagePinLayers(ctx context.Context, recordPath string, pins []string, reg pincheck.Registry) error {
+	// An unreadable record counts as no earlier finding: the write below
+	// replaces it with this run's findings. The read error is kept so a run
+	// that also left a pin undecided says why that pin kept nothing.
+	earlier, earlierErr := readImagePinLayersFindings(recordPath)
+	if earlierErr != nil {
+		earlier = imagePinLayersFindings{}
+	}
 	findings := imagePinLayersFindings{}
+	var undecided []string
 	for _, pinned := range pins {
 		res, err := pincheck.Check(ctx, reg, imagePinLayersRegistryRef(pinned), []string{imagePinLayersPlatform})
 		if err != nil {
-			return fmt.Errorf("checking the layers of %s: %w", pinned, err)
+			undecided = append(undecided, fmt.Sprintf("%s (%v)", pinned, err))
+			if dead := earlier[pinned]; len(dead) > 0 {
+				findings[pinned] = dead
+			}
+			continue
 		}
 		if len(res.Dead) > 0 {
 			findings[pinned] = res.Dead
@@ -197,6 +223,13 @@ func runImagePinLayers(ctx context.Context, recordPath string, pins []string, re
 	}
 	if err := atomicfile.EnsureDirAndWriteJSON(recordPath, findings); err != nil {
 		return fmt.Errorf("recording the image pin layers findings: %w", err)
+	}
+	if len(undecided) > 0 {
+		msg := fmt.Sprintf("could not decide the layers of %d pin(s): %s", len(undecided), strings.Join(undecided, "; "))
+		if earlierErr != nil {
+			msg += "; they kept no earlier finding because " + earlierErr.Error()
+		}
+		return errors.New(msg)
 	}
 	return nil
 }
