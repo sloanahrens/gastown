@@ -502,6 +502,13 @@ func (d *Daemon) startReworkNumbersTicker() (<-chan time.Time, func()) {
 	}
 	ticker := d.clk().NewTicker(reworkNumbersCheckTick)
 	d.logger.Printf("Rework numbers ticker started (check interval %v)", reworkNumbersCheckTick)
+	// Catch up at start rather than waiting an hour for the first tick: the
+	// ticker's first tick is an hour out, so a daemon that restarts more often
+	// than that would never reach the week's run (gt-r5p0bd). The record still
+	// decides whether the week is due.
+	if !d.isShutdownInProgress() {
+		d.startReworkNumbersTick()
+	}
 	return ticker.Chan(), ticker.Stop
 }
 
