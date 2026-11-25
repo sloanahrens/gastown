@@ -1,12 +1,21 @@
 package cmd
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
+
+var errBlockedRead = errors.New("bd blocked failed")
+
+// rigRead is what the fake blocked read returns for one rig.
+type rigRead struct {
+	issues []*beads.Issue
+	err    error
+}
 
 func TestSpecBlockedMaps(t *testing.T) {
 	t.Parallel()
@@ -240,6 +249,66 @@ func TestInheritedFromRigs(t *testing.T) {
 			got := inheritedFromRigs(tc.perRig)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("inheritedFromRigs() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadBlockedByRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		rigs       []string
+		reads      map[string]rigRead
+		wantPerRig map[string][]*beads.Issue
+		wantFailed map[string]error
+	}{
+		{
+			name: "two rigs read give both in perRig and none in failed",
+			rigs: []string{"gt", "hq"},
+			reads: map[string]rigRead{
+				"gt": {issues: []*beads.Issue{{ID: "gt-b", Priority: 0, BlockedBy: []string{"gt-x"}}}},
+				"hq": {issues: []*beads.Issue{{ID: "hq-c", Priority: 1}}},
+			},
+			wantPerRig: map[string][]*beads.Issue{
+				"gt": {{ID: "gt-b", Priority: 0, BlockedBy: []string{"gt-x"}}},
+				"hq": {{ID: "hq-c", Priority: 1}},
+			},
+			wantFailed: map[string]error{},
+		},
+		{
+			name: "one rig that fails is named in failed and left out of perRig",
+			rigs: []string{"gt", "hq"},
+			reads: map[string]rigRead{
+				"gt": {issues: []*beads.Issue{{ID: "gt-b", Priority: 2}}},
+				"hq": {err: errBlockedRead},
+			},
+			wantPerRig: map[string][]*beads.Issue{
+				"gt": {{ID: "gt-b", Priority: 2}},
+			},
+			wantFailed: map[string]error{"hq": errBlockedRead},
+		},
+		{
+			name:       "no rigs give empty non-nil maps",
+			rigs:       nil,
+			reads:      map[string]rigRead{},
+			wantPerRig: map[string][]*beads.Issue{},
+			wantFailed: map[string]error{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			blocked := func(rig string) ([]*beads.Issue, error) {
+				r := tc.reads[rig]
+				return r.issues, r.err
+			}
+			gotPerRig, gotFailed := readBlockedByRig(tc.rigs, blocked)
+			if !reflect.DeepEqual(gotPerRig, tc.wantPerRig) {
+				t.Fatalf("readBlockedByRig() perRig = %+v, want %+v", gotPerRig, tc.wantPerRig)
+			}
+			if !reflect.DeepEqual(gotFailed, tc.wantFailed) {
+				t.Fatalf("readBlockedByRig() failed = %+v, want %+v", gotFailed, tc.wantFailed)
 			}
 		})
 	}
