@@ -307,7 +307,7 @@ func TestFollowupFeedStampsCreatedAt(t *testing.T) {
 		{ID: "a", Path: "docs/reference.md", Title: "name the error"},
 		{ID: "b", Path: "internal/daemon/landing_worker.go", Title: "swap the nil check"},
 	}
-	filed, _, _ := f.lander.fileFollowupBeads(f.work, f.result, fresh, nil)
+	filed, _, _ := f.lander.fileFollowupBeads(f.work, f.result, fresh, nil, "")
 	if len(filed) != 2 {
 		t.Fatalf("filed %d entries for findings in two packages, want two", len(filed))
 	}
