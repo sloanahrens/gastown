@@ -1034,3 +1034,32 @@ func TestQueueReplayOldLineIsBehaviour(t *testing.T) {
 		})
 	}
 }
+
+// TestQueuedFindingCount: the queue alert counts findings, not lines. A finding
+// two lines name is one, a line with no findings is none, and a finding om gave
+// no id is still a finding, so it counts on its own (gt-7nbxgw).
+func TestQueuedFindingCount(t *testing.T) {
+	t.Parallel()
+	other := ReviewFindingText{ID: "f-10", Severity: "minor", File: "internal/land/note.go", Line: 30, Title: "drop the unused field"}
+	unnamed := ReviewFindingText{Severity: "minor", File: "internal/land/note.go", Line: 40, Title: "name the error"}
+	for _, tc := range []struct {
+		name string
+		q    []QueuedFollowup
+		want int
+	}{
+		{"an empty queue", nil, 0},
+		{"a line with no findings", []QueuedFollowup{queueLine("gt-a", "gastown")}, 0},
+		{"one finding on one line", []QueuedFollowup{queueLine("gt-a", "gastown", queuedFinding)}, 1},
+		{"one finding two lines name", []QueuedFollowup{queueLine("gt-a", "gastown", queuedFinding), queueLine("gt-b", "gastown", queuedFinding)}, 1},
+		{"two findings on one line", []QueuedFollowup{queueLine("gt-a", "gastown", queuedFinding, other)}, 2},
+		{"two findings on two lines", []QueuedFollowup{queueLine("gt-a", "gastown", queuedFinding), queueLine("gt-b", "gastown", other)}, 2},
+		{"two findings with no id", []QueuedFollowup{queueLine("gt-a", "gastown", unnamed, unnamed)}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := queuedFindingCount(tc.q); got != tc.want {
+				t.Errorf("queuedFindingCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
