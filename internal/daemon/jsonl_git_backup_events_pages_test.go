@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // eventsPageCall is one call of the paged read's readPage seam.
@@ -324,6 +327,185 @@ func TestExportEventsPagesStops(t *testing.T) {
 		}
 		if _, err := os.Stat(eventsExportStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the state file was written: %v", err)
+		}
+	})
+}
+
+// eventsPageExport is the page reader's table exporter: it records each call's
+// query and directory and writes the rows as one events.jsonl shard there.
+type eventsPageExport struct {
+	rows      []string
+	skipWrite bool // report the rows but write no shard
+	err       error
+	calls     int
+	dirs      []string
+	queries   []string
+}
+
+func (f *eventsPageExport) export(_ string, q beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
+	f.calls++
+	f.dirs = append(f.dirs, dir)
+	inline, err := q.Inline()
+	if err != nil {
+		return 0, err
+	}
+	f.queries = append(f.queries, inline)
+	switch {
+	case f.err != nil:
+		return 0, f.err
+	case len(f.rows) == 0 || f.skipWrite:
+		return len(f.rows), nil
+	}
+	body := strings.Join(f.rows, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(body), 0644); err != nil {
+		return 0, err
+	}
+	return len(f.rows), nil
+}
+
+// eventsPageReaderDaemon is a daemon on a temp town, and its gt events export dir.
+func eventsPageReaderDaemon(t *testing.T) (*Daemon, string) {
+	t.Helper()
+	town := t.TempDir()
+	repo, _ := JsonlBackupRepo(town, nil)
+	return &Daemon{config: &Config{TownRoot: town}}, filepath.Join(repo, "gt")
+}
+
+// TestEventsPageReader: the production page reader exports one events page
+// into the export's staging directory, returns its rows, and removes it (gt-mjw5a7).
+func TestEventsPageReader(t *testing.T) {
+	t.Parallel()
+	rows := []string{
+		eventsLine("e1", "2026-10-31 10:00:00"),
+		eventsLine("e2", "2026-10-31 10:00:01"),
+		eventsLine("e3", "2026-10-31 10:00:01"),
+	}
+	const (
+		bound = "2026-10-30 10:00:00"
+		id    = "11111111-1111-1111-1111-111111111111"
+	)
+
+	t.Run("returns the exported rows in order", func(t *testing.T) {
+		t.Parallel()
+		d, _ := eventsPageReaderDaemon(t)
+		exp := &eventsPageExport{rows: rows}
+		page, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var got []string
+		for _, row := range page {
+			got = append(got, string(row))
+		}
+		if !slices.Equal(got, rows) {
+			t.Errorf("page = %q, want %q", got, rows)
+		}
+	})
+
+	t.Run("reads the page built from the bound and limit", func(t *testing.T) {
+		t.Parallel()
+		d, _ := eventsPageReaderDaemon(t)
+		exp := &eventsPageExport{rows: rows}
+		if _, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		want, err := beadsql.BackupEventsPage("gt", bound, id, 3).Inline()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(exp.queries) != 1 || exp.queries[0] != want {
+			t.Errorf("queries = %q, want one %q", exp.queries, want)
+		}
+	})
+
+	t.Run("stages the read in the events export's incoming directory and removes it", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		for _, tc := range []struct {
+			name   string
+			patrol *DaemonPatrolConfig
+		}{
+			{"the default repo", nil},
+			{"a configured repo", &DaemonPatrolConfig{Patrols: &PatrolsConfig{JsonlGitBackup: &JsonlGitBackupConfig{GitRepo: filepath.Join(t.TempDir(), "backup")}}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				d := &Daemon{config: &Config{TownRoot: town}, patrolConfig: tc.patrol}
+				exp := &eventsPageExport{rows: rows}
+				if _, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3); err != nil {
+					t.Fatalf("read: %v", err)
+				}
+				repo, _ := JsonlBackupRepo(town, tc.patrol)
+				if want, got := filepath.Join(repo, "gt", eventsIncomingDir), filepath.Dir(exp.dirs[0]); got != want {
+					t.Errorf("stage parent = %s, want %s", got, want)
+				}
+				if _, err := os.Stat(exp.dirs[0]); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the stage %s survived the read: %v", exp.dirs[0], err)
+				}
+			})
+		}
+	})
+
+	t.Run("an export of no rows is an empty page", func(t *testing.T) {
+		t.Parallel()
+		d, _ := eventsPageReaderDaemon(t)
+		exp := &eventsPageExport{}
+		page, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if len(page) != 0 {
+			t.Errorf("page = %q, want none", page)
+		}
+	})
+
+	t.Run("a failed export is an error", func(t *testing.T) {
+		t.Parallel()
+		d, _ := eventsPageReaderDaemon(t)
+		exp := &eventsPageExport{err: errors.New("the dolt read timed out")}
+		if _, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3); err == nil || !strings.Contains(err.Error(), "the dolt read timed out") {
+			t.Errorf("read error = %v, want the export's error", err)
+		}
+	})
+
+	t.Run("an export reporting rows it did not write is refused", func(t *testing.T) {
+		t.Parallel()
+		d, _ := eventsPageReaderDaemon(t)
+		exp := &eventsPageExport{rows: rows, skipWrite: true}
+		if _, err := d.eventsPageReader("gt", "/data", time.Minute, exp.export)(bound, id, 3); err == nil {
+			t.Error("an export that reported rows but wrote none was read as a page")
+		}
+	})
+
+	t.Run("a page it cannot stage is refused", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			db    string
+			block bool // a file where the incoming directory belongs
+		}{
+			{"a database name outside the town", "../gt", false},
+			{"an incoming directory in the way", "gt", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				d, exportDir := eventsPageReaderDaemon(t)
+				if tc.block {
+					if err := os.MkdirAll(exportDir, 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(exportDir, eventsIncomingDir), []byte("in the way"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				exp := &eventsPageExport{rows: rows}
+				if _, err := d.eventsPageReader(tc.db, "/data", time.Minute, exp.export)(bound, id, 3); err == nil {
+					t.Error("a page was read")
+				}
+				if exp.calls != 0 {
+					t.Errorf("the export was asked for %d page(s), want none", exp.calls)
+				}
+			})
 		}
 	})
 }
