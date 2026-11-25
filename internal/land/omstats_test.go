@@ -10,6 +10,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/authorkind"
 )
 
 // omStatsRecordLine renders rec the way the landing worker writes it.
@@ -557,6 +559,93 @@ func TestOmStatsRecordParse(t *testing.T) {
 				t.Errorf("author kind, branch = %q, %q; want %q, %q", got.authorKind, got.branch, tc.wantKind, tc.wantBranch)
 			}
 		})
+	}
+}
+
+// TestOmStatsAuthors is gt-rupcpu's acceptance: the authors table groups each
+// record by the kind of seat that wrote its branch — its own author kind, the
+// kind a line written before that field names in its branch, or the unnamed row
+// — while the agents table counts exactly as it did before.
+func TestOmStatsAuthors(t *testing.T) {
+	t.Parallel()
+	records := omStatsRecords(t,
+		ReviewRecord{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: VerdictRequestChanges,
+			Agent: "opus", Branch: "polecat/dag/gt-a", AuthorKind: authorkind.Polecat, Findings: 2, At: omStatsAt(16, 10, 0, 0)},
+		ReviewRecord{BeadID: "gt-a", Rig: "gastown", Attempt: 2, Score: 0.90, Verdict: VerdictApprove,
+			Agent: "opus", Branch: "polecat/dag/gt-a", AuthorKind: authorkind.Polecat, At: omStatsAt(16, 11, 0, 0)},
+		ReviewRecord{BeadID: "gt-b", Rig: "gastown", Attempt: 1, Score: 0.45, Verdict: VerdictRequestChanges,
+			Agent: "sonnet", Branch: "crew/bird/gt-b", AuthorKind: authorkind.Crew, Findings: 1, At: omStatsAt(16, 12, 0, 0)},
+		// A line written before the log carried its author fields: its branch
+		// still names the kind of seat that wrote it.
+		ReviewRecord{BeadID: "gt-c", Rig: "gastown", Attempt: 1, Score: 0.85, Verdict: VerdictApprove,
+			Agent: "haiku", Branch: "crew/x/y", At: omStatsAt(16, 13, 0, 0)},
+		// Neither field: the record cannot say who wrote the work.
+		ReviewRecord{BeadID: "gt-d", Rig: "longeye", Attempt: 1, Score: 0.95, Verdict: VerdictApprove,
+			Agent: "flash", At: omStatsAt(17, 9, 0, 0)},
+	)
+
+	stats, err := AggregateOmStats(strings.NewReader(records), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	wantAuthors := []OmStatsGroup{
+		{Name: authorkind.Crew, Approvals: 1, Rejections: 1, Rate: 0.5},
+		{Name: authorkind.Polecat, Approvals: 1, Rejections: 1, Rate: 0.5},
+		{Name: OmStatsUnnamed, Approvals: 1, Rejections: 0, Rate: 0},
+	}
+	if len(stats.Authors) != len(wantAuthors) {
+		t.Fatalf("authors = %+v, want %+v", stats.Authors, wantAuthors)
+	}
+	for i, want := range wantAuthors {
+		if stats.Authors[i] != want {
+			t.Errorf("author %d = %+v, want %+v", i, stats.Authors[i], want)
+		}
+	}
+	// The authors table is a second view of the same records, not a
+	// replacement: the agents table counts every record as before.
+	wantAgents := []OmStatsGroup{
+		{Name: "opus", Approvals: 1, Rejections: 1, Rate: 0.5},
+		{Name: "sonnet", Approvals: 0, Rejections: 1, Rate: 1},
+		{Name: "flash", Approvals: 1, Rejections: 0, Rate: 0},
+		{Name: "haiku", Approvals: 1, Rejections: 0, Rate: 0},
+	}
+	if len(stats.Agents) != len(wantAgents) {
+		t.Fatalf("agents = %+v, want %+v", stats.Agents, wantAgents)
+	}
+	for i, want := range wantAgents {
+		if stats.Agents[i] != want {
+			t.Errorf("agent %d = %+v, want %+v", i, stats.Agents[i], want)
+		}
+	}
+}
+
+// TestOmStatsAuthorsPreferTheRecordKind: a record that names its author kind is
+// grouped by that field even when its branch names another kind, because the
+// kind was read from the branch when the line was written (gt-rupcpu).
+func TestOmStatsAuthorsPreferTheRecordKind(t *testing.T) {
+	t.Parallel()
+	records := omStatsRecords(t,
+		ReviewRecord{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: VerdictRequestChanges,
+			Branch: "polecat/dag/gt-a", AuthorKind: authorkind.Overseer, Findings: 1, At: omStatsAt(16, 10, 0, 0)},
+		ReviewRecord{BeadID: "gt-b", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: VerdictRequestChanges,
+			Branch: "polecat/dag/gt-b", Findings: 1, At: omStatsAt(16, 11, 0, 0)},
+	)
+
+	stats, err := AggregateOmStats(strings.NewReader(records), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	want := []OmStatsGroup{
+		{Name: authorkind.Overseer, Rejections: 1, Rate: 1},
+		{Name: authorkind.Polecat, Rejections: 1, Rate: 1},
+	}
+	if len(stats.Authors) != len(want) {
+		t.Fatalf("authors = %+v, want %+v", stats.Authors, want)
+	}
+	for i, w := range want {
+		if stats.Authors[i] != w {
+			t.Errorf("author %d = %+v, want %+v", i, stats.Authors[i], w)
+		}
 	}
 }
 

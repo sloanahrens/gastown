@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 )
 
@@ -27,12 +28,16 @@ const OmStatsTopBeads = 10
 const OmStatsUnnamed = "(none)"
 
 // OmStats is the town's om verdicts aggregated: how often om rejects a
-// landing, by day, rig and author seat, how many review rounds each bead's
-// records reached, and the beads rejected most.
+// landing, by day, rig, author seat and author kind, how many review rounds
+// each bead's records reached, and the beads rejected most.
 type OmStats struct {
-	Days     []OmStatsDay   `json:"days"`
-	Rigs     []OmStatsGroup `json:"rigs"`
-	Agents   []OmStatsGroup `json:"agents"`
+	Days   []OmStatsDay   `json:"days"`
+	Rigs   []OmStatsGroup `json:"rigs"`
+	Agents []OmStatsGroup `json:"agents"`
+	// Authors groups a record by the kind of seat that wrote its branch: the
+	// record's author kind, or the kind its branch names when the line predates
+	// that field (authorkind.Kind), or OmStatsUnnamed when it names neither.
+	Authors  []OmStatsGroup `json:"authors"`
 	Rounds   OmStatsRounds  `json:"rounds"`
 	TopBeads []OmStatsBead  `json:"top_beads"`
 	// Skipped counts the review-record lines that were not a record, so they
@@ -88,8 +93,8 @@ type OmStatsBead struct {
 // The review records are the source. The log fills only the days before the
 // first review record — when the reviews file begins — and those days are
 // marked Fallback. The log counts in the day table alone: it names no rig, no
-// seat and no attempt, so Rounds and TopBeads come from the review records. A
-// nil reader reads nothing.
+// seat, no author branch and no attempt, so Authors, Rounds and TopBeads come
+// from the review records. A nil reader reads nothing.
 //
 // A record line that is not one, or carries no instant, is skipped and counted,
 // however long it is; a line the reader cannot read fails the report. Any other
@@ -104,11 +109,13 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 		Days:     []OmStatsDay{},
 		Rigs:     []OmStatsGroup{},
 		Agents:   []OmStatsGroup{},
+		Authors:  []OmStatsGroup{},
 		TopBeads: []OmStatsBead{},
 	}
 	days := map[string]*omStatsCounts{}
 	rigs := map[string]*omStatsCounts{}
 	agents := map[string]*omStatsCounts{}
+	authors := map[string]*omStatsCounts{}
 	beads := map[string]*omStatsBeadAcc{}
 	attempts := map[string]int{}
 	var firstRecordDay time.Time
@@ -130,14 +137,24 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 				continue
 			}
 			rig, agent := orOmStatsUnnamed(rec.Rig), orOmStatsUnnamed(rec.Agent)
+			// The author kind is the record's own when it carries one; a line
+			// written before the field falls back to the kind its branch names,
+			// and a line naming neither is unnamed.
+			author := line.authorKind
+			if author == "" && line.branch != "" {
+				author = authorkind.Kind(line.branch)
+			}
+			author = orOmStatsUnnamed(author)
 			counts := omStatsCountsFor(days, day)
 			rigCounts := omStatsCountsFor(rigs, rig)
 			agentCounts := omStatsCountsFor(agents, agent)
+			authorCounts := omStatsCountsFor(authors, author)
 			if rec.IsRejection() {
 				findings, score := float64(rec.Findings), rec.Score
 				counts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				rigCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				agentCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
+				authorCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				bead := omStatsBeadFor(beads, rec.BeadID)
 				bead.rejections++
 				if rec.Rig != "" {
@@ -147,6 +164,7 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 				counts.approvals++
 				rigCounts.approvals++
 				agentCounts.approvals++
+				authorCounts.approvals++
 			}
 			if rec.Attempt > attempts[rec.BeadID] {
 				attempts[rec.BeadID] = rec.Attempt
@@ -192,6 +210,7 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 	sort.Slice(stats.Days, func(i, j int) bool { return stats.Days[i].Day < stats.Days[j].Day })
 	stats.Rigs = omStatsGroups(rigs)
 	stats.Agents = omStatsGroups(agents)
+	stats.Authors = omStatsGroups(authors)
 	for _, max := range attempts {
 		switch {
 		case max >= 3:
@@ -341,8 +360,9 @@ type omStatsReviewRecord struct {
 	hasScore, hasFindings bool
 	// authorKind and branch are the review log's own author fields: the kind
 	// of seat that wrote the branch and the branch it submitted on. A line
-	// written before the log carried them reads both empty. Nothing in the
-	// report reads them yet (gt-qgvgep).
+	// written before the log carried them reads both empty. The authors table
+	// reads them: the kind when the line names one, else the kind its branch
+	// names (gt-qgvgep, gt-rupcpu).
 	authorKind string
 	branch     string
 }

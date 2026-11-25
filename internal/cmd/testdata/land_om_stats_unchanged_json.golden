@@ -54,6 +54,14 @@
       "rate": 0
     }
   ],
+  "authors": [
+    {
+      "name": "(none)",
+      "approvals": 2,
+      "rejections": 1,
+      "rate": 0.3333333333333333
+    }
+  ],
   "rounds": {
     "1": 1,
     "2": 1,
