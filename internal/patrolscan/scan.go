@@ -1432,6 +1432,21 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	return f, true
 }
 
+// closedPoolResumeNote is what a recovery restart says about the pool it
+// resumed on: an answered seat stays on the pool the operator closed and the
+// restart names it rather than staying silent (overseer decision 2026-11-24).
+// The caller joins a non-empty note after its reason with "; ". A failed read
+// is named as the failure it is, so an unread cap never reads as an open pool.
+func closedPoolResumeNote(c *SeatCap, err error) string {
+	if err != nil {
+		return "cap read failed: " + err.Error()
+	}
+	if c == nil || !c.Closed {
+		return ""
+	}
+	return fmt.Sprintf("resumed on closed pool %s (cap 0)", c.Key)
+}
+
 // releaseBlocked frees the seat and defers the bead when the bead cannot
 // proceed: an unresolved blocking dependency of the bead the seat holds means a
 // restart only spawns a session that would end the turn the way the last one
