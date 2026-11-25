@@ -331,7 +331,7 @@ func TestRehearsalRefusesTagProxyImage(t *testing.T) {
 // om token and its meta file, or the write-capable registry bot's token.
 func refusedInRehearsal(file string) bool {
 	promote := strings.HasPrefix(file, "promote-") && strings.HasSuffix(file, ".key")
-	return promote || file == "jev.env" || file == ForgeTokenFile || file == OMTokenFile || file == OMTokenMetaFile || file == RegistryTokenFile
+	return promote || file == "jev.env" || file == ForgeTokenFile || file == OMTokenFile || file == OMTokenMetaFile || file == registryTokenFile
 }
 
 // volumeMountAt returns the mount at path, or nil.

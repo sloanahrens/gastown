@@ -3446,12 +3446,40 @@ func TestRenderCarriesTheLedgerReaderSecret(t *testing.T) {
 	}
 }
 
+// TestSecretVolumeModes holds secretVolume to the mode each entry's manifest
+// records: no entry is narrowed, so an owner-read 0400 stays 0400 and a 0600
+// stays 0600, whatever the file's name (gt-0oyfpa).
+func TestSecretVolumeModes(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name, mode string
+		want       int32
+	}{
+		{"ledger.env", "0600", 0o600},
+		{"ledger.env", "0400", 0o400},
+		{registryTokenFile, "0600", 0o600},
+	}
+	for _, row := range rows {
+		t.Run(row.name+" at "+row.mode, func(t *testing.T) {
+			t.Parallel()
+			vol, err := secretVolume(manifestdata.SecretFile{Name: row.name, Mode: row.mode})
+			if err != nil {
+				t.Fatalf("secretVolume(%q, %s) refused: %v", row.name, row.mode, err)
+			}
+			if vol.Secret == nil || vol.Secret.DefaultMode == nil {
+				t.Fatalf("secretVolume(%q, %s) has no Secret volume with a defaultMode", row.name, row.mode)
+			}
+			if got := *vol.Secret.DefaultMode; got != row.want {
+				t.Errorf("secretVolume(%q, %s) defaultMode = %04o, want %04o", row.name, row.mode, got, row.want)
+			}
+		})
+	}
+}
+
 // TestSecretVolumesCarryTheirManifestMode holds every Secret volume the loop
 // renders to its entry's manifest mode as the defaultMode. The reader refuses a
 // file readable by group or others, so a volume left at the Kubernetes default
-// 0644 would fail the cloud step closed (gt-nlf1i6). The registry bot's token is
-// the one entry rendered narrower than its manifest mode allows: owner-read
-// only, because the token can write packages (gt-h53ixs).
+// 0644 would fail the cloud step closed (gt-nlf1i6).
 func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
@@ -3465,9 +3493,6 @@ func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 		want, err := strconv.ParseInt(file.Mode, 8, 32)
 		if err != nil {
 			t.Fatalf("entry %q mode %q does not parse as octal: %v", file.Name, file.Mode, err)
-		}
-		if file.Name == RegistryTokenFile {
-			want = 0o400
 		}
 		if got := *vol.Secret.DefaultMode; int64(got) != want {
 			t.Errorf("entry %q volume defaultMode = %o, want %04o", file.Name, got, want)
@@ -3491,21 +3516,52 @@ func TestDaemonHoldsNoRegistryToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing the secrets manifest: %v", err)
 	}
-	if filesHold(manifest.Files, RegistryTokenFile) {
-		t.Errorf("the secrets manifest still lists %s under files, so the render mounts it", RegistryTokenFile)
+	if filesHold(manifest.Files, registryTokenFile) {
+		t.Errorf("the secrets manifest still lists %s under files, so the render mounts it", registryTokenFile)
 	}
 	var recorded *templates.UnclaimedSecret
 	for i := range manifest.Unclaimed {
-		if manifest.Unclaimed[i].Name == RegistryTokenFile {
+		if manifest.Unclaimed[i].Name == registryTokenFile {
 			recorded = &manifest.Unclaimed[i]
 		}
 	}
 	if recorded == nil {
-		t.Fatalf("the secrets manifest does not record %s under unclaimed", RegistryTokenFile)
+		t.Fatalf("the secrets manifest does not record %s under unclaimed", registryTokenFile)
 	}
 	if strings.TrimSpace(recorded.Search) == "" {
-		t.Errorf("the unclaimed entry for %s has no search, so nothing records why no daemon code reads it", RegistryTokenFile)
+		t.Errorf("the unclaimed entry for %s has no search, so nothing records why no daemon code reads it", registryTokenFile)
 	}
+}
+
+// registryTokenFile is the registry bot's token entry, by the name the shipped
+// manifest gives it. The daemon pod never mounts it, so the tests hold the name
+// here rather than in a production constant.
+const registryTokenFile = "forgejo-registry.env"
+
+// registryTokenPath is where the daemon pod would mount the registry bot's token:
+// the XDG config directory every Secrets entry lands in (gt-h53ixs).
+const registryTokenPath = manifestdata.LiveConfigDirPath + "/" + registryTokenFile
+
+// assertNoRegistryToken fails when m mounts or writes the registry bot's token.
+func assertNoRegistryToken(t *testing.T, m Manifests) {
+	t.Helper()
+	pod := m.Deployment.Spec.Template.Spec
+	if got := volumeSecret(pod.Volumes, secretVolumeName(registryTokenFile)); got != "" {
+		t.Errorf("the pod carries the volume %s for the Secret %q, want no registry token volume", secretVolumeName(registryTokenFile), got)
+	}
+	for _, mount := range pod.Containers[0].VolumeMounts {
+		if mount.MountPath == registryTokenPath || mount.SubPath == registryTokenFile {
+			t.Errorf("the daemon mounts the registry token at %s (subPath %q)", mount.MountPath, mount.SubPath)
+		}
+	}
+	if slices.Contains(secretNames(m.Secrets), SecretNamePrefix+registryTokenFile) {
+		t.Errorf("the render writes the Secret %q, want none", SecretNamePrefix+registryTokenFile)
+	}
+}
+
+// filesHold reports whether files names the secret file name.
+func filesHold(files []templates.SecretFile, name string) bool {
+	return slices.ContainsFunc(files, func(f templates.SecretFile) bool { return f.Name == name })
 }
 
 // TestSecretModeRefusalSeparatesTheEntryFromTheReason holds the wording of a
