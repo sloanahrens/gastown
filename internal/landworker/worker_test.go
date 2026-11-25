@@ -1059,13 +1059,14 @@ func order(is []*beads.Issue) string {
 	return strings.Join(got, ",")
 }
 
-// A P1 submitted later lands before a P2 submitted earlier: priority leads,
-// so a throughput fix does not wait behind queued P2 work (gt-t2jhf).
-func TestSortByLandingOrderPutsPriorityFirst(t *testing.T) {
+// Two beads submitted at the same time: the P1 lands before the P2, so a
+// throughput fix does not wait behind queued P2 work at the same submission
+// time (gt-t2jhf).
+func TestSortByLandingOrderBreaksSameTimeByPriority(t *testing.T) {
 	t.Parallel()
 	is := []*beads.Issue{
 		readyIssue("gt-p2", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
-		readyIssue("gt-p1", 1, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+		readyIssue("gt-p1", 1, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
 	}
 	sortByLandingOrder(is)
 	if got := order(is); got != "gt-p1,gt-p2" {
@@ -1258,14 +1259,13 @@ func TestPassWithoutDrainLandsEverything(t *testing.T) {
 	}
 }
 
-// The queue the worker walks is priority first: the P1 submitted later is
-// landed before the earlier P2, so the drain that follows pays for the fix
-// that matters first (gt-t2jhf).
-func TestPassLandsHigherPriorityFirst(t *testing.T) {
+// Beads submitted at the same time: the pass lands the P1 before the P2, so the
+// drain that follows pays for the fix that matters first (gt-t2jhf).
+func TestPassLandsSameTimeByPriority(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReadyAt(t, "gt-p2", 2, "2026-09-30T10:00:00Z")
-	h.seedReadyAt(t, "gt-p1", 1, "2026-09-30T11:00:00Z")
+	h.seedReadyAt(t, "gt-p1", 1, "2026-09-30T10:00:00Z")
 	rep := h.w.Pass(context.Background())
 	if rep.Landed != 2 {
 		t.Fatalf("report %v; want both landed", rep)
