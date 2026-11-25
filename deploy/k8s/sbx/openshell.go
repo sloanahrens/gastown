@@ -35,8 +35,8 @@ const (
 	gatewayStatefulSet = "openshell"
 	// gatewayCPU and gatewayMemory are the request and limit the gateway's
 	// containers run with, as up.sh's guaranteed_pod gives them (gt-cjm8fu).
-	gatewayCPU    = "250m"
-	gatewayMemory = "768Mi"
+	gatewayCPU    = "500m"
+	gatewayMemory = "1Gi"
 )
 
 // openshellObjectScopes maps the kinds this render accepts to whether each is

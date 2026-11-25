@@ -416,7 +416,7 @@ gateway_ops="$S/state/patch-gateway"
 check "the gateway statefulset is patched once" test "$(count 'patch statefulset/openshell' "$CALLS_LOG")" -eq 1
 check "the gateway is patched after the chart install" before "helm upgrade --install" "patch statefulset/openshell"
 check "the gateway is patched before its rollout is awaited" before "patch statefulset/openshell" "rollout status statefulset/openshell"
-check "the gateway's container has requests equal to limits (250m, 768Mi)" guaranteed "$gateway_ops" containers 0 250m 768Mi
+check "the gateway's container has requests equal to limits (500m, 1Gi)" guaranteed "$gateway_ops" containers 0 500m 1Gi
 check "the gateway patch covers its one container" test "$(ops_on "$gateway_ops")" -eq 1
 controller_ops="$S/state/patch-controller"
 check "the controller deployment is patched once with the pair" test "$(count 'patch deployment/agent-sandbox-controller' "$CALLS_LOG")" -eq 1
@@ -1020,9 +1020,9 @@ echo "every container and init container of a control-plane pod gets requests eq
 scenario guaranteed_sidecar
 run "$UP" STUB_GATEWAY_CONTAINERS="openshell gateway-proxy" STUB_GATEWAY_INIT=migrate --
 check "a pod with a sidecar and an init container still comes up" test "$RC" -eq 0
-check "the gateway container has the pair" guaranteed "$S/state/patch-gateway" containers 0 250m 768Mi
-check "the sidecar container has the pair" guaranteed "$S/state/patch-gateway" containers 1 250m 768Mi
-check "the init container has the pair" guaranteed "$S/state/patch-gateway" initContainers 0 250m 768Mi
+check "the gateway container has the pair" guaranteed "$S/state/patch-gateway" containers 0 500m 1Gi
+check "the sidecar container has the pair" guaranteed "$S/state/patch-gateway" containers 1 500m 1Gi
+check "the init container has the pair" guaranteed "$S/state/patch-gateway" initContainers 0 500m 1Gi
 check "the patch covers every container and init container" test "$(ops_on "$S/state/patch-gateway")" -eq 3
 
 echo "a controller pod without the named container stops the run"
