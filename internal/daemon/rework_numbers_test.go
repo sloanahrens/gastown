@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
@@ -847,6 +848,10 @@ func TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		ReworkNumbers: &agentconfig.ReworkNumbersConfig{Enabled: true},
 	}}
+	// Starting the ticker also starts the start-time check (gt-4v9xog): the step
+	// is faked so it reads no town, and the run is joined before the test ends.
+	read := 0
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
 	channel, stop := d.startReworkNumbersTicker()
 	if channel == nil || stop == nil {
 		t.Fatal("an enabled rework_numbers started no ticker")
@@ -865,7 +870,8 @@ func TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	default:
 		t.Error("no tick arrived one check interval after the start")
 	}
-	stop()
+	// The production join: it stops the ticker and waits, bounded, for the run.
+	d.stopReworkNumbersPatrol(stop)
 }
 
 // TestReworkProgramReworkNumbersTickRunsTheStepOnce: one started tick runs the
@@ -1029,4 +1035,60 @@ func TestReworkProgramReworkNumbersStopJoinsTheRun(t *testing.T) {
 		unblock()
 		d.reworkNumbersCycles.Wait()
 	})
+}
+
+// TestReworkNumbersStartCheckRunsTheWeekOnce is the bead's first acceptance: a
+// daemon that starts with the patrol enabled and no last-run record runs the
+// week's step once at start, without waiting for the check ticker's first tick.
+func TestReworkNumbersStartCheckRunsTheWeekOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+
+	channel, stop := d.startReworkNumbersTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("an enabled rework_numbers started no ticker")
+	}
+	// The production join: it stops the ticker and waits, bounded, for the run.
+	d.stopReworkNumbersPatrol(stop)
+
+	if read != 1 {
+		t.Errorf("the start check read the town's records %d times, want once", read)
+	}
+	reworkProgramRead(t, town)
+}
+
+// TestReworkNumbersStartCheckHonorsTheShutdownLock is the refusal branch of the
+// start check: a daemon that starts while gt down holds shutdown.lock runs no
+// check, as the select case's guard does on every tick.
+func TestReworkNumbersStartCheckHonorsTheShutdownLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+
+	lockPath := filepath.Join(town, "daemon", "shutdown.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := flock.New(lockPath)
+	if locked, err := lock.TryLock(); err != nil || !locked {
+		t.Fatalf("TryLock = %v, %v", locked, err)
+	}
+	t.Cleanup(func() { _ = lock.Unlock() })
+
+	channel, stop := d.startReworkNumbersTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("an enabled rework_numbers started no ticker")
+	}
+	d.stopReworkNumbersPatrol(stop)
+
+	if read != 0 {
+		t.Errorf("the start check read the town's records %d times under shutdown.lock, want none", read)
+	}
 }
