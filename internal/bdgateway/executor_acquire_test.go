@@ -22,6 +22,7 @@ func TestExecutorAcquireSlot(t *testing.T) {
 			DoltPort:      "3307",
 			MaxConcurrent: 1,
 			runner:        &fakeRunner{},
+			after:         immediateAfter,
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)
