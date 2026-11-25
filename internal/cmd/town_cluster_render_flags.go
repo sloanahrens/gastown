@@ -225,7 +225,7 @@ func loadRenderFlags(path string) (clusterRenderFlags, bool, error) {
 	r := f.renderFlagsRecord
 	// A record written before the cap was recorded has no key for it. The flag's
 	// default is what such a record meant; zero would hand the gateway its own
-	// default of 16 instead.
+	// default of 8 instead.
 	r.BdGatewayMaxConcurrent = defaultBdGatewayMaxConcurrent
 	if f.BdGatewayMaxConcurrent != nil {
 		r.BdGatewayMaxConcurrent = *f.BdGatewayMaxConcurrent

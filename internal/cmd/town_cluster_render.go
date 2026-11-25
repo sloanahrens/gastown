@@ -136,7 +136,7 @@ type clusterRenderFlags struct {
 	bdGatewayTokenSecret string
 	// bdGatewayMaxConcurrent is the bd gateway's concurrency cap across all its pods,
 	// written as --max-concurrent with a values file's bd image; each pod runs its
-	// share of the total, and zero means the gateway's own default of 16 in total.
+	// share of the total, and zero means the gateway's own default of 8 in total.
 	bdGatewayMaxConcurrent int
 	// bdGatewayCPURequest is the bd gateway container's CPU request, written as its
 	// requests.cpu; empty renders no request, and the gateway carries no limit.
@@ -335,7 +335,7 @@ func init() {
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayTokenSecret, "bd-gateway-token-secret", "",
 		"the Secret the bd gateway reads its tokens from, mounted whole in the gateway (default "+defaultBdGatewayTokenSecret+"); the render names it and never creates it; it is read only when the values file names a bd image")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayMaxConcurrent, "bd-gateway-max-concurrent", defaultBdGatewayMaxConcurrent,
-		"the most bd processes all the gateway's pods run at once, a positive total, or zero for the gateway's own default of 16 in total; each pod runs the total divided by --bd-gateway-replicas, rounded up; a rehearsal renders no gateway, so the cap reaches only a live render; a negative cap is refused")
+		"the most bd processes all the gateway's pods run at once, a positive total, or zero for the gateway's own default of 8 in total; each pod runs the total divided by --bd-gateway-replicas, rounded up; a rehearsal renders no gateway, so the cap reaches only a live render; a negative cap is refused")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayReplicas, "bd-gateway-replicas", defaultBdGatewayReplicas,
 		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, one serving while the other rolls (gt-yz0s8v); a rehearsal renders no gateway, so the count reaches only a live render; a count below zero or above two is refused")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayCPURequest, "bd-gateway-cpu-request", "",

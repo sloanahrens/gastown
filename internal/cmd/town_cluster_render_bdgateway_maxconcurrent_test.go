@@ -210,7 +210,7 @@ func TestTownClusterRenderBdGatewayMaxConcurrentReplay(t *testing.T) {
 
 // TestTownClusterRenderBdGatewayMaxConcurrentRecordedDefault holds what a record
 // with no cap key means: a record written before the cap was recorded replays the
-// flag's default, not zero, which the gateway would read as its own default of 16.
+// flag's default, not zero, which the gateway would read as its own default of 8.
 // A key that holds zero keeps zero.
 func TestTownClusterRenderBdGatewayMaxConcurrentRecordedDefault(t *testing.T) {
 	t.Parallel()
