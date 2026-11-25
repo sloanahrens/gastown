@@ -922,7 +922,10 @@ func followupBody(w Work, res Result, g followupGroup, acceptance string) string
 	for _, c := range g.Findings {
 		fmt.Fprintf(&b, "- %s\n", c.Detail)
 	}
-	b.WriteString("\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\n")
+	b.WriteString("\n")
+	b.WriteString(followupCheckMainNote)
+	b.WriteString("\n## Constraints\n")
+	b.WriteString(followupEditsNote(g.Key))
 	b.WriteString(followupRevertNote)
 	b.WriteString("\n## Out of scope\nAnything the findings do not name.\n")
 	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
@@ -943,6 +946,32 @@ func followupAcceptance(findings []FollowupCandidate) string {
 		lines = append(lines, "- [ ] "+item)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// followupCheckMainNote closes every generated bead's Goal with the step a seat
+// works by hand when a finding is already fixed on main: check it there first,
+// and a fix main already carries is recorded in the commit body and ticked
+// rather than reworked (gt-pdjkig).
+const followupCheckMainNote = "Check each finding against origin/main before you start; one already fixed there needs no change, " +
+	"so say so in the commit body and tick its box.\n"
+
+// followupEditsNote is the Constraints sentence naming the files a group's fix
+// edits: the group's key, and its test file for a Go key. A bead titled by one
+// file is worked as that file and its test, not the package's other files
+// (gt-pdjkig). The test file is named with "create ... if it does not exist"
+// because a source file need not have one on the target branch, and the
+// dispatcher refuses a bead whose Constraints name a file the branch lacks. An
+// empty key names no file, so it keeps the sentence that sends the seat to the
+// findings.
+func followupEditsNote(key string) string {
+	const rest = " Keep the rig's gate green. Do not widen the change.\n"
+	switch {
+	case key == "":
+		return "Only the files the findings name." + rest
+	case strings.HasSuffix(key, ".go"):
+		return "Edit only " + key + ", and create " + strings.TrimSuffix(key, ".go") + "_test.go if it does not exist." + rest
+	}
+	return "Edit only " + key + "." + rest
 }
 
 // followupRevertNote is the paragraph every generated bead carries in its
