@@ -4197,6 +4197,42 @@ type ReviewPoolConfig struct {
 	ReuseExpiryStr string `json:"reuse_expiry,omitempty"`
 }
 
+// reviewPoolDefaultMax is how many reviews may run at once when
+// max_concurrent is 0 (unset).
+const reviewPoolDefaultMax = 3
+
+// reviewPoolMaxLimit is the largest max_concurrent the pool accepts.
+const reviewPoolMaxLimit = 8
+
+// reviewPoolExpiry is how long a reused review verdict stays valid. Until
+// reuse_expiry is read (gt-hf2nvz) every pool answers this constant.
+const reviewPoolExpiry = 45 * time.Minute
+
+// ReviewPoolFor answers whether the review pool is on for rig, how many reviews
+// may run at once, and how long a reused verdict stays valid. A nil config or
+// ReviewPool, and a rig not listed in Rigs, is off with no error. max_concurrent
+// is checked whenever the block is present: 0 gives reviewPoolDefaultMax, 1 to
+// 8 are kept, and anything else is an error with on false, so the caller leaves
+// the pool off and reports the error.
+func (c *LandingWorkerConfig) ReviewPoolFor(rig string) (on bool, max int, expiry time.Duration, err error) {
+	if c == nil || c.ReviewPool == nil {
+		return false, 0, 0, nil
+	}
+	rp := c.ReviewPool
+	max = rp.MaxConcurrent
+	switch {
+	case max == 0:
+		max = reviewPoolDefaultMax
+	case max < 0 || max > reviewPoolMaxLimit:
+		return false, 0, 0, fmt.Errorf("patrols.landing_worker.review_pool.max_concurrent is %d: want 0 (default %d) or 1 to %d",
+			rp.MaxConcurrent, reviewPoolDefaultMax, reviewPoolMaxLimit)
+	}
+	if !slices.Contains(rp.Rigs, rig) {
+		return false, 0, 0, nil
+	}
+	return true, max, reviewPoolExpiry, nil
+}
+
 // ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The
 // half that changes per rig — the remote URL, the gate workflow, the bot
 // logins and the mirror target — is merge_queue.forgejo, resolved by
