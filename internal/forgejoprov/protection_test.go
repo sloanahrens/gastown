@@ -419,6 +419,121 @@ func TestEnsureRuleDryRunSendsNoWrite(t *testing.T) {
 	}
 }
 
+// TestEnsureClosedRuleCreates checks that a repository with no main rule gets the closed
+// main rule by one POST, and that the stored rule is ClosedMainRule, not MainRule.
+func TestEnsureClosedRuleCreates(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	var logs []string
+	p := userProvisioner(f, false, &logs)
+	if err := p.EnsureClosedRule(protectionRepo, opts); err != nil {
+		t.Fatalf("EnsureClosedRule: %v", err)
+	}
+	writes := f.Writes()
+	if len(writes) != 1 || writes[0].Method != http.MethodPost {
+		t.Fatalf("sent %d writes, want one POST", len(writes))
+	}
+	want, err := json.Marshal(ClosedMainRule(opts))
+	if err != nil {
+		t.Fatalf("encode closed rule: %v", err)
+	}
+	got, err := json.Marshal(f.Rule(protectionRepo, "main"))
+	if err != nil {
+		t.Fatalf("encode stored rule: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("stored rule = %s, want the closed rule %s", got, want)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "created branch protection main on acme/rig") {
+		t.Fatalf("logged %q, want a line saying the rule was created", logs)
+	}
+}
+
+// TestEnsureClosedRuleRefusesEachFailingBranch drives every error branch of EnsureClosedRule:
+// a list that fails or is not a rule list, a rule already named for main, and a create whose
+// reply is not 201. Each error is checked not to carry the admin token or the minted secret.
+func TestEnsureClosedRuleRefusesEachFailingBranch(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	heldList := listJSON(t, servedRule(t, MainRule(opts)))
+	cases := []struct {
+		name      string
+		transport *ruleTransport
+		wantErr   string
+	}{
+		{
+			name:      "list refused",
+			transport: &ruleTransport{getStatus: http.StatusInternalServerError, getBody: echoReply},
+			wantErr:   "GET /repos/acme/rig/branch_protections: unexpected HTTP 500",
+		},
+		{
+			name:      "list is not a rule list",
+			transport: &ruleTransport{getStatus: http.StatusOK, getBody: echoReply},
+			wantErr:   "reply is not a list of rules",
+		},
+		{
+			name:      "main rule already named",
+			transport: &ruleTransport{getStatus: http.StatusOK, getBody: heldList, writeStatus: http.StatusCreated, writeBody: echoReply},
+			wantErr:   "branch protection main on acme/rig already exists",
+		},
+		{
+			name:      "create answered 200",
+			transport: &ruleTransport{getStatus: http.StatusOK, getBody: "[]", writeStatus: http.StatusOK, writeBody: echoReply},
+			wantErr:   "POST /repos/acme/rig/branch_protections: unexpected HTTP 200",
+		},
+		{
+			name:      "create answered 204",
+			transport: &ruleTransport{getStatus: http.StatusOK, getBody: "[]", writeStatus: http.StatusNoContent, writeBody: ""},
+			wantErr:   "POST /repos/acme/rig/branch_protections: unexpected HTTP 204",
+		},
+		{
+			name:      "create refused",
+			transport: &ruleTransport{getStatus: http.StatusOK, getBody: "[]", writeStatus: http.StatusUnprocessableEntity, writeBody: echoReply},
+			wantErr:   "POST /repos/acme/rig/branch_protections: unexpected HTTP 422",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var logs []string
+			p := &Provisioner{Client: &Client{
+				API:   forgejotest.APIRoot + forgejotest.APIPath,
+				HTTP:  &http.Client{Transport: c.transport},
+				Token: newSecret(fixtureToken),
+				Log:   func(line string) { logs = append(logs, line) },
+			}}
+			err := p.EnsureClosedRule(protectionRepo, opts)
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("EnsureClosedRule = %v, want an error containing %q", err, c.wantErr)
+			}
+			if strings.Contains(err.Error(), fixtureToken) || strings.Contains(err.Error(), mintedSecret) {
+				t.Fatalf("error carries a secret: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnsureClosedRuleDryRunSendsNoWrite checks that a dry run reports the create and sends no
+// write.
+func TestEnsureClosedRuleDryRunSendsNoWrite(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	var logs []string
+	p := userProvisioner(f, true, &logs)
+	if err := p.EnsureClosedRule(protectionRepo, testOptions()); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if n := len(f.Writes()); n != 0 {
+		t.Fatalf("dry run sent %d writes, want none", n)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "would create branch protection main on acme/rig") {
+		t.Fatalf("dry run logged %q, want it to say it would create the rule", logs)
+	}
+}
+
 // TestEnsureNoRuleRemovesOnlyTheLandPattern checks that the land/* rule is deleted, with
 // its name escaped as land%2F*, and that the main rule is left as it was.
 func TestEnsureNoRuleRemovesOnlyTheLandPattern(t *testing.T) {
@@ -514,6 +629,12 @@ func TestProtectionStopsOnARefusedRequest(t *testing.T) {
 			wantErr:   "/branch_protections: request failed",
 		},
 		{
+			name:      "closed create fails",
+			transport: listThenFailTransport{list: "[]"},
+			run:       func(p *Provisioner) error { return p.EnsureClosedRule(protectionRepo, opts) },
+			wantErr:   "/branch_protections: request failed",
+		},
+		{
 			name:      "no-rule list fails",
 			transport: failingTransport{},
 			run:       func(p *Provisioner) error { return p.EnsureNoRule(protectionRepo, DefaultLandBranch) },
@@ -552,6 +673,7 @@ func TestProtectionRefusesABadRepoBeforeAnyRequest(t *testing.T) {
 		run  func(p *Provisioner) error
 	}{
 		{name: "EnsureRule", run: func(p *Provisioner) error { return p.EnsureRule("acme", opts) }},
+		{name: "EnsureClosedRule", run: func(p *Provisioner) error { return p.EnsureClosedRule("acme", opts) }},
 		{name: "EnsureNoRule", run: func(p *Provisioner) error { return p.EnsureNoRule("acme", DefaultLandBranch) }},
 	}
 	for _, c := range cases {
