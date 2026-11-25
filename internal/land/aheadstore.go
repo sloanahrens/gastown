@@ -68,6 +68,9 @@ type AheadStore struct {
 
 	// writeFile is the test seam for the write Put makes; nil means atomicfile.WriteFile.
 	writeFile func(path string, data []byte, perm os.FileMode) error
+	// readFile is the test seam for the read Put makes before it writes; nil
+	// means os.ReadFile.
+	readFile func(path string) ([]byte, error)
 }
 
 // TownAheadStore is the review-ahead store for one rig's landings.
@@ -75,10 +78,11 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 	return &AheadStore{TownRoot: townRoot, Rig: rig}
 }
 
-// Put stores rec as its bead's record, replacing whatever record the bead had
-// before, whatever head that record judged. A failed write is returned as an
-// error; the atomic write (atomicfile.WriteFile) is what leaves no partial file
-// behind.
+// Put stores rec as its bead's record unless the record already stored began
+// its review later: a slow review of an old head finishes after a new head's
+// review, and only the start can tell them apart. A stored file that does not
+// decode is replaced. A failed write is returned as an error; the atomic write
+// (atomicfile.WriteFile) is what leaves no partial file behind.
 func (s AheadStore) Put(rec AheadRecord) error {
 	if err := rec.refuseToStore(); err != nil {
 		return err
@@ -87,13 +91,22 @@ func (s AheadStore) Put(rec AheadRecord) error {
 	if err != nil {
 		return err
 	}
+	// The store's tree is checked before the record is read, so a landings dir
+	// that is not private is refused as that, not as a record that will not read.
+	if err := ensureLandingsDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	stored, err := s.recordAt(path)
+	if err != nil {
+		return err
+	}
+	if stored != nil && stored.StartedAt.After(rec.StartedAt) {
+		return nil
+	}
 	rec.V, rec.Rig = aheadRecordVersion, s.Rig
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding review-ahead record: %w", err)
-	}
-	if err := ensureLandingsDir(filepath.Dir(path)); err != nil {
-		return err
 	}
 	write := s.writeFile
 	if write == nil {
@@ -103,6 +116,34 @@ func (s AheadStore) Put(rec AheadRecord) error {
 		return fmt.Errorf("writing review-ahead record: %w", err)
 	}
 	return nil
+}
+
+// recordAt returns the record stored at path. A nil record with a nil error
+// means there is no record to keep: no file, a path that is not a regular
+// file, or a file that does not decode as a record. A regular file that cannot
+// be read is an error: it may be the newer record Put exists to keep, so Put
+// must not write over it.
+func (s AheadStore) recordAt(path string) (*AheadRecord, error) {
+	read := s.readFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		// Only this store writes a record to that path, and it writes a file.
+		if info, statErr := os.Stat(path); statErr == nil && !info.Mode().IsRegular() {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading review-ahead record: %w", err)
+	}
+	var rec AheadRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, nil
+	}
+	return &rec, nil
 }
 
 // refuseToStore reports whether the store may keep rec: nil when it may, and
