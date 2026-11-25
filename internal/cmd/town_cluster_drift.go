@@ -222,11 +222,19 @@ func runClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 
 // compareDriftForCluster routes the run to the compare of d.cluster before any
 // input is read: the empty value and clusterControl run compareClusterDrift, and
-// clusterSbx runs compareSbxClusterDrift. Any other name is refused, naming both
-// clusters it knows, so a typo never reads the control cluster.
+// clusterSbx runs compareSbxClusterDrift. A --exec-via on the control arm is
+// refused there, naming the flag and the cluster, since the control compare reads
+// with the command's own kubectl and would ignore it. Any other name is refused,
+// naming both clusters it knows, so a typo never reads the control cluster.
 func compareDriftForCluster(ctx context.Context, d clusterDriftDeps) error {
 	switch d.cluster {
 	case "", clusterControl:
+		// The flag selects how the gt-sbx compare reaches kubectl; the control
+		// compare never reads through it, so a run that sets it would silently
+		// compare in a form it did not ask for. Refuse it before any input.
+		if d.execVia != "" {
+			return fmt.Errorf("--exec-via %q is refused for the %s cluster: it is the %s compare's read form, and the %s compare reads with the command's own kubectl; nothing was read", d.execVia, clusterControl, clusterSbx, clusterControl)
+		}
 		return compareClusterDrift(ctx, d)
 	case clusterSbx:
 		return compareSbxClusterDrift(ctx, d)
