@@ -23,6 +23,8 @@ import (
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -382,15 +384,49 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return runTownRunnerRoll(runnerRollDepsFor(townRoot, productionPodExec, cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
+	return runTownRunnerRoll(runnerRollDepsFor(townRoot, productionPodExec, productionRunsSeam(), cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
 }
 
-// runnerRollRunsSeam lets a test build the roll's runs read without the host:
-// client stands in for the viewer client, repos for the Mac copy of the rig
-// settings rigForgejoRepos reads. The command passes no seam, so production reads both.
+// runnerRollRunsSeam is how the roll's runs read gets its two inputs: client is the
+// viewer client and repos the rig repos to wait on, read for the town root (the Mac
+// copy of the rig settings). A test passes its own; production passes
+// productionRunsSeam.
 type runnerRollRunsSeam struct {
 	client func() (runnerroll.ForgejoRunLister, error)
-	repos  func(townRoot string) []string
+	repos  func(townRoot string) ([]string, error)
+}
+
+// productionRunsSeam is the seam the command passes: the viewer client and every rig's repo.
+func productionRunsSeam() runnerRollRunsSeam {
+	return runnerRollRunsSeam{
+		client: viewerRunLister,
+		repos:  func(townRoot string) ([]string, error) { return rollForgejoRepos(townRoot, rig.ResolveForgejoConfig) },
+	}
+}
+
+// rollForgejoRepos is the repo list the roll waits on: one owner/repo per rig in the
+// registry. Unlike the dashboard's tolerant rigForgejoRepos it FAILS CLOSED: a
+// registry that cannot be read, or any rig whose Forgejo remote cannot be resolved or
+// parsed, is an error naming it, because a shorter list would let the wait succeed
+// while that rig's gate or post-land run is still running and the runner is replaced.
+func rollForgejoRepos(townRoot string, resolve func(townRoot, rigName string) *config.ForgejoConfig) ([]string, error) {
+	names, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("the roll cannot list the rigs to wait on: %w", err)
+	}
+	var repos []string
+	for _, name := range names {
+		fc := resolve(townRoot, name)
+		if fc == nil || fc.RemoteURL == "" {
+			return nil, fmt.Errorf("rig %s names no Forgejo remote, so the roll cannot tell which runs to wait on", name)
+		}
+		owner, repo, err := land.RepoFromRemoteURL(fc.RemoteURL)
+		if err != nil {
+			return nil, fmt.Errorf("rig %s: its Forgejo remote %q does not parse, so the roll cannot tell which runs to wait on: %w", name, fc.RemoteURL, err)
+		}
+		repos = append(repos, owner+"/"+repo)
+	}
+	return repos, nil
 }
 
 // viewerRunLister is the roll's read-only viewer client, so its credential cannot land.
@@ -401,7 +437,10 @@ func viewerRunLister() (runnerroll.ForgejoRunLister, error) {
 // runnerRollRunsRead builds the roll's runs read over one seam. A town that
 // names no repos reads no token file for a read the roll cannot use.
 func runnerRollRunsRead(townRoot string, seam runnerRollRunsSeam) (func(context.Context) ([]runnerroll.WorkflowRun, error), error) {
-	repos := seam.repos(townRoot)
+	repos, err := seam.repos(townRoot)
+	if err != nil {
+		return nil, err
+	}
 	if len(repos) == 0 {
 		return nil, errors.New("the town names no Forgejo rig repos, so the roll has no run list to wait on")
 	}
@@ -417,13 +456,9 @@ func runnerRollRunsRead(townRoot string, seam runnerRollRunsSeam) (func(context.
 // built is carried in err, which the roll reports before it takes the hold. The
 // landing read is the pod's townhealth.json, and the runs read lists the gate
 // and post-land runs of the rig repos through the viewer's client, so a real
-// roll waits for both rather than refusing for want of them. A test passes at
-// most one seam holding both builders; the command passes none.
-func runnerRollDepsFor(townRoot string, exec podExec, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool, seams ...runnerRollRunsSeam) runnerRollDeps {
-	seam := runnerRollRunsSeam{client: viewerRunLister, repos: rigForgejoRepos}
-	if len(seams) > 0 {
-		seam = seams[0]
-	}
+// roll waits for both rather than refusing for want of them. A rig it cannot resolve
+// is a read that returns the reason, never a shorter list.
+func runnerRollDepsFor(townRoot string, exec podExec, seam runnerRollRunsSeam, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
 	store, storeErr := podHoldStore(townRoot, exec)
 	runs, runsErr := runnerRollRunsRead(townRoot, seam)
 	if runsErr != nil {

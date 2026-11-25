@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 )
@@ -899,7 +901,7 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 // TestTownRunnerRollHoldPathUsesTheExportedName: the roll's hold path is built from runnerroll's one exported name.
 func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 	t.Parallel()
-	got := runnerRollDepsFor("/town", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
+	got := runnerRollDepsFor("/town", nil, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
 	if !strings.HasSuffix(got, runnerroll.LandingHoldName) {
 		t.Errorf("the roll's hold path %q does not end with %q", got, runnerroll.LandingHoldName)
 	}
@@ -917,7 +919,7 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 		argv, stdin = got, in
 		return []byte("created\n"), 0, nil
 	}
-	deps := runnerRollDepsFor("/town", fakePodExec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("/town", fakePodExec, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.err != nil {
 		t.Fatalf("deps error = %v, want none", deps.err)
 	}
@@ -940,7 +942,7 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 // takes the hold or runs any step.
 func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
 	t.Parallel()
-	deps := runnerRollDepsFor("", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("", nil, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.err == nil {
 		t.Fatal("deps for an empty town root carry no error")
 	}
@@ -960,10 +962,10 @@ func TestRunnerRollDepsForWiresTheRunsRead(t *testing.T) {
 	var townRoot string
 	seam := runnerRollRunsSeam{
 		client: func() (runnerroll.ForgejoRunLister, error) { return lister, nil },
-		repos:  func(got string) []string { townRoot = got; return []string{"acme/widgets"} },
+		repos:  func(got string) ([]string, error) { townRoot = got; return []string{"acme/widgets"}, nil },
 	}
 
-	deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false, seam)
+	deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 
 	if deps.err != nil {
 		t.Fatalf("deps error = %v, want none", deps.err)
@@ -1000,19 +1002,23 @@ func TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead(t *testing.T) {
 	}{
 		{name: "the client cannot be built", want: noToken.Error(), seam: runnerRollRunsSeam{
 			client: func() (runnerroll.ForgejoRunLister, error) { return nil, noToken },
-			repos:  func(string) []string { return []string{"acme/widgets"} },
+			repos:  func(string) ([]string, error) { return []string{"acme/widgets"}, nil },
+		}},
+		{name: "the repo list cannot be built", want: "registry unreadable", seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) { return &rollLister{}, nil },
+			repos:  func(string) ([]string, error) { return nil, errors.New("registry unreadable") },
 		}},
 		{name: "the town names no repos", want: "names no Forgejo rig repos", seam: runnerRollRunsSeam{
 			client: func() (runnerroll.ForgejoRunLister, error) {
 				t.Error("the viewer client was built for a town that names no repos")
 				return &rollLister{}, nil
 			},
-			repos: func(string) []string { return nil },
+			repos: func(string) ([]string, error) { return nil, nil },
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false, tc.seam)
+			deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, tc.seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 
 			if deps.runs == nil {
 				t.Fatal("a failed runs build left the deps with no read at all")
@@ -1023,6 +1029,76 @@ func TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead(t *testing.T) {
 			}
 			if runs != nil {
 				t.Errorf("read returned %v, want no runs", runs)
+			}
+		})
+	}
+}
+
+// fixedRunsSeam is the runs seam of a test that does not drive the runs read: a
+// fixed repo list and a client that lists nothing, so the unit tier reads no rig
+// settings and no token file.
+func fixedRunsSeam() runnerRollRunsSeam {
+	return runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) { return &rollLister{}, nil },
+		repos:  func(string) ([]string, error) { return []string{"acme/widgets"}, nil },
+	}
+}
+
+// TestRollForgejoRepos drives the production repo builder on a town root written
+// to a temp directory (the registry read is the real one; only the Forgejo
+// resolve, which reads rig settings through git, is injected): one repo per rig,
+// and a fail-closed error naming the rig, or the registry, whenever the list
+// could not be complete.
+func TestRollForgejoRepos(t *testing.T) {
+	t.Parallel()
+	const rigs = `{"version":1,"rigs":{"alpha":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"al"}},"zeta":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"ze"}}}}`
+	remotes := func(alpha, zeta string) func(string, string) *config.ForgejoConfig {
+		return func(_, name string) *config.ForgejoConfig {
+			switch name {
+			case "alpha":
+				return &config.ForgejoConfig{RemoteURL: alpha}
+			case "zeta":
+				if zeta == "" {
+					return nil
+				}
+				return &config.ForgejoConfig{RemoteURL: zeta}
+			}
+			return nil
+		}
+	}
+	cases := []struct {
+		name    string
+		rigs    string
+		resolve func(string, string) *config.ForgejoConfig
+		want    []string
+		wantErr string
+	}{
+		{name: "every rig resolves", rigs: rigs, resolve: remotes("https://forge.test/acme/alpha.git", "https://forge.test/acme/zeta"), want: []string{"acme/alpha", "acme/zeta"}},
+		{name: "a rig with no Forgejo config", rigs: rigs, resolve: remotes("https://forge.test/acme/alpha.git", ""), wantErr: "rig zeta"},
+		{name: "a rig whose remote does not parse", rigs: rigs, resolve: remotes("not a url", "https://forge.test/acme/zeta"), wantErr: "rig alpha"},
+		{name: "a registry that is not there", rigs: "", resolve: remotes("", ""), wantErr: "cannot list the rigs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.rigs != "" {
+				if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(tc.rigs), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := rollForgejoRepos(town, tc.resolve)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || got != nil {
+					t.Fatalf("rollForgejoRepos = %q, %v; want no list and an error containing %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tc.want) {
+				t.Fatalf("rollForgejoRepos = %q, %v; want %q", got, err, tc.want)
 			}
 		})
 	}
