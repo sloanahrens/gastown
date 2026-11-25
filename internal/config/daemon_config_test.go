@@ -747,6 +747,92 @@ func TestReviewPoolConfigAbsentIsNil(t *testing.T) {
 	}
 }
 
+// TestReviewPoolConfigOnOff pins who gets the review pool: a nil config, a nil
+// review_pool and a rig not listed are off with no error; a listed rig is on
+// for the constant 45m expiry.
+func TestReviewPoolConfigOnOff(t *testing.T) {
+	t.Parallel()
+	pool := &ReviewPoolConfig{Rigs: []string{"gastown"}}
+	cases := map[string]struct {
+		cfg  *LandingWorkerConfig
+		rig  string
+		want bool
+	}{
+		"nil config":      {nil, "gastown", false},
+		"nil review_pool": {&LandingWorkerConfig{}, "gastown", false},
+		"rig not listed":  {&LandingWorkerConfig{ReviewPool: pool}, "longeye", false},
+		"rig listed":      {&LandingWorkerConfig{ReviewPool: pool}, "gastown", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			on, max, expiry, err := tc.cfg.ReviewPoolFor(tc.rig)
+			if err != nil {
+				t.Fatalf("ReviewPoolFor(%q): %v", tc.rig, err)
+			}
+			if on != tc.want {
+				t.Fatalf("ReviewPoolFor(%q) on = %v, want %v", tc.rig, on, tc.want)
+			}
+			if !on {
+				if max != 0 || expiry != 0 {
+					t.Errorf("off returned max %d expiry %v, want zero values", max, expiry)
+				}
+				return
+			}
+			if expiry != 45*time.Minute {
+				t.Errorf("expiry = %v, want 45m", expiry)
+			}
+		})
+	}
+}
+
+// TestReviewPoolConfigMax pins max_concurrent: 0 is the default 3, 1 to 8 are
+// kept, and anything else is an error with the pool off. The refusal holds
+// even for a rig not listed, so a bad value is never silent.
+func TestReviewPoolConfigMax(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		max    int
+		listed bool
+		want   int
+		err    bool
+	}{
+		"0 gives the default":   {max: 0, listed: true, want: 3},
+		"1 is kept":             {max: 1, listed: true, want: 1},
+		"8 is kept":             {max: 8, listed: true, want: 8},
+		"-1 is refused":         {max: -1, listed: true, err: true},
+		"9 is refused":          {max: 9, listed: true, err: true},
+		"9 is refused unlisted": {max: 9, listed: false, err: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const rig = "gastown"
+			rigs := []string{"longeye"}
+			if tc.listed {
+				rigs = []string{rig}
+			}
+			cfg := &LandingWorkerConfig{ReviewPool: &ReviewPoolConfig{Rigs: rigs, MaxConcurrent: tc.max}}
+			on, got, _, err := cfg.ReviewPoolFor(rig)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("max_concurrent %d: no error", tc.max)
+				}
+				if on {
+					t.Errorf("max_concurrent %d: on = true with an error, want off", tc.max)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("max_concurrent %d: %v", tc.max, err)
+			}
+			if !on || got != tc.want {
+				t.Errorf("max_concurrent %d: on = %v max = %d, want on with max %d", tc.max, on, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHMSyncConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	t.Parallel()
 
