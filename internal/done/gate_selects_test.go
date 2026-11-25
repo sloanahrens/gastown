@@ -60,6 +60,52 @@ func TestGateSelectsAPatternThatNamesATest(t *testing.T) {
 	}
 }
 
+// TestGateSelectsListsWithTheGateTags: go test -list carries the Gate line's
+// -tags list after the pattern when the line names one, so an integration-
+// tagged test is listed; a line with no tags lists exactly as before
+// (gt-fztxxa).
+func TestGateSelectsListsWithTheGateTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{"tags named", "## Goal\nx\n\n## Gate\ngo test -tags integration ./internal/done -run 'TestGateSelects' -count=1\n", "test -list TestGateSelects -tags integration ./internal/done"},
+		{"no tags", gateSelectsDescription, "test -list TestGateSelects ./internal/done"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			run := func(_ string, args ...string) ([]byte, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return []byte("TestGateSelects\n"), nil
+			}
+			if err := checkGateSelectsForSubmit(t, run, tc.description); err != nil {
+				t.Fatalf("checkBranchForSubmit() = %v, want the pattern to pass", err)
+			}
+			if !slices.Equal(calls, []string{tc.want}) {
+				t.Errorf("go test calls = %q, want exactly %q", calls, tc.want)
+			}
+		})
+	}
+}
+
+// TestGateSelectsRefusesATaggedPatternThatNamesNoTest: a tagged Gate line
+// whose listing, with its tags, still names no test refuses with the check's
+// own text (gt-fztxxa).
+func TestGateSelectsRefusesATaggedPatternThatNamesNoTest(t *testing.T) {
+	t.Parallel()
+	description := "## Goal\nx\n\n## Gate\ngo test -tags integration ./internal/done -run 'TestGateSelects' -count=1\n"
+	run := func(_ string, _ ...string) ([]byte, error) {
+		return []byte("ok  \tgithub.com/x/internal/done\t0.002s\n"), nil
+	}
+	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, description),
+		"go test -tags integration ./internal/done -run 'TestGateSelects' -count=1", "./internal/done",
+		"-run matches test function names; name the tests so the pattern selects them")
+}
+
 // TestGateSelectsRefusesAPatternThatNamesNoTest: a -run pattern whose list
 // names no test refuses, naming the Gate line and the package.
 func TestGateSelectsRefusesAPatternThatNamesNoTest(t *testing.T) {
