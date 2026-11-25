@@ -398,6 +398,7 @@ func TestBdGatewayReplicasRefusal(t *testing.T) {
 func TestBdGatewayReplicasTwoGolden(t *testing.T) {
 	t.Parallel()
 	v := bdGatewayWorkloadValues(t)
+	v.BdGatewayMaxConcurrent = 16
 	v.BdGatewayReplicas = 2
 	m := mustBuild(t, v)
 	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway-two-replicas.yaml", document(t, m.BdGatewayDeployment))
@@ -415,8 +416,9 @@ func TestBdGatewayMaxConcurrentDefaultMatchesGateway(t *testing.T) {
 
 // TestBdGatewayReplicasMaxConcurrent holds --max-concurrent to the total across pods:
 // each pod runs the total divided by the replica count, rounded up, so a two-replica
-// render at the gateway's own total of 16 runs 8 on each pod. A zero total is that 16,
-// and the flag is left off only when one pod would repeat the gateway's own default.
+// render at the gateway's own total of 16 runs 8 on each pod. A zero total is
+// bdGatewayMaxConcurrentDefault, and the flag is left off only when one pod would
+// repeat the gateway's own default.
 // The three-replica rows exercise the division beyond the render's two-pod bound, and
 // the golden is the reviewed copy of the two-pod case.
 func TestBdGatewayReplicasMaxConcurrent(t *testing.T) {
@@ -435,8 +437,8 @@ func TestBdGatewayReplicasMaxConcurrent(t *testing.T) {
 		{"5 total over 2 pods", 5, 2, 3, true},
 		{"5 total over 3 pods", 5, 3, 2, true},
 		{"zero total over 1 pod leaves the flag off", 0, 1, 0, false},
-		{"zero total over 2 pods splits the gateway's 16", 0, 2, 8, true},
-		{"zero total over 3 pods splits the gateway's 16", 0, 3, 6, true},
+		{"zero total over 2 pods splits the gateway's default", 0, 2, (bdGatewayMaxConcurrentDefault + 1) / 2, true},
+		{"zero total over 3 pods splits the gateway's default", 0, 3, (bdGatewayMaxConcurrentDefault + 2) / 3, true},
 	}
 	for _, tc := range perPod {
 		t.Run(tc.name, func(t *testing.T) {
@@ -458,7 +460,7 @@ func TestBdGatewayReplicasMaxConcurrent(t *testing.T) {
 		{"a total of 16 at two replicas renders 8", 16, 2, "8"},
 		{"a total of 5 at two replicas renders 3", 5, 2, "3"},
 		{"a zero total at one replica leaves the flag off", 0, 1, ""},
-		{"a zero total at two replicas renders the gateway's 8", 0, 2, "8"},
+		{"a zero total at two replicas renders the gateway's default share", 0, 2, strconv.Itoa((bdGatewayMaxConcurrentDefault + 1) / 2)},
 	}
 	for _, tc := range rendered {
 		t.Run(tc.name, func(t *testing.T) {
@@ -477,6 +479,7 @@ func TestBdGatewayReplicasMaxConcurrent(t *testing.T) {
 	t.Run("the two-replica golden carries 8 on each pod", func(t *testing.T) {
 		t.Parallel()
 		v := bdGatewayWorkloadValues(t)
+		v.BdGatewayMaxConcurrent = 16
 		v.BdGatewayReplicas = 2
 		m := mustBuild(t, v)
 		command := m.BdGatewayDeployment.Spec.Template.Spec.Containers[0].Command
