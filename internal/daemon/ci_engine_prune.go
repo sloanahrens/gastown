@@ -1563,3 +1563,19 @@ func (d *Daemon) ciEnginePruneLogf(kind, format string, args ...any) {
 		d.logger.Printf("%s", fmt.Sprintf(format, args...))
 	}
 }
+
+// ciEngineCacheOverKeep is how far the build cache is over the keep size after the
+// age prune: the reclaimable bytes docker reported before it ran, less the bytes it
+// reclaimed, less the keep size, never below zero. usable is false when either figure
+// is unread or negative, and then over is zero: a caller checks usable before it acts
+// on over.
+func ciEngineCacheOverKeep(reclaimable int64, reclaimableKnown bool, reclaimed int64, reclaimedKnown bool, keepBytes int64) (over int64, usable bool) {
+	if !reclaimableKnown || !reclaimedKnown || reclaimable < 0 || reclaimed < 0 {
+		return 0, false
+	}
+	over = reclaimable - reclaimed - keepBytes
+	if over < 0 {
+		return 0, true
+	}
+	return over, true
+}

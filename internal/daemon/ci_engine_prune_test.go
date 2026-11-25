@@ -1617,6 +1617,93 @@ func TestCIEngineBuildCacheCapArgv(t *testing.T) {
 	}
 }
 
+// TestCIEngineCacheOverKeep: the build cache is over the keep size by the reclaimable
+// bytes the age prune left behind, never below zero; an unread or negative figure is
+// not usable.
+func TestCIEngineCacheOverKeep(t *testing.T) {
+	t.Parallel()
+	const gb = int64(1) << 30
+	for _, tc := range []struct {
+		name             string
+		reclaimable      int64
+		reclaimableKnown bool
+		reclaimed        int64
+		reclaimedKnown   bool
+		keepBytes        int64
+		wantOver         int64
+		wantUsable       bool
+	}{
+		{
+			name:             "nothing reclaimed leaves the whole excess over the keep size",
+			reclaimable:      12 * gb,
+			reclaimableKnown: true,
+			reclaimed:        0,
+			reclaimedKnown:   true,
+			keepBytes:        10 * gb,
+			wantOver:         2 * gb,
+			wantUsable:       true,
+		},
+		{
+			name:             "a reclaim that covers the excess leaves nothing over",
+			reclaimable:      12 * gb,
+			reclaimableKnown: true,
+			reclaimed:        3 * gb,
+			reclaimedKnown:   true,
+			keepBytes:        10 * gb,
+			wantOver:         0,
+			wantUsable:       true,
+		},
+		{
+			name:             "an unread reclaimable figure is not usable",
+			reclaimable:      12 * gb,
+			reclaimableKnown: false,
+			reclaimed:        0,
+			reclaimedKnown:   true,
+			keepBytes:        10 * gb,
+			wantOver:         0,
+			wantUsable:       false,
+		},
+		{
+			name:             "an unread reclaimed figure is not usable",
+			reclaimable:      12 * gb,
+			reclaimableKnown: true,
+			reclaimed:        0,
+			reclaimedKnown:   false,
+			keepBytes:        10 * gb,
+			wantOver:         0,
+			wantUsable:       false,
+		},
+		{
+			name:             "a negative reclaimable figure is not usable",
+			reclaimable:      -1,
+			reclaimableKnown: true,
+			reclaimed:        0,
+			reclaimedKnown:   true,
+			keepBytes:        10 * gb,
+			wantOver:         0,
+			wantUsable:       false,
+		},
+		{
+			name:             "a negative reclaimed figure is not usable",
+			reclaimable:      12 * gb,
+			reclaimableKnown: true,
+			reclaimed:        -1,
+			reclaimedKnown:   true,
+			keepBytes:        10 * gb,
+			wantOver:         0,
+			wantUsable:       false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			over, usable := ciEngineCacheOverKeep(tc.reclaimable, tc.reclaimableKnown, tc.reclaimed, tc.reclaimedKnown, tc.keepBytes)
+			if over != tc.wantOver || usable != tc.wantUsable {
+				t.Fatalf("cache over keep = (%d, %t), want (%d, %t)", over, usable, tc.wantOver, tc.wantUsable)
+			}
+		})
+	}
+}
+
 // TestCIEngineBuildCacheZeroReclaimWarn: a build cache prune that reclaims nothing
 // while docker reported reclaimable cache logs one WARN naming the keep size as well
 // as the age filter.
