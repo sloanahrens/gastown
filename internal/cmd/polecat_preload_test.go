@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -269,5 +270,64 @@ func TestBuildRigSeatsUnreadableRouteTableStillPreloads(t *testing.T) {
 	}
 	if got := warn.String(); !strings.Contains(got, "failed to preload beads in gastown") {
 		t.Errorf("the seat build did not warn that its preload failed after an unreadable route table:\n%s", got)
+	}
+}
+
+// gatewaySQLRefusal is the stderr bd prints when the gateway refuses its
+// `bd sql` call with HTTP 403: the read token may not run sql, a write-class
+// verb (gt-bbclhr). It is the wording gtwrap produces, which preloadRigSeats
+// reads.
+const gatewaySQLRefusal = "gtwrap: the bd gateway at http://gateway.test refused the call with HTTP 403: forbidden: bdgateway: token class may not run this verb (sql)"
+
+// TestPreloadRigSeatsRefusal is gt-uv89bw: the dashboard is one long-lived
+// process that polls, and the gateway refuses the preload's bd sql on every
+// poll. The first refusal warns once and sends the preload; every later call in
+// the process sends nothing and warns nothing.
+//
+//testpolicy:allow parallel — sets the process-wide refusal memory, which a parallel seat-build test in this package would see mid-run; the test resets it before and after, and the parallel tests run only once it has finished
+func TestPreloadRigSeatsRefusal(t *testing.T) {
+	preloadSeatsRefused.Store(false)
+	t.Cleanup(func() { preloadSeatsRefused.Store(false) })
+
+	rigPath := routeRigTown(t, "")
+	preload := preloadSeatArgs(t)
+	var calls [][]string
+	run := func(_ context.Context, _ string, args []string) ([]byte, []byte, error) {
+		calls = append(calls, slices.Clone(args))
+		if sameBDCall(args, preload) {
+			return nil, []byte(gatewaySQLRefusal), errors.New("exit status 125")
+		}
+		return []byte("[]"), nil, nil
+	}
+	preloadCalls := func() int {
+		n := 0
+		for _, args := range calls {
+			if sameBDCall(args, preload) {
+				n++
+			}
+		}
+		return n
+	}
+	bd := beads.New(rigPath, beads.WithDirRunner(run))
+
+	var warn bytes.Buffer
+	preloadRigSeats(&warn, bd, "gastown")
+	if n := preloadCalls(); n != 1 {
+		t.Fatalf("the first refused preload sent the read %d time(s), want exactly 1", n)
+	}
+	if n := strings.Count(warn.String(), "warning: failed to preload beads in gastown"); n != 1 {
+		t.Fatalf("the first refused preload warned %d time(s), want exactly 1:\n%s", n, warn.String())
+	}
+
+	for call := 2; call <= 3; call++ {
+		warn.Reset()
+		before := preloadCalls()
+		preloadRigSeats(&warn, bd, "gastown")
+		if n := preloadCalls() - before; n != 0 {
+			t.Errorf("call %d after the refusal sent the preload read %d time(s), want 0", call, n)
+		}
+		if got := warn.String(); got != "" {
+			t.Errorf("call %d after the refusal warned:\n%s", call, got)
+		}
 	}
 }

@@ -640,10 +640,42 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 // back to its own per-call query. On a rig the route table puts on the tracker
 // there is nothing to warm and nothing is read, so nothing is warned — the
 // per-call path is that rig's only path (gt-p85pw.108).
+//
+// The gateway's refusal of the preload's bd sql with HTTP 403 is the policy as
+// written: sql is write class and the read token is excluded (gt-bbclhr). The
+// dashboard is one long-lived process that polls, so once that refusal is seen
+// the process stops asking: every later call sends nothing and warns nothing
+// (gt-uv89bw).
 func preloadRigSeats(warn io.Writer, bd *beads.Beads, rigName string) {
-	if err := bd.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
-		fmt.Fprintf(warn, "warning: failed to preload beads in %s: %v\n", rigName, err)
+	if preloadSeatsRefused.Load() {
+		return
 	}
+	err := bd.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses)
+	if err == nil {
+		return
+	}
+	if gatewayRefusedSQL(err) {
+		preloadSeatsRefused.Store(true)
+	}
+	fmt.Fprintf(warn, "warning: failed to preload beads in %s: %v\n", rigName, err)
+}
+
+// preloadSeatsRefused is set once this process has seen the bd gateway refuse
+// the preload's bd sql with HTTP 403. It is process-wide because the dashboard
+// that polls is one process; the refusal does not change while it runs.
+var preloadSeatsRefused atomic.Bool
+
+// bdSQLVerb is the bd verb the gateway names in a refusal of the preload's
+// read, as the refusal's text carries it.
+const bdSQLVerb = "sql"
+
+// gatewayRefusedSQL reports whether err is the bd gateway's HTTP 403 refusal of
+// a bd sql call, by the wording gtwrap produces. It is the same convention
+// beads' allowStaleAnswer reads for the --allow-stale refusal (gt-d3v0iu). Any
+// other error is a warning for that call only.
+func gatewayRefusedSQL(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "refused the call with HTTP 403") && strings.Contains(msg, bdSQLVerb)
 }
 
 // buildRigSeats gathers one rig's polecat rows for `gt polecat list`: a seat
