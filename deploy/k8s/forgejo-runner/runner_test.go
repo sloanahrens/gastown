@@ -1309,6 +1309,61 @@ func TestDindCPUShare(t *testing.T) {
 	}
 }
 
+// TestDindRequestsValidateAgainstTheLimit drives the optional engine request
+// share: a request above its Values.DindResources limit is refused with an error
+// naming Values.DindRequests, and one at or below the limit, or left empty,
+// builds.
+func TestDindRequestsValidateAgainstTheLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		limits   Share
+		requests Share
+		wantErr  string
+	}{
+		{"empty share takes the limit", Share{}, Share{}, ""},
+		{"cpu below the limit", Share{CPU: "4"}, Share{CPU: "2"}, ""},
+		{"cpu at the limit", Share{CPU: "4"}, Share{CPU: "4"}, ""},
+		{"cpu at the limit in millicores", Share{CPU: "4"}, Share{CPU: "4000m"}, ""},
+		{"cpu at the fractional limit", Share{CPU: "2.5"}, Share{CPU: "2500m"}, ""},
+		{"cpu above the limit", Share{CPU: "4"}, Share{CPU: "6"}, "Values.DindRequests"},
+		{"cpu above the limit in millicores", Share{CPU: "4"}, Share{CPU: "4500m"}, "Values.DindRequests"},
+		{"cpu above the default limit", Share{}, Share{CPU: "9"}, "Values.DindRequests"},
+		{"cpu is not a quantity", Share{}, Share{CPU: "two"}, "Values.DindRequests.CPU"},
+		{"cpu is a fraction outside the grammar", Share{}, Share{CPU: "1/3"}, "Values.DindRequests.CPU"},
+		{"memory below the limit", Share{Memory: "8Gi"}, Share{Memory: "4Gi"}, ""},
+		{"memory at the limit", Share{Memory: "8Gi"}, Share{Memory: "8Gi"}, ""},
+		{"memory at the limit in another suffix", Share{Memory: "8Gi"}, Share{Memory: "8192Mi"}, ""},
+		{"memory above the limit", Share{Memory: "8Gi"}, Share{Memory: "12Gi"}, "Values.DindRequests"},
+		{"memory above the default limit", Share{}, Share{Memory: "13Gi"}, "Values.DindRequests"},
+		{"memory has no suffix", Share{}, Share{Memory: "8"}, "Values.DindRequests.Memory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues()
+			v.DindResources = tc.limits
+			v.DindRequests = tc.requests
+			m, err := Build(v)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Build refused requests %+v within limits %+v: %v", tc.requests, tc.limits, err)
+				}
+				dind := containerNamed(t, m.Deployment.Spec.Template.Spec, DindContainerName)
+				if dind.Resources.Limits.CPU == "" || dind.Resources.Limits.Memory == "" {
+					t.Errorf("the engine limits = %+v, want the limit rendered", dind.Resources.Limits)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Build accepted requests %+v above limits %+v", tc.requests, tc.limits)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestConfigYAMLQuotesAnyLabel drives the scalar quoting: a label holding a
 // single quote and a YAML comment character must read back as the label it was,
 // not as a document a reader would have to repair.
