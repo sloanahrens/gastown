@@ -889,7 +889,14 @@ func (d *Daemon) triggerTierSweep() {
 			// retries.
 			return
 		}
-		d.recordPatrolRun(&d.tierSweepRun, "tier_sweep", d.clk().Now())
+		// The cycle's run is recorded before the patrol clock, from the start
+		// this trigger stored (now) to the same completion time the patrol
+		// record carries: the overdue rule allows a job its own run's duration
+		// on top of its cadence, and a failed append must not cost the patrol
+		// its record (gt-9g78tq).
+		ended := d.clk().Now()
+		d.recordTierSweepJobRun(now, ended)
+		d.recordPatrolRun(&d.tierSweepRun, "tier_sweep", ended)
 	}()
 }
 
