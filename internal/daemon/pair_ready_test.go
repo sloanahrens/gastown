@@ -534,6 +534,55 @@ func TestPairReadyUnreadableSkewRaisesNoReadyItem(t *testing.T) {
 	assert.Contains(t, it.Summary, "no roll starts", "the item does not say that no roll starts")
 }
 
+// TestPairReadyImagesAnswerForAnUnreadableCommit: the tier sweep asks the pair
+// check whether a commit's images are published before it re-runs the build. A
+// commit the check could not read answers neither failed nor published, which
+// the sweep reads as unanswered and never as a success (gt-ogt6jh, gt-opkfch).
+// A published pair whose bd pin's schema level cannot be read is one such
+// commit: the pass holds the unreadable item in place of the pair-ready item, so
+// the images are unmeasured (gt-5f0kue, gt-gyeeni).
+func TestPairReadyImagesAnswerForAnUnreadableCommit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		arm  func(*pairFixture)
+	}{
+		{
+			name: "the bd pin's schema level cannot be read",
+			arm: func(fx *pairFixture) {
+				fx.check.skew = &pairReadySkewReads{
+					LevelAt:  func(context.Context, string) (int, error) { return 0, errors.New("the clone cannot read that commit") },
+					Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+				}
+			},
+		},
+		{
+			name: "the images registry cannot be read",
+			arm:  func(fx *pairFixture) { fx.reg = &fakePairRegistry{err: errors.New("registry unreachable")} },
+		},
+		{
+			name: "the comparison with the running commit cannot be read",
+			arm:  func(fx *pairFixture) { fx.api.compares = nil },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			tc.arm(fx)
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1, "the unreadable read raised %v; want the check's unreadable item", pairSkewItemKinds(items))
+			require.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind, "the fixture did not drive an unreadable read")
+
+			failed, published := fx.check.imagesAnswerFor("gastown", pairGreen)
+			assert.False(t, failed, "a commit the check could not read answered failed")
+			assert.False(t, published, "a commit the check could not read answered published, so the sweep would read it as a success")
+		})
+	}
+}
+
 // pairBdTree is the listing git prints for bd's migrations directory at a commit
 // whose migrations run from 0001 to last: bd's three non-migration files beside
 // them, as the pinned bd commit holds them.
