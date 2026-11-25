@@ -1370,6 +1370,10 @@ func TestCompleteKeptSeatEndLogsTheReasonTheRerunLeft(t *testing.T) {
 		// rerun leaves the kept record the way the re-run's end leaves it.
 		rerun   func(t *testing.T, town string, h *patrolScanHost)
 		wantLog string
+
+		// wantEnd, on a row whose re-run left no record, is where the
+		// completion line must end: the record state, with no reason after it.
+		wantEnd string
 	}{
 		{
 			name: "a re-run that keeps the seat with a new reason",
@@ -1386,6 +1390,7 @@ func TestCompleteKeptSeatEndLogsTheReasonTheRerunLeft(t *testing.T) {
 				}
 			},
 			wantLog: "its keep is gone",
+			wantEnd: "its keep is gone (its kept record is not there)",
 		},
 		{
 			name: "a re-run that left an unreadable record",
@@ -1426,6 +1431,11 @@ func TestCompleteKeptSeatEndLogsTheReasonTheRerunLeft(t *testing.T) {
 			}
 			if got := logs.String(); strings.Contains(got, oldReason) {
 				t.Errorf("log names the stale reason %q:\n%s", oldReason, got)
+			}
+			if tt.wantEnd != "" {
+				if got := strings.TrimSpace(logs.String()); !strings.HasSuffix(got, tt.wantEnd) {
+					t.Errorf("line must end at %q with no reason after the record state:\n%s", tt.wantEnd, got)
+				}
 			}
 		})
 	}
