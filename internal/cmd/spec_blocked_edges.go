@@ -95,6 +95,17 @@ func readBlockedByRig(rigs []string, blocked func(rig string) ([]*beads.Issue, e
 	return perRig, failed
 }
 
+// inheritedSeam is the inherited-priority seam the candidate read takes
+// (gt-6dzat3). Each call reads every rig's blocked list again, so a tick sees
+// the blocked issues as they are then, and returns the inherited priorities
+// those lists give plus the rigs whose read failed.
+func inheritedSeam(rigs []string, blocked func(rig string) ([]*beads.Issue, error)) func() (map[string]specdispatch.Inherited, map[string]error) {
+	return func() (map[string]specdispatch.Inherited, map[string]error) {
+		perRig, failed := readBlockedByRig(rigs, blocked)
+		return inheritedFromRigs(perRig), failed
+	}
+}
+
 // appendNewIDs appends each id in ids that list does not already hold. Appending
 // to a nil list allocates, so the result never shares a backing array with ids.
 func appendNewIDs(list, ids []string) []string {
