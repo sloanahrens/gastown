@@ -3,6 +3,7 @@ package land
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -127,8 +128,8 @@ func TestVerdictReuseStoreRefusesWhatItCannotWrite(t *testing.T) {
 		{"rig is empty", func(s *AheadStore, _ *AheadRecord) { s.Rig = "" }, nil, "invalid rig"},
 		{"rig climbs out of the store", func(s *AheadStore, _ *AheadRecord) { s.Rig = ".." }, nil, "invalid rig"},
 		{"rig holds a separator", func(s *AheadStore, _ *AheadRecord) { s.Rig = "a/b" }, nil, "invalid rig"},
-		{"bead is empty", func(_ *AheadStore, r *AheadRecord) { r.Bead = "" }, nil, "invalid bead"},
-		{"bead climbs out of the store", func(_ *AheadStore, r *AheadRecord) { r.Bead = "../gt-abc" }, nil, "invalid bead"},
+		{"bead is empty", func(_ *AheadStore, r *AheadRecord) { r.Bead = "" }, nil, "refusing bead"},
+		{"bead climbs out of the store", func(_ *AheadStore, r *AheadRecord) { r.Bead = "../gt-abc" }, nil, "refusing bead"},
 		{"record cannot be encoded", func(_ *AheadStore, r *AheadRecord) { r.ReviewSecs = math.NaN() }, nil, "encoding review-ahead record"},
 		{"write fails", func(s *AheadStore, _ *AheadRecord) {
 			s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
@@ -177,5 +178,146 @@ func TestVerdictReuseStoreRefusesWhatItCannotWrite(t *testing.T) {
 				t.Errorf("a refused Put left a record behind at %s", aheadTestPath(town, "gastown", "gt-abc"))
 			}
 		})
+	}
+}
+
+// TestVerdictReuseStorePutRefusesNonOMVerdict: Put keeps a record only for the
+// verdicts om itself reaches. An outcome that is not exactly "verdict" or
+// "conflict", or a verdict word an om skip, error or waiver carries, is refused
+// with an error that names the outcome, and no record is written.
+func TestVerdictReuseStorePutRefusesNonOMVerdict(t *testing.T) {
+	t.Parallel()
+	badOutcomes := []string{"", "Verdict", "verdict ", "timeout", "verdict"}
+	badVerdicts := []string{VerdictSkipped, VerdictErrorPrefix + "timeout", VerdictOverseerPrefix + "gt-abc"}
+	for _, outcome := range badOutcomes {
+		for _, verdict := range badVerdicts {
+			t.Run(fmt.Sprintf("outcome %q verdict %q", outcome, verdict), func(t *testing.T) {
+				t.Parallel()
+				town := t.TempDir()
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.Outcome, rec.Verdict.Verdict = outcome, verdict
+				err := TownAheadStore(town, "gastown").Put(rec)
+				if err == nil {
+					t.Fatalf("Put stored outcome %q with verdict %q, want a refusal", outcome, verdict)
+				}
+				if want := fmt.Sprintf("%q", outcome); !strings.Contains(err.Error(), want) {
+					t.Errorf("Put error = %q, want it to name the outcome %s", err, want)
+				}
+				assertNoRecord(t, town, "gt-abc")
+			})
+		}
+	}
+
+	t.Run("conflict carrying a verdict", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		rec := aheadTestRecord("gt-abc", aheadTestHead)
+		rec.Outcome, rec.Verdict.Verdict = "conflict", VerdictSkipped
+		err := TownAheadStore(town, "gastown").Put(rec)
+		if err == nil {
+			t.Fatal("Put stored a conflict that carried a verdict, want a refusal")
+		}
+		if !strings.Contains(err.Error(), `"conflict"`) {
+			t.Errorf("Put error = %q, want it to name the outcome", err)
+		}
+		assertNoRecord(t, town, "gt-abc")
+	})
+
+	stored := []struct {
+		name    string
+		outcome string
+		verdict string
+	}{
+		{"conflict with no verdict", "conflict", ""},
+		{"approve", "verdict", VerdictApprove},
+		{"request_changes", "verdict", VerdictRequestChanges},
+	}
+	for _, tc := range stored {
+		t.Run("stores "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := aheadTestRecord("gt-abc", aheadTestHead)
+			rec.Outcome, rec.Verdict.Verdict = tc.outcome, tc.verdict
+			if err := TownAheadStore(town, "gastown").Put(rec); err != nil {
+				t.Fatalf("Put(%q, %q): %v", tc.outcome, tc.verdict, err)
+			}
+			if _, err := os.Stat(aheadTestPath(town, "gastown", "gt-abc")); err != nil {
+				t.Errorf("Put did not store outcome %q with verdict %q: %v", tc.outcome, tc.verdict, err)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseStoreBadComponent: a bead that is not one path component, or
+// a head that is not a sha, is refused and leaves no record.
+func TestVerdictReuseStoreBadComponent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		edit    func(rec *AheadRecord)
+		wantErr string
+	}{
+		{"empty bead", func(r *AheadRecord) { r.Bead = "" }, "refusing bead"},
+		{"bead climbs out of the store", func(r *AheadRecord) { r.Bead = "../gt-abc" }, "refusing bead"},
+		{"bead holds a separator", func(r *AheadRecord) { r.Bead = "gt/abc" }, "refusing bead"},
+		{"empty head", func(r *AheadRecord) { r.Head = "" }, "refusing head"},
+		{"head is not hex", func(r *AheadRecord) { r.Head = aheadTestHead[:7] + "g" + aheadTestHead[8:] }, "refusing head"},
+		{"head is uppercase", func(r *AheadRecord) { r.Head = strings.ToUpper(aheadTestHead) }, "refusing head"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := aheadTestRecord("gt-abc", aheadTestHead)
+			tc.edit(&rec)
+			err := TownAheadStore(town, "gastown").Put(rec)
+			if err == nil {
+				t.Fatalf("Put returned nil, want an error naming %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Put error = %q, want it to name %q", err, tc.wantErr)
+			}
+			assertNoRecord(t, town, "gt-abc")
+		})
+	}
+}
+
+// TestVerdictReuseStoreFailedWriteLeavesNoRecord: a write that fails after the
+// store has made its temp file leaves neither a record nor a partial file. The
+// record path is a directory the atomic write's rename cannot replace, so the
+// real writer fails.
+func TestVerdictReuseStoreFailedWriteLeavesNoRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := aheadTestPath(town, "gastown", "gt-abc")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := TownAheadStore(town, "gastown").Put(aheadTestRecord("gt-abc", aheadTestHead))
+	if err == nil {
+		t.Fatal("Put over a directory returned nil, want the write error")
+	}
+	if !strings.Contains(err.Error(), "writing review-ahead record") {
+		t.Errorf("Put error = %q, want it to name the write", err)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.IsDir() {
+		t.Errorf("record path after the failed write = %v (stat error %v), want the original directory", info, statErr)
+	}
+	entries, readErr := os.ReadDir(filepath.Dir(path))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != "gt-abc.json" {
+		t.Errorf("failed write left %v in the record directory, want only gt-abc.json", entries)
+	}
+}
+
+// assertNoRecord fails when the store kept a record for bead in town.
+func assertNoRecord(t *testing.T, town, bead string) {
+	t.Helper()
+	path := aheadTestPath(town, "gastown", bead)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a refused Put left a record at %s (stat error %v)", path, err)
 	}
 }
