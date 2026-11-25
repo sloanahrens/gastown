@@ -3657,7 +3657,7 @@ func TestSpecCandidatesInheritedFailed(t *testing.T) {
 		{
 			name:   "one failed rig is named with its error",
 			failed: map[string]error{"gastown": errors.New("blocked list unreadable")},
-			want:   []string{"inherited priority: gastown's blocked list could not be read (blocked list unreadable); its blockers order at their own priority"},
+			want:   []string{"priority inheritance unavailable for gastown: blocked list unreadable"},
 		},
 		{
 			name: "two failed rigs are named in rig-name order",
@@ -3666,8 +3666,8 @@ func TestSpecCandidatesInheritedFailed(t *testing.T) {
 				"alpha": errors.New("timeout"),
 			},
 			want: []string{
-				"inherited priority: alpha's blocked list could not be read (timeout); its blockers order at their own priority",
-				"inherited priority: zeta's blocked list could not be read (connection refused); its blockers order at their own priority",
+				"priority inheritance unavailable for alpha: timeout",
+				"priority inheritance unavailable for zeta: connection refused",
 			},
 		},
 		{
@@ -3692,10 +3692,50 @@ func TestSpecCandidatesInheritedFailed(t *testing.T) {
 	}
 }
 
-// specTown is a temp town with one operational rig whose .beads looks like a
-// database, so specCandidates walks it. The board itself is served by the
-// specReadyBoard seam.
-func specTown(t *testing.T) string {
+// TestSpecPriorityInheritanceUnavailable is the candidate read's report of a rig
+// whose blocked list the inherited seam could not read (gt-a6xfgr), through the
+// fake town: the tick line names that rig and its error, and the rigs whose
+// blocked lists did read still order their blockers by the inherited priority.
+func TestSpecPriorityInheritanceUnavailable(t *testing.T) {
+	t.Parallel()
+	town := specTownWithRigs(t, "gastown", "second")
+	board := func(rigPath string) ([]*beads.Issue, error) {
+		if filepath.Base(rigPath) == "gastown" {
+			return []*beads.Issue{
+				{ID: "gt-gastown", Type: "task", Status: "open", Priority: 2, CreatedAt: "2026-09-01T00:00:00Z"},
+			}, nil
+		}
+		return []*beads.Issue{
+			{ID: "gt-other", Type: "task", Status: "open", Priority: 1, CreatedAt: "2026-09-01T00:00:00Z"},
+			{ID: "gt-blocker", Type: "task", Status: "open", Priority: 2, CreatedAt: "2026-09-02T00:00:00Z"},
+		}, nil
+	}
+	errBlocked := errors.New("bd blocked failed\nfor gastown, its database did not answer")
+	blocked := func(rig string) ([]*beads.Issue, error) {
+		if rig == "gastown" {
+			return nil, errBlocked
+		}
+		return []*beads.Issue{
+			{ID: "gt-dep", Priority: 0, Status: "open", BlockedBy: []string{"gt-blocker"}},
+		}, nil
+	}
+	got := specCandidatesDropping(town, 2, board, notDocked, nil, nil, nil, inheritedSeam([]string{"gastown", "second"}, blocked))
+	if want := []string{"priority inheritance unavailable for gastown: bd blocked failed"}; !slices.Equal(got.Notices, want) {
+		t.Fatalf("Notices = %q, want %q", got.Notices, want)
+	}
+	ids := make([]string, 0, len(got.Candidates))
+	for _, c := range got.Candidates {
+		ids = append(ids, c.Spec.ID)
+	}
+	if want := []string{"gt-blocker", "gt-other", "gt-gastown"}; !slices.Equal(ids, want) {
+		t.Fatalf("candidate order = %v, want %v; the readable rig's blocker still inherits P0", ids, want)
+	}
+}
+
+// specTownWithRigs is a temp town whose rigs registry names rigs, each operational
+// with a .beads that looks like a database, so specCandidates walks it. The
+// board itself is served by the specReadyBoard seam.
+func specTownWithRigs(t *testing.T, rigs ...string) string {
 	t.Helper()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
@@ -3706,17 +3746,30 @@ func specTown(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{"gastown": {}}})
+	cfg := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
+	for _, rig := range rigs {
+		cfg.Rigs[rig] = config.RigEntry{}
+	}
+	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads", "dolt"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, rig := range rigs {
+		if err := os.MkdirAll(filepath.Join(townRoot, rig, ".beads", "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return townRoot
+}
+
+// specTown is a temp town with one operational rig whose .beads looks like a
+// database, so specCandidates walks it.
+func specTown(t *testing.T) string {
+	t.Helper()
+	return specTownWithRigs(t, "gastown")
 }
 
 // specCandidates is the dispatcher's intake, so it is the place the
