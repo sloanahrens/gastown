@@ -2033,6 +2033,8 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 		backend  string
 		progress string
 		failStep bool
+		noRunner bool
+		badSpec  bool
 		wantExec bool
 		wantErr  bool
 		wantFile string
@@ -2041,6 +2043,9 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 		{name: "a plan with no Progress step writes nothing", backend: config.TierSweepRunnerDocker, wantFile: earlier},
 		{name: "a failing Progress step is returned and keeps the stored record", progress: `{"tiers":["integration"],"running":"race"}`, failStep: true, wantExec: true, wantErr: true, wantFile: earlier},
 		{name: "a Progress step that prints no JSON object is refused and keeps the stored record", progress: "not json", wantExec: true, wantErr: true, wantFile: earlier},
+		{name: "a missing runner block is refused and keeps the stored record", noRunner: true, wantErr: true, wantFile: earlier},
+		{name: "a backend the daemon does not know is refused and keeps the stored record", backend: "podman", wantErr: true, wantFile: earlier},
+		{name: "a spec no backend renders is refused and keeps the stored record", badSpec: true, wantErr: true, wantFile: earlier},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2050,8 +2055,13 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 			cluster := &runnerCluster{t: t, progress: []byte(tc.progress), failProgress: tc.failStep}
 			cmds := &runnerFakeCmds{answer: cluster.answer}
 			d.execCmd = cmds.run
-			if tc.backend != "" {
+			switch {
+			case tc.backend != "":
 				d.patrolConfig.Patrols.TierSweep.Runner.Backend = tc.backend
+			case tc.noRunner:
+				d.patrolConfig.Patrols.TierSweep.Runner = nil
+			case tc.badSpec:
+				spec.CPUs = 0
 			}
 			if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
 				t.Fatal(err)
