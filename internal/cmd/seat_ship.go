@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -28,25 +29,79 @@ type seatShipDeps struct {
 	Outbox   string
 	Deadline time.Duration
 	Stderr   io.Writer
+	// Expire makes the run's deadline context from the caller's. A nil Expire is
+	// context.WithTimeout; a test injects one whose deadline it fires itself, so
+	// no test waits on real time.
+	Expire func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc)
 }
 
 // runSeatShip is gt seat ship: a finished seat posts its record as one SEAT-END
 // comment on its bead, and the sandbox can exit instead of waiting for the
 // daemon to pull the record out (gt-7h8s5r). It returns the exit code: 0 once
 // the comment is posted, 1 with one `seat ship: <reason>` line on d.Stderr for
-// any failure. Nothing is retried.
+// any failure. Nothing is retried. The whole run, reads and post, must finish
+// within d.Deadline.
+//
+// A failure line at the deadline does not say the record was not posted: the
+// bead store's calls take no context and cannot be canceled, so a post that was
+// in flight when the deadline passed may still land after this returns. A caller
+// that must know reads the bead's comments.
 func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string) int {
 	fail := func(err error) int {
 		reason := strings.Join(strings.Fields(err.Error()), " ")
 		_, _ = fmt.Fprintf(d.Stderr, "seat ship: %s\n", reason)
 		return 1
 	}
-	if err := ctx.Err(); err != nil {
-		return fail(err)
+	if d.Deadline <= 0 {
+		return fail(fmt.Errorf("deadline %s is not positive", d.Deadline))
 	}
+	if err := ctx.Err(); err != nil {
+		return fail(seatShipStopped(ctx, d.Deadline))
+	}
+	// The bead store's calls take no context, so a call that hangs cannot be
+	// canceled. The run goes in its own goroutine and this function waits on
+	// the deadline instead. The channel holds one outcome, so a run that
+	// finishes after the deadline sends and exits with no reader. Only the
+	// calling goroutine writes to d.Stderr.
+	expire := d.Expire
+	if expire == nil {
+		expire = context.WithTimeout
+	}
+	runCtx, cancel := expire(ctx, d.Deadline)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- seatShipRecord(d, rig, polecat, bead) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fail(err)
+		}
+		return 0
+	case <-runCtx.Done():
+		return fail(seatShipStopped(ctx, d.Deadline))
+	}
+}
+
+// seatShipStopped is why a run ended before its record was posted, and whose
+// deadline it was: a canceled parent is reported as canceled, a parent whose own
+// deadline passed as the caller's deadline, and only the run's own expiry names
+// d.Deadline and says the post may still complete.
+func seatShipStopped(ctx context.Context, deadline time.Duration) error {
+	switch err := ctx.Err(); {
+	case errors.Is(err, context.Canceled):
+		return errors.New("canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New("the caller's deadline passed before the record was posted")
+	}
+	return fmt.Errorf("deadline %s passed before the record was posted; the post may still complete", deadline)
+}
+
+// seatShipRecord reads the seat's record and posts it as the bead's SEAT-END
+// comment. It returns the first failure, wrapped with the step it came from.
+func seatShipRecord(d seatShipDeps, rig, polecat, bead string) error {
 	submitted, err := seatSubmitted(d.Beads, bead)
 	if err != nil {
-		return fail(fmt.Errorf("reading %s: %w", bead, err))
+		return fmt.Errorf("reading %s: %w", bead, err)
 	}
 	payload, err := seatship.Collect(seatship.CollectInput{
 		Rig:         rig,
@@ -59,14 +114,14 @@ func runSeatShip(ctx context.Context, d seatShipDeps, rig, polecat, bead string)
 		TailBytes:   seatShipTailBytes,
 	})
 	if err != nil {
-		return fail(err)
+		return fmt.Errorf("collecting %s: %w", bead, err)
 	}
 	comment, err := seatship.Encode(payload)
 	if err != nil {
-		return fail(err)
+		return fmt.Errorf("encoding %s: %w", bead, err)
 	}
 	if err := d.Beads.AddComment(bead, comment); err != nil {
-		return fail(fmt.Errorf("posting the record on %s: %w", bead, err))
+		return fmt.Errorf("posting the record on %s: %w", bead, err)
 	}
-	return 0
+	return nil
 }
