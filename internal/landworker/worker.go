@@ -559,8 +559,8 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// the whole list, not the beads this pass still has to land, because the
 	// column it answers counts what waits.
 	w.Queue.Publish(w.Rig, len(issues))
-	// The beads this pass has looked at, whatever it left them on: a bead that
-	// stays ready after its attempt is not tried twice in one pass, and the
+	// The submissions this pass has looked at, whatever it left them on: a bead
+	// that stays ready after its attempt is not tried twice in one pass, and the
 	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
 	handled := make(map[string]bool, len(issues))
 	for {
@@ -575,7 +575,7 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if issue == nil {
 			return rep
 		}
-		handled[issue.ID] = true
+		handled[handledKey(issue)] = true
 		// IsActionable, not IsTerminal: deferring a submitted bead is the
 		// operator's only hold on it (gt bead reset refuses a ready bead), so
 		// the worker must read the same park the health count reports, or a
@@ -1873,14 +1873,25 @@ func sortByLandingOrder(issues []*beads.Issue) {
 	})
 }
 
-// nextReady returns the first bead of a listed ready board that this pass has
-// not looked at yet, in landing order, or nil when it has looked at every one:
-// the pass takes the next bead from each fresh list the way it lands them, so a
-// P0 made ready mid-pass lands next (gt-wgvu6p).
+// handledKey names one submission of a bead for the pass's handled set: the
+// bead's id and the time of its last READY TO LAND block. A bead the pass tried
+// that is still ready with the same block is the same submission and is not
+// tried twice; a bead its seat resubmitted carries a newer block, so it is a new
+// entry and is picked in landing order (gt-jx9f8g). The block time, not
+// land.SubmittedAt, because SubmittedAt falls back to the bead's UpdatedAt,
+// which moves with every write to the bead.
+func handledKey(issue *beads.Issue) string {
+	return issue.ID + "@" + land.ReadyBlockTime(issue.Notes).Format(time.RFC3339Nano)
+}
+
+// nextReady returns the first bead of a listed ready board whose submission
+// this pass has not looked at yet, in landing order, or nil when it has looked
+// at every one: the pass takes the next bead from each fresh list the way it
+// lands them, so a P0 made ready mid-pass lands next (gt-wgvu6p).
 func nextReady(issues []*beads.Issue, handled map[string]bool) *beads.Issue {
 	sortByLandingOrder(issues)
 	for _, issue := range issues {
-		if issue != nil && !handled[issue.ID] {
+		if issue != nil && !handled[handledKey(issue)] {
 			return issue
 		}
 	}
