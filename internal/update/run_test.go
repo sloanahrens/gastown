@@ -1336,8 +1336,9 @@ func TestRunVerifyGreenNoDetail(t *testing.T) {
 }
 
 // TestRunVerifyFailedCheckPartial: a failed check records checksDetail in the
-// verify step and the run ends partial; the passing health check is not folded
-// into that detail.
+// verify step and the run ends partial. The health check runs and passes here,
+// so the detail must name only the failed check: folding the passing health
+// check in would add a "health: ..." part the absence assertion below rejects.
 func TestRunVerifyFailedCheckPartial(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
@@ -1354,11 +1355,17 @@ func TestRunVerifyFailedCheckPartial(t *testing.T) {
 	if verify.Result != ResultFailed {
 		t.Errorf("verify Result = %q, want %q", verify.Result, ResultFailed)
 	}
-	if want := fmt.Sprintf("%s: got %q, want %q", checkGTVersion, verifyTestOld, runTestSHA); verify.Detail != want {
-		t.Errorf("verify Detail = %q, want %q", verify.Detail, want)
+	// The detail names the failed check and what it reported. It is not pinned
+	// whole: a roll that folded every check into the detail would still carry
+	// this part, and the assertion below is what rejects the extra health part.
+	if want := fmt.Sprintf("%s: got %q, want %q", checkGTVersion, verifyTestOld, runTestSHA); !strings.Contains(verify.Detail, want) {
+		t.Errorf("verify Detail = %q, want the failed check %q", verify.Detail, want)
+	}
+	if f.verify.healthCalls == 0 {
+		t.Fatalf("the health probe was never asked, so its absence from the detail proves nothing")
 	}
 	if strings.Contains(verify.Detail, checkHealth) {
-		t.Errorf("verify Detail = %q, want only the failed check", verify.Detail)
+		t.Errorf("verify Detail = %q, want only the failed check, not the passing health check", verify.Detail)
 	}
 }
 
