@@ -816,3 +816,35 @@ func TestImagePinLayersStartCheckRunsOnce(t *testing.T) {
 		t.Errorf("the last-run record names %s, want the day the start check ran", got)
 	}
 }
+
+// TestImagePinLayersStartRecordSkipsToday: starting the ticker with a last-run
+// record naming today's UTC day calls the run seam zero times and logs that the
+// day already ran.
+func TestImagePinLayersStartRecordSkipsToday(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := imagePinDurabilityNoon(t, "2026-11-16")
+	if err := writeImagePinLayersLastRun(imagePinLayersLastRunPath(town), now.Add(-time.Hour)); err != nil {
+		t.Fatalf("seeding today's last-run record: %v", err)
+	}
+	var logged bytes.Buffer
+	var calls atomic.Int32
+	d := imagePinDurabilityCountingDaemon(t, town, &calls, &logged)
+	d.clock = clockwork.NewFakeClockAt(now)
+	d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+		return make(chan time.Time), func() {}
+	}
+
+	_, stop := d.startImagePinLayersTicker()
+	if stop == nil {
+		t.Fatal("the enabled patrol started no ticker")
+	}
+	d.stopImagePinLayersPatrol(stop)
+
+	if got := calls.Load(); got != 0 {
+		t.Errorf("starting the ticker inside a day that already ran called the run seam %d times, want none", got)
+	}
+	if !strings.Contains(logged.String(), "already ran on 2026-11-16") {
+		t.Errorf("the start check logged %q, want the day named as already run", logged.String())
+	}
+}
