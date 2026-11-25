@@ -364,6 +364,14 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	if consumed > 0 {
 		lines = append(lines, l.compactQueue(w.Rig, existing, skips, base)...)
 	}
+	// The bead bound counts beads, so it can hold at 40 while held findings pile
+	// up behind it with no bead of their own: a queue longer than
+	// followupQueueAlertOver findings after this landing's drain is that, and one
+	// alert per landing names it (gt-rkew3w). A nil sink reports nothing, and a
+	// queue the feed could not read is empty here, its line already logged.
+	if n := queuedFindingCount(queued[consumed:]); n > followupQueueAlertOver && l.FollowupAlert != nil {
+		l.FollowupAlert(fmt.Sprintf("%d follow-up findings are queued with no bead, at the %d-bead bound", n, l.followupBackpressure()))
+	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
 	// comment is for a finding another landing raised (gt-4ty22).
