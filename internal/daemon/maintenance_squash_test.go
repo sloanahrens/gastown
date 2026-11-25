@@ -2923,10 +2923,11 @@ func TestSquashCheckRecoversAfterAFailedRunInsideTheGate(t *testing.T) {
 	}
 }
 
-// TestSquashCheckLogsTheRecovery: when the recovery seam returns a Recovery the
-// check logs it with the database, the state the recovery found, the branches it
-// dropped and the ones it kept (gt-oym2v2). The line is the one place an operator
-// reads that a dead run's branches were touched.
+// TestSquashCheckLogsTheRecovery: when the recovery seam returns a Recovery that
+// dropped or kept a branch the check logs it with the database, the state the
+// recovery found, the branches it dropped and the ones it kept (gt-oym2v2). The
+// line is the one place an operator reads that a dead run's branches were
+// touched.
 func TestSquashCheckLogsTheRecovery(t *testing.T) {
 	t.Parallel()
 	d, _, _, logs := squashTickDaemon(t, squashEnabled())
@@ -2953,6 +2954,52 @@ func TestSquashCheckLogsTheRecovery(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the recovery's log line lacks %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestSquashRecordRecoveryLineOnlyWhenSomethingWasDroppedOrKept: the dead-run
+// line names the recovery's work, so the check writes it only when the Recovery
+// dropped or kept a branch; a Recovery that changed no branch did no work, and
+// the line would claim an action it never took (gt-6f9e8i).
+func TestSquashRecordRecoveryLineOnlyWhenSomethingWasDroppedOrKept(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		rec     *doltsquash.Recovery
+		wantLog bool
+	}{
+		{
+			name:    "a recovery that dropped a branch",
+			rec:     &doltsquash.Recovery{State: doltsquash.RecoveryBeforeSwap, Dropped: []string{"compact-work"}, Reason: "the work branch was dropped"},
+			wantLog: true,
+		},
+		{
+			name:    "a recovery that kept a branch",
+			rec:     &doltsquash.Recovery{State: doltsquash.RecoverySwappedKept, Kept: []string{"main-pre-squash"}, Reason: "the swap stands"},
+			wantLog: true,
+		},
+		{
+			name:    "a recovery that changed no branch",
+			rec:     &doltsquash.Recovery{State: doltsquash.RecoverySwappedKept},
+			wantLog: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := squashTickDaemon(t, squashEnabled())
+			root := squashBackupRoot(t, d)
+			writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+				return tc.rec, nil
+			}
+
+			d.runScheduledMaintenance()
+
+			if got := strings.Contains(logs.String(), "recovered a dead run"); got != tc.wantLog {
+				t.Errorf("the check logged the dead-run line %t, want %t:\n%s", got, tc.wantLog, logs.String())
+			}
+		})
 	}
 }
 
