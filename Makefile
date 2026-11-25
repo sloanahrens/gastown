@@ -108,6 +108,11 @@ LDFLAGS := -s -w \
            -X github.com/steveyegge/gastown/internal/cmd.BuildTime=$(BUILD_TIME) \
            -X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1
 
+# Export the physical working directory, not a caller's PWD. A seat's shell
+# may name a symlink (/sandbox/gt/work); CURDIR is getcwd's resolved path, so
+# presubmit and gate children run where the files really are (gt-15ix74).
+export PWD := $(CURDIR)
+
 # ICU4C detection for macOS (required by go-icu-regex transitive dependency).
 # Homebrew installs icu4c as a keg-only package, so headers/libs aren't on the
 # default search path. Auto-detect the prefix and export CGo flags.
