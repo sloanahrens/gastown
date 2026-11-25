@@ -45,6 +45,8 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"BackupTable":                 BackupTable("hq", "labels"),
 		"BackupEvents":                BackupEvents("hq", ""),
 		"BackupEventsSince":           BackupEvents("hq", "2026-10-31 16:53:07"),
+		"BackupEventsPage":            BackupEventsPage("hq", "", "", 100),
+		"BackupEventsPageAfter":       BackupEventsPage("hq", "2026-10-31 16:53:07", "0f8fad5b-d9cb-469f-a165-70867728950e", 100),
 	} {
 		s, err := q.Inline()
 		if err != nil {
@@ -75,6 +77,8 @@ func TestQueriesRefuseBadIdentifiers(t *testing.T) {
 		"BackupTable":      BackupTable("hq", "labels;"),
 		"BackupEvents":     BackupEvents("hq; DROP TABLE events", ""),
 		"BackupEventBound": BackupEvents("hq", "2026-10-31' OR '1'='1"),
+		"BackupEventsPage": BackupEventsPage("hq; DROP TABLE events", "", "", 10),
+		"EventsPageBound":  BackupEventsPage("hq", "2026-10-31' OR '1'='1", "0f8fad5b-d9cb-469f-a165-70867728950e", 10),
 		// An empty list would build `IN ()`, which is not a statement, so it is
 		// refused rather than sent.
 		"CommentsOfNoIDs": CommentsOf(nil),
@@ -640,5 +644,75 @@ func TestBackupEventsReadsFromItsBoundary(t *testing.T) {
 
 	if _, err := BackupEvents("hq", "yesterday").Inline(); err == nil {
 		t.Error("a bound that is not a timestamp was sent to Dolt")
+	}
+}
+
+// TestBackupEventsPageKeysetText: a page after a row takes the rows that sort
+// after its (created_at, id), in the append's order and bounded at limit; the
+// first page has no bound at all (gt-974eod).
+func TestBackupEventsPageKeysetText(t *testing.T) {
+	t.Parallel()
+	const ts = "2026-11-24 21:37:45"
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	const afterRow = "SELECT * FROM `gt`.events WHERE (created_at > '" + ts + "' OR (created_at = '" + ts + "' AND id > '" + id + "')) ORDER BY created_at, id LIMIT 500"
+	for _, tc := range []struct {
+		name, after, afterID string
+		limit                int
+		want                 string
+	}{
+		{name: "first page", limit: 500, want: "SELECT * FROM `gt`.events ORDER BY created_at, id LIMIT 500"},
+		{name: "after a row", after: ts, afterID: id, limit: 500, want: afterRow},
+	} {
+		got, err := BackupEventsPage("gt", tc.after, tc.afterID, tc.limit).Inline()
+		if err != nil {
+			t.Fatalf("%s: Inline: %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestBackupEventsPageLimitBounds: a page holds 1 to 100000 rows; both ends are
+// accepted, and the refusals beyond them are in TestBackupEventsPageRefusals.
+func TestBackupEventsPageLimitBounds(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{1, 100000} {
+		if _, err := BackupEventsPage("hq", "", "", limit).Inline(); err != nil {
+			t.Errorf("limit %d refused: %v", limit, err)
+		}
+	}
+}
+
+// TestBackupEventsPageRefusals: each input that cannot be a literal Dolt
+// compares, or a limit outside 1 to 100000, is refused with an error that
+// names it, never sent as a statement. A stray id with no created_at bound is
+// refused too, because there is no page it could start after.
+func TestBackupEventsPageRefusals(t *testing.T) {
+	t.Parallel()
+	const ts = "2026-11-24 21:37:45"
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	for name, tc := range map[string]struct {
+		q    Query
+		want string
+	}{
+		"non-timestamp bound": {BackupEventsPage("hq", "yesterday", id, 10), "events page bound"},
+		"injected bound":      {BackupEventsPage("hq", "2026-10-31' OR '1'='1", id, 10), "events page bound"},
+		"non-uuid id":         {BackupEventsPage("hq", ts, "not-a-uuid", 10), "events page id"},
+		"id with a quote":     {BackupEventsPage("hq", ts, id[:35]+"'", 10), "events page id"},
+		"id without a bound":  {BackupEventsPage("hq", "", id, 10), "has no created_at bound"},
+		"limit zero":          {BackupEventsPage("hq", "", "", 0), "events page limit 0"},
+		"limit over the cap":  {BackupEventsPage("hq", "", "", 100001), "events page limit 100001"},
+		"negative limit":      {BackupEventsPage("hq", "", "", -1), "events page limit -1"},
+		"bad database":        {BackupEventsPage("hq; DROP TABLE events", "", "", 10), "invalid identifier"},
+	} {
+		_, err := tc.q.Inline()
+		if err == nil {
+			t.Errorf("%s: the page was sent", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q does not name %q", name, err, tc.want)
+		}
 	}
 }
