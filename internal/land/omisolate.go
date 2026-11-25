@@ -25,6 +25,10 @@ type Isolator interface {
 // os.TempDir() when its caller names no directory, so two reviews at once would
 // overwrite each other's files there. Only the copy is wrapped; r's own om runs
 // with the environment the landing gives it.
+//
+// The copy reads a failed review's raw reply from tmp too, the directory its own
+// om saves one in: the receiver's RawDir is another review's, so a pool review
+// that exits without a verdict would otherwise quote that one (gt-hnbpyp).
 func (r OMReviewer) Isolated(tmp string) Reviewer {
 	c := r
 	c.Out = nil
@@ -33,6 +37,7 @@ func (r OMReviewer) Isolated(tmp string) Reviewer {
 	if tmp != "" {
 		c.OutDir = filepath.Join(tmp, "out")
 		c.run = withEnv(r.run, "TMPDIR="+tmp)
+		c.RawDir = func() string { return tmp }
 	}
 	return c
 }

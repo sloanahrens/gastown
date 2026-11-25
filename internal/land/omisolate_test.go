@@ -3,6 +3,7 @@ package land
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // isolatedApprove is the verdict every isolated review in these rows reaches.
@@ -215,5 +217,59 @@ func TestIsolatedEmptyTmpRefusesTheReview(t *testing.T) {
 	}
 	if argv != nil {
 		t.Fatalf("om ran for a refused review: %v", argv)
+	}
+}
+
+// envTMPDIR is the directory the TMPDIR entry of env names, and whether env
+// holds one. The fake om of TestVerdictReuseIsolatedReadsItsOwnRawDir reads it
+// the way om reads os.TempDir(), so the row writes its raw reply where the
+// isolated copy's own om would.
+func envTMPDIR(env []string) (string, bool) {
+	for _, e := range env {
+		if dir, ok := strings.CutPrefix(e, "TMPDIR="); ok {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+// TestVerdictReuseIsolatedReadsItsOwnRawDir: a pool review that exits without a
+// verdict quotes the raw reply its own om saved under tmp, never the one the
+// receiver's RawDir points at, so a failure never reports another review's reply
+// (gt-hnbpyp). The fake writes its reply into the directory its TMPDIR entry
+// names, as om does, so the row exercises the invocation path rather than a
+// layout the test assumes.
+func TestVerdictReuseIsolatedReadsItsOwnRawDir(t *testing.T) {
+	t.Parallel()
+	own, other := t.TempDir(), t.TempDir()
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	writeRaw(t, other, "raw-stdout.txt", "another review's reply", at.Add(time.Second))
+	r := OMReviewer{
+		OutDir: t.TempDir(),
+		RawDir: func() string { return other },
+		now:    func() time.Time { return at },
+	}
+	r.run = func(_ context.Context, _ string, env, _ []string, out io.Writer) (int, error) {
+		dir, ok := envTMPDIR(env)
+		if !ok {
+			t.Fatal("the isolated review was given no TMPDIR entry")
+		}
+		writeRaw(t, dir, "raw-stdout.txt", "this review's reply", at.Add(time.Second))
+		_, _ = io.WriteString(out, "om: reviewing\n")
+		return 2, nil
+	}
+	c, ok := r.Isolated(own).(OMReviewer)
+	if !ok {
+		t.Fatalf("%T is not an OMReviewer", r.Isolated(own))
+	}
+	_, err := reviewAt(context.Background(), c, "", t.TempDir(), "aaa", "bbb")
+	if !errors.Is(err, ErrOMExecution) {
+		t.Fatalf("error = %v, want it to wrap ErrOMExecution", err)
+	}
+	if got := err.Error(); !strings.Contains(got, ": raw reply: this review's reply") {
+		t.Fatalf("error does not quote the reply under tmp: %s", got)
+	}
+	if got := err.Error(); strings.Contains(got, "another review's reply") {
+		t.Fatalf("error quotes another review's reply: %s", got)
 	}
 }
