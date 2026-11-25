@@ -325,7 +325,7 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 	t.Parallel()
 	findings := []Finding{
 		minorAt("internal/land/note.go", 1, "a"),
-		minorAt("internal/land/followup.go", 2, "b"),
+		minorAt("internal/land/note_test.go", 2, "b"),
 		minorAt("internal/land/note.go", 3, "c"),
 		minorAt("internal/daemon/landing_worker.go", 4, "d"),
 		minorAt("internal/daemon/landing_worker.go", 5, "e"),
@@ -482,7 +482,7 @@ func TestFollowupAcceptanceStatesTheFix(t *testing.T) {
 	f := newFollowupFixture(t, 0.8, []Finding{
 		minorAt("internal/land/note.go", 230, "swap the nil check"),
 		minorAt("internal/land/note.go", 0, "name the error"),
-		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook"},
+		{ID: "4", Severity: "minor", Path: "internal/land/note_test.go", Title: "document the hook"},
 	})
 	f.run()
 	if len(f.fake.created) != 1 {
@@ -491,7 +491,7 @@ func TestFollowupAcceptanceStatesTheFix(t *testing.T) {
 	acceptance := specdispatch.Sections(f.fake.created[0].Body)["acceptance"]
 	want := "- [ ] Finding resolved: swap the nil check (internal/land/note.go:230)\n" +
 		"- [ ] Finding resolved: name the error (internal/land/note.go)\n" +
-		"- [ ] Finding resolved: document the hook (internal/land/hook.go)\n"
+		"- [ ] Finding resolved: document the hook (internal/land/note_test.go)\n"
 	if strings.TrimSpace(acceptance) != strings.TrimSpace(want) {
 		t.Errorf("acceptance =\n%s\nwant\n%s", acceptance, want)
 	}
@@ -504,7 +504,7 @@ func TestFollowupFiledAcceptanceFieldIsTheSectionBoxes(t *testing.T) {
 	t.Parallel()
 	f := newFollowupFixture(t, 0.8, []Finding{
 		minorAt("internal/land/note.go", 230, "swap the nil check"),
-		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook"},
+		{ID: "4", Severity: "minor", Path: "internal/land/note_test.go", Title: "document the hook"},
 	})
 	f.run()
 	if len(f.fake.created) != 1 {
