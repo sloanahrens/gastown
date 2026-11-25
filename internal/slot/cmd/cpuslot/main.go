@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/slot"
@@ -98,4 +99,24 @@ func runFrom(args []string, h host) (int, error) {
 		return h.run(args)
 	}
 	return h.queued(townRoot, role, args)
+}
+
+// withCoreShare returns env with GOMAXPROCS set to share unless the build
+// already names one: a build that sets its own, as the gate's
+// cpuquota-driven GOMAXPROCS does, keeps it. It never mutates env, so the
+// caller's environment survives the call. A share below one is clamped to
+// one, the floor slot.CPUShare promises, so a bad value cannot leave the
+// build unbounded (Go reads GOMAXPROCS of zero or less as no limit).
+func withCoreShare(env []string, share int) []string {
+	if share < 1 {
+		share = 1
+	}
+	for _, entry := range env {
+		if key, _, ok := strings.Cut(entry, "="); ok && key == "GOMAXPROCS" {
+			return env
+		}
+	}
+	shared := make([]string, len(env), len(env)+1)
+	copy(shared, env)
+	return append(shared, fmt.Sprintf("GOMAXPROCS=%d", share))
 }
