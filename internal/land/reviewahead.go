@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,9 +125,17 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	}
 	// A landing that edits the root .om.json changes the bar om judges it
 	// against, so it waits for the overseer rather than om (gt-93hf4): the
-	// pool makes no verdict for it, and the landing's own check runs the
-	// refusal, which fails closed on an unreadable diff.
-	if rej := l.omConfigRejection(g, base, merged, w.Head, w.BeadID); rej != nil {
+	// pool makes no verdict for it. The paths are read here rather than through
+	// land.go's omConfigRejection because its fail-closed refusal suits the
+	// landing and not the pool: a diff that cannot be read has to surface as an
+	// error, or a caller switching on the outcome reads the failed read as a
+	// submission with nothing to review.
+	paths, err := g.DiffNameOnly(base, merged)
+	if err != nil {
+		return "", &InfraError{Stage: "read changed paths", Err: err}
+	}
+	if slices.Contains(paths, omConfigFile) {
+		l.logf("%s: ahead merge of %s edits %s, which waits for the overseer", w.BeadID, shortSHA(w.Head), omConfigFile)
 		return AheadSkipped, nil
 	}
 	// NEXT BEAD: here the review runs om on the merged tree and stores the
