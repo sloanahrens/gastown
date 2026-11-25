@@ -1145,6 +1145,11 @@ type Daemon struct {
 	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
+	// patrolScanBooted is set by the first patrol_scan check after this
+	// process started, which runPatrolScanCheck scans whatever the persisted
+	// last run says, so the work a shutdown canceled is not a full interval
+	// late (patrol_scan_boot.go, gt-3z6wd5).
+	patrolScanBooted atomic.Bool
 	// patrolScanMemory is the patrol scan's in-process ledger (patrolScanMemoryLedger).
 	patrolScanMemory     *patrolscan.MemoryLedger
 	patrolScanMemoryOnce sync.Once
