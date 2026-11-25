@@ -969,7 +969,11 @@ func omStageDuration(stages string) *time.Duration {
 // The gate time is the ci stage on a cut-over rig: the candidate gate runs in
 // Forgejo CI (StageCI in internal/land), so its line is "ci 2m46s, om 21s". A
 // line that names both prefers the explicit gate.
+//
+// A line that carries omReusedMarker has no om time: the landing reused a stored
+// review and ran no om, whatever else the line names.
 func omStageTimes(stages string) (lint, gate, om *time.Duration) {
+	reused := strings.Contains(stages, omReusedMarker)
 	for _, part := range strings.Split(stages, ", ") {
 		name, rest, ok := strings.Cut(part, " ")
 		if !ok {
@@ -990,7 +994,9 @@ func omStageTimes(stages string) (lint, gate, om *time.Duration) {
 				gate = &d
 			}
 		case "om":
-			om = &d
+			if !reused {
+				om = &d
+			}
 		}
 	}
 	return lint, gate, om
