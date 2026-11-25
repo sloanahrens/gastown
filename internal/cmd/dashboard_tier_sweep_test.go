@@ -648,6 +648,58 @@ func TestTierSweepRunningProgressFinishedTiers(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunningTier: the running object's tier is the one the cycle's
+// progress file names as running, so the label moves to race when integration
+// ends inside the shared Job (gt-u4o5rk). The runner rewrites the file after
+// each tier and writes no running tier once every tier has finished, so a file
+// naming none, like no file at all, leaves the tier the log's stage lines gave.
+// Mutation: drop the progress.Running assignment and the race row reads
+// integration.
+func TestTierSweepRunningTier(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		// progress is the cycle's progress.json body; "" leaves its run without one.
+		progress string
+		want     string
+	}{
+		"progress names race": {
+			progress: `{"rig":"gastown","sha":"6193c7a7","tiers":[{"tier":"integration","verdict":"GREEN","passed":82}],"running":"race"}`,
+			want:     "race",
+		},
+		"progress names no running tier": {
+			progress: `{"rig":"gastown","sha":"6193c7a7","tiers":[{"tier":"integration","verdict":"GREEN","passed":82}],"running":""}`,
+			want:     "integration",
+		},
+		"no progress file": {want: "integration"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := tierSweepTestReader(t, tierSweepProgressCycle...)
+			if tc.progress != "" {
+				dir := filepath.Join(r.sweepRunsRoot, "gastown", "gastown-6193c7a7-integration-race")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "progress.json"), []byte(tc.progress), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			ts := r.read(tierSweepProgressStart.Add(4 * time.Minute))
+			if ts.Unavailable {
+				t.Fatalf("a progress read that succeeds must not mark the section unavailable: %+v", ts)
+			}
+			if ts.Running == nil {
+				t.Fatal("the started cycle reads running")
+			}
+			if ts.Running.Tier != tc.want {
+				t.Errorf("running tier = %q, want %q", ts.Running.Tier, tc.want)
+			}
+		})
+	}
+}
+
 // TestTierSweepRunningProgressMissingFileKeepsTheObject: with no progress file
 // for the open cycle the running object is today's, field for field — no
 // finished tiers, and no unavailable note for a file that does not exist.
