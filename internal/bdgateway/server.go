@@ -391,6 +391,12 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		CPUMS:    frames.Result().CPUMS,
 		Conflict: frames.Conflict(),
 	}
+	if !seen {
+		// Say in the log that the reply was lost, so a reader does not take the
+		// ExitRefused status for a cause bd reported. It is set before
+		// SetStderrError so bd's stderr cannot replace the fixed text.
+		rec.Error = lostExitFrameError
+	}
 	rec.SetStderrError(frames.StderrHead())
 	g.log.Log(rec)
 }
@@ -590,6 +596,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // finish: the HTTP handler records it for a stream that never sent an exit frame,
 // and cmd/bdgw's exec returns it for a call refused before bd started.
 const ExitRefused = 125
+
+// lostExitFrameError is the call log's error for a call that started but whose
+// exit frame never reached the caller. The text is fixed: the gateway does not
+// know why the caller stopped reading or how far the call got, and it says so
+// rather than leaving the ExitRefused line with no cause.
+const lostExitFrameError = "the exit frame did not reach the caller: it stopped reading; the call may have run to its end, check before repeating"
 
 // internalFailureMessage is what a caller reads for a failure inside the gateway.
 const internalFailureMessage = "the gateway failed the call"
