@@ -28,8 +28,10 @@ const (
 	// the largest user, a bead body sent with --body-file=-.
 	MaxStdinBytes = 1 << 20
 
-	// DefaultMaxConcurrent caps bd processes running at once, the design's 16.
-	DefaultMaxConcurrent = 16
+	// DefaultMaxConcurrent caps bd processes running at once: 8, below the about
+	// 12 simultaneous new connections the path from the gateway's VM to the host's
+	// Dolt admits, since each bd process opens its own (gt-w0iqhu).
+	DefaultMaxConcurrent = 8
 
 	// DefaultTimeout bounds a call whose head names no timeout_ms. The design's
 	// class maximums (reads 30 s, writes 60 s, list and ready 120 s) are applied
