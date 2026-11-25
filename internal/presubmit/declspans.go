@@ -55,6 +55,10 @@ func specNames(spec ast.Spec) []string {
 	case *ast.ValueSpec:
 		names := make([]string, 0, len(s.Names))
 		for _, id := range s.Names {
+			if id.Name == "_" {
+				// The blank identifier declares no name a caller can find (gt-whjd81).
+				continue
+			}
 			names = append(names, id.Name)
 		}
 		return names
