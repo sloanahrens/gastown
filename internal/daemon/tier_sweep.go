@@ -2950,6 +2950,9 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	// statusErr is the status read that failed on the last look, nil once a look
 	// reads the status: the budget names it when it judges a run that never ended.
 	var statusErr error
+	// progressLogged is set once a failed progress copy is logged, so a run that
+	// keeps failing it says so once rather than on every poll.
+	var progressLogged bool
 	for {
 		res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
 		if err == nil {
@@ -2987,6 +2990,15 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 				return tierSweepRunnerNoResultStage(started, err, false)
 			}
 			return d.tierSweepRunnerStageResult(st, spec, res, started, stageStart)
+		}
+		// A run still going (its status read succeeded and nothing was copied) has
+		// its progress record copied out on each poll. A failure is logged once for
+		// the run and changes nothing: the wait's outcome is still the result's.
+		if err == nil {
+			if perr := d.tierSweepRunnerProgress(ctx, spec); perr != nil && !progressLogged {
+				progressLogged = true
+				d.logger.Printf("tier_sweep: %s: reading run %s's progress failed: %v", spec.Rig, spec.RunID, perr)
+			}
 		}
 		select {
 		case <-budget:

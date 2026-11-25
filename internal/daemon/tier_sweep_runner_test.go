@@ -985,13 +985,15 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // priority answers the priority preflight's listing instead of the healthy one,
 // so a cycle can be driven from a protected pod the sweep outranks to a healthy
 // cluster and back. progress is what the Progress step prints, and failProgress
-// fails that step; an exec is the only command that step runs.
+// fails that step; an exec is the only command that step runs. goingReads answers
+// the first that many status reads with no status: the run is still going.
 type runnerCluster struct {
 	t           *testing.T
 	status      string
 	statusErr   bool
 	flakyStatus int
 	statusReads int
+	goingReads  int
 	jobs        string
 	jobsErr     bool
 	// capacity answers the capacity preflight; empty is runnerGoldenCapacity,
@@ -1100,6 +1102,9 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 		if c.statusErr || c.statusReads <= c.flakyStatus {
 			return nil, []byte("Error from server (NotFound): jobs.batch not found\n"), errors.New("exit status 1")
 		}
+		if c.statusReads <= c.goingReads {
+			return nil, nil, nil
+		}
 		return []byte(c.status), nil, nil
 	case slices.Contains(argv, "rev-parse"):
 		if c.failRevParse {
@@ -1119,7 +1124,9 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 			return nil, []byte("error: timed out waiting for the condition\n"), errors.New("exit status 1")
 		}
 	case slices.Contains(argv, "exec"):
-		if c.failProgress {
+		// The sync stage's exec runs before the loop and must succeed: failProgress
+		// fails only the exec into the Job, which is the Progress step.
+		if c.failProgress && slices.ContainsFunc(argv, func(arg string) bool { return strings.HasPrefix(arg, "job/") }) {
 			// The step prints a whole record and still fails: it must not be stored.
 			return c.progress, []byte("error: unable to exec into the run's Job\n"), errors.New("exit status 1")
 		}
@@ -2085,6 +2092,60 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 			}
 			if string(got) != tc.wantFile {
 				t.Errorf("progress.json = %q, want %q", got, tc.wantFile)
+			}
+		})
+	}
+}
+
+// TestTierSweepRunnerProgressLoop is the copy the wait makes on each poll while
+// the run goes on. A failing Progress step is logged once for the run and changes
+// nothing: the wait still reaches the result. A run that has ended does not call
+// the step (gt-8rk2ql).
+func TestTierSweepRunnerProgressLoop(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		goingReads    int
+		flakyStatus   int
+		progressFails bool
+		wantExecs     int
+		wantLogs      int
+	}{
+		{name: "a run going on two polls and ended on the third calls the step twice and logs a failure once", goingReads: 2, progressFails: true, wantExecs: 2, wantLogs: 1},
+		{name: "a healthy Progress step on each poll logs nothing", goingReads: 2, wantExecs: 2},
+		{name: "a run that has ended on the first read does not call the step", progressFails: true},
+		{name: "a status read that fails does not call the step", flakyStatus: 1, progressFails: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, st := runnerKubernetesDaemon(t, now)
+			result := runnerTestResult(spec, now)
+			cluster := &runnerCluster{t: t, status: "Complete", result: &result, goingReads: tc.goingReads, flakyStatus: tc.flakyStatus, progress: []byte(`{"tiers":["integration"]}`), failProgress: tc.progressFails}
+			cmds := &runnerFakeCmds{answer: cluster.answer}
+			d.execCmd = cmds.run
+			var logs bytes.Buffer
+			d.logger = log.New(&logs, "", 0)
+			d.tierSweepSeams.pollInterval = time.Millisecond
+			d.tierSweepSeams.budgetTimer = runnerBudgetNeverEnds
+
+			stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+			if stage.reason != "" {
+				t.Fatalf("stage = %+v, want the result folded: a failing progress step must not end the wait", stage)
+			}
+			if !strings.Contains(stage.output, "integration GREEN passed=66") {
+				t.Errorf("stage output does not carry the copied verdict:\n%s", stage.output)
+			}
+			// The Progress step is the only exec that cats the progress record; the
+			// sync stage's exec runs the chown and is not counted.
+			if n := len(runnerCalls(cmds.ran, "exec", "cat")); n != tc.wantExecs {
+				t.Errorf("progress steps = %d, want %d: %q", n, tc.wantExecs, cmds.ran)
+			}
+			want := "tier_sweep: gastown: reading run " + spec.RunID + "'s progress failed:"
+			if n := strings.Count(logs.String(), want); n != tc.wantLogs {
+				t.Errorf("progress failure lines = %d, want %d:\n%s", n, tc.wantLogs, logs.String())
 			}
 		})
 	}
