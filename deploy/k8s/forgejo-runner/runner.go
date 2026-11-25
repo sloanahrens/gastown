@@ -183,9 +183,9 @@ var jobEnvs = []EnvVar{
 	{Name: "GOLANGCI_LINT_CACHE", Value: lintCacheDir},
 }
 
-// Share is a container's whole resource share. Requests equal limits, so the
-// scheduler promises the container the share rather than allowing it to burst
-// into a neighbour's.
+// Share is a container's CPU and memory quantities. A container with no
+// requests share asks for its whole limit, so the scheduler promises it that
+// share rather than allowing it to burst into a neighbour's.
 type Share struct {
 	CPU    string
 	Memory string
@@ -318,7 +318,7 @@ func runnerContainer(v Values) Container {
 			{Name: "DOCKER_TLS_VERIFY", Value: "1"},
 			{Name: "DOCKER_CERT_PATH", Value: certsClientDir},
 		},
-		Resources: containerResources(v.RunnerResources),
+		Resources: containerResources(v.RunnerResources, Share{}),
 		VolumeMounts: []VolumeMount{
 			// The registration result is the only thing the runner writes.
 			{Name: runnerDataVolume, MountPath: runnerDataDir},
@@ -342,7 +342,7 @@ func dindContainer(v Values) Container {
 		// with a dash through to it.
 		Args:            []string{dindInsecureRegistry},
 		Env:             []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: certsDir}},
-		Resources:       containerResources(v.DindResources),
+		Resources:       containerResources(v.DindResources, Share{}),
 		SecurityContext: &SecurityContext{Privileged: true},
 		VolumeMounts: []VolumeMount{
 			{Name: certsVolume, MountPath: certsDir},
@@ -365,10 +365,18 @@ func dindStartupProbe() *Probe {
 	}
 }
 
-// containerResources returns share as both the requests and the limits.
-func containerResources(share Share) ContainerResources {
-	list := ResourceList{CPU: share.CPU, Memory: share.Memory}
-	return ContainerResources{Requests: list, Limits: list}
+// containerResources returns limits as the limits and requests as the requests,
+// with each empty requests field taking its limit.
+func containerResources(limits, requests Share) ContainerResources {
+	limit := ResourceList{CPU: limits.CPU, Memory: limits.Memory}
+	request := ResourceList{CPU: requests.CPU, Memory: requests.Memory}
+	if request.CPU == "" {
+		request.CPU = limit.CPU
+	}
+	if request.Memory == "" {
+		request.Memory = limit.Memory
+	}
+	return ContainerResources{Requests: request, Limits: limit}
 }
 
 // objectMeta is the metadata every object carries. Each call builds its own
@@ -784,7 +792,7 @@ type EnvVar struct {
 	Value string `yaml:"value"`
 }
 
-// ContainerResources is a container's requests and limits, given identically.
+// ContainerResources is a container's requests and limits.
 type ContainerResources struct {
 	Requests ResourceList `yaml:"requests"`
 	Limits   ResourceList `yaml:"limits"`
