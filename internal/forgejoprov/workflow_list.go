@@ -14,17 +14,27 @@ import (
 // hook covers a new rig with no operator step.
 const DefaultWorkflowList = "/data/gitea/home/hooks/pre-receive.d/gt-protected-workflow-repos"
 
+// noWorkflowList is the listPath that skips the hook list: --workflow-list none. The
+// pod's list is written from the source list by forgejo-hook-install, so a provision
+// outside the pod has no list to append to and logs the step the operator still owes.
+const noWorkflowList = "none"
+
 // EnsureWorkflowProtected leaves repo named in the workflow-file hook list at listPath.
 // A repository the list already names on a whole line, in any case, is not written
 // again. Any other is appended once, after every existing line. A list that cannot be
 // read, or holds nothing, fails the call: a hook reading an empty list protects nothing,
-// so passing would hide the gap.
+// so passing would hide the gap. A listPath of none skips the list: no lock, no read, no
+// write, and the skip is logged.
 //
 // The read and the write run under the list's lock, so two provisions appending at
 // once cannot each read the list before the other writes and drop the other's line.
 func (p *Provisioner) EnsureWorkflowProtected(repo, listPath string) (err error) {
 	if _, _, err := splitRepo(repo); err != nil {
 		return err
+	}
+	if listPath == noWorkflowList {
+		p.logf("workflow-file hook list: skipped (--workflow-list none); add the repository to ops/forgejo/protected-repos.txt and run forgejo-hook-install apply")
+		return nil
 	}
 	unlock, err := p.lockWorkflowList(listPath)
 	if err != nil {

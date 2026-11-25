@@ -497,3 +497,83 @@ func TestEnsureWorkflowProtectedAppendsOnce(t *testing.T) {
 		t.Errorf("writes of the list over two provisions = %d, want 1", got)
 	}
 }
+
+// noneSkipLine is the line a skipped hook list logs; the operator reads it to find the step
+// the skip leaves to them.
+const noneSkipLine = "workflow-file hook list: skipped (--workflow-list none); add the repository to ops/forgejo/protected-repos.txt and run forgejo-hook-install apply"
+
+// TestEnsureWorkflowProtectedNone: a list of none takes no lock, reads and writes no file,
+// and logs the skip line; a malformed repository is still refused before the skip.
+func TestEnsureWorkflowProtectedNone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		repo    string
+		dryRun  bool
+		wantErr bool
+	}{
+		{name: "a provision skips the list", repo: protectionRepo},
+		{name: "a dry run skips the list too", repo: protectionRepo, dryRun: true},
+		{name: "a malformed repository is refused before the skip", repo: "acme/rig/extra", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mem := newMemFiles()
+			mem.seed(testWorkflowList, "acme/other\n", workflowListMode)
+			lock := &listLock{}
+			files := &guardedFiles{memFiles: mem, lock: lock}
+			var logs strings.Builder
+			p := &Provisioner{
+				Client:   &Client{DryRun: tc.dryRun, Log: func(line string) { logs.WriteString(line + "\n") }},
+				Files:    files,
+				ListLock: lock.lock,
+			}
+
+			err := p.EnsureWorkflowProtected(tc.repo, "none")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsureWorkflowProtected(%q, none) error = %v, want error %t", tc.repo, err, tc.wantErr)
+			}
+			if lock.acquired != 0 {
+				t.Errorf("the lock was taken %d times, want none", lock.acquired)
+			}
+			if files.reads != 0 {
+				t.Errorf("the list was read %d times, want none", files.reads)
+			}
+			if len(mem.ops) != 0 {
+				t.Errorf("file operations = %v, want none", mem.ops)
+			}
+			if tc.wantErr {
+				return
+			}
+			if got := logs.String(); got != noneSkipLine+"\n" {
+				t.Errorf("logs = %q, want the skip line", got)
+			}
+		})
+	}
+}
+
+// TestEnsureWorkflowProtectedNoneRunReachesMainRule: a run with --workflow-list none skips the
+// hook list and still writes the main rule, so the repository is provisioned.
+func TestEnsureWorkflowProtectedNoneRunReachesMainRule(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+
+	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--workflow-list", "none")
+	if res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	if !strings.Contains(res.logs, noneSkipLine) {
+		t.Errorf("logs = %q, want the skip line", res.shown())
+	}
+	for _, op := range files.ops {
+		if strings.Contains(op, DefaultWorkflowList) {
+			t.Errorf("the default hook list was touched: %s", op)
+		}
+	}
+	if rule := f.Rule(protectionRepo, "main"); rule == nil {
+		t.Errorf("main rule not written after the skip")
+	}
+}
