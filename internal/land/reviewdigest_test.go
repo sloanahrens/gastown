@@ -77,6 +77,61 @@ func TestVerdictReuseExpectedFlags(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseExpectedFlagsCriteriaContext pins --criteria-file and
+// --context-file, each gated on its own input as reviewOnce gates the argv:
+// the criteria flag on the bead's acceptance text and the context flag on the
+// accepted-risk record. Each row that has one text and not the other fails if
+// the condition reads the wrong field, and the rows without the texts fail if
+// one is added unconditionally.
+func TestVerdictReuseExpectedFlagsCriteriaContext(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	const criteria = "- [ ] the review tool runs"
+	const accepted = "risk: a stale cache is accepted"
+	// input builds the landing's input the way the landing builds one, from a
+	// bead carrying criteria (or none when empty) and the accepted-risk text the
+	// row names; a row then sets only the other inputs it names.
+	input := func(criteriaText, acceptedText string) ReviewInput {
+		issue := &beads.Issue{ID: "gt-abc", AcceptanceCriteria: criteriaText}
+		return BuildReviewInput(issue, nil, op, acceptedText, "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+	}
+	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
+	with := func(extra ...string) []string {
+		want := append(slices.Clone(baseline), extra...)
+		slices.Sort(want)
+		return want
+	}
+	prior := []Finding{{ID: "gt-abc.1", Severity: "major", Path: "internal/land/x.go", Line: 9, Title: "x"}}
+	for _, tc := range []struct {
+		name     string
+		criteria string
+		accepted string
+		prior    []Finding
+		round    int
+		bar      float64
+		want     []string
+	}{
+		{"neither text", "", "", nil, 0, 0, baseline},
+		{"only the criteria text", criteria, "", nil, 0, 0, with("--criteria-file")},
+		{"only the context text", "", accepted, nil, 0, 0, with("--context-file")},
+		{"both texts", criteria, accepted, nil, 0, 0, with("--criteria-file", "--context-file")},
+		{"only the other inputs", "", "", prior, 1, 0.7, with("--prior-findings", "--round", "--threshold")},
+		{"criteria text and the other inputs", criteria, "", prior, 1, 0.7, with("--criteria-file", "--prior-findings", "--round", "--threshold")},
+		{"context text and the other inputs", "", accepted, prior, 1, 0.7, with("--context-file", "--prior-findings", "--round", "--threshold")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := input(tc.criteria, tc.accepted)
+			in.PriorFindings = tc.prior
+			in.Round = tc.round
+			got := ExpectedReviewFlags(in, tc.bar)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ExpectedReviewFlags() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestVerdictReuseExpectedFlagsPriorFindings pins --prior-findings: the flag is
 // present when the input carries the previous round's findings and absent when
 // only the other conditional inputs are set, so a condition gated on the wrong
