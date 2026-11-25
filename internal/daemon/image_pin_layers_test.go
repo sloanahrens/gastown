@@ -848,3 +848,73 @@ func TestImagePinLayersStartRecordSkipsToday(t *testing.T) {
 		t.Errorf("the start check logged %q, want the day named as already run", logged.String())
 	}
 }
+
+// TestImagePinLayersStartFailureOffInstallsNothing: with the image_pin_layers
+// patrol not enabled, starting the ticker asks for no ticker, installs no run
+// seam, calls no run seam, logs nothing and writes no last-run record. Each
+// config is run with no seam, and with a counting seam set by the caller, so a
+// start path that reached a run without the patrol's guard shows as a call.
+func TestImagePinLayersStartFailureOffInstallsNothing(t *testing.T) {
+	t.Parallel()
+	configs := []struct {
+		name   string
+		config *DaemonPatrolConfig
+	}{
+		{"no patrols block", nil},
+		{"an empty patrols block", &DaemonPatrolConfig{}},
+		{"a disabled block", &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			ImagePinLayers: &agentconfig.ImagePinLayersConfig{Enabled: false},
+		}}},
+	}
+	for _, tt := range configs {
+		for _, preset := range []bool{false, true} {
+			name := tt.name + ", no run seam set"
+			if preset {
+				name = tt.name + ", a counting run seam set"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				var logged bytes.Buffer
+				var calls, tickerRequests atomic.Int32
+				d := &Daemon{
+					config:       &Config{TownRoot: t.TempDir()},
+					logger:       log.New(&logged, "", 0),
+					patrolConfig: tt.config,
+					clock:        clockwork.NewFakeClockAt(imagePinDurabilityNoon(t, "2026-11-16")),
+				}
+				d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+					tickerRequests.Add(1)
+					return make(chan time.Time), func() {}
+				}
+				if preset {
+					d.imagePinLayersRun = func(context.Context, time.Time) error {
+						calls.Add(1)
+						return nil
+					}
+				}
+
+				channel, stop := d.startImagePinLayersTicker()
+				d.stopImagePinLayersPatrol(stop)
+
+				if channel != nil || stop != nil {
+					t.Error("the off patrol started a ticker, want none")
+				}
+				if got := tickerRequests.Load(); got != 0 {
+					t.Errorf("the off patrol asked for %d tickers, want none", got)
+				}
+				if !preset && d.imagePinLayersRun != nil {
+					t.Error("the off patrol installed a run seam, want none")
+				}
+				if got := calls.Load(); got != 0 {
+					t.Errorf("the off patrol called the run seam %d times, want none", got)
+				}
+				if logged.Len() != 0 {
+					t.Errorf("the off patrol logged %q, want nothing", logged.String())
+				}
+				if _, err := os.Stat(imagePinLayersLastRunPath(d.config.TownRoot)); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the off patrol wrote a last-run record (%v), want none", err)
+				}
+			})
+		}
+	}
+}
