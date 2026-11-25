@@ -218,28 +218,6 @@ func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	}
 }
 
-// With the one-review-per-bead guard in Offer, a review can never find another
-// run's entry under its bead through the public API, so this row sets that
-// state directly: a late exit must remove only its own entry.
-func TestReviewPoolLateExitKeepsNewerEntry(t *testing.T) {
-	t.Parallel()
-	ctx := waitCtx(t)
-	rev := newFakeAheadReviewer(t, ctx, nil)
-	close(rev.release)
-	pool := &ReviewPool{Reviewer: rev}
-	newer := &aheadRun{head: "8888888", done: make(chan struct{})}
-	pool.running = map[string]*aheadRun{"gt-late": newer}
-
-	pool.review(context.Background(), land.Work{BeadID: "gt-late", Head: "9999999"}, &aheadRun{head: "9999999", done: make(chan struct{})})
-
-	pool.mu.Lock()
-	got := pool.running["gt-late"]
-	pool.mu.Unlock()
-	if got != newer {
-		t.Errorf("a late exit removed or replaced the newer entry for gt-late")
-	}
-}
-
 func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)

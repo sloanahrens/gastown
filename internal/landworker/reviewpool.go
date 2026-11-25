@@ -77,14 +77,12 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 }
 
 // review makes one review under its own child of ctx. The entry leaves the
-// map before done closes, so Wait sees the review end. It removes the entry
-// only while the entry is its own run.
+// map before done closes, so Wait sees the review end. The guard in Offer
+// makes the entry under w.BeadID this run's own.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
 		p.mu.Lock()
-		if p.running[w.BeadID] == run {
-			delete(p.running, w.BeadID)
-		}
+		delete(p.running, w.BeadID)
 		p.mu.Unlock()
 		close(run.done)
 	}()
