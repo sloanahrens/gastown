@@ -1047,6 +1047,64 @@ func TestCandidateGateWaitIs20Minutes(t *testing.T) {
 	}
 }
 
+// TestCandidateGateWindowComesFromTheSeam: with windowContext set, the wait runs
+// under the seam's context, asked for the gate's WaitTimeout. A window that is
+// already canceled ends the wait after one read with ErrCISilence; a window that
+// never expires lets a passing run pass. The timer seam never fires, so only the
+// window can end a wait, and the test reads no clock.
+func TestCandidateGateWindowComesFromTheSeam(t *testing.T) {
+	t.Parallel()
+	canceled := func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, cancel
+	}
+	never := func(parent context.Context) (context.Context, context.CancelFunc) {
+		return parent, func() {}
+	}
+	tests := []struct {
+		name        string
+		window      func(context.Context) (context.Context, context.CancelFunc)
+		state       forgejo.CommitState
+		wantState   CandidateState
+		wantSilence bool
+	}{
+		{name: "a canceled window ends the wait", window: canceled, state: forgejo.StatePending, wantState: CandidateSilent, wantSilence: true},
+		{name: "a window that never expires lets a pass", window: never, state: forgejo.StateSuccess, wantState: CandidatePassed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(tt.state, "ci / gate (push)")}}
+			gate := fastGate(client)
+			gate.waitTimer = func(time.Duration) <-chan time.Time { return make(chan time.Time) }
+			var asked time.Duration
+			gate.windowContext = func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+				asked = d
+				return tt.window(parent)
+			}
+			res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if asked != gate.WaitTimeout {
+				t.Fatalf("window asked for %s; want the gate's WaitTimeout %s", asked, gate.WaitTimeout)
+			}
+			if client.polls != 1 {
+				t.Fatalf("polled %d times; want the window to end the wait after one read", client.polls)
+			}
+			if res.State != tt.wantState {
+				t.Fatalf("state = %v, want %v", res.State, tt.wantState)
+			}
+			if tt.wantSilence && !errors.Is(res.Err, ErrCISilence) {
+				t.Fatalf("err = %v, want one wrapping ErrCISilence", res.Err)
+			}
+			if !tt.wantSilence && res.Err != nil {
+				t.Fatalf("Run: %v", res.Err)
+			}
+		})
+	}
+}
+
 // TestCandidateGateAPIFailureIsNotAVerdict: a Forgejo that answers with an
 // error on every read exhausts the tolerance and fails the landing into the
 // infra path rather than stalling it.
