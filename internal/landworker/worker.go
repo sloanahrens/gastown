@@ -842,7 +842,11 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	// the outcome that reads it (gt-3qmv4.2).
 	w.bead(issue.ID).installNow = beads.HasLabel(issue, LabelInstallNow)
 
-	work, ok := w.resolveWork(issue)
+	work, ok, err := w.resolveWork(issue)
+	if err != nil {
+		w.infraFailure(issue.ID, "reading what to land", err, rep)
+		return
+	}
 	if !ok {
 		w.waitForHuman(issue.ID, "no-request", fmt.Sprintf("Landing worker: %s carries %s but neither a READY TO LAND block nor a \"Submitted for landing: <branch> @ <sha>\" comment says what to land. Leaving the label for a human.", issue.ID, land.LabelReadyToLand))
 		rep.Skipped++
@@ -930,15 +934,17 @@ var submittedRE = regexp.MustCompile(`Submitted for landing: (\S+) @ ([0-9a-fA-F
 
 // resolveWork reads the landing request from the READY TO LAND block, or,
 // failing that, the latest submission comment. It leaves Agent empty: process
-// asks the seat's agent bead only for a request it is about to land.
-func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
+// asks the seat's agent bead only for a request it is about to land. ok is
+// false when neither the notes nor the comments name the work; a comments read
+// that fails is reported as an error, since what the bead asks for is then
+// unknown rather than absent.
+func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 	if work, err := land.WorkFromBead(issue, w.Rig); err == nil {
-		return work, true
+		return work, true, nil
 	}
 	comments, err := w.Beads.Comments(issue.ID)
 	if err != nil {
-		w.logf("%s: reading comments: %v", issue.ID, err)
-		return land.Work{}, false
+		return land.Work{}, false, fmt.Errorf("reading comments on %s: %w", issue.ID, err)
 	}
 	for i := len(comments) - 1; i >= 0; i-- {
 		m := submittedRE.FindStringSubmatch(comments[i].Text)
@@ -949,9 +955,29 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 		if target == "" {
 			target = "main"
 		}
-		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true
+		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true, nil
 	}
-	return land.Work{}, false
+	return land.Work{}, false, nil
+}
+
+// reviewWorks builds a work for each issue given, in the order given, from the
+// same resolveWork process reads, so the pool reviews the head the submission
+// names. It sorts, filters and skips nothing: an issue whose work cannot be
+// resolved, or whose comments cannot be read, is returned as an error with no
+// works at all rather than dropped from a shorter list.
+func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work, error) { //nolint:unparam // landing names the bead being landed; gt-iyvkxm reads it to leave that bead out
+	works := make([]land.Work, 0, len(issues))
+	for _, issue := range issues {
+		work, ok, err := w.resolveWork(issue)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: no READY TO LAND block and no submission comment say what to land", issue.ID)
+		}
+		works = append(works, work)
+	}
+	return works, nil
 }
 
 // submissionActor is the identity work is recorded as submitted by: the author
