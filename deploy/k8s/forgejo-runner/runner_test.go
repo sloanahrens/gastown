@@ -1254,6 +1254,68 @@ func TestDindCPUShare(t *testing.T) {
 	}
 }
 
+// TestContainerResourcesRequests drives the split between a container's limits
+// and its optional requests: an empty requests share asks for the limits, a
+// requests share is carried with the limits unchanged, and an empty request
+// field takes its limit. The last subtest drives both rendered containers, so
+// the rendered pod keeps asking for each container's whole share.
+func TestContainerResourcesRequests(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		limits       Share
+		requests     Share
+		wantRequests ResourceList
+		wantLimits   ResourceList
+	}{
+		{
+			name:         "empty requests share asks for the limits",
+			limits:       Share{CPU: "4", Memory: "8Gi"},
+			requests:     Share{},
+			wantRequests: ResourceList{CPU: "4", Memory: "8Gi"},
+			wantLimits:   ResourceList{CPU: "4", Memory: "8Gi"},
+		},
+		{
+			name:         "requests share is carried with the limits unchanged",
+			limits:       Share{CPU: "8", Memory: "12Gi"},
+			requests:     Share{CPU: "4", Memory: "8Gi"},
+			wantRequests: ResourceList{CPU: "4", Memory: "8Gi"},
+			wantLimits:   ResourceList{CPU: "8", Memory: "12Gi"},
+		},
+		{
+			name:         "empty request field takes its limit",
+			limits:       Share{CPU: "8", Memory: "12Gi"},
+			requests:     Share{CPU: "4"},
+			wantRequests: ResourceList{CPU: "4", Memory: "12Gi"},
+			wantLimits:   ResourceList{CPU: "8", Memory: "12Gi"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := containerResources(tc.limits, tc.requests)
+			if got.Requests != tc.wantRequests {
+				t.Errorf("the requests = %+v, want %+v", got.Requests, tc.wantRequests)
+			}
+			if got.Limits != tc.wantLimits {
+				t.Errorf("the limits = %+v, want %+v", got.Limits, tc.wantLimits)
+			}
+		})
+	}
+	t.Run("the rendered containers ask for their whole share", func(t *testing.T) {
+		t.Parallel()
+		pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
+		containers := slices.Concat(pod.InitContainers, pod.Containers)
+		if len(containers) == 0 {
+			t.Fatal("the rendered pod holds no container, so the check read nothing")
+		}
+		for _, c := range containers {
+			if c.Resources.Requests != c.Resources.Limits {
+				t.Errorf("the container %q requests %+v, want its limits %+v", c.Name, c.Resources.Requests, c.Resources.Limits)
+			}
+		}
+	})
+}
+
 // TestDindRequestsValidateAgainstTheLimit drives the optional engine request
 // share: a request above its Values.DindResources limit is refused with an error
 // naming Values.DindRequests, and one at or below the limit, or left empty,
