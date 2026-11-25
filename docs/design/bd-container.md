@@ -152,8 +152,10 @@ mode 0600. The gateway mounts that emptyDir read-only at `/run/bdgw/tokens`. The
 Secret volume is 0440, which the pod's fsGroup needs for the copy to read it, but
 the gateway's token loader refuses any mode other than 0600. `Values.BdGatewayMaxConcurrent`
 is the cap across the gateway's pods, and each pod runs that total divided by
-the replica count, rounded up; zero means the gateway's own default of 16 in
-total, so eight per pod at two replicas.
+the replica count, rounded up; zero means the gateway's own default of 8 in
+total, so four per pod at two replicas. The 8 is under the about 12 simultaneous
+new connections the VM-to-host path admits, since each bd process opens its own
+connection (gt-w0iqhu).
 The readiness probe is `bdgw ready` with the same `--tokens-dir`, `--verbs` and
 `--workspace` paths the serve command uses, the three flags `bdgw ready` requires.
 

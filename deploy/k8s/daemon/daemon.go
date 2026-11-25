@@ -898,8 +898,8 @@ type Values struct {
 	// BdGatewayMaxConcurrent is the gateway's concurrency cap across all its pods. Each
 	// pod renders it as --max-concurrent, the total divided by the replica count and
 	// rounded up, so the total is what Dolt serves whatever the replica count. Zero
-	// means the gateway's own default of 16 in total: at one pod the flag stays off and
-	// the gateway applies 16, and at two pods each renders 8. A negative value is
+	// means the gateway's own default of 8 in total: at one pod the flag stays off and
+	// the gateway applies 8, and at two pods each renders 4. A negative value is
 	// refused. It is read only with BdGatewayImage.
 	BdGatewayMaxConcurrent int
 	// BdGatewayReplicas is the gateway Deployment's replica count. Zero means one, the
