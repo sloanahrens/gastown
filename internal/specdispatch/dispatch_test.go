@@ -604,7 +604,7 @@ func TestBudgetPictureNamesHeldSeatsAboveTheCap(t *testing.T) {
 			{Agent: agent, Name: "gastown/e", State: SeatStateSession},
 			{Agent: agent, Name: "gastown/f", State: SeatStateSession},
 			{Agent: agent, Name: "gastown/g", State: SeatStateLanding},
-			{Agent: agent, Name: "gastown/h", State: SeatStateDeadHooked},
+			{Agent: agent, Name: "gastown/h", State: "dead-hooked"},
 			{Agent: agent, Name: "gastown/i", State: SeatStateClaim},
 		}
 	}

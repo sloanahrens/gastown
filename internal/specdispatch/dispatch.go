@@ -411,9 +411,6 @@ const (
 	// SeatStateLanding is a seat whose polecat ran gt done and whose bead
 	// waits for the landing worker.
 	SeatStateLanding = "landing"
-	// SeatStateDeadHooked is a seat whose session is gone while its bead is
-	// still hooked.
-	SeatStateDeadHooked = "dead-hooked"
 	// SeatStateClaim is a seat another sling reserved before its session
 	// existed.
 	SeatStateClaim = "claim"
