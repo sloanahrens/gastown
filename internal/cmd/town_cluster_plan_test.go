@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -448,13 +450,13 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 }
 
 // planLiveAnswer is the live Deployment kubectl prints, with revision annotated
-// and resourceVersion set to rv-<name>, which planWantResourceVersion expects.
+// and resourceVersion set to rv-<revision>, which planWantResourceVersion expects.
 func planLiveAnswer(t *testing.T, resource, revision string) string {
 	t.Helper()
 	name := strings.TrimPrefix(resource, "deployment/")
 	body, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"name":            name,
-		"resourceVersion": "rv-" + name,
+		"resourceVersion": "rv-" + revision,
 		"annotations":     map[string]string{"deployment.kubernetes.io/revision": revision},
 	}})
 	if err != nil {
@@ -476,18 +478,24 @@ func planKubectlAnswering(t *testing.T, answer func(resource string) (string, in
 	}
 }
 
-// planKubectl answers each Deployment with the revision rev-<name>, which
-// planWantRevision expects for the rendered Deployment.
+// planRevisionOf is the revision the fake cluster holds for a Deployment: a positive
+// whole number, as the controller stamps, with a value of its own for each name.
+func planRevisionOf(name string) string {
+	return strconv.Itoa(int(crc32.ChecksumIEEE([]byte(name))%1000) + 1)
+}
+
+// planKubectl answers each Deployment with the revision planRevisionOf gives its
+// name, which planWantRevision expects for the rendered Deployment.
 func planKubectl(t *testing.T) update.RunFunc {
 	t.Helper()
 	return planKubectlAnswering(t, func(resource string) (string, int, error) {
-		return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+		return planLiveAnswer(t, resource, planRevisionOf(strings.TrimPrefix(resource, "deployment/"))), 0, nil
 	})
 }
 
-// planWantRevision is the revision plan.json records for a rendered file: rev-<name>
-// for a Deployment, and none for any other kind.
-func planWantRevision(t *testing.T, f planFile) string {
+// planWantDeployment is the resource a rendered file names when it is a Deployment,
+// and none for any other kind.
+func planWantDeployment(t *testing.T, f planFile) string {
 	t.Helper()
 	var head struct {
 		Kind     string `yaml:"kind"`
@@ -501,18 +509,29 @@ func planWantRevision(t *testing.T, f planFile) string {
 	if head.Kind != "Deployment" {
 		return ""
 	}
-	return "rev-" + head.Metadata.Name
+	return "deployment/" + head.Metadata.Name
+}
+
+// planWantRevision is the revision plan.json records for a rendered file: the
+// revision planRevisionOf gives a Deployment's name, and none for any other kind.
+func planWantRevision(t *testing.T, f planFile) string {
+	t.Helper()
+	resource := planWantDeployment(t, f)
+	if resource == "" {
+		return ""
+	}
+	return planRevisionOf(strings.TrimPrefix(resource, "deployment/"))
 }
 
 // planWantResourceVersion is the resourceVersion plan.json records for a rendered
-// file: rv-<name> for a Deployment, the name planWantRevision gives rev-<name>.
+// file: rv-<revision> for a Deployment, the revision planWantRevision gives it.
 func planWantResourceVersion(t *testing.T, f planFile) string {
 	t.Helper()
 	rev := planWantRevision(t, f)
 	if rev == "" {
 		return ""
 	}
-	return "rv-" + strings.TrimPrefix(rev, "rev-")
+	return "rv-" + rev
 }
 
 // TestClusterShapePlanLiveResourceVersion: plan.json records each rendered
@@ -554,7 +573,7 @@ func TestClusterShapePlanLiveRevisions(t *testing.T) {
 	var reads []string
 	kube := planKubectlAnswering(t, func(resource string) (string, int, error) {
 		reads = append(reads, resource)
-		return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+		return planLiveAnswer(t, resource, planRevisionOf(strings.TrimPrefix(resource, "deployment/"))), 0, nil
 	})
 	dir := planOut(t)
 	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
@@ -572,7 +591,7 @@ func TestClusterShapePlanLiveRevisions(t *testing.T) {
 			t.Errorf("plan.json revision for %s = %q, want %q", f.Name, rec.Files[i].Revision, want)
 		}
 		if want != "" {
-			deployments = append(deployments, "deployment/"+strings.TrimPrefix(want, "rev-"))
+			deployments = append(deployments, planWantDeployment(t, f))
 		}
 	}
 	if len(deployments) == 0 {
@@ -623,6 +642,55 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
 	})
+}
+
+// TestClusterShapePlanRevisionRefuses: a live Deployment whose revision annotation
+// is zero, negative, not a whole number, or missing refuses the plan. The refusal
+// names the Deployment the plan read and the value, prints no id and writes no
+// plan.json.
+func TestClusterShapePlanRevisionRefuses(t *testing.T) {
+	t.Parallel()
+	annotated := func(revision string) func(string) (string, int, error) {
+		return func(resource string) (string, int, error) { return planLiveAnswer(t, resource, revision), 0, nil }
+	}
+	cases := []struct {
+		name   string
+		answer func(resource string) (string, int, error)
+		want   string
+	}{
+		{"the revision is zero", annotated("0"), `revision "0", which is not a positive whole number`},
+		{"the revision is negative", annotated("-3"), `revision "-3", which is not a positive whole number`},
+		{"the revision is not a number", annotated("three"), `revision "three", which is not a positive whole number`},
+		{"the revision is a fraction", annotated("1.5"), `revision "1.5", which is not a positive whole number`},
+		{"the annotation is missing", func(string) (string, int, error) {
+			return `{"metadata":{"resourceVersion":"rv-1"}}`, 0, nil
+		}, "has no revision annotation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reads []string
+			kube := planKubectlAnswering(t, func(resource string) (string, int, error) {
+				reads = append(reads, resource)
+				return tc.answer(resource)
+			})
+			dir := planOut(t)
+			out := &bytes.Buffer{}
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			if len(reads) == 0 {
+				t.Fatal("the plan read no Deployment, so the refusal was never reached")
+			}
+			if err == nil || !strings.Contains(err.Error(), reads[0]) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan = %v, want an error naming %s and holding %q", err, reads[0], tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+			}
+		})
+	}
 }
 
 // TestClusterShapePlanLiveAbsent: a Deployment the cluster does not hold is a normal
@@ -703,7 +771,7 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 		wantErr string
 	}{
 		{"the Deployment is present", func(resource string) (string, int, error) {
-			return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+			return planLiveAnswer(t, resource, planRevisionOf(strings.TrimPrefix(resource, "deployment/"))), 0, nil
 		}, ""},
 		{"the Deployment is absent", func(string) (string, int, error) { return "", 0, nil }, ""},
 		{"the Deployment is unreadable", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
