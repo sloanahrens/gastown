@@ -2,9 +2,11 @@ package dashboard
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The pane leads with a banner while a gt update roll runs (gt-o8m8ho): its
@@ -342,5 +344,106 @@ func TestSystemUpdatesBannerDrawsNothingWhenNowIsIdle(t *testing.T) {
 	}
 	if got := dom.element(t, "systemupdates").Kids; got != 1 {
 		t.Errorf("the pane drew %d lines, want the one commit row", got)
+	}
+}
+
+// The pane draws one line under the sweep block (gt-logvfe): the newest green
+// gastown sweep with its age and the commits main is ahead of it, 'no green
+// sweep yet' without one, 'ahead unknown' at -1, and nothing while the sweep
+// section cannot be read.
+
+// lastGreenState is a reading whose section carries the ahead count and the last
+// green sweep, which is nil when none is.
+func lastGreenState(src systemUpdatesSources, green map[string]any, ahead int) map[string]any {
+	st := systemUpdatesState(src, systemUpdateGoodRow())
+	su := st["system_updates"].(map[string]any)
+	if green != nil {
+		su["last_green"] = green
+	}
+	su["ahead"] = ahead
+	return st
+}
+
+// lastGreenAgo is a green sweep stamped two hours before now, as the feed sends it.
+func lastGreenAgo() map[string]any {
+	return map[string]any{"sha": "3333bbbb4444cccc", "at": time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)}
+}
+
+// lastGreenLine is the line under the sweep block, or "" when the pane draws none.
+func lastGreenLine(t *testing.T, dom *pageDOM) string {
+	t.Helper()
+	if first := dom.descend(t, "systemupdates", 0); strings.Contains(first.Class, "sulastgreen") {
+		return first.Text
+	}
+	return ""
+}
+
+// The green sweep's sha is cut to eight characters and its age read off the stamp;
+// an ahead count of -1 reads 'ahead unknown', never zero; no green sweep reads
+// 'no green sweep yet'.
+func TestSystemUpdatesLastGreenDrawsTheSweepAndAhead(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		green map[string]any
+		ahead int
+		want  string
+	}{
+		{"a count", lastGreenAgo(), 3, `^last green 3333bbbb .+ \(2h00m ago\) · main is 3 commits ahead$`},
+		{"unknown", lastGreenAgo(), -1, `^last green 3333bbbb .+ \(2h00m ago\) · ahead unknown$`},
+		{"no green sweep", nil, -1, `^no green sweep yet$`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", lastGreenState(systemUpdatesSources{}, tc.green, tc.ahead))
+			if got := lastGreenLine(t, dom); !regexp.MustCompile(tc.want).MatchString(got) {
+				t.Errorf("the line reads %q, want it to match %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A green sweep with no time draws its sha and count and no age, never a NaN.
+func TestSystemUpdatesLastGreenWithoutATimeDrawsNoAge(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", lastGreenState(systemUpdatesSources{}, map[string]any{"sha": "3333bbbb4444cccc"}, 3))
+	if got := lastGreenLine(t, dom); got != "last green 3333bbbb · main is 3 commits ahead" {
+		t.Errorf("the line reads %q, want the sha and the count with no age", got)
+	}
+}
+
+// A sweep section that cannot be read draws no line, with or without a green
+// sweep, and a reading with no ahead count draws none either.
+func TestSystemUpdatesLastGreenDrawsNothingWhenUnknown(t *testing.T) {
+	t.Parallel()
+
+	noAhead := lastGreenState(systemUpdatesSources{}, lastGreenAgo(), 0)
+	delete(noAhead["system_updates"].(map[string]any), "ahead")
+	for _, tc := range []struct {
+		name string
+		st   map[string]any
+	}{
+		{"a sweep source unknown with a green sweep", lastGreenState(systemUpdatesSources{sweepUnknown: true}, lastGreenAgo(), 3)},
+		{"a sweep source unknown with no green sweep", lastGreenState(systemUpdatesSources{sweepUnknown: true}, nil, -1)},
+		{"the section unavailable", lastGreenState(systemUpdatesSources{unavailable: true}, lastGreenAgo(), 3)},
+		{"no ahead count", noAhead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", tc.st)
+			if got := lastGreenLine(t, dom); got != "" {
+				t.Errorf("the pane drew the line %q, want none", got)
+			}
+			if got := dom.element(t, "systemupdates").Kids; got != 1 {
+				t.Errorf("the pane drew %d lines, want the one commit row", got)
+			}
+		})
 	}
 }

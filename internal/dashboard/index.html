@@ -3231,6 +3231,19 @@ function paintPaneIcon(id, chips) {
 // paintSystemUpdatesIcon is the System updates header's worst state (gt-jug4e0).
 function paintSystemUpdatesIcon(chips) { paintPaneIcon("systemupdatesico", chips); }
 
+// systemUpdateLastGreenLine is the line under the sweep block (gt-logvfe): the
+// newest green sweep, its age and the commits main is ahead of it. A reading
+// with no ahead count, or an unknown sweep section, draws no line.
+function systemUpdateLastGreenLine(su) {
+  if (typeof su.ahead !== "number" || systemUpdateStageUnknown(su, "sweep")) return null;
+  const g = su.last_green;
+  if (!g) return el("div", "surow sulastgreen", "no green sweep yet");
+  const sha = String(g.sha || "").slice(0, 8) || "–";
+  const when = systemUpdateTimeSet(g.at) ? " " + clock(g.at).slice(0, 5) + " (" + age(g.at) + " ago)" : "";
+  const ahead = su.ahead < 0 ? "ahead unknown" : "main is " + su.ahead + " commits ahead";
+  return el("div", "surow sulastgreen", "last green " + sha + when + " · " + ahead);
+}
+
 function renderSystemUpdates(s) {
   const su = s.system_updates, banner = systemUpdateBannerRoll(su, Date.now());
   const sweep = su && su.now && su.now.sweep;
@@ -3242,6 +3255,8 @@ function renderSystemUpdates(s) {
   box.replaceChildren();
   if (banner) box.append(systemUpdateBannerLine(banner, (su && su.rows) || []));
   if (sweep && !sweepUnknown) box.append(systemUpdateBannerSweepLine(sweep));
+  const lastGreen = su && systemUpdateLastGreenLine(su);
+  if (lastGreen) box.append(lastGreen);
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
