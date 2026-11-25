@@ -57,6 +57,25 @@ func checkGateSelects(run gateListRunner, dir, gate string) error {
 	return nil
 }
 
+// checkGateStaticSelects is checkGateSelects over the static lister: it refuses a Gate line whose
+// -run pattern selects no test, reading the names from go list and the parser, so no test binary
+// starts and no TestMain runs (gt-uhqzic). A lister that is not wired, or fails, is a refusal.
+func checkGateStaticSelects(list gateTestLister, dir, gate string) error {
+	for _, gr := range gateRunLines(gate) {
+		if list == nil {
+			return fmt.Errorf("Gate line %q: no go test runner is configured, so its tests cannot be listed", gr.Line)
+		}
+		names, err := list(dir, gr)
+		if err != nil {
+			return fmt.Errorf("Gate line %q: its tests cannot be listed: %w", gr.Line, err)
+		}
+		if len(names) == 0 {
+			return fmt.Errorf("Gate line %q selects no test in %s: -run matches test function names; name the tests so the pattern selects them", gr.Line, strings.Join(gr.Packages, " "))
+		}
+	}
+	return nil
+}
+
 // gateListArgs is the argv go test -list runs for one Gate line: the -run
 // pattern, then the line's -tags list when it names one, then its packages,
 // so an integration-tagged test is listed (gt-fztxxa).
