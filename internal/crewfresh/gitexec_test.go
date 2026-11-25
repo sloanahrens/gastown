@@ -59,9 +59,19 @@ func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e))
 func (e exitError) ExitCode() int { return int(e) }
 
 // scriptedGit is the Git over a scripted command, so a unit test reaches both
-// the answers and the failures without starting a process.
+// the answers and the failures without starting a process. Its calls run under
+// a context that never ends on its own: a local call reports the context's
+// error in place of the command's once a deadline has passed, so a real
+// deadline would let a scheduler pause turn a scripted failure into a
+// deadline (gt-i4pah6).
 func scriptedGit(f *fakeCommand) Git {
-	return &gitExec{dir: testDir, command: f.run, localTimeout: time.Millisecond}
+	return &gitExec{
+		dir:     testDir,
+		command: f.run,
+		callContext: func(time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		},
+	}
 }
 
 // wantArgv fails the test unless argv is the one git command the method was
@@ -76,47 +86,49 @@ func wantArgv(t *testing.T, f *fakeCommand, want ...string) {
 	}
 }
 
-// Failures a case drives through every method: the error each one must return
-// when git refuses.
+// Failures a case drives through every method: the failure each one must
+// return when git refuses. The table holds the failure, not a fake: each run
+// builds its own fakeCommand, since one shared fake would collect the argv of
+// every run and race between parallel ones (gt-7ild3d).
 var commandFailures = []struct {
 	name    string
-	command *fakeCommand
+	err     error
 	call    func(Git) error
 	wantArg []string
 }{
 	{
 		name:    "fetch",
-		command: &fakeCommand{err: errors.New("no such remote")},
+		err:     errors.New("no such remote"),
 		call:    func(g Git) error { return g.Fetch(time.Minute) },
 		wantArg: []string{"git", "-C", testDir, "fetch", "origin", "main"},
 	},
 	{
 		name:    "branch",
-		command: &fakeCommand{err: errors.New("not a git repository")},
+		err:     errors.New("not a git repository"),
 		call:    func(g Git) error { _, err := g.Branch(); return err },
 		wantArg: []string{"git", "-C", testDir, "rev-parse", "--abbrev-ref", "HEAD"},
 	},
 	{
 		name:    "clean",
-		command: &fakeCommand{err: errors.New("index unreadable")},
+		err:     errors.New("index unreadable"),
 		call:    func(g Git) error { _, err := g.Clean(); return err },
 		wantArg: []string{"git", "-C", testDir, "status", "--porcelain"},
 	},
 	{
 		name:    "behind",
-		command: &fakeCommand{err: errors.New("origin/main is not a commit")},
+		err:     errors.New("origin/main is not a commit"),
 		call:    func(g Git) error { _, err := g.Behind(); return err },
 		wantArg: []string{"git", "-C", testDir, "rev-list", "--count", "HEAD..origin/main"},
 	},
 	{
 		name:    "ancestor",
-		command: &fakeCommand{err: exitError(2)},
+		err:     exitError(2),
 		call:    func(g Git) error { _, err := g.HeadIsAncestorOfOriginMain(); return err },
 		wantArg: []string{"git", "-C", testDir, "merge-base", "--is-ancestor", "HEAD", "origin/main"},
 	},
 	{
 		name:    "fast-forward",
-		command: &fakeCommand{err: errors.New("not possible to fast-forward")},
+		err:     errors.New("not possible to fast-forward"),
 		call:    func(g Git) error { return g.FastForwardMain() },
 		wantArg: []string{"git", "-C", testDir, "merge", "--ff-only", "origin/main"},
 	},
@@ -129,10 +141,11 @@ func TestGitMethodsReturnTheCommandFailure(t *testing.T) {
 	for _, tc := range commandFailures {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if err := tc.call(scriptedGit(tc.command)); err == nil {
+			command := &fakeCommand{err: tc.err}
+			if err := tc.call(scriptedGit(command)); err == nil {
 				t.Fatal("method = nil error, want the command's failure")
 			}
-			wantArgv(t, tc.command, tc.wantArg...)
+			wantArgv(t, command, tc.wantArg...)
 		})
 	}
 }
@@ -354,14 +367,17 @@ func TestGitCommandErrorNamesTheCommandAndWrapsTheFailure(t *testing.T) {
 
 // Every method runs its git command under a deadline, so no call can stall the
 // caller on a hung git: the fetch under its caller's timeout and each other
-// call under localTimeout (gt-vpj84).
+// call under localTimeout (gt-vpj84). The Git is the one production builds, a
+// timeout and no context seam, since a scripted Git's seam has no deadline
+// (gt-i4pah6); a fired deadline leaves the assertion unchanged, so no load can
+// fail this row.
 func TestGitEveryCallRunsUnderADeadline(t *testing.T) {
 	t.Parallel()
 	for _, tc := range commandFailures {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			command := &fakeCommand{err: tc.command.err}
-			_ = tc.call(scriptedGit(command))
+			command := &fakeCommand{err: tc.err}
+			_ = tc.call(&gitExec{dir: testDir, command: command.run})
 			if len(command.bounded) != 1 || !command.bounded[0] {
 				t.Errorf("ran under a deadline = %v, want one command run under one", command.bounded)
 			}
