@@ -241,6 +241,46 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 	}
 }
 
+// TestEnsureRulePatchesClosedToFinal checks that a closed main rule, the protection an earlier
+// part of the run leaves with nobody on the merge whitelist, is patched once to the final form so
+// the landing bot ends up whitelisted, and that a second call sends no write.
+func TestEnsureRulePatchesClosedToFinal(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	seedRule(t, f, protectionRepo, servedRule(t, ClosedMainRule(opts)))
+	var logs []string
+	p := userProvisioner(f, false, &logs)
+	if err := p.EnsureRule(protectionRepo, opts); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	writes := f.Writes()
+	if len(writes) != 1 || writes[0].Method != http.MethodPatch {
+		t.Fatalf("first run sent %v, want one PATCH", writes)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "updated branch protection main on acme/rig") {
+		t.Fatalf("first run logged %q, want a line saying the rule was updated", logs)
+	}
+	want, err := json.Marshal(MainRule(opts))
+	if err != nil {
+		t.Fatalf("encode final rule: %v", err)
+	}
+	got, err := json.Marshal(f.Rule(protectionRepo, "main"))
+	if err != nil {
+		t.Fatalf("encode stored rule: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("stored rule = %s, want the final rule %s", got, want)
+	}
+	if err := p.EnsureRule(protectionRepo, opts); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if n := len(f.Writes()); n != 1 {
+		t.Fatalf("second run sent %d writes in all, want the first run's one and no more", n)
+	}
+}
+
 // TestEnsureRuleJudgesEveryField checks that a live rule differing from MainRule in any one
 // field is patched, not reported as already set. Each row changes one field and nothing
 // else, so a field left out of the drift check fails its row. The rule name is the lookup
