@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	"github.com/steveyegge/gastown/deploy/k8s/sbx"
 )
 
@@ -344,6 +345,54 @@ func TestClusterDriftSbxFlagsUnknownCluster(t *testing.T) {
 				t.Fatalf("exit = %d, want %d; error %v", got, driftExitUnreadable, err)
 			}
 			for _, want := range []string{clusterControl, clusterSbx} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("error %v, want one naming %q", err, want)
+				}
+			}
+			if len(touched) != 0 {
+				t.Errorf("read %q before refusing, want nothing", touched)
+			}
+			if len(seam.reads) != 0 || len(seam.renders) != 0 {
+				t.Errorf("read %q and rendered %d times, want nothing", seam.reads, len(seam.renders))
+			}
+			if out.Len() != 0 {
+				t.Errorf("printed %q, want nothing", out)
+			}
+		})
+	}
+}
+
+// TestClusterDriftSbxControlExecViaIsRefused holds --exec-via with the control
+// cluster, and with the default one, to a refusal that names the flag and the
+// cluster before anything is read: the exceptions file, the town, the render and
+// kubectl stay untouched, so a flag the control compare does not use never reads
+// the control cluster.
+func TestClusterDriftSbxControlExecViaIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, cluster string }{
+		{name: "the default cluster", cluster: ""},
+		{name: "--cluster control", cluster: clusterControl},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, seam, out := sbxCompareDeps(t, sbxCompareRecord())
+			d.cluster = tc.cluster
+			d.execVia = "docker-exec:gt-sbx-ctx:sandbox-node"
+			var touched []string
+			d.exceptions = func() []byte {
+				touched = append(touched, "exceptions")
+				return k8s.DriftExceptionsYAML
+			}
+			d.now = driftExceptionsNow
+			d.render.findTown = func() (string, error) {
+				touched = append(touched, "findTown")
+				return "", errors.New("the town was read")
+			}
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != driftExitUnreadable {
+				t.Fatalf("exit = %d, want %d; error %v", got, driftExitUnreadable, err)
+			}
+			for _, want := range []string{"--exec-via", clusterControl, d.execVia} {
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("error %v, want one naming %q", err, want)
 				}
