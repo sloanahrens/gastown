@@ -36,7 +36,7 @@ const shellMetacharacters = "&|;<>()`$#!*?[]{}~\\"
 // or leaves a quote open; either way it is not one plain command.
 func isCompound(line string) bool {
 	var quote rune
-	for _, r := range line {
+	for i, r := range line {
 		switch {
 		case quote != 0:
 			if r == quote {
@@ -44,11 +44,19 @@ func isCompound(line string) bool {
 			}
 		case r == '\'' || r == '"':
 			quote = r
+		case r == '$' && endsWord(line[i+1:]):
 		case strings.ContainsRune(shellMetacharacters, r):
 			return true
 		}
 	}
 	return quote != 0
+}
+
+// endsWord reports whether rest, the text after a dollar, ends the shell word
+// there: the shell expands nothing after such a dollar, so it is the regexp's
+// end anchor and not the start of a variable or a substitution.
+func endsWord(rest string) bool {
+	return rest == "" || rest[0] == ' ' || rest[0] == '\t'
 }
 
 // packageCharacters are the runes a package argument may hold; a word with
@@ -126,15 +134,27 @@ func unquotePattern(pattern string) string {
 
 // safePattern reports whether a -run pattern is non-empty, does not start with
 // a dash (the shape of a flag, meaning -run lost its value), and holds only
-// pattern characters.
+// pattern characters and end anchors: '^TestA$' is the commonest Gate pattern,
+// and dropping it would let the line through unchecked (gt-hx8f5i).
 func safePattern(pattern string) bool {
 	if pattern == "" || strings.HasPrefix(pattern, "-") {
 		return false
 	}
-	for _, r := range pattern {
+	for i, r := range pattern {
+		if r == '$' && anchors(pattern[i+1:]) {
+			continue
+		}
 		if !strings.ContainsRune(patternCharacters, r) {
 			return false
 		}
 	}
 	return true
+}
+
+// anchors reports whether a dollar followed by rest is the regexp's end
+// anchor: it ends the pattern, an alternative, a group or one level of a
+// subtest path. Before anything else it has the shape of a variable or a
+// command substitution, which the branch check never hands on.
+func anchors(rest string) bool {
+	return rest == "" || strings.ContainsRune("|)/", rune(rest[0]))
 }

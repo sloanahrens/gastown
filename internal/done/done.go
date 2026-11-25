@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -1546,6 +1547,14 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 	// (gt-eyum7q, gt-3der6d, gt-c9cp26). Any other bead never reads the diff.
 	if err := followupBudgetCheck(r.g, sub.sourceIssue, baseRef, r.rigCfg); err != nil {
 		return err
+	}
+	// The Gate's -run patterns are checked here, where the branch holding the
+	// new tests exists: a pattern the spec lint could not judge on main
+	// (gt-hx8f5i).
+	if sub.sourceIssue != nil {
+		if err := checkGateSelects(r.deps.listTests, r.cwd, specdispatch.Sections(sub.sourceIssue.Description)["gate"]); err != nil {
+			return err
+		}
 	}
 	var sourceNotes, description string
 	if sub.sourceIssue != nil {
