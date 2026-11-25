@@ -968,19 +968,21 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	if pod != nil {
 		inner = update.SkippedInstaller{Reason: podHostInstallReason}
 	}
+	// The town's pre-roll checks gate the install: they run before anything is
+	// installed or swapped, in this process, which is the new image's own gt and
+	// bd. The running commit is read through the install's verify probes, so a
+	// build the gate cannot read is refused before anything changes. The
+	// pair-level check reads the bd pin the pair installs, which the preflight's
+	// own checks, run by the image that is running now, do not. The registry
+	// match re-derives the pair for the file's commit, so a file the registry
+	// does not publish is refused before anything changes. The install holds the
+	// gate, so the commit it records has one owner.
+	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify)
 	install := &update.DigestInstaller{
-		Inner:  inner,
-		Path:   path,
-		Images: images,
-		// The town's pre-roll checks gate the install: they run before anything is
-		// installed or swapped, in this process, which is the new image's own gt
-		// and bd. The running commit is read through the install's verify probes,
-		// so a build the gate cannot read is refused before anything changes. The
-		// pair-level check reads the bd pin the pair installs, which the
-		// preflight's own checks, run by the image that is running now, do not.
-		// The registry match re-derives the pair for the file's commit, so a file
-		// the registry does not publish is refused before anything changes.
-		PreSwap: preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify),
+		Inner:   inner,
+		Path:    path,
+		Images:  images,
+		PreSwap: gate.check,
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
@@ -1010,8 +1012,8 @@ type pairLevelReads struct {
 }
 
 // preSwapGate is a digest install's pre-swap gate: the seams a pair is checked
-// against and the running commit the gate reads. running is the commit the
-// running daemon reported to the gate's last run.
+// against, the daemon probe the running commit is read through, and the commit
+// that read returned. One gate belongs to one install's PreSwap.
 type preSwapGate struct {
 	townRoot string
 	run      func(context.Context, string) []PreflightResult
@@ -1021,25 +1023,25 @@ type preSwapGate struct {
 	running  string
 }
 
-// preSwapPreflight is a digest install's pre-swap gate: it runs the daemon's
+// preSwapPreflight builds a digest install's pre-swap gate: it runs the daemon's
 // pre-roll checks over townRoot through run and refuses the pair when any check
 // failed, naming every failed check and its message; reads the running daemon's
 // commit through verify and refuses a build it cannot read; then refuses a pair
 // whose bd pin carries another schema level than the live database; and finally
 // refuses a pair the registry does not derive for its commit, through
-// pairMatchesRegistry, so the file must name the pair the registry publishes.
-// A gate that cannot run — no town root, no check seam, no daemon probe, or a
-// seam that reports no results — is a failure, never a pass: an install nothing
-// checked is not an install the checks passed. A nil derive is refused by
-// pairMatchesRegistry itself: a missing derivation is never a match.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes) func(context.Context, update.ImagePair) error {
-	gate := &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify}
-	return gate.check
+// pairMatchesRegistry. A gate that cannot run — no town root, no check seam, no
+// daemon probe, or a seam that reports no results — is a failure, never a pass:
+// an install nothing checked is not an install the checks passed. A nil derive
+// is refused by pairMatchesRegistry itself.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes) *preSwapGate {
+	return &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify}
 }
 
 // check refuses a pair the gate cannot pass, as the preflight check, and records
-// the running commit it read on the gate.
+// the running commit it read. A run that cannot read the commit records none, so
+// the gate never reports a commit that run did not read.
 func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
+	g.running = ""
 	switch {
 	case g.townRoot == "":
 		return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no town root to check")}

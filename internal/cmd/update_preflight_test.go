@@ -57,8 +57,9 @@ func (p *preflightRunningProbes) Health(context.Context) (string, error) {
 
 // preflightDigestInstaller builds the installer digestInstaller wires for a
 // digest install over one town root, so a test drives its pre-swap gate. run is
-// the check seam; nil builds the installer with no check seam wired.
-func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult) *update.DigestInstaller {
+// the check seam (nil: none); verify is the daemon probe the running commit is
+// read through (nil: unwired).
+func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult, verify update.VerifyProbes) *update.DigestInstaller {
 	t.Helper()
 	path, _ := podPairValuesFile(t)
 	seams := updateSeams{
@@ -78,9 +79,7 @@ func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Co
 		PairDerive: pairHeldDerive(podPairPair),
 	}
 	target := podPairTarget()
-	// The running daemon reports a commit, so the gate's read of it passes and a
-	// row is decided by the guard it tests.
-	deps := update.Deps{Verify: &preflightRunningProbes{commit: preflightRunningCommit}}
+	deps := update.Deps{Verify: verify}
 	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
@@ -143,7 +142,7 @@ func TestPreRollGuardPreSwapNamesEveryFailedCheck(t *testing.T) {
 				checkedRoot = townRoot
 				return tt.results
 			}
-			install := preflightDigestInstaller(t, townRoot, run)
+			install := preflightDigestInstaller(t, townRoot, run, &preflightRunningProbes{commit: preflightRunningCommit})
 
 			err := install.PreSwap(context.Background(), podPairPair)
 			if len(tt.want) == 0 {
@@ -207,7 +206,7 @@ func TestPreRollGuardPreSwapRunsTheRealChecks(t *testing.T) {
 			run := func(ctx context.Context, townRoot string) []PreflightResult {
 				return runPreflightChecksWith(ctx, townRoot, checks)
 			}
-			install := preflightDigestInstaller(t, townRoot, run)
+			install := preflightDigestInstaller(t, townRoot, run, &preflightRunningProbes{commit: preflightRunningCommit})
 
 			err := install.PreSwap(context.Background(), podPairPair)
 			if len(tt.want) == 0 {
@@ -278,7 +277,7 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 			// row's want names the guard it expects instead.
 			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair), &preflightRunningProbes{commit: preflightRunningCommit})
 
-			err := gate(context.Background(), podPairPair)
+			err := gate.check(context.Background(), podPairPair)
 			if err == nil {
 				t.Fatal("the pre-swap gate accepted the pair: a preflight that cannot run is a failure, not a pass")
 			}
@@ -367,7 +366,7 @@ func TestPreSwapPairMatchesRegistry(t *testing.T) {
 			}
 			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive, &preflightRunningProbes{commit: preflightRunningCommit})
 
-			err := gate(context.Background(), pair)
+			err := gate.check(context.Background(), pair)
 			if len(seen) != 1 || seen[0] != pair.Commit {
 				t.Errorf("the derivation was asked about commits %q, want exactly [%q]", seen, pair.Commit)
 			}
@@ -414,7 +413,7 @@ func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
 			t.Parallel()
 			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil, &preflightRunningProbes{commit: preflightRunningCommit})
 
-			err := gate(context.Background(), tt.pair)
+			err := gate.check(context.Background(), tt.pair)
 			if err == nil {
 				t.Fatal("PreSwap accepted a pair with no registry derivation wired")
 			}
@@ -431,29 +430,23 @@ func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
 	}
 }
 
-// TestPreSwapRunningCommit holds the pre-swap gate to the running daemon's
-// commit: the gate reads it through the verify probes, so a readable commit
-// reaches the check and the pair passes, while a read that fails or reports no
-// commit is refused as the preflight check, naming the running commit it could
-// not read. A gate with no daemon probe is refused too: the read cannot run, and
-// a commit the gate did not read is not a commit it checked. The preflight, the
-// pair levels and the registry match all pass, so every row is decided by the
-// running-commit read alone.
+// TestPreSwapRunningCommit holds the gate the installer wires to the running
+// daemon's commit: the gate reads it through the install's verify probes, so a
+// readable commit reaches the check and the pair passes, while a read that fails
+// or reports no commit is refused as the preflight check. A gate with no daemon
+// probe refuses too: a commit the gate did not read is not a commit it checked.
+// The other checks pass, so every row is decided by the running-commit read.
 func TestPreSwapRunningCommit(t *testing.T) {
 	t.Parallel()
-	// unreadable is the daemon probe's failure, wrapped by the refusal.
 	unreadable := errors.New("the pod did not answer")
 	tests := []struct {
 		name string
-		// verify is the gate's daemon probe; nil leaves it unwired.
+		// verify is the installer's daemon probe; nil leaves it unwired.
 		verify *preflightRunningProbes
-		// want is empty when the pair is accepted; otherwise every string must
-		// appear in the refusal.
-		want []string
-		// wantRead is the number of DaemonVersion reads the row expects.
+		// want is empty when the pair is accepted; else every string must appear.
+		want     []string
 		wantRead int
-		// wantErr is the read failure the refusal must wrap.
-		wantErr error
+		wantErr  error
 	}{
 		{
 			name:     "a readable running commit reaches the check",
@@ -481,16 +474,14 @@ func TestPreSwapRunningCommit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			pair := pairOfValues(pairMatchPair())
-			// A nil row hands the gate a nil interface, not a typed nil the gate
-			// would call.
+			// A nil row hands the installer a nil interface, not a typed nil.
 			var verify update.VerifyProbes
 			if tt.verify != nil {
 				verify = tt.verify
 			}
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(pair), verify)
+			install := preflightDigestInstaller(t, t.TempDir(), preflightPassing, verify)
 
-			err := gate(context.Background(), pair)
+			err := install.PreSwap(context.Background(), podPairPair)
 			if tt.verify != nil && tt.verify.asked != tt.wantRead {
 				t.Errorf("the daemon was read %d times, want %d", tt.verify.asked, tt.wantRead)
 			}
@@ -516,5 +507,30 @@ func TestPreSwapRunningCommit(t *testing.T) {
 				t.Errorf("PreSwap error = %v, want it to wrap %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestPreSwapRunningCommitRecords holds the gate to the running commit it
+// records: an accepted pair leaves the commit the daemon reported on the gate,
+// and a later run that cannot read the commit leaves none.
+func TestPreSwapRunningCommitRecords(t *testing.T) {
+	t.Parallel()
+	probe := &preflightRunningProbes{commit: preflightRunningCommit}
+	gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(podPairPair), probe)
+
+	if err := gate.check(context.Background(), podPairPair); err != nil {
+		t.Fatalf("PreSwap = %v, want the pair accepted", err)
+	}
+	if gate.running != preflightRunningCommit {
+		t.Errorf("recorded running commit = %q, want %q", gate.running, preflightRunningCommit)
+	}
+
+	// A daemon that stops answering must not leave the previous run's commit.
+	probe.commit = ""
+	if err := gate.check(context.Background(), podPairPair); err == nil {
+		t.Fatal("PreSwap accepted a pair whose running commit it could not read")
+	}
+	if gate.running != "" {
+		t.Errorf("recorded running commit = %q after a refused read, want none", gate.running)
 	}
 }
