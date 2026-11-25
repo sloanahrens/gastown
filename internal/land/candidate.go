@@ -270,6 +270,11 @@ type CandidateGate struct {
 	// waitTimer is the timer the poll waits on; nil means time.After. Tests
 	// inject one that returns at once and records each wait (gt-ecez9b).
 	waitTimer func(time.Duration) <-chan time.Time
+	// windowContext is the context the wait window is made from, given the
+	// gate's WaitTimeout; nil means context.WithTimeout. Tests inject one that is
+	// already canceled or never expires, so a test that does not assert the
+	// window does not depend on the wall clock (gt-16e434).
+	windowContext func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc)
 	// GateLogDir is where a rejected gate's job log is kept, the rig's
 	// GateLogDir(townRoot, rig). Empty keeps no log.
 	GateLogDir string
@@ -436,7 +441,7 @@ func (g *CandidateGate) push(wt Repo, branch, head string) error {
 // candidateStatusErrorTolerance times in a row; a status that reported a
 // failure is a verdict on the first read (gt-394h5).
 func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res CandidateResult) CandidateResult {
-	ctx, cancel := context.WithTimeout(parent, g.waitTimeout())
+	ctx, cancel := g.waitWindow(parent, g.waitTimeout())
 	defer cancel()
 	blips := 0
 	// unreported counts the consecutive reads with no verdict: the poll line is
@@ -916,6 +921,15 @@ func (g *CandidateGate) pollTimer(d time.Duration) <-chan time.Time {
 		return g.waitTimer(d)
 	}
 	return time.After(d)
+}
+
+// waitWindow is the context the wait runs under: the windowContext seam when it
+// is set, else a real deadline of d.
+func (g *CandidateGate) waitWindow(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if g.windowContext != nil {
+		return g.windowContext(parent, d)
+	}
+	return context.WithTimeout(parent, d)
 }
 
 func (g *CandidateGate) callTimeout() time.Duration {
