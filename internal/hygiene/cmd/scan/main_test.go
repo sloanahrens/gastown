@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,12 +45,16 @@ type fakeGit struct {
 	// originErr is a failed read of the origin's URL, for the case where the
 	// remote is listed but its URL cannot be read.
 	originErr error
+	diff      map[string][]string // ref expression to the names git diff -z lists
 	fail      map[string]error
 }
 
 func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 	if err, ok := g.fail[args[0]]; ok {
 		return nil, err
+	}
+	if args[0] == "diff" {
+		return g.diffAnswer(dir, args)
 	}
 	switch strings.Join(args, " ") {
 	case "rev-parse --show-toplevel":
@@ -93,6 +98,22 @@ func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 		return []byte(g.origin + "\n"), nil
 	}
 	return nil, fmt.Errorf("fake git does not model %v", args)
+}
+
+// diffAnswer answers only git diff --name-only -z <ref>...HEAD.
+func (g fakeGit) diffAnswer(dir string, args []string) ([]byte, error) {
+	if dir != g.top || len(args) != 4 || args[1] != "--name-only" || args[2] != "-z" {
+		return nil, fmt.Errorf("fake git does not model diff %v in %q", args, dir)
+	}
+	names, ok := g.diff[args[3]]
+	if !ok {
+		return nil, fmt.Errorf("fake git: no diff answer for %s", args[3])
+	}
+	var out []byte
+	for _, name := range names {
+		out = append(out, name+"\x00"...)
+	}
+	return out, nil
 }
 
 // lists reports whether the fake lists the remote name.
@@ -756,5 +777,91 @@ func TestRunRefusesAnAccountThatIsNotAUsableName(t *testing.T) {
 				t.Errorf("stdout = %q, want nothing", got.stdout)
 			}
 		})
+	}
+}
+
+// billingAt is the output line of the billing finding at line 1 of file.
+func billingAt(file string) string {
+	return file + ":1 " + hygiene.RuleBillingID + "\n"
+}
+
+// changedTree holds three violating files, one clean file and the allow list.
+func changedTree(t *testing.T) (string, []string) {
+	t.Helper()
+	top := treeWith(t, "[]", map[string]string{"docs/changed.md": billingLine + "\n", "docs/second.md": billingLine + "\n",
+		"docs/unchanged.md": billingLine + "\n", "docs/clean.md": "clean\n"})
+	return top, []string{"docs/changed.md", "docs/clean.md", "docs/second.md", "docs/unchanged.md", allowPath}
+}
+
+// TestScanChangedSinceRuleFileScansEverything covers a rule file in the diff.
+func TestScanChangedSinceRuleFileScansEverything(t *testing.T) {
+	t.Parallel()
+	rules := []string{"internal/hygiene/hygiene.go", allowPath, "internal/hygiene/blocked.sha256", "internal/hygiene/cmd/scan/main.go", "internal/manifestdata/pod.go"}
+	paths := append([]string{"docs/unchanged.md"}, rules...)
+	for _, rule := range rules {
+		t.Run(rule, func(t *testing.T) {
+			t.Parallel()
+			files := map[string]string{"docs/unchanged.md": billingLine + "\n"}
+			for _, name := range rules {
+				files[name] = "[]\n"
+			}
+			top := treeWith(t, "[]", files)
+			git := fakeGit{top: top, paths: paths, diff: map[string][]string{"origin/main...HEAD": {rule}}}
+			got := runFixtureGit(t, top, git, []string{"-changed-since", "origin/main"}, fixtureBlocked)
+			if got.code != exitFindings || got.stdout != billingAt("docs/unchanged.md") {
+				t.Fatalf("exit %d, stdout %q; want exit %d and the unchanged file's finding (stderr: %s)", got.code, got.stdout, exitFindings, got.stderr)
+			}
+		})
+	}
+}
+
+// TestScanChangedSince covers the changed-only scan: only the files the diff
+// names are scanned, and a diff the scan cannot read scans every path.
+func TestScanChangedSince(t *testing.T) {
+	t.Parallel()
+	const diffRef = "origin/main...HEAD"
+	changed, second := billingAt("docs/changed.md"), billingAt("docs/second.md")
+	all := changed + second + billingAt("docs/unchanged.md")
+	cases := []struct {
+		name     string
+		base     string // the -changed-since value; origin/main when empty
+		diff     map[string][]string
+		fail     map[string]error
+		wantCode int
+		wantOut  string
+		wantErr  string // a word stderr must hold; empty means stderr is empty
+	}{
+		{name: "a changed file's violation is reported and an unchanged file's is not", diff: map[string][]string{diffRef: {"docs/changed.md"}}, wantCode: exitFindings, wantOut: changed},
+		{name: "a candidate two commits ahead scans the files of both commits", diff: map[string][]string{diffRef: {"docs/changed.md", "docs/second.md"}}, wantCode: exitFindings, wantOut: changed + second},
+		{name: "a diff that names only clean files reports nothing", diff: map[string][]string{diffRef: {"docs/clean.md"}}, wantCode: exitClean},
+		{name: "an empty diff scans nothing", diff: map[string][]string{diffRef: nil}, wantCode: exitClean},
+		{name: "a deleted name that is not tracked is dropped without an error", diff: map[string][]string{diffRef: {"docs/deleted.md", "docs/changed.md"}}, wantCode: exitFindings, wantOut: changed},
+		{name: "a diff git cannot read scans every tracked path", fail: map[string]error{"diff": errors.New("exit status 128")}, wantCode: exitFindings, wantOut: all, wantErr: "every tracked path"},
+		{name: "an unknown ref scans every tracked path", base: "origin/gone", diff: map[string][]string{diffRef: {"docs/changed.md"}}, wantCode: exitFindings, wantOut: all, wantErr: "every tracked path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			top, paths := changedTree(t)
+			args := []string{"-changed-since", cmp.Or(tc.base, "origin/main")}
+			got := runFixtureGit(t, top, fakeGit{top: top, paths: paths, diff: tc.diff, fail: tc.fail}, args, fixtureBlocked)
+			if got.code != tc.wantCode || got.stdout != tc.wantOut {
+				t.Fatalf("exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
+			}
+			if (got.stderr == "") != (tc.wantErr == "") || !strings.Contains(got.stderr, tc.wantErr) {
+				t.Errorf("stderr = %q, want it to hold %q, or nothing when that is empty", got.stderr, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestScanChangedSinceRefusesARefThatIsAnOption: --output= would make git write a
+// file, so an option-shaped ref exits 2 before any diff runs.
+func TestScanChangedSinceRefusesARefThatIsAnOption(t *testing.T) {
+	t.Parallel()
+	top, paths := changedTree(t)
+	got := runFixtureGit(t, top, fakeGit{top: top, paths: paths}, []string{"-changed-since", "--output=docs/out.md"}, fixtureBlocked)
+	if got.code != exitError || got.stdout != "" || !strings.Contains(got.stderr, "must not start with -") {
+		t.Fatalf("exit %d, stdout %q; want exit %d, no stdout, and stderr saying the ref must not start with - (stderr: %s)", got.code, got.stdout, exitError, got.stderr)
 	}
 }
