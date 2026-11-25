@@ -141,7 +141,7 @@ func minorFinding(title string) Finding {
 // minorAt is a minor finding in a named file, for the cases that split a
 // landing's findings by the package they land in.
 func minorAt(fpath string, line int, title string) Finding {
-	return Finding{ID: "3", Severity: "minor", Path: fpath, Line: line, Title: title}
+	return Finding{ID: "3", Severity: "minor", Path: fpath, Line: line, Title: title, Class: FindingClassBehaviour}
 }
 
 // TestFollowupFeedHasNoUpperCap: a landing om approved at or above the rig's own
