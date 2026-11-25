@@ -46,7 +46,7 @@ func checkGateSelects(run gateListRunner, dir, gate string) error {
 		if run == nil {
 			return fmt.Errorf("Gate line %q: no go test runner is configured, so its tests cannot be listed", gr.Line)
 		}
-		out, err := run(dir, append([]string{"test", "-list", gr.Pattern}, gr.Packages...)...)
+		out, err := run(dir, gateListArgs(gr)...)
 		if err != nil {
 			return fmt.Errorf("Gate line %q: go test -list did not complete (%v), so its tests cannot be checked:\n%s", gr.Line, err, firstLines(out, 10))
 		}
@@ -55,6 +55,17 @@ func checkGateSelects(run gateListRunner, dir, gate string) error {
 		}
 	}
 	return nil
+}
+
+// gateListArgs is the argv go test -list runs for one Gate line: the -run
+// pattern, then the line's -tags list when it names one, then its packages,
+// so an integration-tagged test is listed (gt-fztxxa).
+func gateListArgs(gr GateRun) []string {
+	args := []string{"test", "-list", gr.Pattern}
+	if gr.Tags != "" {
+		args = append(args, "-tags", gr.Tags)
+	}
+	return append(args, gr.Packages...)
 }
 
 // testNameRE matches the names go test -list prints: tests, benchmarks, examples, fuzz.
