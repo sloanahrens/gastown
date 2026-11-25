@@ -596,6 +596,18 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestRepoHostTools and TestRepoDarwinFiles walk every non-test Go file
+		// in the module and read the host-tools allowlist, so a non-test Go
+		// file's change or deletion, and a change to the allowlist, are their
+		// inputs. A deleted allowlist fails its read (gt-b2n8r3).
+		pkg:   "internal/hosttools",
+		tests: []string{"TestRepoHostTools", "TestRepoDarwinFiles"},
+		judges: func(rel string) bool {
+			return nonTestGo(rel) || rel == "internal/hosttools/testdata/host-tools-allow.txt"
+		},
+		removal: true,
+	},
+	{
 		pkg:    "internal/rig",
 		tests:  []string{"TestNoMergeSettingsCommandCallsOutsideResolver"},
 		judges: underInternal,
