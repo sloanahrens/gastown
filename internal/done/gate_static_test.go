@@ -81,3 +81,108 @@ func TestPackageTestNamesRefusesAFailedStep(t *testing.T) {
 		}
 	}
 }
+
+// TestStaticGateListerSelectsByPattern: the pattern keeps the names it selects, in package then
+// file order, and go list runs with the Gate line's tags and packages (gt-002qkd).
+func TestStaticGateListerSelectsByPattern(t *testing.T) {
+	t.Parallel()
+	const out = `{"ImportPath":"x/a","Dir":"/w/a","TestGoFiles":["a_test.go"]}
+{"ImportPath":"x/b","Dir":"/w/b","TestGoFiles":["b_test.go"]}
+`
+	dirs := map[string]fstest.MapFS{
+		"/w/a": {"a_test.go": {Data: []byte("package a\n\nfunc TestAlpha(t *testing.T) {}\nfunc TestBeta(t *testing.T) {}\n")}},
+		"/w/b": {"b_test.go": {Data: []byte("package b\n\nfunc TestAlphaTwo(t *testing.T) {}\nfunc BenchmarkAlpha(b *testing.B) {}\n")}},
+	}
+	tests := []struct {
+		pattern string
+		want    []string
+	}{
+		{"Alpha", []string{"TestAlpha", "TestAlphaTwo", "BenchmarkAlpha"}},
+		{"TestBeta|Two", []string{"TestBeta", "TestAlphaTwo"}},
+		{"", []string{"TestAlpha", "TestBeta", "TestAlphaTwo", "BenchmarkAlpha"}},
+		{"Nothing", nil},
+	}
+	for _, tc := range tests {
+		var args []string
+		run := func(_ string, _ []string, a ...string) ([]byte, error) {
+			args = a
+			return []byte(out), nil
+		}
+		lister := newStaticGateLister(run, func() []string { return nil }, func(dir string) fs.FS { return dirs[dir] })
+		got, err := lister("/w", GateRun{Packages: []string{"./a", "./b"}, Pattern: tc.pattern, Tags: "integration"})
+		if err != nil {
+			t.Fatalf("lister(%q) error = %v", tc.pattern, err)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("lister(%q) = %q, want %q", tc.pattern, got, tc.want)
+		}
+		if !slices.Contains(args, "integration") || !slices.Contains(args, "./b") {
+			t.Errorf("go list args = %q, want the Gate line's tags and packages", args)
+		}
+	}
+}
+
+// TestStaticGateListerListsANameOnceInAStableOrder: a name two packages declare is listed once, at
+// its first position, the same on every run (gt-002qkd).
+func TestStaticGateListerListsANameOnceInAStableOrder(t *testing.T) {
+	t.Parallel()
+	const out = `{"ImportPath":"x/a","Dir":"/w/a","TestGoFiles":["a_test.go"]}
+{"ImportPath":"x/a_test","Dir":"/w/a_ext","XTestGoFiles":["ext_test.go"]}
+`
+	dirs := map[string]fstest.MapFS{
+		"/w/a":     {"a_test.go": {Data: []byte("package a\n\nfunc TestShared(t *testing.T) {}\nfunc TestOnlyA(t *testing.T) {}\n")}},
+		"/w/a_ext": {"ext_test.go": {Data: []byte("package a_test\n\nfunc TestOnlyB(t *testing.T) {}\nfunc TestShared(t *testing.T) {}\n")}},
+	}
+	run := func(string, []string, ...string) ([]byte, error) { return []byte(out), nil }
+	lister := newStaticGateLister(run, func() []string { return nil }, func(dir string) fs.FS { return dirs[dir] })
+	want := []string{"TestShared", "TestOnlyA", "TestOnlyB"}
+	gr := GateRun{Packages: []string{"./a", "./a_test"}, Pattern: "Test"}
+	first, err := lister("/w", gr)
+	if err != nil {
+		t.Fatalf("lister() error = %v", err)
+	}
+	second, err := lister("/w", gr)
+	if err != nil {
+		t.Fatalf("lister() error = %v", err)
+	}
+	if !slices.Equal(first, want) || !slices.Equal(second, want) {
+		t.Errorf("lister() runs = %q and %q, want %q both times", first, second, want)
+	}
+}
+
+// TestStaticGateListerErrors: a go list that fails, an unreadable test file and a -run pattern
+// that does not compile each end the call with its error and no names (gt-002qkd).
+func TestStaticGateListerErrors(t *testing.T) {
+	t.Parallel()
+	errList := errors.New("list failed")
+	const listed = `{"ImportPath":"x/a","Dir":"/w/a","TestGoFiles":["a_test.go"]}
+`
+	const noTests = `{"ImportPath":"x/a","Dir":"/w/a"}
+`
+	listing := func(out string) gateListCommand {
+		return func(string, []string, ...string) ([]byte, error) { return []byte(out), nil }
+	}
+	good := fstest.MapFS{"a_test.go": {Data: []byte("package a\n\nfunc TestA(t *testing.T) {}\n")}}
+	tests := []struct {
+		name    string
+		run     gateListCommand
+		openFS  fstest.MapFS
+		pattern string
+		wantErr error
+	}{
+		{"go list fails", func(string, []string, ...string) ([]byte, error) { return nil, errList }, good, "TestA", errList},
+		{"file unreadable", listing(listed), fstest.MapFS{}, "TestA", fs.ErrNotExist},
+		{"pattern does not compile", listing(listed), good, "[", nil},
+		{"pattern does not compile and no name is listed", listing(noTests), good, "[", nil},
+	}
+	for _, tc := range tests {
+		lister := newStaticGateLister(tc.run, func() []string { return nil }, func(string) fs.FS { return tc.openFS })
+		got, err := lister("/w", GateRun{Packages: []string{"./a"}, Pattern: tc.pattern})
+		if err == nil || got != nil {
+			t.Errorf("%s: lister() = %q, %v; want no names and an error", tc.name, got, err)
+		}
+		if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: lister() error = %v, want it to wrap %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
