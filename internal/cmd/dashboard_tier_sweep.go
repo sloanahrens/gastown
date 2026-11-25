@@ -418,7 +418,7 @@ func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 		if !ok {
 			continue
 		}
-		consider(&dashboard.TierSweepRun{Rig: rig, Tier: r.runningTier(rig, s), Tiers: s.tiers, Since: s.at, ElapsedSec: elapsed})
+		consider(&dashboard.TierSweepRun{Rig: rig, Tier: r.runningTier(rig, s), SHA: s.sha, Tiers: s.tiers, Since: s.at, ElapsedSec: elapsed})
 	}
 	for rig, ev := range r.last {
 		if ev.swept || ev.stage != "shell" {

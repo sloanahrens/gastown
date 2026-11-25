@@ -809,6 +809,7 @@ type TierSweepStage struct {
 type TierSweepRun struct {
 	Rig        string    `json:"rig"`
 	Tier       string    `json:"tier"`
+	SHA        string    `json:"sha,omitempty"`
 	Tiers      []string  `json:"tiers,omitempty"`
 	Since      time.Time `json:"since"`
 	ElapsedSec int64     `json:"elapsed_sec"`
