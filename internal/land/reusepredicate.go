@@ -16,13 +16,18 @@ const (
 	missVersion   = "version"
 	missFuture    = "future"
 	missAge       = "age"
+	// missBaseNotAncestor: the review's base is not an ancestor of the target,
+	// so main was rewritten since the review. missBaseUnreadable: the ancestor
+	// check failed, and a failed read is a miss, never a reuse.
+	missBaseNotAncestor = "base-not-ancestor"
+	missBaseUnreadable  = "base-unreadable"
 )
 
 // ReuseMiss returns "" when rec, a stored review, may stand in for a review
 // keyed by cur, and otherwise the reason it may not. It is the one test for
 // both reuse and invalidity, so the two cannot disagree (gt-6bsp). now is a
-// parameter: nothing here reads the clock. g, base and touched feed the checks
-// after these three, and are unused here.
+// parameter: nothing here reads the clock. g and base feed the base check after
+// the key, version and age checks; touched is unused until the overlap check lands.
 func ReuseMiss(g Repo, rec AheadRecord, cur ReviewKey, base string, touched []string, now time.Time, expiry time.Duration) string {
 	fields := []struct{ name, rec, cur string }{
 		{"Bead", rec.Bead, cur.Bead},
@@ -47,6 +52,17 @@ func ReuseMiss(g Repo, rec AheadRecord, cur ReviewKey, base string, touched []st
 		return missFuture
 	case expiry <= 0 || age > expiry:
 		return missAge
+	}
+	// A review made on another base may stand in only while that base is still
+	// behind the target. The same base needs no git call.
+	if rec.Base != base {
+		ok, err := g.IsAncestor(rec.Base, base)
+		if err != nil {
+			return missBaseUnreadable
+		}
+		if !ok {
+			return missBaseNotAncestor
+		}
 	}
 	return ""
 }
