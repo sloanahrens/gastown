@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1072,6 +1073,125 @@ func TestRunFailsWhenTheResultCannotBeWritten(t *testing.T) {
 	if !strings.Contains(h.stderr.String(), "disk full") {
 		t.Errorf("stderr = %q, want it to name the write failure", h.stderr.String())
 	}
+}
+
+// progressAt reads the progress record the runner left in dir.
+func progressAt(t *testing.T, dir string) Progress {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, progressFileName))
+	if err != nil {
+		t.Fatalf("read the progress record: %v", err)
+	}
+	var p Progress
+	if err := json.Unmarshal(data, &p); err != nil {
+		t.Fatalf("decode the progress record %q: %v", data, err)
+	}
+	return p
+}
+
+// TestRunWritesProgress: the runner writes progress.json before the sweep starts,
+// with the first tier running, and again after each summary line on the sweep's
+// stdout. A line split across writes is read once, and a final line the sweep ends
+// without a newline is read when the sweep returns. A progress write that fails is
+// printed to stderr and changes nothing the run reports (gt-58mdg5).
+func TestRunWritesProgress(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the first tier is running before the sweep starts", func(t *testing.T) {
+		t.Parallel()
+		var h *harness
+		var atStart Progress
+		h = newHarness(t, nil, func(_ []string, _ map[string]string, _, _ io.Writer) int {
+			atStart = progressAt(t, h.out)
+			return 0
+		})
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration,race", "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if atStart.Rig != "gastown" || atStart.SHA != testSHA {
+			t.Errorf("progress names rig %q sha %q, want gastown %s", atStart.Rig, atStart.SHA, testSHA)
+		}
+		if atStart.Running != tiersweep.TierIntegration || len(atStart.Tiers) != 0 {
+			t.Errorf("progress at start = %+v, want integration running and no tier finished", atStart)
+		}
+	})
+
+	t.Run("each summary line moves the running tier on", func(t *testing.T) {
+		t.Parallel()
+		var h *harness
+		var midLine, afterIntegration Progress
+		h = newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			logDir := overrides[tiersweep.EnvLogDir]
+			integration, _ := tiersweep.Summary(tiersweep.TierIntegration, logDir, 66, 0, 0, "", 120)
+			race, _ := tiersweep.Summary(tiersweep.TierRace, logDir, 3, 0, 0, "", 30)
+			// The integration line arrives in two writes; the record moves on only
+			// once its newline is written.
+			fmt.Fprint(stdout, integration[:20])
+			midLine = progressAt(t, h.out)
+			fmt.Fprint(stdout, integration[20:]+"\n")
+			afterIntegration = progressAt(t, h.out)
+			// The race line is the sweep's last output and has no newline.
+			fmt.Fprint(stdout, race)
+			return 0
+		})
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration,race", "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if midLine.Running != tiersweep.TierIntegration || len(midLine.Tiers) != 0 {
+			t.Errorf("progress mid-line = %+v, want integration still running", midLine)
+		}
+		wantIntegration := []ProgressTier{{Tier: tiersweep.TierIntegration, Verdict: "GREEN", Passed: 66, Secs: 120}}
+		if !slices.Equal(afterIntegration.Tiers, wantIntegration) || afterIntegration.Running != tiersweep.TierRace {
+			t.Errorf("progress after integration = %+v, want integration finished and race running", afterIntegration)
+		}
+		final := progressAt(t, h.out)
+		wantFinal := append(wantIntegration, ProgressTier{Tier: tiersweep.TierRace, Verdict: "GREEN", Passed: 3, Secs: 30})
+		if !slices.Equal(final.Tiers, wantFinal) || final.Running != "" {
+			t.Errorf("final progress = %+v, want both tiers finished and nothing running", final)
+		}
+	})
+
+	t.Run("a failed progress write is printed and leaves the result alone", func(t *testing.T) {
+		t.Parallel()
+		var h *harness
+		h = newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			// A directory where progress.json belongs makes the rename that publishes
+			// the next record fail, and the start record has already been written.
+			path := filepath.Join(h.out, progressFileName)
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove the start record: %v", err)
+			}
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatalf("make the blocking directory: %v", err)
+			}
+			line, _ := tiersweep.Summary(tiersweep.TierIntegration, overrides[tiersweep.EnvLogDir], 66, 0, 0, "", 120)
+			fmt.Fprintln(stdout, line)
+			return 0
+		})
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0: a progress write never fails the run (stderr %q)", code, h.stderr.String())
+		}
+		named := 0
+		for _, line := range strings.Split(h.stderr.String(), "\n") {
+			if strings.Contains(line, "write progress") {
+				named++
+			}
+		}
+		if named != 1 {
+			t.Errorf("stderr = %q, want one line naming the progress write", h.stderr.String())
+		}
+		r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+		if err != nil {
+			t.Fatalf("read the result: %v", err)
+		}
+		verdicts, err := sweeprunner.ToTierResults(r)
+		if err != nil {
+			t.Fatalf("convert the result: %v", err)
+		}
+		if v := verdicts[tiersweep.TierIntegration]; v.Verdict != "GREEN" || v.Passed != 66 {
+			t.Errorf("integration = %+v, want GREEN with 66 passed as the sweep printed it", v)
+		}
+	})
 }
 
 // TestRunTakesTheVerdictFromTheSweepExit: the sweep's exit status is the
