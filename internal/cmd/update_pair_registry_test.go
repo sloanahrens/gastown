@@ -72,6 +72,46 @@ func TestPairMatchesRegistry(t *testing.T) {
 	}
 }
 
+// TestPairMatchesRegistryNilDerive holds an install with no registry derivation
+// wired to a refusal before any comparison: the error names the missing
+// derivation and the file's commit, for a file that would match a derivation and
+// for one a comparison would refuse, so an unwired install passes no file and
+// compares none.
+func TestPairMatchesRegistryNilDerive(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// edit changes the file's pair; nil leaves it equal to the derived pair.
+		edit func(f *imagevalues.Values)
+	}{
+		{name: "a file that would match a derivation"},
+		{name: "a file a derivation would refuse", edit: func(f *imagevalues.Values) { f.Daemon = "not-a-digest" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := pairMatchPair()
+			if tc.edit != nil {
+				tc.edit(&f)
+			}
+			err := pairMatchesRegistry(context.Background(), nil, f)
+			if err == nil {
+				t.Fatal("pairMatchesRegistry passed a file with no registry derivation wired")
+			}
+			for _, w := range []string{"no registry derivation wired", f.Commit} {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal %q does not contain %q", err, w)
+				}
+			}
+			for _, w := range []string{"is not a digest reference", "digest sha256:"} {
+				if strings.Contains(err.Error(), w) {
+					t.Errorf("refusal %q compares the file, want the missing derivation refused before any comparison", err)
+				}
+			}
+		})
+	}
+}
+
 // TestPairMatchesRegistryDeriveFails holds a failed derivation to its refusal:
 // the install refuses the file, wrapping the cause so the caller can match it,
 // and never passes on it. A pair answered beside an error still refuses: an
