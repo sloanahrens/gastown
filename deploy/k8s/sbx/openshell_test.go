@@ -163,13 +163,15 @@ func TestOpenShellChartDropsHooksAndSecrets(t *testing.T) {
 }
 
 // hasHookNode re-reads a kept document for the hook annotation, so the
-// assertion does not trust the drop it checks.
+// assertion does not trust the drop it checks. An annotation that is not a
+// scalar counts as a hook, so the assertion fails on it.
 func hasHookNode(doc []byte) bool {
 	node, err := documentNode(doc)
 	if err != nil {
 		return false
 	}
-	return hasHookAnnotation(node)
+	hook, err := hasHookAnnotation(node)
+	return hook || err != nil
 }
 
 // No rejected document ever reaches the rendered output.
@@ -234,6 +236,62 @@ func TestOpenShellChartRefusals(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), row.want) {
 				t.Errorf("error %q does not name %s", err, row.want)
+			}
+		})
+	}
+}
+
+// serviceAccountHookDoc is the certgen ServiceAccount with annotation written as
+// its helm.sh/hook value, so each row changes only the annotation.
+func serviceAccountHookDoc(annotation string) string {
+	return "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: openshell-certgen\n  namespace: openshell\n  annotations:\n    helm.sh/hook: " + annotation + "\n"
+}
+
+// certgenArgs names the three Secrets the certgen Job creates, in the flags the
+// render reads.
+const certgenArgs = `      containers:
+        - name: certgen
+          args:
+            - --server-secret-name=openshell-server-tls
+            - --client-secret-name=openshell-client-tls
+            - --jwt-secret-name=openshell-jwt-keys
+`
+
+// A helm.sh/hook annotation that is a mapping or a sequence is refused, naming
+// the document and the annotation, and a scalar annotation stays a hook.
+func TestParseChartRefusesANonScalarHook(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name, annotation, want string
+	}{
+		{"a mapping", "{pre-install: true}", "helm.sh/hook is not a scalar"},
+		{"a sequence", "[pre-install, pre-upgrade]", "helm.sh/hook is not a scalar"},
+		{"a scalar", "pre-install,pre-upgrade", ""},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			raw := chartOf(serviceAccountHookDoc(row.annotation), certgenJobDoc(certgenArgs), openshellServiceDoc)
+			chart, err := parseChart(raw)
+			if row.want == "" {
+				if err != nil {
+					t.Fatalf("parseChart(): %v", err)
+				}
+				if !slices.Contains(chart.Hooks, "ServiceAccount/openshell-certgen") {
+					t.Errorf("Hooks = %q, want the scalar-annotated ServiceAccount", chart.Hooks)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("parseChart() = %+v, nil error; want a refusal naming %s", chart, row.want)
+			}
+			if chart.Objects != nil || chart.Secrets != nil || chart.Hooks != nil {
+				t.Errorf("parseChart() returned %+v beside the error", chart)
+			}
+			for _, want := range []string{"document 1", "ServiceAccount openshell-certgen", row.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %s", err, want)
+				}
 			}
 		})
 	}

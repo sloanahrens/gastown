@@ -171,7 +171,11 @@ func parseChart(out []byte) (Chart, error) {
 		if err != nil {
 			return Chart{}, fmt.Errorf("document %d: %w", i+1, err)
 		}
-		if hasHookAnnotation(node) {
+		hook, err := hasHookAnnotation(node)
+		if err != nil {
+			return Chart{}, fmt.Errorf("document %d: %s %s: %w", i+1, object.Kind, object.Name, err)
+		}
+		if hook {
 			chart.Hooks = append(chart.Hooks, object.Kind+"/"+object.Name)
 			if object.Kind == "Job" {
 				if err := certgen.read(node); err != nil {
@@ -331,11 +335,20 @@ func readChartObject(doc []byte, node *yaml.Node) (k8s.StaticObject, error) {
 	return object, nil
 }
 
-// hasHookAnnotation reports whether the document is a helm hook.
-func hasHookAnnotation(node *yaml.Node) bool {
+// hasHookAnnotation reports whether the document is a helm hook. The annotation
+// must be a scalar: a mapping or a sequence is an error, not no hook, so the
+// document is never applied as a plain object.
+func hasHookAnnotation(node *yaml.Node) (bool, error) {
 	metadata := mappingValue(node.Content[0], "metadata")
 	annotations := mappingValue(metadata, "annotations")
-	return scalarValue(annotations, hookAnnotation) != ""
+	value := mappingValue(annotations, hookAnnotation)
+	switch {
+	case value == nil:
+		return false, nil
+	case value.Kind != yaml.ScalarNode:
+		return false, fmt.Errorf("%s is not a scalar", hookAnnotation)
+	}
+	return value.Value != "", nil
 }
 
 // certgenFlags collects the Secret names the certgen hook Job creates.
