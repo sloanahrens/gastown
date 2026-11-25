@@ -21,6 +21,13 @@ import (
 // layout it was written in.
 const aheadRecordVersion = 1
 
+// The outcomes a stored review may carry. Put refuses any other spelling, so a
+// reader switching on these two never meets a record it cannot trust.
+const (
+	aheadOutcomeVerdict  = "verdict"
+	aheadOutcomeConflict = "conflict"
+)
+
 // AheadRecord is one review made ahead of a landing, as the store keeps it.
 type AheadRecord struct {
 	V int `json:"v"`
@@ -71,6 +78,9 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 // Put stores rec as its bead's record, replacing whatever record the bead had
 // before, whatever head that record judged.
 func (s AheadStore) Put(rec AheadRecord) error {
+	if err := rec.refuseToStore(); err != nil {
+		return err
+	}
 	path, err := s.path(rec.Bead)
 	if err != nil {
 		return err
@@ -91,6 +101,32 @@ func (s AheadStore) Put(rec AheadRecord) error {
 		return fmt.Errorf("writing review-ahead record: %w", err)
 	}
 	return nil
+}
+
+// refuseToStore returns the error that refuses rec, or nil when the store may
+// keep it.
+func (rec AheadRecord) refuseToStore() error {
+	if !validComponent(rec.Bead) {
+		return fmt.Errorf("review-ahead store: refusing bead %q: not one path component", rec.Bead)
+	}
+	if !isHexSHA(rec.Head) {
+		return fmt.Errorf("review-ahead store: refusing head %q: not a lowercase hex sha", rec.Head)
+	}
+	// Only a verdict om itself reached may be reused. A skip, an error, a
+	// waiver, an empty or unknown outcome, or a case-variant name is refused
+	// rather than kept by default, so a later reader cannot reuse a review
+	// that never decided the work.
+	switch rec.Outcome {
+	case aheadOutcomeVerdict:
+		if rec.Verdict.Verdict == VerdictApprove || rec.Verdict.Verdict == VerdictRequestChanges {
+			return nil
+		}
+	case aheadOutcomeConflict:
+		if rec.Verdict.Verdict == "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("review-ahead store: refusing outcome %q with verdict %q", rec.Outcome, rec.Verdict.Verdict)
 }
 
 // path is the bead's record file. The rig and the bead each stand for one path
