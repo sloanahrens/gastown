@@ -5,8 +5,6 @@ import (
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // TestBundleLabelsUseTheUTCDay: two instants on one UTC day share their bundle
@@ -85,7 +83,6 @@ func TestFindOpenBundle(t *testing.T) {
 	dayOnly := mine[:1]
 	early := day.Add(-time.Hour)
 	late := day.Add(time.Hour)
-	full := specdispatch.MaxAcceptance
 	tests := []struct {
 		name     string
 		existing []ExistingFollowup
@@ -109,10 +106,10 @@ func TestFindOpenBundle(t *testing.T) {
 			[]ExistingFollowup{bundleBead("a", "open", early, otherPkg, 1)}, ""},
 		{"a bead missing the group label is skipped",
 			[]ExistingFollowup{bundleBead("a", "open", early, dayOnly, 1)}, ""},
-		{"a bead at MaxAcceptance findings is skipped",
-			[]ExistingFollowup{bundleBead("a", "open", early, mine, full)}, ""},
-		{"a bead one finding short of MaxAcceptance is found",
-			[]ExistingFollowup{bundleBead("a", "open", early, mine, full-1)}, "a"},
+		{"a bead at three findings is full and skipped",
+			[]ExistingFollowup{bundleBead("a", "open", early, mine, 3)}, ""},
+		{"a bead of two findings is found",
+			[]ExistingFollowup{bundleBead("a", "open", early, mine, 2)}, "a"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,6 +120,41 @@ func TestFindOpenBundle(t *testing.T) {
 			}
 			if gotID != tc.want {
 				t.Errorf("FindOpenBundle() = %q (found %v), want %q", gotID, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestFollowupBundleFull: an open bead of the key on the day is full once it
+// carries three om-fp findings, so the lookup opens a new bundle beside it; two
+// findings still leave room. Three findings under another key or another day are
+// not this key's bundle either (gt-hp9ce8).
+func TestFollowupBundleFull(t *testing.T) {
+	t.Parallel()
+	day := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	const key = "internal/land/a.go"
+	early := day.Add(-time.Hour)
+	tests := []struct {
+		name     string
+		labels   []string
+		findings int
+		want     string
+	}{
+		{"a bead of the key on the day with two findings is found", BundleLabels(day, key), 2, "a"},
+		{"a bead of the key on the day with three findings is full", BundleLabels(day, key), 3, ""},
+		{"a bead of another key on the day with three findings is not found", BundleLabels(day, "internal/land/b.go"), 3, ""},
+		{"a bead of the key on another day with three findings is not found", BundleLabels(day.AddDate(0, 0, 1), key), 3, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := []ExistingFollowup{bundleBead("a", "open", early, tc.labels, tc.findings)}
+			got, ok := FindOpenBundle(existing, day, key)
+			gotID := ""
+			if ok {
+				gotID = got.ID
+			}
+			if gotID != tc.want {
+				t.Errorf("FindOpenBundle(bead of %d findings on %v) = %q, want %q", tc.findings, tc.labels, gotID, tc.want)
 			}
 		})
 	}

@@ -6,16 +6,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// bundleWithRoom is an open bundle of internal/land/note.go for followupDay that
-// has room for room more findings: its labels carry MaxAcceptance-room
-// fingerprints.
-func bundleWithRoom(room int) ExistingFollowup {
+// bundleWithFindings is an open bundle of internal/land/note.go for followupDay
+// that carries n om-fp findings: its labels carry n fingerprints.
+func bundleWithFindings(n int) ExistingFollowup {
 	b := openBundleFor(followupDay, "internal/land/note.go", "open")
-	for i := 1; i < specdispatch.MaxAcceptance-room; i++ {
+	for i := 1; i < n; i++ {
 		b.Labels = append(b.Labels, fmt.Sprintf("%sfill%d", FingerprintPrefix, i))
 	}
 	return b
@@ -41,29 +38,36 @@ func fingerprints(labels []string) int {
 	return n
 }
 
-// TestFeedOverflowsIntoANewBundle: a group larger than the room left in the open
-// bundle fills the bundle by an append and files the rest as new bundles of at
-// most MaxAcceptance findings each (gt-ntkwh0): five findings with room for two
-// append two and create one bundle of three; twelve with room for five append five
-// and create 6 and 1. The landing's comment names the beads.
+// TestFeedOverflowsIntoANewBundle: a group is appended to the open bundle only
+// while that bundle has fewer than followupFindingsPerBead findings (gt-hp9ce8).
+// Five findings with a bundle of three open, which is full, append nothing and
+// file one bundle of five. Twelve with a bundle of one append five, the room the
+// feed still counts in MaxAcceptance, and create 6 and 1, each at most
+// MaxAcceptance findings (gt-ntkwh0). The landing's comment names the appended
+// bead.
 func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name         string
-		n, room      int
+		n, findings  int
+		appends      int
 		appended     int
 		createdSizes []int
 	}{
-		{"five findings with room for two", 5, 2, 2, []int{3}},
-		{"twelve findings with room for five", 12, 5, 5, []int{6, 1}},
+		{"five findings with a full bundle open", 5, 3, 0, 0, []int{5}},
+		{"twelve findings with a bundle of one open", 12, 1, 1, 5, []int{6, 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFollowupFixture(t, 0.8, numberedFindings(tc.n))
-			f.fake.existing = []ExistingFollowup{bundleWithRoom(tc.room)}
+			f.fake.existing = []ExistingFollowup{bundleWithFindings(tc.findings)}
 			log := f.run()
-			if len(f.fake.appended) != 1 || len(f.fake.appended[0].Add.Labels) != tc.appended {
-				t.Fatalf("appended %+v, want one append of %d findings:\n%s", f.fake.appended, tc.appended, log)
+			appended := 0
+			for _, a := range f.fake.appended {
+				appended += len(a.Add.Labels)
+			}
+			if len(f.fake.appended) != tc.appends || appended != tc.appended {
+				t.Fatalf("appended %+v, want %d append(s) of %d findings:\n%s", f.fake.appended, tc.appends, tc.appended, log)
 			}
 			var sizes []int
 			for _, spec := range f.fake.created {
@@ -71,6 +75,9 @@ func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 			}
 			if !slices.Equal(sizes, tc.createdSizes) {
 				t.Errorf("created bundles carry %v findings, want %v:\n%s", sizes, tc.createdSizes, log)
+			}
+			if tc.appends == 0 {
+				return
 			}
 			comments, err := f.bd.Comments("gt-abc")
 			if err != nil || len(comments) != 1 || !strings.Contains(comments[0].Text, "appended to the open follow-up for this landing: gt-bundle") {
@@ -82,9 +89,10 @@ func TestFeedOverflowsIntoANewBundle(t *testing.T) {
 
 // TestFeedQueuesWhenTheBundleWriteFails: a write that fails drops nothing, and the
 // queue holds WHICH findings the failed write was to file: a create that fails
-// queues all five; an overflow whose create fails queues the three of the rest and
-// not the two the append took; and a second chunk that fails leaves the first
-// bundle filed and queues the findings of the second and third chunks.
+// queues all five; with a full bundle open nothing is appended, so the create of
+// all five fails and queues all five; and a second chunk that fails leaves the
+// first bundle filed and queues the findings of the second and third chunks
+// (gt-hp9ce8).
 func TestFeedQueuesWhenTheBundleWriteFails(t *testing.T) {
 	t.Parallel()
 	titles := func(from, to int) []string {
@@ -103,7 +111,7 @@ func TestFeedQueuesWhenTheBundleWriteFails(t *testing.T) {
 		wantQueued  []string
 	}{
 		{"a create that fails", 5, nil, 0, 0, titles(1, 5)},
-		{"an overflow whose create fails", 5, []ExistingFollowup{bundleWithRoom(2)}, 0, 0, titles(3, 5)},
+		{"a full bundle open and a create that fails", 5, []ExistingFollowup{bundleWithFindings(3)}, 0, 0, titles(1, 5)},
 		{"a second chunk that fails", 13, nil, 2, 1, titles(7, 13)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

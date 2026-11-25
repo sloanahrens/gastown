@@ -56,6 +56,12 @@ const (
 	// not grow with a town's whole history of follow-ups. A bead past the bound
 	// is not de-duplicated against, which costs at most a repeat bead.
 	FollowUpListLimit = 1000
+
+	// followupFindingsPerBead is how many om-fp findings an open follow-up bundle
+	// carries before it is full: a bundle at this count takes no more, and the
+	// lookup opens a new one beside it. Six findings never fit the budget gt done
+	// enforces (gt-hp9ce8).
+	followupFindingsPerBead = 3
 )
 
 // FollowupSpec is one follow-up bead to file.

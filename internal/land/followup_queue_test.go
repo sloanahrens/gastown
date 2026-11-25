@@ -773,7 +773,7 @@ func TestQueueReplayFilesIntoTheBundle(t *testing.T) {
 		wantCreated  []int
 	}{
 		{"a new bundle", openFollowupBeads(1), 1, 0, []int{1}},
-		{"the open bundle", append(openFollowupBeads(1), bundleWithRoom(3)), 2, 2, nil},
+		{"a full bundle is not appended to", append(openFollowupBeads(1), bundleWithFindings(3)), 2, 0, []int{2}},
 		{"eight findings, no open bundle", openFollowupBeads(1), 8, 0, []int{6, 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
