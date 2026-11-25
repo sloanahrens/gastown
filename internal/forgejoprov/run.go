@@ -103,6 +103,12 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 // protection steps for every repository. A failure stops the run where it is: each
 // step converges on its own, so a repeat picks up where this one stopped.
 func provision(p *Provisioner, opts *Options) error {
+	// --revoke-token is parsed but its action is not in this build yet. Refusing it
+	// here is what keeps it from falling through to the provision below, which
+	// ensures users and mints tokens: the caller named a revoke, not a provision.
+	if opts.RevokeToken != "" {
+		return fmt.Errorf("--revoke-token is not implemented yet: this build parses and checks the option, then refuses; the revoke action lands in a later change")
+	}
 	// --rotate mints a token and --skip-tokens mints none, so the pair cannot both be
 	// honored; refuse it before any request rather than drop the rotation silently.
 	if opts.Rotate && opts.SkipTokens {

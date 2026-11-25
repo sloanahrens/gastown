@@ -53,6 +53,7 @@ type Options struct {
 	MainBranch     string   // --main-branch: protected landing target
 	LandBranch     string   // --land-branch: candidate branch pattern kept unprotected
 	WorkflowList   string   // --workflow-list: hook list a provisioned repository is appended to
+	RevokeToken    string   // --revoke-token: name of the one bot token to revoke
 	Rotate         bool     // --rotate: mint a new token where one exists, revoking the old
 	DryRun         bool     // --dry-run: read and report without writing
 	// SkipTokens mints, lists and revokes no bot token, for a broker run with no
@@ -135,6 +136,7 @@ var valueFlags = map[string]func(*Options, string){
 	"--main-branch":      func(o *Options, v string) { o.MainBranch = v },
 	"--land-branch":      func(o *Options, v string) { o.LandBranch = v },
 	"--workflow-list":    func(o *Options, v string) { o.WorkflowList = v },
+	"--revoke-token":     func(o *Options, v string) { o.RevokeToken = v },
 }
 
 // Parse turns one command line into Options, resolving defaults from getenv
@@ -193,6 +195,13 @@ func (o *Options) parseFlags(args []string) error {
 			return usagef("%s needs a value", flag)
 		}
 		i++
+		// An empty name is refused here, where the word is still known to be the
+		// flag's value: once stored it is the zero value, which validate cannot
+		// tell from an absent --revoke-token, so the run would fall through to a
+		// normal provision that mints tokens.
+		if flag == "--revoke-token" && args[i] == "" {
+			return usagef("--revoke-token needs a non-empty NAME")
+		}
 		set(o, args[i])
 	}
 	return nil
@@ -258,6 +267,27 @@ func (o *Options) validate() error {
 	for _, repo := range o.Repos {
 		if !validRepo(repo) {
 			return usagef("--repo '%s' must be OWNER/NAME, each part matching [A-Za-z0-9._-]+ and neither '.' nor '..'", repo)
+		}
+	}
+	// --revoke-token names exactly one account's token, from that account's role,
+	// and no repository: each conflict is refused rather than dropped silently.
+	if o.RevokeToken != "" {
+		if err := requirePlain("--revoke-token", o.RevokeToken); err != nil {
+			return err
+		}
+		if o.Rotate {
+			return usagef("--revoke-token cannot be combined with --rotate")
+		}
+		if o.SkipTokens {
+			return usagef("--revoke-token cannot be combined with --skip-tokens")
+		}
+		if len(o.Repos) > 0 {
+			return usagef("--revoke-token cannot be combined with --repo")
+		}
+		// The default roles have already been filled in here, so a command line
+		// that names none arrives with three and is refused by the count.
+		if len(o.Roles) != 1 {
+			return usagef("--revoke-token needs exactly one --role (got %d)", len(o.Roles))
 		}
 	}
 	return nil

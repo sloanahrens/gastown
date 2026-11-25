@@ -141,6 +141,11 @@ func TestParseDefaultsTable(t *testing.T) {
 				o.LandBranch = "cand/*"
 			},
 		},
+		{
+			name:   "--revoke-token names a token and only one role",
+			args:   []string{"--revoke-token", "gt-old", "--role", "landing"},
+			change: func(o *Options) { o.RevokeToken = "gt-old"; o.Roles = []string{"landing"} },
+		},
 		{name: "--rotate", args: []string{"--rotate"}, change: func(o *Options) { o.Rotate = true }},
 		{name: "--dry-run", args: []string{"--dry-run"}, change: func(o *Options) { o.DryRun = true }},
 		{name: "--skip-tokens", args: []string{"--skip-tokens"}, change: func(o *Options) { o.SkipTokens = true }},
@@ -158,6 +163,55 @@ func TestParseDefaultsTable(t *testing.T) {
 			}
 			if !reflect.DeepEqual(*got, want) {
 				t.Errorf("Parse(%v, %v) = %+v, want %+v", tc.args, tc.vars, *got, want)
+			}
+		})
+	}
+}
+
+// TestParseRevokeToken holds --revoke-token's parse into Options and one row per
+// command line the validation refuses around it, so dropping a check leaves a
+// row that no longer refuses its conflict.
+func TestParseRevokeToken(t *testing.T) {
+	t.Parallel()
+	t.Run("a name and one role parse", func(t *testing.T) {
+		t.Parallel()
+		opts, err := Parse([]string{"--revoke-token", "gt-old", "--role", "landing"}, env(nil))
+		if err != nil {
+			t.Fatalf("Parse = %v, want the command line accepted", err)
+		}
+		if opts.RevokeToken != "gt-old" {
+			t.Errorf("RevokeToken = %q, want %q", opts.RevokeToken, "gt-old")
+		}
+		if want := []string{"landing"}; !reflect.DeepEqual(opts.Roles, want) {
+			t.Errorf("Roles = %v, want %v", opts.Roles, want)
+		}
+	})
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"with --rotate", []string{"--revoke-token", "gt-old", "--role", "landing", "--rotate"}, "--revoke-token cannot be combined with --rotate"},
+		{"with --skip-tokens", []string{"--revoke-token", "gt-old", "--role", "landing", "--skip-tokens"}, "--revoke-token cannot be combined with --skip-tokens"},
+		{"with no --role", []string{"--revoke-token", "gt-old"}, "--revoke-token needs exactly one --role"},
+		{"with two --role", []string{"--revoke-token", "gt-old", "--role", "landing", "--role", "polecat"}, "--revoke-token needs exactly one --role"},
+		{"with --repo", []string{"--revoke-token", "gt-old", "--role", "landing", "--repo", "acme/gastown"}, "--revoke-token cannot be combined with --repo"},
+		{"with an empty NAME", []string{"--revoke-token", "", "--role", "landing"}, "--revoke-token needs a non-empty NAME"},
+		{"with a name that is not plain", []string{"--revoke-token", "gt old", "--role", "landing"}, "--revoke-token 'gt old' must match [A-Za-z0-9._-]+"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts, err := Parse(tc.args, env(nil))
+			if err == nil {
+				t.Fatalf("Parse(%v) = %+v, want a usage error", tc.args, *opts)
+			}
+			var refused *UsageError
+			if !errors.As(err, &refused) {
+				t.Fatalf("Parse(%v) error = %v (%T), want *UsageError", tc.args, err, err)
+			}
+			if !strings.Contains(refused.Message, tc.want) {
+				t.Errorf("Parse(%v) error = %q, want it to hold %q", tc.args, refused.Message, tc.want)
 			}
 		})
 	}
