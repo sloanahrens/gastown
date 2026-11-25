@@ -159,6 +159,10 @@ type gitExec struct {
 	command gitCommand
 	// localTimeout bounds each call but the fetch; zero means localGitTimeout.
 	localTimeout time.Duration
+	// callContext makes the context a local call runs under, so a test can
+	// give a scripted command no real deadline (gt-d5kkpc). Nil means a
+	// deadline of the timeout, as production runs.
+	callContext func(timeout time.Duration) (context.Context, context.CancelFunc)
 }
 
 // NewGit returns the Git for the clone at dir, running every command as
@@ -245,7 +249,13 @@ func (g *gitExec) local(args ...string) (string, error) {
 	if timeout <= 0 {
 		timeout = localGitTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	callContext := g.callContext
+	if callContext == nil {
+		callContext = func(timeout time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), timeout)
+		}
+	}
+	ctx, cancel := callContext(timeout)
 	defer cancel()
 	return g.run(ctx, args...)
 }

@@ -494,3 +494,66 @@ func TestCappedWriterKeepsTheFirstBytesOnly(t *testing.T) {
 		t.Errorf("kept %q, want %q", got, "abcde")
 	}
 }
+
+// A local call runs under the context callContext returns, which gets the
+// local timeout and is cancelled when the call ends; with no callContext the
+// call runs under a deadline of that timeout (gt-d5kkpc).
+func TestGitExecCallContextSeam(t *testing.T) {
+	t.Parallel()
+
+	t.Run("seam", func(t *testing.T) {
+		t.Parallel()
+		type ctxKey struct{}
+		seamCtx := context.WithValue(context.Background(), ctxKey{}, "seam")
+		var gotTimeout time.Duration
+		cancelled := false
+		seam := func(timeout time.Duration) (context.Context, context.CancelFunc) {
+			gotTimeout = timeout
+			return seamCtx, func() { cancelled = true }
+		}
+		var ranUnder context.Context
+		command := func(ctx context.Context, argv []string) (string, error) {
+			ranUnder = ctx
+			return "main\n", nil
+		}
+		g := &gitExec{dir: testDir, command: command, localTimeout: 7 * time.Second, callContext: seam}
+
+		if _, err := g.Branch(); err != nil {
+			t.Fatalf("Branch = error %v, want nil", err)
+		}
+		if gotTimeout != 7*time.Second {
+			t.Errorf("seam got timeout %v, want the local timeout 7s", gotTimeout)
+		}
+		if ranUnder != seamCtx {
+			t.Errorf("command ran under %v, want the context the seam returned", ranUnder)
+		}
+		if !cancelled {
+			t.Error("the seam's cancel was not called when the call ended")
+		}
+	})
+
+	t.Run("nil", func(t *testing.T) {
+		t.Parallel()
+		const timeout = 7 * time.Second
+		var deadline time.Time
+		var hasDeadline bool
+		command := func(ctx context.Context, argv []string) (string, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return "main\n", nil
+		}
+		g := &gitExec{dir: testDir, command: command, localTimeout: timeout}
+
+		before := time.Now()
+		if _, err := g.Branch(); err != nil {
+			t.Fatalf("Branch = error %v, want nil", err)
+		}
+		after := time.Now()
+		if !hasDeadline {
+			t.Fatal("command ran without a deadline, want one of the local timeout")
+		}
+		if deadline.Before(before.Add(timeout)) || deadline.After(after.Add(timeout)) {
+			t.Errorf("deadline = %v, want it %v after the call, between %v and %v",
+				deadline, timeout, before.Add(timeout), after.Add(timeout))
+		}
+	})
+}
