@@ -90,7 +90,7 @@ func TestEffectivePrioritiesCycleTerminates(t *testing.T) {
 		if !maps.Equal(got, want) {
 			t.Errorf("cycle: EffectivePriorities = %v, want %v", got, want)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): //testpolicy:allow no-sleep — a hang guard only: the return is the event waited for, and a cycle that never returns fails here rather than hanging the suite
 		t.Fatal("cycle: EffectivePriorities did not return; a cycle must terminate")
 	}
 }
