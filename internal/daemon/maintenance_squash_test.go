@@ -3639,3 +3639,45 @@ func TestSquashRunItemTitleNamesTheSourceOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestSquashCheckCleanCatalog pins gt-syec9g: a recovery that finds nothing (a
+// nil Recovery and a nil error) costs reads only. The check goes on to the
+// readings and Decide as before, and the recovery step writes no ledger line,
+// raises no item and logs no line.
+func TestSquashCheckCleanCatalog(t *testing.T) {
+	t.Parallel()
+	d, server, escalations, logs := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	// A backup a night keeps, so the readings are readable and the check reaches Decide.
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var recovered []string
+	d.maint.squashRecover = func(_ context.Context, _ *Daemon, db string, _ time.Time, _ *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		recovered = append(recovered, db)
+		return nil, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	if !slices.Equal(recovered, []string{"gt"}) {
+		t.Errorf("the recovery ran for %v, want once for gt", recovered)
+	}
+	got := logs.String()
+	// Decide's quiet-day reason is logged only after Decide has run.
+	if !strings.Contains(got, "squash: gt: no threshold tripped") {
+		t.Errorf("the check did not reach Decide after a clean recovery: %q", got)
+	}
+	if _, err := os.Stat(squashLedgerPath(d.config.TownRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a clean recovery wrote the ledger: stat error %v, want the file absent", err)
+	}
+	if len(*escalations) != 0 {
+		t.Errorf("a clean recovery raised an item: %v", *escalations)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(strings.ToLower(line), "recover") {
+			t.Errorf("a clean recovery logged a line: %q", line)
+		}
+	}
+	if squashDestructiveSent(server.queries) {
+		t.Errorf("a clean recovery sent a statement that is not a read: %q", server.queries)
+	}
+}
