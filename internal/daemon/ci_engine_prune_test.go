@@ -626,6 +626,45 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneDryRunReportsTheCappedPlan: a dry run names only what an apply
+// would remove now. Three anonymous volumes against a cap of one list the volume
+// created longest ago alone, count one in the summary, and name the other two as
+// remaining for a later run.
+func TestCIEnginePruneDryRunReportsTheCappedPlan(t *testing.T) {
+	t.Parallel()
+	listing := engListing(t, nil, nil, []map[string]any{
+		engVol(engHex64('1'), 30*time.Hour),
+		engVol(engHex64('2'), 70*time.Hour),
+		engVol(engHex64('3'), 40*time.Hour),
+	})
+	limit := 1
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeDryRun, listing, engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneMaxPerKind = &limit
+	f.tick()
+	f.drain()
+
+	logs := f.logs.String()
+	if n := strings.Count(logs, "dry_run: would remove volume"); n != 1 {
+		t.Fatalf("the dry run named %d volume(s) to remove, want the one an apply would remove:\n%s", n, logs)
+	}
+	if want := "dry_run: would remove volume " + engHex64('2'); !strings.Contains(logs, want) {
+		t.Errorf("the dry run does not name the volume created longest ago (%q):\n%s", want, logs)
+	}
+	if want := "would remove 0 containers, 0 images, 1 volumes"; !strings.Contains(logs, want) {
+		t.Errorf("the dry run's summary does not count the capped plan (%q):\n%s", want, logs)
+	}
+	if want := "0 container(s), 0 image(s), 2 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 1"; !strings.Contains(logs, want) {
+		t.Errorf("the dry run does not name the volumes over the cap (%q):\n%s", want, logs)
+	}
+	// engineDockerExecs matches "-- docker <verb> ", so an empty verb matches no
+	// call at all; each removing verb is named, and the run's own reads are not.
+	for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
+		if n := len(engineDockerExecs(f, verb)); n != 0 {
+			t.Fatalf("a dry run ran %d docker %q command(s)", n, verb)
+		}
+	}
+}
+
 // TestCIEnginePruneApplyRemovesThePlannedIds: an apply runs one docker command per
 // kind over exactly the planned ids, prunes the build cache at the cutoff, and takes
 // its verdict from what docker reported removed; a removal docker did not report,
@@ -2836,7 +2875,7 @@ func TestCIEnginePruneCapVolumesRemaining(t *testing.T) {
 		t.Errorf("docker volume rm removed %q, want the two oldest %q", got, want)
 	}
 	logs := f.logs.String()
-	if want := "3 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
+	if want := "0 container(s), 0 image(s), 3 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
 		t.Errorf("the run's log does not name the volumes left behind (%q):\n%s", want, logs)
 	}
 	if items := enginePruneItems(f); len(items) != 0 {
@@ -2913,7 +2952,7 @@ func TestCIEnginePruneCapsContainers(t *testing.T) {
 	if got, want := engineDockerIDs(execs[0].args), []string{engHex64('1'), engHex64('2')}; !slices.Equal(got, want) {
 		t.Errorf("docker rm removed %q, want the two stopped longest ago %q", got, want)
 	}
-	if want := "3 container(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(f.logs.String(), want) {
+	if want := "3 container(s), 0 image(s), 0 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(f.logs.String(), want) {
 		t.Errorf("the run's log does not name the containers left behind (%q):\n%s", want, f.logs.String())
 	}
 
@@ -2967,7 +3006,7 @@ func TestCIEnginePruneCapRemaining(t *testing.T) {
 	if got, want := engineDockerIDs(execs[0].args), []string{engHex64('1')}; !slices.Equal(got, want) {
 		t.Errorf("docker rm removed %q, want the one stopped longest ago %q", got, want)
 	}
-	if want := "2 container(s) remain for a later run, over ci_engine_prune_max_per_kind 1"; !strings.Contains(f.logs.String(), want) {
+	if want := "2 container(s), 0 image(s), 0 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 1"; !strings.Contains(f.logs.String(), want) {
 		t.Errorf("the run's log does not name the containers left behind (%q):\n%s", want, f.logs.String())
 	}
 	if items := enginePruneItems(f); len(items) != 0 {
@@ -3023,7 +3062,7 @@ func TestCIEnginePruneCapImagesRemaining(t *testing.T) {
 		t.Errorf("docker rmi removed %q, want the plan's first two %q", got, want)
 	}
 	logs := f.logs.String()
-	if want := "3 image(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
+	if want := "0 container(s), 3 image(s), 0 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 2"; !strings.Contains(logs, want) {
 		t.Errorf("the run's log does not name the images left behind (%q):\n%s", want, logs)
 	}
 	if !strings.Contains(logs, "removed 0 containers, 2 images, 0 volumes") {

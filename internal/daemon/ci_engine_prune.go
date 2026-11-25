@@ -1104,10 +1104,24 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	}
 
 	before := polecatimage.Human(*listing.DataRootKiB * 1024)
-	counts := ciEngineRemovalCounts(ciEngineRemovals(plan))
+	// The ledger's stats keep the totals the plan found, as they did before the cap
+	// moved ahead of the dry run's exit; the run's lines count what the cap leaves.
 	stats["containers"] = int64(len(plan.containers))
 	stats["images"] = int64(len(plan.images))
 	stats["volumes"] = int64(len(plan.volumes))
+	// The per-run cap keeps the containers stopped longest ago, the volumes
+	// created longest ago and the plan's first images, most layers first; the
+	// rest wait for a later run, and a run that leaves some is a verdict, not a
+	// failure. A container the cap keeps stays in the engine, so the images and
+	// volumes it still references come out of the plan with it. A dry run reports
+	// this capped plan, so it names only what an apply would remove now.
+	capped, remaining := ciEngineCappedPlan(plan, maxPerKind)
+	plan = capped
+	if remaining.containers > 0 || remaining.images > 0 || remaining.volumes > 0 {
+		d.logger.Printf("disk_maintenance: ci engine prune: %d container(s), %d image(s), %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
+			remaining.containers, remaining.images, remaining.volumes, maxPerKind)
+	}
+	counts := ciEngineRemovalCounts(ciEngineRemovals(plan))
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		for _, c := range plan.containers {
 			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove container %s", c.ID[:12])
@@ -1123,26 +1137,6 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		// The build cache step did not run, so no build_cache_bytes is recorded.
 		outcome = ciEngineOutcomeOK
 		return true, ""
-	}
-
-	// The per-run cap keeps the containers stopped longest ago, the volumes
-	// created longest ago and the plan's first images, most layers first; the
-	// rest wait for a later run, and a run that leaves some is a verdict, not a
-	// failure. A container the cap keeps stays in the engine, so the images and
-	// volumes it still references come out of the plan with it.
-	capped, remaining := ciEngineCappedPlan(plan, maxPerKind)
-	plan = capped
-	if remaining.containers > 0 {
-		d.logger.Printf("disk_maintenance: ci engine prune: %d container(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
-			remaining.containers, maxPerKind)
-	}
-	if remaining.images > 0 {
-		d.logger.Printf("disk_maintenance: ci engine prune: %d image(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
-			remaining.images, maxPerKind)
-	}
-	if remaining.volumes > 0 {
-		d.logger.Printf("disk_maintenance: ci engine prune: %d volume(s) remain for a later run, over ci_engine_prune_max_per_kind %d",
-			remaining.volumes, maxPerKind)
 	}
 
 	// Every kind and the build cache prune run whatever an earlier one did; each
