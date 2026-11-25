@@ -524,3 +524,37 @@ func TestTickEffChunkBoundary(t *testing.T) {
 		}
 	}
 }
+
+// The ids a chunk left unread because its read timed out fill the next chunk
+// only after the ids that are not late, so a chunk that keeps timing out does
+// not hold the same parents at the front of every tick (gt-6f2yal). With no
+// late set the chunk is the one the loop has always read (gt-8gvizh).
+func TestSpecChildrenChunk(t *testing.T) {
+	t.Parallel()
+	wanted := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"}
+	for _, tc := range []struct {
+		name  string
+		asked string
+		read  map[string]bool
+		size  int
+		late  []map[string]bool
+		want  string
+	}{
+		{"no late argument keeps the list order", "c", nil, 8, nil, "cdefghij"},
+		{"a nil late set keeps the list order", "c", nil, 8, []map[string]bool{nil}, "cdefghij"},
+		{"an empty late set keeps the list order", "c", nil, 8, []map[string]bool{{}}, "cdefghij"},
+		{"a late head does not take the first slots", "c", nil, 4, []map[string]bool{{"d": true, "e": true}}, "cfgh"},
+		{"late ids fill what the others leave", "c", nil, 8, []map[string]bool{{"d": true, "f": true}}, "ceghijkd"},
+		{"only late ids left keep the list order", "h", nil, 8, []map[string]bool{{"i": true, "j": true, "k": true}}, "hijk"},
+		{"asked leads even when late", "c", nil, 8, []map[string]bool{{"c": true}}, "cdefghij"},
+		{"read ids stay out of both passes", "c", map[string]bool{"f": true}, 4, []map[string]bool{{"d": true}}, "cegh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := strings.Join(specChildrenChunk(wanted, tc.asked, tc.read, tc.size, tc.late...), "")
+			if got != tc.want {
+				t.Errorf("specChildrenChunk(asked %s, late %v) = %q, want %q", tc.asked, tc.late, got, tc.want)
+			}
+		})
+	}
+}

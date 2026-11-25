@@ -806,14 +806,35 @@ func isBDTimeout(err error) bool {
 // specChildrenChunk is the read that serves the loop when it reaches asked:
 // asked, then the unread wanted ids after it in order, until the chunk holds
 // size ids or the list ends. An asked id the list does not hold is read alone.
-func specChildrenChunk(wanted []string, asked string, read map[string]bool, size int) []string {
+//
+// late optionally holds the ids an earlier tick's chunk left unread because its
+// read timed out (the tick that keeps them passes them here, gt-6f2yal): they
+// fill the chunk only after the ids that are not late, so a parent whose chunk
+// keeps timing out cannot hold the front of every tick. No set, or an empty
+// one, keeps the list order. Only the first set is read.
+func specChildrenChunk(wanted []string, asked string, read map[string]bool, size int, late ...map[string]bool) []string {
 	chunk := []string{asked}
+	var lateIDs map[string]bool
+	if len(late) > 0 {
+		lateIDs = late[0]
+	}
 	if at := slices.Index(wanted, asked); at >= 0 {
-		for _, id := range wanted[at+1:] {
+		rest := wanted[at+1:]
+		// Two passes: the ids that are not late fill the chunk first, so this
+		// tick reaches past a chunk that keeps timing out (gt-6f2yal).
+		for _, id := range rest {
 			if len(chunk) >= size {
 				break
 			}
-			if !read[id] {
+			if !read[id] && !lateIDs[id] {
+				chunk = append(chunk, id)
+			}
+		}
+		for _, id := range rest {
+			if len(chunk) >= size {
+				break
+			}
+			if !read[id] && lateIDs[id] {
 				chunk = append(chunk, id)
 			}
 		}
