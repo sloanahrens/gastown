@@ -899,36 +899,32 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 // TestTownRunnerRollHoldPathUsesTheExportedName: the roll's hold path is built from runnerroll's one exported name.
 func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 	t.Parallel()
-	got := runnerRollDepsFor("/town", &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
+	got := runnerRollDepsFor("/town", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
 	if !strings.HasSuffix(got, runnerroll.LandingHoldName) {
 		t.Errorf("the roll's hold path %q does not end with %q", got, runnerroll.LandingHoldName)
 	}
 }
 
-// TestRunnerRollDepsForWiresThePodHoldStore: the production deps carry a hold
-// store, and a Create through the pod store reaches the pod runner with the hold
-// path under the town root and the content on stdin.
+// TestRunnerRollDepsForWiresThePodHoldStore: the store the production deps carry
+// is the pod store over the exec runnerRollDepsFor was given, so a Create through
+// deps.store reaches that exec with the hold path under the town root and the
+// content on stdin. A deps that wired another exec or path would not.
 func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 	t.Parallel()
-	deps := runnerRollDepsFor("/town", &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
-	if deps.err != nil {
-		t.Fatalf("deps error = %v, want none", deps.err)
-	}
-	if deps.store == nil {
-		t.Fatal("the production deps have no landing hold store")
-	}
-
 	var argv []string
 	var stdin []byte
 	fakePodExec := func(_ context.Context, got []string, in []byte) ([]byte, int, error) {
 		argv, stdin = got, in
 		return []byte("created\n"), 0, nil
 	}
-	store, err := podHoldStore("/town", fakePodExec)
-	if err != nil {
-		t.Fatalf("podHoldStore: %v", err)
+	deps := runnerRollDepsFor("/town", fakePodExec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	if deps.err != nil {
+		t.Fatalf("deps error = %v, want none", deps.err)
 	}
-	if err := store.Create(t.Context(), "owner furiosa\n"); err != nil {
+	if deps.store == nil {
+		t.Fatal("the production deps have no landing hold store")
+	}
+	if err := deps.store.Create(t.Context(), "owner furiosa\n"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if !slices.Contains(argv, filepath.Join("/town", runnerroll.LandingHoldName)) {
@@ -944,7 +940,7 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 // takes the hold or runs any step.
 func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
 	t.Parallel()
-	deps := runnerRollDepsFor("", &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.err == nil {
 		t.Fatal("deps for an empty town root carry no error")
 	}
