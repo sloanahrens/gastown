@@ -15,10 +15,23 @@ const reviewDirPrefix = "review-"
 // addReviewWorktree adds a worktree detached at base for a review made ahead of
 // a landing. It lives in its own WorkRoot/review-<id> directory, created 0700
 // because om's raw model replies are written under it during the review. The
-// git calls here hold gitMu; Land's own git calls do not take it yet.
+// Repo it returns carries the landing's committing identity, read from the
+// head's author the way Land reads it before cutting its own worktree
+// (landingCommitEnv): the merge commit a review makes through it names the
+// landing committer and the seat that did the work (gt-vuv2n). The handle is
+// opened through openLanding rather than l.open, so a review's git reads retry
+// a config read that raced another process, as a landing's reads do. The
+// identity read runs before gitMu is taken; only the worktree calls here hold
+// gitMu.
 // cleanup removes the worktree and the whole review directory; the caller
 // defers it, and a second call does nothing.
-func (l *Lander) addReviewWorktree(g Repo, base string) (wt Repo, dir string, cleanup func(), err error) {
+func (l *Lander) addReviewWorktree(g Repo, w Work, base string) (wt Repo, dir string, cleanup func(), err error) {
+	// The identity is read before the worktree is cut, so an unreadable head
+	// author is returned with no directory made, as Land refuses it.
+	env, err := l.landingCommitEnv(g, w)
+	if err != nil {
+		return nil, "", nil, err
+	}
 	// Making the root and the review directory fail the same way: one return
 	// carries either error, so a refusal is one branch.
 	var review string
@@ -56,5 +69,5 @@ func (l *Lander) addReviewWorktree(g Repo, base string) (wt Repo, dir string, cl
 			}
 		})
 	}
-	return l.open(dir), dir, cleanup, nil
+	return l.openLanding(dir, env), dir, cleanup, nil
 }
