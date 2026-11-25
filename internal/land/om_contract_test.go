@@ -427,6 +427,7 @@ func TestOMContractVerdictFields(t *testing.T) {
 			{ID: "f2", Severity: "minor", Path: "README.md", Title: "typo"},
 		},
 		Version: contractOMSHA,
+		Flags:   []string{"--base", "--bead", "--criteria-file", "--head", "--out", "-C"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("verdict = %+v\nwant      %+v", got, want)
@@ -445,7 +446,8 @@ func TestOMContractApproveWithoutOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Verdict{Verdict: VerdictApprove, Score: 0.95, Version: contractOMSHA}
+	want := Verdict{Verdict: VerdictApprove, Score: 0.95, Version: contractOMSHA,
+		Flags: []string{"--base", "--bead", "--criteria-file", "--head", "--out", "-C"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("verdict = %+v, want %+v", got, want)
 	}
