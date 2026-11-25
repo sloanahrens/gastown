@@ -726,3 +726,38 @@ func TestOMConfigAbsentIsNoConfig(t *testing.T) {
 		t.Errorf("source %q names an error for an absent config", source)
 	}
 }
+
+// TestReviewPoolOMStageReusedFlag drives whole stage log lines through the
+// reader's parse, the call that builds omStage, and checks the Reused flag and
+// the om time. A reused landing's om time is nil: its verdict was stored, not
+// run, so the panel's average skips it.
+func TestReviewPoolOMStageReusedFlag(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		stages string
+		reused bool
+	}{
+		{"reused form", "ci 1m32s, om reused (2m31s, 14m0s old)", true},
+		{"plain om line", "lint 3s, gate 1m, om 20s", false},
+		{"waiver form", "ci 1m32s, om skipped (overseer-reviewed)", false},
+		{"skipped gate", "ci skipped (om rejected), om 12s", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &omReader{}
+			r.parseLogLine("2026/10/03 16:41:42 landing_worker: [land] gt-x: stages: " + tc.stages)
+			if len(r.stages) != 1 {
+				t.Fatalf("stages = %+v, want one stage line", r.stages)
+			}
+			st := r.stages[0]
+			if st.Reused != tc.reused {
+				t.Errorf("Reused = %v, want %v (line %q)", st.Reused, tc.reused, tc.stages)
+			}
+			if tc.reused && st.OM != nil {
+				t.Errorf("reused form om = %v, want nil", *st.OM)
+			}
+		})
+	}
+}

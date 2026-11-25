@@ -97,13 +97,16 @@ var (
 const infraFailedMarker = ": landing failed ("
 
 // omStage is one gated merge's stage timings, off a "stages:" log line. A
-// stage the line does not name is nil; om is nil when the review did not run.
+// stage the line does not name is nil; om is nil when the review did not run,
+// and a reused landing's om is nil too: its verdict was stored, not run.
+// Reused is set when the line carries the reused-verdict suffix.
 type omStage struct {
-	At   time.Time
-	Bead string
-	Lint *time.Duration
-	Gate *time.Duration
-	OM   *time.Duration
+	At     time.Time
+	Bead   string
+	Lint   *time.Duration
+	Gate   *time.Duration
+	OM     *time.Duration
+	Reused bool
 }
 
 // omRejection is one rejected landing, off a "rejected (kind):" log line.
@@ -873,7 +876,8 @@ func (r *omReader) parseLogLine(line string) {
 	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
 		lint, gate, om := omStageTimes(m[3])
-		r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om})
+		_, _, reused := omStageReused(m[3])
+		r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om, Reused: reused})
 		return
 	}
 	if m := omRejectRe.FindStringSubmatch(line); m != nil {
