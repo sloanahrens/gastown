@@ -484,17 +484,21 @@ func runnerRollRunsRead(townRoot string, seam runnerRollRunsSeam) (func(context.
 // landing read is the pod's townhealth.json, and the runs read lists the gate
 // and post-land runs of the rig repos through the viewer's client, so a real
 // roll waits for both rather than refusing for want of them. A rig it cannot resolve
-// is a read that returns the reason, never a shorter list.
+// is a read that returns the reason, never a shorter list. A runs read that cannot
+// be built is carried in err too, so a real roll refuses before the hold instead
+// of taking it for a wait it cannot run.
 func runnerRollDepsFor(townRoot string, exec podExec, seam runnerRollRunsSeam, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
 	store, storeErr := podHoldStore(townRoot, exec)
 	runs, runsErr := runnerRollRunsRead(townRoot, seam)
 	if runsErr != nil {
-		// A read that could not be built is not a read with no runs: the wait
-		// returns the reason, so the roll stops at step 3 and releases the hold.
+		// A read that could not be built is not a read with no runs: it still
+		// returns the reason, so a wait that ran it could not pass as clean. A
+		// real roll never gets that far, since deps.err makes it refuse before
+		// the hold, and a dry run reads no runs.
 		runs = func(context.Context) ([]runnerroll.WorkflowRun, error) { return nil, runsErr }
 	}
 	return runnerRollDeps{
-		err:      storeErr,
+		err:      errors.Join(storeErr, runsErr),
 		store:    store,
 		holdPath: filepath.Join(townRoot, runnerroll.LandingHoldName),
 		landing:  podLandingRead(townRoot, newPodRunner(exec)),
