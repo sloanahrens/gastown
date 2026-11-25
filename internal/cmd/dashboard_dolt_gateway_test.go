@@ -321,3 +321,94 @@ func TestDoltGatewaySectionRegisters(t *testing.T) {
 	}
 	t.Fatalf("the Dolt panel has no %s section registered", doltGatewaySectionKey)
 }
+
+func uint64p(n uint64) *uint64 { return &n }
+
+// withConflicts is a stats answer carrying the cap counters and a conflict count.
+func withConflicts(refusals, conflicts uint64) bdgateway.GatewayStats {
+	s := gatewayCaps(1, 2, refusals)
+	s.Conflicts = uint64p(conflicts)
+	return s
+}
+
+// TestDoltGatewaySectionCountsConflicts: the conflict counter is counted like
+// the refusals, in its own column: the first read is a baseline and the second
+// puts what the counter gained in the bucket it falls in.
+func TestDoltGatewaySectionCountsConflicts(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{withConflicts(5, 2), withConflicts(6, 5)}}
+	section := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440")
+
+	got, err := section.read(context.Background(), start)
+	if err != nil {
+		t.Fatalf("the first read: %v", err)
+	}
+	if want := []string{"ten minutes", "429 refusals", "conflicts"}; !slices.Equal(got.Head, want) {
+		t.Errorf("Head = %v, want %v", got.Head, want)
+	}
+	got, err = section.read(context.Background(), start.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("the second read: %v", err)
+	}
+	if last, want := got.Rows[len(got.Rows)-1], []string{"15:30-15:40", "1", "3"}; !slices.Equal(last, want) {
+		t.Errorf("the bucket the deltas fell in = %v, want %v", last, want)
+	}
+}
+
+// TestDoltGatewaySectionOmitsTheConflictColumn: an answer without the conflict
+// count leaves exactly that column out rather than showing zeros, and the note
+// says so.
+func TestDoltGatewaySectionOmitsTheConflictColumn(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{gatewayCaps(1, 2, 3)}}
+	got, err := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440").read(context.Background(), now)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if want := []string{"ten minutes", "429 refusals"}; !slices.Equal(got.Head, want) {
+		t.Errorf("Head = %v, want %v", got.Head, want)
+	}
+	for _, row := range got.Rows {
+		if len(row) != 2 {
+			t.Errorf("row %v has %d cells, want 2 for the head", row, len(row))
+		}
+	}
+	if !strings.Contains(got.Note, "no conflict count") {
+		t.Errorf("Note = %q, want it to say the stats carry no conflict count", got.Note)
+	}
+}
+
+// TestDoltGatewaySectionConflictGapAddsNothing: an answer that drops the conflict
+// count clears its baseline, so the read after the gap adds nothing to it however
+// far apart the answers that carried it were, and the read after that counts its
+// delta again.
+func TestDoltGatewaySectionConflictGapAddsNothing(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 11, 22, 15, 20, 0, 0, time.UTC)
+	stats := &fakeDoltGatewayStats{answers: []bdgateway.GatewayStats{withConflicts(1, 5), gatewayCaps(1, 2, 1), withConflicts(1, 9), withConflicts(1, 12)}}
+	section := newDoltGatewaySection(stats.read, "bd-gateway.gt.svc:7440")
+	var got dashboard.DoltSection
+	for i := range 3 {
+		var err error
+		if got, err = section.read(context.Background(), start.Add(time.Duration(i)*10*time.Minute)); err != nil {
+			t.Fatalf("read %d: %v", i+1, err)
+		}
+	}
+	for _, row := range got.Rows {
+		if row[2] != "0" {
+			t.Errorf("the read after a gap in the conflict count added %v; it is a new baseline and adds nothing", row)
+		}
+	}
+	got, err := section.read(context.Background(), start.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("read 4: %v", err)
+	}
+	if last := got.Rows[len(got.Rows)-1]; last[2] != "3" {
+		t.Errorf("the bucket after the new baseline = %v, want 3 in the conflicts column", last)
+	}
+}

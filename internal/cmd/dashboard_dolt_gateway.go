@@ -34,7 +34,8 @@ const (
 
 	// The bucket keys are also the column headings, so one name cannot drift
 	// from the other.
-	doltGatewayRefusalsKey = "429 refusals"
+	doltGatewayRefusalsKey  = "429 refusals"
+	doltGatewayConflictsKey = "conflicts"
 )
 
 func init() {
@@ -94,6 +95,7 @@ type doltGatewaySection struct {
 	// newer one was counted is older than the baseline and counts nothing.
 	seq, applied uint64
 	refusals     doltGatewayCounter
+	conflicts    doltGatewayCounter
 	buckets      dashboard.Buckets
 	// restarted is whether the read now drawn saw a counter below its
 	// previous value: the gateway began again, so that read counts nothing.
@@ -112,7 +114,10 @@ func (s *doltGatewaySection) series(stats bdgateway.GatewayStats) []doltGatewayS
 	if stats.CapsPresent {
 		refusals.cur = &stats.TooManyCalls
 	}
-	return []doltGatewaySeries{refusals}
+	return []doltGatewaySeries{
+		refusals,
+		{key: doltGatewayConflictsKey, cur: stats.Conflicts, last: &s.conflicts},
+	}
 }
 
 // read polls the gateway, counts what each counter gained since the previous
@@ -214,6 +219,9 @@ func doltGatewayNote(stats bdgateway.GatewayStats, restarted bool) string {
 	note.WriteString(". Counts per ten minutes start when the dashboard starts")
 	if restarted {
 		note.WriteString("; the gateway restarted since the previous read, so that read added nothing")
+	}
+	if stats.Conflicts == nil {
+		note.WriteString("; the stats carry no conflict count, so that column is left out")
 	}
 	note.WriteString(".")
 	return note.String()
