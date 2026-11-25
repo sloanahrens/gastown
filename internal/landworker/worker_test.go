@@ -1144,6 +1144,20 @@ func TestSortByLandingOrderLandsP0First(t *testing.T) {
 	}
 }
 
+// A P0 submitted after an older P2 still sorts first: the P0 rule outranks
+// submission time (gt-vltd6l).
+func TestSortByLandingOrderP0First(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-p2", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-p0", 0, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-p0,gt-p2" {
+		t.Fatalf("order %s; want the P0 first", got)
+	}
+}
+
 func TestPolecatFromAssignee(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{"gastown/polecats/opal": "opal", crewSeat: "", "": "", "opal": ""} {
@@ -1304,6 +1318,63 @@ func TestPassLandsSameTimeByPriority(t *testing.T) {
 	}
 	if got := strings.Join(landed, ","); got != "gt-p1,gt-p2" {
 		t.Fatalf("landed %s; want the P1 first", got)
+	}
+}
+
+// passLandingOrder runs one pass over the seeded queue and returns the bead ids
+// the lander was called with, in call order. A pass that does not land every
+// seeded bead fails the test.
+func passLandingOrder(t *testing.T, h *harness, seeded int) string {
+	t.Helper()
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != seeded {
+		t.Fatalf("report %v; want all %d landed", rep, seeded)
+	}
+	var landed []string
+	for _, c := range h.lander.calls {
+		landed = append(landed, c.BeadID)
+	}
+	return strings.Join(landed, ",")
+}
+
+// A P0 submitted after an older P2 lands first at the pass, not only in the
+// sort: the pass lands the P0 ahead of the P2 it was queued behind (gt-vltd6l).
+func TestPassLandsP0AheadOfAnOlderP2(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-p2", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-p0", 0, "2026-09-30T10:30:00Z")
+	if got := passLandingOrder(t, h, 2); got != "gt-p0,gt-p2" {
+		t.Fatalf("landed %s; want the P0 first", got)
+	}
+}
+
+// Equal submission times land by priority, then by id, at the pass: the P1
+// lands before the P2 at the same time, and two beads at the same priority and
+// time land in id order (gt-vltd6l).
+func TestPassLandsEqualTimesByPriorityThenID(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-b", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-a", 1, "2026-09-30T10:00:00Z")
+	if got := passLandingOrder(t, h, 2); got != "gt-a,gt-b" {
+		t.Fatalf("landed %s; want the P1 first", got)
+	}
+
+	h = newHarness(t)
+	h.seedReadyAt(t, "gt-b", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-a", 2, "2026-09-30T10:00:00Z")
+	if got := passLandingOrder(t, h, 2); got != "gt-a,gt-b" {
+		t.Fatalf("landed %s; want the id order", got)
+	}
+
+	// The id order above agrees with the priority order, so it cannot show the
+	// priority rule is applied: here the id order and the priority disagree.
+	h = newHarness(t)
+	h.seedReadyAt(t, "gt-a", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-b", 1, "2026-09-30T10:00:00Z")
+	if got := passLandingOrder(t, h, 2); got != "gt-b,gt-a" {
+		t.Fatalf("landed %s; want the P1 first over the lower id", got)
 	}
 }
 
