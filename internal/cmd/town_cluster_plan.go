@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
@@ -33,12 +34,21 @@ type planRecord struct {
 	Files []planRecordFile `json:"files"`
 }
 
-// planRecordFile is one file of a plan record: its name and the hex SHA-256 of
-// its bytes. A rendered Deployment also records the revision the cluster holds
-// for it, as the annotation reads, and the object's resourceVersion, beside that
-// hash. A Deployment the cluster does not hold is marked absent with neither.
+// planPhaseStatic and planPhaseWorkloads name a plan's two phases, in the order
+// they apply: P holds the render's static control-cluster set, W the workloads.
+const (
+	planPhaseStatic    = "P"
+	planPhaseWorkloads = "W"
+)
+
+// planRecordFile is one file of a plan record: its name, its phase (P or W) and
+// the hex SHA-256 of its bytes. A rendered Deployment also records the revision
+// the cluster holds for it, as the annotation reads, and the object's
+// resourceVersion, beside that hash. A Deployment the cluster does not hold is
+// marked absent with neither.
 type planRecordFile struct {
 	Name            string `json:"name"`
+	Phase           string `json:"phase"`
 	SHA256          string `json:"sha256"`
 	Revision        string `json:"revision,omitempty"`
 	ResourceVersion string `json:"resourceVersion,omitempty"`
@@ -162,12 +172,13 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 
 // runTownClusterPlan renders the recorded flags' desired set with
 // runClusterRender, reads each rendered Deployment's revision and resourceVersion
-// through kube, writes plan.json into outDir with writeJSON, and prints the short
-// plan id to out. The plan takes the file set, its apply order and its bytes from
-// the render's own writes, so the id names exactly what the render wrote; the
-// render's own output is dropped, so the id is all that is printed. plan.json is
-// written only after every read succeeds, and the id only after it is written,
-// so a refusal, a render error, a failed read or a failed write prints no id.
+// through kube, writes plan.json into outDir with writeJSON, and prints the phases
+// and the short plan id to out. The plan takes the file set, its apply order and
+// its bytes from the render's own writes, so the id names exactly what the render
+// wrote; the render's own output is dropped, so only the phases and the id are
+// printed. plan.json is written only after every read succeeds, and the output
+// only after it is written, so a refusal, a render error, a failed read or a
+// failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -184,6 +195,17 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		bodies = append(bodies, data)
 		return nil
 	}
+	// The static documents are the render's static set, which the render writes as
+	// their reviewed bytes, so a file is phase P exactly when its bytes are one of them.
+	staticDocs := map[string]bool{}
+	build := d.build
+	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+		m, err := build(v)
+		for _, object := range m.Static {
+			staticDocs[string(object.Doc)] = true
+		}
+		return m, err
+	}
 	d.findTown = func() (string, error) { return root, nil }
 	// The town's running values file is the live render's to settle: a plan is a
 	// review, so it leaves the file the pair-ready check reads as it was.
@@ -194,6 +216,7 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	}
 	files := make([]planFile, len(names))
 	record := planRecord{Files: make([]planRecordFile, len(names))}
+	counts := map[string]int{}
 	for i, name := range names {
 		files[i] = planFile{Name: name, Data: bodies[i]}
 		sum := sha256.Sum256(bodies[i])
@@ -201,13 +224,20 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		if err != nil {
 			return err
 		}
-		record.Files[i] = planRecordFile{Name: name, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent}
+		phase := planPhaseWorkloads
+		if staticDocs[string(bodies[i])] {
+			phase = planPhaseStatic
+		}
+		counts[phase]++
+		record.Files[i] = planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent}
 	}
 	full, short := planID(files)
 	record.ID = full
 	if err := writeJSON(filepath.Join(outDir, planFileName), record); err != nil {
 		return fmt.Errorf("gt town cluster plan: cannot write %s, so the plan is not whole and no id was printed: %w", filepath.Join(outDir, planFileName), err)
 	}
+	fmt.Fprintf(out, "Phases in apply order: %s (static, %d files), then %s (workloads, %d files)\n",
+		planPhaseStatic, counts[planPhaseStatic], planPhaseWorkloads, counts[planPhaseWorkloads])
 	fmt.Fprintln(out, short)
 	return nil
 }

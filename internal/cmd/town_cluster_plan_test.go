@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"io/fs"
@@ -19,6 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/update"
@@ -131,8 +133,8 @@ func planTown(t *testing.T) string {
 // planOut is a fresh plan directory under a temporary parent.
 func planOut(t *testing.T) string { return filepath.Join(t.TempDir(), "plan") }
 
-// TestClusterShapePlanIdPrintsTheShortId: the plan prints the 12-hex short form
-// of planID over the files it rendered, in apply order, and nothing else.
+// TestClusterShapePlanIdPrintsTheShortId: the plan prints the phases line, then
+// the 12-hex short form of planID over the files it rendered, as the last line.
 func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
@@ -140,8 +142,74 @@ func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
 		t.Fatalf("running the plan: %v", err)
 	}
 	_, short := planID(planFilesIn(t, dir))
-	if got := out.String(); got != short+"\n" {
-		t.Fatalf("the plan printed %q, want the short id %q and a newline", got, short)
+	if got := out.String(); !strings.HasSuffix(got, "\n"+short+"\n") {
+		t.Fatalf("the plan printed %q, want the short id %q as its last line", got, short)
+	}
+}
+
+// planStaticDocs is the bytes of each embedded static document: the bytes the
+// render writes for the static set, so a rendered file is phase P exactly when
+// its bytes are one of them.
+func planStaticDocs(t *testing.T) map[string]bool {
+	t.Helper()
+	static, err := k8s.Static()
+	if err != nil {
+		t.Fatalf("reading the embedded static set: %v", err)
+	}
+	docs := make(map[string]bool, len(static))
+	for _, object := range static {
+		docs[string(object.Doc)] = true
+	}
+	return docs
+}
+
+// planWantPhase is the phase plan.json records for a rendered file: P for an
+// embedded static document, W for every other file.
+func planWantPhase(static map[string]bool, f planFile) string {
+	if static[string(f.Data)] {
+		return planPhaseStatic
+	}
+	return planPhaseWorkloads
+}
+
+// TestClusterShapePlanPhases: plan.json gives every file its phase, P for the
+// static set and W for the workloads; each embedded static document is one P
+// file, and no Deployment is P. The output names P then W, in that order, before
+// the plan id.
+func TestClusterShapePlanPhases(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	files := planFilesIn(t, dir)
+	if len(rec.Files) != len(files) {
+		t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+	}
+	static := planStaticDocs(t)
+	counts := map[string]int{}
+	for i, f := range files {
+		want := planWantPhase(static, f)
+		if rec.Files[i].Phase != want {
+			t.Errorf("plan.json phase for %s = %q, want %q", f.Name, rec.Files[i].Phase, want)
+		}
+		if planWantDeployment(t, f) != "" && rec.Files[i].Phase != planPhaseWorkloads {
+			t.Errorf("plan.json phase for the Deployment %s = %q, want %q", f.Name, rec.Files[i].Phase, planPhaseWorkloads)
+		}
+		counts[rec.Files[i].Phase]++
+	}
+	if counts[planPhaseStatic] != len(static) {
+		t.Fatalf("plan.json holds %d phase P files, want the %d embedded static documents", counts[planPhaseStatic], len(static))
+	}
+	if counts[planPhaseWorkloads] == 0 {
+		t.Fatal("plan.json holds no phase W file, so the workloads are missing from the plan")
+	}
+	_, short := planID(files)
+	want := fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n%s\n",
+		counts[planPhaseStatic], counts[planPhaseWorkloads], short)
+	if got := out.String(); got != want {
+		t.Fatalf("the plan printed %q, want the phases in order P then W and the short id:\n%s", got, want)
 	}
 }
 
@@ -197,15 +265,16 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	if rec.ID != full || len(rec.ID) != 64 {
 		t.Fatalf("plan.json id = %q, want the full 64-hex id %q", rec.ID, full)
 	}
-	if got := out.String(); got != rec.ID[:12]+"\n" {
-		t.Fatalf("the plan printed %q, want the 12-hex short id %q and a newline", got, rec.ID[:12])
+	if got := out.String(); !strings.HasSuffix(got, "\n"+rec.ID[:12]+"\n") {
+		t.Fatalf("the plan printed %q, want the 12-hex short id %q as its last line", got, rec.ID[:12])
 	}
 	if len(rec.Files) != len(files) {
 		t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
 	}
+	static := planStaticDocs(t)
 	for i, f := range files {
 		sum := sha256.Sum256(f.Data)
-		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f), ResourceVersion: planWantResourceVersion(t, f)}
+		want := planRecordFile{Name: f.Name, Phase: planWantPhase(static, f), SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f), ResourceVersion: planWantResourceVersion(t, f)}
 		if rec.Files[i] != want {
 			t.Errorf("plan.json file %d = %+v, want %+v", i, rec.Files[i], want)
 		}
