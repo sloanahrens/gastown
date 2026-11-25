@@ -428,6 +428,51 @@ func TestAgentBeadsFixShowError(t *testing.T) {
 	})
 }
 
+// unreadAgentBeads is a bead store whose agent-bead list fails: the database's
+// answer is unknown, not empty.
+type unreadAgentBeads struct {
+	doctorBeads
+	err error
+}
+
+func (u unreadAgentBeads) ListAgentBeads() (map[string]*beads.Issue, error) { return nil, u.err }
+
+// TestAgentBeadsFixUnreadScope verifies that Fix refuses to create anything
+// when an agent-bead scope could not be read. An unread scope is not an empty
+// one: read as empty, every agent the database failed to list looks missing
+// and the destructive fix recreates them (gt-rhu7h3).
+func TestAgentBeadsFixUnreadScope(t *testing.T) {
+	t.Parallel()
+	tmpDir := setupTownDuplicateFixture(t)
+	bd := townDuplicateBD(tmpDir)
+	rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+	storeErr := errors.New("store unavailable")
+	ctx := bd.ctx(tmpDir, "gastown")
+	open := ctx.openBeads
+	ctx.openBeads = func(site beadsSite) doctorBeads {
+		db := open(site)
+		if filepath.Clean(site.workDir) != filepath.Clean(rigDir) {
+			return db
+		}
+		return unreadAgentBeads{doctorBeads: db, err: storeErr}
+	}
+
+	err := NewAgentBeadsCheck().Fix(ctx)
+
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("Fix() error = %v, want the could-not-be-read error wrapping %v", err, storeErr)
+	}
+	if !strings.Contains(err.Error(), "agent beads could not be read") {
+		t.Errorf("Fix() error = %q, want it to say the agent beads could not be read", err)
+	}
+	if creates := bd.creates(); len(creates) != 0 {
+		t.Errorf("Fix() created %v from an unread scope, want no creates", creates)
+	}
+	if updates := bd.updates(); len(updates) != 0 {
+		t.Errorf("Fix() updated %v from an unread scope, want no updates", updates)
+	}
+}
+
 // bdExit is the exit status of a bd call, as *exec.ExitError carries it.
 type bdExit int
 
