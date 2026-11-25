@@ -369,6 +369,62 @@ func setCrewAssignee(t *testing.T, h *submitHarness, assignee string) {
 	}
 }
 
+// TestClaimForCrewSubmit: a crew submission claims a bead nobody else is
+// building for the submitter, so the landing worker's rejection path keeps it
+// with that owner instead of releasing it to dispatch and getting the branch
+// built a second time (gt-42cryp). An unassigned bead and a polecat-held bead
+// are claimed; a bead another crew member holds is left as it is. A failed
+// write is returned, never read as a successful claim.
+func TestClaimForCrewSubmit(t *testing.T) {
+	t.Parallel()
+	const sender = "gastown/crew/operator"
+	cases := []struct {
+		name        string
+		assignee    string
+		updateErr   error
+		wantClaimed bool
+	}{
+		{"unassigned", "", nil, true},
+		{"polecat seat holder", "gastown/polecats/agate", nil, true},
+		{"another crew member", "gastown/crew/wren", nil, false},
+		{"failed write", "", errors.New("database is locked"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSubmitHarness(t)
+			if tc.assignee != "" {
+				setCrewAssignee(t, h, tc.assignee)
+			}
+			before := h.source(t)
+			var bd beads.Client = h.bd
+			if tc.updateErr != nil {
+				bd = &failingBD{Client: h.bd, updateErr: tc.updateErr}
+			}
+			err := claimForCrewSubmit(bd, before, sender)
+			if tc.updateErr != nil {
+				if !errors.Is(err, tc.updateErr) {
+					t.Fatalf("claim error = %v, want the write error %v", err, tc.updateErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("claimForCrewSubmit: %v", err)
+			}
+			after := h.source(t)
+			if tc.wantClaimed {
+				if after.Status != string(beads.StatusInProgress) || after.Assignee != sender {
+					t.Errorf("after claim status %q assignee %q, want in_progress/%q", after.Status, after.Assignee, sender)
+				}
+				return
+			}
+			if after.Status != before.Status || after.Assignee != tc.assignee {
+				t.Errorf("held bead changed to status %q assignee %q, want %q/%q", after.Status, after.Assignee, before.Status, tc.assignee)
+			}
+		})
+	}
+}
+
 // TestCrewSubmitStandsDownPolecatHolder: a crew submission of a bead a live
 // polecat still holds nudges that seat once, names the crew branch and head,
 // says not to submit, and tells it to defer. One takeover comment records it.

@@ -280,6 +280,43 @@ func polecatAssigneeSeat(assignee string, reg *session.PrefixRegistry) (string, 
 	return session.PolecatSessionName(reg.PrefixForRig(parts[0]), parts[2]), true
 }
 
+// claimForCrewSubmit gives a crew submission's bead to the member submitting
+// it, so the landing worker's rejection path keeps the bead with a bird owner
+// instead of reopening it for dispatch and getting the branch built a second
+// time (gt-42cryp). A bead is the submitter's to claim when nobody holds it or
+// a polecat seat does: an unassigned bead has no owner to keep it, and a
+// polecat seat is the holder a crew submission already stands down. Any other
+// holder keeps the bead, so a submission never takes live work from a crew
+// member or bird. A failed write is returned, never read as a successful
+// claim.
+func claimForCrewSubmit(bd beads.Client, issue *beads.Issue, sender string) error {
+	if birdOwnedAssignee(issue.Assignee) {
+		return nil
+	}
+	status := string(beads.StatusInProgress)
+	if err := bd.Update(issue.ID, beads.UpdateOptions{Status: &status, Assignee: &sender}); err != nil {
+		return fmt.Errorf("claiming %s for %s: %w", issue.ID, sender, err)
+	}
+	return nil
+}
+
+// birdOwnedAssignee reports whether assignee names a holder the landing
+// worker's rejection path keeps a bead with: a non-empty assignee with no
+// `polecats` path segment. A polecat seat fails it, and so does an empty
+// assignee, which is exactly the pair claimForCrewSubmit may claim.
+func birdOwnedAssignee(assignee string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return false
+	}
+	for _, seg := range strings.Split(assignee, "/") {
+		if seg == "polecats" {
+			return false
+		}
+	}
+	return true
+}
+
 // standDownCrewHolder tells the polecat that still holds a bead a crew member
 // has just submitted to release its seat with `gt done --status DEFERRED`. The
 // holder cannot submit the work (a crew branch already did), and its session
