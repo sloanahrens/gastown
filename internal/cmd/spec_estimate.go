@@ -446,9 +446,10 @@ func specEstimateLogRecord(beadID, hash string, r estimate.Result, at time.Time)
 		},
 		Embedding: r.Embedding,
 		Minutes: estlog.Minutes{
-			Shape: r.ComponentMinutes.Shape,
-			Embed: r.ComponentMinutes.Embed,
-			Jev:   r.ComponentMinutes.Jev,
+			Shape:    r.ComponentMinutes.Shape,
+			Embed:    r.ComponentMinutes.Embed,
+			Declared: r.ComponentMinutes.Declared,
+			Jev:      r.ComponentMinutes.Jev,
 		},
 		BlendedMinutes: r.Minutes,
 		DeclaredLines:  r.DeclaredLines,

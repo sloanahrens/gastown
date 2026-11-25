@@ -78,7 +78,11 @@ type Shape struct {
 type Minutes struct {
 	Shape *float64 `json:"shape,omitempty"`
 	Embed *float64 `json:"embed,omitempty"`
-	Jev   *float64 `json:"jev,omitempty"`
+	// Declared is the declared-lines curve's minutes; nil when the estimate had
+	// no declared term to average, so a row for such a bead reads as it did
+	// before the field existed.
+	Declared *float64 `json:"declared,omitempty"`
+	Jev      *float64 `json:"jev,omitempty"`
 }
 
 // Append writes r to the estimate log of townRoot as one JSON line, creating
