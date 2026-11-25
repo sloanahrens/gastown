@@ -517,3 +517,73 @@ func (f *fakeLogFS) logLines() []string {
 	}
 	return strings.Split(body, "\n")
 }
+
+// TestDeclaredLinesRoundTrip: a record for a bead whose Size section declares a
+// Change line writes declared_lines and reads the same number back.
+func TestDeclaredLinesRoundTrip(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := sampleRecord("gt-declared")
+	r.DeclaredLines = 80
+	if err := Append(town, r); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, skipped, err := Read(town)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if skipped != 0 || len(got) != 1 {
+		t.Fatalf("Read = %d records, %d skipped; want 1, 0", len(got), skipped)
+	}
+	if got[0].DeclaredLines != 80 {
+		t.Errorf("DeclaredLines = %v, want 80", got[0].DeclaredLines)
+	}
+}
+
+// TestDeclaredLinesOmittedWhenNone: a bead that declares no Change line writes a
+// line with no declared_lines key, so its row reads the same as a row written
+// before the field existed.
+func TestDeclaredLinesOmittedWhenNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := Append(town, sampleRecord("gt-undeclared")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	line, err := os.ReadFile(Path(town))
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(line, &fields); err != nil {
+		t.Fatalf("decode the line: %v", err)
+	}
+	if v, ok := fields["declared_lines"]; ok {
+		t.Errorf("declared_lines = %s on a bead with no Change line, want the key omitted", v)
+	}
+}
+
+// TestDeclaredLinesOldLineDecodes: a line written before the field existed, with
+// no declared_lines key, reads as a record with no declared size and is not
+// counted as malformed.
+func TestDeclaredLinesOldLineDecodes(t *testing.T) {
+	t.Parallel()
+	const oldLine = `{"bead_id":"gt-old","description_hash":"abc","shape":{"boxes":3},"embedding":null,` +
+		`"minutes":{"shape":9.5},"blended_minutes":9.5,"weights_version":"embedded v1","time":"2026-11-01T00:00:00Z"}`
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(Path(town)), 0o755); err != nil {
+		t.Fatalf("create the log directory: %v", err)
+	}
+	if err := os.WriteFile(Path(town), []byte(oldLine+"\n"), 0o644); err != nil {
+		t.Fatalf("write the log: %v", err)
+	}
+	got, skipped, err := Read(town)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if skipped != 0 || len(got) != 1 {
+		t.Fatalf("Read = %d records, %d skipped; want 1, 0", len(got), skipped)
+	}
+	if got[0].BeadID != "gt-old" || got[0].DeclaredLines != 0 {
+		t.Errorf("old line read as %+v, want bead gt-old with no declared size", got[0])
+	}
+}

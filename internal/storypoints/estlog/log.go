@@ -43,6 +43,10 @@ type Record struct {
 	// BlendedMinutes is the blend of the components before it was rounded to a
 	// point.
 	BlendedMinutes float64 `json:"blended_minutes"`
+	// DeclaredLines is the added-line count the bead's Size section declares on
+	// its Change line. It is omitted when the bead declares none, so a row
+	// written before the field existed reads the same as one that declares none.
+	DeclaredLines float64 `json:"declared_lines,omitempty"`
 	// WeightsVersion names the weights the estimate used, as
 	// storypoints.Weights.Version names them.
 	WeightsVersion string `json:"weights_version"`
