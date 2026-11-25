@@ -68,8 +68,8 @@ type AheadStore struct {
 
 	// writeFile is the test seam for the write Put makes; nil means atomicfile.WriteFile.
 	writeFile func(path string, data []byte, perm os.FileMode) error
-	// readFile is the test seam for the read Put makes before it writes; nil
-	// means os.ReadFile.
+	// readFile is the test seam for the reads Put and Get make; nil means
+	// os.ReadFile.
 	readFile func(path string) ([]byte, error)
 }
 
@@ -116,6 +116,48 @@ func (s AheadStore) Put(rec AheadRecord) error {
 		return fmt.Errorf("writing review-ahead record: %w", err)
 	}
 	return nil
+}
+
+// Get returns the record the store keeps for bead. A bead with no record is
+// (zero, false, nil), so a caller with nothing to reuse runs its own review. A
+// file the store could not have written, or one that names another bead, is an
+// error and no record: a read that cannot be trusted must run a fresh review
+// rather than read as a miss.
+func (s AheadStore) Get(bead string) (AheadRecord, bool, error) {
+	path, err := s.path(bead)
+	if err != nil {
+		return AheadRecord{}, false, err
+	}
+	read := s.readFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
+	// Absence is the checked answer "nothing to reuse", and it is read before
+	// the failure branch so it is not mistaken for a read that failed.
+	if errors.Is(err, os.ErrNotExist) {
+		return AheadRecord{}, false, nil
+	}
+	if err != nil {
+		return AheadRecord{}, false, fmt.Errorf("reading review-ahead record: %w", err)
+	}
+	var rec AheadRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return AheadRecord{}, false, fmt.Errorf("decoding review-ahead record for %q: %w", bead, err)
+	}
+	if rec.V != aheadRecordVersion {
+		return AheadRecord{}, false, fmt.Errorf("review-ahead store: record for %q has version %d, want %d", bead, rec.V, aheadRecordVersion)
+	}
+	if rec.Bead != bead {
+		return AheadRecord{}, false, fmt.Errorf("review-ahead store: record for %q names bead %q", bead, rec.Bead)
+	}
+	// The refusals Put applies are the store's own answer to whether it would
+	// have written this record, so the reader refuses exactly what Put refuses:
+	// a head that is not a sha, or an outcome and verdict om never reached.
+	if err := rec.refuseToStore(); err != nil {
+		return AheadRecord{}, false, fmt.Errorf("review-ahead store: unusable record for %q: %w", bead, err)
+	}
+	return rec, true, nil
 }
 
 // recordAt returns the record stored at path. A nil record with a nil error

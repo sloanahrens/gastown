@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -440,6 +441,214 @@ func TestVerdictReuseStoreFailedWriteLeavesNoRecord(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "gt-abc.json" {
 		t.Errorf("failed write left %v in the record directory, want only gt-abc.json", entries)
+	}
+}
+
+// TestVerdictReuseStoreRoundTrip: Get returns what Put stored, and a bead with
+// no record is (zero, false, nil) so its landing runs its own review.
+func TestVerdictReuseStoreRoundTrip(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	store := TownAheadStore(town, "gastown")
+	got, ok, err := store.Get("gt-abc")
+	if err != nil {
+		t.Fatalf("Get on an empty store: %v", err)
+	}
+	if ok || !reflect.DeepEqual(got, AheadRecord{}) {
+		t.Errorf("Get on an empty store = (%+v, %v), want (zero, false)", got, ok)
+	}
+
+	if err := store.Put(aheadTestRecord("gt-abc", aheadTestHead)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok, err = store.Get("gt-abc")
+	if err != nil {
+		t.Fatalf("Get after Put: %v", err)
+	}
+	if !ok {
+		t.Fatal("Get found no record after Put stored one")
+	}
+	want := aheadTestRecord("gt-abc", aheadTestHead)
+	want.V, want.Rig = aheadRecordVersion, "gastown"
+	assertSameAheadRecord(t, got, want)
+}
+
+// TestVerdictReuseStoreCorruptIsAnError: a stored file Get cannot read as the
+// record it asked for is an error and no record, never a miss: truncated JSON,
+// a version this reader does not know, a record naming another bead, a head
+// that is not a sha, and a read that fails. A path the store cannot name is
+// refused the same way.
+func TestVerdictReuseStoreCorruptIsAnError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		write  func(t *testing.T, path string) // seeds the record file; nil leaves none
+		store  func(*AheadStore)               // edits the store before Get
+		bead   string                          // the bead Get is asked for; "" means gt-abc
+		wantIn string                          // substring the error must carry
+	}{
+		{
+			name: "truncated json",
+			write: func(t *testing.T, path string) {
+				writeAheadFile(t, path, []byte(`{"v":1,"bead":"gt-abc"`))
+			},
+			wantIn: "decoding review-ahead record",
+		},
+		{
+			name: "a version this reader does not know",
+			write: func(t *testing.T, path string) {
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.V = aheadRecordVersion + 1
+				writeAheadFile(t, path, marshalAhead(t, rec))
+			},
+			wantIn: "version 2",
+		},
+		{
+			name: "a record that names another bead",
+			write: func(t *testing.T, path string) {
+				rec := aheadTestRecord("gt-other", aheadTestHead)
+				rec.V = aheadRecordVersion
+				writeAheadFile(t, path, marshalAhead(t, rec))
+			},
+			wantIn: `names bead "gt-other"`,
+		},
+		{
+			name: "a head that is not a sha",
+			write: func(t *testing.T, path string) {
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.V, rec.Head = aheadRecordVersion, "not-a-sha"
+				writeAheadFile(t, path, marshalAhead(t, rec))
+			},
+			wantIn: "refusing head",
+		},
+		{
+			name: "the read fails",
+			store: func(s *AheadStore) {
+				s.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+			},
+			wantIn: "reading review-ahead record",
+		},
+		{
+			name:   "no town root",
+			store:  func(s *AheadStore) { s.TownRoot = "" },
+			wantIn: "no town root",
+		},
+		{
+			name:   "a bead that is not one path component",
+			bead:   "../gt-abc",
+			wantIn: "invalid bead",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			bead := tc.bead
+			if bead == "" {
+				bead = "gt-abc"
+			}
+			if tc.write != nil {
+				tc.write(t, aheadTestPath(town, "gastown", bead))
+			}
+			store := TownAheadStore(town, "gastown")
+			if tc.store != nil {
+				tc.store(store)
+			}
+			got, ok, err := store.Get(bead)
+			if err == nil {
+				t.Fatalf("Get returned (%+v, %v, nil), want an error naming %q", got, ok, tc.wantIn)
+			}
+			if ok {
+				t.Errorf("Get reported a usable record beside its error: %+v", got)
+			}
+			if !reflect.DeepEqual(got, AheadRecord{}) {
+				t.Errorf("Get returned %+v beside its error, want the zero record", got)
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("Get error = %q, want it to name %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseStoreGetRefusesNonOMVerdict: a hand-written record whose
+// outcome or verdict the store would not have written is an error and no
+// record, so a caller never reads a verdict om did not reach as reusable.
+func TestVerdictReuseStoreGetRefusesNonOMVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		outcome string
+		verdict string
+		wantIn  string
+	}{
+		{"skipped", aheadOutcomeVerdict, VerdictSkipped, `"skipped"`},
+		{"an om error", aheadOutcomeVerdict, VerdictErrorPrefix + "timeout", `"error:timeout"`},
+		{"an overseer waiver", aheadOutcomeVerdict, VerdictOverseerPrefix + "gt-abc", `"overseer:gt-abc"`},
+		{"no verdict at all", aheadOutcomeVerdict, "", `with verdict ""`},
+		{"an outcome with a trailing space", aheadOutcomeVerdict + " ", VerdictApprove, `"verdict "`},
+		{"an outcome the store does not know", "timeout", VerdictApprove, `"timeout"`},
+		{"a conflict carrying a verdict", aheadOutcomeConflict, VerdictSkipped, `"conflict"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := aheadTestRecord("gt-abc", aheadTestHead)
+			rec.V, rec.Rig = aheadRecordVersion, "gastown"
+			rec.Outcome, rec.Verdict.Verdict = tc.outcome, tc.verdict
+			writeAheadFile(t, aheadTestPath(town, "gastown", "gt-abc"), marshalAhead(t, rec))
+			got, ok, err := TownAheadStore(town, "gastown").Get("gt-abc")
+			if err == nil {
+				t.Fatalf("Get returned (%+v, %v, nil) for outcome %q with verdict %q, want a refusal",
+					got, ok, tc.outcome, tc.verdict)
+			}
+			if ok || !reflect.DeepEqual(got, AheadRecord{}) {
+				t.Errorf("Get returned (%+v, %v) beside its error, want (zero, false)", got, ok)
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("Get error = %q, want it to name %s", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+// writeAheadFile writes data to path under a private directory, standing in for
+// a file the store would not have written.
+func writeAheadFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// marshalAhead encodes rec as the store writes it.
+func marshalAhead(t *testing.T, rec AheadRecord) []byte {
+	t.Helper()
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("encoding the record: %v", err)
+	}
+	return data
+}
+
+// assertSameAheadRecord fails when got and want differ as the store writes
+// them: the stored form is the contract, not time.Time's internals.
+func assertSameAheadRecord(t *testing.T, got, want AheadRecord) {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshaling the record Get returned: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshaling the wanted record: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("Get returned\n%s\nwant\n%s", gotJSON, wantJSON)
 	}
 }
 
