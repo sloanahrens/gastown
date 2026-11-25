@@ -704,10 +704,17 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until=6h") {
 			t.Errorf("build cache prune = %q, want one run with until=6h", prunes)
 		}
-		// The list program is shell by design; no removal is.
-		for _, c := range engineDockerExecs(f, "") {
-			if slices.Contains(c.args, "sh") || slices.Contains(c.args, "-c") {
-				t.Errorf("the remove step ran a shell: %q", c.args)
+		// The list program is shell by design; no removal is. engineDockerExecs
+		// matches "-- docker <verb> ", so an empty verb matches no call at all:
+		// each removing verb is named, and each of its calls is checked. Only the
+		// docker argv is a removal; the kubectl exec before it carries its own
+		// "-c", naming the container.
+		for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
+			for _, c := range engineDockerExecs(f, verb) {
+				argv := c.args[slices.Index(c.args, "docker"):]
+				if slices.Contains(argv, "sh") || slices.Contains(argv, "-c") {
+					t.Errorf("docker %s ran a shell: %q", verb, argv)
+				}
 			}
 		}
 		if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
