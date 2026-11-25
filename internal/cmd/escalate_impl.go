@@ -491,7 +491,13 @@ func (r escalateRun) printCreatedEscalation(res *notify.RaiseResult, severity st
 	if res.FingerprintLabel != "" {
 		fmt.Fprintf(r.out, "  Fingerprint: %s\n", res.FingerprintLabel)
 	}
-	fmt.Fprintf(r.out, "  Routed to: %s\n", strings.Join(res.Targets, ", "))
+	// Every route action, not only the mail targets: a route of a bead and
+	// email:human has no mail target and must not print a blank line.
+	routed := "none"
+	if len(res.Actions) > 0 {
+		routed = strings.Join(res.Actions, ", ")
+	}
+	fmt.Fprintf(r.out, "  Routed to: %s\n", routed)
 	for _, status := range res.Delivery {
 		if status.Error != "" {
 			fmt.Fprintf(r.out, "  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
