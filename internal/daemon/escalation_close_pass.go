@@ -17,6 +17,20 @@ func runEscalationClosePass(flag *atomic.Bool, active func() bool, run func(), l
 	return true
 }
 
+// triggerEscalationClosePass runs one escalation-close pass on its own
+// goroutine, so a pass that resumes seats cannot hold the daemon's loop
+// (gt-tfbail). The call binds the live daemon's own flag, patrol check, run
+// closure and logger, so no unit test drives it: a live daemon shows
+// "escalation_close:" lines in its log between patrol_scan ticks.
+func (d *Daemon) triggerEscalationClosePass() {
+	go func() {
+		runEscalationClosePass(&d.patrolScanRunning,
+			func() bool { return d.isPatrolActive("patrol_scan") },
+			d.escalationCloseRun(),
+			d.logger.Printf)
+	}()
+}
+
 // escalationCloseRun returns a closure that runs one escalation-close nudge
 // pass over every rig the patrol_scan patrol covers, through the production
 // host runPatrolScanOn builds (gt-qa6c7w).
