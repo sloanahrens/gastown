@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -100,5 +103,93 @@ func writeRecordedFlagsFile(t *testing.T, root, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write the flags file: %v", err)
+	}
+}
+
+// planTown is a temporary town holding the fixture's recorded render flags.
+func planTown(t *testing.T) string {
+	t.Helper()
+	town := clusterRenderTestTown(t)
+	if err := saveRenderFlags(renderFlagsPathIn(town), clusterRenderFixture(t)); err != nil {
+		t.Fatalf("recording the render flags: %v", err)
+	}
+	return town
+}
+
+// planOut is a fresh plan directory under a temporary parent.
+func planOut(t *testing.T) string { return filepath.Join(t.TempDir(), "plan") }
+
+// TestClusterShapePlanIdPrintsTheShortId: the plan prints the 12-hex short form
+// of planID over the files it rendered, in apply order, and nothing else.
+func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, planTown(t), io.Discard), out, dir); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading the plan directory: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names) // the render numbers its files in apply order
+	files := make([]planFile, 0, len(names))
+	for _, name := range names {
+		body, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("reading the planned file %s: %v", name, err)
+		}
+		files = append(files, planFile{Name: name, Data: body})
+	}
+	_, short := planID(files)
+	if got := out.String(); got != short+"\n" {
+		t.Fatalf("the plan printed %q, want the short id %q and a newline", got, short)
+	}
+}
+
+// TestClusterShapePlanIdRefusesAndFailsClosed: the refusals the plan makes, the
+// render's among them, each end non-zero and print no id, so an id on the screen
+// always names a rendered set.
+func TestClusterShapePlanIdRefusesAndFailsClosed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (clusterRenderDeps, string)
+		want  string
+	}{
+		{"the town cannot be found", func(t *testing.T) (clusterRenderDeps, string) {
+			d := clusterRenderDepsAt(t, t.TempDir(), io.Discard)
+			d.findTown = func() (string, error) { return "", errors.New("no workspace") }
+			return d, planOut(t)
+		}, "town not found"},
+		{"the --out holds another apply set", func(t *testing.T) (clusterRenderDeps, string) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "taken"), nil, 0o644); err != nil {
+				t.Fatalf("filling --out: %v", err)
+			}
+			return clusterRenderDepsAt(t, planTown(t), io.Discard), dir
+		}, "is not empty"},
+		{"a manifest cannot be written", func(t *testing.T) (clusterRenderDeps, string) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			d.writeFile = func(string, []byte) error { return errors.New("disk full") }
+			return d, planOut(t)
+		}, "disk full"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, dir := tc.setup(t)
+			out := &bytes.Buffer{}
+			err := runTownClusterPlan(d, out, dir)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+		})
 	}
 }
