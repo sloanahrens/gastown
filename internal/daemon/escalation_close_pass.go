@@ -16,3 +16,13 @@ func runEscalationClosePass(flag *atomic.Bool, active func() bool, run func(), l
 	}
 	return true
 }
+
+// escalationCloseRun returns a closure that runs one escalation-close nudge
+// pass over every rig the patrol_scan patrol covers, through the production
+// host runPatrolScanOn builds (gt-qa6c7w).
+func (d *Daemon) escalationCloseRun() func() {
+	return func() {
+		env := &patrolScanHost{d: d}
+		d.nudgeClosedEscalations(env, d.getPatrolRigs("patrol_scan"))
+	}
+}
