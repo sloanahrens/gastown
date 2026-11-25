@@ -44,10 +44,16 @@ func (k *fakeKube) Delete(ctx context.Context, _ string) error {
 	return k.call("Delete")
 }
 
+// nodePruneLogDryWouldRemove are the would-remove lines nodePruneLogDry holds, in
+// log order, so a test can compare the report's lines against them.
+var nodePruneLogDryWouldRemove = []string{
+	"node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z",
+	"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z",
+}
+
 // nodePruneLogDry is a dry run's log as the helper writes it: every line ends in a newline.
-const nodePruneLogDry = "node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z\n" +
-	"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z\n" +
-	"node-prune: dry run planned 2 images\n"
+var nodePruneLogDry = strings.Join(nodePruneLogDryWouldRemove, "\n") + "\n" +
+	fmt.Sprintf("node-prune: dry run planned %d images\n", len(nodePruneLogDryWouldRemove))
 
 // zeroNodePruneReport reports whether rep is the zero report: no lines and no counts.
 func zeroNodePruneReport(rep nodePruneReport) bool {
@@ -55,7 +61,8 @@ func zeroNodePruneReport(rep nodePruneReport) bool {
 }
 
 // TestNodeImagePruneRunDry runs a dry run against a fake helper log. The planned
-// count is the summary's, the calls run in order, and the Job's command has no --apply.
+// count is the summary's, the report's lines are the log's would-remove lines
+// unchanged, the calls run in order, and the Job's command has no --apply.
 func TestNodeImagePruneRunDry(t *testing.T) {
 	t.Parallel()
 
@@ -67,8 +74,11 @@ func TestNodeImagePruneRunDry(t *testing.T) {
 	if got, want := strings.Join(kube.calls, " "), "ListJSON Apply WaitComplete Logs Delete"; got != want {
 		t.Errorf("calls = %q, want %q", got, want)
 	}
-	if rep.Planned != 2 || len(rep.Lines) != 2 {
-		t.Errorf("Planned/Lines = %d/%d, want 2/2", rep.Planned, len(rep.Lines))
+	if rep.Planned != len(nodePruneLogDryWouldRemove) {
+		t.Errorf("Planned = %d, want %d", rep.Planned, len(nodePruneLogDryWouldRemove))
+	}
+	if !slices.Equal(rep.Lines, nodePruneLogDryWouldRemove) {
+		t.Errorf("Lines = %q, want the log's lines %q, in order and byte for byte", rep.Lines, nodePruneLogDryWouldRemove)
 	}
 	var doc nodePruneJobDoc
 	if err := json.Unmarshal(kube.sent, &doc); err != nil {
