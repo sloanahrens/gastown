@@ -282,7 +282,7 @@ func (f *fakeSpecTown) productionCandidates(t *testing.T, splitOver float64, dry
 		if splitOver > 0 && !dryRun {
 			drop = specSplitStaleDropper(splitOver, false, f.annotateOnce, f.removeLabel)
 		}
-		return specCandidatesDropping(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, drop, nil)
+		return specCandidatesDropping(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, drop, nil, nil)
 	}
 }
 
@@ -3570,6 +3570,66 @@ func TestSpecHintSourceReturnsTheQueryError(t *testing.T) {
 	if _, err := hmHintSource(run)(context.Background(), "slow tests", 3); !errors.Is(err, hmhints.ErrUnavailable) {
 		t.Fatalf("hmHintSource error = %v, want hmhints.ErrUnavailable in its chain", err)
 	}
+}
+
+// TestSpecOrderByInheritance is the candidate read's order through the
+// inherited-priority seam (gt-6dzat3). A ready P2 the seam says inherits P0 ranks
+// ahead of an older ready P2; a nil seam orders by own priority and age as
+// before; and the failed rigs the seam reports reach the read.
+func TestSpecOrderByInheritance(t *testing.T) {
+	t.Parallel()
+	board := []*beads.Issue{
+		{ID: "gt-old", Type: "task", Status: "open", Priority: 2, CreatedAt: "2026-09-01T00:00:00Z"},
+		{ID: "gt-new", Type: "task", Status: "open", Priority: 2, CreatedAt: "2026-09-20T00:00:00Z"},
+	}
+	readWith := func(t *testing.T, inherited func() (map[string]specdispatch.Inherited, map[string]error)) specBoardRead {
+		t.Helper()
+		return specCandidatesDropping(specTown(t), 2, func(string) ([]*beads.Issue, error) { return board, nil }, notDocked, nil, nil, nil, inherited)
+	}
+	order := func(read specBoardRead) []string {
+		ids := make([]string, 0, len(read.Candidates))
+		for _, c := range read.Candidates {
+			ids = append(ids, c.Spec.ID)
+		}
+		return ids
+	}
+
+	t.Run("an inherited P0 ranks ahead of an older P2", func(t *testing.T) {
+		seam := func() (map[string]specdispatch.Inherited, map[string]error) {
+			return map[string]specdispatch.Inherited{"gt-new": {Priority: 0, From: "gt-blocked"}}, nil
+		}
+		got := readWith(t, seam)
+		if want := []string{"gt-new", "gt-old"}; !slices.Equal(order(got), want) {
+			t.Fatalf("order = %v, want %v", order(got), want)
+		}
+		if got.Inherited["gt-new"].Priority != 0 {
+			t.Errorf("read.Inherited = %+v, want gt-new at P0", got.Inherited)
+		}
+	})
+
+	t.Run("a nil seam orders by own priority and age", func(t *testing.T) {
+		got := readWith(t, nil)
+		if want := []string{"gt-old", "gt-new"}; !slices.Equal(order(got), want) {
+			t.Fatalf("order = %v, want %v", order(got), want)
+		}
+		if got.Inherited != nil || got.InheritedFailed != nil {
+			t.Errorf("Inherited = %+v, InheritedFailed = %+v, want both nil", got.Inherited, got.InheritedFailed)
+		}
+	})
+
+	t.Run("a failed rig from the seam reaches the read", func(t *testing.T) {
+		errBlocked := errors.New("blocked list unreadable")
+		seam := func() (map[string]specdispatch.Inherited, map[string]error) {
+			return nil, map[string]error{"gastown": errBlocked}
+		}
+		got := readWith(t, seam)
+		if !errors.Is(got.InheritedFailed["gastown"], errBlocked) {
+			t.Errorf("InheritedFailed = %+v, want gastown carrying %v", got.InheritedFailed, errBlocked)
+		}
+		if want := []string{"gt-old", "gt-new"}; !slices.Equal(order(got), want) {
+			t.Errorf("order = %v, want %v with no inheritance", order(got), want)
+		}
+	})
 }
 
 // specTown is a temp town with one operational rig whose .beads looks like a
