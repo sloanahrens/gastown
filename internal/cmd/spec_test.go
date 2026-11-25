@@ -5196,6 +5196,88 @@ func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
 	}
 }
 
+// skipRigStore is one rig's bead store for the skip seam: its ready rows are the
+// rig's board, and each split-list read and each full-bead re-read of the rig is
+// counted under its name (gt-rd87eq).
+type skipRigStore struct {
+	beads.Client
+	rig   string
+	ready []*beads.Issue
+	reads *skipRigReads
+}
+
+// skipRigReads counts the split-held list reads and the duplicate (full-bead
+// re-read) reads each rig gets.
+type skipRigReads struct {
+	mu     sync.Mutex
+	split  map[string]int
+	detail map[string]int
+}
+
+func (r *skipRigReads) count(m map[string]int, rig string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m[rig]++
+}
+
+func (s *skipRigStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return s.ready, nil
+}
+
+func (s *skipRigStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Label == specdispatch.SplitLabel {
+		s.reads.count(s.reads.split, s.rig)
+	}
+	return nil, nil
+}
+
+func (s *skipRigStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	s.reads.count(s.reads.detail, s.rig)
+	out := make(map[string]*beads.Issue, len(s.ready))
+	for _, issue := range s.ready {
+		out[issue.ID] = issue
+	}
+	return out, nil
+}
+
+// TestTickEffSkippedRigsAreNotRead: with skip true for two of four rigs, the
+// production board read (the ready rows and the split-held list) and the
+// candidates' full-bead re-read run for the other two only. The skipped rigs get
+// neither the split-held read nor the duplicate read (gt-rd87eq).
+func TestTickEffSkippedRigsAreNotRead(t *testing.T) {
+	t.Parallel()
+	townRoot, _, _, _ := skipSeamRigs(t)
+	reads := &skipRigReads{split: map[string]int{}, detail: map[string]int{}}
+	stores := map[string]*skipRigStore{}
+	for _, rig := range []string{"gastown", "beads", "gorge", "longeye"} {
+		ready := []*beads.Issue{{ID: rig + "-task", Title: "a task", Type: "task", Status: "open", Priority: 1}}
+		stores[rig] = &skipRigStore{rig: rig, ready: ready, reads: reads}
+	}
+	board := func(rigPath string) ([]*beads.Issue, error) {
+		return specReadyBoardFrom(stores[filepath.Base(rigPath)])
+	}
+	storeFor := func(rig string) beads.Client { return stores[rig] }
+	notDocked := func(string, string) (bool, string) { return false, "" }
+	skip := func(rig string) bool { return rig == "gastown" || rig == "beads" }
+
+	got := specBoardDetails(nil, storeFor, specCandidatesRetrying(townRoot, 2, board, notDocked, nil, skip), nil)
+	if len(got.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", got.Errors)
+	}
+	for _, rig := range []string{"gastown", "beads"} {
+		if reads.split[rig] != 0 || reads.detail[rig] != 0 {
+			t.Errorf("skipped rig %s: %d split-held read(s) and %d duplicate read(s), want none (split = %v, detail = %v)",
+				rig, reads.split[rig], reads.detail[rig], reads.split, reads.detail)
+		}
+	}
+	for _, rig := range []string{"gorge", "longeye"} {
+		if reads.split[rig] != 1 || reads.detail[rig] != 1 {
+			t.Errorf("rig %s: %d split-held read(s) and %d duplicate read(s), want 1 each (split = %v, detail = %v)",
+				rig, reads.split[rig], reads.detail[rig], reads.split, reads.detail)
+		}
+	}
+}
+
 // TestTickEffSkippedRigsGetNoReadyRead: with skip true for two of four rigs,
 // only the other two get a ready read; the skipped rigs' boards are never asked
 // for (gt-svzybb).
