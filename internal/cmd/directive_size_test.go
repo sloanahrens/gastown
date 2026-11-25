@@ -286,16 +286,34 @@ func checkDirectiveCeiling(size, ceiling int) string {
 }
 
 // committedPolecatDirectiveBytes measures the repo's committed directives as a
-// polecat seat receives them.
+// polecat seat receives them, through readDirectiveSize: the ratchet holds the
+// size the command measures rather than a second measurement of the same render
+// that can drift from it.
 func committedPolecatDirectiveBytes(t *testing.T) int {
 	t.Helper()
-	return len(committedPolecatDirectiveText(t))
+	size, err := readDirectiveSize("polecat", stagedCommittedPolecatTown(t), "")
+	if err != nil {
+		t.Fatalf("measure the committed polecat directive: %v", err)
+	}
+	return size.Bytes
 }
 
 // committedPolecatDirectiveText renders the repo's committed directives as a
-// polecat seat receives them: staged into a temp town's central layer, then
-// read and rendered by the same functions that write the seat prompt.
+// polecat seat receives them, for the tests that check its wording: staged into
+// a temp town's central layer, then read and rendered by the functions that
+// write the seat prompt.
 func committedPolecatDirectiveText(t *testing.T) string {
+	t.Helper()
+	directives, err := config.ReadRoleDirectives("polecat", stagedCommittedPolecatTown(t), "")
+	if err != nil {
+		t.Fatalf("read the committed polecat directive: %v", err)
+	}
+	return renderDirectiveSection(directives)
+}
+
+// stagedCommittedPolecatTown stages the repo's committed shared and polecat
+// directive files into a temp town's central layer and returns the town root.
+func stagedCommittedPolecatTown(t *testing.T) string {
 	t.Helper()
 	town := t.TempDir()
 	for _, name := range []string{config.SharedDirectiveName, "polecat"} {
@@ -305,11 +323,7 @@ func committedPolecatDirectiveText(t *testing.T) string {
 		}
 		stageDirectiveFile(t, filepath.Join(config.CentralDirectiveDir(town), name+".md"), string(data))
 	}
-	directives, err := config.ReadRoleDirectives("polecat", town, "")
-	if err != nil {
-		t.Fatalf("read the committed polecat directive: %v", err)
-	}
-	return renderDirectiveSection(directives)
+	return town
 }
 
 // readDirectiveCeiling reads the committed ceiling, refusing a file that holds
