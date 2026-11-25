@@ -577,6 +577,60 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 	})
 }
 
+// TestClusterShapePlanLiveGetOnly: every cluster call the plan makes is a get. The
+// runner records each kubectl call and fails any that is not a get, so an apply,
+// patch, delete or dry run would be caught. A Deployment present, absent or
+// unreadable makes no other call, and each ends with the outcome its read names.
+func TestClusterShapePlanLiveGetOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		answer  func(resource string) (string, int, error)
+		wantErr string
+	}{
+		{"the Deployment is present", func(resource string) (string, int, error) {
+			return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+		}, ""},
+		{"the Deployment is absent", func(string) (string, int, error) { return "", 0, nil }, "does not hold"},
+		{"the Deployment is unreadable", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			kube := func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+				calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+				if name != "kubectl" || len(args) < 2 || args[0] != "get" {
+					return "", 1, errors.New("planted non-get call: " + name + " " + strings.Join(args, " "))
+				}
+				return tc.answer(args[1])
+			}
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			d.runHelm = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if len(args) == 0 || args[0] != "template" {
+					return nil, errors.New("planted non-read helm call: " + name + " " + strings.Join(args, " "))
+				}
+				return []byte(sbxEngineHelmOutput), nil
+			}
+			err := runTownClusterPlan(context.Background(), d, kube, &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("running the plan: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.wantErr)
+			}
+			if len(calls) == 0 {
+				t.Fatal("the plan made no cluster call, so the read was never exercised")
+			}
+			for _, c := range calls {
+				if !strings.HasPrefix(c, "kubectl get deployment/") {
+					t.Errorf("the plan made cluster call %q, want only a get of one Deployment", c)
+				}
+			}
+		})
+	}
+}
+
 // TestClusterShapePlanLongText: the command's help says the plan reads the
 // cluster's Deployments with get only and writes nothing to any cluster, and no
 // longer says that no cluster is contacted.
