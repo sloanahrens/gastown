@@ -5215,7 +5215,14 @@ type specBoardRead struct {
 	// remain but whose respawn budget is spent, so the read left them labeled
 	// instead of retrying them. The tick reports them once.
 	RespawnHeld []string
-	Errors      []string
+	// Inherited is the effective priority the inherited seam gave each blocker
+	// the candidate order used (gt-6dzat3). nil when no seam was wired.
+	Inherited map[string]specdispatch.Inherited
+	// InheritedFailed names the rigs whose blocked list the inherited seam could
+	// not read, with the error each returned. Those rigs' blockers were ordered
+	// at their own priority, so the failure is carried rather than dropped.
+	InheritedFailed map[string]error
+	Errors          []string
 }
 
 // specCandidates reads every operational rig's ready work beads and keeps the
@@ -5342,7 +5349,7 @@ func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *spe
 		read := specCandidatesDropping(dp.townRoot, dp.maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 			dp.reads.call()
 			return dp.ready(rigPath)
-		}, dp.rigStatus, retry, drop, skip)
+		}, dp.rigStatus, retry, drop, skip, nil)
 		return specBoardDetails(dp.reads, dp.detailStore, read, memo)
 	}
 }
@@ -5365,7 +5372,7 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 // never re-read for its full beads, so such a rig gets no split-held or duplicate
 // read either (gt-rd87eq).
 func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip func(rig string) bool) specBoardRead { //nolint:unparam // no production caller passes a non-nil skip yet; the quiet-rig memory connects it
-	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil, skip)
+	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil, skip, nil)
 }
 
 // specCandidatesDropping is specCandidatesRetrying with drop, the tick's
@@ -5375,7 +5382,12 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 // before. nil drops nothing, which is what a tick that must write nothing and
 // a test that reads the board alone pass. skip is applied before the board is
 // read, so a skipped rig's beads are never asked for (gt-svzybb).
-func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, drop specSplitStaleDrop, skip func(rig string) bool) specBoardRead {
+//
+// inherited is the inherited-priority seam (gt-6dzat3): it answers each
+// blocker's effective priority and the rigs it could not read. The candidates
+// are ordered at the better of their own priority and the inherited one. nil
+// means no inheritance, which orders exactly as before.
+func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, drop specSplitStaleDrop, skip func(rig string) bool, inherited func() (map[string]specdispatch.Inherited, map[string]error)) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -5534,7 +5546,12 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 			specs = append(specs, s)
 		}
 	}
-	specdispatch.Order(specs)
+	var eff map[string]specdispatch.Inherited
+	if inherited != nil {
+		eff, read.InheritedFailed = inherited()
+	}
+	specdispatch.OrderWith(specs, eff)
+	read.Inherited = eff
 	read.Candidates = make([]specCandidate, 0, len(specs))
 	for _, s := range specs {
 		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID], UpdatedAt: updatedAt[s.ID], DepCount: depCount[s.ID]})
