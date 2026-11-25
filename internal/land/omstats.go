@@ -28,8 +28,9 @@ const OmStatsTopBeads = 10
 const OmStatsUnnamed = "(none)"
 
 // OmStats is the town's om verdicts aggregated: how often om rejects a
-// landing, by day, rig, author seat and author kind, how many review rounds
-// each bead's records reached, and the beads rejected most.
+// landing, by day, rig, author seat, author kind and, for crew work, the bird
+// that wrote it, how many review rounds each bead's records reached, and the
+// beads rejected most.
 type OmStats struct {
 	Days   []OmStatsDay   `json:"days"`
 	Rigs   []OmStatsGroup `json:"rigs"`
@@ -37,9 +38,14 @@ type OmStats struct {
 	// Authors groups a record by the kind of seat that wrote its branch: the
 	// record's author kind, or the kind its branch names when the line predates
 	// that field (authorkind.Kind), or OmStatsUnnamed when it names neither.
-	Authors  []OmStatsGroup `json:"authors"`
-	Rounds   OmStatsRounds  `json:"rounds"`
-	TopBeads []OmStatsBead  `json:"top_beads"`
+	Authors []OmStatsGroup `json:"authors"`
+	// CrewBirds groups the crew-written records by the bird their branch names
+	// (crewBirdOf), keyed OmStatsUnnamed when it names none, so a week's
+	// rejection rate can be read per bird; a record of another author kind is
+	// in no row (gt-rf138t).
+	CrewBirds []OmStatsGroup `json:"crew_birds,omitempty"`
+	Rounds    OmStatsRounds  `json:"rounds"`
+	TopBeads  []OmStatsBead  `json:"top_beads"`
 	// Skipped counts the review-record lines that were not a record, so they
 	// are in none of the counts above.
 	Skipped int `json:"skipped"`
@@ -93,8 +99,8 @@ type OmStatsBead struct {
 // The review records are the source. The log fills only the days before the
 // first review record — when the reviews file begins — and those days are
 // marked Fallback. The log counts in the day table alone: it names no rig, no
-// seat, no author branch and no attempt, so Authors, Rounds and TopBeads come
-// from the review records. A nil reader reads nothing.
+// seat, no author branch and no attempt, so Authors, CrewBirds, Rounds and
+// TopBeads come from the review records. A nil reader reads nothing.
 //
 // A record line that is not one, or carries no instant, is skipped and counted,
 // however long it is; a line the reader cannot read fails the report. Any other
@@ -106,16 +112,18 @@ type OmStatsBead struct {
 func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) {
 	sinceDay := omStatsDayStart(since)
 	stats := OmStats{
-		Days:     []OmStatsDay{},
-		Rigs:     []OmStatsGroup{},
-		Agents:   []OmStatsGroup{},
-		Authors:  []OmStatsGroup{},
-		TopBeads: []OmStatsBead{},
+		Days:      []OmStatsDay{},
+		Rigs:      []OmStatsGroup{},
+		Agents:    []OmStatsGroup{},
+		Authors:   []OmStatsGroup{},
+		CrewBirds: []OmStatsGroup{},
+		TopBeads:  []OmStatsBead{},
 	}
 	days := map[string]*omStatsCounts{}
 	rigs := map[string]*omStatsCounts{}
 	agents := map[string]*omStatsCounts{}
 	authors := map[string]*omStatsCounts{}
+	crewBirds := map[string]*omStatsCounts{}
 	beads := map[string]*omStatsBeadAcc{}
 	attempts := map[string]int{}
 	var firstRecordDay time.Time
@@ -149,12 +157,21 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 			rigCounts := omStatsCountsFor(rigs, rig)
 			agentCounts := omStatsCountsFor(agents, agent)
 			authorCounts := omStatsCountsFor(authors, author)
+			// The crew-bird table is a third view of the crew records alone: a
+			// record of another kind has no bird to be judged by (gt-rf138t).
+			var birdCounts *omStatsCounts
+			if author == authorkind.Crew {
+				birdCounts = omStatsCountsFor(crewBirds, orOmStatsUnnamed(crewBirdOf(line.branch)))
+			}
 			if rec.IsRejection() {
 				findings, score := float64(rec.Findings), rec.Score
 				counts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				rigCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				agentCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				authorCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
+				if birdCounts != nil {
+					birdCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
+				}
 				bead := omStatsBeadFor(beads, rec.BeadID)
 				bead.rejections++
 				if rec.Rig != "" {
@@ -165,6 +182,9 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 				rigCounts.approvals++
 				agentCounts.approvals++
 				authorCounts.approvals++
+				if birdCounts != nil {
+					birdCounts.approvals++
+				}
 			}
 			if rec.Attempt > attempts[rec.BeadID] {
 				attempts[rec.BeadID] = rec.Attempt
@@ -211,6 +231,7 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 	stats.Rigs = omStatsGroups(rigs)
 	stats.Agents = omStatsGroups(agents)
 	stats.Authors = omStatsGroups(authors)
+	stats.CrewBirds = omStatsGroups(crewBirds)
 	for _, max := range attempts {
 		switch {
 		case max >= 3:

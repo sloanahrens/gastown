@@ -741,6 +741,51 @@ func TestReviewPoolOMStatsCountsReusedOnce(t *testing.T) {
 	}
 }
 
+// TestOmStatsCrewBirds is gt-rf138t's acceptance: the crew-bird table counts
+// the crew records alone, grouped by the bird their branch names, in the
+// authors table's order and figures. A polecat record is in no row (putting it
+// there turns this test red), and a crew record whose branch names no bird is
+// the unnamed row.
+func TestOmStatsCrewBirds(t *testing.T) {
+	t.Parallel()
+	records := omStatsRecords(t,
+		ReviewRecord{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: VerdictRequestChanges,
+			Agent: "sonnet", Branch: "crew/owl/a", AuthorKind: authorkind.Crew, Findings: 2, At: omStatsAt(16, 10, 0, 0)},
+		ReviewRecord{BeadID: "gt-b", Rig: "gastown", Attempt: 1, Score: 0.90, Verdict: VerdictApprove,
+			Agent: "sonnet", Branch: "crew/owl/b", AuthorKind: authorkind.Crew, At: omStatsAt(16, 11, 0, 0)},
+		// A line written before the log carried its author kind: its crew branch
+		// still names the crew, so it counts under the bird it names.
+		ReviewRecord{BeadID: "gt-c", Rig: "gastown", Attempt: 1, Score: 0.50, Verdict: VerdictRequestChanges,
+			Agent: "haiku", Branch: "crew/goose/c", Findings: 1, At: omStatsAt(16, 12, 0, 0)},
+		// A polecat's work is judged by no bird: it is in no row of this table.
+		ReviewRecord{BeadID: "gt-p", Rig: "gastown", Attempt: 1, Score: 0.85, Verdict: VerdictApprove,
+			Agent: "opus", Branch: "polecat/pug/gt-p", AuthorKind: authorkind.Polecat, At: omStatsAt(16, 13, 0, 0)},
+		// The crew kind with no bird to name it: the prefix alone, and no branch.
+		ReviewRecord{BeadID: "gt-d", Rig: "gastown", Attempt: 1, Score: 0.88, Verdict: VerdictApprove,
+			Agent: "seagull", Branch: "crew/", AuthorKind: authorkind.Crew, At: omStatsAt(17, 9, 0, 0)},
+		ReviewRecord{BeadID: "gt-e", Rig: "gastown", Attempt: 1, Score: 0.92, Verdict: VerdictApprove,
+			Agent: "seagull", AuthorKind: authorkind.Crew, At: omStatsAt(17, 10, 0, 0)},
+	)
+
+	stats, err := AggregateOmStats(strings.NewReader(records), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	want := []OmStatsGroup{
+		{Name: "owl", Approvals: 1, Rejections: 1, Rate: 0.5},
+		{Name: "goose", Approvals: 0, Rejections: 1, Rate: 1},
+		{Name: OmStatsUnnamed, Approvals: 2, Rejections: 0, Rate: 0},
+	}
+	if len(stats.CrewBirds) != len(want) {
+		t.Fatalf("crew birds = %+v, want %+v", stats.CrewBirds, want)
+	}
+	for i, w := range want {
+		if stats.CrewBirds[i] != w {
+			t.Errorf("crew bird %d = %+v, want %+v", i, stats.CrewBirds[i], w)
+		}
+	}
+}
+
 // TestCrewBirdOf pins which branch shapes name a bird for the crew-bird
 // table: only a crew branch does, and only when its first segment is the bird.
 func TestCrewBirdOf(t *testing.T) {
