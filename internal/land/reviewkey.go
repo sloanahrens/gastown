@@ -1,6 +1,7 @@
 package land
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -66,4 +67,37 @@ func omRepoConfigAt(g Repo, base string) (omJSON, contextFile string, err error)
 		return "", "", fmt.Errorf("reading context_file %s at %s: %w", *cfg.ContextFile, base, err)
 	}
 	return omJSON, contextFile, nil
+}
+
+// reviewKey is the key a stored review of w must match, and the paths the
+// bead's diff touches: the git facts and the om binary, with the input digest
+// left to the caller (gt-0lys4u). wt is checked out at merged, the merge of
+// w's head onto base, and g is where a later bead reads om's config texts from.
+//
+// Every failure returns an error, which a caller treats as a miss: a key it
+// could not compute is never a key it may reuse (gt-pdusl8).
+func (l *Lander) reviewKey(ctx context.Context, g, wt Repo, w Work, in ReviewInput, base, merged string) (ReviewKey, []string, error) { //nolint:unparam // g is where the input-digest bead reads om's config texts (gt-0lys4u)
+	patchID, err := wt.PatchIDZeroContext(base, merged)
+	if err != nil {
+		return ReviewKey{}, nil, fmt.Errorf("review key: patch-id of %s..%s: %w", base, merged, err)
+	}
+	touched, err := wt.DiffNameOnly(base, merged)
+	if err != nil {
+		return ReviewKey{}, nil, fmt.Errorf("review key: changed paths of %s..%s: %w", base, merged, err)
+	}
+	prober, ok := l.Reviewer.(VersionProber)
+	if !ok {
+		return ReviewKey{}, nil, fmt.Errorf("review key: %T cannot be asked om's version", l.Reviewer)
+	}
+	configHash, err := fileSHA(l.OMConfigPath)
+	if err != nil {
+		return ReviewKey{}, nil, fmt.Errorf("review key: om config: %w", err)
+	}
+	return ReviewKey{
+		Bead:         w.BeadID,
+		Head:         w.Head,
+		PatchID:      patchID,
+		OMVersion:    prober.OMVersion(ctx, in),
+		OMConfigHash: configHash,
+	}, touched, nil
 }
