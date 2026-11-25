@@ -813,6 +813,10 @@ type TierSweepRun struct {
 	Tiers      []string  `json:"tiers,omitempty"`
 	Since      time.Time `json:"since"`
 	ElapsedSec int64     `json:"elapsed_sec"`
+	// Walls is the wall time each tier the open cycle has finished took, keyed
+	// by tier name, off the stage lines the reader kept for it. A cycle whose
+	// stage lines have not reported carries none.
+	Walls map[string]float64 `json:"walls,omitempty"`
 }
 
 // TierSweepRunStage is one tier the sweep runner has finished, off its summary line.
