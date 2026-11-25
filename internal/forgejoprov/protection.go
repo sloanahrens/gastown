@@ -28,6 +28,15 @@ func MainRule(o Options) map[string]any {
 	}
 }
 
+// ClosedMainRule is the main rule with an empty merge whitelist, the body a provision sends
+// before the landing bot can be named: no one is on the merge whitelist, so a run that fails
+// part way leaves the repository protected. It is MainRule(o) with only the whitelist emptied.
+func ClosedMainRule(o Options) map[string]any {
+	rule := MainRule(o)
+	rule["merge_whitelist_usernames"] = []string{}
+	return rule
+}
+
 // EnsureRule leaves the main rule of repo as MainRule(opts) describes it: it creates
 // the rule when absent, patches it when any field of the body has drifted, and sends no
 // write when none has. The body is the one compared field for field, so a field added to
