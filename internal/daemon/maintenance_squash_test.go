@@ -2857,6 +2857,35 @@ func TestSquashRecoverSeamRefusesAConnectionThatDoesNotOpen(t *testing.T) {
 	}
 }
 
+// TestSquashRecoverDatabaseRefusesNilSettings is the refusal row for the default
+// recovery seam's nil guard: a nil settings block returns an error naming the
+// database, opens no connection and sends no statement. Without the guard the
+// seam dereferences the nil block before it opens anything, so the test panics.
+func TestSquashRecoverDatabaseRefusesNilSettings(t *testing.T) {
+	t.Parallel()
+	d, server, _, _ := squashTickDaemon(t, squashEnabled())
+	d.maint.squashRecover = nil // the default seam is what this test drives
+	opened := 0
+	d.maint.squashOpenDB = func(string) (*sql.DB, error) {
+		opened++
+		return nil, errors.New("a connection was opened")
+	}
+
+	rec, err := d.maintenance().squashRecover(context.Background(), d, "gt", squashTestNow, nil)
+	if err == nil || !strings.Contains(err.Error(), "gt") {
+		t.Fatalf("the recovery with nil settings returned (%+v, %v), want an error naming gt", rec, err)
+	}
+	if rec != nil {
+		t.Errorf("the recovery with nil settings returned %+v, want no recovery", rec)
+	}
+	if opened != 0 {
+		t.Errorf("the recovery with nil settings opened %d connections, want none", opened)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("the recovery with nil settings sent %d statements, want none: %q", len(server.queries), server.queries)
+	}
+}
+
 // TestSquashCheckRecoversAfterAFailedRunInsideTheGate: a database whose last
 // recorded run failed two hours ago is held by the 24-hour gate, and no threshold
 // trips, so the check never reaches its run. The recovery seam is still called
