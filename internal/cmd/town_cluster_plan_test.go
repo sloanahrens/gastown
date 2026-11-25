@@ -593,7 +593,6 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 		want   string
 	}{
 		{"the live read exits nonzero", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
-		{"the cluster does not hold it", func(string) (string, int, error) { return "", 0, nil }, "does not hold"},
 		{"the live object has no revision", func(string) (string, int, error) { return `{"metadata":{}}`, 0, nil }, "has no revision annotation"},
 		{"the live object has no resourceVersion", func(string) (string, int, error) {
 			return `{"metadata":{"annotations":{"deployment.kubernetes.io/revision":"1"}}}`, 0, nil
@@ -619,11 +618,77 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 	}
 	t.Run("a rendered file has no readable kind", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
+		_, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
 		if err == nil || !strings.Contains(err.Error(), "cannot read a rendered file's kind") {
 			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
 	})
+}
+
+// TestClusterShapePlanLiveAbsent: a Deployment the cluster does not hold is a normal
+// plan, recorded absent with no revision and no resourceVersion. The read answers
+// absent with no output at exit 0; a get that exits nonzero or errors with no
+// output is not absent and still refuses.
+func TestClusterShapePlanLiveAbsent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		answer  func(resource string) (string, int, error)
+		wantErr string
+	}{
+		{"every Deployment is absent", func(string) (string, int, error) { return "", 0, nil }, ""},
+		{"the get exits nonzero with no output", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
+		{"the get errors with no output", func(string) (string, int, error) { return "", 0, errors.New("connection refused") }, "reading the live"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := planOut(t)
+			out := &bytes.Buffer{}
+			kube := planKubectlAnswering(t, tc.answer)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.wantErr)
+				}
+				if out.Len() != 0 {
+					t.Fatalf("a refused plan printed %q, want nothing", out.String())
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("running the plan: %v", err)
+			}
+			if strings.TrimSpace(out.String()) == "" {
+				t.Fatal("the plan printed no id, want the short id")
+			}
+			rec, _ := readPlanRecord(t, dir)
+			files := planFilesIn(t, dir)
+			if len(rec.Files) != len(files) {
+				t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+			}
+			absent := 0
+			for i, f := range files {
+				got := rec.Files[i]
+				if planWantRevision(t, f) == "" {
+					if got.Absent || got.Revision != "" || got.ResourceVersion != "" {
+						t.Errorf("plan.json for non-Deployment %s = %+v, want no absent mark and no live versions", f.Name, got)
+					}
+					continue
+				}
+				absent++
+				if !got.Absent || got.Revision != "" || got.ResourceVersion != "" {
+					t.Errorf("plan.json for absent Deployment %s = %+v, want absent with no revision and no resourceVersion", f.Name, got)
+				}
+			}
+			if absent == 0 {
+				t.Fatal("the plan rendered no Deployment, so no absent record was checked")
+			}
+		})
+	}
 }
 
 // TestClusterShapePlanLiveGetOnly: every cluster call the plan makes is a get. The
@@ -640,7 +705,7 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 		{"the Deployment is present", func(resource string) (string, int, error) {
 			return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
 		}, ""},
-		{"the Deployment is absent", func(string) (string, int, error) { return "", 0, nil }, "does not hold"},
+		{"the Deployment is absent", func(string) (string, int, error) { return "", 0, nil }, ""},
 		{"the Deployment is unreadable", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
 	}
 	for _, tc := range cases {
