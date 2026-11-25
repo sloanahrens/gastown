@@ -4174,6 +4174,27 @@ type LandingWorkerConfig struct {
 	// Forgejo holds the town-level Forgejo facts this patrol needs, the same
 	// for every rig (gt-fn9e6.3). Nil means the defaults.
 	Forgejo *ForgejoWorkerConfig `json:"forgejo,omitempty"`
+
+	// ReviewPool configures the review pool (gt-i6giwl): the om review of a
+	// queued submission, which the serial landing reuses when nothing om
+	// depends on has changed. Nothing reads it yet; the reader that comes
+	// later treats nil and an empty block alike as off.
+	ReviewPool *ReviewPoolConfig `json:"review_pool,omitempty"`
+}
+
+// ReviewPoolConfig is the review_pool block of the landing worker. Its Rigs
+// means the reverse of LandingWorkerConfig.Rigs: there, empty means every rig;
+// here the pool is for the listed rigs only, so empty lists no rig.
+type ReviewPoolConfig struct {
+	// Rigs are the rigs the pool is on for. A rig not listed is not in the pool.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// MaxConcurrent is how many reviews may run at once. Zero is unset.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
+
+	// ReuseExpiryStr is how long a reused review verdict stays valid, as a
+	// duration string (e.g. "30m"). Stored as written; nothing parses it yet.
+	ReuseExpiryStr string `json:"reuse_expiry,omitempty"`
 }
 
 // ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The
