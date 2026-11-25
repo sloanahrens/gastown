@@ -61,7 +61,7 @@ func TestBlendRungs(t *testing.T) {
 		{
 			name:       "shape and embedding",
 			in:         Inputs{ShapeMinutes: ptr(2), EmbedMinutes: ptr(18)},
-			wantMin:    geoMean(2, 18),
+			wantMin:    geoMean(2, 18) * 0.92,
 			wantRung:   "shape-embed",
 			wantInputs: []string{"shape", "embed"},
 		},
@@ -96,6 +96,52 @@ func TestBlendRungs(t *testing.T) {
 				t.Errorf("JevMinutes = nil, want %v", *tt.wantJev)
 			case tt.wantJev != nil && *got.JevMinutes != *tt.wantJev:
 				t.Errorf("JevMinutes = %v, want %v", *got.JevMinutes, *tt.wantJev)
+			}
+		})
+	}
+}
+
+func TestBlendShapeEmbedScale(t *testing.T) {
+	t.Parallel()
+	// Shape and embedding alone are scaled by 0.92 before the point step. A
+	// blend with a Jev term, and a shape-only blend, are not scaled.
+	tests := []struct {
+		name     string
+		in       Inputs
+		wantMin  float64
+		wantRung string
+	}{
+		{
+			name:     "shape and embedding at ten minutes blend to 9.2",
+			in:       Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10)},
+			wantMin:  9.2,
+			wantRung: "shape-embed",
+		},
+		{
+			name:     "shape, embedding and jev at ten minutes blend to ten",
+			in:       Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), JevMinutes: ptr(10)},
+			wantMin:  10,
+			wantRung: "all",
+		},
+		{
+			name:     "shape only at ten minutes is unchanged",
+			in:       Inputs{ShapeMinutes: ptr(10)},
+			wantMin:  10,
+			wantRung: "shape",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Blend(tt.in)
+			if err != nil {
+				t.Fatalf("Blend error = %v, want nil", err)
+			}
+			if math.Abs(got.Minutes-tt.wantMin) > 1e-9 {
+				t.Errorf("Minutes = %v, want %v", got.Minutes, tt.wantMin)
+			}
+			if got.Rung != tt.wantRung {
+				t.Errorf("Rung = %q, want %q", got.Rung, tt.wantRung)
 			}
 		})
 	}

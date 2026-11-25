@@ -7,6 +7,14 @@ import (
 	"sort"
 )
 
+// shapeEmbedScale scales the blend of shape and embedding alone, the case with
+// no Jev term. Shape and embed alone flag 37.8% of 2451 logged estimates at 10
+// minutes, against 22.8% for the blend with Jev, because Jev reads low. 0.92 is
+// the factor that keeps 22.8% of those estimates at or over 10 minutes. At that
+// flag share, shape and embed alone have precision .61 and recall .34, against
+// .60 and .33 for the three-way blend on 1676 landed beads (gt-gl12sr).
+const shapeEmbedScale = 0.92
+
 // ErrNoInputs reports a Blend call with no input at all.
 var ErrNoInputs = errors.New("storypoints: blend has no inputs")
 
@@ -46,7 +54,8 @@ type Blended struct {
 // Blend averages the inputs that are present on the log scale with equal
 // weight. Every minutes input must be finite and positive, and the Jev
 // probability must lie in 0 to 1; any other input is refused before the
-// average is taken.
+// average is taken. A blend of shape and embedding alone is then scaled by
+// shapeEmbedScale; a blend with a Jev input is not.
 func Blend(in Inputs) (Blended, error) {
 	return blendWith(in, FromMinutes)
 }
@@ -99,6 +108,9 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 	}
 
 	minutes := math.Exp(logSum / float64(len(terms)))
+	if in.EmbedMinutes != nil && !hasJev {
+		minutes *= shapeEmbedScale
+	}
 	points, err := toPoints(minutes)
 	if err != nil {
 		return Blended{}, err
