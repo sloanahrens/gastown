@@ -899,7 +899,8 @@ func TestUpdateJobNewerPairLaunchesItsOwnJob(t *testing.T) {
 
 	// A pair read past the check's own interval, and a heartbeat past the
 	// suppression the earlier launch bought, both still inside the 03:00 window.
-	later := pairReadyInterval + time.Minute
+	// Either can be the longer wait, so the later of the two sets the advance.
+	later := max(pairReadyInterval, updateLaunchSuppression) + time.Minute
 	r.pairForAt(t, r.commits[2], updateTriggerTestTime.Add(later), true, true)
 	r.clock.Advance(later)
 	r.d.triggerUpdate()
