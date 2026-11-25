@@ -5215,6 +5215,25 @@ func quietSkip(memory *specAnnotated, heads map[string]beadsql.RigHash, now time
 	}
 }
 
+// specTickHeads is the tick's one read of the rigs' hashes (gt-mery73): the
+// hashes rigHeads answers when store answers SQLCSV, and nil when it cannot. A
+// failed read logs the unreadable line and returns nil, which quietSkip reads
+// as no hashes, so every rig is read rather than skipped on hashes the tick does
+// not hold. A store that does not answer SQLCSV has no heads to read and returns
+// nil with no line.
+func specTickHeads(townRoot string, rigs []string, store any, logf func(string, ...any)) map[string]beadsql.RigHash {
+	reader, ok := store.(sqlReader)
+	if !ok {
+		return nil
+	}
+	heads, err := rigHeads(townRoot, rigs, reader)
+	if err != nil {
+		logf("rig heads unreadable: %v; reading every rig", err)
+		return nil
+	}
+	return heads
+}
+
 // specCandidatesWith is specCandidates with the rig's park-and-dock check
 // passed in, so a test can hand the read a verdict bd cannot be made to give
 // (gt-6d06g).
