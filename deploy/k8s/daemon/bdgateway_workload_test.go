@@ -404,13 +404,23 @@ func TestBdGatewayReplicasTwoGolden(t *testing.T) {
 	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway-two-replicas.yaml", document(t, m.BdGatewayDeployment))
 }
 
+// TestBdGatewayDefaultCapIsEight pins the renderer's default cap to the literal 8, below
+// the about 12 simultaneous new connections the VM-to-host path admits (gt-w0iqhu).
+func TestBdGatewayDefaultCapIsEight(t *testing.T) {
+	t.Parallel()
+	if bdGatewayMaxConcurrentDefault != 8 {
+		t.Errorf("the renderer's gateway default = %d, want 8", bdGatewayMaxConcurrentDefault)
+	}
+}
+
 // TestBdGatewayMaxConcurrentDefaultMatchesGateway ties the renderer's copy of the
-// gateway's default cap to the constant bdgw serve reads, so an unset total cannot
-// drift into a different per-pod share.
+// gateway's default cap to the constant bdgw serve reads: the renderer's default never
+// exceeds the gateway's, so an unset total cannot render a larger per-pod share than
+// the gateway admits.
 func TestBdGatewayMaxConcurrentDefaultMatchesGateway(t *testing.T) {
 	t.Parallel()
-	if bdGatewayMaxConcurrentDefault != bdgateway.DefaultMaxConcurrent {
-		t.Errorf("the renderer's gateway default = %d, want internal/bdgateway.DefaultMaxConcurrent %d", bdGatewayMaxConcurrentDefault, bdgateway.DefaultMaxConcurrent)
+	if bdGatewayMaxConcurrentDefault > bdgateway.DefaultMaxConcurrent {
+		t.Errorf("the renderer's gateway default = %d, want at most internal/bdgateway.DefaultMaxConcurrent %d", bdGatewayMaxConcurrentDefault, bdgateway.DefaultMaxConcurrent)
 	}
 }
 
