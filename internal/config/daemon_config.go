@@ -4233,6 +4233,48 @@ type LandingInfraConfig struct {
 	// IntervalStr is the wait between probe passes, as a string (e.g.
 	// "60s"). Default 60s.
 	IntervalStr string `json:"interval,omitempty"`
+
+	// ExtraRepos names app repositories the patrol watches, each "owner/repo".
+	ExtraRepos []string `json:"extra_repos,omitempty"`
+}
+
+// extraRepoPart is one owner or repo name: letters, digits, '.', '-', '_'.
+var extraRepoPart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// ExtraRepo is one app repository the landing_infra patrol watches.
+type ExtraRepo struct {
+	Owner string
+	Repo  string
+}
+
+// ExtraRepoRefs returns the extra_repos entries in order, a repeat dropped at
+// its later position. A nil config or no entries gives none. A malformed
+// entry is an error naming it.
+func (c *LandingInfraConfig) ExtraRepoRefs() ([]ExtraRepo, error) {
+	if c == nil {
+		return nil, nil
+	}
+	var refs []ExtraRepo
+	seen := make(map[ExtraRepo]bool, len(c.ExtraRepos))
+	for _, entry := range c.ExtraRepos {
+		owner, repo, ok := strings.Cut(entry, "/")
+		if !ok || !validExtraRepoPart(owner) || !validExtraRepoPart(repo) {
+			return nil, fmt.Errorf("landing_infra.extra_repos: %q is not owner/repo: want two non-empty parts of letters, digits, '.', '-' or '_'", entry)
+		}
+		ref := ExtraRepo{Owner: owner, Repo: repo}
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+// validExtraRepoPart reports whether part is one owner or repo name: it matches
+// extraRepoPart and is not a dot segment.
+func validExtraRepoPart(part string) bool {
+	return extraRepoPart.MatchString(part) && part != "." && part != ".."
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),
