@@ -894,7 +894,7 @@ func TestImagePinLayersStartFailureOffInstallsNothing(t *testing.T) {
 				}
 
 				channel, stop := d.startImagePinLayersTicker()
-				d.imagePinLayersCycles.Wait()
+				d.stopImagePinLayersPatrol(stop)
 
 				if channel != nil || stop != nil {
 					t.Error("the off patrol started a ticker, want none")
