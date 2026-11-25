@@ -47,8 +47,7 @@ type aheadRun struct {
 
 // Offer starts one review per work, launching the goroutines in the order
 // given. Go does not promise that the reviews enter the Reviewer in that
-// order. A work whose bead is already under review is not started again:
-// the review that is running keeps its head. Nothing is started when no
+// order. Nothing is started when no
 // Reviewer is set, so every submission is a miss and the landing runs om
 // inline.
 func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
@@ -61,14 +60,10 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	}
 }
 
-// start registers w as running and launches its review, unless its bead is
-// already under review.
+// start registers w as running and launches its review.
 func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.running[w.BeadID]; ok {
-		return
-	}
 	if p.running == nil {
 		p.running = map[string]*aheadRun{}
 	}

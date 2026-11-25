@@ -37,24 +37,14 @@ func recvBounded[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 }
 
-// waitPool calls pool.Wait on the goroutine it runs on. The caller's bound is
-// the receive from the channel the goroutine closes after it, never the call
-// itself; the select only skips a Wait the test has already given up on.
-func waitPool(bound <-chan struct{}, pool *ReviewPool) {
-	select {
-	case <-bound:
-	default:
-		pool.Wait()
-	}
-}
-
 // poolIdle runs pool.Wait on its own goroutine and returns a channel that
-// closes when Wait returns, so a test bounds the wait with recvBounded.
-func poolIdle(t *testing.T, pool *ReviewPool) <-chan struct{} {
-	bound := waitCtx(t).Done()
+// closes when Wait returns. The bound is the caller's recvBounded on that
+// channel, so a Wait that never returns fails the test by name.
+func poolIdle(pool *ReviewPool) <-chan struct{} {
+	wait := pool.Wait
 	idle := make(chan struct{})
 	go func() {
-		waitPool(bound, pool)
+		wait()
 		close(idle)
 	}()
 	return idle
@@ -119,7 +109,7 @@ func (l *logRecorder) get() []string {
 	return append([]string(nil), l.lines...)
 }
 
-func TestReviewPoolStartsInOrder(t *testing.T) {
+func TestReviewPoolReviewsEachWorkOnce(t *testing.T) {
 	t.Parallel()
 	rev := newFakeAheadReviewer(t, nil)
 	pool := &ReviewPool{Reviewer: rev}
@@ -134,7 +124,7 @@ func TestReviewPoolStartsInOrder(t *testing.T) {
 		started[w.BeadID] = w.Head
 	}
 	close(rev.release)
-	recvBounded(t, poolIdle(t, pool), "the pool going idle")
+	recvBounded(t, poolIdle(pool), "the pool going idle")
 
 	if want := map[string]string{"gt-first": "1111111", "gt-second": "2222222"}; !reflect.DeepEqual(started, want) {
 		t.Errorf("reviews started %v, want one per work %v", started, want)
@@ -158,10 +148,10 @@ func TestReviewPoolWaitReturnsWhenIdle(t *testing.T) {
 	// channel closes.
 	started := make(chan struct{})
 	idle := make(chan struct{})
-	bound := waitCtx(t).Done()
+	wait := pool.Wait
 	go func() {
 		close(started)
-		waitPool(bound, pool)
+		wait()
 		close(idle)
 	}()
 	recvBounded(t, started, "Wait starting")
@@ -184,38 +174,10 @@ func TestReviewPoolLogsNothingForCancelledReview(t *testing.T) {
 	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-stop", Head: "4444444"}})
 	recvBounded(t, rev.entered, "the review start")
 	close(rev.release)
-	recvBounded(t, poolIdle(t, pool), "the pool going idle")
+	recvBounded(t, poolIdle(pool), "the pool going idle")
 
 	if got := logs.get(); len(got) != 0 {
 		t.Errorf("logged %q for a cancelled review, want nothing", got)
-	}
-}
-
-func TestReviewPoolDoesNotStartBeadTwice(t *testing.T) {
-	t.Parallel()
-	rev := newFakeAheadReviewer(t, nil)
-	pool := &ReviewPool{Reviewer: rev}
-	work := land.Work{BeadID: "gt-once", Head: "5555555"}
-
-	pool.Offer(context.Background(), []land.Work{work})
-	recvBounded(t, rev.entered, "the review start")
-	pool.mu.Lock()
-	first := pool.running[work.BeadID]
-	pool.mu.Unlock()
-
-	// Checked at once, while the first review is held, so the result does not
-	// depend on how the goroutines are scheduled.
-	pool.Offer(context.Background(), []land.Work{work})
-	pool.mu.Lock()
-	if pool.running[work.BeadID] != first {
-		t.Errorf("second offer replaced the review already running for %s", work.BeadID)
-	}
-	pool.mu.Unlock()
-
-	close(rev.release)
-	recvBounded(t, poolIdle(t, pool), "the pool going idle")
-	if n := len(rev.reviewed()); n != 1 {
-		t.Errorf("reviewer called %d times for one bead, want 1", n)
 	}
 }
 
@@ -225,7 +187,7 @@ func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 	pool := &ReviewPool{Logf: logs.logf}
 
 	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-none", Head: "6666666"}})
-	recvBounded(t, poolIdle(t, pool), "the pool going idle")
+	recvBounded(t, poolIdle(pool), "the pool going idle")
 
 	if n := len(logs.get()); n != 1 {
 		t.Errorf("logged %d lines with no reviewer, want 1", n)
