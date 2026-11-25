@@ -388,14 +388,14 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 // is the daemon pod's, run through exec (the roll passes productionPodExec, and a
 // test passes a fake so the store this returns is the one it drives); a store that cannot be
 // built is carried in err, which the roll reports before it takes the hold. The
-// landing read and the runs read are not wired here yet, so a real roll still
-// refuses before it takes the hold; --dry-run needs none of them.
+// runs read is not wired here yet, so a real roll still refuses before the hold.
 func runnerRollDepsFor(townRoot string, exec podExec, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
 	store, storeErr := podHoldStore(townRoot, exec)
 	return runnerRollDeps{
 		err:      storeErr,
 		store:    store,
 		holdPath: filepath.Join(townRoot, runnerroll.LandingHoldName),
+		landing:  podLandingRead(townRoot, newPodRunner(exec)),
 		clock:    wallRollClock{},
 		now:      time.Now,
 		signals:  liveRollSignals,
