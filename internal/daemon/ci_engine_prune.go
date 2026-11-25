@@ -1189,6 +1189,8 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	}
 	cache := "build cache prune failed"
 	zeroReclaim := false
+	var reclaimed int64
+	reclaimedKnown := false
 	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge, keepBytes)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
@@ -1197,14 +1199,29 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			reason = fmt.Sprintf("the build cache prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
 		}
 	} else {
-		reclaimed, known, verdict, warn := ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge, keepBytes)
+		var verdict, warn string
+		reclaimed, reclaimedKnown, verdict, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge, keepBytes)
 		cache = verdict
-		if known {
+		if reclaimedKnown {
 			stats["build_cache_bytes"] = reclaimed
 		}
 		if warn != "" {
 			zeroReclaim = true
 			d.logger.Printf("%s", warn)
+		}
+	}
+	// The cap prune follows the age prune when the cache is still over the keep size:
+	// the reclaimable figure docker gave before the age prune, less what the age prune
+	// reclaimed. An unread figure, or an age prune that failed, leaves the excess
+	// unknown, so no cap prune is sent.
+	if over, usable := ciEngineCacheOverKeep(reclaimable, reclaimErr == nil, reclaimed, reclaimedKnown, keepBytes); usable && over > 0 {
+		if _, capStderr, capErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCacheCapArgv(keepBytes)...); capErr != nil {
+			d.ciEnginePruneLogf("cap prune failed", "disk_maintenance: ci engine prune: the cap prune in the %s container failed (%s); the run is retried",
+				ciCacheContainer, ciEngineFailure(capErr, capStderr))
+			failed = true
+			if reason == "" {
+				reason = fmt.Sprintf("the cap prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(capErr, capStderr))
+			}
 		}
 	}
 	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
