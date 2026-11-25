@@ -247,9 +247,9 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	// estimate logged instead of asking those inputs again, so a forced
 	// re-estimate returns the same minutes when the text and weights are
 	// unchanged. New text has no line for its hash, so it gets no Prior and
-	// reads no log.
-	if estimatedBefore {
-		deps.Prior = specEstimatePrior(deps.TownRoot)
+	// reads no log, and an unreadable log is not reported for it.
+	if !estimatedBefore {
+		deps.Prior = nil
 	}
 	estCtx, cancel := context.WithTimeout(ctx, specEstimateTimeout)
 	defer cancel()
@@ -561,7 +561,9 @@ func specEstimateNoneNote(hash string, cause error) string {
 // does. A Jev battery that cannot be opened, and an embedder that is not
 // configured, are not refusals: each becomes a skipped input, named in the
 // note. An embedder URL set without a model is a configuration error and
-// refuses the run (specEstimateEmbedder).
+// refuses the run (specEstimateEmbedder). The Prior reader reads the estimate
+// log where the run appends its line, and an unreadable log is one line on
+// errw.
 func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, error) {
 	sd, err := readSpecDispatchConfig(townRoot)
 	if err != nil {
@@ -578,6 +580,7 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 	return estimate.Deps{
 		Weights:         &weights,
 		TownRoot:        townRoot,
+		Prior:           specEstimatePrior(townRoot, errw),
 		Embedder:        embedder,
 		JevAsk:          specEstimateJev(townRoot, errw),
 		HMRunner:        hmhints.ExecRunner,
