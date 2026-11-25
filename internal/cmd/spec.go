@@ -4572,15 +4572,21 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// rows and their details. retry is the timed-out sling retry, nil on a read
 	// that must write nothing; memo is the verdict memo, nil on the same read;
 	// drop is the stale split label's drop, nil on the same read.
-	board := func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
-		read := specCandidatesDropping(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
-			reads.call()
-			return specReadyBoard(rigPath)
-		}, docked.parkedOrDocked, retry, drop, nil)
-		return specBoardDetails(reads, func(rig string) beads.Client {
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    townRoot,
+		maxPriority: maxPriority,
+		reads:       reads,
+		ready:       specReadyBoard,
+		rigStatus:   docked.parkedOrDocked,
+		heads: specTickHeadsHold(townRoot, townRigs, slingStores{}, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "spec dispatch: "+format+"\n", args...)
+		}),
+		memory: annotations.memory,
+		now:    time.Now,
+		detailStore: func(rig string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
-		}, read, memo)
-	}
+		},
+	})
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
@@ -5232,6 +5238,76 @@ func specTickHeads(townRoot string, rigs []string, store any, logf func(string, 
 		return nil
 	}
 	return heads
+}
+
+// newTickHeads is the tick's hold on its rigs' hashes (gt-wdpcy8): the first call
+// runs read, and every later call in the tick answers what it gave, so the hashes
+// are read once however many board reads the tick takes. A read that gave nothing
+// is held as nothing and is not asked again: a tick that could not read the
+// hashes reads every rig rather than asking the store a second time.
+func newTickHeads(read func() map[string]beadsql.RigHash) func() map[string]beadsql.RigHash {
+	var once sync.Once
+	var heads map[string]beadsql.RigHash
+	return func() map[string]beadsql.RigHash {
+		once.Do(func() { heads = read() })
+		return heads
+	}
+}
+
+// specTickHeadsHold is the tick's one read of the rigs' hashes, held for every
+// board read in the tick: the first call reads through the town's first rig
+// database (every rig database answers the one statement), later calls answer the
+// same map. A town with no rigs holds nil. A store with no SQLCSV yields nil with
+// no log line, on purpose: gt-mery73 says "nil without a line when the store has
+// no SQLCSV".
+func specTickHeadsHold(townRoot string, rigs []string, stores slingStores, logf func(string, ...any)) func() map[string]beadsql.RigHash {
+	return newTickHeads(func() map[string]beadsql.RigHash {
+		if len(rigs) == 0 {
+			return nil
+		}
+		return specTickHeads(townRoot, rigs, stores.pinnedAt(filepath.Join(townRoot, rigs[0])), logf)
+	})
+}
+
+// specTickBoardDeps is what the tick's board closure works through: production
+// passes the real reads and a test passes counting ones.
+type specTickBoardDeps struct {
+	townRoot    string
+	maxPriority int
+	reads       *specTickReads
+	// ready reads one rig's ready beads; rigStatus says whether the rig is parked
+	// or docked.
+	ready     func(rigPath string) ([]*beads.Issue, error)
+	rigStatus func(townRoot, rigName string) (bool, string)
+	// heads is the tick's held hashes and memory the quiet-rig memory: a rig the
+	// memory calls quiet under those hashes is not read.
+	heads  func() map[string]beadsql.RigHash
+	memory *specAnnotated
+	now    func() time.Time
+	// detailStore opens a rig's store for the candidates' details.
+	detailStore func(rig string) beads.Client
+}
+
+// specTickBoard builds the board closure the tick and a held tick both take
+// (gt-wdpcy8, gt-j9pew3): each read takes the held hashes and passes the quiet-rig
+// answer over them to the scan as its skip, so a rig the memory calls quiet gets
+// no ready read.
+//
+// What a skipped rig can miss: rigQuiet answers true only when the rig's head and
+// working hashes are both present and equal to the memory's, the memory's last read
+// found no candidate and that read is under five minutes old; nil hashes or a nil
+// memory skip nothing. So the worst case is a rig whose readiness changed with no
+// change to its own database (a deferral date passing, a blocker closing in
+// another rig): it waits up to five minutes for its next read.
+func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
+	return func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
+		skip := quietSkip(dp.memory, dp.heads(), dp.now())
+		read := specCandidatesDropping(dp.townRoot, dp.maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+			dp.reads.call()
+			return dp.ready(rigPath)
+		}, dp.rigStatus, retry, drop, skip)
+		return specBoardDetails(dp.reads, dp.detailStore, read, memo)
+	}
 }
 
 // specCandidatesWith is specCandidates with the rig's park-and-dock check
