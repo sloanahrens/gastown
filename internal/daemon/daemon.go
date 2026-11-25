@@ -480,6 +480,11 @@ type Daemon struct {
 	// Tests set it to record the install without touching the process-wide slot.
 	installWorkspacePusher func(bdgateway.WorkspacePusher)
 
+	// gatewayRefusals is the window over the bd gateway's refusal counters the
+	// refusals attention collector grows its item from. It lives on the Daemon,
+	// since attentionSources is rebuilt every tick (gt-xu8fkg).
+	gatewayRefusals RefusalWindow
+
 	// workspaceDrift checks each gateway answer for drift and signals the reconcile
 	// loop. startWorkspaceReconcile creates it; the installed pusher and the loop's
 	// probe feed it, and a test calls observe on it to stand in for a gateway answer.
