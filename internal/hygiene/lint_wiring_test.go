@@ -9,8 +9,9 @@ import (
 // lintScanStep is the command make lint runs to enforce the tree scan. The scan
 // needs real git over the whole tracked tree, which the unit tier never starts,
 // so the gate enforces it through make lint (gt-xl8mb8) and this test holds the
-// wiring: the command's own behaviour is tested in cmd/scan with a fake git.
-const lintScanStep = "go run ./internal/hygiene/cmd/scan"
+// wiring: the command's own behaviour is tested in cmd/scan with a fake git. The
+// step carries the scan's flag variable, empty for make lint (gt-5suext).
+const lintScanStep = "go run ./internal/hygiene/cmd/scan $(HYGIENE_SCAN_FLAGS)"
 
 // TestLintRunsTheHygieneScan fails when the lint recipe no longer runs the tree
 // scan, so the enforcement cannot be dropped without a test failing.
@@ -108,4 +109,70 @@ func lintRecipe(makefile string) (string, bool) {
 		out = append(out, l)
 	}
 	return strings.Join(out, "\n"), true
+}
+
+// scanFlagsVar carries the scan's flags: empty for make lint, set by gate-lint
+// to the changed files (gt-5suext).
+const scanFlagsVar = "HYGIENE_SCAN_FLAGS"
+
+// gateScanFlags is what gate-lint sets; the gate's checkout has origin/main.
+const gateScanFlags = "-changed-since origin/main"
+
+// TestLintWiringGateScansChangedFiles fails when the gate's lint stops scanning
+// only the changed files, or make lint stops scanning the whole tree (gt-5suext).
+func TestLintWiringGateScansChangedFiles(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatalf("reading the Makefile: %v", err)
+	}
+	if !gateLintScansChangedFiles(string(data)) {
+		t.Fatalf("gate-lint does not pass %q to the lint scan, or make lint does not keep the full scan", gateScanFlags)
+	}
+}
+
+// TestGateLintScanWiringRefusesAnUnwiredScan mutates one line of a wired
+// Makefile per row. A row whose text is not in the base once fails, so a
+// mutation cannot pass by changing nothing.
+func TestGateLintScanWiringRefusesAnUnwiredScan(t *testing.T) {
+	t.Parallel()
+	const gateLine = "gate-lint: " + scanFlagsVar + " := " + gateScanFlags + "\n"
+	base := scanFlagsVar + " :=\n\nlint: docs-lint\n\t" + lintScanStep + "\n\n" + gateLine + "gate-lint: exec-tax-preflight lint\n"
+	if !gateLintScansChangedFiles(base) {
+		t.Fatal("the wired base Makefile is refused")
+	}
+	for _, c := range []struct{ name, old, new string }{
+		{"gate-lint drops the variable", gateLine, ""},
+		{"gate-lint line commented out", "gate-lint: " + scanFlagsVar, "# gate-lint: " + scanFlagsVar},
+		{"gate-lint names another base", gateScanFlags, "-changed-since HEAD~1"},
+		{"gate-lint swallows the exit", gateScanFlags, gateScanFlags + " || true"},
+		{"variable set under another target", "gate-lint: " + scanFlagsVar, "docs-lint: " + scanFlagsVar},
+		{"default lint carries the flag", scanFlagsVar + " :=\n", scanFlagsVar + " := " + gateScanFlags + "\n"},
+		{"lint scan line drops the variable", " $(" + scanFlagsVar + ")", ""},
+	} {
+		if strings.Count(base, c.old) != 1 {
+			t.Fatalf("%s: %q is not in the base once", c.name, c.old)
+		}
+		if gateLintScansChangedFiles(strings.Replace(base, c.old, c.new, 1)) {
+			t.Errorf("%s: the wiring check passed the mutation", c.name)
+		}
+	}
+}
+
+// gateLintScansChangedFiles reports whether the Makefile text sets the scan's
+// default to empty, sets gate-lint's to gateScanFlags, and runs the scan line
+// with the variable on it.
+func gateLintScansChangedFiles(makefile string) bool {
+	var defaults []string
+	gateSet := false
+	for _, l := range strings.Split(makefile, "\n") {
+		if strings.HasPrefix(l, scanFlagsVar+" ") {
+			defaults = append(defaults, strings.TrimRight(l, " "))
+		}
+		if v, ok := strings.CutPrefix(l, "gate-lint: "+scanFlagsVar+" := "); ok {
+			gateSet = gateSet || strings.TrimRight(v, " ") == gateScanFlags
+		}
+	}
+	recipe, ok := lintRecipe(makefile)
+	return ok && len(defaults) == 1 && defaults[0] == scanFlagsVar+" :=" && gateSet && recipeRunsScan(recipe)
 }

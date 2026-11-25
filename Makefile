@@ -297,6 +297,10 @@ openshell-providers:
 # lint still contended at the end exits red with that evidence. 0 = one try.
 LINT_LOCK_WAIT ?= 600
 
+# The hygiene scan's flags: empty, so make lint scans every tracked file; `:=`
+# so an environment value cannot narrow it (gt-5suext).
+HYGIENE_SCAN_FLAGS :=
+
 # The linter comes from PATH, and a missing one or another version is refused
 # here naming the pin, so no run lints with a tool nobody pinned (gt-zzo1g2).
 lint: docs-lint
@@ -306,7 +310,7 @@ lint: docs-lint
 	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml --build-tags integration $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
 	go run ./cmd/repo-guards
 	@echo "lint: hygiene scan (the operator's name and paths stay out of the tracked tree, gt-xl8mb8)"
-	go run ./internal/hygiene/cmd/scan
+	go run ./internal/hygiene/cmd/scan $(HYGIENE_SCAN_FLAGS)
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	$(CPU_CLASS) go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
@@ -502,7 +506,10 @@ gate: gate-lint gate-test
 # The gate's two stages, which the landing worker runs one at a time, each
 # under its own timeout, and om review only after both pass (gt-b5ugw). make
 # gate is the two in order, unchanged in effect.
+# The gate's lint scans the files its landing changed, against origin/main
+# (gt-5suext); make lint keeps the full scan.
 gate-lint: LINT_RUNNER_FLAGS := --allow-serial-runners
+gate-lint: HYGIENE_SCAN_FLAGS := -changed-since origin/main
 gate-lint: exec-tax-preflight lint
 
 # The unit tier's wall series (gt-u0up0): each run appends one line per package
