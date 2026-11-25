@@ -3632,6 +3632,66 @@ func TestSpecOrderByInheritance(t *testing.T) {
 	})
 }
 
+// TestSpecCandidatesInheritedFailed is the candidate read's report of the rigs
+// the inherited seam could not read (gt-x64phi): each failed rig gets one
+// notice naming the rig and its error, sorted by rig name, and a read with no
+// failure adds none, so a failed rig no longer looks like a successful one.
+func TestSpecCandidatesInheritedFailed(t *testing.T) {
+	t.Parallel()
+	board := []*beads.Issue{
+		{ID: "gt-old", Type: "task", Status: "open", Priority: 2, CreatedAt: "2026-09-01T00:00:00Z"},
+	}
+	readWith := func(t *testing.T, inherited func() (map[string]specdispatch.Inherited, map[string]error)) specBoardRead {
+		t.Helper()
+		return specCandidatesDropping(specTown(t), 2, func(string) ([]*beads.Issue, error) { return board, nil }, notDocked, nil, nil, nil, inherited)
+	}
+	seam := func(failed map[string]error) func() (map[string]specdispatch.Inherited, map[string]error) {
+		return func() (map[string]specdispatch.Inherited, map[string]error) { return nil, failed }
+	}
+
+	tests := []struct {
+		name   string
+		failed map[string]error
+		want   []string
+	}{
+		{
+			name:   "one failed rig is named with its error",
+			failed: map[string]error{"gastown": errors.New("blocked list unreadable")},
+			want:   []string{"inherited priority: gastown's blocked list could not be read (blocked list unreadable); its blockers order at their own priority"},
+		},
+		{
+			name: "two failed rigs are named in rig-name order",
+			failed: map[string]error{
+				"zeta":  errors.New("connection refused"),
+				"alpha": errors.New("timeout"),
+			},
+			want: []string{
+				"inherited priority: alpha's blocked list could not be read (timeout); its blockers order at their own priority",
+				"inherited priority: zeta's blocked list could not be read (connection refused); its blockers order at their own priority",
+			},
+		},
+		{
+			name:   "an empty failed map adds none",
+			failed: map[string]error{},
+			want:   nil,
+		},
+		{
+			name:   "a nil failed map adds none",
+			failed: nil,
+			want:   nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := readWith(t, seam(tc.failed))
+			if !slices.Equal(got.Notices, tc.want) {
+				t.Fatalf("Notices = %q, want %q", got.Notices, tc.want)
+			}
+		})
+	}
+}
+
 // specTown is a temp town with one operational rig whose .beads looks like a
 // database, so specCandidates walks it. The board itself is served by the
 // specReadyBoard seam.

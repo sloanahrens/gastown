@@ -817,6 +817,11 @@ type TierSweepRun struct {
 	// by tier name, off the stage lines the reader kept for it. A cycle whose
 	// stage lines have not reported carries none.
 	Walls map[string]float64 `json:"walls,omitempty"`
+	// Stages is each tier the runner has finished this cycle, in the order it
+	// finished them, off the cycle's progress.json rather than the log. It is
+	// empty until the runner writes its first progress record, and on the
+	// fallback reading, which knows no run directory to read (gt-ph60ia).
+	Stages []TierSweepRunStage `json:"stages,omitempty"`
 }
 
 // TierSweepRunStage is one tier the sweep runner has finished, off its summary line.
@@ -862,8 +867,9 @@ type TierSweepTrendRig struct {
 
 // TierSweep is the daemon's tier sweeps: whether one is running now, the last
 // few that finished, and one wall trend per rig over the last 30 sweeps.
-// Unavailable says the daemon log could not be read, which is not the same as a
-// log that holds no sweeps.
+// Unavailable says a file the section reads could not be read — the daemon log,
+// or an open cycle's progress file — which is not the same as one that holds no
+// sweeps.
 type TierSweep struct {
 	Running     *TierSweepRun       `json:"running,omitempty"`
 	Sweeps      []TierSweepRow      `json:"sweeps"`

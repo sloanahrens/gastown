@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -24,7 +25,13 @@ func tierSweepTestReader(t *testing.T, lines ...string) (*tierSweepReader, strin
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return &tierSweepReader{logPath: path, stateDir: filepath.Join(dir, "tier-sweep"),
+	// The sweep-runs root exists and holds no run: a test that needs a progress
+	// file writes one under it, and the rest read today's object.
+	runs := filepath.Join(dir, "sweep-runs")
+	if err := os.MkdirAll(runs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &tierSweepReader{logPath: path, stateDir: filepath.Join(dir, "tier-sweep"), sweepRunsRoot: runs,
 		rigs: func() ([]string, error) { return []string{"gastown"}, nil },
 		last: map[string]tierSweepEvent{}, start: map[string]tierSweepStarted{}}, path
 }
@@ -606,5 +613,135 @@ func TestTierSweepReaderDatesTheUTCRegion(t *testing.T) {
 	}
 	if want := time.Date(2026, 11, 5, 2, 0, 19, 0, time.UTC); !r.rows[0].At.Equal(want) {
 		t.Errorf("sweep at %v, want %v", r.rows[0].At.UTC(), want)
+	}
+}
+
+// tierSweepProgressCycle is the log of the open cycle the progress rows read:
+// a start of 6193c7a7 whose shell stage has finished, so the cycle is in
+// integration and 6193c7a7's run is the one whose progress file it reads.
+var tierSweepProgressCycle = []string{
+	"2026/10/04 14:00:00 tier_sweep: gastown: sweep started 6193c7a7 (shell, integration, race)",
+	"2026/10/04 14:01:05 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:",
+}
+
+var tierSweepProgressStart = time.Date(2026, 10, 4, 14, 0, 0, 0, time.Local)
+
+// TestTierSweepRunningProgressFinishedTiers: the open cycle's finished tiers
+// ride on the running object, off the progress.json the runner rewrites after
+// each tier (gt-58mdg5). The file is the cycle's own run, found by the start
+// line's sha8 under the reader's sweep-runs root (gt-ph60ia).
+func TestTierSweepRunningProgressFinishedTiers(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t, tierSweepProgressCycle...)
+	sweepRunsRootWith(t, r.sweepRunsRoot, "gastown", []sweepRunFixture{{"gastown-6193c7a7-integration-race", true, 5}})
+
+	ts := r.read(tierSweepProgressStart.Add(30 * time.Minute))
+	if ts.Unavailable {
+		t.Fatalf("a readable progress file must not mark the section unavailable: %+v", ts)
+	}
+	if ts.Running == nil {
+		t.Fatal("the started cycle reads running")
+	}
+	want := []dashboard.TierSweepRunStage{{Tier: "integration", Verdict: "GREEN", Passed: 82, Secs: 1129}}
+	if !reflect.DeepEqual(ts.Running.Stages, want) {
+		t.Fatalf("running stages = %+v, want the progress file's finished tier %+v", ts.Running.Stages, want)
+	}
+}
+
+// TestTierSweepRunningProgressMissingFileKeepsTheObject: with no progress file
+// for the open cycle the running object is today's, field for field — no
+// finished tiers, and no unavailable note for a file that does not exist.
+// A file on another sha's run, or one whose run never wrote it, is the same as
+// no file.
+func TestTierSweepRunningProgressMissingFileKeepsTheObject(t *testing.T) {
+	t.Parallel()
+	cases := map[string][]sweepRunFixture{
+		"no run under the root":                nil,
+		"a run of another sha":                 {{"gastown-a9be03e4-integration-race", true, 5}},
+		"a run whose progress.json never came": {{"gastown-6193c7a7-integration-race", false, 0}},
+	}
+	for name, runs := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := tierSweepTestReader(t, tierSweepProgressCycle...)
+			sweepRunsRootWith(t, r.sweepRunsRoot, "gastown", runs)
+
+			ts := r.read(tierSweepProgressStart.Add(4 * time.Minute))
+			if ts.Unavailable {
+				t.Fatalf("no progress file must not mark the section unavailable: %+v", ts)
+			}
+			want := &dashboard.TierSweepRun{Rig: "gastown", Tier: "integration", SHA: "6193c7a7",
+				Tiers: []string{"shell", "integration", "race"}, Since: tierSweepProgressStart,
+				ElapsedSec: 240, Walls: map[string]float64{"shell": 65}}
+			if !reflect.DeepEqual(ts.Running, want) {
+				t.Fatalf("running = %+v, want today's object %+v", ts.Running, want)
+			}
+		})
+	}
+}
+
+// TestTierSweepRunningProgressFallbackReadsNoFile: the fallback reading — a
+// shell-finished line with no start, for a log from a daemon that writes none —
+// names no sha, so no run directory is the cycle's. A progress file under the
+// rig's root then belongs to some other run and is not read: the fallback object
+// carries no stages and no unavailable note.
+func TestTierSweepRunningProgressFallbackReadsNoFile(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:01:05 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:",
+	)
+	sweepRunsRootWith(t, r.sweepRunsRoot, "gastown", []sweepRunFixture{{"gastown-6193c7a7-integration-race", true, 5}})
+
+	ts := r.read(tierSweepProgressStart.Add(4 * time.Minute))
+	if ts.Unavailable {
+		t.Fatalf("a cycle the fallback reading names no sha for must not read a file: %+v", ts)
+	}
+	if ts.Running == nil || ts.Running.Tier != "integration" {
+		t.Fatalf("running = %+v, want the fallback's integration reading", ts.Running)
+	}
+	if len(ts.Running.Stages) != 0 {
+		t.Errorf("running stages = %+v, want none: the fallback knows no run", ts.Running.Stages)
+	}
+}
+
+// TestTierSweepRunningProgressReadErrorMarksUnavailable: a progress file that
+// cannot be read is the section's unavailable note, never a sweep shown with no
+// finished tier. The sweep itself still reads running off the log, which names
+// the cycle regardless of the file. A sweep-runs root that is not there at all
+// is the same failure: the root is the path the reader was pointed at, and its
+// absence is a misconfiguration, not a town that has not swept.
+func TestTierSweepRunningProgressReadErrorMarksUnavailable(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T, r *tierSweepReader){
+		"corrupt progress file": func(t *testing.T, r *tierSweepReader) {
+			dir := filepath.Join(r.sweepRunsRoot, "gastown", "gastown-6193c7a7-integration-race")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "progress.json"), []byte(`{"rig":"gastown","tiers":[`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"missing sweep-runs root": func(t *testing.T, r *tierSweepReader) {
+			r.sweepRunsRoot = filepath.Join(t.TempDir(), "absent")
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := tierSweepTestReader(t, tierSweepProgressCycle...)
+			setup(t, r)
+
+			ts := r.read(tierSweepProgressStart.Add(4 * time.Minute))
+			if !ts.Unavailable {
+				t.Fatalf("a progress read that fails must mark the section unavailable: %+v", ts)
+			}
+			if ts.Running == nil || ts.Running.SHA != "6193c7a7" {
+				t.Fatalf("running = %+v, want the log's sweep 6193c7a7 still named", ts.Running)
+			}
+			if len(ts.Running.Stages) != 0 {
+				t.Errorf("running stages = %+v, want none from a file that could not be read", ts.Running.Stages)
+			}
+		})
 	}
 }

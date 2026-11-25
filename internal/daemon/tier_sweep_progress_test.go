@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,5 +175,93 @@ func TestWriteRunProgressRefusesMissingDirectory(t *testing.T) {
 	}
 	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
 		t.Fatalf("the missing directory was created: stat err = %v", statErr)
+	}
+}
+
+// The record writeRunProgress stores is the whole object it was given, its mode
+// is 0o644 so other processes can read it, and the temp file it wrote through
+// is gone: progress.json is the only entry in the directory.
+func TestWriteRunProgressStoresObjectAtomically(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	data := []byte(`{"tiers_done":2,"running":"integration"}`)
+	if err := writeRunProgress(dir, data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, runProgressName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("progress.json = %q, want the whole object %q", got, data)
+	}
+	info, err := os.Stat(filepath.Join(dir, runProgressName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Fatalf("progress.json mode = %o, want 644", perm)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != runProgressName {
+		t.Fatalf("dir holds %d entries, want only %s", len(entries), runProgressName)
+	}
+}
+
+// A second write replaces the first: the record holds the second object and is
+// still the only entry in the directory.
+func TestWriteRunProgressSecondWriteReplacesFirst(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := writeRunProgress(dir, []byte(`{"tiers_done":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	second := []byte(`{"tiers_done":2}`)
+	if err := writeRunProgress(dir, second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, runProgressName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, second) {
+		t.Fatalf("progress.json = %q after a second write, want %q", got, second)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != runProgressName {
+		t.Fatalf("dir after a second write holds %d entries, want only %s", len(entries), runProgressName)
+	}
+}
+
+// A reader that opened the record before a second write keeps reading all of
+// the old bytes: the writer renames a new file over the name, it never writes
+// the old one in place.
+func TestWriteRunProgressReplaceLeavesOpenReaderWholeOldRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	old := []byte(`{"tiers_done":1}`)
+	if err := writeRunProgress(dir, old); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.Open(filepath.Join(dir, runProgressName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := writeRunProgress(dir, []byte(`{"tiers_done":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, old) {
+		t.Fatalf("open reader = %q after the record was replaced, want the whole old %q", got, old)
 	}
 }
