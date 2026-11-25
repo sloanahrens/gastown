@@ -34,11 +34,20 @@ type specEstimateStub struct {
 	calls  int
 	result estimate.Result
 	err    error
+	// declaredFromText makes the stub read the declared Change lines from the
+	// bead's text, as estimate.Estimate does, instead of using result's.
+	declaredFromText bool
 }
 
 func (s *specEstimateStub) run(_ context.Context, _ estimate.Deps, issue *beads.Issue) (estimate.Result, error) {
 	s.calls++
 	r := s.result
+	if s.declaredFromText {
+		r.DeclaredLines = 0
+		if n, ok := storypoints.DeclaredLines(issue.Description); ok {
+			r.DeclaredLines = float64(n)
+		}
+	}
 	r.Hash = estimate.SectionHash(issue)
 	return r, s.err
 }
@@ -1029,6 +1038,54 @@ func TestSpecEstimateAppendsOneLogLine(t *testing.T) {
 	}
 	if !got.Time.Equal(specEstimateLogTime()) {
 		t.Errorf("Time = %v, want %v", got.Time, specEstimateLogTime())
+	}
+}
+
+// TestSpecEstimateLogCarriesDeclaredLines: the estimate-log row carries the
+// added-line count the bead's Size section declares, so an eval can join the
+// declared size to the landed time. A Size section with no Change line, or two
+// that state different numbers, writes no declared count.
+func TestSpecEstimateLogCarriesDeclaredLines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		size string
+		want float64
+	}{
+		{"one Change line", "One worker.\nChange: at most 40 added lines in 2 files.", 40},
+		{"no Change line", "One worker.", 0},
+		{"two different Change numbers", "Change: at most 40 added lines.\nChange: at most 90 added lines.", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			db := specEstimateSeed()
+			body := strings.Replace(specEstimateBody, "One worker.", tc.size, 1)
+			if err := db.Update("gt-est", beads.UpdateOptions{Description: &body}); err != nil {
+				t.Fatalf("set the bead's Size section: %v", err)
+			}
+			stub := specEstimateWithFeatures()
+			stub.declaredFromText = true
+
+			if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{}, specEstimateLogRunner(stub, town)); err != nil {
+				t.Fatalf("runSpecEstimateOn: %v", err)
+			}
+
+			records, malformed, err := estlog.Read(town)
+			if err != nil {
+				t.Fatalf("read the estimate log: %v", err)
+			}
+			if malformed != 0 {
+				t.Fatalf("malformed lines = %d, want none", malformed)
+			}
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want the one estimate", len(records))
+			}
+			if got := records[0].DeclaredLines; got != tc.want {
+				t.Errorf("DeclaredLines = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

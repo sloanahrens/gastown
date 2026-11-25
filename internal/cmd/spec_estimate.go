@@ -422,9 +422,10 @@ func specEstimateAppendLog(townRoot string, now func() time.Time) func(beadID, h
 }
 
 // specEstimateLogRecord is the line one estimate appends: the bead and the hash
-// of the text the estimator read, the shape features and embedding it read, each
-// component's minutes, the blended minutes and the weights version, so a retrain
-// fits on what the estimator saw after the bead's text has changed.
+// of the text the estimator read, the shape features and embedding it read, the
+// added-line count the bead's Size section declares, each component's minutes,
+// the blended minutes and the weights version, so a retrain fits on what the
+// estimator saw after the bead's text has changed.
 func specEstimateLogRecord(beadID, hash string, r estimate.Result, at time.Time) estlog.Record {
 	return estlog.Record{
 		BeadID:          beadID,
@@ -450,6 +451,7 @@ func specEstimateLogRecord(beadID, hash string, r estimate.Result, at time.Time)
 			Jev:   r.ComponentMinutes.Jev,
 		},
 		BlendedMinutes: r.Minutes,
+		DeclaredLines:  r.DeclaredLines,
 		WeightsVersion: r.WeightsVersion,
 		Time:           at,
 	}
