@@ -355,6 +355,42 @@ func TestClaimInFlightExactPathStillHolds(t *testing.T) {
 	}
 }
 
+// TestTargetClaimHoldSkipsAPeerThatWaitsOnTheCandidate is gt-353gam's
+// acceptance: a peer that cannot close until the candidate lands must not hold
+// the candidate, while the same peer waiting on another bead still holds it.
+func TestTargetClaimHoldSkipsAPeerThatWaitsOnTheCandidate(t *testing.T) {
+	t.Parallel()
+	peer := Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", Paths: []string{claimTestFile}}
+	for _, tc := range []struct {
+		name        string
+		candidateID string
+		waitsOn     []string
+		want        bool
+	}{
+		{name: "a peer that waits on the candidate holds nothing", candidateID: "fr-zdzs", waitsOn: []string{"fr-zdzs"}, want: false},
+		{name: "the same peer waiting on another bead still holds it", candidateID: "fr-zdzs", waitsOn: []string{"fr-other"}, want: true},
+		{name: "an empty candidate id is named by no wait", candidateID: "", waitsOn: []string{""}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := peer
+			p.WaitsOn = tc.waitsOn
+			c := Claimant{
+				ID: tc.candidateID, Status: "open", Priority: 1,
+				CreatedAt: "2026-10-31T15:00:00Z",
+				Paths:     []string{claimTestFile},
+			}
+			why, held := TargetClaimHold(c, []Claimant{p}, nil, claimTestNow)
+			if held != tc.want {
+				t.Fatalf("held = %v (%q), want %v", held, why, tc.want)
+			}
+			if !tc.want && why != "" {
+				t.Errorf("unheld candidate came back with a reason: %q", why)
+			}
+		})
+	}
+}
+
 // TestClaimHandoffBeadIsNotAPeer is gt-d5f5q's first acceptance row: a handoff
 // note carries an in-flight status for as long as its session runs and cites
 // whatever that session read, so it is no peer a candidate waits behind.

@@ -161,8 +161,12 @@ type Claimant struct {
 	// target-claim rule holds nothing for it and UnreadClaimPeers names it for
 	// the tick's notice (gt-dnp9c).
 	ClaimUnread bool
-	Paths       []string
-	Tests       []string
+	// WaitsOn lists the ids of the beads this one depends on. A peer whose
+	// WaitsOn names the candidate cannot close until the candidate lands, so
+	// the target-claim rule does not hold the candidate for it (gt-353gam).
+	WaitsOn []string
+	Paths   []string
+	Tests   []string
 }
 
 // CloseReasonIsLanding reports whether reason is the close reason a landing
@@ -192,8 +196,11 @@ func NamesTestFile(candidate Claimant) bool { return len(testFiles(candidate.Pat
 // No other peer holds: a closed or landed peer's work is already on main, which
 // the candidate starts from, and a peer that names the file only by a bare name
 // or whose claim could not be read names no path this rule can compare
-// (gt-dnp9c). An unread peer that would otherwise hold is named by
-// UnreadClaimPeers, which the tick reports as a notice.
+// (gt-dnp9c). A peer whose WaitsOn names the candidate holds nothing either: it
+// cannot close until the candidate lands, so holding the candidate for it would
+// wait on a bead that waits on the held one (gt-353gam). An unread peer that
+// would otherwise hold is named by UnreadClaimPeers, which the tick reports as
+// a notice.
 //
 // slated is the set of beads the tick has decided to sling this tick, not the
 // set its ready board carries. A board-carried peer the tick holds for a reason
@@ -234,6 +241,9 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		if shared == "" || distinctTests(candidate.Tests, peer.Tests) {
 			continue
 		}
+		if waitsOn(peer, candidate.ID) {
+			continue
+		}
 		if !holdsStatus(peer, candidate, slated) {
 			continue
 		}
@@ -250,6 +260,20 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		return "", false
 	}
 	return reason, true
+}
+
+// waitsOn reports whether peer depends on the bead id, so it cannot close until
+// that bead lands. An empty id names no bead, so it matches no entry.
+func waitsOn(peer Claimant, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, dep := range peer.WaitsOn {
+		if dep == id {
+			return true
+		}
+	}
+	return false
 }
 
 // holdsStatus reports whether peer is in a state that holds a candidate naming
