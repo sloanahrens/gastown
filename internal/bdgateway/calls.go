@@ -28,6 +28,13 @@ type CallEntry struct {
 	// when that is empty. A call naming neither logs no actor.
 	Actor string `json:"actor,omitempty"`
 	Verb  string `json:"verb"`
+	// Subcommand is the command word after a verb that has subcommands, from
+	// the fixed table the log keeps (dep, comments, label): "remove" for
+	// `bd dep remove`. A verb with no table row, a second word the table does
+	// not list and a call with no second command word omit it, so no argument
+	// value reaches the line here. A line written before the key existed
+	// decodes to an empty subcommand.
+	Subcommand string `json:"subcommand,omitempty"`
 	// Write reports whether the verb is one that may change beads, so a line
 	// says whether the call wrote without the reader knowing the policy. A line
 	// written before the key existed decodes to nil: its write is unknown, not

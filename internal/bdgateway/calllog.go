@@ -363,6 +363,7 @@ func (l *CallLog) log(rec CallRecord, counted, write bool) {
 		Caller:      boundText(rec.Caller),
 		Actor:       boundText(rec.Actor),
 		Verb:        parsed.verb,
+		Subcommand:  parsed.subcommand,
 		Write:       &rec.Write,
 		Flags:       parsed.flags,
 		Beads:       parsed.beads,
@@ -597,6 +598,7 @@ func (l *CallLog) drop() {
 // logParts is the part of argv a line keeps.
 type logParts struct {
 	verb        string
+	subcommand  string
 	flags       []string
 	beads       []string
 	refusedFlag string
@@ -605,9 +607,10 @@ type logParts struct {
 // parseArgv reads argv with the policy's own scanner: the scan decides the
 // verb, the flags and which tokens are operands, and the log adds only the
 // bead-id filter and the per-field bounds on top. It keeps the first command
-// word as the verb, each flag's name (never a value), and the operands that are
-// bead ids in any position (gt-37qy44). Operands that are not bead ids — titles,
-// descriptions, comment bodies — are never kept.
+// word as the verb, the word after it only when the fixed table lists it under
+// that verb (subcommandOf, gt-87x0gj), each flag's name (never a value), and
+// the operands that are bead ids in any position (gt-37qy44). Operands that are
+// not bead ids — titles, descriptions, comment bodies — are never kept.
 //
 // An id-shaped value of an unknown command flag is an operand to the scanner,
 // which cannot tell `--reason gt-abc` from `--force gt-abc` once the verb is
@@ -637,10 +640,31 @@ func (l *CallLog) parseArgv(argv []string) logParts {
 	}
 	if len(scan.words) > 0 && isVerb(scan.words[0]) {
 		parts.verb = scan.words[0]
+		parts.subcommand = subcommandOf(scan.words)
 	}
 	parts.flags = loggedFlags(scan.flags)
 	parts.beads = beadOperands(scan.operands, l.prefixes)
 	return parts
+}
+
+// verbSubcommands is the fixed table a line's subcommand comes from: the second
+// command word each verb may log. The table is the authority, so a token it does
+// not list under the verb is never stored (gt-87x0gj).
+var verbSubcommands = map[string]map[string]bool{
+	"dep":      {"add": true, "remove": true, "list": true, "tree": true, "cycles": true},
+	"comments": {"add": true, "list": true},
+	"label":    {"add": true, "remove": true, "list": true},
+}
+
+// subcommandOf returns the subcommand words may log: the command word after the
+// verb, only when the table lists it under that verb. A verb with no table row,
+// a word outside its row and a call with one command word return empty, so no
+// argument value reaches the line here.
+func subcommandOf(words []string) string {
+	if len(words) < 2 || !verbSubcommands[words[0]][words[1]] {
+		return ""
+	}
+	return words[1]
 }
 
 // beadOperands returns the bead ids among the scanner's operands, in order, up
