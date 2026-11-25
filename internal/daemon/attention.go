@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -285,6 +287,11 @@ type attentionSources struct {
 	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
 	refusalBead func(ctx context.Context, rig, id string) (*beads.Issue, error)
+	// gatewayStats reads the bd gateway's counters for the refusals collector;
+	// nil when no gateway is configured, so the collector raises nothing.
+	// refusalWindow is the window it grows from (gt-xu8fkg).
+	gatewayStats  func(ctx context.Context) (bdgateway.GatewayStats, error)
+	refusalWindow *RefusalWindow
 	// landingState reads the rig's in-flight landing, the landing-stuck
 	// collector's subject.
 	landingState func(rig string) landingState
@@ -851,6 +858,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The gate-run log's last failed append, until the next one succeeds
 		// (gt-nwea8n). It reads the daemon's own memory, so it cannot fail.
 		{kind: attention.KindGateRunLog, collect: s.collectGateRunLog},
+		// The bd gateway's refused calls grown past five in the hour (gt-xu8fkg).
+		// A failed read keeps the previous item, as every collector's does.
+		{kind: attention.KindBdGatewayRefusals, collect: s.collectGatewayRefusals},
 	}, s.questionCollectors()...)
 }
 
@@ -873,6 +883,69 @@ func (s *attentionSources) collectGateRunLog(context.Context) ([]attention.Item,
 		Severity: attention.SeverityMedium,
 		Summary:  "the gate-run log could not be appended: " + msg,
 	}}, nil
+}
+
+// gatewayRefusalsGrowthBar is the growth in refused calls over the hour the
+// refusals item is raised above: more than five (gt-xu8fkg).
+const gatewayRefusalsGrowthBar = 5
+
+// gatewayRefusalsKey is the one item the refusals growth raises; a tick that
+// stays over the bar keeps this key, and with it the item's first_seen.
+const gatewayRefusalsKey = "bd-gateway-refusals"
+
+// collectGatewayRefusals adds this tick's refusal counts to the window and
+// raises one item while the refused calls grown over the hour pass the bar,
+// naming each reason and its growth. A failed read returns its error, so the
+// previous item is kept and the window takes no sample. An answer without the
+// refusals field raises nothing and adds nothing.
+func (s *attentionSources) collectGatewayRefusals(ctx context.Context) ([]attention.Item, error) {
+	if s.gatewayStats == nil || s.refusalWindow == nil {
+		return nil, nil
+	}
+	stats, err := s.gatewayStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !stats.RefusalsPresent {
+		return nil, nil
+	}
+	s.refusalWindow.Add(s.now, stats.Refusals)
+	growth := s.refusalWindow.Growth(s.now)
+	reasons := make([]string, 0, len(growth))
+	var total uint64
+	for reason, n := range growth {
+		if n > 0 {
+			reasons = append(reasons, reason)
+			total += n
+		}
+	}
+	if total <= gatewayRefusalsGrowthBar {
+		return nil, nil
+	}
+	sort.Strings(reasons)
+	named := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		named = append(named, fmt.Sprintf("%s %d", reason, growth[reason]))
+	}
+	return []attention.Item{{
+		Key:      gatewayRefusalsKey,
+		Kind:     attention.KindBdGatewayRefusals,
+		Severity: attention.SeverityMedium,
+		Summary:  fmt.Sprintf("bd gateway refused %d calls in the last hour: %s", total, strings.Join(named, ", ")),
+	}}, nil
+}
+
+// gatewayStatsRead reads the bd gateway's counters through the workspace
+// gateway's URL, token file and client: the same GET the stats panel reads, and
+// one that observes nothing (bdgateway.GatewayPusher.Stats).
+func (d *Daemon) gatewayStatsRead(ctx context.Context) (bdgateway.GatewayStats, error) {
+	gateway := bdgateway.GatewayPusher{
+		URL:       d.env(bdgateway.WorkspaceURLEnv),
+		PushURL:   d.env(bdgateway.WorkspacePushURLEnv),
+		TokenFile: d.env(bdgateway.WorkspaceTokenEnv),
+		HTTP:      d.workspaceHTTP,
+	}
+	return gateway.Stats(ctx)
 }
 
 // collectRedHold raises one high item while the red hold names at least one
@@ -1070,6 +1143,13 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.storyPointsAdoptions = func() ([]storyPointsAdoptionLine, error) {
 		return readStoryPointsAdoptionLog(storyPointsAdoptionLogPath(d.config.TownRoot))
+	}
+	// The refusal window outlives the tick, so it is the Daemon's. The stats
+	// read exists only when a gateway is configured: a town without one raises
+	// nothing and its item clears.
+	s.refusalWindow = &d.gatewayRefusals
+	if d.env(bdgateway.WorkspaceURLEnv) != "" {
+		s.gatewayStats = d.gatewayStatsRead
 	}
 	// The extract read walks the town's .runtime/metrics, where the daily run
 	// writes one directory per day (internal/metrics/extract.go).
