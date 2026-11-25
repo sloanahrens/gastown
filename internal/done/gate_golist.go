@@ -15,9 +15,16 @@ type gateTestFiles struct {
 }
 
 type goListPackage struct {
+	ImportPath   string
 	Dir          string
 	TestGoFiles  []string
 	XTestGoFiles []string
+	Error        *goListError
+}
+
+// goListError is go list's PackageError: why it could not load a package.
+type goListError struct {
+	Err string
 }
 
 // goListTestFiles asks go which test files each package has under tags, building
@@ -43,6 +50,9 @@ func goListTestFiles(run gateListCommand, env []string, dir, tags string, packag
 		}
 		if err != nil {
 			return nil, fmt.Errorf("go list output does not decode: %w", err)
+		}
+		if p.Error != nil {
+			return nil, fmt.Errorf("go list cannot load %s: %s", p.ImportPath, p.Error.Err)
 		}
 		got = append(got, gateTestFiles{Dir: p.Dir, Files: append(append([]string(nil), p.TestGoFiles...), p.XTestGoFiles...)})
 	}
