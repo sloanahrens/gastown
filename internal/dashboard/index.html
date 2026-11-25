@@ -5715,12 +5715,13 @@ function eventsRead() { eventsUnread = 0; paintEvents(); }
 
 // TOWN ACTIVITY is the town's own feed (gt-l98ykr): every line the hub sends as
 // an entry frame, and the whole ring as one backlog frame on connect, drawn
-// newest first and the last ACTIVITY_KEPT. The hub has always sent those frames;
-// until this pane the page only took them as a sign the stream was alive.
+// newest first and the last ACTIVITY_KEPT.
 const ACTIVITY_KEPT = 200;
 let activityLines = []; // newest first
 // ACTIVITY_CLASS is the colour a line's class draws in, from the page's tokens.
-// A class the page has not seen draws plain rather than guessing at a colour.
+// A class the page has not seen draws plain rather than guessing at a colour:
+// only the table's own entries count, so a name that reaches Object.prototype
+// (constructor, toString, __proto__) draws plain too.
 const ACTIVITY_CLASS = {failure: "at-failure", warning: "at-warning", success: "at-success", landing: "at-landing", dispatch: "at-dispatch", restart: "at-restart", plain: "at-plain"};
 // activityAt is a line's stamp in milliseconds, or null when it carries none the
 // page can date: the row then draws no time and the note no age.
@@ -5730,7 +5731,8 @@ function activityAt(e) {
 }
 function activityRow(e) {
   const at = activityAt(e);
-  const r = el("div", "atrow " + (ACTIVITY_CLASS[e && e.class] || "at-plain"));
+  const cls = e && e.class;
+  const r = el("div", "atrow " + (Object.prototype.hasOwnProperty.call(ACTIVITY_CLASS, cls) ? ACTIVITY_CLASS[cls] : "at-plain"));
   r.append(el("span", "t", at == null ? "" : clock(e.at)), el("span", "g", e.rig || ""), el("span", "k", e.kind || ""), el("span", "x", e.text || ""));
   return r;
 }
