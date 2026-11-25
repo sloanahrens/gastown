@@ -917,10 +917,17 @@ func TestImagePinLayersStartRecordRunsOnALaterDay(t *testing.T) {
 	d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
 		return make(chan time.Time), func() {}
 	}
-	// The bound never fires, so the join waits for the start check's run to end
-	// and the reads below are ordered after it.
+	// The test owns the join's bound: the join timer's channel is fed by a context
+	// deadline, so the join returns when the start check's run ends or when the
+	// deadline fires, and nothing waits unbounded. A fired deadline fails the test
+	// after the stop, before any read, so the reads are ordered after a completed
+	// join.
+	bound, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	d.imagePinLayersJoinTimer = func(time.Duration) (<-chan time.Time, func()) {
-		return make(chan time.Time), func() {}
+		fired := make(chan time.Time, 1)
+		stopAfter := context.AfterFunc(bound, func() { fired <- time.Time{} })
+		return fired, func() { stopAfter() }
 	}
 
 	_, stop := d.startImagePinLayersTicker()
@@ -928,6 +935,9 @@ func TestImagePinLayersStartRecordRunsOnALaterDay(t *testing.T) {
 		t.Fatal("the enabled patrol started no ticker")
 	}
 	d.stopImagePinLayersPatrol(stop)
+	if bound.Err() != nil {
+		t.Fatal("the join did not complete within the bound")
+	}
 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("starting the ticker over an earlier day's record called the run seam %d times, want the day's check once", got)
