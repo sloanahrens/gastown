@@ -371,6 +371,70 @@ func TestUpdateImagesWritesTheValuesForAMatchingPair(t *testing.T) {
 	}
 }
 
+// TestDeriveUpdateImagesPairGood holds the derivation the install calls: given a
+// good commit, it answers the pair both images carry and writes no values file.
+func TestDeriveUpdateImagesPairGood(t *testing.T) {
+	t.Parallel()
+	registry, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+
+	got, err := deriveUpdateImagesPair(context.Background(), testUpdateImagesSeams(t, server, &writes), testUpdateImagesSHA, false)
+	if err != nil {
+		t.Fatalf("deriveUpdateImagesPair: %v", err)
+	}
+	address := testRegistryFor(t, server)
+	want := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, registry.reported(imagevalues.DaemonImage)),
+		Polecat: address.Ref(imagevalues.PolecatImage, registry.reported(imagevalues.PolecatImage)),
+		Commit:  testUpdateImagesSHA,
+	}
+	if got != want {
+		t.Errorf("deriveUpdateImagesPair = %+v, want %+v", got, want)
+	}
+	if writes != 0 {
+		t.Errorf("deriveUpdateImagesPair wrote the values file %d times, want none", writes)
+	}
+}
+
+// TestUpdateImagesDefaultOutRefusesATownItCannotFind holds the default values
+// path: without --out the command names the file under the town's gastown
+// directory, so a town it cannot find is a refusal that writes nothing.
+func TestUpdateImagesDefaultOutRefusesATownItCannotFind(t *testing.T) {
+	t.Parallel()
+	_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+	})
+	rows := []struct {
+		name   string
+		mutate func(*updateImagesSeams)
+		want   string
+	}{
+		{"no town lookup", func(s *updateImagesSeams) { s.FindTownRoot = nil }, "no town lookup is wired"},
+		{"the lookup fails", func(s *updateImagesSeams) {
+			s.FindTownRoot = func() (string, error) { return "", errors.New("no town above the working directory") }
+		}, "finding the town root"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			writes := 0
+			seams := testUpdateImagesSeams(t, server, &writes)
+			row.mutate(&seams)
+			_, _, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA)
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("gt update images without --out = %v, want a refusal naming %q", err, row.want)
+			}
+			if writes != 0 {
+				t.Errorf("the values file was written %d times, want none", writes)
+			}
+		})
+	}
+}
+
 // TestUpdateImagesResolvesAnIndexToItsLinuxChild holds the shape the CI
 // publishes: each tag is an index over a linux/amd64 and a linux/arm64 child.
 // The values file records each index's own digest, and the commit comes from
