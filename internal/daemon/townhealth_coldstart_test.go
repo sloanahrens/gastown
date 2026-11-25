@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -132,6 +133,58 @@ func TestTownHealthColdStartRecordedFields(t *testing.T) {
 		if f.Name == townhealth.FieldPromote {
 			t.Errorf("promote = %s %s %q, want no promote field: the fixture's rig names no promote_target",
 				f.Verdict, f.Value, f.Detail)
+		}
+	}
+}
+
+// TestTownHealthColdStartProcessFieldsWithNoRecords pins the other branch of
+// the process table: the same eight fields on a first tick with neither the
+// state file nor the patrol last-run record the previous daemon writes. A
+// field answered by a record reads UNKNOWN with the record it misses, never a
+// green value, so the green table above is the passing side of a check whose
+// failing side is observable (gt-ghomyi, om finding 9c04902dad2d on gt-ogxa07).
+// The New tag never applies to these fields: only the main field carries it,
+// for a rig that has not landed.
+func TestTownHealthColdStartProcessFieldsWithNoRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	for _, path := range []string{StateFile(d.config.TownRoot), patrolLastRunPath(d.config.TownRoot)} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := &healthSources{d: d, evidence: townhealth.DefaultThresholds().SeatEvidence}
+	stubHealthProbes(src, d.config.TownRoot, now)
+	// Slots stay free as coldStartHealth leaves them: a roll drains the
+	// landing passes before it restarts the daemon (gt-u98suh).
+	src.slots = func() (slot.Report, error) { return slot.Report{}, nil }
+	th := townhealth.DefaultThresholds()
+	th.DeadSamples = PatrolScanDeadSamples(d.patrol())
+	r := townhealth.Compute(context.Background(), src.inputs(now, th, nil))
+
+	for _, want := range []struct {
+		key     string
+		tag     townhealth.Tag
+		verdict townhealth.Verdict
+		value   string
+		detail  string
+	}{
+		{key: "dolt", tag: townhealth.Live, verdict: townhealth.Green, value: "p50 4ms"},
+		{key: "exec-tax", tag: townhealth.Live, verdict: townhealth.Green, value: "9ms/exec"},
+		{key: "host", tag: townhealth.Live, verdict: townhealth.Green, value: "load 2 on 8 cores"},
+		{key: "daemon", tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?", detail: "no heartbeat recorded"},
+		{key: "tick:git_hygiene", tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?", detail: "never recorded firing"},
+		{key: "tick:events_prune", tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?", detail: "never recorded firing"},
+		{key: "slot", tag: townhealth.Recorded, verdict: townhealth.Green, value: "free"},
+		{key: "dispatch", tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?",
+			detail: "the daemon's start time is unknown"},
+	} {
+		got := healthField(t, r, want.key)
+		if got.Tag != want.tag || got.Verdict != want.verdict || got.Value != want.value || got.Detail != want.detail {
+			t.Errorf("%s = %s %s %q %q, want %s %s %q %q",
+				want.key, got.Tag, got.Verdict, got.Value, got.Detail,
+				want.tag, want.verdict, want.value, want.detail)
 		}
 	}
 }
