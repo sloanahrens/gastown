@@ -41,7 +41,7 @@ import (
 const specEstimateNotePrefix = "SP ESTIMATE v1"
 
 const (
-	// specEstimateTimeout bounds one estimate, Jev and the embedder included.
+	// specEstimateTimeout bounds one estimate, the embedder included.
 	specEstimateTimeout = 2 * time.Minute
 	// specEstimateEmbedTimeout bounds one embedder request.
 	specEstimateEmbedTimeout = 30 * time.Second
@@ -58,11 +58,10 @@ var specEstimateCmd = &cobra.Command{
 	Short: "Write a bead's story-point estimate (sp:N labels and a note)",
 	Long: `Estimate one work bead before dispatch and write the result to it.
 
-The estimate blends the shape of the bead's text, an embedding of its
+The estimate blends the shape of the bead's text and an embedding of its
 Constraints and Acceptance (when patrols.spec_dispatch.story_points names an
-embedder), and Jev's fits_twenty_minutes answer (when the battery in
-patrols.jev_dispatch opens). An input that cannot be built is left out and
-named in the note, and the rung label says which inputs were used.
+embedder). An input that cannot be built is left out and named in the note,
+and the rung label says which inputs were used.
 
 On success the bead gets sp:N, sp-rung:<rung> and sp-minutes:<n> (the blended
 minutes, one decimal), replacing any earlier sp:, sp-rung:, sp-minutes: and
@@ -79,8 +78,8 @@ exits 0.
 
 --dry-run prints the labels and the note it would write and writes nothing.
 --force estimates again even when the hash matches; the estimate reuses the
-embed and Jev minutes that earlier estimate logged instead of asking those
-inputs again.`,
+embed minutes that earlier estimate logged instead of asking the embedder
+again.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runSpecEstimate,
@@ -243,8 +242,8 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 		return specEstimateOutcome{}, fmt.Errorf("estimating %s: %w", beadID, err)
 	}
 	// A bead whose latest note already names this text was estimated before,
-	// the case --force reaches: the run reuses the embed and Jev minutes that
-	// estimate logged instead of asking those inputs again, so a forced
+	// the case --force reaches: the run reuses the embed minutes that
+	// estimate logged instead of asking the embedder again, so a forced
 	// re-estimate returns the same minutes when the text and weights are
 	// unchanged. New text has no line for its hash, so it gets no Prior and
 	// reads no log, and an unreadable log is not reported for it.
