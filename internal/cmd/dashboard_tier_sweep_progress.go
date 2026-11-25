@@ -10,8 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// TierSweepProgress is the progress file the sweep runner rewrites after each
-// tier (cmd/sweep-run/progress.go): the tiers finished so far and the one running.
+// TierSweepProgress is the progress file the sweep runner writes (cmd/sweep-run/progress.go).
 type TierSweepProgress struct {
 	Rig     string                        `json:"rig"`
 	SHA     string                        `json:"sha"`

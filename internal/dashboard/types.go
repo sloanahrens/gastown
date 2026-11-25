@@ -815,8 +815,7 @@ type TierSweepRun struct {
 	ElapsedSec int64     `json:"elapsed_sec"`
 }
 
-// TierSweepRunStage is one tier the sweep runner has finished, off its summary
-// line: the verdict and the counts the line carried, and the tier's wall time.
+// TierSweepRunStage is one tier the sweep runner has finished, off its summary line.
 // Its JSON names are the runner's progress file's (cmd/sweep-run/progress.go).
 type TierSweepRunStage struct {
 	Tier    string  `json:"tier"`
