@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -62,6 +63,40 @@ func TestSpecDispatchStoreUnavailableIsADeferral(t *testing.T) {
 			// Still a candidate: the next tick slings it once the store answers.
 			if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
 				t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+			}
+		})
+	}
+}
+
+// TestSpecDispatchOrdinaryFailureStillLabels: the store deferral of gt-m7h3xn
+// must not widen to every sling failure. An ordinary sling error, a wrapped
+// context deadline, still labels the bead spec-dispatch-failed; a bond lock
+// timeout keeps its own deferral and is not labelled (gt-8d38p).
+func TestSpecDispatchOrdinaryFailureStillLabels(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		err          error
+		wantFailed   int
+		wantDeferred int
+		wantLabel    bool
+	}{
+		{"ordinary_error_labels", errors.New("instantiating formula mol-polecat-work: unknown var"), 1, 0, true},
+		{"bond_lock_timeout_defers", fmt.Errorf("instantiating formula mol-polecat-work: %w",
+			fmt.Errorf("bonding: %w", ErrBondLockTimeout)), 0, 1, false},
+		{"wrapped_deadline_labels", fmt.Errorf("dep list gt-cl31e9: %w", context.DeadlineExceeded), 1, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+			f.slingErrs["gt-a"] = []error{tc.err}
+			r := runSpecDispatchCycle(f.env())
+			if len(r.Failed) != tc.wantFailed || len(r.Deferred) != tc.wantDeferred || len(f.slung) != 0 {
+				t.Fatalf("failed %+v deferred %+v slung %v; want %d failed and %d deferred", r.Failed, r.Deferred, f.slung, tc.wantFailed, tc.wantDeferred)
+			}
+			if got := slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel); got != tc.wantLabel {
+				t.Errorf("labels = %v, want %s added = %v", f.labels["gt-a"], specdispatch.DispatchFailedLabel, tc.wantLabel)
 			}
 		})
 	}
