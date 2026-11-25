@@ -98,6 +98,7 @@ type landingInfraTarget struct {
 	// viewer token is missing names no run rather than reading one with the
 	// landing bot's write token (gt-koxwa).
 	ViewerTokenPath string
+	Extra           bool // true for a landing_infra.extra_repos app repository
 }
 
 // landingInfraTargets lists the rigs the probe covers: every rig the landing
@@ -127,7 +128,33 @@ func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 		out = append(out, t.withRemote(fj.RemoteURL))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Rig < out[j].Rig })
-	return out
+	return d.appendExtraRepoTargets(pc, out)
+}
+
+// appendExtraRepoTargets adds each landing_infra.extra_repos entry after the
+// rigs, taking the first rig's instance and token paths; with no rig it carries
+// a BaseErr. A malformed entry adds none and is logged once (gt-7pk3fp).
+func (d *Daemon) appendExtraRepoTargets(pc *DaemonPatrolConfig, rigs []landingInfraTarget) []landingInfraTarget {
+	refs, err := landingInfraConfig(pc).ExtraRepoRefs()
+	if err != nil {
+		d.landingInfra.warnExtra.Do(func() {
+			d.logger.Printf("landing_infra: %v; no extra repository is watched", err)
+		})
+		return rigs
+	}
+	base := rigs
+	for _, ref := range refs {
+		t := landingInfraTarget{Rig: "app:" + ref.Owner + "/" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo, Extra: true}
+		if len(base) == 0 {
+			t.BaseErr = errors.New("no rig lands through Forgejo to take the API base from")
+		} else {
+			first := base[0]
+			t.APIBase, t.BaseErr = first.APIBase, first.BaseErr
+			t.TokenPath, t.TokenErr, t.ViewerTokenPath = first.TokenPath, first.TokenErr, first.ViewerTokenPath
+		}
+		rigs = append(rigs, t)
+	}
+	return rigs
 }
 
 // withRemote fills in the repository and API root the rig's remote URL names,
@@ -264,6 +291,7 @@ type landingInfraState struct {
 	// that condition, so a pass while it holds raises nothing further.
 	alertedForgejo bool
 	alertedRunner  bool
+	warnExtra      sync.Once // the malformed extra_repos line, once per daemon run
 }
 
 // report is the probe's last observation as townhealth reads it.
