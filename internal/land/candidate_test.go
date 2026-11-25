@@ -1625,8 +1625,9 @@ func TestCandidateGateRecordsAPassWithFailedLogRead(t *testing.T) {
 }
 
 // TestCandidateGateRecordsARed: a red gate records its row whichever read
-// fails, and the verdict stays failed with no error. A run that cannot be read
-// leaves the row with its identity only (gt-r0fnmo).
+// fails, and the verdict stays failed with no error. A log that cannot be read
+// leaves its stage times zero; a run that cannot be read is covered by
+// TestCandidateGateRecordsFailedRunRead (gt-r0fnmo).
 func TestCandidateGateRecordsARed(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -1651,14 +1652,6 @@ func TestCandidateGateRecordsARed(t *testing.T) {
 			},
 			want:       GateRun{RunID: "7", QueueS: 10, RunS: 140},
 			wantLogged: "for its gate record: log unreadable",
-		},
-		{
-			name: "failed run read",
-			client: func(string) *fakeForgejo {
-				return &fakeForgejo{runsErr: errors.New("runs unreadable")}
-			},
-			want:       GateRun{},
-			wantLogged: "for its gate record: runs unreadable",
 		},
 	}
 	for _, tc := range cases {
@@ -1691,6 +1684,39 @@ func TestCandidateGateRecordsARed(t *testing.T) {
 				t.Fatalf("output %q; want the failed read logged: %q", out.String(), tc.wantLogged)
 			}
 		})
+	}
+}
+
+// TestCandidateGateRecordsFailedRunRead: a red gate whose run cannot be read
+// records queue_s and run_s as -1, unmeasured, never 0: a zero would read as a
+// run that started and stopped at once. The failed read is logged and the
+// verdict stays failed (gt-pjdykg).
+func TestCandidateGateRecordsFailedRunRead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runsErr:  errors.New("runs unreadable"),
+	}
+	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
+	var recs []GateRun
+	var out strings.Builder
+	gate := fastGate(client)
+	gate.Now = func() time.Time { return at }
+	gate.Out = &out
+	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil || res.State != CandidateFailed {
+		t.Fatalf("Run = state %v err %v; want failed with no error: the verdict is the work's", res.State, res.Err)
+	}
+	want := GateRun{TS: at, Rig: "gastown", Bead: "gt-abc", SHA: sha, QueueS: -1, RunS: -1}
+	if len(recs) != 1 || !reflect.DeepEqual(recs[0], want) {
+		t.Fatalf("recorded %+v; want exactly one row %+v", recs, want)
+	}
+	if !strings.Contains(out.String(), "could not be read for its gate record: runs unreadable") {
+		t.Fatalf("output %q; want the failed run read logged", out.String())
 	}
 }
 

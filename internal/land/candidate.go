@@ -333,8 +333,10 @@ func (g *CandidateGate) Run(ctx context.Context, wt Repo, dir string, w Work, he
 // one that tested res.SHA; its job log gives the stage times, and its timestamps
 // give the queue and run seconds. Passed is res.State, never the log's. A run or
 // log that cannot be read is logged and the row is still recorded with what was
-// read, so a failed read never drops a finished gate. The verdict is already
-// decided and is not touched here.
+// read, so a failed read never drops a finished gate. A run that cannot be read
+// has no timestamps, so its queue_s and run_s are -1, unmeasured, never 0: a
+// zero would read as a run that started and stopped at once (gt-pjdykg). The
+// verdict is already decided and is not touched here.
 func (g *CandidateGate) record(parent context.Context, wf GateWorkflow, w Work, res CandidateResult) {
 	if g.Recorder == nil || res.Err != nil || res.State == CandidateSilent {
 		return
@@ -343,6 +345,7 @@ func (g *CandidateGate) record(parent context.Context, wf GateWorkflow, w Work, 
 	run, err := g.runFor(parent, res.SHA)
 	if err != nil {
 		g.logf("%s: the run that tested %s could not be read for its gate record: %v", w.BeadID, shortSHA(res.SHA), err)
+		row.QueueS, row.RunS = -1, -1
 	} else {
 		if log, _, err := g.jobLog(parent, wf, run); err != nil {
 			g.logf("%s: the gate job log on %s could not be read for its gate record: %v", w.BeadID, shortSHA(res.SHA), err)
