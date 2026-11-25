@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 const (
@@ -22,7 +20,7 @@ const (
 	// is left of a group is filed in bundles of at most this many findings
 	// (gt-ghrt3e). The overflow tests read the chunk from it, so moving the chunk
 	// (gt-z8ygdr) changes it here and nothing else.
-	feedChunkCap = specdispatch.MaxAcceptance
+	feedChunkCap = followupFindingsPerBead
 )
 
 // chunkSizes is how n findings are filed as new bundles: sizes of at most
@@ -66,6 +64,35 @@ func fingerprints(labels []string) int {
 		}
 	}
 	return n
+}
+
+// TestFollowupFeedCap: what is left of a group is filed in bundles of at most
+// followupFindingsPerBead findings each, the cap an open bundle fills to, so
+// four findings for one file file a bundle of three and a bundle of one, and
+// seven file three, three and one (gt-z8ygdr).
+func TestFollowupFeedCap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		n     int
+		sizes []int
+	}{
+		{"four findings", 4, []int{3, 1}},
+		{"seven findings", 7, []int{3, 3, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFollowupFixture(t, 0.8, numberedFindings(tc.n))
+			log := f.run()
+			var sizes []int
+			for _, spec := range f.fake.created {
+				sizes = append(sizes, fingerprints(spec.Labels))
+			}
+			if !slices.Equal(sizes, tc.sizes) {
+				t.Errorf("created bundles carry %v findings, want %v:\n%s", sizes, tc.sizes, log)
+			}
+		})
+	}
 }
 
 // TestFeedOverflowsIntoANewBundle: a group is appended to the open bundle only
