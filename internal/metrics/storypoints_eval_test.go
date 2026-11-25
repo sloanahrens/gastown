@@ -3,12 +3,15 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -237,4 +240,124 @@ func TestStoryPointsEvalJoinError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), path) {
 		t.Fatalf("err = %v, want it to name %s", err, path)
 	}
+}
+
+// evalBandHeading opens the band section the text prints after the base table.
+const evalBandHeading = "the estimate bands (the test part)"
+
+// evalBandRead is one band of the --json object, each figure as the literal it holds.
+type evalBandRead struct {
+	Label            string      `json:"label"`
+	Count            int         `json:"count"`
+	ActualMedian     json.Number `json:"actual_median_min"`
+	ShapeMedian      json.Number `json:"shape_median_min"`
+	EmbedMedian      json.Number `json:"embed_median_min"`
+	JevMedian        json.Number `json:"jev_median_min"`
+	BlendedMedian    json.Number `json:"blended_median_min"`
+	OverTenHalfShare json.Number `json:"over_10_5_share"`
+	OverTwentyShare  json.Number `json:"over_20_share"`
+}
+
+// TestStoryPointsEvalBandsTable: the text prints one line per estimate band after
+// the base table, and the --json object carries the same figures. The test part
+// of evalJSONTown falls in three bands; the other four are empty, and their
+// figures are n/a, never zero.
+func TestStoryPointsEvalBandsTable(t *testing.T) {
+	t.Parallel()
+	town := evalJSONTown(t)
+	empty := func(label string) []string {
+		return []string{label, "0", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a"}
+	}
+	want := [][]string{
+		{"under 6", "10", "10.00", "20.00", "n/a", "n/a", "5.00", "0.00", "0.00"},
+		empty("6 to 8"),
+		empty("8 to 9"),
+		empty("9 to 10"),
+		{"10 to 10.5", "5", "10.00", "20.00", "n/a", "n/a", "10.00", "0.00", "0.00"},
+		empty("10.5 to 12"),
+		{"12 and over", "15", "10.00", "20.00", "n/a", "n/a", "12.00", "0.07", "0.07"},
+	}
+
+	t.Run("printed", func(t *testing.T) {
+		t.Parallel()
+		text := evalJSONRun(t, town, false)
+		_, rest, ok := strings.Cut(text, "\n"+evalBandHeading+"\n")
+		if !ok {
+			t.Fatalf("out = %q, want the band section headed %q", text, evalBandHeading)
+		}
+		if !strings.Contains(text[:strings.Index(text, evalBandHeading)], "predictor") {
+			t.Errorf("the band section comes before the base predictor table")
+		}
+		section, _, ok := strings.Cut(rest, cappedHeading)
+		if !ok {
+			t.Fatalf("out = %q, want the capped table after the band section", text)
+		}
+		// One header line, then one line per band.
+		lines := strings.Split(strings.TrimSpace(section), "\n")
+		if len(lines) != len(want)+1 {
+			t.Fatalf("band section has %d lines, want the header and %d bands:\n%s", len(lines), len(want), section)
+		}
+		for _, row := range want {
+			cells := row[1:]
+			if !evalTableRow(regexp.QuoteMeta(row[0]), cells...).MatchString(section) {
+				t.Errorf("band section lacks the row %q with cells %v:\n%s", row[0], cells, section)
+			}
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+		raw := evalJSONRun(t, town, true)
+		var doc struct {
+			Bands []evalBandRead `json:"bands"`
+		}
+		if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+			t.Fatalf("--json did not print one JSON object: %v\n%s", err, raw)
+		}
+		if len(doc.Bands) != len(want) {
+			t.Fatalf("--json carries %d bands, want %d", len(doc.Bands), len(want))
+		}
+		for i, b := range doc.Bands {
+			got := []string{
+				b.Label, strconv.Itoa(b.Count),
+				evalJSONCell(b.ActualMedian), evalJSONCell(b.ShapeMedian),
+				evalJSONCell(b.EmbedMedian), evalJSONCell(b.JevMedian),
+				evalJSONCell(b.BlendedMedian),
+				evalJSONCell(b.OverTenHalfShare), evalJSONCell(b.OverTwentyShare),
+			}
+			if !slices.Equal(got, want[i]) {
+				t.Errorf("band %d: --json reads %v, the text row is %v", i, got, want[i])
+			}
+		}
+	})
+
+	t.Run("short part", func(t *testing.T) {
+		t.Parallel()
+		// Forty landings leave a twelve-row test part, under the minimum.
+		short := evalEvalTown(t, 40)
+		if text := evalJSONRun(t, short, false); strings.Contains(text, evalBandHeading) {
+			t.Errorf("out = %q, want no band section for a test part under %d rows", text, storyPointsEvalMinTest)
+		}
+		var doc struct {
+			Bands json.RawMessage `json:"bands"`
+		}
+		if err := json.Unmarshal([]byte(evalJSONRun(t, short, true)), &doc); err != nil {
+			t.Fatalf("--json did not print one JSON object: %v", err)
+		}
+		if string(doc.Bands) != "null" {
+			t.Errorf("bands = %s, want null for a test part under %d rows", doc.Bands, storyPointsEvalMinTest)
+		}
+	})
+
+	t.Run("write fails", func(t *testing.T) {
+		t.Parallel()
+		c := Commands{
+			Wire: func(context.Context) (RealTown, error) { return RealTown{Town: town}, nil },
+			Out:  failOnWrite{marker: evalBandHeading},
+		}
+		err := Run(context.Background(), CommandStoryPointsEval, c)
+		if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+			t.Fatalf("err = %v, want the failed write of the band section", err)
+		}
+	})
 }

@@ -43,9 +43,9 @@ type EvalSplit struct {
 
 // runStoryPointsEval is main's storypoints-eval step: the join over the wired
 // town, split into the part the figures are read from, printed to Out as the
-// base table, the same table over the capped polecat times (gt-xwqe1r) and the
-// splits. With Commands.StoryPointsJSON the same evaluation is printed as one
-// JSON object instead of the text tables.
+// base table, the estimate bands of that part, the same table over the capped
+// polecat times (gt-xwqe1r) and the splits. With Commands.StoryPointsJSON the
+// same evaluation is printed as one JSON object instead of the text tables.
 func (c Commands) runStoryPointsEval(real RealTown) error {
 	since, err := storyPointsEvalSince(c.StoryPointsSince)
 	if err != nil {
@@ -64,9 +64,12 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 	}
 	if report.Base == nil {
 		// The base table printed no figure from a part too small to read, so
-		// the capped table and the splits print none either, from a part or
-		// groups smaller still.
+		// the bands, the capped table and the splits print none either, from a
+		// part or groups smaller still.
 		return nil
+	}
+	if err := writeEvalBands(c.Out, report.Bands); err != nil {
+		return err
 	}
 	if err := writeEvalCapped(c.Out, report.Capped); err != nil {
 		return err
@@ -78,13 +81,14 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 }
 
 // evalReport is one evaluation's counts and tables, decided once so the text
-// tables and the --json object print the same figures. Base, Capped, ByRounds
-// and BySeat are nil when the test part is under storyPointsEvalMinTest rows: a
-// part too small to read carries no figures in either form.
+// tables and the --json object print the same figures. Base, Bands, Capped,
+// ByRounds and BySeat are nil when the test part is under storyPointsEvalMinTest
+// rows: a part too small to read carries no figures in either form.
 type evalReport struct {
 	Counts   EvalCounts
 	TestRows int
 	Base     []PredictorStats
+	Bands    []EvalBand
 	Capped   []PredictorStats
 	ByRounds []EvalSplit
 	BySeat   []EvalSplit
@@ -99,6 +103,7 @@ func newEvalReport(rows []EvalRow, counts EvalCounts, since time.Time) evalRepor
 		return report
 	}
 	report.Base = evalStats(train, test)
+	report.Bands = evalBands(test)
 	report.Capped = evalStats(capEvalRows(train), capEvalRows(test))
 	report.ByRounds = evalRoundSplits(train, test)
 	report.BySeat = evalSeatSplits(train, test)
@@ -166,6 +171,58 @@ func writeEvalCapped(w io.Writer, stats []PredictorStats) error {
 	_ = tw.Flush()
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// writeEvalBands writes the estimate bands of the test part: one line per band
+// in evalBandLabels order, empty bands included, with its count, the median of
+// each figure its rows carry and the share of its rows over each threshold. The
+// section is built in a strings.Builder and written once, so a refused write is
+// the run's error and a section half printed does not read as a whole.
+func writeEvalBands(w io.Writer, bands []EvalBand) error {
+	var b strings.Builder
+	b.WriteString("\nthe estimate bands (the test part)\n")
+	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(tw, "band\tn\tmedian actual (min)\tmedian shape (min)\tmedian embed (min)\tmedian jev (min)\tmedian blended (min)\tshare over 10.5\tshare over 20\n")
+	for _, band := range bands {
+		f := evalBandFiguresOf(band)
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			band.Label, f.n,
+			f.actual.text(), f.shape.text(), f.embed.text(), f.jev.text(), f.blended.text(),
+			f.overTenHalf.text(), f.overTwenty.text())
+	}
+	_ = tw.Flush()
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// evalBandFigures is one band's row, read by both forms of the section, so an
+// empty band's figures are n/a as text and null in the JSON object.
+type evalBandFigures struct {
+	n                                  int
+	actual, shape, embed, jev, blended evalColumn
+	overTenHalf, overTwenty            evalColumn
+}
+
+// evalBandFiguresOf decides one band's row. A median is n/a when no row carries
+// the figure, and a share is n/a when the band holds no row to be a share of.
+func evalBandFiguresOf(b EvalBand) evalBandFigures {
+	median := func(m *float64) evalColumn {
+		if m == nil {
+			return evalColumn{}
+		}
+		return evalColumn{true, *m}
+	}
+	share := func(v float64) evalColumn { return evalColumn{b.Count != 0, v} }
+	return evalBandFigures{
+		n:           b.Count,
+		actual:      median(b.ActualMedian),
+		shape:       median(b.ShapeMedian),
+		embed:       median(b.EmbedMedian),
+		jev:         median(b.JevMedian),
+		blended:     median(b.BlendedMedian),
+		overTenHalf: share(b.OverTenHalfShare),
+		overTwenty:  share(b.OverTwentyShare),
+	}
 }
 
 // predictorTable is the predictor table as text: the header, then one row per
@@ -378,10 +435,10 @@ func evalRowOf(s PredictorStats) evalRowFigures {
 	}
 }
 
-// The --json object (gt-99x14w): the counts and the four tables the text prints,
-// as one document whose figures are the text tables' own. A figure the text
-// prints as n/a is null, and a table the text does not print is null too, so a
-// reader is never handed a zero for a figure no row could produce.
+// The --json object (gt-99x14w): the counts and the tables the text prints, as
+// one document whose figures are the text tables' own. A figure the text prints
+// as n/a is null, and a table the text does not print is null too, so a reader
+// is never handed a zero for a figure no row could produce.
 
 // evalJSONReport is the object storypoints-eval --json prints.
 type evalJSONReport struct {
@@ -398,6 +455,22 @@ type evalJSONReport struct {
 	// part.
 	ByRounds []evalJSONSplit `json:"by_review_rounds"`
 	BySeat   []evalJSONSplit `json:"by_seat_class"`
+	// Bands are the estimate bands of the test part, null in the same short part.
+	Bands []evalJSONBand `json:"bands"`
+}
+
+// evalJSONBand is one estimate band: its label as the text heads the row, its
+// count, and the figures the text prints, each null where the text prints n/a.
+type evalJSONBand struct {
+	Label            string       `json:"label"`
+	Count            int          `json:"count"`
+	ActualMedian     *json.Number `json:"actual_median_min"`
+	ShapeMedian      *json.Number `json:"shape_median_min"`
+	EmbedMedian      *json.Number `json:"embed_median_min"`
+	JevMedian        *json.Number `json:"jev_median_min"`
+	BlendedMedian    *json.Number `json:"blended_median_min"`
+	OverTenHalfShare *json.Number `json:"over_10_5_share"`
+	OverTwentyShare  *json.Number `json:"over_20_share"`
 }
 
 // evalJSONCounts is the join's accounting: every landing record read, how many
@@ -448,7 +521,7 @@ type evalJSONPredictor struct {
 }
 
 // writeStoryPointsEvalJSON prints the evaluation as one JSON object: the counts
-// and the four tables the text prints, each figure the one the text shows. The
+// and the tables the text prints, each figure the one the text shows. The
 // write is the run's, so one the encoder cannot make fails the run rather than
 // reporting an evaluation nobody received.
 func writeStoryPointsEvalJSON(w io.Writer, report evalReport) error {
@@ -485,7 +558,28 @@ func evalJSONOf(report evalReport) evalJSONReport {
 	}
 	doc.ByRounds = evalJSONSplits(report.ByRounds)
 	doc.BySeat = evalJSONSplits(report.BySeat)
+	doc.Bands = evalJSONBands(report.Bands)
 	return doc
+}
+
+// evalJSONBands is the bands' rows, one per band in the order the text prints.
+func evalJSONBands(bands []EvalBand) []evalJSONBand {
+	out := make([]evalJSONBand, 0, len(bands))
+	for _, band := range bands {
+		f := evalBandFiguresOf(band)
+		out = append(out, evalJSONBand{
+			Label:            band.Label,
+			Count:            f.n,
+			ActualMedian:     f.actual.number(),
+			ShapeMedian:      f.shape.number(),
+			EmbedMedian:      f.embed.number(),
+			JevMedian:        f.jev.number(),
+			BlendedMedian:    f.blended.number(),
+			OverTenHalfShare: f.overTenHalf.number(),
+			OverTwentyShare:  f.overTwenty.number(),
+		})
+	}
+	return out
 }
 
 // evalJSONSplits is the splits' rows, a group's figures null when it printed
