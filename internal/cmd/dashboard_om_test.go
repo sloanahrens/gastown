@@ -379,6 +379,40 @@ func TestOMStageTimes(t *testing.T) {
 	}
 }
 
+// TestReviewPoolOMStageTimesMarker: a stage line that carries the reused
+// marker has no om time of its own. The first two rows pin the real reused form:
+// they return nil with or without a marker check, because "reused" is not a
+// duration. The third row has a parseable om token ahead of the marker, so only
+// a marker check returns nil there.
+func TestReviewPoolOMStageTimesMarker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		stages string
+		wantOM time.Duration // 0 means a nil om time
+	}{
+		{"well-formed reused line", "ci 1m32s, om reused (2m31s, 14m0s old)", 0},
+		{"malformed reused cost", "ci 1m32s, om reused (x, 14m0s old)", 0},
+		{"parseable om token before the marker", "ci 1m32s, om 20s, om reused (x, 14m0s old)", 0},
+		{"plain om line", "lint 3s, gate 1m, om 20s", 20 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, om := omStageTimes(tc.stages)
+			if tc.wantOM == 0 {
+				if om != nil {
+					t.Errorf("omStageTimes(%q) om = %v, want nil", tc.stages, *om)
+				}
+				return
+			}
+			if om == nil || *om != tc.wantOM {
+				t.Errorf("omStageTimes(%q) om = %v, want %v", tc.stages, om, tc.wantOM)
+			}
+		})
+	}
+}
+
 func TestOMParseLogLine(t *testing.T) {
 	t.Parallel()
 	r := &omReader{}
