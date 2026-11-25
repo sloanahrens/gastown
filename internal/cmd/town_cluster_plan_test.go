@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
@@ -311,5 +313,101 @@ func TestClusterShapePlanIdRefusesAndFailsClosed(t *testing.T) {
 				t.Fatalf("a refused plan printed %q, want nothing", out.String())
 			}
 		})
+	}
+}
+
+// townSnapshot maps every entry under root, by its path relative to root, to its
+// kind and, for a regular file, the hex SHA-256 of its bytes. Two snapshots are
+// equal only if nothing under root was created, removed or rewritten between them.
+func townSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			snap[rel] = d.Type().String()
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(body)
+		snap[rel] = "file " + hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshotting the town %s: %v", root, err)
+	}
+	return snap
+}
+
+// TestClusterShapePlanIdWritesNothingOutsideOut: a plan writes into --out and
+// nothing else, so every entry and file hash under the town is the same after it,
+// and the running values file the live render writes is not touched.
+func TestClusterShapePlanIdWritesNothingOutsideOut(t *testing.T) {
+	t.Parallel()
+	town := planTown(t)
+	before := townSnapshot(t, town)
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	if after := townSnapshot(t, town); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the plan changed the town outside --out:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// TestClusterShapePlanIdIncludesTheStaticSet: the recorded run left the static
+// set out, and the plan still renders it, so one of the planned files is the
+// PriorityClass document. The kind is read from each file's YAML, not its name.
+func TestClusterShapePlanIdIncludesTheStaticSet(t *testing.T) {
+	t.Parallel()
+	town := clusterRenderTestTown(t)
+	recorded := clusterRenderFixture(t)
+	recorded.includeStatic = false
+	if err := saveRenderFlags(renderFlagsPathIn(town), recorded); err != nil {
+		t.Fatalf("recording the render flags: %v", err)
+	}
+	dir := planOut(t)
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	for _, f := range planFilesIn(t, dir) {
+		var head struct {
+			Kind string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal(f.Data, &head); err != nil {
+			t.Fatalf("decoding the planned file %s: %v", f.Name, err)
+		}
+		if head.Kind == "PriorityClass" {
+			return
+		}
+	}
+	t.Fatalf("the plan wrote no PriorityClass document, so the static set is missing from it")
+}
+
+// TestClusterShapePlanIdRefusesAnEmptyOut: a plan given no --out is refused by
+// the render's --out check before any write, so the error names the missing
+// --out, no id is printed, and the town is as it was.
+func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
+	t.Parallel()
+	town := planTown(t)
+	before := townSnapshot(t, town)
+	out := &bytes.Buffer{}
+	err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), out, "", atomicfile.WriteJSON)
+	if err == nil || !strings.Contains(err.Error(), "--out is required") {
+		t.Fatalf("runTownClusterPlan with an empty --out = %v, want the --out is required refusal", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a refused plan printed %q, want nothing", out.String())
+	}
+	if after := townSnapshot(t, town); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the refused plan changed the town:\nbefore %v\nafter  %v", before, after)
 	}
 }
