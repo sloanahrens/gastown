@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"errors"
+	"path/filepath"
+
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -26,4 +29,20 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	}
 	// On for this rig: wiring the pool into l, w and workRoot is a later bead
 	// of the map, gt-s47qp4.
+}
+
+// omConfigPath returns om's config file as om resolves it in its own
+// internal/config/config.go: $XDG_CONFIG_HOME/om/config.json when
+// XDG_CONFIG_HOME holds a non-empty value, else <home>/.config/om/config.json.
+// An empty home with no XDG value is an error, because the fallback then names
+// no directory. os.UserConfigDir is not this rule on macOS. No file is read
+// here (gt-3fr65j).
+func omConfigPath(lookup func(string) (string, bool), home string) (string, error) {
+	if dir, ok := lookup("XDG_CONFIG_HOME"); ok && dir != "" {
+		return filepath.Join(dir, "om", "config.json"), nil
+	}
+	if home == "" {
+		return "", errors.New("om config: no non-empty XDG_CONFIG_HOME and no home directory")
+	}
+	return filepath.Join(home, ".config", "om", "config.json"), nil
 }

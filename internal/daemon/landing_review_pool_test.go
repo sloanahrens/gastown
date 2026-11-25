@@ -36,6 +36,83 @@ func reviewPoolTestWorker() *landworker.Worker {
 	}
 }
 
+func TestReviewPoolOMConfigPath(t *testing.T) {
+	t.Parallel()
+	const xdgConfig = "/xdg/config"
+	const home = "/fixture/tester"
+	cases := []struct {
+		name    string
+		env     map[string]string
+		home    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "XDG set",
+			env:  map[string]string{"XDG_CONFIG_HOME": xdgConfig},
+			home: home,
+			want: "/xdg/config/om/config.json",
+		},
+		{
+			name: "XDG set with empty home",
+			env:  map[string]string{"XDG_CONFIG_HOME": xdgConfig},
+			want: "/xdg/config/om/config.json",
+		},
+		{
+			name: "XDG set but empty",
+			env:  map[string]string{"XDG_CONFIG_HOME": ""},
+			home: home,
+			want: "/fixture/tester/.config/om/config.json",
+		},
+		{
+			name:    "XDG set but empty, no home",
+			env:     map[string]string{"XDG_CONFIG_HOME": ""},
+			wantErr: true,
+		},
+		{
+			name: "XDG unset",
+			home: home,
+			want: "/fixture/tester/.config/om/config.json",
+		},
+		{
+			name:    "no XDG and no home",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lookup := func(key string) (string, bool) {
+				v, ok := tc.env[key]
+				return v, ok
+			}
+
+			got, err := omConfigPath(lookup, tc.home)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("omConfigPath() = %q, nil; want an error naming the missing location", got)
+				}
+				for _, want := range []string{"XDG_CONFIG_HOME", "home"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not name %q", err, want)
+					}
+				}
+				if got != "" {
+					t.Fatalf("omConfigPath() returned the path %q with the error; want none", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("omConfigPath() error = %v; want %q", err, tc.want)
+			}
+			if got != tc.want {
+				t.Fatalf("omConfigPath() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReviewPoolWiringOff(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
