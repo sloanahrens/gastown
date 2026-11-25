@@ -569,9 +569,12 @@ func TestEstimateJevCallCount(t *testing.T) {
 	if got := estimateCounted(t, nil); got.jevCalls != jevCalls {
 		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, jevCalls)
 	}
-	jev := &jevCounter{fits: func(int) float64 { return 0.5 }, capFrom: 2}
-	if _, _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead()); skip != nil || jev.calls != jevCalls {
-		t.Fatalf("Jev calls = %d, skip = %v after the cap, want %d and no skip", jev.calls, skip, jevCalls)
+	// Only the first ask to arrive is answered (0.3); the two after it report the
+	// cap, so the median is that one answer and the capped asks add none.
+	jev := &jevCounter{fits: func(int) float64 { return 0.3 }, capFrom: 2}
+	got, used, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead())
+	if skip != nil || jev.calls != jevCalls || used != 1 || math.Abs(got-0.3) > 1e-9 {
+		t.Fatalf("jevInput = %v from %d answers, skip %v after %d calls; want 0.3 from the 1 uncapped answer, all %d asked and no skip", got, used, skip, jev.calls, jevCalls)
 	}
 }
 

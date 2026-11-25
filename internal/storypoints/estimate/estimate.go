@@ -422,17 +422,12 @@ func jevMedian(answers []float64) (float64, bool) {
 }
 
 // jevInput asks the battery jevCalls times, all at once, and returns the median
-// of the answers with the count it used, or the skip that says why not. The asks
-// run together so the wait is the slowest ask, not the sum of three: the lint
-// cuts the whole estimate off at 20 s and a clean one takes about 18 s, so asking
-// one after another let host load alone cross that line. A failed call or an
-// out-of-range answer is dropped, a cap-reached ask is only its own failure (the
-// others are already asked), and with no answer left the first error, in call
-// order, or the out-of-range answers, names it. The daily spend cap is checked
-// before each ask and counted from the usage ledger after it, town-wide, so it
-// is a check-then-spend line that concurrent callers already cross by one ask
-// each; asking together lets one estimate cross it by at most jevCalls-1 more
-// asks, and once the ledger shows the cap spent every later ask refuses.
+// of the answers with the count it used, or the skip that says why not. A failed
+// call or an out-of-range answer is dropped; a cap-reached ask fails only
+// itself, since the others are already asked, and with no answer left the first
+// error, in call order, or the out-of-range answers, names it. The daily spend
+// cap is a check-then-spend line across the town's callers, so asking together
+// can cross it by at most jevCalls-1 asks per estimate.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, int, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, 0, &Skip{Input: "jev", Reason: "no Jev asker"}
