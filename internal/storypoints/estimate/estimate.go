@@ -110,6 +110,10 @@ type Result struct {
 	Minutes float64
 	// Shape is the twelve shape features the estimate read.
 	Shape storypoints.Shape
+	// DeclaredLines is the added-line count the Size section's Change line
+	// declares, 0 when it declares none. The blend never reads it, so it does
+	// not change the estimate.
+	DeclaredLines float64
 	// Embedding is the vector the embedding ridge read; nil when the estimate
 	// had no embedding input.
 	Embedding []float32
@@ -177,6 +181,12 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	var vector []float32
 	var jevAnswers int
 	hash := SectionHash(issue)
+	// A Size section with no readable Change line declares no count, so the
+	// field stays 0 and the log omits it.
+	var declaredLines float64
+	if n, ok := storypoints.DeclaredLines(issue.Description); ok {
+		declaredLines = float64(n)
+	}
 
 	// An unchanged bead reuses the embed and Jev minutes its earlier estimate
 	// recorded, so the embedder and the Jev battery are not asked again.
@@ -237,6 +247,7 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		Points:           blended.Points,
 		Minutes:          blended.Minutes,
 		Shape:            shape,
+		DeclaredLines:    declaredLines,
 		Embedding:        vector,
 		ComponentMinutes: componentMinutes,
 		JevAnswers:       jevAnswers,

@@ -1256,3 +1256,60 @@ func TestNoteCollapsesDependencyText(t *testing.T) {
 		t.Fatalf("note %q did not collapse the title to one line", note)
 	}
 }
+
+// beadWithSize is sampleBead with its Size section set to size, so a test
+// controls the one line DeclaredLines reads.
+func beadWithSize(size string) *beads.Issue {
+	issue := sampleBead()
+	issue.Description = "## Goal\nCombine the inputs into one estimate.\n\n" +
+		"## Constraints\n- Create internal/storypoints/estimate.\n\n" +
+		"## Size\n" + size + "\n\n" +
+		"## Acceptance\n- [ ] A test exists.\n"
+	return issue
+}
+
+// TestDeclaredLinesFromTheSizeSection: Estimate records the added-line count of
+// the Size section's Change line, and 0 when the section declares no count.
+func TestDeclaredLinesFromTheSizeSection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		size string
+		want float64
+	}{
+		{"change line", "Change: at most 80 added lines in 2 files.", 80},
+		{"bold change line", "**Change:** at most 40 added lines.", 40},
+		{"no change line", "One worker.", 0},
+		{"malformed change line", "Change: at most many added lines.", 0},
+		{"two counts", "Change: at most 80 added lines.\nChange: at most 90 added lines.", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Estimate(context.Background(), workingDeps(), beadWithSize(tt.size))
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			if got.DeclaredLines != tt.want {
+				t.Errorf("DeclaredLines = %v, want %v", got.DeclaredLines, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeclaredLinesReadsOnlyTheSizeSection: a Change line outside the Size
+// section declares no count, so the log never records a size the bead's Size
+// section did not state.
+func TestDeclaredLinesReadsOnlyTheSizeSection(t *testing.T) {
+	t.Parallel()
+	issue := sampleBead()
+	issue.Description = "## Goal\nChange: at most 80 added lines in 2 files.\n\n" +
+		"## Size\nOne worker.\n"
+	got, err := Estimate(context.Background(), workingDeps(), issue)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if got.DeclaredLines != 0 {
+		t.Errorf("DeclaredLines = %v from a Goal line, want 0", got.DeclaredLines)
+	}
+}
