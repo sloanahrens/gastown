@@ -457,9 +457,9 @@ var subcommandShaped = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // unhookedSliceSubcommands returns "file:line subcommand" for every []string
 // literal whose first element names a git subcommand outside hooked and push
-// and that a run helper receives, as an argument or through the variable args
-// of the same function (gt-8bezs0). A dash-led first element is the literal
-// scan's: skipped, not reported.
+// and that a run helper receives, as an argument or through a variable of the
+// same function, whatever that variable is named (gt-8bezs0, gt-igzikp). A
+// dash-led first element is the literal scan's: skipped, not reported.
 func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[string]bool) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -484,29 +484,29 @@ func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[
 		if !ok || fn.Body == nil {
 			return true
 		}
-		var argsVals []ast.Expr
+		vals := map[string][]ast.Expr{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.AssignStmt:
 				for i, lhs := range n.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == "args" && i < len(n.Rhs) {
-						argsVals = append(argsVals, n.Rhs[i])
+					if id, ok := lhs.(*ast.Ident); ok && i < len(n.Rhs) {
+						vals[id.Name] = append(vals[id.Name], n.Rhs[i])
 					}
 				}
 			case *ast.RangeStmt:
-				if id, ok := n.Value.(*ast.Ident); ok && id.Name == "args" {
-					argsVals = append(argsVals, n.X)
+				if id, ok := n.Value.(*ast.Ident); ok {
+					vals[id.Name] = append(vals[id.Name], n.X)
 				}
 			}
 			return true
 		})
 		var check func(ast.Expr, bool)
-		check = func(e ast.Expr, followArgs bool) {
+		check = func(e ast.Expr, followVals bool) {
 			ast.Inspect(e, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.Ident:
-					if followArgs && n.Name == "args" {
-						for _, v := range argsVals {
+					if followVals {
+						for _, v := range vals[n.Name] {
 							check(v, false)
 						}
 					}
@@ -565,6 +565,14 @@ func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 		got := unhookedSliceSubcommands(t, "x.go", src, map[string]bool{"checkout": true})
 		if len(got) != 2 || !strings.HasSuffix(got[0], " gc") || !strings.HasSuffix(got[1], " status") {
 			t.Fatalf("unhooked = %q, want gc (through args) and status (built slice); checkout is in the set, push and the dash-led slice are skipped", got)
+		}
+	})
+
+	t.Run("the slice scan follows a slice whatever its variable is named", func(t *testing.T) {
+		src := []byte("package git\nfunc f(g *Git) {\n\targv := []string{\"gc\", \"x\"}\n\tg.run(argv...)\n\tfor _, cmd := range [][]string{{\"reflog\"}} {\n\t\tg.run(cmd...)\n\t}\n}\n")
+		got := unhookedSliceSubcommands(t, "x.go", src, map[string]bool{})
+		if len(got) != 2 || !strings.HasSuffix(got[0], " gc") || !strings.HasSuffix(got[1], " reflog") {
+			t.Fatalf("unhooked = %q, want gc (through argv) and reflog (through the range value cmd)", got)
 		}
 	})
 
