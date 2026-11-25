@@ -38,8 +38,8 @@ var landOmStatsCmd = &cobra.Command{
 
 Reads the town's review records (.runtime/landings/reviews.jsonl), one line
 per om verdict, and aggregates them: per day the approvals, rejections and
-rejection rate, the mean findings and score of the rejections; per rig and per
-author seat the same counts; how many review rounds each bead's records
+rejection rate, the mean findings and score of the rejections; per rig, per
+author seat and per author kind the same counts; how many review rounds each bead's records
 reached (its highest attempt); and the ten beads rejected most.
 
 Days before the first review record are filled from the landing worker's
@@ -243,7 +243,7 @@ func writeLandOmStatsJSON(w io.Writer, stats land.OmStats) error {
 }
 
 // writeLandOmStatsTable prints the report one question at a time: how a day,
-// a rig and a seat land, and which beads take the most rounds.
+// a rig, a seat and an author kind land, and which beads take the most rounds.
 func writeLandOmStatsTable(w io.Writer, stats land.OmStats, since time.Time) {
 	header := "om landings, all days"
 	if !since.IsZero() {
@@ -277,6 +277,10 @@ func writeLandOmStatsTable(w io.Writer, stats land.OmStats, since time.Time) {
 	if len(stats.Agents) > 0 {
 		fmt.Fprintln(w)
 		writeLandOmStatsGroups(w, "Agent", stats.Agents)
+	}
+	if len(stats.Authors) > 0 {
+		fmt.Fprintln(w)
+		writeLandOmStatsGroups(w, "Author", stats.Authors)
 	}
 	fmt.Fprintf(w, "\nRounds per bead: %d took one, %d two, %d three or more\n",
 		stats.Rounds.One, stats.Rounds.Two, stats.Rounds.ThreePlus)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -482,4 +483,137 @@ func TestLandOmStatsReadsAndToleratesTheTownDefaults(t *testing.T) {
 			t.Errorf("defaults did not reach the town's files: %q missing from\n%s", want, got)
 		}
 	}
+}
+
+// omStatsAuthorFixtureLines renders a verdict from a polecat's branch and one
+// from a crew bird's, so the Author table has a row of each kind; the log is
+// empty, so no fallback day enters the report.
+func omStatsAuthorFixtureLines(t *testing.T) (records, log string) {
+	t.Helper()
+	day := func(hour int) time.Time { return time.Date(2026, 10, 16, hour, 0, 0, 0, time.Local) }
+	recs := []land.ReviewRecord{
+		{BeadID: "gt-p1", Rig: "gastown", Attempt: 1, Score: 0.90, Verdict: land.VerdictApprove,
+			Agent: "opus", Branch: "polecat/dag/gt-p1", AuthorKind: authorkind.Polecat, At: day(10)},
+		{BeadID: "gt-p2", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: land.VerdictRequestChanges,
+			Agent: "opus", Branch: "polecat/dag/gt-p2", AuthorKind: authorkind.Polecat, Findings: 2, At: day(11)},
+		{BeadID: "gt-c1", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: land.VerdictRequestChanges,
+			Agent: "sonnet", Branch: "crew/bird/gt-c1", AuthorKind: authorkind.Crew, Findings: 1, At: day(12)},
+	}
+	var lines []string
+	for _, rec := range recs {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal %+v: %v", rec, err)
+		}
+		lines = append(lines, string(line))
+	}
+	return strings.Join(lines, "\n") + "\n", ""
+}
+
+// omStatsTableStart returns the offset of the line whose first cell is title,
+// or -1. A row or a sentence that names the title later does not match.
+func omStatsTableStart(text, title string) int {
+	offset := 0
+	for _, line := range strings.SplitAfter(text, "\n") {
+		if strings.HasPrefix(line, title) && len(line) > len(title) && (line[len(title)] == ' ' || line[len(title)] == '\t') {
+			return offset
+		}
+		offset += len(line)
+	}
+	return -1
+}
+
+// omStatsTableRow returns the fields of the row named name in the table titled
+// title, or nil when the table or the row is missing. The row search ends at
+// the table's first blank line, so a row of a later table cannot match.
+func omStatsTableRow(text, title, name string) []string {
+	start := omStatsTableStart(text, title)
+	if start < 0 {
+		return nil
+	}
+	for _, line := range strings.Split(text[start:], "\n")[1:] {
+		if strings.TrimSpace(line) == "" {
+			return nil
+		}
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == name {
+			return fields
+		}
+	}
+	return nil
+}
+
+// TestLandOmStatsAuthorTable is gt-onszp9's command acceptance: the text form
+// prints authority counts per author kind — polecat against crew — in the
+// Agent table's layout and after it, and --json carries the same rows under
+// "authors". The order row is what a mutation that prints Author first turns
+// red.
+func TestLandOmStatsAuthorTable(t *testing.T) {
+	t.Parallel()
+	records, log := omStatsAuthorFixtureLines(t)
+	report := func(t *testing.T, asJSON bool) string {
+		t.Helper()
+		fake := &landOmStatsFakeFS{files: map[string]string{
+			"/town/reviews.jsonl": records,
+			"/town/daemon.log":    log,
+		}}
+		var out bytes.Buffer
+		if err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, "", "/town/reviews.jsonl", "/town/daemon.log", asJSON, false); err != nil {
+			t.Fatalf("landOmStatsReportFrom: %v", err)
+		}
+		return out.String()
+	}
+
+	t.Run("the Author table follows the Agent table", func(t *testing.T) {
+		t.Parallel()
+		text := report(t, false)
+		agent, author := omStatsTableStart(text, "Agent"), omStatsTableStart(text, "Author")
+		if agent < 0 || author < 0 {
+			t.Fatalf("Agent table at %d, Author table at %d, want both:\n%s", agent, author, text)
+		}
+		if author < agent {
+			t.Errorf("the Author table at %d precedes the Agent table at %d:\n%s", author, agent, text)
+		}
+	})
+
+	t.Run("each author kind's counts", func(t *testing.T) {
+		t.Parallel()
+		text := report(t, false)
+		for _, want := range []struct {
+			kind               string
+			approvals, rejects int
+			rate               string
+		}{
+			{authorkind.Polecat, 1, 1, "50.0%"},
+			{authorkind.Crew, 0, 1, "100.0%"},
+		} {
+			row := omStatsTableRow(text, "Author", want.kind)
+			if row == nil {
+				t.Fatalf("Author table lacks the %s row:\n%s", want.kind, text)
+			}
+			if len(row) != 4 || row[1] != strconv.Itoa(want.approvals) || row[2] != strconv.Itoa(want.rejects) || row[3] != want.rate {
+				t.Errorf("%s row = %v, want %d approvals, %d rejections at %s", want.kind, row, want.approvals, want.rejects, want.rate)
+			}
+		}
+	})
+
+	t.Run("--json carries authors", func(t *testing.T) {
+		t.Parallel()
+		raw := report(t, true)
+		var stats land.OmStats
+		if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+			t.Fatalf("--json output does not decode: %v\n%s", err, raw)
+		}
+		want := []land.OmStatsGroup{
+			{Name: authorkind.Polecat, Approvals: 1, Rejections: 1, Rate: 0.5},
+			{Name: authorkind.Crew, Approvals: 0, Rejections: 1, Rate: 1},
+		}
+		if len(stats.Authors) != len(want) {
+			t.Fatalf("authors = %+v, want %+v", stats.Authors, want)
+		}
+		for i, w := range want {
+			if stats.Authors[i] != w {
+				t.Errorf("author %d = %+v, want %+v", i, stats.Authors[i], w)
+			}
+		}
+	})
 }
