@@ -18,6 +18,9 @@
 // list it could not read, a -dir prefix no tracked path sits under, or an
 // origin remote whose account is not a usable name. A run that could not look
 // never exits 0.
+//
+// -changed-since <ref> scans only the tracked files git diff --name-only
+// <ref>...HEAD lists, or every path when that diff touches a rule file or fails.
 package main
 
 import (
@@ -30,6 +33,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -49,6 +53,11 @@ const (
 // lister reads it from the tree it scans, so it lists exactly the findings the
 // repository has not already excused.
 const allowPath = "internal/hygiene/allow.json"
+
+// ruleFiles and ruleDir decide the rules: a diff touching either scans every path.
+var ruleFiles = []string{"internal/hygiene/hygiene.go", allowPath, "internal/hygiene/blocked.sha256", "internal/hygiene/cmd/scan/main.go"}
+
+const ruleDir = "internal/manifestdata"
 
 // gitRunner runs one git subcommand in dir and returns its standard output.
 // main passes runGit; a unit test passes canned answers, since the unit tier
@@ -75,11 +84,15 @@ func run(args []string, stdout, stderr io.Writer, git gitRunner, openFS workTree
 	townRoot := flags.String("town-root", manifestdata.PodTownRoot, "the town root path to exempt, matched as a whole path; the daemon pod's town root when unset")
 	var dirs prefixList
 	flags.Var(&dirs, "dir", "keep only findings under this tracked path prefix, relative to the work tree top; repeat for more")
+	changedSince := flags.String("changed-since", "", "scan only the tracked files git diff --name-only <ref>...HEAD lists, and every tracked path when the diff touches a rule file or cannot be read; every tracked path when unset")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitClean
 		}
 		return exitError
+	}
+	if strings.HasPrefix(*changedSince, "-") {
+		return fail(stderr, "scan: -changed-since %s: a ref must not start with -", *changedSince)
 	}
 
 	top, err := workTreeTop(git)
@@ -99,6 +112,9 @@ func run(args []string, stdout, stderr io.Writer, git gitRunner, openFS workTree
 	}
 	if len(dirs) > 0 {
 		paths = keepUnder(paths, dirs)
+	}
+	if *changedSince != "" {
+		paths = changedPaths(git, top, *changedSince, paths, stderr)
 	}
 
 	// The identities the scan exempts are the town's, so a default run names
@@ -179,6 +195,33 @@ func trackedFiles(git gitRunner, top string) ([]string, error) {
 		return nil, fmt.Errorf("git ls-files in %s listed no file", top)
 	}
 	return paths, nil
+}
+
+// changedPaths keeps the tracked paths the diff from ref to HEAD lists, read -z so
+// no name is quoted and dropped. --no-renames lists both names of a moved file:
+// with rename detection, git's default, only the new name is listed, and moving a
+// rule file away would never name it. A rule file or unreadable diff keeps every path.
+func changedPaths(git gitRunner, top, ref string, paths []string, stderr io.Writer) []string {
+	out, err := git(top, "diff", "--name-only", "--no-renames", "-z", ref+"...HEAD")
+	if err != nil {
+		fmt.Fprintf(stderr, "scan: -changed-since %s: the diff cannot be read, so every tracked path is scanned: %v\n", ref, err)
+		return paths
+	}
+	changed := make(map[string]bool)
+	for _, name := range strings.Split(string(out), "\x00") {
+		if slices.Contains(ruleFiles, name) || under(name, ruleDir) {
+			fmt.Fprintf(stderr, "scan: -changed-since %s: the diff touches %s, which decides the rules, so every tracked path is scanned\n", ref, name)
+			return paths
+		}
+		changed[name] = true
+	}
+	var kept []string
+	for _, path := range paths {
+		if changed[path] {
+			kept = append(kept, path)
+		}
+	}
+	return kept
 }
 
 // resolveForgeOwner answers the account the scan exempts: the -forge-owner
