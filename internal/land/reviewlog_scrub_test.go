@@ -203,7 +203,7 @@ func TestReviewLogScrubHeldFindingTitleAndPath(t *testing.T) {
 	if got := queued[0].Findings[0]; got.Title != "it logs <redacted> verbatim" || got.File != "internal/land/<redacted>" {
 		t.Errorf("queued title/path = %q/%q, want both scrubbed", got.Title, got.File)
 	}
-	refiled := (&Lander{}).queuedCandidates(queued[0], nil, nil)
+	refiled := (&Lander{}).queuedCandidates(queued[0], "base", nil, nil)
 	if len(refiled) != 1 {
 		t.Fatalf("the queue line refiled %d findings, want one", len(refiled))
 	}

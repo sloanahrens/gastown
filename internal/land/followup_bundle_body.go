@@ -52,9 +52,11 @@ func bundleBody(w Work, res Result, g followupGroup, acceptance string) string {
 }
 
 // bundleGoalLine spells the landed commit in full: followupIDsForCommit matches
-// the commit a landing was recorded at, not a shortened form.
+// the commit a landing was recorded at, not a shortened form. The touched note,
+// when the finding has one, closes the line after the landing it came from, so
+// the bullet ends with the commits that changed the file (gt-vn8dhf).
 func bundleGoalLine(w Work, res Result, c FollowupCandidate) string {
-	return fmt.Sprintf("- %s (from %s, landed %s)", c.Detail, w.BeadID, res.LandedCommit)
+	return fmt.Sprintf("- %s (from %s, landed %s)%s", c.Detail, w.BeadID, res.LandedCommit, findingTouchedNote(c))
 }
 
 // bundleAddition is what appending this landing's group to an open bundle writes.

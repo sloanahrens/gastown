@@ -143,11 +143,20 @@ func (s *followupSkips) guarded(what, then string, call func() string) (answer s
 // followupAnswerKey is what the skip hook is asked about: the landing and the whole
 // candidate, every field the hook can read. A coarser key (the fingerprint
 // normalizes the title) let two candidates the hook answers differently share the
-// first one's answer; the candidate is strings and an int, so it is a valid key and
-// one hook input is one answer (gt-5evt7q).
+// first one's answer; every field is a string or an int, so it is a valid key and
+// one hook input is one answer (gt-5evt7q). Touched is left out because a slice
+// would make the key non-comparable, and because the feed sets it on a replay
+// after the hook has answered, so the hook never reads it (gt-vn8dhf).
 type followupAnswerKey struct {
-	bead string
-	cand FollowupCandidate
+	bead                                            string
+	id, path, title, detail, claim, severity, class string
+	line                                            int
+}
+
+// answerKey is the key c's answer is kept under for the landing bead.
+func answerKey(bead string, c FollowupCandidate) followupAnswerKey {
+	return followupAnswerKey{bead: bead, id: c.ID, path: c.Path, title: c.Title, detail: c.Detail,
+		claim: c.Claim, severity: c.Severity, class: c.Class, line: c.Line}
 }
 
 func newFollowupSkips() *followupSkips {
@@ -189,7 +198,7 @@ func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *fol
 		// It is kept like an empty reason and named once per landing, and the
 		// hook is still asked exactly once per candidate (gt-g97vlb), and once
 		// per finding in a pass: the answer, a panic's included, is kept.
-		key := followupAnswerKey{bead: w.BeadID, cand: c}
+		key := answerKey(w.BeadID, c)
 		reason, asked := skips.answers[key]
 		if !asked {
 			reason = skips.guarded("skip policy", "keeping the finding", func() string { return l.FollowupSkip(w, c) })
@@ -265,7 +274,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 	// outlives the timeout cannot interleave with the next landing's log
 	// (gt-s01pn).
 	done := make(chan []string, 1)
-	go func() { done <- l.followupFeed(w, res, findings, noted, skips, pinDoc) }()
+	go func() { done <- l.followupFeed(w, res, findings, noted, skips, pinDoc, base) }()
 	select {
 	case lines := <-done:
 		for _, line := range lines {
@@ -280,7 +289,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 // comments a repeat earns, and the beads the new findings earn. It returns the
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
-func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips, pinDoc string) (lines []string) {
+func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips, pinDoc, base string) (lines []string) {
 	// Logged on every path, including a feed that files nothing (gt-3v8jno), and
 	// through these lines rather than written directly, so a feed the landing
 	// abandons on its timeout cannot interleave with the next landing's log
@@ -345,9 +354,9 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	// landing's findings, so it goes out first, while the bound leaves it room
 	// (gt-3arxj).
 	var consumed int
-	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips, pinDoc)
+	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips, pinDoc, base)
 	if consumed > 0 {
-		lines = append(lines, l.compactQueue(w.Rig, existing, skips)...)
+		lines = append(lines, l.compactQueue(w.Rig, existing, skips, base)...)
 	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
@@ -409,7 +418,7 @@ func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
 // It returns the lines it wants logged, the beads the drain filed so the caller
 // de-duplicates against them too, and how many queue lines are now consumed:
 // every finding on them is covered, so the compaction may drop them (gt-3arxj).
-func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips, pinDoc string) ([]string, []ExistingFollowup, int) {
+func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips, pinDoc, base string) ([]string, []ExistingFollowup, int) {
 	bound := l.followupBackpressure()
 	consumed := 0
 	for _, q := range queued {
@@ -418,7 +427,7 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 			// waits for the count to fall.
 			return lines, existing, consumed
 		}
-		fresh := l.queuedCandidates(q, existing, skips)
+		fresh := l.queuedCandidates(q, base, existing, skips)
 		if len(fresh) == 0 {
 			consumed++
 			continue
@@ -437,7 +446,7 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 		// A line is consumed only once every finding on it is covered: a bead
 		// that could not be filed leaves its line waiting, whatever the feed
 		// logged about it (gt-3arxj).
-		if len(l.queuedCandidates(q, existing, skips)) == 0 {
+		if len(l.queuedCandidates(q, base, existing, skips)) == 0 {
 			consumed++
 		}
 	}
@@ -455,12 +464,12 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 // lines can be judged covered: another rig's line whose findings read like one
 // of this rig's beads is still waiting to be filed in its own rig, and
 // dropping it would lose the finding (gt-3arxj).
-func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *followupSkips) []string {
+func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *followupSkips, base string) []string {
 	if l.Reviews == nil {
 		return nil
 	}
 	res, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
-		return q.Rig == rig && len(l.queuedCandidates(q, existing, skips)) == 0
+		return q.Rig == rig && len(l.queuedCandidates(q, base, existing, skips)) == 0
 	})
 	if err != nil {
 		return []string{fmt.Sprintf("could not compact the %s of its consumed queue lines (%v)", ReviewsFileName, err)}
@@ -670,7 +679,11 @@ func (l *Lander) queueHeld(w Work, res Result, held []FollowupCandidate) []strin
 // minors om raised that file a bead at all, that FollowupSkip keeps and that no
 // bead already carries (gt-3arxj, gt-3v8jno). A noted finding is dropped here
 // too, so an old queue line never files one (gt-u643bb).
-func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup, skips *followupSkips) []FollowupCandidate {
+//
+// base is this landing's base: each finding the queue would file is marked with
+// the short commits that touched its file in the queue line's landing..base, so
+// a body says the file changed since the landing (gt-vn8dhf).
+func (l *Lander) queuedCandidates(q QueuedFollowup, base string, existing []ExistingFollowup, skips *followupSkips) []FollowupCandidate {
 	// The queue line keeps the landing's bead and rig, not its branch or head.
 	filed, _ := splitNoted(followupFindings(queuedFindings(q.Findings)))
 	cands := l.skippedCandidates(Work{BeadID: q.Bead, Rig: q.Rig}, followupCandidates(filed), skips)
@@ -679,9 +692,36 @@ func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup,
 		if Decide(c, existing, 0).Action == DedupeComment {
 			continue
 		}
+		// The mark is set after the skip hook and the decision, so neither reads
+		// it and the answer it caches is keyed without it (gt-vn8dhf).
+		c.Touched = l.pathTouched(q.Landed, base, c.Path)
 		fresh = append(fresh, c)
 	}
 	return fresh
+}
+
+// pathTouched is the short commits that touched path in landed..base: the mark a
+// replayed finding carries when its file changed since the landing (gt-vn8dhf).
+// The hook is a function the daemon sets, and the feed goroutine has no recover
+// of its own, so a panic gives the empty answer rather than ending the landing
+// worker with the landing it was filing for. No hook, an empty range, a finding
+// om named no file for, or an answer of nothing but blanks leave the finding
+// unmarked.
+func (l *Lander) pathTouched(landed, base, path string) (touched []string) {
+	if l.PathTouched == nil || landed == "" || base == "" || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	defer func() {
+		if v := recover(); v != nil {
+			touched = nil
+		}
+	}()
+	for _, sha := range l.PathTouched(landed, base, path) {
+		if sha = strings.TrimSpace(sha); sha != "" {
+			touched = append(touched, sha)
+		}
+	}
+	return touched
 }
 
 // heldFindingTexts is the findings the bound held back, as the queue line keeps
@@ -982,12 +1022,21 @@ const followupRevertNote = "If the fix removes or rewrites a line an earlier lan
 	"the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the " +
 	"operator for a deletes-by-spec waiver.\n"
 
-// findingResolved opens every acceptance item. A finding's title may state a
-// defect or ask for a change, so a box that restates it asks the worker to
-// leave the defect in place: om read a correct fix as contradicting such a box
-// and rejected it twice (gt-u4xrr). The box names the finding as resolved,
-// which a diff that fixes it satisfies whatever the title's grammar (gt-twr9x).
+// findingResolved opens an acceptance item that asks for one outcome, a fix: a
+// finding whose file is not known to have changed since its landing, and the
+// folded item that mixes the findings past specdispatch.MaxAcceptance. A
+// finding's title may state a defect or ask for a change, so a box that restates
+// it asks the worker to leave the defect in place: om read a correct fix as
+// contradicting such a box and rejected it twice (gt-u4xrr). The box names the
+// finding as resolved, which a diff that fixes it satisfies whatever the title's
+// grammar (gt-twr9x).
 const findingResolved = "Finding resolved: "
+
+// findingResolvedOrFixed opens the box of a finding whose file changed since its
+// landing (Touched): the change may already be the fix, so the box accepts the
+// finding as already fixed on origin/main and gives the commits that changed the
+// file (gt-vn8dhf). Nothing is closed on it: the worker still decides.
+const findingResolvedOrFixed = "Finding resolved, or already fixed on origin/main (the file changed in %s): "
 
 // acceptanceItems is the filed bead's acceptance list: one item per finding,
 // with the ones past specdispatch.MaxAcceptance folded into the last item,
@@ -1002,17 +1051,33 @@ func acceptanceItems(findings []FollowupCandidate) []string {
 }
 
 // findingItems is one acceptance item per finding: "Finding resolved: <title>",
-// and the location when om named one.
+// and the location when om named one. A finding replayed after its file changed
+// since the landing opens its item by accepting it as already fixed
+// (gt-vn8dhf).
 func findingItems(findings []FollowupCandidate) []string {
 	out := make([]string, 0, len(findings))
 	for _, c := range findings {
 		item := findingResolved + NoteField(c.Title)
+		if len(c.Touched) > 0 {
+			item = fmt.Sprintf(findingResolvedOrFixed, strings.Join(c.Touched, ", ")) + NoteField(c.Title)
+		}
 		if loc := location(c.Path, c.Line); loc != "" {
 			item += " (" + loc + ")"
 		}
 		out = append(out, item)
 	}
 	return out
+}
+
+// findingTouchedNote closes a bundle's Goal bullet with the short commits that
+// touched the finding's file since its landing, and is empty for a finding whose
+// file is not known to have changed (gt-vn8dhf). It sits beside the box wording
+// so the two read as one sentence about the same commits.
+func findingTouchedNote(c FollowupCandidate) string {
+	if len(c.Touched) == 0 {
+		return ""
+	}
+	return "; the file changed since the landing in " + strings.Join(c.Touched, ", ")
 }
 
 // findingLine renders one finding as the body lists it: the title, the location

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -332,7 +333,7 @@ func TestFollowupSkipIsAskedOncePerPassWithTheSameArguments(t *testing.T) {
 	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
 		t.Errorf("the queue holds %d line(s) (%v), want the filed line consumed", len(queued), err)
 	}
-	if asks[1] != first {
+	if !reflect.DeepEqual(asks[1], first) {
 		t.Errorf("the second pass asked about %+v, want the first pass's %+v: the same finding must get the same arguments", asks[1], first)
 	}
 }
