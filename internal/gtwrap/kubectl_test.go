@@ -1135,6 +1135,99 @@ func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 	}
 }
 
+// streamKube writes the bytes it holds through the writers the wrapper passes;
+// fakeKube itself writes nothing.
+type streamKube struct {
+	*fakeKube
+	stdout, stderr string
+}
+
+func (s streamKube) AttachStreams(argv []string, env []string, _ io.Reader, stdout, stderr io.Writer) (int, error) {
+	if _, err := io.WriteString(stdout, s.stdout); err != nil {
+		return 1, err
+	}
+	if _, err := io.WriteString(stderr, s.stderr); err != nil {
+		return 1, err
+	}
+	return s.fakeKube.Attach(argv, env)
+}
+
+// kubeBdCallArgs is the call the wrapper makes for bd with args from dir.
+func kubeBdCallArgs(t *testing.T, dir string, args ...string) Call {
+	t.Helper()
+	call, err := Plan(nativeBdTool, args, nil, dir, false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	return call
+}
+
+const execStreamBreak = "error stream protocol error: unknown error\n"
+
+// TestExecLostReplyNote: a bd write call whose stderr ends in the exec stream
+// error prints the lost-reply note, streams byte for byte, at both pod roots.
+func TestExecLostReplyNote(t *testing.T) {
+	t.Parallel()
+	const out = "created gt-abc\n"
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	for _, tc := range []struct{ name, podRoot string }{{"equal roots", ""}, {"different roots", "/pod/town"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = 1
+			var note, stdout, stderr bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stdout: out, stderr: execStreamBreak}
+			if tc.podRoot != "" {
+				k.PodRoot = tc.podRoot
+			}
+			k.Stdout, k.Stderr = &stdout, &stderr
+			if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+				t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+			}
+			if stdout.String() != out || stderr.String() != execStreamBreak {
+				t.Fatalf("streams = %q, %q; want %q, %q", stdout.String(), stderr.String(), out, execStreamBreak)
+			}
+			if got := note.String(); got != want {
+				t.Fatalf("note = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestExecLostReplyNoteNone: a read call and a successful write print no note.
+func TestExecLostReplyNoteNone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		exit int
+	}{
+		{"a read call", []string{"show", "gt-abc"}, 1},
+		{"a successful write", []string{"create"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = tc.exit
+			var note bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stderr: execStreamBreak}
+			k.Stdout, k.Stderr = io.Discard, io.Discard
+			if exit, err := k.Launch(kubeBdCallArgs(t, town, tc.args...)); exit != tc.exit || err != nil {
+				t.Fatalf("Launch = %d, %v; want the call's status %d", exit, err, tc.exit)
+			}
+			if note.Len() != 0 {
+				t.Fatalf("note = %q; want none", note.String())
+			}
+		})
+	}
+}
+
 // beadsTownKube is the target the cluster fake drives for a bd call, with the
 // town built as real directories under the test's own temp dir, so the walk sees
 // the filesystem the wrapper sees.
