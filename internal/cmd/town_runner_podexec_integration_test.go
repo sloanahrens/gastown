@@ -35,14 +35,14 @@ func TestIntegrationProductionPodExecKeepsStderrApart(t *testing.T) {
 	}
 }
 
-// TestIntegrationProductionPodExecExit covers the two failures: a child that
-// exits non-zero is its status with the stdout so far and no error, and a command
-// that cannot start is an error naming it.
-func TestIntegrationProductionPodExecExit(t *testing.T) {
+// TestIntegrationProductionPodExecFailureNamesStderr covers a child that exits non-zero and a
+// command that cannot start: the first is its status with the stdout so far and an
+// error that names its stderr, the second an error naming the command.
+func TestIntegrationProductionPodExecFailureNamesStderr(t *testing.T) {
 	t.Parallel()
-	stdout, exit, err := productionPodExec(podExecContext(t), []string{"sh", "-c", "echo partial; exit 3"}, nil)
-	if err != nil || exit != 3 || string(stdout) != "partial\n" {
-		t.Errorf("productionPodExec = %q, exit %d, err %v; want %q, exit 3, no error", stdout, exit, err, "partial\n")
+	stdout, exit, err := productionPodExec(podExecContext(t), []string{"sh", "-c", "echo partial; echo refused >&2; exit 3"}, nil)
+	if exit != 3 || string(stdout) != "partial\n" || err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("productionPodExec = %q, exit %d, err %v; want %q, exit 3 and an error naming refused", stdout, exit, err, "partial\n")
 	}
 	const missing = "gt-no-such-command-4775kx"
 	_, _, err = productionPodExec(podExecContext(t), []string{missing}, nil)
