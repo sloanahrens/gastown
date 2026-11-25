@@ -216,6 +216,51 @@ func TestWithoutLocalHooksRunsTheSubcommandWithHooksOff(t *testing.T) {
 	s.noUnscripted(t)
 }
 
+// TestWithoutLocalHooksPutsTheOptionAfterTheHandleGitDir: on a handle built
+// with an explicit gitDir, Commit and MergeNoFF send --git-dir, then the
+// hooks-off option, then the subcommand; a push through the same handle
+// carries the --git-dir but no option, so its pre-push hook stays on
+// (gt-7efzug).
+func TestWithoutLocalHooksPutsTheOptionAfterTheHandleGitDir(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), ".repo.git")
+	const off = " -c core.hooksPath=/dev/null"
+	s := newScripted(map[string]reply{
+		"--git-dir=" + dir + off + " commit -m m":                           ok(""),
+		"--git-dir=" + dir + off + " merge --no-ff -m m side":               ok(""),
+		"--git-dir=" + dir + off + " symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
+		"--git-dir=" + dir + " push origin side":                            ok(""),
+	})
+	g := (&Git{gitDir: dir, exec: s.run}).WithoutLocalHooks()
+	if err := g.Commit("m"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := g.MergeNoFF("side", "m"); err != nil {
+		t.Fatalf("MergeNoFF: %v", err)
+	}
+	if err := g.Push("origin", "side", false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	for _, want := range []string{
+		"--git-dir=" + dir + off + " commit -m m",
+		"--git-dir=" + dir + off + " merge --no-ff -m m side",
+	} {
+		if !s.hasSent(want) {
+			t.Errorf("no call recorded as %q; sent %q", want, s.sent())
+		}
+	}
+	c, found := s.sentCall("--git-dir=" + dir + " push origin side")
+	if !found {
+		t.Fatalf("push recorded no plain call; sent %q", s.sent())
+	}
+	for _, arg := range c.args {
+		if strings.HasPrefix(arg, "core.hooksPath") {
+			t.Errorf("push ran with %q; a push must keep the pre-push hook: %q", arg, c.args)
+		}
+	}
+	s.noUnscripted(t)
+}
+
 // TestWithoutLocalHooksCoversWorktreeAndEnvPaths: a worktree add and the
 // commit-tree of a message rewrite, which build their argv in
 // runWithEnvAndTimeout, also run with the repository's local hooks off; a plain
