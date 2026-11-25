@@ -115,10 +115,12 @@ func SystemUpdateRowsWithMore(sweeps []TierSweepRow, pipeline *GastownPipeline, 
 }
 
 // systemCommit is one commit while the inputs are folded together: the longest
-// sha seen, the newest timestamp any stage reported, and the stages themselves.
+// sha seen, the newest and the earliest timestamp any stage reported, and the
+// stages themselves.
 type systemCommit struct {
 	sha   string
 	at    time.Time
+	first time.Time
 	sweep *TierSweepRow
 	runs  []PipelineRun
 	roll  *SystemUpdateRoll
@@ -159,6 +161,7 @@ func joinSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls [
 			c.sweep = &sweep
 		}
 		c.at = newest(c.at, s.At)
+		c.first = oldest(c.first, s.At)
 	}
 
 	if pipeline != nil {
@@ -169,6 +172,7 @@ func joinSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls [
 			}
 			c.runs = append(c.runs, run)
 			c.at = newest(c.at, newest(run.Started, run.Ended))
+			c.first = oldest(c.first, oldest(run.Started, run.Ended))
 		}
 	}
 
@@ -184,6 +188,7 @@ func joinSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls [
 			c.roll = &roll
 		}
 		c.at = newest(c.at, rollTime(r))
+		c.first = oldest(c.first, oldest(r.StartedAt, r.EndedAt))
 	}
 
 	return commits
@@ -231,6 +236,26 @@ func lastGreenSweep(rig []TierSweepRow) *SweepGreen {
 	return nil
 }
 
+// systemUpdatesAhead is how many commits the join reads, other than the green
+// commit, first reported after the last green sweep: the commits that landed
+// since it. rig is the gastown rig's sweeps, so another rig's sweep does not add
+// to the count. The join is taken before the row cap, so a commit the cap cuts
+// still counts. A commit counts by its earliest stage time, so the green commit's
+// own later roll, and an older commit whose roll finished after the green sweep,
+// do not. -1 when no sweep is green.
+func systemUpdatesAhead(rig []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, green *SweepGreen) int {
+	if green == nil {
+		return -1
+	}
+	ahead := 0
+	for _, c := range joinSystemUpdates(rig, pipeline, rolls) {
+		if !sameCommit(c.sha, green.SHA) && c.first.After(green.At) {
+			ahead++
+		}
+	}
+	return ahead
+}
+
 // sweepGreen is whether every stage of the sweep reported GREEN exactly. A sweep
 // with no stage is not green, and neither is a stage whose verdict is blank or
 // anything but GREEN.
@@ -254,6 +279,15 @@ func rollTime(r SystemUpdateRoll) time.Time {
 
 func newest(a, b time.Time) time.Time {
 	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// oldest is the earlier of two stage times. A zero time is no time, so it never
+// wins: a commit's first stamp is the earliest any of its stages reported.
+func oldest(a, b time.Time) time.Time {
+	if a.IsZero() || (!b.IsZero() && b.Before(a)) {
 		return b
 	}
 	return a
