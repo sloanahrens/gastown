@@ -2022,6 +2022,96 @@ func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 	}
 }
 
+// engineArgvEndsWith reports whether the exec's argv ends with the docker argv want.
+func engineArgvEndsWith(args, want []string) bool {
+	return len(args) >= len(want) && slices.Equal(args[len(args)-len(want):], want)
+}
+
+// TestCIEnginePruneCapPassRunsWhenOverTheKeepSize: the age prune reclaims nothing from
+// a build cache docker reports as 12GB reclaimable, and the keep size is 10GB, so the
+// cache is 2GB over. The run sends the cap prune after the age prune, through the same
+// exec, with the cap argv.
+func TestCIEnginePruneCapPassRunsWhenOverTheKeepSize(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+	f.tick()
+	f.drain()
+
+	prunes := engineDockerExecs(f, "builder prune")
+	if len(prunes) != 2 {
+		t.Fatalf("the build cache prunes ran %d time(s), want the age prune then the cap prune", len(prunes))
+	}
+	if want := []string{"docker", "builder", "prune", "-af", "--max-used-space", "10240MB"}; !engineArgvEndsWith(prunes[1].args, want) {
+		t.Errorf("the second build cache prune argv does not end with the cap argv %q: %q", want, prunes[1].args)
+	}
+	if want := []string{"docker", "builder", "prune", "-af", "--filter", "until=6h", "--reserved-space", "10240MB"}; !engineArgvEndsWith(prunes[0].args, want) {
+		t.Errorf("the first build cache prune is not the age prune %q: %q", want, prunes[0].args)
+	}
+}
+
+// TestCIEnginePruneCapPassSkippedWhenNotOver: a cap prune is sent only when the build
+// cache is over the keep size after the age prune. A cache at or under it, a size
+// read that failed, and a dry run send no cap prune.
+func TestCIEnginePruneCapPassSkippedWhenNotOver(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		mode       string
+		df, prune  cliReply
+		wantPrunes int
+	}{
+		"the age prune leaves the cache at the keep size": {
+			mode: agentconfig.DiskMaintenanceModeApply, df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, prune: cliReply{stdout: "Total:\t2GB\n"}, wantPrunes: 1,
+		},
+		"the cache is under the keep size": {
+			mode: agentconfig.DiskMaintenanceModeApply, df: cliReply{stdout: "Build Cache 8GB 8GB (100%)\n"}, prune: cliReply{stdout: "Total:\t0B\n"}, wantPrunes: 1,
+		},
+		"the size before the prune is unreadable": {
+			mode: agentconfig.DiskMaintenanceModeApply, df: cliReply{code: 1, stderr: "Cannot connect to the Docker daemon"}, prune: cliReply{stdout: "Total:\t0B\n"}, wantPrunes: 1,
+		},
+		"a dry run sends no prune at all": {
+			mode: agentconfig.DiskMaintenanceModeDryRun, df: cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"}, prune: cliReply{stdout: "Total:\t0B\n"}, wantPrunes: 0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, tc.mode, engineBuildCacheListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, "-- docker system df", tc.df)
+			replaceEngineReply(f, "-- docker builder prune", tc.prune)
+			f.tick()
+			f.drain()
+
+			if n := len(engineDockerExecs(f, "builder prune")); n != tc.wantPrunes {
+				t.Errorf("the build cache prunes ran %d time(s), want %d:\n%s", n, tc.wantPrunes, f.logs.String())
+			}
+			for _, c := range engineDockerExecs(f, "builder prune") {
+				if slices.Contains(c.args, "--max-used-space") {
+					t.Errorf("a cap prune was sent though the cache is not over the keep size: %q", c.args)
+				}
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneCapPassFailureFailsTheRun: a cap prune that exits non-zero is a
+// failed run, not a verdict that reads as clean. The failure is logged once with the
+// cap pass named, and the run raises its failure item.
+func TestCIEnginePruneCapPassFailureFailsTheRun(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+	replaceEngineReply(f, "--max-used-space", cliReply{code: 1, stderr: "unknown flag: --max-used-space"})
+	f.tick()
+	f.drain()
+
+	engineConcludedAt(t, f, ciCacheTestStart)
+	if line := engineLogLine(f.logs.String(), "the cap prune in the"); !strings.Contains(line, "exit status 1") {
+		t.Errorf("no line names the failed cap prune and its exit status:\n%s", f.logs.String())
+	}
+}
+
 // TestCIEnginePruneBuildCacheSizeReadFailureSkipsOnlyTheWarn: a size read before the
 // prune that fails is logged once and skips only the zero-reclaim check. The build
 // cache prune, the removals and the verdict all still run.
