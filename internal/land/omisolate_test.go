@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,34 @@ func TestVerdictReuseIsolatedSetsTMPDIR(t *testing.T) {
 	}
 	if !slices.Contains(env, "CLAUDE_CONFIG_DIR") {
 		t.Fatalf("review env's %d entries hold no CLAUDE_CONFIG_DIR unset entry", len(env))
+	}
+}
+
+// TestVerdictReuseNonIsolatedEnvUnchanged: an Isolated copy for a non-empty tmp
+// adds TMPDIR; a reviewer Isolated did not make hands its review exactly
+// omUnsetEnv, so a pool's TMPDIR never reaches the landing's own om and points
+// its raw replies at another review's directory.
+func TestVerdictReuseNonIsolatedEnvUnchanged(t *testing.T) {
+	t.Parallel()
+	envs := map[string][]string{}
+	r := OMReviewer{OutDir: t.TempDir()}
+	r.run = recordingEnv(t, envs)
+	in := ReviewInput{BeadID: "gt-pibum9"}
+	in.Dir, in.Base, in.Head, in.Repo = "/wt", "aaa", "bbb", baseRepo{}
+	if _, err := r.ReviewBead(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := envs["review"]
+	if !ok {
+		t.Fatalf("om was not run for the review; %d om call(s) recorded", len(envs))
+	}
+	if !slices.Equal(got, omUnsetEnv) {
+		t.Fatalf("review env has %d entries, want exactly omUnsetEnv's %d", len(got), len(omUnsetEnv))
+	}
+	for _, e := range got {
+		if strings.HasPrefix(e, "TMPDIR=") {
+			t.Fatalf("a reviewer Isolated did not make gave its review an entry for TMPDIR")
+		}
 	}
 }
 
