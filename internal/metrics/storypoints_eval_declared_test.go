@@ -222,6 +222,22 @@ func TestStoryPointsEvalDeclaredPrinted(t *testing.T) {
 	})
 }
 
+// TestStoryPointsEvalDeclaredSeatSectionFailedWrite: a refused write of the
+// seat-class split ends the run with that error, so the declared table, which
+// prints after it, is not reached.
+func TestStoryPointsEvalDeclaredSeatSectionFailedWrite(t *testing.T) {
+	t.Parallel()
+	town := evalDeclaredTown(t, 100)
+	c := Commands{
+		Wire: func(context.Context) (RealTown, error) { return RealTown{Town: town}, nil },
+		Out:  failOnWrite{marker: "by seat class"},
+	}
+	err := Run(context.Background(), CommandStoryPointsEval, c)
+	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatalf("err = %v, want the failed write of the seat-class split", err)
+	}
+}
+
 // TestStoryPointsEvalDeclaredShortPart: a test part under storyPointsEvalMinTest
 // rows prints no declared table, and the --json object carries it as null, as
 // it does the bands.
