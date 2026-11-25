@@ -335,6 +335,33 @@ fi
 cd "$d" 2>/dev/null || refuse "cannot enter $d"
 exec "$@"`
 
+// watchdogScript runs the tool as a child and kills it when the caller's stdin
+// reaches end of file (gt-bkdnxv). The tool reads no stdin, so the end of the
+// kubectl client's stdin is the only signal that nobody wants the tool any more.
+// The tool gets /dev/null as stdin and fd 3 keeps the caller's stdin for the
+// watchdog alone. The watchdog exits with the tool's status, 143 once it killed it.
+const watchdogScript = `exec 3<&0
+"$@" 0</dev/null 3<&- &
+child=$!
+( while read -r _ <&3; do :; done; kill -TERM "$child" 2>/dev/null ) &
+watcher=$!
+wait "$child"
+status=$?
+kill "$watcher" 2>/dev/null
+exit "$status"`
+
+// watchdogArgv returns the sh command line that runs tool under the stdin watchdog.
+// The tool and its arguments follow the sh placeholder as positional words, so a
+// word holding a space, a quote or a dollar sign is never read as shell syntax. An
+// empty tool, or one with a blank command name, is refused: there is nothing to run.
+func watchdogArgv(tool []string) ([]string, error) {
+	if len(tool) == 0 || tool[0] == "" {
+		return nil, errors.New("gtwrap: no command to run under the stdin watchdog")
+	}
+	argv := []string{"sh", "-c", watchdogScript, "sh"}
+	return append(argv, tool...), nil
+}
+
 // execArgv is the kubectl command line that runs call in pod, in dir. The env
 // assignments travel as an env command's arguments, since kubectl exec forwards no
 // environment; the Dolt host is set last so a forwarded value cannot override it.
