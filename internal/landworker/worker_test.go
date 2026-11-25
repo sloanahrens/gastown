@@ -1116,6 +1116,34 @@ func TestSortByLandingOrderBreaksTiesByID(t *testing.T) {
 	}
 }
 
+// A P3 submitted an hour before a P1 lands first: the queue ahead of a
+// submission is all that may delay it, so a low priority cannot wait behind
+// later higher-priority work (gt-rrwwet).
+func TestSortByLandingOrderTakesOldestFirst(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-p1", 1, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+		readyIssue("gt-p3", 3, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-p3,gt-p1" {
+		t.Fatalf("order %s; want the older P3 first", got)
+	}
+}
+
+// A P0 lands ahead of every non-P0 however late it was submitted (gt-rrwwet).
+func TestSortByLandingOrderLandsP0First(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-p3", 3, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-p0", 0, "2026-09-30T12:00:00Z", "2026-09-30T12:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-p0,gt-p3" {
+		t.Fatalf("order %s; want the P0 first", got)
+	}
+}
+
 func TestPolecatFromAssignee(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{"gastown/polecats/opal": "opal", crewSeat: "", "": "", "opal": ""} {

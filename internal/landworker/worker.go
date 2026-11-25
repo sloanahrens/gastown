@@ -1852,22 +1852,27 @@ func (w *Worker) clearIntent(work land.Work) {
 	}
 }
 
-// sortByLandingOrder orders the ready queue the way the worker lands it:
-// highest priority first, then the bead submitted for landing earliest (by
-// land.SubmittedAt, the clock the alarms read too), then ID. Priority leads
-// because a P1 fix pays for every bead landed ahead of it.
+// sortByLandingOrder orders the ready queue the way the worker lands it: a P0
+// first, then the bead submitted for landing earliest (by land.SubmittedAt, the
+// clock the alarms read too), then the lower priority number, then ID. Oldest
+// first means a submission waits at most the queue ahead of it; priority only
+// breaks a tie in submission time. A P0 leads because it is the one class the
+// queue must not make wait (gt-rrwwet).
 func sortByLandingOrder(issues []*beads.Issue) {
 	sort.SliceStable(issues, func(i, j int) bool {
 		a, b := issues[i], issues[j]
 		if a == nil || b == nil {
 			return b == nil && a != nil
 		}
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
+		if (a.Priority == 0) != (b.Priority == 0) {
+			return a.Priority == 0
 		}
 		as, bs := land.SubmittedAt(a), land.SubmittedAt(b)
 		if !as.Equal(bs) {
 			return as.Before(bs)
+		}
+		if a.Priority != b.Priority {
+			return a.Priority < b.Priority
 		}
 		return a.ID < b.ID
 	})
