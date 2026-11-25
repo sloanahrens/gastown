@@ -2993,6 +2993,16 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		if env.ShapeGate != specdispatch.ShapeGateOff {
 			switch {
 			case verdict.Clean():
+				// A refuse tick labels a bead needs-shape, and reshaping it leaves
+				// that label behind: the tick that finds it clean takes it off, so
+				// the reshape queue lists only beads still to reshape (gt-5oyjvn).
+				// A dry run, a waived bead and the other gates leave it alone.
+				if env.ShapeGate == specdispatch.ShapeGateRefuse && !env.DryRun && env.RemoveLabel != nil &&
+					full.HasLabel(specShapeLabel) && !full.HasLabel(specdispatch.ShapeWaivedLabel) {
+					if err := env.RemoveLabel(id, specShapeLabel); err != nil {
+						report.Errors = append(report.Errors, fmt.Sprintf("%s: unlabel: %v", id, err))
+					}
+				}
 			case full.HasLabel(specdispatch.ShapeWaivedLabel):
 				// The operator waived this bead's shape lint (gt-f8ppx): it
 				// dispatches under any gate, with the verdict left on it as the
