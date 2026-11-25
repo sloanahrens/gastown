@@ -926,6 +926,70 @@ func TestGuardSelectsGetwd(t *testing.T) {
 	}
 }
 
+// TestGuardSelectsManifestdata: the internal/manifestdata row runs the pod
+// town root guard when a non-test Go file under deploy, internal or cmd
+// changes or is removed, and selects nothing for a file the walk never reads.
+func TestGuardSelectsManifestdata(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	const guard = "TestNoLiteralPodTownRootOutsideTheConstant"
+
+	tests := []struct {
+		name string
+		diff string
+		want bool // whether TestNoLiteralPodTownRootOutsideTheConstant is selected
+	}{
+		{
+			"a changed non-test Go file under internal selects the pod root guard",
+			"M\x00internal/daemon/patrol.go\x00",
+			true,
+		},
+		{
+			"a changed non-test Go file under deploy selects the pod root guard",
+			"M\x00deploy/k8s/daemon/daemon.go\x00",
+			true,
+		},
+		{
+			"a changed non-test Go file under cmd selects the pod root guard",
+			"M\x00cmd/gt/main.go\x00",
+			true,
+		},
+		{
+			"a removed Go file selects the pod root guard",
+			"D\x00deploy/k8s/forgejo-runner/runner.go\x00",
+			true,
+		},
+		{
+			"a changed test file selects no pod root guard",
+			"M\x00internal/cmd/seat_ship_cmd_test.go\x00",
+			false,
+		},
+		{
+			"a changed docs file selects no pod root guard",
+			"M\x00docs/reference.md\x00",
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			var got []string
+			for _, s := range sel {
+				if s.Package == "internal/manifestdata" {
+					got = s.Tests
+				}
+			}
+			if selected := contains(got, guard); selected != tt.want {
+				t.Errorf("GuardSelects(%q) internal/manifestdata tests = %v; %s selected = %v, want %v", tt.diff, got, guard, selected, tt.want)
+			}
+		})
+	}
+}
+
 // TestGuardSelectsCallercwdReaders: the row's judge is true for every file
 // TestGuardPackagesDoNotReadTheVariable reads, the guard sources it names, the
 // tap_guard files directly under internal/cmd, and the guardlint package with

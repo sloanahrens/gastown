@@ -565,6 +565,18 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestNoLiteralPodTownRootOutsideTheConstant walks every non-test Go
+		// file under deploy, internal and cmd for a literal pod town root, so
+		// each of those is its input. It also fails when deploy/k8s/daemon/
+		// daemon.go is absent, so a deletion counts too (gt-08uq4b).
+		pkg:   "internal/manifestdata",
+		tests: []string{"TestNoLiteralPodTownRootOutsideTheConstant"},
+		judges: func(rel string) bool {
+			return nonTestGo(rel) && (strings.HasPrefix(rel, "deploy/") || strings.HasPrefix(rel, "internal/") || strings.HasPrefix(rel, "cmd/"))
+		},
+		removal: true,
+	},
+	{
 		// TestRoleOverridesHaveNoReader walks every non-test Go file under the
 		// repo root (skipping vendor and dot directories) and stats go.mod, so
 		// each of those is its input. The check's own file is its one allowed
