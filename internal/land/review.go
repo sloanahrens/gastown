@@ -102,6 +102,11 @@ type Verdict struct {
 	// every verdict om reached in one run (gt-cz07b). It is the landing's own
 	// record, not a field om wrote.
 	Rescore *Rescore `json:"-"`
+	// Flags is the sorted names of the flags on the argv the review ran with,
+	// so a flag om was not given (its help did not list it, or its temp file
+	// could not be written) is absent here and a degraded review can be told
+	// from a complete one. The landing's own record, not a field om wrote.
+	Flags []string `json:"-"`
 }
 
 // Rescore is the two om scores of a borderline rejection that was re-scored
@@ -651,6 +656,7 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// om's JSON is kept before the threshold below rewrites the verdict: the
 	// store records what om said, whatever the landing decides on it.
 	r.storeVerdict(in, data, argv)
+	v.Flags = slices.Sorted(slices.Values(flagNames(argv)))
 	// The rig's own threshold at base decides too: an approve scored below it is
 	// a request for changes, whatever om's exit code said.
 	if v.Verdict == VerdictApprove && v.Score < bar {
