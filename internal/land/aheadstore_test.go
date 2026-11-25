@@ -131,9 +131,6 @@ func TestVerdictReuseStoreRefusesWhatItCannotWrite(t *testing.T) {
 		{"bead is empty", func(_ *AheadStore, r *AheadRecord) { r.Bead = "" }, nil, "refusing bead"},
 		{"bead climbs out of the store", func(_ *AheadStore, r *AheadRecord) { r.Bead = "../gt-abc" }, nil, "refusing bead"},
 		{"record cannot be encoded", func(_ *AheadStore, r *AheadRecord) { r.ReviewSecs = math.NaN() }, nil, "encoding review-ahead record"},
-		{"write fails", func(s *AheadStore, _ *AheadRecord) {
-			s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
-		}, nil, "writing review-ahead record"},
 		{"landings dir is not private", nil, func(t *testing.T, town string) {
 			dir := filepath.Join(constants.TownRuntimePath(town), "landings", "review-ahead", "gastown")
 			if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -279,6 +276,28 @@ func TestVerdictReuseStoreBadComponent(t *testing.T) {
 			}
 			assertNoRecord(t, town, "gt-abc")
 		})
+	}
+}
+
+// TestVerdictReuseStoreWriteErrorIsReturned: Put returns the write's error. The
+// seam here fails without writing a byte, so this test covers only the error
+// return; the real atomic write, which is what leaves no partial file, is not
+// exercised here.
+func TestVerdictReuseStoreWriteErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeErr := errors.New("disk full")
+	store := AheadStore{TownRoot: town, Rig: "gastown"}
+	store.writeFile = func(string, []byte, os.FileMode) error { return writeErr }
+	err := store.Put(aheadTestRecord("gt-abc", aheadTestHead))
+	if err == nil {
+		t.Fatal("Put returned nil, want the write's error")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("Put error = %q, want it to wrap the write's error %q", err, writeErr)
+	}
+	if !strings.Contains(err.Error(), "writing review-ahead record") {
+		t.Errorf("Put error = %q, want it to name the write", err)
 	}
 }
 
