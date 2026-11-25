@@ -58,22 +58,30 @@ func TestPodExecOutcome(t *testing.T) {
 }
 
 // TestStderrTail covers the bounded, scrubbed tail an error carries: the last 2048
-// bytes, cut on a character boundary, with a credential-shaped run replaced and
-// nothing for an empty stderr.
+// bytes of the scrubbed text, cut on a character boundary, a credential that starts
+// before the cut replaced whole, and nothing for an empty stderr.
 func TestStderrTail(t *testing.T) {
 	t.Parallel()
-	long := strings.Repeat("a", 8000) + "END"
-	if got := stderrTail([]byte(long)); len(got) != podExecStderrTail || !strings.HasSuffix(got, "END") {
-		t.Errorf("a 8003-byte stderr gave %d bytes ending %q, want its last %d", len(got), got[len(got)-3:], podExecStderrTail)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"a long input keeps its last bytes", strings.Repeat("a", 9997) + "END", strings.Repeat("a", podExecStderrTail-3) + "END"},
+		// 6001 bytes: the cut is at the odd offset 3953, inside the 2-byte character
+		// that starts at 3952, so the tail starts at the next whole one.
+		{"a cut inside a character moves forward", strings.Repeat("é", 3000) + "x", strings.Repeat("é", 1023) + "x"},
+		{"a credential that starts before the cut is replaced whole", strings.Repeat("x", 100) + " token=" + strings.Repeat("s", 3000) + " END", strings.Repeat("x", 100) + " [redacted] END"},
+		{"a token-shaped run is scrubbed and a line break is a space", "failed\ntoken=abc123 now", "failed [redacted] now"},
+		{"an empty stderr is empty", "", ""},
 	}
-	multi := strings.Repeat("é", 3000)
-	if got := stderrTail([]byte(multi)); !utf8.ValidString(got) || len(got) > podExecStderrTail || len(got) < podExecStderrTail-utf8.UTFMax {
-		t.Errorf("a multi-byte stderr gave %d bytes, valid %v; want at most %d and a whole character at the cut", len(got), utf8.ValidString(got), podExecStderrTail)
-	}
-	if got := stderrTail([]byte("failed\ntoken=abc123 now")); got != "failed [redacted] now" {
-		t.Errorf("a token-shaped run gave %q, want it scrubbed and the line break a space", got)
-	}
-	if got := stderrTail(nil); got != "" {
-		t.Errorf("an empty stderr gave %q, want none", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := stderrTail([]byte(tt.in))
+			if got != tt.want || !utf8.ValidString(got) {
+				t.Errorf("stderrTail = %d bytes %q (valid %v), want %d bytes %q", len(got), got, utf8.ValidString(got), len(tt.want), tt.want)
+			}
+		})
 	}
 }

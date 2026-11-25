@@ -16,6 +16,11 @@ import (
 // finding, so the tail is bounded here and passed through report.Scrub.
 const podExecStderrTail = 2048
 
+// podExecStderrBuffer is how much of the end of a child's stderr is kept to scrub:
+// wider than the tail, so a credential-shaped run that starts before the tail's
+// first byte is seen whole and replaced before the tail is cut.
+const podExecStderrBuffer = 8192
+
 // productionPodExec is the real podExec: it runs argv with exec.CommandContext,
 // stdin set from the bytes, and returns what the child printed on stdout, kept
 // apart from stderr, and its exit status. Stderr is never parsed and never mixed
@@ -37,7 +42,7 @@ func productionPodExec(ctx context.Context, argv []string, stdin []byte) ([]byte
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	stderr := &tailWriter{max: podExecStderrTail + utf8.UTFMax}
+	stderr := &tailWriter{max: podExecStderrBuffer}
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	status := -1
@@ -63,17 +68,20 @@ func (w *tailWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// stderrTail is the last podExecStderrTail bytes of b, moved forward to a
-// character boundary if the cut would split one, with credential-shaped runs
-// replaced and line breaks turned to spaces (report.Scrub).
+// stderrTail scrubs b (report.Scrub: credential-shaped runs replaced, line breaks
+// turned to spaces) and returns the last podExecStderrTail bytes of the result,
+// moved forward to a character boundary if the cut would split one. It scrubs
+// first: the error text reaches logs, and a credential that starts before the cut
+// would otherwise survive as a suffix the pattern no longer matches.
 func stderrTail(b []byte) string {
-	if len(b) > podExecStderrTail {
-		b = b[len(b)-podExecStderrTail:]
+	s := report.Scrub(string(b))
+	if len(s) > podExecStderrTail {
+		s = s[len(s)-podExecStderrTail:]
 	}
-	for len(b) > 0 && !utf8.RuneStart(b[0]) {
-		b = b[1:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
 	}
-	return report.Scrub(string(b))
+	return s
 }
 
 // podExecFailure is err with the stderr tail after it, when there is one.
