@@ -1219,3 +1219,60 @@ func TestReworkNumbersStartRecordEarlierWeekRunsOnce(t *testing.T) {
 		t.Errorf("the record names %s after the run, want this week's clock %s", got, reworkProgramNow())
 	}
 }
+
+// TestReworkNumbersStartRecordFailedStep: a start check whose step fails leaves
+// the last-run record naming the week before, logs the error, and the next start
+// runs the step again. A failed start that recorded its week would make the next
+// start read the week as run and skip it, so the numbers would starve for it.
+func TestReworkNumbersStartRecordFailedStep(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	previous := reworkProgramNow().AddDate(0, 0, -7)
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), previous); err != nil {
+		t.Fatalf("the previous week's last-run record: %v", err)
+	}
+	recs, reviews := reworkProgramFigureWeek(t)
+	unreadable := errors.New("the landing ledgers cannot be read")
+	var read atomic.Int32
+	failFirst := func(town string, now func() time.Time) *reworkNumbersStep {
+		step := newReworkNumbersStep(town, now)
+		step.read = func() (reworkNumbersRecord, error) {
+			if read.Add(1) == 1 {
+				return reworkNumbersRecord{}, unreadable
+			}
+			return reworkNumbersRecord{Landings: recs, Reviews: reviews}, nil
+		}
+		return step
+	}
+	startCheck := func() *bytes.Buffer {
+		t.Helper()
+		var logged bytes.Buffer
+		d := reworkNumbersTestDaemon(t, town, &logged)
+		d.clock = clockwork.NewFakeClockAt(reworkProgramNow())
+		d.reworkNumbersStepFor = failFirst
+		reworkNumbersStartAndJoin(t, d)
+		return &logged
+	}
+
+	first := startCheck()
+
+	if got := read.Load(); got != 1 {
+		t.Fatalf("a start whose step failed read the town's records %d times, want once", got)
+	}
+	if !strings.Contains(first.String(), unreadable.Error()) {
+		t.Errorf("a start whose step failed logged %q, want the read's error", first.String())
+	}
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(previous) {
+		t.Errorf("after the failing start the record names %s, want it unchanged at %s", got, previous)
+	}
+
+	// The next start is a fresh step, as a restarted daemon builds.
+	startCheck()
+
+	if got := read.Load(); got != 2 {
+		t.Errorf("a start after a failed start read the town's records %d times in all, want twice", got)
+	}
+	if got := reworkNumbersLastRunAt(t, town); !got.Equal(reworkProgramNow()) {
+		t.Errorf("after the retried start the record names %s, want this week's clock %s", got, reworkProgramNow())
+	}
+}
