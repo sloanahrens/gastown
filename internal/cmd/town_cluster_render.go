@@ -598,6 +598,11 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// town and no control-cluster flag, so it is dispatched before any of the
 	// control-only defaults and checks below.
 	if f.cluster == clusterSbx {
+		// The recorded-flags file carries neither the cluster nor the sandbox paths yet,
+		// so a gt-sbx run that recorded would write nothing and report success: refused.
+		if d.record.record {
+			return errors.New("--record-flags is for the control render: the recorded flags carry no --cluster or gt-sbx path yet, so a gt-sbx run would write no record and report success; drop --record-flags")
+		}
 		return runSbxRender(d, sbxRenderInputs{OutDir: f.out, Manifests: f.sbxManifests, Chart: f.sbxChart, Values: f.sbxValues, Helm: f.helm})
 	}
 	// A run with either record flag needs the town before its flags resolve: the

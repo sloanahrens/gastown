@@ -665,3 +665,84 @@ func TestClusterRenderSbxClusterRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestClusterRenderSbxClusterRefusesRecordFlags: --record-flags with --cluster
+// gt-sbx is refused by name before the town, the engine or any write, so a gt-sbx
+// run never reads as recorded when nothing was written.
+func TestClusterRenderSbxClusterRefusesRecordFlags(t *testing.T) {
+	t.Parallel()
+	out := t.TempDir()
+	d := clusterRenderDeps{
+		findTown: func() (string, error) {
+			t.Error("the gt-sbx render looked up the town before it refused --record-flags")
+			return "", errors.New("planted town")
+		},
+		renderSbx: func(context.Context, sbx.Inputs) (sbx.Set, error) {
+			t.Error("the engine ran before it refused --record-flags")
+			return sbx.Set{}, errors.New("planted render")
+		},
+		writeFile: func(string, []byte) error {
+			t.Error("a gt-sbx run with --record-flags wrote a manifest")
+			return errors.New("planted write")
+		},
+		saveRecord: func(string, clusterRenderFlags) error {
+			t.Error("a gt-sbx run with --record-flags wrote the recorded flags")
+			return errors.New("planted save")
+		},
+		record: clusterRenderRecordOptions{record: true},
+		out:    io.Discard,
+	}
+	f := clusterRenderFlags{cluster: clusterSbx, out: out, sbxManifests: "m", sbxChart: "c", sbxValues: "v"}
+	err := runClusterRender(d, f)
+	if err == nil {
+		t.Fatalf("runClusterRender(--cluster %s --record-flags) = nil, want a refusal naming --record-flags", clusterSbx)
+	}
+	if !strings.Contains(err.Error(), "--record-flags") {
+		t.Errorf("error %q does not name --record-flags", err)
+	}
+	if names := dirNames(t, out); names != nil {
+		t.Errorf("files in %s = %q, want none", out, names)
+	}
+}
+
+// TestTownClusterRenderControlClusterMatchesDefault: --cluster control writes the
+// same bytes as a render that names no cluster, and never reaches the gt-sbx engine.
+func TestTownClusterRenderControlClusterMatchesDefault(t *testing.T) {
+	t.Parallel()
+	town := clusterRenderTestTown(t)
+	control := clusterRenderFixture(t)
+	control.cluster = clusterControl
+	def := control
+	def.cluster = ""
+	def.out = filepath.Join(t.TempDir(), "default")
+	for _, f := range []clusterRenderFlags{control, def} {
+		d := clusterRenderDepsAt(t, town, io.Discard)
+		d.renderSbx = func(context.Context, sbx.Inputs) (sbx.Set, error) {
+			t.Error("the control render reached the gt-sbx engine")
+			return sbx.Set{}, errors.New("planted render")
+		}
+		if err := runClusterRender(d, f); err != nil {
+			t.Fatalf("runClusterRender(--cluster %q): %v", f.cluster, err)
+		}
+	}
+	names := dirNames(t, control.out)
+	if len(names) == 0 {
+		t.Fatal("the control render wrote no file, so there is nothing to compare")
+	}
+	if got := dirNames(t, def.out); !slices.Equal(got, names) {
+		t.Fatalf("a render with no cluster wrote %q, want the control set %q", got, names)
+	}
+	for _, name := range names {
+		want, err := os.ReadFile(filepath.Join(control.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(def.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s from a render with no cluster differs from --cluster %s", name, clusterControl)
+		}
+	}
+}
