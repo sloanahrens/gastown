@@ -815,6 +815,17 @@ type TierSweepRun struct {
 	ElapsedSec int64     `json:"elapsed_sec"`
 }
 
+// TierSweepRunStage is one tier the sweep runner has finished, off its summary line.
+// Its JSON names are the runner's progress file's (cmd/sweep-run/progress.go).
+type TierSweepRunStage struct {
+	Tier    string  `json:"tier"`
+	Verdict string  `json:"verdict"`
+	Passed  int     `json:"passed"`
+	Failed  int     `json:"failed"`
+	Skipped int     `json:"skipped"`
+	Secs    float64 `json:"secs"`
+}
+
 // TierSweepRow is one completed sweep, off its "swept" log line. Secs is nil
 // for a line that predates the duration the daemon logs since gt-iqzr0. Walls
 // is the wall time each tier took, keyed by tier name, off the stage lines that
