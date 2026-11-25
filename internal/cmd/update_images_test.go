@@ -399,6 +399,52 @@ func TestDeriveUpdateImagesPairGood(t *testing.T) {
 	}
 }
 
+// TestDeriveUpdateImagesPairRefuses holds the refusals the install's derivation
+// answers, by message: a daemon and polecat on different commits, a commit that
+// is not the requested one, an unreadable viewer credential, and a bd image not
+// built for the commit. A refusal answers no pair.
+func TestDeriveUpdateImagesPairRefuses(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name                 string
+		daemon               *fakeRegistryImage
+		polecat              *fakeRegistryImage
+		bd                   *fakeRegistryImage
+		withBd               bool
+		unreadableCredential bool
+		want                 string
+	}{
+		{name: "a daemon and polecat on different commits", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesOtherSHA), want: "they must be one commit"},
+		{name: "a commit that is not the requested one", daemon: matchingContents(testUpdateImagesOtherSHA), polecat: matchingContents(testUpdateImagesOtherSHA), want: "not the requested " + testUpdateImagesSHA},
+		{name: "an unreadable viewer credential", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesSHA), unreadableCredential: true, want: "reading the viewer credential"},
+		{name: "a bd image not built for the commit", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesSHA), bd: matchingContents(testUpdateImagesOtherSHA), withBd: true, want: "the bd image was not built for this commit"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+				imagevalues.DaemonImage:  row.daemon,
+				imagevalues.PolecatImage: row.polecat,
+				imagevalues.BdImage:      row.bd,
+			})
+			writes := 0
+			seams := testUpdateImagesSeams(t, server, &writes)
+			if row.unreadableCredential {
+				seams.Credentials = func() (string, string, error) {
+					return "", "", errors.New("the viewer token file is missing")
+				}
+			}
+			got, err := deriveUpdateImagesPair(context.Background(), seams, testUpdateImagesSHA, row.withBd)
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("deriveUpdateImagesPair = %+v, %v, want a refusal naming %q", got, err, row.want)
+			}
+			if got != (imagevalues.Values{}) {
+				t.Errorf("a refused derivation answered %+v, want no pair", got)
+			}
+		})
+	}
+}
+
 // TestUpdateImagesDefaultOutRefusesATownItCannotFind holds the default values
 // path: without --out the command names the file under the town's gastown
 // directory, so a town it cannot find is a refusal that writes nothing.
