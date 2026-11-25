@@ -16,7 +16,7 @@ const movedOnLogPrefix = "moved-on\x00"
 // that landed: the only kind this pass drops (gt-i72us8).
 func movedOnKeep(rec keptSandboxSeatRecord) bool {
 	return rec.Landing != nil && rec.Landing.Landed &&
-		strings.HasPrefix(rec.Reason, branchGuardReasonPrefix)
+		strings.HasPrefix(rec.Reason, seatWorksKeepPrefix)
 }
 
 // movedOnSeat reads the kept record at path and the seat's agent bead and

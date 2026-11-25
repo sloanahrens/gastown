@@ -1326,6 +1326,27 @@ func TestTakeoverSeatEndEndsNothingItCannotProve(t *testing.T) {
 	}
 }
 
+// The branch-mismatch keep reason has one named prefix: keepReason builds it
+// from seatWorksKeepPrefix rather than a copy of the text, and the text stays
+// what the kept records already hold (gt-3ynei5).
+func TestKeepReasonBranchMismatchUsesTheSeatWorksPrefix(t *testing.T) {
+	t.Parallel()
+	end := sandboxSeatEnd{
+		SandboxSeat: true, SandboxGone: true, Landed: true, Retired: true,
+		Branch:        "polecat/capable/gt-new1+m1",
+		LandedBranch:  "polecat/capable/gt-old1+m2",
+		CleanupStatus: polecat.CleanupClean,
+	}
+	const want = "the seat works polecat/capable/gt-new1+m1, not the landed polecat/capable/gt-old1+m2"
+	why := end.keepReason()
+	if why != want {
+		t.Fatalf("keepReason = %q, want %q", why, want)
+	}
+	if !strings.HasPrefix(why, seatWorksKeepPrefix) {
+		t.Errorf("keepReason = %q, want it to start with seatWorksKeepPrefix %q", why, seatWorksKeepPrefix)
+	}
+}
+
 // The reasons below are pinned: each one names the fact that kept the seat, so
 // an operator reading the daemon log knows which measurement to look at.
 func TestSandboxSeatEndKeepReasons(t *testing.T) {
