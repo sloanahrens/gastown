@@ -298,6 +298,33 @@ func TestMetricsExtractStaleIgnoresAFutureWriteTime(t *testing.T) {
 	}
 }
 
+// TestMetricsExtractStaleAgesAnUnstattableFooterFromMidnight: a newest footer
+// that cannot be statted has no write time the age can trust, so the stale item
+// ages it from the day's midnight (gt-thzlac). A day two days and six hours old
+// whose footer is a symlink to itself — not missing, so the day still counts as
+// finished, but stat fails with ELOOP and leaves the write time zero — raises
+// the stale item naming the day and the midnight age, beside the unreadable one
+// (gt-10mqv4).
+func TestMetricsExtractStaleAgesAnUnstattableFooterFromMidnight(t *testing.T) {
+	t.Parallel()
+	const day = "2026-11-19"
+	f := metricsExtractRig(t, time.Date(2026, 11, 21, 6, 0, 0, 0, time.UTC))
+	writeExtractDay(t, f.d.config.TownRoot, day, "")
+	footer := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metrics.FooterName)
+	if err := os.Symlink(metrics.FooterName, footer); err != nil {
+		t.Fatal(err)
+	}
+	items := f.collect(t, f.src.collectMetricsExtract)
+	if len(items) != 2 || items[0].Key != metricsExtractStaleKey || items[1].Key != metricsExtractUnreadableKey {
+		t.Fatalf("items = %+v, want the stale item beside the unreadable one", items)
+	}
+	for _, want := range []string{day, "54h0m"} {
+		if !strings.Contains(items[0].Summary, want) {
+			t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+		}
+	}
+}
+
 // TestMetricsExtractStaleReadsTheFooterWriteTime: the read carries the newest
 // day's footer.json mtime as the extract's write time, and leaves it zero when
 // the footer cannot be statted, so the age falls back to the day's midnight.
