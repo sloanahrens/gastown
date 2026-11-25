@@ -7,12 +7,14 @@
 //
 // The renderer pins the runner image at Version and the engine at DindTag, runs
 // one replica under the Recreate strategy so a rollout never overlaps two pods
-// on one claim, gives the pod requests equal to limits (runner DefaultRunnerCPU
-// and DefaultRunnerMemory, engine DefaultDindCPU and DefaultDindMemory), and
-// defaults the engine claim to DefaultDindStorage. Values may override the
-// shares, both claim sizes, the capacity and the labels; the labels and the
-// Forgejo host address have no default, because a runner with no label takes no
-// job and a pod that cannot resolve forgejo cannot register.
+// on one claim, gives each container requests equal to its limits (runner
+// DefaultRunnerCPU and DefaultRunnerMemory, engine DefaultDindCPU and
+// DefaultDindMemory) unless Values.DindRequests asks for less than the engine's
+// limit, and defaults the engine claim to DefaultDindStorage. Values may
+// override the shares, set the engine's requests below its limit, both claim
+// sizes, the capacity and the labels; the labels and the Forgejo host address
+// have no default, because a runner with no label takes no job and a pod that
+// cannot resolve forgejo cannot register.
 //
 // An operator verifies after applying what this package cannot: that the engine
 // issues its client certificate and the runner's TLS handshake succeeds, that a
@@ -342,7 +344,7 @@ func dindContainer(v Values) Container {
 		// with a dash through to it.
 		Args:            []string{dindInsecureRegistry},
 		Env:             []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: certsDir}},
-		Resources:       containerResources(v.DindResources, Share{}),
+		Resources:       containerResources(v.DindResources, v.DindRequests),
 		SecurityContext: &SecurityContext{Privileged: true},
 		VolumeMounts: []VolumeMount{
 			{Name: certsVolume, MountPath: certsDir},
