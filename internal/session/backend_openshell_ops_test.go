@@ -842,6 +842,36 @@ func TestBackendStreamCutReadErrorIsAnError(t *testing.T) {
 	t.Run("tail read fails", func(t *testing.T) { fails(t, nil, sentinel) })
 }
 
+func TestBackendStreamCutAtAnswers(t *testing.T) {
+	t.Parallel()
+	stamp := time.Date(2026, 11, 24, 17, 30, 0, 0, time.UTC)
+	cut := `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection","timestamp":"` + stamp.Format(time.RFC3339Nano) + `"}` + "\n"
+	answers := func(t *testing.T, stat, tail string, want bool, wantAt time.Time) {
+		t.Helper()
+		got, at, err := streamCutBackend(t, stat, nil, tail, nil).StreamCutAt(openshellTestSession)
+		if err != nil || got != want || !at.Equal(wantAt) {
+			t.Fatalf("StreamCutAt = %v, %v, %v, want %v, %v", got, at, err, want, wantAt)
+		}
+	}
+	t.Run("cut stream returns its timestamp", func(t *testing.T) { answers(t, streamCutStat, cut, true, stamp) })
+	t.Run("normal tail", func(t *testing.T) { answers(t, streamCutStat, `{"type":"assistant"}`+"\n", false, time.Time{}) })
+	t.Run("no transcript", func(t *testing.T) { answers(t, "", "", false, time.Time{}) })
+}
+
+func TestBackendStreamCutAtReadErrorIsAnError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("sandbox unreachable")
+	fails := func(t *testing.T, statErr, tailErr error) {
+		t.Helper()
+		got, at, err := streamCutBackend(t, streamCutStat, statErr, "", tailErr).StreamCutAt(openshellTestSession)
+		if got || !at.IsZero() || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), openshellTestSession) {
+			t.Fatalf("StreamCutAt = %v, %v, %v, want false, zero time and the read error naming the session", got, at, err)
+		}
+	}
+	t.Run("transcript stat fails", func(t *testing.T) { fails(t, sentinel, nil) })
+	t.Run("tail read fails", func(t *testing.T) { fails(t, nil, sentinel) })
+}
+
 func writeOpsRecord(t *testing.T, b *openshellBackend) {
 	t.Helper()
 	if err := WriteSandboxRecord(b.townRoot, SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat}); err != nil {
