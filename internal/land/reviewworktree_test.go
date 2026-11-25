@@ -164,6 +164,38 @@ func TestVerdictReuseWorktreeHoldsGitMu(t *testing.T) {
 	}
 }
 
+// addFails is a Repo whose worktree add fails, as git does for a ref it cannot
+// check out.
+type addFails struct{ Repo }
+
+func (addFails) WorktreeAddDetached(string, string) error {
+	return errors.New("fatal: invalid reference")
+}
+
+// TestVerdictReuseWorktreeRefusesFailedAdd: a failed add is returned, and the
+// review directory it made is removed, so nothing is left under WorkRoot.
+func TestVerdictReuseWorktreeRefusesFailedAdd(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	wt, dir, cleanup, err := l.addReviewWorktree(addFails{Repo: l.open(l.Repo)}, f.base)
+	if err == nil || !strings.Contains(err.Error(), "invalid reference") {
+		t.Fatalf("addReviewWorktree with a failed add = %v, want the add's error", err)
+	}
+	if wt != nil || dir != "" || cleanup != nil {
+		t.Errorf("refusal returned wt=%v dir=%q cleanup=%v; want none", wt, dir, cleanup != nil)
+	}
+	entries, err := os.ReadDir(f.workRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), reviewDirPrefix) {
+			t.Errorf("review directory %s left behind after a failed add", e.Name())
+		}
+	}
+}
+
 func TestVerdictReuseWorktreeRefusesFileWorkRoot(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)

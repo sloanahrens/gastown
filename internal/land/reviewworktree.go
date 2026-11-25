@@ -19,10 +19,13 @@ const reviewDirPrefix = "review-"
 // cleanup removes the worktree and the whole review directory; the caller
 // defers it, and a second call does nothing.
 func (l *Lander) addReviewWorktree(g Repo, base string) (wt Repo, dir string, cleanup func(), err error) {
-	if err := os.MkdirAll(l.WorkRoot, 0o700); err != nil {
-		return nil, "", nil, err
+	// Making the root and the review directory fail the same way: one return
+	// carries either error, so a refusal is one branch.
+	var review string
+	err = os.MkdirAll(l.WorkRoot, 0o700)
+	if err == nil {
+		review, err = os.MkdirTemp(l.WorkRoot, reviewDirPrefix+"*")
 	}
-	review, err := os.MkdirTemp(l.WorkRoot, reviewDirPrefix+"*")
 	if err != nil {
 		return nil, "", nil, err
 	}
