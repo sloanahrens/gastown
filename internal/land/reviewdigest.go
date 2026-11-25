@@ -7,13 +7,15 @@ import "slices"
 // --head and --out on every run, --bead when the review names its work bead,
 // --threshold when bar > 0, --round when Round > 0, --prior-findings when the
 // input has the previous round's findings, --criteria-file when it carries the
-// bead's acceptance text, and --context-file when it carries the accepted-risk
-// record. The other conditional flags arrive with the next beads. Whether the
-// installed om takes a flag is a run-time question its help probe answers, so a
-// run whose probe refuses --threshold, --round, --criteria-file or
-// --context-file carries fewer flags, and Verdict.Flags records the set it ran
-// with. Any mismatch against the list a stored review ran with is a
-// reuse miss, not a near match: the key's InputDigest covers these flags
+// bead's acceptance text, --context-file when it carries the accepted-risk
+// record, --bead-file when it carries the work-item file, --policy-file when it
+// carries the town-policy block, and --rounds-file when it carries the rounds
+// ledger. Whether the installed om takes a flag is a run-time question its help
+// probe answers, so a run whose probe refuses --threshold, --round,
+// --criteria-file, --context-file, --bead-file, --policy-file or --rounds-file
+// carries fewer flags, and Verdict.Flags records the set it ran with. Any
+// mismatch against the list a stored review ran with is a reuse miss, not a
+// near match: the key's InputDigest covers these flags
 // (gt-0lys4u), and ReuseMiss compares every key field for equality, so a flag
 // over-claimed here costs a review and never reuses a stale verdict.
 func ExpectedReviewFlags(in ReviewInput, bar float64) []string {
@@ -35,6 +37,15 @@ func ExpectedReviewFlags(in ReviewInput, bar float64) []string {
 	}
 	if in.AcceptedRisksText != "" {
 		flags = append(flags, "--context-file")
+	}
+	if in.BriefText != "" {
+		flags = append(flags, "--bead-file")
+	}
+	if in.PolicyText != "" {
+		flags = append(flags, "--policy-file")
+	}
+	if in.RoundsText != "" {
+		flags = append(flags, "--rounds-file")
 	}
 	slices.Sort(flags)
 	return flags

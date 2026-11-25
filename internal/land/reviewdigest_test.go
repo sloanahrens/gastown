@@ -27,6 +27,7 @@ func TestVerdictReuseExpectedFlagsAlways(t *testing.T) {
 			issue := &beads.Issue{ID: tc.beadID}
 			in := BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
 			in.Round = 0
+			in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
 			got := ExpectedReviewFlags(in, 0)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("ExpectedReviewFlags() = %q, want %q", got, tc.want)
@@ -43,10 +44,13 @@ func TestVerdictReuseExpectedFlags(t *testing.T) {
 	t.Parallel()
 	op := &config.OperatorConfig{}
 	// input builds the landing's input for a bead on its first round, the way
-	// the landing builds one; a row then sets only the inputs it names.
+	// the landing builds one, with the brief, policy and rounds texts cleared
+	// so a row sets only the inputs it names.
 	input := func() ReviewInput {
 		issue := &beads.Issue{ID: "gt-abc"}
-		return BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in := BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
+		return in
 	}
 	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
 	with := func(extra ...string) []string {
@@ -90,10 +94,13 @@ func TestVerdictReuseExpectedFlagsCriteriaContext(t *testing.T) {
 	const accepted = "risk: a stale cache is accepted"
 	// input builds the landing's input the way the landing builds one, from a
 	// bead carrying criteria (or none when empty) and the accepted-risk text the
-	// row names; a row then sets only the other inputs it names.
+	// row names, with the brief, policy and rounds texts cleared; a row then
+	// sets only the other inputs it names.
 	input := func(criteriaText, acceptedText string) ReviewInput {
 		issue := &beads.Issue{ID: "gt-abc", AcceptanceCriteria: criteriaText}
-		return BuildReviewInput(issue, nil, op, acceptedText, "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in := BuildReviewInput(issue, nil, op, acceptedText, "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
+		return in
 	}
 	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
 	with := func(extra ...string) []string {
@@ -140,10 +147,13 @@ func TestVerdictReuseExpectedFlagsPriorFindings(t *testing.T) {
 	t.Parallel()
 	op := &config.OperatorConfig{}
 	// input builds the landing's input for a bead on its first round, the way
-	// the landing builds one; a row then sets only the inputs it names.
+	// the landing builds one, then clears the brief, policy and rounds texts so
+	// a row sets only the inputs it names.
 	input := func() ReviewInput {
 		issue := &beads.Issue{ID: "gt-abc"}
-		return BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in := BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
+		return in
 	}
 	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
 	with := func(extra ...string) []string {
@@ -167,6 +177,72 @@ func TestVerdictReuseExpectedFlagsPriorFindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			in := input()
+			in.PriorFindings = tc.prior
+			in.Round = tc.round
+			got := ExpectedReviewFlags(in, tc.bar)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ExpectedReviewFlags() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseExpectedFlagsBeadPolicyRounds pins --bead-file,
+// --policy-file and --rounds-file, each gated on its own input as reviewOnce
+// gates the argv: the work-item text, the town-policy block and the rounds
+// ledger. Each row that has one of the texts and not the others fails if the
+// condition reads the wrong field, and a row without a text fails if its flag
+// is added unconditionally (gt-dfjiob).
+func TestVerdictReuseExpectedFlagsBeadPolicyRounds(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	const brief = "# Work item\n"
+	const policyText = "# Landing policy"
+	const rounds = "[]"
+	// input builds the landing's input the way the landing builds one, then
+	// clears the three texts so a row sets only the inputs it names.
+	input := func() ReviewInput {
+		issue := &beads.Issue{ID: "gt-abc"}
+		in := BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+		in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
+		return in
+	}
+	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
+	with := func(extra ...string) []string {
+		want := append(slices.Clone(baseline), extra...)
+		slices.Sort(want)
+		return want
+	}
+	prior := []Finding{{ID: "gt-abc.1", Severity: "major", Path: "internal/land/x.go", Line: 9, Title: "x"}}
+	for _, tc := range []struct {
+		name   string
+		brief  string
+		policy string
+		rounds string
+		prior  []Finding
+		round  int
+		bar    float64
+		want   []string
+	}{
+		{"no text, nothing else", "", "", "", nil, 0, 0, baseline},
+		{"only the brief text", brief, "", "", nil, 0, 0, with("--bead-file")},
+		{"only the policy text", "", policyText, "", nil, 0, 0, with("--policy-file")},
+		{"only the rounds text", "", "", rounds, nil, 0, 0, with("--rounds-file")},
+		{"all three texts", brief, policyText, rounds, nil, 0, 0, with("--bead-file", "--policy-file", "--rounds-file")},
+		{"only the other inputs", "", "", "", prior, 1, 0.7, with("--prior-findings", "--round", "--threshold")},
+		{"brief text and the other inputs", brief, "", "", prior, 1, 0.7, with("--bead-file", "--prior-findings", "--round", "--threshold")},
+		{"policy text and the other inputs", "", policyText, "", prior, 1, 0.7, with("--policy-file", "--prior-findings", "--round", "--threshold")},
+		{"rounds text and the other inputs", "", "", rounds, prior, 1, 0.7, with("--rounds-file", "--prior-findings", "--round", "--threshold")},
+		{"the other two texts and the other inputs", "", policyText, rounds, prior, 1, 0.7, with("--policy-file", "--rounds-file", "--prior-findings", "--round", "--threshold")},
+		{"brief and policy texts and the other inputs", brief, policyText, "", prior, 1, 0.7, with("--bead-file", "--policy-file", "--prior-findings", "--round", "--threshold")},
+		{"brief and rounds texts and the other inputs", brief, "", rounds, prior, 1, 0.7, with("--bead-file", "--rounds-file", "--prior-findings", "--round", "--threshold")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := input()
+			in.BriefText = tc.brief
+			in.PolicyText = tc.policy
+			in.RoundsText = tc.rounds
 			in.PriorFindings = tc.prior
 			in.Round = tc.round
 			got := ExpectedReviewFlags(in, tc.bar)
