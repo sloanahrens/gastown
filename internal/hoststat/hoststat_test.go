@@ -244,6 +244,30 @@ func TestSampleCPUIdleNamesACancelledTopApartFromATimeout(t *testing.T) {
 	}
 }
 
+// noDeadline is a caller context with no timer. sampleCPUIdle's own window is
+// the only deadline, and a top that returns at once never reaches it.
+func noDeadline() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
+// expiredDeadline is a caller deadline already past, so the window has closed
+// before top starts and no test waits on a timer (gt-2roirg).
+func expiredDeadline() (context.Context, context.CancelFunc) {
+	return context.WithDeadline(context.Background(), time.Unix(0, 0))
+}
+
+// outlivesWindow is a top that watches its context the way a real top is cut
+// off when the window closes. The window is already closed, so Done is ready
+// and the select never blocks; an open context fails the row instead.
+func outlivesWindow(ctx context.Context) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return nil, errors.New("window still open")
+	}
+}
+
 // A top that cannot be read says why: a failed run, a timeout and an output
 // with no idle share are three different faults to the operator reading the
 // daemon log (gt-kc8v1).
@@ -251,18 +275,20 @@ func TestSampleCPUIdleNamesWhyTopCouldNotBeRead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
+		ctx     func() (context.Context, context.CancelFunc)
 		top     func(context.Context) ([]byte, error)
 		wantErr string
 	}{
-		{"top fails", func(context.Context) ([]byte, error) { return nil, errors.New("refused") }, "top failed: refused"},
-		{"top outlives the sample window", func(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }, "did not finish"},
-		{"top prints no idle share", func(context.Context) ([]byte, error) { return []byte("garbage\n"), nil }, "no CPU idle share"},
+		// No row waits on a real timer: a 50 ms caller deadline let a loaded
+		// host expire it before "top failed" was reported (gt-2roirg).
+		{"top fails", noDeadline, func(context.Context) ([]byte, error) { return nil, errors.New("refused") }, "top failed: refused"},
+		{"top outlives the sample window", expiredDeadline, outlivesWindow, "did not finish"},
+		{"top prints no idle share", noDeadline, func(context.Context) ([]byte, error) { return []byte("garbage\n"), nil }, "no CPU idle share"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			// The caller's own deadline stands in for sampleTimeout.
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			ctx, cancel := tt.ctx()
 			defer cancel()
 			_, err := sampleCPUIdle(ctx, tt.top)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
