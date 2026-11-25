@@ -474,6 +474,16 @@ func readLiveObject(ctx context.Context, d clusterDriftDeps, resource, namespace
 // cluster in step, a drift error for a difference, an unreadable one for a read
 // that failed.
 func compareSbxClusterDrift(ctx context.Context, d clusterDriftDeps) error {
+	// A deps value built without the render seam or the read runner cannot
+	// compare anything, so each is refused here, before any input is read: a
+	// run that went on would render through a nil seam or read through a nil
+	// runner.
+	if d.render.renderSbx == nil {
+		return errors.New("no gt-sbx set render is wired, so the sandbox compare cannot render the desired set; nothing was read")
+	}
+	if d.kubectl == nil {
+		return errors.New("no kubectl read runner is wired, so the sandbox compare cannot read the cluster; nothing was read")
+	}
 	root, err := d.render.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace, so the recorded render flags cannot be read: %w", err)
