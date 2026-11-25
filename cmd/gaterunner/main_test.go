@@ -27,7 +27,7 @@ func goldenArgs() []string {
 	return []string{
 		"-label", "docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli",
 		"-label", "node:docker://data.forgejo.org/oci/node:20.19",
-		"-label", "ci-base:docker://data.forgejo.org/oci/gastown-runner:go1.27-node20",
+		"-label", "ci-base:docker://ci-base:latest",
 		"-forgejo-host-ip", "192.168.5.2",
 	}
 }

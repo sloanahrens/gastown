@@ -12,7 +12,7 @@ runner:
   labels:
     - 'docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli'
     - 'node:docker://data.forgejo.org/oci/node:20.19'
-    - 'ci-base:docker://data.forgejo.org/oci/gastown-runner:go1.27-node20'
+    - 'ci-base:docker://ci-base:latest'
 container:
   network: 'host'
   options: '--add-host=forgejo:192.168.5.2 --init --tmpfs /tmp:exec,size=2g -v ci-gomod:/home/ci/go -v ci-gocache:/home/ci/.cache/go-build -v ci-npm:/home/ci/.npm -v /certs/client:/certs/client'
