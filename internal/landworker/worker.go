@@ -197,6 +197,11 @@ type Worker struct {
 	// of the landing; nil, the only value today, leaves the worker exactly as
 	// it was before the field existed (gt-8vfrwi).
 	Pool *ReviewPool
+	// Stored is where a later bead asks which ready beads have a stored
+	// rejecting review, so the worker can reuse a verdict instead of running
+	// om inline; nil, the only value today, leaves the worker exactly as it
+	// was before the field existed (gt-5q8ayw).
+	Stored AheadHints
 	// WatchTarget is the branch the worker watches for commits that reached
 	// it without a landing (a direct push); each pass that finds one runs
 	// the post-landing command for it. The leftover sweep also reads it as
