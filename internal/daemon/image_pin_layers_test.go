@@ -63,6 +63,45 @@ func imagePinDurabilityCountingDaemon(t *testing.T, town string, calls *atomic.I
 	return d
 }
 
+// TestImagePinLayersStartCheckSkipsShutdown is the refusal branch of the start
+// check: a daemon that starts while gt down holds shutdown.lock runs no check,
+// as the ticker case does on every tick. The no-lock row is the control: the
+// seam is reached there, so zero in the shutdown row is not a vacuous pass.
+func TestImagePinLayersStartCheckSkipsShutdown(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		holdLock bool
+		wantRuns int32
+	}{
+		{"no shutdown", false, 1},
+		{"shutdown.lock held", true, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			var calls atomic.Int32
+			d := imagePinDurabilityCountingDaemon(t, town, &calls, io.Discard)
+			d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+				return make(chan time.Time), func() {}
+			}
+			if tt.holdLock {
+				holdShutdownLock(t, town)
+			}
+
+			channel, stop := d.startImagePinLayersTicker()
+			if channel == nil || stop == nil {
+				t.Fatal("an enabled image_pin_layers started no ticker")
+			}
+			d.stopImagePinLayersPatrol(stop)
+
+			if got := calls.Load(); got != tt.wantRuns {
+				t.Errorf("the start check called the run seam %d times, want %d", got, tt.wantRuns)
+			}
+		})
+	}
+}
+
 // TestImagePinDurabilityImagePinLayersPatrolStartsOnlyWhenEnabled is the bead's
 // first acceptance: the patrol's own ticker exists only when
 // daemon.patrols.image_pin_layers.enabled is true, and a town that names no key

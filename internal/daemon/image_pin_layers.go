@@ -300,7 +300,11 @@ func (d *Daemon) startImagePinLayersTicker() (<-chan time.Time, func()) {
 	// The start check: a one-hour ticker never reaches its first tick in a town
 	// that restarts oftener, so the day's check is asked once here. The record
 	// decides, so a start inside a day that already ran logs it and runs nothing.
-	d.startImagePinLayersTick()
+	// A start while gt down holds shutdown.lock runs nothing either, as the
+	// ticker case does on every tick.
+	if !d.isShutdownInProgress() {
+		d.startImagePinLayersTick()
+	}
 	return ticks, stop
 }
 
