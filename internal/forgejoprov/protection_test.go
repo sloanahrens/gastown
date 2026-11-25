@@ -451,6 +451,49 @@ func TestEnsureClosedRuleCreates(t *testing.T) {
 	}
 }
 
+// TestEnsureClosedRuleVerifiesTheReply checks that the closed rule's create is judged by its
+// own reply: a complete reply passes, and a 201 whose reply lacks a field of the closed body
+// fails the run instead of passing as set.
+func TestEnsureClosedRuleVerifiesTheReply(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	t.Run("a complete reply passes", func(t *testing.T) {
+		t.Parallel()
+		f := forgejotest.New()
+		f.AddRepo(protectionRepo)
+		var logs []string
+		p := userProvisioner(f, false, &logs)
+		if err := p.EnsureClosedRule(protectionRepo, opts); err != nil {
+			t.Fatalf("EnsureClosedRule = %v, want a complete reply to pass", err)
+		}
+	})
+	t.Run("a reply that lacks a field fails the run", func(t *testing.T) {
+		t.Parallel()
+		reply := ClosedMainRule(opts)
+		delete(reply, "block_on_outdated_branch")
+		data, err := json.Marshal(reply)
+		if err != nil {
+			t.Fatalf("encode reply: %v", err)
+		}
+		var logs []string
+		p := &Provisioner{Client: &Client{
+			API: forgejotest.APIRoot + forgejotest.APIPath,
+			HTTP: &http.Client{Transport: &ruleTransport{
+				getStatus:   http.StatusOK,
+				getBody:     "[]",
+				writeStatus: http.StatusCreated,
+				writeBody:   string(data),
+			}},
+			Token: newSecret(fixtureToken),
+			Log:   func(line string) { logs = append(logs, line) },
+		}}
+		err = p.EnsureClosedRule(protectionRepo, opts)
+		if err == nil || !strings.Contains(err.Error(), "the write for main on acme/rig did not take") {
+			t.Fatalf("EnsureClosedRule = %v, want the write for main on acme/rig did not take", err)
+		}
+	})
+}
+
 // TestEnsureClosedRuleRefusesEachFailingBranch drives every error branch of EnsureClosedRule:
 // a list that fails or is not a rule list, a rule already named for main, and a create whose
 // reply is not 201. Each error is checked not to carry the admin token or the minted secret.

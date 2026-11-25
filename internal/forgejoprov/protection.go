@@ -95,8 +95,9 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 
 // EnsureClosedRule creates the main rule of repo as ClosedMainRule(opts) describes it, when no
 // rule is named for the main branch. A run that fails after it leaves the repository protected
-// with nobody on the merge whitelist. A rule already named is refused, not judged: this call
-// reads no field of it, so it never reports an existing rule as set.
+// with nobody on the merge whitelist. The create's reply is checked as EnsureRule's is. A rule
+// already named is refused, not judged: this call reads no field of it, so it never reports an
+// existing rule as set.
 func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -115,7 +116,8 @@ func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 		p.logf("would create branch protection %s on %s", rule, repo)
 		return nil
 	}
-	status, resp, err := p.Client.Do(http.MethodPost, base, ClosedMainRule(opts))
+	body := ClosedMainRule(opts)
+	status, resp, err := p.Client.Do(http.MethodPost, base, body)
 	if err != nil {
 		return err
 	}
@@ -123,7 +125,7 @@ func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 		return p.Client.Unexpected(http.MethodPost, base, status, resp)
 	}
 	p.logf("created branch protection %s on %s", rule, repo)
-	return nil
+	return p.verifyWrite(rule, repo, resp, body)
 }
 
 // EnsureNoRule leaves no protection rule named rule on repo: it removes the rule when
