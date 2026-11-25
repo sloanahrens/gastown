@@ -567,6 +567,11 @@ func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time
 // minus keep_days as doltsquash.Decide computes it. The run marker is held for
 // the recovery's length, so a live run's branches are not read as a dead run's.
 func (d *Daemon) recoverSquashDatabase(ctx context.Context, db string, now time.Time, settings *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+	// No settings means no bound to run the recovery under: refuse before any
+	// connection opens, rather than dereference the nil block.
+	if settings == nil {
+		return nil, fmt.Errorf("squash: recovering %s: no squash settings", db)
+	}
 	conn, err := d.maintenance().squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
 	if err != nil {
 		return nil, fmt.Errorf("squash: opening the connection to %s: %w", db, err)
