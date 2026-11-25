@@ -1358,6 +1358,19 @@ func (s *squashDeferrals) reset(db string) {
 // of gt-b8na21, not process uptime, so a daemon roll does not reset it.
 const squashDeferAlertAfter = 24 * time.Hour
 
+// squashDeferAlertDueSince reports whether the deferral alert is due for a
+// database whose consecutive gc-flag deferrals began at first, at time now,
+// given whether that database has already been alerted. A zero first (no
+// deferral yet) and an alerted database are never due; otherwise the alert
+// waits squashDeferAlertAfter from first. Both times are passed in, never read,
+// so the decision is pure and its test needs no clock.
+func squashDeferAlertDueSince(first, now time.Time, alerted bool) bool {
+	if alerted || first.IsZero() {
+		return false
+	}
+	return now.Sub(first) >= squashDeferAlertAfter
+}
+
 // squashDeferAlertMessage is the one-line alert for db, whose squash checks the
 // gc flag has deferred for held. It names the database and the whole hours held
 // and no other value. A control or line-separator rune in db prints as '?', so
