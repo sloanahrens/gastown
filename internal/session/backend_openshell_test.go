@@ -2388,14 +2388,53 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 
 // The common work path is the seat's start directory: every seat links its
 // worktree at /sandbox/gt/work, so Go's cache key holds that path and not the
-// seat's name (gt-f80lq2).
+// seat's name (gt-f80lq2). The link command runs in a sandbox rooted in a temp
+// dir, so the test resolves the path the seat's shell starts in, not only the
+// argv populate issued.
 func TestSandboxCommonWorkLinksTheWorktree(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 
-	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+	// The sandbox file system: the worktree the link points at, and the link's
+	// parent, as populate creates them in the container. Resolved here so the
+	// expected paths are not spelled through a link in the temp root.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving the temp root: %v", err)
+	}
+	sandboxPath := func(p string) string { return filepath.Join(root, p) }
+	if err := os.MkdirAll(sandboxPath(openshellTestWorkDir), 0o755); err != nil {
+		t.Fatalf("creating the worktree: %v", err)
+	}
+	// Run the link command populate issues in that file system, so the test
+	// resolves where the seat's shell lands, not just which argv it sent.
+	run := b.cli.Run
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+		if i := slices.Index(argv, "ln"); i >= 0 {
+			var paths []string
+			for _, a := range argv[i+1:] {
+				if !strings.HasPrefix(a, "-") {
+					paths = append(paths, a)
+				}
+			}
+			if len(paths) != 2 {
+				return nil, nil, fmt.Errorf("ln argv %q does not name a source and a destination", argv[i:])
+			}
+			dst := sandboxPath(paths[1])
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return nil, nil, err
+			}
+			if err := os.Symlink(sandboxPath(paths[0]), dst); err != nil {
+				return nil, nil, err
+			}
+		}
+		return run(ctx, argv, stdin, env)
+	}
+
+	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
 	// The link is the last exec of populate, right after the redirect: the
@@ -2413,6 +2452,16 @@ func TestSandboxCommonWorkLinksTheWorktree(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("last two calls:\n got %q\nwant %q", got, want)
+	}
+	// The seat's shell starts in the link, so resolving it must reach the
+	// worktree the seat's environment names: not the link itself, and not some
+	// other directory the seat's tools would not treat as its own.
+	resolved, err := filepath.EvalSymlinks(sandboxPath(sandboxCommonWork))
+	if err != nil {
+		t.Fatalf("resolving %s: %v", sandboxCommonWork, err)
+	}
+	if wantPath := sandboxPath(prep.Env["GT_POLECAT_PATH"]); resolved != wantPath {
+		t.Fatalf("%s resolves to %q, want the worktree GT_POLECAT_PATH names, %q", sandboxCommonWork, resolved, wantPath)
 	}
 }
 
