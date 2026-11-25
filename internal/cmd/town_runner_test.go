@@ -1043,6 +1043,99 @@ func TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead(t *testing.T) {
 	}
 }
 
+// TestRunnerRollDepsForClientRefuses: a viewer client that cannot be built is a
+// deps error, so a real roll refuses before it takes the hold or runs a step. The
+// error names the token file's path and never its contents.
+func TestRunnerRollDepsForClientRefuses(t *testing.T) {
+	t.Parallel()
+	tokenPath := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	const token = "viewer-token-that-must-not-print"
+	if err := os.WriteFile(tokenPath, []byte(forgejo.EnvKey+"="+token+"\n"), 0o644); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+	seam := runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) {
+			return viewerRunListerVia(func(role string, opts ...forgejo.Option) (*forgejo.Client, error) {
+				return forgejo.NewClient(role, append(opts, forgejo.WithTokenFile(tokenPath))...)
+			})
+		},
+		repos: func(string) ([]string, error) { return []string{"acme/widgets"}, nil },
+	}
+	events := &rollEvents{}
+	exec := func(context.Context, []string, []byte) ([]byte, int, error) {
+		events.add("pod:exec")
+		return []byte("created\n"), 0, nil
+	}
+
+	deps := runnerRollDepsFor("/town", exec, seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+
+	if deps.err == nil {
+		t.Fatal("a viewer client that cannot be built left the deps with no error")
+	}
+	if strings.Contains(deps.err.Error(), token) {
+		t.Errorf("the deps error carries the token: %v", deps.err)
+	}
+	if !strings.Contains(deps.err.Error(), tokenPath) {
+		t.Errorf("the deps error %q does not name the token file %s", deps.err, tokenPath)
+	}
+
+	err := runTownRunnerRoll(deps)
+
+	if !errors.Is(err, deps.err) {
+		t.Fatalf("roll error = %v, want the deps error wrapped", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("the roll error carries the token: %v", err)
+	}
+	if len(events.calls) != 0 {
+		t.Errorf("calls = %v, want none: the roll ran a step before refusing", events.calls)
+	}
+}
+
+// TestRunnerRollDepsForNoReposRefuses: a rig repo list that comes back empty is a
+// deps error, so the roll refuses before the hold and builds no viewer client; no
+// token is in either error.
+func TestRunnerRollDepsForNoReposRefuses(t *testing.T) {
+	t.Parallel()
+	const token = "viewer-token-that-must-not-print"
+	seam := runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) {
+			t.Error("the viewer client was built for a town that names no repos")
+			return nil, errors.New("reading the token file")
+		},
+		repos: func(string) ([]string, error) { return nil, nil },
+	}
+	events := &rollEvents{}
+	exec := func(context.Context, []string, []byte) ([]byte, int, error) {
+		events.add("pod:exec")
+		return []byte("created\n"), 0, nil
+	}
+
+	deps := runnerRollDepsFor("/town", exec, seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+
+	if deps.err == nil {
+		t.Fatal("an empty rig repo list left the deps with no error")
+	}
+	if !strings.Contains(deps.err.Error(), "names no Forgejo rig repos") {
+		t.Errorf("the deps error %q does not name the empty repo list", deps.err)
+	}
+	if strings.Contains(deps.err.Error(), token) {
+		t.Errorf("the deps error carries the token: %v", deps.err)
+	}
+
+	err := runTownRunnerRoll(deps)
+
+	if !errors.Is(err, deps.err) {
+		t.Fatalf("roll error = %v, want the deps error wrapped", err)
+	}
+	if len(events.calls) != 0 {
+		t.Errorf("calls = %v, want none: the roll ran a step before refusing", events.calls)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("the roll error carries the token: %v", err)
+	}
+}
+
 // fixedRunsSeam is the runs seam of a test that does not drive the runs read: a
 // fixed repo list and a client that lists nothing, so the unit tier reads no rig
 // settings and no token file.
