@@ -354,10 +354,10 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	for _, db := range step.settings.Databases {
 		// A failed or killed run can leave the database with no main, and its own
 		// record then holds the 24-hour gate shut, so recovery runs first, before
-		// the readings and Decide, whatever either says (gt-ngculo). A Recovery is
-		// logged here (gt-oym2v2); a held marker and an error each leave this
-		// database's check undecided and skip it, because its catalog is not one
-		// the readings and Decide can safely judge.
+		// the readings and Decide, whatever either says (gt-ngculo). A Recovery
+		// that dropped or kept a branch is logged here (gt-6f9e8i); a held marker
+		// and an error each leave this database's check undecided and skip it,
+		// because its catalog is not one the readings and Decide can safely judge.
 		recovery, err := d.maintenance().squashRecover(ctx, d, db, now, step.settings)
 		if errors.Is(err, doltsquash.ErrRunMarkerHeld) {
 			// A live run holds the town's marker, so the database's branches
@@ -381,8 +381,13 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			continue
 		}
 		if recovery != nil {
-			d.logger.Printf("squash: %s: recovered a dead run (%s): dropped %s, kept %s: %s",
-				db, recovery.State, squashBranchList(recovery.Dropped), squashBranchList(recovery.Kept), recovery.Reason)
+			// The line names the recovery's work, so it is written only when a
+			// branch was dropped or kept: a Recovery that changed no branch did
+			// nothing for the line to report (gt-6f9e8i).
+			if len(recovery.Dropped) > 0 || len(recovery.Kept) > 0 {
+				d.logger.Printf("squash: %s: recovered a dead run (%s): dropped %s, kept %s: %s",
+					db, recovery.State, squashBranchList(recovery.Dropped), squashBranchList(recovery.Kept), recovery.Reason)
+			}
 			// A recovery is visible the way a failed run is: one ledger line says
 			// what it found and did. It is not a run: the line carries no time and
 			// writes no run record, so the database's 24-hour gate stays its last
