@@ -37,9 +37,9 @@ type Env struct {
 	ListLock func(listPath string) (unlock func() error, err error)
 }
 
-// Run provisions what opts names, in the order the shell script did: each role's bot
-// and token (no token under --skip-tokens), then for each repository its access, the
-// viewer grant, its workflow-file hook list entry, the main rule and the removal of the
+// Run provisions what opts names: each role's bot and token (no token under
+// --skip-tokens), then for each repository its workflow-file hook list entry, the closed
+// main rule, its access, the viewer grant, the final main rule and the removal of the
 // candidate-branch rule. It returns ExitOK when the run finished (a dry run included,
 // which sends no write) and ExitFailure when a step failed. Progress and failures go to
 // env.Log; no admin or minted token reaches it.
@@ -130,22 +130,40 @@ func provision(p *Provisioner, opts *Options) error {
 	return nil
 }
 
-// provisionRepo grants the repository access before it writes the protection: Forgejo
-// drops a merge whitelist entry for a login that is not yet a collaborator, so the
-// access has to come first (gt-fn9e6.23). The viewer grant is made here only when the
-// role loop does not make it, so the access is never granted twice (gt-fn9e6.49).
-// The workflow-file hook list is written before the rules, so a run that stops after a
-// rule is written has already put the repository under the hook.
+// provisionRepo protects the repository before it grants access, so a run that stops part
+// way leaves main closed rather than open. It writes the workflow-file hook list first, so a
+// run that stops after a rule is written has already put the repository under the hook, then
+// the closed main rule, then the grants, then the final main rule, which names the landing
+// bot now that it is a collaborator. The viewer grant is made here only when the role loop
+// does not make it, so the access is never granted twice (gt-fn9e6.49).
 func provisionRepo(p *Provisioner, repo string, opts *Options) error {
+	// Each role's access is resolved before the first write, so a role the run knows
+	// nothing about is refused before the repository is touched.
+	type grant struct {
+		role string
+		perm string
+	}
+	var grants []grant
 	for _, role := range opts.Roles {
 		perm, ok, err := CollaboratorPermission(role)
 		if err != nil {
 			return err
 		}
-		if !ok {
-			continue
+		if ok {
+			grants = append(grants, grant{role, perm})
 		}
-		if err := p.EnsureCollaborator(role, repo, perm); err != nil {
+	}
+	if err := p.EnsureWorkflowProtected(repo, opts.WorkflowList); err != nil {
+		return err
+	}
+	// The closed rule comes before the grants: the landing bot cannot be named while it is
+	// not yet a collaborator (gt-fn9e6.23), so the first rule leaves nobody on the merge
+	// whitelist and a run that stops at a grant leaves the repository protected.
+	if err := p.EnsureClosedRule(repo, *opts); err != nil {
+		return err
+	}
+	for _, g := range grants {
+		if err := p.EnsureCollaborator(g.role, repo, g.perm); err != nil {
 			return err
 		}
 	}
@@ -153,9 +171,6 @@ func provisionRepo(p *Provisioner, repo string, opts *Options) error {
 		if _, err := p.EnsureViewerAccess(repo); err != nil {
 			return err
 		}
-	}
-	if err := p.EnsureWorkflowProtected(repo, opts.WorkflowList); err != nil {
-		return err
 	}
 	if err := p.EnsureRule(repo, *opts); err != nil {
 		return err
