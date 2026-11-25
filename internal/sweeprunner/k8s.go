@@ -38,6 +38,9 @@ const (
 	// runnerContainerName and dindContainerName name the pod's two containers.
 	runnerContainerName = "runner"
 	dindContainerName   = "dind"
+	// progressFileName is the progress record the runner rewrites under OutputDir
+	// after each tier.
+	progressFileName = "progress.json"
 
 	// readerContainerName names the reader pod's one container.
 	readerContainerName = "reader"
@@ -464,6 +467,11 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 				// which is not a failure (gt-4lj2q).
 				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+LogsDirName, filepath.Join(spec.OutDir, LogsDirName)), MissingSourcePath: OutputDir + "/" + LogsDirName},
 			},
+			// The runner mounts the output claim, where the progress record is
+			// rewritten after each tier, so the exec reads it while the Job runs;
+			// the reader pod comes only after the Job ends. The step's stdout is
+			// the file.
+			Progress: &Step{Argv: kubectlArgv(spec, "exec", "job/"+job.Metadata.Name, "-c", runnerContainerName, "--", "cat", OutputDir+"/"+progressFileName)},
 		},
 	}, nil
 }
