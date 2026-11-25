@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 	"github.com/steveyegge/gastown/internal/promote"
@@ -132,6 +133,17 @@ const (
 	// is deliberately not landworker.LabelRedMain: the post-land runner's
 	// close-on-green would close a sweep bead on an unrelated landing.
 	tierSweepRedLabel = "tier-sweep-red"
+
+	// tierSweepLedgerJob is the job name a cycle's run carries in the town's job
+	// ledger, which the job list and the overdue rule read.
+	tierSweepLedgerJob = "tier_sweep"
+
+	// tierSweepOutcomeOK is the outcome every recorded cycle carries. A RED sweep
+	// is a result, not a failed job, so it is recorded ok too.
+	tierSweepOutcomeOK = "ok"
+
+	// tierSweepStatDurationMS is the ledger stat holding a cycle's duration.
+	tierSweepStatDurationMS = "duration_ms"
 
 	// tierSweepRetryMinGap is the least time between a red cycle and the early
 	// re-run its closed fix beads allow, so a sweep that stays red on every new
@@ -1367,6 +1379,24 @@ func (d *Daemon) tierSweepWriteState(rig string, st tierSweepState) error {
 		return w(d.config.TownRoot, rig, st)
 	}
 	return writeTierSweepState(d.config.TownRoot, rig, st)
+}
+
+// recordTierSweepJobRun appends one completed cycle to the town's job ledger.
+// It records no next due time: a recorded next due is judged by itself, with no
+// run-duration allowance and no grace, so recording one would make the job
+// overdue sooner. An append that fails logs one line and returns; the cycle's
+// verdict stands.
+func (d *Daemon) recordTierSweepJobRun(started, ended time.Time) {
+	entry := jobledger.Run{
+		Job:       tierSweepLedgerJob,
+		StartedAt: started,
+		EndedAt:   ended,
+		Outcome:   tierSweepOutcomeOK,
+		Stats:     map[string]int64{tierSweepStatDurationMS: ended.Sub(started).Milliseconds()},
+	}
+	if err := d.appendJobRun(entry); err != nil {
+		d.logger.Printf("tier_sweep: the job run was not recorded: %v", err)
+	}
 }
 
 // runTierSweep is one cycle over every configured rig. It reports whether the
