@@ -37,7 +37,7 @@ func imageTestPinURL(repo string) string {
 	return "http://forgejo:3000/" + imageTestOwner + "/" + repo + ".git"
 }
 
-// imagePinsText is the pins file newImageRig writes, one line per source.
+// imagePinsText is the pins file newImageFixture writes, one line per source.
 func imagePinsText() string {
 	return "bd " + imageTestPinURL("beads") + " " + imageTestBDCommit + "\n" +
 		"om " + imageTestPinURL("organic-mechanic") + " " + imageTestOMCommit + "\n" +
@@ -59,7 +59,17 @@ type imageRig struct {
 	root string
 }
 
-func newImageRig(t *testing.T) *imageRig {
+// imageFixture is the directory tree and the pins file a family of cases reads,
+// built once under one t.TempDir(). It holds no per-case state: a rig copies its
+// flags and builds its own deps and output buffer.
+type imageFixture struct {
+	root  string
+	flags daemonImageFlags
+}
+
+// newImageFixture builds the gt source, the source directories and the pins file
+// under one t.TempDir().
+func newImageFixture(t *testing.T) imageFixture {
 	t.Helper()
 	root := t.TempDir()
 	mk := func(name string) string {
@@ -79,16 +89,29 @@ func newImageRig(t *testing.T) *imageRig {
 	if err := os.WriteFile(filepath.Join(gtSrc, "deploy", "daemon", daemonimage.KnownHostsName), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := &imageRig{out: &bytes.Buffer{}, root: root}
-	r.flags = daemonImageFlags{
+	fx := imageFixture{root: root, flags: daemonImageFlags{
 		rev: imageTestRev, out: mk("out"), gtSrc: gtSrc, bdSrc: mk("beads"),
 		omSrc: mk("om"), hmSrc: mk("hm"), devopsSrc: mk("devops"),
 		mangoSrc: mk("mango"), mangoCommit: imageTestMangoCommit,
 		pins: filepath.Join(root, "image-pins"),
-	}
-	if err := os.WriteFile(r.flags.pins, []byte(imagePinsText()), 0o600); err != nil {
+	}}
+	if err := os.WriteFile(fx.flags.pins, []byte(imagePinsText()), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return fx
+}
+
+// newImageRig is a rig on a fixture of its own.
+func newImageRig(t *testing.T) *imageRig {
+	t.Helper()
+	return newImageRigOn(t, newImageFixture(t))
+}
+
+// newImageRigOn is a rig on fx: its own deps and output buffer, and a copy of
+// fx's flags. The fakes report through this case's t.
+func newImageRigOn(t *testing.T, fx imageFixture) *imageRig {
+	t.Helper()
+	r := &imageRig{out: &bytes.Buffer{}, root: fx.root, flags: fx.flags}
 	mainBySrc := map[string]string{
 		r.flags.bdSrc: imageTestBDCommit, r.flags.omSrc: imageTestOMCommit,
 		r.flags.hmSrc: imageTestHMCommit, r.flags.devopsSrc: imageTestDevCommit,
