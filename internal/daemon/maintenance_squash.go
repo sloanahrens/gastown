@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beadsql"
@@ -1348,4 +1349,25 @@ func (s *squashDeferrals) reset(db string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.counts, db)
+}
+
+// squashDeferAlertAfter is how long the gc flag may defer a database's squash
+// checks before the alert is raised: a day. The two holders of the flag release
+// it by deferring and run far shorter than a day, so a day of deferrals means
+// the squash is stalled. The alert clock is meant to be the persisted since-stamp
+// of gt-b8na21, not process uptime, so a daemon roll does not reset it.
+const squashDeferAlertAfter = 24 * time.Hour
+
+// squashDeferAlertMessage is the one-line alert for db, whose squash checks the
+// gc flag has deferred for held. It names the database and the whole hours held
+// and no other value. A control or line-separator rune in db prints as '?', so
+// the message stays one line.
+func squashDeferAlertMessage(db string, held time.Duration) string {
+	db = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return '?'
+		}
+		return r
+	}, db)
+	return fmt.Sprintf("squash: %s deferred by the gc flag for %dh", db, int(held/time.Hour))
 }
