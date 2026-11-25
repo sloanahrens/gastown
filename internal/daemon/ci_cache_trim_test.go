@@ -496,7 +496,7 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
 			at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
 
-			ok, why := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20)
+			ok, why := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour)
 			if ok {
 				t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
 			}
@@ -982,13 +982,6 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 			want: "ci_cache_max_age",
 		},
 		{
-			name: "a zero warn figure",
-			mutate: func(f *ciCacheFixture) {
-				f.d.patrolConfig.Patrols.DiskMaintenance.CICacheWarnBytes = "0GB"
-			},
-			want: "ci_cache_warn_bytes",
-		},
-		{
 			// A town with no kubernetes runner has no control cluster, so the trim
 			// is not configured: it neither runs nor says anything.
 			name: "a runner on the docker backend is not configured",
@@ -1371,15 +1364,15 @@ func TestCICacheTrimCappedScriptReportsAndRemovesNothingUnderTheCap(t *testing.T
 
 // TestCICacheTrimNoopItemPerVolume: ci-gocache keeps the no-op item it has
 // always had, measured against its cap. A capped volume raises its own item over
-// its cap, even under the warn figure, clears it at or under the cap, and leaves
-// the other volume's item alone.
+// its cap, clears it at or under the cap, and leaves the other volume's item
+// alone.
 func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 	t.Parallel()
 	const overGocacheCap = 45 << 20 // KiB: 45 GiB, over the default 40 GiB ci_gocache_cap_bytes
-	const overCap = 2 << 20         // KiB: 2 GiB, over the 1 GiB npm cap and under the warn figure
+	const overCap = 2 << 20         // KiB: 2 GiB, over the 1 GiB npm cap
 	const npmKey = "ci-cache-trim-noop-ci-npm"
 
-	t.Run("a capped volume raises its own item over its cap, under the warn figure", func(t *testing.T) {
+	t.Run("a capped volume raises its own item over its cap", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.npmExec = ciCacheReply(overCap, 0, overCap)
@@ -1430,19 +1423,45 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 	})
 }
 
+// TestCICacheTrimNoopItemUncappedVolumeRaisesNothing: a volume with no cap and no
+// lru program has no threshold to measure against, so no reading raises its
+// item. Every row the table holds is capped or lru, so this volume is not in the
+// table; the test pins that such a volume stays silent.
+func TestCICacheTrimNoopItemUncappedVolumeRaisesNothing(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	const overGiB = 40 << 20 // KiB: 40 GiB, over every cap the table holds
+	uncapped := ciCacheVolume{name: "ci-scratch", root: ciCacheTestGocacheRoot}
+	f.d.ciCacheTrimMeasure(agentconfig.DiskMaintenanceModeApply, uncapped, ciCacheTrimReply{beforeKiB: overGiB, afterKiB: overGiB})
+	if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
+		t.Errorf("an uncapped volume over 40 GiB raised %+v, want none", items)
+	}
+}
+
+// TestCICacheTrimIgnoresTheWarnFigure: the pass no longer reads
+// ci_cache_warn_bytes, since no volume is measured against it. A value the daemon
+// used to refuse does not stop a trim: the trim runs and execs into the volumes.
+func TestCICacheTrimIgnoresTheWarnFigure(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.d.patrolConfig.Patrols.DiskMaintenance.CICacheWarnBytes = "0GB"
+	f.tick()
+	f.drain()
+	if n := len(f.execs()); n == 0 {
+		t.Errorf("a trim with a zero warn figure made no exec, want the trim to run")
+	}
+}
+
 // TestCICacheTrimGocacheNoopOverCap: the ci-gocache volume's no-op item is
-// measured against its cap, the setting the pass copies into the row, not the
-// warn figure. A run over the cap raises the item, whether it removed no file or
-// removed files, since the LRU floor leaves a fast-written volume over its cap;
-// a reading at or under the cap clears it, even between the warn figure and the
-// cap.
+// measured against its cap, the setting the pass copies into the row. A run over
+// the cap raises the item, whether it removed no file or removed files, since the
+// LRU floor leaves a fast-written volume over its cap; a reading at or under the
+// cap clears it.
 func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 	t.Parallel()
 	const (
-		capKiB = 40 << 20 // KiB: the default ci_gocache_cap_bytes, 40 GiB
-		// betweenWarnAndCap is under the cap and over the default 30 GB warn
-		// figure: the warn figure would raise the item for it, the cap does not.
-		betweenWarnAndCap = 35 << 20
+		capKiB            = 40 << 20 // KiB: the default ci_gocache_cap_bytes, 40 GiB
+		betweenWarnAndCap = 35 << 20 // KiB: under the cap, so the item clears
 		overCap           = 45 << 20
 	)
 
@@ -1454,7 +1473,7 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 	}{
 		{name: "a run that removed nothing over the cap raises the item", afterKiB: overCap, raised: true},
 		{name: "a reading at the cap", afterKiB: capKiB},
-		{name: "a reading under the cap and over the warn figure", afterKiB: betweenWarnAndCap},
+		{name: "a reading under the cap", afterKiB: betweenWarnAndCap},
 		{name: "a run that removed files while over the cap", afterKiB: overCap, removed: 7, raised: true},
 	}
 	for _, tt := range cases {
