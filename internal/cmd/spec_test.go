@@ -5719,3 +5719,31 @@ func TestTickEffRecordRigReadAbsentRig(t *testing.T) {
 		t.Errorf("gastown recorded %+v, want %+v", got, want)
 	}
 }
+
+// TestTickEffRecordedRigQuiet: the read recordRigRead stores makes its rig quiet
+// over the hashes the tick held only when it listed no candidate; a read that
+// listed one leaves the rig to be read (gt-1sruj4).
+func TestTickEffRecordedRigQuiet(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	heads := map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}}
+
+	cases := []struct {
+		name       string
+		candidates int
+		want       bool
+	}{
+		{"a read that listed no candidate is quiet", 0, true},
+		{"a read that listed one candidate is not quiet", 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+			recordRigRead(memory, heads, "gastown", tc.candidates, at)
+			if got := memory.rigQuiet("gastown", heads, at.Add(time.Minute)); got != tc.want {
+				t.Errorf("rigQuiet after a read of %d candidate(s) = %v, want %v", tc.candidates, got, tc.want)
+			}
+		})
+	}
+}
