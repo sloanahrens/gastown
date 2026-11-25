@@ -259,7 +259,8 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 			}
 			return work.ID, nil
 		},
-		seat: d.escalationSeatState,
+		seat:   d.escalationSeatState,
+		resume: func(rig, name string) { d.patrolScanSeat(h, rig, name) },
 		nudge: func(target, msg string, timeout time.Duration) error {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
