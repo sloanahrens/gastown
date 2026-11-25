@@ -27,14 +27,16 @@ func (b *resubmitBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 }
 
 // TestPassPicksAResubmittedBeadAgain: a P2 the pass attempted comes back ready
-// with a newer READY block, so it is a new submission and lands again ahead of
-// the P3 the pass still holds. Keyed by id alone, the handled set passed it
-// over for the P3 (gt-jx9f8g).
+// with a newer READY block, so it is a new submission and lands again. Both
+// beads are P2, so the older submission leads: gt-z (10:01) lands between the
+// two submissions of gt-x (10:00 and 10:05). Keyed by id alone, the handled set
+// would pass the resubmitted bead over and the pass would land only gt-x,gt-z
+// (gt-jx9f8g).
 func TestPassPicksAResubmittedBeadAgain(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReadyAt(t, "gt-x", 2, "2026-09-30T10:00:00Z")
-	h.seedReadyAt(t, "gt-z", 3, "2026-09-30T10:01:00Z")
+	h.seedReadyAt(t, "gt-z", 2, "2026-09-30T10:01:00Z")
 	h.w.Beads = &resubmitBeads{Fake: h.bd, reseed: func() {
 		h.seedReadyAt(t, "gt-x", 2, "2026-09-30T10:05:00Z")
 	}}
@@ -42,8 +44,8 @@ func TestPassPicksAResubmittedBeadAgain(t *testing.T) {
 		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
 	}
 	h.w.Pass(t.Context())
-	if got := landedOrder(h.lander.calls); got != "gt-x,gt-x,gt-z" {
-		t.Fatalf("landed %s; want gt-x,gt-x,gt-z: the resubmitted P2 is picked again before the P3", got)
+	if got := landedOrder(h.lander.calls); got != "gt-x,gt-z,gt-x" {
+		t.Fatalf("landed %s; want gt-x,gt-z,gt-x: the resubmitted P2 is picked again after the older P2", got)
 	}
 }
 
