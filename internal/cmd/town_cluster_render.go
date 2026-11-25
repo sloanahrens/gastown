@@ -546,9 +546,48 @@ func checkOutDir(path string) error {
 	return nil
 }
 
+// validateCluster refuses an unknown --cluster, a gt-sbx run without one of its
+// inputs and a control run given a gt-sbx input, before the town is looked up.
+// An empty cluster reads as control.
+func validateCluster(f clusterRenderFlags) error {
+	sbxFlags := []struct{ flag, value string }{{"--sbx-manifests", f.sbxManifests}, {"--sbx-chart", f.sbxChart}, {"--sbx-values", f.sbxValues}}
+	switch f.cluster {
+	case "", clusterControl:
+		var given []string
+		for _, in := range sbxFlags {
+			if in.value != "" {
+				given = append(given, in.flag)
+			}
+		}
+		if len(given) > 0 {
+			return fmt.Errorf("%s is for --cluster %s only, and this run is the control cluster: drop it, or name --cluster %s; no file was written", strings.Join(given, ", "), clusterSbx, clusterSbx)
+		}
+		return nil
+	case clusterSbx:
+		var missing []string
+		if f.out == "" {
+			missing = append(missing, "--out")
+		}
+		for _, in := range sbxFlags {
+			if in.value == "" {
+				missing = append(missing, in.flag)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("--cluster %s needs %s: the gt-sbx render reads and writes no file without them; no file was written", clusterSbx, strings.Join(missing, ", "))
+		}
+		return nil
+	default:
+		return fmt.Errorf("--cluster %q is not a cluster the render knows: want %s, the default, or %s; no file was written", f.cluster, clusterControl, clusterSbx)
+	}
+}
+
 // runClusterRender writes the manifests for f into f.out and prints the
 // Secret-creating commands. Every refusal happens before the first write.
 func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
+	if err := validateCluster(f); err != nil {
+		return err
+	}
 	// The record describes the live pair that is running, so a rehearsal refuses to
 	// write one: its flags would be replayed into a live render as a rehearsal. The
 	// flags answer this alone, so it is refused before the town is looked up.
