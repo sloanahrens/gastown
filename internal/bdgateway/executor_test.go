@@ -697,6 +697,15 @@ func TestExecutorEndings(t *testing.T) {
 	}
 }
 
+// immediateAfter is the timer seam for a test whose slot wait must refuse at
+// once: its channel already holds a value, so the wait sees the timer fired
+// before it starts, and its stop reports that the timer had already fired.
+func immediateAfter(time.Duration) (<-chan time.Time, func() bool) {
+	fired := make(chan time.Time, 1)
+	fired <- time.Time{}
+	return fired, func() bool { return false }
+}
+
 // TestExecutorCap: with every slot taken the next call is refused by name
 // before a process starts, and the slot a call held is released when it ends.
 func TestExecutorCap(t *testing.T) {
@@ -712,6 +721,7 @@ func TestExecutorCap(t *testing.T) {
 		DoltPort:      "3307",
 		MaxConcurrent: 1,
 		runner:        runner,
+		after:         immediateAfter,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
