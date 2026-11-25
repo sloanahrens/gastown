@@ -851,10 +851,20 @@ func (d *Daemon) settleDiskMaintenanceWindow(now time.Time) {
 }
 
 // recordDiskMaintenanceRun records the daily pass as a last run, so gt jobs
-// reads its row as run rather than never_run (gt-27erxa). It is called only
-// where the pass reached its end and ran its targets; a pass that deferred
-// never settles and a pass that refused whole records nothing, so a refusal is
-// never read as a run.
+// reads its row as run rather than never_run (gt-27erxa).
+//
+// The rule, for every path: the row is written only when at least one target
+// completed its work, meaning its plan was built and not refused and, in apply
+// mode, its apply finished without an error (in a dry run the plan is the work).
+// A target whose plan could not be built, a target whose plan refused, a target
+// whose apply failed or deferred, and a pass whose every target did one of
+// those record nothing, and the log says so (reportDiskMaintenanceNoRun). The
+// reason is what gt jobs reads the row for: a last-run row holds a time and no
+// outcome, and it is read for freshness (never_run, then overdue past the
+// cadence). A refused or failed pass written into it would clear that alarm and
+// hide a job that keeps failing, while an unrecorded one leaves the row never_run
+// or overdue, which is the loud signal a failing job must give. The failure
+// itself is in the log lines of the target.
 func (d *Daemon) recordDiskMaintenanceRun(now time.Time) {
 	d.recordPatrolRun(&d.diskMaintenanceRun, "disk_maintenance", now)
 }
@@ -949,8 +959,11 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	apply := mode == agentconfig.DiskMaintenanceModeApply
 	policy := diskmaint.Policy{Keep: keep, Apply: apply, Now: now}
 	deferred := false
+	results := map[diskMaintTargetResult]int{}
 	for _, name := range due.selection(targets) {
-		if d.diskMaintenanceTarget(ctx, name, targets[name], policy, apply) {
+		result := d.diskMaintenanceTarget(ctx, name, targets[name], policy, apply)
+		results[result]++
+		if result == diskMaintTargetDeferred {
 			deferred = true
 			continue
 		}
@@ -969,7 +982,12 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		d.runActionsRetention(s.now(), apply)
 		concluded := s.now()
 		d.settleDiskMaintenanceWindow(concluded)
-		d.recordDiskMaintenanceRun(concluded)
+		if results[diskMaintTargetRan] > 0 {
+			d.recordDiskMaintenanceRun(concluded)
+		} else {
+			d.logger.Printf("disk_maintenance: daily pass not recorded as a run: no target completed its work (%d refused, %d plans could not be built, %d applies failed)",
+				results[diskMaintTargetRefused], results[diskMaintTargetPlanFailed], results[diskMaintTargetFailed])
+		}
 	}
 }
 
@@ -987,36 +1005,55 @@ func (d *Daemon) concludeDiskMaintenance(concluded time.Time, due diskMaintDue) 
 	}
 }
 
+// diskMaintTargetResult is how one target's turn in a pass ended.
+type diskMaintTargetResult int
+
+const (
+	// diskMaintTargetRan: the plan was built and not refused and, in apply mode,
+	// the apply finished without an error. It is the only result that counts as
+	// the target having run (recordDiskMaintenanceRun).
+	diskMaintTargetRan diskMaintTargetResult = iota
+	// diskMaintTargetRefused: the plan refused, because it could not check its inputs.
+	diskMaintTargetRefused
+	// diskMaintTargetPlanFailed: the plan could not be built.
+	diskMaintTargetPlanFailed
+	// diskMaintTargetFailed: the apply returned an error.
+	diskMaintTargetFailed
+	// diskMaintTargetDeferred: the apply deferred; the window stays open for a retry.
+	diskMaintTargetDeferred
+)
+
 // diskMaintenanceTarget plans one target and, in apply mode, applies the plan.
-// It reports whether the apply deferred.
-func (d *Daemon) diskMaintenanceTarget(ctx context.Context, name string, target diskmaint.Target, policy diskmaint.Policy, apply bool) bool {
+// It reports how the target's turn ended.
+func (d *Daemon) diskMaintenanceTarget(ctx context.Context, name string, target diskmaint.Target, policy diskmaint.Policy, apply bool) diskMaintTargetResult {
 	plan, err := target.Plan(ctx, policy)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: %s: the plan could not be built: %v", name, err)
-		return false
+		return diskMaintTargetPlanFailed
 	}
 	if plan.Refused != "" {
 		// A refused plan is an alarm in both modes: it means the run could not
 		// check its inputs, not that the registry was clean.
 		d.logger.Printf("disk_maintenance: %s: refused: %s", name, plan.Refused)
-		return false
+		return diskMaintTargetRefused
 	}
 	if !apply {
 		d.logger.Printf("disk_maintenance: %s dry_run: %d to delete, %d kept", name, len(plan.Actions), len(plan.Kept))
-		return false
+		return diskMaintTargetRan
 	}
 	result, err := target.Apply(ctx, plan)
 	switch {
 	case result.Deferred != "":
 		d.logger.Printf("disk_maintenance: %s apply deferred: %s", name, result.Deferred)
-		return true
+		return diskMaintTargetDeferred
 	case err != nil:
 		d.logger.Printf("disk_maintenance: %s apply failed: %v (%d deleted, %d failed)", name, err, len(result.Done), len(result.Failed))
+		return diskMaintTargetFailed
 	default:
 		d.logger.Printf("disk_maintenance: %s apply: deleted %d of %d, freed %d bytes",
 			name, len(result.Done), len(plan.Actions), result.BytesFreed)
 	}
-	return false
+	return diskMaintTargetRan
 }
 
 // diskMaintenanceContext bounds one pass and stops its reads when the daemon

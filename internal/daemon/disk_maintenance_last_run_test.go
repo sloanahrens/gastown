@@ -109,10 +109,15 @@ func TestDiskMaintenanceLastRunSkipsAPassRefusedWhole(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceLastRunRecordsAPassWhoseTargetRefused: a target whose plan
-// refused (it could not check its inputs) was still run by the pass: the window
-// settles and the run is recorded, as the pass reached its end.
-func TestDiskMaintenanceLastRunRecordsAPassWhoseTargetRefused(t *testing.T) {
+// diskMaintNotRecorded is the log line a daily pass writes when no target
+// completed its work, and so records no last run.
+const diskMaintNotRecorded = "daily pass not recorded as a run"
+
+// TestDiskMaintenanceLastRunSkipsAPassWhoseEveryTargetRefused: a target whose
+// plan refused (it could not check its inputs) did not run its work; a pass whose
+// only target refused records no last run, says so, and still settles its window
+// (gt-27erxa, om finding 12f69a57440c).
+func TestDiskMaintenanceLastRunSkipsAPassWhoseEveryTargetRefused(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
 	f.target.plan = diskmaint.Plan{Refused: "the registry listing was unreadable"}
@@ -122,7 +127,78 @@ func TestDiskMaintenanceLastRunRecordsAPassWhoseTargetRefused(t *testing.T) {
 	if !strings.Contains(logs.String(), "refused: the registry listing was unreadable") {
 		t.Fatalf("the target did not refuse, so this row proves nothing: %q", logs.String())
 	}
+	if at, ok := diskMaintRecordedRun(t, d); ok {
+		t.Errorf("recorded a daily run at %v from a pass whose every target refused: %q", at, logs.String())
+	}
+	if !strings.Contains(logs.String(), diskMaintNotRecorded) {
+		t.Errorf("the log does not say the pass was not recorded as a run: %q", logs.String())
+	}
+	if d.diskMaintenanceSettledAt().IsZero() {
+		t.Error("the pass did not settle its window: it would retry every tick")
+	}
+}
+
+// TestDiskMaintenanceLastRunRecordsAPassWhereOneTargetRan: some targets refuse and
+// one runs its work: the pass ran, so the last run is recorded.
+func TestDiskMaintenanceLastRunRecordsAPassWhereOneTargetRan(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.target.plan = diskmaint.Plan{Refused: "the registry listing was unreadable"}
+	f.extra = map[string]*diskMaintFakeTarget{"engine": {}}
+
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "refused: the registry listing was unreadable") || !strings.Contains(logs.String(), "engine dry_run") {
+		t.Fatalf("one target must refuse and the other run, or this row proves nothing: %q", logs.String())
+	}
 	if _, ok := diskMaintRecordedRun(t, d); !ok {
-		t.Errorf("a pass that ran to its end left no last run: %q", logs.String())
+		t.Errorf("a pass in which one target ran left no last run: %q", logs.String())
+	}
+	if strings.Contains(logs.String(), diskMaintNotRecorded) {
+		t.Errorf("the log says the pass was not recorded though a target ran: %q", logs.String())
+	}
+}
+
+// TestDiskMaintenanceLastRunSkipsAPassWhosePlanCannotBeBuilt: a target whose plan
+// cannot be built did not run, so the pass records no last run and says so.
+func TestDiskMaintenanceLastRunSkipsAPassWhosePlanCannotBeBuilt(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.target.planErr = errors.New("the ledger could not be read")
+
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "the plan could not be built: the ledger could not be read") {
+		t.Fatalf("the plan did not fail, so this row proves nothing: %q", logs.String())
+	}
+	if at, ok := diskMaintRecordedRun(t, d); ok {
+		t.Errorf("recorded a daily run at %v from a pass whose plan could not be built: %q", at, logs.String())
+	}
+	if !strings.Contains(logs.String(), diskMaintNotRecorded) {
+		t.Errorf("the log does not say the pass was not recorded as a run: %q", logs.String())
+	}
+}
+
+// TestDiskMaintenanceLastRunSkipsAPassWhoseApplyFailed: a target that ran and
+// failed is a run that failed, not a good run: a last-run row holds a time and no
+// outcome and is read for freshness, so recording it would clear the overdue alarm
+// on a job that keeps failing. The pass records nothing and says so.
+func TestDiskMaintenanceLastRunSkipsAPassWhoseApplyFailed(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	d.patrolConfig = diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
+	f.target.plan = diskmaint.Plan{Actions: []diskmaint.Action{{Kind: "delete-path", Ref: "ci-gocache/x"}}}
+	f.target.applyErr = errors.New("the registry refused the delete")
+
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "apply failed: the registry refused the delete") {
+		t.Fatalf("the apply did not fail, so this row proves nothing: %q", logs.String())
+	}
+	if at, ok := diskMaintRecordedRun(t, d); ok {
+		t.Errorf("recorded a daily run at %v from a pass whose only apply failed: %q", at, logs.String())
+	}
+	if !strings.Contains(logs.String(), diskMaintNotRecorded) {
+		t.Errorf("the log does not say the pass was not recorded as a run: %q", logs.String())
 	}
 }
