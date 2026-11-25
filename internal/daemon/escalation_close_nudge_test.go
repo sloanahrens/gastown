@@ -1721,6 +1721,84 @@ func TestEscalationCloseLandingMidPassIsJudgedNextPass(t *testing.T) {
 	}
 }
 
+// A closed escalation whose seat has no live session resumes that seat once and
+// is settled, not nudged. The resume runs only when the seat still holds the
+// bead, and a nil resume does nothing (gt-lmohcl).
+func TestJudgeEscalationCloseResumes(t *testing.T) {
+	t.Parallel()
+	type resumeCall struct{ rig, name string }
+	now := time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		holds       string
+		seat        escalationSeat
+		withResume  bool
+		wantOutcome escalationOutcome
+		wantResumes []resumeCall
+		wantSent    int
+	}{
+		{
+			name:        "not-live seat holding the bead is resumed and settled",
+			holds:       closeTestBead,
+			seat:        escalationSeat{},
+			withResume:  true,
+			wantOutcome: escalationSettled,
+			wantResumes: []resumeCall{{"gastown", "capable"}},
+		},
+		{
+			name:        "live idle seat is nudged, not resumed",
+			holds:       closeTestBead,
+			seat:        escalationSeat{Live: true, Idle: true},
+			withResume:  true,
+			wantOutcome: escalationNudged,
+			wantSent:    1,
+		},
+		{
+			name:        "seat that no longer holds the bead is settled, not resumed",
+			holds:       "gt-work2",
+			seat:        escalationSeat{},
+			withResume:  true,
+			wantOutcome: escalationSettled,
+		},
+		{
+			name:        "nil resume settles a not-live seat",
+			holds:       closeTestBead,
+			seat:        escalationSeat{},
+			wantOutcome: escalationSettled,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var resumes []resumeCall
+			var sent []string
+			s := escalationCloseSeams{
+				holding: func(string, string) (string, error) { return tt.holds, nil },
+				seat:    func(string, string) (escalationSeat, error) { return tt.seat, nil },
+				nudge: func(target, _ string, _ time.Duration) error {
+					sent = append(sent, target)
+					return nil
+				},
+				now:  func() time.Time { return now },
+				logf: func(string, ...any) {},
+			}
+			if tt.withResume {
+				s.resume = func(rig, name string) { resumes = append(resumes, resumeCall{rig, name}) }
+			}
+			budget := &escalationSendBudget{now: s.now, remaining: 1}
+			if got := judgeEscalationClose(s, "gastown", closeTestEscalation(time.Time{}), budget); got != tt.wantOutcome {
+				t.Errorf("outcome = %v, want %v", got, tt.wantOutcome)
+			}
+			if !slices.Equal(resumes, tt.wantResumes) {
+				t.Errorf("resumes = %v, want %v", resumes, tt.wantResumes)
+			}
+			if len(sent) != tt.wantSent {
+				t.Errorf("sent %v, want %d nudges", sent, tt.wantSent)
+			}
+		})
+	}
+}
+
 // escalationCloseEsc is a closed escalation carrying reason, for the message.
 func escalationCloseEsc(reason string) patrolscan.Escalation {
 	return patrolscan.Escalation{ID: closeTestEscID, CloseReason: reason}
