@@ -414,13 +414,12 @@ func TestBdGatewayDefaultCapIsEight(t *testing.T) {
 }
 
 // TestBdGatewayMaxConcurrentDefaultMatchesGateway ties the renderer's copy of the
-// gateway's default cap to the constant bdgw serve reads: the renderer's default never
-// exceeds the gateway's, so an unset total cannot render a larger per-pod share than
-// the gateway admits.
+// gateway's default cap to the constant bdgw serve reads: the two must be the same
+// number, so a later change to one cannot silently split them.
 func TestBdGatewayMaxConcurrentDefaultMatchesGateway(t *testing.T) {
 	t.Parallel()
-	if bdGatewayMaxConcurrentDefault > bdgateway.DefaultMaxConcurrent {
-		t.Errorf("the renderer's gateway default = %d, want at most internal/bdgateway.DefaultMaxConcurrent %d", bdGatewayMaxConcurrentDefault, bdgateway.DefaultMaxConcurrent)
+	if bdGatewayMaxConcurrentDefault != bdgateway.DefaultMaxConcurrent {
+		t.Errorf("the renderer's gateway default = %d, want equal to internal/bdgateway.DefaultMaxConcurrent %d", bdGatewayMaxConcurrentDefault, bdgateway.DefaultMaxConcurrent)
 	}
 }
 
