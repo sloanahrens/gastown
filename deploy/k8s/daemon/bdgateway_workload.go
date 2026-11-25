@@ -240,7 +240,7 @@ func bdGatewayTokenCopy(v Values) Container {
 // absent: internal/bdgateway.DefaultMaxConcurrent. The renderer imports no command
 // package (imports_test.go), so the value is repeated here and a test ties it to the
 // gateway's constant.
-const bdGatewayMaxConcurrentDefault = 16
+const bdGatewayMaxConcurrentDefault = 8
 
 // bdGatewayMaxConcurrentPerPod is the --max-concurrent one pod runs and whether the
 // command carries it. Values.BdGatewayMaxConcurrent is the total across the replicas,
