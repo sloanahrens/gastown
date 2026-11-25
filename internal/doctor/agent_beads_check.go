@@ -54,23 +54,37 @@ type agentBeadScope struct {
 // loadAgentBeadScope loads agent beads and wisp IDs from one beads database.
 // Agent beads are ephemeral (stored in wisps), but we also check issues for
 // backward compatibility. The wisps list doesn't include type/labels, so wisp
-// IDs are tracked separately for existence checks.
-func loadAgentBeadScope(bd doctorBeads) agentBeadScope {
+// IDs are tracked separately for existence checks. The error is the one
+// ListAgentBeads returned: the database's answer is unknown, not empty.
+func loadAgentBeadScope(bd doctorBeads) (agentBeadScope, error) {
 	scope := agentBeadScope{
 		issues: make(map[string]*beads.Issue),
 		wisps:  make(map[string]bool),
 	}
-	if agents, err := bd.ListAgentBeads(); err == nil {
-		for id, issue := range agents {
-			scope.issues[id] = issue
-		}
+	agents, err := bd.ListAgentBeads()
+	if err != nil {
+		return scope, err
+	}
+	for id, issue := range agents {
+		scope.issues[id] = issue
 	}
 	if wispIDs, _ := bd.ListWispIDs(); wispIDs != nil {
 		for id := range wispIDs {
 			scope.wisps[id] = true
 		}
 	}
-	return scope
+	return scope, nil
+}
+
+// unreadScope reports that an agent-bead database could not be read, so no
+// agent's existence is known: listing its agents as missing would be a guess
+// (gt-9bwrei).
+func (c *AgentBeadsCheck) unreadScope(err error) *CheckResult {
+	return &CheckResult{
+		Name:    c.Name(),
+		Status:  StatusSkipped,
+		Message: "agent beads could not be read: " + err.Error(),
+	}
 }
 
 // DestructiveFix marks this repair as destructive (gt-638go.3): it mutates tracker rows.
@@ -118,12 +132,19 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// beads, so a town-level duplicate must not satisfy a rig check (gt-abj);
 	// the town scope below is what annotates a bead found only there.
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townScope := loadAgentBeadScope(ctx.beadsRigLocal(townBeadsPath))
+	townScope, err := loadAgentBeadScope(ctx.beadsRigLocal(townBeadsPath))
+	if err != nil {
+		return c.unreadScope(fmt.Errorf("town beads %s: %w", townBeadsPath, err))
+	}
 
 	rigScopes := make(map[string]agentBeadScope) // key: prefix
 	for prefix, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		rigScopes[prefix] = loadAgentBeadScope(ctx.beadsRigLocal(rigBeadsPath))
+		scope, err := loadAgentBeadScope(ctx.beadsRigLocal(rigBeadsPath))
+		if err != nil {
+			return c.unreadScope(fmt.Errorf("rig beads %s: %w", rigBeadsPath, err))
+		}
+		rigScopes[prefix] = scope
 	}
 
 	// checkAgentBead verifies an agent bead exists in the database it is
@@ -322,7 +343,9 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		// NewRigLocal comment above); a routed wrapper would re-target the town DB.
 		bd := ctx.beadsRigLocal(rigBeadsPath)
 		rigName := info.name
-		rigScope := loadAgentBeadScope(bd)
+		// An unread scope is still an empty one here: bead gt-rhu7h3 makes
+		// the fix refuse before creating anything.
+		rigScope, _ := loadAgentBeadScope(bd)
 
 		// Same as Run: an unreadable crew directory creates nothing rather
 		// than guessing which crew members exist (gt-ro1lc).
