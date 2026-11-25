@@ -113,6 +113,12 @@ const rulesPendingReason = "jev_rules has not yet asked about this submission"
 // before this reason is asked (gt-0vb2fy); one it leaves is the patrol's.
 const sandboxNotGoneReason = "the gateway has not confirmed the sandbox gone"
 
+// branchGuardReasonPrefix starts the keep reason of a seat whose branch is not
+// the one that landed. A seat kept this way waits on its own branch to land;
+// one that has since been slung to another bead never will, so its record is
+// dropped rather than re-alerted (gt-qrzhot).
+const branchGuardReasonPrefix = "the seat works "
+
 // sandboxSessionLiveReason is the keep reason of a seat whose live session still
 // answers to its name. A set ended marker alone does not prove that session has
 // ended, so the sandbox waits for the patrol, which runs the same check
@@ -171,7 +177,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	case strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.LandedBranch) == "":
 		return "branch=" + orMissingText(e.Branch) + " landed_branch=" + orMissingText(e.LandedBranch) + ": a branch nothing recorded cannot show this seat's work is the landed work"
 	case e.Branch != e.LandedBranch:
-		return "the seat works " + e.Branch + ", not the landed " + e.LandedBranch
+		return branchGuardReasonPrefix + e.Branch + ", not the landed " + e.LandedBranch
 	case !e.Retired:
 		return retiredRecordKeepReason
 	}
@@ -253,6 +259,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		kept       string
 		unmeasured string
 		partial    string
+		seatBranch string
 		removed    bool
 	)
 	err = polecat.WithSandboxSeatLock(rigPath, name, func() error {
@@ -261,6 +268,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			unmeasured = unmeasuredReason
 			return nil
 		}
+		seatBranch = end.Branch
 		// An offer that rests on no "done" state is finished only when a held
 		// sandbox's ended marker says so, which endHeldSandboxAtLanding reads
 		// below; a sandbox that is gone or failed has no marker to read (gt-xb20n9).
@@ -431,6 +439,14 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		log("kept: %s", kept)
 		return false
 	case kept != "":
+		// A seat whose branch guard keep rests on a bead the seat no longer
+		// works has moved on: no later pass can satisfy the keep, so it leaves
+		// no record to re-alert for a seat that is gone (gt-qrzhot).
+		if strings.HasPrefix(kept, branchGuardReasonPrefix) && seatMovedOn(seatBranch, landing.BeadID) {
+			h.clearKeptSeat(rig, name)
+			log("kept: %s (the seat has moved on to another bead; no record is kept)", kept)
+			return false
+		}
 		h.recordKeptSeat(rig, name, landing, kept)
 		log("kept: %s", kept)
 		return false

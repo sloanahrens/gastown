@@ -237,6 +237,7 @@ func dirExists(t *testing.T, path string) bool {
 func TestEndFinishedSandboxSeat(t *testing.T) {
 	t.Parallel()
 	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	keptRecordWritten, keptRecordAbsent := true, false
 	tests := []struct {
 		name        string
 		fields      func(*beads.AgentFields)
@@ -257,6 +258,11 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		wantDeleted bool
 		// noRecord leaves the sandbox at the gateway with no registry record.
 		noRecord bool
+		// wantKeptRecord asserts whether a kept record was written; nil does
+		// not check it.
+		wantKeptRecord *bool
+		// wantLog asserts a substring of the end's log; "" does not check it.
+		wantLog string
 	}{
 		{
 			name: "a finished seat goes", landing: finished, desired: intent.DesiredStop,
@@ -324,9 +330,26 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name:    "another branch keeps it",
-			fields:  func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
-			landing: finished, desired: intent.DesiredStop, wantAsked: true,
+			// A takeover: the seat works its own branch of the bead that landed
+			// through another branch, so its keep still records (gt-qrzhot).
+			name:           "another branch keeps it",
+			fields:         func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-n4xq8+x2" },
+			landing:        finished,
+			desired:        intent.DesiredStop,
+			wantAsked:      true,
+			wantKeptRecord: &keptRecordWritten,
+		},
+		{
+			// The seat was slung to another bead before this landing's end ran,
+			// so its keep can never be satisfied and no record is kept
+			// (gt-qrzhot).
+			name:           "a branch naming another bead keeps it and records no keep",
+			fields:         func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
+			landing:        finished,
+			desired:        intent.DesiredStop,
+			wantAsked:      true,
+			wantKeptRecord: &keptRecordAbsent,
+			wantLog:        "(the seat has moved on to another bead; no record is kept)",
 		},
 		{
 			name:    "a seat something still wants keeps it",
@@ -351,6 +374,8 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newSeatEndFake(t)
+			var logs strings.Builder
+			f.host.d.logger = log.New(&logs, "", 0)
 			if tt.fields != nil {
 				tt.fields(&f.seatFields)
 			}
@@ -402,6 +427,24 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 				if want := f.host.sessionName(endRig, endPolecat); len(f.deleted) != 1 || f.deleted[0] != want {
 					t.Errorf("deleted %v, want exactly the seat's sandbox %s", f.deleted, want)
 				}
+			}
+			if tt.wantKeptRecord != nil {
+				path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+				if err != nil {
+					t.Fatalf("kept record path: %v", err)
+				}
+				rec, err := readKeptSandboxSeatRecord(path)
+				switch {
+				case *tt.wantKeptRecord && err != nil:
+					t.Errorf("no kept record written, want one: %v", err)
+				case !*tt.wantKeptRecord && err == nil:
+					t.Errorf("kept record %+v written, want none", rec)
+				case !*tt.wantKeptRecord && !errors.Is(err, os.ErrNotExist):
+					t.Errorf("reading the kept record: %v", err)
+				}
+			}
+			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log %q does not name %q", logs.String(), tt.wantLog)
 			}
 		})
 	}
