@@ -281,22 +281,25 @@ func ciEngineBuildCacheTotal(out []byte) (int64, error) {
 
 // ciEngineBuildCacheReport reads a build cache prune that ran without error. It
 // returns the bytes the prune reclaimed and whether docker printed that figure in a
-// size at all (known is false when the Total line could not be read), the verdict
-// line naming them, and the WARN line when the prune reclaimed nothing although
-// docker reported reclaimable cache before it ran; unusedAge and keepBytes are the
-// filter and the keep size that WARN names. reclaimableKnown is false when that size
-// read failed, which skips the WARN and nothing else. A total that cannot be read is
-// named by docker's last line, bounded, and fails nothing.
-func ciEngineBuildCacheReport(out []byte, reclaimable int64, reclaimableKnown bool, unusedAge time.Duration, keepBytes int64) (reclaimed int64, known bool, verdict, warn string) {
+// size at all (known is false when the Total line could not be read), and the verdict
+// line naming them. A total that cannot be read is named by docker's last line,
+// bounded, and fails nothing.
+func ciEngineBuildCacheReport(out []byte) (reclaimed int64, known bool, verdict string) {
 	n, err := ciEngineBuildCacheTotal(out)
 	if err != nil {
-		return 0, false, fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
+		return 0, false, fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out)))
 	}
-	if n == 0 && reclaimableKnown && reclaimable > 0 {
-		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s and the keep size was %s, so cache younger than the filter or inside the keep size is not removed",
-			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge), ciEngineKeepStorageSize(keepBytes))
-	}
-	return n, true, "build cache reclaimed " + polecatimage.Human(n), warn
+	return n, true, "build cache reclaimed " + polecatimage.Human(n)
+}
+
+// ciEngineZeroReclaimWarn is the WARN for a run whose age prune and cap prune both
+// reclaimed nothing although docker reported reclaimable cache before them, and the
+// cache is still over the keep size. It names the age prune's filter and keep flag and
+// the cap prune's flag, so the operator sees which passes ran and with what limits.
+func ciEngineZeroReclaimWarn(reclaimable int64, unusedAge time.Duration, keepBytes int64) string {
+	size := ciEngineKeepStorageSize(keepBytes)
+	return fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s and the cap prune reclaimed %s, though docker system df reported %s reclaimable before them; the age prune ran with --filter until=%s and %s %s, the cap prune with %s %s, so the cache stayed over the keep size",
+		polecatimage.Human(0), polecatimage.Human(0), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge), ciEngineKeepStorageFlag, size, ciEngineMaxUsedSpaceFlag, size)
 }
 
 // ciEngineCapReclaimed reads the cap prune's output the way ciEngineBuildCacheReport
@@ -1211,15 +1214,11 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			reason = fmt.Sprintf("the build cache prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(err, stderr))
 		}
 	} else {
-		var verdict, warn string
-		reclaimed, reclaimedKnown, verdict, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge, keepBytes)
+		var verdict string
+		reclaimed, reclaimedKnown, verdict = ciEngineBuildCacheReport(pruned)
 		cache = verdict
 		if reclaimedKnown {
 			stats["build_cache_bytes"] = reclaimed
-		}
-		if warn != "" {
-			zeroReclaim = true
-			d.logger.Printf("%s", warn)
 		}
 	}
 	// The cap prune follows the age prune when the cache is still over the keep size:
@@ -1239,6 +1238,13 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			cache += ", " + capText
 			if capKnown {
 				stats["build_cache_bytes"] += capReclaimed
+			}
+			// The zero-reclaim WARN is raised only when the cap prune also reclaimed
+			// nothing: the age prune alone reclaiming 0 is not enough while the cap
+			// prune could still have removed cache over the keep size.
+			if capKnown && capReclaimed == 0 && reclaimedKnown && reclaimed == 0 {
+				zeroReclaim = true
+				d.logger.Printf("%s", ciEngineZeroReclaimWarn(reclaimable, unusedAge, keepBytes))
 			}
 		}
 	}
