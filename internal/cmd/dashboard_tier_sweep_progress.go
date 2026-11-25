@@ -40,10 +40,11 @@ func readTierSweepProgress(path string) (TierSweepProgress, bool, error) {
 
 // findSweepProgress returns the progress.json of the newest run of rig's commit sha8
 // under root. A run is a directory named rig-sha8-<tiers>: the run id tierSweepRunnerRunID
-// builds in package daemon, unexported, so this name shape is the contract. The rig
-// directory is read with os.ReadDir, not globbed, so a root name holding [ or * is a
-// path. An unreadable rig directory is an error, never no run; a missing rig directory
-// under an existing root is no run, and so is a run with no progress.json.
+// builds in package daemon, unexported, so this name shape is the contract
+// (TestFindSweepProgressNewestMatch). The rig directory is read with os.ReadDir, not
+// globbed, so a root name holding [ or * is a path. An unreadable rig directory is an
+// error, never no run; a missing rig directory under an existing root is no run, and so
+// is a run with no progress.json.
 func findSweepProgress(root, rig, sha8 string) (string, bool, error) {
 	if !plainSweepName(rig) || !plainSweepName(sha8) {
 		return "", false, fmt.Errorf("find sweep progress: rig %q and sha %q must each be one plain name", rig, sha8)
