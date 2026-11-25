@@ -12,14 +12,17 @@ import (
 )
 
 // reviewPoolEnv is the environment wireReviewPool reads om's config location
-// through: os.LookupEnv and os.UserHomeDir in production, and a fake in the
-// tests, which never read the host's environment (gt-aovgi3).
+// through: os.LookupEnv, os.UserHomeDir and os.Stat in production, and injected
+// fakes in the tests (gt-aovgi3, gt-lfykjq).
 type reviewPoolEnv struct {
 	// lookup reads an environment variable; nil is os.LookupEnv.
 	lookup func(key string) (string, bool)
 	// home returns the user's home directory; nil is os.UserHomeDir. Its
 	// result is needed only when XDG_CONFIG_HOME names no directory.
 	home func() (string, error)
+	// stat reports om's config file; nil is os.Stat. An error means the review
+	// key's config file cannot be used (gt-lfykjq).
+	stat func(name string) (os.FileInfo, error)
 }
 
 // wireReviewPool is where the daemon wires the review pool into a rig's
@@ -31,9 +34,9 @@ type reviewPoolEnv struct {
 // own config file, so a landing can reuse a review its queue-time twin made
 // (gt-yqoha0, gt-aovgi3).
 //
-// The error is the on path's when om's config file cannot be located: the
-// Lander is then left as it was, pool off, so a failure never reads as a
-// wired pool (gt-aovgi3).
+// The error is the on path's when om's config file cannot be named or does not
+// exist: the wiring is undone and the pool stays off, so a failure never reads
+// as a wired pool (gt-aovgi3, gt-lfykjq).
 func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // w and workRoot are the pool's wiring targets, used by the on path a later bead of gt-s47qp4 adds
 	on, _, expiry, err := cfg.ReviewPoolFor(rig)
 	if err != nil {
@@ -47,18 +50,29 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	if !on {
 		return nil
 	}
-	// The review key reads om's own config from this file, so it is resolved
-	// before anything is wired: a path this function cannot name leaves the
-	// pool off rather than wiring one whose key could not be trusted
-	// (gt-aovgi3).
-	omPath, err := reviewPoolOMConfigPath(env)
-	if err != nil {
-		return fmt.Errorf("landing_worker: %s: %w", rig, err)
-	}
 	// The store hangs off the town the Lander already lands for, so its
 	// records sit beside the town's other landing state (gt-yqoha0).
 	l.Ahead = land.TownAheadStore(l.TownRoot, rig)
 	l.ReuseExpiry = expiry
+	// The review key is computed from om's own config file, so a pool wired
+	// without it could never produce a verdict the landing could trust: a
+	// missing config file or a path this function cannot name undoes the
+	// wiring above rather than leaving the pool on (gt-lfykjq).
+	stat := env.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	omPath, err := reviewPoolOMConfigPath(env)
+	if err == nil {
+		if _, statErr := stat(omPath); statErr != nil {
+			err = fmt.Errorf("om config: %w", statErr)
+		}
+	}
+	if err != nil {
+		l.Ahead, l.ReuseExpiry, l.OMConfigPath = nil, 0, ""
+		d.logger.Printf("landing_worker: %s: review pool off: %v", rig, err)
+		return fmt.Errorf("landing_worker: %s: %w", rig, err)
+	}
 	l.OMConfigPath = omPath
 	// Wiring the Worker and workRoot into the pool is a later bead of the map,
 	// gt-s47qp4.

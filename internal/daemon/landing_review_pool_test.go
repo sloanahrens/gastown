@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -54,6 +55,30 @@ func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
 			return "", nil
 		},
 	}
+}
+
+// reviewPoolTestOMConfig puts om's config file under a fresh XDG directory and
+// returns the environment naming it plus the file's path, which the on path
+// requires to exist (gt-lfykjq).
+func reviewPoolTestOMConfig(t *testing.T, home func() (string, error)) (reviewPoolEnv, string) {
+	t.Helper()
+	configHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(configHome, "om"), 0o700); err != nil {
+		t.Fatalf("make om's config directory: %v", err)
+	}
+	omConfig := filepath.Join(configHome, "om", "config.json")
+	if err := os.WriteFile(omConfig, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write om's config file: %v", err)
+	}
+	return reviewPoolEnv{
+		lookup: func(key string) (string, bool) {
+			if key == "XDG_CONFIG_HOME" {
+				return configHome, true
+			}
+			return "", false
+		},
+		home: home,
+	}, omConfig
 }
 
 func TestReviewPoolOMConfigPath(t *testing.T) {
@@ -250,16 +275,9 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 			// An unlisted rig must not read the environment at all, so its
 			// rows use the env that fails the test on a read.
 			env := reviewPoolTestEnv(t)
+			wantOMConfig := ""
 			if tc.wantOn {
-				env = reviewPoolEnv{
-					lookup: func(key string) (string, bool) {
-						if key == "XDG_CONFIG_HOME" {
-							return "/sentinel/xdg", true
-						}
-						return "", false
-					},
-					home: func() (string, error) { return "/sentinel/home", nil },
-				}
+				env, wantOMConfig = reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
 			}
 			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews", env); err != nil {
 				t.Fatalf("wireReviewPool: %v", err)
@@ -286,8 +304,8 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 				if lander.ReuseExpiry != tc.wantExpiry {
 					t.Fatalf("ReuseExpiry = %v; want %v", lander.ReuseExpiry, tc.wantExpiry)
 				}
-				if want := "/sentinel/xdg/om/config.json"; lander.OMConfigPath != want {
-					t.Fatalf("OMConfigPath = %q; want %q", lander.OMConfigPath, want)
+				if lander.OMConfigPath != wantOMConfig {
+					t.Fatalf("OMConfigPath = %q; want %q", lander.OMConfigPath, wantOMConfig)
 				}
 				// Only the pool fields may move: with them cleared, the
 				// Lander must be the one the daemon built. Lander holds a mutex,
@@ -373,11 +391,12 @@ func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
 	}
 }
 
-// TestReviewPoolWiringOMConfigErrorStaysOff pins that a pool the config lists
-// stays off when om's config file cannot be located: the error comes back, the
-// Lander and the Worker are the ones the daemon built, and nothing is logged
-// in the pool's own voice (gt-aovgi3).
-func TestReviewPoolWiringOMConfigErrorStaysOff(t *testing.T) {
+// TestReviewPoolWiringNoOMConfigStaysOff pins that a pool the config lists
+// stays off when om's own config file cannot be used: a missing file and a
+// location this process cannot name each log one line, undo the wiring (Ahead
+// back to nil, so the rig lands with om inline) and return the error
+// (gt-lfykjq).
+func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 	t.Parallel()
 	noXDG := func(string) (string, bool) { return "", false }
 	cases := []struct {
@@ -386,20 +405,36 @@ func TestReviewPoolWiringOMConfigErrorStaysOff(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name: "file missing",
+			env: reviewPoolEnv{
+				lookup: func(key string) (string, bool) {
+					if key == "XDG_CONFIG_HOME" {
+						return "/sentinel/xdg", true
+					}
+					return "", false
+				},
+				home: func() (string, error) { return "/sentinel/home", nil },
+				stat: func(name string) (os.FileInfo, error) {
+					return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+				},
+			},
+			wantErr: "/sentinel/xdg/om/config.json",
+		},
+		{
+			name: "no home and no XDG",
+			env: reviewPoolEnv{
+				lookup: noXDG,
+				home:   func() (string, error) { return "", nil },
+			},
+			wantErr: "XDG_CONFIG_HOME",
+		},
+		{
 			name: "home directory read fails",
 			env: reviewPoolEnv{
 				lookup: noXDG,
 				home:   func() (string, error) { return "", errors.New("no home for this process") },
 			},
 			wantErr: "no home for this process",
-		},
-		{
-			name: "no XDG and no home",
-			env: reviewPoolEnv{
-				lookup: noXDG,
-				home:   func() (string, error) { return "", nil },
-			},
-			wantErr: "XDG_CONFIG_HOME",
 		},
 	}
 	for _, tc := range cases {
@@ -415,19 +450,26 @@ func TestReviewPoolWiringOMConfigErrorStaysOff(t *testing.T) {
 			}, lander, worker, "/sentinel/reviews", tc.env)
 
 			if err == nil {
-				t.Fatal("wireReviewPool returned nil with no om config location; want the error")
+				t.Fatal("wireReviewPool returned nil without a usable om config file; want the error")
 			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("error %q does not name %q", err, tc.wantErr)
+			if !strings.Contains(err.Error(), "gastown") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not name the rig and %q", err, tc.wantErr)
+			}
+			if lander.Ahead != nil {
+				t.Fatalf("Lander.Ahead = %+v with no om config file; want nil, the pool off", lander.Ahead)
 			}
 			if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
-				t.Fatalf("an unresolved config location changed the Lander:\ngot  %+v\nwant %+v", lander, want)
+				t.Fatalf("no om config file changed the Lander:\ngot  %+v\nwant %+v", lander, want)
 			}
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
-				t.Fatalf("an unresolved config location changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
 			}
-			if got := logs.String(); got != "" {
-				t.Fatalf("an unresolved config location logged %q; want the returned error only", got)
+			got := logs.String()
+			if n := strings.Count(got, "\n"); n != 1 {
+				t.Fatalf("no om config file logged %d lines, want one naming the rig and the cause; log:\n%s", n, got)
+			}
+			if !strings.Contains(got, "gastown") || !strings.Contains(got, tc.wantErr) {
+				t.Fatalf("log line %q does not name the rig and %q", got, tc.wantErr)
 			}
 		})
 	}
