@@ -44,6 +44,10 @@ const (
 	// cannot hold Exec and its concurrency slot past the deadline.
 	DefaultKillGrace = 2 * time.Second
 
+	// DefaultSlotWait is the wait for a concurrency slot that the options name
+	// no SlotWait for. Nothing reads it yet: the wait itself lands separately.
+	DefaultSlotWait = 5 * time.Second
+
 	// stderrHeadBytes bounds how much of bd's stderr a call keeps for its log
 	// line. The first line is what names bd's failure; the cap lets a line that
 	// is one long run of bytes stay bounded.
@@ -119,6 +123,9 @@ type Options struct {
 	// KillGrace bounds the wait for bd's process after the deadline's kill; 0
 	// means DefaultKillGrace.
 	KillGrace time.Duration
+	// SlotWait is how long a call waits for a concurrency slot; 0 means
+	// DefaultSlotWait. The executor stores it but no call waits on it yet.
+	SlotWait time.Duration
 	// runner starts one process. Unexported so only this package's tests can
 	// put a fake behind it.
 	runner processRunner
@@ -139,6 +146,7 @@ type Executor struct {
 	doltCredentialFile string
 	defaultTimeout     time.Duration
 	killGrace          time.Duration
+	slotWait           time.Duration
 	slots              chan struct{}
 	// capRefusals, peakInFlight and windowPeak are atomics rather than a lock:
 	// the stats route reads them while calls run, and the refusal path must not
@@ -180,6 +188,9 @@ func New(opts Options) (*Executor, error) {
 	if opts.KillGrace < 0 {
 		return nil, fmt.Errorf("%w: KillGrace %s is negative", ErrUnconfigured, opts.KillGrace)
 	}
+	if opts.SlotWait < 0 {
+		return nil, fmt.Errorf("%w: SlotWait %s is negative", ErrUnconfigured, opts.SlotWait)
+	}
 	max := opts.MaxConcurrent
 	if max == 0 {
 		max = DefaultMaxConcurrent
@@ -191,6 +202,10 @@ func New(opts Options) (*Executor, error) {
 	grace := opts.KillGrace
 	if grace == 0 {
 		grace = DefaultKillGrace
+	}
+	wait := opts.SlotWait
+	if wait == 0 {
+		wait = DefaultSlotWait
 	}
 	runner := opts.runner
 	if runner == nil {
@@ -208,6 +223,7 @@ func New(opts Options) (*Executor, error) {
 		doltCredentialFile: opts.DoltCredentialFile,
 		defaultTimeout:     limit,
 		killGrace:          grace,
+		slotWait:           wait,
 		slots:              make(chan struct{}, max),
 		runner:             runner,
 	}, nil
