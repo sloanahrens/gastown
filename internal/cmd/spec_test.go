@@ -1641,6 +1641,74 @@ func TestSpecDispatchDryRunShowsTheFormula(t *testing.T) {
 	}
 }
 
+// TestSpecDryRunInheritance: the dry run's would-sling line names the priority
+// a blocker takes by inheritance and the bead that gave it, and an ordinary
+// candidate's line is unchanged (gt-e1rbft). The read is the production one
+// over the inherited seam, so the source id comes from a blocked read as the
+// tick's own does.
+func TestSpecDryRunInheritance(t *testing.T) {
+	t.Parallel()
+	lines := func(t *testing.T, inherited func() (map[string]specdispatch.Inherited, map[string]error)) map[string]string {
+		t.Helper()
+		f := newFakeSpecTown(
+			cleanSpec("gt-blocker", 2, "2026-09-01T00:00:00Z"),
+			cleanSpec("gt-plain", 2, "2026-09-02T00:00:00Z"),
+		)
+		store := &specReadyStub{}
+		for _, s := range f.specs {
+			issue := issueOfSpec(s)
+			store.issues = append(store.issues, &issue)
+		}
+		env := f.env()
+		env.DryRun = true
+		env.PerTick = 2
+		env.Candidates = func() specBoardRead {
+			return specCandidatesDropping(specTown(t), 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, nil, nil, inherited)
+		}
+		r := runSpecDispatchCycle(env)
+		if len(f.slung) != 0 {
+			t.Fatalf("slung %v; a dry run slings nothing", f.slung)
+		}
+		if len(r.Dispatched) != 2 {
+			t.Fatalf("dispatched = %+v, want both candidates", r.Dispatched)
+		}
+		out := map[string]string{}
+		for _, e := range r.Dispatched {
+			out[e.Bead] = e.Line
+		}
+		return out
+	}
+	plainLine := func(t *testing.T, got string) {
+		t.Helper()
+		if !strings.HasPrefix(got, "gt-plain: would sling to gastown on ") {
+			t.Errorf("gt-plain line = %q, want the would-sling line", got)
+		}
+		if strings.Contains(got, "inheritance") {
+			t.Errorf("gt-plain line = %q, want no inheritance note: it blocks nothing", got)
+		}
+	}
+
+	t.Run("a blocker names the priority and source it inherited", func(t *testing.T) {
+		blocked := []*beads.Issue{{ID: "gt-blocked", Priority: 0, BlockedBy: []string{"gt-blocker"}}}
+		got := lines(t, inheritedSeam([]string{"gastown"}, func(string) ([]*beads.Issue, error) { return blocked, nil }))
+		if want := "; P0 by inheritance from gt-blocked"; !strings.HasSuffix(got["gt-blocker"], want) {
+			t.Errorf("gt-blocker line = %q, want the %q suffix", got["gt-blocker"], want)
+		}
+		plainLine(t, got["gt-plain"])
+	})
+
+	t.Run("an entry that does not beat the candidate's own priority leaves the line unchanged", func(t *testing.T) {
+		seam := func() (map[string]specdispatch.Inherited, map[string]error) {
+			return map[string]specdispatch.Inherited{"gt-blocker": {Priority: 2, From: "gt-blocked"}}, nil
+		}
+		got := lines(t, seam)
+		if strings.Contains(got["gt-blocker"], "inheritance") {
+			t.Errorf("gt-blocker line = %q, want no note: P2 is its own priority", got["gt-blocker"])
+		}
+		plainLine(t, got["gt-plain"])
+	})
+}
+
 // TestSpecDispatchResumesARecordedBranch: a bead the patrol tick readied after
 // its polecat died is slung onto the branch its work survives on, and the tick
 // line names it (gt-gzhin.3).

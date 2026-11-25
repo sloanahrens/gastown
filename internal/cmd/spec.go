@@ -3396,6 +3396,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if overrunNote != "" {
 				entry.Line += "; " + overrunNote
 			}
+			// The candidate was ranked at the better of its own priority and
+			// the priority it inherits as a blocker (gt-bqdwtb), so the line
+			// says where that rank came from (gt-e1rbft).
+			entry.Line += specInheritedNote(c.Spec.ID, c.Spec.Priority, read.Inherited)
 			report.Dispatched = append(report.Dispatched, entry)
 			slated[id] = true
 			budget.Bump(seat.Agent, budget.Now)
@@ -4174,6 +4178,19 @@ func specResumeNote(resume, gone string) string {
 		return "; resume branch " + gone + " gone"
 	}
 	return ""
+}
+
+// specInheritedNote names the effective priority a blocker took from the bead
+// it holds up, for the dry run's would-sling line (gt-e1rbft). Only an entry
+// that beats the candidate's own priority is named: that is the condition
+// specdispatch.OrderWith ranks by, so a candidate the seam saw but did not
+// boost, or one it saw not at all, reads as unchanged.
+func specInheritedNote(id string, own int, inherited map[string]specdispatch.Inherited) string {
+	e, ok := inherited[id]
+	if !ok || e.Priority >= own {
+		return ""
+	}
+	return fmt.Sprintf("; P%d by inheritance from %s", e.Priority, e.From)
 }
 
 func isSpecSlingRefusal(err error) bool {
