@@ -876,7 +876,7 @@ func (r *omReader) parseLogLine(line string) {
 	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
 		lint, gate, om := omStageTimes(m[3])
-		_, _, reused := omStageReused(m[3])
+		reused := strings.Contains(m[3], omReusedMarker)
 		r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om, Reused: reused})
 		return
 	}

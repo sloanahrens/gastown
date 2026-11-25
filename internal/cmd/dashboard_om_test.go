@@ -739,6 +739,9 @@ func TestReviewPoolOMStageReusedFlag(t *testing.T) {
 		reused bool
 	}{
 		{"reused form", "ci 1m32s, om reused (2m31s, 14m0s old)", true},
+		{"malformed cost still reused", "ci 1m32s, om reused (x, 14m0s old)", true},
+		{"negative age still reused", "ci 1m32s, om reused (2m31s, -14m0s old)", true},
+		{"negative cost still reused", "ci 1m32s, om reused (-2m31s, 14m0s old)", true},
 		{"plain om line", "lint 3s, gate 1m, om 20s", false},
 		{"waiver form", "ci 1m32s, om skipped (overseer-reviewed)", false},
 		{"skipped gate", "ci skipped (om rejected), om 12s", false},
