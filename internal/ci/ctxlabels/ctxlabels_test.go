@@ -24,7 +24,7 @@ const (
 	// other is a commit the context must not be staged at.
 	other = "fedcba9876543210fedcba9876543210fedcba98"
 	// bdPin is the bd commit the polecat image is built from.
-	bdPin = "c1efb992c9ee42046f9a6188625b11fe88e05f53"
+	bdPin = "bf42f9afaf4d7f67ec014f7e52d61a3b5ed01a32"
 	// floor is the Go floor the image build takes.
 	floor = "1.10.0"
 )
