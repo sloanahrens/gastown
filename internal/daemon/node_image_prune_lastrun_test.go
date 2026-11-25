@@ -18,6 +18,41 @@ func TestNodeImagePruneLastMissingFileReadsEmpty(t *testing.T) {
 	}
 }
 
+// writeLastRecord writes raw record bytes into the town's runtime directory,
+// bypassing the write's validation, so a test can pin how the read treats a
+// file it did not write itself.
+func writeLastRecord(t *testing.T, town, content string) {
+	t.Helper()
+	dir := filepath.Join(town, ".runtime")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, nodeImagePruneLastFile), []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+// Whitespace around the record belongs to the file, not to the id: a trailing
+// newline, spaces around the id and a trailing carriage return all read back as
+// the bare id, so the prune compares the id it recorded.
+func TestNodeImagePruneLastReadTrims(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ name, content string }{
+		{"trailing newline", "run-1_ok\n"},
+		{"surrounding spaces", "  run-1_ok  "},
+		{"trailing carriage return", "run-1_ok\r"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			town := t.TempDir()
+			writeLastRecord(t, town, tt.content)
+			if id, err := readNodeImagePruneLast(town); err != nil || id != "run-1_ok" {
+				t.Fatalf("readNodeImagePruneLast() = %q, %v, want %q", id, err, "run-1_ok")
+			}
+		})
+	}
+}
+
 // A written id reads back, and the file holds it at mode 0600.
 func TestNodeImagePruneLastRoundTrip(t *testing.T) {
 	t.Parallel()
