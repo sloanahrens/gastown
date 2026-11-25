@@ -5636,3 +5636,26 @@ func TestTickEffRecordRigReadNilGuards(t *testing.T) {
 		}
 	})
 }
+
+// TestTickEffRecordRigReadAbsentRig: a rig the tick holds no hashes for (absent from
+// a non-nil heads) is recorded as nothing, not as an empty hash that would read
+// the board as unknown, and a rig the tick does hold still records (gt-314i6w).
+func TestTickEffRecordRigReadAbsentRig(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	heads := map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}}
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+
+	recordRigRead(memory, heads, "om", 3, at)
+	recordRigRead(memory, heads, "gastown", 2, at)
+
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	if got, ok := memory.rigs["om"]; ok {
+		t.Errorf("recorded %+v for om, absent from heads, want nothing", got)
+	}
+	want := specRigRead{Head: "g1", Working: "g2", At: at, Candidates: 2}
+	if got := memory.rigs["gastown"]; got != want {
+		t.Errorf("gastown recorded %+v, want %+v", got, want)
+	}
+}
