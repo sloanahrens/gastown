@@ -26,3 +26,17 @@ func reportPatrolScanDue(dec patrolDueDecision, logf func(string, ...any)) bool 
 func (d *Daemon) patrolScanDue(now time.Time) patrolDueDecision {
 	return evaluatePatrolDue(d.config.TownRoot, "patrol_scan", d.patrolScanRun.last(), now, patrolScanInterval(d.patrol()))
 }
+
+// triggerPatrolScanIfDue starts the patrol_scan tick only when the patrol is
+// active and its due decision says so, and reports whether a tick started
+// (gt-76xdws). An inactive patrol returns before any decision is read, and a
+// tick that is not due is logged and not started.
+func (d *Daemon) triggerPatrolScanIfDue() bool {
+	if !d.isPatrolActive("patrol_scan") {
+		return false
+	}
+	if !reportPatrolScanDue(d.patrolScanDue(time.Now()), d.logger.Printf) {
+		return false
+	}
+	return d.triggerPatrolScan()
+}
