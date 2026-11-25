@@ -851,6 +851,73 @@ func TestProvisionOrderFinalPatch(t *testing.T) {
 	}
 }
 
+// TestProvisionOrderFinalPatchFails: a run that fails at the final rule patch leaves the
+// repository on the closed rule with every grant already made, so a provision that stops
+// part way never leaves main open; a repeat converges to the final rule, and a repeat of
+// that clean state sends no write (gt-fn9e6.23).
+func TestProvisionOrderFinalPatchFails(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+
+	// The final patch is the PATCH of the main rule; every earlier write succeeds.
+	failed := runProvisioning(t, failingRoute{next: f, match: "/branch_protections/" + fixtureMainRule, status: http.StatusInternalServerError}, files, nil, "--repo", protectionRepo)
+	if failed.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", failed.code, ExitFailure, failed.shown())
+	}
+	if !strings.Contains(failed.logs, "PATCH /repos/"+protectionRepo+"/branch_protections/"+fixtureMainRule+": unexpected HTTP 500") {
+		t.Errorf("logs = %q, want the failed final patch named", failed.shown())
+	}
+	merged := baseEnv()
+	opts, err := Parse([]string{"--repo", protectionRepo}, func(name string) string { return merged[name] })
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rule := f.Rule(protectionRepo, fixtureMainRule)
+	if rule == nil {
+		t.Fatalf("main rule absent after a failed final patch, want the closed rule in place")
+	}
+	if !carries(rule, ClosedMainRule(*opts)) {
+		t.Errorf("main rule = %v, want the closed form %v", rule, ClosedMainRule(*opts))
+	}
+	if carries(rule, MainRule(*opts)) {
+		t.Errorf("main rule = %v, want the closed form: the final patch did not take", rule)
+	}
+	for _, want := range []struct{ role, perm string }{
+		{"polecat", permissionWrite},
+		{"landing", permissionWrite},
+		{"registry", ""},
+	} {
+		if got := f.Permission(protectionRepo, DefaultBotPrefix+want.role); got != want.perm {
+			t.Errorf("%s holds %q, want %q: the grants come before the final patch", DefaultBotPrefix+want.role, got, want.perm)
+		}
+	}
+
+	// A repeat over that state patches the closed rule into the final one.
+	before := len(f.CallLog())
+	repeat := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
+	if repeat.code != ExitOK {
+		t.Fatalf("repeat run = %d, want %d (logs: %s)", repeat.code, ExitOK, repeat.shown())
+	}
+	if got := countCalls(f.CallLog()[before:], http.MethodPatch, "/branch_protections/"+fixtureMainRule); got != 1 {
+		t.Errorf("PATCHes of the main rule on the repeat = %d, want 1", got)
+	}
+	if rule = f.Rule(protectionRepo, fixtureMainRule); rule == nil || !carries(rule, MainRule(*opts)) {
+		t.Errorf("main rule after the repeat = %v, want the final form %v", rule, MainRule(*opts))
+	}
+
+	// A repeat of the clean state sends no write.
+	before = len(f.CallLog())
+	again := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
+	if again.code != ExitOK {
+		t.Fatalf("second repeat = %d, want %d (logs: %s)", again.code, ExitOK, again.shown())
+	}
+	if writes := nonGET(f.CallLog()[before:]); len(writes) != 0 {
+		t.Errorf("second repeat sent writes %v, want none", writes)
+	}
+}
+
 // TestRunProtectsBeforeAccess: the closed main rule is written before the first collaborator
 // grant, and the final rule, which names the landing bot, only after the grant that makes it
 // a collaborator, which Forgejo requires (gt-fn9e6.23).
