@@ -1275,8 +1275,8 @@ func deadSeatClass(state poolSeatState) string {
 // worth a read. hookedBead is the live work the seat's disposition read names
 // for its hook, so a running sling for that bead and this seat count once
 // (gt-75fma5); a seat whose disposition could not be read passes "". class is
-// the seat's disposition class (deadSeatClass), or deadClassUnread when it was
-// not read.
+// the seat's disposition class as deadSeatClass names it, and a seat whose
+// state read failed passes deadClassUnread.
 func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead, class string, now time.Time) poolSession {
 	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 	stale := parkedStale(townRoot, rigName, name, now)
