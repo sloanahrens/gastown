@@ -551,6 +551,80 @@ func TestEnsureClosedRuleKeeps(t *testing.T) {
 	}
 }
 
+// TestEnsureClosedRuleRefusesTeams checks that a held main rule naming a team on the push or the
+// merge whitelist is neither closed nor final: EnsureClosedRule refuses it and sends no write. A
+// rule whose team lists are absent or empty is still left alone.
+func TestEnsureClosedRuleRefusesTeams(t *testing.T) {
+	t.Parallel()
+	const fixtureTeam = "release-team"
+	cases := []struct {
+		name    string
+		seed    func(t *testing.T, opts Options) map[string]any
+		wantErr bool
+	}{
+		{
+			name: "closed rule with a merge team",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				rule := ClosedMainRule(opts)
+				rule["merge_whitelist_teams"] = []string{fixtureTeam}
+				return servedRule(t, rule)
+			},
+			wantErr: true,
+		},
+		{
+			name: "final rule with a push team",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				rule := MainRule(opts)
+				rule["push_whitelist_teams"] = []string{fixtureTeam}
+				return servedRule(t, rule)
+			},
+			wantErr: true,
+		},
+		{
+			name: "plain closed rule",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				return servedRule(t, ClosedMainRule(opts))
+			},
+		},
+		{
+			name: "closed rule with empty team lists",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				rule := ClosedMainRule(opts)
+				rule["push_whitelist_teams"] = []string{}
+				rule["merge_whitelist_teams"] = []string{}
+				return servedRule(t, rule)
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			opts := testOptions()
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
+			seedRule(t, f, protectionRepo, c.seed(t, opts))
+			var logs []string
+			p := userProvisioner(f, false, &logs)
+			err := p.EnsureClosedRule(protectionRepo, opts)
+			if n := len(f.Writes()); n != 0 {
+				t.Fatalf("a held rule sent %d writes, want none", n)
+			}
+			if c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "branch protection main on acme/rig is neither closed nor final") {
+					t.Fatalf("EnsureClosedRule = %v, want the neither closed nor final error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnsureClosedRule = %v, want the rule left alone", err)
+			}
+			if !strings.Contains(strings.Join(logs, "\n"), "branch protection main on acme/rig is already closed or final") {
+				t.Fatalf("logged %q, want a line saying the rule is already closed or final", logs)
+			}
+		})
+	}
+}
+
 // TestEnsureClosedRuleVerifiesTheReply checks that the closed rule's create is judged by its
 // own reply: a complete reply passes, and a 201 whose reply lacks a field of the closed body
 // fails the run instead of passing as set.

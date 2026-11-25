@@ -94,7 +94,8 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 }
 
 // EnsureClosedRule leaves a closed or final main rule alone, refuses any other existing one, and
-// creates the closed rule otherwise, so a run that fails part way never leaves main open.
+// creates the closed rule otherwise, so a run that fails part way never leaves main open. A rule
+// naming a team on either whitelist is not closed or final: that team can still push or merge.
 func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -107,7 +108,7 @@ func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 		return err
 	}
 	if held := findRule(rules, rule); held != nil {
-		if carries(held, ClosedMainRule(opts)) || carries(held, MainRule(opts)) {
+		if heldIsExactly(held, ClosedMainRule(opts)) || heldIsExactly(held, MainRule(opts)) {
 			p.logf("branch protection %s on %s is already closed or final", rule, repo)
 			return nil
 		}
@@ -198,6 +199,18 @@ func (p *Provisioner) verifyWrite(rule, repo string, resp []byte, body map[strin
 		return fmt.Errorf("the write for %s on %s did not take%s", rule, repo, p.Client.BodyTail(resp))
 	}
 	return nil
+}
+
+// heldIsExactly reports whether held is want with no team on either whitelist: it carries every
+// field of want, and push_whitelist_teams and merge_whitelist_teams are absent or empty. A held
+// rule that names a team on either list is not closed or final, because that team can still push
+// or merge however the rest of the body reads.
+func heldIsExactly(held, want map[string]any) bool {
+	if !carries(held, want) {
+		return false
+	}
+	return sameJSON(held["push_whitelist_teams"], []string{}) &&
+		sameJSON(held["merge_whitelist_teams"], []string{})
 }
 
 // carries reports whether have holds every field of want at the value want names.
