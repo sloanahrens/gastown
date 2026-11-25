@@ -227,9 +227,10 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 // Existence is checked per database (see agentBeadScope): a rig agent bead that
 // exists only in the town database is treated as missing and recreated in its
 // rig's database, so agent lookups that require rig-local beads work (gt-abj).
+// An unread agent-bead scope refuses the whole fix before any write (gt-rhu7h3).
 func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
-	// Collect errors instead of failing on first — one broken rig shouldn't
-	// block fixes for all other rigs.
+	// Collect errors instead of failing on first — one rig's failed write
+	// shouldn't block fixes for all other rigs.
 	var errs []error
 
 	// NewRigLocal pins each fix to its own database. Spawn paths create
@@ -344,6 +345,19 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		return errors.Join(errs...)
 	}
 
+	// Read every rig's scope before fixing anything: an unread scope is not an
+	// empty one, so a failed read refuses the whole fix rather than recreating
+	// every agent the database failed to list (gt-rhu7h3).
+	rigScopes := make(map[string]agentBeadScope) // key: prefix
+	for prefix, info := range prefixToRig {
+		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
+		scope, err := loadAgentBeadScope(ctx.beadsRigLocal(rigBeadsPath))
+		if err != nil {
+			return fmt.Errorf("agent beads could not be read: rig beads %s: %w", rigBeadsPath, err)
+		}
+		rigScopes[prefix] = scope
+	}
+
 	// Fix agents for each rig — existence checked against that rig's own
 	// database, so town-level duplicates don't mask missing rig-local beads.
 	for prefix, info := range prefixToRig {
@@ -352,9 +366,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		// NewRigLocal comment above); a routed wrapper would re-target the town DB.
 		bd := ctx.beadsRigLocal(rigBeadsPath)
 		rigName := info.name
-		// An unread scope is still an empty one here: bead gt-rhu7h3 makes
-		// the fix refuse before creating anything.
-		rigScope, _ := loadAgentBeadScope(bd)
+		rigScope := rigScopes[prefix]
 
 		// Same as Run: an unreadable crew directory creates nothing rather
 		// than guessing which crew members exist (gt-ro1lc).
