@@ -128,6 +128,66 @@ func TestFindOpenBundle(t *testing.T) {
 	}
 }
 
+// TestFollowupBundleCutKeysOfOnePackageGetOwnBundles: two cut keys of one package
+// and day never share a bundle. The bundle is named by the cut key, so a bead
+// opened for one key is never the bundle the other key appends to (gt-841oj0).
+func TestFollowupBundleCutKeysOfOnePackageGetOwnBundles(t *testing.T) {
+	t.Parallel()
+	day := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		a, b string
+	}{
+		{"two source files in one package", "internal/land/a.go", "internal/land/b.go"},
+		{"a source file and the package it sits in", "internal/land/a.go", "internal/land"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if slices.Equal(BundleLabels(day, tc.a), BundleLabels(day, tc.b)) {
+				t.Fatalf("BundleLabels(%q) = BundleLabels(%q) = %q, want two bundles", tc.a, tc.b, BundleLabels(day, tc.a))
+			}
+			bead := bundleBead("a", "open", day, BundleLabels(day, tc.a), 1)
+			if got, ok := FindOpenBundle([]ExistingFollowup{bead}, day, tc.b); ok {
+				t.Errorf("FindOpenBundle(bead of %q) for %q found %q, want no bundle", tc.a, tc.b, got.ID)
+			}
+			if got, ok := FindOpenBundle([]ExistingFollowup{bead}, day, tc.a); !ok || got.ID != "a" {
+				t.Errorf("FindOpenBundle(bead of %q) for %q found %q (%v), want the bead", tc.a, tc.a, got.ID, ok)
+			}
+		})
+	}
+}
+
+// TestFollowupBundleKeyOnAnotherDayIsNotFound: a bead wearing the labels of a
+// cut key on another UTC day is not that key's bundle today. The same-day row
+// is the control: the bead is found when the day matches (gt-841oj0).
+func TestFollowupBundleKeyOnAnotherDayIsNotFound(t *testing.T) {
+	t.Parallel()
+	day := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	const key = "internal/land/a.go"
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"a bead of the key on the day is found", BundleLabels(day, key), "a"},
+		{"a bead of the key on the next day is not found", BundleLabels(day.AddDate(0, 0, 1), key), ""},
+		{"a bead of the key on the previous day is not found", BundleLabels(day.AddDate(0, 0, -1), key), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := []ExistingFollowup{bundleBead("a", "open", day.Add(-time.Hour), tc.labels, 1)}
+			got, ok := FindOpenBundle(existing, day, key)
+			gotID := ""
+			if ok {
+				gotID = got.ID
+			}
+			if gotID != tc.want {
+				t.Errorf("FindOpenBundle(key %q on %v) = %q, want %q", key, day, gotID, tc.want)
+			}
+		})
+	}
+}
+
 // TestFindOpenBundleKeepsTheEmptyPackageApart: a finding with no path, or one in
 // a file at the repository root, is the group "" and gets its own bundle, which
 // a bead of a real package never satisfies (gt-vuy738).

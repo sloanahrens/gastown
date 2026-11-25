@@ -24,26 +24,26 @@ const (
 	FollowUpGroupLabelPrefix = "om-grp:"
 )
 
-// BundleLabels are the labels that identify the follow-up bundle for pkg on the
+// BundleLabels are the labels that identify the follow-up bundle for key on the
 // UTC day of day: the day as YYYY-MM-DD in UTC, and the first 12 hex digits of
-// sha256(pkg). pkg is the group followupPackage names for a finding; the empty
-// package hashes like any other, so it is a group of its own.
-func BundleLabels(day time.Time, pkg string) []string {
-	sum := sha256.Sum256([]byte(pkg))
+// sha256(key). key is the cut key of a follow-up group (followupCutKey, the Key
+// of a followupGroup), so two source files of one package get two bundles.
+func BundleLabels(day time.Time, key string) []string {
+	sum := sha256.Sum256([]byte(key))
 	return []string{
 		FollowUpDayLabelPrefix + day.UTC().Format(time.DateOnly),
 		FollowUpGroupLabelPrefix + hex.EncodeToString(sum[:])[:12],
 	}
 }
 
-// FindOpenBundle is the follow-up a landing for pkg on the UTC day of day appends
+// FindOpenBundle is the follow-up a landing for key on the UTC day of day appends
 // its findings to: the oldest bead with Status "open" that wears both
 // BundleLabels and carries fewer om-fp findings than one worker takes. A bead
 // in progress, hooked or closed is never appended to. A bead whose CreatedAt did
 // not parse is the zero time and so sorts as the oldest; both bundle labels
-// still hold it to the same day and package.
-func FindOpenBundle(existing []ExistingFollowup, day time.Time, pkg string) (ExistingFollowup, bool) {
-	want := BundleLabels(day, pkg)
+// still hold it to the same day and key.
+func FindOpenBundle(existing []ExistingFollowup, day time.Time, key string) (ExistingFollowup, bool) {
+	want := BundleLabels(day, key)
 	var best ExistingFollowup
 	found := false
 	for _, e := range existing {
