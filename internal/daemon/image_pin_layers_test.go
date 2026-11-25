@@ -901,6 +901,66 @@ func TestImagePinLayersStartRecordSkipsToday(t *testing.T) {
 	}
 }
 
+// TestImagePinLayersStartFailureRetriesNextStart: a start check whose run seam
+// fails leaves the last-run record naming the day before, logs the error, and
+// the next start asks the seam again. The record must not name today after a
+// failed run, or the next start would read the day as run and skip it.
+func TestImagePinLayersStartFailureRetriesNextStart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := imagePinDurabilityNoon(t, "2026-11-16")
+	previous := imagePinDurabilityNoon(t, "2026-11-15")
+	record := imagePinLayersLastRunPath(town)
+	if err := writeImagePinLayersLastRun(record, previous); err != nil {
+		t.Fatalf("seeding the previous day's last-run record: %v", err)
+	}
+	const runErr = "registry unreachable"
+	var calls atomic.Int32
+	failFirst := func(context.Context, time.Time) error {
+		if calls.Add(1) == 1 {
+			return errors.New(runErr)
+		}
+		return nil
+	}
+	startCheck := func(logged io.Writer) {
+		t.Helper()
+		d := imagePinDurabilityTestDaemon(t, town, logged)
+		d.clock = clockwork.NewFakeClockAt(now)
+		d.imagePinLayersRun = failFirst
+		d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+			return make(chan time.Time), func() {}
+		}
+		_, stop := d.startImagePinLayersTicker()
+		if stop == nil {
+			t.Fatal("the enabled patrol started no ticker")
+		}
+		d.stopImagePinLayersPatrol(stop)
+	}
+
+	var first bytes.Buffer
+	startCheck(&first)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("the failing start called the run seam %d times, want 1", got)
+	}
+	if !strings.Contains(first.String(), runErr) {
+		t.Errorf("the failing start logged %q, want the run's error", first.String())
+	}
+	last, found, err := readImagePinLayersLastRun(record)
+	if err != nil || !found || !last.Equal(previous) {
+		t.Errorf("after the failing start the last-run record names %v (found %v, err %v), want it unchanged at %v", last, found, err, previous)
+	}
+
+	var second bytes.Buffer
+	startCheck(&second)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("the next start left the run seam at %d calls, want it called again (2)", got)
+	}
+	last, found, err = readImagePinLayersLastRun(record)
+	if err != nil || !found || imagePinLayersDay(last) != "2026-11-16" {
+		t.Errorf("after the retried start the last-run record names %v (found %v, err %v), want today", last, found, err)
+	}
+}
+
 // TestImagePinLayersStartFailureOffInstallsNothing: with the image_pin_layers
 // patrol not enabled, starting the ticker asks for no ticker, installs no run
 // seam, calls no run seam, logs nothing and writes no last-run record. Each
