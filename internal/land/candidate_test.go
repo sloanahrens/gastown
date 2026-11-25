@@ -149,6 +149,16 @@ func fastGate(client CandidateStatus) *CandidateGate {
 	}
 }
 
+// silenceGate is fastGate with the 200 ms wait window set explicitly. Only a
+// test that asserts the window closing (ErrCISilence as the expected ending)
+// may use it: it waits the window out by design, so the window must stay short
+// however long fastGate's is made.
+func silenceGate(client CandidateStatus) *CandidateGate {
+	gate := fastGate(client)
+	gate.WaitTimeout = 200 * time.Millisecond
+	return gate
+}
+
 // passGate is fastGate with a window a passing run can use. A fake that reports
 // success ends the wait at once, so the long window costs no time on a pass,
 // while a 200 ms window lets a loaded host time out a gate still reporting
@@ -999,7 +1009,7 @@ func TestCandidateGateSilenceIsNoVerdict(t *testing.T) {
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(forgejo.StatePending, "ci / gate (push)")}}
-	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	res := silenceGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.State != CandidateSilent {
 		t.Fatalf("state = %v, want silent", res.State)
 	}
@@ -1028,7 +1038,7 @@ func TestCandidateGateWaitIs20Minutes(t *testing.T) {
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	// No statuses at all: the fake reports nothing however long the gate polls.
 	client := &fakeForgejo{}
-	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	res := silenceGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.State != CandidateSilent {
 		t.Fatalf("state = %v, want the no-verdict state", res.State)
 	}
@@ -1749,7 +1759,7 @@ func TestCandidateGateRecordsNoSilence(t *testing.T) {
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	var calls int
-	gate := fastGate(&fakeForgejo{})
+	gate := silenceGate(&fakeForgejo{})
 	gate.Recorder = func(GateRun) { calls++ }
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
