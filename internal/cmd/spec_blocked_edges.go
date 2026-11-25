@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // blockedEdges is one rig's blocked-issue read, shaped for priority inheritance.
@@ -60,6 +61,20 @@ func specMergeBlockedEdges(perRig []blockedEdges) blockedEdges {
 		}
 	}
 	return merged
+}
+
+// inheritedFromRigs gives each blocker the best priority of what it holds up,
+// across every rig's blocked issues. perRig maps a rig name to that rig's
+// blocked issues as bd reports them. A ready blocker is on no blocked list, so
+// it is in no rig's Own map; it still gets an entry when a blocked issue it
+// holds up has a known priority. The entry names that issue as its source.
+func inheritedFromRigs(perRig map[string][]*beads.Issue) map[string]specdispatch.Inherited {
+	edges := make([]blockedEdges, 0, len(perRig))
+	for _, issues := range perRig {
+		edges = append(edges, specBlockedMaps(issues))
+	}
+	merged := specMergeBlockedEdges(edges)
+	return specdispatch.EffectivePriorities(merged.Own, merged.BlockedBy)
 }
 
 // appendNewIDs appends each id in ids that list does not already hold. Appending
