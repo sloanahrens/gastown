@@ -406,7 +406,10 @@ func parseTierSweepVerdicts(s string) []dashboard.TierSweepStage {
 //
 // The chosen cycle's finished tiers ride along: findSweepProgress names the
 // progress.json of its run under sweepRunsRoot, and readTierSweepProgress reads
-// it. Only the started reading knows the cycle's sha, so the fallback reading
+// it. That file also names the tier running now, which replaces the
+// stage-derived tier when it names one: the shared Job's stages are not one per
+// tier, so only the runner knows integration ended and race began (gt-u4o5rk).
+// Only the started reading knows the cycle's sha, so the fallback reading
 // carries none. A progress read that fails is returned with the run it belongs
 // to, for read to mark the section unavailable (gt-ph60ia).
 func (r *tierSweepReader) running(now time.Time) (*dashboard.TierSweepRun, error) {
@@ -458,6 +461,12 @@ func (r *tierSweepReader) running(now time.Time) (*dashboard.TierSweepRun, error
 	}
 	if found {
 		best.Stages = progress.Tiers
+		// The runner names the tier it is in now, the tier in flight after the
+		// last one it finished. A file naming none has finished every tier, so
+		// it leaves the reading the log gave (gt-u4o5rk).
+		if progress.Running != "" {
+			best.Tier = progress.Running
+		}
 	}
 	return best, nil
 }
