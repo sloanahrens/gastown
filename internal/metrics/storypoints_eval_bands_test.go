@@ -21,7 +21,9 @@ func bandsByLabel(t *testing.T, bands []EvalBand) map[string]EvalBand {
 }
 
 func TestEvalBands(t *testing.T) {
+	t.Parallel()
 	t.Run("edges", func(t *testing.T) {
+		t.Parallel()
 		// Each blended value lands in exactly one band, the one its label names.
 		cases := []struct {
 			blended float64
@@ -51,6 +53,7 @@ func TestEvalBands(t *testing.T) {
 	})
 
 	t.Run("fixture", func(t *testing.T) {
+		t.Parallel()
 		// Hand-computed figures. Every median and share is exact in float64.
 		rows := []EvalRow{
 			// under 6
@@ -168,6 +171,7 @@ func TestEvalBands(t *testing.T) {
 	})
 
 	t.Run("empty input", func(t *testing.T) {
+		t.Parallel()
 		byLabel := bandsByLabel(t, evalBands(nil))
 		for _, label := range evalBandLabels {
 			b := byLabel[label]
