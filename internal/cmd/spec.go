@@ -5212,7 +5212,11 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 // specCandidatesRetrying is specCandidatesWith plus retry, the read of a rig's
 // beads a killed-at-its-bound sling left labeled and whose retries remain: the
 // tick slings such a bead again instead of waiting for a person (gt-vaivp).
-func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry) specBoardRead {
+//
+// skip is the quiet-rig seam (gt-w2xa0f). It is variadic so the existing
+// callers keep compiling. The rig loop does not consult it yet, so every rig
+// is read; gt-svzybb wires the skip answer into the loop.
+func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip ...func(rig string) bool) specBoardRead { //nolint:unparam // skip is the seam gt-svzybb consumes; part 1 of gt-w2xa0f only adds it
 	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil)
 }
 

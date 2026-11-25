@@ -5138,3 +5138,39 @@ func TestSpecSlingParamsDriveSlingRunPastAContentOverlap(t *testing.T) {
 		})
 	}
 }
+
+// TestTickEffSkipNilReadsAllRigs: with skip nil the read still reads every rig
+// in the registry, as it did before the quiet-rig seam (gt-w2xa0f).
+func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	rigs := map[string]config.RigEntry{"gastown": {}, "beads": {}, "gorge": {}, "longeye": {}}
+	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: rigs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name := range rigs {
+		if err := os.MkdirAll(filepath.Join(townRoot, name, ".beads", "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := map[string]int{}
+	board := func(rigPath string) ([]*beads.Issue, error) {
+		read[filepath.Base(rigPath)]++
+		return nil, nil
+	}
+	notDocked := func(string, string) (bool, string) { return false, "" }
+
+	got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, nil)
+	if len(got.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", got.Errors)
+	}
+	for name := range rigs {
+		if read[name] != 1 {
+			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", name, read[name], read)
+		}
+	}
+}
