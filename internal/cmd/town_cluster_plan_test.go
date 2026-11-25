@@ -19,6 +19,7 @@ import (
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // TestClusterShapePlanFlagsRefuses: each refusal names its cause and returns no
@@ -133,7 +134,7 @@ func planOut(t *testing.T) string { return filepath.Join(t.TempDir(), "plan") }
 func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, planTown(t), io.Discard), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	_, short := planID(planFilesIn(t, dir))
@@ -185,7 +186,7 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	t.Parallel()
 	town := planTown(t)
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	files := planFilesIn(t, dir)
@@ -202,13 +203,13 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	}
 	for i, f := range files {
 		sum := sha256.Sum256(f.Data)
-		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:])}
+		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f)}
 		if rec.Files[i] != want {
 			t.Errorf("plan.json file %d = %+v, want %+v", i, rec.Files[i], want)
 		}
 	}
 	again := planOut(t)
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, again, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, again, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan again: %v", err)
 	}
 	if _, againBody := readPlanRecord(t, again); !bytes.Equal(body, againBody) {
@@ -267,7 +268,7 @@ func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T)
 			t.Parallel()
 			d, dir, writeJSON := tc.setup(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(d, out, dir, writeJSON)
+			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, writeJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
 			}
@@ -296,7 +297,7 @@ func TestClusterShapePlanIdMakesOnlyReadCalls(t *testing.T) {
 		}
 		return []byte(sbxEngineHelmOutput), nil
 	}
-	if err := runTownClusterPlan(d, &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), d, planKubectl(t), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
 		t.Fatalf("the plan failed under a runner that fails every non-read call: %v", err)
 	}
 	for _, c := range calls {
@@ -339,7 +340,7 @@ func TestClusterShapePlanIdRefusesAndFailsClosed(t *testing.T) {
 			t.Parallel()
 			d, dir := tc.setup(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(d, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, atomicfile.WriteJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
 			}
@@ -389,7 +390,7 @@ func TestClusterShapePlanIdWritesNothingOutsideOut(t *testing.T) {
 	t.Parallel()
 	town := planTown(t)
 	before := townSnapshot(t, town)
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	if after := townSnapshot(t, town); !reflect.DeepEqual(after, before) {
@@ -409,7 +410,7 @@ func TestClusterShapePlanIdIncludesTheStaticSet(t *testing.T) {
 		t.Fatalf("recording the render flags: %v", err)
 	}
 	dir := planOut(t)
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	for _, f := range planFilesIn(t, dir) {
@@ -434,7 +435,7 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 	town := planTown(t)
 	before := townSnapshot(t, town)
 	out := &bytes.Buffer{}
-	err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), out, "", atomicfile.WriteJSON)
+	err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, "", atomicfile.WriteJSON)
 	if err == nil || !strings.Contains(err.Error(), "--out is required") {
 		t.Fatalf("runTownClusterPlan with an empty --out = %v, want the --out is required refusal", err)
 	}
@@ -443,5 +444,149 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 	}
 	if after := townSnapshot(t, town); !reflect.DeepEqual(after, before) {
 		t.Fatalf("the refused plan changed the town:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// planLiveAnswer is the live Deployment kubectl prints, with revision annotated.
+func planLiveAnswer(t *testing.T, resource, revision string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"metadata": map[string]any{
+		"name":        strings.TrimPrefix(resource, "deployment/"),
+		"annotations": map[string]string{"deployment.kubernetes.io/revision": revision},
+	}})
+	if err != nil {
+		t.Fatalf("encoding the live answer: %v", err)
+	}
+	return string(body)
+}
+
+// planKubectlAnswering is the plan's cluster read: each call must be the drift
+// read's get of one Deployment, and answer gives its output and exit.
+func planKubectlAnswering(t *testing.T, answer func(resource string) (string, int, error)) update.RunFunc {
+	t.Helper()
+	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+		get := len(args) == 7 && args[0] == "get" && strings.HasPrefix(args[1], "deployment/") && args[2] == "-n" && args[4] == "--ignore-not-found" && args[5] == "-o" && args[6] == "json"
+		if name != "kubectl" || !get {
+			t.Fatalf("the plan ran %s %q, want only a get of one Deployment", name, args)
+		}
+		return answer(args[1])
+	}
+}
+
+// planKubectl answers each Deployment with the revision rev-<name>, which
+// planWantRevision expects for the rendered Deployment.
+func planKubectl(t *testing.T) update.RunFunc {
+	t.Helper()
+	return planKubectlAnswering(t, func(resource string) (string, int, error) {
+		return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+	})
+}
+
+// planWantRevision is the revision plan.json records for a rendered file: rev-<name>
+// for a Deployment, and none for any other kind.
+func planWantRevision(t *testing.T, f planFile) string {
+	t.Helper()
+	var head struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(f.Data, &head); err != nil {
+		t.Fatalf("decoding the planned file %s: %v", f.Name, err)
+	}
+	if head.Kind != "Deployment" {
+		return ""
+	}
+	return "rev-" + head.Metadata.Name
+}
+
+// TestClusterShapePlanLiveRevisions: plan.json records each rendered Deployment's
+// revision as the cluster reads it, one get per Deployment and no other call.
+func TestClusterShapePlanLiveRevisions(t *testing.T) {
+	t.Parallel()
+	var reads []string
+	kube := planKubectlAnswering(t, func(resource string) (string, int, error) {
+		reads = append(reads, resource)
+		return planLiveAnswer(t, resource, "rev-"+strings.TrimPrefix(resource, "deployment/")), 0, nil
+	})
+	dir := planOut(t)
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	files := planFilesIn(t, dir)
+	if len(rec.Files) != len(files) {
+		t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+	}
+	var deployments []string
+	for i, f := range files {
+		want := planWantRevision(t, f)
+		if rec.Files[i].Revision != want {
+			t.Errorf("plan.json revision for %s = %q, want %q", f.Name, rec.Files[i].Revision, want)
+		}
+		if want != "" {
+			deployments = append(deployments, "deployment/"+strings.TrimPrefix(want, "rev-"))
+		}
+	}
+	if len(deployments) == 0 {
+		t.Fatal("the plan rendered no Deployment, so no revision was recorded")
+	}
+	if !reflect.DeepEqual(reads, deployments) {
+		t.Fatalf("the plan read %v from the cluster, want one get per rendered Deployment %v", reads, deployments)
+	}
+}
+
+// TestClusterShapePlanLiveRefusesAndWritesNoPlan: each unreadable, absent or
+// revisionless Deployment refuses the plan, which prints no id and writes no plan.json.
+func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		answer func(resource string) (string, int, error)
+		want   string
+	}{
+		{"the live read exits nonzero", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
+		{"the cluster does not hold it", func(string) (string, int, error) { return "", 0, nil }, "does not hold"},
+		{"the live object has no revision", func(string) (string, int, error) { return `{"metadata":{}}`, 0, nil }, "has no revision annotation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := planOut(t)
+			out := &bytes.Buffer{}
+			kube := planKubectlAnswering(t, tc.answer)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", err)
+			}
+		})
+	}
+	t.Run("a rendered file has no readable kind", func(t *testing.T) {
+		t.Parallel()
+		_, err := planLiveRevision(context.Background(), planKubectl(t), []byte("kind: ["))
+		if err == nil || !strings.Contains(err.Error(), "cannot read a rendered file's kind") {
+			t.Fatalf("planLiveRevision = %v, want the unreadable-kind refusal", err)
+		}
+	})
+}
+
+// TestClusterShapePlanLongText: the command's help says the plan reads the
+// cluster's Deployments with get only and writes nothing to any cluster, and no
+// longer says that no cluster is contacted.
+func TestClusterShapePlanLongText(t *testing.T) {
+	t.Parallel()
+	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
+	if !strings.Contains(long, "reads the cluster's Deployments with get only and writes nothing to any cluster") {
+		t.Errorf("Long text = %q, want it to say the plan reads the cluster's Deployments with get only and writes nothing to any cluster", long)
+	}
+	if strings.Contains(long, "no cluster is contacted") {
+		t.Errorf("Long text = %q, still says no cluster is contacted", long)
 	}
 }
