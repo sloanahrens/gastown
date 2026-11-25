@@ -4193,7 +4193,8 @@ type ReviewPoolConfig struct {
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 
 	// ReuseExpiryStr is how long a reused review verdict stays valid, as a
-	// duration string (e.g. "30m"). Stored as written; nothing parses it yet.
+	// duration string (e.g. "30m"). ReviewPoolFor parses it; empty means
+	// reviewPoolDefaultExpiry.
 	ReuseExpiryStr string `json:"reuse_expiry,omitempty"`
 }
 
@@ -4204,16 +4205,23 @@ const reviewPoolDefaultMax = 3
 // reviewPoolMaxLimit is the largest max_concurrent the pool accepts.
 const reviewPoolMaxLimit = 8
 
-// reviewPoolExpiry is how long a reused review verdict stays valid. Until
-// reuse_expiry is read (gt-hf2nvz) every pool answers this constant.
-const reviewPoolExpiry = 45 * time.Minute
+// reviewPoolDefaultExpiry is how long a reused review verdict stays valid when
+// reuse_expiry is empty: a stored review older than that has seen too much
+// change on main.
+const reviewPoolDefaultExpiry = 45 * time.Minute
+
+// reviewPoolMaxExpiry is the largest reuse_expiry the pool accepts.
+const reviewPoolMaxExpiry = 24 * time.Hour
 
 // ReviewPoolFor answers whether the review pool is on for rig, how many reviews
 // may run at once, and how long a reused verdict stays valid. A nil config or
 // ReviewPool, and a rig not listed in Rigs, is off with no error. max_concurrent
 // is checked whenever the block is present: 0 gives reviewPoolDefaultMax, 1 to
 // 8 are kept, and anything else is an error with on false, so the caller leaves
-// the pool off and reports the error.
+// the pool off and reports the error. expiry comes from reuse_expiry: empty
+// gives reviewPoolDefaultExpiry, and a value that does not parse, is not
+// positive or is above reviewPoolMaxExpiry is likewise an error with on false.
+// Both checks hold for a rig not listed, so a bad value is never silent.
 func (c *LandingWorkerConfig) ReviewPoolFor(rig string) (on bool, max int, expiry time.Duration, err error) {
 	if c == nil || c.ReviewPool == nil {
 		return false, 0, 0, nil
@@ -4227,10 +4235,22 @@ func (c *LandingWorkerConfig) ReviewPoolFor(rig string) (on bool, max int, expir
 		return false, 0, 0, fmt.Errorf("patrols.landing_worker.review_pool.max_concurrent is %d: want 0 (default %d) or 1 to %d",
 			rp.MaxConcurrent, reviewPoolDefaultMax, reviewPoolMaxLimit)
 	}
+	expiry = reviewPoolDefaultExpiry
+	if rp.ReuseExpiryStr != "" {
+		expiry, err = time.ParseDuration(rp.ReuseExpiryStr)
+		if err != nil {
+			return false, 0, 0, fmt.Errorf("patrols.landing_worker.review_pool.reuse_expiry is %q: want a duration such as \"30m\"",
+				rp.ReuseExpiryStr)
+		}
+		if expiry <= 0 || expiry > reviewPoolMaxExpiry {
+			return false, 0, 0, fmt.Errorf("patrols.landing_worker.review_pool.reuse_expiry is %q: want more than 0 and at most %s",
+				rp.ReuseExpiryStr, reviewPoolMaxExpiry)
+		}
+	}
 	if !slices.Contains(rp.Rigs, rig) {
 		return false, 0, 0, nil
 	}
-	return true, max, reviewPoolExpiry, nil
+	return true, max, expiry, nil
 }
 
 // ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The

@@ -749,7 +749,7 @@ func TestReviewPoolConfigAbsentIsNil(t *testing.T) {
 
 // TestReviewPoolConfigOnOff pins who gets the review pool: a nil config, a nil
 // review_pool and a rig not listed are off with no error; a listed rig is on
-// for the constant 45m expiry.
+// for the default 45m expiry.
 func TestReviewPoolConfigOnOff(t *testing.T) {
 	t.Parallel()
 	pool := &ReviewPoolConfig{Rigs: []string{"gastown"}}
@@ -828,6 +828,71 @@ func TestReviewPoolConfigMax(t *testing.T) {
 			}
 			if !on || got != tc.want {
 				t.Errorf("max_concurrent %d: on = %v max = %d, want on with max %d", tc.max, on, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolConfigExpiry pins reuse_expiry: empty gives the 45m default,
+// and a valid positive duration up to 24h is kept as written.
+func TestReviewPoolConfigExpiry(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		expiry string
+		want   time.Duration
+	}{
+		"empty gives 45m": {"", 45 * time.Minute},
+		"2h is kept":      {"2h", 2 * time.Hour},
+		"24h is kept":     {"24h", 24 * time.Hour},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &LandingWorkerConfig{ReviewPool: &ReviewPoolConfig{
+				Rigs: []string{"gastown"}, ReuseExpiryStr: tc.expiry,
+			}}
+			on, _, got, err := cfg.ReviewPoolFor("gastown")
+			if err != nil {
+				t.Fatalf("reuse_expiry %q: %v", tc.expiry, err)
+			}
+			if !on || got != tc.want {
+				t.Errorf("reuse_expiry %q: on = %v expiry = %v, want on with %v", tc.expiry, on, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolConfigBadExpiry pins reuse_expiry's refusals: a value that does
+// not parse, is not positive or is above 24h is an error with the pool off.
+// The refusal holds even for a rig not listed, so a bad value is never silent.
+func TestReviewPoolConfigBadExpiry(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		expiry string
+		listed bool
+	}{
+		"soon does not parse":  {expiry: "soon", listed: true},
+		"-1h is not positive":  {expiry: "-1h", listed: true},
+		"0s is not positive":   {expiry: "0s", listed: true},
+		"48h is over the cap":  {expiry: "48h", listed: true},
+		"48h refused unlisted": {expiry: "48h", listed: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const rig = "gastown"
+			rigs := []string{"longeye"}
+			if tc.listed {
+				rigs = []string{rig}
+			}
+			cfg := &LandingWorkerConfig{ReviewPool: &ReviewPoolConfig{Rigs: rigs, ReuseExpiryStr: tc.expiry}}
+			on, max, expiry, err := cfg.ReviewPoolFor(rig)
+			if err == nil {
+				t.Fatalf("reuse_expiry %q: no error", tc.expiry)
+			}
+			if on || max != 0 || expiry != 0 {
+				t.Errorf("reuse_expiry %q: on = %v max = %d expiry = %v with an error, want off and zero values",
+					tc.expiry, on, max, expiry)
 			}
 		})
 	}
