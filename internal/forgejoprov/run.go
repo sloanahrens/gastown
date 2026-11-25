@@ -172,6 +172,9 @@ func provisionRepo(p *Provisioner, repo string, opts *Options) error {
 			return err
 		}
 	}
+	// The final rule comes only after the grants: Forgejo drops a merge whitelist entry for
+	// a login that is not yet a collaborator (gt-fn9e6.23), so the landing bot can be named
+	// by this patch and not by the closed rule written above.
 	if err := p.EnsureRule(repo, *opts); err != nil {
 		return err
 	}

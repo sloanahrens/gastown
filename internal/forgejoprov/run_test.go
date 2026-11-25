@@ -818,6 +818,39 @@ func TestProvisionOrderClosedFirst(t *testing.T) {
 	}
 }
 
+// TestProvisionOrderFinalPatch: a clean run ends with the final main rule, which patches the
+// landing bot onto the merge whitelist once the grants have made it a collaborator, and with
+// every role's grant in place (gt-fn9e6.23).
+func TestProvisionOrderFinalPatch(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	if res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo); res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	merged := baseEnv()
+	opts, err := Parse([]string{"--repo", protectionRepo}, func(name string) string { return merged[name] })
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rule := f.Rule(protectionRepo, fixtureMainRule)
+	if rule == nil {
+		t.Fatalf("main rule absent after a clean run, want the final rule")
+	}
+	if !carries(rule, MainRule(*opts)) {
+		t.Errorf("main rule = %v, want the final form %v", rule, MainRule(*opts))
+	}
+	for _, want := range []struct{ role, perm string }{
+		{"polecat", permissionWrite},
+		{"landing", permissionWrite},
+		{"registry", ""},
+	} {
+		if got := f.Permission(protectionRepo, DefaultBotPrefix+want.role); got != want.perm {
+			t.Errorf("%s holds %q, want %q", DefaultBotPrefix+want.role, got, want.perm)
+		}
+	}
+}
+
 // TestRunProtectsBeforeAccess: the closed main rule is written before the first collaborator
 // grant, and the final rule, which names the landing bot, only after the grant that makes it
 // a collaborator, which Forgejo requires (gt-fn9e6.23).
