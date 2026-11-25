@@ -3155,11 +3155,20 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 		var wispErr error
 		wisps, wispErr = b.listWispsByLabels([]string{label})
 		if wispErr != nil {
-			// An MR *is* the wisp carrying the label, so a failed wisps read is
-			// an unreadable merge queue, not an empty one. Degrading to the
-			// issues table would drop every live MR and read as no open merge
-			// request (gt-i9wzx).
-			return nil, markUnavailable(wispErr)
+			// A read token's bd sql is refused by the gateway, which would
+			// strand the dashboard's MR column; bd mol wisp list is a read the
+			// token may run, so that refusal alone falls back to it
+			// (gt-0iam89). An MR *is* the wisp carrying the label, so any
+			// other failed wisps read is an unreadable merge queue, not an
+			// empty one: degrading to the issues table would drop every live
+			// MR and read as no open merge request (gt-i9wzx).
+			if !gatewaySQLRefused(wispErr) {
+				return nil, markUnavailable(wispErr)
+			}
+			wisps, wispErr = b.mergeRequestWispsByLabel(label)
+			if wispErr != nil {
+				return nil, markUnavailable(wispErr)
+			}
 		}
 	}
 	return finishMergeRequests(b, issueResults, wisps, opts)
@@ -3193,6 +3202,28 @@ func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 		return nil, nil
 	}
 	return b.queryWisps(beadsql.WispsWithLabels(labels))
+}
+
+// mergeRequestWispsByLabel is ListMergeRequests' fallback for a read token the
+// gateway refuses bd sql to (gt-0iam89): it keeps the wisps carrying label,
+// the set listWispsByLabels' join returns, and --all leaves the status filter
+// to finishMergeRequests, as over the sql and cached reads.
+func (b *Beads) mergeRequestWispsByLabel(label string) ([]*Issue, error) {
+	out, err := b.run("mol", "wisp", "list", "--json", "--all")
+	if err != nil {
+		return nil, err
+	}
+	all, err := parseMolWispList(out)
+	if err != nil {
+		return nil, err
+	}
+	labeled := make([]*Issue, 0, len(all))
+	for _, wisp := range all {
+		if HasLabel(wisp, label) {
+			labeled = append(labeled, wisp)
+		}
+	}
+	return labeled, nil
 }
 
 // queryWisps runs one wisps-table SELECT and scans its rows. It is the single
