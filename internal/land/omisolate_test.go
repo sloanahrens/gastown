@@ -233,6 +233,115 @@ func envTMPDIR(env []string) (string, bool) {
 	return "", false
 }
 
+// omEnvCall is one om invocation a test recorded: the argv it was given and a
+// copy of the env, so a row can tell what each child saw after the run.
+type omEnvCall struct {
+	argv []string
+	env  []string
+}
+
+// omCallName is what a recorded call asked om to do, so a row names the call it
+// reads: "version" and "review --help" for the probes and "review" for the
+// review itself.
+func omCallName(argv []string) string {
+	if slices.Contains(argv, "--help") {
+		return "review --help"
+	}
+	return omSubcommand(argv)
+}
+
+// recordOMEnv answers om's version probe and its review, and appends every call
+// with its env to calls, so a row can read what the probes and the review were
+// each given.
+func recordOMEnv(t *testing.T, calls *[]omEnvCall) runFunc {
+	t.Helper()
+	return func(_ context.Context, _ string, env, argv []string, out io.Writer) (int, error) {
+		*calls = append(*calls, omEnvCall{argv: slices.Clone(argv), env: slices.Clone(env)})
+		switch omCallName(argv) {
+		case "version":
+			_, _ = io.WriteString(out, stubVersionLine())
+			return 0, nil
+		case "review --help":
+			_, _ = io.WriteString(out, "Usage: om review\n")
+			return 0, nil
+		}
+		for i, a := range argv {
+			if a == "--out" {
+				if err := os.WriteFile(argv[i+1], []byte(isolatedApprove), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return 0, nil
+	}
+}
+
+// TestVerdictReuseIsolatedProbesGetTMPDIR: the copy's version and help probes
+// run through the same withEnv-wrapped runner as its review, so they see
+// TMPDIR=tmp too (gt-1h6tvh). A probe left on the landing's environment would
+// keep om's raw replies in os.TempDir(), where every other review on the host
+// keeps its own.
+func TestVerdictReuseIsolatedProbesGetTMPDIR(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	var calls []omEnvCall
+	r := OMReviewer{OutDir: t.TempDir()}
+	r.run = recordOMEnv(t, &calls)
+	c, ok := r.Isolated(tmp).(BeadReviewer)
+	if !ok {
+		t.Fatalf("%T is not a BeadReviewer", r.Isolated(tmp))
+	}
+	// CriteriaText makes the review ask the help probe as well as the version
+	// probe, so one run covers both probes and the review.
+	in := ReviewInput{BeadID: "gt-1h6tvh", CriteriaText: "- [ ] the change is wired"}
+	in.Dir, in.Base, in.Head, in.Repo = "/wt", "aaa", "bbb", baseRepo{}
+	if _, err := c.ReviewBead(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	want := "TMPDIR=" + tmp
+	for _, name := range []string{"version", "review --help", "review"} {
+		i := slices.IndexFunc(calls, func(c omEnvCall) bool { return omCallName(c.argv) == name })
+		if i < 0 {
+			t.Fatalf("om was not called as %q; %d call(s) recorded", name, len(calls))
+		}
+		if !slices.Contains(calls[i].env, want) {
+			t.Fatalf("the %s call's %d env entries hold no TMPDIR for the isolated tmp", name, len(calls[i].env))
+		}
+	}
+}
+
+// TestVerdictReuseIsolatedOriginalHasNoTMPDIR: Isolated wraps only the copy's
+// runner, so a review through the receiver after the copy is made gives its om
+// and its probes exactly omUnsetEnv, with no TMPDIR entry (gt-1h6tvh). A
+// landing's om that inherited a pool's TMPDIR would keep its raw replies in
+// another review's directory.
+func TestVerdictReuseIsolatedOriginalHasNoTMPDIR(t *testing.T) {
+	t.Parallel()
+	var calls []omEnvCall
+	r := OMReviewer{OutDir: t.TempDir()}
+	r.run = recordOMEnv(t, &calls)
+	r.Isolated(t.TempDir())
+	in := ReviewInput{BeadID: "gt-1h6tvh", CriteriaText: "- [ ] the change is wired"}
+	in.Dir, in.Base, in.Head, in.Repo = "/wt", "aaa", "bbb", baseRepo{}
+	if _, err := r.ReviewBead(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("om was not run for the receiver's review")
+	}
+	for _, c := range calls {
+		name := omCallName(c.argv)
+		if !slices.Equal(c.env, omUnsetEnv) {
+			t.Fatalf("the receiver's %s call has %d env entries, want exactly omUnsetEnv's %d", name, len(c.env), len(omUnsetEnv))
+		}
+		for _, e := range c.env {
+			if strings.HasPrefix(e, "TMPDIR=") {
+				t.Fatalf("the receiver's %s call was given a TMPDIR entry after Isolated made a copy", name)
+			}
+		}
+	}
+}
+
 // TestVerdictReuseIsolatedReadsItsOwnRawDir: a pool review that exits without a
 // verdict quotes the raw reply its own om saved under tmp, never the one the
 // receiver's RawDir points at, so a failure never reports another review's reply
