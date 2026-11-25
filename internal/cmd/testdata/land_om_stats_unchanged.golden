@@ -14,6 +14,9 @@ Agent   Approvals  Rejections  Rate
 opus    1          1           50.0%
 sonnet  1          0           0.0%
 
+Author  Approvals  Rejections  Rate
+(none)  2          1           33.3%
+
 Rounds per bead: 1 took one, 1 two, 0 three or more
 
 Beads rejected most
