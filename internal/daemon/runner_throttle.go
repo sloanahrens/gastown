@@ -54,7 +54,7 @@ func ReadRunnerThrottle(ctx context.Context, exec func(ctx context.Context, args
 	if exec == nil {
 		return RunnerThrottle{}, errors.New("no exec seam, so the runner's cpu.stat cannot be read")
 	}
-	text, err := exec(ctx, runnerThrottleArgs...)
+	text, err := exec(ctx, slices.Clone(runnerThrottleArgs)...)
 	if err == nil {
 		var t RunnerThrottle
 		if t, err = ParseCPUStat(text); err == nil {
