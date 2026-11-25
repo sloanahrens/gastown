@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -98,5 +99,60 @@ func savePatrolLastRunForTest(t *testing.T, townRoot string, at time.Time) {
 	t.Helper()
 	if err := savePatrolLastRun(townRoot, "patrol_scan", at); err != nil {
 		t.Fatalf("save patrol_scan last run: %v", err)
+	}
+}
+
+// TestReportPatrolScanDue pins what the patrol_scan tick logs for each due
+// decision and what it returns (gt-q0o40s): a warning is logged whatever the
+// due-ness, so a broken record is never silent.
+func TestReportPatrolScanDue(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		dec      patrolDueDecision
+		wantLine string
+		wantDue  bool
+	}{
+		{
+			name:     "not due logs the not-due line and returns false",
+			dec:      patrolDueDecision{due: false, note: "last run 3m ago, interval 10m"},
+			wantLine: "patrol_scan: not due — last run 3m ago, interval 10m",
+			wantDue:  false,
+		},
+		{
+			name:     "due logs the due line and returns true",
+			dec:      patrolDueDecision{due: true, note: "last run 12m ago, interval 10m"},
+			wantLine: "patrol_scan: due — last run 12m ago, interval 10m",
+			wantDue:  true,
+		},
+		{
+			name:     "due with warn logs the WARNING line and returns true",
+			dec:      patrolDueDecision{due: true, note: "no last-run record", warn: "last-run state unreadable (corrupt)"},
+			wantLine: "patrol_scan: WARNING: last-run state unreadable (corrupt) — no last-run record",
+			wantDue:  true,
+		},
+		{
+			name:     "not due with warn still logs the WARNING line and returns false",
+			dec:      patrolDueDecision{due: false, note: "last run 3m ago, interval 10m", warn: "last-run state unreadable (corrupt)"},
+			wantLine: "patrol_scan: WARNING: last-run state unreadable (corrupt) — last run 3m ago, interval 10m",
+			wantDue:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var lines []string
+			logf := func(format string, args ...any) {
+				lines = append(lines, fmt.Sprintf(format, args...))
+			}
+
+			if got := reportPatrolScanDue(tc.dec, logf); got != tc.wantDue {
+				t.Errorf("returned %v, want %v", got, tc.wantDue)
+			}
+			if len(lines) != 1 || lines[0] != tc.wantLine {
+				t.Errorf("logged %q, want one line %q", lines, tc.wantLine)
+			}
+		})
 	}
 }
