@@ -21,7 +21,7 @@ const (
 func movedOnRec() keptSandboxSeatRecord {
 	return keptSandboxSeatRecord{
 		Bead:    movedOnLandedBead,
-		Reason:  branchGuardReasonPrefix + movedOnOther + ", not the landed " + movedOnLanded,
+		Reason:  seatWorksKeepPrefix + movedOnOther + ", not the landed " + movedOnLanded,
 		Since:   time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC),
 		Landing: &sandboxSeatLanding{BeadID: movedOnLandedBead, Branch: movedOnLanded, Landed: true},
 	}

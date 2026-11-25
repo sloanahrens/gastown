@@ -113,11 +113,13 @@ const rulesPendingReason = "jev_rules has not yet asked about this submission"
 // before this reason is asked (gt-0vb2fy); one it leaves is the patrol's.
 const sandboxNotGoneReason = "the gateway has not confirmed the sandbox gone"
 
-// branchGuardReasonPrefix starts the keep reason of a seat whose branch is not
-// the one that landed. A seat kept this way waits on its own branch to land;
-// one that has since been slung to another bead never will, so its record is
-// dropped rather than re-alerted (gt-qrzhot).
-const branchGuardReasonPrefix = "the seat works "
+// seatWorksKeepPrefix starts the keep reason of a seat whose branch is not the
+// one that landed. A seat kept this way waits on its own branch to land; one
+// that has since been slung to another bead never will, so its record is
+// dropped rather than re-alerted (gt-qrzhot). keepReason builds the reason from
+// it and the moved-on patrol matches records by it, so the text has one
+// definition (gt-3ynei5).
+const seatWorksKeepPrefix = "the seat works "
 
 // sandboxSessionLiveReason is the keep reason of a seat whose live session still
 // answers to its name. A set ended marker alone does not prove that session has
@@ -177,7 +179,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	case strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.LandedBranch) == "":
 		return "branch=" + orMissingText(e.Branch) + " landed_branch=" + orMissingText(e.LandedBranch) + ": a branch nothing recorded cannot show this seat's work is the landed work"
 	case e.Branch != e.LandedBranch:
-		return branchGuardReasonPrefix + e.Branch + ", not the landed " + e.LandedBranch
+		return seatWorksKeepPrefix + e.Branch + ", not the landed " + e.LandedBranch
 	case !e.Retired:
 		return retiredRecordKeepReason
 	}
@@ -444,7 +446,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// record an earlier pass left goes and this pass leaves none to
 		// re-alert for a seat that is gone (gt-qrzhot). A record that cannot
 		// be removed stays, and the log names it rather than claiming it gone.
-		if strings.HasPrefix(kept, branchGuardReasonPrefix) && seatMovedOn(seatBranch, landing.BeadID) {
+		if strings.HasPrefix(kept, seatWorksKeepPrefix) && seatMovedOn(seatBranch, landing.BeadID) {
 			if err := h.forgetKeptSeat(rig, name); err != nil {
 				log("kept: %s (the seat has moved on to another bead, but its kept record could not be removed: %v)", kept, err)
 				return false
