@@ -357,3 +357,41 @@ func TestPreSwapPairMatchesRegistry(t *testing.T) {
 		})
 	}
 }
+
+// TestPreSwapPairMatchesRegistryUnwired holds the pre-swap gate to refusing an
+// install with no registry derivation wired: the preflight passes and the pair
+// levels agree, so only the registry match can refuse, and a nil derivation is
+// refused there before any comparison, as the preflight check, naming the
+// missing derivation and the commit it could not match. A gate that panicked on
+// the nil derivation would fail the row.
+func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// pair is the pair the gate is given: it passes the preflight and the
+		// pair-level check, so the row is decided by the unwired derivation alone.
+		pair update.ImagePair
+	}{
+		{name: "a pair the registry would match is refused with no derivation wired", pair: pairOfValues(pairMatchPair())},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil)
+
+			err := gate(context.Background(), tt.pair)
+			if err == nil {
+				t.Fatal("PreSwap accepted a pair with no registry derivation wired")
+			}
+			var pc update.PairCheckError
+			if !errors.As(err, &pc) || pc.Check != update.CheckPreflight {
+				t.Errorf("PreSwap error = %v, want a PairCheckError naming %q", err, update.CheckPreflight)
+			}
+			for _, want := range []string{"no registry derivation wired", tt.pair.Commit} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("PreSwap error = %q, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
