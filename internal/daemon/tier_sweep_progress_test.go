@@ -76,7 +76,8 @@ func TestWriteRunProgressRenameFailureRemovesTemp(t *testing.T) {
 var errProgressInjected = errors.New("injected failure")
 
 // failingProgressTemp fails one call on a real temp file: Write, Sync or Close.
-// Sync and Close still close the file, so the test leaks no descriptor.
+// Only its Close wrapper closes the real file; on a Write or Sync failure the
+// writer's own Close call does, so the test leaks no descriptor.
 type failingProgressTemp struct {
 	progressTemp
 	step string
@@ -108,7 +109,7 @@ func (f failingProgressTemp) Close() error {
 // directory, keeps the old record whole, and leaves no temp file beside it.
 func TestWriteRunProgressFailedStepKeepsOldRecordAndRemovesTemp(t *testing.T) {
 	t.Parallel()
-	for _, step := range []string{"write", "sync", "close", "chmod"} {
+	for _, step := range []string{"createtemp", "write", "sync", "close", "chmod"} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
@@ -118,6 +119,9 @@ func TestWriteRunProgressFailedStepKeepsOldRecordAndRemovesTemp(t *testing.T) {
 			}
 			fs := progressFS{
 				createTemp: func(d, pattern string) (progressTemp, error) {
+					if step == "createtemp" {
+						return nil, errProgressInjected
+					}
 					tmp, err := os.CreateTemp(d, pattern)
 					if err != nil {
 						return nil, err
