@@ -21,13 +21,20 @@ const (
 	// check failed, and a failed read is a miss, never a reuse.
 	missBaseNotAncestor = "base-not-ancestor"
 	missBaseUnreadable  = "base-unreadable"
+	// missOverlapPrefix is followed by the one touched path main has changed since
+	// the review's base. missDiffUnreadable: the diff of main since that base failed,
+	// and a failed read is a miss, never "no overlap".
+	missOverlapPrefix  = "overlap:"
+	missDiffUnreadable = "diff-unreadable"
 )
 
 // ReuseMiss returns "" when rec, a stored review, may stand in for a review
 // keyed by cur, and otherwise the reason it may not. It is the one test for
 // both reuse and invalidity, so the two cannot disagree (gt-6bsp). now is a
-// parameter: nothing here reads the clock. g and base feed the base check after
-// the key, version and age checks; touched is unused until the overlap check lands.
+// parameter: nothing here reads the clock. g, base and touched feed the base
+// and overlap checks after the key, version and age checks: a review on another
+// base is reusable only while that base is an ancestor of base and main has not
+// changed a touched path since it.
 func ReuseMiss(g Repo, rec AheadRecord, cur ReviewKey, base string, touched []string, now time.Time, expiry time.Duration) string {
 	fields := []struct{ name, rec, cur string }{
 		{"Bead", rec.Bead, cur.Bead},
@@ -63,8 +70,31 @@ func ReuseMiss(g Repo, rec AheadRecord, cur ReviewKey, base string, touched []st
 		if !ok {
 			return missBaseNotAncestor
 		}
+		// Main moved since the review's base: a review of a touched path is stale.
+		changed, err := g.DiffNameOnly(rec.Base, base)
+		if err != nil {
+			return missDiffUnreadable
+		}
+		if path, ok := firstTouched(changed, touched); ok {
+			return missOverlapPrefix + path
+		}
 	}
 	return ""
+}
+
+// firstTouched returns the first of changed that is also in touched, in the order
+// changed lists them, and false when none is. The order makes the miss reason stable.
+func firstTouched(changed, touched []string) (string, bool) {
+	set := make(map[string]bool, len(touched))
+	for _, p := range touched {
+		set[p] = true
+	}
+	for _, p := range changed {
+		if set[p] {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // usableOMVersion reports whether v names an om whose verdicts can be reused:

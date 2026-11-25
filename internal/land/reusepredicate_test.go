@@ -160,6 +160,10 @@ func (r *ancestorRepo) IsAncestor(ancestor, descendant string) (bool, error) {
 	return r.ancestor, r.err
 }
 
+// DiffNameOnly names no path: the ancestor rows pass no touched paths, so the
+// overlap check has nothing to find.
+func (r *ancestorRepo) DiffNameOnly(_, _ string) ([]string, error) { return nil, nil }
+
 // TestVerdictReusePredicateVetoNotAncestor: a record on another base is reusable only when
 // that base is an ancestor of the target, and it is asked as IsAncestor(recorded base, target).
 // A record on the same base is reusable with no git call.
@@ -215,6 +219,79 @@ func TestVerdictReusePredicateAncestorReadFails(t *testing.T) {
 			g := &ancestorRepo{ancestor: tc.ancestor, err: errors.New("ancestry unreadable")}
 			if got := ReuseMiss(g, rec, cur, "new-base", nil, reuseTestNow(), time.Hour); got != missBaseUnreadable {
 				t.Errorf("ReuseMiss = %q, want %q", got, missBaseUnreadable)
+			}
+		})
+	}
+}
+
+// diffRepo is a Repo that reports every base as an ancestor, answers DiffNameOnly
+// with the paths and error it was built with, and records the range it was asked about.
+type diffRepo struct {
+	Repo
+	paths      []string
+	err        error
+	from, into string
+}
+
+func (r *diffRepo) IsAncestor(_, _ string) (bool, error) { return true, nil }
+
+func (r *diffRepo) DiffNameOnly(base, head string) ([]string, error) {
+	r.from, r.into = base, head
+	return r.paths, r.err
+}
+
+// TestVerdictReusePredicateVetoOverlap: a review on another base is a miss when main has
+// changed a touched path since that base, and the reason names that path. It is reusable
+// when main changed only other paths, or when nothing is touched. The diff is asked as
+// DiffNameOnly(recorded base, target).
+func TestVerdictReusePredicateVetoOverlap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		touched []string
+		changed []string
+		want    string
+	}{
+		{"main changed a touched file", []string{"a.go", "b.go"}, []string{"c.go", "b.go"}, missOverlapPrefix + "b.go"},
+		{"two touched files changed name the first in git order", []string{"b.go", "a.go"}, []string{"a.go", "b.go"}, missOverlapPrefix + "a.go"},
+		{"main changed only other files", []string{"a.go"}, []string{"c.go"}, ""},
+		{"empty touched", nil, []string{"c.go"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec, cur := reuseTestRecord(), reuseTestKey()
+			rec.Base = "old-base"
+			g := &diffRepo{paths: tc.changed}
+			if got := ReuseMiss(g, rec, cur, "new-base", tc.touched, reuseTestNow(), time.Hour); got != tc.want {
+				t.Errorf("ReuseMiss = %q, want %q", got, tc.want)
+			}
+			if g.from != "old-base" || g.into != "new-base" {
+				t.Errorf("DiffNameOnly(%q, %q), want DiffNameOnly(%q, %q)", g.from, g.into, "old-base", "new-base")
+			}
+		})
+	}
+}
+
+// TestVerdictReusePredicateVetoReadFails: a DiffNameOnly error is a miss, even when the paths
+// it returns do not touch the change, so a failed read never reads as no overlap.
+func TestVerdictReusePredicateVetoReadFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		paths []string
+	}{
+		{"error with no paths", nil},
+		{"error with a path that does not overlap", []string{"c.go"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec, cur := reuseTestRecord(), reuseTestKey()
+			rec.Base = "old-base"
+			g := &diffRepo{paths: tc.paths, err: errors.New("diff unreadable")}
+			if got := ReuseMiss(g, rec, cur, "new-base", []string{"a.go"}, reuseTestNow(), time.Hour); got != missDiffUnreadable {
+				t.Errorf("ReuseMiss = %q, want %q", got, missDiffUnreadable)
 			}
 		})
 	}
