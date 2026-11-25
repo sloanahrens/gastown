@@ -40,6 +40,17 @@ func (f *seatLockFake) Get(name string) (*polecat.Polecat, error) {
 	return f.idlePolecatReuseFake.Get(name)
 }
 
+// TestSeatLockManagerImplementsLocker guards the seam the pool path uses: the
+// real polecat manager must offer LockSeatPick, or the optional assertion
+// silently skips the lock in production.
+func TestSeatLockManagerImplementsLocker(t *testing.T) {
+	t.Parallel()
+	var mgr idlePolecatReuse = &polecat.Manager{}
+	if _, ok := mgr.(seatPickLocker); !ok {
+		t.Fatal("*polecat.Manager does not implement seatPickLocker, so the pool pick would take no seat-pick lock")
+	}
+}
+
 // TestSeatLockOrder guards gt-qy0s27: the pool path takes the seat-pick lock
 // before the idle read and releases it when the reuse loop ends, on every exit.
 func TestSeatLockOrder(t *testing.T) {
