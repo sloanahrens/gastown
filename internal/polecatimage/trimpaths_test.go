@@ -33,6 +33,8 @@ type fakeTrimFS struct {
 	modErr     map[string]error
 	removeErr  map[string]error
 	removed    []string
+	opens      int
+	openErr    error
 }
 
 func newFakeTrimFS() *fakeTrimFS {
@@ -86,15 +88,24 @@ func (f *fakeTrimFS) fs() trimPathsFS {
 			}
 			return filepath.Clean(name), nil
 		},
-		modTime: func(root, rel string) (time.Time, error) {
-			name := filepath.Join(root, rel)
-			if err, ok := f.modErr[name]; ok {
-				return time.Time{}, err
+		open: func(root string) (trimRoot, error) {
+			if f.openErr != nil {
+				return trimRoot{}, f.openErr
 			}
-			if at, ok := f.mtimes[name]; ok {
-				return at, nil
-			}
-			return fakeTrimNow.Add(-24 * time.Hour), nil
+			f.opens++
+			return trimRoot{
+				modTime: func(rel string) (time.Time, error) {
+					name := filepath.Join(root, rel)
+					if err, ok := f.modErr[name]; ok {
+						return time.Time{}, err
+					}
+					if at, ok := f.mtimes[name]; ok {
+						return at, nil
+					}
+					return fakeTrimNow.Add(-24 * time.Hour), nil
+				},
+				close: func() error { return nil },
+			}, nil
 		},
 		now: func() time.Time { return fakeTrimNow },
 	}
@@ -919,16 +930,11 @@ func TestDiskTrimPathsFSReportsAShardDirectoryThatIsNotThere(t *testing.T) {
 	}
 }
 
-// TestDiskTrimPathsFSReportsNoTimeUnderAClaimThatIsNotThere pins the time read's refusal: a claim the
-// run cannot open gives an error and no time, so the caller never removes on a time it did not read.
-func TestDiskTrimPathsFSReportsNoTimeUnderAClaimThatIsNotThere(t *testing.T) {
+// TestDiskTrimPathsFSReportsAClaimRootThatIsNotThere pins the adapter's open refusal (gt-dw8x7e).
+func TestDiskTrimPathsFSReportsAClaimRootThatIsNotThere(t *testing.T) {
 	t.Parallel()
-	mtime, err := diskTrimPathsFS().modTime(filepath.Join(t.TempDir(), "absent"), "gocache/ab/one")
-	if err == nil {
-		t.Fatal("modTime under a missing claim returned no error")
-	}
-	if !mtime.IsZero() {
-		t.Errorf("modTime under a missing claim = %v, want the zero time with the error", mtime)
+	if _, err := diskTrimPathsFS().open(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("open under a missing claim returned no error")
 	}
 }
 
@@ -961,6 +967,33 @@ func TestRemoveTrimPathsRefusesAShardCountOfNone(t *testing.T) {
 	}
 	if len(f.removed) != 0 || len(f.dirs) != 1 {
 		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsOpensTheClaimRootOnce pins the run's one os.Root across three targets (gt-dw8x7e).
+func TestRemoveTrimPathsOpensTheClaimRootOnce(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/one", "gocache/two", "gocache/three")
+	if _, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs()); err != nil {
+		t.Fatalf("RemoveTrimPaths: %v", err)
+	}
+	if f.opens != 1 {
+		t.Errorf("the run opened the claim root %d times for 3 targets, want once", f.opens)
+	}
+}
+
+// TestRemoveTrimPathsRefusesAClaimRootItCannotOpen pins the fail-closed open: no root, nothing removed.
+func TestRemoveTrimPathsRefusesAClaimRootItCannotOpen(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/one")
+	f.openErr = fs.ErrPermission
+	if _, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPaths trimmed through a claim root it could not open")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v with no claim root, want nothing removed", f.removed)
 	}
 }
 

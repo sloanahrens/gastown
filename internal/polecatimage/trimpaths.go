@@ -31,9 +31,9 @@ type trimPathsFS struct {
 	remove func(root, rel string) error
 	// resolve follows every symlink in a path and returns the real name.
 	resolve func(name string) (string, error)
-	// modTime returns the modification time of rel, a path below root, a link itself rather than its
-	// target. It is read through root as remove is, so a directory swapped out of the claim is refused.
-	modTime func(root, rel string) (time.Time, error)
+	// open opens the claim root once per run, which reads every target's modification time
+	// through it rather than opening a root per target (gt-dw8x7e).
+	open func(root string) (trimRoot, error)
 	// now is the clock a removal judges a file's age by.
 	now func() time.Time
 }
@@ -56,29 +56,30 @@ func diskTrimPathsFS() trimPathsFS {
 		read:    os.ReadFile,
 		remove:  removeInRoot,
 		resolve: filepath.EvalSymlinks,
-		modTime: modTimeInRoot,
+		open:    openClaimRoot,
 		now:     time.Now,
 	}
 }
 
-// modTimeInRoot is the modification time of rel, read through an os.Root opened on root, the way
-// removeInRoot removes it: a directory swapped for a link out of the claim fails the read rather than
-// being followed to a file outside it.
-func modTimeInRoot(root, rel string) (mtime time.Time, err error) {
+// trimRoot is the claim root a trim-paths run holds: modTime reads a target's time and close releases it.
+type trimRoot struct {
+	modTime func(rel string) (time.Time, error)
+	close   func() error
+}
+
+// openClaimRoot opens the claim root a run holds, so a directory swapped out of the claim fails the read.
+func openClaimRoot(root string) (trimRoot, error) {
 	r, err := os.OpenRoot(root)
 	if err != nil {
-		return time.Time{}, err
+		return trimRoot{}, err
 	}
-	defer func() {
-		if cerr := r.Close(); err == nil {
-			err = cerr
+	return trimRoot{func(rel string) (time.Time, error) {
+		info, err := r.Lstat(rel)
+		if err != nil {
+			return time.Time{}, err
 		}
-	}()
-	info, err := r.Lstat(rel)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return info.ModTime(), nil
+		return info.ModTime(), nil
+	}, r.Close}, nil
 }
 
 // removeInRoot deletes rel through an os.Root opened on root, so the kernel-level walk refuses a
@@ -293,12 +294,17 @@ func trimTargets(realRoot string, list []string, w trimPathsFS) ([]string, int, 
 // removeTargets removes the targets trimTargets resolved, and counts the entries it found gone as
 // absent. A target a seat used since the listing is kept, not removed. A removal that fails does not
 // stop the rest, and the count comes back in the error.
-func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (TrimPathsResult, error) {
-	res := TrimPathsResult{Absent: gone}
+func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (res TrimPathsResult, err error) {
+	res = TrimPathsResult{Absent: gone}
+	r, err := w.open(realRoot)
+	if err != nil {
+		return TrimPathsResult{}, fmt.Errorf("opening the claim %s: %w", realRoot, err)
+	}
+	defer func() { err = errors.Join(err, r.close()) }()
 	failed, firstPath := 0, ""
 	var firstErr error
 	for _, target := range targets {
-		kept, err := removeTarget(realRoot, target, w)
+		kept, err := removeTarget(r, realRoot, target, w)
 		switch {
 		case err == nil && kept:
 			res.Kept++
@@ -323,12 +329,12 @@ func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (
 // at the moment of removal, not at the listing, so a file a seat used since the listing is kept. A
 // time that cannot be read is an error, never a removal; a file gone before its time is read comes
 // back as fs.ErrNotExist and counts as absent.
-func removeTarget(realRoot, target string, w trimPathsFS) (bool, error) {
+func removeTarget(r trimRoot, realRoot, target string, w trimPathsFS) (bool, error) {
 	rel, err := filepath.Rel(realRoot, target)
 	if err != nil {
 		return false, err
 	}
-	mtime, err := w.modTime(realRoot, rel)
+	mtime, err := r.modTime(rel)
 	if err != nil {
 		return false, err
 	}
