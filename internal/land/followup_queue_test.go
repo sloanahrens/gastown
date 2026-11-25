@@ -720,6 +720,205 @@ func TestQueueKeepsTheClass(t *testing.T) {
 	}
 }
 
+// queuedDetail is queuedFinding as a filed body's Goal bullet renders it.
+const queuedDetail = "name the error (at internal/land/note.go:12, om finding f-9, minor)"
+
+// touchedNote is what the Goal bullet of a finding replayed after its file
+// changed since the landing ends with: the commits that touched the file
+// (gt-vn8dhf).
+func touchedNote(shas ...string) string {
+	return "; the file changed since the landing in " + strings.Join(shas, ", ")
+}
+
+// touchedBox is the acceptance box of a finding replayed after its file changed:
+// it accepts the finding as already fixed on origin/main (gt-vn8dhf).
+func touchedBox(shas ...string) string {
+	return "- [ ] Finding resolved, or already fixed on origin/main (the file changed in " +
+		strings.Join(shas, ", ") + "): name the error (internal/land/note.go:12)"
+}
+
+// plainBox is the acceptance box of a finding whose file is not known to have
+// changed since the landing.
+const plainBox = "- [ ] Finding resolved: name the error (internal/land/note.go:12)"
+
+// goalBullet is the one Goal bullet of a filed body, so a test asserts the
+// wording of the line a worker reads rather than the body as a whole.
+func goalBullet(t *testing.T, body string) string {
+	t.Helper()
+	goal, _, _ := strings.Cut(body, "\n## Constraints")
+	var got []string
+	for _, line := range strings.Split(goal, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			got = append(got, line)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("the Goal carries %d bullets, want one:\n%s", len(got), body)
+	}
+	return got[0]
+}
+
+// queuedReplayFixture is a landing with nothing of its own to file and room
+// under the bound, replaying one queue line of queuedFinding with the lander's
+// PathTouched set to hook (nil for none).
+func queuedReplayFixture(t *testing.T, hook func(landed, base, path string) []string) *followupFixture {
+	t.Helper()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	f.lander.PathTouched = hook
+	f.fake.existing = openFollowupBeads(1)
+	return f
+}
+
+// TestFollowupTouched: a queued finding replayed after its file changed since
+// the landing says so in the filed body. With PathTouched answering two commits
+// the Goal bullet ends with them and the acceptance box accepts the finding as
+// already fixed on origin/main; with no hook, an empty answer, a panic or a
+// blank sha the body is unchanged; and a landing's own finding is never marked,
+// because only a replay can be out of date with the file (gt-vn8dhf).
+func TestFollowupTouched(t *testing.T) {
+	t.Parallel()
+	const (
+		shaA = "aaa1111"
+		shaB = "bbb2222"
+		path = "internal/land/note.go"
+	)
+	// unchanged is the body a replay files when its file is not known to have
+	// changed: the plain bullet naming the landing it came from, and the plain
+	// box.
+	unchanged := func(t *testing.T, f *followupFixture) {
+		t.Helper()
+		log := f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads, want one:\n%s", len(f.fake.created), log)
+		}
+		created := f.fake.created[0]
+		if want := "- " + queuedDetail + " (from gt-held, landed " + queuedLanded + ")"; goalBullet(t, created.Body) != want {
+			t.Errorf("Goal bullet = %q, want %q", goalBullet(t, created.Body), want)
+		}
+		if created.Acceptance != plainBox {
+			t.Errorf("Acceptance = %q, want %q", created.Acceptance, plainBox)
+		}
+	}
+	t.Run("two commits", func(t *testing.T) {
+		var calls [][3]string
+		f := queuedReplayFixture(t, func(landed, base, p string) []string {
+			calls = append(calls, [3]string{landed, base, p})
+			return []string{shaA, shaB}
+		})
+		log := f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads, want one:\n%s", len(f.fake.created), log)
+		}
+		if len(calls) == 0 {
+			t.Fatal("PathTouched was never asked")
+		}
+		// The hook is handed the queue line's landing and this landing's base,
+		// the range the commits that touched the file are read from.
+		for _, c := range calls {
+			if c != [3]string{queuedLanded, "base", path} {
+				t.Errorf("PathTouched(%q, %q, %q), want (%q, %q, %q)", c[0], c[1], c[2], queuedLanded, "base", path)
+			}
+		}
+		created := f.fake.created[0]
+		bullet := goalBullet(t, created.Body)
+		if !strings.HasSuffix(bullet, touchedNote(shaA, shaB)) {
+			t.Errorf("Goal bullet = %q, want it to end with %q", bullet, touchedNote(shaA, shaB))
+		}
+		if !strings.Contains(bullet, "(from gt-held, landed "+queuedLanded+")") {
+			t.Errorf("Goal bullet = %q, want the landing it came from kept", bullet)
+		}
+		if want := touchedBox(shaA, shaB); created.Acceptance != want {
+			t.Errorf("Acceptance = %q, want %q", created.Acceptance, want)
+		}
+	})
+	t.Run("no PathTouched", func(t *testing.T) {
+		unchanged(t, queuedReplayFixture(t, nil))
+	})
+	t.Run("PathTouched answers none", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { return nil })
+		unchanged(t, f)
+	})
+	t.Run("PathTouched answers only blanks", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { return []string{"", "  "} })
+		unchanged(t, f)
+	})
+	t.Run("a blank sha beside a real one is dropped", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { return []string{"", shaA} })
+		f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads, want one", len(f.fake.created))
+		}
+		if bullet, want := goalBullet(t, f.fake.created[0].Body), touchedNote(shaA); !strings.HasSuffix(bullet, want) {
+			t.Errorf("Goal bullet = %q, want it to end with %q", bullet, want)
+		}
+	})
+	t.Run("PathTouched panics", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { panic("the hook broke") })
+		unchanged(t, f)
+	})
+	t.Run("the skip hook sees no mark", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { return []string{shaA, shaB} })
+		var seen []int
+		f.lander.FollowupSkip = func(_ Work, c FollowupCandidate) string {
+			seen = append(seen, len(c.Touched))
+			return ""
+		}
+		f.run()
+		if len(seen) == 0 {
+			t.Fatal("the skip hook was never asked")
+		}
+		for _, n := range seen {
+			if n != 0 {
+				t.Errorf("the skip hook saw %d touched commits, want none: the mark is set after it answers", n)
+			}
+		}
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads, want one", len(f.fake.created))
+		}
+		if bullet, want := goalBullet(t, f.fake.created[0].Body), touchedNote(shaA, shaB); !strings.HasSuffix(bullet, want) {
+			t.Errorf("Goal bullet = %q, want it to end with %q", bullet, want)
+		}
+	})
+	t.Run("a landing's own finding is not marked", func(t *testing.T) {
+		var calls int
+		f := newFollowupFixture(t, 0.9, []Finding{{ID: "f-9", Severity: "minor", Path: path, Line: 12,
+			Title: "name the error", Detail: queuedClaim}})
+		f.lander.PathTouched = func(string, string, string) []string {
+			calls++
+			return []string{shaA, shaB}
+		}
+		f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads, want one", len(f.fake.created))
+		}
+		if calls != 0 {
+			t.Errorf("PathTouched was asked %d times about a landing's own finding, want never", calls)
+		}
+		if body := f.fake.created[0].Body; strings.Contains(body, "file changed") {
+			t.Errorf("the body of a landing's own finding marks a file change:\n%s", body)
+		}
+	})
+	t.Run("appended to an open bundle", func(t *testing.T) {
+		f := queuedReplayFixture(t, func(string, string, string) []string { return []string{shaA, shaB} })
+		f.fake.existing = append(f.fake.existing, openBundleFor(followupDay, path, "open"))
+		f.run()
+		if len(f.fake.created) != 0 || len(f.fake.appended) != 1 {
+			t.Fatalf("created %d, appended %d, want the finding appended to the open bundle", len(f.fake.created), len(f.fake.appended))
+		}
+		add := f.fake.appended[0].Add
+		if len(add.Lines) != 1 || !strings.HasSuffix(add.Lines[0], touchedNote(shaA, shaB)) {
+			t.Errorf("appended lines = %q, want one ending with %q", add.Lines, touchedNote(shaA, shaB))
+		}
+		if len(add.Boxes) != 1 || add.Boxes[0] != touchedBox(shaA, shaB) {
+			t.Errorf("appended boxes = %q, want %q", add.Boxes, touchedBox(shaA, shaB))
+		}
+	})
+}
+
 // queuedFeed runs the feed over a landing with nothing of its own to file and
 // one queue line of findings that an earlier landing held back, against the
 // follow-ups already open in existing (gt-bsyzhk).

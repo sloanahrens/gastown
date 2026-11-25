@@ -1,6 +1,7 @@
 package land
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -134,7 +135,7 @@ func TestFollowupSkipAnswersAreKeyedByTheWholeCandidate(t *testing.T) {
 	w := Work{BeadID: "gt-x"}
 	for pass := 1; pass <= 2; pass++ {
 		kept := l.skippedCandidates(w, []FollowupCandidate{a, b, boom}, skips)
-		if len(kept) != 2 || kept[0] != b || kept[1] != boom {
+		if want := []FollowupCandidate{b, boom}; !reflect.DeepEqual(kept, want) {
 			t.Errorf("pass %d: kept %+v, want the title the hook keeps and the one it panicked on", pass, kept)
 		}
 	}

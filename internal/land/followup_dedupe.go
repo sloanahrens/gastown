@@ -115,8 +115,11 @@ type ExistingFollowup struct {
 // the landing worker is about to file for it. Detail is the finding rendered as
 // a bead body lists it and Claim is om's own account of it, so a finding the
 // backpressure bound queues can be filed later from what it carries; the
-// decision itself needs only Path and Title. Candidate is already the gate
-// interface in this package (candidate.go), hence the longer name.
+// decision itself needs only Path and Title. Touched is the short commits that
+// touched Path after a queued finding's landing, set by the feed on a replay and
+// read only by the body and box wording: the decision and the fingerprint never
+// read it (gt-vn8dhf). Candidate is already the gate interface in this package
+// (candidate.go), hence the longer name.
 type FollowupCandidate struct {
 	ID       string
 	Path     string
@@ -126,6 +129,7 @@ type FollowupCandidate struct {
 	Severity string
 	Line     int
 	Class    string
+	Touched  []string
 }
 
 // DedupeAction is what the landing worker does with a finding.

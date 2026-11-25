@@ -208,6 +208,18 @@ type Lander struct {
 	// bead). It is called once per skipped finding of a pass and must be safe to
 	// call from the feed goroutine, which has no recover of its own (gt-xwdiiy).
 	FollowupClass func(c FollowupCandidate) string
+	// PathTouched, when set, is asked about every fresh finding the feed reads
+	// back from a queue line: it returns the short commits that touched the
+	// finding's file in landed..base, where landed is the commit the queue
+	// line's landing was recorded at and base this landing's base. A non-empty
+	// answer marks the finding in the filed body as one whose file changed since
+	// the landing, so its box accepts a fix already on origin/main (gt-vn8dhf).
+	// The drain and the compaction read a queue line again in one pass, so it is
+	// asked more than once for the same finding and must be pure: a panic or an
+	// empty answer leaves the finding unmarked, and the landing is unaffected.
+	// It runs in the feed path: keep it cheap. Nil marks nothing, and the daemon
+	// that wires it is gt-h80mxo.
+	PathTouched func(landed, base, path string) []string
 	// AcceptedRiskAlert, when set, raises the attention item the overseer sees
 	// for a review that was given an accepted risk (gt-tvhg8): key names the
 	// work bead and the head reviewed, so a repeat of the same review keeps
