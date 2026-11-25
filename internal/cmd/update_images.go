@@ -528,6 +528,9 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 // calls it too, so it refuses unwired seams itself. sha must be a full commit
 // (imagevalues.ValidCommit): its tag is sliced from it.
 func deriveUpdateImagesPair(ctx context.Context, seams updateImagesSeams, sha string, withBd bool) (imagevalues.Values, error) {
+	if !imagevalues.ValidCommit(sha) {
+		return imagevalues.Values{}, fmt.Errorf("gt update images: --sha %q is not a full 40-character lowercase commit", sha)
+	}
 	if err := validateUpdateImagesSeams(seams); err != nil {
 		return imagevalues.Values{}, err
 	}

@@ -400,13 +400,15 @@ func TestDeriveUpdateImagesPairGood(t *testing.T) {
 }
 
 // TestDeriveUpdateImagesPairRefuses holds the refusals the install's derivation
-// answers, by message: a daemon and polecat on different commits, a commit that
-// is not the requested one, an unreadable viewer credential, and a bd image not
-// built for the commit. A refusal answers no pair.
+// answers, by message: a sha that is not a full commit, a daemon and polecat on
+// different commits, a commit that is not the requested one, an unreadable
+// viewer credential, and a bd image not built for the commit. A refusal answers
+// no pair.
 func TestDeriveUpdateImagesPairRefuses(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
 		name                 string
+		sha                  string
 		daemon               *fakeRegistryImage
 		polecat              *fakeRegistryImage
 		bd                   *fakeRegistryImage
@@ -414,6 +416,7 @@ func TestDeriveUpdateImagesPairRefuses(t *testing.T) {
 		unreadableCredential bool
 		want                 string
 	}{
+		{name: "a sha that is not a full commit", sha: "0123abc", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesSHA), want: "is not a full 40-character lowercase commit"},
 		{name: "a daemon and polecat on different commits", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesOtherSHA), want: "they must be one commit"},
 		{name: "a commit that is not the requested one", daemon: matchingContents(testUpdateImagesOtherSHA), polecat: matchingContents(testUpdateImagesOtherSHA), want: "not the requested " + testUpdateImagesSHA},
 		{name: "an unreadable viewer credential", daemon: matchingContents(testUpdateImagesSHA), polecat: matchingContents(testUpdateImagesSHA), unreadableCredential: true, want: "reading the viewer credential"},
@@ -434,7 +437,11 @@ func TestDeriveUpdateImagesPairRefuses(t *testing.T) {
 					return "", "", errors.New("the viewer token file is missing")
 				}
 			}
-			got, err := deriveUpdateImagesPair(context.Background(), seams, testUpdateImagesSHA, row.withBd)
+			sha := testUpdateImagesSHA
+			if row.sha != "" {
+				sha = row.sha
+			}
+			got, err := deriveUpdateImagesPair(context.Background(), seams, sha, row.withBd)
 			if err == nil || !strings.Contains(err.Error(), row.want) {
 				t.Fatalf("deriveUpdateImagesPair = %+v, %v, want a refusal naming %q", got, err, row.want)
 			}
