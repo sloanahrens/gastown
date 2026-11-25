@@ -297,6 +297,67 @@ func TestParseChartRefusesANonScalarHook(t *testing.T) {
 	}
 }
 
+// secretDoc is a Secret named name, with the helm.sh/hook annotation when hook is
+// set.
+func secretDoc(name string, hook bool) string {
+	doc := "apiVersion: v1\nkind: Secret\nmetadata:\n  name: " + name + "\n  namespace: openshell\n"
+	if hook {
+		doc += "  annotations:\n    helm.sh/hook: pre-install\n"
+	}
+	return doc
+}
+
+// A hook Secret is dropped from Objects, kept in Hooks, and named in Secrets once
+// in output order, as an unannotated Secret is.
+func TestParseChartNamesAHookSecret(t *testing.T) {
+	t.Parallel()
+	certgenSecrets := []string{"openshell-server-tls", "openshell-client-tls", "openshell-jwt-keys"}
+	rows := []struct {
+		name, hook string
+		raw        []byte
+		want       []string
+	}{
+		{
+			"a hook Secret alone",
+			"openshell-hook-secret",
+			chartOf(certgenJobDoc(certgenArgs), secretDoc("openshell-hook-secret", true), openshellServiceDoc),
+			append([]string{"openshell-hook-secret"}, certgenSecrets...),
+		},
+		{
+			"a hook Secret the certgen Job also names",
+			"openshell-server-tls",
+			chartOf(certgenJobDoc(certgenArgs), secretDoc("openshell-server-tls", true), openshellServiceDoc),
+			certgenSecrets,
+		},
+		{
+			"a hook Secret before an unannotated Secret",
+			"first-hook",
+			chartOf(certgenJobDoc(certgenArgs), secretDoc("first-hook", true), secretDoc("second-plain", false), openshellServiceDoc),
+			append([]string{"first-hook", "second-plain"}, certgenSecrets...),
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			chart, err := parseChart(row.raw)
+			if err != nil {
+				t.Fatalf("parseChart(): %v", err)
+			}
+			if !slices.Equal(chart.Secrets, row.want) {
+				t.Errorf("Secrets = %q, want %q", chart.Secrets, row.want)
+			}
+			if !slices.Contains(chart.Hooks, "Secret/"+row.hook) {
+				t.Errorf("Hooks = %q, want Secret/%s", chart.Hooks, row.hook)
+			}
+			for _, object := range chart.Objects {
+				if object.Kind == "Secret" {
+					t.Errorf("Objects holds the Secret %s", object.Name)
+				}
+			}
+		})
+	}
+}
+
 // The certgen Job names its Secrets in either helm spelling, in the order the
 // flags are read.
 func TestOpenShellChartReadsCertgenSecretFlags(t *testing.T) {

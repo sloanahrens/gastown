@@ -182,6 +182,9 @@ func parseChart(out []byte) (Chart, error) {
 					return Chart{}, fmt.Errorf("document %d: hook Job %s: %w", i+1, object.Name, err)
 				}
 			}
+			if object.Kind == "Secret" {
+				chart.Secrets = append(chart.Secrets, object.Name)
+			}
 			continue
 		}
 		if object.Kind == "Secret" {
