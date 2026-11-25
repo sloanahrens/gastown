@@ -485,13 +485,7 @@ func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 		parts = append(parts, count(live, "session", "sessions"))
 	}
 	if dead > 0 {
-		// The split names the classes the dead seats were counted in; a seat
-		// whose read named no class carries no split, as on the tick line.
-		split := classes
-		if classes[""] > 0 {
-			split = nil
-		}
-		parts = append(parts, specdispatch.DeadHookedCount(dead, split))
+		parts = append(parts, specdispatch.DeadHookedCount(dead, namedClassSplit(classes)))
 	}
 	if landing > 0 {
 		parts = append(parts, fmt.Sprintf("%d mid-landing", landing))

@@ -4091,14 +4091,11 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 		r.Live[agent] = t.Total
 		if t.DeadHooked > 0 {
 			r.DeadHooked[agent] = t.DeadHooked
-			// The split is carried only when every dead-hooked seat named its
-			// class: a seat whose read named none counts under "", and a blank
-			// class is not one the tick line can print (gt-ueb3g2).
-			if t.DeadHookedByClass[""] == 0 {
+			if split := namedClassSplit(t.DeadHookedByClass); split != nil {
 				if r.DeadHookedClasses == nil {
 					r.DeadHookedClasses = map[string]map[string]int{}
 				}
-				r.DeadHookedClasses[agent] = t.DeadHookedByClass
+				r.DeadHookedClasses[agent] = split
 			}
 		}
 	}
