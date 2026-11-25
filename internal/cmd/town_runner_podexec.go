@@ -30,19 +30,25 @@ func productionPodExec(ctx context.Context, argv []string, stdin []byte) ([]byte
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
-	err := cmd.Run()
+	return podExecOutcome(ctx, argv[0], stdout.Bytes(), cmd.Run())
+}
+
+// podExecOutcome turns what running the child ended with into productionPodExec's
+// answer. It takes the error as a value, so each branch is driven without
+// starting a process.
+func podExecOutcome(ctx context.Context, name string, stdout []byte, err error) ([]byte, int, error) {
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
-		return stdout.Bytes(), 0, nil
+		return stdout, 0, nil
 	case ctx.Err() != nil:
-		return nil, 0, fmt.Errorf("running %s: %w", argv[0], ctx.Err())
+		return nil, 0, fmt.Errorf("running %s: %w", name, ctx.Err())
 	case errors.As(err, &exit):
 		if exit.ExitCode() < 0 {
-			return nil, 0, fmt.Errorf("running %s: %w", argv[0], err)
+			return nil, 0, fmt.Errorf("running %s: %w", name, err)
 		}
-		return stdout.Bytes(), exit.ExitCode(), nil
+		return stdout, exit.ExitCode(), nil
 	default:
-		return nil, 0, fmt.Errorf("starting %s: %w", argv[0], err)
+		return nil, 0, fmt.Errorf("starting %s: %w", name, err)
 	}
 }
