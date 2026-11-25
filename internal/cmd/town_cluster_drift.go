@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	"github.com/steveyegge/gastown/deploy/k8s/sbx"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -82,6 +83,10 @@ type clusterDriftDeps struct {
 	now           func() time.Time
 	kubectl       update.RunFunc
 	out           io.Writer
+	// cluster is the cluster the run compares and execVia the form the sandbox
+	// reads take to reach kubectl; the flags that set them are a later bead's.
+	cluster string
+	execVia string
 }
 
 // realClusterDriftDeps is the host's: the render's seams, the runner's render,
@@ -411,4 +416,12 @@ func readLiveObject(ctx context.Context, d clusterDriftDeps, resource, namespace
 		return nil, false, fmt.Errorf("the live %s answer is not a JSON object: %w", resource, err)
 	}
 	return live, false, nil
+}
+
+// compareSbxClusterDrift is the gt-sbx compare over the recorded render flags;
+// this first commit holds only its tests.
+var _ sbx.Inputs
+
+func compareSbxClusterDrift(ctx context.Context, d clusterDriftDeps) error {
+	return nil
 }
