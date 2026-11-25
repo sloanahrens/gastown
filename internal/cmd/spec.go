@@ -5202,6 +5202,19 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 	return specCandidatesWith(townRoot, maxPriority, board, IsRigParkedOrDocked)
 }
 
+// quietSkip is the quiet-rig answer for the scan's skip seam (gt-qw374d): nil
+// when heads is nil, so a tick with no hashes reads every rig, and nil when
+// memory is nil, so an unwired memory never skips a rig. Otherwise the skip
+// answers memory.rigQuiet for each rig under heads, as of now.
+func quietSkip(memory *specAnnotated, heads map[string]beadsql.RigHash, now time.Time) func(rig string) bool {
+	if heads == nil || memory == nil {
+		return nil
+	}
+	return func(rig string) bool {
+		return memory.rigQuiet(rig, heads, now)
+	}
+}
+
 // specCandidatesWith is specCandidates with the rig's park-and-dock check
 // passed in, so a test can hand the read a verdict bd cannot be made to give
 // (gt-6d06g).

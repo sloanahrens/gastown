@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -5301,5 +5302,51 @@ func TestTickEffSkippedRigsGetNoReadyRead(t *testing.T) {
 		if read[rig] != 1 {
 			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", rig, read[rig], read)
 		}
+	}
+}
+
+// TestTickEffQuietSkip: quietSkip answers the quiet-rig memory over the tick's
+// hashes. With no hashes, or no memory, it returns nil so every rig is read.
+// Otherwise the skip is true only for a rig the memory calls quiet under heads
+// (gt-qw374d).
+func TestTickEffQuietSkip(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	stored := beadsql.RigHash{Head: "h1", Working: "w1"}
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	memory.noteRigRead("gt", stored, base, 0)
+	now := base.Add(time.Minute)
+
+	t.Run("nil heads reads every rig", func(t *testing.T) {
+		if quietSkip(memory, nil, now) != nil {
+			t.Error("quietSkip with nil heads returned a skip, want nil so every rig is read")
+		}
+	})
+	t.Run("nil memory reads every rig", func(t *testing.T) {
+		if quietSkip(nil, map[string]beadsql.RigHash{"gt": stored}, now) != nil {
+			t.Error("quietSkip with nil memory returned a skip, want nil so every rig is read")
+		}
+	})
+
+	cases := []struct {
+		name  string
+		rig   string
+		heads map[string]beadsql.RigHash
+		want  bool
+	}{
+		{"quiet rig is skipped", "gt", map[string]beadsql.RigHash{"gt": stored}, true},
+		{"changed rig is read", "gt", map[string]beadsql.RigHash{"gt": {Head: "h2", Working: "w1"}}, false},
+		{"rig absent from heads is read", "gt", map[string]beadsql.RigHash{"be": stored}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skip := quietSkip(memory, tc.heads, now)
+			if skip == nil {
+				t.Fatal("quietSkip returned nil for non-nil heads and memory, want a skip")
+			}
+			if got := skip(tc.rig); got != tc.want {
+				t.Errorf("skip(%q) = %v, want %v", tc.rig, got, tc.want)
+			}
+		})
 	}
 }
