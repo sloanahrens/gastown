@@ -29,6 +29,26 @@ const mergeRequestFallbackShow = `[
   {"id":"gt-wisp-mr-closed","title":"Merge: gt-old","description":"branch: polecat/test/gt-old@def\ntarget: main\nsource_issue: gt-old\nrig: gastown\n","status":"closed","priority":1,"ephemeral":true,"labels":["gt:merge-request"]}
 ]`
 
+// mergeRequestSQLRows is the `bd sql --json` answer an allowed wisps read
+// returns: the rows the label join selects, with labels_csv as the sql decoder
+// hands it over. Their IDs differ from the wisp-list answer's, so a result
+// built from the fallback instead of these rows is visible in the returned IDs.
+const mergeRequestSQLRows = `[
+  {"id":"gt-sql-mr-open","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"issue_type":"merge-request","labels_csv":"gt:merge-request","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z"},
+  {"id":"gt-sql-mr-closed","title":"Merge: gt-old","description":"branch: polecat/test/gt-old@def\ntarget: main\nsource_issue: gt-old\nrig: gastown\n","status":"closed","priority":1,"issue_type":"merge-request","labels_csv":"gt:merge-request","created_at":"2026-06-28T00:00:00Z","updated_at":"2026-06-28T00:00:00Z"}
+]`
+
+// mergeRequestSQLShow is the `bd show --json` hydration for both answers the
+// sql-allowed fake below can return — the sql rows' IDs and the wisp list's —
+// so a run that took the wrong read is caught on its returned IDs rather than
+// inside hydration.
+const mergeRequestSQLShow = `[
+  {"id":"gt-sql-mr-open","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"ephemeral":true,"labels":["gt:merge-request"],"dependencies":[{"id":"gt-source","status":"closed","issue_type":"task"}]},
+  {"id":"gt-sql-mr-closed","title":"Merge: gt-old","description":"branch: polecat/test/gt-old@def\ntarget: main\nsource_issue: gt-old\nrig: gastown\n","status":"closed","priority":1,"ephemeral":true,"labels":["gt:merge-request"]},
+  {"id":"gt-wisp-mr-open","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"ephemeral":true,"labels":["gt:merge-request"],"dependencies":[{"id":"gt-source","status":"closed","issue_type":"task"}]},
+  {"id":"gt-wisp-mr-closed","title":"Merge: gt-old","description":"branch: polecat/test/gt-old@def\ntarget: main\nsource_issue: gt-old\nrig: gastown\n","status":"closed","priority":1,"ephemeral":true,"labels":["gt:merge-request"]}
+]`
+
 // mergeRequestFallbackBD answers a ListMergeRequests run whose bd sql read is
 // sql, serving wispList for the `mol wisp list` fallback and the show
 // hydration above. Every other call is an empty answer.
@@ -55,6 +75,42 @@ func wispListArgv(r *recorder) string {
 		}
 	}
 	return ""
+}
+
+// TestListMergeRequestsSQLAllowed is the other side of the fallback: when the
+// gateway allows bd sql, ListMergeRequests answers from the sql rows and must
+// not also pay for the wisp list read.
+func TestListMergeRequestsSQLAllowed(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(func(args []string) reply {
+		switch args[0] {
+		case "sql":
+			return reply{stdout: mergeRequestSQLRows}
+		case "mol":
+			return reply{stdout: mergeRequestFallbackWisps}
+		case "show":
+			return reply{stdout: mergeRequestSQLShow}
+		default:
+			return reply{stdout: "[]"}
+		}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	mrs, err := b.ListMergeRequests(ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
+	if err != nil {
+		t.Fatalf("ListMergeRequests() error = %v, want the allowed sql read's answer", err)
+	}
+	ids := make([]string, 0, len(mrs))
+	for _, mr := range mrs {
+		ids = append(ids, mr.ID)
+	}
+	if want := []string{"gt-sql-mr-open", "gt-sql-mr-closed"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ListMergeRequests() ids = %v, want %v: the merge requests the allowed sql rows name", ids, want)
+	}
+	if got := wispListArgv(r); got != "" {
+		t.Errorf("wisp read = %q, want none: an allowed sql read answers the merge requests without the wisp list fallback", got)
+	}
 }
 
 func TestListMergeRequestsSQLRefused(t *testing.T) {
