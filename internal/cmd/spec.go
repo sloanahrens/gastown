@@ -3826,6 +3826,15 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 				notes:            [][2]string{{note, note}},
 			})
 		}
+		// A sling whose store did not answer (bd's store_unavailable exit, or a
+		// read the store went silent on) failed on the store's stall, not on the
+		// bead. The label this path would add holds a P0 bead out of the queue
+		// until a person clears it, so the store's failure defers the bead and
+		// the next tick slings it again once the store answers (gt-m7h3xn).
+		if beads.IsStoreUnavailable(err) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, the store did not answer: %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
 		// A bond that could not take the town bond lock within its wait never
 		// reached bd, so this is not Dolt contention and no retry of it can
 		// duplicate a write (gt-ye21). It is a deferral all the same: the queue
