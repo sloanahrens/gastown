@@ -133,6 +133,10 @@ const (
 	gomodMountPath   = cacheMountRoot + "/go"
 	gocacheMountPath = cacheMountRoot + "/.cache/go-build"
 	npmMountPath     = cacheMountRoot + "/.npm"
+	// lintCacheDir is golangci-lint's cache: a directory inside the ci-gomod volume,
+	// which the job user owns, so it survives between jobs with no volume of its own
+	// (gt-76s9vc).
+	lintCacheDir = gomodMountPath + "/golangci-lint-cache"
 
 	gomodCacheVolume = "ci-gomod"
 	gocacheVolume    = "ci-gocache"
@@ -176,6 +180,7 @@ var jobEnvs = []EnvVar{
 	{Name: "DOCKER_HOST", Value: "tcp://localhost:" + strconv.Itoa(dindPort)},
 	{Name: "DOCKER_TLS_VERIFY", Value: "1"},
 	{Name: "DOCKER_CERT_PATH", Value: certsClientDir},
+	{Name: "GOLANGCI_LINT_CACHE", Value: lintCacheDir},
 }
 
 // Share is a container's whole resource share. Requests equal limits, so the

@@ -586,10 +586,11 @@ func TestRunnerEnvsReachEngine(t *testing.T) {
 	t.Parallel()
 	doc := decodeConfig(t, mustBuild(t, goldenValues()))
 	want := map[string]string{
-		"DOCKER_HOST":       "tcp://localhost:2376",
-		"DOCKER_TLS_VERIFY": "1",
-		"DOCKER_CERT_PATH":  "/certs/client",
-		"CI_CPU_QUOTA":      strconv.Itoa(roundedUpCPUs(t, DefaultDindCPU)),
+		"DOCKER_HOST":         "tcp://localhost:2376",
+		"DOCKER_TLS_VERIFY":   "1",
+		"DOCKER_CERT_PATH":    "/certs/client",
+		"GOLANGCI_LINT_CACHE": "/home/ci/go/golangci-lint-cache",
+		"CI_CPU_QUOTA":        strconv.Itoa(roundedUpCPUs(t, DefaultDindCPU)),
 	}
 	for name, value := range want {
 		if got := doc.Runner.Envs[name]; got != value {
@@ -598,6 +599,37 @@ func TestRunnerEnvsReachEngine(t *testing.T) {
 	}
 	if len(doc.Runner.Envs) != len(want) {
 		t.Errorf("runner.envs = %q, want exactly %d entries", doc.Runner.Envs, len(want))
+	}
+}
+
+// TestBuildRendersLintCacheEnv drives the lint cache a job step reads from
+// runner.envs: golangci-lint takes its cache directory from GOLANGCI_LINT_CACHE,
+// so the variable must reach every job, or the lint runs cold on each gate.
+func TestBuildRendersLintCacheEnv(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	if got, want := doc.Runner.Envs["GOLANGCI_LINT_CACHE"], "/home/ci/go/golangci-lint-cache"; got != want {
+		t.Errorf("runner.envs GOLANGCI_LINT_CACHE = %q, want %q", got, want)
+	}
+}
+
+// TestLintCacheDirIsInsideTheGomodVolume drives where the lint cache lives: a
+// directory inside the ci-gomod volume the job user owns, so it survives between
+// jobs without a volume of its own. It must not sit under pkg/mod, which the
+// module cache owns.
+func TestLintCacheDirIsInsideTheGomodVolume(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	dir := doc.Runner.Envs["GOLANGCI_LINT_CACHE"]
+	mount, ok := optionMounts(t, doc.Container.Options)[gomodCacheVolume]
+	if !ok {
+		t.Fatalf("container.options %q does not mount %s", doc.Container.Options, gomodCacheVolume)
+	}
+	if !strings.HasPrefix(dir, mount+"/") {
+		t.Errorf("GOLANGCI_LINT_CACHE = %q, want a directory under the %s mount %q", dir, gomodCacheVolume, mount)
+	}
+	if strings.HasPrefix(dir, mount+"/pkg/mod") {
+		t.Errorf("GOLANGCI_LINT_CACHE = %q, want it outside pkg/mod", dir)
 	}
 }
 
