@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -232,6 +233,135 @@ func TestSystemUpdatesRowsReportsHowManyWereCut(t *testing.T) {
 	}
 }
 
+// TestSystemUpdateRowsKeep holds the commits the section draws beside its newest
+// rows: the commit under a sweep in flight and the last green sweep's. A kept
+// commit the cap cut is drawn after the newest rows, a kept sha no joined commit
+// names is drawn with no stages, and a limit of zero or less draws no keep
+// (gt-hueeyb).
+func TestSystemUpdateRowsKeep(t *testing.T) {
+	t.Parallel()
+
+	// sha is the eight-character sha of commit i; commit 7 is the newest of the
+	// eight joined commits, commit 0 the oldest.
+	sha := func(i int) string { return sysTestSHA(i)[:8] }
+	var sweeps []TierSweepRow
+	for i := range 8 {
+		sweeps = append(sweeps, TierSweepRow{At: sysTestClock.Add(time.Duration(i) * time.Minute), Rig: "gastown", SHA: sha(i)})
+	}
+	newest := []string{sha(7), sha(6), sha(5), sha(4), sha(3), sha(2)}
+
+	cases := []struct {
+		name     string
+		limit    int
+		keeps    []string
+		want     []string
+		wantMore int
+	}{
+		{
+			name:     "no keep draws the newest six",
+			limit:    systemUpdatesRowCap,
+			want:     newest,
+			wantMore: 2,
+		},
+		{
+			name:     "the swept commit the cap cut is drawn after the newest",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{sha(0)},
+			want:     append(slices.Clone(newest), sha(0)),
+			wantMore: 1,
+		},
+		{
+			name:     "the swept and green shas naming one commit draw one row",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{sha(0), sysTestSHA(0)[:12]},
+			want:     append(slices.Clone(newest), sha(0)),
+			wantMore: 1,
+		},
+		{
+			name:     "a keep the newest rows draw is not repeated",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{sha(7)},
+			want:     newest,
+			wantMore: 2,
+		},
+		{
+			name:     "older kept rows are newest first among themselves",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{sha(0), sha(1)},
+			want:     append(slices.Clone(newest), sha(1), sha(0)),
+			wantMore: 0,
+		},
+		{
+			name:     "a sha no joined commit names draws a row after the joined ones",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{sha(9)},
+			want:     append(slices.Clone(newest), sha(9)),
+			wantMore: 2,
+		},
+		{
+			name:     "a limit of zero adds no keep",
+			limit:    0,
+			keeps:    []string{sha(0)},
+			want:     []string{},
+			wantMore: len(sweeps),
+		},
+		{
+			name:     "a blank or short keep names no commit",
+			limit:    systemUpdatesRowCap,
+			keeps:    []string{"", "abc"},
+			want:     newest,
+			wantMore: 2,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rows, more := SystemUpdateRowsWithMore(sweeps, nil, nil, tt.limit, tt.keeps...)
+			got := make([]string, 0, len(rows))
+			for _, row := range rows {
+				got = append(got, row.SHA)
+			}
+			assert.Equal(t, tt.want, got, "rows drawn")
+			assert.Equal(t, tt.wantMore, more, "commits reported left out")
+		})
+	}
+
+	t.Run("a sha no joined commit names has no stages and no time", func(t *testing.T) {
+		t.Parallel()
+		rows, _ := SystemUpdateRowsWithMore(sweeps[:3], nil, nil, systemUpdatesRowCap, sysTestSHA(9)[:8])
+		require.Len(t, rows, 4)
+		last := rows[3]
+		assert.Equal(t, sysTestSHA(9)[:8], last.SHA)
+		assert.True(t, last.At.IsZero(), "a row with no join has no time")
+		assert.Nil(t, last.Sweep)
+		assert.Empty(t, last.Runs)
+		assert.Nil(t, last.Roll)
+	})
+
+	t.Run("NewSystemUpdates draws the swept and last green commits", func(t *testing.T) {
+		t.Parallel()
+		// Commit 0 is the only green sweep, so it is the last green one, and the
+		// swept commit 1 is the second oldest, which the cap cuts.
+		var judged []TierSweepRow
+		for i := range 8 {
+			verdict := "RED"
+			if i == 0 {
+				verdict = "GREEN"
+			}
+			judged = append(judged, sweepAt(i, "gastown", sha(i), verdict))
+		}
+		su := NewSystemUpdates(judged, nil, nil, false, sha(1))
+		require.NotNil(t, su.LastGreen)
+		assert.Equal(t, sha(0), su.LastGreen.SHA)
+		var got []string
+		for _, row := range su.Rows {
+			got = append(got, row.SHA)
+		}
+		assert.Equal(t, append(slices.Clone(newest), sha(1), sha(0)), got, "rows drawn")
+		assert.Equal(t, 0, su.More, "commits reported left out")
+	})
+}
+
 // sweepAt is a sweep of the rig at minute min of the test clock, one stage per
 // verdict, so a test reads its verdicts in order.
 func sweepAt(min int, rig, sha string, verdicts ...string) TierSweepRow {
@@ -454,7 +584,9 @@ func TestSystemUpdatesAheadCounts(t *testing.T) {
 		want     int
 		wantCut  int
 	}{
-		{name: "after the green sweep, the cap cut ones too", sweeps: eight, want: 7, wantCut: 2},
+		// The green commit is the oldest, so the cap cuts it; it is drawn beside the
+		// rows as the last green sweep, so one commit is left out (gt-hueeyb).
+		{name: "after the green sweep, the cap cut ones too", sweeps: eight, want: 7, wantCut: 1},
 		{
 			name:   "the green commit's own later roll does not count",
 			sweeps: []TierSweepRow{sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN")},

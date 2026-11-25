@@ -69,11 +69,17 @@ type NowSweep struct {
 // NewSystemUpdates builds the section from the sweeps, pipeline runs and rolls
 // the readers read. The row cap is the section's own, so a caller never picks
 // it. A nil pipeline joins no runs into the rows. Sweeps and LastGreen read only
-// the gastown rig's sweeps.
-func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, unavailable bool) *SystemUpdates {
-	rows, more := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, systemUpdatesRowCap)
+// the gastown rig's sweeps. sweptKeep names the commit under a sweep in flight,
+// if one runs; the section draws it, and the last green sweep's commit, beside
+// its newest rows even when the cap cut them.
+func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []SystemUpdateRoll, unavailable bool, sweptKeep ...string) *SystemUpdates {
 	rig := rigSweeps(sweeps)
 	lastGreen := lastGreenSweep(rig)
+	keeps := append([]string{}, sweptKeep...)
+	if lastGreen != nil {
+		keeps = append(keeps, lastGreen.SHA)
+	}
+	rows, more := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, systemUpdatesRowCap, keeps...)
 	ahead := systemUpdatesAhead(rig, pipeline, rolls, lastGreen)
 	if len(rig) > systemUpdatesSweepCap {
 		rig = rig[:systemUpdatesSweepCap]
