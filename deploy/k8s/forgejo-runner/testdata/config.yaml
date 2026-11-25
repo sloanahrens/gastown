@@ -15,7 +15,7 @@ runner:
     - 'ci-base:docker://ci-base:latest'
 container:
   network: 'host'
-  options: '--add-host=forgejo:192.168.5.2 --init --tmpfs /tmp:exec,size=2g -v ci-gomod:/home/ci/go -v ci-gocache:/home/ci/.cache/go-build -v ci-npm:/home/ci/.npm -v /certs/client:/certs/client'
+  options: '--add-host=forgejo:192.168.5.2 --init -v ci-gomod:/home/ci/go -v ci-gocache:/home/ci/.cache/go-build -v ci-npm:/home/ci/.npm -v /certs/client:/certs/client'
   valid_volumes:
     - 'ci-gomod'
     - 'ci-gocache'
