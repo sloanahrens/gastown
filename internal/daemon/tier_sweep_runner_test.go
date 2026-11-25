@@ -984,7 +984,8 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // failWait fails the reader pod's readiness wait, not the sync pod's.
 // priority answers the priority preflight's listing instead of the healthy one,
 // so a cycle can be driven from a protected pod the sweep outranks to a healthy
-// cluster and back.
+// cluster and back. progress is what the Progress step prints, and failProgress
+// fails that step; an exec is the only command that step runs.
 type runnerCluster struct {
 	t           *testing.T
 	status      string
@@ -1008,6 +1009,8 @@ type runnerCluster struct {
 	failApply      int
 	applies        int
 	priority       []byte
+	progress       []byte
+	failProgress   bool
 }
 
 // goldenListing reads a live-cluster fixture the sweep's guards were captured
@@ -1115,6 +1118,12 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 		if c.failWait && !slices.ContainsFunc(argv, func(arg string) bool { return strings.HasPrefix(arg, "pod/gt-sweep-sync-") }) {
 			return nil, []byte("error: timed out waiting for the condition\n"), errors.New("exit status 1")
 		}
+	case slices.Contains(argv, "exec"):
+		if c.failProgress {
+			// The step prints a whole record and still fails: it must not be stored.
+			return c.progress, []byte("error: unable to exec into the run's Job\n"), errors.New("exit status 1")
+		}
+		return c.progress, nil, nil
 	case slices.Contains(argv, "cp"):
 		// The sync stage's copy lands in the repo claim; the reader's copies
 		// bring the result and the per-unit logs home.
@@ -2007,6 +2016,65 @@ func TestTierSweepRunnerCollect(t *testing.T) {
 				if _, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err != nil {
 					t.Errorf("the copied result does not read back: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// TestTierSweepRunnerProgress is the copy the wait makes while a run goes on: the
+// Progress step's stdout is stored as progress.json in the run's output
+// directory. A plan with no Progress step writes nothing, and a step that fails
+// or prints what is not a JSON object leaves the record the last poll stored.
+func TestTierSweepRunnerProgress(t *testing.T) {
+	t.Parallel()
+	const earlier = `{"tiers":["integration"]}`
+	cases := []struct {
+		name     string
+		backend  string
+		progress string
+		failStep bool
+		wantExec bool
+		wantErr  bool
+		wantFile string
+	}{
+		{name: "a Progress step's stdout is stored as the run's progress record", progress: `{"tiers":["integration"],"running":"race"}`, wantExec: true, wantFile: `{"tiers":["integration"],"running":"race"}`},
+		{name: "a plan with no Progress step writes nothing", backend: config.TierSweepRunnerDocker, wantFile: earlier},
+		{name: "a failing Progress step is returned and keeps the stored record", progress: `{"tiers":["integration"],"running":"race"}`, failStep: true, wantExec: true, wantErr: true, wantFile: earlier},
+		{name: "a Progress step that prints no JSON object is refused and keeps the stored record", progress: "not json", wantExec: true, wantErr: true, wantFile: earlier},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, _ := runnerKubernetesDaemon(t, now)
+			cluster := &runnerCluster{t: t, progress: []byte(tc.progress), failProgress: tc.failStep}
+			cmds := &runnerFakeCmds{answer: cluster.answer}
+			d.execCmd = cmds.run
+			if tc.backend != "" {
+				d.patrolConfig.Patrols.TierSweep.Runner.Backend = tc.backend
+			}
+			if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(spec.OutDir, runProgressName)
+			if err := os.WriteFile(path, []byte(earlier), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err := d.tierSweepRunnerProgress(context.Background(), spec)
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want an error = %v", err, tc.wantErr)
+			}
+			if got := len(runnerCalls(cmds.ran, "exec")) > 0; got != tc.wantExec {
+				t.Errorf("a progress step ran = %v, want %v: %q", got, tc.wantExec, cmds.ran)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.wantFile {
+				t.Errorf("progress.json = %q, want %q", got, tc.wantFile)
 			}
 		})
 	}
