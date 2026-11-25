@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -359,6 +360,46 @@ func TestClusterDriftSbxFlagsUnknownCluster(t *testing.T) {
 				t.Errorf("printed %q, want nothing", out)
 			}
 		})
+	}
+}
+
+// sbxChartFixturePath is the sbx package's trimmed copy of the pinned OpenShell
+// chart's helm output, which that package's own render tests parse.
+const sbxChartFixturePath = "../../deploy/k8s/sbx/testdata/openshell-trimmed.yaml"
+
+// TestClusterDriftSbxRenderedKindsAreOnTheKindTable holds every kind the two
+// rendered-set fixtures hold to clusterTargetKinds: the static set SbxStatic
+// returns and the chart objects the production OpenShell parses from the chart
+// fixture, whose hook documents and Secret it drops, so they are not checked. A
+// kind a fixture gains fails here rather than at run time, where the guarded
+// read runner refuses any kind the table does not name (gt-e79lff).
+func TestClusterDriftSbxRenderedKindsAreOnTheKindTable(t *testing.T) {
+	t.Parallel()
+	static, err := k8s.SbxStatic()
+	if err != nil {
+		t.Fatalf("reading the gt-sbx static set: %v", err)
+	}
+	chartRaw, err := os.ReadFile(filepath.FromSlash(sbxChartFixturePath))
+	if err != nil {
+		t.Fatalf("reading the chart fixture %s: %v", sbxChartFixturePath, err)
+	}
+	// The chart fixture stands in for helm's output: OpenShell parses it with the
+	// production parser and never runs helm itself.
+	chart, err := sbx.OpenShell(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
+		return chartRaw, nil
+	}, "/sbx/chart", "/sbx/values.yaml")
+	if err != nil {
+		t.Fatalf("parsing the chart fixture %s: %v", sbxChartFixturePath, err)
+	}
+	objects := make([]k8s.StaticObject, 0, len(static)+len(chart.Objects))
+	objects = append(objects, static...)
+	objects = append(objects, chart.Objects...)
+	for _, object := range objects {
+		// readSbxLive lowercases the kind before the read runner checks it, so the
+		// table is checked here the way the read checks it.
+		if kind := strings.ToLower(object.Kind); !isClusterTargetKind(kind) {
+			t.Errorf("the rendered %s %s is a kind clusterTargetKinds does not hold, so the drift read would refuse it; add the kind's row", object.Kind, object.Name)
+		}
 	}
 }
 
