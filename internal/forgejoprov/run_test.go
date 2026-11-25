@@ -639,6 +639,41 @@ func TestRunRotateWithSkipTokensRefuses(t *testing.T) {
 	}
 }
 
+// TestProvisionRefusesRevokeToken: --revoke-token is parsed and checked, but its
+// action is not in this build, so a run that carries it fails before any request
+// and never falls through to the normal provision, which ensures users and mints
+// the tokens the caller asked to revoke.
+func TestProvisionRefusesRevokeToken(t *testing.T) {
+	t.Parallel()
+	for name, args := range map[string][]string{
+		"live run": {"--revoke-token", "gt-old", "--role", "landing"},
+		"dry run":  {"--revoke-token", "gt-old", "--role", "landing", "--dry-run"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
+			files := newMemFiles()
+
+			res := runProvisioning(t, f, files, nil, args...)
+			if res.code != ExitFailure {
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+			}
+			for _, want := range []string{"--revoke-token", "not implemented yet"} {
+				if !strings.Contains(res.logs, want) {
+					t.Errorf("logs = %q, want the refusal to hold %q", res.shown(), want)
+				}
+			}
+			if calls := f.CallLog(); len(calls) != 0 {
+				t.Errorf("run sent %d requests, want none: a revoke never provisions", len(calls))
+			}
+			if got := tokenFileCount(files); got != 0 {
+				t.Errorf("run wrote %d token files, want none", got)
+			}
+		})
+	}
+}
+
 // TestRunSkipTokensDryRunPlanNamesTheSkippedStep: a dry run with --skip-tokens
 // prints the token step as skipped and still plans the repository writes.
 func TestRunSkipTokensDryRunPlanNamesTheSkippedStep(t *testing.T) {
