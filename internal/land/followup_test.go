@@ -116,6 +116,18 @@ func (f *followupFixture) run() string {
 	return log.String()
 }
 
+// followupLintTarget is the target branch inventory a filed body is linted
+// against: the files the caller says the branch holds. The dispatcher supplies
+// the real one, so a body that names a file is linted as it will be dispatched
+// (gt-pdjkig).
+func followupLintTarget(files ...string) *specdispatch.TargetTree {
+	set := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		set[f] = struct{}{}
+	}
+	return &specdispatch.TargetTree{Branch: "main", Files: set}
+}
+
 // majorFinding is a finding the follow-up feed does not file: a major refuses
 // the landing it was raised on (gt-oi4je).
 func majorFinding(title string) Finding {
@@ -471,12 +483,15 @@ func TestFollowupFeedBodyLintsClean(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		findings []Finding
+		files    []string
 		want     int
 	}{
 		{"one bead for the landing",
-			[]Finding{minorAt("internal/land/note.go", 230, "swap the nil check"), minorFinding("name the error")}, 1},
+			[]Finding{minorAt("internal/land/note.go", 230, "swap the nil check"), minorFinding("name the error")},
+			[]string{"internal/land/note.go"}, 1},
 		{"one bead per package",
-			[]Finding{minorAt("internal/land/note.go", 230, "swap the nil check"), minorAt("docs/reference.md", 4, "name the error")}, 2},
+			[]Finding{minorAt("internal/land/note.go", 230, "swap the nil check"), minorAt("docs/reference.md", 4, "name the error")},
+			[]string{"internal/land/note.go", "docs/reference.md"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -487,7 +502,7 @@ func TestFollowupFeedBodyLintsClean(t *testing.T) {
 			}
 			for i, filed := range f.fake.created {
 				spec := specdispatch.Spec{ID: fmt.Sprintf("gt-filed-%d", i), Title: filed.Title, Type: "task",
-					Status: "open", Description: filed.Body}
+					Status: "open", Description: filed.Body, Target: followupLintTarget(tc.files...)}
 				if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); !v.Clean() {
 					t.Fatalf("the filed body does not lint clean: %s\n%s", v.Line(spec.ID), spec.Description)
 				}
@@ -528,7 +543,8 @@ func TestFollowupFeedFilesALargeGroupInBundlesOfAtMostMaxAcceptance(t *testing.T
 		if fps != want[i] || boxes != want[i] {
 			t.Errorf("bundle %d carries %d fingerprints and %d boxes, want %d of each", i, fps, boxes, want[i])
 		}
-		if v := specdispatch.Lint(specdispatch.Spec{ID: "gt-b", Title: spec.Title, Type: "task", Status: "open", Description: spec.Body}, specdispatch.LoadTemplate("")); !v.Clean() {
+		if v := specdispatch.Lint(specdispatch.Spec{ID: "gt-b", Title: spec.Title, Type: "task", Status: "open",
+			Description: spec.Body, Target: followupLintTarget("internal/land/note.go")}, specdispatch.LoadTemplate("")); !v.Clean() {
 			t.Errorf("bundle %d does not lint clean: %s", i, v.Line("gt-b"))
 		}
 		goal, _, _ := strings.Cut(spec.Body, "\n## Constraints")
@@ -1199,8 +1215,76 @@ func TestFollowupBodyTellsThePolecatAboutTheRevertCheck(t *testing.T) {
 			t.Errorf("the bead was labelled deletes-by-spec automatically: %v", created.Labels)
 		}
 	}
-	spec := specdispatch.Spec{ID: "gt-filed-0", Title: created.Title, Type: "task", Status: "open", Description: created.Body}
+	spec := specdispatch.Spec{ID: "gt-filed-0", Title: created.Title, Type: "task", Status: "open",
+		Description: created.Body, Target: followupLintTarget("internal/land/note.go")}
 	if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); !v.Clean() {
 		t.Errorf("the body does not lint clean: %s\n%s", v.Line(spec.ID), created.Body)
+	}
+}
+
+// TestFollowupBodyNamesTheFileItsFixIsIn: the filed body closes its Goal by
+// telling the seat to check each finding against origin/main before it works,
+// and its Constraints name the group's key file and that file's test as the
+// only files to edit, so a bead titled by one file does not read as licence to
+// edit the package. A key outside Go names its file alone, and a Go key's test
+// file is named as one to create, so a branch without it still dispatches
+// (gt-pdjkig).
+func TestFollowupBodyNamesTheFileItsFixIsIn(t *testing.T) {
+	t.Parallel()
+	const checkMain = "Check each finding against origin/main before you start; one already fixed there needs no change, so say so in the commit body and tick its box."
+	for _, tc := range []struct {
+		name    string
+		finding Finding
+		edits   string   // the Constraints sentence naming the files
+		files   []string // the target branch's files, which the lint checks them against
+	}{
+		{
+			name:    "a source file",
+			finding: minorAt("internal/cmd/spec.go", 42, "name the error"),
+			edits:   "Edit only internal/cmd/spec.go, and create internal/cmd/spec_test.go if it does not exist.",
+			// The test file is absent on purpose: the body must stay
+			// dispatchable for a source file main has no test for.
+			files: []string{"internal/cmd/spec.go"},
+		},
+		{
+			name:    "no key",
+			finding: Finding{ID: "4", Severity: "minor", Title: "name the error"},
+			edits:   "Only the files the findings name.",
+		},
+		{
+			name:    "a file with no Go test",
+			finding: minorAt("docs/reference.md", 6, "name the error"),
+			edits:   "Edit only docs/reference.md.",
+			files:   []string{"docs/reference.md"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFollowupFixture(t, 0.8, []Finding{tc.finding})
+			f.run()
+			if len(f.fake.created) != 1 {
+				t.Fatalf("filed %d beads, want one", len(f.fake.created))
+			}
+			created := f.fake.created[0]
+			body := created.Body
+			goal, constraints, ok := strings.Cut(body, "\n## Constraints")
+			if !ok {
+				t.Fatalf("the body has no Constraints section:\n%s", body)
+			}
+			if !strings.Contains(goal, checkMain) {
+				t.Errorf("the Goal lacks %q:\n%s", checkMain, goal)
+			}
+			if !strings.Contains(constraints, tc.edits) {
+				t.Errorf("the Constraints lack %q:\n%s", tc.edits, constraints)
+			}
+			if tc.name == "a file with no Go test" && strings.Contains(constraints, "_test.go") {
+				t.Errorf("the Constraints name a Go test file for a file that has none:\n%s", constraints)
+			}
+			spec := specdispatch.Spec{ID: "gt-filed-0", Title: created.Title, Type: "task", Status: "open",
+				Description: body, Target: followupLintTarget(tc.files...)}
+			if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); !v.Clean() {
+				t.Errorf("the body does not lint clean against %v: %s\n%s", tc.files, v.Line(spec.ID), body)
+			}
+		})
 	}
 }
