@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
@@ -248,6 +250,13 @@ func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T)
 			}
 			return d, planOut(t), atomicfile.WriteJSON
 		}, "disk full"},
+		{"the set cannot be built", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			d.build = func(k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				return k8sdaemon.Manifests{}, errors.New("planted build error")
+			}
+			return d, planOut(t), atomicfile.WriteJSON
+		}, "planted build error"},
 		{"plan.json cannot be written", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
 			writeJSON := func(string, any) error { return errors.New("plan.json: disk full") }
 			return clusterRenderDepsAt(t, planTown(t), io.Discard), planOut(t), writeJSON
@@ -269,6 +278,31 @@ func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T)
 				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", err)
 			}
 		})
+	}
+}
+
+// TestClusterShapePlanIdMakesOnlyReadCalls: a runner that fails every helm call
+// but `helm template`, the render's one read, never fails the plan, because the
+// plan makes no other call. Every call the runner sees is a read.
+func TestClusterShapePlanIdMakesOnlyReadCalls(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+	d.runHelm = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		call := strings.Join(append([]string{name}, args...), " ")
+		calls = append(calls, call)
+		if len(args) == 0 || args[0] != "template" {
+			return nil, errors.New("planted non-read call: " + call)
+		}
+		return []byte(sbxEngineHelmOutput), nil
+	}
+	if err := runTownClusterPlan(d, &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+		t.Fatalf("the plan failed under a runner that fails every non-read call: %v", err)
+	}
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "helm template ") {
+			t.Errorf("the plan ran %q, want only the read helm template", c)
+		}
 	}
 }
 
