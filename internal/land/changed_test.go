@@ -223,6 +223,8 @@ var guardTriggers = []struct {
 	{"internal/config", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
+	// Any non-test Go file is the os.Getwd ratchet's input (gt-s6icgn).
+	{"internal/callercwd", "M\x00internal/cmd/seat_ship_cmd.go\x00"},
 	{"internal/rig", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/tmux", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
@@ -784,6 +786,70 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			}
 			if !contains(pkgs, tt.want) {
 				t.Errorf("GuardSelects(%q) = %v, want %s among them", tt.diff, pkgs, tt.want)
+			}
+		})
+	}
+}
+
+// TestGuardSelectsGetwd: the os.Getwd ratchet runs when a non-test Go file
+// changes, when its allowlist changes, and when a Go file is removed, since a
+// deleted file can leave an allowlist entry that no longer calls os.Getwd. A
+// change under internal/cmd that adds os.Getwd passed presubmit and failed the
+// landing's ratchet (gt-s6icgn).
+func TestGuardSelectsGetwd(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	ratchet := []string{"TestGetwdAllowlistCanOnlyShrink", "TestNoDirectGetwd"}
+
+	tests := []struct {
+		name string
+		diff string
+		want []string // the internal/callercwd tests that must be selected, nil for none
+	}{
+		{
+			"a changed internal/cmd Go file selects the ratchet",
+			"M\x00internal/cmd/seat_ship_cmd.go\x00",
+			ratchet,
+		},
+		{
+			"a changed allowlist selects the ratchet",
+			"M\x00internal/callercwd/testdata/getwd-allow.txt\x00",
+			ratchet,
+		},
+		{
+			"a removed Go file selects the ratchet",
+			"D\x00internal/cmd/gone.go\x00",
+			ratchet,
+		},
+		{
+			"a changed test file selects no ratchet test",
+			"M\x00internal/cmd/seat_ship_cmd_test.go\x00",
+			nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			var got []string
+			for _, s := range sel {
+				if s.Package == "internal/callercwd" {
+					got = s.Tests
+				}
+			}
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("GuardSelects(%q) internal/callercwd tests = %v, want none", tt.diff, got)
+				}
+				return
+			}
+			for _, name := range tt.want {
+				if !contains(got, name) {
+					t.Errorf("GuardSelects(%q) internal/callercwd tests = %v, want %s among them", tt.diff, got, name)
+				}
 			}
 		})
 	}
