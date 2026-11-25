@@ -45,8 +45,11 @@ const (
 	DefaultKillGrace = 2 * time.Second
 
 	// DefaultSlotWait is the wait for a concurrency slot that the options name
-	// no SlotWait for.
-	DefaultSlotWait = 5 * time.Second
+	// no SlotWait for. It stays under the 5 second bound of the metrics bd
+	// reads (queueBdTimeout, reviewBdTimeout, configRigListTimeout), so a call
+	// that finds every slot taken is refused by name before the caller's own
+	// timeout cuts it off.
+	DefaultSlotWait = 2 * time.Second
 
 	// stderrHeadBytes bounds how much of bd's stderr a call keeps for its log
 	// line. The first line is what names bd's failure; the cap lets a line that

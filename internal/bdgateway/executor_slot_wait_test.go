@@ -53,6 +53,29 @@ func TestExecutorSlotWaitOption(t *testing.T) {
 	}
 }
 
+// TestExecutorDefaultSlotWait: the default slot wait is 2s, under the shortest
+// caller deadline of 5s, and an executor built with no SlotWait holds it.
+func TestExecutorDefaultSlotWait(t *testing.T) {
+	t.Parallel()
+	if DefaultSlotWait != 2*time.Second {
+		t.Fatalf("DefaultSlotWait = %s, want 2s", DefaultSlotWait)
+	}
+	e, err := New(Options{
+		Binary:        "/opt/bd/bd",
+		WorkspaceRoot: testWorkspace(t),
+		Home:          "/home/bdgw",
+		Path:          "/usr/bin:/bin",
+		DoltHost:      "gt-dolt",
+		DoltPort:      "3307",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if e.slotWait != 2*time.Second {
+		t.Errorf("slot wait = %s, want 2s", e.slotWait)
+	}
+}
+
 // signalAfter is a timer seam whose timer never fires and which tells the test
 // each time the executor starts one, so a test knows a call is waiting without
 // any real wait.
