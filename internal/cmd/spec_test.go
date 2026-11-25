@@ -672,6 +672,57 @@ func TestSpecDispatchShapeGate(t *testing.T) {
 	})
 }
 
+// A bead the refuse gate labeled needs-shape keeps the label until it lints
+// clean, and the tick that finds it clean takes the label off, so the overseer's
+// reshape queue lists only the beads still to reshape (gt-5oyjvn).
+func TestSpecDispatchShapeGateDropsAStaleNeedsShape(t *testing.T) {
+	t.Parallel()
+	stale := func() specdispatch.Spec {
+		s := cleanSpec("gt-ok", 1, "2026-09-29T10:00:00Z")
+		s.Labels = []string{specShapeLabel}
+		return s
+	}
+
+	t.Run("clean bead drops the label and is slung", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(stale())
+		r := runSpecDispatchCycle(f.env())
+		if len(f.unlabels) != 1 || f.unlabels[0] != "gt-ok:needs-shape" {
+			t.Fatalf("unlabels = %v, want the stale label removed once", f.unlabels)
+		}
+		if len(f.slung) != 1 || len(r.Dispatched) != 1 {
+			t.Fatalf("slung %v report %+v, want the clean bead slung", f.slung, r)
+		}
+	})
+
+	t.Run("dry run keeps the label", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(stale())
+		env := f.env()
+		env.DryRun = true
+		runSpecDispatchCycle(env)
+		if len(f.unlabels) != 0 {
+			t.Fatalf("dry run removed labels: %v", f.unlabels)
+		}
+		if got := f.specs["gt-ok"].Labels; !slices.Contains(got, specShapeLabel) {
+			t.Errorf("dry run dropped the label: %v", got)
+		}
+	})
+
+	t.Run("failed removal is reported and the bead still slings", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(stale())
+		f.unlabelErrs["gt-ok"] = errors.New("label write refused")
+		r := runSpecDispatchCycle(f.env())
+		if len(r.Errors) != 1 || r.Errors[0] != "gt-ok: unlabel: label write refused" {
+			t.Fatalf("errors = %q, want one unlabel error", r.Errors)
+		}
+		if len(f.slung) != 1 {
+			t.Fatalf("slung %v, want the clean bead still slung", f.slung)
+		}
+	})
+}
+
 // A held unshaped bead spends no seat and does not block the shaped beads
 // behind it: the hold is a skip, not a stop (gt-f8ppx acceptance 4).
 func TestSpecDispatchUnshapedHoldSpendsNoSeat(t *testing.T) {
