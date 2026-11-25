@@ -459,3 +459,149 @@ func TestSystemUpdatesPageDrawsNoTimeForAStageWithoutARecord(t *testing.T) {
 		}
 	}
 }
+
+// sweepTableSweep is one sweep of the section's Sweeps list, off the feed's
+// TierSweepRow: its time, its commit and, where the record kept one, its total.
+func sweepTableSweep(at, sha string, secs any) map[string]any {
+	row := map[string]any{"at": at, "sha": sha}
+	if secs != nil {
+		row["secs"] = secs
+	}
+	return row
+}
+
+// sweepTableState is a reading carrying the section's sweeps above its one
+// commit row; a nil list leaves the key out, as a feed that predates it does.
+func sweepTableState(src systemUpdatesSources, sweeps []any) map[string]any {
+	st := systemUpdatesState(src, systemUpdateGoodRow())
+	if sweeps != nil {
+		st["system_updates"].(map[string]any)["sweeps"] = sweeps
+	}
+	return st
+}
+
+// sweepTableSweeps is five sweeps, newest first, each breaking something the
+// table draws: one from today, a lost total, an empty sha, a stamp that is not
+// a time, and a sha the table has to cut.
+func sweepTableSweeps(today string) []any {
+	return []any{
+		sweepTableSweep(today, "aaaa111122223333444455556666777788889999", 1830),
+		sweepTableSweep("2020-03-04T18:05:00Z", "bbbb2222333344445555", nil),
+		sweepTableSweep("2020-03-04T12:00:00Z", "", 95),
+		sweepTableSweep("0001-01-01T00:00:00Z", "dddd444455556666", 7200),
+		sweepTableSweep("2020-01-01T23:00:00Z", "eeee55556666", 60),
+	}
+}
+
+// sweepTableLine reads back one line of the pane's sweeps table, line 0 being
+// its header, as each cell's text, class and title.
+func sweepTableLine(t *testing.T, dom *pageDOM, line int) []drawn {
+	t.Helper()
+
+	n := dom.descend(t, "systemupdates", 0, line).Kids
+	cells := make([]drawn, n)
+	for i := range cells {
+		cells[i] = dom.descend(t, "systemupdates", 0, line, i)
+	}
+	return cells
+}
+
+// The pane draws the section's sweeps as a table under the sweep block and
+// above its commit rows (gt-8a819i): one line per sweep, newest first, with the
+// when, the commit and the total, and a dash for a total the record lost.
+func TestSystemUpdatesSweepTable(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	today := pageExpr(t, dom, "new Date().toISOString()")
+	dom.call(t, "renderSystemUpdates", sweepTableState(systemUpdatesSources{}, sweepTableSweeps(today)))
+
+	if got := dom.element(t, "systemupdates").Kids; got != 2 {
+		t.Fatalf("the pane drew %d lines, want the table and the one commit row", got)
+	}
+	if got := dom.descend(t, "systemupdates", 0).Kids; got != 6 {
+		t.Fatalf("the table drew %d lines, want a header and one per sweep", got)
+	}
+	for i, want := range []string{"When", "Commit", "Total"} {
+		if got := dom.descend(t, "systemupdates", 0, 0, i).Text; got != want {
+			t.Errorf("header cell %d reads %q, want %q", i, got, want)
+		}
+	}
+	if got := dom.descend(t, "systemupdates", 0, 0, 2).Class; got != "n" {
+		t.Errorf("the Total header wears %q, want the right-aligned column class", got)
+	}
+
+	// A when-cell is the sweep's time on the viewer's clock, with the date unless
+	// the sweep is from today. The expected text is built from the page's own
+	// Date and clock, not from the function under test, so it holds in any zone.
+	clockOf := func(iso string) string { return pageExpr(t, dom, `clock("`+iso+`").slice(0, 5)`) }
+	dated := func(iso string) string {
+		return pageExpr(t, dom, `new Date("`+iso+`").toLocaleDateString([], {month: "short", day: "numeric"})`) + " " + clockOf(iso)
+	}
+	// The stamps are the fixture's own. Line 3's is not a real time, so it draws a
+	// dash and has no title; a run that straddles local midnight would read the
+	// first sweep as not from today.
+	var stamps []string
+	for _, row := range sweepTableSweeps(today) {
+		stamps = append(stamps, row.(map[string]any)["at"].(string))
+	}
+	whens := []string{clockOf(today), dated(stamps[1]), dated(stamps[2]), "–", dated(stamps[4])}
+	for line, want := range []struct{ sha, total string }{
+		{"aaaa11112222", "31m"},
+		{"bbbb22223333", "–"},
+		{"–", "2m"},
+		{"dddd44445555", "2h00m"},
+		{"eeee55556666", "60s"},
+	} {
+		cells := sweepTableLine(t, dom, line+1)
+		if len(cells) != 3 {
+			t.Fatalf("sweep line %d drew %d cells, want three", line, len(cells))
+		}
+		if cells[0].Text != whens[line] {
+			t.Errorf("sweep line %d reads the when %q, want %q", line, cells[0].Text, whens[line])
+		}
+		if line != 3 && !strings.Contains(cells[0].Title, stamps[line]) {
+			t.Errorf("sweep line %d's when is titled %q, want the feed's stamp %q in it", line, cells[0].Title, stamps[line])
+		}
+		if cells[1].Text != want.sha || cells[2].Text != want.total || cells[2].Class != "n" {
+			t.Errorf("sweep line %d reads the commit %q and total %q wearing %q, want %q and %q wearing n", line, cells[1].Text, cells[2].Text, cells[2].Class, want.sha, want.total)
+		}
+	}
+	// The full sha is kept in the commit cell's title, where the cut one hides it.
+	if got := sweepTableLine(t, dom, 1)[1].Title; got != "aaaa111122223333444455556666777788889999" {
+		t.Errorf("the commit cell is titled %q, want the sweep's full sha", got)
+	}
+	if got := dom.descend(t, "systemupdates", 1).Kids; got != 8 {
+		t.Errorf("the commit row under the table drew %d children, want its sha, six chips and the pair chip", got)
+	}
+}
+
+// A reading with no sweeps draws no table, and neither does an unread sweep
+// source: an unread section is not one that says there were none (gt-8a819i).
+func TestSystemUpdatesSweepTableDrawsNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		src    systemUpdatesSources
+		sweeps []any
+	}{
+		{"a feed that carries no list", systemUpdatesSources{}, nil},
+		{"an empty list", systemUpdatesSources{}, []any{}},
+		{"a sweep source that could not be read", systemUpdatesSources{sweepUnknown: true}, sweepTableSweeps("2020-03-05T21:40:00Z")},
+		{"an unavailable section", systemUpdatesSources{unavailable: true}, sweepTableSweeps("2020-03-05T21:40:00Z")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", sweepTableState(tc.src, tc.sweeps))
+			if got := dom.element(t, "systemupdates").Kids; got != 1 {
+				t.Fatalf("the pane drew %d lines, want the one commit row and no table", got)
+			}
+			if got := dom.descend(t, "systemupdates", 0).Kids; got != 8 {
+				t.Errorf("the pane's only line drew %d children, want a commit row rather than a table", got)
+			}
+		})
+	}
+}

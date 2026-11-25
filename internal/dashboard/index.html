@@ -3186,6 +3186,48 @@ function systemUpdateSweepBlock(sweep) {
   return lines;
 }
 
+// systemUpdateSweepWhen is a sweep's at as the table draws it: the viewer's
+// 24-hour clock, with the date when the sweep is not from today, since the list
+// spans days (gt-8a819i); a stamp that is not a real time draws a dash.
+function systemUpdateSweepWhen(at) {
+  if (!systemUpdateTimeSet(at)) return "–";
+  const d = new Date(at);
+  const day = d.toDateString() === new Date().toDateString() ? "" : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " ";
+  return day + clock(at).slice(0, 5);
+}
+
+// systemUpdateSweepsTable is the table of the section's sweeps (gt-8a819i): one
+// line per sweep, in the feed's order, which is newest first, with the when,
+// the commit and the cycle's total. fmtDur draws a dash for a total the record
+// lost. An unread sweep source draws no table, and neither does a reading with
+// no sweeps: an unread section is not one that says there were none. It draws
+// no verdicts and no failed packages.
+function systemUpdateSweepsTable(su) {
+  if (!su || systemUpdateStageUnknown(su, "sweep")) return null;
+  const sweeps = su.sweeps || [];
+  if (!sweeps.length) return null;
+  const table = el("table"), head = el("tr");
+  [["When"], ["Commit"], ["Total", "the whole cycle, every tier the sweep ran", 1]].forEach(([h, tip, num]) => {
+    const th = el("th", num ? "n" : "", h);
+    if (tip) th.title = tip;
+    head.append(th);
+  });
+  table.append(head);
+  for (const row of sweeps) {
+    const tr = el("tr");
+    const when = el("td", "title", systemUpdateSweepWhen(row.at));
+    if (systemUpdateTimeSet(row.at)) when.title = row.at + " · " + age(row.at) + " ago";
+    tr.append(when);
+    const sha = String(row.sha || "");
+    const commit = el("td", "title", sha.slice(0, 12) || "–");
+    if (sha.length > 12) commit.title = sha;
+    tr.append(commit);
+    tr.append(el("td", "n", fmtDur(row.secs)));
+    table.append(tr);
+  }
+  return [table];
+}
+
 // The pane header's icon follows the worst chip the pane drew, red above amber.
 // Green and grey earn no colour of their own — a pair is never green, and grey
 // is nothing read — so the icon stays the heading's muted dash unless a red or
@@ -3299,6 +3341,7 @@ function renderSystemUpdates(s) {
   if (sweep && !sweepUnknown) for (const line of systemUpdateSweepBlock(sweep)) box.append(line);
   const lastGreen = su && systemUpdateLastGreenLine(su);
   if (lastGreen) box.append(lastGreen);
+  for (const line of systemUpdateSweepsTable(su) || []) box.append(line);
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
