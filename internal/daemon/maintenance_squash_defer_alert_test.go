@@ -113,6 +113,68 @@ func TestSquashDeferAlertMessage(t *testing.T) {
 	}
 }
 
+// TestSquashDeferAlertDueSince pins the pure time-based due decision: the alert
+// is due only once the first deferral is a day old and the database has not been
+// alerted, so a zero first and an already-alerted database are never due
+// (gt-2m37vf).
+func TestSquashDeferAlertDueSince(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		first   time.Time
+		now     time.Time
+		alerted bool
+		want    bool
+	}{
+		{
+			name:  "a zero first is not due",
+			first: time.Time{},
+			now:   start.Add(48 * time.Hour),
+			want:  false,
+		},
+		{
+			name:  "23h59m is not due",
+			first: start,
+			now:   start.Add(23*time.Hour + 59*time.Minute),
+			want:  false,
+		},
+		{
+			name:  "24h is due",
+			first: start,
+			now:   start.Add(24 * time.Hour),
+			want:  true,
+		},
+		{
+			name:    "an alerted database is never due",
+			first:   start,
+			now:     start.Add(24 * time.Hour),
+			alerted: true,
+			want:    false,
+		},
+		{
+			name:    "an alerted database is not due a week later",
+			first:   start,
+			now:     start.Add(7 * 24 * time.Hour),
+			alerted: true,
+			want:    false,
+		},
+		{
+			name:  "a now before the first deferral is not due",
+			first: start,
+			now:   start.Add(-time.Hour),
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := squashDeferAlertDueSince(tt.first, tt.now, tt.alerted); got != tt.want {
+				t.Fatalf("squashDeferAlertDueSince(%v, %v, %t) = %t, want %t", tt.first, tt.now, tt.alerted, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSquashDeferAlertCounterConcurrent pins that the counter the Daemon holds
 // counts every deferral when the deferrals run on different goroutines.
 func TestSquashDeferAlertCounterConcurrent(t *testing.T) {
