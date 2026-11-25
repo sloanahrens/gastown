@@ -589,32 +589,28 @@ func parseCICacheTrimSelection(out []byte, root string) (ciCacheTrimReply, error
 	return reply, nil
 }
 
-// ciCacheTrimSettings reads the CI trim's four settings from the patrol's
+// ciCacheTrimSettings reads the CI trim's three settings from the patrol's
 // block, returning the default for each one that is empty. The last is the
 // ci-gocache cap in bytes. A value the patrol cannot act on is an error naming
 // its key.
-func ciCacheTrimSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duration, int64, int64, error) {
+func ciCacheTrimSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duration, int64, error) {
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
 	}
 	every, err := settings.CICacheTrimEvery()
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, err
 	}
 	age, err := settings.CICacheMaxAgeDuration()
 	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	warn, err := settings.CICacheWarnLimit()
-	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, err
 	}
 	gocacheCap, err := settings.CIGocacheCapLimit()
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, err
 	}
-	return every, age, warn, gocacheCap, nil
+	return every, age, gocacheCap, nil
 }
 
 // ciCacheTrimContext is the kubectl context of the control cluster the runner
@@ -657,7 +653,7 @@ func (d *Daemon) runCICacheTrimTick() {
 	if _, configured, _ := ciCacheTrimContext(pc); !configured {
 		return
 	}
-	every, _, _, _, err := ciCacheTrimSettings(pc)
+	every, _, _, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -685,7 +681,7 @@ func (d *Daemon) runCICacheTrimTick() {
 func (d *Daemon) runCICacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	if _, _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
+	if _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
 		d.refuseDiskMaintenance(err)
 		return
 	}
@@ -705,7 +701,7 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	every, maxAge, warn, gocacheCap, err := ciCacheTrimSettings(pc)
+	every, maxAge, gocacheCap, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
@@ -743,7 +739,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		// A run that could not reach a verdict is a failed run: the volume's next
 		// attempt is the full interval, and the failure raises one item under the
 		// volume's key, carrying why that volume's own trim failed (gt-76cz9d, gt-u8n4tx).
-		ok, why := d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn)
+		ok, why := d.ciCacheTrimVolume(ctx, mode, at, v, maxAge)
 		if ok {
 			d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, true, s.now(), every, "")
 			continue
@@ -797,7 +793,7 @@ func ciCacheTrimProgram(mode string, v ciCacheVolume, minutes int64) ([]string, 
 // trim logs for that volume, which the volume's item carries (gt-u8n4tx). A volume
 // whose exec or reply failed is a failed run that names the volume and removes
 // nothing.
-func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration, warn int64) (verdict bool, reason string) {
+func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration) (verdict bool, reason string) {
 	minutes := int64(maxAge / time.Minute)
 	program, err := ciCacheTrimProgram(mode, v, minutes)
 	if err != nil {
@@ -862,31 +858,30 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s); nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText)
 	}
-	d.ciCacheTrimMeasure(mode, v, reply, warn)
+	d.ciCacheTrimMeasure(mode, v, reply)
 	return true, ""
 }
 
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
 // reading. The threshold is the volume's cap: the table's constant for a capped
-// volume, and the setting the pass copies into the row for ci-gocache. Only a
-// volume with no cap at all is measured against the warn figure. A reading at or
-// under the threshold clears the item. Over it, the lru volume raises the item
-// whatever the trim removed: its program never selects a file younger than the
-// floor, so a volume written faster than its cap ends every trim over the cap
-// with files removed, and that reading is the one that says so. Every other
-// volume raises the item only when the trim removed no file; a reading over the
-// threshold after removals leaves the item as it is. A dry run measures nothing,
-// since it removes nothing by design.
-func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply, warn int64) {
+// volume, and the setting the pass copies into the row for ci-gocache. A volume
+// with neither a cap nor an lru program has no threshold, so it raises nothing.
+// A reading at or under the threshold clears the item. Over it, the lru volume
+// raises the item whatever the trim removed: its program never selects a file
+// younger than the floor, so a volume written faster than its cap ends every
+// trim over the cap with files removed, and that reading is the one that says
+// so. Every other volume raises the item only when the trim removed no file; a
+// reading over the threshold after removals leaves the item as it is. A dry run
+// measures nothing, since it removes nothing by design.
+func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
 	}
-	key := ciCacheNoOpKeyOf(v)
-	capMeasured := v.capped() || v.lru
-	threshold, limit := warn, "the warn figure of "
-	if capMeasured {
-		threshold, limit = v.capKiB*1024, "its cap of "
+	if !v.capped() && !v.lru {
+		return
 	}
+	key := ciCacheNoOpKeyOf(v)
+	threshold := v.capKiB * 1024
 	after := reply.afterKiB * 1024
 	if after <= threshold {
 		d.cacheTrimNoOp.clear(key)
@@ -899,15 +894,11 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	// older than the floor was already selected, so what is left was written
 	// inside the last floor minutes. The summary names the floor rather than the
 	// max age, which does not apply to that program.
-	summary := fmt.Sprintf("%s holds %s, over %s%s: what is left was written inside the last %d minutes, which the trim keeps",
-		v.name, polecatimage.Human(after), limit, polecatimage.Human(threshold), ciCacheLRUFloorMinutes)
+	summary := fmt.Sprintf("%s holds %s, over its cap of %s: what is left was written inside the last %d minutes, which the trim keeps",
+		v.name, polecatimage.Human(after), polecatimage.Human(threshold), ciCacheLRUFloorMinutes)
 	if !v.lru {
-		holder := "CI cache trim removed no file while the Go build cache holds"
-		if capMeasured {
-			holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
-		}
-		summary = fmt.Sprintf("%s %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
-			holder, polecatimage.Human(after), limit, polecatimage.Human(threshold))
+		summary = fmt.Sprintf("CI cache trim of %s removed no %s while the volume holds %s, over its cap of %s: nothing there is older than the max age, or the trim is not reaching it",
+			v.name, v.unit(), polecatimage.Human(after), polecatimage.Human(threshold))
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
