@@ -901,6 +901,46 @@ func TestImagePinLayersStartRecordSkipsToday(t *testing.T) {
 	}
 }
 
+// TestImagePinLayersStartRecordRunsOnALaterDay: starting the ticker with a
+// last-run record naming an earlier UTC day calls the run seam once, and the
+// record then names today.
+func TestImagePinLayersStartRecordRunsOnALaterDay(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := imagePinDurabilityNoon(t, "2026-11-16")
+	if err := writeImagePinLayersLastRun(imagePinLayersLastRunPath(town), now.AddDate(0, 0, -1)); err != nil {
+		t.Fatalf("seeding the earlier day's last-run record: %v", err)
+	}
+	var calls atomic.Int32
+	d := imagePinDurabilityCountingDaemon(t, town, &calls, io.Discard)
+	d.clock = clockwork.NewFakeClockAt(now)
+	d.newImagePinLayersTicker = func(time.Duration) (<-chan time.Time, func()) {
+		return make(chan time.Time), func() {}
+	}
+	// The bound never fires, so the join waits for the start check's run to end
+	// and the reads below are ordered after it.
+	d.imagePinLayersJoinTimer = func(time.Duration) (<-chan time.Time, func()) {
+		return make(chan time.Time), func() {}
+	}
+
+	_, stop := d.startImagePinLayersTicker()
+	if stop == nil {
+		t.Fatal("the enabled patrol started no ticker")
+	}
+	d.stopImagePinLayersPatrol(stop)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("starting the ticker over an earlier day's record called the run seam %d times, want the day's check once", got)
+	}
+	last, found, err := readImagePinLayersLastRun(imagePinLayersLastRunPath(town))
+	if err != nil || !found {
+		t.Fatalf("the start check left no last-run record: found %v, %v", found, err)
+	}
+	if got := imagePinLayersDay(last); got != "2026-11-16" {
+		t.Errorf("the last-run record names %s, want today, 2026-11-16", got)
+	}
+}
+
 // TestImagePinLayersStartFailureRetriesNextStart: a start check whose run seam
 // fails leaves the last-run record naming the day before, logs the error, and
 // the next start asks the seam again. The record must not name today after a
