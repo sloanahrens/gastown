@@ -2112,6 +2112,50 @@ func TestCIEnginePruneCapPassFailureFailsTheRun(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneCapPassFailureReasonIsCarried: the failed cap prune's reason, the
+// container, the exit status and docker's first stderr line, is the item's text, so
+// the operator reads what failed from the attention item and not only from the log.
+func TestCIEnginePruneCapPassFailureReasonIsCarried(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+	replaceEngineReply(f, "--max-used-space", cliReply{code: 1, stderr: "unknown flag: --max-used-space"})
+	f.tick()
+	f.drain()
+
+	items := enginePruneItems(f)
+	if len(items) != 1 {
+		t.Fatalf("the run raised %d CI engine prune item(s), want the one a failed run raises:\n%s", len(items), f.logs.String())
+	}
+	want := "the cap prune in the " + ciCacheContainer + " container failed (exit status 1, stderr: unknown flag: --max-used-space)"
+	if !strings.Contains(items[0].Escalation.Description, want) {
+		t.Errorf("the item does not carry the cap prune's reason %q:\n%s", want, items[0].Escalation.Description)
+	}
+}
+
+// TestCIEnginePruneCapPassFailureUnreadSizeSkipsWithoutFailing: a build cache size that
+// cannot be read before the age prune skips the cap prune and the zero-reclaim check,
+// and the run still reaches a verdict that raises no failure item.
+func TestCIEnginePruneCapPassFailureUnreadSizeSkipsWithoutFailing(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{code: 1, stderr: "Cannot connect to the Docker daemon"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t2GB\n"})
+	f.tick()
+	f.drain()
+
+	if n := len(engineDockerExecs(f, "builder prune")); n != 1 {
+		t.Errorf("the build cache prunes ran %d time(s), want the age prune alone:\n%s", n, f.logs.String())
+	}
+	if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+		t.Errorf("the run did not reach its verdict:\n%s", f.logs.String())
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("an unread size raised a failure item, want none: %+v", items)
+	}
+}
+
 // TestCIEnginePruneVerdictNamesBothFigures: when the cap prune runs, the verdict line
 // names the age prune's reclaimed figure and the cap prune's, and the ledger's build
 // cache bytes are their sum. When the cap prune does not run, the line ends at the age
