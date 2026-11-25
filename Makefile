@@ -565,7 +565,10 @@ gate-test:
 	@# code 4 (go run folds any program code to 1 and prints "exit status N"), and
 	@# a passing suite with a non-zero tierwall prints the incomplete-series alarm. -json sits after the
 	@# package list, where the go tool still parses it, so the unit tier's line
-	@# keeps the shape the gate-shape tests pin. The last line is gateverdict's:
+	@# keeps the shape the gate-shape tests pin. -ldflags='-s -w' sits there too:
+	@# it drops the symbol table and DWARF from each test link (gt-oorsoj), and
+	@# panics and goroutine dumps keep function names and line numbers, which the
+	@# pclntab carries. The last line is gateverdict's:
 	@# it names a red stage, exits 1, and keeps the PASSED wording (gt-w3aby).
 	@# -p and each test binary's GOMAXPROCS are the CPU quota, read once here
 	@# (gt-g9fnsa): a job sees NumCPU under a narrower cgroup quota and goes
@@ -574,7 +577,7 @@ gate-test:
 	q=$$(go run ./internal/testpolicy/cmd/cpuquota) || { echo "gate: FAILED at cpuquota" >&2; exit 1; }; \
 	stream=$$(mktemp); \
 	go run ./internal/testpolicy/cmd/integrationvet & vet=$$!; \
-	$(CPU_CLASS) GOMAXPROCS=$$q GT_TEST_DOCKER=0 go test -p $$q -timeout 20m ./... -json >"$$stream" & gt=$$!; \
+	$(CPU_CLASS) GOMAXPROCS=$$q GT_TEST_DOCKER=0 go test -p $$q -timeout 20m ./... -ldflags='-s -w' -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	go run ./internal/testpolicy/cmd/tierwall -slow-tests $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
 	rm -f "$$stream"; \

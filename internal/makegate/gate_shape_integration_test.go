@@ -104,6 +104,29 @@ func TestIntegrationGateUnitTierRunsThroughTheCache(t *testing.T) {
 	}
 }
 
+// TestIntegrationGateUnitTierStripsTheLinkedBinaries checks "gate's unit tier
+// links its test binaries with -ldflags='-s -w', and the flag is not one the
+// result cache is defeated by".
+// Mutation: drop the -ldflags pair from the unit tier's go test line, and the
+// largest test links write their symbol table and DWARF again (gt-oorsoj).
+func TestIntegrationGateUnitTierStripsTheLinkedBinaries(t *testing.T) {
+	const strip = "-ldflags='-s -w'"
+	out := dryGate(t, RealMake(repoRoot(t)))
+	n := lineOf(out, unitTierLine)
+	if n == 0 {
+		t.Fatalf("gate does not run the unit tier over every package\n%s", out)
+	}
+	unit := strings.Split(out, "\n")[n-1]
+	if !strings.Contains(unit, strip) {
+		t.Fatalf("gate's unit tier line does not carry %s, so its test binaries keep their symbols and DWARF\n%s", strip, out)
+	}
+	for _, bad := range cachedUnitTierViolations {
+		if bad.match(unit) {
+			t.Fatalf("gate's unit tier carries %s, so the result cache no longer serves it\n%s", bad.name, out)
+		}
+	}
+}
+
 // unitTierLine is gate's one unit-tier go test, as `make -n gate` prints it.
 const unitTierLine = "GOMAXPROCS=$q GT_TEST_DOCKER=0 go test -p $q -timeout 20m ./..."
 
