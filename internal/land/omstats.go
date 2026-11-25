@@ -339,11 +339,18 @@ func omStatsMostRejected(m map[string]*omStatsBeadAcc) []OmStatsBead {
 type omStatsReviewRecord struct {
 	rec                   ReviewRecord
 	hasScore, hasFindings bool
+	// authorKind and branch are the review log's own author fields: the kind
+	// of seat that wrote the branch and the branch it submitted on. A line
+	// written before the log carried them reads both empty. Nothing in the
+	// report reads them yet (gt-qgvgep).
+	authorKind string
+	branch     string
 }
 
 // parseOmStatsReviewRecord decodes raw as one ReviewRecord line. The outer
 // score and findings fields win over the embedded record's, so the pointers
-// report whether the line named each figure.
+// report whether the line named each figure. The author fields are plain
+// strings, so a line that names neither reads both empty (gt-qgvgep).
 func parseOmStatsReviewRecord(raw []byte) (omStatsReviewRecord, bool) {
 	var line struct {
 		ReviewRecord
@@ -360,6 +367,8 @@ func parseOmStatsReviewRecord(raw []byte) (omStatsReviewRecord, bool) {
 		rec:         line.ReviewRecord,
 		hasScore:    line.Score != nil,
 		hasFindings: line.Findings != nil,
+		authorKind:  line.ReviewRecord.AuthorKind,
+		branch:      line.ReviewRecord.Branch,
 	}
 	if out.hasScore {
 		out.rec.Score = *line.Score
