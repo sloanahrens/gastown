@@ -1014,6 +1014,44 @@ func TestTownRunnerRollRefusesWithoutASignalSourceBeforeTheHold(t *testing.T) {
 	}
 }
 
+// TestTownRunnerRollRefusesOnADepsError: a production read that could not be
+// built is returned before the roll takes the hold, so nothing runs and the
+// operator sees why.
+func TestTownRunnerRollRefusesOnADepsError(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	buildErr := errors.New("no token file")
+	f.deps.err = buildErr
+
+	err := runTownRunnerRoll(f.deps)
+
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("error = %v, want the deps error wrapped", err)
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want none", f.events.calls)
+	}
+	if f.store.present {
+		t.Error("the landing hold was taken despite the deps error")
+	}
+}
+
+// TestTownRunnerRollDryRunIgnoresADepsError: a dry run needs none of the reads
+// the deps error came from, so it still prints its steps.
+func TestTownRunnerRollDryRunIgnoresADepsError(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	f.deps.dryRun = true
+	f.deps.err = errors.New("no token file")
+
+	if err := runTownRunnerRoll(f.deps); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !strings.Contains(f.out.String(), "step 1/5: take the landing hold") {
+		t.Errorf("dry run printed no steps; got:\n%s", f.out.String())
+	}
+}
+
 // rollFlagsCmd is the roll command with every flag defined except missing.
 func rollFlagsCmd(missing string) *cobra.Command {
 	cmd := &cobra.Command{}
