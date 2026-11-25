@@ -1,6 +1,7 @@
 package land
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -705,6 +706,167 @@ func TestVerdictReuseAheadStoreFails(t *testing.T) {
 	}
 	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
 		t.Errorf("a record exists although the write failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// aheadCheckRepo is the fixture's repository with the tree comparison failed on
+// demand.
+type aheadCheckRepo struct {
+	Repo
+	failTrees error
+}
+
+func (r *aheadCheckRepo) TreesIdentical(a, b string) (bool, error) {
+	if r.failTrees != nil {
+		return false, r.failTrees
+	}
+	return r.Repo.TreesIdentical(a, b)
+}
+
+// TestVerdictReuseAheadSkipsAfterMerge: a clean merge the landing would refuse
+// as empty, or as an edit to the root .om.json, has nothing for om to judge, so
+// ReviewAhead skips it and stores no record. Each row asserts the skip's log
+// line, which names the reason: a mutant that deletes its check falls through
+// to the same AheadSkipped without that line, so the outcome alone would not
+// turn it red.
+func TestVerdictReuseAheadSkipsAfterMerge(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name  string
+		setup func(f *landFixture)
+		// log is the line the skip writes, naming the reason it skipped.
+		log string
+	}{
+		{"merged tree equals base's", func(f *landFixture) {
+			// The branch's only change is already on the target, so the merge
+			// yields base's tree.
+			f.pushMain("b.txt", "work\n")
+		}, "leaves origin/main unchanged"},
+		{"branch edits .om.json", func(f *landFixture) {
+			f.branchEditing(omConfigFile, "{\"threshold\": 0.9}\n")
+		}, "edits " + omConfigFile + ", which waits for the overseer"},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			tc.setup(f)
+			aheadSeedBead(f, aheadReadyIssue(f.work))
+			l := f.lander()
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			var out bytes.Buffer
+			l.Out = &out
+			before := aheadBeadWrites(t, f.bd)
+			got, err := l.ReviewAhead(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("ReviewAhead: unexpected error: %v", err)
+			}
+			if got != AheadSkipped {
+				t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+			}
+			if !strings.Contains(out.String(), tc.log) {
+				t.Errorf("ReviewAhead logged %q, want a line containing %q", out.String(), tc.log)
+			}
+			if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+				t.Errorf("a record was stored for a skipped review (stat err %v)", err)
+			}
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+			}
+			aheadNoReviewDir(t, f)
+			if !l.gitMu.TryLock() {
+				t.Errorf("gitMu is still held after ReviewAhead returned")
+			} else {
+				l.gitMu.Unlock()
+			}
+		})
+	}
+}
+
+// TestVerdictReuseAheadSkipsAfterMergeTreeReadFails: the empty-merge check is a
+// git read; a read that fails is returned as an error rather than skipping a
+// review at an unknown tree.
+func TestVerdictReuseAheadSkipsAfterMergeTreeReadFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	cmpErr := errors.New("fatal: bad object HEAD^{tree}")
+	l.openRepo = func(dir string) Repo {
+		return &aheadCheckRepo{Repo: f.git.Open(dir), failTrees: cmpErr}
+	}
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the tree-comparison error", got)
+	}
+	if !errors.Is(err, cmpErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, cmpErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "compare trees" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "compare trees")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored for a review whose tree read failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// TestVerdictReuseAheadChangedPathsReadFails: the .om.json check is a git read;
+// a read that fails is returned as an error, not skipped as the config edit is,
+// so a caller switching on the outcome cannot read the failed read as a
+// submission with nothing to review.
+func TestVerdictReuseAheadChangedPathsReadFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	l.openRepo = func(dir string) Repo {
+		return diffFailsRepo{Repo: f.git.Open(dir)}
+	}
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the changed-paths read error", got)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "read changed paths" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "read changed paths")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty (not %q)", got, AheadSkipped)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored for a review whose changed-paths read failed (stat err %v)", err)
 	}
 	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
 		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)

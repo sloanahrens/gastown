@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,9 +112,35 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 		}
 		return AheadConflict, nil
 	}
+	merged := out.Commit
+	// A merge that leaves the target's tree unchanged is what Land refuses as
+	// empty, so om has nothing to judge and there is nothing to store.
+	same, err := wt.TreesIdentical(base, merged)
+	if err != nil {
+		return "", &InfraError{Stage: "compare trees", Err: err}
+	}
+	if same {
+		l.logf("%s: ahead merge of %s leaves %s/%s unchanged", w.BeadID, shortSHA(w.Head), l.remote(), w.Target)
+		return AheadSkipped, nil
+	}
+	// A landing that edits the root .om.json changes the bar om judges it
+	// against, so it waits for the overseer rather than om (gt-93hf4): the
+	// pool makes no verdict for it. The paths are read here rather than through
+	// land.go's omConfigRejection because its fail-closed refusal suits the
+	// landing and not the pool: a diff that cannot be read has to surface as an
+	// error, or a caller switching on the outcome reads the failed read as a
+	// submission with nothing to review.
+	paths, err := g.DiffNameOnly(base, merged)
+	if err != nil {
+		return "", &InfraError{Stage: "read changed paths", Err: err}
+	}
+	if slices.Contains(paths, omConfigFile) {
+		l.logf("%s: ahead merge of %s edits %s, which waits for the overseer", w.BeadID, shortSHA(w.Head), omConfigFile)
+		return AheadSkipped, nil
+	}
 	// NEXT BEAD: here the review runs om on the merged tree and stores the
-	// verdict. Until that lands, a clean merge is AheadSkipped and the landing
-	// runs om inline; ctx is unused.
+	// verdict. Until that lands, a clean merge that reaches this point is
+	// AheadSkipped and the landing runs om inline; ctx is unused.
 	return AheadSkipped, nil
 }
 
