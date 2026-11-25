@@ -2679,10 +2679,11 @@ func (d *Daemon) Run() (err error) {
 	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
 	// deterministic replacement for the witness LLM's patrol. Same check-cadence
 	// shape as jsonl_git_backup (gt-21gba2): the ticker wakes on the shorter
-	// check cadence while the select case runs a scan only when the persisted
-	// last run says it is due (gt-gd6qh6), so a scan due at a restart is picked
-	// up soon after it instead of a full interval late, and the shorter cadence
-	// does not run scans more often than the run interval.
+	// check cadence while the select case scans on the first check after a boot
+	// and otherwise only when the persisted last run says it is due
+	// (gt-gd6qh6, gt-l5r6ht), so a scan due at a restart is picked up soon
+	// after it instead of a full interval late, and the shorter cadence does
+	// not run scans more often than the run interval.
 	var patrolScanTicker *time.Ticker
 	var patrolScanChan <-chan time.Time
 	if d.isPatrolActive("patrol_scan") {
@@ -3014,12 +3015,15 @@ func (d *Daemon) Run() (err error) {
 		case <-patrolScanChan:
 			// Patrol scan tick — restarts confirmed-dead polecats through the
 			// supervisor, closes orphaned work molecules and reports stranded
-			// work, per rig, on its own goroutine (gt-4k3fj.6). The tick runs
-			// only when the persisted last run says it is due, so a daemon
+			// work, per rig, on its own goroutine (gt-4k3fj.6). The first check
+			// after a boot scans whatever the persisted last run says; every
+			// later check runs only when it says the tick is due, so a daemon
 			// restart cannot push the next pass back by a full interval
-			// (gt-76xdws).
+			// (gt-76xdws, gt-l5r6ht).
 			if !d.isShutdownInProgress() {
-				d.triggerPatrolScanIfDue()
+				runPatrolScanCheck(&d.patrolScanBooted,
+					func() { d.triggerPatrolScan() },
+					func() { d.triggerPatrolScanIfDue() })
 			}
 
 		case <-landingInfraChan:
