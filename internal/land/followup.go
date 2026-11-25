@@ -543,9 +543,10 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			}
 			// A group larger than the room left in the bundle fills it and
 			// files the rest as bundles of their own, at most MaxAcceptance
-			// findings each (gt-ntkwh0).
+			// findings each (gt-ntkwh0); the room is the findings-per-bead cap
+			// less what the bundle carries (gt-fpfw9y).
 			take, rest := g, []FollowupCandidate(nil)
-			if room := specdispatch.MaxAcceptance - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
+			if room := followupFindingsPerBead - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
 				take = followupGroup{Key: g.Key, Package: g.Package, Pinned: g.Pinned, Findings: g.Findings[:room]}
 				rest = g.Findings[room:]
 			}
