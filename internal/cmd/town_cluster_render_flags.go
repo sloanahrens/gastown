@@ -68,15 +68,24 @@ type renderFlagsRecord struct {
 	TrackerBackupImage            string `json:"tracker_backup_image"`
 	DaemonBdGatewayURL            string `json:"daemon_bd_gateway_url"`
 	IncludeStatic                 bool   `json:"include_static"`
+	// Cluster is the cluster the render was for. A record written before it was
+	// recorded has no key here and reads as the control render (renderFlagsFile).
+	Cluster string `json:"cluster"`
+	// The gt-sbx render's three paths. A control record carries none of them.
+	SbxManifests string `json:"sbx_manifests,omitempty"`
+	SbxChart     string `json:"sbx_chart,omitempty"`
+	SbxValues    string `json:"sbx_values,omitempty"`
 }
 
-// renderFlagsFile is the record as the file's JSON decodes into it. Its cap and
-// replica fields shadow the record's own fields of the same keys, so an absent key is
-// nil rather than the zero the record's int would read it as (loadRenderFlags).
+// renderFlagsFile is the record as the file's JSON decodes into it. Its cap,
+// replica and cluster fields shadow the record's own fields of the same keys, so an
+// absent key is nil rather than the zero the record's field would read it as
+// (loadRenderFlags).
 type renderFlagsFile struct {
 	renderFlagsRecord
-	BdGatewayMaxConcurrent *int `json:"bd_gateway_max_concurrent"`
-	BdGatewayReplicas      *int `json:"bd_gateway_replicas"`
+	BdGatewayMaxConcurrent *int    `json:"bd_gateway_max_concurrent"`
+	BdGatewayReplicas      *int    `json:"bd_gateway_replicas"`
+	Cluster                *string `json:"cluster"`
 	// The two retired Mac-directory flags (gt-ja7otj). A file written before the
 	// mounts were removed still carries their keys; they are decoded here only so
 	// DisallowUnknownFields reads the record instead of refusing it, and their
@@ -119,6 +128,10 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		TrackerBackupImage:            f.trackerBackupImage,
 		DaemonBdGatewayURL:            f.daemonBdGatewayURL,
 		IncludeStatic:                 f.includeStatic,
+		Cluster:                       f.cluster,
+		SbxManifests:                  f.sbxManifests,
+		SbxChart:                      f.sbxChart,
+		SbxValues:                     f.sbxValues,
 	}
 }
 
@@ -161,6 +174,10 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		// A file written before the flag was recorded has no key for it, and false
 		// is what such a record meant: the flag's default.
 		includeStatic: r.IncludeStatic,
+		cluster:       r.Cluster,
+		sbxManifests:  r.SbxManifests,
+		sbxChart:      r.SbxChart,
+		sbxValues:     r.SbxValues,
 	}
 }
 
@@ -218,6 +235,12 @@ func loadRenderFlags(path string) (clusterRenderFlags, bool, error) {
 	r.BdGatewayReplicas = defaultBdGatewayReplicas
 	if f.BdGatewayReplicas != nil {
 		r.BdGatewayReplicas = *f.BdGatewayReplicas
+	}
+	// A record written before the cluster was recorded has no key for it, and
+	// such a record is the control render, the flag's default.
+	r.Cluster = clusterControl
+	if f.Cluster != nil {
+		r.Cluster = *f.Cluster
 	}
 	return r.flags(), true, nil
 }
