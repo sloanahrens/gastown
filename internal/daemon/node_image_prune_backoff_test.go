@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,33 @@ func TestNodePruneBackoffDecides(t *testing.T) {
 				t.Errorf("Allowed(%q) = %v, want %v", tt.id, got, tt.want)
 			}
 		})
+	}
+}
+
+// The map holds at most nodePruneBackoffEntries run ids: when a new id fails
+// into a full map, the id whose last failure is oldest is dropped and may be
+// tried again, while a newer id stays barred (gt-42832l).
+func TestNodePruneBackoffDropsTheOldestWhenFull(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	var b nodePruneBackoff
+	for i := 0; i < nodePruneBackoffMax; i++ {
+		b.Failed("oldest", now)
+		b.Failed("newest", now.Add(time.Minute))
+	}
+	for i := 0; i < nodePruneBackoffEntries-2; i++ {
+		b.Failed(fmt.Sprintf("filler-%d", i), now.Add(time.Duration(i+2)*time.Minute))
+	}
+	b.Failed("newest", now.Add(time.Hour))
+	if b.Allowed("oldest", now.Add(time.Hour)) {
+		t.Fatal("a repeat failure of an id already in a full map dropped the oldest entry")
+	}
+	b.Failed("one-more", now.Add(time.Hour))
+	if !b.Allowed("oldest", now.Add(time.Hour)) {
+		t.Fatal("the run id whose last failure was oldest was not dropped from a full map")
+	}
+	if b.Allowed("newest", now.Add(time.Hour)) {
+		t.Fatal("a newer run id was dropped from a full map")
 	}
 }
 
