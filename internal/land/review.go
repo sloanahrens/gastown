@@ -397,6 +397,9 @@ type OMReviewer struct {
 	RawDir func() string
 
 	run runFunc // nil means realRun
+	// now is the attempt's clock; nil means time.Now. A test sets it so the raw
+	// reply boundary is pinned without the wall clock (gt-tjuc75).
+	now func() time.Time
 	// criteriaWriter writes the acceptance text and returns its path; nil
 	// means writeCriteria. The verdict directory's permissions cannot fail this
 	// write and not the verdict file's, so this is the seam a test reaching the
@@ -614,7 +617,11 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// A raw reply outlives a run, so one older than this attempt is another om's;
 	// the clock is truncated so a coarse mtime cannot push a fresh file back.
 	rawDir := r.rawReplyDir()
-	start := time.Now().Truncate(time.Second)
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	start := now().Truncate(time.Second)
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 		return Verdict{}, fmt.Errorf("%w after %s", ErrOMTimeout, timeout)
