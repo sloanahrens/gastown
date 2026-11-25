@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -651,6 +653,112 @@ func TestWorkerRunsAgainForAPageThatConnectsDuringItsRun(t *testing.T) {
 
 	wantSignal(t, started, "the worker's second run did not start")
 	assert.Equal(t, 2, runs, "the connect during the first run is served by a second run")
+}
+
+// At most three polls run at once. Eight polls start through runPoll and block
+// until released, so three hold the gate and the other five wait for a slot. The
+// settle after the three starts is a bounded yield, so a gate that let a fourth
+// poll in has time to start it before the count is read. A poll whose ctx ends
+// while the gate is full returns without running, and all eight run to the end
+// once released.
+func TestHubPollGate(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	const polls = 8
+	var mu sync.Mutex
+	inFlight, peak, finished := 0, 0, 0
+	started := make(chan struct{}, polls)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	fn := func() {
+		mu.Lock()
+		inFlight++
+		peak = max(peak, inFlight)
+		mu.Unlock()
+		started <- struct{}{}
+		holdUntil(release)
+		mu.Lock()
+		inFlight--
+		finished++
+		mu.Unlock()
+	}
+	var doneCount atomic.Int32
+	allDone := make(chan struct{})
+	for n := 0; n < polls; n++ {
+		go func() {
+			h.runPoll(ctx, fn)
+			if doneCount.Add(1) == polls {
+				close(allDone)
+			}
+		}()
+	}
+	t.Cleanup(func() {
+		releaseAll()
+		stop()
+		wantSignal(t, allDone, "the polls did not stop")
+	})
+
+	for n := 0; n < 3; n++ {
+		wantSignal(t, started, "fewer than three polls started")
+	}
+	for n := 0; n < 100; n++ {
+		runtime.Gosched()
+	}
+	mu.Lock()
+	held := inFlight
+	mu.Unlock()
+	assert.Equal(t, 3, held, "three polls run and the other five wait for a slot")
+
+	lateCtx, lateStop := context.WithCancel(ctx)
+	defer lateStop()
+	lateRan := make(chan struct{}, 1)
+	lateDone := make(chan struct{})
+	go func() {
+		defer close(lateDone)
+		h.runPoll(lateCtx, func() {
+			lateRan <- struct{}{}
+			holdUntil(release)
+		})
+	}()
+	lateStop()
+	wantSignal(t, lateDone, "a poll whose ctx ended while it waited for a slot did not return")
+	assert.Empty(t, lateRan, "a poll whose ctx ended while it waited for a slot does not run")
+
+	releaseAll()
+	wantSignal(t, allDone, "the polls did not all run to the end once released")
+	mu.Lock()
+	assert.Equal(t, 8, finished, "all eight polls run to the end once released")
+	assert.Equal(t, 3, peak, "at most three polls ran at once")
+	mu.Unlock()
+
+	// The gate is free and the ctx has already ended, so select may pick either
+	// case. fn runs in this goroutine, so the count needs no lock: a poll that
+	// takes a slot and then runs fn anyway shows up in some of the fifty runs.
+	ended, endedStop := context.WithCancel(context.Background())
+	endedStop()
+	endedRuns := 0
+	for n := 0; n < 50; n++ {
+		h.runPoll(ended, func() { endedRuns++ })
+	}
+	assert.Equal(t, 0, endedRuns, "a poll whose ctx has ended does not run, even with a slot free")
+}
+
+// holdUntil is the wait a poll makes while the test holds it. It returns when
+// release closes, or when testGuard passes, so a release that never comes fails
+// the test with a message instead of a hang.
+func holdUntil(release <-chan struct{}) {
+	//testpolicy:allow no-sleep — failure-only watchdog: a passing run never reaches it
+	timer := time.NewTimer(testGuard)
+	defer timer.Stop()
+	select {
+	case <-release:
+	case <-timer.C:
+	}
 }
 
 // With no page open, a request wakes the workers, and the health worker's read is

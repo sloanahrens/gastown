@@ -13,6 +13,11 @@ import (
 
 const (
 	loadHistory = 360 // samples kept: an hour at the default 10s
+
+	// maxParallelPolls is how many polls may run at once. The workers all start
+	// their tickers in the same instant, so the polls of one period fire together
+	// and each starts its own bd reads (gt-aezsy6).
+	maxParallelPolls = 3
 )
 
 // The lists the state frame leaves out, each sent as its own event. They are the
@@ -81,6 +86,10 @@ type Hub struct {
 	detailCache map[string]detailEntry
 	detailGate  detailGate // bead-detail reads join Run's lifecycle (gt-fekq1)
 
+	// pollGate holds one slot per poll that is running, so at most
+	// maxParallelPolls run at once (see runPoll).
+	pollGate chan struct{}
+
 	// costProviders builds the Cost panel's provider rows, in order. Nil is the
 	// default list (BuildCostProviders); a test injects its own list here.
 	costProviders []costProviderBuilder
@@ -120,6 +129,7 @@ func NewHub(cfg Config) *Hub {
 		jevGood:    map[string]time.Time{},
 		listSent:   map[string][]byte{},
 		wake:       make(chan struct{}),
+		pollGate:   make(chan struct{}, maxParallelPolls),
 		alerts:     NewAlerter(cfg.Now),
 		after: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
@@ -301,17 +311,33 @@ func (h *Hub) workFrom(ctx context.Context, ticks <-chan time.Time, wake <-chan 
 				return
 			}
 			last = h.cfg.Now()
-			fn()
+			h.runPoll(ctx, fn)
 		case <-wake:
 			wake = h.wakeChan()
 			if ctx.Err() != nil {
 				return
 			}
 			if h.due(&last, every) {
-				fn()
+				h.runPoll(ctx, fn)
 			}
 		}
 	}
+}
+
+// runPoll runs fn once a slot of pollGate is free, and gives the slot back when
+// fn returns. A poll whose ctx ends while it waits for a slot does not run, so
+// Run returning still means no poll is left waiting on the gate.
+func (h *Hub) runPoll(ctx context.Context, fn func()) {
+	select {
+	case <-ctx.Done():
+		return
+	case h.pollGate <- struct{}{}:
+	}
+	defer func() { <-h.pollGate }()
+	if ctx.Err() != nil { // select picks at random when both are ready
+		return
+	}
+	fn()
 }
 
 // due reports whether a worker whose last run was at *last should run now,
