@@ -3,6 +3,8 @@ package land
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -272,5 +274,239 @@ func TestVerdictReuseAheadShowFails(t *testing.T) {
 				t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
 			}
 		})
+	}
+}
+
+// aheadWorktreeAdd is one worktree add: the directory it was made at and the
+// ref it was cut from.
+type aheadWorktreeAdd struct {
+	path, ref string
+}
+
+// aheadWorktreeAdds is the shared record of the worktree adds ReviewAhead
+// made. A recorder is made per openRepo call, so the record is held by pointer.
+type aheadWorktreeAdds struct {
+	adds []aheadWorktreeAdd
+}
+
+// aheadWorktreeRecorder is the fixture's clone with a seam over its worktree
+// adds: it records each add, so a test can name the review worktree, see what
+// it was cut from, and see that the landing's own wt was never its target.
+type aheadWorktreeRecorder struct {
+	Repo
+	rec *aheadWorktreeAdds
+}
+
+func (r *aheadWorktreeRecorder) WorktreeAddDetached(path, ref string) error {
+	r.rec.adds = append(r.rec.adds, aheadWorktreeAdd{path: path, ref: ref})
+	return r.Repo.WorktreeAddDetached(path, ref)
+}
+
+// TestVerdictReuseAheadWorktreeRemoved: a review that reaches the worktree
+// step and returns makes its directory under WorkRoot, removes it before it
+// returns, and never adds a worktree at the landing's own WorkRoot/wt.
+func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	rec := &aheadWorktreeAdds{}
+	l.openRepo = func(dir string) Repo {
+		return &aheadWorktreeRecorder{Repo: f.git.Open(dir), rec: rec}
+	}
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("ReviewAhead: unexpected error: %v", err)
+	}
+	if got != AheadSkipped {
+		t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+	}
+	if len(rec.adds) != 1 {
+		t.Fatalf("worktree adds = %q, want exactly one", rec.adds)
+	}
+	dir := rec.adds[0].path
+	review := filepath.Dir(dir)
+	if filepath.Base(dir) != landWorktreeName || filepath.Dir(review) != f.workRoot || !strings.HasPrefix(filepath.Base(review), reviewDirPrefix) {
+		t.Fatalf("worktree added at %s, want %s/%s*/%s", dir, f.workRoot, reviewDirPrefix, landWorktreeName)
+	}
+	if _, err := os.Stat(review); !os.IsNotExist(err) {
+		t.Errorf("review directory %s left behind after ReviewAhead returned (stat err %v)", review, err)
+	}
+	if _, err := os.Stat(filepath.Join(f.workRoot, landWorktreeName)); !os.IsNotExist(err) {
+		t.Errorf("ReviewAhead touched the landing's worktree %s (stat err %v)", filepath.Join(f.workRoot, landWorktreeName), err)
+	}
+}
+
+// TestVerdictReuseAheadWorktreeAtBase: the review worktree is cut from the
+// target tip the fetch brought in — the base the review merges onto — not
+// from the head under review.
+func TestVerdictReuseAheadWorktreeAtBase(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	rec := &aheadWorktreeAdds{}
+	l.openRepo = func(dir string) Repo {
+		return &aheadWorktreeRecorder{Repo: f.git.Open(dir), rec: rec}
+	}
+	if _, err := l.ReviewAhead(context.Background(), f.work); err != nil {
+		t.Fatalf("ReviewAhead: unexpected error: %v", err)
+	}
+	if len(rec.adds) != 1 {
+		t.Fatalf("worktree adds = %q, want exactly one", rec.adds)
+	}
+	if got := rec.adds[0].ref; got != f.base {
+		t.Errorf("review worktree cut at %s, want the target tip %s", got, f.base)
+	}
+}
+
+// aheadLockProbe is the worktree fake addReviewWorktree is given: a Repo that
+// answers the head's author and checks that the lander's gitMu is free at that
+// first call, before addReviewWorktree takes the lock for the worktree calls
+// (reviewworktree.go). TryLock succeeds and the probe releases it again. A
+// ReviewAhead that still held the lock across the worktree step, as one that
+// had not released it after its fetches would, is holding it when the call
+// arrives and fails the test.
+type aheadLockProbe struct {
+	Repo
+	t      *testing.T
+	l      *Lander
+	called bool
+}
+
+func (p *aheadLockProbe) CommitIdentity(string) (string, string, error) {
+	p.called = true
+	if !p.l.gitMu.TryLock() {
+		// Fatalf, not Errorf: the caller is about to take the lock itself, so
+		// the test would deadlock before an Errorf could be reported.
+		p.t.Fatalf("the worktree fake was called with the shared git lock held, so addReviewWorktree would deadlock on it")
+	}
+	p.l.gitMu.Unlock()
+	return "Seat Opal", "opal@gastown.local", nil
+}
+
+// TestVerdictReuseAheadLockFreeAtWorktreeAdd: ReviewAhead's fetches take the
+// shared git lock and release it, so the worktree step that takes the lock
+// itself finds it free.
+func TestVerdictReuseAheadLockFreeAtWorktreeAdd(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	// gitfake records no authors, so the probe answers the author read the way
+	// the fixture's seam does, and the read reaches the handle.
+	l.authorOf = nil
+	probe := &aheadLockProbe{t: t, l: l}
+	l.openRepo = func(dir string) Repo {
+		probe.Repo = f.git.Open(dir)
+		return probe
+	}
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("ReviewAhead: unexpected error: %v", err)
+	}
+	if got != AheadSkipped {
+		t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+	}
+	if !probe.called {
+		t.Fatal("ReviewAhead called no worktree fake, so the lock was never observed at the worktree step")
+	}
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// aheadRevFails is a Repo whose Rev fails for the refs holding needle, as git
+// does for a ref the fetch did not write.
+type aheadRevFails struct {
+	Repo
+	needle string
+	err    error
+}
+
+func (r aheadRevFails) Rev(ref string) (string, error) {
+	if strings.Contains(ref, r.needle) {
+		return "", r.err
+	}
+	return r.Repo.Rev(ref)
+}
+
+// TestVerdictReuseAheadResolveTargetFails: the base is a git read, and a read
+// that fails is returned as an error rather than reviewed at an unknown base.
+func TestVerdictReuseAheadResolveTargetFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	revErr := errors.New("fatal: bad object origin/main")
+	l.openRepo = func(dir string) Repo {
+		return aheadRevFails{Repo: f.git.Open(dir), needle: "origin/main", err: revErr}
+	}
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the resolve error", got)
+	}
+	if !errors.Is(err, revErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, revErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "resolve target" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "resolve target")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+	}
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// TestVerdictReuseAheadWorktreeAddFails: an add that fails is returned as an
+// error, and the review directory it made is not left under WorkRoot.
+func TestVerdictReuseAheadWorktreeAddFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	l.openRepo = func(dir string) Repo { return addFails{Repo: f.git.Open(dir)} }
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil || !strings.Contains(err.Error(), "invalid reference") {
+		t.Fatalf("ReviewAhead with a failed worktree add = %q, %v; want the add's error", got, err)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "review worktree" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "review worktree")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+	}
+	if entries, err := os.ReadDir(f.workRoot); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), reviewDirPrefix) {
+				t.Errorf("review directory %s left behind after a failed add", e.Name())
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
 	}
 }
