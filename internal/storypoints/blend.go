@@ -15,6 +15,11 @@ import (
 // .60 and .33 for the three-way blend on 1676 landed beads (gt-gl12sr).
 const shapeEmbedScale = 0.92
 
+// declaredScale scales the blend of shape, embedding and declared lines, the
+// case with no Jev term. 0.89 is the factor that keeps the hold rate at the
+// measured 22.6% on 842 logged estimates whose bead declared lines (gt-r1gm6c).
+const declaredScale = 0.89
+
 // ErrNoInputs reports a Blend call with no input at all.
 var ErrNoInputs = errors.New("storypoints: blend has no inputs")
 
@@ -30,13 +35,16 @@ var ErrBadProbability = errors.New("storypoints: probability must be between 0 a
 // not available. Shape is required; embedding and Jev are optional. Weights
 // holds the knot table that maps the Jev probability to minutes. JevMinutes is
 // a Jev estimate already in minutes, used only when JevFits is nil; when both
-// are set the probability wins and JevMinutes is not read.
+// are set the probability wins and JevMinutes is not read. DeclaredMinutes is
+// the declared-lines estimate; it is averaged only with shape and embedding,
+// and only when there is no Jev term.
 type Inputs struct {
-	ShapeMinutes *float64
-	EmbedMinutes *float64
-	JevFits      *float64
-	JevMinutes   *float64
-	Weights      Weights
+	ShapeMinutes    *float64
+	EmbedMinutes    *float64
+	DeclaredMinutes *float64
+	JevFits         *float64
+	JevMinutes      *float64
+	Weights         Weights
 }
 
 // Blended is one estimate: the averaged minutes, the point they round to, the
@@ -55,7 +63,9 @@ type Blended struct {
 // weight. Every minutes input must be finite and positive, and the Jev
 // probability must lie in 0 to 1; any other input is refused before the
 // average is taken. A blend of shape and embedding alone is then scaled by
-// shapeEmbedScale; a blend with a Jev input is not.
+// shapeEmbedScale. A shape-and-embedding blend with declared lines and no Jev
+// term averages the declared lines too and is scaled by declaredScale instead.
+// A blend with a Jev input is not scaled.
 func Blend(in Inputs) (Blended, error) {
 	return blendWith(in, FromMinutes)
 }
@@ -72,6 +82,12 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 	if in.ShapeMinutes == nil {
 		return Blended{}, ErrNoShape
 	}
+	// A declared value is checked whenever it is set, so a bad one is refused
+	// even on a blend that does not average it.
+	if in.DeclaredMinutes != nil && !ValidMinutes(*in.DeclaredMinutes) {
+		return Blended{}, fmt.Errorf("%w: declared input is %v", ErrNoMinutes, *in.DeclaredMinutes)
+	}
+	hasDeclared := in.DeclaredMinutes != nil && in.EmbedMinutes != nil && !hasJev
 
 	type term struct {
 		name    string
@@ -96,6 +112,9 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		jevMinutes = &m
 		terms = append(terms, term{"jev", m})
 	}
+	if hasDeclared {
+		terms = append(terms, term{"declared", *in.DeclaredMinutes})
+	}
 
 	names := make([]string, 0, len(terms))
 	var logSum float64
@@ -108,7 +127,10 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 	}
 
 	minutes := math.Exp(logSum / float64(len(terms)))
-	if in.EmbedMinutes != nil && !hasJev {
+	switch {
+	case hasDeclared:
+		minutes *= declaredScale
+	case in.EmbedMinutes != nil && !hasJev:
 		minutes *= shapeEmbedScale
 	}
 	points, err := toPoints(minutes)
@@ -119,15 +141,16 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		Minutes:    minutes,
 		Points:     points,
 		Inputs:     names,
-		Rung:       rungFor(in.EmbedMinutes != nil, hasJev),
+		Rung:       rungFor(in.EmbedMinutes != nil, hasJev, hasDeclared),
 		JevMinutes: jevMinutes,
 	}, nil
 }
 
-// rungFor names the rung for the optional inputs that are present.
-func rungFor(embed, jev bool) string {
+// rungFor names the rung for the optional inputs that are present. A declared
+// term on a shape-and-embedding blend names the rung all, as a Jev term does.
+func rungFor(embed, jev, declared bool) string {
 	switch {
-	case embed && jev:
+	case (embed && jev) || declared:
 		return "all"
 	case jev:
 		return "shape-jev"
