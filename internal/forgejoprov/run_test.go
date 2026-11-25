@@ -321,9 +321,9 @@ func TestRunOverAnExistingViewerBot(t *testing.T) {
 	}
 }
 
-// TestRunDriftIsRepaired: a main rule that has drifted is patched in place, not created
-// again, and the run says so.
-func TestRunDriftIsRepaired(t *testing.T) {
+// TestRunDriftIsRefused: a main rule that is neither closed nor final stops the run before
+// any grant, so a provision never grants access over a rule that leaves main open.
+func TestRunDriftIsRefused(t *testing.T) {
 	t.Parallel()
 	f := forgejotest.New()
 	f.AddRepo(protectionRepo)
@@ -331,18 +331,20 @@ func TestRunDriftIsRepaired(t *testing.T) {
 	before := len(f.CallLog())
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
-	if res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if !strings.Contains(res.logs, "branch protection main on acme/rig is neither closed nor final") {
+		t.Errorf("logs = %q, want the refusal to name the rule", res.shown())
 	}
 	calls := f.CallLog()[before:]
-	if got := countCalls(calls, http.MethodPatch, "/branch_protections/main"); got != 1 {
-		t.Errorf("PATCHes of main = %d, want 1", got)
+	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
+		if got := countCalls(calls, method, "/branch_protections"); got != 0 {
+			t.Errorf("%s branch protection calls = %d, want 0: the existing rule is left alone", method, got)
+		}
 	}
-	if got := countCalls(calls, http.MethodPost, "/branch_protections"); got != 0 {
-		t.Errorf("POSTs of a branch protection = %d, want 0: the rule exists", got)
-	}
-	if !strings.Contains(res.logs, "updated branch protection main on acme/rig") {
-		t.Errorf("logs = %q, want the update reported", res.shown())
+	if got := countCalls(calls, http.MethodPut, "/collaborators/"); got != 0 {
+		t.Errorf("collaborator grants = %d, want 0: the run stopped before any grant", got)
 	}
 }
 
@@ -695,7 +697,7 @@ func TestRunExitCodes(t *testing.T) {
 		{
 			name:    "a repo the instance does not hold",
 			args:    []string{"--repo", "acme/missing"},
-			wantLog: "/repos/acme/missing/collaborators/bot-polecat: unexpected HTTP 404",
+			wantLog: "/repos/acme/missing/branch_protections returned 404",
 		},
 	}
 	for _, tc := range cases {
@@ -783,27 +785,62 @@ func TestRunUnprotectedRepoProvisions(t *testing.T) {
 	}
 }
 
-// TestRunGrantsAccessBeforeProtection: a repository's collaborator grant is written before
-// its protection, because Forgejo drops a whitelist entry for a login that is not yet a
-// collaborator (gt-fn9e6.23).
-func TestRunGrantsAccessBeforeProtection(t *testing.T) {
+// TestProvisionOrderClosedFirst: a run that fails at the first collaborator grant leaves the
+// closed main rule on the repository and no grant, so a partial provision never leaves main
+// open.
+func TestProvisionOrderClosedFirst(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	res := runProvisioning(t, failingRoute{next: f, match: "/collaborators/", status: http.StatusInternalServerError}, newMemFiles(), nil, "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	for _, role := range []string{"polecat", "landing", "registry", "viewer"} {
+		if got := f.Permission(protectionRepo, DefaultBotPrefix+role); got != "" {
+			t.Errorf("%s holds %q, want no grant: the run failed at the first one", DefaultBotPrefix+role, got)
+		}
+	}
+	rule := f.Rule(protectionRepo, fixtureMainRule)
+	if rule == nil {
+		t.Fatalf("main rule absent after a failure at the first grant, want the closed rule in place")
+	}
+	merged := baseEnv()
+	opts, err := Parse([]string{"--repo", protectionRepo}, func(name string) string { return merged[name] })
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !carries(rule, ClosedMainRule(*opts)) {
+		t.Errorf("main rule = %v, want the closed form %v", rule, ClosedMainRule(*opts))
+	}
+	if carries(rule, MainRule(*opts)) {
+		t.Errorf("main rule = %v, want the closed form: the landing bot cannot be named before its grant", rule)
+	}
+}
+
+// TestRunProtectsBeforeAccess: the closed main rule is written before the first collaborator
+// grant, and the final rule, which names the landing bot, only after the grant that makes it
+// a collaborator, which Forgejo requires (gt-fn9e6.23).
+func TestRunProtectsBeforeAccess(t *testing.T) {
 	t.Parallel()
 	f := forgejotest.New()
 	f.AddRepo(protectionRepo)
 	if res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo); res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	grant, protect := -1, -1
+	closed, grant, final := -1, -1, -1
 	for i, c := range f.Writes() {
-		if c.Method == http.MethodPut && strings.Contains(c.Path, "/collaborators/") && grant < 0 {
+		switch {
+		case c.Method == http.MethodPost && strings.Contains(c.Path, "/branch_protections") && closed < 0:
+			closed = i
+		case c.Method == http.MethodPut && strings.Contains(c.Path, "/collaborators/") && grant < 0:
 			grant = i
-		}
-		if c.Method == http.MethodPost && strings.Contains(c.Path, "/branch_protections") && protect < 0 {
-			protect = i
+		case c.Method == http.MethodPatch && strings.Contains(c.Path, "/branch_protections/main") && final < 0:
+			final = i
 		}
 	}
-	if grant < 0 || protect < 0 || grant > protect {
-		t.Errorf("grant write at %d, protection write at %d: want the grant first", grant, protect)
+	if closed < 0 || grant < 0 || final < 0 || !(closed < grant && grant < final) {
+		t.Errorf("closed rule write at %d, first grant at %d, final rule write at %d: want the closed rule first, the grants, then the final rule", closed, grant, final)
 	}
 }
 
