@@ -613,6 +613,244 @@ func TestVerdictReuseStoreGetRefusesNonOMVerdict(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseStoreHintRejecting: Hint reports the head the record's review
+// judged and whether that review refuses the work. A conflict, a request_changes
+// and an approval whose findings block the landing are rejecting; a clean
+// approval is not; no record is ("", false, nil); and a record the store cannot
+// trust is an error, never a miss and never a clean answer.
+func TestVerdictReuseStoreHintRejecting(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		bead     string                          // "" means gt-abc
+		seed     func(t *testing.T, town string) // writes the record file; nil leaves the store empty
+		store    func(*AheadStore)               // edits the store before Hint; nil keeps it
+		wantHead string
+		wantRej  bool
+		wantErr  string
+	}{
+		{name: "no record"},
+		{
+			name:     "approve",
+			seed:     func(t *testing.T, town string) { seedAheadRecord(t, town, aheadTestRecord("gt-abc", aheadTestHead)) },
+			wantHead: aheadTestHead,
+		},
+		{
+			name: "approve with a major finding",
+			seed: func(t *testing.T, town string) {
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.Verdict.Findings = []Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 1, Title: "big"}}
+				seedAheadRecord(t, town, rec)
+			},
+			wantHead: aheadTestHead,
+			wantRej:  true,
+		},
+		{
+			name: "request_changes",
+			seed: func(t *testing.T, town string) {
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.Verdict = Verdict{Verdict: VerdictRequestChanges, Score: 0.2, Summary: "rework"}
+				seedAheadRecord(t, town, rec)
+			},
+			wantHead: aheadTestHead,
+			wantRej:  true,
+		},
+		{
+			name: "conflict",
+			seed: func(t *testing.T, town string) {
+				rec := aheadTestRecord("gt-abc", aheadTestHead)
+				rec.Outcome, rec.Verdict = aheadOutcomeConflict, Verdict{}
+				seedAheadRecord(t, town, rec)
+			},
+			wantHead: aheadTestHead,
+			wantRej:  true,
+		},
+		{
+			name: "a file that does not decode",
+			seed: func(t *testing.T, town string) {
+				writeAheadFile(t, aheadTestPath(town, "gastown", "gt-abc"), []byte(`{"v":1,"bead":"gt-abc"`))
+			},
+			wantErr: "decoding review-ahead record",
+		},
+		{
+			name:    "a bead that is not one path component",
+			bead:    "../gt-abc",
+			wantErr: "invalid bead",
+		},
+		{
+			name: "the read fails",
+			store: func(s *AheadStore) {
+				s.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+			},
+			wantErr: "reading review-ahead record",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			bead := tc.bead
+			if bead == "" {
+				bead = "gt-abc"
+			}
+			if tc.seed != nil {
+				tc.seed(t, town)
+			}
+			store := TownAheadStore(town, "gastown")
+			if tc.store != nil {
+				tc.store(store)
+			}
+			head, rejecting, err := store.Hint(bead)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Hint = (%q, %v, nil), want an error naming %q", head, rejecting, tc.wantErr)
+				}
+				if head != "" || rejecting {
+					t.Errorf("Hint returned (%q, %v) beside its error, want (\"\", false)", head, rejecting)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("Hint error = %q, want it to name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Hint: %v", err)
+			}
+			if head != tc.wantHead {
+				t.Errorf("Hint head = %q, want %q", head, tc.wantHead)
+			}
+			if rejecting != tc.wantRej {
+				t.Errorf("Hint rejecting = %v, want %v", rejecting, tc.wantRej)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseStoreDelete: Delete removes the record, so the next Get is a
+// miss; deleting a bead with no record is nil; a remove the filesystem refuses
+// is an error and leaves the record; and a path the store would not have
+// written is refused rather than removed.
+func TestVerdictReuseStoreDelete(t *testing.T) {
+	t.Parallel()
+
+	t.Run("delete then Get is a miss", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		store := TownAheadStore(town, "gastown")
+		if err := store.Put(aheadTestRecord("gt-abc", aheadTestHead)); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if err := store.Delete("gt-abc"); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if _, ok, err := store.Get("gt-abc"); err != nil || ok {
+			t.Errorf("Get after Delete = (ok %v, err %v), want a miss", ok, err)
+		}
+		if _, err := os.Stat(aheadTestPath(town, "gastown", "gt-abc")); !os.IsNotExist(err) {
+			t.Errorf("record file after Delete: stat error %v, want it gone", err)
+		}
+	})
+
+	t.Run("deleting a missing record is nil", func(t *testing.T) {
+		t.Parallel()
+		if err := TownAheadStore(t.TempDir(), "gastown").Delete("gt-abc"); err != nil {
+			t.Errorf("Delete of a bead with no record = %v, want nil", err)
+		}
+	})
+
+	t.Run("a failing remove is an error", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		seedAheadRecord(t, town, aheadTestRecord("gt-abc", aheadTestHead))
+		removeErr := errors.New("read-only filesystem")
+		store := TownAheadStore(town, "gastown")
+		store.removeFile = func(string) error { return removeErr }
+		err := store.Delete("gt-abc")
+		if err == nil {
+			t.Fatal("Delete returned nil, want the remove's error")
+		}
+		if !errors.Is(err, removeErr) {
+			t.Errorf("Delete error = %q, want it to wrap the remove's error %q", err, removeErr)
+		}
+		if !strings.Contains(err.Error(), "deleting review-ahead record") {
+			t.Errorf("Delete error = %q, want it to name the delete", err)
+		}
+		if _, statErr := os.Stat(aheadTestPath(town, "gastown", "gt-abc")); statErr != nil {
+			t.Errorf("a failed Delete lost the record: %v", statErr)
+		}
+	})
+
+	t.Run("a remove that finds the record already gone is nil", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		seedAheadRecord(t, town, aheadTestRecord("gt-abc", aheadTestHead))
+		store := TownAheadStore(town, "gastown")
+		store.removeFile = func(string) error { return os.ErrNotExist }
+		if err := store.Delete("gt-abc"); err != nil {
+			t.Errorf("Delete whose remove found no file = %v, want nil", err)
+		}
+	})
+
+	t.Run("a directory at the record path is refused and left", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := aheadTestPath(town, "gastown", "gt-abc")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := TownAheadStore(town, "gastown").Delete("gt-abc")
+		if err == nil {
+			t.Fatal("Delete over a directory returned nil, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("Delete error = %q, want it to name the path's kind", err)
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.IsDir() {
+			t.Errorf("record path after the refused Delete = %v (stat error %v), want the directory left in place", info, statErr)
+		}
+	})
+
+	t.Run("an unreadable path is an error", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		// A regular file where the rig's directory must be: the lookup fails
+		// with "not a directory", which is not the "no record" answer.
+		rigDir := filepath.Dir(aheadTestPath(town, "gastown", "gt-abc"))
+		if err := os.MkdirAll(filepath.Dir(rigDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rigDir, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := TownAheadStore(town, "gastown").Delete("gt-abc")
+		if err == nil {
+			t.Fatal("Delete with an unreachable record path returned nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "checking review-ahead record") {
+			t.Errorf("Delete error = %q, want it to name the check", err)
+		}
+	})
+
+	t.Run("a bead that is not one path component is refused", func(t *testing.T) {
+		t.Parallel()
+		err := TownAheadStore(t.TempDir(), "gastown").Delete("../gt-abc")
+		if err == nil {
+			t.Fatal("Delete of ../gt-abc returned nil, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "invalid bead") {
+			t.Errorf("Delete error = %q, want it to name the bead", err)
+		}
+	})
+}
+
+// seedAheadRecord writes rec to its bead's record path with the store's v and rig.
+func seedAheadRecord(t *testing.T, town string, rec AheadRecord) {
+	t.Helper()
+	rec.V, rec.Rig = aheadRecordVersion, "gastown"
+	writeAheadFile(t, aheadTestPath(town, "gastown", rec.Bead), marshalAhead(t, rec))
+}
+
 // writeAheadFile writes data to path under a private directory, standing in for
 // a file the store would not have written.
 func writeAheadFile(t *testing.T, path string, data []byte) {
