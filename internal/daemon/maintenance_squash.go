@@ -573,7 +573,8 @@ func (d *Daemon) recoverSquashDatabase(ctx context.Context, db string, now time.
 	if settings == nil {
 		return nil, fmt.Errorf("squash: recovering %s: no squash settings", db)
 	}
-	conn, err := d.maintenance().squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
+	m := d.maintenance()
+	conn, err := m.squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
 	if err != nil {
 		return nil, fmt.Errorf("squash: opening the connection to %s: %w", db, err)
 	}
