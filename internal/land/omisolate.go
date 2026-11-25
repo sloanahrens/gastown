@@ -42,6 +42,20 @@ func (r OMReviewer) Isolated(tmp string) Reviewer {
 	return c
 }
 
+// OMVersion returns the version of the om this reviewer runs, the string
+// ReviewBead stamps on Verdict.Version: a stored review is only reusable under
+// the om that made it, so a caller compares it before reusing one (gt-jtdmp4).
+//
+// It is the same cached probe ReviewBead reads (omVersion), so the answer a
+// caller gets is the one that review would record, and a probe that fails
+// reports omVersionUnknown exactly as the verdict does. It takes the caller's
+// ReviewInput because the probe runs `om version` in in.Dir and warns as
+// in.Logf directs; constructing one of its own is what TestReviewInputGuard
+// refuses.
+func (r OMReviewer) OMVersion(ctx context.Context, in ReviewInput) string {
+	return r.omVersion(ctx, in)
+}
+
 // withEnv returns run with extra appended to the env it gives each child, an
 // entry with "=" setting that variable. It keeps extra out of the caller's
 // slice's backing array, which may be a package-level list every reviewer
