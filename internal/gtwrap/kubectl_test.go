@@ -1255,3 +1255,56 @@ func TestKubectlSettlesBeadsDirRefusesUnreadable(t *testing.T) {
 		t.Fatalf("attached %q after a refused walk; want no call run", f.attached)
 	}
 }
+
+func TestWatchdogArgv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		tool []string
+	}{
+		{"plain words", []string{"gt", "attention", "-f"}},
+		{"a word with a space", []string{"gt", "attention", "--since", "5 minutes"}},
+		{"a word with a quote", []string{"echo", "it's"}},
+		{"a word with a dollar sign", []string{"printf", "$HOME"}},
+		{"a word that would substitute", []string{"echo", "$(id)"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			argv, err := watchdogArgv(tc.tool)
+			if err != nil {
+				t.Fatalf("watchdogArgv(%q) error %v; want nil", tc.tool, err)
+			}
+			if len(argv) != 4+len(tc.tool) {
+				t.Fatalf("argv has %d words, want %d: %q", len(argv), 4+len(tc.tool), argv)
+			}
+			if argv[0] != "sh" || argv[1] != "-c" || argv[2] != watchdogScript || argv[3] != "sh" {
+				t.Fatalf("argv head %q, want sh -c <watchdog script> sh", argv[:4])
+			}
+			if !slices.Equal(argv[4:], tc.tool) {
+				t.Fatalf("tool words %q, want %q, one word each", argv[4:], tc.tool)
+			}
+		})
+	}
+}
+
+func TestWatchdogArgvRefusesNoTool(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		tool []string
+	}{
+		{"no words", nil},
+		{"an empty slice", []string{}},
+		{"a blank command name", []string{""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			argv, err := watchdogArgv(tc.tool)
+			if err == nil || argv != nil {
+				t.Fatalf("watchdogArgv(%q) = %q, %v; want no argv and an error", tc.tool, argv, err)
+			}
+		})
+	}
+}
