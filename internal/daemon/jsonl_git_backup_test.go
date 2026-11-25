@@ -4812,3 +4812,46 @@ func TestJSONLBackupIssuesBudgetSeededSample(t *testing.T) {
 		t.Errorf("the issues export was handed %s with a seeded sample, want about %s", issues, want)
 	}
 }
+
+// The export runs under the daemon's own context: a SIGTERM ends the table in
+// flight instead of letting the full export run on into the drain, and the
+// failure it reports still names the table (gt-3kcbst).
+func TestJSONLExportStopsWithTheDaemon(t *testing.T) {
+	t.Parallel()
+
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	defer stopDaemon()
+
+	// The seam stands for the table's dolt run, and the daemon is told to stop
+	// while it is in flight. It reports the context it was handed — read there,
+	// not after the call, since exportTableToJsonl cancels its own context when
+	// it returns, so a context read after it is done either way.
+	var seamCalls int
+	var seamCtxErr error
+	d := jsonlExportTestDaemon(t, `{}`, func(ctx context.Context, _ *exec.Cmd, _ string, _ time.Duration) ([]byte, error) {
+		stopDaemon()
+		seamCalls++
+		seamCtxErr = ctx.Err()
+		if seamCtxErr != nil {
+			return nil, seamCtxErr
+		}
+		return []byte(`{"rows":[]}`), nil
+	})
+	d.ctx = daemonCtx
+
+	_, err := d.exportDatabaseToJsonl("testdb", t.TempDir(), t.TempDir(), false)
+
+	if !errors.Is(seamCtxErr, context.Canceled) {
+		t.Fatalf("the context handed to the run seam ended with %v after the daemon was told to stop, want its cancellation (seam calls: %d)",
+			seamCtxErr, seamCalls)
+	}
+	if err == nil {
+		t.Fatal("the export completed after the daemon was told to stop: the table in flight was not killed with it")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("export error = %v, want the daemon's cancellation reported", err)
+	}
+	if !strings.Contains(err.Error(), "issues") {
+		t.Errorf("error %q does not name the table in flight", err)
+	}
+}
