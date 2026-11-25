@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -1316,4 +1317,30 @@ func squashBranchList(names []string) string {
 		return "none"
 	}
 	return strings.Join(names, ", ")
+}
+
+// squashDeferrals counts, per database, the consecutive squash checks the
+// maintenance gc flag deferred (gt-2n9wff). The zero value is ready to use, and
+// its methods are safe for concurrent use.
+type squashDeferrals struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+// deferred adds one deferral for db and returns the database's new count.
+func (s *squashDeferrals) deferred(db string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		s.counts = make(map[string]int)
+	}
+	s.counts[db]++
+	return s.counts[db]
+}
+
+// reset sets db's count back to zero, so its next deferral counts as one.
+func (s *squashDeferrals) reset(db string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.counts, db)
 }
