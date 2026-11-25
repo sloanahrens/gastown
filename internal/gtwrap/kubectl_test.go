@@ -1135,6 +1135,279 @@ func TestAttachSaysWhenThePodWasReplaced(t *testing.T) {
 	}
 }
 
+// streamKube writes the bytes it holds through the writers the wrapper passes;
+// fakeKube itself writes nothing. Both streams are written whatever the other
+// returns, as the child's two copies are, and the first write error is returned.
+// gotStdout, when set, records the stdout writer it was given.
+type streamKube struct {
+	*fakeKube
+	stdout, stderr string
+	gotStdout      *io.Writer
+}
+
+func (s streamKube) AttachStreams(argv []string, env []string, _ io.Reader, stdout, stderr io.Writer) (int, error) {
+	if s.gotStdout != nil {
+		*s.gotStdout = stdout
+	}
+	_, outErr := io.WriteString(stdout, s.stdout)
+	_, errErr := io.WriteString(stderr, s.stderr)
+	exit, err := s.fakeKube.Attach(argv, env)
+	return exit, errors.Join(err, outErr, errErr)
+}
+
+// failWriter is a caller's stream that refuses every write.
+type failWriter struct{}
+
+var errWriterClosed = errors.New("the caller's stream is closed")
+
+func (failWriter) Write([]byte) (int, error) { return 0, errWriterClosed }
+
+// kubeBdCallArgs is the call the wrapper makes for bd with args from dir.
+func kubeBdCallArgs(t *testing.T, dir string, args ...string) Call {
+	t.Helper()
+	call, err := Plan(nativeBdTool, args, nil, dir, false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	return call
+}
+
+const execStreamBreak = "error stream protocol error: unknown error\n"
+
+// TestExecLostReplyNote: a bd write call whose stderr ends in the exec stream
+// error prints the lost-reply note, streams byte for byte, at both pod roots.
+func TestExecLostReplyNote(t *testing.T) {
+	t.Parallel()
+	const out = "created gt-abc\n"
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	for _, tc := range []struct{ name, podRoot string }{{"equal roots", ""}, {"different roots", "/pod/town"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = 1
+			var note, stdout, stderr bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stdout: out, stderr: execStreamBreak}
+			if tc.podRoot != "" {
+				k.PodRoot = tc.podRoot
+			}
+			k.Stdout, k.Stderr = &stdout, &stderr
+			if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+				t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+			}
+			if stdout.String() != out || stderr.String() != execStreamBreak {
+				t.Fatalf("streams = %q, %q; want %q, %q", stdout.String(), stderr.String(), out, execStreamBreak)
+			}
+			if got := note.String(); got != want {
+				t.Fatalf("note = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestExecLostReplyNoteNilStreams: a Kube with no Stdout and no Stderr still
+// notes a broken stream on a bd write; the detector has no off switch. The fake
+// writes to the process's own streams, which the Kube defaults to.
+func TestExecLostReplyNoteNilStreams(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.Shell = streamKube{fakeKube: f, stderr: execStreamBreak}
+	var procOut, procErr bytes.Buffer
+	k.Stdout, k.Stderr, k.processOut, k.processErr = nil, nil, &procOut, &procErr
+	if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+		t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+	}
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	if got := note.String(); got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+	if procErr.String() != execStreamBreak {
+		t.Fatalf("the process's stderr got %q, want the tool's stderr %q", procErr.String(), execStreamBreak)
+	}
+}
+
+// TestExecLostReplyNoteText pins the note as the operator reads it.
+func TestExecLostReplyNoteText(t *testing.T) {
+	t.Parallel()
+	const want = "gt-wrap: the bd call may have run: the exec stream broke before its reply arrived, so check with bd show before repeating anything that is not idempotent (a comment, a create); a repeated dep remove is safe, since it answers No dependency found\n"
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.Shell = streamKube{fakeKube: f, stderr: execStreamBreak}
+	k.Stdout, k.Stderr = io.Discard, io.Discard
+	if _, err := k.Launch(kubeBdCallArgs(t, town, "create")); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if got := note.String(); got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+}
+
+// pipeKube runs its child the way os/exec does for a writer that is not a file:
+// the child writes into a pipe, and one goroutine copies the pipe to the writer
+// and stops at the first error, leaving the pipe unread. The child writes flood
+// bytes and then the break text, which is the last line of a real stream, and the call ends only when the child's
+// writes return, as Wait does.
+type pipeKube struct {
+	*fakeKube
+	ctx   context.Context
+	flood int
+}
+
+func (p pipeKube) AttachStreams(argv []string, env []string, _ io.Reader, _, stderr io.Writer) (int, error) {
+	pr, pw := io.Pipe()
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(stderr, pr)
+	}()
+	_, _ = pw.Write(bytes.Repeat([]byte("x"), p.flood))
+	_, _ = io.WriteString(pw, execStreamBreak)
+	_ = pw.Close()
+	select {
+	case <-copied:
+	case <-p.ctx.Done():
+	}
+	return p.fakeKube.Attach(argv, env)
+}
+
+// TestExecFailingStderrDoesNotStopTheChild: a caller's stderr that fails on its
+// first write must not leave the child's pipe unread. The child then writes a
+// mebibyte; the call returns inside the watchdog with the child's status, the
+// writer's error and the note.
+func TestExecFailingStderrDoesNotStopTheChild(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	k.Shell = pipeKube{fakeKube: f, ctx: ctx, flood: 1 << 20}
+	k.Stdout, k.Stderr = io.Discard, failWriter{}
+	type result struct {
+		exit int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		exit, err := k.Launch(kubeBdCallArgs(t, town, "create"))
+		done <- result{exit, err}
+	}()
+	select {
+	case r := <-done:
+		if r.exit != 1 || !errors.Is(r.err, errWriterClosed) {
+			t.Fatalf("Launch = %d, %v; want the child's status 1 and the stream's error", r.exit, r.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Launch did not return: the failing stderr stopped the copy and the child blocked on the unread pipe")
+	}
+	if !strings.Contains(note.String(), "the bd call may have run") {
+		t.Fatalf("note = %q, want the lost-reply note", note.String())
+	}
+}
+
+// TestExecStdoutIsTheCallersWriter: at equal roots a bd call's stdout goes to the
+// caller's own writer, not a wrapper around it (an *os.File is then the child's
+// descriptor), and the two streams reach one shared writer in the order written.
+func TestExecStdoutIsTheCallersWriter(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	f := healthyKube()
+	f.attachExit = 1
+	var note, both bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	var got io.Writer
+	k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak, gotStdout: &got}
+	k.Stdout, k.Stderr = &both, &both
+	if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+		t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+	}
+	if got != io.Writer(&both) {
+		t.Fatalf("stdout given to the shell is %T, want the caller's own writer", got)
+	}
+	if want := "out\n" + execStreamBreak; both.String() != want {
+		t.Fatalf("shared stream = %q, want %q", both.String(), want)
+	}
+}
+
+// TestExecLostReplyNoteSurvivesAFailingStream: a caller's stderr or stdout that
+// fails cannot hide the note, and the call keeps its status.
+func TestExecLostReplyNoteSurvivesAFailingStream(t *testing.T) {
+	t.Parallel()
+	want := "gt-wrap: " + lostReplyNote([]string{nativeBdTool, "create"}, 1, execStreamBreak) + "\n"
+	for _, tc := range []struct {
+		name           string
+		stdout, stderr io.Writer
+	}{
+		{"stderr fails", io.Discard, failWriter{}},
+		{"stdout fails", failWriter{}, io.Discard},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = 1
+			var note bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak}
+			k.Stdout, k.Stderr = tc.stdout, tc.stderr
+			exit, err := k.Launch(kubeBdCallArgs(t, town, "create"))
+			if exit != 1 || !errors.Is(err, errWriterClosed) {
+				t.Fatalf("Launch = %d, %v; want the call's status 1 and the stream's error", exit, err)
+			}
+			if got := note.String(); got != want {
+				t.Fatalf("note = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestExecLostReplyNoteNone: a read call and a successful write print no note.
+func TestExecLostReplyNoteNone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		exit int
+	}{
+		{"a read call", []string{"show", "gt-abc"}, 1},
+		{"a successful write", []string{"create"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = tc.exit
+			var note bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			k.Shell = streamKube{fakeKube: f, stderr: execStreamBreak}
+			k.Stdout, k.Stderr = io.Discard, io.Discard
+			if exit, err := k.Launch(kubeBdCallArgs(t, town, tc.args...)); exit != tc.exit || err != nil {
+				t.Fatalf("Launch = %d, %v; want the call's status %d", exit, err, tc.exit)
+			}
+			if note.Len() != 0 {
+				t.Fatalf("note = %q; want none", note.String())
+			}
+		})
+	}
+}
+
 // beadsTownKube is the target the cluster fake drives for a bd call, with the
 // town built as real directories under the test's own temp dir, so the walk sees
 // the filesystem the wrapper sees.

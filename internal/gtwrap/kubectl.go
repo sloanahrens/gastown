@@ -1,12 +1,14 @@
 package gtwrap
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -65,13 +67,18 @@ type Kubectl struct {
 	// uses os.ReadFile. A redirect that exists but cannot be read refuses the
 	// call, since read as absent it would name the worktree's own .beads.
 	ReadFile func(string) ([]byte, error)
-	// Stdout and Stderr receive the tool's output when the pod town root and the
-	// Mac town differ: the tool prints pod paths, and the wrapper rewrites them to
-	// the Mac's. They are the wrapper's own streams. When the roots are equal, the
-	// tool's output goes to the caller's streams through the Shell unchanged, and
-	// these are not read. Nil refuses a rewriting call, so its output is never lost.
+	// Stdout and Stderr are the wrapper's own streams. They receive the tool's
+	// output when the pod town root and the Mac town differ: the tool prints pod
+	// paths, and the wrapper rewrites them to the Mac's. A rewriting call with
+	// either nil is refused, so its output is never lost. When the roots are equal
+	// the tool's stdout goes to Stdout unchanged, and a bd call's stderr is copied
+	// to Stderr and into a tail for its lost-reply note. A nil Stdout or Stderr
+	// there is the process's own os.Stdout or os.Stderr, so the note has no off switch.
 	Stdout io.Writer
 	Stderr io.Writer
+	// processOut and processErr stand in for os.Stdout and os.Stderr when Stdout
+	// or Stderr is nil; a test sets them so nothing reaches the real streams.
+	processOut, processErr io.Writer
 	// ProbeTimeout bounds each probe. Zero means probeTimeout.
 	ProbeTimeout time.Duration
 }
@@ -119,9 +126,31 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if len(dropped) > 0 {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
 	}
-	exit, err := k.attach(l.pod, call, dir)
+	// Keep a bd call's stderr tail so a broken exec stream is noted (gt-n3gkzs).
+	tail := &tailBuffer{max: lostReplyTailBytes}
+	exit, err := k.attach(l.pod, call, dir, tail)
+	if note := lostReplyNote(call.Argv, exit, string(tail.buf)); note != "" {
+		fmt.Fprintf(k.Note, "gt-wrap: %s\n", note)
+	}
 	k.noteReplacedPod(l.pod, exit)
 	return exit, err
+}
+
+// lostReplyTailBytes bounds the stderr tail: the exec break is on the last line.
+const lostReplyTailBytes = 2 << 10
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	max int
+	buf []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
+	}
+	return len(p), nil
 }
 
 // noteReplacedPod says when a call's 137 is the daemon pod replaced under it: one
@@ -150,25 +179,75 @@ func (k Kubectl) noteReplacedPod(pod string, exit int) {
 // attached the rewriter writes an unterminated line as far as a later byte cannot
 // change it; without one the line is held until it ends, since the stream may be
 // binary. The exit status, the standard input and the walk-up script are the same
-// either way.
-func (k Kubectl) attach(pod string, call Call, dir string) (int, error) {
+// either way. A bd call's stderr is also copied into tail, so a broken exec stream
+// is noted after the call; that copy is the one change to what the caller sees,
+// since kubectl's stderr is then a pipe, not the terminal.
+func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (int, error) {
 	argv := k.execArgv(pod, call, dir)
+	stdout, stderr := k.outputs()
 	if !k.rewrites() {
-		if call.Stdin != nil {
-			return k.Shell.AttachStdin(argv, nil, call.Stdin)
+		if call.Argv[0] != nativeBdTool {
+			if call.Stdin != nil {
+				return k.Shell.AttachStdin(argv, nil, call.Stdin)
+			}
+			return k.Shell.Attach(argv, nil)
 		}
-		return k.Shell.Attach(argv, nil)
+		// Only a bd call's stderr is copied, for the tail: its stdout is the
+		// caller's own writer, which an *os.File hands to the child as the
+		// descriptor itself. Its stderr becomes a pipe the tail and the caller's
+		// stderr share. bd runs in the pod, where its stderr is the exec stream
+		// whatever the Mac's is, so only kubectl's own stderr sees the pipe.
+		errs := &tailFirst{tail: tail, w: stderr}
+		exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, stdout, errs)
+		return exit, errors.Join(err, errs.err)
 	}
 	// The same condition stdioFlags uses for a terminal: -t is passed only when the
 	// tool's stdin is the caller's terminal.
 	prompt := call.TTY && call.Stdin == nil
-	out := newOutputRewriter(k.Stdout, k.podRoot(), k.Town, prompt)
-	errOut := newOutputRewriter(k.Stderr, k.podRoot(), k.Town, prompt)
-	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errOut)
+	out := newOutputRewriter(stdout, k.podRoot(), k.Town, prompt)
+	errOut := newOutputRewriter(stderr, k.podRoot(), k.Town, prompt)
+	errs := &tailFirst{tail: tail, w: errOut}
+	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errs)
 	// The tool's last line need not end in a newline, so the two streams are
 	// flushed before the call returns. A failure to write the output is reported
 	// with the tool's own status, so the caller keeps it.
-	return exit, errors.Join(err, out.Flush(), errOut.Flush())
+	return exit, errors.Join(err, out.Flush(), errOut.Flush(), errs.err)
+}
+
+// outputs is the writers the call's output goes to: the wrapper's own streams,
+// else the process's, so a bd call's stderr is always read for its note.
+func (k Kubectl) outputs() (stdout, stderr io.Writer) {
+	stdout, stderr = k.Stdout, k.Stderr
+	if stdout == nil {
+		stdout = cmp.Or(k.processOut, io.Writer(os.Stdout))
+	}
+	if stderr == nil {
+		stderr = cmp.Or(k.processErr, io.Writer(os.Stderr))
+	}
+	return stdout, stderr
+}
+
+// tailFirst is the writer a bd call's stderr is handed to. os/exec copies a
+// writer that is not an *os.File in a goroutine that stops at the first error,
+// leaving the pipe unread, and a child that then writes past the pipe buffer
+// blocks, so Wait never returns. So Write never fails: it writes the tail (which
+// cannot fail), then w; on w's first error it keeps that error in err, stops
+// writing to w, and keeps feeding the tail. The caller returns err after the
+// process has exited.
+type tailFirst struct {
+	tail *tailBuffer
+	w    io.Writer
+	err  error
+}
+
+func (t *tailFirst) Write(p []byte) (int, error) {
+	_, _ = t.tail.Write(p)
+	if t.err == nil {
+		if _, err := t.w.Write(p); err != nil {
+			t.err = err
+		}
+	}
+	return len(p), nil
 }
 
 // rewrites reports whether the pod's town root and the Mac's differ, and so
