@@ -85,6 +85,24 @@ func TestTierSweepRunningFromTheSweepStartedLine(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunningCarriesTheSHA: the running object names the commit the
+// open cycle sweeps, off its sweep-started line, so the panel can show which
+// commit is under sweep while the cycle runs.
+func TestTierSweepRunningCarriesTheSHA(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 14, 0, 0, 0, time.Local)
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+	)
+	ts := r.read(start.Add(time.Minute))
+	if ts.Running == nil {
+		t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+	}
+	if ts.Running.SHA != "a9be03e4" {
+		t.Errorf("running sha = %q, want the sweep-started line's a9be03e4", ts.Running.SHA)
+	}
+}
+
 // TestTierSweepRunningAdvancesPastAFinishedStage: a started cycle's tier follows
 // the stage lines logged since it began, not the first tier of the start line.
 // The shell stage finishing moves the cycle into integration, which the stage
