@@ -77,13 +77,13 @@ func TestVerdictReuseIsolatedSetsTMPDIR(t *testing.T) {
 	}
 	env, ok := envs["review"]
 	if !ok {
-		t.Fatalf("om was not run for the review; envs recorded: %v", envs)
+		t.Fatalf("om was not run for the review; %d om call(s) recorded", len(envs))
 	}
 	if want := "TMPDIR=" + tmp; !slices.Contains(env, want) {
-		t.Fatalf("review env = %v, want it to hold %q", env, want)
+		t.Fatalf("review env's %d entries hold no TMPDIR for the isolated tmp", len(env))
 	}
 	if !slices.Contains(env, "CLAUDE_CONFIG_DIR") {
-		t.Fatalf("review env = %v, want CLAUDE_CONFIG_DIR still unset by it", env)
+		t.Fatalf("review env's %d entries hold no CLAUDE_CONFIG_DIR unset entry", len(env))
 	}
 }
 
