@@ -451,15 +451,16 @@ func TestEnsureClosedRuleCreates(t *testing.T) {
 	}
 }
 
-// TestEnsureClosedRuleKeeps checks that an existing main rule, whatever its form (closed, final
-// or open), is left alone: EnsureClosedRule sends no write and logs that a rule of that name
-// exists and that its form is not read, so a provision resuming after a partial failure does
-// not fail on it and the log does not claim the rule is protected.
+// TestEnsureClosedRuleKeeps checks the three forms an existing main rule can have: a closed or a
+// final rule is left alone with no write and a log line, and any other rule (here an open one)
+// is an error that names the repository, with no write, so a provision never goes on to grant
+// access over a rule that leaves main open.
 func TestEnsureClosedRuleKeeps(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		seed func(t *testing.T, opts Options) map[string]any
+		name    string
+		seed    func(t *testing.T, opts Options) map[string]any
+		wantErr string
 	}{
 		{
 			name: "closed rule",
@@ -478,6 +479,7 @@ func TestEnsureClosedRuleKeeps(t *testing.T) {
 			seed: func(t *testing.T, opts Options) map[string]any {
 				return servedRule(t, map[string]any{"rule_name": opts.MainBranch, "enable_push": true})
 			},
+			wantErr: "branch protection main on acme/rig is neither closed nor final",
 		},
 	}
 	for _, c := range cases {
@@ -489,18 +491,21 @@ func TestEnsureClosedRuleKeeps(t *testing.T) {
 			seedRule(t, f, protectionRepo, c.seed(t, opts))
 			var logs []string
 			p := userProvisioner(f, false, &logs)
-			if err := p.EnsureClosedRule(protectionRepo, opts); err != nil {
-				t.Fatalf("EnsureClosedRule = %v, want an existing rule left alone", err)
-			}
+			err := p.EnsureClosedRule(protectionRepo, opts)
 			if n := len(f.Writes()); n != 0 {
 				t.Fatalf("an existing rule sent %d writes, want none", n)
 			}
-			joined := strings.Join(logs, "\n")
-			if !strings.Contains(joined, "a rule named main already exists on acme/rig; its form is not read here") {
-				t.Fatalf("logged %q, want a line saying a rule of that name exists and its form is not read", logs)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("EnsureClosedRule = %v, want an error containing %q", err, c.wantErr)
+				}
+				return
 			}
-			if strings.Contains(joined, "already set") {
-				t.Fatalf("logged %q, a line that does not read the rule must not say it is set", logs)
+			if err != nil {
+				t.Fatalf("EnsureClosedRule = %v, want an existing closed or final rule left alone", err)
+			}
+			if !strings.Contains(strings.Join(logs, "\n"), "branch protection main on acme/rig is already closed or final") {
+				t.Fatalf("logged %q, want a line saying the rule is already closed or final", logs)
 			}
 		})
 	}

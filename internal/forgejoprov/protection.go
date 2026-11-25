@@ -93,13 +93,8 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 	return p.verifyWrite(rule, repo, resp, body)
 }
 
-// EnsureClosedRule leaves the main rule of repo alone when one is already named for the branch:
-// it sends no write and logs that a rule of that name exists, without reading a field of it, so
-// a closed, a final or an open rule all pass the same way and the log does not claim the rule
-// is protected. Making an existing rule the final form is the final patch's job (EnsureRule),
-// not this step's. Otherwise it creates the rule as ClosedMainRule(opts) describes it, so a run that
-// fails after it leaves the repository protected with nobody on the merge whitelist. The create's
-// reply is checked as EnsureRule's is.
+// EnsureClosedRule leaves a closed or final main rule alone, refuses any other existing one, and
+// creates the closed rule otherwise, so a run that fails part way never leaves main open.
 func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -111,9 +106,12 @@ func (p *Provisioner) EnsureClosedRule(repo string, opts Options) error {
 	if err != nil {
 		return err
 	}
-	if findRule(rules, rule) != nil {
-		p.logf("a rule named %s already exists on %s; its form is not read here", rule, repo)
-		return nil
+	if held := findRule(rules, rule); held != nil {
+		if carries(held, ClosedMainRule(opts)) || carries(held, MainRule(opts)) {
+			p.logf("branch protection %s on %s is already closed or final", rule, repo)
+			return nil
+		}
+		return fmt.Errorf("branch protection %s on %s is neither closed nor final: set it by hand in the web UI, then re-run", rule, repo)
 	}
 	if p.Client.DryRun {
 		p.logf("would create branch protection %s on %s", rule, repo)
