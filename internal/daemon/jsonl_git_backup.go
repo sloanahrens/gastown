@@ -911,7 +911,17 @@ func (d *Daemon) exportTableToJsonl(target jsonlTarget, table string, q beadsql.
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	// The export runs under the daemon's context, so a SIGTERM kills this
+	// table's dolt child with it instead of letting a full export read on into
+	// the drain, and the failure the caller reports names the table, as it
+	// does for a timeout (gt-3kcbst). Run always sets d.ctx; the Background
+	// fallback is for a Daemon built without one (tests), whose export only
+	// its budget ends.
+	parent := d.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	start := time.Now()
 
