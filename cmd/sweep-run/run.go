@@ -267,11 +267,13 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 		// host sweep passes a script stage none either (tierSweepStageEnv). It
 		// does get the no-slot setting the in-process sweep gets: the container
 		// holds no town for the script's own gt slot run calls to find, and the
-		// runner holds its own reservation.
+		// runner holds its own reservation. The trigger is off for the same
+		// reason: its state lives in a town the container does not have.
 		code = d.RunScript(scriptProgram, append([]string{scriptPath}, opts.Tiers...), work,
 			environWith(d.Environ, map[string]string{
-				tiersweep.EnvLogDir: opts.logDir(),
-				tiersweep.EnvNoSlot: "1",
+				tiersweep.EnvLogDir:  opts.logDir(),
+				tiersweep.EnvNoSlot:  "1",
+				tiersweep.EnvTrigger: "0",
 			}),
 			io.MultiWriter(stdout, captured),
 			io.MultiWriter(stderr, sweepErrs))
@@ -281,8 +283,11 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 			tiersweep.EnvTested: opts.SHA,
 			envJobs:             strconv.Itoa(opts.Jobs),
 			// The runner container has no town, so the sweep's packages run
-			// without gt slot run; the runner holds its own reservation.
-			tiersweep.EnvNoSlot: "1",
+			// without gt slot run; the runner holds its own reservation. The trigger
+			// is off for the same reason: its state lives in a town the container
+			// does not have.
+			tiersweep.EnvNoSlot:  "1",
+			tiersweep.EnvTrigger: "0",
 		}
 		code = d.Sweep(sweepArgs(work, opts.Tiers), overrides,
 			io.MultiWriter(stdout, captured),
