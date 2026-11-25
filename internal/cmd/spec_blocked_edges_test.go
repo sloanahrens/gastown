@@ -313,3 +313,51 @@ func TestReadBlockedByRig(t *testing.T) {
 		})
 	}
 }
+
+func TestInheritedSeam(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		rigs       []string
+		reads      map[string]rigRead
+		wantInh    map[string]specdispatch.Inherited
+		wantFailed map[string]error
+	}{
+		{
+			name: "a ready blocker on no blocked list inherits the P0 of the blocked bead it holds up",
+			rigs: []string{"gastown"},
+			reads: map[string]rigRead{
+				"gastown": {issues: []*beads.Issue{{ID: "gt-b", Priority: 0, BlockedBy: []string{"gt-a"}}}},
+			},
+			wantInh:    map[string]specdispatch.Inherited{"gt-a": {Priority: 0, From: "gt-b"}},
+			wantFailed: map[string]error{},
+		},
+		{
+			name: "a rig whose read fails is named and the other rig still passes its inheritance on",
+			rigs: []string{"gastown", "hq"},
+			reads: map[string]rigRead{
+				"gastown": {issues: []*beads.Issue{{ID: "gt-b", Priority: 0, BlockedBy: []string{"gt-a"}}}},
+				"hq":      {err: errBlockedRead},
+			},
+			wantInh:    map[string]specdispatch.Inherited{"gt-a": {Priority: 0, From: "gt-b"}},
+			wantFailed: map[string]error{"hq": errBlockedRead},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			blocked := func(rig string) ([]*beads.Issue, error) {
+				r := tc.reads[rig]
+				return r.issues, r.err
+			}
+			seam := inheritedSeam(tc.rigs, blocked)
+			gotInh, gotFailed := seam()
+			if !reflect.DeepEqual(gotInh, tc.wantInh) {
+				t.Fatalf("inheritedSeam() inherited = %+v, want %+v", gotInh, tc.wantInh)
+			}
+			if !reflect.DeepEqual(gotFailed, tc.wantFailed) {
+				t.Fatalf("inheritedSeam() failed = %+v, want %+v", gotFailed, tc.wantFailed)
+			}
+		})
+	}
+}
