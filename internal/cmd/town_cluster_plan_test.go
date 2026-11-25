@@ -203,7 +203,7 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	}
 	for i, f := range files {
 		sum := sha256.Sum256(f.Data)
-		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f)}
+		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f), ResourceVersion: planWantResourceVersion(t, f)}
 		if rec.Files[i] != want {
 			t.Errorf("plan.json file %d = %+v, want %+v", i, rec.Files[i], want)
 		}
@@ -447,12 +447,15 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 	}
 }
 
-// planLiveAnswer is the live Deployment kubectl prints, with revision annotated.
+// planLiveAnswer is the live Deployment kubectl prints, with revision annotated
+// and resourceVersion set to rv-<name>, which planWantResourceVersion expects.
 func planLiveAnswer(t *testing.T, resource, revision string) string {
 	t.Helper()
+	name := strings.TrimPrefix(resource, "deployment/")
 	body, err := json.Marshal(map[string]any{"metadata": map[string]any{
-		"name":        strings.TrimPrefix(resource, "deployment/"),
-		"annotations": map[string]string{"deployment.kubernetes.io/revision": revision},
+		"name":            name,
+		"resourceVersion": "rv-" + name,
+		"annotations":     map[string]string{"deployment.kubernetes.io/revision": revision},
 	}})
 	if err != nil {
 		t.Fatalf("encoding the live answer: %v", err)
@@ -499,6 +502,49 @@ func planWantRevision(t *testing.T, f planFile) string {
 		return ""
 	}
 	return "rev-" + head.Metadata.Name
+}
+
+// planWantResourceVersion is the resourceVersion plan.json records for a rendered
+// file: rv-<name> for a Deployment, the name planWantRevision gives rev-<name>.
+func planWantResourceVersion(t *testing.T, f planFile) string {
+	t.Helper()
+	rev := planWantRevision(t, f)
+	if rev == "" {
+		return ""
+	}
+	return "rv-" + strings.TrimPrefix(rev, "rev-")
+}
+
+// TestClusterShapePlanLiveResourceVersion: plan.json records each rendered
+// Deployment's resourceVersion beside its revision, and a non-Deployment file
+// records none.
+func TestClusterShapePlanLiveResourceVersion(t *testing.T) {
+	t.Parallel()
+	dir := planOut(t)
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	files := planFilesIn(t, dir)
+	if len(rec.Files) != len(files) {
+		t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+	}
+	recorded := 0
+	for i, f := range files {
+		want := planWantResourceVersion(t, f)
+		if rec.Files[i].ResourceVersion != want {
+			t.Errorf("plan.json resourceVersion for %s = %q, want %q", f.Name, rec.Files[i].ResourceVersion, want)
+		}
+		if want != "" {
+			recorded++
+			if rec.Files[i].Revision == "" {
+				t.Errorf("plan.json records resourceVersion %q for %s with no revision beside it", want, f.Name)
+			}
+		}
+	}
+	if recorded == 0 {
+		t.Fatal("the plan rendered no Deployment, so no resourceVersion was recorded")
+	}
 }
 
 // TestClusterShapePlanLiveRevisions: plan.json records each rendered Deployment's
@@ -549,6 +595,9 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 		{"the live read exits nonzero", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
 		{"the cluster does not hold it", func(string) (string, int, error) { return "", 0, nil }, "does not hold"},
 		{"the live object has no revision", func(string) (string, int, error) { return `{"metadata":{}}`, 0, nil }, "has no revision annotation"},
+		{"the live object has no resourceVersion", func(string) (string, int, error) {
+			return `{"metadata":{"annotations":{"deployment.kubernetes.io/revision":"1"}}}`, 0, nil
+		}, "has no resourceVersion"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -570,9 +619,9 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 	}
 	t.Run("a rendered file has no readable kind", func(t *testing.T) {
 		t.Parallel()
-		_, err := planLiveRevision(context.Background(), planKubectl(t), []byte("kind: ["))
+		_, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
 		if err == nil || !strings.Contains(err.Error(), "cannot read a rendered file's kind") {
-			t.Fatalf("planLiveRevision = %v, want the unreadable-kind refusal", err)
+			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
 	})
 }
