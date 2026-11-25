@@ -218,6 +218,41 @@ func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	}
 }
 
+// TestReviewPoolFree checks how many more reviews may start: Max less the
+// entries running, never below 0. It fills the running set directly: a pool
+// holds one entry per review under way, and the past-the-cap row tests the
+// clamp itself, not how the pool came to hold that many.
+func TestReviewPoolFree(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		running int
+		want    int
+	}{
+		{name: "none running", running: 0, want: 2},
+		{name: "one running", running: 1, want: 1},
+		{name: "at the cap", running: 2, want: 0},
+		{name: "past the cap", running: 3, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &ReviewPool{Max: 2, running: map[string]*aheadRun{}}
+			for n := 0; n < tt.running; n++ {
+				pool.running[fmt.Sprintf("gt-running-%d", n)] = &aheadRun{head: "0000000"}
+			}
+
+			pool.mu.Lock()
+			got := pool.free()
+			pool.mu.Unlock()
+
+			if got != tt.want {
+				t.Errorf("free() with %d entries running and Max %d = %d, want %d", tt.running, pool.Max, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)

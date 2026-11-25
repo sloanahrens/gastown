@@ -24,8 +24,8 @@ type AheadHints interface {
 // a verdict instead of running om inline. Offer starts the reviews; Wait
 // returns when none is running.
 //
-// Max, Begin, End and Hints are stored here and not yet read: the cap, the
-// begin and end hooks and the hint check land with the beads that use them.
+// Max is read by free. Begin, End and Hints are stored here and not yet read:
+// the begin and end hooks and the hint check land with the beads that use them.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -111,6 +111,16 @@ func (p *ReviewPool) Wait() {
 			<-done
 		}
 	}
+}
+
+// free returns how many more reviews may start: Max less the reviews running,
+// never below 0. The caller holds p.mu.
+func (p *ReviewPool) free() int {
+	n := p.Max - len(p.running)
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // logf logs through Logf when one is set.
