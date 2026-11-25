@@ -1316,6 +1316,59 @@ func TestContainerResourcesRequests(t *testing.T) {
 	})
 }
 
+// TestDindRequestsRender drives the rendered engine sidecar's requests: a set
+// Values.DindRequests is what the dind container asks for while its limits stay
+// Values.DindResources, an empty one asks for the limits, and the runner
+// container keeps asking for its whole share either way.
+func TestDindRequestsRender(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		limits       Share
+		requests     Share
+		wantRequests ResourceList
+		wantLimits   ResourceList
+	}{
+		{
+			name:         "requests render with the limits unchanged",
+			limits:       Share{CPU: "8", Memory: "12Gi"},
+			requests:     Share{CPU: "4", Memory: "8Gi"},
+			wantRequests: ResourceList{CPU: "4", Memory: "8Gi"},
+			wantLimits:   ResourceList{CPU: "8", Memory: "12Gi"},
+		},
+		{
+			name:         "empty requests take the limits",
+			limits:       Share{CPU: "8", Memory: "12Gi"},
+			requests:     Share{},
+			wantRequests: ResourceList{CPU: "8", Memory: "12Gi"},
+			wantLimits:   ResourceList{CPU: "8", Memory: "12Gi"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values := goldenValues()
+			values.DindResources = tc.limits
+			values.DindRequests = tc.requests
+			dind := containerNamed(t, mustBuild(t, values).Deployment.Spec.Template.Spec, DindContainerName)
+			if dind.Resources.Requests != tc.wantRequests {
+				t.Errorf("the engine requests = %+v, want %+v", dind.Resources.Requests, tc.wantRequests)
+			}
+			if dind.Resources.Limits != tc.wantLimits {
+				t.Errorf("the engine limits = %+v, want %+v", dind.Resources.Limits, tc.wantLimits)
+			}
+		})
+	}
+	t.Run("the runner keeps asking for its whole share", func(t *testing.T) {
+		t.Parallel()
+		values := goldenValues()
+		values.DindRequests = Share{CPU: "4", Memory: "8Gi"}
+		runner := containerNamed(t, mustBuild(t, values).Deployment.Spec.Template.Spec, runnerContainerName)
+		if runner.Resources.Requests != runner.Resources.Limits {
+			t.Errorf("the runner requests %+v, want its limits %+v", runner.Resources.Requests, runner.Resources.Limits)
+		}
+	})
+}
+
 // TestDindRequestsValidateAgainstTheLimit drives the optional engine request
 // share: a request above its Values.DindResources limit is refused with an error
 // naming Values.DindRequests, and one at or below the limit, or left empty,
