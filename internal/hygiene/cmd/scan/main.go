@@ -198,9 +198,11 @@ func trackedFiles(git gitRunner, top string) ([]string, error) {
 }
 
 // changedPaths keeps the tracked paths the diff from ref to HEAD lists, read -z so
-// no name is quoted and dropped. A rule file or unreadable diff keeps every path.
+// no name is quoted and dropped. --no-renames lists both names of a moved file:
+// with rename detection, git's default, only the new name is listed, and moving a
+// rule file away would never name it. A rule file or unreadable diff keeps every path.
 func changedPaths(git gitRunner, top, ref string, paths []string, stderr io.Writer) []string {
-	out, err := git(top, "diff", "--name-only", "-z", ref+"...HEAD")
+	out, err := git(top, "diff", "--name-only", "--no-renames", "-z", ref+"...HEAD")
 	if err != nil {
 		fmt.Fprintf(stderr, "scan: -changed-since %s: the diff cannot be read, so every tracked path is scanned: %v\n", ref, err)
 		return paths

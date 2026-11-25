@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -45,8 +46,11 @@ type fakeGit struct {
 	// originErr is a failed read of the origin's URL, for the case where the
 	// remote is listed but its URL cannot be read.
 	originErr error
-	diff      map[string][]string // ref expression to the names git diff -z lists
-	fail      map[string]error
+	diff      map[string][]string // ref expression to the names git diff -z lists with --no-renames
+	// renamedFrom names the old side of a rename in diff: a git run without
+	// --no-renames, rename detection on as git's default, lists only the new side.
+	renamedFrom []string
+	fail        map[string]error
 }
 
 func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
@@ -102,15 +106,19 @@ func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 
 // diffAnswer answers only git diff --name-only -z <ref>...HEAD.
 func (g fakeGit) diffAnswer(dir string, args []string) ([]byte, error) {
-	if dir != g.top || len(args) != 4 || args[1] != "--name-only" || args[2] != "-z" {
+	detectsRenames := !slices.Contains(args, "--no-renames")
+	if dir != g.top || args[1] != "--name-only" || args[len(args)-2] != "-z" {
 		return nil, fmt.Errorf("fake git does not model diff %v in %q", args, dir)
 	}
-	names, ok := g.diff[args[3]]
+	names, ok := g.diff[args[len(args)-1]]
 	if !ok {
-		return nil, fmt.Errorf("fake git: no diff answer for %s", args[3])
+		return nil, fmt.Errorf("fake git: no diff answer for %s", args[len(args)-1])
 	}
 	var out []byte
 	for _, name := range names {
+		if detectsRenames && slices.Contains(g.renamedFrom, name) {
+			continue
+		}
 		out = append(out, name+"\x00"...)
 	}
 	return out, nil
@@ -796,7 +804,7 @@ func changedTree(t *testing.T) (string, []string) {
 // TestScanChangedSinceRuleFileScansEverything covers a rule file in the diff.
 func TestScanChangedSinceRuleFileScansEverything(t *testing.T) {
 	t.Parallel()
-	rules := []string{"internal/hygiene/hygiene.go", allowPath, "internal/hygiene/blocked.sha256", "internal/hygiene/cmd/scan/main.go", "internal/manifestdata/pod.go"}
+	rules := append(slices.Clone(ruleFiles), ruleDir+"/pod.go")
 	paths := append([]string{"docs/unchanged.md"}, rules...)
 	for _, rule := range rules {
 		t.Run(rule, func(t *testing.T) {
@@ -812,6 +820,31 @@ func TestScanChangedSinceRuleFileScansEverything(t *testing.T) {
 				t.Fatalf("exit %d, stdout %q; want exit %d and the unchanged file's finding (stderr: %s)", got.code, got.stdout, exitFindings, got.stderr)
 			}
 		})
+	}
+}
+
+// TestScanChangedSinceRenamedRuleFile covers a rule file moved to a non-rule name:
+// git's rename detection would list only the new name, so the scan reads the diff
+// with --no-renames, which lists both.
+func TestScanChangedSinceRenamedRuleFile(t *testing.T) {
+	t.Parallel()
+	rule := ruleFiles[0]
+	top := treeWith(t, "[]", map[string]string{"docs/unchanged.md": billingLine + "\n", "docs/moved.md": "clean\n"})
+	git := fakeGit{top: top, paths: []string{"docs/moved.md", "docs/unchanged.md"}, diff: map[string][]string{"origin/main...HEAD": {rule, "docs/moved.md"}}, renamedFrom: []string{rule}}
+	got := runFixtureGit(t, top, git, []string{"-changed-since", "origin/main"}, fixtureBlocked)
+	if got.code != exitFindings || got.stdout != billingAt("docs/unchanged.md") {
+		t.Fatalf("exit %d, stdout %q; want exit %d and the unchanged file's finding, every path scanned (stderr: %s)", got.code, got.stdout, exitFindings, got.stderr)
+	}
+}
+
+// TestRuleFilesExist fails when a rule file or the rule directory is moved: a
+// path the scan names that no longer exists would silently stop deciding the rules.
+func TestRuleFilesExist(t *testing.T) {
+	t.Parallel()
+	for _, name := range append(slices.Clone(ruleFiles), ruleDir) {
+		if _, err := os.Stat(filepath.Join("..", "..", "..", "..", name)); err != nil {
+			t.Errorf("%s: %v; ruleFiles and ruleDir name a path the checkout does not have", name, err)
+		}
 	}
 }
 
