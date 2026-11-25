@@ -179,6 +179,10 @@ const (
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
 
+	// RuleBdGatewayRefusals is the bd gateway refusing calls, whether at once or
+	// after the bounded wait for a slot (gt-q0eh0r).
+	RuleBdGatewayRefusals = "bd_gateway.refusals"
+
 	// RuleRedHold is the red hold rule: dispatch starts no work while the hold
 	// is set, so the overseer is woken to lift it (gt-7j8krh).
 	RuleRedHold = "hold.red"
@@ -508,6 +512,9 @@ var ruleFlags = map[string]RuleFlags{
 	// Callers turned away at the gateway's cap are work that did not run, so
 	// the operator is woken the way an idle dispatcher wakes it (gt-7oy397).
 	RuleBDGatewayCapHit: flagsWake,
+	// Calls the gateway refused are work that did not run, so the operator is
+	// woken the way the cap-hit rule wakes it (gt-q0eh0r).
+	RuleBdGatewayRefusals: flagsWake,
 	// Callers turned away at the gateway's cap are work that did not run, so
 	// the operator is woken the way an idle dispatcher wakes it (gt-7oy397).
 	// A main nobody could judge blocks the landings a red one does: it carries
@@ -601,6 +608,7 @@ var kindRules = map[Kind]string{
 	KindSeatEndNoRecord:               RuleSeatEndNoRecord,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
+	KindBdGatewayRefusals:             RuleBdGatewayRefusals,
 	KindStoryPoints:                   RuleStoryPoints,
 	KindOverrunBlind:                  RuleOverrunBlind,
 	KindJobOverdue:                    RuleJobOverdue,
