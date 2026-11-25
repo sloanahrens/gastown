@@ -565,6 +565,16 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestRoleOverridesHaveNoReader walks every non-test Go file under the
+		// repo root (skipping vendor and dot directories) and stats go.mod, so
+		// each of those is its input. The check's own file is its one allowed
+		// hit, so deleting that file fails it too (gt-kd1ich).
+		pkg:     "internal/doctor",
+		tests:   []string{"TestRoleOverridesHaveNoReader"},
+		judges:  func(rel string) bool { return nonTestGo(rel) || rel == "go.mod" },
+		removal: true,
+	},
+	{
 		// TestGuardPackagesDoNotReadTheVariable reads the guard sources it
 		// names, the tap_guard files directly under internal/cmd and the
 		// guardlint package with its baseline, and fails when one of them
