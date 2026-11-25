@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -185,5 +187,45 @@ func TestRunawayBeadBudgetNegativeStopsTheDispatchTickCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines") {
 		t.Errorf("error = %v, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines", err)
+	}
+}
+
+// TestSpecFollowupBudgetReadsTheRigMergeQueue: the lint's follow-up budget is
+// the bead rig's merge_queue settings, read as gt done reads them, and land's
+// defaults for a rig that sets none (gt-hixqtv).
+func TestSpecFollowupBudgetReadsTheRigMergeQueue(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigDir := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("creating the rig dir: %v", err)
+	}
+	cfg := `{"name":"gastown","merge_queue":{"followup_max_added_lines":150,"followup_max_files":5}}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("writing the rig config: %v", err)
+	}
+	if added, files := specFollowupBudget(root, "gastown"); added != 150 || files != 5 {
+		t.Errorf("the configured budget = %d added lines, %d files, want 150 and 5", added, files)
+	}
+	for _, rig := range []string{"nosuchrig", ""} {
+		added, files := specFollowupBudget(root, rig)
+		if added != land.DefaultFollowupMaxAddedLines || files != land.DefaultFollowupMaxFiles {
+			t.Errorf("the budget of rig %q = %d added lines, %d files, want the defaults %d and %d",
+				rig, added, files, land.DefaultFollowupMaxAddedLines, land.DefaultFollowupMaxFiles)
+		}
+	}
+}
+
+// TestLintOptionsCarryTheFollowupBudget: the lint options carry the resolved
+// follow-up budget, so a rig that configures one has it read by the command's
+// lint and the tick's lint alike (gt-hixqtv).
+func TestLintOptionsCarryTheFollowupBudget(t *testing.T) {
+	t.Parallel()
+	budget := func(rig string) (int, int) { return 150, 5 }
+	if got := (specLintOpts{FollowupBudget: budget}).lintOptionsFor("gastown"); got.FollowupMaxAddedLines != 150 || got.FollowupMaxFiles != 5 {
+		t.Errorf("gt spec lint's options = %d added lines, %d files, want 150 and 5", got.FollowupMaxAddedLines, got.FollowupMaxFiles)
+	}
+	if got := (specDispatchEnv{FollowupBudget: budget}).lintOptionsFor("gastown"); got.FollowupMaxAddedLines != 150 || got.FollowupMaxFiles != 5 {
+		t.Errorf("the tick's options = %d added lines, %d files, want 150 and 5", got.FollowupMaxAddedLines, got.FollowupMaxFiles)
 	}
 }

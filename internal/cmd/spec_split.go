@@ -736,7 +736,7 @@ func specSplitLintCheck(townRoot, beadID string, sd *config.SpecDispatchConfig, 
 	return func(spec specdispatch.Spec) specdispatch.LintVerdict {
 		spec.Rig = rig
 		spec.TownRigs = rigs
-		return specdispatch.LintWith(spec, tmpl, opts.lintOptions())
+		return specdispatch.LintWith(spec, tmpl, opts.lintOptionsFor(rig))
 	}, nil
 }
 
