@@ -136,13 +136,11 @@ func TestLockSeatPickSeamNilTakesTheLock(t *testing.T) {
 }
 
 // LockSeatPick refuses, rather than returning a lock it does not hold, when the lock cannot be opened.
+// The directory-at-lock-path case is Linux-only; see manager_seatpick_linux_test.go.
 func TestLockSeatPickRefusesWhenTheLockCannotBeTaken(t *testing.T) {
 	t.Parallel()
 	tests := map[string]func(p string) error{
 		"lock dir cannot be created": func(p string) error { return os.WriteFile(filepath.Join(p, ".runtime"), nil, 0o644) },
-		"lock path is a directory": func(p string) error {
-			return os.MkdirAll(filepath.Join(p, ".runtime", "locks", "seat-pick.lock"), 0o755)
-		},
 	}
 	for name, setup := range tests {
 		rigPath := t.TempDir()
