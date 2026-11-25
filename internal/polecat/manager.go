@@ -213,6 +213,10 @@ type Manager struct {
 	// beforePolecatLock, when set, runs as lockPolecat is about to wait on a
 	// polecat's lock, so a test can see a caller reach the wait.
 	beforePolecatLock func(name string)
+	// seatPickAttempt, when set, runs once per LockSeatPick after the lock
+	// directory exists and before the flock is taken, so a test can see a
+	// caller reach the seat-pick lock while it is still free.
+	seatPickAttempt func()
 	// getwd is the process working directory the shell check compares against
 	// the worktree; nil means os.Getwd. A test sets it instead of moving the
 	// whole process with a chdir.
@@ -527,6 +531,9 @@ func (m *Manager) LockSeatPick() (unlock func(), err error) {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 	fl := flock.New(filepath.Join(lockDir, "seat-pick.lock"))
+	if m.seatPickAttempt != nil {
+		m.seatPickAttempt()
+	}
 	if err = fl.Lock(); err != nil {
 		return nil, fmt.Errorf("acquiring seat-pick lock: %w", err)
 	}
