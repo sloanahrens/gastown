@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,7 +19,7 @@ import (
 
 // integrationWatchdogLimit is the ceiling on one watchdog run. It is not a wait: each
 // test returns as soon as its script exits, and a script still running at the
-// ceiling is stopped and fails the test.
+// ceiling is killed by its CommandContext and fails the test.
 const integrationWatchdogLimit = 30 * time.Second
 
 // TestIntegrationWatchdogKillsOnStdinEOF runs the production watchdog under the real
@@ -32,20 +33,23 @@ func TestIntegrationWatchdogKillsOnStdinEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watchdogArgv = %v", err)
 	}
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe = %v", err)
+	}
+	defer stdinR.Close()
+	defer stdinW.Close()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe = %v", err)
+	}
+	defer outR.Close()
+	defer outW.Close()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("StdinPipe = %v", err)
-	}
-	defer stdin.Close()
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("StdoutPipe = %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start = %v", err)
-	}
-	pid, err := readChildPid(ctx, stdout)
+	cmd.Stdin = stdinR
+	cmd.Stdout = outW
+	ran := runCommand(cmd)
+	pid, err := readChildPid(ctx, outR)
 	if err != nil {
 		t.Fatalf("the child did not print its pid: %v", err)
 	}
@@ -54,16 +58,18 @@ func TestIntegrationWatchdogKillsOnStdinEOF(t *testing.T) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-	if err := stdin.Close(); err != nil {
+	if err := stdinW.Close(); err != nil {
 		t.Fatalf("close the script's stdin: %v", err)
 	}
-	waitErr := waitWithin(ctx, cmd)
-	if err := ctx.Err(); err != nil {
-		t.Fatalf("the script did not exit within %s after its stdin closed: %v", integrationWatchdogLimit, err)
+	var runErr error
+	select {
+	case runErr = <-ran:
+	case <-ctx.Done():
+		t.Fatalf("the script did not exit within %s after its stdin closed: %v", integrationWatchdogLimit, ctx.Err())
 	}
 	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		t.Fatalf("Wait = %v", waitErr)
+	if runErr != nil && !errors.As(runErr, &exitErr) {
+		t.Fatalf("Run = %v", runErr)
 	}
 	if got := cmd.ProcessState.ExitCode(); got != 143 {
 		t.Errorf("the script exited %d; want 143, the child's status after the watchdog's TERM", got)
@@ -92,30 +98,41 @@ func TestIntegrationWatchdogPassesTheChildStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("watchdogArgv = %v", err)
 			}
-			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-			// The pipe stays open for the whole run: the script must finish without its
-			// stdin ever closing.
-			stdin, err := cmd.StdinPipe()
+			// The pipe's write end stays open for the whole run: the script must finish
+			// without its stdin ever closing.
+			stdinR, stdinW, err := os.Pipe()
 			if err != nil {
-				t.Fatalf("StdinPipe = %v", err)
+				t.Fatalf("stdin pipe = %v", err)
 			}
-			defer stdin.Close()
-			if err := cmd.Start(); err != nil {
-				t.Fatalf("Start = %v", err)
-			}
-			waitErr := waitWithin(ctx, cmd)
-			if err := ctx.Err(); err != nil {
-				t.Fatalf("the script waited for its stdin: it did not exit within %s: %v", integrationWatchdogLimit, err)
+			defer stdinR.Close()
+			defer stdinW.Close()
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			cmd.Stdin = stdinR
+			ran := runCommand(cmd)
+			var runErr error
+			select {
+			case runErr = <-ran:
+			case <-ctx.Done():
+				t.Fatalf("the script waited for its stdin: it did not exit within %s: %v", integrationWatchdogLimit, ctx.Err())
 			}
 			var exitErr *exec.ExitError
-			if waitErr != nil && !errors.As(waitErr, &exitErr) {
-				t.Fatalf("Wait = %v", waitErr)
+			if runErr != nil && !errors.As(runErr, &exitErr) {
+				t.Fatalf("Run = %v", runErr)
 			}
 			if got := cmd.ProcessState.ExitCode(); got != tc.status {
 				t.Errorf("the script exited %d; want %d, the child's own status", got, tc.status)
 			}
 		})
 	}
+}
+
+// runCommand runs cmd on a goroutine and returns the channel its Run error arrives on.
+// The caller bounds the receive with a select on its context, and CommandContext kills
+// the command at that ceiling, so a command that never exits cannot hold the test.
+func runCommand(cmd *exec.Cmd) <-chan error {
+	ran := make(chan error, 1)
+	go func() { ran <- cmd.Run() }()
+	return ran
 }
 
 // readChildPid reads the first line the child prints and parses it as a pid. The read
@@ -140,20 +157,6 @@ func readChildPid(ctx context.Context, r io.Reader) (int, error) {
 		return res.pid, res.err
 	case <-ctx.Done():
 		return 0, ctx.Err()
-	}
-}
-
-// waitWithin waits for cmd to exit and returns its wait error. The wait runs beside
-// the context: a command still running at the ceiling is killed by its
-// CommandContext, and the caller reads the context's error rather than blocking.
-func waitWithin(ctx context.Context, cmd *exec.Cmd) error {
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
