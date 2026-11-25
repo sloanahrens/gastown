@@ -1611,17 +1611,37 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 // escalation), and the pane idles at its prompt until the overrun guard stops it at 20 minutes. It
 // asks the optional StreamCutter extension; a host without it has no such rule.
 //
+// A host that implements StreamCutDater also dates the cut, and the seat's
+// quiet time is the larger of res.QuietFor and the cut record's age, so a cut
+// seen on its first sample is revived then (gt-0lajvh). A host without it has
+// no age: its quiet precondition is checked before any read, as it was.
+//
 // It shares the revival rule's guards and cooldown: a quiet under reviveQuiet,
 // a heartbeat that says stuck or is inside gt done, work that is submitted,
 // held or not assigned, and a cut of false leave the seat alone. A StreamCut
-// read that fails is Unknown and nothing is acted on.
+// read that fails is Unknown and nothing is acted on; a dated read that fails
+// on a seat quiet under reviveQuiet leaves it alone, since its age is unknown.
 func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, bool) {
 	cutter, ok := s.env.(StreamCutter)
-	if !ok || res.QuietFor < reviveQuiet {
+	if !ok {
+		return Finding{}, false
+	}
+	now := s.o.Now()
+	quiet := res.QuietFor
+	dater, dated := s.env.(StreamCutDater)
+	var cut bool
+	var cutErr error
+	if dated {
+		var at time.Time
+		cut, at, cutErr = dater.StreamCutAt(rig, name)
+		if cutErr == nil && cut {
+			quiet = max(quiet, cutAge(now, at))
+		}
+	}
+	if quiet < reviveQuiet {
 		return Finding{}, false
 	}
 	f := Finding{Kind: "seat", Subject: name}
-	now := s.o.Now()
 	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
 		f.Outcome, f.Detail = OutcomeSkipped, why
 		return f, true
@@ -1634,17 +1654,28 @@ func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, boo
 	if work == nil {
 		return Finding{}, false
 	}
-	cut, err := cutter.StreamCut(rig, name)
-	if err != nil {
-		f.Outcome, f.Detail = OutcomeUnknown, "model stream unreadable: "+err.Error()
+	if !dated {
+		cut, cutErr = cutter.StreamCut(rig, name)
+	}
+	if cutErr != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "model stream unreadable: "+cutErr.Error()
 		return f, true
 	}
 	if !cut {
 		return Finding{}, false
 	}
-	quiet := res.QuietFor.Round(time.Second)
-	reason := fmt.Sprintf("patrol scan: revived %s after %s quiet: its model stream was cut and the seat never resumed; the preserved worktree resumes the bead", work.ID, quiet)
-	return s.reviveRestart(rig, name, work, now, quiet, reason), true
+	quietFor := quiet.Round(time.Second)
+	reason := fmt.Sprintf("patrol scan: revived %s after %s quiet: its model stream was cut and the seat never resumed; the preserved worktree resumes the bead", work.ID, quietFor)
+	return s.reviveRestart(rig, name, work, now, quietFor, reason), true
+}
+
+// cutAge is how long before now the cut record at was written. A zero time,
+// the host's answer for a record whose time does not parse, counts as 0.
+func cutAge(now, at time.Time) time.Duration {
+	if at.IsZero() {
+		return 0
+	}
+	return now.Sub(at)
 }
 
 // fileUnnamed files the missing escalation of a seat stopped on ESCALATED whose escalations name

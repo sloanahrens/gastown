@@ -627,6 +627,72 @@ func TestReviveCutFuncLeavesTheOtherSeatsAlone(t *testing.T) {
 	}
 }
 
+// datedCutFake is cutFake with the optional StreamCutDater extension: cutAt is
+// the time of each seat's cut record, and the zero time is one that does not parse.
+type datedCutFake struct {
+	*cutFake
+	cutAt map[string]time.Time
+}
+
+func (f *datedCutFake) StreamCutAt(_, p string) (bool, time.Time, error) {
+	return f.cut[p], f.cutAt[p], f.cutErr[p]
+}
+
+// gt-0lajvh: a seat whose stream was cut is as quiet as the cut record is old,
+// so reviveCut revives it on the pass that first sees it instead of waiting
+// for a second sample. A host without StreamCutDater keeps the quiet rule.
+func TestReviveCutDatedAgesTheCut(t *testing.T) {
+	t.Parallel()
+	streamErr := errors.New("transcript: sandbox unreachable")
+	cases := []struct {
+		name    string
+		quiet   time.Duration // the baseline sample's QuietFor
+		cutAt   time.Time
+		cut     bool
+		cutErr  error
+		noDater bool    // a host offering only StreamCutter
+		want    Outcome // "" = no finding
+		detail  string
+	}{
+		{"baseline sample, cut six minutes old: revived", 0, now.Add(-6 * time.Minute), true, nil, false, OutcomeRevived, "after 6m0s quiet: its model stream was cut"},
+		{"baseline sample, cut two minutes old: left alone", 0, now.Add(-2 * time.Minute), true, nil, false, "", ""},
+		{"quiet six minutes, unparseable cut time: revived as now", 6 * time.Minute, time.Time{}, true, nil, false, OutcomeRevived, "after 6m0s quiet: its model stream was cut"},
+		{"baseline sample, no cut: left alone", 0, now.Add(-6 * time.Minute), false, nil, false, "", ""},
+		{"quiet six minutes, stream unreadable: unknown", 6 * time.Minute, now.Add(-6 * time.Minute), true, streamErr, false, OutcomeUnknown, "model stream unreadable"},
+		{"baseline sample, stream unreadable: left alone", 0, now.Add(-6 * time.Minute), true, streamErr, false, "", ""},
+		{"StreamCutter only, baseline sample, cut six minutes old: left alone as before", 0, now.Add(-6 * time.Minute), true, nil, true, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := newFake()
+			liveQuiet(base, "ruby", tc.quiet)
+			cut := &cutFake{fakeEnv: base, cut: map[string]bool{"ruby": tc.cut}, cutErr: map[string]error{}}
+			if tc.cutErr != nil {
+				cut.cutErr["ruby"] = tc.cutErr
+			}
+			s := scanner(base, nil)
+			s.o.Now = func() time.Time { return now }
+			s.env = cut
+			if !tc.noDater {
+				s.env = &datedCutFake{cutFake: cut, cutAt: map[string]time.Time{"ruby": tc.cutAt}}
+			}
+
+			f, ok := s.reviveCut("gastown", "ruby", base.verdicts["ruby"])
+
+			if wantOK := tc.want != ""; ok != wantOK {
+				t.Fatalf("reviveCut ok=%v (%q %q), want ok=%v", ok, f.Outcome, f.Detail, wantOK)
+			}
+			if ok && (f.Outcome != tc.want || !strings.Contains(f.Detail, tc.detail)) {
+				t.Fatalf("finding = %q %q, want %q with %q", f.Outcome, f.Detail, tc.want, tc.detail)
+			}
+			if restarted := len(base.restarts) == 1; restarted != (tc.want == OutcomeRevived) {
+				t.Fatalf("restarts = %v, want a restart only when revived", base.restarts)
+			}
+		})
+	}
+}
+
 // gt-hd29ip: the Alive tick runs reviveCut after revivePushed and before
 // reviveAnswered, so a cut seat is restarted and a pushed one is revived first.
 func TestReviveCutTickAliveCallsTheRule(t *testing.T) {
