@@ -152,11 +152,11 @@ func (r *tierSweepReader) read(now time.Time) *dashboard.TierSweep {
 		return &dashboard.TierSweep{Unavailable: true}
 	}
 	trends, trendsErr := r.trends()
-	ts := &dashboard.TierSweep{Sweeps: r.recent(), Trends: trends, TrendsUnavailable: trendsErr != nil}
-	if run := r.running(now); run != nil {
-		ts.Running = run
-	}
-	return ts
+	run, progressErr := r.running(now)
+	// An unreadable progress file marks the section, not the sweep: the log
+	// still says which cycle runs, only its finished tiers are unknown.
+	return &dashboard.TierSweep{Sweeps: r.recent(), Trends: trends, TrendsUnavailable: trendsErr != nil,
+		Unavailable: progressErr != nil, Running: run}
 }
 
 // scanLog reads what the daemon log gained since the last scan. A log that
@@ -403,7 +403,13 @@ func parseTierSweepVerdicts(s string) []dashboard.TierSweepStage {
 // open start is read the old way, for a log from a daemon that logs none: the
 // shell stage's finished line is the sign, a cycle whose integration stage
 // (which carries race) is running in the silence that follows.
-func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
+//
+// The chosen cycle's finished tiers ride along: findSweepProgress names the
+// progress.json of its run under sweepRunsRoot, and readTierSweepProgress reads
+// it. Only the started reading knows the cycle's sha, so the fallback reading
+// carries none. A progress read that fails is returned with the run it belongs
+// to, for read to mark the section unavailable (gt-ph60ia).
+func (r *tierSweepReader) running(now time.Time) (*dashboard.TierSweepRun, error) {
 	var best *dashboard.TierSweepRun
 	consider := func(run *dashboard.TierSweepRun) {
 		if best == nil || run.Since.After(best.Since) {
@@ -439,7 +445,21 @@ func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 		}
 		consider(&dashboard.TierSweepRun{Rig: rig, Tier: "integration", Since: ev.at, ElapsedSec: elapsed, Walls: copyWalls(r.walls[rig])})
 	}
-	return best
+	if best == nil || best.SHA == "" {
+		return best, nil
+	}
+	path, ok, err := findSweepProgress(r.sweepRunsRoot, best.Rig, best.SHA)
+	if err != nil || !ok {
+		return best, err
+	}
+	progress, found, err := readTierSweepProgress(path)
+	if err != nil {
+		return best, err
+	}
+	if found {
+		best.Stages = progress.Tiers
+	}
+	return best, nil
 }
 
 // runningTier is the tier a started cycle is in now. A stage's finished line
