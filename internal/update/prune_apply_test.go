@@ -85,6 +85,99 @@ func TestApplyPrune(t *testing.T) {
 	}
 }
 
+// recheckLedger answers with the record the ledger holds at re-check time.
+type recheckLedger struct {
+	record ImageRecord
+	err    error
+}
+
+func (l *recheckLedger) Read() (ImageRecord, error) {
+	if l.err != nil {
+		return ImageRecord{}, l.err
+	}
+	return l.record, nil
+}
+
+// recheckStable is a ledger record whose pairs name another digest than the tag's.
+var recheckStable = ImageRecord{
+	Current:  ImagePair{Daemon: imgRef("gastown-daemon", "1"), Polecat: imgRef("gastown-polecat", "2")},
+	Previous: ImagePair{Daemon: imgRef("gastown-daemon", "3"), Polecat: imgRef("gastown-polecat", "4")},
+}
+
+// TestPruneRecheck: a candidate the plan's rule now keeps, or a read that
+// fails, is an error naming the tag, which ApplyPrune turns into a skip.
+func TestPruneRecheck(t *testing.T) {
+	t.Parallel()
+	tag := "staleaaaaaaa"
+	stale := PruneEntry{Image: "gastown-daemon", Tag: tag, Digest: pruneDigest("a")}
+	bdStale := PruneEntry{Image: pruneBdImage, Tag: tag, Digest: pruneDigest("a")}
+	installedNow := ImageRecord{
+		Current:  ImagePair{Daemon: imgRef("gastown-daemon", "a"), Polecat: imgRef("gastown-polecat", "2")},
+		Previous: recheckStable.Previous,
+	}
+	previousNow := recheckStable
+	previousNow.Previous = ImagePair{Daemon: imgRef("gastown-daemon", "a"), Polecat: imgRef("gastown-polecat", "4")}
+	errRead, errGreen := errors.New("disk gone"), errors.New("refs listing refused")
+
+	tests := []struct {
+		name      string
+		record    ImageRecord
+		readErr   error
+		green     map[string]bool
+		greenErr  error
+		noGreen   bool
+		entry     PruneEntry
+		want      string // a text the error must carry; "" means the entry passes
+		greenRead int
+	}{
+		{name: "an unchanged ledger and no green ref pass", record: recheckStable, entry: stale, greenRead: 1},
+		{name: "a digest that becomes installed is kept", record: installedNow, entry: stale, want: "installed pair", greenRead: 1},
+		{name: "a digest that becomes previous is kept", record: previousNow, entry: stale, want: "previous pair", greenRead: 1},
+		{name: "a tag that becomes a green ref is kept", record: recheckStable, green: map[string]bool{tag: true}, entry: stale, want: "green/" + tag, greenRead: 1},
+		{name: "a bd tag is kept when the pair names no bd digest", record: recheckStable, entry: bdStale, want: "no bd digest", greenRead: 1},
+		{name: "a ledger read error names the tag", record: recheckStable, readErr: errRead, entry: stale, want: errRead.Error()},
+		{name: "an incomplete ledger names the tag", record: ImageRecord{Previous: recheckStable.Previous}, entry: stale, want: "no installed pair"},
+		{name: "a green read error names the tag", record: recheckStable, greenErr: errGreen, entry: stale, want: errGreen.Error(), greenRead: 1},
+		{name: "no green reader wired names the tag", record: recheckStable, noGreen: true, entry: stale, want: "no green refs reader"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			greens := 0
+			green := func() (map[string]bool, error) {
+				greens++
+				if tc.greenErr != nil {
+					return nil, tc.greenErr
+				}
+				return tc.green, nil
+			}
+			if tc.noGreen {
+				green = nil
+			}
+
+			err := PruneRecheck(&recheckLedger{record: tc.record, err: tc.readErr}, green, 20)(tc.entry)
+
+			if greens != tc.greenRead {
+				t.Errorf("the green refs were read %d times, want %d", greens, tc.greenRead)
+			}
+			if err == nil {
+				if tc.want != "" {
+					t.Errorf("re-check of %s returned nil, want an error naming %q", tc.entry.Tag, tc.want)
+				}
+				return
+			}
+			if tc.want == "" {
+				t.Errorf("re-check of %s returned %v, want nil", tc.entry.Tag, err)
+			}
+			for _, want := range []string{tc.entry.Image + "/" + tc.entry.Tag, tc.want} {
+				if want != "" && !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestApplyPruneRefuses: a negative max or a nil callback is refused before
 // any call, so a bad argument never reaches the registry.
 func TestApplyPruneRefuses(t *testing.T) {
