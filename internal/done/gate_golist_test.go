@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -51,6 +52,30 @@ func TestGoListTestFilesArgvAndDecode(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("tags %q: goListTestFiles() = %+v, want %+v", tc.tags, got, want)
 		}
+	}
+}
+
+// TestGoListTestFilesPackageError: a package go list could not load carries an Error and no
+// files; it is refused by name, the first such package wins, and no listing comes back, so
+// a missing package is never read as a package with no tests (gt-ehy53r).
+func TestGoListTestFilesPackageError(t *testing.T) {
+	t.Parallel()
+	const out = `{"ImportPath":"x/a","Dir":"/w/a","TestGoFiles":["a_test.go"]}
+{"ImportPath":"x/missing","Dir":"/w/missing","Error":{"Err":"no required module provides package x/missing"}}
+{"ImportPath":"x/later","Dir":"/w/later","Error":{"Err":"second failure"}}
+`
+	var argv []string
+	got, err := goListTestFiles(fakeGoList(out, nil, &argv), nil, "/w", "", []string{"./a", "./missing", "./later"})
+	if err == nil || got != nil {
+		t.Fatalf("goListTestFiles() = %+v, %v; want no listing and an error", got, err)
+	}
+	for _, want := range []string{"x/missing", "no required module provides package x/missing"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "x/later") {
+		t.Errorf("error = %q, names a later package; the first Error package must win", err)
 	}
 }
 
