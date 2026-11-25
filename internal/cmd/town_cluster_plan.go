@@ -1,6 +1,10 @@
 package cmd
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"io"
+)
 
 // planRecordedFlags is the render flags a plan replays: the flags the last live
 // render recorded under the town, with the static control-cluster set included
@@ -27,4 +31,10 @@ func planRecordedFlags(findTown func() (string, error), out string) (clusterRend
 	rec.includeStatic = true
 	rec.out = out
 	return rec, root, nil
+}
+
+// runTownClusterPlan is not built yet: the next commit renders the recorded
+// flags into outDir and prints the short plan id.
+func runTownClusterPlan(_ clusterRenderDeps, _ io.Writer, _ string) error {
+	return errors.New("gt town cluster plan: not built")
 }
