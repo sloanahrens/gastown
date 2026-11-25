@@ -1077,8 +1077,9 @@ func driftRecordedAnswer(t *testing.T, answer update.RunFunc, recorded map[strin
 	}
 }
 
-// driftControlRunner is the control cluster's values, held to the share the case
-// names so a test renders a runner that differs from the record.
+// driftControlRunner is the control cluster's values, held to the dind CPU the case
+// names on both the limit and the request, so a test renders a runner that differs
+// from the record.
 func driftControlRunner(t *testing.T, dindCPU string) forgejorunner.Values {
 	t.Helper()
 	v, err := forgejorunner.ControlValues()
@@ -1087,6 +1088,7 @@ func driftControlRunner(t *testing.T, dindCPU string) forgejorunner.Values {
 	}
 	if dindCPU != "" {
 		v.DindResources.CPU = dindCPU
+		v.DindRequests.CPU = dindCPU
 	}
 	return v
 }
@@ -1122,9 +1124,9 @@ func TestTownClusterDriftHoldsARunnerInStep(t *testing.T) {
 }
 
 // TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota holds the recorded
-// cluster's dind share of 8 to a render of 6, which is one line for the cpu
-// request and one for the limit, and one for config.yml, whose quota is that same
-// share.
+// cluster's dind request of 4 and limit of 8 to a render of 6 for both, which is one
+// line for the cpu request and one for the limit, and one for config.yml, whose
+// quota is that same limit.
 func TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota(t *testing.T) {
 	t.Parallel()
 	recorded := driftRunnerRecorded(t)
@@ -1145,7 +1147,7 @@ func TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota(t *testing.T)
 	}
 	wantLines := []string{
 		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.limits.cpu", "6", "8"),
-		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "6", "8"),
+		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "6", "4"),
 		"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", sixManifests.ConfigMap.Data["config.yml"], recordedConfig),
 	}
 	wantLines = append(wantLines, driftSecretLines(t)...)
