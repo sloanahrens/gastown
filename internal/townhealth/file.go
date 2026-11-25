@@ -30,11 +30,17 @@ func Write(townRoot string, r Report) error {
 
 // Read loads the health file.
 func Read(townRoot string) (Report, error) {
-	var r Report
 	data, err := os.ReadFile(Path(townRoot))
 	if err != nil {
-		return r, err
+		return Report{}, err
 	}
+	return Parse(data)
+}
+
+// Parse reads a health report from the bytes of the health file, so a caller
+// holding the bytes (not a path) judges the same report Read would.
+func Parse(data []byte) (Report, error) {
+	var r Report
 	// The landing_passes key decodes beside the report, shadowing the report's
 	// own tag: a report from a daemon before the field has no key, and reads as
 	// passes unknown, not zero (gt-u98suh).

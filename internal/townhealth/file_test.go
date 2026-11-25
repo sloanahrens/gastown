@@ -151,6 +151,60 @@ func TestReadWithoutLandingPassesIsUnknown(t *testing.T) {
 	}
 }
 
+// TestParseReadsTheLandingStateFromBytes: the pod's bytes carry the landing
+// state the roll waits on, so Parse reads the pass count, whether it is known,
+// and the pause reason from the report's bytes alone (gt-40q8ju).
+func TestParseReadsTheLandingStateFromBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		body       string
+		wantPasses int
+		wantKnown  bool
+		wantPaused string
+	}{
+		{"passes known", `{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[],"landing_passes":3}`, 3, true, ""},
+		{"passes unknown", `{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[]}`, 0, false, ""},
+		{"pause reason", `{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[],"landing_passes":0,"landing_paused":"overseer: drain the queue"}`, 0, true, "overseer: drain the queue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Parse([]byte(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.LandingPasses != tt.wantPasses || got.PassesKnown != tt.wantKnown || got.LandingPaused != tt.wantPaused {
+				t.Errorf("Parse = passes %d known %v paused %q, want %d known %v paused %q",
+					got.LandingPasses, got.PassesKnown, got.LandingPaused, tt.wantPasses, tt.wantKnown, tt.wantPaused)
+			}
+		})
+	}
+}
+
+// TestParseRefusesBadBytes: a report with no tick time, a landing_passes that
+// is not a number, or bytes that are not JSON is an error, never a report read
+// as clean (gt-40q8ju).
+func TestParseRefusesBadBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"no tick time", `{"verdict":"green","fields":[],"landing_passes":0}`},
+		{"passes not a number", `{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[],"landing_passes":"two"}`},
+		{"not json", `at 11:00`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse([]byte(tt.body)); err == nil {
+				t.Errorf("Parse(%s) succeeded, want an error", tt.body)
+			}
+		})
+	}
+}
+
 // TestLandingPassesLeaveVerdictAndLineUnchanged: the count is shown nowhere on
 // the line or in the verdict, so the same inputs judge and render the same
 // whether one pass or none is in flight.
