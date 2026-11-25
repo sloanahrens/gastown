@@ -285,6 +285,12 @@ type idlePolecatReuse interface {
 	Get(name string) (*polecat.Polecat, error)
 }
 
+// seatPickLocker is the optional rig-wide seat-pick lock the pool pick takes.
+// A fake without it picks unlocked, so the manager is asserted, not required.
+type seatPickLocker interface {
+	LockSeatPick() (func(), error)
+}
+
 // reuseOrRefuseAtDirCap is the seat decision of a sling that has passed the
 // respawn breaker: reuse an idle polecat's sandbox, else refuse when the rig is
 // already at its directory cap. A nil info with a nil error means the caller
@@ -491,12 +497,31 @@ func reuseIdlePolecatForSlingWith(
 			}
 		}
 	}
+	// The pool pick holds the seat-pick lock from its idle read until the reuse
+	// loop has ended, so parallel picks cannot reuse one seat. releaseSeatPick is
+	// idempotent: the loop releases it, and the defer covers early returns. The
+	// spawn and the hook step run unlocked.
+	var seatPickUnlock func()
+	releaseSeatPick := func() {
+		if seatPickUnlock != nil {
+			seatPickUnlock()
+			seatPickUnlock = nil
+		}
+	}
+	defer releaseSeatPick()
 	// nextSeat hands out the pool's remaining reusable seats from the one read
 	// of the rig; it is nil unless the pool chose this seat. Parallel slings
 	// read the same first seat, and all but one lose it at the reuse gate, so a
 	// refused seat moves on to the next instead of ending the reuse.
 	var nextSeat func() string
 	if polecatName == "" {
+		if locker, ok := polecatMgr.(seatPickLocker); ok {
+			unlock, lockErr := locker.LockSeatPick()
+			if lockErr != nil {
+				return nil, fmt.Errorf("%s taking the seat-pick lock: %w", dispatch.SlingRefusalMarker, lockErr)
+			}
+			seatPickUnlock = unlock
+		}
 		idle, findErr := polecatMgr.IdlePolecats()
 		if findErr != nil {
 			return nil, nil
@@ -588,6 +613,7 @@ func reuseIdlePolecatForSlingWith(
 		}
 		return nil, nil
 	}
+	releaseSeatPick()
 
 	// The reuse above has already written the agent bead (hook_bead set,
 	// agent_state=spawning), so both failures below hand the polecat back: the
