@@ -1461,6 +1461,47 @@ func TestGatewayRefusalWordingBeadsReads(t *testing.T) {
 	}
 }
 
+// TestBdGatewayAllowStaleProbeAnswersLocally: the --allow-stale capability probe
+// is answered without a request, with the gateway's refusal wording beads reads
+// (gt-9idlu7). The doer fails the test if it is called. A leading -C pair before
+// the flag is settled first, so the probe with a directory is answered the same way.
+func TestBdGatewayAllowStaleProbeAnswersLocally(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "gastown"), 0o755); err != nil {
+		t.Fatalf("make the rig directory: %v", err)
+	}
+	beadsDir := filepath.Join(town, "gastown", ".beads")
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "bare probe", argv: []string{"bd", "--allow-stale", "version"}},
+		{name: "probe with a -C directory before the flag", argv: []string{"bd", "-C", "gastown", "--allow-stale", "version"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("the --allow-stale probe sent a request to the gateway; it must be answered locally")
+				return statusResponse(http.StatusForbidden, `{"code":"forbidden","message":"unexpected"}`), nil
+			}))
+			code, err := g.Launch(Call{Argv: tt.argv, Env: []string{"BEADS_DIR=" + beadsDir}, Dir: town})
+			if err == nil {
+				t.Fatal("Launch returned no error for the --allow-stale probe")
+			}
+			if code != exitDown {
+				t.Errorf("exit code = %d, want %d", code, exitDown)
+			}
+			for _, want := range []string{"refused the call with HTTP 403", "--allow-stale"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("local answer %q does not contain %q, the substring beads reads", err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestBdGatewayDoctor: the doctor names the URL, the token file and the first
 // step that fails, and asks /readyz with the token, never /v1/exec.
 func TestBdGatewayDoctor(t *testing.T) {
