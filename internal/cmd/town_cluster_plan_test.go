@@ -2,14 +2,19 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // TestClusterShapePlanFlagsRefuses: each refusal names its cause and returns no
@@ -124,29 +129,144 @@ func planOut(t *testing.T) string { return filepath.Join(t.TempDir(), "plan") }
 func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(clusterRenderDepsAt(t, planTown(t), io.Discard), out, dir); err != nil {
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, planTown(t), io.Discard), out, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
-	entries, err := os.ReadDir(dir)
+	_, short := planID(planFilesIn(t, dir))
+	if got := out.String(); got != short+"\n" {
+		t.Fatalf("the plan printed %q, want the short id %q and a newline", got, short)
+	}
+}
+
+// planFilesIn reads the files of the plan in dir, in apply order. plan.json is
+// left out: it records the plan, and the plan id does not name it.
+func planFilesIn(t *testing.T, dir string) []planFile {
+	t.Helper()
+	entries, err := os.ReadDir(dir) // sorted by name, and the render numbers its files in apply order
 	if err != nil {
 		t.Fatalf("reading the plan directory: %v", err)
 	}
-	names := make([]string, 0, len(entries))
+	files := make([]planFile, 0, len(entries))
 	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	sort.Strings(names) // the render numbers its files in apply order
-	files := make([]planFile, 0, len(names))
-	for _, name := range names {
-		body, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("reading the planned file %s: %v", name, err)
+		if e.Name() == planFileName {
+			continue
 		}
-		files = append(files, planFile{Name: name, Data: body})
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading the planned file %s: %v", e.Name(), err)
+		}
+		files = append(files, planFile{Name: e.Name(), Data: body})
 	}
-	_, short := planID(files)
-	if got := out.String(); got != short+"\n" {
-		t.Fatalf("the plan printed %q, want the short id %q and a newline", got, short)
+	return files
+}
+
+// readPlanRecord decodes the plan.json in dir and returns it with its bytes.
+func readPlanRecord(t *testing.T, dir string) (planRecord, []byte) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dir, planFileName))
+	if err != nil {
+		t.Fatalf("reading %s: %v", planFileName, err)
+	}
+	var rec planRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatalf("decoding %s: %v", planFileName, err)
+	}
+	return rec, body
+}
+
+// TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne: plan.json holds the
+// full id and each file's name and SHA-256 in apply order, the output prints the
+// 12-hex short form of that id, and the same inputs write the same plan.json.
+func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
+	t.Parallel()
+	town := planTown(t)
+	dir, out := planOut(t), &bytes.Buffer{}
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), out, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	files := planFilesIn(t, dir)
+	full, _ := planID(files)
+	rec, body := readPlanRecord(t, dir)
+	if rec.ID != full || len(rec.ID) != 64 {
+		t.Fatalf("plan.json id = %q, want the full 64-hex id %q", rec.ID, full)
+	}
+	if got := out.String(); got != rec.ID[:12]+"\n" {
+		t.Fatalf("the plan printed %q, want the 12-hex short id %q and a newline", got, rec.ID[:12])
+	}
+	if len(rec.Files) != len(files) {
+		t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+	}
+	for i, f := range files {
+		sum := sha256.Sum256(f.Data)
+		want := planRecordFile{Name: f.Name, SHA256: hex.EncodeToString(sum[:])}
+		if rec.Files[i] != want {
+			t.Errorf("plan.json file %d = %+v, want %+v", i, rec.Files[i], want)
+		}
+	}
+	again := planOut(t)
+	if err := runTownClusterPlan(clusterRenderDepsAt(t, town, io.Discard), &bytes.Buffer{}, again, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan again: %v", err)
+	}
+	if _, againBody := readPlanRecord(t, again); !bytes.Equal(body, againBody) {
+		t.Fatalf("the same inputs wrote a different plan.json:\n%s\nwant:\n%s", againBody, body)
+	}
+}
+
+// TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError: a refusal, a
+// render error and a failed plan.json write each return an error, print no id
+// and leave no plan.json, so the file's presence always means the plan is whole.
+func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (clusterRenderDeps, string, func(string, any) error)
+		want  string
+	}{
+		{"the town cannot be found", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
+			d := clusterRenderDepsAt(t, t.TempDir(), io.Discard)
+			d.findTown = func() (string, error) { return "", errors.New("no workspace") }
+			return d, planOut(t), atomicfile.WriteJSON
+		}, "town not found"},
+		{"the --out holds another apply set", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "taken"), nil, 0o644); err != nil {
+				t.Fatalf("filling --out: %v", err)
+			}
+			return clusterRenderDepsAt(t, planTown(t), io.Discard), dir, atomicfile.WriteJSON
+		}, "is not empty"},
+		{"a file fails after another was written", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			writes := 0
+			d.writeFile = func(path string, data []byte) error {
+				writes++
+				if writes == 2 {
+					return errors.New("disk full")
+				}
+				return os.WriteFile(path, data, 0o644)
+			}
+			return d, planOut(t), atomicfile.WriteJSON
+		}, "disk full"},
+		{"plan.json cannot be written", func(t *testing.T) (clusterRenderDeps, string, func(string, any) error) {
+			writeJSON := func(string, any) error { return errors.New("plan.json: disk full") }
+			return clusterRenderDepsAt(t, planTown(t), io.Discard), planOut(t), writeJSON
+		}, "disk full"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, dir, writeJSON := tc.setup(t)
+			out := &bytes.Buffer{}
+			err := runTownClusterPlan(d, out, dir, writeJSON)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a failed plan printed %q, want nothing", out.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", err)
+			}
+		})
 	}
 }
 
@@ -183,7 +303,7 @@ func TestClusterShapePlanIdRefusesAndFailsClosed(t *testing.T) {
 			t.Parallel()
 			d, dir := tc.setup(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(d, out, dir)
+			err := runTownClusterPlan(d, out, dir, atomicfile.WriteJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
 			}
