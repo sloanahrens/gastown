@@ -16,6 +16,9 @@ func TestBoxCheckRefusesGateLint(t *testing.T) {
 		"- [ ] the landing gate's lint passes\n- [ ] a named test passes",
 		"- [ ] a named test passes\n  - [ ] the landing gate's lint passes",
 		"- [ ] go vet ./internal/specdispatch and the landing gate's lint passes",
+		// A typographic apostrophe (U+2019) is how a keyboard writes the
+		// possessive; it must match the same phrase (gt-8cwcen).
+		"- [ ] the landing gate’s lint passes",
 	} {
 		t.Run(text, func(t *testing.T) {
 			t.Parallel()
