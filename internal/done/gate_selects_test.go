@@ -16,15 +16,15 @@ import (
 const gateSelectsDescription = "## Goal\nx\n\n## Gate\ngo test ./internal/done -run 'TestGateSelects' -count=1\ngo vet ./internal/done\n"
 
 // checkGateSelectsForSubmit drives the production call site: a polecat's
-// branch check over a bead carrying description, with run standing in for go
-// test.
-func checkGateSelectsForSubmit(t *testing.T, run gateListRunner, description string) error {
+// branch check over a bead carrying description, with list standing in for
+// newStaticGateLister.
+func checkGateSelectsForSubmit(t *testing.T, list gateTestLister, description string) error {
 	t.Helper()
 	r := &doneRun{
 		cwd:  t.TempDir(),
 		out:  new(bytes.Buffer),
 		opts: doneOptions{allowReverts: true, allowThrowawayPaths: true},
-		deps: doneSubmitDeps{listTests: run},
+		deps: doneSubmitDeps{listTests: list},
 	}
 	return checkBranchForSubmit(r, doneSubmission{sourceIssue: &beads.Issue{Description: description}}, "origin/main")
 }
@@ -43,27 +43,27 @@ func wantGateRefusal(t *testing.T, err error, wants ...string) {
 	}
 }
 
-// TestGateSelectsAPatternThatNamesATest: a -run pattern whose list names a
-// test passes the branch check.
+// TestGateSelectsAPatternThatNamesATest: a -run pattern whose lister names a
+// test passes the branch check, and the lister is asked for that line's
+// pattern and packages (gt-ez5xmi).
 func TestGateSelectsAPatternThatNamesATest(t *testing.T) {
 	t.Parallel()
-	var calls []string
-	run := func(_ string, args ...string) ([]byte, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return []byte("TestGateSelectsAPatternThatNamesATest\nok  \tgithub.com/x/internal/done\t0.002s\n"), nil
+	var asked []GateRun
+	list := func(_ string, gr GateRun) ([]string, error) {
+		asked = append(asked, gr)
+		return []string{"TestGateSelectsAPatternThatNamesATest"}, nil
 	}
-	if err := checkGateSelectsForSubmit(t, run, gateSelectsDescription); err != nil {
+	if err := checkGateSelectsForSubmit(t, list, gateSelectsDescription); err != nil {
 		t.Fatalf("checkBranchForSubmit() = %v, want the pattern to pass", err)
 	}
-	if want := "test -list TestGateSelects ./internal/done"; !strings.Contains(strings.Join(calls, "\n"), want) {
-		t.Errorf("go test calls = %q, want one containing %q", calls, want)
+	if len(asked) != 1 || asked[0].Pattern != "TestGateSelects" || !slices.Equal(asked[0].Packages, []string{"./internal/done"}) {
+		t.Errorf("lister was asked %+v, want the one Gate line's pattern and packages", asked)
 	}
 }
 
-// TestGateSelectsListsWithTheGateTags: go test -list carries the Gate line's
-// -tags list after the pattern when the line names one, so an integration-
-// tagged test is listed; a line with no tags lists exactly as before
-// (gt-fztxxa).
+// TestGateSelectsListsWithTheGateTags: the lister is asked for the Gate line's
+// -tags list when the line names one, so an integration-tagged test is listed;
+// a line with no tags asks with none (gt-fztxxa, gt-ez5xmi).
 func TestGateSelectsListsWithTheGateTags(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -71,22 +71,22 @@ func TestGateSelectsListsWithTheGateTags(t *testing.T) {
 		description string
 		want        string
 	}{
-		{"tags named", "## Goal\nx\n\n## Gate\ngo test -tags integration ./internal/done -run 'TestGateSelects' -count=1\n", "test -list TestGateSelects -tags integration ./internal/done"},
-		{"no tags", gateSelectsDescription, "test -list TestGateSelects ./internal/done"},
+		{"tags named", "## Goal\nx\n\n## Gate\ngo test -tags integration ./internal/done -run 'TestGateSelects' -count=1\n", "integration"},
+		{"no tags", gateSelectsDescription, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calls []string
-			run := func(_ string, args ...string) ([]byte, error) {
-				calls = append(calls, strings.Join(args, " "))
-				return []byte("TestGateSelects\n"), nil
+			var asked []GateRun
+			list := func(_ string, gr GateRun) ([]string, error) {
+				asked = append(asked, gr)
+				return []string{"TestGateSelects"}, nil
 			}
-			if err := checkGateSelectsForSubmit(t, run, tc.description); err != nil {
+			if err := checkGateSelectsForSubmit(t, list, tc.description); err != nil {
 				t.Fatalf("checkBranchForSubmit() = %v, want the pattern to pass", err)
 			}
-			if !slices.Equal(calls, []string{tc.want}) {
-				t.Errorf("go test calls = %q, want exactly %q", calls, tc.want)
+			if len(asked) != 1 || asked[0].Tags != tc.want {
+				t.Errorf("lister was asked %+v, want one Gate line with tags %q", asked, tc.want)
 			}
 		})
 	}
@@ -94,58 +94,56 @@ func TestGateSelectsListsWithTheGateTags(t *testing.T) {
 
 // TestGateSelectsRefusesATaggedPatternThatNamesNoTest: a tagged Gate line
 // whose listing, with its tags, still names no test refuses with the check's
-// own text (gt-fztxxa).
+// own text (gt-fztxxa, gt-ez5xmi).
 func TestGateSelectsRefusesATaggedPatternThatNamesNoTest(t *testing.T) {
 	t.Parallel()
 	description := "## Goal\nx\n\n## Gate\ngo test -tags integration ./internal/done -run 'TestGateSelects' -count=1\n"
-	run := func(_ string, _ ...string) ([]byte, error) {
-		return []byte("ok  \tgithub.com/x/internal/done\t0.002s\n"), nil
-	}
-	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, description),
+	list := func(_ string, _ GateRun) ([]string, error) { return nil, nil }
+	wantGateRefusal(t, checkGateSelectsForSubmit(t, list, description),
 		"go test -tags integration ./internal/done -run 'TestGateSelects' -count=1", "./internal/done",
 		"-run matches test function names; name the tests so the pattern selects them")
 }
 
-// TestGateSelectsRefusesAPatternThatNamesNoTest: a -run pattern whose list
-// names no test refuses, naming the Gate line and the package.
+// TestGateSelectsRefusesAPatternThatNamesNoTest: a -run pattern whose lister
+// names no test refuses, naming the Gate line and the package (gt-ez5xmi).
 func TestGateSelectsRefusesAPatternThatNamesNoTest(t *testing.T) {
 	t.Parallel()
-	run := func(_ string, _ ...string) ([]byte, error) {
-		return []byte("ok  \tgithub.com/x/internal/done\t0.002s\n"), nil
-	}
-	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, gateSelectsDescription),
+	list := func(_ string, _ GateRun) ([]string, error) { return nil, nil }
+	wantGateRefusal(t, checkGateSelectsForSubmit(t, list, gateSelectsDescription),
 		"go test ./internal/done -run 'TestGateSelects' -count=1", "./internal/done",
 		"-run matches test function names; name the tests so the pattern selects them")
 }
 
-// TestGateSelectsRefusesAListThatFails: a go test -list that fails refuses,
-// naming its error and carrying the first lines of its output; the refusal
-// does not call every failure a build failure (gt-hx8f5i).
+// TestGateSelectsRefusesAListThatFails: a lister that fails refuses, naming
+// the Gate line and carrying its error, so a failed listing never passes as a
+// clean one (gt-hx8f5i, gt-ez5xmi).
 func TestGateSelectsRefusesAListThatFails(t *testing.T) {
 	t.Parallel()
-	run := func(_ string, _ ...string) ([]byte, error) {
-		return []byte("./gate_selects_test.go:3:2: undefined: missing\n"), errors.New("exit status 1")
+	list := func(_ string, _ GateRun) ([]string, error) {
+		return nil, errors.New("go list: exit status 1")
 	}
-	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, gateSelectsDescription),
-		"go test -list did not complete (exit status 1)",
-		"./gate_selects_test.go:3:2: undefined: missing")
+	wantGateRefusal(t, checkGateSelectsForSubmit(t, list, gateSelectsDescription),
+		"go test ./internal/done -run 'TestGateSelects' -count=1",
+		"its tests cannot be listed: go list: exit status 1")
 }
 
-// TestGateSelectsRefusesNoiseAroundAnEmptyList: go test -list can emit noise
-// (a package's init logging, a warning) around an empty list; none of it names
-// a test, so the Gate line refuses (gt-hx8f5i).
+// TestGateSelectsRefusesNoiseAroundAnEmptyList: the old check's go test -list
+// output can carry noise (a package's init logging, a warning) around an empty
+// list; none of it names a test, so checkGateSelects refuses. The static lister
+// parses names instead of output, so the branch check no longer reaches this
+// (gt-hx8f5i).
 func TestGateSelectsRefusesNoiseAroundAnEmptyList(t *testing.T) {
 	t.Parallel()
 	run := func(_ string, _ ...string) ([]byte, error) {
 		return []byte("2026/11/24 12:00:00 warning: no tests to run\nPASS\nok  \tgithub.com/x/internal/done\t0.002s\n"), nil
 	}
-	wantGateRefusal(t, checkGateSelectsForSubmit(t, run, gateSelectsDescription),
+	wantGateRefusal(t, checkGateSelects(run, t.TempDir(), gateSelectsDescription),
 		"go test ./internal/done -run 'TestGateSelects' -count=1",
 		"-run matches test function names; name the tests so the pattern selects them")
 }
 
-// TestGateSelectsRefusesAMissingRunner: a check with no list runner refuses a
-// Gate that has a pattern to check, instead of reaching for the real go test.
+// TestGateSelectsRefusesAMissingRunner: a check with no lister refuses a Gate
+// that has a pattern to check, instead of reaching for the real go test.
 func TestGateSelectsRefusesAMissingRunner(t *testing.T) {
 	t.Parallel()
 	wantGateRefusal(t, checkGateSelectsForSubmit(t, nil, gateSelectsDescription),
@@ -182,16 +180,19 @@ func TestGateSelectsRunnerRunsGoUnderTheICUCgoEnv(t *testing.T) {
 	}
 }
 
-// TestGateSelectsWiringConfiguresTheRunner: useRealSubmitDeps wires a list
-// runner, so a submitted Gate line's -run pattern is checked. The wiring
-// stores function values only, so calling it reads no host state
-// (gt-hx8f5i).
-func TestGateSelectsWiringConfiguresTheRunner(t *testing.T) {
+// TestGateSelectsWiringConfiguresTheLister: useRealSubmitDeps wires the static
+// lister, so a submitted Gate line's -run pattern is checked without a test
+// binary starting. The wiring stores function values only, so calling it reads
+// no host state (gt-hx8f5i, gt-ez5xmi).
+func TestGateSelectsWiringConfiguresTheLister(t *testing.T) {
 	t.Parallel()
 	r := &doneRun{out: new(bytes.Buffer), env: func(string) string { return "" }}
 	r.useRealSubmitDeps(Options{})
-	if r.deps.listTests == nil {
-		t.Fatal("useRealSubmitDeps wired no Gate -run list runner")
+	// The typed assignment is the assertion: on the old gateListRunner field
+	// this line does not compile.
+	var list gateTestLister = r.deps.listTests
+	if list == nil {
+		t.Fatal("useRealSubmitDeps wired no Gate -run lister")
 	}
 }
 
@@ -205,10 +206,10 @@ func TestGateSelectsABeadWithNoCheckedLine(t *testing.T) {
 		"## Goal\nx\n\n## Gate\ngo test ./internal/done -count=1\n",
 		"## Goal\nx\n\n## Gate\ngo test ./... -run 'TestGateSelects' -count=1\n",
 	} {
-		run := func(_ string, args ...string) ([]byte, error) {
-			return nil, fmt.Errorf("go test ran for a Gate with no checked line: %q", args)
+		list := func(_ string, _ GateRun) ([]string, error) {
+			return nil, fmt.Errorf("the lister ran for a Gate with no checked line")
 		}
-		if err := checkGateSelectsForSubmit(t, run, description); err != nil {
+		if err := checkGateSelectsForSubmit(t, list, description); err != nil {
 			t.Fatalf("checkBranchForSubmit(%q) = %v, want no checked line to pass", description, err)
 		}
 	}
