@@ -52,10 +52,12 @@ type NowRoll struct {
 	To         string `json:"to,omitempty"`
 }
 
-// NowSweep is the tier sweep in flight: the rig it sweeps, the tier it is at,
-// and its wall time so far, as the tier sweep's running record reports them.
+// NowSweep is the tier sweep in flight: the rig it sweeps, the commit it sweeps,
+// the tier it is at, and its wall time so far, as the tier sweep's running record
+// reports them. SHA is empty when the record names no commit.
 type NowSweep struct {
 	Rig        string `json:"rig"`
+	SHA        string `json:"sha,omitempty"`
 	Tier       string `json:"tier"`
 	ElapsedSec int64  `json:"elapsed_sec"`
 }
@@ -89,7 +91,7 @@ func systemUpdatesNow(u *UpdateStatus, ts *TierSweep) *SystemUpdatesNow {
 		now.Roll = &NowRoll{RunID: u.RunID, Step: u.Current, ElapsedSec: u.ElapsedSec, From: u.From, To: u.To}
 	}
 	if ts != nil && ts.Running != nil {
-		now.Sweep = &NowSweep{Rig: ts.Running.Rig, Tier: ts.Running.Tier, ElapsedSec: ts.Running.ElapsedSec}
+		now.Sweep = &NowSweep{Rig: ts.Running.Rig, SHA: ts.Running.SHA, Tier: ts.Running.Tier, ElapsedSec: ts.Running.ElapsedSec}
 	}
 	if now.Roll == nil && now.Sweep == nil {
 		return nil

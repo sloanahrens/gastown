@@ -82,6 +82,46 @@ func TestSystemUpdatesNowNamesTheRollAndSweepRunning(t *testing.T) {
 	}
 }
 
+// The Now block's sweep names the commit the running sweep is sweeping, so the
+// panel can say which commit a sweep is on. A running record that names no commit
+// gives the sweep no sha.
+func TestSystemUpdatesNowCarriesTheSweepSHA(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		running *TierSweepRun
+		wantSHA string
+	}{
+		{
+			name:    "a running sweep with a sha",
+			running: &TierSweepRun{Rig: "gastown", SHA: sysTestSHA(5)[:8], Tier: "integration", ElapsedSec: 42},
+			wantSHA: sysTestSHA(5)[:8],
+		},
+		{
+			name:    "a running sweep without a sha",
+			running: &TierSweepRun{Rig: "gastown", Tier: "integration", ElapsedSec: 42},
+			wantSHA: "",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewHub(Config{
+				TierSweep:     func() *TierSweep { return &TierSweep{Running: tt.running} },
+				SystemUpdates: func() *SystemUpdates { return NewSystemUpdates(nil, nil, nil, false) },
+			})
+			h.pollSystemUpdates()
+
+			got := h.State().SystemUpdates
+			require.NotNil(t, got, "the section is in the feed once its reader reports")
+			require.NotNil(t, got.Now, "the running sweep is not named in the Now block")
+			require.NotNil(t, got.Now.Sweep, "the running sweep is not named in the Now block")
+			assert.Equal(t, tt.wantSHA, got.Now.Sweep.SHA, "the sweep's sha was not carried into the Now block")
+		})
+	}
+}
+
 // The Now block is built from the readers at the section's own poll, not from
 // what an older poll left in the feed: a roll that ended before the section poll
 // is not named as running.
