@@ -837,6 +837,104 @@ func TestVerdictReuseAheadSkipsAfterMergeTreeReadFails(t *testing.T) {
 	}
 }
 
+// aheadBeadWriteLog is a bead store that records every write ReviewAhead asks
+// for through the Beads interface and forwards it to the fixture's fake. The
+// pool's contract is that only the serial landing changes a bead, and reject is
+// the way it could break it: reject reaches a bead only through these five
+// writes, a rejection note, a label update, a comment, or a close. A reject
+// that returns before writing returns the rejection as an error, which a row
+// requiring err == nil catches too, so a row with both assertions covers
+// every reject path as well as every direct write.
+type aheadBeadWriteLog struct {
+	*beadsfake.Fake
+	calls []string
+}
+
+func (b *aheadBeadWriteLog) Update(id string, opts beads.UpdateOptions) error {
+	b.calls = append(b.calls, "Update "+id)
+	return b.Fake.Update(id, opts)
+}
+
+func (b *aheadBeadWriteLog) AppendNotes(id, note string) error {
+	b.calls = append(b.calls, "AppendNotes "+id)
+	return b.Fake.AppendNotes(id, note)
+}
+
+func (b *aheadBeadWriteLog) AddComment(id, text string) error {
+	b.calls = append(b.calls, "AddComment "+id)
+	return b.Fake.AddComment(id, text)
+}
+
+func (b *aheadBeadWriteLog) ForceCloseWithReason(reason string, ids ...string) error {
+	b.calls = append(b.calls, "ForceCloseWithReason "+strings.Join(ids, ","))
+	return b.Fake.ForceCloseWithReason(reason, ids...)
+}
+
+func (b *aheadBeadWriteLog) CloseWithReason(reason string, ids ...string) error {
+	b.calls = append(b.calls, "CloseWithReason "+strings.Join(ids, ","))
+	return b.Fake.CloseWithReason(reason, ids...)
+}
+
+// TestVerdictReuseAheadWritesNoBeadState: on every path the pool has built so
+// far — a skip before the review, a conflict, and a clean merge — ReviewAhead
+// makes no bead write and calls no reject. The store counts the writes, so a
+// bead whose state the pool changed would be named by the record it left.
+func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name  string
+		store bool // whether the lander has a review-ahead store
+		issue func(w Work) beads.Issue
+		setup func(f *landFixture)
+		want  AheadOutcome
+	}{
+		{"skip with the feature off", false, aheadReadyIssue, nil, AheadSkipped},
+		{"skip on a bead that is not actionable", true, func(w Work) beads.Issue {
+			i := aheadReadyIssue(w)
+			i.Status = "closed"
+			return i
+		}, nil, AheadSkipped},
+		{"conflict", true, aheadReadyIssue, func(f *landFixture) {
+			aheadConflictMain(f)
+		}, AheadConflict},
+		{"clean merge", true, aheadReadyIssue, nil, AheadSkipped},
+		{"clean merge leaving the target's tree unchanged", true, aheadReadyIssue, func(f *landFixture) {
+			f.pushMain("b.txt", "work\n")
+		}, AheadSkipped},
+		{"clean merge editing .om.json", true, aheadReadyIssue, func(f *landFixture) {
+			f.branchEditing(omConfigFile, "{\"threshold\": 0.9}\n")
+		}, AheadSkipped},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			// branchEditing re-seeds the fixture's bead and work, so the row's
+			// setup runs before the bead is seeded from f.work.
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			aheadSeedBead(f, tc.issue(f.work))
+			l := f.lander()
+			if tc.store {
+				l.Ahead = TownAheadStore(f.town, "gastown")
+			}
+			writes := &aheadBeadWriteLog{Fake: f.bd}
+			l.Beads = writes
+			got, err := l.ReviewAhead(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("ReviewAhead: unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("ReviewAhead = %q, want %q", got, tc.want)
+			}
+			if len(writes.calls) != 0 {
+				t.Errorf("ReviewAhead wrote bead state on the %s path: %v", tc.name, writes.calls)
+			}
+		})
+	}
+}
+
 // TestVerdictReuseAheadChangedPathsReadFails: the .om.json check is a git read;
 // a read that fails is returned as an error, not skipped as the config edit is,
 // so a caller switching on the outcome cannot read the failed read as a
