@@ -98,6 +98,95 @@ func TestVerdictReuseStorePutWritesTheRecord(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseStorePutKeepsNewer: Put keeps the record already stored when
+// that review began later than the one Put is given, so a slow review of an old
+// head that finishes last cannot replace the newer head's record.
+func TestVerdictReuseStorePutKeepsNewer(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		stored   func(rec *AheadRecord) // edits the record already on disk
+		incoming func(rec *AheadRecord) // edits the record Put is given
+		garbled  bool                   // the path holds bytes that are not a record
+		want     string                 // head the record must carry after Put
+	}{
+		{
+			// The old head's review started first and finished last: the
+			// comparison is on the start, so the stored newer head stays.
+			name: "an earlier start that finished later is kept out",
+			stored: func(rec *AheadRecord) {
+				rec.Head = aheadTestNewHead
+				rec.StartedAt = base.Add(5 * time.Minute)
+				rec.ReviewedAt = base.Add(6 * time.Minute)
+			},
+			incoming: func(rec *AheadRecord) {
+				rec.StartedAt = base
+				rec.ReviewedAt = base.Add(30 * time.Minute)
+			},
+			want: aheadTestNewHead,
+		},
+		{
+			name: "a later start replaces",
+			stored: func(rec *AheadRecord) {
+				rec.StartedAt = base
+				rec.ReviewedAt = base.Add(30 * time.Minute)
+			},
+			incoming: func(rec *AheadRecord) {
+				rec.Head = aheadTestNewHead
+				rec.StartedAt = base.Add(5 * time.Minute)
+				rec.ReviewedAt = base.Add(6 * time.Minute)
+			},
+			want: aheadTestNewHead,
+		},
+		{
+			name:    "a file that does not decode is replaced",
+			garbled: true,
+			want:    aheadTestHead, // the incoming record
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := aheadTestPath(town, "gastown", "gt-abc")
+			store := TownAheadStore(town, "gastown")
+			if tc.garbled {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("not a record"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stored := aheadTestRecord("gt-abc", aheadTestHead)
+				tc.stored(&stored)
+				if err := store.Put(stored); err != nil {
+					t.Fatalf("seeding the stored record: %v", err)
+				}
+			}
+			incoming := aheadTestRecord("gt-abc", aheadTestHead)
+			if tc.incoming != nil {
+				tc.incoming(&incoming)
+			}
+			if err := store.Put(incoming); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading the record: %v", err)
+			}
+			var got AheadRecord
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("the record after Put does not decode: %v\n%s", err, data)
+			}
+			if got.Head != tc.want {
+				t.Errorf("stored head = %s, want %s", got.Head, tc.want)
+			}
+		})
+	}
+}
+
 // TestVerdictReuseStoreFileIs0600: the record is readable by its owner only.
 func TestVerdictReuseStoreFileIs0600(t *testing.T) {
 	t.Parallel()
@@ -299,6 +388,28 @@ func TestVerdictReuseStoreWriteErrorIsReturned(t *testing.T) {
 	if !strings.Contains(err.Error(), "writing review-ahead record") {
 		t.Errorf("Put error = %q, want it to name the write", err)
 	}
+}
+
+// TestVerdictReuseStoreUnreadableRecordIsAnError: a stored record Put cannot
+// read is an error, not an empty store. The unreadable record may be the newer
+// one Put exists to keep, so Put writes nothing over it.
+func TestVerdictReuseStoreUnreadableRecordIsAnError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	readErr := errors.New("permission denied")
+	store := AheadStore{TownRoot: town, Rig: "gastown"}
+	store.readFile = func(string) ([]byte, error) { return nil, readErr }
+	err := store.Put(aheadTestRecord("gt-abc", aheadTestHead))
+	if err == nil {
+		t.Fatal("Put returned nil, want the read's error")
+	}
+	if !errors.Is(err, readErr) {
+		t.Errorf("Put error = %q, want it to wrap the read's error %q", err, readErr)
+	}
+	if !strings.Contains(err.Error(), "reading review-ahead record") {
+		t.Errorf("Put error = %q, want it to name the read", err)
+	}
+	assertNoRecord(t, town, "gt-abc")
 }
 
 // TestVerdictReuseStoreFailedWriteLeavesNoRecord: a write that fails after the
