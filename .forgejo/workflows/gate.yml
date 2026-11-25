@@ -22,7 +22,10 @@
 # tag, which a depth-1 checkout alone does not have, and the tags step below
 # fetches the tags. main is the base the candidate is built on, so the
 # candidate's history reaches it. `fetch-depth: 0` would fetch every head
-# instead of these two (gt-ebco0).
+# instead of these two (gt-ebco0). The fetch is blobless (--filter=blob:none):
+# the gate reads the candidate's commits and tags, and the checkout supplies
+# the working tree, so old history's file contents are not fetched, which saves
+# 10 to 17 seconds of every gate run (gt-gyrhgu).
 name: ci
 on:
   push:
@@ -35,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: fetch the candidate and main with history
         run: |
-          git fetch --no-tags --prune --depth=2147483647 origin \
+          git fetch --no-tags --prune --filter=blob:none --depth=2147483647 origin \
             "+refs/heads/$GITHUB_REF_NAME:refs/remotes/origin/$GITHUB_REF_NAME" \
             "+refs/heads/main:refs/remotes/origin/main"
           git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"

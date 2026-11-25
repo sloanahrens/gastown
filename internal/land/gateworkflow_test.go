@@ -344,3 +344,52 @@ func TestGateFetchProblemsNamesEveryHeadFetch(t *testing.T) {
 		})
 	}
 }
+
+// gateWorkflowSteps reads this repo's committed gate workflow and returns the
+// gate job's steps.
+func gateWorkflowSteps(t *testing.T) []gateStep {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, GateWorkflowPath("gate")))
+	if err != nil {
+		t.Fatalf("reading this repo's gate workflow: %v", err)
+	}
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []gateStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing this repo's gate workflow: %v", err)
+	}
+	job, ok := doc.Jobs["gate"]
+	if !ok {
+		t.Fatal("this repo's gate workflow has no gate job")
+	}
+	return job.Steps
+}
+
+// TestGateWorkflowHeadFetchIsBlobless holds the gate's history fetch to a
+// blobless one: the gate reads the candidate's commits (git describe, the
+// landing's ancestry) and the working tree comes from the checkout, so the
+// fetch has no use for file contents of old history, and fetching them costs
+// 10 to 17 seconds of every gate run (gt-gyrhgu).
+func TestGateWorkflowHeadFetchIsBlobless(t *testing.T) {
+	t.Parallel()
+	const want = "--filter=blob:none"
+	for _, step := range gateWorkflowSteps(t) {
+		for _, words := range gitFetchWords(step.Run) {
+			if !slices.Contains(words, gateDeepenMainRef) {
+				continue
+			}
+			if !slices.Contains(words, want) {
+				t.Errorf("the fetch that deepens main does not pass %s: %q", want, words)
+			}
+			return
+		}
+	}
+	t.Fatal("no step fetches origin/main with full history")
+}
