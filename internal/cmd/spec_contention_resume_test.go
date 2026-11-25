@@ -66,7 +66,7 @@ func TestSpecContentionResumeRetriesOnceThePauseIsOver(t *testing.T) {
 	db.Seed(contentionHeldIssue("gt-a", specTestNow.Add(-time.Second)))
 	store := contentionDropStore{db}
 
-	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(-time.Second)), notDocked, contentionResumeRetry(store))
+	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(-time.Second)), notDocked, contentionResumeRetry(store), nil)
 
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-a" {
 		t.Fatalf("candidates = %+v, want the retried bead", got.Candidates)
@@ -111,7 +111,7 @@ func TestSpecContentionResumeHoldsTheBeadUntilThePauseIsOver(t *testing.T) {
 	db.Seed(contentionHeldIssue("gt-a", specTestNow.Add(time.Minute)))
 	store := contentionDropStore{db}
 
-	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(time.Minute)), notDocked, contentionResumeRetry(store))
+	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(time.Minute)), notDocked, contentionResumeRetry(store), nil)
 
 	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
 		t.Fatalf("candidates = %+v, LabeledFailed = %d; want the bead held and counted", got.Candidates, got.LabeledFailed)
@@ -205,7 +205,7 @@ func TestSpecContentionResumeReportsAnUnreadableRecord(t *testing.T) {
 		return []*beads.Issue{&held}, nil
 	}
 
-	got := specCandidatesRetrying(townRoot, 2, board, notDocked, contentionResumeRetry(store))
+	got := specCandidatesRetrying(townRoot, 2, board, notDocked, contentionResumeRetry(store), nil)
 
 	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
 		t.Fatalf("candidates = %+v, LabeledFailed = %d; want the unreadable bead held", got.Candidates, got.LabeledFailed)
@@ -330,7 +330,7 @@ func TestSpecContentionResumeRespawnLimitHoldsTheBead(t *testing.T) {
 	retry := contentionResumeRetry(store)
 	retry.respawnGate = func(string) (bool, []string) { return true, nil }
 
-	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(-time.Second)), notDocked, retry)
+	got := specCandidatesRetrying(townRoot, 2, contentionResumeBoard(specTestNow.Add(-time.Second)), notDocked, retry, nil)
 
 	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
 		t.Fatalf("candidates = %+v, LabeledFailed = %d; want the bead held", got.Candidates, got.LabeledFailed)
