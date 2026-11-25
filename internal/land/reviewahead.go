@@ -17,12 +17,16 @@ const (
 	// store. ReviewAhead does not return it yet.
 	AheadStored AheadOutcome = "stored"
 	// AheadConflict means the submission does not merge onto the target, so no
-	// verdict was made. ReviewAhead does not return it yet.
+	// verdict was made: a conflict record was stored instead.
 	AheadConflict AheadOutcome = "conflict"
 	// AheadSkipped is a submission no review was made for. The landing runs om
 	// inline, as it does without a review-ahead store.
 	AheadSkipped AheadOutcome = "skipped"
 )
+
+// aheadSourcePool is the Source an AheadRecord carries when the review pool
+// made it ahead of its landing, rather than a landing running om inline.
+const aheadSourcePool = "pool"
 
 // ReviewAhead makes the review of w that a later landing reuses, ahead of
 // that landing. It never writes to Beads: only the serial landing changes a
@@ -56,8 +60,8 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	if OverseerReviewed(issue, w.Head) {
 		return AheadSkipped, nil
 	}
-	// started is when this review began: the land log dates it now, and a later
-	// bead stores it as the record's started_at. Nothing stores a record yet.
+	// started is when this review began: the land log dates it, and a conflict
+	// record stores it as started_at.
 	started := l.aheadNow()
 	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
 	g := l.open(l.Repo)
@@ -73,7 +77,7 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	// addReviewWorktree takes gitMu for the git calls it makes, and the lock is
 	// not reentrant: aheadFetches has released it, so this call takes it
 	// itself. Holding it here would deadlock the add.
-	_, dir, cleanup, err := l.addReviewWorktree(g, w, base)
+	wt, dir, cleanup, err := l.addReviewWorktree(g, w, base)
 	if err != nil {
 		return "", &InfraError{Stage: "review worktree", Err: err}
 	}
@@ -81,9 +85,35 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	// and the review directory that holds it.
 	defer cleanup()
 	l.logf("%s: ahead review worktree at %s", w.BeadID, dir)
-	// NEXT BEAD: here the review merges the candidate into the worktree and
-	// runs om on the merged tree. Until that lands, every submission that
-	// reaches this point is AheadSkipped and ctx is unused.
+	// mergeWork reports a conflict the way Land reads it: a Rejection with a
+	// nil error and the merge aborted.
+	out, err := mergeWork(wt, w, base)
+	if err != nil {
+		return "", err
+	}
+	if out.Rejection != nil {
+		// The submission does not merge onto the target, so no verdict can be
+		// made. The conflict is kept so a reader can tell a review that found a
+		// conflict from one that never ran; the landing still decides the
+		// rejection itself.
+		l.logf("%s: ahead merge of %s conflicts in %d file(s)", w.BeadID, shortSHA(w.Head), len(out.Rejection.Conflicting))
+		rec := AheadRecord{
+			Bead:       w.BeadID,
+			Head:       w.Head,
+			Base:       base,
+			StartedAt:  started,
+			ReviewedAt: l.aheadNow(),
+			Outcome:    aheadOutcomeConflict,
+			Source:     aheadSourcePool,
+		}
+		if err := l.Ahead.Put(rec); err != nil {
+			return "", &InfraError{Stage: "store record", Err: err}
+		}
+		return AheadConflict, nil
+	}
+	// NEXT BEAD: here the review runs om on the merged tree and stores the
+	// verdict. Until that lands, a clean merge is AheadSkipped and the landing
+	// runs om inline; ctx is unused.
 	return AheadSkipped, nil
 }
 

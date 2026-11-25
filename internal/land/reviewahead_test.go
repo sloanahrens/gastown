@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -504,6 +505,211 @@ func TestVerdictReuseAheadWorktreeAddFails(t *testing.T) {
 	} else if !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// aheadConflictMain rewrites b.txt on origin/main, the file the fixture's
+// branch adds, so the head and the new target tip conflict when merged. It
+// returns the new target tip, the base the review merges onto.
+func aheadConflictMain(f *landFixture) string {
+	f.t.Helper()
+	return f.pushMain("b.txt", "target wins\n")
+}
+
+// aheadNoReviewDir fails the test when a review directory is left under the
+// fixture's WorkRoot.
+func aheadNoReviewDir(t *testing.T, f *landFixture) {
+	t.Helper()
+	entries, err := os.ReadDir(f.workRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), reviewDirPrefix) {
+			t.Errorf("review directory %s left behind after ReviewAhead returned", e.Name())
+		}
+	}
+}
+
+// TestVerdictReuseAheadConflictRecorded: a head that does not merge onto the
+// target tip stores a conflict record — no verdict — and ReviewAhead reports
+// AheadConflict. The record is dated by the review's start and its read of the
+// clock when the merge came back, and the pool writes no bead.
+func TestVerdictReuseAheadConflictRecorded(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	store := TownAheadStore(f.town, "gastown")
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	reads := 0
+	store.Now = func() time.Time {
+		reads++
+		return t0.Add(time.Duration(reads) * time.Minute)
+	}
+	l.Ahead = store
+	base := aheadConflictMain(f)
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("ReviewAhead: unexpected error: %v", err)
+	}
+	if got != AheadConflict {
+		t.Errorf("ReviewAhead = %q, want %q", got, AheadConflict)
+	}
+	// One read for started_at, one for reviewed_at: a record that dated both
+	// from the same read would pass every field check below but the timing.
+	if reads != 2 {
+		t.Errorf("ReviewAhead read the store clock %d times, want 2 (start, then reviewed_at)", reads)
+	}
+	data, err := os.ReadFile(aheadTestPath(f.town, "gastown", f.work.BeadID))
+	if err != nil {
+		t.Fatalf("reading the conflict record: %v", err)
+	}
+	var rec AheadRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("the conflict record is not an AheadRecord: %v\n%s", err, data)
+	}
+	if rec.Outcome != "conflict" || rec.Source != "pool" {
+		t.Errorf("record outcome/source = %q/%q, want conflict/pool", rec.Outcome, rec.Source)
+	}
+	if rec.Bead != f.work.BeadID || rec.Rig != "gastown" {
+		t.Errorf("record bead/rig = %q/%q, want %q/gastown", rec.Bead, rec.Rig, f.work.BeadID)
+	}
+	if rec.Head != f.work.Head {
+		t.Errorf("record head = %s, want the conflicting head %s", rec.Head, f.work.Head)
+	}
+	if rec.Base != base {
+		t.Errorf("record base = %s, want the target tip %s", rec.Base, base)
+	}
+	if rec.Verdict.Verdict != "" {
+		t.Errorf("record verdict = %q, want none on a conflict", rec.Verdict.Verdict)
+	}
+	if want := t0.Add(time.Minute); !rec.StartedAt.Equal(want) {
+		t.Errorf("record started_at = %s, want the review's start %s", rec.StartedAt, want)
+	}
+	if want := t0.Add(2 * time.Minute); !rec.ReviewedAt.Equal(want) {
+		t.Errorf("record reviewed_at = %s, want the merge's return %s", rec.ReviewedAt, want)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// aheadMergeFails is the review worktree with a seamed merge: it fails both
+// merge shapes with err and, carrying the fixture Repo underneath, reports no
+// conflicting file, the shape of a merge that fails for another reason.
+type aheadMergeFails struct {
+	Repo
+	err error
+}
+
+func (r aheadMergeFails) MergeNoFF(string, string) error   { return r.err }
+func (r aheadMergeFails) MergeSquash(string, string) error { return r.err }
+
+// TestVerdictReuseAheadMergeErrorReturned: a merge that fails for a reason
+// other than a conflict is returned as the error it is, with no record stored:
+// a review that never happened must not read as one that did.
+func TestVerdictReuseAheadMergeErrorReturned(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	mergeErr := errors.New("fatal: refusing to merge unrelated histories")
+	l.openRepo = func(dir string) Repo {
+		return aheadMergeFails{Repo: f.git.Open(dir), err: mergeErr}
+	}
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the merge error", got)
+	}
+	if !errors.Is(err, mergeErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, mergeErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "merge" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "merge")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored for a merge that failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// TestVerdictReuseAheadStoreFails: a conflict whose record the store cannot
+// write is returned as an error naming the store stage, never as AheadConflict:
+// a conflict nobody can read back must not read as one that was kept.
+func TestVerdictReuseAheadStoreFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	store := TownAheadStore(f.town, "gastown")
+	writeErr := errors.New("disk full")
+	writes := 0
+	store.writeFile = func(string, []byte, os.FileMode) error {
+		writes++
+		return writeErr
+	}
+	l.Ahead = store
+	aheadConflictMain(f)
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the store error", got)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, writeErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "store record" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "store record")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty (not %q)", got, AheadConflict)
+	}
+	if writes != 1 {
+		t.Errorf("the store write ran %d times, want 1", writes)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record exists although the write failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
 	if !l.gitMu.TryLock() {
 		t.Errorf("gitMu is still held after ReviewAhead returned an error")
 	} else {
