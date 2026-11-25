@@ -277,6 +277,20 @@ type Lander struct {
 	// return promptly; the watch does its alerting off it.
 	CIFailure func(f CIFailure)
 
+	// Ahead is the review-ahead store a review made before its landing is
+	// kept in, so the landing can reuse that verdict (gt-vq81d1). Nil means
+	// the feature is off and every landing runs om inline.
+	Ahead *AheadStore
+	// ReuseExpiry is how old a stored review-ahead verdict may be and still be
+	// reused. Nothing reads it yet (gt-vq81d1).
+	ReuseExpiry time.Duration
+	// OMConfigPath is the rig checkout's .om.json path the review key reads
+	// the config from. Nothing reads it yet (gt-vq81d1).
+	OMConfigPath string
+	// gitMu serializes the git reads the review key makes on this lander. Nothing
+	// takes it yet (gt-vq81d1).
+	gitMu sync.Mutex
+
 	openRepo func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
 	// authorOf is the test seam for the head's author, for a handle that cannot
 	// record authors (gitfake). nil reads the author through the handle.
