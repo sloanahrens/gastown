@@ -11,10 +11,10 @@ import (
 
 // The pane leads with a banner while a gt update roll runs (gt-o8m8ho): its
 // step, elapsed and the builds it moves between; an ended roll stays ten minutes.
-// A tier sweep running now draws its own banner too (gt-dln3rq): the rig, the
-// tier and the elapsed time, with no ended banner left behind. An ended roll's
-// pill names the outcome its row records, and its time is that roll's own
-// (gt-avxdbf).
+// A tier sweep running now draws a block too (gt-iw2p6u): a header naming the
+// rig, the commit and the cycle's age, then one line per tier of the cycle, with
+// no ended banner left behind. An ended roll's pill names the outcome its row
+// records, and its time is that roll's own (gt-avxdbf).
 
 func bannerRoll() map[string]any {
 	return map[string]any{"run_id": "run-7", "step": "install", "elapsed_sec": 480, "from": "1111aaaa2222", "to": "3333bbbb4444"}
@@ -145,26 +145,25 @@ func TestSystemUpdatesBannerSweepUnknown(t *testing.T) {
 	}
 }
 
-// A running tier sweep with no roll draws the pane's first line as its banner:
-// sweeping, the rig it sweeps, the tier and the elapsed time.
+// A running tier sweep with no roll draws the pane's first line as its header:
+// sweeping, the rig it sweeps, the commit under sweep (a dash when the feed names
+// none) and the cycle's age. The tier appears in its own line, never in the
+// header (gt-iw2p6u).
 func TestSystemUpdatesBannerShowsTheRunningSweep(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: bannerSweep()}, systemUpdateGoodRow()))
 	if got := dom.element(t, "systemupdates").Kids; got != 2 {
-		t.Fatalf("the pane drew %d lines, want the banner and the one row", got)
+		t.Fatalf("the pane drew %d lines, want the header and the one row", got)
 	}
 	if got := paneBanner(t, dom); got != "sweeping" {
-		t.Fatalf("the first line reads %q, want a sweep banner", got)
+		t.Fatalf("the first line reads %q, want a sweep header", got)
 	}
-	for i, want := range []string{"gastown", "race", "5m"} {
+	for i, want := range []string{"gastown", "@ –", "cycle 5m"} {
 		if got := dom.descend(t, "systemupdates", 0, i+1).Text; got != want {
-			t.Errorf("banner cell %d reads %q, want %q", i+1, got, want)
+			t.Errorf("header cell %d reads %q, want %q", i+1, got, want)
 		}
-	}
-	if got := dom.descend(t, "systemupdates", 0, 2).Class; got != "tag warnc" {
-		t.Errorf("the tier chip wears %q, want the running amber", got)
 	}
 }
 
@@ -446,4 +445,130 @@ func TestSystemUpdatesLastGreenDrawsNothingWhenUnknown(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sweepBlockSweep is a running sweep mid-cycle: integration finished in 1129 s
+// and race running, with the shell tier's 300 s wall already spent on the host.
+func sweepBlockSweep() map[string]any {
+	return map[string]any{
+		"rig": "gastown", "sha": "abcdef1234567890", "tier": "race", "elapsed_sec": 1500,
+		"tiers":  []any{"integration", "race", "combo"},
+		"stages": []any{map[string]any{"tier": "integration", "verdict": "GREEN", "passed": 12, "failed": 0, "secs": 1129}},
+		"walls":  map[string]any{"shell": 300, "integration": 1129},
+	}
+}
+
+// sweepLine is one line the pane drew under #systemupdates, its cells joined so
+// a failure names the whole line: "tier | state | counts | time".
+func sweepLine(t *testing.T, dom *pageDOM, line int) string {
+	t.Helper()
+
+	d := dom.descend(t, "systemupdates", line)
+	cells := make([]string, d.Kids)
+	for i := range cells {
+		cells[i] = dom.descend(t, "systemupdates", line, i).Text
+	}
+	return strings.Join(cells, " | ")
+}
+
+// The sweep block (gt-iw2p6u) is a header naming the rig, the commit under
+// sweep and the cycle's age with no tier beside it, then one line per tier of
+// the cycle in order: the finished tier its verdict, counts and duration, the
+// tier running now its own elapsed — the cycle's age less the walls the
+// finished tiers took, the shell tier's included — and a dash for one waiting.
+func TestSystemUpdatesSweepBlock(t *testing.T) {
+	t.Parallel()
+
+	t.Run("finished, running and waiting tiers", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: sweepBlockSweep()}, systemUpdateGoodRow()))
+		if got, want := sweepLine(t, dom, 0), "sweeping | gastown | @ abcdef12 | cycle 25m"; got != want {
+			t.Errorf("the header reads %q, want %q", got, want)
+		}
+		if got, want := sweepLine(t, dom, 1), "integration | passed | 12 passed, 0 failed | 19m"; got != want {
+			t.Errorf("the finished tier reads %q, want %q", got, want)
+		}
+		if got, want := sweepLine(t, dom, 2), "race | running | 71s"; got != want {
+			t.Errorf("the running tier reads %q, want %q (1500s less shell 300s and integration 1129s)", got, want)
+		}
+		if got, want := sweepLine(t, dom, 3), "combo | –"; got != want {
+			t.Errorf("the waiting tier reads %q, want %q", got, want)
+		}
+		if got := dom.element(t, "systemupdates").Kids; got != 5 {
+			t.Errorf("the pane drew %d lines, want the header, three tiers and the one row", got)
+		}
+	})
+
+	t.Run("the header carries no tier tag", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: sweepBlockSweep()}, systemUpdateGoodRow()))
+		head := dom.descend(t, "systemupdates", 0)
+		for i := 0; i < head.Kids; i++ {
+			if got := dom.descend(t, "systemupdates", 0, i).Class; strings.Contains(got, "tag") {
+				t.Errorf("header cell %d wears %q, want no tier tag on the header", i, got)
+			}
+		}
+	})
+
+	t.Run("a shell tier finished with only its wall", func(t *testing.T) {
+		t.Parallel()
+
+		// The shell tier runs on the host before the job, so it has a wall and
+		// no progress stage: it reads finished with its wall, never waiting.
+		sweep := map[string]any{
+			"rig": "gastown", "sha": "abcdef1234567890", "tier": "integration", "elapsed_sec": 600,
+			"tiers": []any{"shell", "integration", "race"},
+			"walls": map[string]any{"shell": 300},
+		}
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: sweep}, systemUpdateGoodRow()))
+		if got, want := sweepLine(t, dom, 1), "shell | finished | 5m"; got != want {
+			t.Errorf("the shell tier reads %q, want %q", got, want)
+		}
+		if got, want := sweepLine(t, dom, 2), "integration | running | 5m"; got != want {
+			t.Errorf("the running tier reads %q, want %q (600s less the shell's 300s)", got, want)
+		}
+		if got, want := sweepLine(t, dom, 3), "race | –"; got != want {
+			t.Errorf("the waiting tier reads %q, want %q", got, want)
+		}
+	})
+
+	t.Run("an old feed with no sha and no tiers", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: bannerSweep()}, systemUpdateGoodRow()))
+		if got, want := sweepLine(t, dom, 0), "sweeping | gastown | @ – | cycle 5m"; got != want {
+			t.Errorf("the header reads %q, want %q", got, want)
+		}
+		if got := dom.element(t, "systemupdates").Kids; got != 2 {
+			t.Errorf("the pane drew %d lines, want the header and the one row and no tier lines", got)
+		}
+	})
+
+	t.Run("an empty sha", func(t *testing.T) {
+		t.Parallel()
+
+		sweep := sweepBlockSweep()
+		sweep["sha"] = ""
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerState(bannerNow{sweep: sweep}, systemUpdateGoodRow()))
+		if got, want := sweepLine(t, dom, 0), "sweeping | gastown | @ – | cycle 25m"; got != want {
+			t.Errorf("the header reads %q, want a dash for the empty sha", got)
+		}
+	})
+
+	t.Run("an unknown sweep", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		dom.call(t, "renderSystemUpdates", bannerSweepUnknownState(systemUpdateGoodRow()))
+		if got := dom.element(t, "systemupdates").Kids; got != 1 {
+			t.Errorf("the pane drew %d lines, want the one commit row and no sweep block", got)
+		}
+	})
 }

@@ -3129,19 +3129,61 @@ function systemUpdateBannerLine(b, rows) {
   return line;
 }
 
-// systemUpdateBannerSweepLine is a running tier sweep's banner (gt-dln3rq): the
-// rig it sweeps, the tier it is at and the elapsed time. The feed names a sweep
-// only while it runs, so the banner is drawn while Now carries one and a push
-// without one keeps none behind. An unreadable sweep draws none even when an
-// older Now block still carries one (gt-bn5e6c).
-function systemUpdateBannerSweepLine(sweep) {
-  const line = el("div", "surow subanner");
-  line.append(el("span", "subannerword", "sweeping"));
-  line.append(el("span", "subannerrig", sweep.rig || "–"));
-  line.append(el("span", "tag warnc", sweep.tier || "starting"));
-  line.append(el("span", "subannertime", fmtDur(sweep.elapsed_sec)));
-  line.title = "tier sweep " + (sweep.rig || "?") + (sweep.tier ? " " + sweep.tier : "");
-  return line;
+// systemUpdateSweepBlock is a running tier sweep's block (gt-iw2p6u): a header
+// naming the rig, the commit under sweep and the cycle's age, then one line per
+// tier the cycle runs, in order. A finished tier carries the verdict, counts and
+// duration its progress stage reports; a tier with a wall and no stage — the
+// shell tier runs on the host, before the job and outside its progress file —
+// carries that wall and claims no verdict; the tier running now carries its own
+// elapsed, the cycle's age less every finished tier's wall; the tiers still
+// waiting a dash. Its caller draws it only while Now carries a sweep, and draws
+// none when the sweep could not be read, even though an older Now block still
+// names one (gt-bn5e6c).
+function systemUpdateSweepBlock(sweep) {
+  const sha = String(sweep.sha || "").slice(0, 8) || "–";
+  const head = el("div", "surow subanner");
+  head.append(el("span", "subannerword", "sweeping"));
+  head.append(el("span", "subannerrig", sweep.rig || "–"));
+  head.append(el("span", "subannersha", "@ " + sha));
+  head.append(el("span", "subannertime", "cycle " + fmtDur(sweep.elapsed_sec)));
+  head.title = "tier sweep " + (sweep.rig || "?") + " @ " + sha;
+  const lines = [head], stages = sweep.stages || [], walls = sweep.walls || {};
+  const stageOf = tier => stages.find(st => st.tier === tier);
+  // A wall the reader sent is a number; anything else is a reading nobody made.
+  const wallOf = tier => {
+    const v = Object.prototype.hasOwnProperty.call(walls, tier) ? Number(walls[tier]) : NaN;
+    return isFinite(v) ? v : null;
+  };
+  // What the finished tiers already spent of the cycle: each once, from its wall
+  // or, with the wall lost, its stage's own secs. The tier running now is not
+  // among them, even when a wall for it arrived.
+  const spent = [...new Set([...Object.keys(walls), ...stages.map(st => st.tier)])]
+    .filter(tier => tier !== sweep.tier)
+    .reduce((sum, tier) => {
+      const wall = wallOf(tier), stage = stageOf(tier);
+      const secs = wall != null ? wall : (stage ? Number(stage.secs) : NaN);
+      return isFinite(secs) ? sum + secs : sum;
+    }, 0);
+  for (const tier of (sweep.tiers || [])) {
+    const line = el("div", "surow sutier"), stage = stageOf(tier), wall = wallOf(tier);
+    line.append(el("span", "sutiername", tier));
+    if (stage) {
+      const chip = stage.verdict === "GREEN" ? SYSTEM_UPDATE_CHIPS.ok : SYSTEM_UPDATE_CHIPS.failed;
+      line.append(el("span", "tag " + chip[0], chip[2]));
+      line.append(el("span", "sutiercounts", stage.passed + " passed, " + stage.failed + " failed"));
+      line.append(el("span", "sutiertime", fmtDur(stage.secs)));
+    } else if (tier === sweep.tier) {
+      line.append(el("span", "tag " + SYSTEM_UPDATE_CHIPS.running[0], SYSTEM_UPDATE_CHIPS.running[2]));
+      line.append(el("span", "sutiertime", fmtDur(sweep.elapsed_sec - spent)));
+    } else if (wall != null) {
+      line.append(el("span", "sutierdone", "finished"));
+      line.append(el("span", "sutiertime", fmtDur(wall)));
+    } else {
+      line.append(el("span", "sutierwait", "–"));
+    }
+    lines.push(line);
+  }
+  return lines;
 }
 
 // The pane header's icon follows the worst chip the pane drew, red above amber.
@@ -3254,7 +3296,7 @@ function renderSystemUpdates(s) {
   const box = $("systemupdates"), rows = (su && su.rows) || [], chips = [];
   box.replaceChildren();
   if (banner) box.append(systemUpdateBannerLine(banner, (su && su.rows) || []));
-  if (sweep && !sweepUnknown) box.append(systemUpdateBannerSweepLine(sweep));
+  if (sweep && !sweepUnknown) for (const line of systemUpdateSweepBlock(sweep)) box.append(line);
   const lastGreen = su && systemUpdateLastGreenLine(su);
   if (lastGreen) box.append(lastGreen);
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
