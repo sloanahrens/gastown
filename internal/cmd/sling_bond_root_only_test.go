@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -72,25 +73,29 @@ func writeDaemonSettings(t *testing.T, townRoot, body string) {
 
 // TestSlingBondRootOnly: a sling bonds its formula with --root-only when the
 // town's daemon settings ask for it (bond_root_only), and bonds every step as
-// before when the key is off, absent, or the settings file cannot be read.
+// before when the key is off, absent, or the settings file cannot be read. A
+// settings file that is present but does not load warns, naming the file.
 func TestSlingBondRootOnly(t *testing.T) {
 	t.Parallel()
 	const (
 		on         = `{"type":"daemon-patrol-config","version":1,"bond_root_only":true}`
 		off        = `{"type":"daemon-patrol-config","version":1,"bond_root_only":false}`
 		absent     = `{"type":"daemon-patrol-config","version":1}`
+		invalid    = `{"type":"daemon-patrol-config","bond_root_only":`
 		unreadable = "dir"
 	)
 	tests := []struct {
 		name     string
 		settings string // "" writes no settings file at all
 		want     bool
+		wantWarn bool
 	}{
-		{"key true", on, true},
-		{"key false", off, false},
-		{"key absent", absent, false},
-		{"settings file absent", "", false},
-		{"settings file unreadable", unreadable, false},
+		{"key true", on, true, false},
+		{"key false", off, false, false},
+		{"key absent", absent, false, false},
+		{"settings file absent", "", false, false},
+		{"settings file unreadable", unreadable, false, true},
+		{"settings file invalid", invalid, false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,8 +114,10 @@ func TestSlingBondRootOnly(t *testing.T) {
 			}
 
 			fake := &bondArgvBD{}
-			stores := slingStoresOn(nil, beads.WithRunner(fake.run))
-			res, err := formulaBDFor(stores).instantiate(
+			var warned bytes.Buffer
+			f := formulaBDFor(slingStoresOn(nil, beads.WithRunner(fake.run)))
+			f.warn = &warned
+			res, err := f.instantiate(
 				"mol-polecat-work", "gt-mmoj3w", "bond root-only", t.TempDir(), townRoot, nil)
 			if err != nil {
 				t.Fatalf("instantiate: %v; calls: %q", err, fake.all)
@@ -122,6 +129,20 @@ func TestSlingBondRootOnly(t *testing.T) {
 			argv := fake.onlyBond(t)
 			if got := slices.Contains(argv, "--root-only"); got != tc.want {
 				t.Errorf("mol bond argv %q carries --root-only = %v, want %v", strings.Join(argv, " "), got, tc.want)
+			}
+
+			msg := warned.String()
+			if !tc.wantWarn {
+				if msg != "" {
+					t.Errorf("warned %q, want no warning", msg)
+				}
+				return
+			}
+			if path := config.DaemonPatrolConfigPath(townRoot); !strings.Contains(msg, path) {
+				t.Errorf("warning %q does not name the settings file %s", msg, path)
+			}
+			if !strings.Contains(msg, "bond_root_only") {
+				t.Errorf("warning %q does not name the setting", msg)
 			}
 		})
 	}

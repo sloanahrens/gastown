@@ -864,8 +864,9 @@ type FormulaOnBeadResult = sling.FormulaResult
 // engine at a site (nil: the bd on PATH), sleep is the pause between
 // contention retries of the bond and between tries of its lock wait, now is
 // the clock that wait is bounded by, jitter is the random source its backoff
-// draws from, and stores are the sling's bead stores, so a spec sling's
-// formula cook and bond are counted on its trace (gt-h3bka5).
+// draws from, stores are the sling's bead stores, so a spec sling's formula
+// cook and bond are counted on its trace (gt-h3bka5), and warn is where a town
+// settings file that exists but does not load is reported (nil: os.Stderr).
 // InstantiateFormulaOnBead, CookFormula and bondFormulaDirect are its methods
 // on realFormulaBD. A nil seam takes the real one.
 type formulaBD struct {
@@ -874,6 +875,7 @@ type formulaBD struct {
 	now    func() time.Time
 	jitter func() float64
 	stores slingStores
+	warn   io.Writer
 }
 
 // realFormulaBD is the bd on PATH with the real retry backoff.
@@ -885,7 +887,7 @@ func realFormulaBD() formulaBD {
 // sling passing its trace's stores counts the formula cook and bond on that
 // trace.
 func formulaBDFor(stores slingStores) formulaBD {
-	return formulaBD{sleep: bdContentionSleep, now: time.Now, jitter: rand.Float64, stores: stores}
+	return formulaBD{sleep: bdContentionSleep, now: time.Now, jitter: rand.Float64, stores: stores, warn: os.Stderr}
 }
 
 // engine is the formula engine at site, opened with this formulaBD's store
@@ -907,17 +909,27 @@ func (f formulaBD) beadEngine(beadID, formulaWorkDir, townRoot string) formulaEn
 		dir:      formulaWorkDir,
 		beadsDir: beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID),
 		townRoot: townRoot,
-	}, bondEngineOpts(townRoot)...)
+	}, bondEngineOpts(townRoot, f.warn)...)
 }
 
 // bondRootOnlySetting reports whether the town's daemon settings ask for a
-// root-only bond (bond_root_only in the town's daemon settings file). The
-// setting is off unless that file says otherwise: a file that is absent,
-// unreadable or invalid reads as off, so a sling that cannot see the setting
-// bonds every step as it always has rather than failing the dispatch.
-func bondRootOnlySetting(townRoot string) bool {
+// root-only bond (bond_root_only in the town's daemon settings file). An absent
+// file means off, so a sling in a town without the setting bonds every step as
+// it always has rather than failing the dispatch. A file that is there but does
+// not load is off too, but warns through warn: dropping it silently would hide
+// a broken bond_root_only behind the old bond-every-step behaviour (gt-e345vg).
+func bondRootOnlySetting(townRoot string, warn io.Writer) bool {
 	cfg, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(townRoot))
-	if err != nil || cfg == nil {
+	if err != nil {
+		if !errors.Is(err, config.ErrNotFound) {
+			if warn == nil {
+				warn = os.Stderr
+			}
+			fmt.Fprintf(warn, "warning: %v; bonding every step as if bond_root_only were false\n", err)
+		}
+		return false
+	}
+	if cfg == nil {
 		return false
 	}
 	return cfg.BondRootOnly
@@ -925,9 +937,10 @@ func bondRootOnlySetting(townRoot string) bool {
 
 // bondEngineOpts are what a bond's engine adds to the sling's own store
 // options: beads.WithBondRootOnly when the town's daemon settings ask for a
-// root-only bond, nothing otherwise.
-func bondEngineOpts(townRoot string) []beads.Option {
-	if !bondRootOnlySetting(townRoot) {
+// root-only bond, nothing otherwise. A settings file that does not load is
+// reported to warn by bondRootOnlySetting.
+func bondEngineOpts(townRoot string, warn io.Writer) []beads.Option {
+	if !bondRootOnlySetting(townRoot, warn) {
 		return nil
 	}
 	return []beads.Option{beads.WithBondRootOnly()}
