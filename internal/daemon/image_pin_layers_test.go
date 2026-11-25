@@ -114,8 +114,7 @@ func TestImagePinDurabilityImagePinLayersPatrolStartsOnlyWhenEnabled(t *testing.
 			if len(intervals) != before+1 || intervals[before] != imagePinLayersCheckTick {
 				t.Errorf("%s asked for tickers at %v, want one at the %v check cadence", tt.name, intervals[before:], imagePinLayersCheckTick)
 			}
-			stop()
-			d.imagePinLayersCycles.Wait()
+			d.stopImagePinLayersPatrol(stop)
 			if stops != 1 {
 				t.Errorf("%s ran the stop func %d times, want the ticker stopped once", tt.name, stops)
 			}
@@ -770,10 +769,11 @@ func TestImagePinDurabilityTheStartedTickerInstallsTheProductionRun(t *testing.T
 	on := imagePinDurabilityTestDaemon(t, town, io.Discard)
 	on.clock = clockwork.NewFakeClockAt(now)
 	on.newImagePinLayersTicker = newTicker
-	if _, stop := on.startImagePinLayersTicker(); stop == nil {
+	_, stop := on.startImagePinLayersTicker()
+	if stop == nil {
 		t.Fatal("the enabled patrol started no ticker")
 	}
-	on.imagePinLayersCycles.Wait()
+	on.stopImagePinLayersPatrol(stop)
 	if on.imagePinLayersRun == nil {
 		t.Error("the started ticker left no run seam, so a tick would run nothing")
 	}
@@ -803,8 +803,7 @@ func TestImagePinLayersStartCheckRunsOnce(t *testing.T) {
 	if stop == nil {
 		t.Fatal("the enabled patrol started no ticker")
 	}
-	defer stop()
-	d.imagePinLayersCycles.Wait()
+	d.stopImagePinLayersPatrol(stop)
 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("starting the ticker called the run seam %d times, want the day's check once", got)
