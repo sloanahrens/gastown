@@ -3003,9 +3003,12 @@ func (d *Daemon) Run() (err error) {
 		case <-patrolScanChan:
 			// Patrol scan tick — restarts confirmed-dead polecats through the
 			// supervisor, closes orphaned work molecules and reports stranded
-			// work, per rig, on its own goroutine (gt-4k3fj.6).
+			// work, per rig, on its own goroutine (gt-4k3fj.6). The tick runs
+			// only when the persisted last run says it is due, so a daemon
+			// restart cannot push the next pass back by a full interval
+			// (gt-76xdws).
 			if !d.isShutdownInProgress() {
-				d.triggerPatrolScan()
+				d.triggerPatrolScanIfDue()
 			}
 
 		case <-landingInfraChan:
