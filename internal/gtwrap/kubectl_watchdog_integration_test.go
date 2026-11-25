@@ -57,7 +57,7 @@ func TestIntegrationWatchdogKillsOnStdinEOF(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatalf("close the script's stdin: %v", err)
 	}
-	waitErr := cmd.Wait()
+	waitErr := waitWithin(ctx, cmd)
 	if err := ctx.Err(); err != nil {
 		t.Fatalf("the script did not exit within %s after its stdin closed: %v", integrationWatchdogLimit, err)
 	}
@@ -103,7 +103,7 @@ func TestIntegrationWatchdogPassesTheChildStatus(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatalf("Start = %v", err)
 			}
-			waitErr := cmd.Wait()
+			waitErr := waitWithin(ctx, cmd)
 			if err := ctx.Err(); err != nil {
 				t.Fatalf("the script waited for its stdin: it did not exit within %s: %v", integrationWatchdogLimit, err)
 			}
@@ -140,6 +140,20 @@ func readChildPid(ctx context.Context, r io.Reader) (int, error) {
 		return res.pid, res.err
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	}
+}
+
+// waitWithin waits for cmd to exit and returns its wait error. The wait runs beside
+// the context: a command still running at the ceiling is killed by its
+// CommandContext, and the caller reads the context's error rather than blocking.
+func waitWithin(ctx context.Context, cmd *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
