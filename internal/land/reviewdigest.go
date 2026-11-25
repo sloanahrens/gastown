@@ -10,7 +10,10 @@ import "slices"
 // arrive with the next beads. Whether the installed om takes a flag is a
 // run-time question its help probe answers, so a run whose probe refuses
 // --threshold or --round carries fewer flags, and Verdict.Flags records the set
-// it ran with.
+// it ran with. Any mismatch against the list a stored review ran with is a
+// reuse miss, not a near match: the key's InputDigest covers these flags
+// (gt-0lys4u), and ReuseMiss compares every key field for equality, so a flag
+// over-claimed here costs a review and never reuses a stale verdict.
 func ExpectedReviewFlags(in ReviewInput, bar float64) []string {
 	flags := []string{"-C", "--base", "--head", "--out"}
 	if in.BeadID != "" {
