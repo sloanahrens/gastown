@@ -507,6 +507,59 @@ func TestOmStatsIgnoresTheHeadField(t *testing.T) {
 	}
 }
 
+// TestOmStatsRecordParse: the report's record parser keeps the review log's
+// author kind and branch as plain strings, and a line written before the log
+// carried them reads both empty. Neither decides which lines count, so a
+// malformed line is still skipped and counted (gt-qgvgep).
+func TestOmStatsRecordParse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		line       string
+		wantKind   string
+		wantBranch string
+		wantRecs   int
+		wantSkip   int
+	}{
+		{
+			name:       "a line naming its author kind and branch",
+			line:       `{"bead":"gt-a","rig":"gastown","attempt":1,"score":0.4,"verdict":"request_changes","branch":"crew/bird/gt-a","author_kind":"crew","findings":2,"at":"2026-10-16T10:00:00Z"}`,
+			wantKind:   "crew",
+			wantBranch: "crew/bird/gt-a",
+			wantRecs:   1,
+		},
+		{
+			name:     "a line written before the author fields",
+			line:     `{"bead":"gt-old","rig":"gastown","attempt":1,"score":0.4,"verdict":"request_changes","agent":"opus","findings":2,"at":"2026-10-20T12:00:00Z"}`,
+			wantRecs: 1,
+		},
+		{
+			name:     "a malformed line",
+			line:     `{"bead":"gt-torn"`,
+			wantRecs: 0,
+			wantSkip: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recs, skipped, err := readOmStatsRecords(strings.NewReader(tc.line + "\n"))
+			if err != nil {
+				t.Fatalf("readOmStatsRecords: %v", err)
+			}
+			if len(recs) != tc.wantRecs || skipped != tc.wantSkip {
+				t.Fatalf("read %d records, skipped %d; want %d and %d", len(recs), skipped, tc.wantRecs, tc.wantSkip)
+			}
+			if len(recs) == 0 {
+				return
+			}
+			if got := recs[0]; got.authorKind != tc.wantKind || got.branch != tc.wantBranch {
+				t.Errorf("author kind, branch = %q, %q; want %q, %q", got.authorKind, got.branch, tc.wantKind, tc.wantBranch)
+			}
+		})
+	}
+}
+
 // TestOmStatsWindowUsesTheSequenceAwareParser reads the container's UTC region:
 // parsed as local time those lines sit six hours in the future, and the window
 // must count them at the instant they happened. A line with no stamp of its
