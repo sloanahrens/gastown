@@ -7,6 +7,9 @@ package daemon
 // with its reason. The Job list is read first and a failure returns before the
 // gate is asked: the gate takes a nil or empty list as no Job active, so an error
 // dropped into it would let the prune run during a roll (gt-pxb6jq).
+// The disk-maintenance mode is read last: a mode the patrol cannot act on
+// refuses the prune with its reason, so a config built in code cannot silently
+// become an apply.
 
 import (
 	"errors"
