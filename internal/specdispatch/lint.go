@@ -322,7 +322,7 @@ type LintOptions struct {
 	// be made, so it passes.
 	RequireEstimate bool
 	// FollowupMaxAddedLines and FollowupMaxFiles are the added-line and file
-	// budget the done gate holds a bead labelled om-followup to. The caller
+	// budget the done gate holds a bead labeled om-followup to. The caller
 	// fills them from the bead's rig merge-queue settings the way gt done reads
 	// them; zero or below takes land's defaults, 80 added lines and 3 files.
 	// A bead without the label is not judged on them (gt-hixqtv).
