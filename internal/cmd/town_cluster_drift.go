@@ -418,10 +418,37 @@ func readLiveObject(ctx context.Context, d clusterDriftDeps, resource, namespace
 	return live, false, nil
 }
 
-// compareSbxClusterDrift is the gt-sbx compare over the recorded render flags;
-// this first commit holds only its tests.
-var _ sbx.Inputs
-
+// compareSbxClusterDrift renders the gt-sbx set from the sandbox paths the
+// recorded render flags name, then compares it with the sandbox cluster through
+// the read runner d.execVia builds. Its status is the compare's: nil for a
+// cluster in step, a drift error for a difference, an unreadable one for a read
+// that failed.
 func compareSbxClusterDrift(ctx context.Context, d clusterDriftDeps) error {
-	return nil
+	root, err := d.render.findTown()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace, so the recorded render flags cannot be read: %w", err)
+	}
+	recordPath := renderFlagsPathIn(root)
+	flags, ok, err := loadRenderFlags(recordPath)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("no live render has recorded its flags at %s, so there is no gt-sbx render to compare the sandbox cluster with; nothing was read", recordPath)
+	}
+	runner, err := clusterKubectl(d.execVia, "", d.kubectl)
+	if err != nil {
+		return err
+	}
+	set, err := d.render.renderSbx(ctx, sbx.Inputs{
+		Read:             d.render.readFile,
+		Run:              sbxHelmRunner(d.render.runHelm, ""),
+		AgentSandboxPath: flags.sbxManifests,
+		ChartDir:         flags.sbxChart,
+		ValuesPath:       flags.sbxValues,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot render the gt-sbx desired set to compare: %w", err)
+	}
+	return compareSbxDrift(ctx, d, set, runner)
 }
