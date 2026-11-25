@@ -2672,15 +2672,21 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
-	// deterministic replacement for the witness LLM's patrol.
+	// deterministic replacement for the witness LLM's patrol. Same check-cadence
+	// shape as jsonl_git_backup (gt-21gba2): the ticker wakes on the shorter
+	// check cadence while the select case runs a scan only when the persisted
+	// last run says it is due (gt-gd6qh6), so a scan due at a restart is picked
+	// up soon after it instead of a full interval late, and the shorter cadence
+	// does not run scans more often than the run interval.
 	var patrolScanTicker *time.Ticker
 	var patrolScanChan <-chan time.Time
 	if d.isPatrolActive("patrol_scan") {
 		interval := patrolScanInterval(pc)
-		patrolScanTicker = time.NewTicker(interval)
+		patrolScanTicker = time.NewTicker(patrolScanCheckTick(pc))
 		patrolScanChan = patrolScanTicker.C
 		defer patrolScanTicker.Stop()
-		d.logger.Printf("Patrol scan ticker started (interval %v)", interval)
+		d.logger.Printf("Patrol scan ticker started (check every %v, run interval %v)",
+			patrolScanCheckTick(pc), interval)
 	}
 
 	// Start the resource sampler ticker if enabled (default on, gt-qqwey). Its
