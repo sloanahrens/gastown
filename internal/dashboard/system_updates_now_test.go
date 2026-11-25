@@ -122,6 +122,47 @@ func TestSystemUpdatesNowCarriesTheSweepSHA(t *testing.T) {
 	}
 }
 
+// The Now block's sweep carries the cycle's whole tier list, the tiers the runner
+// has finished and the wall time each took, so the panel names the tier running
+// now and the ones still waiting. A running record that carries none gives none.
+func TestSystemUpdatesNowCarriesTheSweepTiersAndWalls(t *testing.T) {
+	t.Parallel()
+
+	stages := []TierSweepRunStage{{Tier: "unit", Verdict: "GREEN", Passed: 10, Secs: 3.5}}
+	walls := map[string]float64{"unit": 3.5}
+	cases := []struct {
+		name    string
+		running *TierSweepRun
+	}{
+		{
+			name:    "tiers, finished tiers and walls",
+			running: &TierSweepRun{Rig: "gastown", Tier: "integration", ElapsedSec: 42, Tiers: []string{"unit", "integration"}, Stages: stages, Walls: walls},
+		},
+		{
+			name:    "none of them",
+			running: &TierSweepRun{Rig: "gastown", Tier: "integration", ElapsedSec: 42},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewHub(Config{
+				TierSweep:     func() *TierSweep { return &TierSweep{Running: tt.running} },
+				SystemUpdates: func() *SystemUpdates { return NewSystemUpdates(nil, nil, nil, false) },
+			})
+			h.pollSystemUpdates()
+
+			got := h.State().SystemUpdates
+			require.NotNil(t, got, "the section is in the feed once its reader reports")
+			require.NotNil(t, got.Now, "the running sweep is not named in the Now block")
+			require.NotNil(t, got.Now.Sweep, "the running sweep is not named in the Now block")
+			assert.Equal(t, tt.running.Tiers, got.Now.Sweep.Tiers, "the cycle's tiers were not carried into the Now block")
+			assert.Equal(t, tt.running.Stages, got.Now.Sweep.Stages, "the finished tiers were not carried into the Now block")
+			assert.Equal(t, tt.running.Walls, got.Now.Sweep.Walls, "the tier walls were not carried into the Now block")
+		})
+	}
+}
+
 // The Now block is built from the readers at the section's own poll, not from
 // what an older poll left in the feed: a roll that ended before the section poll
 // is not named as running.
