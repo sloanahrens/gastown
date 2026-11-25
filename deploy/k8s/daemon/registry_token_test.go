@@ -29,7 +29,14 @@ func TestRegistryTokenMountAbsent(t *testing.T) {
 
 	t.Run("a rehearsal", func(t *testing.T) {
 		t.Parallel()
-		m := mustBuild(t, rehearsalValues(t))
+		v := rehearsalValues(t)
+		// The shipped manifest no longer names the entry, so name it here: the
+		// rehearsal must drop an entry that is named, not merely lack one.
+		v.Secrets = append(v.Secrets, templates.SecretFile{Name: RegistryTokenFile, Mode: "0600"})
+		if !filesHold(v.Secrets, RegistryTokenFile) {
+			t.Fatalf("Values.Secrets does not hold %s, so the rehearsal test would pass without exercising the drop", RegistryTokenFile)
+		}
+		m := mustBuild(t, v)
 		assertNoRegistryToken(t, m)
 	})
 }
