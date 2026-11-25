@@ -59,7 +59,11 @@ func namedClassSplit(byClass map[string]int) map[string]int {
 //
 //   - Claim: a seat another sling reserved before its session existed (claim).
 //   - DeadHooked: a seat whose polecat crashed with its bead still hooked (deadHooked).
-//   - DeadHookedByClass: the DeadHooked seats split by their class (deadClass, as deadSeatClass names it), not a flag of its own.
+//   - DeadHookedByClass: the DeadHooked seats split by class so the tick line
+//     and the roster can tell a seat waiting for its landing from a done seat
+//     holding an unpushed commit from a crashed seat, which one dead-hooked
+//     count cannot (deadClass, as deadSeatClass names it). It is not a flag of
+//     its own.
 //   - Landing: a seat mid-landing, whose polecat ran gt done and whose bead the landing worker has not closed (landing).
 //   - Sessions: a seat carrying none of Claim, DeadHooked or Landing.
 //
