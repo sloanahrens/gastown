@@ -245,8 +245,10 @@ const bdGatewayMaxConcurrentDefault = 8
 // bdGatewayMaxConcurrentPerPod is the --max-concurrent one pod runs and whether the
 // command carries it. Values.BdGatewayMaxConcurrent is the total across the replicas,
 // so each pod takes the total divided by the replica count, rounded up; a zero total
-// is the gateway's own default of 16 in total, so two pods take 8 each. The flag is
-// left off only when it would repeat that default, one pod with no total set, so an
+// is the gateway's own default of 8 in total, so two pods take 4 each. The 8 is under
+// the about 12 simultaneous new connections the VM-to-host path admits, since each bd
+// process opens its own (gt-w0iqhu). The flag is left off only when it would repeat
+// that default, one pod with no total set, so an
 // unset cap renders what the gateway applied before replicas were configurable. A
 // replica count below one reads as one so the division cannot fail; bdGatewayReplicas
 // never returns zero.
