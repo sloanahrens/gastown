@@ -573,8 +573,11 @@ func TestGasTownLocalExcludePatterns_IncludesBeads(t *testing.T) {
 }
 
 // TestLocalExcludePatterns pins the exported list the sandbox seat clone will
-// write: its contents, that it is what EnsureLocalExcludePatterns writes into
-// a fresh clone, and that a caller cannot change a later call's slice.
+// write: its contents, that it is what the exclude writer puts in a fresh
+// clone, and that a caller cannot change a later call's slice. The exported
+// EnsureLocalExcludePatterns wrapper itself is driven by
+// TestIntegrationEnsureLocalExcludePatternsWritesLocalExcludePatterns: it
+// opens a real git, and this tier refuses git.
 func TestLocalExcludePatterns(t *testing.T) {
 	t.Parallel()
 
@@ -588,7 +591,7 @@ func TestLocalExcludePatterns(t *testing.T) {
 		}
 	})
 
-	t.Run("equals what EnsureLocalExcludePatterns writes", func(t *testing.T) {
+	t.Run("equals what the exclude writer puts in a fresh clone", func(t *testing.T) {
 		t.Parallel()
 		f := gitfake.New()
 		tmp := t.TempDir()
@@ -598,9 +601,9 @@ func TestLocalExcludePatterns(t *testing.T) {
 		clone := filepath.Join(tmp, "clone")
 		f.Clone(t, origin, clone)
 
-		// Through the In form so the test stays in-process; it is the same
-		// write path as EnsureLocalExcludePatterns, whose only other work is
-		// opening a real git.
+		// Through the In form, the entry point the crew, polecat and doctor
+		// callers use, so the test stays in-process. The exported
+		// EnsureLocalExcludePatterns wrapper is driven by its integration test.
 		if err := EnsureLocalExcludePatternsIn(clone, f.Open(clone)); err != nil {
 			t.Fatalf("EnsureLocalExcludePatternsIn() error = %v", err)
 		}
