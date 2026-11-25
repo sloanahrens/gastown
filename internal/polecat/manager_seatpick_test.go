@@ -57,6 +57,53 @@ func TestLockSeatPickOnAnotherRigDoesNotWait(t *testing.T) {
 	other()
 }
 
+// The seam runs once per LockSeatPick, after the lock directory exists and
+// before the flock is taken, so the lock is still free when it runs (gt-mn6lr9).
+func TestLockSeatPickSeamRunsOnceBeforeTheLockIsTaken(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, newWorld(), nil, newNoDatabaseDB())
+	var calls int
+	var freeAtCall bool
+	var probeErr error
+	m.seatPickAttempt = func() {
+		calls++
+		freeAtCall, probeErr = seatPickLockFree(rigPath)
+	}
+	unlock, err := m.LockSeatPick()
+	if err != nil {
+		t.Fatalf("LockSeatPick: %v", err)
+	}
+	defer unlock()
+	if calls != 1 {
+		t.Fatalf("seam ran %d times, want 1", calls)
+	}
+	if probeErr != nil {
+		t.Fatalf("probing the seat-pick lock from the seam: %v", probeErr)
+	}
+	if !freeAtCall {
+		t.Fatal("seam ran while the seat-pick lock was already held")
+	}
+}
+
+// With no seam set, LockSeatPick takes the lock and releases it as before (gt-mn6lr9).
+func TestLockSeatPickSeamNilTakesTheLock(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, newWorld(), nil, newNoDatabaseDB())
+	unlock, err := m.LockSeatPick()
+	if err != nil {
+		t.Fatalf("LockSeatPick with no seam: %v", err)
+	}
+	if free, err := seatPickLockFree(rigPath); err != nil || free {
+		t.Fatalf("lock not held after LockSeatPick: free %v, err %v", free, err)
+	}
+	unlock()
+	if free, err := seatPickLockFree(rigPath); err != nil || !free {
+		t.Fatalf("lock not free after unlock: free %v, err %v", free, err)
+	}
+}
+
 // LockSeatPick refuses, rather than returning a lock it does not hold, when the lock cannot be opened.
 func TestLockSeatPickRefusesWhenTheLockCannotBeTaken(t *testing.T) {
 	t.Parallel()
