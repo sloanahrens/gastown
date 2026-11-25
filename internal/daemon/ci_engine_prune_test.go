@@ -988,18 +988,31 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 // between the list and the inspect makes docker exit 1 after printing the JSON of
 // the objects it did inspect. The list program prints that array and hands its
 // stderr back; the run uses the listing when every stderr line is docker's
-// missing-object report, so an object that went no longer makes the pass prune
-// nothing.
+// missing-object report or du's vanished-file report, so an object that went no
+// longer makes the pass prune nothing. The docker 29.9.3 lines were captured by the
+// overseer on 2026-11-24 18:24 CST on the CI engine; the older forms are kept.
 func TestCIEngineListToleratesAGoneObject(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"container", "image", "volume"} {
-		t.Run(kind, func(t *testing.T) {
+	for name, stderr := range map[string]string{
+		"older container form": "Error: No such container: gone",
+		"older image form":     "Error: No such image: gone",
+		"older volume form":    "Error: No such volume: gone",
+		// docker 29.9.3, container inspect.
+		"docker 29.9.3 container": "Error response from daemon: No such container: gone",
+		// docker 29.9.3, image inspect.
+		"docker 29.9.3 image": "Error response from daemon: No such image: gone",
+		// docker 29.9.3, volume inspect.
+		"docker 29.9.3 volume": "Error response from daemon: get gone: no such volume",
+		// du's line from the 18:04 failure on the CI engine (hq-wisp-i1jsk).
+		"du vanished file": "du: /var/lib/docker/x/fs/tmp/go-build1: No such file or directory",
+	} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			listing := engineFailureListing(t)
 			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
 			replaceEngineReply(f, "ci-engine-list", cliReply{
 				stdout: string(listing),
-				stderr: "Error: No such " + kind + ": gone",
+				stderr: stderr,
 				code:   1,
 			})
 			f.tick()
@@ -1007,11 +1020,11 @@ func TestCIEngineListToleratesAGoneObject(t *testing.T) {
 			// The listed objects reached the plan: every kind was removed.
 			for _, verb := range []string{"rm", "rmi", "volume rm"} {
 				if n := len(engineDockerExecs(f, verb)); n != 1 {
-					t.Errorf("the listing with a gone %s ran docker %s %d time(s), want once", kind, verb, n)
+					t.Errorf("the listing with %q ran docker %s %d time(s), want once", stderr, verb, n)
 				}
 			}
 			if items := enginePruneItems(f); len(items) != 0 {
-				t.Errorf("a listing with a gone %s raised %d failure item(s):\n%s", kind, len(items), f.logs.String())
+				t.Errorf("a listing with %q raised %d failure item(s):\n%s", stderr, len(items), f.logs.String())
 			}
 		})
 	}
@@ -1036,6 +1049,13 @@ func TestCIEngineListFailsOnOtherInspectStderr(t *testing.T) {
 		},
 		"a gone line with another stderr line": {
 			stderr:      "Error: No such container: gone\nError response from daemon: conflict",
+			withListing: true,
+			wantInLog:   "the listing exec into the " + ciCacheContainer + " container failed",
+		},
+		// docker 29.9.3's gone line beside its conflict line: the gone line alone would
+		// be tolerated, the conflict line makes the whole listing a failure.
+		"a docker 29.9.3 gone line with a conflict line": {
+			stderr:      "Error response from daemon: No such container: gone\nError response from daemon: conflict",
 			withListing: true,
 			wantInLog:   "the listing exec into the " + ciCacheContainer + " container failed",
 		},

@@ -1479,10 +1479,6 @@ func (d *Daemon) ciEngineBuildCacheReclaimable(ctx context.Context, kubeconfig, 
 // ciEngineFailure skips them, and err decides which lines those are. An empty stderr is
 // not this case, so a bare non-zero status with no diagnosis stays a failure.
 func ciEngineDuVanished(err error, stderr []byte) bool {
-	const (
-		duPrefix = "du: "
-		vanished = ": No such file or directory"
-	)
 	lines := 0
 	for _, raw := range strings.Split(string(stderr), "\n") {
 		if ciEngineKubectlLine(err, raw) {
@@ -1492,7 +1488,7 @@ func ciEngineDuVanished(err error, stderr []byte) bool {
 		if line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, duPrefix) || !strings.HasSuffix(line, vanished) {
+		if !ciEngineDuVanishedLine(line) {
 			return false
 		}
 		lines++
@@ -1500,21 +1496,33 @@ func ciEngineDuVanished(err error, stderr []byte) bool {
 	return lines > 0
 }
 
+// ciEngineDuVanishedLine reports whether one stderr line is du's report of a file that
+// vanished while it walked: du's program prefix and the errno text.
+func ciEngineDuVanishedLine(line string) bool {
+	const (
+		duPrefix = "du: "
+		vanished = ": No such file or directory"
+	)
+	return strings.HasPrefix(line, duPrefix) && strings.HasSuffix(line, vanished)
+}
+
 // ciEngineGoneLine is docker's report that an object it was asked to inspect is
 // gone: the line it prints for one id that CI removed between the list and the
-// inspect. The object word is docker's own, and the message names the id.
-var ciEngineGoneLine = regexp.MustCompile(`(?i)^Error: No such (container|image|volume): \S`)
+// inspect. The forms are the older `Error: No such <kind>: <id>` and docker 29.9.3's
+// `Error response from daemon: No such <container|image>: <id>` and
+// `Error response from daemon: get <name>: no such volume`. The message names the id.
+var ciEngineGoneLine = regexp.MustCompile(`(?i)^(?:Error: No such (?:container|image|volume): \S|Error response from daemon: No such (?:container|image): \S|Error response from daemon: get \S+: no such volume$)`)
 
-// ciEngineStderrOnlyGone reports whether a failed list program's stderr is only
-// docker's report of objects gone between the list and the inspect: at least one
-// such line, and no line of any other kind. The report is docker's own, so the
-// line must carry docker's missing-object wording; any other line is a fault, and
-// a bare non-zero status with no report stays a failure. kubectl's own lines are
-// skipped, as ciEngineFailure and ciEngineDuVanished skip them, since kubectl
-// relays the program's stderr on the same stream and reports the status on its
-// own line; err decides which lines are kubectl's. An empty stderr is not this
-// case.
-func ciEngineStderrOnlyGone(err error, stderr []byte) bool {
+// ciEngineStderrOnlyVanished reports whether a failed list program's stderr is only
+// reports of objects or files that vanished between the list and the read: at least
+// one such line, and no line of any other kind. A docker line must carry docker's
+// missing-object wording (ciEngineGoneLine) and a du line must be du's vanished-file
+// report (ciEngineDuVanishedLine); any other line is a fault, and a bare non-zero
+// status with no report stays a failure. kubectl's own lines are skipped, as
+// ciEngineFailure and ciEngineDuVanished skip them, since kubectl relays the
+// program's stderr on the same stream and reports the status on its own line; err
+// decides which lines are kubectl's. An empty stderr is not this case.
+func ciEngineStderrOnlyVanished(err error, stderr []byte) bool {
 	lines := 0
 	for _, raw := range strings.Split(string(stderr), "\n") {
 		if ciEngineKubectlLine(err, raw) {
@@ -1524,7 +1532,7 @@ func ciEngineStderrOnlyGone(err error, stderr []byte) bool {
 		if line == "" {
 			continue
 		}
-		if !ciEngineGoneLine.MatchString(line) {
+		if !ciEngineGoneLine.MatchString(line) && !ciEngineDuVanishedLine(line) {
 			return false
 		}
 		lines++
@@ -1534,10 +1542,11 @@ func ciEngineStderrOnlyGone(err error, stderr []byte) bool {
 
 // ciEngineListFromExec reads the list program's output. A run that exited zero
 // must print a listing. A run that exited non-zero still gives its listing when
-// every stderr line is docker's missing-object report and the arrays it did print
-// parse: docker inspected the objects it found, and only the ids that went are
-// missing. Any other stderr line, or no listing, is the exec's failure, named the
-// way every engine exec's is: its exit status and the first bounded stderr line.
+// every stderr line is docker's missing-object report or du's vanished-file report
+// and the arrays it did print parse: docker inspected the objects it found, and only
+// the ids that went are missing. Any other stderr line, or no listing, is the exec's
+// failure, named the way every engine exec's is: its exit status and the first
+// bounded stderr line.
 func ciEngineListFromExec(stdout, stderr []byte, runErr error) (ciEngineListing, error) {
 	listing, parseErr := parseCIEngineListing(stdout)
 	if runErr == nil {
@@ -1546,7 +1555,7 @@ func ciEngineListFromExec(stdout, stderr []byte, runErr error) (ciEngineListing,
 		}
 		return listing, nil
 	}
-	if parseErr != nil || !ciEngineStderrOnlyGone(runErr, stderr) {
+	if parseErr != nil || !ciEngineStderrOnlyVanished(runErr, stderr) {
 		return ciEngineListing{}, fmt.Errorf("the listing exec into the %s container failed (%s)", ciCacheContainer, ciEngineFailure(runErr, stderr))
 	}
 	return listing, nil
