@@ -114,6 +114,26 @@ func TestMainRuleFields(t *testing.T) {
 	}
 }
 
+// TestClosedMainRuleBody checks that the closed main rule is the main rule with an empty merge
+// whitelist and no other field changed: enable_merge_whitelist stays true, so nobody is named to merge.
+func TestClosedMainRuleBody(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	want := MainRule(opts)
+	want["merge_whitelist_usernames"] = []string{}
+	got, err := json.Marshal(ClosedMainRule(opts))
+	if err != nil {
+		t.Fatalf("encode closed rule: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode want: %v", err)
+	}
+	if string(got) != string(wantJSON) {
+		t.Fatalf("ClosedMainRule body = %s, want %s", got, wantJSON)
+	}
+}
+
 // TestEnsureRuleCreateConvergeAndIdempotent checks that an absent rule is created with one
 // POST, a drifted rule is patched with one PATCH, and a rule that already matches sends no
 // write. A second run after either write sends nothing more.
