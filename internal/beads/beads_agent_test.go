@@ -890,6 +890,66 @@ func TestActingAsKeepsOptions(t *testing.T) {
 	}
 }
 
+// TestForAgentBeadKeepsOptions: ForAgentBead derives a copy that still makes
+// its bd calls through the runner and counts them with the observer its input
+// was built with, including when that input is an ActingAs copy. Agent-bead
+// helpers route a client through ForAgentBead, and a crew submission builds
+// its client through ActingAs, so a copy that dropped either option would
+// send the submission's calls to the real bd, or count none of them, without
+// anything failing.
+func TestForAgentBeadKeepsOptions(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var ran [][]string
+	observed := 0
+	runner := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) == 2 && args[0] == "--allow-stale" && args[1] == "version" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		mu.Lock()
+		ran = append(ran, append([]string(nil), args...))
+		mu.Unlock()
+		return []byte(`{"id":"gt-abc","title":"the bead"}`), nil, nil
+	}
+	observe := func() { mu.Lock(); observed++; mu.Unlock() }
+
+	// The bin names a file that does not exist: the injected runner keeps
+	// every call in-process, and a copy that dropped it fails here instead of
+	// running the host's bd.
+	workDir := t.TempDir()
+	base := NewWithBeadsDir(workDir, filepath.Join(workDir, ".beads"),
+		WithActor("base-actor"),
+		WithBin(filepath.Join(workDir, "absent-bd")),
+		WithRunner(runner),
+		WithCallObserver(observe))
+	as := base.ActingAs("step-actor")
+	fb := as.ForAgentBead()
+	if fb == as {
+		t.Fatal("ForAgentBead returned the wrapper itself, so the rows below prove nothing")
+	}
+
+	for _, c := range []struct {
+		name string
+		b    *Beads
+	}{{"ActingAs copy", as}, {"ForAgentBead copy", fb}} {
+		before := observed
+		if _, err := c.b.Create(CreateOptions{Title: "the bead"}); err != nil {
+			t.Fatalf("Create through the %s: %v", c.name, err)
+		}
+		if got := observed - before; got != 1 {
+			t.Errorf("Create through the %s fired the observer %d times, want 1", c.name, got)
+		}
+	}
+
+	if len(ran) != 2 {
+		t.Fatalf("the runner recorded %d calls, want one per copy: %q", len(ran), ran)
+	}
+	if !slices.Contains(ran[1], "--actor=step-actor") {
+		t.Errorf("ForAgentBead copy argv = %q, want the actor derived through ActingAs", ran[1])
+	}
+}
+
 // TestGetAgentBead_DualScopePrefersRigLocal verifies that when the bead exists
 // rig-local, reads resolve there without needing the town fallback.
 func TestGetAgentBead_DualScopePrefersRigLocal(t *testing.T) {
