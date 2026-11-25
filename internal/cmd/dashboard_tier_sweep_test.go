@@ -178,6 +178,55 @@ func TestTierSweepRunningShellOnlyCycle(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunningWalls: the running cycle carries the wall times its stage
+// lines have reported, shell included, so the page can net them off the running
+// tier's timer (gt-1u0eq7). A cycle no stage line has reported carries none.
+// Mutation: leave Walls unset in running() and the shell rows go red.
+func TestTierSweepRunningWalls(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 16, 0, 0, 0, time.Local)
+	t.Run("a started cycle carries its finished shell wall", func(t *testing.T) {
+		t.Parallel()
+		r, _ := tierSweepTestReader(t,
+			"2026/10/04 16:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+			"2026/10/04 16:05:00 tier_sweep: gastown: shell finished (exit 0) in 5m0s; last lines:",
+		)
+		ts := r.read(start.Add(6 * time.Minute))
+		if ts.Running == nil {
+			t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+		}
+		if got := ts.Running.Walls; len(got) != 1 || got["shell"] != 300 {
+			t.Errorf("running walls = %v, want shell 300 alone", got)
+		}
+	})
+	t.Run("a started cycle with no stage line carries none", func(t *testing.T) {
+		t.Parallel()
+		r, _ := tierSweepTestReader(t,
+			"2026/10/04 16:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		)
+		ts := r.read(start.Add(time.Minute))
+		if ts.Running == nil {
+			t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+		}
+		if got := ts.Running.Walls; len(got) != 0 {
+			t.Errorf("running walls = %v, want none", got)
+		}
+	})
+	t.Run("a shell finish with no start line carries its shell wall", func(t *testing.T) {
+		t.Parallel()
+		r, _ := tierSweepTestReader(t,
+			"2026/10/04 16:05:00 tier_sweep: gastown: shell finished (exit 0) in 5m0s; last lines:",
+		)
+		ts := r.read(start.Add(6 * time.Minute))
+		if ts.Running == nil {
+			t.Fatalf("a finished shell stage with no swept line is a sweep in flight: %+v", ts)
+		}
+		if got := ts.Running.Walls; len(got) != 1 || got["shell"] != 300 {
+			t.Errorf("running walls = %v, want shell 300 alone", got)
+		}
+	})
+}
+
 // A swept line closes the cycle its start opened: the rig reads idle, and the
 // sweep appears in the rows.
 func TestTierSweepSweptClosesTheStartedCycle(t *testing.T) {
