@@ -102,6 +102,19 @@ const (
 	configKey        = "config.yml"
 	containerNetwork = "host"
 
+	// jobTmpfs is the job container's temp directory: a tmpfs in memory, so a
+	// test's t.TempDir creates and removes files without writing them through
+	// the container's overlay filesystem. Go writes and executes its test
+	// binaries under TMPDIR, and docker mounts a tmpfs noexec unless told
+	// otherwise, so exec is part of the option. 2g is 2.2 times the 0.89 GB peak
+	// measured on 2026-11-24 at origin/main 260505e6c for a full
+	// go test ./... -p 8 with TMPDIR on a scratch directory; the gate workflow
+	// sets neither TMPDIR nor GOTMPDIR, so Go and every test already use /tmp. A
+	// tmpfs counts against the job container's memory as a cap, not a
+	// reservation. A job that fills it fails its own write with "no space left on
+	// device" (ENOSPC), which reads as the tmpfs and not as a product failure.
+	jobTmpfs = "/tmp:exec,size=2g"
+
 	// dindInsecureRegistry is the engine argument that lets a job pull from
 	// Forgejo's package registry: it listens on the HTTP port 3000, which no
 	// certificate covers.
@@ -558,11 +571,12 @@ func wholeCPUs(cpu string) (int, error) {
 
 // containerOptions is what every job container is started with: the forgejo
 // alias its own /etc/hosts does not inherit from the pod, an init process that
-// reaps the job's orphans, the three cache volumes, and the engine's client
+// reaps the job's orphans, a tmpfs at /tmp that keeps a test's temp files out of
+// the overlay filesystem, the three cache volumes, and the engine's client
 // certificates the job steps read through DOCKER_CERT_PATH.
 func containerOptions(v Values) string {
-	parts := make([]string, 0, 3+2*len(cacheMounts))
-	parts = append(parts, "--add-host="+ForgejoHostname+":"+v.ForgejoHostIP, "--init")
+	parts := make([]string, 0, 5+2*len(cacheMounts))
+	parts = append(parts, "--add-host="+ForgejoHostname+":"+v.ForgejoHostIP, "--init", "--tmpfs", jobTmpfs)
 	for _, mount := range cacheMounts {
 		parts = append(parts, "-v", mount.volume+":"+mount.path)
 	}

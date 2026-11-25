@@ -650,6 +650,75 @@ func TestJobOptionsInitAndCerts(t *testing.T) {
 	}
 }
 
+// TestJobOptionsTmpfs drives the job container's temp directory: a tmpfs at
+// /tmp, so a test's t.TempDir creates and removes files without writing them
+// through the container's overlay filesystem. It must carry exec, because Go
+// writes and runs its test binaries under TMPDIR (which is /tmp) and docker
+// mounts a tmpfs noexec unless told otherwise.
+func TestJobOptionsTmpfs(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	mounts := optionTmpfs(t, doc.Container.Options)
+	if len(mounts) != 1 {
+		t.Fatalf("container.options %q carries %d --tmpfs pairs, want exactly one", doc.Container.Options, len(mounts))
+	}
+	path, opts, ok := strings.Cut(mounts[0], ":")
+	if !ok {
+		t.Fatalf("--tmpfs %q carries no settings, want exec and a size among them", mounts[0])
+	}
+	if path != "/tmp" {
+		t.Errorf("--tmpfs path = %q, want /tmp", path)
+	}
+	settings := strings.Split(opts, ",")
+	if !slices.Contains(settings, "exec") {
+		t.Errorf("--tmpfs %q does not carry exec, so go test cannot execute a test binary under /tmp", mounts[0])
+	}
+	if gib := tmpfsGiB(t, settings); gib < 1 || gib > 4 {
+		t.Errorf("--tmpfs size = %d GiB, want a whole number between 1 and 4", gib)
+	}
+}
+
+// optionTmpfs returns the value after each --tmpfs in options, the way docker
+// takes a tmpfs as a path and settings in one argument.
+func optionTmpfs(t *testing.T, options string) []string {
+	t.Helper()
+	fields := strings.Fields(options)
+	var values []string
+	for i, field := range fields {
+		if field != "--tmpfs" {
+			continue
+		}
+		if i+1 >= len(fields) {
+			t.Fatalf("container.options %q ends with a --tmpfs and no value", options)
+		}
+		values = append(values, fields[i+1])
+	}
+	return values
+}
+
+// tmpfsGiB returns the mount's size as a whole number of GiB, reading docker's
+// suffix the way it does: "2g" is 2. It fails when no setting carries a size.
+func tmpfsGiB(t *testing.T, settings []string) int {
+	t.Helper()
+	for _, setting := range settings {
+		value, ok := strings.CutPrefix(setting, "size=")
+		if !ok {
+			continue
+		}
+		digits, ok := strings.CutSuffix(value, "g")
+		if !ok {
+			t.Fatalf("size %q is not a whole number of GiB", value)
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			t.Fatalf("size %q is not a whole number of GiB: %v", value, err)
+		}
+		return n
+	}
+	t.Fatalf("settings %q carry no size", settings)
+	return 0
+}
+
 // roundedUpCPUs is the whole cores a CPU quantity rounds up to, read independently
 // of the renderer: "6500m" is 6.5 cores.
 func roundedUpCPUs(t *testing.T, cpu string) int {
