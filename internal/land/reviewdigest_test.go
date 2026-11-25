@@ -76,3 +76,48 @@ func TestVerdictReuseExpectedFlags(t *testing.T) {
 		})
 	}
 }
+
+// TestVerdictReuseExpectedFlagsPriorFindings pins --prior-findings: the flag is
+// present when the input carries the previous round's findings and absent when
+// only the other conditional inputs are set, so a condition gated on the wrong
+// field fails its rows (gt-qsi4qi).
+func TestVerdictReuseExpectedFlagsPriorFindings(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	// input builds the landing's input for a bead on its first round, the way
+	// the landing builds one; a row then sets only the inputs it names.
+	input := func() ReviewInput {
+		issue := &beads.Issue{ID: "gt-abc"}
+		return BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+	}
+	baseline := []string{"--base", "--bead", "--head", "--out", "-C"}
+	with := func(extra ...string) []string {
+		want := append(slices.Clone(baseline), extra...)
+		slices.Sort(want)
+		return want
+	}
+	prior := []Finding{{ID: "gt-abc.1", Severity: "major", Path: "internal/land/x.go", Line: 9, Title: "x"}}
+	for _, tc := range []struct {
+		name  string
+		prior []Finding
+		round int
+		bar   float64
+		want  []string
+	}{
+		{"no prior findings, nothing else", nil, 0, 0, baseline},
+		{"only prior findings", prior, 0, 0, with("--prior-findings")},
+		{"only the other inputs", nil, 1, 0.7, with("--round", "--threshold")},
+		{"prior findings and the other inputs", prior, 1, 0.7, with("--prior-findings", "--round", "--threshold")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := input()
+			in.PriorFindings = tc.prior
+			in.Round = tc.round
+			got := ExpectedReviewFlags(in, tc.bar)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ExpectedReviewFlags() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
