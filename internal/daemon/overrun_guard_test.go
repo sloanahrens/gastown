@@ -1640,3 +1640,65 @@ func TestOverrunSeatFor_ReadsTheSubmissionAndJudgesAnUnreadableBeadOnTheKeptRead
 		t.Errorf("no alarm for the unreadable bead:\n%s", buf.String())
 	}
 }
+
+// addBlindTestSeat gives the daemon a second live polecat holding bead, with
+// its record and session, so the guard's listing finds it.
+func addBlindTestSeat(t *testing.T, d *Daemon, name, bead string) {
+	t.Helper()
+	seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), name)
+	if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
+		r.WorkBead = bead
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tm, ok := d.tmux.(*fakeTmux)
+	if !ok {
+		t.Fatalf("daemon tmux is %T, want the fake", d.tmux)
+	}
+	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), name), "node", testEpoch)
+}
+
+// TestOverrunGuardBlindCount: each guard tick counts the seats it dropped
+// because their bead could not be read and no usable kept read stood in, and a
+// tick that drops none counts zero; another caller of overrunWorkingSeats (the
+// overseer report) leaves the guard's count alone (gt-tqv1dk). Nothing reads
+// the count yet: its alarm is the next bead of the split, gt-35d8ae.
+func TestOverrunGuardBlindCount(t *testing.T) {
+	t.Parallel()
+	d, buf, _ := newOverrunSeatDaemon(t)
+	addBlindTestSeat(t, d, "furiosa", "gt-bbb22")
+	writeRigsJSON(t, d.config.TownRoot, []string{"gastown"})
+	for _, name := range []string{"capable", "furiosa"} {
+		if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "gastown", "polecats", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	d.openWorkBeads = unreadableBeads{}.open
+	seats, err := d.overrunTickSeats()
+	if err != nil {
+		t.Fatalf("overrunTickSeats: %v", err)
+	}
+	if len(seats) != 0 {
+		t.Fatalf("judged %d seats with no readable bead and no kept read:\n%s", len(seats), buf.String())
+	}
+	if got := d.overrunBlindSeats(); got != 2 {
+		t.Errorf("blind seats after a tick with two unreadable beads = %d, want 2:\n%s", got, buf.String())
+	}
+
+	// Another caller walks the same seats, here with the beads readable again:
+	// it must not store its own count over the guard's.
+	d.openWorkBeads = workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}, "gt-bbb22": {ID: "gt-bbb22"}}.open
+	d.overrunWorkingSeats()
+	if got := d.overrunBlindSeats(); got != 2 {
+		t.Errorf("blind seats after another caller's walk = %d, want the guard's 2 left intact", got)
+	}
+
+	if _, err := d.overrunTickSeats(); err != nil {
+		t.Fatalf("overrunTickSeats: %v", err)
+	}
+	if got := d.overrunBlindSeats(); got != 0 {
+		t.Errorf("blind seats after a tick where every bead reads = %d, want 0", got)
+	}
+}
