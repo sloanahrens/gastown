@@ -34,13 +34,21 @@ type verifyAnswer struct {
 
 // fakeVerifyProbes answers each probe with what a test set, recording calls.
 // The daemon answers its script in order and repeats the last answer once the
-// script runs out; healthLines is a health script read the same way.
+// script runs out; healthLines and healthAnswers are health scripts read the
+// same way, and an entry of healthAnswers may carry an error.
 type fakeVerifyProbes struct {
 	gt, image, health                             string
 	errGT, errImage, errHealth                    error
 	daemon                                        []verifyAnswer
 	healthLines                                   []string
+	healthAnswers                                 []verifyHealthAnswer
 	daemonCalls, gtCalls, imageCalls, healthCalls int
+}
+
+// verifyHealthAnswer is one Health result: a line or an error.
+type verifyHealthAnswer struct {
+	line string
+	err  error
 }
 
 func (p *fakeVerifyProbes) GTVersion(context.Context) (string, error) {
@@ -65,6 +73,10 @@ func (p *fakeVerifyProbes) ImageLabel(context.Context) (string, error) {
 
 func (p *fakeVerifyProbes) Health(context.Context) (string, error) {
 	p.healthCalls++
+	if len(p.healthAnswers) > 0 {
+		answer := p.healthAnswers[min(p.healthCalls-1, len(p.healthAnswers)-1)]
+		return answer.line, answer.err
+	}
 	if len(p.healthLines) > 0 {
 		return p.healthLines[min(p.healthCalls-1, len(p.healthLines)-1)], nil
 	}
@@ -481,6 +493,37 @@ func TestVerifyWithSettleDoesNotRetryAProbeError(t *testing.T) {
 	}
 	if len(*sleeps) != 0 {
 		t.Errorf("slept %d times, want none: a probe error is not waited on", len(*sleeps))
+	}
+}
+
+// TestVerifyWithSettleStopsOnAReReadError: a health probe that answers the
+// first read with a settling line and a later read with an error ends the
+// settle at that error: the check carries the error text, and neither a
+// further sleep nor a further read follows.
+func TestVerifyWithSettleStopsOnAReReadError(t *testing.T) {
+	t.Parallel()
+	const errText = "gt status --line failed"
+	probes := greenProbes()
+	probes.healthAnswers = []verifyHealthAnswer{
+		{line: verifyTestSettling},
+		{err: errors.New(errText)},
+	}
+	clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+	sleep, sleeps := verifySleeps(clock)
+
+	checks, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, verifyTestPoll)
+	if err != nil {
+		t.Fatalf("VerifyWithSettle: %v", err)
+	}
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != errText {
+		t.Errorf("health detail = %q, want the re-read's error text %q", health.Detail, errText)
+	}
+	if probes.healthCalls != 2 {
+		t.Errorf("read the health line %d times, want 2: the first read and one re-read", probes.healthCalls)
+	}
+	if len(*sleeps) != 1 {
+		t.Errorf("slept %d times, want 1: the failed re-read ends the settle", len(*sleeps))
 	}
 }
 
