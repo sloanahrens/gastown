@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -111,13 +112,22 @@ type planDocument struct {
 	} `yaml:"metadata"`
 }
 
+// planRevisionIsNumber reports whether a revision annotation is a positive whole
+// number. The controller stamps 1, 2, 3 and so on; zero, a sign, a fraction or any
+// other text is not a revision the plan can trust.
+func planRevisionIsNumber(revision string) bool {
+	n, err := strconv.ParseUint(revision, 10, 64)
+	return err == nil && n > 0
+}
+
 // planLiveVersions returns the revision and the resourceVersion the cluster holds
 // for the Deployment a rendered file names, read with one get through the drift
 // command's read, as the annotation and the metadata read. A file that is not a
 // Deployment reads nothing. A Deployment the cluster does not hold is a normal
 // plan: it returns absent with no revision and no resourceVersion. A Deployment
-// that is held with no revision annotation or no resourceVersion, or a get that
-// failed, is an error: an empty value would let a later apply pass as unchanged.
+// that is held with no revision annotation, a revision that is not a positive
+// whole number, or no resourceVersion, or a get that failed, is an error: an empty
+// or unreadable value would let a later apply pass as unchanged.
 func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (string, string, bool, error) {
 	var doc planDocument
 	if err := yaml.Unmarshal(body, &doc); err != nil {
@@ -139,6 +149,9 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 	revision, _ := annotations[planRevisionAnnotation].(string)
 	if revision == "" {
 		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, doc.Metadata.Namespace)
+	}
+	if !planRevisionIsNumber(revision) {
+		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has revision %q, which is not a positive whole number, so no plan was written", resource, doc.Metadata.Namespace, revision)
 	}
 	resourceVersion, _ := metadata["resourceVersion"].(string)
 	if resourceVersion == "" {
