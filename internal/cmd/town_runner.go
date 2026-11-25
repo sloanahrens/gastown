@@ -380,15 +380,21 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return runTownRunnerRoll(runnerRollDepsFor(townRoot, cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
+	return runTownRunnerRoll(runnerRollDepsFor(townRoot, productionPodExec, cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
 }
 
 // runnerRollDepsFor is the production roll's deps. The applier is wired to the
 // control cluster's checked-in values, the renderer and kubectl. The hold store
-// and the two wait reads are not wired here, so a real roll refuses before it
-// takes the hold until another bead supplies them; --dry-run needs neither.
-func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
+// is the daemon pod's, run through exec (the roll passes productionPodExec, and a
+// test passes a fake so the store this returns is the one it drives); a store that cannot be
+// built is carried in err, which the roll reports before it takes the hold. The
+// landing read and the runs read are not wired here yet, so a real roll still
+// refuses before it takes the hold; --dry-run needs none of them.
+func runnerRollDepsFor(townRoot string, exec podExec, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
+	store, storeErr := podHoldStore(townRoot, exec)
 	return runnerRollDeps{
+		err:      storeErr,
+		store:    store,
 		holdPath: filepath.Join(townRoot, runnerroll.LandingHoldName),
 		clock:    wallRollClock{},
 		now:      time.Now,
@@ -407,6 +413,12 @@ func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait, ro
 		dryRun:      dryRun,
 		out:         out,
 	}
+}
+
+// podHoldStore is the landing hold's store in the daemon pod, each operation run
+// through exec as a pod command.
+func podHoldStore(townRoot string, exec podExec) (runnerroll.HoldStore, error) {
+	return runnerroll.NewPodStore(townRoot, newPodRunner(exec))
 }
 
 // wallRollClock is the production clock for the waits: the wall clock, and a
