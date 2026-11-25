@@ -223,6 +223,7 @@ var guardTriggers = []struct {
 	{"internal/config", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/doctor", "M\x00internal/daemon/patrol.go\x00"},
 	// Any non-test Go file is the os.Getwd ratchet's input (gt-s6icgn).
 	{"internal/callercwd", "M\x00internal/cmd/seat_ship_cmd.go\x00"},
 	// TestHoldSitesAreTheOnlyReaders walks every non-test Go file under
@@ -801,6 +802,71 @@ func TestGuardSelectsRemovals(t *testing.T) {
 // deleted file can leave an allowlist entry that no longer calls os.Getwd. A
 // change under internal/cmd that adds os.Getwd passed presubmit and failed the
 // landing's ratchet (gt-s6icgn).
+// TestGuardSelectsDoctor: TestRoleOverridesHaveNoReader walks every non-test Go
+// file in the repo root and stats go.mod, so the row's judge is true for each
+// of them and selects the test; a changed test file or a docs file selects none
+// (gt-kd1ich).
+func TestGuardSelectsDoctor(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	const roles = "TestRoleOverridesHaveNoReader"
+
+	tests := []struct {
+		name string
+		diff string
+		want bool // whether TestRoleOverridesHaveNoReader is selected
+	}{
+		{
+			"a changed non-test Go file under internal selects the roles guard",
+			"M\x00internal/daemon/patrol.go\x00",
+			true,
+		},
+		{
+			"a changed non-test Go file outside internal selects the roles guard",
+			"M\x00cmd/gt/main.go\x00",
+			true,
+		},
+		{
+			"a removed Go file selects the roles guard",
+			"D\x00internal/cmd/gone.go\x00",
+			true,
+		},
+		{
+			"a changed go.mod selects the roles guard",
+			"M\x00go.mod\x00",
+			true,
+		},
+		{
+			"a changed test file selects no roles guard",
+			"M\x00internal/cmd/seat_ship_cmd_test.go\x00",
+			false,
+		},
+		{
+			"a changed docs file selects no roles guard",
+			"M\x00docs/reference.md\x00",
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			var got []string
+			for _, s := range sel {
+				if s.Package == "internal/doctor" {
+					got = s.Tests
+				}
+			}
+			if selected := contains(got, roles); selected != tt.want {
+				t.Errorf("GuardSelects(%q) internal/doctor tests = %v; %s selected = %v, want %v", tt.diff, got, roles, selected, tt.want)
+			}
+		})
+	}
+}
+
 func TestGuardSelectsGetwd(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return true }
