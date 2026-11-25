@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1016,6 +1017,189 @@ func TestPatrolScanLeavesAKeptRecordWithoutLandingFactsAlone(t *testing.T) {
 	}
 }
 
+// keptNoSandboxPatrol is the gateway-silent kept record of the fixture seat with
+// no sandbox record: its agent bead is seeded so the seat's own gateway (gw1 in
+// endSettings) resolves, and every gateway ask is recorded with the gateway it
+// went to. up is the answer per gateway: a gateway not listed has no sandbox.
+func keptNoSandboxPatrol(t *testing.T, up map[string]bool) (*keptSeatPatrol, *[]string, *strings.Builder) {
+	t.Helper()
+	p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+	p.seedAgent()
+	var asked []string
+	p.host.sandboxExists = func(gateway, name string) (bool, error) {
+		asked = append(asked, gateway)
+		return up[gateway], nil
+	}
+	p.host.recordKeptSeat(endRig, endPolecat, keptSeatLanding(), gatewayNoAnswerKeepReason(p.clk.Now()))
+	logs := &strings.Builder{}
+	p.host.d.logger = log.New(logs, "", 0)
+	return p, &asked, logs
+}
+
+func keptSeatCount(t *testing.T, town string) int {
+	t.Helper()
+	seats, bad, err := KeptSandboxSeats(town)
+	if err != nil || len(bad) != 0 {
+		t.Fatalf("kept seats: bad %v, %v", bad, err)
+	}
+	return len(seats)
+}
+
+// A gateway-silent kept record whose seat has no sandbox record and whose
+// sandbox the seat's own gateway no longer has is dropped (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxIsDropped(t *testing.T) {
+	t.Parallel()
+	p, asked, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 0 {
+		t.Errorf("kept seats = %d, want the record dropped", n)
+	}
+	if want := []string{"gw1"}; !slices.Equal(*asked, want) {
+		t.Errorf("gateways asked = %v, want the seat's own gateway %v", *asked, want)
+	}
+	if want := "patrol_scan: kept record of " + endRig + "/" + endPolecat + " dropped: its sandbox record is gone and the gateway has no sandbox"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// A sandbox that lives on the seat's own gateway, which is not the default one,
+// keeps its record: the default gateway has none, and asking it would read the
+// seat as gone and delete the record wrongly (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxOnItsOwnGatewayStays(t *testing.T) {
+	t.Parallel()
+	p, asked, _ := keptNoSandboxPatrol(t, map[string]bool{"gw1": true})
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 1 {
+		t.Errorf("kept seats = %d, want the record kept: the sandbox exists on gw1", n)
+	}
+	if want := []string{"gw1"}; !slices.Equal(*asked, want) {
+		t.Errorf("gateways asked = %v, want only %v, never the default gateway", *asked, want)
+	}
+}
+
+// A gateway that errors keeps the record and says why (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxGatewayErrorStays(t *testing.T) {
+	t.Parallel()
+	p, _, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	p.host.sandboxExists = func(string, string) (bool, error) { return false, errors.New("gateway down") }
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 1 {
+		t.Errorf("kept seats = %d, want the record kept", n)
+	}
+	if want := "kept record of " + endRig + "/" + endPolecat + " kept: cannot ask gateway \"gw1\" whether it has its sandbox: gateway down"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// A kept record whose seat's agent cannot be resolved to a gateway is kept and
+// no gateway is asked (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxUnknownGatewayStays(t *testing.T) {
+	t.Parallel()
+	p, asked, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	p.host.agentRecord = func(string, string) (string, error) { return "", nil }
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 1 {
+		t.Errorf("kept seats = %d, want the record kept", n)
+	}
+	if len(*asked) != 0 {
+		t.Errorf("gateways asked = %v, want none", *asked)
+	}
+	if want := "kept record of " + endRig + "/" + endPolecat + " kept: its agent is not a sandbox seat"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// A kept record the pass cannot remove is kept, and the failure is logged. The
+// removal fails through the seam, not file permissions, which a root process
+// ignores (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxUnremovableStays(t *testing.T) {
+	t.Parallel()
+	p, _, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	p.host.removeKeptSeat = func(string, string, string) error { return errors.New("injected removal failure") }
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 1 {
+		t.Errorf("kept seats = %d, want the record kept", n)
+	}
+	if want := "kept record of " + endRig + "/" + endPolecat + " kept: its record cannot be removed: injected removal failure"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// The record walk's and the drop pass's gateway questions together never exceed
+// the tick's one budget (twice the records plus a reserve): under a budget of
+// one record that is three questions. The walk spends two on its one
+// record, the reserve is the drop pass's, and the pass stops with a log line when
+// it is spent; the next tick continues after the seat asked last, so the second
+// kept record is reached (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxAsksShareOneBudget(t *testing.T) {
+	t.Parallel()
+	p, asked, logs := keptNoSandboxPatrol(t, map[string]bool{"gw1": true})
+	rec := keptSandboxSeatRecord{Bead: "gt-other", Reason: gatewayNoAnswerKeepReason(p.clk.Now()), Since: p.clk.Now()}
+	if err := writeKeptSandboxSeat(p.town, endRig, "basalt", rec); err != nil {
+		t.Fatal(err)
+	}
+	// One registry record the gateway still has: the walk asks it twice.
+	if err := session.WriteSandboxRecord(p.town, session.SandboxRecord{Session: "gt-w00", Gateway: "gw1", CreatedAt: p.clk.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	p.host.sandboxStatus = func(gateway, name string) (sandbox.Status, error) {
+		*asked = append(*asked, "phase@"+gateway)
+		return readySandboxStatus(gateway, name)
+	}
+	p.host.sandboxEndedMarker = func(string, string) (bool, error) { return false, nil }
+	p.host.sandboxRecordBudget = 1
+	p.host.agentRecord = func(string, string) (string, error) { return endSandboxIn, nil }
+
+	const total = 1*gatewayAsksPerTickFactor + 1
+	p.host.patrolScanSandboxRecords()
+	if len(*asked) != total {
+		t.Fatalf("tick 1 asked the gateway %d times %v, want exactly the tick's budget of %d", len(*asked), *asked, total)
+	}
+	if want := "kept-record drop pass stopped at the tick's gateway budget; the rest wait"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+	before := len(*asked)
+	p.host.patrolScanSandboxRecords()
+	if got := len(*asked) - before; got > total {
+		t.Errorf("tick 2 asked %d times, want at most %d", got, total)
+	}
+	if got := strings.Count(logs.String(), "kept-record drop pass stopped at the tick's gateway budget"); got != 1 {
+		t.Errorf("the budget stop was logged %d times over two ticks that both stopped at it, want once:\n%s", got, logs.String())
+	}
+}
+
+// A seat whose gateway cannot be resolved keeps its record, asks no gateway and
+// logs one line; the same keep on the next tick is not logged again, and a
+// changed reason is (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxUnresolvedSeatLogsOncePerReason(t *testing.T) {
+	t.Parallel()
+	p, asked, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	p.host.agentRecord = func(string, string) (string, error) { return "", errors.New("agent bead unreadable") }
+	p.host.patrolScanSandboxRecords()
+	p.host.patrolScanSandboxRecords()
+
+	if n := keptSeatCount(t, p.town); n != 1 {
+		t.Errorf("kept seats = %d, want the record kept", n)
+	}
+	if len(*asked) != 0 {
+		t.Errorf("gateways asked = %v, want none", *asked)
+	}
+	want := "kept record of " + endRig + "/" + endPolecat + " kept: cannot resolve its gateway: reading the agent bead: agent bead unreadable"
+	if got := strings.Count(logs.String(), want); got != 1 {
+		t.Errorf("the keep was logged %d times over two ticks, want once:\n%s", got, logs.String())
+	}
+	p.host.agentRecord = func(string, string) (string, error) { return "", errors.New("another reason") }
+	p.host.patrolScanSandboxRecords()
+	if !strings.Contains(logs.String(), "reading the agent bead: another reason") {
+		t.Errorf("a changed reason was not logged:\n%s", logs.String())
+	}
+}
+
 // The patrol offers a seat's end only once it has removed the sandbox's record
 // and can read the landing facts from the kept record: a removal that fails and
 // a kept record that cannot be read each leave the keep as it is (gt-cz5tdz).
@@ -1325,5 +1509,84 @@ func TestSandboxSeatEndCompletionsAskOutsideTheTickBudget(t *testing.T) {
 	}
 	if want := 2 * walkAsks; gatewayAsks != want {
 		t.Errorf("the tick asked the gateway %d questions, want %d: the walk's and the seat ends the walk completed", gatewayAsks, want)
+	}
+}
+
+// A completion's seat-end questions are outside the budget: a walk record the
+// gateway no longer has is removed with one question, the completion that
+// follows asks its own, and the budget has counted only the walk's. The tick's
+// gateway questions are at most the budget plus four per checked record
+// (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxCompletionIsOutsideTheBudget(t *testing.T) {
+	t.Parallel()
+	p, asked, _ := keptNoSandboxPatrol(t, map[string]bool{})
+	p.registryRecord(t) // the seat's sandbox record, whose sandbox the gateway no longer has
+	p.host.sandboxRecordBudget = 1
+
+	p.host.patrolScanSandboxRecords()
+
+	const budget = 1*gatewayAsksPerTickFactor + 1
+	const completionMost = 4
+	if p.host.asks.asked != 1 {
+		t.Errorf("the budget counted %d questions, want 1: only the walk's existence question", p.host.asks.asked)
+	}
+	if len(*asked) < 2 {
+		t.Errorf("gateway questions = %v, want the walk's and the completion's", *asked)
+	}
+	if len(*asked) > budget+completionMost*1 {
+		t.Errorf("gateway questions = %d, want at most %d: the budget plus four per checked record", len(*asked), budget+completionMost)
+	}
+}
+
+// A sandbox record that a sling writes between the drop pass's first read and
+// the seat lock keeps the kept record: the walk decides that seat now (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxSlingRaceKeepsTheRecord(t *testing.T) {
+	t.Parallel()
+	p, _, _ := keptNoSandboxPatrol(t, map[string]bool{})
+	reads := 0
+	p.host.sandboxRecordRead = func(string, string) (session.SandboxRecord, bool, error) {
+		reads++
+		if reads == 1 {
+			return session.SandboxRecord{}, false, nil // absent at the outer read
+		}
+		return session.SandboxRecord{Session: "written-by-the-sling"}, true, nil // present under the lock
+	}
+	removed := 0
+	p.host.removeKeptSeat = func(string, string, string) error { removed++; return nil }
+	p.host.asks = newGatewayAskBudget(sandboxRecordsPerTick)
+
+	p.host.dropKeptSandboxSeatsWithoutRecord()
+
+	if reads < 2 {
+		t.Fatalf("the sandbox record was read %d times, want a re-read under the lock", reads)
+	}
+	if removed != 0 || keptSeatCount(t, p.town) != 1 {
+		t.Errorf("removed %d, kept seats %d: want the record kept", removed, keptSeatCount(t, p.town))
+	}
+}
+
+// A sandbox record that cannot be re-read under the lock keeps the kept record
+// and is logged once, not on every tick (gt-5lel7f).
+func TestPatrolScanKeptRecordNoSandboxLockedReadErrorLogsOnce(t *testing.T) {
+	t.Parallel()
+	p, _, logs := keptNoSandboxPatrol(t, map[string]bool{})
+	reads := 0
+	p.host.sandboxRecordRead = func(string, string) (session.SandboxRecord, bool, error) {
+		reads++
+		if reads%2 == 1 {
+			return session.SandboxRecord{}, false, nil
+		}
+		return session.SandboxRecord{}, false, errors.New("registry unreadable")
+	}
+	p.host.asks = newGatewayAskBudget(sandboxRecordsPerTick)
+	p.host.dropKeptSandboxSeatsWithoutRecord()
+	p.host.dropKeptSandboxSeatsWithoutRecord()
+
+	if keptSeatCount(t, p.town) != 1 {
+		t.Error("the kept record was removed although its sandbox record could not be re-read")
+	}
+	want := "kept: its sandbox record cannot be re-read: registry unreadable"
+	if got := strings.Count(logs.String(), want); got != 1 {
+		t.Errorf("the keep was logged %d times over two passes, want once:\n%s", got, logs.String())
 	}
 }

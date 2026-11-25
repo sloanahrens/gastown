@@ -427,6 +427,10 @@ type patrolScanHost struct {
 	// removeSandboxRecord is session.CleanupSandboxWith(nil, ...) when nil: a
 	// seam for the unit tier's removal failure.
 	removeSandboxRecord func(townRoot, name string) error
+	// removeKeptSeat is removeKeptSandboxSeat when nil: a test sets it to make a
+	// kept record's removal fail without relying on file permissions (a root
+	// process ignores them).
+	removeKeptSeat func(townRoot, rig, name string) error
 	// removeSandboxSeatDirs is polecat.RemoveSandboxSeatHostDirs when nil: the
 	// step that ends a finished sandbox seat, a seam for the unit tier, which
 	// cannot start git (gt-sefzt). It reports whether any directory was
@@ -478,6 +482,12 @@ type patrolScanHost struct {
 	// (sandboxRecordsPerTick) when zero. A seam so the bound test writes few
 	// records.
 	sandboxRecordBudget int
+	// asks is the tick's one budget of gateway questions, set when the record
+	// pass starts; the record walk and the kept-record drop pass draw on it.
+	asks *gatewayAskBudget
+	// sandboxRecordRead is session.ReadSandboxRecord when nil: a seam so a row can
+	// write a sandbox record between the drop pass's two reads of it.
+	sandboxRecordRead func(townRoot, name string) (session.SandboxRecord, bool, error)
 	// unrecordedLogged is set once the census has listed the polecats that
 	// record no agent. The host lives one tick (patrol_scan.go), so each tick
 	// logs them once however many restarts ask.

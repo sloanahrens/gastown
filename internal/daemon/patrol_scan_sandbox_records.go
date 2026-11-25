@@ -21,7 +21,47 @@ const (
 	sandboxRecordGrace = 5 * time.Minute
 	// sandboxRecordsPerTick bounds the records one tick checks.
 	sandboxRecordsPerTick = 20
+	// gatewayAsksPerTickFactor is how many gateway questions a tick may ask for
+	// each record it may check: the existence question and the phase question.
+	gatewayAsksPerTickFactor = 2
 )
+
+// gatewayAskBudget bounds the gateway questions the record walk and the
+// kept-record drop pass ask in one patrol tick. The walk spends from it as it
+// asks, at most twice per record it checks, and the drop pass takes what is
+// left: the budget is sized as the walk's most plus a reserve, so a busy walk
+// cannot starve the drop pass. A completion (completeKeptSeatEnd) is outside it:
+// it follows a record the walk has just removed, so it cannot wait for a later
+// tick, and its seat end asks the gateway at most four questions (existence,
+// phase, outbox copy, errored-sandbox removal). A tick's gateway questions are
+// therefore at most the budget plus four per checked record.
+type gatewayAskBudget struct {
+	left  int
+	asked int
+}
+
+// newGatewayAskBudget sizes the tick's budget for a walk of at most records
+// records, each of which may ask the gateway twice, plus a reserve of half as
+// many questions that only the drop pass may spend.
+func newGatewayAskBudget(records int) *gatewayAskBudget {
+	return &gatewayAskBudget{left: records*gatewayAsksPerTickFactor + max(1, records/2)}
+}
+
+// spend counts one question the record walk asks.
+func (b *gatewayAskBudget) spend() {
+	b.left--
+	b.asked++
+}
+
+// takeDrop spends one question for the kept-record drop pass, or reports that
+// the tick's budget is gone.
+func (b *gatewayAskBudget) takeDrop() bool {
+	if b.left <= 0 {
+		return false
+	}
+	b.spend()
+	return true
+}
 
 // patrolScanSandboxRecords removes the registry record of every sandbox the
 // gateway no longer has. A sandbox created with --no-keep deletes itself when
@@ -57,35 +97,27 @@ const (
 // a seat whose end is recorded counts the tick in its kept record, whose reason
 // names the time of the last try, and nothing else is recorded for it.
 //
-// At most the budget (sandboxRecordsPerTick) of records is checked per tick,
-// live ones included. A checked record costs one tmux probe, and unless a live
-// session answers, the existence question to the gateway, then the phase
-// question when the sandbox exists: at most two gateway questions. So the walk
-// makes at most the budget in tmux probes and twice the budget in gateway
-// questions, and records the gateway still has cannot starve the ones behind
-// them. A completion (completeKeptSeatEnd) asks the gateway its own questions
-// for the seat end it re-runs, and those are outside the walk's budget: the
-// completion follows a record the walk has already charged, so it takes no
-// other record's place, and it cannot move to a later tick because the pass has
-// just removed the record that named the seat, so no later walk offers that
-// seat again. The walk still checks exactly its budget in records, whatever the
-// completions ask. The walk over the name-sorted records starts after the name
-// the last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks
-// judge consecutive names and every record is judged within ceil(n/budget)
-// ticks, whatever the tick's clock phase. A failed removal is logged and the
-// pass goes on.
+// At most sandboxRecordsPerTick records are checked per tick, live ones
+// included, and each tick continues after the record the last one ended on, so
+// every record is judged within a bounded number of ticks. The walk's questions
+// (at most two per checked record) and those of the kept-record drop pass come
+// out of one per-tick budget (gatewayAskBudget); the questions a completion
+// asks (completeKeptSeatEnd) do not, and are at most four per removed record.
+// A failed removal is logged and the pass goes on.
 //
 // A seat the end kept is only released once its sandbox is gone, and a pass
 // that removes the record has just made that true; no later pass sees the seat
 // again, so this one completes it (gt-cz5tdz). See completeKeptSeatEnd.
 func (h *patrolScanHost) patrolScanSandboxRecords() {
-	names := session.ListSandboxSessions(h.town())
-	if len(names) == 0 {
-		return
-	}
 	budget := h.sandboxRecordBudget
 	if budget <= 0 {
 		budget = sandboxRecordsPerTick
+	}
+	h.asks = newGatewayAskBudget(budget)
+	names := session.ListSandboxSessions(h.town())
+	if len(names) == 0 {
+		h.dropKeptSandboxSeatsWithoutRecord()
+		return
 	}
 	now := h.d.clk().Now()
 	n := len(names)
@@ -114,6 +146,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		if live {
 			continue
 		}
+		h.asks.spend()
 		exists, err := h.sandboxStillExists(rec.Gateway, name)
 		if err != nil {
 			h.countGatewayTry(rec)
@@ -124,6 +157,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			// A gateway that cannot give the phase is silent for this tick too
 			// (gt-7h38pd). A Stopped sandbox cannot answer the ended-marker
 			// question, so it is ended on its phase and seat, not its marker.
+			h.asks.spend()
 			phase, err := h.sandboxPhase(rec.Gateway, name)
 			if err != nil {
 				h.countGatewayTry(rec)
@@ -159,6 +193,120 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		h.d.logger.Printf("patrol_scan: sandbox record %s removed: the gateway has no such sandbox (%s/%s)", name, rec.Rig, rec.Polecat)
 		h.completeKeptSeatEnd(rec)
 	}
+	h.dropKeptSandboxSeatsWithoutRecord()
+}
+
+// dropKeptSandboxSeatsWithoutRecord drops the gateway-silent kept record of a
+// seat whose sandbox record is gone and whose sandbox its own gateway no longer
+// has (gt-5lel7f). A keep for another reason is left, and so is a record whose
+// seat or gateway cannot be resolved or whose gateway does not answer. Its
+// gateway questions come out of the tick's shared budget, and a later tick
+// continues where this one stopped.
+func (h *patrolScanHost) dropKeptSandboxSeatsWithoutRecord() {
+	seats, _, err := KeptSandboxSeats(h.town())
+	if err != nil {
+		h.d.logger.Printf("patrol_scan: the kept-seat records cannot be read, so none is dropped: %v", err)
+		return
+	}
+	cursor := h.d.keptDropCursor
+	n := len(seats)
+	start := sort.Search(n, func(i int) bool { return seats[i].Rig+"/"+seats[i].Name > cursor }) % max(n, 1)
+	h.d.keptDropCursor = ""
+	for i := 0; i < n; i++ {
+		seat := seats[(start+i)%n]
+		if !isGatewayNoAnswerKeep(seat.Reason) {
+			continue
+		}
+		name := h.sessionName(seat.Rig, seat.Name)
+		if _, ok, err := h.readSandboxRecord(name); err != nil || ok {
+			continue
+		}
+		key := seat.Rig + "/" + seat.Name
+		info, sandboxed, err := h.openshellSeat(seat.Rig, seat.Name)
+		if err != nil {
+			h.keptDropLogOnce(key, fmt.Sprintf("patrol_scan: kept record of %s kept: cannot resolve its gateway: %v", key, err))
+			continue
+		}
+		if !sandboxed {
+			h.keptDropLogOnce(key, fmt.Sprintf("patrol_scan: kept record of %s kept: its agent is not a sandbox seat, so its gateway is unknown", key))
+			continue
+		}
+		if !h.asks.takeDrop() {
+			h.keptDropLogOnce(keptDropBudgetKey, "patrol_scan: kept-record drop pass stopped at the tick's gateway budget; the rest wait for the next tick")
+			return
+		}
+		h.d.keptDropCursor = key
+		exists, err := h.sandboxStillExists(info.gateway, name)
+		if err != nil {
+			h.keptDropLogOnce(key, fmt.Sprintf("patrol_scan: kept record of %s kept: cannot ask gateway %q whether it has its sandbox: %v", key, info.gateway, err))
+			continue
+		}
+		if exists {
+			// The keep for the old reason is over, so a later one is logged again.
+			delete(h.d.keptDropLogged, key)
+			continue
+		}
+		err = h.withSeatLock(seat.Rig, seat.Name, func() error {
+			// A sling that wrote the seat's sandbox record since this pass read
+			// it owns the seat again, so the walk decides it.
+			_, ok, err := h.readSandboxRecord(name)
+			if err != nil {
+				return fmt.Errorf("its sandbox record cannot be re-read: %w", err)
+			}
+			if ok {
+				return nil
+			}
+			if err := h.removeKeptSeatRecord(seat.Rig, seat.Name); err != nil {
+				return fmt.Errorf("its record cannot be removed: %w", err)
+			}
+			// The gateway answered, so the seat's silent-gateway count ends with
+			// the record; an alarm left behind would raise the seat on its own.
+			h.d.clearGatewayTally(seat.Rig, seat.Name)
+			delete(h.d.keptDropLogged, key)
+			h.d.logger.Printf("patrol_scan: kept record of %s dropped: its sandbox record is gone and the gateway has no sandbox", key)
+			return nil
+		})
+		if err != nil {
+			h.keptDropLogOnce(key, fmt.Sprintf("patrol_scan: kept record of %s kept: %v", key, err))
+		}
+	}
+	// The pass ran to its end, so the next backlog is logged again.
+	delete(h.d.keptDropLogged, keptDropBudgetKey)
+}
+
+// readSandboxRecord reads a seat's sandbox registry record: session.ReadSandboxRecord
+// when no seam is set.
+func (h *patrolScanHost) readSandboxRecord(name string) (session.SandboxRecord, bool, error) {
+	if h.sandboxRecordRead != nil {
+		return h.sandboxRecordRead(h.town(), name)
+	}
+	return session.ReadSandboxRecord(h.town(), name)
+}
+
+// keptDropBudgetKey is the keptDropLogged key of the budget-stop line, which is
+// not a seat's.
+const keptDropBudgetKey = "\x00budget"
+
+// keptDropLogOnce logs a keep once per record until the reason changes, so a
+// seat that stays unresolved is not logged again every tick.
+func (h *patrolScanHost) keptDropLogOnce(key, msg string) {
+	if h.d.keptDropLogged[key] == msg {
+		return
+	}
+	if h.d.keptDropLogged == nil {
+		h.d.keptDropLogged = map[string]string{}
+	}
+	h.d.keptDropLogged[key] = msg
+	h.d.logger.Print(msg)
+}
+
+// removeKeptSeatRecord removes a seat's kept record: removeKeptSandboxSeat when
+// no seam is set.
+func (h *patrolScanHost) removeKeptSeatRecord(rig, name string) error {
+	if h.removeKeptSeat != nil {
+		return h.removeKeptSeat(h.town(), rig, name)
+	}
+	return removeKeptSandboxSeat(h.town(), rig, name)
 }
 
 // completeKeptSeatEnd offers the end of a seat the end kept once the patrol has
