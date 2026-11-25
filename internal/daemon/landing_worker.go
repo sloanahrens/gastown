@@ -1024,7 +1024,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 func (d *Daemon) controlClusterExec() func(context.Context, ...string) (string, error) {
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, d.diskMaintenanceSeams().getenv)
 	return func(ctx context.Context, args ...string) (string, error) {
-		kubeContext, ok, err := ciCacheTrimContext(d.patrolConfig)
+		kubeContext, ok, err := ciCacheTrimContext(d.patrol())
 		if err != nil || !ok {
 			return "", errors.Join(err, errors.New("no kubernetes runner names a control cluster"))
 		}

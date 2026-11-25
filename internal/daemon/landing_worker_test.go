@@ -2429,3 +2429,31 @@ func TestFollowupBeadsAppend(t *testing.T) {
 		})
 	}
 }
+
+// TestLandingWorkerControlClusterExecReadsThroughPatrol: the control-cluster
+// seam reads the patrol config the way every other reader does, through
+// patrol(), so it never races the heartbeat's reload that swaps the field under
+// patrolMu. Run under -race, a direct read of the field is a DATA RACE here.
+func TestLandingWorkerControlClusterExecReadsThroughPatrol(t *testing.T) {
+	t.Parallel()
+	cli := newFakeCLIFor(func(cliCall) cliReply { return cliReply{stderr: "refused\n", code: 1} })
+	d := nodeDiskDaemon(t, cli, nodeDiskPatrol(ciCacheTestContext))
+	exec := d.controlClusterExec()
+
+	const rounds = 200
+	swapped := make(chan struct{})
+	go func() {
+		defer close(swapped)
+		for i := 0; i < rounds; i++ {
+			d.patrolMu.Lock()
+			d.patrolConfig = nodeDiskPatrol(ciCacheTestContext)
+			d.patrolMu.Unlock()
+		}
+	}()
+	for i := 0; i < rounds; i++ {
+		if _, err := exec(context.Background(), runnerThrottleArgs...); err == nil {
+			t.Fatal("controlClusterExec: want the failed kubectl's error, got none")
+		}
+	}
+	within(t, 10*time.Second, "the config swapper", swapped)
+}
