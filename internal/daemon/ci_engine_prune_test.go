@@ -534,6 +534,9 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 
 // engineDockerExecs returns the exec calls that ran docker with the given verb words.
 func engineDockerExecs(f *ciCacheFixture, verb string) []cliCall {
+	if verb == "" {
+		panic("engineDockerExecs: an empty verb matches no call; name the verb")
+	}
 	var out []cliCall
 	for _, c := range f.execs() {
 		if strings.Contains(cacheTrimVerb(c.args)+" ", "-- docker "+verb+" ") {
@@ -541,6 +544,32 @@ func engineDockerExecs(f *ciCacheFixture, verb string) []cliCall {
 		}
 	}
 	return out
+}
+
+// TestEngineDockerExecsRefusesAnEmptyVerb: the helper matches "-- docker <verb> ",
+// so an empty verb searches for "-- docker  " (two spaces), which no call contains
+// and an assertion built on it cannot fail. The helper panics on an empty verb,
+// naming itself, and a named verb is not refused.
+func TestEngineDockerExecsRefusesAnEmptyVerb(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+
+	t.Run("an empty verb panics", func(t *testing.T) {
+		defer func() {
+			got := recover()
+			want := "engineDockerExecs: an empty verb matches no call; name the verb"
+			if got != want {
+				t.Fatalf("engineDockerExecs(\"\") panic = %v, want %q", got, want)
+			}
+		}()
+		engineDockerExecs(f, "")
+	})
+
+	t.Run("a named verb is not refused", func(t *testing.T) {
+		if got := engineDockerExecs(f, "rm"); len(got) != 0 {
+			t.Fatalf("engineDockerExecs(f, \"rm\") = %d call(s) on a fixture that ran no docker", len(got))
+		}
+	})
 }
 
 // engineExecIndex returns where in the pass's exec calls the first call whose verb
@@ -609,8 +638,8 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 	f.tick()
 	f.drain()
 
-	// engineDockerExecs matches "-- docker <verb> ", so an empty verb matches no
-	// call at all; each removing verb is named, and the run's own reads are not.
+	// engineDockerExecs refuses an empty verb, so each removing verb is named,
+	// and the run's own reads are not.
 	for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
 		if n := len(engineDockerExecs(f, verb)); n != 0 {
 			t.Fatalf("a dry run ran %d docker %q command(s)", n, verb)
@@ -660,8 +689,8 @@ func TestCIEnginePruneDryRunReportsTheCappedPlan(t *testing.T) {
 	if want := "0 container(s), 0 image(s), 2 volume(s) remain for a later run, over ci_engine_prune_max_per_kind 1"; !strings.Contains(logs, want) {
 		t.Errorf("the dry run does not name the volumes over the cap (%q):\n%s", want, logs)
 	}
-	// engineDockerExecs matches "-- docker <verb> ", so an empty verb matches no
-	// call at all; each removing verb is named, and the run's own reads are not.
+	// engineDockerExecs refuses an empty verb, so each removing verb is named,
+	// and the run's own reads are not.
 	for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
 		if n := len(engineDockerExecs(f, verb)); n != 0 {
 			t.Fatalf("a dry run ran %d docker %q command(s)", n, verb)
@@ -705,10 +734,9 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			t.Errorf("build cache prune = %q, want one run with until=6h", prunes)
 		}
 		// The list program is shell by design; no removal is. engineDockerExecs
-		// matches "-- docker <verb> ", so an empty verb matches no call at all:
-		// each removing verb is named, and each of its calls is checked. Only the
-		// docker argv is a removal; the kubectl exec before it carries its own
-		// "-c", naming the container.
+		// refuses an empty verb, so each removing verb is named, and each of its
+		// calls is checked. Only the docker argv is a removal; the kubectl exec
+		// before it carries its own "-c", naming the container.
 		for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
 			for _, c := range engineDockerExecs(f, verb) {
 				argv := c.args[slices.Index(c.args, "docker"):]
