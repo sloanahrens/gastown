@@ -282,7 +282,7 @@ kubectl apply -f "$HERE/gateway-nodeport.yaml"
 kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
 # The gateway is a control-plane pod, so it runs Guaranteed (gt-cjm8fu). The
 # chart's container names are not fixed here, so every container gets the pair.
-guaranteed_pod openshell statefulset/openshell 250m 768Mi
+guaranteed_pod openshell statefulset/openshell 500m 1Gi
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants
