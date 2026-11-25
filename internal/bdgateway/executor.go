@@ -45,7 +45,7 @@ const (
 	DefaultKillGrace = 2 * time.Second
 
 	// DefaultSlotWait is the wait for a concurrency slot that the options name
-	// no SlotWait for. Nothing reads it yet: the wait itself lands separately.
+	// no SlotWait for.
 	DefaultSlotWait = 5 * time.Second
 
 	// stderrHeadBytes bounds how much of bd's stderr a call keeps for its log
@@ -124,7 +124,7 @@ type Options struct {
 	// means DefaultKillGrace.
 	KillGrace time.Duration
 	// SlotWait is how long a call waits for a concurrency slot; 0 means
-	// DefaultSlotWait. The executor stores it but no call waits on it yet.
+	// DefaultSlotWait.
 	SlotWait time.Duration
 	// runner starts one process. Unexported so only this package's tests can
 	// put a fake behind it.
@@ -306,17 +306,30 @@ func raisePeak(peak *atomic.Uint64, n uint64) {
 }
 
 // acquireSlot takes a concurrency slot for one call. A taken slot records the
-// in-flight peak and returns the release that frees it. A full executor refuses
-// at once with ErrTooManyCalls, counts one refusal, and returns no release.
+// in-flight peak and returns the release that frees it. A free slot is taken at
+// once. A full executor waits for one to free, up to slotWait on the timer the
+// after seam starts, and a wait that ends unanswered counts one refusal and
+// returns ErrTooManyCalls with no release.
 func (e *Executor) acquireSlot(_ context.Context) (release func(), err error) {
 	select {
 	case e.slots <- struct{}{}:
-		e.recordInFlight()
-		return func() { <-e.slots }, nil
+		return e.slotHeld(), nil
 	default:
+	}
+	expired, _ := e.after(e.slotWait)
+	select {
+	case e.slots <- struct{}{}:
+		return e.slotHeld(), nil
+	case <-expired:
 		e.capRefusals.Add(1)
 		return nil, ErrTooManyCalls
 	}
+}
+
+// slotHeld records a taken slot in the in-flight peak and returns its release.
+func (e *Executor) slotHeld() func() {
+	e.recordInFlight()
+	return func() { <-e.slots }
 }
 
 // Exec runs one bd call: it maps the head to the workspace, builds bd's
