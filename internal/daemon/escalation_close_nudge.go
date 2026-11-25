@@ -202,6 +202,11 @@ type escalationCloseSeams struct {
 	holding func(rig, name string) (string, error)
 	// seat reads the seat's session.
 	seat func(rig, name string) (escalationSeat, error)
+	// resume starts a seat whose session has ended, so it does not wait for
+	// patrol_scan's next pass (gt-lmohcl). The pass calls it once for a closed
+	// escalation whose seat holds the bead and has no live session, and settles
+	// the escalation whether or not it acted. nil does nothing.
+	resume func(rig, name string)
 	// nudge types msg into target's pane, a "rig/name" seat address, using
 	// the default wait-idle delivery rather than the target's file queue. The
 	// send gives up after timeout, its share of what is left of the pass's send
@@ -407,7 +412,11 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 		return escalationPending
 	}
 	if !seatState.Live {
-		// An ended seat is resumed by patrol_scan (gt-4hduq), not nudged.
+		// An ended seat is resumed, not nudged. The resume seam starts it now;
+		// patrol_scan's pass resumes it otherwise (gt-4hduq, gt-lmohcl).
+		if s.resume != nil {
+			s.resume(rig, name)
+		}
 		s.logf("escalation_close: %s: %s settled without a nudge: seat session is not live", seat, e.ID)
 		return escalationSettled
 	}
