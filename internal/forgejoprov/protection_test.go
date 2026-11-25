@@ -451,6 +451,61 @@ func TestEnsureClosedRuleCreates(t *testing.T) {
 	}
 }
 
+// TestEnsureClosedRuleKeeps checks that an existing main rule, whatever its form (closed, final
+// or open), is left alone: EnsureClosedRule sends no write and logs that a rule of that name
+// exists and that its form is not read, so a provision resuming after a partial failure does
+// not fail on it and the log does not claim the rule is protected.
+func TestEnsureClosedRuleKeeps(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		seed func(t *testing.T, opts Options) map[string]any
+	}{
+		{
+			name: "closed rule",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				return servedRule(t, ClosedMainRule(opts))
+			},
+		},
+		{
+			name: "final rule",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				return servedRule(t, MainRule(opts))
+			},
+		},
+		{
+			name: "open rule",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				return servedRule(t, map[string]any{"rule_name": opts.MainBranch, "enable_push": true})
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			opts := testOptions()
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
+			seedRule(t, f, protectionRepo, c.seed(t, opts))
+			var logs []string
+			p := userProvisioner(f, false, &logs)
+			if err := p.EnsureClosedRule(protectionRepo, opts); err != nil {
+				t.Fatalf("EnsureClosedRule = %v, want an existing rule left alone", err)
+			}
+			if n := len(f.Writes()); n != 0 {
+				t.Fatalf("an existing rule sent %d writes, want none", n)
+			}
+			joined := strings.Join(logs, "\n")
+			if !strings.Contains(joined, "a rule named main already exists on acme/rig; its form is not read here") {
+				t.Fatalf("logged %q, want a line saying a rule of that name exists and its form is not read", logs)
+			}
+			if strings.Contains(joined, "already set") {
+				t.Fatalf("logged %q, a line that does not read the rule must not say it is set", logs)
+			}
+		})
+	}
+}
+
 // TestEnsureClosedRuleVerifiesTheReply checks that the closed rule's create is judged by its
 // own reply: a complete reply passes, and a 201 whose reply lacks a field of the closed body
 // fails the run instead of passing as set.
@@ -495,12 +550,11 @@ func TestEnsureClosedRuleVerifiesTheReply(t *testing.T) {
 }
 
 // TestEnsureClosedRuleRefusesEachFailingBranch drives every error branch of EnsureClosedRule:
-// a list that fails or is not a rule list, a rule already named for main, and a create whose
-// reply is not 201. Each error is checked not to carry the admin token or the minted secret.
+// a list that fails or is not a rule list, and a create whose reply is not 201. Each error is
+// checked not to carry the admin token or the minted secret.
 func TestEnsureClosedRuleRefusesEachFailingBranch(t *testing.T) {
 	t.Parallel()
 	opts := testOptions()
-	heldList := listJSON(t, servedRule(t, MainRule(opts)))
 	cases := []struct {
 		name      string
 		transport *ruleTransport
@@ -515,11 +569,6 @@ func TestEnsureClosedRuleRefusesEachFailingBranch(t *testing.T) {
 			name:      "list is not a rule list",
 			transport: &ruleTransport{getStatus: http.StatusOK, getBody: echoReply},
 			wantErr:   "reply is not a list of rules",
-		},
-		{
-			name:      "main rule already named",
-			transport: &ruleTransport{getStatus: http.StatusOK, getBody: heldList, writeStatus: http.StatusCreated, writeBody: echoReply},
-			wantErr:   "branch protection main on acme/rig already exists",
 		},
 		{
 			name:      "create answered 200",
