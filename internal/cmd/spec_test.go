@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,7 +281,7 @@ func (f *fakeSpecTown) productionCandidates(t *testing.T, splitOver float64, dry
 		if splitOver > 0 && !dryRun {
 			drop = specSplitStaleDropper(splitOver, false, f.annotateOnce, f.removeLabel)
 		}
-		return specCandidatesDropping(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, drop)
+		return specCandidatesDropping(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, drop, nil)
 	}
 }
 
@@ -5197,30 +5196,28 @@ func TestTickEffSkipNilReadsAllRigs(t *testing.T) {
 	}
 }
 
-// TestTickEffSkipNonNilIsNotConsulted pins the seam of this part: a non-nil skip
-// that answers true for two rigs is accepted and never called, so every rig is
-// still read. gt-svzybb makes it skip the ready read (gt-w2xa0f).
-func TestTickEffSkipNonNilIsNotConsulted(t *testing.T) {
+// TestTickEffSkippedRigsGetNoReadyRead: with skip true for two of four rigs,
+// only the other two get a ready read; the skipped rigs' boards are never asked
+// for (gt-svzybb).
+func TestTickEffSkippedRigsGetNoReadyRead(t *testing.T) {
 	t.Parallel()
-	townRoot, rigs, board, reads := skipSeamRigs(t)
+	townRoot, _, board, reads := skipSeamRigs(t)
 	notDocked := func(string, string) (bool, string) { return false, "" }
-	var asked atomic.Int32
-	skip := func(rig string) bool {
-		asked.Add(1)
-		return rig == "gastown" || rig == "beads"
-	}
+	skip := func(rig string) bool { return rig == "gastown" || rig == "beads" }
 
 	got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, skip)
 	if len(got.Errors) != 0 {
 		t.Fatalf("Errors = %v, want none", got.Errors)
 	}
-	if n := asked.Load(); n != 0 {
-		t.Errorf("skip was called %d time(s), want 0 in this part", n)
-	}
 	read := reads()
-	for name := range rigs {
-		if read[name] != 1 {
-			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", name, read[name], read)
+	for _, rig := range []string{"gastown", "beads"} {
+		if read[rig] != 0 {
+			t.Errorf("skipped rig %s read %d time(s), want no ready read (reads = %v)", rig, read[rig], read)
+		}
+	}
+	for _, rig := range []string{"gorge", "longeye"} {
+		if read[rig] != 1 {
+			t.Errorf("rig %s read %d time(s), want 1 (reads = %v)", rig, read[rig], read)
 		}
 	}
 }
