@@ -215,6 +215,11 @@ type Values struct {
 	// DindResources is the engine sidecar's share; each empty field takes its
 	// default.
 	DindResources Share
+	// DindRequests is the engine sidecar's requests when they must be smaller
+	// than its limits, so the scheduler promises less than the pod may use;
+	// DindResources stays the limit. An empty field takes the limit, and
+	// validate refuses a request larger than it (gt-d6a3mh).
+	DindRequests Share
 }
 
 // Manifests is what Build returns, in the order Render writes them.
@@ -447,6 +452,9 @@ func (v Values) validate() error {
 	if err := validateShare("Values.DindResources", v.DindResources); err != nil {
 		return err
 	}
+	if err := validateDindRequests(v.DindRequests, v.DindResources); err != nil {
+		return err
+	}
 	if !storageRE.MatchString(v.DindStorage) {
 		return fmt.Errorf("the engine claim storage %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 40Gi", v.DindStorage)
 	}
@@ -467,6 +475,69 @@ func validateShare(field string, s Share) error {
 		return fmt.Errorf("%s.Memory %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 1Gi", field, s.Memory)
 	}
 	return nil
+}
+
+// validateDindRequests refuses a Values.DindRequests field larger than the
+// matching Values.DindResources limit. A field the caller leaves empty takes the
+// limit, so it has nothing to compare.
+func validateDindRequests(requests, limits Share) error {
+	if requests.CPU != "" {
+		request, requestOK := cpuCores(requests.CPU)
+		limit, limitOK := cpuCores(limits.CPU)
+		if !requestOK || !limitOK {
+			return fmt.Errorf("Values.DindRequests.CPU %q against the Values.DindResources limit %q: want a positive core count such as 1 or 2.5, or millicores such as 500m", requests.CPU, limits.CPU)
+		}
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("Values.DindRequests.CPU %q is larger than the Values.DindResources limit %q: want a request at most the limit", requests.CPU, limits.CPU)
+		}
+	}
+	if requests.Memory != "" {
+		request, requestOK := memoryBytes(requests.Memory)
+		limit, limitOK := memoryBytes(limits.Memory)
+		if !requestOK || !limitOK {
+			return fmt.Errorf("Values.DindRequests.Memory %q against the Values.DindResources limit %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 1Gi", requests.Memory, limits.Memory)
+		}
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("Values.DindRequests.Memory %q is larger than the Values.DindResources limit %q: want a request at most the limit", requests.Memory, limits.Memory)
+		}
+	}
+	return nil
+}
+
+// cpuCores parses a CPU quantity into exact cores. ok is false when cpu is
+// outside cpuRE, the grammar validateShare accepts.
+func cpuCores(cpu string) (*big.Rat, bool) {
+	if !cpuRE.MatchString(cpu) {
+		return nil, false
+	}
+	cores, ok := new(big.Rat).SetString(strings.TrimSuffix(cpu, "m"))
+	if !ok {
+		return nil, false
+	}
+	if strings.HasSuffix(cpu, "m") {
+		cores.Quo(cores, big.NewRat(1000, 1))
+	}
+	return cores, true
+}
+
+// memoryMultipliers maps each suffix memoryRE accepts to its binary multiplier.
+var memoryMultipliers = map[string]int64{"Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40}
+
+// memoryBytes parses a memory quantity into bytes. ok is false when mem is
+// outside memoryRE, the grammar validateShare accepts.
+func memoryBytes(mem string) (*big.Int, bool) {
+	if !memoryRE.MatchString(mem) {
+		return nil, false
+	}
+	multiplier, known := memoryMultipliers[mem[len(mem)-2:]]
+	if !known {
+		return nil, false
+	}
+	value, ok := new(big.Int).SetString(mem[:len(mem)-2], 10)
+	if !ok {
+		return nil, false
+	}
+	return value.Mul(value, big.NewInt(multiplier)), true
 }
 
 // validDNS1123Label reports whether name is a DNS-1123 label: lowercase
