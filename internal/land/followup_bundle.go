@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // The follow-up bundle's identity: the minor findings for one source file (its cut
@@ -38,9 +36,9 @@ func BundleLabels(day time.Time, key string) []string {
 
 // FindOpenBundle is the follow-up a landing for key on the UTC day of day appends
 // its findings to: the oldest bead with Status "open" that wears both
-// BundleLabels and carries fewer om-fp findings than one worker takes. A bead
-// in progress, hooked or closed is never appended to. A bead whose CreatedAt did
-// not parse is the zero time and so sorts as the oldest; both bundle labels
+// BundleLabels and carries fewer om-fp findings than followupFindingsPerBead. A
+// bead in progress, hooked or closed is never appended to. A bead whose CreatedAt
+// did not parse is the zero time and so sorts as the oldest; both bundle labels
 // still hold it to the same day and key.
 func FindOpenBundle(existing []ExistingFollowup, day time.Time, key string) (ExistingFollowup, bool) {
 	want := BundleLabels(day, key)
@@ -50,7 +48,7 @@ func FindOpenBundle(existing []ExistingFollowup, day time.Time, key string) (Exi
 		if e.Status != "open" {
 			continue
 		}
-		if !hasAllLabels(e.Labels, want) || fingerprintLabelCount(e.Labels) >= specdispatch.MaxAcceptance {
+		if !hasAllLabels(e.Labels, want) || fingerprintLabelCount(e.Labels) >= followupFindingsPerBead {
 			continue
 		}
 		if !found || e.CreatedAt.Before(best.CreatedAt) {
