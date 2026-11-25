@@ -14,7 +14,10 @@ const pairDigestPrefixLength = 12
 // derived for its commit. The daemon and polecat images are always compared;
 // the bd image only when the file names one. It returns nil when each compared
 // image is the derived one, and otherwise names the first differing image with
-// the first 12 hex of both digests.
+// the first 12 hex of both digests. Not every error is a digest mismatch: it
+// also refuses a derived pair with no full commit, a derived image that is
+// empty, a file or derived image that is not a digest reference, and the same
+// digest under another repository, each with its own message.
 func pairMatchesDerived(file, derived imagevalues.Values) error {
 	if !imagevalues.ValidCommit(derived.Commit) {
 		return fmt.Errorf("the derived pair has no full commit, so the file cannot be matched to a derivation")

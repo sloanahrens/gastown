@@ -62,6 +62,8 @@ func TestPairMatchesDerived(t *testing.T) {
 		{name: "a derived pair with no commit is refused", edit: func(_, d *imagevalues.Values) { d.Commit = "" }, want: []string{"no full commit"}},
 		{name: "a file daemon that is a tag is refused", edit: func(f, _ *imagevalues.Values) { f.Daemon = "registry.internal:5000/town/gastown-daemon:latest" }, want: []string{"file's daemon image", "not a digest reference"}},
 		{name: "a file with no polecat image is refused", edit: func(f, _ *imagevalues.Values) { f.Polecat = "" }, want: []string{"file's polecat image", "not a digest reference"}},
+		{name: "a derived daemon that is a tag is refused", edit: func(_, d *imagevalues.Values) { d.Daemon = "registry.internal:5000/town/gastown-daemon:latest" }, want: []string{"derived daemon image", "not a digest reference"}},
+		{name: "a derived bd that is a tag is refused", edit: func(_, d *imagevalues.Values) { d.Bd = "registry.internal:5000/town/gastown-bd:latest" }, want: []string{"derived bd image", "not a digest reference"}},
 		{name: "a derived polecat that is a tag is refused", edit: func(_, d *imagevalues.Values) { d.Polecat = "registry.internal:5000/town/gastown-polecat:latest" }, want: []string{"derived polecat image", "not a digest reference"}},
 		{name: "a file bd that is a tag is refused", edit: func(f, _ *imagevalues.Values) { f.Bd = "registry.internal:5000/town/gastown-bd:latest" }, want: []string{"file's bd image", "not a digest reference"}},
 	}
