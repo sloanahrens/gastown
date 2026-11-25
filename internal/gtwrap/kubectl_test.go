@@ -158,6 +158,13 @@ func testKubectl(shell Shell, note *bytes.Buffer) Kubectl {
 // environment the target sees is the filtered one.
 func kubeCall(t *testing.T, dir string, tty bool) Call {
 	t.Helper()
+	return kubeCallArgs(t, dir, tty, "status", "--line")
+}
+
+// kubeCallArgs is the call the wrapper makes for `gt` with args, through Plan, with
+// the same environment kubeCall gives it.
+func kubeCallArgs(t *testing.T, dir string, tty bool, args ...string) Call {
+	t.Helper()
 	env := []string{
 		"GT_ROLE=polecat",
 		"TERM=xterm-256color",
@@ -166,11 +173,87 @@ func kubeCall(t *testing.T, dir string, tty bool) Call {
 		"HOME=/Users/user",
 		"CLAUDE_CODE_OAUTH_TOKEN=placeholder",
 	}
-	call, err := Plan("gt", []string{"status", "--line"}, env, dir, tty)
+	call, err := Plan("gt", args, env, dir, tty)
 	if err != nil {
 		t.Fatalf("Plan returned an error: %v", err)
 	}
 	return call
+}
+
+// walkUpPrefix is the kubectl argv up to the walk-up script's parameters for a call
+// from dir under the town, with the environment kubeCallArgs plans. The tool's own
+// words follow it.
+func walkUpPrefix(tty bool, dir string) []string {
+	return append(execPrefix(tty),
+		"env", "GT_ROLE=polecat", "TERM=xterm-256color", testDolt,
+		"sh", "-c", podWalkUpScript, "sh",
+		dir, kubePodRoot, dir)
+}
+
+// TestExecArgvFollowCallUsesTheWatchdog: a gt attention call that follows a stream
+// runs under the stdin watchdog, with the tool and its arguments after the
+// watchdog's words, which come after the walk-up script's parameters.
+func TestExecArgvFollowCallUsesTheWatchdog(t *testing.T) {
+	t.Parallel()
+	for _, tty := range []bool{true, false} {
+		t.Run(ttyName(tty), func(t *testing.T) {
+			t.Parallel()
+			f := healthyKube()
+			var note bytes.Buffer
+			dir := kubeTown + "/rig/polecats"
+			exit, err := testKubectl(f, &note).Launch(kubeCallArgs(t, dir, tty, "attention", "-f"))
+			if err != nil || exit != 0 {
+				t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+			}
+			if len(f.attached) != 1 {
+				t.Fatalf("attached %d commands, want 1", len(f.attached))
+			}
+			watchdog, err := watchdogArgv([]string{"gt", "attention", "-f"})
+			if err != nil {
+				t.Fatalf("watchdogArgv error %v; want nil", err)
+			}
+			want := append(walkUpPrefix(tty, dir), watchdog...)
+			if !slices.Equal(f.attached[0], want) {
+				t.Fatalf("attached argv\n got %q\nwant %q", f.attached[0], want)
+			}
+		})
+	}
+}
+
+// TestExecArgvOtherCallsUnchanged: a call that does not follow a stream keeps the
+// argv it had before the watchdog, byte for byte, including a -f that is another
+// flag's value and a follow that is turned off.
+func TestExecArgvOtherCallsUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"a call with no follow flag", []string{"status", "--line"}},
+		{"attention with no follow flag", []string{"attention"}},
+		{"a -f that is the value of --since", []string{"attention", "--since", "-f"}},
+		{"a -f that is the value of --interval", []string{"attention", "--interval", "-f"}},
+		{"a follow turned off", []string{"attention", "-f", "--follow=false"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthyKube()
+			var note bytes.Buffer
+			dir := kubeTown + "/rig/polecats"
+			exit, err := testKubectl(f, &note).Launch(kubeCallArgs(t, dir, false, tc.args...))
+			if err != nil || exit != 0 {
+				t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+			}
+			if len(f.attached) != 1 {
+				t.Fatalf("attached %d commands, want 1", len(f.attached))
+			}
+			want := append(walkUpPrefix(false, dir), append([]string{"gt"}, tc.args...)...)
+			if !slices.Equal(f.attached[0], want) {
+				t.Fatalf("attached argv\n got %q\nwant %q", f.attached[0], want)
+			}
+		})
+	}
 }
 
 // execPrefix is the kubectl argv up to and including the pod, container and `--`

@@ -358,15 +358,21 @@ func watchdogArgv(tool []string) ([]string, error) {
 	if len(tool) == 0 || tool[0] == "" {
 		return nil, errors.New("gtwrap: no command to run under the stdin watchdog")
 	}
+	return watchdogWrap(tool), nil
+}
+
+// watchdogWrap is the watchdogArgv line for a tool that already names a command.
+func watchdogWrap(tool []string) []string {
 	argv := []string{"sh", "-c", watchdogScript, "sh"}
-	return append(argv, tool...), nil
+	return append(argv, tool...)
 }
 
 // execArgv is the kubectl command line that runs call in pod, in dir. The env
 // assignments travel as an env command's arguments, since kubectl exec forwards no
 // environment; the Dolt host is set last so a forwarded value cannot override it.
 // The shell then walks up from dir to the nearest directory the pod has, and runs
-// the tool there.
+// the tool there. A call that follows a stream runs under the stdin watchdog, so
+// the tool ends when kubectl's stdin closes; every other call keeps its argv.
 func (k Kubectl) execArgv(pod string, call Call, dir string) []string {
 	argv := k.kubectlArgv("-n", k.Namespace, "exec")
 	argv = append(argv, stdioFlags(call)...)
@@ -380,7 +386,13 @@ func (k Kubectl) execArgv(pod string, call Call, dir string) []string {
 	}
 	argv = append(argv, doltHostVar+"="+doltHostGateway)
 	argv = append(argv, "sh", "-c", podWalkUpScript, "sh", dir, k.podRoot(), call.Dir)
-	return append(argv, call.Argv...)
+	tool := call.Argv
+	if isFollowCall(tool) {
+		// isFollowCall passes only a gt call, which names a command, so the
+		// watchdog's refusal for a tool with no name cannot hold here.
+		tool = watchdogWrap(tool)
+	}
+	return append(argv, tool...)
 }
 
 // deploymentRef names the Deployment, its namespace and its context, for a reason.
