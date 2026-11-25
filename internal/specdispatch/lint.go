@@ -321,6 +321,13 @@ type LintOptions struct {
 	// sp-rung is none carries the estimate's own answer that no estimate could
 	// be made, so it passes.
 	RequireEstimate bool
+	// FollowupMaxAddedLines and FollowupMaxFiles are the added-line and file
+	// budget the done gate holds a bead labelled om-followup to. The caller
+	// fills them from the bead's rig merge-queue settings the way gt done reads
+	// them; zero or below takes land's defaults, 80 added lines and 3 files.
+	// A bead without the label is not judged on them (gt-hixqtv).
+	FollowupMaxAddedLines int
+	FollowupMaxFiles      int
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -931,11 +938,17 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if r, refused := changeBudgetRefusal(s, sections["size"], opts); refused {
 		failures = append(failures, r)
 	}
-	// A Change line declaring fewer added lines than the median of what beads
-	// at the same estimate landed with trips the landing gate at twice the
-	// declared number, where a finished branch cannot act on it; it is refused
-	// here, naming the declaration that keeps under the gate (gt-vb9pi9).
-	if r, refused := declaredLinesRefusal(s, sections); refused {
+	// A follow-up bead's Change line past the done gate's follow-up budget is
+	// refused before the declared-lines floor, since that floor would ask such
+	// a bead to declare more than gt done accepts (gt-hixqtv).
+	if r, refused := followupBudgetRefusal(s, sections["size"], opts); refused {
+		failures = append(failures, r)
+	} else if r, refused := declaredLinesRefusal(s, sections); refused {
+		// A Change line declaring fewer added lines than the median of what
+		// beads at the same estimate landed with trips the landing gate at
+		// twice the declared number, where a finished branch cannot act on it;
+		// it is refused here, naming the declaration that keeps under the gate
+		// (gt-vb9pi9).
 		failures = append(failures, r)
 	}
 	if len(failures) > 0 {
@@ -1060,6 +1073,56 @@ func changeBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) 
 	return Refusal{Field: "size", Reason: fmt.Sprintf(
 		"the Size section declares at most %d added lines, over the change budget maximum of %d: split the bead by package (one bead per package) or by test group (one bead per group of acceptance boxes that share a fake)",
 		budget.Lines, opts.BudgetMaxLines)}, true
+}
+
+// followupLabel is land.FollowUpLabel's spelling. internal/land imports this
+// package, so the lint cannot read the constant from there, and the two
+// spellings are kept in step by hand (gt-hixqtv).
+const followupLabel = "om-followup"
+
+// followupMaxAddedLines and followupMaxFiles are land's default follow-up
+// budget (land.DefaultFollowupMaxAddedLines and land.DefaultFollowupMaxFiles),
+// spelled here for the same reason followupLabel is (gt-hixqtv).
+const (
+	followupMaxAddedLines = 80
+	followupMaxFiles      = 3
+)
+
+// followupBudgetRefusal is the lint's verdict on an om-followup bead's Change
+// line (gt-hixqtv): a follow-up fixes one finding from a passing review, and
+// gt done refuses a change past the follow-up budget, so a bead that declares
+// more is refused here where its author can still cut it. It is asked before
+// declaredLinesRefusal and suppresses it, because the floor's "declare at
+// least" would ask for more than the follow-up budget accepts. A bead without
+// the label, a Change line that does not parse (changeBudgetRefusal owns that
+// reading) or one that is absent (a feed body declares no Change line), and a
+// declaration within both limits are not refused.
+func followupBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) {
+	if !s.HasLabel(followupLabel) {
+		return Refusal{}, false
+	}
+	budget, found, err := ParseChangeBudget(size)
+	if err != nil || !found {
+		return Refusal{}, false
+	}
+	maxAdded, maxFiles := opts.FollowupMaxAddedLines, opts.FollowupMaxFiles
+	if maxAdded <= 0 {
+		maxAdded = followupMaxAddedLines
+	}
+	if maxFiles <= 0 {
+		maxFiles = followupMaxFiles
+	}
+	if budget.Lines <= maxAdded && budget.Files <= maxFiles {
+		return Refusal{}, false
+	}
+	declared := fmt.Sprintf("%d added lines", budget.Lines)
+	if budget.Files > 0 {
+		declared += fmt.Sprintf(" in %d files", budget.Files)
+	}
+	return Refusal{Field: "size", Reason: fmt.Sprintf(
+		"the Change line declares %s, over the follow-up budget of %d added lines and %d files: "+
+			"cut the bead by finding or by file, and do not declare more (gt done refuses a follow-up change past this budget)",
+		declared, maxAdded, maxFiles)}, true
 }
 
 // declaredLinesRefusal is the lint's verdict on a Change line that declares

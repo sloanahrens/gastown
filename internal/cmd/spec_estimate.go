@@ -914,7 +914,7 @@ func specHeldShapedWalk(env specDispatchEnv, read specBoardRead) (ids []string, 
 			lines = append(lines, fmt.Sprintf("%s: story points estimate ahead: cannot read its blockers: %s", id, firstErrLine(err)))
 			continue
 		}
-		if specdispatch.LintWith(walked, env.Template, env.lintOptions()).Clean() {
+		if specdispatch.LintWith(walked, env.Template, env.lintOptionsFor(c.Rig)).Clean() {
 			ids = append(ids, id)
 		}
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/gastown/internal/models"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
@@ -1286,6 +1287,20 @@ func specRiskPaths(spec specdispatch.Spec, target *specdispatch.TargetTree) ([]s
 	return land.MatchRiskPaths(target.RiskGlobs, specdispatch.PathTokens(text)), ""
 }
 
+// specFollowupBudget is a rig's follow-up budget, the added lines and files an
+// om-followup bead's change may spend, read as gt done reads it: the rig's
+// merge_queue settings, or land's defaults for a rig that sets none. A rig the
+// resolver does not know reads the defaults, as an unset budget does
+// (gt-hixqtv). internal/land imports internal/specdispatch, so the lint is
+// handed these numbers here rather than reading them there.
+func specFollowupBudget(townRoot, rig string) (maxAdded, maxFiles int) {
+	maxAdded, maxFiles = land.DefaultFollowupMaxAddedLines, land.DefaultFollowupMaxFiles
+	if mq := rigpkg.ResolveMergeQueueConfig(townRoot, rig); mq != nil {
+		maxAdded, maxFiles = mq.GetFollowupMaxAddedLines(maxAdded), mq.GetFollowupMaxFiles(maxFiles)
+	}
+	return maxAdded, maxFiles
+}
+
 // specBeadRig is the rig beadID belongs to, by its ID prefix: the rig the lint's
 // other-rig check treats as the bead's own. Empty for a town bead or an unknown
 // prefix (gt-qotsst).
@@ -1579,6 +1594,11 @@ type specLintOpts struct {
 	// ReworkLandings reads a rig's landings of the advisory window, set with
 	// --estimate; nil prints no rework advice (gt-ntel2p).
 	ReworkLandings func(rig string) ([]land.LandingRecord, error)
+	// FollowupBudget is a rig's follow-up budget, the added lines and files
+	// the lint holds an om-followup bead's Change line to, read as gt done
+	// reads it (gt-hixqtv). Nil leaves both at zero, and the lint then reads
+	// land's defaults.
+	FollowupBudget func(rig string) (maxAdded, maxFiles int)
 }
 
 // specLintEstimateWait is the longest the lint waits for --estimate's run: the
@@ -1615,6 +1635,7 @@ func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimat
 		return specLintOpts{}, err
 	}
 	opts.RequireEstimate = !allowUnestimated
+	opts.FollowupBudget = func(rig string) (int, int) { return specFollowupBudget(townRoot, rig) }
 	if withEstimate {
 		opts.Estimate = specLintEstimateRun(townRoot, errw)
 		opts.ReworkLandings = func(rig string) ([]land.LandingRecord, error) {
@@ -1632,6 +1653,18 @@ func (o specLintOpts) lintOptions() specdispatch.LintOptions {
 		BudgetRequired:  o.BudgetRequired,
 		RequireEstimate: o.RequireEstimate,
 	}
+}
+
+// lintOptionsFor is lintOptions with the follow-up budget of the bead's rig,
+// read as gt done reads it, so the lint refuses an om-followup bead that
+// declares more than the gate accepts (gt-hixqtv). lintOptions stays the
+// story-point settings alone, which is what a caller with no bead rig reads.
+func (o specLintOpts) lintOptionsFor(rig string) specdispatch.LintOptions {
+	opts := o.lintOptions()
+	if o.FollowupBudget != nil {
+		opts.FollowupMaxAddedLines, opts.FollowupMaxFiles = o.FollowupBudget(rig)
+	}
+	return opts
 }
 
 // gt spec lint --estimate (gt-5ynb86): the lint never estimates by itself, so
@@ -1759,7 +1792,7 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 		}
 		spec = estimated
 	}
-	verdict := specdispatch.LintWith(spec, tmpl, opts.lintOptions())
+	verdict := specdispatch.LintWith(spec, tmpl, opts.lintOptionsFor(spec.Rig))
 	report.OK = verdict.Clean()
 	report.NeedsPlanning = verdict.Route == specdispatch.RoutePlanning
 	report.Refusals = append(report.Refusals, verdict.Refusals...)
@@ -2372,6 +2405,11 @@ type specDispatchEnv struct {
 	// declares no change budget (story_points.lint_budget_required,
 	// gt-muzkwi). False is off.
 	StoryPointLintBudgetRequired bool
+	// FollowupBudget is a rig's follow-up budget, the added lines and files the
+	// lint holds an om-followup bead's Change line to, read as gt done reads it
+	// (gt-hixqtv). Nil reads land's defaults, the budget a rig that configures
+	// none has.
+	FollowupBudget func(rig string) (maxAdded, maxFiles int)
 	// StoryPointEstimate is the estimate the tick runs for a bead, under a
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
 	// The outcome carries the numbers the split route reads.
@@ -2572,7 +2610,7 @@ func (e specDispatchEnv) lint(spec specdispatch.Spec) specdispatch.LintVerdict {
 	if e.Lint != nil {
 		return e.Lint(spec)
 	}
-	return specdispatch.LintWith(spec, e.Template, e.lintOptions())
+	return specdispatch.LintWith(spec, e.Template, e.lintOptionsFor(spec.Rig))
 }
 
 // lintOptions is the settings the tick lints a candidate with: the same
@@ -2584,6 +2622,18 @@ func (e specDispatchEnv) lintOptions() specdispatch.LintOptions {
 		BudgetMaxLines:  e.StoryPointLintBudgetMaxLines,
 		BudgetRequired:  e.StoryPointLintBudgetRequired,
 	}
+}
+
+// lintOptionsFor is lintOptions with the follow-up budget of the candidate's
+// rig, read as gt done reads it, so the tick holds an om-followup bead the
+// seat's own lint would refuse (gt-hixqtv). An env with no reader falls back
+// to the lint's defaults, as a rig that configures none does.
+func (e specDispatchEnv) lintOptionsFor(rig string) specdispatch.LintOptions {
+	opts := e.lintOptions()
+	if e.FollowupBudget != nil {
+		opts.FollowupMaxAddedLines, opts.FollowupMaxFiles = e.FollowupBudget(rig)
+	}
+	return opts
 }
 
 // inFlightCap is the number of slings the tick runs at once. An env that sets
@@ -4577,6 +4627,18 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		targets[rig] = tree
 		return tree
 	}
+	// Each rig's follow-up budget, read once per tick: the lint asks it per
+	// candidate, and a rig's merge_queue settings do not change inside a tick
+	// (gt-hixqtv).
+	followups := map[string][2]int{}
+	followupBudgetOf := func(rig string) (int, int) {
+		if b, ok := followups[rig]; ok {
+			return b[0], b[1]
+		}
+		added, files := specFollowupBudget(townRoot, rig)
+		followups[rig] = [2]int{added, files}
+		return added, files
+	}
 	template := specdispatch.LoadTemplate(tmplPath)
 	// The shape-and-label verdicts of the candidates the scan already read,
 	// kept across the daemon's ticks beside the annotations (gt-km9jt).
@@ -4608,6 +4670,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	})
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
+		FollowupBudget: followupBudgetOf,
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
 		Drift:          imagedrift.StoreFor(townRoot),
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
