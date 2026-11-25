@@ -177,6 +177,28 @@ func TestKindValuesPullSandboxImageAlways(t *testing.T) {
 	}
 }
 
+// A saturated VM stalls the gateway's Dolt acquire for 8 to 22 s, past the
+// chart's 15 s liveness window, and the kubelet restarts it mid-roll
+// (gt-8i4ziw). Six 10 s checks with a 5 s timeout give a 60 s window, and the
+// readiness timeout is 3 s.
+func TestKindValuesRelaxGatewayLivenessWindow(t *testing.T) {
+	t.Parallel()
+	v := decodeDocs(t, "values/kind.yaml")[0]
+	for _, row := range []struct {
+		Probe, Key string
+		Want       int
+	}{
+		{"liveness", "periodSeconds", 10},
+		{"liveness", "timeoutSeconds", 5},
+		{"liveness", "failureThreshold", 6},
+		{"readiness", "timeoutSeconds", 3},
+	} {
+		if got := at(t, v, "probes", row.Probe, row.Key); got != row.Want {
+			t.Errorf("probes.%s.%s = %v, want %d", row.Probe, row.Key, got, row.Want)
+		}
+	}
+}
+
 func TestStaticManifestsParse(t *testing.T) {
 	t.Parallel()
 	for _, rel := range []string{"kind/gateway-nodeport.yaml", "values/kind/control-plane-services.yaml", "values/kind/hosts.yaml", "values/cloud/control-plane-services.yaml", "values/cloud/hosts.yaml", "policy/kind.yaml", "bd-gateway-service-admission.yaml"} {
