@@ -60,3 +60,94 @@ func TestSpecBlockedMaps(t *testing.T) {
 		})
 	}
 }
+
+func TestSpecMergeBlockedEdges(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		perRig []blockedEdges
+		want   blockedEdges
+	}{
+		{
+			name:   "no rigs gives empty non-nil maps",
+			perRig: nil,
+			want: blockedEdges{
+				Own:       map[string]int{},
+				BlockedBy: map[string][]string{},
+			},
+		},
+		{
+			name: "two rigs with disjoint ids give the union",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 1}, BlockedBy: map[string][]string{"gt-a": {"gt-x"}}},
+				{Own: map[string]int{"hq-b": 0}, BlockedBy: map[string][]string{"hq-b": {"hq-y"}}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 1, "hq-b": 0},
+				BlockedBy: map[string][]string{"gt-a": {"gt-x"}, "hq-b": {"hq-y"}},
+			},
+		},
+		{
+			name: "an id in both rigs keeps the better priority when the worse rig comes first",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 3}, BlockedBy: map[string][]string{}},
+				{Own: map[string]int{"gt-a": 1}, BlockedBy: map[string][]string{}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 1},
+				BlockedBy: map[string][]string{},
+			},
+		},
+		{
+			name: "an id in both rigs keeps the better priority when the better rig comes first",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 0}, BlockedBy: map[string][]string{}},
+				{Own: map[string]int{"gt-a": 2}, BlockedBy: map[string][]string{}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 0},
+				BlockedBy: map[string][]string{},
+			},
+		},
+		{
+			name: "a blocker repeated across rigs appears once",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 1}, BlockedBy: map[string][]string{"gt-a": {"gt-x", "gt-y"}}},
+				{Own: map[string]int{"gt-a": 1}, BlockedBy: map[string][]string{"gt-a": {"gt-y", "gt-z"}}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 1},
+				BlockedBy: map[string][]string{"gt-a": {"gt-x", "gt-y", "gt-z"}},
+			},
+		},
+		{
+			name: "a blocker repeated within one rig appears once",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 1}, BlockedBy: map[string][]string{"gt-a": {"gt-x", "gt-x"}}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 1},
+				BlockedBy: map[string][]string{"gt-a": {"gt-x"}},
+			},
+		},
+		{
+			name: "an empty blocker list adds no edge",
+			perRig: []blockedEdges{
+				{Own: map[string]int{"gt-a": 2}, BlockedBy: map[string][]string{"gt-a": {}}},
+			},
+			want: blockedEdges{
+				Own:       map[string]int{"gt-a": 2},
+				BlockedBy: map[string][]string{},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := specMergeBlockedEdges(tc.perRig)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("specMergeBlockedEdges() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
