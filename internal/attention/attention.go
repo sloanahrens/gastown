@@ -252,6 +252,9 @@ const (
 	// KindBDGatewayCapHit: the bd gateway refused calls at its concurrency cap,
 	// so bd callers were turned away while the cap held (gt-7oy397).
 	KindBDGatewayCapHit Kind = "bd-gateway-cap-hit"
+	// KindBdGatewayRefusals: the bd gateway refused calls, whether at once or
+	// after the bounded wait for a slot, so those calls did not run (gt-q0eh0r).
+	KindBdGatewayRefusals Kind = "bd-gateway-refusals"
 	// KindMainUnknown: the rig's red-main check could not judge main for
 	// several runs in a row, so whether main is red is unknown (gt-glc2yh).
 	KindMainUnknown Kind = "main-unknown"
@@ -285,6 +288,7 @@ func Kinds() []Kind {
 		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
 		KindBDGatewayCapHit,
+		KindBdGatewayRefusals,
 		KindMainUnknown,
 		KindRedHoldHeld,
 		KindSeatEndNoRecord,
