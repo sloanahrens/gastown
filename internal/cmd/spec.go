@@ -5350,6 +5350,10 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 	updatedAt := map[string]string{}
 	depCount := map[string]int{}
 	labeled := map[string]bool{}
+	// skipped counts the rigs the skip seam answered for, so the tick says the
+	// board was not read for them rather than passing their absence in silence
+	// (gt-i3wvfv).
+	skipped := 0
 	for _, name := range names {
 		rigPath := filepath.Join(townRoot, name)
 		if _, err := os.Stat(rigPath); err != nil {
@@ -5368,6 +5372,7 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 			continue
 		}
 		if skip != nil && skip(name) {
+			skipped++
 			continue
 		}
 		issues, err := board(rigPath)
@@ -5498,6 +5503,9 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID], UpdatedAt: updatedAt[s.ID], DepCount: depCount[s.ID]})
 	}
 	read.LabeledFailed = len(labeled)
+	if skipped > 0 {
+		read.Notices = append(read.Notices, fmt.Sprintf("%d quiet rig(s) skipped this tick, not read for their beads", skipped))
+	}
 	return read
 }
 
