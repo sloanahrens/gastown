@@ -5528,3 +5528,35 @@ func TestTickEffQuietWiring(t *testing.T) {
 		t.Errorf("the live rig beads got %d ready read(s) over two board reads, want 2 (reads = %v)", ready["beads"], ready)
 	}
 }
+
+// TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
+// memory with the hashes the tick held for it, the time of the read and the number
+// of candidates it listed (gt-pa5zu3).
+func TestTickEffRecordRigRead(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	heads := map[string]beadsql.RigHash{
+		"gastown": {Head: "g1", Working: "g2"},
+		"beads":   {Head: "b1", Working: "b2"},
+	}
+
+	recordRigRead(memory, heads, "gastown", 3, at)
+
+	memory.mu.Lock()
+	got, ok := memory.rigs["gastown"]
+	memory.mu.Unlock()
+	if !ok {
+		t.Fatal("the rig's read was not recorded")
+	}
+	want := specRigRead{Head: "g1", Working: "g2", At: at, Candidates: 3}
+	if got != want {
+		t.Errorf("recorded %+v, want %+v", got, want)
+	}
+	memory.mu.Lock()
+	_, other := memory.rigs["beads"]
+	memory.mu.Unlock()
+	if other {
+		t.Error("a rig that was not recorded appears in the memory")
+	}
+}
