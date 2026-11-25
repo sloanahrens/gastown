@@ -17,7 +17,7 @@ func TestTakeWindowStatsReturnsTheWindowPeakThenResets(t *testing.T) {
 	const capacity = 2
 	runner := &capRunner{bound: waitCtx(t), started: make(chan struct{}, capacity)}
 	e, err := New(Options{Binary: "/opt/bd/bd", WorkspaceRoot: testWorkspace(t), Home: "/home/bdgw",
-		Path: "/usr/bin:/bin", DoltHost: "gt-dolt", DoltPort: "3307", MaxConcurrent: capacity, runner: runner})
+		Path: "/usr/bin:/bin", DoltHost: "gt-dolt", DoltPort: "3307", MaxConcurrent: capacity, runner: runner, after: immediateAfter})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
