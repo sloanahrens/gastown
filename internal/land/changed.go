@@ -565,6 +565,27 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestRetiredRunnerNameIsGoneFromCode walks every file under internal,
+		// cmd, deploy and docs for the retired Docker Forgejo runner's name,
+		// skipping _test.go files and docs/plans, so any other file there is
+		// its input, Go or not: a name added in a package the change does not
+		// touch otherwise passes presubmit and fails later (gt-ntm1r4). A
+		// deletion is its input too: deleting the last file under one of
+		// those directories leaves WalkDir no base to open, and a scan that
+		// drops under 100 files fails, so the walk can fail on a deletion
+		// alone.
+		pkg:   "internal/daemon",
+		tests: []string{"TestRetiredRunnerNameIsGoneFromCode"},
+		judges: func(rel string) bool {
+			if strings.HasSuffix(rel, "_test.go") || strings.HasPrefix(rel, "docs/plans/") {
+				return false
+			}
+			return strings.HasPrefix(rel, "internal/") || strings.HasPrefix(rel, "cmd/") ||
+				strings.HasPrefix(rel, "deploy/") || strings.HasPrefix(rel, "docs/")
+		},
+		removal: true,
+	},
+	{
 		// TestNoLiteralPodTownRootOutsideTheConstant walks every non-test Go
 		// file under deploy, internal and cmd for a literal pod town root, so
 		// each of those is its input. It also fails when deploy/k8s/daemon/
