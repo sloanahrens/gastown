@@ -150,7 +150,8 @@ func sweepLaunchCheck(ctx context.Context, probe func(context.Context) (bool, st
 // the first read, failing with the last line and "still settling after <wait>";
 // any other answer ends it at once; a failed sleep returns its error. A poll
 // that is not positive is refused before any probe is asked: a wait that never
-// advances the clock would then never reach its bound.
+// advances the clock would then never reach its bound. A poll that would pass
+// the bound is shortened to what is left, so the settle ends at wait.
 func VerifyWithSettle(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p VerifyProbes, want string, wait, poll time.Duration) ([]Check, error) {
 	if poll <= 0 {
 		return nil, fmt.Errorf("the settle poll must be positive, got %s", poll)
@@ -162,11 +163,18 @@ func VerifyWithSettle(ctx context.Context, clock Clock, sleep func(context.Conte
 	}
 	start := clock.Now()
 	for {
-		if clock.Now().Sub(start) >= wait {
+		elapsed := clock.Now().Sub(start)
+		if elapsed >= wait {
 			health.Detail += fmt.Sprintf(" (still settling after %s)", wait)
 			return checks, nil
 		}
-		if err := sleep(ctx, poll); err != nil {
+		// Sleep no longer than the bound leaves, so a poll that does not divide
+		// wait ends the settle at wait instead of at its next multiple.
+		pause := poll
+		if remaining := wait - elapsed; remaining < pause {
+			pause = remaining
+		}
+		if err := sleep(ctx, pause); err != nil {
 			return checks, err
 		}
 		line, err := p.Health(ctx)

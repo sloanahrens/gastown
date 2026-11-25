@@ -410,6 +410,27 @@ func TestVerifyWithSettleFailsAtTheWaitBound(t *testing.T) {
 	}
 }
 
+// TestVerifyWithSettleBoundWhenPollDoesNotDivideWait: a poll that does not
+// divide wait is shortened at the bound, so the settle ends at wait, not at the
+// next multiple of poll.
+func TestVerifyWithSettleBoundWhenPollDoesNotDivideWait(t *testing.T) {
+	t.Parallel()
+	probes := greenProbes()
+	probes.healthLines = []string{verifyTestSettling}
+	start := parseVerifyTime(t)
+	clock := &fakeVerifyClock{now: start}
+	sleep, _ := verifySleeps(clock)
+
+	checks, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, 40*time.Second)
+	if err != nil {
+		t.Fatalf("VerifyWithSettle: %v", err)
+	}
+	assertFailedChecks(t, checks, checkHealth)
+	if elapsed := clock.now.Sub(start); elapsed != verifyTestTimeout {
+		t.Errorf("settle ended after %s, want the %s bound: the sleep must stop at the bound", elapsed, verifyTestTimeout)
+	}
+}
+
 // TestVerifyWithSettleReturnsAFailedSleepError: a failed sleep is not swallowed.
 func TestVerifyWithSettleReturnsAFailedSleepError(t *testing.T) {
 	t.Parallel()
