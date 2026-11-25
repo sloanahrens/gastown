@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
 )
@@ -68,7 +69,11 @@ func (f *seatPickRigFake) Get(name string) (*polecat.Polecat, error) {
 // takes beta.
 func TestSeatPickTwoSlingsGetDifferentSeats(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	// A hang guard, not a timing assertion: every wait below resolves on a
+	// channel, so a passing run never reaches this deadline. A regression that
+	// blocks a pick fails here instead of stalling until go test's timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
 	fake := &seatPickRigFake{
 		ctx:       ctx,
 		unclaimed: []*polecat.Polecat{{Name: "alpha"}, {Name: "beta"}},
