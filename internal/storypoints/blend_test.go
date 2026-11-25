@@ -147,6 +147,105 @@ func TestBlendShapeEmbedScale(t *testing.T) {
 	}
 }
 
+func TestBlendDeclaredTerm(t *testing.T) {
+	t.Parallel()
+	// A declared-lines term joins shape and embedding with equal weight on the
+	// log scale and scales the average by declaredScale. It applies only to a
+	// shape-and-embed blend with no Jev term; any other blend ignores it.
+	tests := []struct {
+		name       string
+		in         Inputs
+		wantMin    float64
+		wantRung   string
+		wantInputs []string
+	}{
+		{
+			name:       "shape, embedding and declared at ten minutes blend to 8.9",
+			in:         Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), DeclaredMinutes: ptr(10)},
+			wantMin:    8.9,
+			wantRung:   "all",
+			wantInputs: []string{"shape", "embed", "declared"},
+		},
+		{
+			name:       "the same blend without declared is the 9.2 of the previous bead",
+			in:         Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10)},
+			wantMin:    9.2,
+			wantRung:   "shape-embed",
+			wantInputs: []string{"shape", "embed"},
+		},
+		{
+			name:       "the three inputs average on the log scale before the declared scale",
+			in:         Inputs{ShapeMinutes: ptr(2), EmbedMinutes: ptr(18), DeclaredMinutes: ptr(4)},
+			wantMin:    geoMean(2, 18, 4) * 0.89,
+			wantRung:   "all",
+			wantInputs: []string{"shape", "embed", "declared"},
+		},
+		{
+			name:       "declared with a jev term is ignored and the jev blend keeps its meaning",
+			in:         Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), JevMinutes: ptr(10), DeclaredMinutes: ptr(40)},
+			wantMin:    10,
+			wantRung:   "all",
+			wantInputs: []string{"shape", "embed", "jev"},
+		},
+		{
+			name:       "declared without embedding is ignored",
+			in:         Inputs{ShapeMinutes: ptr(10), DeclaredMinutes: ptr(40)},
+			wantMin:    10,
+			wantRung:   "shape",
+			wantInputs: []string{"shape"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Blend(tt.in)
+			if err != nil {
+				t.Fatalf("Blend error = %v, want nil", err)
+			}
+			if math.Abs(got.Minutes-tt.wantMin) > 1e-9 {
+				t.Errorf("Minutes = %v, want %v", got.Minutes, tt.wantMin)
+			}
+			if got.Rung != tt.wantRung {
+				t.Errorf("Rung = %q, want %q", got.Rung, tt.wantRung)
+			}
+			if !slices.Equal(got.Inputs, tt.wantInputs) {
+				t.Errorf("Inputs = %q, want %q", got.Inputs, tt.wantInputs)
+			}
+		})
+	}
+}
+
+func TestBlendDeclaredTermRefusals(t *testing.T) {
+	t.Parallel()
+	// A declared value is validated whenever it is set, even on a blend that
+	// does not average it, so a bad value never passes silently.
+	tests := []struct {
+		name string
+		in   Inputs
+	}{
+		{"zero declared minutes", Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), DeclaredMinutes: ptr(0)}},
+		{"negative declared minutes", Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), DeclaredMinutes: ptr(-2)}},
+		{"NaN declared minutes", Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), DeclaredMinutes: ptr(math.NaN())}},
+		{"infinite declared minutes", Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), DeclaredMinutes: ptr(math.Inf(1))}},
+		{"bad declared minutes with jev", Inputs{ShapeMinutes: ptr(10), EmbedMinutes: ptr(10), JevMinutes: ptr(10), DeclaredMinutes: ptr(0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Blend(tt.in)
+			if !errors.Is(err, ErrNoMinutes) {
+				t.Fatalf("Blend error = %v, want ErrNoMinutes", err)
+			}
+			if !strings.Contains(err.Error(), "declared input") {
+				t.Errorf("Blend error = %q, want it to name \"declared input\"", err)
+			}
+			if got.Rung != "" || got.Minutes != 0 {
+				t.Errorf("Blend returned %+v with the error; want the zero value", got)
+			}
+		})
+	}
+}
+
 func TestBlendPointsFollowFromMinutes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
