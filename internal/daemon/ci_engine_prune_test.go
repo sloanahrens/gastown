@@ -2112,6 +2112,82 @@ func TestCIEnginePruneCapPassFailureFailsTheRun(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneVerdictNamesBothFigures: when the cap prune runs, the verdict line
+// names the age prune's reclaimed figure and the cap prune's, and the ledger's build
+// cache bytes are their sum. When the cap prune does not run, the line ends at the age
+// prune's figure alone.
+func TestCIEnginePruneVerdictNamesBothFigures(t *testing.T) {
+	t.Parallel()
+	t.Run("the cap prune runs", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+		replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"})
+		replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t1GB\n"})
+		replaceEngineReply(f, "--max-used-space", cliReply{stdout: "Total:\t3GB\n"})
+		f.tick()
+		f.drain()
+
+		line := engineLogLine(f.logs.String(), "removed 1 containers, 1 images, 1 volumes")
+		want := "; build cache reclaimed " + polecatimage.Human(1_000_000_000) + ", cap prune reclaimed " + polecatimage.Human(3_000_000_000)
+		if !strings.HasSuffix(line, want) {
+			t.Errorf("the verdict line does not end with %q:\n%s", want, f.logs.String())
+		}
+		ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("opening the job ledger: %v", err)
+		}
+		runs, err := ledger.Tail(ciEnginePruneName, 10)
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("the job ledger holds %d run(s) (%v), want one", len(runs), err)
+		}
+		if got := runs[0].Stats["build_cache_bytes"]; got != 4_000_000_000 {
+			t.Errorf("recorded build_cache_bytes = %d, want the age prune's and the cap prune's sum 4000000000", got)
+		}
+	})
+	t.Run("the cap prune's total is unreadable", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+		replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 12GB 12GB (100%)\n"})
+		replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t1GB\n"})
+		replaceEngineReply(f, "--max-used-space", cliReply{stdout: "Deleted build cache objects:\nabc\n"})
+		f.tick()
+		f.drain()
+
+		line := engineLogLine(f.logs.String(), "removed 1 containers, 1 images, 1 volumes")
+		want := `; build cache reclaimed ` + polecatimage.Human(1_000_000_000) + `, cap prune reclaimed unknown (docker's last line was "abc")`
+		if !strings.HasSuffix(line, want) {
+			t.Errorf("the verdict line does not end with %q:\n%s", want, f.logs.String())
+		}
+		ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("opening the job ledger: %v", err)
+		}
+		runs, err := ledger.Tail(ciEnginePruneName, 10)
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("the job ledger holds %d run(s) (%v), want one", len(runs), err)
+		}
+		if got := runs[0].Stats["build_cache_bytes"]; got != 1_000_000_000 {
+			t.Errorf("recorded build_cache_bytes = %d, want the age prune's figure alone 1000000000", got)
+		}
+	})
+	t.Run("the cap prune does not run", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+		replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 8GB 8GB (100%)\n"})
+		replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t2GB\n"})
+		f.tick()
+		f.drain()
+
+		line := engineLogLine(f.logs.String(), "removed 1 containers, 1 images, 1 volumes")
+		if want := "; build cache reclaimed " + polecatimage.Human(2_000_000_000); !strings.HasSuffix(line, want) {
+			t.Errorf("the verdict line does not end with %q:\n%s", want, f.logs.String())
+		}
+		if strings.Contains(line, "cap prune") {
+			t.Errorf("the verdict line names a cap prune that did not run:\n%s", line)
+		}
+	})
+}
+
 // TestCIEnginePruneBuildCacheSizeReadFailureSkipsOnlyTheWarn: a size read before the
 // prune that fails is logged once and skips only the zero-reclaim check. The build
 // cache prune, the removals and the verdict all still run.
@@ -2529,6 +2605,7 @@ func TestCIEnginePruneRecordsRun(t *testing.T) {
 			setup: func(f *ciCacheFixture) {
 				replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
 				replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t2GB\n"})
+				replaceEngineReply(f, "--max-used-space", cliReply{stdout: "Total:\t0B\n"})
 			},
 			wantOutcome: ciEngineOutcomeOK,
 			wantStats:   map[string]int64{"containers": 1, "images": 1, "volumes": 1, "build_cache_bytes": 2_000_000_000},

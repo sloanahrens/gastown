@@ -299,6 +299,18 @@ func ciEngineBuildCacheReport(out []byte, reclaimable int64, reclaimableKnown bo
 	return n, true, "build cache reclaimed " + polecatimage.Human(n), warn
 }
 
+// ciEngineCapReclaimed reads the cap prune's output the way ciEngineBuildCacheReport
+// reads the age prune's: the bytes it reclaimed and whether docker printed them, and
+// the verdict clause naming them after the age prune's. A total that cannot be read
+// is named by docker's last line, bounded, and fails nothing.
+func ciEngineCapReclaimed(out []byte) (n int64, known bool, text string) {
+	n, err := ciEngineBuildCacheTotal(out)
+	if err != nil {
+		return 0, false, fmt.Sprintf("cap prune reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out)))
+	}
+	return n, true, "cap prune reclaimed " + polecatimage.Human(n)
+}
+
 // ciEngineLastLine is the last line of out that is not blank, or "".
 func ciEngineLastLine(out []byte) string {
 	lines := strings.Split(string(out), "\n")
@@ -1026,8 +1038,8 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // verdict, and why when it did not: the first line of the error or the refusal
 // sentence the run logs, which the attention item carries. Every run, whatever
 // path it takes, is appended to the job ledger: the plan's counts, the bytes the
-// build cache step reclaimed and how the run ended, with the next due at one
-// interval from its end. A run that cannot list the engine or plan from the
+// build cache steps reclaimed (the cap prune's too, when it ran) and how the run
+// ended, with the next due at one interval from its end. A run that cannot list the engine or plan from the
 // listing removes nothing and says why. Right before the image command it re-reads
 // what the containers use and drops the planned images one now references; a
 // re-read that fails removes no image and fails the run after the other kinds have
@@ -1215,12 +1227,18 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 	// reclaimed. An unread figure, or an age prune that failed, leaves the excess
 	// unknown, so no cap prune is sent.
 	if over, usable := ciEngineCacheOverKeep(reclaimable, reclaimErr == nil, reclaimed, reclaimedKnown, keepBytes); usable && over > 0 {
-		if _, capStderr, capErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCacheCapArgv(keepBytes)...); capErr != nil {
+		if capOut, capStderr, capErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCacheCapArgv(keepBytes)...); capErr != nil {
 			d.ciEnginePruneLogf("cap prune failed", "disk_maintenance: ci engine prune: the cap prune in the %s container failed (%s); the run is retried",
 				ciCacheContainer, ciEngineFailure(capErr, capStderr))
 			failed = true
 			if reason == "" {
 				reason = fmt.Sprintf("the cap prune in the %s container failed (%s)", ciCacheContainer, ciEngineFailure(capErr, capStderr))
+			}
+		} else {
+			capReclaimed, capKnown, capText := ciEngineCapReclaimed(capOut)
+			cache += ", " + capText
+			if capKnown {
+				stats["build_cache_bytes"] += capReclaimed
 			}
 		}
 	}
