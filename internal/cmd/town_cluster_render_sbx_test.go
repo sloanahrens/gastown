@@ -494,3 +494,28 @@ func TestClusterRenderSbxEngineNumbersWithTheControlRenderWidth(t *testing.T) {
 		}
 	}
 }
+
+// TestClusterRenderSbxClusterFlagsAreRegistered: the gt-sbx flags exist with
+// their defaults, so a control render that names none of them keeps the
+// control cluster and empty sbx inputs.
+func TestClusterRenderSbxClusterFlagsAreRegistered(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, want string }{
+		{"cluster", clusterControl},
+		{"sbx-manifests", ""},
+		{"sbx-chart", ""},
+		{"sbx-values", ""},
+		{"helm", "helm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			flag := townClusterRenderCmd.Flags().Lookup(tc.name)
+			if flag == nil {
+				t.Fatalf("--%s is not registered on gt town cluster render", tc.name)
+			}
+			if flag.DefValue != tc.want {
+				t.Errorf("--%s defaults to %q, want %q", tc.name, flag.DefValue, tc.want)
+			}
+		})
+	}
+}
