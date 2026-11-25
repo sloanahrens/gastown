@@ -394,6 +394,14 @@ type updateSeams struct {
 	// the pair's commit carries and the live database's level. A gate with a read
 	// unwired refuses its pair rather than swapping a pair it did not check.
 	PairLevel pairLevelReads
+	// PairDerive is the install's registry re-derivation: the pair the town's
+	// registry publishes for a commit, which the pre-swap gate compares the
+	// values file against. productionUpdateSeams binds it to
+	// deriveUpdateImagesPair over the images seams, read with the viewer
+	// credential the update Job mounts. A digest install with no derivation
+	// wired refuses every pair through pairMatchesRegistry: a missing derivation
+	// is never a match.
+	PairDerive deriveFunc
 }
 
 // inPod reports whether the run's process is in a pod: a nil InPod is not.
@@ -409,15 +417,20 @@ func runsInPod(getenv func(string) string) bool {
 
 // productionUpdateSeams wires the real town, effects and orchestrator.
 func productionUpdateSeams() updateSeams {
+	images := productionUpdateImagesSeams()
 	return updateSeams{
 		FindTownRoot: workspace.FindFromCwdOrError,
 		DepsFactory:  realUpdateDeps,
 		Run:          update.Run,
-		Images:       productionUpdateImagesSeams(),
-		BdBase:       productionUpdateBdBaseSeams(),
-		ImageSwap:    realImageSwap,
-		PodRun:       realRunFunc(),
-		InPod:        func() bool { return runsInPod(os.Getenv) },
+		Images:       images,
+		// The install's pre-swap gate re-derives the pair from the same registry
+		// the images subcommand reads, with the viewer credential the update Job
+		// mounts.
+		PairDerive: installPairDerive(images),
+		BdBase:     productionUpdateBdBaseSeams(),
+		ImageSwap:  realImageSwap,
+		PodRun:     realRunFunc(),
+		InPod:      func() bool { return runsInPod(os.Getenv) },
 		// A pod roll leaves the town's own values file at the pair it rolled to,
 		// so the town's readers see it without an overseer copying the file.
 		WriteTownValues: imagevalues.Write,
@@ -963,7 +976,9 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 		// installed or swapped, in this process, which is the new image's own gt
 		// and bd. The pair-level check reads the bd pin the pair installs, which
 		// the preflight's own checks, run by the image that is running now, do not.
-		PreSwap: preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel),
+		// The registry match re-derives the pair for the file's commit, so a file
+		// the registry does not publish is refused before anything changes.
+		PreSwap: preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive),
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
@@ -994,12 +1009,15 @@ type pairLevelReads struct {
 
 // preSwapPreflight is a digest install's pre-swap gate: it runs the daemon's
 // pre-roll checks over townRoot through run and refuses the pair when any check
-// failed, naming every failed check and its message, and then refuses a pair
-// whose bd pin carries another schema level than the live database. A gate that
-// cannot run — no town root, no check seam, or a seam that reports no results —
-// is a failure, never a pass: an install nothing checked is not an install the
-// checks passed.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads) func(context.Context, update.ImagePair) error {
+// failed, naming every failed check and its message; then refuses a pair whose
+// bd pin carries another schema level than the live database; and finally
+// refuses a pair the registry does not derive for its commit, through
+// pairMatchesRegistry, so the file must name the pair the registry publishes.
+// A gate that cannot run — no town root, no check seam, or a seam that reports
+// no results — is a failure, never a pass: an install nothing checked is not an
+// install the checks passed. A nil derive is refused by pairMatchesRegistry
+// itself: a missing derivation is never a match.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc) func(context.Context, update.ImagePair) error {
 	return func(ctx context.Context, pair update.ImagePair) error {
 		switch {
 		case townRoot == "":
@@ -1013,7 +1031,26 @@ func preSwapPreflight(townRoot string, run func(context.Context, string) []Prefl
 		if err := pairLevelSkew(ctx, townRoot, pair, reads); err != nil {
 			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
 		}
+		if err := pairMatchesRegistry(ctx, derive, pairValues(pair)); err != nil {
+			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+		}
 		return nil
+	}
+}
+
+// pairValues is the values file a pair names: its commit and images, the triple
+// the registry derivation is compared against.
+func pairValues(pair update.ImagePair) imagevalues.Values {
+	return imagevalues.Values{Daemon: pair.Daemon, Polecat: pair.Polecat, Bd: pair.Bd, Commit: pair.Commit}
+}
+
+// installPairDerive is a digest install's registry re-derivation: the pair the
+// town's registry publishes for a commit, read through the images subcommand's
+// seams and the viewer credential the update Job mounts. The bd image is derived
+// too, because the Job's init container writes the values file with the bd key.
+func installPairDerive(seams updateImagesSeams) deriveFunc {
+	return func(ctx context.Context, sha string) (imagevalues.Values, error) {
+		return deriveUpdateImagesPair(ctx, seams, sha, true)
 	}
 }
 

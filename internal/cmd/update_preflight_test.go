@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/update"
@@ -40,6 +41,9 @@ func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Co
 		// The pair-level check reads agreeing levels, so a row that tests the
 		// town checks is decided by them alone.
 		PairLevel: agreeingPairLevels(),
+		// The derivation answers the pair the fixture installs, so the registry
+		// match passes and a row is decided by the guard it tests.
+		PairDerive: pairHeldDerive(podPairPair),
 	}
 	target := podPairTarget()
 	installer, err := digestInstaller(seams, townRoot, update.Deps{}, path, &target, io.Discard)
@@ -237,7 +241,7 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 			// These rows never reach the pair-level reads: each stops the gate at
 			// the check seam. Zero reads would refuse if one were reached, and the
 			// row's want names the guard it expects instead.
-			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{})
+			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair))
 
 			err := gate(context.Background(), podPairPair)
 			if err == nil {
@@ -261,5 +265,95 @@ func TestPreRollGuardProductionWiresThePreflight(t *testing.T) {
 	t.Parallel()
 	if productionUpdateSeams().Preflight == nil {
 		t.Fatal("productionUpdateSeams wires no preflight: every digest install would be refused")
+	}
+}
+
+// pairHeldDerive is a registry derivation that answers the pair a fixture holds:
+// a row testing another guard passes the registry match and is decided by that
+// guard alone.
+func pairHeldDerive(pair update.ImagePair) deriveFunc {
+	return func(context.Context, string) (imagevalues.Values, error) {
+		return pairValues(pair), nil
+	}
+}
+
+// pairOfValues is the pair a values file names, the pair a gate is given.
+func pairOfValues(v imagevalues.Values) update.ImagePair {
+	return update.ImagePair{Daemon: v.Daemon, Polecat: v.Polecat, Bd: v.Bd, Commit: v.Commit}
+}
+
+// TestPreSwapPairMatchesRegistry holds the pre-swap gate to the registry's
+// re-derivation: the values file built from the pair the gate is given is
+// compared with the pair the derivation answers for its commit, so an equal pair
+// passes and a pair the derivation does not answer is refused as the preflight
+// check, naming the field and both digests. The preflight passes and the levels
+// agree, so no row is decided by another guard. The derivation is asked about
+// the pair's commit and nothing else.
+func TestPreSwapPairMatchesRegistry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// edit changes the pair the gate is given; nil leaves it equal to the
+		// derived pair.
+		edit func(p *update.ImagePair)
+		// want is empty when the pair matches; otherwise every string must
+		// appear in the refusal.
+		want []string
+	}{
+		{name: "a file equal to the derived pair passes"},
+		{
+			name: "a differing daemon digest is refused as the preflight check",
+			edit: func(p *update.ImagePair) { p.Daemon = pairMatchRef(imagevalues.DaemonImage, "111111111111") },
+			want: []string{"daemon", "sha256:111111111111", "sha256:dddddddddddd"},
+		},
+		{
+			name: "a differing polecat digest is refused as the preflight check",
+			edit: func(p *update.ImagePair) { p.Polecat = pairMatchRef(imagevalues.PolecatImage, "222222222222") },
+			want: []string{"polecat", "sha256:222222222222", "sha256:eeeeeeeeeeee"},
+		},
+		{
+			name: "a differing bd digest is refused as the preflight check",
+			edit: func(p *update.ImagePair) { p.Bd = pairMatchRef(imagevalues.BdImage, "333333333333") },
+			want: []string{"bd", "sha256:333333333333", "sha256:bbbbbbbbbbbb"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			derived := pairMatchPair()
+			pair := pairOfValues(derived)
+			if tt.edit != nil {
+				tt.edit(&pair)
+			}
+			var seen []string
+			derive := func(_ context.Context, sha string) (imagevalues.Values, error) {
+				seen = append(seen, sha)
+				return derived, nil
+			}
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive)
+
+			err := gate(context.Background(), pair)
+			if len(seen) != 1 || seen[0] != pair.Commit {
+				t.Errorf("the derivation was asked about commits %q, want exactly [%q]", seen, pair.Commit)
+			}
+			if len(tt.want) == 0 {
+				if err != nil {
+					t.Fatalf("PreSwap refused a pair equal to the derived pair: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("PreSwap accepted a pair the registry derivation does not match")
+			}
+			var pc update.PairCheckError
+			if !errors.As(err, &pc) || pc.Check != update.CheckPreflight {
+				t.Errorf("PreSwap error = %v, want a PairCheckError naming %q", err, update.CheckPreflight)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("PreSwap error = %q, want it to name %q", err, want)
+				}
+			}
+		})
 	}
 }

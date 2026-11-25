@@ -232,9 +232,12 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		// rather than leaving the run to a writer the test did not wire.
 		WriteTownValues: noTownValuesWrite,
 		// The preflight is not what this fixture reads: its pairs pass the gate,
-		// the pair-level check included.
+		// the pair-level check and the registry match included.
 		Preflight: preflightPassing,
 		PairLevel: agreeingPairLevels(),
+		// The derivation answers the values file's pair, so the gate reaches the
+		// swap.
+		PairDerive: pairHeldDerive(update.ImagePair{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}),
 	}
 	args := append([]string{"--images", values}, extra...)
 	if _, err := runPodCommand(t, seams, args...); err != nil {

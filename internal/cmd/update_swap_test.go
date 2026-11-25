@@ -570,9 +570,12 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 		},
 		Notifier: func(string) notify.Notifier { return notifyfake.New() },
 		// The pre-swap gate is not what this test drives: its checks pass, the
-		// pair-level check included.
+		// pair-level check and the registry match included.
 		Preflight: preflightPassing,
 		PairLevel: agreeingPairLevels(),
+		// The derivation answers the values file's pair, so the gate reaches the
+		// swap.
+		PairDerive: pairHeldDerive(newPair),
 	}
 	c := newUpdateCmdWith(seams)
 	c.SetArgs([]string{"--images", values})

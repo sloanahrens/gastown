@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -30,6 +31,17 @@ func agreeingPairLevels() pairLevelReads {
 		Database: func(context.Context, string) (int, error) {
 			return pairLevelSchema, nil
 		},
+	}
+}
+
+// pairLevelImages is the pair the pair-level rows hand the gate: a full commit
+// and the daemon and polecat digests the registry derivation answers for it, so
+// a row that clears the level check also clears the registry match.
+func pairLevelImages() update.ImagePair {
+	return update.ImagePair{
+		Daemon:  pairMatchRef(imagevalues.DaemonImage, "dddddddddddd"),
+		Polecat: pairMatchRef(imagevalues.PolecatImage, "eeeeeeeeeeee"),
+		Commit:  pairLevelCommit,
 	}
 }
 
@@ -85,48 +97,48 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 	}{
 		{
 			name:  "a pin at 67 against a database at 66 refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: skewed,
 			want:  []string{pairLevelCommit, pairLevelBdPin, "schema level 67", "database is at 66"},
 		},
 		{
 			name:  "a pin at 66 against a database at 67 refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: reverse,
 			want:  []string{pairLevelCommit, pairLevelBdPin, "schema level 66", "database is at 67"},
 		},
 		{
 			name:  "equal levels pass",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: pinAt(pairLevelBdPin, pairLevelSchema),
 		},
 		{
 			name:  "a pin that cannot be read refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: pinFails,
 			want:  []string{pairLevelCommit, "no such path"},
 		},
 		{
 			name:  "a pin level that cannot be read refuses, even against a database at zero",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: levelFails,
 			want:  []string{pairLevelCommit, "bd carries no migrations"},
 		},
 		{
 			name:  "a database level that cannot be read refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: databaseFails,
 			want:  []string{"database's schema level", "Dolt is not reachable"},
 		},
 		{
 			name:  "a pair-level read that is not wired refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: pairLevelReads{Database: agreeingPairLevels().Database},
 			want:  []string{"no read of the pair's bd pin level"},
 		},
 		{
 			name:  "a database read that is not wired refuses",
-			pair:  update.ImagePair{Commit: pairLevelCommit},
+			pair:  pairLevelImages(),
 			reads: pairLevelReads{PinLevel: agreeingPairLevels().PinLevel},
 			want:  []string{"no read of the database's schema level"},
 		},
@@ -139,7 +151,7 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, tt.reads)
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, tt.reads, pairHeldDerive(tt.pair))
 
 			err := gate(context.Background(), tt.pair)
 			if len(tt.want) == 0 {
