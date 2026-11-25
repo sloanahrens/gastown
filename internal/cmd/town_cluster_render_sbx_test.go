@@ -574,3 +574,94 @@ func TestClusterRenderSbxClusterFlagsAreRegistered(t *testing.T) {
 		})
 	}
 }
+
+// TestClusterRenderSbxClusterRefusals: each refused run is named before the town,
+// the engine or a write; an empty cluster renders the control set.
+func TestClusterRenderSbxClusterRefusals(t *testing.T) {
+	t.Parallel()
+	sbxRun := clusterRenderFlags{cluster: clusterSbx, sbxManifests: "m", sbxChart: "c", sbxValues: "v"}
+	controlRun := clusterRenderFlags{cluster: clusterControl}
+	for _, tc := range []struct {
+		name string
+		base clusterRenderFlags
+		edit func(*clusterRenderFlags)
+		want []string
+	}{
+		{"an unknown cluster", clusterRenderFlags{}, func(f *clusterRenderFlags) { f.cluster = "gt-prod" }, []string{"gt-prod", clusterControl, clusterSbx}},
+		{"gt-sbx without --sbx-manifests", sbxRun, func(f *clusterRenderFlags) { f.sbxManifests = "" }, []string{"--sbx-manifests"}},
+		{"gt-sbx without --sbx-chart", sbxRun, func(f *clusterRenderFlags) { f.sbxChart = "" }, []string{"--sbx-chart"}},
+		{"gt-sbx without --sbx-values", sbxRun, func(f *clusterRenderFlags) { f.sbxValues = "" }, []string{"--sbx-values"}},
+		{"gt-sbx without --out", sbxRun, func(f *clusterRenderFlags) { f.out = "" }, []string{"--out"}},
+		{"a control run with --sbx-manifests", controlRun, func(f *clusterRenderFlags) { f.sbxManifests = "m" }, []string{"--sbx-manifests"}},
+		{"a control run with --sbx-chart", controlRun, func(f *clusterRenderFlags) { f.sbxChart = "c" }, []string{"--sbx-chart"}},
+		{"a control run with --sbx-values", controlRun, func(f *clusterRenderFlags) { f.sbxValues = "v" }, []string{"--sbx-values"}},
+		{"an empty cluster with --sbx-values", clusterRenderFlags{}, func(f *clusterRenderFlags) { f.sbxValues = "v" }, []string{"--sbx-values"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := filepath.Join(t.TempDir(), "out")
+			f := tc.base
+			f.out = out
+			tc.edit(&f)
+			d := clusterRenderDeps{
+				findTown: func() (string, error) {
+					t.Error("the render looked up the town before it refused the run")
+					return "", errors.New("planted town")
+				},
+				renderSbx: func(context.Context, sbx.Inputs) (sbx.Set, error) {
+					t.Error("the engine ran before it refused the run")
+					return sbx.Set{}, errors.New("planted render")
+				},
+				getenv:   func(string) string { return "" },
+				userHome: func() (string, error) { return "", errors.New("planted home") },
+				out:      io.Discard,
+			}
+			err := runClusterRender(d, f)
+			if err == nil {
+				t.Fatalf("runClusterRender() = nil, want a refusal naming %q", tc.want)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+			if names := dirNames(t, out); names != nil {
+				t.Errorf("files in %s = %q, want none", out, names)
+			}
+		})
+	}
+
+	// An empty cluster is the control cluster: it writes the control set, byte for byte.
+	town := clusterRenderTestTown(t)
+	control := clusterRenderFixture(t)
+	control.cluster = clusterControl
+	control.out = filepath.Join(t.TempDir(), "control")
+	empty := control
+	empty.cluster = ""
+	empty.out = filepath.Join(t.TempDir(), "empty")
+	for _, f := range []clusterRenderFlags{control, empty} {
+		if err := runClusterRender(clusterRenderDepsAt(t, town, io.Discard), f); err != nil {
+			t.Fatalf("runClusterRender(--cluster %q): %v", f.cluster, err)
+		}
+	}
+	names := dirNames(t, control.out)
+	if len(names) == 0 {
+		t.Fatal("the control render wrote no file, so there is nothing to compare")
+	}
+	if got := dirNames(t, empty.out); !slices.Equal(got, names) {
+		t.Fatalf("an empty cluster wrote %q, want the control set %q", got, names)
+	}
+	for _, name := range names {
+		want, err := os.ReadFile(filepath.Join(control.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(empty.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s from an empty cluster differs from the control render", name)
+		}
+	}
+}
