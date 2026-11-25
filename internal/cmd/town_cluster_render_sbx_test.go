@@ -495,6 +495,61 @@ func TestClusterRenderSbxEngineNumbersWithTheControlRenderWidth(t *testing.T) {
 	}
 }
 
+// --cluster gt-sbx reaches runSbxRender through runClusterRender with the three
+// paths and the --helm binary, and the command prints the engine's Secret lines.
+// The sandbox render reads no town, so the town lookup is planted to fail.
+func TestClusterRenderSbxClusterDispatchesToTheEngine(t *testing.T) {
+	t.Parallel()
+	out := t.TempDir()
+	var got sbx.Inputs
+	var helmName string
+	var stdout bytes.Buffer
+	d := clusterRenderDeps{
+		findTown: func() (string, error) {
+			t.Error("the gt-sbx render looked up the town; it reads none")
+			return "", errors.New("planted town")
+		},
+		readFile: func(string) ([]byte, error) {
+			t.Error("the gt-sbx render read a file itself; sbx.Render reads through the reader it was given")
+			return nil, errors.New("planted read")
+		},
+		renderSbx: func(ctx context.Context, in sbx.Inputs) (sbx.Set, error) {
+			got = in
+			if _, err := in.Run(ctx, "helm", "template"); err != nil {
+				return sbx.Set{}, err
+			}
+			return sbx.Set{Objects: sbxEngineObjects, Secrets: []string{"openshell-secrets"}}, nil
+		},
+		runHelm: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			helmName = name
+			return nil, nil
+		},
+		writeFile: func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:       &stdout,
+	}
+	f := clusterRenderFlags{
+		cluster:      clusterSbx,
+		out:          out,
+		sbxManifests: "/pin/agent-sandbox.yaml",
+		sbxChart:     "/chart",
+		sbxValues:    "/values.yaml",
+		helm:         "/opt/helm",
+	}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("runClusterRender(--cluster %s): %v", clusterSbx, err)
+	}
+	if got.AgentSandboxPath != "/pin/agent-sandbox.yaml" || got.ChartDir != "/chart" || got.ValuesPath != "/values.yaml" {
+		t.Errorf("runSbxRender got manifests %q, chart %q, values %q; want the three paths it was given",
+			got.AgentSandboxPath, got.ChartDir, got.ValuesPath)
+	}
+	if want := "/opt/helm"; helmName != want {
+		t.Errorf("the render ran %q, want the --helm binary %q", helmName, want)
+	}
+	if want := "expected Secret: openshell-secrets\n"; stdout.String() != want {
+		t.Errorf("stdout = %q, want the engine's output %q", stdout.String(), want)
+	}
+}
+
 // TestClusterRenderSbxClusterFlagsAreRegistered: the gt-sbx flags exist with
 // their defaults, so a control render that names none of them keeps the
 // control cluster and empty sbx inputs.
