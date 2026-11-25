@@ -4,8 +4,10 @@ import (
 	"errors"
 	"iter"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -82,8 +84,8 @@ func TestSeatLockOrder(t *testing.T) {
 			if (info != nil) != tt.wantInfo || (err != nil) != tt.wantErr {
 				t.Errorf("info = %+v, err = %v; want info=%v error=%v", info, err, tt.wantInfo, tt.wantErr)
 			}
-			if tt.lockErr != nil && !errors.Is(err, tt.lockErr) {
-				t.Errorf("err = %v, want it to wrap %v", err, tt.lockErr)
+			if tt.lockErr != nil && (!errors.Is(err, tt.lockErr) || !strings.Contains(err.Error(), dispatch.SlingRefusalMarker)) {
+				t.Errorf("err = %v, want it to wrap %v behind %s", err, tt.lockErr, dispatch.SlingRefusalMarker)
 			}
 		})
 	}

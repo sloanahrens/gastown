@@ -286,8 +286,7 @@ type idlePolecatReuse interface {
 }
 
 // seatPickLocker is the optional rig-wide seat-pick lock the pool pick takes.
-// It is asserted on the polecat manager, so a fake that does not implement it
-// picks without the lock.
+// A fake without it picks unlocked, so the manager is asserted, not required.
 type seatPickLocker interface {
 	LockSeatPick() (func(), error)
 }
@@ -499,10 +498,9 @@ func reuseIdlePolecatForSlingWith(
 		}
 	}
 	// The pool pick holds the seat-pick lock from its idle read until the reuse
-	// loop below has ended, so two parallel picks cannot reuse the same seat.
-	// releaseSeatPick is idempotent: the loop releases it once it ends, and the
-	// deferred call covers each early return in between. The spawn and the hook
-	// step after the loop run unlocked.
+	// loop has ended, so parallel picks cannot reuse one seat. releaseSeatPick is
+	// idempotent: the loop releases it, and the defer covers early returns. The
+	// spawn and the hook step run unlocked.
 	var seatPickUnlock func()
 	releaseSeatPick := func() {
 		if seatPickUnlock != nil {
@@ -520,7 +518,7 @@ func reuseIdlePolecatForSlingWith(
 		if locker, ok := polecatMgr.(seatPickLocker); ok {
 			unlock, lockErr := locker.LockSeatPick()
 			if lockErr != nil {
-				return nil, fmt.Errorf("taking the seat-pick lock: %w", lockErr)
+				return nil, fmt.Errorf("%s taking the seat-pick lock: %w", dispatch.SlingRefusalMarker, lockErr)
 			}
 			seatPickUnlock = unlock
 		}
