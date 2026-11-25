@@ -2,6 +2,7 @@ package land
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -11,17 +12,39 @@ const followupNoteLineLimit = 20
 
 // followupNoted reports whether a finding is a note on the landing's own bead
 // rather than a follow-up bead: om's comment and test-style minors are the note
-// (operator decision, 2026-11-19; the bound stays 40), and every other class,
-// including none, is filed (gt-i8ywix).
-func followupNoted(class string) bool {
-	return class == FindingClassComment || class == FindingClassTestStyle
+// wherever the file is (operator decision, 2026-11-19; the bound stays 40), and
+// so is a finding under docs/ or directives/ whose class is not
+// FindingClassBehaviour, since a text nit in a doc or a directive is not a
+// defect a seat follows up (gt-1tkqok). Every other finding is filed
+// (gt-i8ywix): one of class FindingClassBehaviour under those paths, and every
+// finding, class-less ones included, outside them.
+func followupNoted(f Finding) bool {
+	if f.Class == FindingClassComment || f.Class == FindingClassTestStyle {
+		return true
+	}
+	return f.Class != FindingClassBehaviour && docDirectivePath(f.Path)
+}
+
+// docDirectivePath reports whether p names a file under the repository's docs/
+// or directives/ directory. om writes paths with forward slashes from the root
+// and may prefix them with "./", so path.Clean folds that before the prefix
+// test; a look-alike directory such as docsite/ or internal/docs/ is not one of
+// the two (gt-1tkqok).
+func docDirectivePath(p string) bool {
+	p = path.Clean(strings.TrimSpace(p))
+	for _, dir := range []string{"docs", "directives"} {
+		if p == dir || strings.HasPrefix(p, dir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // splitNoted splits a landing's findings into the ones filed as beads and the
 // ones noted on the bead, keeping om's order on both sides (gt-i8ywix).
 func splitNoted(findings []Finding) (filed, noted []Finding) {
 	for _, f := range findings {
-		if followupNoted(f.Class) {
+		if followupNoted(f) {
 			noted = append(noted, f)
 			continue
 		}
