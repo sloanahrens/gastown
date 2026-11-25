@@ -916,10 +916,8 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			// The startup command names files under the host town root
 			// (--settings, --append-system-prompt-file, GT_SYSTEM_PROMPT_FILE);
 			// inside the sandbox they live under its own town root. That root
-			// is mapped from the real worktree path the backend names in
-			// GT_POLECAT_PATH, never from the prepared work dir: the latter may
-			// be a link path every seat shares (gt-f80lq2). A backend that
-			// names no worktree has no root to map, and the launch stops here.
+			// is mapped from the worktree sandboxWorktreeFromEnv reads, whose
+			// doc comment carries the reason it is not the prepared work dir.
 			sandboxWorkDir, werr := sandboxWorktreeFromEnv(prep.Env)
 			if werr != nil {
 				return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, werr)
