@@ -1411,6 +1411,46 @@ func TestRunKeepsTheEndOfTheSweepOutput(t *testing.T) {
 	})
 }
 
+// TestRunnerTurnsTheContainerTriggerOff: the runner container holds no town, so
+// the container-package trigger cannot keep its state there: every record fails
+// and no skip is ever found, so each container package runs and the run prints a
+// failed record. TIER_SWEEP_TRIGGER=0 asks the sweep for every container package
+// without that call, for the Go sweep and for the rig's script alike (gt-px7g8q).
+func TestRunnerTurnsTheContainerTriggerOff(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the Go sweep runs with the trigger off", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+			return 0
+		})
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) { return rel == goSweepDir, nil }
+		runAndRead(t, h, "integration")
+		if got := h.overrides[tiersweep.EnvTrigger]; got != "0" {
+			t.Errorf("sweep %s = %q, want 0: the runner container has no town to keep the trigger's state in", tiersweep.EnvTrigger, got)
+		}
+	})
+
+	t.Run("the rig's script runs with the trigger off", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) { return rel == scriptPath, nil }
+		var env []string
+		h.deps.RunScript = func(_ string, _ []string, _ string, e []string, stdout, _ io.Writer) int {
+			env = e
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n",
+				envValue(e, tiersweep.EnvLogDir))
+			return 0
+		}
+		runAndRead(t, h, "integration")
+		if v := envValue(env, tiersweep.EnvTrigger); v != "0" {
+			t.Errorf("the script environment holds %s = %q, want 0: the container holds no town for the trigger's state",
+				tiersweep.EnvTrigger, v)
+		}
+	})
+}
+
 // TestRunChoosesTheSweepTheTreeShips: the runner makes the same choice the
 // daemon's host sweep makes for a checked-out tree (resolveIn): the Go sweep in
 // process where the tree has cmd/tier-sweep, else the rig's tier script with the
