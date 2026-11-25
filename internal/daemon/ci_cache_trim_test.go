@@ -60,6 +60,16 @@ const ciCachePodsRunningJSON = `{"items":[{"metadata":{"name":"` + ciCacheTestPo
 const ciCachePodsDindWaitingJSON = `{"items":[{"metadata":{"name":"` + ciCacheTestPod + `"},` +
 	`"status":{"containerStatuses":[{"name":"dind","state":{"waiting":{"reason":"ContainerCreating"}}}]}}]}`
 
+// ciCachePodsDindInitRunningJSON is the same pod with dind a native sidecar.
+const ciCachePodsDindInitRunningJSON = `{"items":[{"metadata":{"name":"` + ciCacheTestPod + `"},` +
+	`"status":{"initContainerStatuses":[` +
+	`{"name":"dind","state":{"running":{"startedAt":"2026-11-06T01:00:00Z"}}}]}}]}`
+
+// ciCachePodsDindDownJSON is the same pod with dind running in neither list.
+const ciCachePodsDindDownJSON = `{"items":[{"metadata":{"name":"` + ciCacheTestPod + `"},` +
+	`"status":{"containerStatuses":[{"name":"dind","state":{"waiting":{"reason":"ContainerCreating"}}}],` +
+	`"initContainerStatuses":[{"name":"dind","state":{"terminated":{"exitCode":1}}}]}}]}`
+
 // ciCacheFixture is the daemon a CI cache trim test runs: the patrol on, a
 // kubernetes runner named on the tier sweep, kubectl answered in process, and a
 // clock and a dispatch the test drives.
@@ -830,6 +840,54 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 			}
 			if n := strings.Count(f.logs.String(), tt.want); n != 1 {
 				t.Errorf("the failure was logged %d times across two attempts, want once an hour", n)
+			}
+		})
+	}
+}
+
+// TestCICacheTrimPodNamesTheRunningPod: the trim execs into the runner pod whose
+// dind container is running, whether dind is a regular container or a native
+// sidecar reported in initContainerStatuses. A pod with dind up in neither list
+// refuses as not running, and a reply with no item list refuses.
+func TestCICacheTrimPodNamesTheRunningPod(t *testing.T) {
+	t.Parallel()
+	// want empty means the pod is named and exec'd into; otherwise the run
+	// refuses without an exec and logs want.
+	tests := []struct {
+		name string
+		pods cliReply
+		want string
+	}{
+		{name: "dind runs as a regular container", pods: cliReply{stdout: ciCachePodsRunningJSON}},
+		{name: "dind runs as an init container", pods: cliReply{stdout: ciCachePodsDindInitRunningJSON}},
+		{name: "dind is running in neither list", pods: cliReply{stdout: ciCachePodsDindDownJSON}, want: "is not running in forgejo"},
+		{name: "the reply names no item list", pods: cliReply{stdout: "{}"}, want: "the reply names no item list"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			f.pods = tt.pods
+			f.tick()
+			f.drain()
+
+			execs := f.execs()
+			if tt.want == "" {
+				if len(execs) != len(ciCacheVolumes) {
+					t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
+				}
+				for _, c := range execs {
+					if !slices.Contains(c.args, ciCacheTestPod) {
+						t.Errorf("exec argv does not name the running pod %s: %q", ciCacheTestPod, cacheTrimVerb(c.args))
+					}
+				}
+				return
+			}
+			if len(execs) != 0 {
+				t.Errorf("ran %d execs, want none: no running pod was named", len(execs))
+			}
+			if !strings.Contains(f.logs.String(), tt.want) {
+				t.Errorf("logs do not name the refusal %q:\n%s", tt.want, f.logs.String())
 			}
 		})
 	}

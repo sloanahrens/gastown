@@ -920,9 +920,19 @@ func (d *Daemon) ciCacheTrimLogf(kind, format string, args ...any) {
 	}
 }
 
+// ciCacheContainerStatus is one container's status in a pod's reply; only its
+// running state counts as up.
+type ciCacheContainerStatus struct {
+	Name  string `json:"name"`
+	State struct {
+		Running *struct{} `json:"running"`
+	} `json:"state"`
+}
+
 // ciCacheTrimPod names a runner pod whose dind container is running, the one the
-// exec goes into. A reply with no item list refuses, because an unreadable reply
-// would read as no runner at all.
+// exec goes into, in either the container statuses or, for a native sidecar, the
+// initContainerStatuses. A reply with no item list refuses, because an unreadable
+// reply would read as no runner at all.
 func (d *Daemon) ciCacheTrimPod(ctx context.Context, kubeconfig, kubeContext string) (string, error) {
 	out, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
 		"get", "pods", "-n", ciCacheNamespace, "-l", ciCachePodLabel, "-o", "json")
@@ -935,12 +945,8 @@ func (d *Daemon) ciCacheTrimPod(ctx context.Context, kubeconfig, kubeContext str
 				Name string `json:"name"`
 			} `json:"metadata"`
 			Status struct {
-				ContainerStatuses []struct {
-					Name  string `json:"name"`
-					State struct {
-						Running *struct{} `json:"running"`
-					} `json:"state"`
-				} `json:"containerStatuses"`
+				ContainerStatuses     []ciCacheContainerStatus `json:"containerStatuses"`
+				InitContainerStatuses []ciCacheContainerStatus `json:"initContainerStatuses"`
 			} `json:"status"`
 		} `json:"items"`
 	}
@@ -951,9 +957,14 @@ func (d *Daemon) ciCacheTrimPod(ctx context.Context, kubeconfig, kubeContext str
 		return "", errors.New("the runner's pods could not be decoded: the reply names no item list")
 	}
 	for _, pod := range *list.Items {
-		for _, c := range pod.Status.ContainerStatuses {
-			if c.Name == ciCacheContainer && c.State.Running != nil && pod.Metadata.Name != "" {
-				return pod.Metadata.Name, nil
+		if pod.Metadata.Name == "" {
+			continue
+		}
+		for _, statusList := range [][]ciCacheContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
+			for _, c := range statusList {
+				if c.Name == ciCacheContainer && c.State.Running != nil {
+					return pod.Metadata.Name, nil
+				}
 			}
 		}
 	}
