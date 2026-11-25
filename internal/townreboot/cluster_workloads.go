@@ -20,7 +20,9 @@ type replicasDeployment struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
-		Replicas int `json:"replicas"`
+		// A pointer, so an absent spec.replicas is nil and reads as an unknown
+		// count rather than the 0 a drained stop leaves (gt-k59lbc).
+		Replicas *int `json:"replicas"`
 	} `json:"spec"`
 	Status struct {
 		ReadyReplicas int `json:"readyReplicas"`
@@ -49,7 +51,8 @@ func replicasScaleFix(name string) string {
 
 // ReplicasCheck reads the daemon and dashboard Deployments and passes when each
 // runs its desired replicas with every one ready; a Deployment a drained stop
-// scaled to zero is the operations doc's step 6 (gt-fvna6b).
+// scaled to zero is the operations doc's step 6 (gt-fvna6b). A Deployment with
+// no spec.replicas fails as an unknown count, never as a drained stop (gt-k59lbc).
 func ReplicasCheck(run Runner) Check {
 	return Check{
 		Name: "6 replicas",
@@ -86,20 +89,27 @@ func ReplicasCheck(run Runner) Check {
 					problems = append(problems, name+" is not in the deployment list")
 					continue
 				}
-				if d.Spec.Replicas < 1 {
+				if d.Spec.Replicas == nil {
+					// An absent field is an unknown desired count, not a drained
+					// stop, so the row names the field and prints no scale fix.
+					problems = append(problems, name+" has no spec.replicas: the desired count is unknown")
+					continue
+				}
+				desired := *d.Spec.Replicas
+				if desired < 1 {
 					problems = append(problems, fmt.Sprintf(
 						"%s has %d replicas: expected after a drained stop, and nothing is running",
-						name, d.Spec.Replicas))
+						name, desired))
 					fixes = append(fixes, replicasScaleFix(name))
 					continue
 				}
-				if d.Status.ReadyReplicas < d.Spec.Replicas {
+				if d.Status.ReadyReplicas < desired {
 					problems = append(problems, fmt.Sprintf("%s %d/%d ready",
-						name, d.Status.ReadyReplicas, d.Spec.Replicas))
+						name, d.Status.ReadyReplicas, desired))
 					continue
 				}
 				healthy = append(healthy, fmt.Sprintf("%s %d/%d ready",
-					name, d.Status.ReadyReplicas, d.Spec.Replicas))
+					name, d.Status.ReadyReplicas, desired))
 			}
 			if len(problems) > 0 {
 				return Result{Detail: strings.Join(problems, "; "), Fix: strings.Join(fixes, " && ")}

@@ -185,6 +185,55 @@ func TestRebootCheckClusterReplicasCommands(t *testing.T) {
 	}
 }
 
+// TestRebootCheckReplicasAbsentSpec pins that a Deployment whose JSON has no
+// spec.replicas is an unknown desired count, not a drained stop: its row fails,
+// names the missing field and carries no scale fix, while the other
+// Deployment's scale fix is still printed (gt-k59lbc).
+func TestRebootCheckReplicasAbsentSpec(t *testing.T) {
+	t.Parallel()
+	absentDaemon := `{"metadata":{"name":"daemon"},"spec":{},"status":{"readyReplicas":0}}`
+	absentDashboard := `{"metadata":{"name":"dashboard"},"spec":{},"status":{"readyReplicas":0}}`
+	tests := []struct {
+		name       string
+		out        string
+		wantDetail string
+		wantFix    string
+	}{
+		{
+			name:       "daemon has no spec.replicas",
+			out:        deploymentsJSON(absentDaemon, deploymentJSON("dashboard", 1, 1)),
+			wantDetail: "daemon has no spec.replicas: the desired count is unknown",
+		},
+		{
+			name:       "daemon has no spec.replicas and dashboard is scaled to zero",
+			out:        deploymentsJSON(absentDaemon, deploymentJSON("dashboard", 0, 0)),
+			wantDetail: "daemon has no spec.replicas: the desired count is unknown; dashboard has 0 replicas: expected after a drained stop, and nothing is running",
+			wantFix:    dashboardReplicasFix,
+		},
+		{
+			name:       "dashboard has no spec.replicas and daemon is scaled to zero",
+			out:        deploymentsJSON(deploymentJSON("daemon", 0, 0), absentDashboard),
+			wantDetail: "daemon has 0 replicas: expected after a drained stop, and nothing is running; dashboard has no spec.replicas: the desired count is unknown",
+			wantFix:    daemonReplicasFix,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			row := replicasRow(replicaListing(tt.out))
+			if row.OK {
+				t.Errorf("OK = true, want a failed row (detail %q)", row.Detail)
+			}
+			if row.Detail != tt.wantDetail {
+				t.Errorf("Detail = %q, want %q", row.Detail, tt.wantDetail)
+			}
+			if row.Fix != tt.wantFix {
+				t.Errorf("Fix = %q, want %q", row.Fix, tt.wantFix)
+			}
+		})
+	}
+}
+
 // forwardProbeCall is the one read the forward check makes: curl prints the
 // dashboard's status code and nothing else.
 const forwardProbeCall = `curl --max-time 8 -s -o /dev/null -w %{http_code} http://127.0.0.1:8787/api/state`
