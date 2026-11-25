@@ -4576,7 +4576,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		read := specCandidatesDropping(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 			reads.call()
 			return specReadyBoard(rigPath)
-		}, docked.parkedOrDocked, retry, drop)
+		}, docked.parkedOrDocked, retry, drop, nil)
 		return specBoardDetails(reads, func(rig string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 		}, read, memo)
@@ -5214,12 +5214,11 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 // tick slings such a bead again instead of waiting for a person (gt-vaivp).
 //
 // skip is the quiet-rig seam (gt-w2xa0f): the last parameter, with exactly this
-// type. nil means every rig is read, as before. This part only declares it, so a
-// non-nil skip is accepted and NOT consulted yet: gt-svzybb makes a rig it
-// answers true for get no ready read, and gt-rd87eq no split-held or duplicate
-// read either.
-func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip func(rig string) bool) specBoardRead { //nolint:unparam // skip is the seam gt-svzybb consumes; this part only declares it
-	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil)
+// type. nil means every rig is read, as before. A rig skip answers true for gets
+// no ready read at all, so the board is not asked for its beads (gt-svzybb).
+// The split-held and duplicate reads are not skipped here (gt-rd87eq).
+func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, skip func(rig string) bool) specBoardRead { //nolint:unparam // no production caller passes a non-nil skip yet; the quiet-rig memory connects it
+	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil, skip)
 }
 
 // specCandidatesDropping is specCandidatesRetrying with drop, the tick's
@@ -5227,8 +5226,9 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 // The drop runs before the bead is classified, so a stale bead is a candidate
 // of this tick like any other and a label that is not stale stays held as
 // before. nil drops nothing, which is what a tick that must write nothing and
-// a test that reads the board alone pass.
-func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, drop specSplitStaleDrop) specBoardRead {
+// a test that reads the board alone pass. skip is applied before the board is
+// read, so a skipped rig's beads are never asked for (gt-svzybb).
+func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, drop specSplitStaleDrop, skip func(rig string) bool) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -5255,6 +5255,9 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 			continue
 		}
 		if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
+			continue
+		}
+		if skip != nil && skip(name) {
 			continue
 		}
 		issues, err := board(rigPath)
