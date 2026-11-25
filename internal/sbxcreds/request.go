@@ -11,10 +11,11 @@ import (
 // The validity window a request may ask for; kubeadm issues any period.
 const minValidity, maxValidity = time.Hour, 8760 * time.Hour // one year
 
-// namePattern is the shape the container, client name and group must have.
-var namePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+// namePattern is the shape the container, client name and group must have: lowercase letters,
+// digits and dashes, opening with a letter or digit so no value can be read as a flag.
+var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
-// dockerExec starts every argv this package builds; it runs no process itself (docs/design/pod-engine.md).
+// dockerExec prefixes every argv Argv builds; a new literal here needs its own bullet in docs/design/pod-engine.md.
 var dockerExec = []string{"docker", "exec"}
 
 // Request is the certificate to issue: the container, the client name, the organization (group) and the validity.
@@ -30,7 +31,7 @@ type Request struct {
 func (r Request) Argv() ([]string, error) {
 	for _, f := range []struct{ name, value string }{{"container", r.Container}, {"client name", r.ClientName}, {"group", r.Group}} {
 		if !namePattern.MatchString(f.value) {
-			return nil, fmt.Errorf("%s %q is not lowercase letters, digits and dashes", f.name, f.value)
+			return nil, fmt.Errorf("%s %q is not lowercase letters, digits and dashes, starting with a letter or digit", f.name, f.value)
 		}
 	}
 	validity, err := time.ParseDuration(r.Validity)
@@ -40,6 +41,5 @@ func (r Request) Argv() ([]string, error) {
 	if validity < minValidity || validity > maxValidity {
 		return nil, fmt.Errorf("validity %q is outside %s to %s", r.Validity, minValidity, maxValidity)
 	}
-	return append(slices.Clone(dockerExec), r.Container, "kubeadm", "kubeconfig", "user", "--client-name", r.ClientName,
-		"--org", r.Group, "--validity-period", validity.String()), nil
+	return append(slices.Clone(dockerExec), r.Container, "kubeadm", "kubeconfig", "user", "--client-name", r.ClientName, "--org", r.Group, "--validity-period", validity.String()), nil
 }

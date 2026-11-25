@@ -20,8 +20,7 @@ func TestRequestArgv(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ validity, want string }{{"24h", "24h0m0s"}, {"1h", "1h0m0s"}, {"8760h", "8760h0m0s"}} {
 		req := sbxcreds.Request{Container: "gt-sbx-control-plane", ClientName: "gt-deployer-apply", Group: "gt-deployer-apply", Validity: tc.validity}
-		want := []string{"docker", "exec", "gt-sbx-control-plane", "kubeadm", "kubeconfig", "user",
-			"--client-name", "gt-deployer-apply", "--org", "gt-deployer-apply", "--validity-period", tc.want}
+		want := []string{"docker", "exec", "gt-sbx-control-plane", "kubeadm", "kubeconfig", "user", "--client-name", "gt-deployer-apply", "--org", "gt-deployer-apply", "--validity-period", tc.want}
 		got, err := req.Argv()
 		if err != nil {
 			t.Fatalf("Argv() with validity %q: %v", tc.validity, err)
@@ -42,7 +41,9 @@ func TestRequestRefuses(t *testing.T) {
 		want  string
 	}{
 		{"an empty container", func(r *sbxcreds.Request) { r.Container = "" }, "container"},
+		{"a dash-led container", func(r *sbxcreds.Request) { r.Container = "-v" }, "container"},
 		{"a dot in the client name", func(r *sbxcreds.Request) { r.ClientName = "gt.deployer" }, "client name"},
+		{"an uppercase client name", func(r *sbxcreds.Request) { r.ClientName = "GT-deployer" }, "client name"},
 		{"an underscore in the group", func(r *sbxcreds.Request) { r.Group = "gt_deployer" }, "group"},
 		{"a validity under one hour", func(r *sbxcreds.Request) { r.Validity = "59m" }, "outside"},
 		{"a validity over 8760 hours", func(r *sbxcreds.Request) { r.Validity = "8761h" }, "outside"},
