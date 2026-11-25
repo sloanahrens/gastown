@@ -1,8 +1,9 @@
 # The Values the control cluster's forgejo-runner is built from, read from the
 # cluster on 2026-11-18: the runner's ConfigMap labels, the address the forgejo
 # alias resolves to, the claim sizes the claims hold, and each container's
-# share. Decoded by ControlValues; a key Values does not have is refused, so a
-# knob added here must first exist in Values (gt-q2nigb). It holds labels, an
+# share, with the engine's requests below its limit so a tier sweep beside it
+# still fits. Decoded by ControlValues; a key Values does not have is refused, so
+# a knob added here must first exist in Values (gt-q2nigb). It holds labels, an
 # address and sizes, and no credential.
 namespace: forgejo
 capacity: 2
@@ -19,3 +20,6 @@ runnerResources:
 dindResources:
   cpu: "8"
   memory: 12Gi
+dindRequests:
+  cpu: "4"
+  memory: 8Gi

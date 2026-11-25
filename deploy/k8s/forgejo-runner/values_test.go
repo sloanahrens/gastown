@@ -9,7 +9,8 @@ import (
 )
 
 // controlClusterValues is values.control.yaml as the Goal records the control
-// cluster on 2026-11-18.
+// cluster: the values read on 2026-11-18, and the engine's requests as the live
+// cluster was patched to run them below its limit.
 func controlClusterValues() Values {
 	return Values{
 		Namespace: "forgejo",
@@ -24,6 +25,7 @@ func controlClusterValues() Values {
 		RunnerStorage:   "1Gi",
 		RunnerResources: Share{CPU: "1", Memory: "1Gi"},
 		DindResources:   Share{CPU: "8", Memory: "12Gi"},
+		DindRequests:    Share{CPU: "4", Memory: "8Gi"},
 	}
 }
 
@@ -37,6 +39,28 @@ func TestControlValuesBuild(t *testing.T) {
 	}
 	if _, err := Build(v); err != nil {
 		t.Fatalf("Build(ControlValues()): %v", err)
+	}
+}
+
+// TestControlValuesRenderTheEngineBelowItsLimit drives the control values through
+// Build: the engine asks for the requests the file names and keeps the larger
+// limit, so a tier sweep beside it still fits on the node.
+func TestControlValuesRenderTheEngineBelowItsLimit(t *testing.T) {
+	t.Parallel()
+	v, err := ControlValues()
+	if err != nil {
+		t.Fatalf("ControlValues: %v", err)
+	}
+	m, err := Build(v)
+	if err != nil {
+		t.Fatalf("Build(ControlValues()): %v", err)
+	}
+	dind := containerNamed(t, m.Deployment.Spec.Template.Spec, DindContainerName)
+	if want := (ResourceList{CPU: "4", Memory: "8Gi"}); dind.Resources.Requests != want {
+		t.Errorf("the engine requests = %+v, want the control values' %+v", dind.Resources.Requests, want)
+	}
+	if want := (ResourceList{CPU: "8", Memory: "12Gi"}); dind.Resources.Limits != want {
+		t.Errorf("the engine limits = %+v, want %+v", dind.Resources.Limits, want)
 	}
 }
 

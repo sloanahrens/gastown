@@ -124,8 +124,8 @@
                 "memory": "12Gi"
               },
               "requests": {
-                "cpu": "8",
-                "memory": "12Gi"
+                "cpu": "4",
+                "memory": "8Gi"
               }
             },
             "restartPolicy": "Always",

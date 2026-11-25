@@ -35,8 +35,8 @@ spec:
               value: /certs
           resources:
             requests:
-              cpu: "8"
-              memory: 12Gi
+              cpu: "4"
+              memory: 8Gi
             limits:
               cpu: "8"
               memory: 12Gi
