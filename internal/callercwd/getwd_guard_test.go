@@ -72,6 +72,44 @@ func TestGetwdAllowlistCanOnlyShrink(t *testing.T) {
 	}
 }
 
+// TestGetwdScanFollowsASymlinkedRoot pins the case a seat hits: its shell's
+// PWD is a symlink to the worktree, so the scan root the guard derives is the
+// symlink. filepath.WalkDir does not follow a symlinked root, so an unresolved
+// root visits one entry and reports no sites, and every allowlist entry reads
+// as stale.
+func TestGetwdScanFollowsASymlinkedRoot(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	writeFixture(t, tree, "pkg/foo.go", "package pkg\n\nimport \"os\"\n\nfunc f() {\n\tos.Getwd()\n}\n")
+	link := filepath.Join(t.TempDir(), "work")
+	if err := os.Symlink(tree, link); err != nil {
+		t.Fatalf("symlink %s: %v", link, err)
+	}
+
+	sites, err := getwdSites(link, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("getwdSites(%s) = %v, want the sites under the symlinked root", link, err)
+	}
+	if len(sites) != 1 || sites[0].key() != "pkg/foo.go:f" || sites[0].line != 6 {
+		t.Fatalf("getwdSites(%s) = %+v, want the one os.Getwd site pkg/foo.go:f at line 6", link, sites)
+	}
+}
+
+// TestGetwdScanRefusesAnUnresolvableRoot keeps a root that does not exist from
+// reading as a clean scan: the ratchet would then excuse nothing and pass.
+func TestGetwdScanRefusesAnUnresolvableRoot(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "absent")
+
+	sites, err := getwdSites(missing, func(string) bool { return false })
+	if err == nil {
+		t.Fatalf("getwdSites(%s) = %d sites and no error, want a refusal naming the root", missing, len(sites))
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("getwdSites(%s) error = %q, want it to name the root", missing, err)
+	}
+}
+
 // TestGetwdGuardFixtureCases drives every failing branch of the guard with
 // fixture sources and allowlists in a temp directory, so each refusal is
 // proven before the guard is trusted over the real tree.
@@ -393,10 +431,17 @@ func loadGetwdAllowlist(path string) ([]allowEntry, error) {
 // getwdSites scans every non-test Go file under root and returns the os.Getwd
 // uses in them, skipping a path for which skip reports true. It reads
 // repository source only, rooted at the given root, and fails on a directory or
-// parse error rather than reporting a clean scan.
+// parse error rather than reporting a clean scan. The root is resolved through
+// any symlink before the walk: WalkDir does not follow a symlinked root, so a
+// seat whose PWD names the worktree through a link would otherwise scan
+// nothing and read every allowlist entry as stale.
 func getwdSites(root string, skip func(rel string) bool) ([]getwdSite, error) {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve scan root %s: %w", root, err)
+	}
 	var sites []getwdSite
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(resolved, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -409,7 +454,7 @@ func getwdSites(root string, skip func(rel string) bool) ([]getwdSite, error) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(resolved, path)
 		if err != nil {
 			return err
 		}
