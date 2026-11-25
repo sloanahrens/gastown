@@ -700,3 +700,37 @@ func TestReportSweepRowDatesTierByItsOwnTip(t *testing.T) {
 		})
 	}
 }
+
+// TestReviewPoolHourKeepsReusedLine: a landing that reused a stored om verdict
+// writes the reused form of its stage line. The hour report stores that line
+// as written and prints it unchanged.
+func TestReviewPoolHourKeepsReusedLine(t *testing.T) {
+	t.Parallel()
+	const reused = "stages: ci 1m32s, om reused (2m31s, 14m0s old)"
+	root := reportTown(t, map[string]string{
+		"daemon/daemon.log": strings.Join([]string{
+			"2026/10/02 13:20:00 landing_worker: [land] gt-reuse: merged 1a2b3c4d onto origin/main (5e6f7a8b) as 9a8b7c6d; gating the merged tree, then om review",
+			"2026/10/02 13:21:00 landing_worker: [land] gt-reuse: " + reused,
+			"2026/10/02 13:22:00 landing_worker: [land] gt-reuse: landed 9a8b7c6d on origin/main (patch-id 11223344)",
+			"",
+		}, "\n"),
+	})
+	r, out := reportRunFor(t, root, func(string) (BeadStore, error) {
+		return &reportFakeStore{Fake: beadsfake.New()}, nil
+	})
+	doc := r.Collect()
+	if len(doc.Landings) != 1 || doc.Landings[0].Stages != reused {
+		t.Fatalf("landings = %+v, want one row whose stages are %q", doc.Landings, reused)
+	}
+	r.Render(doc)
+
+	var row string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "  gt-reuse  ") {
+			row = line
+		}
+	}
+	if !strings.HasSuffix(row, "  "+reused) {
+		t.Fatalf("landing row must end with the reused stage line %q:\n%s", reused, out)
+	}
+}
