@@ -402,6 +402,32 @@ func TestVerdictReuseOMVersionUsesTheProbe(t *testing.T) {
 	})
 }
 
+// TestVerdictReuseOMVersionCached: two OMVersion calls on one reviewer for one
+// installed om exec `om version` once, the second answered from the probe cache
+// ReviewBead fills, so a caller comparing a stored verdict with the installed om
+// does not run om again (gt-y8jcu2).
+func TestVerdictReuseOMVersionCached(t *testing.T) {
+	t.Parallel()
+	var probes int
+	r := OMReviewer{OutDir: t.TempDir(), Path: omProbeFile(t)}
+	r.run = func(_ context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
+		if omSubcommand(argv) == "version" {
+			probes++
+			_, _ = io.WriteString(out, stubVersionLine())
+		}
+		return 0, nil
+	}
+	in := BuildReviewInput(&beads.Issue{ID: "gt-y8jcu2"}, nil, nil, "", "", "aaa", "bbb", "", "/wt", baseRepo{})
+	first := r.OMVersion(context.Background(), in)
+	second := r.OMVersion(context.Background(), in)
+	if first != stubOMVersion || second != first {
+		t.Fatalf("OMVersion returned %q then %q, want %q both times", first, second, stubOMVersion)
+	}
+	if probes != 1 {
+		t.Fatalf("om version ran %d time(s) for two OMVersion calls, want 1", probes)
+	}
+}
+
 // TestVerdictReuseIsolatedReadsItsOwnRawDir: a pool review that exits without a
 // verdict quotes the raw reply its own om saved under tmp, never the one the
 // receiver's RawDir points at, so a failure never reports another review's reply
