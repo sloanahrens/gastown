@@ -14,6 +14,33 @@ import (
 	"time"
 )
 
+// defaultBranchProbe is the ref Push asks about before its fork guard decides
+// whether a destination is the remote's default branch.
+const defaultBranchProbe = "refs/remotes/origin/HEAD"
+
+// probeTolerant returns s's runner with the default-branch probe answered as
+// "main" and every other call judged by s as before. A test that pushes answers
+// the probe here instead of scripting it: the command Push sends, its global
+// options and the hooks-off decoration are the guard's business, so a change
+// there must not fail a test about the push's own argv (gt-5t3szj).
+func probeTolerant(s *scripted) runFunc {
+	return func(c gitCall) (string, string, error) {
+		if len(c.args) > 0 && c.args[len(c.args)-1] == defaultBranchProbe {
+			return "refs/remotes/origin/main\n", "", nil
+		}
+		return s.run(c)
+	}
+}
+
+// newPushTestGit returns a Git whose runner answers the default-branch probe
+// without a scripted entry and records every other call in s.
+func newPushTestGit(t *testing.T, s *scripted) *Git {
+	t.Helper()
+	g := newTestGit(t, s)
+	g.exec = probeTolerant(s)
+	return g
+}
+
 // TestHooksOffArgs pins where `-c core.hooksPath=/dev/null` lands: before a
 // subcommand the package sends, but after every global option, and nowhere on a
 // push or a subcommand it does not recognise.
@@ -94,10 +121,9 @@ func TestWithoutAllHooksDecoratesPush(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := newScripted(map[string]reply{
-				tt.hooks + "symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
 				tt.push + "push *": ok(""),
 			})
-			g := tt.wrap(newTestGit(t, s))
+			g := tt.wrap(newPushTestGit(t, s))
 			if err := g.Push("origin", "side", false); err != nil {
 				t.Fatalf("Push: %v", err)
 			}
@@ -128,7 +154,6 @@ func TestWithoutAllHooksDecoratesTheOtherPushBuilders(t *testing.T) {
 	t.Parallel()
 	const off = "-c core.hooksPath=/dev/null "
 	s := newScripted(map[string]reply{
-		off + "symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
 		off + "push *": ok(""),
 		"push *":       ok(""),
 	})
@@ -139,7 +164,7 @@ func TestWithoutAllHooksDecoratesTheOtherPushBuilders(t *testing.T) {
 		{"without all hooks", off, (*Git).WithoutAllHooks},
 		{"without local hooks", "", (*Git).WithoutLocalHooks},
 	} {
-		g := h.wrap(newTestGit(t, s))
+		g := h.wrap(newPushTestGit(t, s))
 		for _, c := range []struct {
 			what, want string
 			err        error
@@ -184,9 +209,8 @@ func TestWithoutLocalHooksRunsTheSubcommandWithHooksOff(t *testing.T) {
 		"-c core.hooksPath=/dev/null commit -m m":             ok(""),
 		"-c core.hooksPath=/dev/null merge --no-ff -m m side": ok(""),
 		"push origin side": ok(""),
-		"-c core.hooksPath=/dev/null symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
 	})
-	g := (&Git{workDir: dir, exec: s.run}).WithoutLocalHooks()
+	g := (&Git{workDir: dir, exec: probeTolerant(s)}).WithoutLocalHooks()
 	if err := g.Commit("m"); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -226,12 +250,11 @@ func TestWithoutLocalHooksPutsTheOptionAfterTheHandleGitDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), ".repo.git")
 	const off = " -c core.hooksPath=/dev/null"
 	s := newScripted(map[string]reply{
-		"--git-dir=" + dir + off + " commit -m m":                           ok(""),
-		"--git-dir=" + dir + off + " merge --no-ff -m m side":               ok(""),
-		"--git-dir=" + dir + off + " symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
-		"--git-dir=" + dir + " push origin side":                            ok(""),
+		"--git-dir=" + dir + off + " commit -m m":             ok(""),
+		"--git-dir=" + dir + off + " merge --no-ff -m m side": ok(""),
+		"--git-dir=" + dir + " push origin side":              ok(""),
 	})
-	g := (&Git{gitDir: dir, exec: s.run}).WithoutLocalHooks()
+	g := (&Git{gitDir: dir, exec: probeTolerant(s)}).WithoutLocalHooks()
 	if err := g.Commit("m"); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -347,10 +370,9 @@ func TestWithoutLocalHooksCoversTimedStdinMergeCheck(t *testing.T) {
 				tt.prefix + "patch-id *":                   ok("abc 1\n"),
 				tt.prefix + "merge *":                      ok(""),
 				tt.prefix + "reset *":                      ok(""),
-				tt.prefix + "symbolic-ref *":               ok("refs/remotes/origin/main\n"),
 				"push *":                                   ok(""),
 			})
-			g := &Git{workDir: dir, exec: s.run}
+			g := &Git{workDir: dir, exec: probeTolerant(s)}
 			if tt.prefix != "" {
 				g = g.WithoutLocalHooks()
 			}
