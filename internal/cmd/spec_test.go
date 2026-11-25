@@ -5305,6 +5305,60 @@ func TestTickEffSkippedRigsGetNoReadyRead(t *testing.T) {
 	}
 }
 
+// TestTickEffSkippedRigsAreNoticed: with skip true for two of four rigs, the read
+// logs one notice naming the count, 2, and still returns the candidates of the
+// two rigs it read (gt-i3wvfv). A skipped read must never pass in silence.
+func TestTickEffSkippedRigsAreNoticed(t *testing.T) {
+	t.Parallel()
+	townRoot, _, _, _ := skipSeamRigs(t)
+	board := func(rigPath string) ([]*beads.Issue, error) {
+		rig := filepath.Base(rigPath)
+		return []*beads.Issue{{ID: rig + "-task", Title: "a task", Type: "task", Status: "open", Priority: 1}}, nil
+	}
+	notDocked := func(string, string) (bool, string) { return false, "" }
+	skip := func(rig string) bool { return rig == "gastown" || rig == "beads" }
+
+	got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, skip)
+	if len(got.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", got.Errors)
+	}
+	var notices []string
+	for _, n := range got.Notices {
+		if strings.Contains(n, "skipped") {
+			notices = append(notices, n)
+		}
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "2") {
+		t.Fatalf("skip notices = %q, want exactly one naming the count 2", notices)
+	}
+	ids := map[string]bool{}
+	for _, c := range got.Candidates {
+		ids[c.Spec.ID] = true
+	}
+	if len(got.Candidates) != 2 || !ids["gorge-task"] || !ids["longeye-task"] {
+		t.Errorf("Candidates = %v, want the gorge and longeye candidates", ids)
+	}
+}
+
+// TestTickEffNoSkipNoSkipNotice: with skip nil, or a skip that answers false for
+// every rig, the read logs no skip notice, so the notice never claims a rig the
+// tick read was skipped (gt-i3wvfv).
+func TestTickEffNoSkipNoSkipNotice(t *testing.T) {
+	t.Parallel()
+	townRoot, _, board, _ := skipSeamRigs(t)
+	notDocked := func(string, string) (bool, string) { return false, "" }
+	noneSkipped := func(string) bool { return false }
+
+	for name, skip := range map[string]func(string) bool{"nil": nil, "all false": noneSkipped} {
+		got := specCandidatesRetrying(townRoot, 2, board, notDocked, nil, skip)
+		for _, n := range got.Notices {
+			if strings.Contains(n, "skipped") {
+				t.Errorf("skip %s: notice %q, want none", name, n)
+			}
+		}
+	}
+}
+
 // TestTickEffQuietSkip: quietSkip answers the quiet-rig memory over the tick's
 // hashes. With no hashes, or no memory, it returns nil so every rig is read.
 // Otherwise the skip is true only for a rig the memory calls quiet under heads
