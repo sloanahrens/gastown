@@ -116,7 +116,10 @@ func TestFindSweepProgressNewestMatch(t *testing.T) {
 		sha8    string
 		wantRun string // the run directory the match must be in; "" for no match
 	}{
-		// The literal run name pins the daemon's run id shape (tierSweepRunnerRunID, unexported).
+		// The literal run name is copied from tierSweepRunnerRunID (package daemon,
+		// unexported; no exported seam exists to check it against, and none is built
+		// here) and is not checked against it, so the row changes when the daemon's
+		// run name does.
 		{"one match", []sweepRunFixture{{"gastown-6193c7a7-integration-race", true, 5}}, "6193c7a7", "gastown-6193c7a7-integration-race"},
 		{"two matches take the newer", []sweepRunFixture{
 			{"gastown-6193c7a7-integration-race", true, 90},
