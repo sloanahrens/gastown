@@ -79,7 +79,6 @@ func TestRenderSecretNamesRoleGolden(t *testing.T) {
 	wantNames := []string{
 		"daemon-dolt-archive.key",
 		"daemon-forgejo-landing.env",
-		"daemon-forgejo-registry.env",
 		"daemon-forgejo-viewer.env",
 		"daemon-jev.env",
 		"daemon-ledger-reader.dsn",

@@ -5,7 +5,6 @@
 # here. Blank lines and # comments are not names (gt-gg9hv.66).
 forgejo-landing.env
 forgejo-polecat.env
-forgejo-registry.env
 forgejo-viewer.env
 promote-gastown.key
 promote-gastown.key.pub
