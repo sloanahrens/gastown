@@ -768,6 +768,41 @@ func TestCPUClassExecRunsWhenPriorityRefused(t *testing.T) {
 	}
 }
 
+// TestCPUShare: one CPU-class build's share is the host's cores divided by the
+// slot count, rounded down so concurrent builds together stay under the core
+// count (gt-70ic39). A size below one means no slot bound and grants the whole
+// host; a core count below one still grants 1, because a GOMAXPROCS below one
+// leaves the setting unchanged, so the cap would not apply.
+// Mutation: round up (24 over 5 is 5) and the "rounds down" row fails.
+func TestCPUShare(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		numCPU, size int
+		want         int
+	}{
+		{name: "divides evenly", numCPU: 24, size: 3, want: 8},
+		{name: "rounds down", numCPU: 24, size: 5, want: 4},
+		{name: "never zero", numCPU: 2, size: 3, want: 1},
+		{name: "unset size", numCPU: 24, size: 0, want: 24},
+		{name: "negative size", numCPU: 24, size: -1, want: 24},
+		{name: "no cores", numCPU: 0, size: 3, want: 1},
+		{name: "negative cores", numCPU: -2, size: 3, want: 1},
+		// The core count wins over the slot count: an unset size on a failed
+		// core probe still never yields a negative share.
+		{name: "negative cores with unset size", numCPU: -2, size: 0, want: 1},
+		{name: "no cores with unset size", numCPU: 0, size: 0, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CPUShare(tc.numCPU, tc.size); got != tc.want {
+				t.Errorf("CPUShare(%d, %d) = %d, want %d", tc.numCPU, tc.size, got, tc.want)
+			}
+		})
+	}
+}
+
 // containsEntry reports whether env holds entry.
 func containsEntry(env []string, entry string) bool {
 	return slices.Contains(env, entry)

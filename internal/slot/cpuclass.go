@@ -56,6 +56,22 @@ func CPUClassSize(townRoot string) int {
 	return config.LoadOperationalConfig(townRoot).GetDaemonConfig().CPUClassSizeV()
 }
 
+// CPUShare is the cores one of size concurrent CPU-class builds may use on a
+// host with numCPU cores: numCPU/size rounded down and at least 1, the whole
+// host when size is below one, and 1 when numCPU is below one.
+func CPUShare(numCPU, size int) int {
+	if numCPU < 1 {
+		return 1
+	}
+	if size < 1 {
+		return numCPU
+	}
+	if share := numCPU / size; share > 0 {
+		return share
+	}
+	return 1
+}
+
 // cpuQueue is the arrival queue on disk: the next ticket sequence number and
 // every live waiter's ticket, ordered by Seq. It orders the waiters because a
 // kernel flock grants whoever wins the race, not whoever arrived first; only
