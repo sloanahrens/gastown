@@ -33,6 +33,10 @@ type SystemUpdates struct {
 	// LastGreen is the newest gastown sweep that was all GREEN, found among every
 	// sweep the reader holds, not only the five Sweeps draws. Nil when none is.
 	LastGreen *SweepGreen `json:"last_green,omitempty"`
+	// Ahead is how many joined commits other than LastGreen's first reported after
+	// the green sweep, counted before the row cap (systemUpdatesAhead). It is -1
+	// when no sweep is green. No omitempty: a zero count serializes as 0.
+	Ahead int `json:"ahead"`
 }
 
 // SystemUpdatesNow is what runs right now: a roll, a sweep, or both.
@@ -70,6 +74,7 @@ func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []
 	rows, more := SystemUpdateRowsWithMore(sweeps, pipeline, rolls, systemUpdatesRowCap)
 	rig := rigSweeps(sweeps)
 	lastGreen := lastGreenSweep(rig)
+	ahead := systemUpdatesAhead(rig, pipeline, rolls, lastGreen)
 	if len(rig) > systemUpdatesSweepCap {
 		rig = rig[:systemUpdatesSweepCap]
 	}
@@ -79,6 +84,7 @@ func NewSystemUpdates(sweeps []TierSweepRow, pipeline *GastownPipeline, rolls []
 		Unavailable: unavailable,
 		Sweeps:      rig,
 		LastGreen:   lastGreen,
+		Ahead:       ahead,
 	}
 }
 

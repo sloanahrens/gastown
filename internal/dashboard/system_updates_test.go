@@ -433,3 +433,67 @@ func TestSystemUpdatesSweepsANewerRedSweepOfTheCommitHidesItsGreen(t *testing.T)
 	require.NotNil(t, su.LastGreen)
 	assert.Equal(t, sysTestSHA(1)[:8], su.LastGreen.SHA)
 }
+
+// Ahead counts the joined commits, other than the green one, whose first stage is
+// after the last green sweep, before the row cap. An older commit whose roll ended
+// after the green sweep does not count: it started before it.
+func TestSystemUpdatesAheadCounts(t *testing.T) {
+	t.Parallel()
+
+	green := sweepAt(0, "gastown", sysTestSHA(0)[:8], "GREEN")
+	red := func(min int, rig string, i int) TierSweepRow { return sweepAt(min, rig, sysTestSHA(i)[:8], "RED") }
+	eight := []TierSweepRow{green}
+	for i := 1; i <= 7; i++ {
+		eight = append(eight, red(i, "gastown", i))
+	}
+	cases := []struct {
+		name     string
+		sweeps   []TierSweepRow
+		pipeline *GastownPipeline
+		rolls    []SystemUpdateRoll
+		want     int
+		wantCut  int
+	}{
+		{name: "after the green sweep, the cap cut ones too", sweeps: eight, want: 7, wantCut: 2},
+		{
+			name:   "the green commit's own later roll does not count",
+			sweeps: []TierSweepRow{sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN")},
+			rolls:  []SystemUpdateRoll{sysTestRoll(sysTestSHA(1), sysTestClock.Add(5*time.Minute), sysTestClock.Add(6*time.Minute))},
+		},
+		{
+			name:   "an older commit whose roll ended after the green sweep",
+			sweeps: []TierSweepRow{red(1, "gastown", 1), sweepAt(3, "gastown", sysTestSHA(2)[:8], "GREEN")},
+			rolls:  []SystemUpdateRoll{sysTestRoll(sysTestSHA(1), sysTestClock.Add(2*time.Minute), sysTestClock.Add(5*time.Minute))},
+		},
+		{
+			name:     "a commit first reported by a run or a roll",
+			sweeps:   []TierSweepRow{green},
+			pipeline: &GastownPipeline{Runs: []PipelineRun{{Workflow: postLandWorkflow, SHA: sysTestSHA(2)[:12], Status: pipelineSuccess, Started: sysTestClock.Add(2 * time.Minute)}}},
+			rolls:    []SystemUpdateRoll{sysTestRoll(sysTestSHA(3), sysTestClock.Add(4*time.Minute), sysTestClock.Add(5*time.Minute))},
+			want:     2,
+		},
+		{name: "another rig's sweep", sweeps: []TierSweepRow{green, red(4, "other", 4)}},
+		{name: "no green sweep is -1", sweeps: []TierSweepRow{red(1, "gastown", 1)}, want: -1},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			su := NewSystemUpdates(tt.sweeps, tt.pipeline, tt.rolls, false)
+
+			assert.Equal(t, tt.want, su.Ahead, "Ahead")
+			assert.Equal(t, tt.wantCut, su.More, "commits the row cap left out")
+		})
+	}
+}
+
+// Ahead serializes a zero count as 0 and no green sweep as -1.
+func TestSystemUpdatesAheadSerializes(t *testing.T) {
+	t.Parallel()
+
+	zero, err := json.Marshal(NewSystemUpdates([]TierSweepRow{sweepAt(1, "gastown", sysTestSHA(1)[:8], "GREEN")}, nil, nil, false))
+	require.NoError(t, err)
+	assert.Contains(t, string(zero), `"ahead":0`)
+	none, err := json.Marshal(NewSystemUpdates([]TierSweepRow{sweepAt(1, "gastown", sysTestSHA(1)[:8], "RED")}, nil, nil, false))
+	require.NoError(t, err)
+	assert.Contains(t, string(none), `"ahead":-1`)
+}
