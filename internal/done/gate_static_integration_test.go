@@ -63,6 +63,28 @@ func TestIntegrationListBoundedEndsOnAHungLister(t *testing.T) {
 	}
 }
 
+// TestIntegrationStaticGateListerAppliesTheBuildTags: the same Gate line without its -tags lists
+// nothing on the real go, because the test file sits behind the integration build constraint,
+// which go list applies and a text scan of the directory could not (gt-ssmxte).
+func TestIntegrationStaticGateListerAppliesTheBuildTags(t *testing.T) {
+	const line = "go test ./internal/cmd -run 'TestIntegrationAcceptanceTickRetriesAGuardMissOnRealBd' -count=1"
+	runs := gateRunLines(line)
+	if len(runs) != 1 {
+		t.Fatalf("gateRunLines(%q) = %d lines, want 1", line, len(runs))
+	}
+	gr := runs[0]
+	lister := newStaticGateLister(execGateListCommand, os.Environ, os.DirFS)
+	ctx, cancel := context.WithTimeout(t.Context(), listerDeadline)
+	defer cancel()
+	got, err := listBounded(ctx, lister, "../..", gr)
+	if err != nil {
+		t.Fatalf("lister(%q) error = %v", gr.Pattern, err)
+	}
+	if len(got) != 0 {
+		t.Errorf("lister(%q) = %q; want no name: the test file is behind the integration build constraint", gr.Pattern, got)
+	}
+}
+
 // TestIntegrationStaticGateListerListsAPackageWhoseTestMainStartsAContainer: the real go list and
 // the parser list the one test of internal/cmd's integration tier, under its tag. No test binary
 // starts, so the TestMain that starts a container never runs (gt-8uqh1g).
