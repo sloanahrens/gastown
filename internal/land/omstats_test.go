@@ -740,3 +740,31 @@ func TestReviewPoolOMStatsCountsReusedOnce(t *testing.T) {
 		t.Errorf("rigs = %+v, want one gastown approval", stats.Rigs)
 	}
 }
+
+// TestCrewBirdOf pins which branch shapes name a bird for the crew-bird
+// table: only a crew branch does, and only when its first segment is the bird.
+func TestCrewBirdOf(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{"a crew branch", "crew/owl/gt-1", "owl"},
+		{"a crew branch with a rest of many segments", "crew/goose/a/b", "goose"},
+		{"a crew branch with no bead segment", "crew/owl", "owl"},
+		{"a polecat branch", "polecat/x/y", ""},
+		{"the crew prefix with no bird", "crew/", ""},
+		{"an empty bird segment", "crew//y", ""},
+		{"the crew word with no slash", "crew", ""},
+		{"no branch", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := crewBirdOf(tc.branch); got != tc.want {
+				t.Errorf("crewBirdOf(%q) = %q, want %q", tc.branch, got, tc.want)
+			}
+		})
+	}
+}

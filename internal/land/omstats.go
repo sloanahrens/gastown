@@ -525,3 +525,15 @@ func orOmStatsUnnamed(name string) string {
 	}
 	return name
 }
+
+// crewBirdOf names the bird that owns a crew branch, the segment after crew/,
+// so the om-stats crew-bird table groups a bird's submissions (gt-rf138t). A
+// branch that is not under crew/, or that names no bird, belongs to none.
+func crewBirdOf(branch string) string {
+	rest, ok := strings.CutPrefix(branch, authorkind.CrewPrefix)
+	if !ok {
+		return ""
+	}
+	bird, _, _ := strings.Cut(rest, "/")
+	return bird
+}
