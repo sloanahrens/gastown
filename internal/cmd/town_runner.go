@@ -278,6 +278,10 @@ func liveRollSignals() (context.Context, context.CancelFunc) {
 // the clock they poll on, the signal source, the applier, and the flags. The
 // production command builds it with runnerRollDepsFor.
 type runnerRollDeps struct {
+	// err is a production read that could not be built, such as a missing token
+	// file or an empty repo list. A real roll returns it before any step runs or
+	// the hold is taken; a dry run needs none of the reads and ignores it.
+	err         error
 	store       runnerroll.HoldStore
 	holdPath    string
 	landing     func(ctx context.Context) (pause string, passes int, known bool, err error)
@@ -446,6 +450,12 @@ func (d runnerRollDeps) rollContext() (context.Context, context.CancelFunc) {
 // runTownRunnerRoll runs the roll over the runner: runnerroll.Run owns the
 // steps, and this supplies the runner's seams, its step names and its target.
 func runTownRunnerRoll(d runnerRollDeps) error {
+	// Refuse before anything else: a read that could not be built leaves nothing
+	// to run, and a real roll must not take the hold without it. A dry run needs
+	// none of the reads, so it prints its steps regardless.
+	if d.err != nil && !d.dryRun {
+		return fmt.Errorf("the roll's deps cannot be built, so it takes no hold: %w", d.err)
+	}
 	if d.apply == nil {
 		return errors.New("the roll has no applier, so it cannot apply the runner")
 	}
