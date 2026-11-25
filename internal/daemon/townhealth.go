@@ -353,6 +353,10 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 	// record: no run recorded and no pass in flight.
 	rec, err := readPatrolLastRunFile(s.townRoot())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// No patrol was judged this read, so none is known to be UNKNOWN: the
+		// set the dedupe keeps starts over, and a patrol that is UNKNOWN again
+		// once the record reads is logged again (gt-l5ct9a).
+		s.d.ticksUnknown = nil
 		return nil, err
 	}
 	started := s.daemonStarted()
