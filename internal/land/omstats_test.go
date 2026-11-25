@@ -562,3 +562,39 @@ func TestOmStatsWindowUsesTheSequenceAwareParser(t *testing.T) {
 		wantOmStatsDay(t, stats, want)
 	}
 }
+
+// TestReviewPoolOMStatsCountsReusedOnce: a landing that reused its om verdict
+// has one review record, written when om ran on the queue, and the landing's
+// own daemon-log lines a day later do not make a second review. The bead is one
+// approval and one round, on the day the review ran.
+func TestReviewPoolOMStatsCountsReusedOnce(t *testing.T) {
+	t.Parallel()
+	records := omStatsRecords(t,
+		ReviewRecord{BeadID: "gt-reuse", Rig: "gastown", Attempt: 1, Score: 0.91, Verdict: VerdictApprove, Agent: "opus", At: omStatsAt(16, 10, 0, 0)},
+	)
+	log := strings.Join([]string{
+		"2026/10/17 10:30:00 landing_worker: [land] gt-reuse: merged 1a2b3c4d onto origin/main (5e6f7a8b) as 9a8b7c6d; gating the merged tree, then om review",
+		"2026/10/17 10:31:00 landing_worker: [land] gt-reuse: stages: ci 1m32s, om reused (2m31s, 14m0s old)",
+		"2026/10/17 10:32:00 landing_worker: [land] gt-reuse: landed 9a8b7c6d on origin/main (patch-id 11223344)",
+		"2026/10/17 10:32:01 landing_worker: [land] gt-reuse: already landed as 9a8b7c6d; finishing its record",
+		"",
+	}, "\n")
+
+	stats, err := AggregateOmStats(strings.NewReader(records), strings.NewReader(log), time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	if stats.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0", stats.Skipped)
+	}
+	if len(stats.Days) != 1 {
+		t.Fatalf("days = %+v, want only the review's day: the landing's log lines must not add one", stats.Days)
+	}
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Approvals: 1})
+	if want := (OmStatsRounds{One: 1}); stats.Rounds != want {
+		t.Errorf("rounds = %+v, want %+v", stats.Rounds, want)
+	}
+	if len(stats.Rigs) != 1 || stats.Rigs[0] != (OmStatsGroup{Name: "gastown", Approvals: 1}) {
+		t.Errorf("rigs = %+v, want one gastown approval", stats.Rigs)
+	}
+}
