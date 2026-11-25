@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -320,14 +321,22 @@ type jevCounter struct {
 	fits    func(call int) float64
 	capFrom int
 	calls   int
+	mu      sync.Mutex
 }
 
+// ask numbers each call in arrival order under mu: jevInput asks together, so
+// the calls reach it from three goroutines and fits(call) names the Nth ask to
+// arrive, not the Nth ask jevInput started. Every fits table in these tests is
+// read as a set of answers (the median ignores order), never as a position.
 func (j *jevCounter) ask(context.Context, *beads.Issue) (dispatch.Answers, error) {
+	j.mu.Lock()
 	j.calls++
-	if j.capFrom > 0 && j.calls >= j.capFrom {
+	call := j.calls
+	j.mu.Unlock()
+	if j.capFrom > 0 && call >= j.capFrom {
 		return dispatch.Answers{}, dispatch.ErrCapReached
 	}
-	fits := j.fits(j.calls)
+	fits := j.fits(call)
 	if fits < 0 {
 		return dispatch.Answers{}, errors.New("ask failed")
 	}
@@ -551,17 +560,21 @@ func TestEstimateSkippedInputs(t *testing.T) {
 	}
 }
 
-// TestEstimateJevCallCount: a new text makes exactly jevCalls calls and a
-// cap-reached ask ends the asks; TestEstimateReusesPriorMinutes covers the none
-// a Prior-served text makes.
+// TestEstimateJevCallCount: a new text makes exactly jevCalls calls, all asked
+// together, so a cap-reached ask fails only itself and the answer the first ask
+// gave still stands; TestEstimateReusesPriorMinutes covers the none a
+// Prior-served text makes.
 func TestEstimateJevCallCount(t *testing.T) {
 	t.Parallel()
 	if got := estimateCounted(t, nil); got.jevCalls != jevCalls {
 		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, jevCalls)
 	}
-	jev := &jevCounter{fits: func(int) float64 { return 0.5 }, capFrom: 2}
-	if _, _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead()); skip != nil || jev.calls != 2 {
-		t.Fatalf("Jev calls = %d, skip = %v after the cap, want 2 and no skip", jev.calls, skip)
+	// Only the first ask to arrive is answered (0.3); the two after it report the
+	// cap, so the median is that one answer and the capped asks add none.
+	jev := &jevCounter{fits: func(int) float64 { return 0.3 }, capFrom: 2}
+	got, used, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead())
+	if skip != nil || jev.calls != jevCalls || used != 1 || math.Abs(got-0.3) > 1e-9 {
+		t.Fatalf("jevInput = %v from %d answers, skip %v after %d calls; want 0.3 from the 1 uncapped answer, all %d asked and no skip", got, used, skip, jev.calls, jevCalls)
 	}
 }
 

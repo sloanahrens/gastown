@@ -5,7 +5,13 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/jev/dispatch"
 )
 
 // TestEstimateJevMedianSpread: each estimate gets two 13.565-minute answers
@@ -47,4 +53,39 @@ func TestEstimateJevFailedCalls(t *testing.T) {
 	if err != nil || got.Rung != "shape-embed" || len(got.Skipped) != 1 || got.Skipped[0].Input != "jev" || got.Skipped[0].Reason != "battery is down" {
 		t.Fatalf("rung %q skipped %+v err %v, want the Jev input skipped with the first error", got.Rung, got.Skipped, err)
 	}
+}
+
+// TestEstimateJevAsksRunTogether: every ask blocks until all jevCalls asks are in
+// flight, so asking one after another leaves the first ask waiting for the others
+// until the bubble's fake deadline ends it, which fails the test with no real wait. The
+// median and the answer count are the same as when the asks ran in turn.
+func TestEstimateJevAsksRunTogether(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		arrived := 0
+		allInFlight := make(chan struct{})
+		ask := func(ctx context.Context, _ *beads.Issue) (dispatch.Answers, error) {
+			mu.Lock()
+			arrived++
+			if arrived == jevCalls {
+				close(allInFlight)
+			}
+			mu.Unlock()
+			select {
+			case <-allInFlight:
+				return dispatch.Answers{FitsTwentyMinutes: 0.4}, nil
+			case <-ctx.Done():
+				return dispatch.Answers{}, ctx.Err()
+			}
+		}
+		// The bubble's clock is fake: when every goroutine waits, the deadline
+		// passes at once, so asks run in turn fail here instead of hanging.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		got, used, skip := jevInput(ctx, Deps{JevAsk: ask}, sampleBead())
+		if skip != nil || used != jevCalls || math.Abs(got-0.4) > 1e-9 {
+			t.Fatalf("jevInput = %v, %d answers, skip %v; want the median 0.4 from %d answers", got, used, skip, jevCalls)
+		}
+	})
 }
