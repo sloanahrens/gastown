@@ -327,15 +327,16 @@ func specSplitVerdict(answer specStoryPointAnswer) (minutes float64, rung, reaso
 }
 
 // specSplitRungActs reports whether the route acts on an estimate made at
-// rung. The route acts on `all` and `shape-jev` only, and it does not act on
-// `shape-embed` or `shape`: a shape-embed estimate is the fallback made when
-// Jev is unavailable, and under host load it reads minutes higher than the
-// same text's all-rung estimate, so the bead is slung with the route's notice
-// instead of held (gt-s93y6n). The design sets the shape-only rung aside until
-// the shadow recompute clears its correlation bar.
+// rung. The route acts on `all`, `shape-jev` and `shape-embed`, and not on
+// `shape`: the shape-only rung is the single-input estimate, and the design
+// sets it aside until the shadow recompute clears its correlation bar. A
+// shape-embed estimate is a two-input rung, and it is the normal rung now that
+// the estimate no longer asks Jev (gt-vel5tc). Its scale is set by the 0.92
+// blend of shape and embed alone (gt-q6g6w7), which is what lets it act
+// without the minutes jump gt-s93y6n saw when a failed Jev call fell back to it.
 func specSplitRungActs(rung string) bool {
 	switch rung {
-	case "all", "shape-jev":
+	case "all", "shape-jev", "shape-embed":
 		return true
 	}
 	return false
