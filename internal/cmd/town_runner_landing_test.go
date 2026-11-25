@@ -73,7 +73,7 @@ func TestRunnerRollLandingReadRefuses(t *testing.T) {
 func TestRunnerRollLandingReadIsWiredInDeps(t *testing.T) {
 	t.Parallel()
 	fake := &fakePodExec{stdout: landingReport(t, "runner roll", 2, true)}
-	deps := runnerRollDepsFor("/town", fake.exec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("/town", fake.exec, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.landing == nil {
 		t.Fatal("the production deps have no landing read")
 	}

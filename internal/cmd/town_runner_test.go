@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"github.com/spf13/cobra"
 
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 )
 
@@ -899,7 +902,7 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 // TestTownRunnerRollHoldPathUsesTheExportedName: the roll's hold path is built from runnerroll's one exported name.
 func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 	t.Parallel()
-	got := runnerRollDepsFor("/town", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
+	got := runnerRollDepsFor("/town", nil, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false).holdPath
 	if !strings.HasSuffix(got, runnerroll.LandingHoldName) {
 		t.Errorf("the roll's hold path %q does not end with %q", got, runnerroll.LandingHoldName)
 	}
@@ -917,7 +920,7 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 		argv, stdin = got, in
 		return []byte("created\n"), 0, nil
 	}
-	deps := runnerRollDepsFor("/town", fakePodExec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("/town", fakePodExec, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.err != nil {
 		t.Fatalf("deps error = %v, want none", deps.err)
 	}
@@ -940,7 +943,7 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 // takes the hold or runs any step.
 func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
 	t.Parallel()
-	deps := runnerRollDepsFor("", nil, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+	deps := runnerRollDepsFor("", nil, fixedRunsSeam(), &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
 	if deps.err == nil {
 		t.Fatal("deps for an empty town root carry no error")
 	}
@@ -949,6 +952,231 @@ func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
 
 	if !errors.Is(err, deps.err) {
 		t.Fatalf("error = %v, want the store error wrapped", err)
+	}
+}
+
+// TestRunnerRollDepsForWiresTheRunsRead: the production deps list the seam's
+// rig repo through its viewer client, so the roll waits on a real run list.
+func TestRunnerRollDepsForWiresTheRunsRead(t *testing.T) {
+	t.Parallel()
+	lister := &rollLister{}
+	var townRoot string
+	seam := runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) { return lister, nil },
+		repos:  func(got string) ([]string, error) { townRoot = got; return []string{"acme/widgets"}, nil },
+	}
+
+	deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+
+	if deps.err != nil {
+		t.Fatalf("deps error = %v, want none", deps.err)
+	}
+	if deps.runs == nil {
+		t.Fatal("the production deps have no runs read")
+	}
+	runs, err := deps.runs(t.Context())
+	if err != nil {
+		t.Fatalf("runs read: %v", err)
+	}
+	if townRoot != "/town" {
+		t.Errorf("the repos were read for town root %q, want /town", townRoot)
+	}
+	var asked []string
+	for _, request := range lister.requests {
+		fields := strings.Fields(request)
+		if len(fields) < 2 || fields[0] != "acme/widgets" {
+			t.Fatalf("list request %q is not for acme/widgets", request)
+		}
+		asked = append(asked, fields[1])
+	}
+	slices.Sort(asked)
+	if want := []string{"gate.yml", "post-land.yml"}; !slices.Equal(asked, want) {
+		t.Errorf("workflows listed = %q, want %q for the one repo", asked, want)
+	}
+	if len(runs) != 6 || runs[0].Repo != "acme/widgets" {
+		t.Errorf("runs read returned %d runs, first %+v; want 6 from acme/widgets", len(runs), runs)
+	}
+}
+
+// TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead: a client that cannot
+// be built, and a town that names no repos, each leave a read that returns the
+// reason, never a nil read or an empty listing; the no-repos case reads no token.
+func TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead(t *testing.T) {
+	t.Parallel()
+	noToken := errors.New("no viewer token file")
+	cases := []struct {
+		name string
+		seam runnerRollRunsSeam
+		want string
+	}{
+		{name: "the client cannot be built", want: noToken.Error(), seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) { return nil, noToken },
+			repos:  func(string) ([]string, error) { return []string{"acme/widgets"}, nil },
+		}},
+		{name: "the repo list cannot be built", want: "registry unreadable", seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) { return &rollLister{}, nil },
+			repos:  func(string) ([]string, error) { return nil, errors.New("registry unreadable") },
+		}},
+		{name: "the town names no repos", want: "names no Forgejo rig repos", seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) {
+				t.Error("the viewer client was built for a town that names no repos")
+				return &rollLister{}, nil
+			},
+			repos: func(string) ([]string, error) { return nil, nil },
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, tc.seam, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false)
+
+			if deps.runs == nil {
+				t.Fatal("a failed runs build left the deps with no read at all")
+			}
+			runs, err := deps.runs(t.Context())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("read error = %v, want it to name %q", err, tc.want)
+			}
+			if runs != nil {
+				t.Errorf("read returned %v, want no runs", runs)
+			}
+		})
+	}
+}
+
+// fixedRunsSeam is the runs seam of a test that does not drive the runs read: a
+// fixed repo list and a client that lists nothing, so the unit tier reads no rig
+// settings and no token file.
+func fixedRunsSeam() runnerRollRunsSeam {
+	return runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) { return &rollLister{}, nil },
+		repos:  func(string) ([]string, error) { return []string{"acme/widgets"}, nil },
+	}
+}
+
+// TestRollForgejoRepos drives the production repo builder on a town root written
+// to a temp directory (the registry read is the real one; only the Forgejo
+// resolve, which reads rig settings through git, is injected): one repo per rig,
+// and a fail-closed error naming the rig, or the registry, whenever the list
+// could not be complete.
+func TestRollForgejoRepos(t *testing.T) {
+	t.Parallel()
+	const rigs = `{"version":1,"rigs":{"alpha":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"al"}},"zeta":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"ze"}}}}`
+	remotes := func(alpha, zeta string) func(string, string) (*config.ForgejoConfig, error) {
+		return func(_, name string) (*config.ForgejoConfig, error) {
+			switch name {
+			case "alpha":
+				return &config.ForgejoConfig{RemoteURL: alpha}, nil
+			case "zeta":
+				if zeta == "" {
+					return nil, nil
+				}
+				return &config.ForgejoConfig{RemoteURL: zeta}, nil
+			}
+			return nil, nil
+		}
+	}
+	unreadable := func(string, string) (*config.ForgejoConfig, error) {
+		return nil, errors.New("settings/config.json: permission denied")
+	}
+	cases := []struct {
+		name    string
+		rigs    string
+		resolve func(string, string) (*config.ForgejoConfig, error)
+		want    []string
+		wantErr string
+	}{
+		{name: "every rig resolves", rigs: rigs, resolve: remotes("https://forge.test/acme/alpha.git", "https://forge.test/acme/zeta"), want: []string{"acme/alpha", "acme/zeta"}},
+		{name: "a rig with no Forgejo config", rigs: rigs, resolve: remotes("https://forge.test/acme/alpha.git", ""), wantErr: "rig zeta"},
+		{name: "a rig whose remote does not parse", rigs: rigs, resolve: remotes("not a url", "https://forge.test/acme/zeta"), wantErr: "rig alpha"},
+		{name: "a settings tier that cannot be read", rigs: rigs, resolve: unreadable, wantErr: "rig alpha: its Forgejo settings cannot be read"},
+		{name: "a registry that is not there", rigs: "", resolve: remotes("", ""), wantErr: "cannot list the rigs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.rigs != "" {
+				if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(tc.rigs), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := rollForgejoRepos(town, tc.resolve)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || got != nil {
+					t.Fatalf("rollForgejoRepos = %q, %v; want no list and an error containing %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tc.want) {
+				t.Fatalf("rollForgejoRepos = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// noRepoFile is a repo-file opener whose repository holds no tracked file, so the
+// repo tier of a rig's settings names nothing and only the rig-local tiers count.
+type noRepoFile struct{}
+
+func (noRepoFile) ShowFileAtRev(string, string) (string, error) { return "", errors.New("not tracked") }
+
+// TestProductionRunsSeamReadsStrictSettings drives the production seam's resolver
+// (rig.ResolveForgejoConfigWithError) on a temp town root: a rig whose settings tier
+// exists but cannot be read (a directory where settings/config.json should be) is an
+// error naming the rig and the file, not a shorter list; the same rig without that
+// tier is only a rig that names no remote, so the error is about the remote.
+func TestProductionRunsSeamReadsStrictSettings(t *testing.T) {
+	t.Parallel()
+	strict := strictForgejoResolver(func(string) rig.RepoFileReader { return noRepoFile{} })
+	town := func(t *testing.T) string {
+		dir := t.TempDir()
+		for path, content := range map[string]string{"mayor/rigs.json": `{"version":1,"rigs":{"alpha":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"al"}}}}`} {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, path)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, path), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	t.Run("an unreadable settings tier is an error naming the rig", func(t *testing.T) {
+		t.Parallel()
+		dir := town(t)
+		if err := os.MkdirAll(filepath.Join(dir, "alpha", "settings", "config.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got, err := rollForgejoRepos(dir, strict)
+		if err == nil || got != nil || !strings.Contains(err.Error(), "rig alpha") || !strings.Contains(err.Error(), "settings") {
+			t.Fatalf("rollForgejoRepos = %q, %v; want no list and an error naming rig alpha and its settings", got, err)
+		}
+	})
+	t.Run("the same rig without that tier only names no remote", func(t *testing.T) {
+		t.Parallel()
+		got, err := rollForgejoRepos(town(t), strict)
+		if err == nil || got != nil || !strings.Contains(err.Error(), "names no Forgejo remote") {
+			t.Fatalf("rollForgejoRepos = %q, %v; want no list and a names-no-remote error", got, err)
+		}
+	})
+}
+
+// TestViewerRunListerReadsTheViewerRole: the roll's client is built for the viewer
+// role, the read-only account, and a build error is returned with no client.
+func TestViewerRunListerReadsTheViewerRole(t *testing.T) {
+	t.Parallel()
+	var role string
+	fake := func(r string, _ ...forgejo.Option) (*forgejo.Client, error) {
+		role = r
+		return nil, errors.New("no token")
+	}
+	if lister, err := viewerRunListerVia(fake); err == nil || lister != nil {
+		t.Errorf("viewerRunListerVia = %v, %v; want no client and the build error", lister, err)
+	}
+	if role != config.ForgejoRoleViewer {
+		t.Errorf("the client was built for role %q, want %q", role, config.ForgejoRoleViewer)
 	}
 }
 
