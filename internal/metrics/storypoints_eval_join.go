@@ -32,6 +32,10 @@ type EvalRow struct {
 	// record with no review rows and a crew landing leave them zero and empty.
 	OMRounds int
 	Agent    string
+	// DeclaredLines is the added-line count the bead's Size section declared
+	// when the row's estimate was made, zero when it declared none. The
+	// evaluation's declared-lines table splits its rows by it.
+	DeclaredLines float64
 }
 
 // EvalCounts accounts for every input the join read: the landing records it
@@ -119,6 +123,7 @@ func joinEval(townRoot string) ([]EvalRow, EvalCounts, error) {
 			JevMinutes:     est.Minutes.Jev,
 			OMRounds:       l.rec.OMRounds,
 			Agent:          l.rec.Agent,
+			DeclaredLines:  est.DeclaredLines,
 		})
 	}
 	// A stable sort keeps the ledgers' order for landings at the same instant,
