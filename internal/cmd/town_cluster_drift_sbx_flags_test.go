@@ -62,6 +62,57 @@ func sbxCompareDeps(t *testing.T, record *clusterRenderFlags) (clusterDriftDeps,
 	return clusterDriftDeps{render: render, cluster: clusterSbx, out: out, kubectl: seam.kubectl}, seam, out
 }
 
+// TestClusterDriftSbxRecordIsCheckedBeforeTheRender holds the record to the
+// compare's cluster and its three sandbox paths before the render: a control
+// record is refused naming the record path and the cluster it holds, and a
+// record missing any one sandbox path is refused naming the missing flag, with
+// nothing rendered and nothing read.
+func TestClusterDriftSbxRecordIsCheckedBeforeTheRender(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		control bool
+		clear   func(*clusterRenderFlags)
+		want    []string
+	}{
+		{name: "a control record names its cluster", control: true, want: []string{clusterControl}},
+		{name: "a record with no --sbx-manifests names the flag", clear: func(r *clusterRenderFlags) { r.sbxManifests = "" }, want: []string{"--sbx-manifests"}},
+		{name: "a record with no --sbx-chart names the flag", clear: func(r *clusterRenderFlags) { r.sbxChart = "" }, want: []string{"--sbx-chart"}},
+		{name: "a record with no --sbx-values names the flag", clear: func(r *clusterRenderFlags) { r.sbxValues = "" }, want: []string{"--sbx-values"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			record := sbxCompareRecord()
+			if tc.control {
+				record.cluster = clusterControl
+			}
+			if tc.clear != nil {
+				tc.clear(record)
+			}
+			d, seam, out := sbxCompareDeps(t, record)
+			err := compareSbxClusterDrift(context.Background(), d)
+			if err == nil {
+				t.Fatalf("compare = nil, want a refusal; printed:\n%s", out)
+			}
+			root, findErr := d.render.findTown()
+			if findErr != nil {
+				t.Fatalf("finding the town: %v", findErr)
+			}
+			if recordPath := renderFlagsPathIn(root); !strings.Contains(err.Error(), recordPath) {
+				t.Errorf("error %v, want one naming the record %s", err, recordPath)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %v, want one naming %q", err, want)
+				}
+			}
+			if len(seam.renders) != 0 || len(seam.reads) != 0 {
+				t.Errorf("rendered %d times and read %q, want nothing", len(seam.renders), seam.reads)
+			}
+		})
+	}
+}
+
 // TestClusterDriftSbxCompareRendersTheRecordedSetAndFollowsTheCompare holds the
 // compare to the recorded render's paths and its status to the cluster's answer:
 // nil for a cluster in step, drift for a port held differently, unreadable for a
