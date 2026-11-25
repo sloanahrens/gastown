@@ -4,6 +4,7 @@ import (
 	"errors"
 	"iter"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -86,6 +87,43 @@ func TestSeatLockOrder(t *testing.T) {
 			}
 			if tt.lockErr != nil && (!errors.Is(err, tt.lockErr) || !strings.Contains(err.Error(), dispatch.SlingRefusalMarker)) {
 				t.Errorf("err = %v, want it to wrap %v behind %s", err, tt.lockErr, dispatch.SlingRefusalMarker)
+			}
+		})
+	}
+}
+
+// TestSeatLockSkipped guards gt-k222qq: a named seat and an available rework
+// seat take no seat-pick lock, because the seat is chosen before the pool pick.
+// A rework whose seat is unavailable falls to the pool, which takes the lock.
+func TestSeatLockSkipped(t *testing.T) {
+	t.Parallel()
+	const alphaBranch = "polecat/alpha/gt-rw1+muu1"
+	seat := &polecat.Polecat{Name: "alpha", Branch: alphaBranch, State: polecat.StateIdle}
+	tests := []struct {
+		name     string
+		opts     SlingSpawnOptions
+		seats    map[string]*reworkSeat
+		wantLock bool
+	}{
+		{"named seat takes no lock", SlingSpawnOptions{Name: "alpha", HookBead: "gt-next"}, nil, false},
+		{"rework preference takes no lock", SlingSpawnOptions{HookBead: "gt-rw1"},
+			map[string]*reworkSeat{"gt-rw1": {PolecatName: "alpha", Branch: alphaBranch}}, false},
+		{"unavailable rework seat falls to the pool and locks", SlingSpawnOptions{HookBead: "gt-rw1"},
+			map[string]*reworkSeat{"gt-rw1": {PolecatName: "beta", Branch: "polecat/beta/gt-rw1+muu1"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &seatLockFake{idlePolecatReuseFake: idlePolecatReuseFake{idle: seat, seats: []*polecat.Polecat{seat}}}
+
+			info, err := reuseIdlePolecatForSlingWith(fake, reworkIdleReuseEnv(tt.seats), "rig",
+				tt.opts, func() polecat.RespawnMark { return polecat.RespawnMark{} })
+
+			if err != nil || info == nil {
+				t.Fatalf("info = %+v, err = %v; want a reused seat", info, err)
+			}
+			if got := slices.Contains(fake.events, "lock"); got != tt.wantLock {
+				t.Errorf("took the seat-pick lock = %v, want %v (events %v)", got, tt.wantLock, fake.events)
 			}
 		})
 	}
