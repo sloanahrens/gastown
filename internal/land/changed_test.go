@@ -225,6 +225,10 @@ var guardTriggers = []struct {
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
 	// Any non-test Go file is the os.Getwd ratchet's input (gt-s6icgn).
 	{"internal/callercwd", "M\x00internal/cmd/seat_ship_cmd.go\x00"},
+	// TestHoldSitesAreTheOnlyReaders walks every non-test Go file under
+	// internal/ outside internal/ring, so a change to any of them is its input
+	// (gt-amxhex).
+	{"internal/ring", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/rig", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/tmux", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
@@ -849,6 +853,69 @@ func TestGuardSelectsGetwd(t *testing.T) {
 			for _, name := range tt.want {
 				if !contains(got, name) {
 					t.Errorf("GuardSelects(%q) internal/callercwd tests = %v, want %s among them", tt.diff, got, name)
+				}
+			}
+		})
+	}
+}
+
+// TestGuardSelectsRing: TestHoldSitesAreTheOnlyReaders walks every non-test Go
+// file under internal/ except internal/ring, so a change to any of them selects
+// it, and a deleted hold site fails its one-call-per-site check. A change to a
+// test file, or to internal/ring itself, is not input to it (gt-amxhex).
+func TestGuardSelectsRing(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	ring := []string{"TestHoldSitesAreTheOnlyReaders"}
+
+	tests := []struct {
+		name string
+		diff string
+		want []string // the internal/ring tests that must be selected, nil for none
+	}{
+		{
+			"a changed non-test Go file under internal/ selects the hold-sites guard",
+			"M\x00internal/daemon/standby.go\x00",
+			ring,
+		},
+		{
+			"a deleted hold site selects the hold-sites guard",
+			"D\x00internal/dispatch/hold.go\x00",
+			ring,
+		},
+		{
+			"a changed test file under internal/ selects no hold-sites test",
+			"M\x00internal/daemon/standby_test.go\x00",
+			nil,
+		},
+		{
+			"a changed file under internal/ring selects no hold-sites test",
+			"M\x00internal/ring/hold.go\x00",
+			nil,
+		},
+		{
+			"a docs-only change selects no hold-sites test",
+			"M\x00docs/testing.md\x00",
+			nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			got := selection(sel, "internal/ring")
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("GuardSelects(%q) internal/ring tests = %v, want none", tt.diff, got)
+				}
+				return
+			}
+			for _, name := range tt.want {
+				if !contains(got, name) {
+					t.Errorf("GuardSelects(%q) internal/ring tests = %v, want %s among them", tt.diff, got, name)
 				}
 			}
 		})

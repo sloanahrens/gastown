@@ -565,6 +565,16 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestHoldSitesAreTheOnlyReaders walks every non-test Go file under
+		// internal/ except internal/ring, which it skips, so any such file is
+		// its input. A deleted hold site fails its one-call-per-site check, so
+		// a deletion is its input too (gt-amxhex).
+		pkg:     "internal/ring",
+		tests:   []string{"TestHoldSitesAreTheOnlyReaders"},
+		judges:  func(rel string) bool { return underInternal(rel) && !strings.HasPrefix(rel, "internal/ring/") },
+		removal: true,
+	},
+	{
 		// The os.Getwd ratchet reads every non-test Go file in the repo and the
 		// allowlist it checks against. A removed file can leave an entry that no
 		// longer calls os.Getwd, so a deletion is its input too (gt-s6icgn).
