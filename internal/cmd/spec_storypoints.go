@@ -366,12 +366,15 @@ func specSplitLabelStale(labels []string, trigger float64) bool {
 }
 
 // specSplitRungWeak reports whether rung is one the split route should not hold
-// a bead on: the weak rungs a label can still record from an earlier estimate.
-// They are named here rather than read from specSplitRungActs, so the route's
-// next rung decision does not move which labels count as stale (gt-ie2ehm).
+// a bead on: a split label recorded at shape is stale whatever minutes it
+// carries. shape-embed is not weak. It is the normal rung since the 2026-11-24
+// operator decision (gt-gl12sr), so a split label recorded there is kept by the
+// stale-label drop. The rung is named here rather than read from
+// specSplitRungActs, so the route's next rung decision does not move which
+// labels count as stale (gt-ie2ehm).
 func specSplitRungWeak(rung string) bool {
 	switch rung {
-	case "shape-embed", "shape":
+	case "shape":
 		return true
 	}
 	return false
