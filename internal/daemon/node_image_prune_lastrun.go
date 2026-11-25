@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -19,7 +20,9 @@ const nodeImagePruneLastFile = "node_image_prune_last"
 
 // readNodeImagePruneLast returns the run id the prune last ran for. A missing
 // file means no run yet and reads as the empty id; any other read failure is an
-// error, so an unreadable record is never mistaken for an unpruned node.
+// error, so an unreadable record is never mistaken for an unpruned node. The
+// record is trimmed of surrounding whitespace, so a trailing newline written by
+// another tool does not change the id the prune compares.
 func readNodeImagePruneLast(townRoot string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(constants.TownRuntimePath(townRoot), nodeImagePruneLastFile))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -28,7 +31,7 @@ func readNodeImagePruneLast(townRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading the node image prune last-run record: %w", err)
 	}
-	return string(data), nil
+	return strings.TrimSpace(string(data)), nil
 }
 
 // writeNodeImagePruneLast records runID as the run the prune last ran for. The
