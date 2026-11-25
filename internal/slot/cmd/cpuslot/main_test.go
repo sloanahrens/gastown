@@ -167,6 +167,71 @@ func TestCPUClassWrapperQueuesFromACrewCheckout(t *testing.T) {
 	}
 }
 
+// TestWithCoreShare is the CPU-class build's core bound: a build that names no
+// GOMAXPROCS of its own gains one carrying the slot's share, a build that sets
+// its own keeps it, and a share below one is floored at one so a bad value
+// cannot leave the build unbounded.
+func TestWithCoreShare(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		env   []string
+		share int
+		want  []string
+	}{
+		{
+			name:  "adds the share when the build sets none",
+			env:   []string{"PATH=/bin"},
+			share: 8,
+			want:  []string{"PATH=/bin", "GOMAXPROCS=8"},
+		},
+		{
+			name:  "keeps a GOMAXPROCS the build sets itself",
+			env:   []string{"PATH=/bin", "GOMAXPROCS=4"},
+			share: 8,
+			want:  []string{"PATH=/bin", "GOMAXPROCS=4"},
+		},
+		{
+			name:  "floors a share below one",
+			env:   []string{"PATH=/bin"},
+			share: 0,
+			want:  []string{"PATH=/bin", "GOMAXPROCS=1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := withCoreShare(tc.env, tc.share); !slices.Equal(got, tc.want) {
+				t.Fatalf("withCoreShare(%v, %d) = %v, want %v", tc.env, tc.share, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWithCoreShareDoesNotModifyItsArgument: the caller's environment is read
+// only. The slice has spare capacity and entries past its length, so an
+// implementation that appends onto it writes into the backing array and is
+// caught; a zero-capacity literal would hide that.
+// Mutation: append directly onto env, and the backing-array check goes red.
+func TestWithCoreShareDoesNotModifyItsArgument(t *testing.T) {
+	t.Parallel()
+	backing := []string{"PATH=/bin", "SENTINEL=a", "SENTINEL=b"}
+	env := backing[:1]
+	got := withCoreShare(env, 8)
+	if want := []string{"PATH=/bin", "GOMAXPROCS=8"}; !slices.Equal(got, want) {
+		t.Fatalf("withCoreShare = %v, want %v", got, want)
+	}
+	if want := []string{"SENTINEL=a", "SENTINEL=b"}; !slices.Equal(backing[1:], want) {
+		t.Fatalf("withCoreShare wrote past the caller's slice: backing = %v, want %v", backing, want)
+	}
+	if len(env) != 1 {
+		t.Fatalf("withCoreShare changed the argument: %d entries, want 1", len(env))
+	}
+	if env[0] != "PATH=/bin" {
+		t.Fatalf("withCoreShare changed the argument's first entry: %q, want %q", env[0], "PATH=/bin")
+	}
+}
+
 // notRead is the working directory a case must not read.
 func notRead(t *testing.T) func() (string, error) {
 	t.Helper()
