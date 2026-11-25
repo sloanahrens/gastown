@@ -76,7 +76,9 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 }
 
 // Put stores rec as its bead's record, replacing whatever record the bead had
-// before, whatever head that record judged.
+// before, whatever head that record judged. A failed write is returned as an
+// error; the atomic write (atomicfile.WriteFile) is what leaves no partial file
+// behind.
 func (s AheadStore) Put(rec AheadRecord) error {
 	if err := rec.refuseToStore(); err != nil {
 		return err
@@ -103,8 +105,8 @@ func (s AheadStore) Put(rec AheadRecord) error {
 	return nil
 }
 
-// refuseToStore returns the error that refuses rec, or nil when the store may
-// keep it.
+// refuseToStore reports whether the store may keep rec: nil when it may, and
+// the error naming why not otherwise.
 func (rec AheadRecord) refuseToStore() error {
 	if !validComponent(rec.Bead) {
 		return fmt.Errorf("review-ahead store: refusing bead %q: not one path component", rec.Bead)
