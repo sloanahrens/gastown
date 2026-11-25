@@ -609,8 +609,12 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 	f.tick()
 	f.drain()
 
-	if n := len(engineDockerExecs(f, "")); n != 0 {
-		t.Fatalf("a dry run ran %d docker command(s)", n)
+	// engineDockerExecs matches "-- docker <verb> ", so an empty verb matches no
+	// call at all; each removing verb is named, and the run's own reads are not.
+	for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
+		if n := len(engineDockerExecs(f, verb)); n != 0 {
+			t.Fatalf("a dry run ran %d docker %q command(s)", n, verb)
+		}
 	}
 	if n := len(engineExecs(f, "ci-engine-list")); n != 1 {
 		t.Fatalf("a dry run ran the list program %d time(s), want once", n)
