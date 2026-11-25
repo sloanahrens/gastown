@@ -632,9 +632,11 @@ func TestReviveCutFuncLeavesTheOtherSeatsAlone(t *testing.T) {
 type datedCutFake struct {
 	*cutFake
 	cutAt map[string]time.Time
+	reads int // StreamCutAt calls, so a test can say a guarded seat costs no read
 }
 
 func (f *datedCutFake) StreamCutAt(_, p string) (bool, time.Time, error) {
+	f.reads++
 	return f.cut[p], f.cutAt[p], f.cutErr[p]
 }
 
@@ -659,7 +661,8 @@ func TestReviveCutDatedAgesTheCut(t *testing.T) {
 		{"quiet six minutes, unparseable cut time: revived as now", 6 * time.Minute, time.Time{}, true, nil, false, OutcomeRevived, "after 6m0s quiet: its model stream was cut"},
 		{"baseline sample, no cut: left alone", 0, now.Add(-6 * time.Minute), false, nil, false, "", ""},
 		{"quiet six minutes, stream unreadable: unknown", 6 * time.Minute, now.Add(-6 * time.Minute), true, streamErr, false, OutcomeUnknown, "model stream unreadable"},
-		{"baseline sample, stream unreadable: left alone", 0, now.Add(-6 * time.Minute), true, streamErr, false, "", ""},
+		{"baseline sample, stream unreadable: unknown, never 'not old enough'", 0, now.Add(-6 * time.Minute), true, streamErr, false, OutcomeUnknown, "model stream unreadable"},
+		{"quiet ten minutes, stream unreadable: unknown", 10 * time.Minute, time.Time{}, false, streamErr, false, OutcomeUnknown, "model stream unreadable: transcript: sandbox unreachable"},
 		{"StreamCutter only, baseline sample, cut six minutes old: left alone as before", 0, now.Add(-6 * time.Minute), true, nil, true, "", ""},
 	}
 	for _, tc := range cases {
@@ -690,6 +693,30 @@ func TestReviveCutDatedAgesTheCut(t *testing.T) {
 				t.Fatalf("restarts = %v, want a restart only when revived", base.restarts)
 			}
 		})
+	}
+}
+
+// gt-0lajvh: the guards run before the dated read, so a seat a guard holds costs
+// no backend read, and an unreadable cut time makes the seat Unknown whatever
+// its quiet time.
+func TestReviveCutDatedGuardsRunBeforeTheRead(t *testing.T) {
+	t.Parallel()
+	base := newFake()
+	liveQuiet(base, "ruby", 10*time.Minute)
+	base.heartbeats["ruby"] = &Heartbeat{State: "stuck", At: now.Add(-6 * time.Minute)}
+	cut := &cutFake{fakeEnv: base, cut: map[string]bool{"ruby": true}, cutErr: map[string]error{}}
+	dated := &datedCutFake{cutFake: cut, cutAt: map[string]time.Time{"ruby": now.Add(-6 * time.Minute)}}
+	s := scanner(base, nil)
+	s.o.Now = func() time.Time { return now }
+	s.env = dated
+
+	f, ok := s.reviveCut("gastown", "ruby", base.verdicts["ruby"])
+
+	if !ok || f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "heartbeat says stuck") {
+		t.Fatalf("reviveCut = %q %q ok=%v, want the heartbeat skip", f.Outcome, f.Detail, ok)
+	}
+	if dated.reads != 0 {
+		t.Fatalf("StreamCutAt was read %d times for a seat its heartbeat holds, want none", dated.reads)
 	}
 }
 

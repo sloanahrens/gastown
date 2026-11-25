@@ -1619,16 +1619,47 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 // It shares the revival rule's guards and cooldown: a quiet under reviveQuiet,
 // a heartbeat that says stuck or is inside gt done, work that is submitted,
 // held or not assigned, and a cut of false leave the seat alone. A StreamCut
-// read that fails is Unknown and nothing is acted on; a dated read that fails
-// on a seat quiet under reviveQuiet leaves it alone, since its age is unknown.
+// read that fails is Unknown and nothing is acted on, dated or not and whatever
+// the seat's quiet time. The guards run before the read, so a guarded seat costs
+// no backend read; a seat quiet under reviveQuiet that a guard holds is left
+// silent, as when the quiet gate ran first.
 func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, bool) {
 	cutter, ok := s.env.(StreamCutter)
 	if !ok {
 		return Finding{}, false
 	}
-	now := s.o.Now()
-	quiet := res.QuietFor
 	dater, dated := s.env.(StreamCutDater)
+	if !dated && res.QuietFor < reviveQuiet {
+		return Finding{}, false
+	}
+	f := Finding{Kind: "seat", Subject: name}
+	now := s.o.Now()
+	// quietEnough is true when the seat was already quiet under the sample's own
+	// clock. A seat that is not stays silent for every guard below, as it did
+	// when the quiet gate ran first: only a dated cut can make it quiet enough.
+	quietEnough := res.QuietFor >= reviveQuiet
+	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
+		if !quietEnough {
+			return Finding{}, false
+		}
+		f.Outcome, f.Detail = OutcomeSkipped, why
+		return f, true
+	}
+	work, err := s.reviveWork(rig, name)
+	if err != nil {
+		if !quietEnough {
+			return Finding{}, false
+		}
+		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
+		return f, true
+	}
+	if work == nil {
+		return Finding{}, false
+	}
+	// The cut is read after the guards, so a guarded seat costs no backend read.
+	// A failed read is Unknown whatever the seat's quiet time: a cut whose time
+	// cannot be read is neither "not cut" nor "not old enough".
+	quiet := res.QuietFor
 	var cut bool
 	var cutErr error
 	if dated {
@@ -1637,31 +1668,14 @@ func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, boo
 		if cutErr == nil && cut {
 			quiet = max(quiet, cutAge(now, at))
 		}
-	}
-	if quiet < reviveQuiet {
-		return Finding{}, false
-	}
-	f := Finding{Kind: "seat", Subject: name}
-	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
-		f.Outcome, f.Detail = OutcomeSkipped, why
-		return f, true
-	}
-	work, err := s.reviveWork(rig, name)
-	if err != nil {
-		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
-		return f, true
-	}
-	if work == nil {
-		return Finding{}, false
-	}
-	if !dated {
+	} else {
 		cut, cutErr = cutter.StreamCut(rig, name)
 	}
 	if cutErr != nil {
 		f.Outcome, f.Detail = OutcomeUnknown, "model stream unreadable: "+cutErr.Error()
 		return f, true
 	}
-	if !cut {
+	if !cut || quiet < reviveQuiet {
 		return Finding{}, false
 	}
 	quietFor := quiet.Round(time.Second)
