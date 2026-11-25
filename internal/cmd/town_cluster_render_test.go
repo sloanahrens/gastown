@@ -131,6 +131,7 @@ func clusterRenderDepsAt(t *testing.T, town string, out io.Writer) clusterRender
 		encode:                   k8sdaemon.YAML,
 		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
 		writeFile:                func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		writeTownValues:          imagevalues.Write,
 		saveRecord:               saveRenderFlags,
 		out:                      out,
 	}
@@ -2649,7 +2650,8 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 
 // TestTownClusterRenderWritesTheRunningValuesFile holds a live render to the
 // town's own values file, the one the pair-ready check reads the running commit
-// from (gt-tju7oo).
+// from (gt-tju7oo). The write goes through the writeTownValues seam exactly once,
+// with the town's values path and the pair the render read.
 func TestTownClusterRenderWritesTheRunningValuesFile(t *testing.T) {
 	t.Parallel()
 	f := clusterRenderFixture(t)
@@ -2658,14 +2660,38 @@ func TestTownClusterRenderWritesTheRunningValuesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finding the town: %v", err)
 	}
+	type townValuesCall struct {
+		path string
+		v    imagevalues.Values
+	}
+	var calls []townValuesCall
+	writeTownValues := d.writeTownValues
+	d.writeTownValues = func(path string, v imagevalues.Values) error {
+		calls = append(calls, townValuesCall{path: path, v: v})
+		return writeTownValues(path, v)
+	}
 	if err := runClusterRender(d, f); err != nil {
 		t.Fatalf("render: %v", err)
+	}
+	pair, ok, err := imagevalues.LoadIn(f.dir)
+	if err != nil || !ok {
+		t.Fatalf("reading the render's image pair: ok=%v err=%v", ok, err)
+	}
+	wantPath := imagevalues.PathIn(filepath.Join(town, "gastown"))
+	if len(calls) != 1 {
+		t.Fatalf("the render called the writeTownValues seam %d times, want once", len(calls))
+	}
+	if calls[0].path != wantPath {
+		t.Fatalf("the seam wrote %s, want the town's values path %s", calls[0].path, wantPath)
+	}
+	if calls[0].v != pair {
+		t.Fatalf("the seam wrote %+v, want the render's pair %+v", calls[0].v, pair)
 	}
 	want, err := os.ReadFile(imagevalues.PathIn(f.dir))
 	if err != nil {
 		t.Fatalf("reading the render's values file: %v", err)
 	}
-	got, err := os.ReadFile(imagevalues.PathIn(filepath.Join(town, "gastown")))
+	got, err := os.ReadFile(wantPath)
 	if err != nil {
 		t.Fatalf("the render wrote no running values file under the town: %v", err)
 	}

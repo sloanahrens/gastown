@@ -218,6 +218,9 @@ type clusterRenderDeps struct {
 	saveRecord func(path string, f clusterRenderFlags) error
 	record     clusterRenderRecordOptions
 	out        io.Writer
+	// writeTownValues writes the town's running values file, the one the pair-ready
+	// check reads. A caller that must not settle a running pair replaces it.
+	writeTownValues func(path string, v imagevalues.Values) error
 }
 
 // realClusterRenderDeps is the host's. The environment is the one the compose
@@ -239,6 +242,7 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		runHelm:                  execHelm,
 		encode:                   k8sdaemon.YAML,
 		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
+		writeTownValues:          imagevalues.Write,
 		writeFile: func(path string, data []byte) error {
 			return os.WriteFile(path, data, 0o644) //nolint:gosec // manifests hold no secret; the operator reads them
 		},
@@ -647,7 +651,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// manifests, so a failed manifest write leaves the running commit as it was.
 	townValues := imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
 	if !f.rehearsal {
-		if err := imagevalues.Write(townValues, pair); err != nil {
+		if err := d.writeTownValues(townValues, pair); err != nil {
 			return fmt.Errorf("cannot write the running values file %s, and the manifests are written: %w", townValues, err)
 		}
 	}
