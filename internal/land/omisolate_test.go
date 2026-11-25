@@ -3,7 +3,9 @@ package land
 import (
 	"bytes"
 	"context"
+	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -31,6 +33,58 @@ func reviewIsolated(t *testing.T, c Reviewer, argv *[]string, in ReviewInput) (s
 		t.Fatalf("om was not given --out: %v", *argv)
 	}
 	return (*argv)[i+1], v, nil
+}
+
+// recordingEnv answers om's version probe and its review, and records the env
+// each call was given by subcommand, so a row can read what the child sees.
+func recordingEnv(t *testing.T, envs map[string][]string) runFunc {
+	t.Helper()
+	return func(_ context.Context, _ string, env, argv []string, out io.Writer) (int, error) {
+		envs[omSubcommand(argv)] = slices.Clone(env)
+		if omSubcommand(argv) == "version" {
+			_, _ = io.WriteString(out, stubVersionLine())
+			return 0, nil
+		}
+		for i, a := range argv {
+			if a == "--out" {
+				if err := os.WriteFile(argv[i+1], []byte(isolatedApprove), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return 0, nil
+	}
+}
+
+// TestVerdictReuseIsolatedSetsTMPDIR: om keeps its raw replies in os.TempDir()
+// when its caller names none, so the review call of an isolated copy is given
+// TMPDIR=tmp; omUnsetEnv still rides the same env as an unset entry, so om's
+// CLAUDE_CONFIG_DIR is still stripped.
+func TestVerdictReuseIsolatedSetsTMPDIR(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	envs := map[string][]string{}
+	r := OMReviewer{OutDir: t.TempDir()}
+	r.run = recordingEnv(t, envs)
+	c, ok := r.Isolated(tmp).(BeadReviewer)
+	if !ok {
+		t.Fatalf("%T is not a BeadReviewer", c)
+	}
+	in := ReviewInput{BeadID: "gt-1e7u58"}
+	in.Dir, in.Base, in.Head, in.Repo = "/wt", "aaa", "bbb", baseRepo{}
+	if _, err := c.ReviewBead(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := envs["review"]
+	if !ok {
+		t.Fatalf("om was not run for the review; %d om call(s) recorded", len(envs))
+	}
+	if want := "TMPDIR=" + tmp; !slices.Contains(env, want) {
+		t.Fatalf("review env's %d entries hold no TMPDIR for the isolated tmp", len(env))
+	}
+	if !slices.Contains(env, "CLAUDE_CONFIG_DIR") {
+		t.Fatalf("review env's %d entries hold no CLAUDE_CONFIG_DIR unset entry", len(env))
+	}
 }
 
 // filesUnder lists every file under root, so a row can tell whether a review
