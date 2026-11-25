@@ -43,16 +43,20 @@ type Result struct {
 	// Dead names each digest the registry does not serve, as
 	// "<digest> (<platform> config)" or "<digest> (<platform> layer <n>)", with
 	// layer n one-based, so a digest that two platforms share appears once per
-	// platform.
+	// platform. A manifest the registry no longer serves is named as
+	// "<digest> (manifest)" for the pin's own index or image, and as
+	// "<digest> (<platform> manifest)" for a platform's child of an index.
 	Dead []string
 }
 
 // Check reports the digests of imageRef that the registry does not serve.
 // imageRef is host/repo@sha256:<64 hex>; an index is followed to the manifests
-// of platforms, each "os/arch" or "os/arch/variant". Anything Check cannot
-// decide is an error, never Dead: a reference that does not resolve, a platform
-// the index lacks, a manifest it cannot read and a registry error. A platform
-// named more than once is asked for and reported once.
+// of platforms, each "os/arch" or "os/arch/variant". A manifest the registry
+// says is gone (ErrManifestGone) is Dead, and the check goes on with the other
+// platforms. Anything else Check cannot decide is an error, never Dead: a
+// reference that does not resolve, a platform the index lacks, a manifest it
+// cannot read for any other reason and a registry error. A platform named more
+// than once is asked for and reported once.
 func Check(ctx context.Context, reg Registry, imageRef string, platforms []string) (Result, error) {
 	if reg == nil {
 		return Result{}, fmt.Errorf("pincheck: %s: no registry to ask", imageRef)
@@ -78,15 +82,19 @@ func Check(ctx context.Context, reg Registry, imageRef string, platforms []strin
 		requested = append(requested, p)
 	}
 
+	res := Result{Ref: imageRef}
 	top, err := readManifest(ctx, reg, repo, ref)
+	if errors.Is(err, ErrManifestGone) {
+		res.Dead = append(res.Dead, ref+" (manifest)")
+		return res, nil
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("pincheck: %s: %w", imageRef, err)
 	}
-	images, err := platformImages(ctx, reg, repo, imageRef, top, requested)
+	images, err := platformImages(ctx, reg, repo, imageRef, top, requested, &res)
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Ref: imageRef}
 	for _, im := range images {
 		if err := checkImage(ctx, reg, repo, im, &res); err != nil {
 			return Result{}, fmt.Errorf("pincheck: %s: %w", imageRef, err)
@@ -109,8 +117,9 @@ const maxPlatformManifests = 16
 
 // platformImages resolves top into the image manifest of every requested
 // platform. An image ref is already that manifest for each platform; an index
-// names one child per platform.
-func platformImages(ctx context.Context, reg Registry, repo, imageRef string, top manifest, requested []platform) ([]platformImage, error) {
+// names one child per platform. A child the registry no longer serves is
+// recorded in res.Dead and the other children are still resolved.
+func platformImages(ctx context.Context, reg Registry, repo, imageRef string, top manifest, requested []platform, res *Result) ([]platformImage, error) {
 	if top.kind == kindImage {
 		if len(requested) > 1 {
 			return nil, fmt.Errorf("pincheck: %s: the reference is an image manifest, not an index, so it names one platform, not %d", imageRef, len(requested))
@@ -131,6 +140,10 @@ func platformImages(ctx context.Context, reg Registry, repo, imageRef string, to
 				return nil, fmt.Errorf("pincheck: %s: the index names %q for %s, not sha256:<64 lowercase hex>", imageRef, child, p)
 			}
 			childManifest, err := readManifest(ctx, reg, repo, child)
+			if errors.Is(err, ErrManifestGone) {
+				res.Dead = append(res.Dead, fmt.Sprintf("%s (%s manifest)", child, p))
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("pincheck: %s: %s: %w", imageRef, p, err)
 			}
