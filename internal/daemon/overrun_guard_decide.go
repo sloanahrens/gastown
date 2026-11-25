@@ -199,6 +199,27 @@ func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge, max
 	return s, s.GateSpent
 }
 
+// withGateSling starts the gate answer and the run of failed reads over when
+// the state belongs to a different sling than dispatch, the time of the sling
+// event the run began with (overrunSeams.dispatchAt): both were read for that
+// sling, and a carried in-gate answer would exempt the new sling's first
+// minutes. It never keys on a clock the guard derives: a restart of the seat,
+// a later session start (slungFloor) and an answered escalation all move the
+// clock the tick measures from, and none of them is a new sling. A record
+// written before the field existed has no sling, so it too starts over once:
+// the answer it holds is one read old and is read again this tick, and the
+// wrong direction would exempt time. A run whose log holds no sling event
+// names no sling, so the tick does not call it: slungAt then dates the run from
+// the agent bead's update time, which moves whenever that bead is written, and
+// resetting on it would empty the run of failed reads on every tick. It runs
+// before the tick's gate read (gt-uojbm7).
+func (s overrunState) withGateSling(dispatch time.Time) overrunState {
+	if !s.GateAnswerSlingAt.Equal(dispatch) {
+		s.GateAnswerSlingAt, s.GateIn, s.GateReadFailures = dispatch, false, 0
+	}
+	return s
+}
+
 // overrunGateReadCarryMax is how many consecutive failed gate reads may still
 // carry the last answer. Past it the guard counts all of the seat's time, the
 // direction that stops: a gate read that stays broken is a guard that cannot
@@ -276,6 +297,7 @@ func chargeWait(spent time.Duration, seenAt, now time.Time, inWait bool, maxChar
 func (s overrunState) sameWait(o overrunState) bool {
 	return s.GateIn == o.GateIn && s.GateReadFailures == o.GateReadFailures &&
 		s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt) &&
+		s.GateAnswerSlingAt.Equal(o.GateAnswerSlingAt) &&
 		s.EscalationSeenAt.Equal(o.EscalationSeenAt) && s.EscalationSpent == o.EscalationSpent &&
 		s.EscalationSlingAt.Equal(o.EscalationSlingAt) &&
 		s.RestartSlingAt.Equal(o.RestartSlingAt) && s.RestartedAt.Equal(o.RestartedAt)
@@ -305,6 +327,12 @@ type overrunState struct {
 	GateSlingAt time.Time     `json:"gate_sling_at,omitzero"`
 	GateSpent   time.Duration `json:"gate_spent,omitempty"`
 	GateSeenAt  time.Time     `json:"gate_seen_at,omitzero"`
+
+	// GateAnswerSlingAt is the sling GateIn and GateReadFailures were read in:
+	// the time of the sling event, not the clock GateSlingAt follows, so a restart
+	// or a session floor inside the sling keeps the answer and a new sling drops
+	// it (withGateSling).
+	GateAnswerSlingAt time.Time `json:"gate_answer_sling_at,omitzero"`
 
 	// GateIn is the answer of the last successful gate read: whether the seat
 	// was inside its own gate. GateReadFailures counts the consecutive failed

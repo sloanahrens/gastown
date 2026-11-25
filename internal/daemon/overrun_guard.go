@@ -245,6 +245,12 @@ type overrunSeams struct {
 	// the seat because the bead's last submission is read with it (the seat's
 	// bead read), so the clock and the run end it started after are one read.
 	slungAt func(seat overrunSeat) (time.Time, bool)
+	// dispatchAt is the time of the sling event the seat's run began with, before
+	// the first-spawn and floor rewrites slungAt and slungFloor make, false when
+	// the log holds none; nil reads as slungAt. It names the sling: a restart of
+	// the seat, a later session start or an answered escalation moves the clock the
+	// guard measures from, but none of them is a new sling (gt-uojbm7).
+	dispatchAt func(seat overrunSeat) (time.Time, bool)
 	// addedLines counts the lines the seat's handle adds over origin/main, so
 	// the guard can weigh how much work a seat has done. It opens the same
 	// handle overrunSeatGit picks for the stop's save, dirty check, push and
@@ -799,9 +805,14 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	type seatSlot struct {
 		take  bool
 		slung time.Time
-		state overrunState
-		reads overrunSeatReads
-		read  bool
+		// dispatch names the sling the run belongs to (overrunSeams.dispatchAt);
+		// named is false when a wired dispatchAt found no sling event, which
+		// leaves the gate answer where it is.
+		dispatch time.Time
+		named    bool
+		state    overrunState
+		reads    overrunSeatReads
+		read     bool
 	}
 	slots := make([]seatSlot, len(seats))
 	for i, seat := range seats {
@@ -813,6 +824,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		if !ok {
 			continue
 		}
+		dispatch, named := slung, true
+		if s.dispatchAt != nil {
+			dispatch, named = s.dispatchAt(seat)
+		}
 		slung = slungFloor(slung, seat.SessionStart, seat.RestartedAt)
 		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
 		if err != nil {
@@ -821,7 +836,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			d.logger.Printf("overrun_guard: %s: cannot read state for %s: %v", who, seat.Bead, err)
 			continue
 		}
-		slots[i] = seatSlot{take: true, slung: slung, state: state}
+		slots[i] = seatSlot{take: true, slung: slung, dispatch: dispatch, named: named, state: state}
 	}
 	poolSize := s.readPoolSize
 	if poolSize == 0 {
@@ -858,7 +873,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
-		slung, state := slots[i].slung, slots[i].state
+		slung, state, dispatch, named := slots[i].slung, slots[i].state, slots[i].dispatch, slots[i].named
 		// The three per-seat reads of the pass, made before the loop for a seat whose
 		// state is known to be readable, and folded into the pass's own stats.
 		reads := slots[i].reads
@@ -896,6 +911,9 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// consecutive failures, then counts all of its time: the failure is
 		// recorded before the carry is judged, so the third one in a row is the
 		// one that stops it (recordGateRead, carriedGate).
+		if named {
+			state = state.withGateSling(dispatch)
+		}
 		inGate := reads.inGate
 		if reads.gateErr != nil {
 			state.recordGateRead(false, false)
@@ -1116,6 +1134,7 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		now:          time.Now,
 		workingSeats: d.overrunTickSeats,
 		slungAt:      sl.slungAt,
+		dispatchAt:   sl.dispatchAt,
 		addedLines:   addedLines,
 		// A count that fails leaves the tripwire blind on this seat, so it is
 		// raised rather than left in the log alone (gt-eb7bzu). The key names
@@ -1331,26 +1350,9 @@ type overrunSlungReader struct {
 // and the guard leaves the seat alone: a stop on the wrong seat is worse than a
 // missed one (gt-ydc5c4).
 func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
-	if !r.loaded {
-		r.loaded = true
-		r.clock = events.NewDispatchClock()
-		evs, err := events.Read(r.d.config.TownRoot)
-		if err != nil {
-			r.d.logger.Printf("overrun_guard: reading events: %v", err)
-		}
-		r.clock.Add(evs)
-		r.evs = evs
-	}
-	// The later end wins: a bead submitted after an escalation was dated from
-	// the submission, and one escalated after a submission from the escalation.
-	// StartSince never moves the boundary backwards, so passing the later of the
-	// two is what makes both ends available to the clock.
-	end := seat.SubmittedAt
-	if seat.EscalatedEnd.After(end) {
-		end = seat.EscalatedEnd
-	}
-	if start, ok := r.clock.StartSince(seat.Bead, end); ok {
-		if !r.clockNamesSeat(seat, start) {
+	start, ok, named := r.dispatchStart(seat)
+	if named {
+		if !ok {
 			return time.Time{}, false
 		}
 		// A seat that ended without a run-end event keeps the run, so its first
@@ -1371,6 +1373,46 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// dispatchAt is the time of the sling event slungAt starts from: the earliest
+// sling of the bead the run's end does not close, before the first-spawn rewrite.
+// It is false when the log holds no sling for the bead, or holds one that is
+// another seat's. Only a new sling moves it (gt-uojbm7).
+func (r *overrunSlungReader) dispatchAt(seat overrunSeat) (time.Time, bool) {
+	start, ok, named := r.dispatchStart(seat)
+	return start, named && ok
+}
+
+// dispatchStart reads the dispatch clock for seat: the sling event's time, ok
+// false when that run is not this seat's, and named false when the log holds no
+// sling for the bead at all.
+func (r *overrunSlungReader) dispatchStart(seat overrunSeat) (start time.Time, ok, named bool) {
+	if !r.loaded {
+		r.loaded = true
+		r.clock = events.NewDispatchClock()
+		evs, err := events.Read(r.d.config.TownRoot)
+		if err != nil {
+			r.d.logger.Printf("overrun_guard: reading events: %v", err)
+		}
+		r.clock.Add(evs)
+		r.evs = evs
+	}
+	// The later end wins: a bead submitted after an escalation was dated from
+	// the submission, and one escalated after a submission from the escalation.
+	// StartSince never moves the boundary backwards, so passing the later of the
+	// two is what makes both ends available to the clock.
+	end := seat.SubmittedAt
+	if seat.EscalatedEnd.After(end) {
+		end = seat.EscalatedEnd
+	}
+	if start, found := r.clock.StartSince(seat.Bead, end); found {
+		if !r.clockNamesSeat(seat, start) {
+			return time.Time{}, false, true
+		}
+		return start, true, true
+	}
+	return time.Time{}, false, false
 }
 
 // clockNamesSeat reports whether the run that slungAt dated at start belongs to
