@@ -42,6 +42,15 @@ func (r OMReviewer) Isolated(tmp string) Reviewer {
 	return c
 }
 
+// VersionProber is a Reviewer that can be asked the version of the om it runs,
+// so a caller holding only a Reviewer can compare it with a stored verdict's
+// (gt-spfj2z).
+type VersionProber interface {
+	OMVersion(ctx context.Context, in ReviewInput) string
+}
+
+var _ VersionProber = OMReviewer{}
+
 // OMVersion returns the version of the om this reviewer runs, the string
 // ReviewBead stamps on Verdict.Version: a stored review is only reusable under
 // the om that made it, so a caller compares it before reusing one (gt-jtdmp4).
