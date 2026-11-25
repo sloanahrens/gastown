@@ -247,7 +247,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/workspace.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
-		sandboxExec("ln", "-sfn", openshellTestWorkDir, "/sandbox/gt/work"),
+		sandboxExec("ln", "-sfnT", openshellTestWorkDir, "/sandbox/gt/work"),
 	}
 	if got := stageNames(fake.Calls()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("openshell calls:\n got %q\nwant %q", got, want)
@@ -2399,7 +2399,9 @@ func TestSandboxCommonWorkLinksTheWorktree(t *testing.T) {
 		t.Fatalf("Prepare: %v", err)
 	}
 	// The link is the last exec of populate, right after the redirect: the
-	// record is written on the host once the exec has succeeded.
+	// record is written on the host once the exec has succeeded. -T is pinned
+	// with the argv: without it, a real directory at the destination makes the
+	// command link inside it and exit 0 (gt-0b1ly9).
 	calls := stageNames(fake.Calls())
 	if len(calls) < 2 {
 		t.Fatalf("openshell calls = %q; want the redirect and the link at the end", calls)
@@ -2407,7 +2409,7 @@ func TestSandboxCommonWorkLinksTheWorktree(t *testing.T) {
 	got := calls[len(calls)-2:]
 	want := [][]string{
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
-		sandboxExec("ln", "-sfn", openshellTestWorkDir, "/sandbox/gt/work"),
+		sandboxExec("ln", "-sfnT", openshellTestWorkDir, "/sandbox/gt/work"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("last two calls:\n got %q\nwant %q", got, want)

@@ -1142,7 +1142,10 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 		// The seat starts in the common path, so Go's cache key holds it and
 		// not the seat's name. Linked before the record, which is the last thing
 		// populate writes, so a failed link rolls back with no record behind.
-		if err := b.run(ctx, spec.Session, "ln", "-sfn", workDir, sandboxCommonWork); err != nil {
+		// -T: without it, a real directory already at the destination makes ln
+		// link inside it and exit 0, leaving the seat somewhere that is not its
+		// worktree (gt-0b1ly9).
+		if err := b.run(ctx, spec.Session, "ln", "-sfnT", workDir, sandboxCommonWork); err != nil {
 			return fmt.Errorf("linking %s to %s: %w", sandboxCommonWork, workDir, err)
 		}
 		return WriteSandboxRecord(b.townRoot, SandboxRecord{
