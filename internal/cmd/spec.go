@@ -4786,6 +4786,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		detailStore: func(rig string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 		},
+		rigs: townRigs,
 	})
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
@@ -5520,6 +5521,9 @@ type specTickBoardDeps struct {
 	now    func() time.Time
 	// detailStore opens a rig's store for the candidates' details.
 	detailStore func(rig string) beads.Client
+	// rigs are the town's rigs, the set the inherited seam reads a blocked
+	// list from each tick.
+	rigs []string
 }
 
 // specTickBoard builds the board closure the tick and a held tick both take
@@ -5533,13 +5537,20 @@ type specTickBoardDeps struct {
 // memory skip nothing. So the worst case is a rig whose readiness changed with no
 // change to its own database (a deferral date passing, a blocker closing in
 // another rig): it waits up to five minutes for its next read.
+//
+// The candidate order takes the inherited seam over every rig's blocked list
+// (gt-4cpx5s): the seam reads all of dp.rigs, one blocked call per rig per board
+// read, including a board with no candidate. Its opener is its own, as
+// detailStore's is; the ready board keeps no handle to share.
 func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
 	return func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
 		skip := quietSkip(dp.memory, dp.heads(), dp.now())
 		read := specCandidatesDropping(dp.townRoot, dp.maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 			dp.reads.call()
 			return dp.ready(rigPath)
-		}, dp.rigStatus, retry, drop, skip, nil)
+		}, dp.rigStatus, retry, drop, skip, inheritedSeam(dp.rigs, inheritedBlockedReader(dp.townRoot, func(beadsDir string) ([]*beads.Issue, error) {
+			return beads.NewPinned(beadsDir).Blocked()
+		})))
 		return specBoardDetails(dp.reads, dp.detailStore, read, memo)
 	}
 }
