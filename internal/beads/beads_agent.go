@@ -3,6 +3,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -507,6 +508,9 @@ func agentBeadFields(id string, issue *Issue) (*Issue, *AgentFields, error) {
 // Queries both the issues table (authoritative metadata source) and the
 // wisps table (fallback existence source). Issues take precedence for duplicate
 // IDs so labels/type are preserved for doctor validation.
+//
+// A failed wisps read is returned with no map: the answer is unknown, not
+// none, so a caller cannot read it as "no wisp-backed agent beads" (gt-c07xhh).
 func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// Query issues table first. Issues include labels and type metadata used by
 	// doctor checks (for example, validating gt:agent labels).
@@ -533,7 +537,10 @@ func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// Query wisps table as a fallback source.
 	// Keep issues-table entries when both exist for the same ID so richer
 	// metadata (labels/type) is preserved.
-	wispBeads, _ := b.ListAgentBeadsFromWisps()
+	wispBeads, err := b.ListAgentBeadsFromWisps()
+	if err != nil {
+		return nil, err
+	}
 
 	return mergeAgentBeadSources(issuesByID, wispBeads), nil
 }
@@ -555,7 +562,13 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 }
 
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
-// Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
+// Returns nil, nil when bd answers that there are no wisps (its not_found
+// answer) and when the body cannot be parsed.
+//
+// Every other failed read is returned wrapped by markUnavailable, because the
+// answer is unknown and never none. A missing wisps table is not one of them:
+// bd answers it with exit 0 and an empty list, so the only "no wisps" failure
+// is not_found (gt-c07xhh).
 //
 // A PreloadBeads(...) snapshot is checked first: it answers from the one bd
 // sql round trip that call already paid for (gt-92zx), instead of this
@@ -573,7 +586,12 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 	} else {
 		out, err := b.run("mol", "wisp", "list", "--json")
 		if err != nil {
-			return nil, nil // Wisps table may not exist yet
+			if errors.Is(err, ErrNotFound) {
+				// bd answered that the wisps table holds nothing: no
+				// wisp-backed agent beads, not an unknown answer.
+				return nil, nil
+			}
+			return nil, markUnavailable(err)
 		}
 
 		// bd mol wisp list --json returns {"wisps": [...], "count": N, ...}

@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1151,5 +1152,107 @@ func TestListAgentBeadsPassesNoLimit(t *testing.T) {
 	}
 	if len(got) != total {
 		t.Errorf("ListAgentBeads returned %d agent beads, want all %d; argv: %q", len(got), total, rec.argvs())
+	}
+}
+
+// TestListAgentBeadsWispReadFailure: a `bd mol wisp list` that failed is not
+// "no wisp-backed agent beads". Only bd's not_found answer means that, and a
+// missing wisps table is not a failure at all (bd answers exit 0 with an empty
+// list). Every other failure leaves the answer unknown, so both functions
+// return it and ListAgentBeads returns no map (gt-c07xhh).
+func TestListAgentBeadsWispReadFailure(t *testing.T) {
+	t.Parallel()
+	const (
+		issueBacked = "gt-r-polecat-from-issues"
+		wispBacked  = "gt-r-polecat-from-wisps"
+	)
+	issueRows := `[{"id":"` + issueBacked + `","title":"from issues","status":"open","type":"agent","labels":["gt:agent"]}]`
+
+	tests := []struct {
+		name                 string
+		wisps                reply
+		wantErr              bool
+		wantStoreUnavailable bool
+		wantBeads            []string
+	}{
+		{
+			name:                 "store unavailable exit 25",
+			wisps:                reply{stderr: "Error: database did not answer", err: exitError{code: bdStoreUnavailableExit}},
+			wantErr:              true,
+			wantStoreUnavailable: true,
+		},
+		{
+			name:    "untyped failure exit 1 with stderr",
+			wisps:   reply{stderr: "Error: something broke", err: exitError{code: 1}},
+			wantErr: true,
+		},
+		{
+			name:      "not_found envelope",
+			wisps:     reply{stdout: `{"error":{"kind":"not_found"}}`, err: exitError{code: bdNotFoundExit}},
+			wantBeads: []string{issueBacked},
+		},
+		{
+			name:      "empty wisps list for a missing table",
+			wisps:     reply{stdout: `{"wisps": [], "count": 0}`},
+			wantBeads: []string{issueBacked},
+		},
+		{
+			name:      "wisp read still merges as fallback",
+			wisps:     reply{stdout: `{"wisps": [{"id":"` + wispBacked + `","status":"open","type":"agent"}], "count": 1}`},
+			wantBeads: []string{issueBacked, wispBacked},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecorder(func(args []string) reply {
+				if len(args) >= 3 && args[0] == "mol" && args[1] == "wisp" && args[2] == "list" {
+					return tt.wisps
+				}
+				if len(args) > 0 && args[0] == "list" {
+					return reply{stdout: issueRows}
+				}
+				return reply{}
+			})
+			b := newRecordedBeads(t.TempDir(), rec)
+
+			gotWisps, err := b.ListAgentBeadsFromWisps()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ListAgentBeadsFromWisps() error = %v, want error = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if gotWisps != nil {
+					t.Errorf("ListAgentBeadsFromWisps() = %v, want no map when the read failed", gotWisps)
+				}
+				if !errors.Is(err, ErrUnavailable) {
+					t.Errorf("ListAgentBeadsFromWisps() error = %v, want ErrUnavailable", err)
+				}
+				if got := IsStoreUnavailable(err); got != tt.wantStoreUnavailable {
+					t.Errorf("IsStoreUnavailable(ListAgentBeadsFromWisps() error) = %v, want %v", got, tt.wantStoreUnavailable)
+				}
+			}
+
+			got, err := b.ListAgentBeads()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ListAgentBeads() error = %v, want error = %v (argv: %q)", err, tt.wantErr, rec.argvs())
+			}
+			if tt.wantErr {
+				if got != nil {
+					t.Errorf("ListAgentBeads() = %v, want no map when the wisps read failed", got)
+				}
+				if !errors.Is(err, ErrUnavailable) {
+					t.Errorf("ListAgentBeads() error = %v, want ErrUnavailable", err)
+				}
+				return
+			}
+			if len(got) != len(tt.wantBeads) {
+				t.Fatalf("ListAgentBeads() = %v, want %v", got, tt.wantBeads)
+			}
+			for _, id := range tt.wantBeads {
+				if _, ok := got[id]; !ok {
+					t.Errorf("ListAgentBeads() is missing %s: %v", id, got)
+				}
+			}
+		})
 	}
 }
