@@ -5764,9 +5764,11 @@ func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, r
 	// A rig whose blocked list the inherited seam could not read ordered its
 	// blockers at their own priority, which looks like a successful read. Name
 	// the rig and the error, sorted by rig so the tick log reads the same
-	// however the seam's map iterates (gt-x64phi).
+	// however the seam's map iterates (gt-x64phi), and pass the error through
+	// firstErrLine, the formatter the tick's other read-error lines use, so a
+	// multi-line read failure names its first line only (gt-a6xfgr).
 	for _, rig := range slices.Sorted(maps.Keys(read.InheritedFailed)) {
-		read.Notices = append(read.Notices, fmt.Sprintf("inherited priority: %s's blocked list could not be read (%v); its blockers order at their own priority", rig, read.InheritedFailed[rig]))
+		read.Notices = append(read.Notices, fmt.Sprintf("priority inheritance unavailable for %s: %s", rig, firstErrLine(read.InheritedFailed[rig])))
 	}
 	return read
 }
