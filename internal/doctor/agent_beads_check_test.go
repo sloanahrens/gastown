@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -551,4 +552,100 @@ func TestListPolecats_MissingDirIsZeroPolecats(t *testing.T) {
 	if len(polecats) != 0 {
 		t.Errorf("missing polecats directory should yield no polecats, got: %v", polecats)
 	}
+}
+
+// unreadableAgentBeads is a bead store whose agent-bead list fails with err,
+// the unread scope; every other call answers through the embedded store.
+type unreadableAgentBeads struct {
+	doctorBeads
+	err error
+}
+
+func (u unreadableAgentBeads) ListAgentBeads() (map[string]*beads.Issue, error) {
+	return nil, u.err
+}
+
+// failAgentListAt answers ctx's bead stores from bd, except that the store at
+// dir fails its agent-bead list, as a database whose answer is unknown.
+func failAgentListAt(bd *doctorTown, townRoot, rigName, dir string, err error) *CheckContext {
+	ctx := bd.ctx(townRoot, rigName)
+	open := ctx.openBeads
+	ctx.openBeads = func(site beadsSite) doctorBeads {
+		inner := open(site)
+		if site.workDir == dir {
+			return unreadableAgentBeads{doctorBeads: inner, err: err}
+		}
+		return inner
+	}
+	return ctx
+}
+
+// TestAgentBeadsCheckUnreadScope verifies that a beads database that cannot be
+// read is reported as unknown rather than as every agent missing, so a scope
+// that was never read is never mistaken for a town with no agent beads
+// (gt-9bwrei).
+func TestAgentBeadsCheckUnreadScope(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("store unavailable")
+
+	// Each case makes one database's agent-bead list fail.
+	cases := []struct {
+		name string
+		dir  func(townRoot string) string
+	}{
+		{"town scope", beads.GetTownBeadsPath},
+		{"rig scope", func(townRoot string) string { return filepath.Join(townRoot, "gastown", "mayor", "rig") }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := setupTownDuplicateFixture(t)
+			dir := tc.dir(tmpDir)
+			ctx := failAgentListAt(newDoctorTown(), tmpDir, "gastown", dir, boom)
+
+			result := NewAgentBeadsCheck().Run(ctx)
+
+			if result.Status != StatusSkipped {
+				t.Fatalf("unread scope: status = %v (%s), want StatusSkipped (unknown)", result.Status, result.Message)
+			}
+			if !strings.Contains(result.Message, "agent beads could not be read") {
+				t.Errorf("message %q does not say the agent beads could not be read", result.Message)
+			}
+			if !strings.Contains(result.Message, boom.Error()) {
+				t.Errorf("message %q does not carry the read error %q", result.Message, boom)
+			}
+			if !strings.Contains(result.Message, dir) {
+				t.Errorf("message %q does not name the database %s it could not read", result.Message, dir)
+			}
+			if len(result.Details) != 0 {
+				t.Errorf("unread scope listed %v as missing; no agent is known missing", result.Details)
+			}
+		})
+	}
+
+	// A readable scope keeps reporting a rig-local missing bead, so the fix
+	// above does not turn a real gap into an unknown.
+	t.Run("readable scope unchanged", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := setupTownDuplicateFixture(t)
+		ctx := newDoctorTown().ctx(tmpDir, "gastown")
+
+		result := NewAgentBeadsCheck().Run(ctx)
+
+		if result.Status != StatusError {
+			t.Fatalf("status = %v (%s), want StatusError for the missing rig-local bead", result.Status, result.Message)
+		}
+		found := false
+		for _, detail := range result.Details {
+			if strings.HasPrefix(detail, "gs-gastown-crew-alice") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected gs-gastown-crew-alice in missing details, got: %v", result.Details)
+		}
+	})
 }
