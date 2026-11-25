@@ -78,3 +78,40 @@ func TestGateLinesReturnsGoTestRunLines(t *testing.T) {
 		})
 	}
 }
+
+// TestGateRunReadsTags is gt-mwzlyk's table: a Gate line's -tags list is kept
+// as written, in either spelling, when it holds only letters, digits, comma,
+// underscore and dot. A list with any other text reads as no tags, and the
+// line is still read. A want row lists the Tags of each run the line yields.
+func TestGateRunReadsTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		gate string
+		want []string
+	}{
+		{"the -tags spelling", "go test -tags integration ./internal/done -run 'TestGateRun'", []string{"integration"}},
+		{"the -tags= spelling", "go test -tags=integration ./internal/done -run 'TestGateRun'", []string{"integration"}},
+		{"a comma list", "go test -tags integration,unit ./internal/done -run TestGateRun", []string{"integration,unit"}},
+		{"dot and underscore", "go test -tags=go_1.22 ./internal/done -run TestGateRun", []string{"go_1.22"}},
+		{"a quoted tag list", "go test -tags 'integration' ./internal/done -run 'TestGateRun'", []string{"integration"}},
+		{"tags after the pattern", "go test ./internal/done -run 'TestGateRun' -tags integration", []string{"integration"}},
+		{"no tags", "go test ./internal/done -run 'TestGateRun' -count=1", []string{""}},
+		{"a plus in the list", "go test -tags=integration+race ./internal/done -run 'TestGateRun'", []string{""}},
+		{"a space inside quotes", "go test -tags 'integ ration' ./internal/done -run 'TestGateRun'", []string{""}},
+		{"-tags with no value", "go test ./internal/done -run 'TestGateRun' -tags", []string{""}},
+		{"a flag taken as the tag value", "go test -tags -run 'TestGateRun' ./internal/done", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, run := range gateRunLines(tc.gate) {
+				got = append(got, run.Tags)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("gateRunLines(%q) tags = %q; want %q", tc.gate, got, tc.want)
+			}
+		})
+	}
+}

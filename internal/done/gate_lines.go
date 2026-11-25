@@ -3,14 +3,16 @@ package done
 import "strings"
 
 // GateRun is one Gate line that runs go test with a -run filter: the line
-// trimmed of surrounding space, the package arguments go test is given, and
-// the pattern -run selects. Packages and the pattern hold only safe
-// characters, so the branch check can pass them as arguments, never through a
-// shell (gt-hx8f5i).
+// trimmed of surrounding space, the package arguments go test is given, the
+// pattern -run selects, and the -tags list as written. Packages, the pattern
+// and the tags hold only safe characters, so the branch check can pass them
+// as arguments, never through a shell (gt-hx8f5i, gt-mwzlyk). Tags is empty
+// when the line names no tags or its list holds an unsafe character.
 type GateRun struct {
 	Line     string
 	Packages []string
 	Pattern  string
+	Tags     string
 }
 
 // gateRunLines returns the go test lines of a bead's Gate section that narrow
@@ -91,6 +93,13 @@ func gateRun(line string) (GateRun, bool) {
 			run.Pattern = unquotePattern(fields[i])
 		case strings.HasPrefix(field, "-run="):
 			run.Pattern = unquotePattern(strings.TrimPrefix(field, "-run="))
+		case field == "-tags":
+			if i+1 < len(fields) {
+				i++
+				run.Tags = safeTags(unquotePattern(fields[i]))
+			}
+		case strings.HasPrefix(field, "-tags="):
+			run.Tags = safeTags(unquotePattern(strings.TrimPrefix(field, "-tags=")))
 		case packageArg(field):
 			run.Packages = append(run.Packages, field)
 		}
@@ -121,7 +130,7 @@ func packageArg(word string) bool {
 }
 
 // unquotePattern drops one pair of matching shell quotes around a -run
-// pattern, so a quoted pattern reads as its literal text.
+// pattern or a -tags list, so a quoted value reads as its literal text.
 func unquotePattern(pattern string) string {
 	if len(pattern) >= 2 {
 		first, last := pattern[0], pattern[len(pattern)-1]
@@ -149,6 +158,22 @@ func safePattern(pattern string) bool {
 		}
 	}
 	return true
+}
+
+// tagCharacters are the runes a -tags list may hold: letters, digits, comma,
+// underscore and dot.
+const tagCharacters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789,_."
+
+// safeTags returns tags as written when it holds only tag characters, and
+// the empty string otherwise: a list with any other text is read as no tags,
+// so no unchecked tag text is kept for go test (gt-mwzlyk).
+func safeTags(tags string) string {
+	for _, r := range tags {
+		if !strings.ContainsRune(tagCharacters, r) {
+			return ""
+		}
+	}
+	return tags
 }
 
 // anchors reports whether a dollar followed by rest is the regexp's end
