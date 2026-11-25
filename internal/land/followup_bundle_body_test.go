@@ -40,6 +40,31 @@ func TestBundleSpecLabelsByItsCutKey(t *testing.T) {
 	}
 }
 
+// TestFollowupTitle: a bundle is titled by its group's cut key, the source file
+// its work belongs to, and by the repository root when the key is empty.
+func TestFollowupTitle(t *testing.T) {
+	t.Parallel()
+	day := time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
+	w, res := bundleLanding("gt-ma07ji", bundleFirst, 0.8)
+	for _, tc := range []struct {
+		name, key, pkg, path, title string
+	}{
+		{"source file", "internal/cmd/spec.go", "internal/cmd", "internal/cmd/spec.go",
+			"Follow-ups in internal/cmd/spec.go for 2026-11-24"},
+		{"empty key", "", "", "README.md", "Follow-ups in the repository root for 2026-11-24"},
+		{"empty key with a package", "", "internal/cmd", "internal/cmd/spec.go",
+			"Follow-ups in the repository root for 2026-11-24"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := followupGroup{Key: tc.key, Package: tc.pkg,
+				Findings: followupCandidates([]Finding{minorAt(tc.path, 10, "name the error")})}
+			if got := bundleSpec(w, res, day, g).Title; got != tc.title {
+				t.Errorf("title = %q, want %q", got, tc.title)
+			}
+		})
+	}
+}
+
 // TestBundleSpec: the open-bundle spec, its shaped body, boxes and labels.
 func TestBundleSpec(t *testing.T) {
 	t.Parallel()

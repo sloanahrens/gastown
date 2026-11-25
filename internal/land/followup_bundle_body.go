@@ -22,8 +22,8 @@ func bundleSpec(w Work, res Result, day time.Time, g followupGroup) FollowupSpec
 	labels = append(labels, BundleLabels(day, g.Key)...)
 	acceptance := followupAcceptance(g.Findings)
 	in := "the repository root"
-	if g.Package != "" {
-		in = g.Package
+	if g.Key != "" {
+		in = g.Key
 	}
 	return FollowupSpec{
 		Title:      fmt.Sprintf("Follow-ups in %s for %s", in, day.UTC().Format(time.DateOnly)),

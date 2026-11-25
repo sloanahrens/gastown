@@ -174,7 +174,7 @@ func TestFollowupFeedBeadShape(t *testing.T) {
 		t.Fatalf("filed %d beads, want one:\n%s", len(f.fake.created), log)
 	}
 	spec := f.fake.created[0]
-	wantTitle := "Follow-ups in internal/land for 2026-11-21"
+	wantTitle := "Follow-ups in internal/land/note.go for 2026-11-21"
 	if spec.Title != wantTitle {
 		t.Errorf("title = %q, want %q", spec.Title, wantTitle)
 	}
@@ -349,7 +349,7 @@ func TestFollowupFeedSplitsAFullLandingByCutKey(t *testing.T) {
 		{"internal/land/note.go", "internal/land", findings[:3]},
 	} {
 		spec := f.fake.created[i]
-		wantTitle := fmt.Sprintf("Follow-ups in %s for 2026-11-21", tc.pkg)
+		wantTitle := fmt.Sprintf("Follow-ups in %s for 2026-11-21", tc.key)
 		if spec.Title != wantTitle {
 			t.Errorf("bead %d title = %q, want %q", i, spec.Title, wantTitle)
 		}
@@ -455,7 +455,7 @@ func TestFollowupFeedTreatsARootFileAsHavingNoPackage(t *testing.T) {
 	}
 	// Packages file in sorted order, and no package sorts before a named one.
 	root := f.fake.created[0]
-	if want := "Follow-ups in the repository root for 2026-11-21"; root.Title != want {
+	if want := "Follow-ups in README.md for 2026-11-21"; root.Title != want {
 		t.Errorf("title = %q, want %q", root.Title, want)
 	}
 	if strings.Contains(root.Title+root.Body, "in .") {
