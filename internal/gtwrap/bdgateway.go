@@ -136,6 +136,13 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if err := g.settleDirectory(&call); err != nil {
 		return exitDown, err
 	}
+	// The gateway refuses the --allow-stale probe with HTTP 403, and beads sends that
+	// probe from each new gt process, so the refusal is answered here with no request
+	// (gt-9idlu7). The leading -C pair is settled above, so a probe with a directory
+	// is answered the same way.
+	if slices.Equal(call.Argv, []string{"bd", "--allow-stale", "version"}) {
+		return exitDown, g.allowStaleRefusal()
+	}
 	if err := g.settleBeadsDir(&call); err != nil {
 		return exitDown, err
 	}
@@ -312,9 +319,28 @@ func (g BdGateway) refusal(resp *http.Response) error {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, gatewayBodyLimit))
 	var payload bdgateway.ErrorPayload
 	if err == nil && json.Unmarshal(data, &payload) == nil && payload.Code != "" {
-		return fmt.Errorf("gtwrap: the bd gateway at %s refused the call with HTTP %d: %s: %s", g.URL, resp.StatusCode, payload.Code, payload.Message)
+		return g.refused(resp.StatusCode, payload)
 	}
 	return fmt.Errorf("gtwrap: the bd gateway at %s refused the call with HTTP %d, so the call did not run", g.URL, resp.StatusCode)
+}
+
+// refused is the one-line error for a refusal carrying the gateway's payload.
+// beads reads two substrings of it (allowStaleAnswer, gt-d3v0iu), so the local
+// --allow-stale answer and the gateway's own refusal are both built here.
+func (g BdGateway) refused(status int, payload bdgateway.ErrorPayload) error {
+	return fmt.Errorf("gtwrap: the bd gateway at %s refused the call with HTTP %d: %s: %s", g.URL, status, payload.Code, payload.Message)
+}
+
+// allowStaleRefusal is the gateway's refusal of the --allow-stale probe, answered
+// without a request. The message is the policy's own: ErrAmbiguousVerb, the flag
+// the policy cannot place. The suffix tells a reader of gt-wrap's output that no
+// request was sent, so the answer is not shown as one the gateway gave.
+func (g BdGateway) allowStaleRefusal() error {
+	payload := bdgateway.ErrorPayload{
+		Code:    "forbidden",
+		Message: fmt.Sprintf("%v: %q is not a bd root flag the policy can place", bdgateway.ErrAmbiguousVerb, "--allow-stale"),
+	}
+	return fmt.Errorf("%w; no request was sent", g.refused(http.StatusForbidden, payload))
 }
 
 // Doctor reports whether a call could run: the token file readable, and the
