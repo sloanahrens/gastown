@@ -734,6 +734,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		// The backpressure holds findings back silently otherwise, so the day
 		// it does, the loss reaches a human as a low attention item (gt-4ty22).
 		lander.FollowupAlert = d.followupBackpressureAlert(rigName)
+		lander.PathTouched = d.pathTouchedHook(repo)
 		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups; %d open %s beads stop it)",
 			rigName, land.FollowupBackpressureOrDefault(lander.FollowupBackpressure), land.FollowUpLabel)
 	}
