@@ -762,7 +762,7 @@ func TestQueueReplayHoldsAtTheBound(t *testing.T) {
 // TestQueueReplayFilesIntoTheBundle: a queued finding replayed when the bound has
 // room goes into the day's bundle, and the consumed line is dropped: filed as a
 // new bundle when none is open, appended to the open one when there is, and, past
-// the room of one bundle, as bundles of at most MaxAcceptance findings (gt-ntkwh0).
+// the room of one bundle, as bundles of at most feedChunkCap findings (gt-ntkwh0).
 func TestQueueReplayFilesIntoTheBundle(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -774,7 +774,7 @@ func TestQueueReplayFilesIntoTheBundle(t *testing.T) {
 	}{
 		{"a new bundle", openFollowupBeads(1), 1, 0, []int{1}},
 		{"a full bundle is not appended to", append(openFollowupBeads(1), bundleWithFindings(3)), 2, 0, []int{2}},
-		{"eight findings, no open bundle", openFollowupBeads(1), 8, 0, []int{6, 2}},
+		{"findings past one chunk, no open bundle", openFollowupBeads(1), feedChunkCap + 2, 0, chunkSizes(feedChunkCap + 2)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -497,21 +497,22 @@ func TestFollowupFeedBodyLintsClean(t *testing.T) {
 }
 
 // TestFollowupFeedFilesALargeGroupInBundlesOfAtMostMaxAcceptance: a package's
-// findings past the lint maximum are filed in bundles of at most MaxAcceptance
-// findings each, not in one bead with the boxes folded: 13 findings with no open
-// bundle file 6, 6 and 1, every bundle lints as shaped with a box per finding, no
-// bundle carries more than MaxAcceptance fingerprints, and every finding is named
-// under exactly one Goal. This replaces the gt-4ty22 rule that one package stays
-// one bead however many findings there are (gt-ntkwh0).
+// findings past the lint maximum are filed in bundles of at most feedChunkCap
+// findings each, not in one bead with the boxes folded: 2*feedChunkCap+1 findings
+// with no open bundle file chunkSizes(2*feedChunkCap+1), every bundle lints as
+// shaped with a box per finding, no bundle carries more than feedChunkCap
+// fingerprints, and every finding is named under exactly one Goal. This replaces
+// the gt-4ty22 rule that one package stays one bead however many findings there
+// are (gt-ntkwh0).
 func TestFollowupFeedFilesALargeGroupInBundlesOfAtMostMaxAcceptance(t *testing.T) {
 	t.Parallel()
 	var findings []Finding
-	for i := 0; i < 2*specdispatch.MaxAcceptance+1; i++ {
+	for i := 0; i < 2*feedChunkCap+1; i++ {
 		findings = append(findings, minorFinding(string(rune('a'+i))+" finding"))
 	}
 	f := newFollowupFixture(t, 0.8, findings)
 	f.run()
-	want := []int{specdispatch.MaxAcceptance, specdispatch.MaxAcceptance, 1}
+	want := chunkSizes(2*feedChunkCap + 1)
 	if len(f.fake.created) != len(want) {
 		t.Fatalf("filed %d beads, want %d", len(f.fake.created), len(want))
 	}
