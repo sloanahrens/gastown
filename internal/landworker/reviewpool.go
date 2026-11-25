@@ -46,10 +46,10 @@ type aheadRun struct {
 }
 
 // Offer starts one review per work, launching the goroutines in the order
-// given. Go does not promise that the reviews enter the Reviewer in that
-// order. Nothing is started when no
-// Reviewer is set, so every submission is a miss and the landing runs om
-// inline.
+// given; Go does not promise that the reviews enter the Reviewer in that
+// order. A work whose bead already has a review running is a no-op: no second
+// reviewer and no second goroutine. Nothing is started when no Reviewer is
+// set, so every submission is a miss and the landing runs om inline.
 func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	if p.Reviewer == nil {
 		p.logf("ahead review: no reviewer set; %d submissions not reviewed ahead", len(works))
@@ -60,10 +60,14 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	}
 }
 
-// start registers w as running and launches its review.
+// start registers w as running and launches its review, unless its bead
+// already has one running.
 func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, ok := p.running[w.BeadID]; ok {
+		return
+	}
 	if p.running == nil {
 		p.running = map[string]*aheadRun{}
 	}
@@ -73,11 +77,14 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 }
 
 // review makes one review under its own child of ctx. The entry leaves the
-// map before done closes, so Wait sees the review end.
+// map before done closes, so Wait sees the review end. It removes the entry
+// only while the entry is its own run.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
 		p.mu.Lock()
-		delete(p.running, w.BeadID)
+		if p.running[w.BeadID] == run {
+			delete(p.running, w.BeadID)
+		}
 		p.mu.Unlock()
 		close(run.done)
 	}()
