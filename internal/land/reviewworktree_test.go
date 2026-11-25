@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -54,7 +55,7 @@ func TestVerdictReuseWorktreeNeverWT(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.base)
+	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.work, f.base)
 	if err != nil {
 		t.Fatalf("addReviewWorktree: %v", err)
 	}
@@ -78,12 +79,65 @@ func TestVerdictReuseWorktreeNeverWT(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseWorktreeOpensWithLandingEnv: the Repo a review worktree
+// returns is opened with the landing's committing identity, read from the
+// head's author as Land reads it. The row checks the wiring only; the merge
+// commit the identity makes is asserted by the integration bead (gt-4eg2d3).
+func TestVerdictReuseWorktreeOpensWithLandingEnv(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var got []string
+	l.landingEnv = func(env []string) { got = env }
+
+	_, _, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.work, f.base)
+	if err != nil {
+		t.Fatalf("addReviewWorktree: %v", err)
+	}
+	defer cleanup()
+
+	want, err := CommittingEnv(Identity{Name: "Seat Opal", Email: "opal@gastown.local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("review worktree handle env = %q, want %q", got, want)
+	}
+}
+
+// TestVerdictReuseWorktreeRefusesUnreadableAuthor: the identity is read before
+// the review directory is made, so a failed author read is returned and leaves
+// nothing under WorkRoot (gt-4eg2d3).
+func TestVerdictReuseWorktreeRefusesUnreadableAuthor(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.authorOf = func(Work) (Identity, error) { return Identity{}, errors.New("git log: bad revision") }
+
+	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.work, f.base)
+	if err == nil || !strings.Contains(err.Error(), "bad revision") {
+		t.Fatalf("addReviewWorktree with an unreadable author = %v (dir %q), want the read's error", err, dir)
+	}
+	if wt != nil || dir != "" || cleanup != nil {
+		t.Errorf("refusal returned wt=%v dir=%q cleanup=%v; want none", wt, dir, cleanup != nil)
+	}
+	entries, err := os.ReadDir(f.workRoot)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), reviewDirPrefix) {
+			t.Errorf("review directory %s made before the author read", e.Name())
+		}
+	}
+}
+
 func TestVerdictReuseWorktreeCleanup(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
 	g := l.open(l.Repo)
-	_, dir, cleanup, err := l.addReviewWorktree(g, f.base)
+	_, dir, cleanup, err := l.addReviewWorktree(g, f.work, f.base)
 	if err != nil {
 		t.Fatalf("addReviewWorktree: %v", err)
 	}
@@ -126,7 +180,7 @@ func TestVerdictReuseWorktreeCleanupAfterFailedRemove(t *testing.T) {
 	var out bytes.Buffer
 	l.Out = &out
 	g := lockedRemove{Repo: l.open(l.Repo)}
-	_, dir, cleanup, err := l.addReviewWorktree(g, f.base)
+	_, dir, cleanup, err := l.addReviewWorktree(g, f.work, f.base)
 	if err != nil {
 		t.Fatalf("addReviewWorktree: %v", err)
 	}
@@ -153,7 +207,7 @@ func TestVerdictReuseWorktreeHoldsGitMu(t *testing.T) {
 	f := newLandFixture(t)
 	l := f.lander()
 	probe := &gitMuProbe{Repo: l.open(l.Repo), t: t, l: l}
-	_, _, cleanup, err := l.addReviewWorktree(probe, f.base)
+	_, _, cleanup, err := l.addReviewWorktree(probe, f.work, f.base)
 	if err != nil {
 		t.Fatalf("addReviewWorktree: %v", err)
 	}
@@ -178,7 +232,7 @@ func TestVerdictReuseWorktreeRefusesFailedAdd(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	wt, dir, cleanup, err := l.addReviewWorktree(addFails{Repo: l.open(l.Repo)}, f.base)
+	wt, dir, cleanup, err := l.addReviewWorktree(addFails{Repo: l.open(l.Repo)}, f.work, f.base)
 	if err == nil || !strings.Contains(err.Error(), "invalid reference") {
 		t.Fatalf("addReviewWorktree with a failed add = %v, want the add's error", err)
 	}
@@ -205,7 +259,7 @@ func TestVerdictReuseWorktreeRefusesFileWorkRoot(t *testing.T) {
 	if err := os.WriteFile(l.WorkRoot, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.base)
+	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.work, f.base)
 	if err == nil {
 		t.Fatalf("addReviewWorktree under a file WorkRoot = %s, nil; want an error", dir)
 	}
