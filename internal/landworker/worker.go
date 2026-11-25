@@ -193,6 +193,10 @@ type Worker struct {
 	// sees it, so the submission battery still asks about one that lands
 	// within its interval and whose branch is then pruned. nil skips it.
 	FirstSight FirstSight
+	// Pool is the review pool a later bead reads to review submissions ahead
+	// of the landing; nil, the only value today, leaves the worker exactly as
+	// it was before the field existed (gt-8vfrwi).
+	Pool *ReviewPool
 	// WatchTarget is the branch the worker watches for commits that reached
 	// it without a landing (a direct push); each pass that finds one runs
 	// the post-landing command for it. The leftover sweep also reads it as
