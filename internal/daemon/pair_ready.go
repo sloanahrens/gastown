@@ -79,9 +79,11 @@ import (
 )
 
 const (
-	// pairReadyInterval is how often the check reads. A green commit lands a
-	// few times a day, so a quarter hour is prompt without being a poll.
-	pairReadyInterval = 15 * time.Minute
+	// pairReadyInterval is how often the check reads: the recovery heartbeat's
+	// default period. Greens land about every half hour and one read is a
+	// handful of read-only registry calls, so a pair is announced on the
+	// heartbeat after its images finish instead of up to a quarter hour later.
+	pairReadyInterval = 3 * time.Minute
 	// pairReadyBudget bounds one read of every image rig, so the heartbeat is
 	// held for at most this long. A rig that runs past it keeps what it held.
 	pairReadyBudget = time.Minute

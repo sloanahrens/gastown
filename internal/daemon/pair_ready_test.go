@@ -23,6 +23,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/bdskew"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
@@ -1197,6 +1198,47 @@ func TestPairReadyIsDueOnTheIntervalOnly(t *testing.T) {
 
 	fx.run(pairT0.Add(pairReadyInterval))
 	assert.Empty(t, fx.check.observed(), "the check did not read once its interval was up")
+}
+
+// TestPairReadyInterval: the check reads on every recovery heartbeat, so a pair
+// is announced on the heartbeat after its images finish. The bound row reads
+// both constants, so setting the interval back to a quarter hour turns it red.
+func TestPairReadyInterval(t *testing.T) {
+	t.Parallel()
+
+	// The row pins the interval against the heartbeat it rides on: a throttle
+	// longer than the heartbeat leaves a finished pair unread for whole beats.
+	rows := []struct {
+		name      string
+		interval  time.Duration
+		heartbeat time.Duration
+	}{
+		{"pair-ready check", pairReadyInterval, config.DefaultRecoveryHeartbeatInterval},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			if row.interval > row.heartbeat {
+				t.Errorf("the %s reads every %v, slower than the recovery heartbeat's %v", row.name, row.interval, row.heartbeat)
+			}
+		})
+	}
+
+	// The check itself reads three minutes after its last read and not two, so
+	// a pair published in between is announced on the next heartbeat.
+	t.Run("two minutes throttles, three reads", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
+
+		fx.reg = &fakePairRegistry{}
+		fx.run(pairT0.Add(2 * time.Minute))
+		assert.Len(t, fx.check.observed(), 1, "the check read 2 minutes after its last read")
+
+		fx.run(pairT0.Add(3 * time.Minute))
+		assert.Empty(t, fx.check.observed(), "the check did not read 3 minutes after its last read")
+	})
 }
 
 // pairHandlerTransport answers each request in process, so the registry fixture
