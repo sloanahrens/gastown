@@ -36,7 +36,6 @@ func goldenValues() Values {
 			"ci-base:docker://ci-base:latest",
 		},
 		ForgejoHostIP: "192.168.5.2",
-		DindRequests:  Share{CPU: "4", Memory: "8Gi"},
 	}
 }
 
@@ -247,9 +246,8 @@ func TestDindIsANativeSidecar(t *testing.T) {
 }
 
 // TestDindKeepsItsRenderedContainer drives the engine's own settings, which the move
-// to a native sidecar must leave alone: the image, arguments, environment, limits,
-// privilege and mounts are the ones the previous golden recorded, and the requests
-// sit below those limits.
+// to a native sidecar must leave alone: the image, arguments, environment, shares,
+// privilege and mounts are the ones the previous golden recorded.
 func TestDindKeepsItsRenderedContainer(t *testing.T) {
 	t.Parallel()
 	dind := containerNamed(t, mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec, DindContainerName)
@@ -263,10 +261,8 @@ func TestDindKeepsItsRenderedContainer(t *testing.T) {
 	if want := []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: "/certs"}}; !slices.Equal(dind.Env, want) {
 		t.Errorf("engine env = %+v, want %+v", dind.Env, want)
 	}
-	if want := (ContainerResources{
-		Requests: ResourceList{CPU: "4", Memory: "8Gi"},
-		Limits:   ResourceList{CPU: "8", Memory: "12Gi"},
-	}); dind.Resources != want {
+	share := ResourceList{CPU: "8", Memory: "12Gi"}
+	if want := (ContainerResources{Requests: share, Limits: share}); dind.Resources != want {
 		t.Errorf("engine resources = %+v, want %+v", dind.Resources, want)
 	}
 	if dind.SecurityContext == nil || !dind.SecurityContext.Privileged {
@@ -701,9 +697,6 @@ func TestRunnerConfigCPUQuota(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			v := goldenValues()
-			// The quota follows the limit; an empty requests share takes it, so the
-			// override below reaches both and validate accepts it.
-			v.DindRequests = Share{}
 			v.DindResources.CPU = tt.dindCPU
 			m := mustBuild(t, v)
 			got := decodeConfig(t, m).Runner.Envs["CI_CPU_QUOTA"]
@@ -805,9 +798,6 @@ func TestGoldenMismatchIsReported(t *testing.T) {
 func TestRenderClaimsAndLimits(t *testing.T) {
 	t.Parallel()
 	v := goldenValues()
-	// The claims and limits are this test's subject; an empty requests share makes
-	// each container ask for its whole limit.
-	v.DindRequests = Share{}
 	m := mustBuild(t, v)
 
 	checkClaimGolden(t, m.DindClaim, "dind-claim.yaml")
@@ -855,7 +845,6 @@ func TestRenderClaimsAndLimits(t *testing.T) {
 	t.Run("shares and claim sizes come from Values", func(t *testing.T) {
 		t.Parallel()
 		values := goldenValues()
-		values.DindRequests = Share{}
 		values.DindStorage = "80Gi"
 		values.RunnerStorage = "2Gi"
 		values.RunnerResources = Share{CPU: "2", Memory: "3Gi"}
@@ -1237,8 +1226,8 @@ func TestBuildRefusesInvalidValues(t *testing.T) {
 }
 
 // TestDindCPUShare drives the engine's CPU share: the default is the 8 cores the
-// live gate runner runs with, and with an empty requests share a Values override
-// still reaches both the requests and the limits.
+// live gate runner runs with, and a Values override still reaches both the
+// requests and the limits.
 func TestDindCPUShare(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1252,8 +1241,6 @@ func TestDindCPUShare(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			values := goldenValues()
-			// An empty requests share takes the limit, so the override reaches both.
-			values.DindRequests = Share{}
 			values.DindResources = Share{CPU: tc.cpu}
 			pod := mustBuild(t, values).Deployment.Spec.Template.Spec
 			dind := containerNamed(t, pod, DindContainerName)
@@ -1316,10 +1303,7 @@ func TestContainerResourcesRequests(t *testing.T) {
 	}
 	t.Run("the rendered containers ask for their whole share", func(t *testing.T) {
 		t.Parallel()
-		values := goldenValues()
-		// An empty requests share is what asks for the whole limit.
-		values.DindRequests = Share{}
-		pod := mustBuild(t, values).Deployment.Spec.Template.Spec
+		pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
 		containers := slices.Concat(pod.InitContainers, pod.Containers)
 		if len(containers) == 0 {
 			t.Fatal("the rendered pod holds no container, so the check read nothing")
