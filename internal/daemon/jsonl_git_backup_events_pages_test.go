@@ -20,17 +20,20 @@ type eventsPageCall struct {
 
 // eventsPagedRows is a fake events table read in pages: lines are in
 // created_at, id order, each call returns the rows after its keyset, and a
-// stuck fake returns the first page whatever keyset it is given.
+// stuck fake returns the first page whatever keyset it is given. err fails
+// every call; errAt fails the call at that 1-based position and serves the
+// calls before it.
 type eventsPagedRows struct {
 	lines []string
 	calls []eventsPageCall
 	err   error
+	errAt int
 	stuck bool
 }
 
 func (f *eventsPagedRows) readPage(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error) {
 	f.calls = append(f.calls, eventsPageCall{afterCreatedAt, afterID, limit})
-	if f.err != nil {
+	if f.err != nil && (f.errAt == 0 || f.errAt == len(f.calls)) {
 		return nil, f.err
 	}
 	start := 0
@@ -221,6 +224,43 @@ func TestExportEventsPages(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestExportEventsPagesReadError: a page read that fails after a page was
+// written returns the error with the rows already written, reads no further
+// page, and writes no state file (gt-t4eldj).
+func TestExportEventsPagesReadError(t *testing.T) {
+	t.Parallel()
+	rows := []string{
+		`{"id":"e1","created_at":"2026-10-31 10:00:00","type":"created"}`,
+		`{"id":"e2","created_at":"2026-10-31 10:00:01","type":"created"}`,
+		`{"id":"e3","created_at":"2026-10-31 10:00:01","type":"updated"}`,
+		`{"id":"e4","created_at":"2026-10-31 10:00:02","type":"created"}`,
+		`{"id":"e5","created_at":"2026-10-31 10:00:03","type":"deleted"}`,
+	}
+	dir := t.TempDir()
+	readErr := errors.New("the second page read failed")
+	fake := &eventsPagedRows{lines: rows, err: readErr, errAt: 2}
+
+	written, err := (&Daemon{}).exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", dir, 2, fake.readPage)
+	if err == nil {
+		t.Fatal("a failed second page reported success")
+	}
+	if !errors.Is(err, readErr) {
+		t.Errorf("error %q does not wrap the read error", err)
+	}
+	if !strings.Contains(err.Error(), "events") {
+		t.Errorf("error %q does not name events", err)
+	}
+	if written != 2 {
+		t.Errorf("written = %d, want the 2 rows of the first page", written)
+	}
+	if len(fake.calls) != 2 {
+		t.Errorf("readPage was called %d time(s), want 2", len(fake.calls))
+	}
+	if _, statErr := os.Stat(eventsExportStatePath(dir)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the state file was written after the failed read (stat error %v)", statErr)
+	}
 }
 
 // TestExportEventsPagesStops: the paged read stops before a page when its ctx
