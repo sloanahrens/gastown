@@ -224,6 +224,11 @@ var guardTriggers = []struct {
 	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/manifestdata", "M\x00deploy/k8s/daemon/daemon.go\x00"},
+	// TestRetiredRunnerNameIsGoneFromCode walks every file under internal,
+	// cmd, deploy and docs, so a doc and a non-Go deploy file are both its
+	// input (gt-ntm1r4).
+	{"internal/daemon", "M\x00docs/reference.md\x00"},
+	{"internal/daemon", "M\x00deploy/k8s/daemon/daemon.yaml\x00"},
 	{"internal/doctor", "M\x00internal/daemon/patrol.go\x00"},
 	// Any non-test Go file is the os.Getwd ratchet's input (gt-s6icgn).
 	{"internal/callercwd", "M\x00internal/cmd/seat_ship_cmd.go\x00"},
@@ -279,10 +284,11 @@ var guardRequiredTests = map[string][]string{
 	"internal/land": {"TestEveryTreeScanningTestIsRegistered"},
 }
 
-// unguarded is a changed path no guard predicate reads: a doc outside every
-// guard's inputs, so a branch holding only this one triggers no path guard.
+// unguarded is a changed path no guard predicate reads: a plan doc under
+// docs/plans, which the retired-name guard skips by name and no other entry's
+// predicate names, so a branch holding only this one triggers no path guard.
 // The always entries still run (gt-t4rchq).
-const unguarded = "M\x00docs/testing.md\x00"
+const unguarded = "M\x00docs/plans/old-plan.md\x00"
 
 // alwaysPackages are the guards every non-empty diff must run: no path
 // predicate can stand for any of them (gt-t4rchq). The tests each one runs
@@ -749,9 +755,10 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"internal/session",
 		},
 		{
-			// The always entries still run; no path predicate selects the doc.
-			"deleting a doc selects no path guard",
-			"D\x00docs/old.md\x00",
+			// The always entries still run; no path predicate selects a plan
+			// doc, which the retired-name guard skips by name (gt-ntm1r4).
+			"deleting a plan doc selects no path guard",
+			"D\x00docs/plans/old.md\x00",
 			"",
 		},
 		{
@@ -922,6 +929,92 @@ func TestGuardSelectsGetwd(t *testing.T) {
 				if !contains(got, name) {
 					t.Errorf("GuardSelects(%q) internal/callercwd tests = %v, want %s among them", tt.diff, got, name)
 				}
+			}
+		})
+	}
+}
+
+// TestGuardSelectsDaemon: TestRetiredRunnerNameIsGoneFromCode walks every file
+// under internal, cmd, deploy and docs (docs/plans aside) and skips _test.go,
+// so the row is selected by a change or a deletion of exactly those files,
+// since a deleted file can leave the walk no directory to open. A test file, a
+// docs/plans file or a repo-root file selects nothing (gt-ntm1r4).
+func TestGuardSelectsDaemon(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	const guard = "TestRetiredRunnerNameIsGoneFromCode"
+
+	tests := []struct {
+		name string
+		diff string
+		want bool // whether TestRetiredRunnerNameIsGoneFromCode is selected
+	}{
+		{
+			"a changed Go file under internal selects the retired name guard",
+			"M\x00internal/daemon/patrol.go\x00",
+			true,
+		},
+		{
+			"a changed Go file under cmd selects the retired name guard",
+			"M\x00cmd/gt/main.go\x00",
+			true,
+		},
+		{
+			"a changed non-Go file under deploy selects the retired name guard",
+			"M\x00deploy/k8s/daemon/daemon.yaml\x00",
+			true,
+		},
+		{
+			"a changed non-Go file under docs selects the retired name guard",
+			"M\x00docs/reference.md\x00",
+			true,
+		},
+		{
+			"a changed test file selects no retired name guard",
+			"M\x00internal/daemon/patrol_test.go\x00",
+			false,
+		},
+		{
+			"a changed docs/plans file selects no retired name guard",
+			"M\x00docs/plans/old-plan.md\x00",
+			false,
+		},
+		{
+			"a changed repo-root file selects no retired name guard",
+			"M\x00go.mod\x00",
+			false,
+		},
+		{
+			"a deleted non-Go file under deploy selects the retired name guard",
+			"D\x00deploy/k8s/daemon/daemon.yaml\x00",
+			true,
+		},
+		{
+			"a deleted file under docs selects the retired name guard",
+			"D\x00docs/reference.md\x00",
+			true,
+		},
+		{
+			"a deleted test file selects no retired name guard",
+			"D\x00internal/daemon/patrol_test.go\x00",
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
+			var got []string
+			for _, s := range sel {
+				if s.Package == "internal/daemon" {
+					got = s.Tests
+				}
+			}
+			if selected := contains(got, guard); selected != tt.want {
+				t.Errorf("GuardSelects(%q) internal/daemon tests = %v; %s selected = %v, want %v", tt.diff, got, guard, selected, tt.want)
 			}
 		})
 	}

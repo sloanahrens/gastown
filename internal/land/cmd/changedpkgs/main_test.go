@@ -203,9 +203,9 @@ func TestRunRefusesAnInventoryWithNoRows(t *testing.T) {
 }
 
 // TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff pins the command line
-// presubmit runs for a branch that trips no path predicate: the union of the
-// always entries' tests and their packages, and nothing for an empty diff
-// (gt-t4rchq).
+// presubmit runs for a docs-only diff: the union of the always entries' tests
+// and the retired-name guard's, one -run union over their packages, and
+// nothing for an empty diff (gt-t4rchq, gt-ntm1r4).
 func TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -215,14 +215,17 @@ func TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff(t *testing.T) {
 	}{
 		{
 			// The three always entries: internal/mayorrig, internal/podengine
-			// and internal/testpolicy, with their tests in one -run union.
+			// and internal/testpolicy, with their tests in one -run union. A
+			// doc under docs also selects the retired-name guard, whose walk
+			// reads docs (gt-ntm1r4).
 			name:       "a docs-only diff still runs the always guards",
 			nameStatus: nameStatus("M docs/testing.md"),
 			want: "-run ^(TestAllowedTools|TestDockerTier|TestEnvArgsGuardOnTree|" +
 				"TestEveryEngineSiteHasARowPerFunction|" +
 				"TestGitFree|TestPolicy|TestRealGit|TestRepoMayorRig|" +
+				"TestRetiredRunnerNameIsGoneFromCode|" +
 				"TestUnionMergeOnlyOnGrowOnlyLists|TestUnitTierMain)$ " +
-				"./internal/mayorrig ./internal/podengine ./internal/testpolicy\n",
+				"./internal/daemon ./internal/mayorrig ./internal/podengine ./internal/testpolicy\n",
 		},
 		{
 			// An empty diff changes nothing, so presubmit has nothing to run.
