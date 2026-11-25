@@ -1,13 +1,16 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -810,6 +813,80 @@ func TestForAgentBead_KeepsWrapperDatabaseForLists(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "beads_dir="+townBeadsDir+" args=list") {
 		t.Fatalf("ListAgentBeads on a rig wrapper listed the town database; log:\n%s", logOutput)
+	}
+}
+
+// TestActingAsKeepsOptions: ActingAs changes only the actor. The copy it
+// returns makes its bd calls through the runner and counts them with the
+// observer the original was built with, and its argv differs from the
+// original's only in --actor. A sling step derives its actor-scoped stores
+// through ActingAs, so a copy that dropped either option would send the step's
+// calls to the real bd, or count none of them, without anything failing.
+func TestActingAsKeepsOptions(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var ran [][]string
+	observed := 0
+	runner := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) == 2 && args[0] == "--allow-stale" && args[1] == "version" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		mu.Lock()
+		ran = append(ran, append([]string(nil), args...))
+		mu.Unlock()
+		return []byte(`{"id":"gt-abc","title":"the bead"}`), nil, nil
+	}
+	observe := func() { mu.Lock(); observed++; mu.Unlock() }
+
+	// The bin names a file that does not exist: the injected runner keeps
+	// every call in-process, and a copy that dropped it fails here instead of
+	// running the host's bd.
+	workDir := t.TempDir()
+	base := NewWithBeadsDir(workDir, filepath.Join(workDir, ".beads"),
+		WithActor("base-actor"),
+		WithBin(filepath.Join(workDir, "absent-bd")),
+		WithRunner(runner),
+		WithCallObserver(observe))
+	as := base.ActingAs("copy-actor")
+	if as == base {
+		t.Fatal("ActingAs returned the wrapper itself, so the rows below prove nothing")
+	}
+
+	for _, c := range []struct {
+		name string
+		b    *Beads
+	}{{"copy", as}, {"original", base}} {
+		before := observed
+		if _, err := c.b.Create(CreateOptions{Title: "the bead"}); err != nil {
+			t.Fatalf("Create through the %s: %v", c.name, err)
+		}
+		if got := observed - before; got != 1 {
+			t.Errorf("Create through the %s fired the observer %d times, want 1", c.name, got)
+		}
+	}
+
+	if len(ran) != 2 {
+		t.Fatalf("the runner recorded %d calls, want one per wrapper: %q", len(ran), ran)
+	}
+	copyArgv, baseArgv := ran[0], ran[1]
+	if !slices.Contains(copyArgv, "--actor=copy-actor") || slices.Contains(copyArgv, "--actor=base-actor") {
+		t.Errorf("copy argv = %q, want --actor=copy-actor and not the original's actor", copyArgv)
+	}
+	if !slices.Contains(baseArgv, "--actor=base-actor") {
+		t.Errorf("original argv after ActingAs = %q, want its own actor unchanged", baseArgv)
+	}
+	stripActor := func(args []string) []string {
+		var out []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "--actor=") {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+	if got, want := stripActor(copyArgv), stripActor(baseArgv); !slices.Equal(got, want) {
+		t.Errorf("copy argv = %q, original argv = %q; they differ in more than --actor", copyArgv, baseArgv)
 	}
 }
 
