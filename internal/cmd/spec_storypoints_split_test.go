@@ -245,11 +245,11 @@ func TestSplitRungShapeEmbedIsNotHeld(t *testing.T) {
 	}
 }
 
-// TestSplitRungShapeEmbedStaleLabelReleased: specSplitLabelStale is the other
-// caller of the acting-rung set. A split label recorded at shape-embed is
-// stale whatever minutes it carries, because the weak-rung rule fires before
-// the acting set is consulted (gt-s93y6n, gt-ie2ehm).
-func TestSplitRungShapeEmbedStaleLabelReleased(t *testing.T) {
+// TestSplitRungShapeEmbedLabelKept: a split label recorded at shape-embed is
+// kept over the trigger: the route does not act on shape-embed, so the label
+// is not stale and nothing reads it as a weak rung (gt-s93y6n, gt-ie2ehm). The
+// bead stays held, with no removal, no stale note, and no stale notice.
+func TestSplitRungShapeEmbedLabelKept(t *testing.T) {
 	t.Parallel()
 	held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
 	held.Labels = []string{"sp:8", "sp-rung:shape-embed", "sp-minutes:12.8", specdispatch.SplitLabel}
@@ -262,18 +262,20 @@ func TestSplitRungShapeEmbedStaleLabelReleased(t *testing.T) {
 	}
 	r := runSpecDispatchCycle(env)
 
-	if got := strings.Join(f.slung, " "); got != "gt-split" {
-		t.Fatalf("slung %q, want gt-split: the stale label is dropped and the bead taken", got)
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want the bead held: a shape-embed label is kept", f.slung)
 	}
-	if slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) || len(f.unlabels) != 1 {
-		t.Errorf("labels = %v removals = %v, want the split label taken off once", f.specs["gt-split"].Labels, f.unlabels)
+	if !slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) {
+		t.Errorf("labels = %v, want the split label still on", f.specs["gt-split"].Labels)
 	}
-	notes := splitStaleNotes(f, "gt-split")
-	if len(notes) != 1 || !strings.Contains(notes[0], "rung shape-embed") || strings.Contains(notes[0], "12.8") {
-		t.Fatalf("stale notes = %q, want one naming rung shape-embed rather than a trigger", notes)
+	if len(f.unlabels) != 0 {
+		t.Errorf("removals = %v, want none", f.unlabels)
 	}
-	if notices := splitStaleNotices(r.Notices); len(notices) != 1 {
-		t.Errorf("notices = %q, want one saying the bead is offered again", notices)
+	if notes := splitStaleNotes(f, "gt-split"); len(notes) != 0 {
+		t.Errorf("stale notes = %q, want none", notes)
+	}
+	if notices := splitStaleNotices(r.Notices); len(notices) != 0 {
+		t.Errorf("notices = %q, want none", notices)
 	}
 }
 
@@ -764,10 +766,11 @@ func TestSplitLabelStale(t *testing.T) {
 	}
 }
 
-// TestSplitLabelStaleOnWeakRung: a split label recorded at a weak rung the
-// route should not hold a bead on is stale whatever minutes it carries, while
-// an acting rung keeps the minutes-under-trigger rule and a label set with no
-// readable rung keeps its label (gt-ie2ehm).
+// TestSplitLabelStaleOnWeakRung: a split label recorded at the weak rung shape
+// is stale whatever minutes it carries, while shape-embed is not weak: the
+// route does not act on it, so its label is kept. An acting rung keeps the
+// minutes-under-trigger rule and a label set with no readable rung keeps its
+// label (gt-ie2ehm, gt-y6jr7h).
 func TestSplitLabelStaleOnWeakRung(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -775,10 +778,10 @@ func TestSplitLabelStaleOnWeakRung(t *testing.T) {
 		labels []string
 		want   bool
 	}{
-		{"shape-embed under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:shape-embed"}, true},
-		{"shape-embed over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:shape-embed"}, true},
+		{"shape-embed over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:shape-embed"}, false},
 		{"shape rung over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:shape"}, true},
-		{"shape-embed with no minutes", []string{"split", "sp-rung:shape-embed"}, true},
+		{"shape rung under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:shape"}, true},
+		{"shape-embed with no minutes", []string{"split", "sp-rung:shape-embed"}, false},
 		{"an acting rung over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:all"}, false},
 		{"an acting rung under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, true},
 		{"no rung", []string{"split", "sp-minutes:12.8"}, false},
@@ -840,9 +843,9 @@ func TestSplitLabelStaleDropped(t *testing.T) {
 		{name: "stale under the trigger", labels: splitStaleLabels(), wantSlung: true,
 			wantNote: []string{"9.3 min", "under the 10-minute split trigger"}},
 		{name: "a weak rung over the trigger",
-			labels:     []string{"sp:8", "sp-rung:shape-embed", "sp-minutes:12.8", specdispatch.SplitLabel},
+			labels:     []string{"sp:8", "sp-rung:shape", "sp-minutes:12.8", specdispatch.SplitLabel},
 			wantSlung:  true,
-			wantNote:   []string{"rung shape-embed", "should not hold a bead on"},
+			wantNote:   []string{"rung shape", "should not hold a bead on"},
 			refuseNote: []string{"trigger", "12.8"}},
 		{name: "over the trigger", labels: []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}},
 		{name: "a failed removal", labels: splitStaleLabels(), removeErr: errors.New("bd refused")},
