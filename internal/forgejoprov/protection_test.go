@@ -334,6 +334,62 @@ func TestEnsureRuleJudgesEveryField(t *testing.T) {
 	}
 }
 
+// TestEnsureRuleRefusesTeams checks that a held main rule naming a team on the push or the merge
+// whitelist is refused with an error naming the repository and no write, drifted or not: the patch
+// body names neither team field, so a patch would leave the team able to push or merge while the
+// run reported the rule set. A rule that drifted only in a body field is still patched once.
+func TestEnsureRuleRefusesTeams(t *testing.T) {
+	t.Parallel()
+	const fixtureTeam = "release-team"
+	cases := []struct {
+		name       string
+		field      string
+		drift      bool
+		wantErr    bool
+		wantMethod string
+	}{
+		{name: "final rule with a merge team", field: "merge_whitelist_teams", wantErr: true},
+		{name: "final rule with a push team", field: "push_whitelist_teams", wantErr: true},
+		{name: "team-naming rule that drifted in a body field", field: "merge_whitelist_teams", drift: true, wantErr: true},
+		{name: "drifted body field with no team is patched once", drift: true, wantMethod: http.MethodPatch},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			opts := testOptions()
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
+			rule := MainRule(opts)
+			if c.field != "" {
+				rule[c.field] = []string{fixtureTeam}
+			}
+			if c.drift {
+				rule["enable_push"] = true
+			}
+			seedRule(t, f, protectionRepo, servedRule(t, rule))
+			var logs []string
+			p := userProvisioner(f, false, &logs)
+			err := p.EnsureRule(protectionRepo, opts)
+			writes := f.Writes()
+			if c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "branch protection main on acme/rig") || !strings.Contains(err.Error(), "names a push or merge team") {
+					t.Fatalf("EnsureRule = %v, want an error naming the repository and its team", err)
+				}
+				if len(writes) != 0 {
+					t.Fatalf("a team-naming rule sent %d writes, want none", len(writes))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnsureRule = %v, want the drifted rule patched", err)
+			}
+			if len(writes) != 1 || writes[0].Method != c.wantMethod {
+				t.Fatalf("sent %d writes, want one %s", len(writes), c.wantMethod)
+			}
+		})
+	}
+}
+
 // TestEnsureRuleFailsWhenTheWriteDoesNotTake checks that a PATCH whose reply still shows
 // the old merge whitelist fails the run, instead of passing as set.
 func TestEnsureRuleFailsWhenTheWriteDoesNotTake(t *testing.T) {

@@ -41,7 +41,10 @@ func ClosedMainRule(o Options) map[string]any {
 // the rule when absent, patches it when any field of the body has drifted, and sends no
 // write when none has. The body is the one compared field for field, so a field added to
 // it is judged for drift as well. A write's own reply must carry every field of the body,
-// so a field Forgejo ignores fails the run instead of passing it.
+// so a field Forgejo ignores fails the run instead of passing it. A held rule that names a
+// team on either whitelist is refused without a write, drifted or not: the body names
+// neither team field, so a patch would leave the team its access while the run reports the
+// rule set.
 func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -55,6 +58,9 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 		return err
 	}
 	if held := findRule(rules, rule); held != nil {
+		if heldNamesTeam(held) {
+			return fmt.Errorf("branch protection %s on %s names a push or merge team: set the rule by hand in the web UI, then re-run", rule, repo)
+		}
 		if carries(held, body) {
 			p.logf("branch protection %s on %s is already set", rule, repo)
 			return nil
@@ -211,6 +217,13 @@ func heldIsExactly(held, want map[string]any) bool {
 	}
 	return sameJSON(held["push_whitelist_teams"], []string{}) &&
 		sameJSON(held["merge_whitelist_teams"], []string{})
+}
+
+// heldNamesTeam reports whether held names a team on either whitelist: heldIsExactly carries
+// its want argument, so held compared with itself runs that function's team test (gt-2r9t2x)
+// and no second comparison of the two fields.
+func heldNamesTeam(held map[string]any) bool {
+	return !heldIsExactly(held, held)
 }
 
 // carries reports whether have holds every field of want at the value want names.
