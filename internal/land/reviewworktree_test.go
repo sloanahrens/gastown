@@ -226,44 +226,70 @@ func (addFails) WorktreeAddDetached(string, string) error {
 	return errors.New("fatal: invalid reference")
 }
 
-// TestVerdictReuseWorktreeRefusesFailedAdd: a failed add is returned, and the
-// review directory it made is removed, so nothing is left under WorkRoot.
-func TestVerdictReuseWorktreeRefusesFailedAdd(t *testing.T) {
+// TestVerdictReuseWorktreeAddFails: a review worktree that cannot be added is
+// refused with the failure returned, leaves no review directory, and leaves
+// gitMu takable for the next caller. A regular file where WorkRoot goes refuses
+// the mkdir for every uid, which keeps the failure deterministic in the
+// root-owned checkout and sandbox without a file mode.
+func TestVerdictReuseWorktreeAddFails(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	l := f.lander()
-	wt, dir, cleanup, err := l.addReviewWorktree(addFails{Repo: l.open(l.Repo)}, f.work, f.base)
-	if err == nil || !strings.Contains(err.Error(), "invalid reference") {
-		t.Fatalf("addReviewWorktree with a failed add = %v, want the add's error", err)
+	tests := []struct {
+		name string
+		// setup returns the lander, the Repo it is called with, and the
+		// directory scanned for a review directory left behind.
+		setup   func(t *testing.T, f *landFixture) (l *Lander, g Repo, scan string)
+		wantErr string
+	}{
+		{
+			name: "WorkRoot under a regular file",
+			setup: func(t *testing.T, f *landFixture) (*Lander, Repo, string) {
+				t.Helper()
+				l := f.lander()
+				l.WorkRoot = filepath.Join(t.TempDir(), "work")
+				if err := os.WriteFile(l.WorkRoot, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return l, l.open(l.Repo), filepath.Dir(l.WorkRoot)
+			},
+		},
+		{
+			name: "a worktree add that fails",
+			setup: func(t *testing.T, f *landFixture) (*Lander, Repo, string) {
+				t.Helper()
+				l := f.lander()
+				return l, addFails{Repo: l.open(l.Repo)}, f.workRoot
+			},
+			wantErr: "invalid reference",
+		},
 	}
-	if wt != nil || dir != "" || cleanup != nil {
-		t.Errorf("refusal returned wt=%v dir=%q cleanup=%v; want none", wt, dir, cleanup != nil)
-	}
-	entries, err := os.ReadDir(f.workRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), reviewDirPrefix) {
-			t.Errorf("review directory %s left behind after a failed add", e.Name())
-		}
-	}
-}
-
-func TestVerdictReuseWorktreeRefusesFileWorkRoot(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	l := f.lander()
-	// A file where WorkRoot should be refuses the MkdirAll for every uid.
-	l.WorkRoot = filepath.Join(t.TempDir(), "work")
-	if err := os.WriteFile(l.WorkRoot, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	wt, dir, cleanup, err := l.addReviewWorktree(l.open(l.Repo), f.work, f.base)
-	if err == nil {
-		t.Fatalf("addReviewWorktree under a file WorkRoot = %s, nil; want an error", dir)
-	}
-	if wt != nil || dir != "" || cleanup != nil {
-		t.Errorf("refusal returned wt=%v dir=%q cleanup=%v; want none", wt, dir, cleanup != nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l, g, scan := tt.setup(t, f)
+			wt, dir, cleanup, err := l.addReviewWorktree(g, f.work, f.base)
+			if err == nil {
+				t.Fatalf("addReviewWorktree = nil error, dir %q; want the failure returned", dir)
+			}
+			if tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("addReviewWorktree error = %v, want it to carry %q", err, tt.wantErr)
+			}
+			if wt != nil || dir != "" || cleanup != nil {
+				t.Errorf("refusal returned wt=%v dir=%q cleanup=%v; want none", wt, dir, cleanup != nil)
+			}
+			entries, err := os.ReadDir(scan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), reviewDirPrefix) {
+					t.Errorf("review directory %s left behind after a failed add", filepath.Join(scan, e.Name()))
+				}
+			}
+			if !l.gitMu.TryLock() {
+				t.Fatal("gitMu is still held after a failed add")
+			}
+			l.gitMu.Unlock()
+		})
 	}
 }
