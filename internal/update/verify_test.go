@@ -480,6 +480,49 @@ func TestVerifyWithSettleKeepsTheVersionChecksFromTheFirstRun(t *testing.T) {
 	}
 }
 
+// TestVerifyWithSettleRefusesANonPositivePoll: a poll that is not positive is
+// refused before any probe is asked or any wait starts. The health line settles
+// and the sleep returns an error, so a missing refusal shows as a sleep rather
+// than a hang: the wait would otherwise never reach its bound on a clock that
+// does not advance.
+func TestVerifyWithSettleRefusesANonPositivePoll(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		poll time.Duration
+	}{
+		{name: "zero", poll: 0},
+		{name: "negative", poll: -verifyTestPoll},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probes := greenProbes()
+			probes.healthLines = []string{verifyTestSettling}
+			clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+			sleeps := 0
+			sleep := func(context.Context, time.Duration) error {
+				sleeps++
+				return errors.New("sleep reached")
+			}
+
+			checks, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, tc.poll)
+			if err == nil {
+				t.Fatal("VerifyWithSettle accepted a non-positive poll, want an error")
+			}
+			if checks != nil {
+				t.Errorf("returned %d checks with the refusal, want none", len(checks))
+			}
+			if sleeps != 0 {
+				t.Errorf("slept %d times, want none: the refusal comes before the loop", sleeps)
+			}
+			if probes.gtCalls != 0 || probes.healthCalls != 0 {
+				t.Errorf("version probe called %d times and health %d, want none: the refusal comes before any probe", probes.gtCalls, probes.healthCalls)
+			}
+		})
+	}
+}
+
 func TestVerifyAllGreen(t *testing.T) {
 	t.Parallel()
 	checks := Verify(context.Background(), greenProbes(), verifyTestWant)
