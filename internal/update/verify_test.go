@@ -649,10 +649,10 @@ func TestClassifyHealthLineFailsASeatReasonThatIsNotARecordedDeadOne(t *testing.
 	}, healthFail)
 }
 
-// TestClassifyHealthLineFailsARedLine drives classifyHealthLine on the
+// TestClassifyHealthLineFailsARedOrUnknownLine drives classifyHealthLine on the
 // verdicts that are no settling state: a RED line alone, beside a queue state
 // and beside a late tick, and a stale UNKNOWN line.
-func TestClassifyHealthLineFailsARedLine(t *testing.T) {
+func TestClassifyHealthLineFailsARedOrUnknownLine(t *testing.T) {
 	t.Parallel()
 	assertHealthClass(t, []string{
 		"RED tick 1m ago: landing=stuck",
