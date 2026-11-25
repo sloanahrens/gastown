@@ -542,9 +542,9 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 				break
 			}
 			// A group larger than the room left in the bundle fills it and
-			// files the rest as bundles of their own, at most MaxAcceptance
-			// findings each (gt-ntkwh0); the room is the findings-per-bead cap
-			// less what the bundle carries (gt-fpfw9y).
+			// files the rest as bundles of their own, at most
+			// followupFindingsPerBead findings each (gt-ntkwh0); the room is the
+			// findings-per-bead cap less what the bundle carries (gt-fpfw9y).
 			take, rest := g, []FollowupCandidate(nil)
 			if room := followupFindingsPerBead - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
 				take = followupGroup{Key: g.Key, Package: g.Package, Pinned: g.Pinned, Findings: g.Findings[:room]}
@@ -589,14 +589,15 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 		if done {
 			continue
 		}
-		// What is left of the group is filed in bundles of at most MaxAcceptance
-		// findings each, the number of boxes one worker's landing carries, so a
-		// group of 13 files 6, 6 and 1 and no bundle is born over the cap. Each
-		// bundle counts against the bound and the budget; one that cannot be
-		// filed holds its findings and every later one's, which the feed's queue
-		// keeps for a later landing, and the appended part is never queued again.
-		for from := 0; from < len(remaining); from += specdispatch.MaxAcceptance {
-			chunk := remaining[from:min(from+specdispatch.MaxAcceptance, len(remaining))]
+		// What is left of the group is filed in bundles of at most
+		// followupFindingsPerBead findings each, the cap an open bundle fills
+		// to, so a group of seven files 3, 3 and 1 and no bundle is born over
+		// the cap. Each bundle counts against the bound and the budget; one
+		// that cannot be filed holds its findings and every later one's, which
+		// the feed's queue keeps for a later landing, and the appended part is
+		// never queued again.
+		for from := 0; from < len(remaining); from += followupFindingsPerBead {
+			chunk := remaining[from:min(from+followupFindingsPerBead, len(remaining))]
 			if stop == nil && open+len(ids) >= bound {
 				at := open + len(ids)
 				stop = func(held int) string { return l.holdBack(at, bound, held) }
