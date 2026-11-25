@@ -174,11 +174,15 @@ func TestFindSweepProgressRefuses(t *testing.T) {
 	unreadableRig := func(t *testing.T) string {
 		root := sweepRunsRootWith(t, t.TempDir(), "gastown", []sweepRunFixture{{"gastown-6193c7a7-integration-race", true, 5}})
 		rigDir := filepath.Join(root, "gastown")
+		info, err := os.Stat(rigDir)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Chmod(rigDir, 0); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			if err := os.Chmod(rigDir, 0o755); err != nil {
+			if err := os.Chmod(rigDir, info.Mode().Perm()); err != nil {
 				t.Error(err)
 			}
 		})
