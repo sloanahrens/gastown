@@ -523,6 +523,101 @@ func TestImagePinDurabilityRefusals(t *testing.T) {
 	}
 }
 
+// TestImagePinDurabilityManifestGoneIndex: a registry that answers 404 for the
+// pin's own index no longer serves the pin. That is Dead, not an error: the
+// index digest is named once with the role manifest, and no blob is asked for.
+func TestImagePinDurabilityManifestGoneIndex(t *testing.T) {
+	t.Parallel()
+	indexDigest := digestFor(0x01)
+	reg := &fakeRegistry{
+		refErr: map[string]error{indexDigest: fmt.Errorf("the 404: %w", ErrManifestGone)},
+	}
+
+	ref := "example.test/oci/docker@" + indexDigest
+	res, err := Check(context.Background(), reg, ref, []string{"linux/arm64"})
+	if err != nil {
+		t.Fatalf("Check(%s) = error %v, want no error: a manifest the registry no longer serves is Dead", ref, err)
+	}
+	want := []string{indexDigest + " (manifest)"}
+	if !slices.Equal(res.Dead, want) {
+		t.Errorf("Result.Dead = %v, want %v", res.Dead, want)
+	}
+	if got := reg.blobsAsked(); len(got) != 0 {
+		t.Errorf("BlobExists was asked for %v, want none: the index that names the blobs is gone", got)
+	}
+}
+
+// TestImagePinDurabilityManifestGoneChild: an index whose amd64 child the
+// registry no longer serves reports that child with its platform, and the
+// arm64 child, which is whole, is still checked and its dead layer reported.
+func TestImagePinDurabilityManifestGoneChild(t *testing.T) {
+	t.Parallel()
+	indexDigest := digestFor(0x01)
+	amdChild, armChild := digestFor(0x11), digestFor(0x21)
+	armConfig, armLayer := digestFor(0x22), digestFor(0x23)
+	reg := &fakeRegistry{
+		manifests: map[string]fakeManifest{
+			indexDigest: {body: indexBody(mediaTypeOCIIndex,
+				entry{digest: amdChild, platform: "linux/amd64"},
+				entry{digest: armChild, platform: "linux/arm64"},
+			), mediaType: mediaTypeOCIIndex},
+			armChild: {body: imageBody(mediaTypeOCIManifest, armConfig, armLayer), mediaType: mediaTypeOCIManifest},
+		},
+		refErr: map[string]error{amdChild: fmt.Errorf("the 404: %w", ErrManifestGone)},
+		blobs:  map[string]bool{armConfig: true},
+	}
+
+	ref := "example.test/oci/docker@" + indexDigest
+	res, err := Check(context.Background(), reg, ref, []string{"linux/amd64", "linux/arm64"})
+	if err != nil {
+		t.Fatalf("Check(%s) = error %v, want no error", ref, err)
+	}
+	want := []string{amdChild + " (linux/amd64 manifest)", armLayer + " (linux/arm64 layer 1)"}
+	if !slices.Equal(res.Dead, want) {
+		t.Errorf("Result.Dead = %v, want %v: the gone amd64 child, then the arm64 layer the check still reached", res.Dead, want)
+	}
+	wantAsked := []string{armConfig, armLayer}
+	if got := reg.blobsAsked(); !slices.Equal(got, wantAsked) {
+		t.Errorf("BlobExists was asked for %v, want the arm64 config and layer %v", got, wantAsked)
+	}
+}
+
+// TestImagePinDurabilityManifestGoneNotGone: a manifest read that fails with
+// anything other than ErrManifestGone is an error with an empty Result, never a
+// dead pin: an unreachable registry is not one that has dropped the manifest.
+func TestImagePinDurabilityManifestGoneNotGone(t *testing.T) {
+	t.Parallel()
+	indexDigest := digestFor(0x01)
+	child := digestFor(0x11)
+	plain := errors.New("connection reset by peer")
+	tests := []struct {
+		name string
+		ref  string
+	}{
+		{name: "index", ref: indexDigest},
+		{name: "child", ref: child},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := &fakeRegistry{
+				manifests: map[string]fakeManifest{
+					indexDigest: {body: indexBody(mediaTypeOCIIndex, entry{digest: child, platform: "linux/arm64"}), mediaType: mediaTypeOCIIndex},
+					child:       {body: imageBody(mediaTypeOCIManifest, digestFor(0x12)), mediaType: mediaTypeOCIManifest},
+				},
+				refErr: map[string]error{tc.ref: plain},
+			}
+
+			res, err := Check(context.Background(), reg, "example.test/oci/docker@"+indexDigest, []string{"linux/arm64"})
+			if !errors.Is(err, plain) {
+				t.Fatalf("Check = %+v, %v, want the registry error %v", res, err, plain)
+			}
+			if res.Ref != "" || len(res.Dead) != 0 {
+				t.Errorf("Check = %+v, want an empty Result: an unreadable manifest is not a dead digest", res)
+			}
+		})
+	}
+}
+
 // durabilityRegistry is a fake registry holding one linux/arm64 index whose
 // every blob is served, and the reference that names it.
 func durabilityRegistry() (*fakeRegistry, string) {
@@ -601,14 +696,19 @@ type fakeRegistry struct {
 	manifests   map[string]fakeManifest
 	blobs       map[string]bool
 	manifestErr error
-	blobErr     error
-	asked       []string
+	// refErr answers the manifest read at a ref with its error.
+	refErr  map[string]error
+	blobErr error
+	asked   []string
 }
 
 func (f *fakeRegistry) Manifest(_ context.Context, repo, ref string) ([]byte, string, error) {
 	f.asked = append(f.asked, "manifest "+repo+"@"+ref)
 	if f.manifestErr != nil {
 		return nil, "", f.manifestErr
+	}
+	if err := f.refErr[ref]; err != nil {
+		return nil, "", err
 	}
 	m, ok := f.manifests[ref]
 	if !ok {
