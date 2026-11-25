@@ -2730,6 +2730,46 @@ func TestTownClusterRenderRehearsalWritesNoRunningValuesFile(t *testing.T) {
 	}
 }
 
+// TestTownClusterRenderRunningValuesRehearsal holds a rehearsal to the seam: a
+// rehearsal render never calls writeTownValues, so a run that is not live
+// settles no running pair.
+func TestTownClusterRenderRunningValuesRehearsal(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.rehearsal = true
+	f.forgeHost = ""
+	f.confirmStopped = false
+	f.namespace = "gt-rehearsal"
+	d := clusterRenderTestDeps(t, io.Discard)
+	calls := 0
+	d.writeTownValues = func(string, imagevalues.Values) error {
+		calls++
+		return nil
+	}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a rehearsal called the writeTownValues seam %d times, want none", calls)
+	}
+}
+
+// TestTownClusterRenderRunningValuesWriteError holds a live render to returning
+// the seam's error: a failed write to the running values file is refused under
+// its own message, with the cause wrapped, never reported as a clean render.
+func TestTownClusterRenderRunningValuesWriteError(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	d := clusterRenderTestDeps(t, io.Discard)
+	cause := errors.New("the values file is read-only")
+	d.writeTownValues = func(string, imagevalues.Values) error { return cause }
+	err := runClusterRender(d, f)
+	requireErrorNames(t, err, "cannot write the running values file")
+	if !errors.Is(err, cause) {
+		t.Fatalf("the refusal %q does not wrap the seam's error %q", err, cause)
+	}
+}
+
 // TestTownClusterRenderPrintsThePodsTownCopyStep names the command that copies
 // the values file into the daemon pod's town copy: the pod's town root is
 // TownRootPath, so the copy lands at TownRootPath/gastown, and the line is
