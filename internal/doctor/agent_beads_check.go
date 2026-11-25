@@ -278,7 +278,16 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		// beads). Legacy 1.1.0-era identity beads are type=task with no
 		// gt:agent label, so they land here: repair them in place instead of
 		// falling through to a duplicate-ID create (gt-8po).
-		if issue, err := bd.Show(id); err == nil && issue != nil {
+		//
+		// Only not-found proves the bead is absent: any other show error (an
+		// unavailable or stalled store) is returned rather than read as
+		// missing, which would create a duplicate of a bead that may exist
+		// (gt-xhoxrk).
+		issue, err := bd.Show(id)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("reading agent bead %s: %w", id, err)
+		}
+		if err == nil && issue != nil {
 			// Bead exists but is closed — REOPEN it instead of recreating
 			if issue.Status == "closed" {
 				openStatus := "open"

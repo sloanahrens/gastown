@@ -1,9 +1,11 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -375,6 +377,124 @@ func TestAgentBeadsExistCheck_FixLabelsLegacyOpenBeadInsteadOfCreating(t *testin
 		if !strings.Contains(log, want) {
 			t.Errorf("expected Fix() to add gt:agent label to legacy bead %s in the rig database, got log: %q", id, log)
 		}
+	}
+}
+
+// TestAgentBeadsFixShowError verifies that Fix creates an agent bead only
+// when the store says it is missing. A show that fails for any reason other
+// than not-found (an unavailable or stalled store) is returned naming the
+// bead, and nothing is created: a failed read is not evidence the bead is
+// absent (gt-xhoxrk).
+func TestAgentBeadsFixShowError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unavailable show is returned and creates nothing", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := setupTownDuplicateFixture(t)
+		bd := townDuplicateBD(tmpDir)
+		rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+		storeErr := errors.New("store unavailable")
+		bd.db(rigDir).FailWith("show", storeErr)
+
+		check := NewAgentBeadsCheck()
+		err := check.Fix(bd.ctx(tmpDir, "gastown"))
+
+		if !errors.Is(err, storeErr) {
+			t.Fatalf("Fix() error = %v, want the store error %v", err, storeErr)
+		}
+		if !strings.Contains(err.Error(), "reading agent bead gs-gastown-crew-alice") {
+			t.Errorf("Fix() error = %q, want it to name the bead it could not read", err)
+		}
+		if creates := bd.creates(); len(creates) != 0 {
+			t.Errorf("Fix() created %v after a failed read, want no creates", creates)
+		}
+	})
+
+	t.Run("not-found show still creates", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := setupTownDuplicateFixture(t)
+		bd := townDuplicateBD(tmpDir)
+		rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+
+		check := NewAgentBeadsCheck()
+		if err := check.Fix(bd.ctx(tmpDir, "gastown")); err != nil {
+			t.Fatalf("Fix() returned error: %v", err)
+		}
+
+		want := "create gs-gastown-crew-alice dir=" + rigDir
+		if log := writeLog(bd); !strings.Contains(log, want) {
+			t.Errorf("Fix() did not create the missing bead: want %q in log %q", want, log)
+		}
+	})
+}
+
+// bdExit is the exit status of a bd call, as *exec.ExitError carries it.
+type bdExit int
+
+func (e bdExit) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e bdExit) ExitCode() int { return int(e) }
+
+// realShowAgentBeads answers Show through a real beads.Beads whose bd runner
+// replies as the bd binary does, so the doctor's not-found test reads the
+// error beads.Show produces, not one a fake builds by hand.
+type realShowAgentBeads struct {
+	doctorBeads
+	real *beads.Beads
+}
+
+func (r realShowAgentBeads) Show(id string) (*beads.Issue, error) { return r.real.Show(id) }
+
+// bdMissingIDAnswer is what `BD_MACHINE=1 bd show <unknown id> --json` prints
+// (exit 20).
+const bdMissingIDAnswer = `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"not_found","message":"1 of 1 ids failed","ids":[{"id":"gs-gastown-crew-alice","kind":"not_found","message":"no issue found matching \"gs-gastown-crew-alice\""}]}}`
+
+// TestAgentBeadsFixRealShowAnswers drives Fix through beads.Show's own error
+// mapping with bd's real answers: a missing id still creates the bead, and a
+// store-unavailable exit creates nothing and names the bead (gt-xhoxrk).
+func TestAgentBeadsFixRealShowAnswers(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name       string
+		stdout     string
+		exit       int
+		wantCreate bool
+	}{
+		{"bd's answer for a missing id (exit 20 and the not_found envelope)", bdMissingIDAnswer, 20, true},
+		{"bd's store-unavailable exit (25)", "", 25, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := setupTownDuplicateFixture(t)
+			bd := townDuplicateBD(tmpDir)
+			ctx := bd.ctx(tmpDir, "gastown")
+			open := ctx.openBeads
+			ctx.openBeads = func(site beadsSite) doctorBeads {
+				real := beads.New(site.workDir, beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
+					if len(args) == 0 || args[0] != "show" {
+						return nil, nil, errors.New("unexpected bd call " + strings.Join(args, " "))
+					}
+					return []byte(row.stdout), nil, bdExit(row.exit)
+				}))
+				return realShowAgentBeads{doctorBeads: open(site), real: real}
+			}
+
+			err := NewAgentBeadsCheck().Fix(ctx)
+
+			creates := bd.creates()
+			if row.wantCreate {
+				if err != nil || len(creates) != 1 {
+					t.Fatalf("Fix() = %v with creates %v, want one create and no error", err, creates)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "reading agent bead gs-gastown-crew-alice") {
+				t.Fatalf("Fix() = %v, want an error naming the bead it could not read", err)
+			}
+			if len(creates) != 0 {
+				t.Errorf("Fix() created %v after an unavailable show, want none", creates)
+			}
+		})
 	}
 }
 
