@@ -531,7 +531,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 		done, remaining := false, p.Findings
 	lookup:
 		for candidates := existing; ; {
-			bundle, ok := FindOpenBundle(candidates, day, g.Package)
+			bundle, ok := FindOpenBundle(candidates, day, g.Key)
 			if !ok {
 				break
 			}
@@ -540,7 +540,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			// findings each (gt-ntkwh0).
 			take, rest := g, []FollowupCandidate(nil)
 			if room := specdispatch.MaxAcceptance - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
-				take = followupGroup{Package: g.Package, Pinned: g.Pinned, Findings: g.Findings[:room]}
+				take = followupGroup{Key: g.Key, Package: g.Package, Pinned: g.Pinned, Findings: g.Findings[:room]}
 				rest = g.Findings[room:]
 			}
 			add := bundleAddition(w, res, take)
@@ -605,7 +605,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 				held = append(held, remaining[from:]...)
 				break
 			}
-			spec := bundleSpec(w, res, day, followupGroup{Package: g.Package, Pinned: g.Pinned, Findings: chunk})
+			spec := bundleSpec(w, res, day, followupGroup{Key: g.Key, Package: g.Package, Pinned: g.Pinned, Findings: chunk})
 			id, err := l.Followups.CreateFollowup(spec)
 			if err != nil {
 				held = append(held, remaining[from:]...)
@@ -617,8 +617,9 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			// counts this bead in the week's filed total (gt-y5wvum).
 			filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
 			// A bundle filed here is one the later groups of this landing look
-			// up, so the next group of the same package appends to it rather
-			// than filing a second bead (gt-v7dolf).
+			// up. A landing has one group per cut key, so no later group carries
+			// this bundle's labels and the lookup never finds it; the line stays
+			// so a repeated key appends rather than files a second bead (gt-v7dolf).
 			existing = append(existing, filed[len(filed)-1])
 			lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(chunk)), res.Verdict.Score))
 		}

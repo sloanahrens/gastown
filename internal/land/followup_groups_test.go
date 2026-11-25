@@ -82,26 +82,3 @@ func TestFollowupGroupsCutBySourceFile(t *testing.T) {
 		})
 	}
 }
-
-// TestFollowupFeedAppendsASecondGroupOfOnePackageToItsBundle: two source files
-// of one package are two groups, both labelled by that package until the
-// labels follow the cut key (gt-841oj0). The second group must append to the
-// bundle the first one filed in this landing, not file a second bead with the
-// same package label (gt-zfwsgg, gt-v7dolf).
-func TestFollowupFeedAppendsASecondGroupOfOnePackageToItsBundle(t *testing.T) {
-	t.Parallel()
-	f := newFollowupFixture(t, 0.8, []Finding{
-		minorAt("internal/land/note.go", 1, "name the error"),
-		minorAt("internal/land/hook.go", 2, "swap the nil check"),
-	})
-	log := f.run()
-	if len(f.fake.created) != 1 {
-		t.Fatalf("filed %d beads for two source files of one package, want one:\n%s", len(f.fake.created), log)
-	}
-	if len(f.fake.appended) != 1 {
-		t.Fatalf("appended %d times, want the second group to append once:\n%s", len(f.fake.appended), log)
-	}
-	if got, want := f.fake.appended[0].ID, "gt-filed"; got != want {
-		t.Errorf("the second group appended to %q, want the bundle the first filed, %q", got, want)
-	}
-}

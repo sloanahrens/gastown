@@ -33,12 +33,12 @@ func TestFeedSkipsABundleThatRefuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFollowupFixture(t, 0.8, []Finding{minorAt("internal/land/note.go", 230, "swap the nil check")})
-			older := openBundleFor(followupDay, "internal/land", "open")
+			older := openBundleFor(followupDay, "internal/land/note.go", "open")
 			older.ID, older.CreatedAt = "gt-older", followupDay.Add(-time.Hour)
 			if tc.malformed {
 				older.Description = strings.Replace(older.Description, "- [ ]", "-", -1)
 			}
-			newer := openBundleFor(followupDay, "internal/land", "open")
+			newer := openBundleFor(followupDay, "internal/land/note.go", "open")
 			newer.ID = "gt-newer"
 			f.fake.existing = []ExistingFollowup{older, newer}
 			f.fake.appendErrs = map[string]error{"gt-older": refuse}

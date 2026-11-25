@@ -18,8 +18,26 @@ func bundleLanding(id, commit string, score float64) (Work, Result) {
 	return Work{BeadID: id, Rig: "gastown"}, Result{LandedCommit: commit, Verdict: Verdict{Verdict: VerdictApprove, Score: score}}
 }
 
+// bundleGroupAt is a group whose key and package are both pkg: these body tests
+// check the body and its title for a package, not how findings are cut, so the
+// key the bundle's labels are read from is the same string.
 func bundleGroupAt(pkg string, findings ...Finding) followupGroup {
-	return followupGroup{Package: pkg, Findings: followupCandidates(findings)}
+	return followupGroup{Key: pkg, Package: pkg, Findings: followupCandidates(findings)}
+}
+
+// TestBundleSpecLabelsByItsCutKey: a bundle's labels name its group's cut key, not
+// its package, so two source files of one package never share a bundle
+// (gt-841oj0).
+func TestBundleSpecLabelsByItsCutKey(t *testing.T) {
+	t.Parallel()
+	day := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	w, res := bundleLanding("gt-abc", bundleFirst, 0.8)
+	g := followupGroup{Key: "internal/land/note.go", Package: "internal/land",
+		Findings: followupCandidates([]Finding{minorAt("internal/land/note.go", 230, "swap the nil check")})}
+	labels := bundleSpec(w, res, day, g).Labels
+	if want := BundleLabels(day, "internal/land/note.go"); !slices.Equal(labels[len(labels)-2:], want) {
+		t.Errorf("bundle labels = %v, want the cut key's %v", labels, want)
+	}
 }
 
 // TestBundleSpec: the open-bundle spec, its shaped body, boxes and labels.

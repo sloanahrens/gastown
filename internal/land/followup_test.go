@@ -181,7 +181,7 @@ func TestFollowupFeedBeadShape(t *testing.T) {
 	want := []string{FollowUpLabel,
 		Fingerprint("internal/land/note.go", "swap the nil check"),
 		Fingerprint("internal/land/note.go", "name the error")}
-	want = append(want, BundleLabels(followupDay, "internal/land")...)
+	want = append(want, BundleLabels(followupDay, "internal/land/note.go")...)
 	if !slices.Equal(spec.Labels, want) {
 		t.Errorf("labels = %v, want %v", spec.Labels, want)
 	}
@@ -321,7 +321,7 @@ func TestFollowupFeedStampsCreatedAt(t *testing.T) {
 // TestFollowupFeedSplitsAFullLandingByPackage: a landing carrying findings in
 // more than one package files one bead per package, each shaped for the
 // package's own findings, because that is the work one worker takes (gt-4ty22).
-func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
+func TestFollowupFeedSplitsAFullLandingByCutKey(t *testing.T) {
 	t.Parallel()
 	findings := []Finding{
 		minorAt("internal/land/note.go", 1, "a"),
@@ -338,14 +338,15 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 	if len(f.fake.created) != 3 {
 		t.Fatalf("filed %d beads, want one per package:\n%s", len(f.fake.created), log)
 	}
-	// Packages are filed in sorted order, so the beads are stable run to run.
+	// Cut keys are filed in sorted order, so the beads are stable run to run. The
+	// test file note_test.go is keyed to note.go, so the third bead has both.
 	for i, tc := range []struct {
-		pkg      string
+		key, pkg string
 		findings []Finding
 	}{
-		{"docs", findings[5:]},
-		{"internal/daemon", findings[3:5]},
-		{"internal/land", findings[:3]},
+		{"docs/reference.md", "docs", findings[5:]},
+		{"internal/daemon/landing_worker.go", "internal/daemon", findings[3:5]},
+		{"internal/land/note.go", "internal/land", findings[:3]},
 	} {
 		spec := f.fake.created[i]
 		wantTitle := fmt.Sprintf("Follow-ups in %s for 2026-11-21", tc.pkg)
@@ -356,7 +357,7 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 		for _, fd := range tc.findings {
 			wantLabels = append(wantLabels, Fingerprint(fd.Path, fd.Title))
 		}
-		wantLabels = append(wantLabels, BundleLabels(followupDay, tc.pkg)...)
+		wantLabels = append(wantLabels, BundleLabels(followupDay, tc.key)...)
 		if !slices.Equal(spec.Labels, wantLabels) {
 			t.Errorf("bead %d labels = %v, want %v", i, spec.Labels, wantLabels)
 		}
@@ -375,19 +376,67 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 	}
 }
 
-// TestFollowupFeedFilesOneBeadForTwoFilesOfOnePackage: two files of one package
-// in one landing file one bead. A bundle filed earlier in the landing is one the
-// later lookups see, so the second file's group appends to it rather than filing
-// a second bead (gt-v7dolf).
-func TestFollowupFeedFilesOneBeadForTwoFilesOfOnePackage(t *testing.T) {
+// TestFollowupFeedFilesOneBeadPerSourceFile: a bundle is one source file's work,
+// so two files of one package are two beads, and a landing's finding appends to
+// the open bundle of its own file only (gt-5ddr8t, gt-841oj0).
+func TestFollowupFeedFilesOneBeadPerSourceFile(t *testing.T) {
 	t.Parallel()
-	f := newFollowupFixture(t, 0.8, []Finding{
-		minorAt("internal/land/note.go", 1, "name the error"),
-		minorAt("internal/land/hook.go", 2, "swap the nil check"),
-	})
+	for _, tc := range []struct {
+		name         string
+		existing     []ExistingFollowup
+		findings     []Finding
+		wantCreated  int
+		wantAppended []string
+	}{
+		{"two files of one package file two beads", nil,
+			[]Finding{minorAt("internal/land/note.go", 1, "name the error"), minorAt("internal/land/hook.go", 2, "swap the nil check")},
+			2, nil},
+		{"a finding in a second file files its own bead beside the first file's open bundle",
+			[]ExistingFollowup{openBundleFor(followupDay, "internal/land/note.go", "open")},
+			[]Finding{minorAt("internal/land/hook.go", 2, "swap the nil check")},
+			1, nil},
+		{"a second landing the same day appends a finding in the first file to that file's bead",
+			[]ExistingFollowup{openBundleFor(followupDay, "internal/land/note.go", "open")},
+			[]Finding{minorAt("internal/land/note.go", 1, "name the error")},
+			0, []string{"gt-bundle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFollowupFixture(t, 0.8, tc.findings)
+			f.fake.existing = tc.existing
+			log := f.run()
+			if len(f.fake.created) != tc.wantCreated {
+				t.Errorf("filed %d beads, want %d:\n%s", len(f.fake.created), tc.wantCreated, log)
+			}
+			var appended []string
+			for _, a := range f.fake.appended {
+				appended = append(appended, a.ID)
+			}
+			if !slices.Equal(appended, tc.wantAppended) {
+				t.Errorf("appended to %v, want %v:\n%s", appended, tc.wantAppended, log)
+			}
+		})
+	}
+}
+
+// TestFollowupFeedFilesLabelsEachBeadByItsSourceFile: the two beads of two files
+// of one package each carry their own file's bundle labels, so a later landing
+// finds the bead of its file and no other (gt-5ddr8t).
+func TestFollowupFeedFilesLabelsEachBeadByItsSourceFile(t *testing.T) {
+	t.Parallel()
+	hook := minorAt("internal/land/hook.go", 2, "swap the nil check")
+	note := minorAt("internal/land/note.go", 1, "name the error")
+	f := newFollowupFixture(t, 0.8, []Finding{note, hook})
 	log := f.run()
-	if len(f.fake.created) != 1 {
-		t.Fatalf("filed %d beads for two files of one package, want one:\n%s", len(f.fake.created), log)
+	if len(f.fake.created) != 2 {
+		t.Fatalf("filed %d beads, want two:\n%s", len(f.fake.created), log)
+	}
+	// Files are filed in sorted key order: hook.go, then note.go.
+	for i, fd := range []Finding{hook, note} {
+		want := append([]string{FollowUpLabel, Fingerprint(fd.Path, fd.Title)}, BundleLabels(followupDay, fd.Path)...)
+		if got := f.fake.created[i].Labels; !slices.Equal(got, want) {
+			t.Errorf("bead %d labels = %v, want %v", i, got, want)
+		}
 	}
 }
 
@@ -673,7 +722,7 @@ func TestFollowupFeedKeepsFilingTheFreshFindingsOfARepeatLanding(t *testing.T) {
 	if len(f.fake.created) != 1 {
 		t.Fatalf("filed %d beads, want one for the fresh finding", len(f.fake.created))
 	}
-	want := append([]string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}, BundleLabels(followupDay, "internal/land")...)
+	want := append([]string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}, BundleLabels(followupDay, "internal/land/note.go")...)
 	if got := f.fake.created[0].Labels; !slices.Equal(got, want) {
 		t.Errorf("labels = %v, want only the filed finding's fingerprint", got)
 	}
