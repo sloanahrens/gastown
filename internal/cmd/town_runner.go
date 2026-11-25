@@ -400,23 +400,40 @@ type runnerRollRunsSeam struct {
 func productionRunsSeam() runnerRollRunsSeam {
 	return runnerRollRunsSeam{
 		client: viewerRunLister,
-		repos:  func(townRoot string) ([]string, error) { return rollForgejoRepos(townRoot, rig.ResolveForgejoConfig) },
+		repos: func(townRoot string) ([]string, error) {
+			return rollForgejoRepos(townRoot, strictForgejoResolver(rig.OpenRepoFile))
+		},
+	}
+}
+
+// strictForgejoResolver is the roll's resolver of a rig's Forgejo config over open (the
+// repo-file seam): rig.ResolveForgejoConfigWithError, which returns the error of a
+// settings tier that exists but cannot be read instead of dropping it.
+func strictForgejoResolver(open rig.RepoFileOpener) func(townRoot, rigName string) (*config.ForgejoConfig, error) {
+	return func(townRoot, rigName string) (*config.ForgejoConfig, error) {
+		return rig.ResolveForgejoConfigWithError(open, townRoot, rigName)
 	}
 }
 
 // rollForgejoRepos is the repo list the roll waits on: one owner/repo per rig in the
 // registry. Unlike the dashboard's tolerant rigForgejoRepos it FAILS CLOSED: a
-// registry that cannot be read, or any rig whose Forgejo remote cannot be resolved or
-// parsed, is an error naming it, because a shorter list would let the wait succeed
-// while that rig's gate or post-land run is still running and the runner is replaced.
-func rollForgejoRepos(townRoot string, resolve func(townRoot, rigName string) *config.ForgejoConfig) ([]string, error) {
+// registry that cannot be read, a rig whose settings cannot be read (resolve is
+// the strict resolver, which reports a tier that exists but is unreadable, since
+// that tier might have named another remote), or a Forgejo remote that is missing
+// or does not parse, is an error naming it, because a shorter list would let the
+// wait succeed while that rig's gate or post-land run is still running and the
+// runner is replaced.
+func rollForgejoRepos(townRoot string, resolve func(townRoot, rigName string) (*config.ForgejoConfig, error)) ([]string, error) {
 	names, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, fmt.Errorf("the roll cannot list the rigs to wait on: %w", err)
 	}
 	var repos []string
 	for _, name := range names {
-		fc := resolve(townRoot, name)
+		fc, err := resolve(townRoot, name)
+		if err != nil {
+			return nil, fmt.Errorf("rig %s: its Forgejo settings cannot be read, so the roll cannot tell which runs to wait on: %w", name, err)
+		}
 		if fc == nil || fc.RemoteURL == "" {
 			return nil, fmt.Errorf("rig %s names no Forgejo remote, so the roll cannot tell which runs to wait on", name)
 		}
@@ -431,7 +448,17 @@ func rollForgejoRepos(townRoot string, resolve func(townRoot, rigName string) *c
 
 // viewerRunLister is the roll's read-only viewer client, so its credential cannot land.
 func viewerRunLister() (runnerroll.ForgejoRunLister, error) {
-	return forgejo.NewClient(config.ForgejoRoleViewer)
+	return viewerRunListerVia(forgejo.NewClient)
+}
+
+// viewerRunListerVia is viewerRunLister over newClient, the seam a test uses to read
+// the role the client is built for without reading a token file.
+func viewerRunListerVia(newClient func(role string, opts ...forgejo.Option) (*forgejo.Client, error)) (runnerroll.ForgejoRunLister, error) {
+	client, err := newClient(config.ForgejoRoleViewer)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // runnerRollRunsRead builds the roll's runs read over one seam. A town that
