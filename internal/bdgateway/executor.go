@@ -130,9 +130,9 @@ type Options struct {
 	// put a fake behind it.
 	runner processRunner
 	// after starts a timer: the channel fires once after d, and the func stops
-	// it. Unexported so only this package's tests can put a fake behind it; nil
-	// means a time.NewTimer wrapper.
-	after func(d time.Duration) (<-chan time.Time, func())
+	// it and returns time.Timer.Stop's result. Unexported so only this package's
+	// tests can put a fake behind it; nil means a time.NewTimer wrapper.
+	after func(d time.Duration) (<-chan time.Time, func() bool)
 }
 
 // Executor runs one allowed bd call inside the gateway's workspace tree. The
@@ -160,7 +160,7 @@ type Executor struct {
 	peakInFlight atomic.Uint64
 	windowPeak   atomic.Uint64
 	runner       processRunner
-	after        func(d time.Duration) (<-chan time.Time, func())
+	after        func(d time.Duration) (<-chan time.Time, func() bool)
 }
 
 // New builds an executor. A field bd cannot run without is refused by name
@@ -239,11 +239,11 @@ func New(opts Options) (*Executor, error) {
 	}, nil
 }
 
-// newTimer is the default timer seam: a timer that fires once after d, and the
-// func that stops it.
-func newTimer(d time.Duration) (<-chan time.Time, func()) {
+// newTimer is the default timer seam: a timer that fires once after d, and its
+// Stop, which reports whether it stopped a live timer.
+func newTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	t := time.NewTimer(d)
-	return t.C, func() { t.Stop() }
+	return t.C, t.Stop
 }
 
 // CapSnapshot is the executor's concurrency-cap counters, which GET /v1/stats

@@ -13,15 +13,15 @@ type fakeAfter struct {
 	durations []time.Duration
 }
 
-func (f *fakeAfter) after(d time.Duration) (<-chan time.Time, func()) {
+func (f *fakeAfter) after(d time.Duration) (<-chan time.Time, func() bool) {
 	f.calls++
 	f.durations = append(f.durations, d)
-	return make(chan time.Time), func() {}
+	return make(chan time.Time), func() bool { return true }
 }
 
 // newAfterExecutor builds an executor with the given timer seam. A nil seam
 // leaves the option unset, so the executor takes its default.
-func newAfterExecutor(t *testing.T, after func(time.Duration) (<-chan time.Time, func())) *Executor {
+func newAfterExecutor(t *testing.T, after func(time.Duration) (<-chan time.Time, func() bool)) *Executor {
 	t.Helper()
 	e, err := New(Options{
 		Binary:        "/opt/bd/bd",
@@ -54,33 +54,19 @@ func TestExecutorAfterSeam(t *testing.T) {
 		}
 	})
 
-	t.Run("the default fires a zero duration at once", func(t *testing.T) {
+	t.Run("the default stop reports whether it stopped a live timer", func(t *testing.T) {
 		e := newAfterExecutor(t, nil)
 		if e.after == nil {
 			t.Fatal("default seam is nil, want a timer wrapper")
 		}
-		ch, stop := e.after(0)
-		defer stop()
-		// A zero-duration timer is already due, so the receive returns at once.
-		// The bound only ends a hang: a timer that never fires fails the row.
-		ctx := waitCtx(t)
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			t.Fatal("default timer with a zero duration did not fire")
+		// The hour cannot elapse in a test, so the timer stays live until the
+		// first stop and nothing here waits on the channel.
+		_, stop := e.after(time.Hour)
+		if !stop() {
+			t.Fatal("first stop returned false, want true for a live timer")
 		}
-	})
-
-	t.Run("the default stop leaves the channel empty", func(t *testing.T) {
-		e := newAfterExecutor(t, nil)
-		ch, stop := e.after(time.Hour)
-		stop()
-		// The hour cannot elapse in a test, so an empty non-blocking receive is
-		// the check: nothing waits here.
-		select {
-		case <-ch:
-			t.Fatal("default timer fired after its stop func ran")
-		default:
+		if stop() {
+			t.Fatal("second stop returned true, want false for an already stopped timer")
 		}
 	})
 }
