@@ -29,6 +29,7 @@ type controlValues struct {
 	RunnerStorage   string   `yaml:"runnerStorage"`
 	RunnerResources Share    `yaml:"runnerResources"`
 	DindResources   Share    `yaml:"dindResources"`
+	DindRequests    Share    `yaml:"dindRequests"`
 }
 
 // ControlValues returns the Values the control cluster's runner is built from:
@@ -65,6 +66,7 @@ func decodeControlValues(data []byte) (Values, error) {
 		RunnerStorage:   doc.RunnerStorage,
 		RunnerResources: doc.RunnerResources,
 		DindResources:   doc.DindResources,
+		DindRequests:    doc.DindRequests,
 	}
 	if err := v.validate(); err != nil {
 		return Values{}, fmt.Errorf("values.control.yaml: %w", err)

@@ -138,6 +138,57 @@ func TestControlValuesFileCarriesNoCredential(t *testing.T) {
 	}
 }
 
+// TestDindRequestsDecode drives the strict decoder over the optional engine
+// request share: a file naming dindRequests decodes it into Values.DindRequests,
+// an unknown key under it is refused rather than dropped, and a file without it
+// leaves the share empty so the validator takes the limit.
+func TestDindRequestsDecode(t *testing.T) {
+	t.Parallel()
+	const base = `namespace: forgejo
+labels:
+  - "gate:docker://gate:1"
+forgejoHostIP: "10.0.0.7"
+dindStorage: 40Gi
+runnerStorage: 1Gi
+runnerResources:
+  cpu: "1"
+  memory: 1Gi
+dindResources:
+  cpu: "8"
+  memory: 12Gi
+`
+	t.Run("decodes into Values.DindRequests", func(t *testing.T) {
+		t.Parallel()
+		v, err := decodeControlValues([]byte(base + "dindRequests:\n  cpu: \"4\"\n  memory: 8Gi\n"))
+		if err != nil {
+			t.Fatalf("decodeControlValues: %v", err)
+		}
+		if want := (Share{CPU: "4", Memory: "8Gi"}); v.DindRequests != want {
+			t.Errorf("Values.DindRequests = %+v, want %+v", v.DindRequests, want)
+		}
+	})
+	t.Run("an unknown key under it is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := decodeControlValues([]byte(base + "dindRequests:\n  gpu: \"1\"\n"))
+		if err == nil {
+			t.Fatal("decodeControlValues accepted an unknown key under dindRequests")
+		}
+		if !strings.Contains(err.Error(), "gpu") {
+			t.Errorf("error = %q, want it to name %q", err, "gpu")
+		}
+	})
+	t.Run("a file without it leaves the share empty", func(t *testing.T) {
+		t.Parallel()
+		v, err := decodeControlValues([]byte(base))
+		if err != nil {
+			t.Fatalf("decodeControlValues: %v", err)
+		}
+		if v.DindRequests != (Share{}) {
+			t.Errorf("Values.DindRequests = %+v, want the zero share", v.DindRequests)
+		}
+	})
+}
+
 // fieldNamed returns the field of t whose name matches key case-insensitively,
 // which is how a yaml key maps onto the value it sets.
 func fieldNamed(t reflect.Type, key string) (reflect.StructField, bool) {
