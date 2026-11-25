@@ -1023,6 +1023,19 @@ func (s *Scanner) Tick(rig string) Report {
 	return r
 }
 
+// TickSeat scans one seat of one rig through seat(), the rules Tick applies to
+// every seat, and reports that seat alone: Checked is 1 and the findings hold
+// the seat's own finding, if it has one. It runs none of Tick's rig-wide passes,
+// so a caller that names one seat gets that seat's answer and nothing about the
+// rest of the rig.
+func (s *Scanner) TickSeat(rig, name string) Report {
+	r := Report{Rig: rig, Checked: 1}
+	if f, ok := s.seat(rig, name); ok {
+		r.Findings = append(r.Findings, f)
+	}
+	return r
+}
+
 // seat decides one polecat. It reports a finding only when there is something
 // to say beyond "alive" or "nothing to do".
 func (s *Scanner) seat(rig, name string) (Finding, bool) {
