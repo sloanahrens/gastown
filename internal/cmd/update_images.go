@@ -493,9 +493,8 @@ where it names instead.`,
 	return c
 }
 
-// runUpdateImages reads both images, holds their commits to sha, and records
-// the pair once it is known good. withBd also reads the bd gateway image at the
-// same tag and records it under the bd key.
+// runUpdateImages derives the pair for sha and records it once it is known
+// good. withBd also derives the bd gateway image's digest under the bd key.
 func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out string, withBd bool) error {
 	if !imagevalues.ValidCommit(sha) {
 		return fmt.Errorf("gt update images: --sha %q is not a full 40-character lowercase commit", sha)
@@ -503,28 +502,49 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	if cmd.Flags().Changed("out") && out == "" {
 		return errors.New("gt update images: --out names no values file")
 	}
-	if err := validateUpdateImagesSeams(seams); err != nil {
-		return err
-	}
-	townRoot, err := seams.FindTownRoot()
-	if err != nil {
-		return fmt.Errorf("gt update images: finding the town root: %w", err)
-	}
 	if !cmd.Flags().Changed("out") {
 		// The default is the file the readers look for: the shared path under
 		// the town's gastown directory, never the directory the command runs in.
+		if err := validateUpdateImagesSeams(seams); err != nil {
+			return err
+		}
+		townRoot, err := seams.FindTownRoot()
+		if err != nil {
+			return fmt.Errorf("gt update images: finding the town root: %w", err)
+		}
 		out = imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
+	}
+	next, err := deriveUpdateImagesPair(cmd.Context(), seams, sha, withBd)
+	if err != nil {
+		return err
+	}
+	return writeUpdateImagesValues(cmd, seams, out, next)
+}
+
+// deriveUpdateImagesPair reads the daemon and polecat images at sha's tag from
+// the town's registry, holds their commit labels to sha, and answers the pair
+// they name. withBd also reads the bd gateway image and answers its digest under
+// Bd. It writes nothing: the caller decides where the pair goes. The install
+// calls it too, so it refuses unwired seams itself. sha must be a full commit
+// (imagevalues.ValidCommit): its tag is sliced from it.
+func deriveUpdateImagesPair(ctx context.Context, seams updateImagesSeams, sha string, withBd bool) (imagevalues.Values, error) {
+	if err := validateUpdateImagesSeams(seams); err != nil {
+		return imagevalues.Values{}, err
+	}
+	townRoot, err := seams.FindTownRoot()
+	if err != nil {
+		return imagevalues.Values{}, fmt.Errorf("gt update images: finding the town root: %w", err)
 	}
 	registry, err := seams.Registry(townRoot)
 	if err != nil {
-		return fmt.Errorf("gt update images: %w", err)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: %w", err)
 	}
 	if err := registry.Validate(); err != nil {
-		return fmt.Errorf("gt update images: %w", err)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: %w", err)
 	}
 	user, token, err := seams.Credentials()
 	if err != nil {
-		return fmt.Errorf("gt update images: reading the viewer credential: %w", err)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: reading the viewer credential: %w", err)
 	}
 	reader := registryReader{
 		base:          registry.BaseURL(),
@@ -535,20 +555,20 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 		token:         token,
 	}
 	tag := sha[:updateImagesTagLength]
-	daemon, err := reader.image(cmd.Context(), "daemon", imagevalues.DaemonImage, tag)
+	daemon, err := reader.image(ctx, "daemon", imagevalues.DaemonImage, tag)
 	if err != nil {
-		return fmt.Errorf("gt update images: %w", err)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: %w", err)
 	}
-	polecat, err := reader.image(cmd.Context(), "polecat", imagevalues.PolecatImage, tag)
+	polecat, err := reader.image(ctx, "polecat", imagevalues.PolecatImage, tag)
 	if err != nil {
-		return fmt.Errorf("gt update images: %w", err)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: %w", err)
 	}
 	if daemon.Commit != polecat.Commit {
-		return fmt.Errorf("gt update images: the daemon image %s carries commit %q, the polecat image %s carries commit %q; they must be one commit",
+		return imagevalues.Values{}, fmt.Errorf("gt update images: the daemon image %s carries commit %q, the polecat image %s carries commit %q; they must be one commit",
 			daemon.Repo, daemon.Commit, polecat.Repo, polecat.Commit)
 	}
 	if daemon.Commit != sha {
-		return fmt.Errorf("gt update images: the daemon image %s carries commit %q, not the requested %s", daemon.Repo, daemon.Commit, sha)
+		return imagevalues.Values{}, fmt.Errorf("gt update images: the daemon image %s carries commit %q, not the requested %s", daemon.Repo, daemon.Commit, sha)
 	}
 	next := imagevalues.Values{
 		Daemon:  registry.Ref(imagevalues.DaemonImage, daemon.Digest),
@@ -556,16 +576,16 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 		Commit:  sha,
 	}
 	if withBd {
-		bd, err := reader.image(cmd.Context(), "bd", imagevalues.BdImage, tag)
+		bd, err := reader.image(ctx, "bd", imagevalues.BdImage, tag)
 		if err != nil {
-			return fmt.Errorf("gt update images: %w", err)
+			return imagevalues.Values{}, fmt.Errorf("gt update images: %w", err)
 		}
 		if bd.Commit != sha {
-			return fmt.Errorf("gt update images: the bd image %s carries commit %q, not the requested %s; the bd image was not built for this commit", bd.Repo, bd.Commit, sha)
+			return imagevalues.Values{}, fmt.Errorf("gt update images: the bd image %s carries commit %q, not the requested %s; the bd image was not built for this commit", bd.Repo, bd.Commit, sha)
 		}
 		next.Bd = registry.Ref(imagevalues.BdImage, bd.Digest)
 	}
-	return writeUpdateImagesValues(cmd, seams, out, next)
+	return next, nil
 }
 
 // plaintextHostOf is the one non-loopback host the viewer credential may reach
