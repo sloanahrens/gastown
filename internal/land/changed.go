@@ -621,11 +621,13 @@ var treeWideGuards = []treeWideGuard{
 		// TestRepoHostTools and TestRepoDarwinFiles walk every non-test Go file
 		// in the module and read the host-tools allowlist, so a non-test Go
 		// file's change or deletion, and a change to the allowlist, are their
-		// inputs. A deleted allowlist fails its read (gt-b2n8r3).
+		// inputs. A deleted allowlist fails its read (gt-b2n8r3). repoRoot
+		// stats go.mod to find the root, so a deleted go.mod makes them fail
+		// or scan a parent's tree (gt-6z1ytg).
 		pkg:   "internal/hosttools",
 		tests: []string{"TestRepoHostTools", "TestRepoDarwinFiles"},
 		judges: func(rel string) bool {
-			return nonTestGo(rel) || rel == "internal/hosttools/testdata/host-tools-allow.txt"
+			return nonTestGo(rel) || rel == "go.mod" || rel == "internal/hosttools/testdata/host-tools-allow.txt"
 		},
 		removal: true,
 	},

@@ -1088,11 +1088,12 @@ func TestGuardSelectsRing(t *testing.T) {
 	}
 }
 
-// TestGuardSelectsHostTools: TestRepoHostTools and TestRepoDarwinFiles walk every
+// TestGuardSelectsHosttools: TestRepoHostTools and TestRepoDarwinFiles walk every
 // non-test Go file in the module and read the host-tools allowlist, so a change
 // or deletion of a non-test Go file, and a change to the allowlist, select both.
-// A test file and a doc select neither (gt-b2n8r3).
-func TestGuardSelectsHostTools(t *testing.T) {
+// A deleted go.mod selects both too, since repoRoot stats it. A test file and a
+// doc select neither (gt-b2n8r3, gt-6z1ytg).
+func TestGuardSelectsHosttools(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return true }
 	hostTools := []string{"TestRepoDarwinFiles", "TestRepoHostTools"}
@@ -1110,6 +1111,11 @@ func TestGuardSelectsHostTools(t *testing.T) {
 		{
 			"a deleted non-test Go file selects both guards",
 			"D\x00internal/dispatch/hold.go\x00",
+			hostTools,
+		},
+		{
+			"a deleted go.mod selects both guards, since repoRoot stats it",
+			"D\x00go.mod\x00",
 			hostTools,
 		},
 		{
