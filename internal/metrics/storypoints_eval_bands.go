@@ -19,9 +19,10 @@ const (
 	evalOverTwenty  = 20
 )
 
-// EvalBand is one estimate band of the evaluation: the rows whose blended
-// minutes fall in it, with the median of each minutes figure they carry and the
-// share of them that ran long. A median is nil when no row in the band carries
+// EvalBand is one group of the evaluation's bucket tables: the estimate bands,
+// or the declared-lines buckets (gt-fopbcr). It holds the rows in the group,
+// with the median of each minutes figure they carry and the share of them that
+// ran long. A median is nil when no row in the band carries
 // that figure, and each share is a fraction of Count, zero for an empty band.
 type EvalBand struct {
 	Label            string

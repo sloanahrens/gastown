@@ -77,21 +77,72 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 	if err := writeEvalSplits(c.Out, "by review rounds (the test part)", report.ByRounds); err != nil {
 		return err
 	}
-	return writeEvalSplits(c.Out, "by seat class (the test part)", report.BySeat)
+	if err := writeEvalSplits(c.Out, "by seat class (the test part)", report.BySeat); err != nil {
+		return err
+	}
+	// The declared-lines table comes last, so the sections before it print as
+	// they did before it existed.
+	return writeEvalDeclared(c.Out, report.Declared)
 }
 
 // evalReport is one evaluation's counts and tables, decided once so the text
-// tables and the --json object print the same figures. Base, Bands, Capped,
-// ByRounds and BySeat are nil when the test part is under storyPointsEvalMinTest
-// rows: a part too small to read carries no figures in either form.
+// tables and the --json object print the same figures. Base, Bands, Declared,
+// Capped, ByRounds and BySeat are nil when the test part is under
+// storyPointsEvalMinTest rows: a part too small to read carries no figures in
+// either form.
 type evalReport struct {
 	Counts   EvalCounts
 	TestRows int
 	Base     []PredictorStats
 	Bands    []EvalBand
+	Declared []EvalBand
 	Capped   []PredictorStats
 	ByRounds []EvalSplit
 	BySeat   []EvalSplit
+}
+
+// evalDeclaredHeading opens the declared-lines section the text prints after the
+// bands (gt-fopbcr).
+const evalDeclaredHeading = "the declared Change lines (the test part)"
+
+// evalDeclaredLabels names the buckets evalDeclaredBuckets returns, in order:
+// the first three end at 50, 100 and 200 added lines, then over 200, then the
+// rows whose estimate declared no Change line.
+var evalDeclaredLabels = []string{"up to 50", "51 to 100", "101 to 200", "over 200", "none declared"}
+
+// evalDeclaredBuckets groups rows by the added lines their estimate declared,
+// one EvalBand per label in evalDeclaredLabels order, so an empty input still
+// returns every bucket. A bucket's edge belongs to the bucket ending there: 50
+// is up to 50, 51 is 51 to 100. A row that declared no lines (zero, as the
+// estimate log omits the field) is in none declared.
+func evalDeclaredBuckets(rows []EvalRow) []EvalBand {
+	groups := make([][]EvalRow, len(evalDeclaredLabels))
+	for _, row := range rows {
+		i := evalDeclaredIndex(row.DeclaredLines)
+		groups[i] = append(groups[i], row)
+	}
+	buckets := make([]EvalBand, len(groups))
+	for i, group := range groups {
+		buckets[i] = evalBandOf(evalDeclaredLabels[i], group)
+	}
+	return buckets
+}
+
+// evalDeclaredIndex is the bucket of a declared line count, as an index into
+// evalDeclaredLabels.
+func evalDeclaredIndex(lines float64) int {
+	switch {
+	case lines <= 0:
+		return 4
+	case lines <= 50:
+		return 0
+	case lines <= 100:
+		return 1
+	case lines <= 200:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // newEvalReport splits rows at since and scores every table the command prints
@@ -104,6 +155,7 @@ func newEvalReport(rows []EvalRow, counts EvalCounts, since time.Time) evalRepor
 	}
 	report.Base = evalStats(train, test)
 	report.Bands = evalBands(test)
+	report.Declared = evalDeclaredBuckets(test)
 	report.Capped = evalStats(capEvalRows(train), capEvalRows(test))
 	report.ByRounds = evalRoundSplits(train, test)
 	report.BySeat = evalSeatSplits(train, test)
@@ -179,11 +231,26 @@ func writeEvalCapped(w io.Writer, stats []PredictorStats) error {
 // section is built in a strings.Builder and written once, so a refused write is
 // the run's error and a section half printed does not read as a whole.
 func writeEvalBands(w io.Writer, bands []EvalBand) error {
+	return writeEvalBucketTable(w, "the estimate bands (the test part)", "band", bands)
+}
+
+// writeEvalDeclared writes the declared-lines table of the test part (gt-fopbcr):
+// the same columns as the bands, one row per declared-lines bucket in
+// evalDeclaredLabels order.
+func writeEvalDeclared(w io.Writer, buckets []EvalBand) error {
+	return writeEvalBucketTable(w, evalDeclaredHeading, "declared lines", buckets)
+}
+
+// writeEvalBucketTable writes one section of buckets under title, its first
+// column headed first. The section is built in a strings.Builder and written
+// once, so a refused write is the run's error and a section half printed does
+// not read as a whole.
+func writeEvalBucketTable(w io.Writer, title, first string, buckets []EvalBand) error {
 	var b strings.Builder
-	b.WriteString("\nthe estimate bands (the test part)\n")
+	fmt.Fprintf(&b, "\n%s\n", title)
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "band\tn\tmedian actual (min)\tmedian shape (min)\tmedian embed (min)\tmedian jev (min)\tmedian blended (min)\tshare over 10.5\tshare over 20\n")
-	for _, band := range bands {
+	fmt.Fprintf(tw, "%s\tn\tmedian actual (min)\tmedian shape (min)\tmedian embed (min)\tmedian jev (min)\tmedian blended (min)\tshare over 10.5\tshare over 20\n", first)
+	for _, band := range buckets {
 		f := evalBandFiguresOf(band)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			band.Label, f.n,
@@ -457,6 +524,9 @@ type evalJSONReport struct {
 	BySeat   []evalJSONSplit `json:"by_seat_class"`
 	// Bands are the estimate bands of the test part, null in the same short part.
 	Bands []evalJSONBand `json:"bands"`
+	// ByDeclared is the declared-lines table of the test part (gt-fopbcr), its
+	// rows with the bands' fields, null in the same short part.
+	ByDeclared []evalJSONBand `json:"by_declared_lines"`
 }
 
 // evalJSONBand is one estimate band: its label as the text heads the row, its
@@ -559,6 +629,7 @@ func evalJSONOf(report evalReport) evalJSONReport {
 	doc.ByRounds = evalJSONSplits(report.ByRounds)
 	doc.BySeat = evalJSONSplits(report.BySeat)
 	doc.Bands = evalJSONBands(report.Bands)
+	doc.ByDeclared = evalJSONBands(report.Declared)
 	return doc
 }
 
