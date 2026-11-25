@@ -716,3 +716,143 @@ func TestVerdictReuseAheadStoreFails(t *testing.T) {
 		l.gitMu.Unlock()
 	}
 }
+
+// aheadCheckReads counts the two reads the post-merge skips make: the tree
+// comparison and the changed-paths read the .om.json check asks git for.
+// ReviewAhead makes neither elsewhere in this path, so a count says whether a
+// skip was reached.
+type aheadCheckReads struct {
+	trees, diffs int
+}
+
+// aheadCheckRepo is the fixture's repository with those two reads counted, and
+// optionally the tree comparison failed.
+type aheadCheckRepo struct {
+	Repo
+	rec       *aheadCheckReads
+	failTrees error
+}
+
+func (r *aheadCheckRepo) TreesIdentical(a, b string) (bool, error) {
+	r.rec.trees++
+	if r.failTrees != nil {
+		return false, r.failTrees
+	}
+	return r.Repo.TreesIdentical(a, b)
+}
+
+func (r *aheadCheckRepo) DiffNameOnly(base, head string) ([]string, error) {
+	r.rec.diffs++
+	return r.Repo.DiffNameOnly(base, head)
+}
+
+// TestVerdictReuseAheadSkipsAfterMerge: a clean merge the landing would refuse
+// as empty, or as an edit to the root .om.json, has nothing for om to judge, so
+// ReviewAhead skips it and stores no record. The read each row names is what
+// turns it red when its check is deleted: both rows otherwise fall through to
+// the same AheadSkipped.
+func TestVerdictReuseAheadSkipsAfterMerge(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name  string
+		setup func(f *landFixture)
+		// diffs is whether the .om.json check reads the merge's paths: false
+		// for the empty-tree row, which skips before reaching the check.
+		diffs bool
+	}{
+		{"merged tree equals base's", func(f *landFixture) {
+			// The branch's only change is already on the target, so the merge
+			// yields base's tree.
+			f.pushMain("b.txt", "work\n")
+		}, false},
+		{"branch edits .om.json", func(f *landFixture) {
+			f.branchEditing(omConfigFile, "{\"threshold\": 0.9}\n")
+		}, true},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			tc.setup(f)
+			aheadSeedBead(f, aheadReadyIssue(f.work))
+			l := f.lander()
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			rec := &aheadCheckReads{}
+			l.openRepo = func(dir string) Repo {
+				return &aheadCheckRepo{Repo: f.git.Open(dir), rec: rec}
+			}
+			before := aheadBeadWrites(t, f.bd)
+			got, err := l.ReviewAhead(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("ReviewAhead: unexpected error: %v", err)
+			}
+			if got != AheadSkipped {
+				t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+			}
+			if rec.trees == 0 {
+				t.Error("the review made no tree comparison, so it did not check for an empty merge")
+			}
+			if readDiffs := rec.diffs > 0; readDiffs != tc.diffs {
+				t.Errorf("ReviewAhead read the merge's paths %d time(s), want diffs=%t", rec.diffs, tc.diffs)
+			}
+			if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+				t.Errorf("a record was stored for a skipped review (stat err %v)", err)
+			}
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+			}
+			aheadNoReviewDir(t, f)
+			if !l.gitMu.TryLock() {
+				t.Errorf("gitMu is still held after ReviewAhead returned")
+			} else {
+				l.gitMu.Unlock()
+			}
+		})
+	}
+}
+
+// TestVerdictReuseAheadSkipsAfterMergeTreeReadFails: the empty-merge check is a
+// git read; a read that fails is returned as an error rather than skipping a
+// review at an unknown tree.
+func TestVerdictReuseAheadSkipsAfterMergeTreeReadFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	cmpErr := errors.New("fatal: bad object HEAD^{tree}")
+	rec := &aheadCheckReads{}
+	l.openRepo = func(dir string) Repo {
+		return &aheadCheckRepo{Repo: f.git.Open(dir), rec: rec, failTrees: cmpErr}
+	}
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the tree-comparison error", got)
+	}
+	if !errors.Is(err, cmpErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, cmpErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "compare trees" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "compare trees")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored for a review whose tree read failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
