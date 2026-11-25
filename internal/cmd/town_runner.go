@@ -21,6 +21,8 @@ import (
 	"github.com/spf13/cobra"
 
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -383,19 +385,58 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 	return runTownRunnerRoll(runnerRollDepsFor(townRoot, productionPodExec, cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
 }
 
+// runnerRollRunsSeam lets a test build the roll's runs read without the host:
+// client stands in for the viewer client, repos for the Mac copy of the rig
+// settings rigForgejoRepos reads. The command passes no seam, so production reads both.
+type runnerRollRunsSeam struct {
+	client func() (runnerroll.ForgejoRunLister, error)
+	repos  func(townRoot string) []string
+}
+
+// viewerRunLister is the roll's read-only viewer client, so its credential cannot land.
+func viewerRunLister() (runnerroll.ForgejoRunLister, error) {
+	return forgejo.NewClient(config.ForgejoRoleViewer)
+}
+
+// runnerRollRunsRead builds the roll's runs read over one seam. A town that
+// names no repos reads no token file for a read the roll cannot use.
+func runnerRollRunsRead(townRoot string, seam runnerRollRunsSeam) (func(context.Context) ([]runnerroll.WorkflowRun, error), error) {
+	repos := seam.repos(townRoot)
+	if len(repos) == 0 {
+		return nil, errors.New("the town names no Forgejo rig repos, so the roll has no run list to wait on")
+	}
+	client, clientErr := seam.client()
+	read, readErr := newRollRunsRead(client, repos)
+	return read, errors.Join(clientErr, readErr)
+}
+
 // runnerRollDepsFor is the production roll's deps. The applier is wired to the
 // control cluster's checked-in values, the renderer and kubectl. The hold store
 // is the daemon pod's, run through exec (the roll passes productionPodExec, and a
 // test passes a fake so the store this returns is the one it drives); a store that cannot be
 // built is carried in err, which the roll reports before it takes the hold. The
-// runs read is not wired here yet, so a real roll still refuses before the hold.
-func runnerRollDepsFor(townRoot string, exec podExec, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
+// landing read is the pod's townhealth.json, and the runs read lists the gate
+// and post-land runs of the rig repos through the viewer's client, so a real
+// roll waits for both rather than refusing for want of them. A test passes at
+// most one seam holding both builders; the command passes none.
+func runnerRollDepsFor(townRoot string, exec podExec, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool, seams ...runnerRollRunsSeam) runnerRollDeps {
+	seam := runnerRollRunsSeam{client: viewerRunLister, repos: rigForgejoRepos}
+	if len(seams) > 0 {
+		seam = seams[0]
+	}
 	store, storeErr := podHoldStore(townRoot, exec)
+	runs, runsErr := runnerRollRunsRead(townRoot, seam)
+	if runsErr != nil {
+		// A read that could not be built is not a read with no runs: the wait
+		// returns the reason, so the roll stops at step 3 and releases the hold.
+		runs = func(context.Context) ([]runnerroll.WorkflowRun, error) { return nil, runsErr }
+	}
 	return runnerRollDeps{
 		err:      storeErr,
 		store:    store,
 		holdPath: filepath.Join(townRoot, runnerroll.LandingHoldName),
 		landing:  podLandingRead(townRoot, newPodRunner(exec)),
+		runs:     runs,
 		clock:    wallRollClock{},
 		now:      time.Now,
 		signals:  liveRollSignals,

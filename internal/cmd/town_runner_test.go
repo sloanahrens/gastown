@@ -952,6 +952,82 @@ func TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold(t *testing.T) {
 	}
 }
 
+// TestRunnerRollDepsForWiresTheRunsRead: the production deps list the seam's
+// rig repo through its viewer client, so the roll waits on a real run list.
+func TestRunnerRollDepsForWiresTheRunsRead(t *testing.T) {
+	t.Parallel()
+	lister := &rollLister{}
+	var townRoot string
+	seam := runnerRollRunsSeam{
+		client: func() (runnerroll.ForgejoRunLister, error) { return lister, nil },
+		repos:  func(got string) []string { townRoot = got; return []string{"acme/widgets"} },
+	}
+
+	deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false, seam)
+
+	if deps.err != nil {
+		t.Fatalf("deps error = %v, want none", deps.err)
+	}
+	if deps.runs == nil {
+		t.Fatal("the production deps have no runs read")
+	}
+	runs, err := deps.runs(t.Context())
+	if err != nil {
+		t.Fatalf("runs read: %v", err)
+	}
+	if townRoot != "/town" {
+		t.Errorf("the repos were read for town root %q, want /town", townRoot)
+	}
+	live := strings.Join([]string{forgejo.RunStatusWaiting, forgejo.RunStatusBlocked, forgejo.RunStatusRunning}, ",")
+	if want := []string{"acme/widgets gate.yml " + live, "acme/widgets post-land.yml " + live}; !slices.Equal(lister.requests, want) {
+		t.Errorf("list requests = %q, want %q", lister.requests, want)
+	}
+	if len(runs) != 6 || runs[0].Repo != "acme/widgets" {
+		t.Errorf("runs read returned %d runs, first %+v; want 6 from acme/widgets", len(runs), runs)
+	}
+}
+
+// TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead: a client that cannot
+// be built, and a town that names no repos, each leave a read that returns the
+// reason, never a nil read or an empty listing; the no-repos case reads no token.
+func TestRunnerRollDepsForAFailedRunsBuildIsNotAnEmptyRead(t *testing.T) {
+	t.Parallel()
+	noToken := errors.New("no viewer token file")
+	cases := []struct {
+		name string
+		seam runnerRollRunsSeam
+		want string
+	}{
+		{name: "the client cannot be built", want: noToken.Error(), seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) { return nil, noToken },
+			repos:  func(string) []string { return []string{"acme/widgets"} },
+		}},
+		{name: "the town names no repos", want: "names no Forgejo rig repos", seam: runnerRollRunsSeam{
+			client: func() (runnerroll.ForgejoRunLister, error) {
+				t.Error("the viewer client was built for a town that names no repos")
+				return &rollLister{}, nil
+			},
+			repos: func(string) []string { return nil },
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := runnerRollDepsFor("/town", (&fakePodExec{}).exec, &bytes.Buffer{}, time.Minute, time.Minute, time.Minute, false, tc.seam)
+
+			if deps.runs == nil {
+				t.Fatal("a failed runs build left the deps with no read at all")
+			}
+			runs, err := deps.runs(t.Context())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("read error = %v, want it to name %q", err, tc.want)
+			}
+			if runs != nil {
+				t.Errorf("read returned %v, want no runs", runs)
+			}
+		})
+	}
+}
+
 // changeHoldDuringRuns makes the runs read write the store, as another process
 // would between the take and the release.
 func changeHoldDuringRuns(f *rollFixture, content string, present bool) {
