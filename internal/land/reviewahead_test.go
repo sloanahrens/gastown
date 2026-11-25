@@ -664,3 +664,55 @@ func TestVerdictReuseAheadMergeErrorReturned(t *testing.T) {
 		l.gitMu.Unlock()
 	}
 }
+
+// TestVerdictReuseAheadStoreFails: a conflict whose record the store cannot
+// write is returned as an error naming the store stage, never as AheadConflict:
+// a conflict nobody can read back must not read as one that was kept.
+func TestVerdictReuseAheadStoreFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	aheadSeedBead(f, aheadReadyIssue(f.work))
+	l := f.lander()
+	store := TownAheadStore(f.town, "gastown")
+	writeErr := errors.New("disk full")
+	writes := 0
+	store.writeFile = func(string, []byte, os.FileMode) error {
+		writes++
+		return writeErr
+	}
+	l.Ahead = store
+	aheadConflictMain(f)
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead: got outcome %q and no error, want the store error", got)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("ReviewAhead error = %v, want it to wrap %v", err, writeErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "store record" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "store record")
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty (not %q)", got, AheadConflict)
+	}
+	if writes != 1 {
+		t.Errorf("the store write ran %d times, want 1", writes)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record exists although the write failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
