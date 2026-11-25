@@ -441,11 +441,16 @@ func submitCrewForLanding(r *doneRun) error {
 	return markCrewSubmitted(r, issue, bd, target, head)
 }
 
-// markCrewSubmitted writes a crew submission's three records in order, the
-// submission comment, the READY TO LAND block and the label, then prints the
-// outcome. Every caller has already verified the branch is on origin at head
+// markCrewSubmitted claims the bead for the submitter, writes a crew
+// submission's three records in order, the submission comment, the READY TO
+// LAND block and the label, then prints the outcome. The claim comes first, so
+// the landing worker reads a bird as the owner and a rejection keeps the bead
+// with it. Every caller has already verified the branch is on origin at head
 // and gated it (or said why it did not).
 func markCrewSubmitted(r *doneRun, issue *beads.Issue, bd beads.Client, target, head string) error {
+	if err := claimForCrewSubmit(bd, issue, r.sender); err != nil {
+		return doneExit(doneExitReadyFailed, fmt.Sprintf("could not claim %s for %s", r.issueID, r.sender), err)
+	}
 	comment := fmt.Sprintf("Submitted for landing: %s @ %s onto %s", land.NoteField(r.branch), head, land.NoteField(target))
 	if err := bd.AddCommentAs(r.issueID, r.sender, comment); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("could not record the submission on %s", r.issueID), err)
