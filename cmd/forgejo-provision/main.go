@@ -88,7 +88,8 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --land-branch PATTERN  candidate branch pattern, which the run makes sure is
                          unprotected (default: %s)
   --workflow-list FILE   workflow-file hook list each repository is appended
-                         to, unless it already names it (default: %s)
+                         to, unless it already names it (default: %s); the
+                         word none skips the list
   --rotate               mint a new token even where a token file exists, and
                          revoke the token the file records (its TOKEN_NAME
                          line, else the token named by --token-name)
