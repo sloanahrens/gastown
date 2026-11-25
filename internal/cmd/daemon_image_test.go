@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -578,11 +582,80 @@ func TestDaemonImageGatewayFlagRules(t *testing.T) {
 	})
 }
 
+// imageTreeSizes maps every path under root, relative to root, to its size.
+func imageTreeSizes(root string) (map[string]int64, error) {
+	sizes := map[string]int64{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		sizes[rel] = info.Size()
+		return nil
+	})
+	return sizes, err
+}
+
+// imageTreeReporter is the part of *testing.T the shared-fixture check reports
+// through, so a row can drive the check with a recording reporter.
+type imageTreeReporter interface {
+	Errorf(format string, args ...any)
+}
+
+// checkImageTree lists root again and reports each path that differs from the
+// before listing, and a listing that fails. It covers root and everything under
+// it: the cases that keep their own t.TempDir are outside it by design.
+func checkImageTree(rep imageTreeReporter, root string, before map[string]int64) {
+	after, err := imageTreeSizes(root)
+	if err != nil {
+		rep.Errorf("list the fixture after the refusals: %v", err)
+		return
+	}
+	for _, change := range imageTreeChanges(root, before, after) {
+		rep.Errorf("a refusal wrote into the shared fixture: %s", change)
+	}
+}
+
+// imageTreeChanges names, as absolute paths under root and in path order, each
+// path that was created, removed or resized between two listings of the tree.
+func imageTreeChanges(root string, before, after map[string]int64) []string {
+	var changes []string
+	for _, rel := range slices.Sorted(maps.Keys(after)) {
+		was, ok := before[rel]
+		switch {
+		case !ok:
+			changes = append(changes, fmt.Sprintf("created %s", filepath.Join(root, rel)))
+		case was != after[rel]:
+			changes = append(changes, fmt.Sprintf("resized %s from %d to %d bytes", filepath.Join(root, rel), was, after[rel]))
+		}
+	}
+	for _, rel := range slices.Sorted(maps.Keys(before)) {
+		if _, ok := after[rel]; !ok {
+			changes = append(changes, fmt.Sprintf("removed %s", filepath.Join(root, rel)))
+		}
+	}
+	return changes
+}
+
 // Every refusal comes before any step runs (the rig's deps fail the test if one
 // does), with --apply as well as without. Each row removes one thing; a test
-// fails if any one refusal is removed.
+// fails if any one refusal is removed. The rows share one fixture: a refusal
+// writes nothing, and the cleanup fails the test, naming each path, if one did.
 func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 	t.Parallel()
+	fx := newImageFixture(t)
+	before, err := imageTreeSizes(fx.root)
+	if err != nil {
+		t.Fatalf("list the fixture: %v", err)
+	}
+	t.Cleanup(func() { checkImageTree(t, fx.root, before) })
 	canon := func(t *testing.T) string {
 		t.Helper()
 		p := filepath.Join(t.TempDir(), "gastown", "mayor", "rig")
@@ -653,7 +726,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				r := newImageRig(t)
+				r := newImageRigOn(t, fx)
 				r.flags.apply = apply
 				tc.edit(t, &r.flags)
 				r.deps.builder = func(daemonimage.Builder) imageBuilder {
@@ -671,6 +744,34 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestImageTreeChangesNamesEachChange pins the cleanup's check: a listing that
+// matches reports nothing, and each created, resized or removed path is named.
+func TestImageTreeChangesNamesEachChange(t *testing.T) {
+	t.Parallel()
+	const root = "/fixture"
+	for _, tc := range []struct {
+		name          string
+		before, after map[string]int64
+		want          []string
+	}{
+		{"unchanged", map[string]int64{".": 4096, "out": 4096}, map[string]int64{".": 4096, "out": 4096}, nil},
+		{"created under out", map[string]int64{".": 4096, "out": 4096}, map[string]int64{".": 4096, "out": 4096, "out/gt": 0},
+			[]string{"created " + root + "/out/gt"}},
+		{"resized", map[string]int64{"image-pins": 10}, map[string]int64{"image-pins": 12},
+			[]string{"resized " + root + "/image-pins from 10 to 12 bytes"}},
+		{"removed", map[string]int64{"gt": 4096, "gt/Dockerfile": 3}, map[string]int64{"gt": 4096},
+			[]string{"removed " + root + "/gt/Dockerfile"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := imageTreeChanges(root, tc.before, tc.after)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("changes = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1304,5 +1405,53 @@ func TestImageFetcher(t *testing.T) {
 	}
 	if _, err := imageFetcher(respond(http.StatusOK, ""))(context.Background(), "https://bad host/"); err == nil {
 		t.Error("a URL that cannot be a request was not an error")
+	}
+}
+
+// recordingReporter is an imageTreeReporter that keeps what it is told.
+type recordingReporter struct{ lines []string }
+
+func (r *recordingReporter) Errorf(format string, args ...any) {
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+// TestCheckImageTree drives the shared-fixture alarm itself: a file created
+// after the listing is reported by its path, an unchanged tree reports nothing,
+// and a root that cannot be listed reports the failure.
+func TestCheckImageTree(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		root  func(root string) string
+		want  string // a substring every report must hold; "" means no report
+	}{
+		{"a created file is named", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "stray"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, func(root string) string { return root }, "created " + "%s" + "/stray"},
+		{"an unchanged tree reports nothing", func(*testing.T, string) {}, func(root string) string { return root }, ""},
+		{"a root that does not exist reports the listing", func(*testing.T, string) {},
+			func(root string) string { return filepath.Join(root, "missing") }, "list the fixture after the refusals"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			before, err := imageTreeSizes(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, root)
+			var rep recordingReporter
+			checkImageTree(&rep, tc.root(root), before)
+			want := strings.ReplaceAll(tc.want, "%s", root)
+			switch {
+			case want == "" && len(rep.lines) != 0:
+				t.Fatalf("reported %q, want nothing", rep.lines)
+			case want != "" && !strings.Contains(strings.Join(rep.lines, "\n"), want):
+				t.Fatalf("reported %q, want a line holding %q", rep.lines, want)
+			}
+		})
 	}
 }
