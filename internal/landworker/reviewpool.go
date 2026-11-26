@@ -22,7 +22,7 @@ type AheadHints interface {
 
 // ReviewPool runs reviews ahead of landings, so the serial landing can reuse
 // a verdict instead of running om inline. Offer starts the reviews, up to Max
-// at once; Wait returns when none is running.
+// at once, where a Max below 1 counts as 1; Wait returns when none is running.
 //
 // Begin, End and Hints are stored here and not yet read: the begin and end
 // hooks and the hint check land with the beads that use them.
@@ -119,10 +119,14 @@ func (p *ReviewPool) Wait() {
 	}
 }
 
-// free returns how many more reviews may start: Max less the reviews running,
-// never below 0. The caller holds p.mu.
+// free returns how many more reviews may start: Max, or 1 when Max is below 1,
+// less the reviews running, and never below 0. The caller holds p.mu.
 func (p *ReviewPool) free() int {
-	n := p.Max - len(p.running)
+	max := p.Max
+	if max < 1 {
+		max = 1
+	}
+	n := max - len(p.running)
 	if n < 0 {
 		return 0
 	}
