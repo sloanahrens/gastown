@@ -3383,6 +3383,8 @@ var heartbeatSteps = []heartbeatStep{
 	// its unhandled window (gt-71714). Last, so it reads the escalations the
 	// steps above filed this tick.
 	{name: "unhandled-escalations", run: (*Daemon).pushUnhandledEscalations},
+	// Text or email the owed red hold (gt-e678p8); non-lifecycle, so the E-stop does not hold it.
+	{name: "red-hold-push", run: (*Daemon).pushRedHold},
 }
 
 // OwnerKindManual is the owner of a daemon nobody's service manager started,
