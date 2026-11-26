@@ -366,6 +366,16 @@ type Daemon struct {
 	// only.
 	lastAttention *attentionCache
 
+	// clusterDriftCache keeps the drift collector's last answer across
+	// attention ticks, which rebuild their sources each heartbeat, so the
+	// compare runs once per clusterDriftInterval (cluster_drift_cache.go,
+	// gt-menvlj).
+	clusterDriftCache clusterDriftCache
+	// clusterDriftCompare is the drift collector's compare, injected so it
+	// reads no cluster. nil until the bead that wires the real read: the cache
+	// keeps its unreadable answer like any other (gt-menvlj).
+	clusterDriftCompare func(ctx context.Context) (clusterDriftResult, error)
+
 	// seatUnreachable is the polecat-health pass's outage tracker, and the
 	// items the attention tick's collector reads from it
 	// (seat_unreachable_patrol.go, gt-q6hafz). The pass and the collector run

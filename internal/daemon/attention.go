@@ -405,9 +405,9 @@ type attentionSources struct {
 	// (PatrolsConfig.ClusterDriftEnabled). A nil func is a sources value that
 	// carries no setting, and the patrol's default is off (gt-b6j1k5).
 	clusterDriftEnabled func() bool
-	// clusterDriftAnswer is the drift compare's answer, injected so the
-	// collector reads no cluster. nil is the unreadable item, never a clear:
-	// the wiring bead supplies it (gt-b6j1k5).
+	// clusterDriftAnswer is the drift compare's answer through the 15 minute
+	// cache. A sources value that carries none raises the unreadable item
+	// rather than a clear (gt-b6j1k5, gt-menvlj).
 	clusterDriftAnswer func(ctx context.Context) (clusterDriftResult, error)
 
 	// questions is the overseer-question collectors' read of the town
@@ -1029,12 +1029,15 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		s.jobList = func(now time.Time) ([]JobReading, error) { return list(root, now) }
 	}
 	s.patrolOff = func(name string) bool { return d.patrolOffReason(name) != "" }
-	// The drift compare itself is wired by a later bead. Until then a setting
-	// turned on raises the unreadable item rather than a false clear
-	// (gt-b6j1k5).
+	// The drift compare runs through the 15 minute cache, so a heartbeat between
+	// runs reads the last answer, failure included, and the compare is called
+	// no sooner than the next run (gt-menvlj).
 	s.clusterDriftEnabled = func() bool {
 		cfg := d.patrol()
 		return cfg != nil && cfg.Patrols.ClusterDriftEnabled()
+	}
+	s.clusterDriftAnswer = func(ctx context.Context) (clusterDriftResult, error) {
+		return d.clusterDriftCache.Answer(ctx, now, d.clusterDriftRun())
 	}
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed

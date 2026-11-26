@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -132,15 +133,18 @@ func TestClusterDriftPatrolOff(t *testing.T) {
 }
 
 // TestClusterDriftPatrolIsWiredAndRegistered: the production sources carry the
-// setting, it answers PatrolsConfig.ClusterDriftEnabled for the patrol config
-// in force (off by default, on when the block asks), and the collector is one
-// of the queue's.
+// setting and the answer, the setting answers
+// PatrolsConfig.ClusterDriftEnabled for the patrol config in force (off by
+// default, on when the block asks), and the collector is one of the queue's.
 func TestClusterDriftPatrolIsWiredAndRegistered(t *testing.T) {
 	t.Parallel()
 	d, _, _ := patrolReloadTown(t)
 	s := d.attentionSources(time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC))
 	if s.clusterDriftEnabled == nil {
 		t.Fatal("the production sources carry no cluster_drift setting")
+	}
+	if s.clusterDriftAnswer == nil {
+		t.Fatal("the production sources carry no answer, so the collector never runs the compare")
 	}
 	if s.clusterDriftEnabled() {
 		t.Fatal("the patrol is on with no cluster_drift block in the settings")
@@ -153,5 +157,100 @@ func TestClusterDriftPatrolIsWiredAndRegistered(t *testing.T) {
 	}}
 	if !s.clusterDriftEnabled() {
 		t.Error("patrols.cluster_drift.enabled = true, but the production setting answers false")
+	}
+}
+
+// clusterDriftDaemon is a daemon over a temporary town with the cluster_drift
+// patrol on and its clock at at, handed back so a test moves it between
+// heartbeats.
+func clusterDriftDaemon(t *testing.T, at time.Time) (*Daemon, *clockwork.FakeClock) {
+	t.Helper()
+	d, _, _ := patrolReloadTown(t)
+	fc := clockwork.NewFakeClockAt(at)
+	d.clock = fc
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ClusterDrift: &config.ClusterDriftPatrolConfig{Enabled: true},
+	}}
+	return d, fc
+}
+
+// clusterDriftHeartbeat runs the drift collector over the sources the daemon
+// builds at its clock's now, as one heartbeat does.
+func clusterDriftHeartbeat(t *testing.T, d *Daemon) []attention.Item {
+	t.Helper()
+	return collectClusterDriftOnce(t, d.attentionSources(d.clk().Now()))
+}
+
+// TestClusterDriftPatrolAnswersOncePerInterval is the bead's first box: two
+// heartbeats 14 minutes apart make one compare call, and the heartbeat at 15
+// minutes makes a second.
+func TestClusterDriftPatrolAnswersOncePerInterval(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	d, fc := clusterDriftDaemon(t, base)
+	calls := 0
+	d.clusterDriftCompare = func(context.Context) (clusterDriftResult, error) {
+		calls++
+		return clusterDriftResult{Differing: []string{"Deployment/gastown-daemon: spec.replicas 2 -> 3"}}, nil
+	}
+
+	steps := []struct {
+		name      string
+		advance   time.Duration
+		wantCalls int
+	}{
+		{"the first heartbeat runs the compare", 0, 1},
+		{"14 minutes later reads the kept answer", 14 * time.Minute, 1},
+		{"15 minutes after the run runs the compare again", time.Minute, 2},
+	}
+	for _, step := range steps {
+		fc.Advance(step.advance)
+		items := clusterDriftHeartbeat(t, d)
+		if calls != step.wantCalls {
+			t.Errorf("%s: the compare ran %d times, want %d", step.name, calls, step.wantCalls)
+		}
+		assertClusterDriftItem(t, items, attention.RuleClusterDrift, attention.KindClusterDrift)
+	}
+}
+
+// TestClusterDriftPatrolKeepsAFailedRun is the bead's second box: a failing
+// compare raises the unreadable item on the first heartbeat, and the heartbeat
+// 14 minutes later makes no second call, raising the kept failure.
+func TestClusterDriftPatrolKeepsAFailedRun(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	d, fc := clusterDriftDaemon(t, base)
+	calls := 0
+	d.clusterDriftCompare = func(context.Context) (clusterDriftResult, error) {
+		calls++
+		return clusterDriftResult{}, errors.New("the cluster read was refused")
+	}
+
+	assertClusterDriftItem(t, clusterDriftHeartbeat(t, d),
+		attention.RuleClusterDriftUnreadable, attention.KindClusterDriftUnreadable)
+	if calls != 1 {
+		t.Fatalf("the first heartbeat ran the compare %d times, want 1", calls)
+	}
+
+	fc.Advance(14 * time.Minute)
+	assertClusterDriftItem(t, clusterDriftHeartbeat(t, d),
+		attention.RuleClusterDriftUnreadable, attention.KindClusterDriftUnreadable)
+	if calls != 1 {
+		t.Errorf("the 14 minute heartbeat ran the compare again: %d calls, want the one failed run kept", calls)
+	}
+}
+
+// TestClusterDriftPatrolNilCompareIsUnreadable: with the production wiring and
+// no compare set, a setting that is on raises the unreadable item rather than
+// a false clear, on the first heartbeat and on the next.
+func TestClusterDriftPatrolNilCompareIsUnreadable(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	d, fc := clusterDriftDaemon(t, base)
+
+	for _, advance := range []time.Duration{0, 14 * time.Minute} {
+		fc.Advance(advance)
+		assertClusterDriftItem(t, clusterDriftHeartbeat(t, d),
+			attention.RuleClusterDriftUnreadable, attention.KindClusterDriftUnreadable)
 	}
 }
