@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,34 +139,52 @@ func status(state forgejo.CommitState, context string) forgejo.CommitStatus {
 	return forgejo.CommitStatus{Status: state, Context: context}
 }
 
-// gate polls fast, so a test's wait window is milliseconds rather than the
-// production interval. The window leaves room for the status-retry tolerance's
-// few reads even when parallel tests load the scheduler: a window that only
-// fits one read turns every blip test into a race with the silence window.
+// fastGatePollBudget caps the status reads a fastGate makes. The reads of a
+// silenceGate wait stay under it: its 200 ms window allows about 200 polls at
+// the 1 ms poll interval.
+const fastGatePollBudget = 300
+
+// errFastGatePollBudget is the status read error past fastGatePollBudget.
+var errFastGatePollBudget = errors.New("fastGate poll budget spent: the status never reported")
+
+// budgetedStatus counts the status reads of one fastGate wait. fastGate's
+// window never closes, so a status that stays pending would poll without end;
+// past the budget every read fails, and the wait's tolerance ends it with
+// that error.
+type budgetedStatus struct {
+	CandidateStatus
+	reads atomic.Int64
+}
+
+func (b *budgetedStatus) CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error) {
+	if b.reads.Add(1) > fastGatePollBudget {
+		return nil, errFastGatePollBudget
+	}
+	return b.CandidateStatus.CombinedStatus(ctx, owner, repo, ref)
+}
+
+// fastGate polls every millisecond and waits for nothing: its window never
+// closes on its own, so a wait ends on a status verdict, a read error or the
+// tolerance, and a status that stays pending ends on the read budget (which
+// reads as a read error). A test that asserts the silence timeout uses
+// silenceGate.
 func fastGate(client CandidateStatus) *CandidateGate {
 	return &CandidateGate{
-		Client: client, Owner: "gastown", RepoName: "gastown", Workflow: "gate",
-		PollInterval: time.Millisecond, CallTimeout: time.Second, WaitTimeout: 200 * time.Millisecond,
+		Client: &budgetedStatus{CandidateStatus: client}, Owner: "gastown", RepoName: "gastown", Workflow: "gate",
+		PollInterval: time.Millisecond, CallTimeout: time.Second,
+		windowContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithCancel(parent)
+		},
 	}
 }
 
-// silenceGate is fastGate with the 200 ms wait window set explicitly. Only a
+// silenceGate is fastGate with the real 200 ms wait window and no seam. Only a
 // test that asserts the window closing (ErrCISilence as the expected ending)
-// may use it: it waits the window out by design, so the window must stay short
-// however long fastGate's is made.
+// may use it: it waits the window out by design, so the window must stay short.
 func silenceGate(client CandidateStatus) *CandidateGate {
 	gate := fastGate(client)
+	gate.windowContext = nil
 	gate.WaitTimeout = 200 * time.Millisecond
-	return gate
-}
-
-// passGate is fastGate with a window a passing run can use. A fake that reports
-// success ends the wait at once, so the long window costs no time on a pass,
-// while a 200 ms window lets a loaded host time out a gate still reporting
-// (gt-7vnq97). A test that expects the timed-out state keeps fastGate.
-func passGate(client CandidateStatus) *CandidateGate {
-	gate := fastGate(client)
-	gate.WaitTimeout = 30 * time.Second
 	return gate
 }
 
@@ -350,7 +369,7 @@ func TestCandidateGatePushesTheCandidateAndTakesTheVerdict(t *testing.T) {
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")}}
-	gate := passGate(client)
+	gate := fastGate(client)
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.Err != nil {
@@ -1165,7 +1184,7 @@ func TestCandidateGateWaitIs20Minutes(t *testing.T) {
 }
 
 // TestCandidateGateWindowComesFromTheSeam: with windowContext set, the wait runs
-// under the seam's context, asked for the gate's WaitTimeout. A window that is
+// under the seam's context, asked for the gate's wait timeout. A window that is
 // already canceled ends the wait after one read with ErrCISilence; a window that
 // never expires lets a passing run pass. The timer seam never fires, so only the
 // window can end a wait, and the test reads no clock.
@@ -1203,8 +1222,8 @@ func TestCandidateGateWindowComesFromTheSeam(t *testing.T) {
 				return tt.window(parent)
 			}
 			res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
-			if asked != gate.WaitTimeout {
-				t.Fatalf("window asked for %s; want the gate's WaitTimeout %s", asked, gate.WaitTimeout)
+			if want := gate.waitTimeout(); asked != want {
+				t.Fatalf("window asked for %s; want the gate's wait timeout %s", asked, want)
 			}
 			if client.polls != 1 {
 				t.Fatalf("polled %d times; want the window to end the wait after one read", client.polls)
@@ -1219,6 +1238,51 @@ func TestCandidateGateWindowComesFromTheSeam(t *testing.T) {
 				t.Fatalf("Run: %v", res.Err)
 			}
 		})
+	}
+}
+
+// TestCandidateGateFastGateHasNoRealWindow: fastGate's window never closes by
+// itself. Asked for a one-nanosecond window it hands back an open context with
+// no deadline, and its WaitTimeout stays zero. silenceGate keeps the real 200 ms
+// window and no seam. The check reads the deadline rather than waiting for
+// expiry, so it reads no clock and cannot race a loaded scheduler.
+func TestCandidateGateFastGateHasNoRealWindow(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := fastGate(&fakeForgejo{}).waitWindow(context.Background(), time.Nanosecond)
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("fastGate's window carries a deadline; want the window that never closes")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("fastGate's window is closed: %v", ctx.Err())
+	}
+	if w := fastGate(&fakeForgejo{}).WaitTimeout; w != 0 {
+		t.Fatalf("fastGate WaitTimeout = %s; want zero", w)
+	}
+	silence := silenceGate(&fakeForgejo{})
+	if silence.windowContext != nil {
+		t.Fatal("silenceGate sets a window seam; want the real window")
+	}
+	if silence.WaitTimeout != 200*time.Millisecond {
+		t.Fatalf("silenceGate WaitTimeout = %s; want 200ms", silence.WaitTimeout)
+	}
+}
+
+// TestCandidateGateFastGateBoundsAStuckWait: fastGate's window never closes, so
+// a status that stays pending would poll for as long as the test binary runs.
+// Past its read budget every read fails, and the tolerance ends the wait with
+// that read error: not silence, and not a hang.
+func TestCandidateGateFastGateBoundsAStuckWait(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{statuses: []forgejo.CommitStatus{status(forgejo.StatePending, "ci / gate (push)")}}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err == nil || errors.Is(res.Err, ErrCISilence) || !strings.Contains(res.Err.Error(), "consecutive") {
+		t.Fatalf("err = %v; want the stuck wait to end in the status-read error past the budget", res.Err)
+	}
+	if res.State != CandidateSilent {
+		t.Fatalf("state = %v, want no verdict", res.State)
 	}
 }
 
@@ -1251,7 +1315,7 @@ func TestCandidateGateAbsorbsTransientStatusErrors(t *testing.T) {
 		statusErrs: []error{errors.New("forgejo: GET statuses returned 502"), errors.New("context deadline exceeded")},
 		statuses:   []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
 	}
-	gate := passGate(client)
+	gate := fastGate(client)
 	var log strings.Builder
 	gate.Out = &log
 
@@ -1291,7 +1355,7 @@ func TestCandidateGateNonConsecutiveBlipsDoNotAddUp(t *testing.T) {
 		status(forgejo.StatePending, "ci / gate (push)"),
 		status(forgejo.StateSuccess, "ci / gate (push)"),
 	}}
-	gate := passGate(&blipAfterReads{CandidateStatus: client, blipAt: map[int]error{
+	gate := fastGate(&blipAfterReads{CandidateStatus: client, blipAt: map[int]error{
 		2: errors.New("forgejo: GET statuses returned 502"),
 		4: errors.New("connection reset by peer"),
 		6: errors.New("context deadline exceeded"),
@@ -1332,7 +1396,7 @@ func pollLines(t *testing.T, client CandidateStatus) int {
 	t.Helper()
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
-	gate := passGate(client)
+	gate := fastGate(client)
 	var log strings.Builder
 	gate.Out = &log
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
@@ -1389,7 +1453,7 @@ func TestCandidateGatePollIntervals(t *testing.T) {
 		if tt.blip {
 			client.statusErrs = []error{errors.New("connection reset by peer")}
 		}
-		gate := passGate(client)
+		gate := fastGate(client)
 		gate.PollInterval = tt.poll
 		var waits []time.Duration
 		gate.waitTimer = func(d time.Duration) <-chan time.Time {
@@ -1449,7 +1513,7 @@ func TestCandidateGatePollErrorToleranceUnchanged(t *testing.T) {
 	passed := status(forgejo.StateSuccess, "ci / gate (push)")
 	// waitOnce drives the production wait on an instant poll timer.
 	waitOnce := func(client CandidateStatus) CandidateResult {
-		gate := passGate(client)
+		gate := fastGate(client)
 		gate.waitTimer = func(time.Duration) <-chan time.Time {
 			fired := make(chan time.Time)
 			close(fired)
@@ -1755,7 +1819,7 @@ func TestCandidateGateRecordsAPass(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
 	var recs []GateRun
-	gate := passGate(client)
+	gate := fastGate(client)
 	gate.Now = func() time.Time { return at }
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
@@ -1784,7 +1848,7 @@ func TestCandidateGateRecordsAPassWithFailedLogRead(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
 	var recs []GateRun
-	gate := passGate(client)
+	gate := fastGate(client)
 	gate.Now = func() time.Time { return at }
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
@@ -1909,7 +1973,7 @@ func TestCandidateGateRecordsRunningRuns(t *testing.T) {
 		log:      recordLogPass,
 	}
 	var recs []GateRun
-	gate := passGate(client)
+	gate := fastGate(client)
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
@@ -1937,7 +2001,7 @@ func TestCandidateGateRecordsRunningRunsFails(t *testing.T) {
 	}
 	var recs []GateRun
 	var out strings.Builder
-	gate := passGate(client)
+	gate := fastGate(client)
 	gate.Out = &out
 	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
 
