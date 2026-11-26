@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -159,8 +160,8 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 		l.logf("%s: ahead merge of %s edits %s, which waits for the overseer", w.BeadID, shortSHA(w.Head), omConfigFile)
 		return AheadSkipped, aheadBuilt{}, nil
 	}
-	// The input and key are built for the review the next bead runs, so a key
-	// that cannot be computed is returned here rather than when om runs.
+	// The input and key are built before om runs, so a key that cannot be
+	// computed costs no review.
 	// reviewKey runs off gitMu. Its git reads are of the base and merged commits,
 	// which do not change, and the om config it reads is a file, not a git
 	// write. Its om version probe is a subprocess that must not hold the lock.
@@ -176,10 +177,34 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	// returned input names none.
 	built := aheadBuilt{In: in, Key: key}
 	built.In.Dir = ""
-	// NEXT BEAD: here the review runs om on the merged tree and stores the
-	// verdict. Until that lands, a clean merge that reaches this point is
-	// AheadSkipped and the landing runs om inline.
+	if _, err := l.aheadReview(ctx, in); err != nil {
+		return "", aheadBuilt{}, err
+	}
+	// NEXT BEAD: store the verdict aheadReview returns here. It is dropped
+	// until then, so a reviewed merge is AheadSkipped and the landing runs om
+	// inline.
 	return AheadSkipped, built, nil
+}
+
+// aheadReview runs om over in's checkout: the review, and the re-score of a
+// borderline rejection, both through a copy of the reviewer isolated under the
+// review directory that holds the checkout. It is reached only by a Lander with
+// an Ahead store, so a rig with the review pool off spends no om run here.
+//
+// review and rescoreBorderline read only a Lander's Reviewer and Out, so they
+// run on a second Lander holding the isolated reviewer and l.Out. It is built
+// field by field because copying l would copy its gitMu.
+func (l *Lander) aheadReview(ctx context.Context, in ReviewInput) (Verdict, error) {
+	iso, ok := l.Reviewer.(Isolator)
+	if !ok {
+		return Verdict{}, &InfraError{Stage: "review", Err: errors.New("the reviewer cannot be isolated from the landing's review")}
+	}
+	pool := &Lander{Reviewer: iso.Isolated(filepath.Dir(in.Dir)), Out: l.Out}
+	v, err := pool.review(ctx, in)
+	if err != nil {
+		return Verdict{}, &InfraError{Stage: "review", Err: err}
+	}
+	return pool.rescoreBorderline(ctx, v, in), nil
 }
 
 // aheadInput assembles the review input for w through the helper Land's om stage
