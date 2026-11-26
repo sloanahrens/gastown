@@ -111,14 +111,18 @@ func (p followupPolicy) clock() func() time.Time {
 	return p.now
 }
 
-// policyFor builds the policy applyFollowupPolicy installs with the wall clock
-// the rest of the daemon reads, so it judges the hold-out window (gt-l0q48h).
-var policyFor = newFollowupPolicy
-
 // applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built,
-// with the class function the skips line records (gt-xwdiiy).
+// with the class function the skips line records (gt-xwdiiy). The policy takes
+// the wall clock the rest of the daemon reads, so it judges the hold-out window
+// (gt-l0q48h).
 func applyFollowupPolicy(l *land.Lander) {
-	p := policyFor()
+	applyFollowupPolicyFrom(l, newFollowupPolicy)
+}
+
+// applyFollowupPolicyFrom sets the follow-up skip policy build returns on a
+// Lander, with the same class function applyFollowupPolicy installs (gt-l0q48h).
+func applyFollowupPolicyFrom(l *land.Lander, build func() followupPolicy) {
+	p := build()
 	l.FollowupSkip = p.reason
 	l.FollowupClass = func(c land.FollowupCandidate) string {
 		return omlessons.Classify(land.ReviewFindingText{Title: c.Title, Claim: c.Claim})

@@ -159,18 +159,11 @@ func TestFollowupSkipPolicySetsTheClass(t *testing.T) {
 	}
 }
 
-// TestApplyFollowupPolicyBuildsThroughPolicyFor: applyFollowupPolicy builds its
-// hook through policyFor, so a fake fixed inside the hold-out window withholds
-// what the same fake fixed before it keeps (gt-l0q48h).
-// Swapping policyFor is deliberate: the acceptance names it, t.Cleanup restores the prior value, no test runs beside it, and it is the specDispatchTimeout idiom of proc_runner_integration_test.go.
-
-//testpolicy:allow parallel — it swaps policyFor for a counting fake, so no test may run beside it
+// TestApplyFollowupPolicyBuildsThroughPolicyFor: applyFollowupPolicyFrom builds
+// its hook with the builder it is given, once, so a fake fixed inside the
+// hold-out window withholds what the same fake fixed before it keeps (gt-l0q48h).
 func TestApplyFollowupPolicyBuildsThroughPolicyFor(t *testing.T) {
-	prior := policyFor
-	t.Cleanup(func() {
-		//testpolicy:allow no-global-swap — restores the prior value the test swapped
-		policyFor = prior
-	})
+	t.Parallel()
 	finding := land.FollowupCandidate{Path: "internal/daemon/landing_worker.go", Severity: "minor",
 		Title: "the doc says the policy is off by default", Claim: "the parser reads it as on, so the sentence is no longer true"}
 	for _, tc := range []struct {
@@ -182,15 +175,14 @@ func TestApplyFollowupPolicyBuildsThroughPolicyFor(t *testing.T) {
 		{"before the window the finding is filed", followupBeforeHoldOut, ""},
 	} {
 		calls := 0
-		//testpolicy:allow no-global-swap — the counting fake is the swap this test makes
-		policyFor = func() followupPolicy {
+		fake := func() followupPolicy {
 			calls++
 			return followupPolicy{now: func() time.Time { return tc.at }}
 		}
 		var l land.Lander
-		applyFollowupPolicy(&l)
+		applyFollowupPolicyFrom(&l, fake)
 		if calls != 1 {
-			t.Fatalf("%s: policyFor called %d times, want 1: applyFollowupPolicy builds its own policy", tc.name, calls)
+			t.Fatalf("%s: builder called %d times, want 1: applyFollowupPolicyFrom builds the policy it is given", tc.name, calls)
 		}
 		if got := l.FollowupSkip(land.Work{BeadID: "gt-b0000"}, finding); got != tc.want {
 			t.Errorf("%s: FollowupSkip(%q at %s) = %q, want %q", tc.name, finding.Title, tc.at.Format(time.RFC3339), got, tc.want)
@@ -198,7 +190,7 @@ func TestApplyFollowupPolicyBuildsThroughPolicyFor(t *testing.T) {
 	}
 }
 
-// TestApplyFollowupPolicyDefault: with policyFor at its default, the hook applyFollowupPolicy installs on a zero Lander answers a clock-free protection decision, and the function takes only the Lander (gt-l0q48h).
+// TestApplyFollowupPolicyDefault: the hook applyFollowupPolicy installs on a zero Lander answers a clock-free protection decision, and the function takes only the Lander (gt-l0q48h).
 func TestApplyFollowupPolicyDefault(t *testing.T) {
 	t.Parallel()
 	if fn := reflect.ValueOf(applyFollowupPolicy).Type(); fn.NumIn() != 1 || fn.IsVariadic() {
