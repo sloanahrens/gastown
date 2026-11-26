@@ -32,79 +32,96 @@ func driftFingerprintOf(t *testing.T, value any) string {
 	return "sha256:" + hex.EncodeToString(sum[:])[:12]
 }
 
-// driftWantSides is the text of each side of the line for path, and whether the
-// line hides them. A side is its compact JSON on a path the reviewed list allows,
-// or its fingerprint. A path off the list, or one side naming a secret word,
-// hides every side (gt-2h7fjc). It mirrors the rule the compare applies; the
-// secret-arg test adds a check that no named value appears in the line.
-func driftWantSides(t *testing.T, path string, values ...any) ([]string, bool) {
+// driftPrints is the marker of a drift line that prints its values: none.
+const driftPrints = ""
+
+// driftWantSide is one side's text in a drift line: its compact JSON when the
+// line's marker is driftPrints, else its fingerprint. The table rows decide the
+// marker; this only writes the text it names.
+func driftWantSide(t *testing.T, marker string, value any) string {
 	t.Helper()
-	hidden := !driftValueSafe(path)
-	encoded := make([]string, len(values))
-	for i, value := range values {
+	if marker != driftPrints {
+		return driftFingerprintOf(t, value)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encoding %#v for its line: %v", value, err)
+	}
+	if len(raw) > driftReadableLimit {
+		t.Fatalf("encoding %s is past the %d-byte limit; the expectation needs a cut", raw, driftReadableLimit)
+	}
+	return string(raw)
+}
+
+// driftWantLine is the line the compare must report for a field the two sides
+// carry differently, under the marker its row states.
+func driftWantLine(t *testing.T, path, marker string, rendered, live any) string {
+	t.Helper()
+	return path + ": rendered " + driftWantSide(t, marker, rendered) + ", observed " + driftWantSide(t, marker, live) + marker
+}
+
+// driftWantAbsentLine is the line for a field or list entry the live object lacks,
+// under the marker its row states.
+func driftWantAbsentLine(t *testing.T, path, marker string, rendered any) string {
+	t.Helper()
+	return path + ": rendered " + driftWantSide(t, marker, rendered) + ", observed absent" + marker
+}
+
+// driftMirrorMarker is the marker a line for path carries, worked out the way the
+// compare works it out. Drift tests in other files still call the mirror below,
+// so it stays; the table rows in this file state their marker literally instead.
+func driftMirrorMarker(t *testing.T, path string, values ...any) string {
+	t.Helper()
+	if !driftValueSafe(path) {
+		return driftHiddenMarker
+	}
+	for _, value := range values {
 		raw, err := json.Marshal(value)
 		if err != nil {
 			t.Fatalf("encoding %#v for its line: %v", value, err)
 		}
-		encoded[i] = string(raw)
-		if configTextSecretWord.MatchString(encoded[i]) {
-			hidden = true
+		if configTextSecretWord.MatchString(string(raw)) {
+			return driftSecretMarker
 		}
 	}
-	texts := make([]string, len(values))
-	for i, value := range values {
-		if hidden {
-			texts[i] = driftFingerprintOf(t, value)
-			continue
-		}
-		if len(encoded[i]) > driftReadableLimit {
-			t.Fatalf("encoding %s is past the %d-byte limit; the expectation needs a cut", encoded[i], driftReadableLimit)
-		}
-		texts[i] = encoded[i]
-	}
-	return texts, hidden
+	return driftPrints
 }
 
-// driftWantLine is one drift line: its path, each side's text, and the hidden
-// marker when the line hides its values.
-func driftWantLine(path, renderedText, observed string, hidden bool) string {
-	line := path + ": rendered " + renderedText + ", observed " + observed
-	if hidden {
-		line += driftHiddenMarker
-	}
-	return line
-}
-
-// driftWantDifference is the line the compare must report for a field the two
-// sides carry differently.
+// driftWantDifference is driftWantLine under the marker the compare gives path.
+// The drift tests in other files call it (gt-2h7fjc).
 func driftWantDifference(t *testing.T, path string, rendered, live any) string {
 	t.Helper()
-	texts, hidden := driftWantSides(t, path, rendered, live)
-	return driftWantLine(path, texts[0], texts[1], hidden)
+	return driftWantLine(t, path, driftMirrorMarker(t, path, rendered, live), rendered, live)
 }
 
-// driftWantAbsent is the line for a field or list entry the live object lacks.
+// driftWantAbsent is driftWantAbsentLine under the marker the compare gives path.
 func driftWantAbsent(t *testing.T, path string, rendered any) string {
 	t.Helper()
-	texts, hidden := driftWantSides(t, path, rendered)
-	return driftWantLine(path, texts[0], "absent", hidden)
+	return driftWantAbsentLine(t, path, driftMirrorMarker(t, path, rendered), rendered)
 }
 
-// driftLineShape is a hidden drift line: a JSON path, a fingerprint or absent for
-// each side, and the hidden marker, never a value (gt-wi4885, gt-2h7fjc).
-var driftLineShape = regexp.MustCompile(`^.+: rendered (sha256:[0-9a-f]{12}|absent), observed (sha256:[0-9a-f]{12}|absent)` + regexp.QuoteMeta(driftHiddenMarker) + `$`)
+// driftLineShape is a drift line that hides its values: a JSON path, a
+// fingerprint of the rendered side, a fingerprint or absent observed side, and
+// the marker that says why, never a value (gt-wi4885, gt-2h7fjc).
+var driftLineShape = regexp.MustCompile(`^.+: rendered sha256:[0-9a-f]{12}, observed (sha256:[0-9a-f]{12}|absent)(` +
+	regexp.QuoteMeta(driftHiddenMarker) + `|` + regexp.QuoteMeta(driftSecretMarker) + `)$`)
 
 // driftReadableLineShape is a drift line that prints its values: a JSON path and
-// each side, with no hidden marker.
+// each side, with no marker.
 var driftReadableLineShape = regexp.MustCompile(`^.+: rendered .+, observed .+$`)
 
-// driftLineShapeOK holds line to its shape: a line that carries the hidden
-// marker is only fingerprints, and any other line is a path and each side.
+// driftFingerprintSide matches a side that is a bare fingerprint, which only a
+// hidden line may carry: a printed side is JSON, so a string is quoted.
+var driftFingerprintSide = regexp.MustCompile(`: rendered sha256:|, observed sha256:`)
+
+// driftLineShapeOK holds line to its shape: a line that carries a hidden marker
+// is only fingerprints, and any other line is a path and each side's JSON with
+// no fingerprint side.
 func driftLineShapeOK(line string) bool {
-	if strings.HasSuffix(line, driftHiddenMarker) {
+	if strings.HasSuffix(line, driftHiddenMarker) || strings.HasSuffix(line, driftSecretMarker) {
 		return driftLineShape.MatchString(line)
 	}
-	return driftReadableLineShape.MatchString(line)
+	return driftReadableLineShape.MatchString(line) && !driftFingerprintSide.MatchString(line)
 }
 
 // driftRendered is a rendered daemon Deployment decoded from the render's own
@@ -336,14 +353,14 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				driftEnvOf(t, driftContainer(t, live, "daemon"), "TZ")["value"] = "UTC"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].env[name=TZ].value", "America/Chicago", "UTC")},
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].env[name=TZ].value", driftHiddenMarker, "America/Chicago", "UTC")},
 		},
 		{
 			name: "an argument",
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["args"].([]any)[1] = "/run/secrets/other-token"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].args[1]", "/run/secrets/om-token", "/run/secrets/other-token")},
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].args[1]", driftSecretMarker, "/run/secrets/om-token", "/run/secrets/other-token")},
 		},
 		{
 			name: "a command",
@@ -351,7 +368,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				command := driftInitContainer(t, live, "registry-proxy")["command"].([]any)
 				command[2] = "exit 1"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command[2]", "sleep infinity", "exit 1")},
+			want: []string{driftWantLine(t, "spec.template.spec.initContainers[name=registry-proxy].command[2]", driftHiddenMarker, "sleep infinity", "exit 1")},
 		},
 		{
 			name: "a positional list the live object made longer",
@@ -359,7 +376,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				initContainer := driftInitContainer(t, live, "registry-proxy")
 				initContainer["command"] = append(initContainer["command"].([]any), "--extra")
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command",
+			want: []string{driftWantLine(t, "spec.template.spec.initContainers[name=registry-proxy].command", driftHiddenMarker,
 				[]any{"/bin/sh", "-c", "sleep infinity"}, []any{"/bin/sh", "-c", "sleep infinity", "--extra"})},
 		},
 		{
@@ -368,7 +385,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				initContainer := driftInitContainer(t, live, "registry-proxy")
 				initContainer["command"] = initContainer["command"].([]any)[:2]
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command",
+			want: []string{driftWantLine(t, "spec.template.spec.initContainers[name=registry-proxy].command", driftHiddenMarker,
 				[]any{"/bin/sh", "-c", "sleep infinity"}, []any{"/bin/sh", "-c"})},
 		},
 		{
@@ -376,7 +393,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["readinessProbe"].(map[string]any)["periodSeconds"] = 15
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].readinessProbe.periodSeconds", 10, 15)},
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].readinessProbe.periodSeconds", driftHiddenMarker, 10, 15)},
 		},
 		{
 			name: "a mount",
@@ -384,7 +401,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				mounts := driftContainer(t, live, "daemon")["volumeMounts"].([]any)
 				mounts[1].(map[string]any)["subPath"] = "promote-om.key.old"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].volumeMounts[mountPath=/run/gt/xdg/gt/promote-om.key].subPath",
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].volumeMounts[mountPath=/run/gt/xdg/gt/promote-om.key].subPath", driftHiddenMarker,
 				"promote-om.key", "promote-om.key.old")},
 		},
 		{
@@ -393,7 +410,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				resources := driftContainer(t, live, "daemon")["resources"].(map[string]any)
 				resources["limits"].(map[string]any)["memory"] = "2Gi"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.limits.memory", "1024Mi", "2Gi")},
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].resources.limits.memory", driftPrints, "1024Mi", "2Gi")},
 		},
 		{
 			name: "a quantity exponent beyond anything a quantity fits",
@@ -405,7 +422,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				resources := driftContainer(t, live, "daemon")["resources"].(map[string]any)
 				resources["requests"].(map[string]any)["cpu"] = "1"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu", "1e999999999999", "1")},
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu", driftPrints, "1e999999999999", "1")},
 		},
 		{
 			name: "a volume",
@@ -413,7 +430,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				volumes := driftPodSpec(live)["volumes"].([]any)
 				volumes[0].(map[string]any)["persistentVolumeClaim"].(map[string]any)["claimName"] = "other"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName", "town-state", "other")},
+			want: []string{driftWantLine(t, "spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName", driftHiddenMarker, "town-state", "other")},
 		},
 		{
 			name: "a host alias",
@@ -421,7 +438,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				alias := driftPodSpec(live)["hostAliases"].([]any)[0].(map[string]any)
 				alias["hostnames"].([]any)[0] = "host.docker.internal.old"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.hostAliases[ip=192.168.5.2].hostnames[0]",
+			want: []string{driftWantLine(t, "spec.template.spec.hostAliases[ip=192.168.5.2].hostnames[0]", driftHiddenMarker,
 				"host.docker.internal", "host.docker.internal.old")},
 		},
 		{
@@ -429,28 +446,28 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				live["spec"].(map[string]any)["strategy"].(map[string]any)["type"] = "RollingUpdate"
 			},
-			want: []string{driftWantDifference(t, "spec.strategy.type", "Recreate", "RollingUpdate")},
+			want: []string{driftWantLine(t, "spec.strategy.type", driftPrints, "Recreate", "RollingUpdate")},
 		},
 		{
 			name: "the replicas",
 			live: func(t *testing.T, live map[string]any) {
 				live["spec"].(map[string]any)["replicas"] = 2
 			},
-			want: []string{driftWantDifference(t, "spec.replicas", 1, 2)},
+			want: []string{driftWantLine(t, "spec.replicas", driftPrints, 1, 2)},
 		},
 		{
 			name: "a label",
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["labels"].(map[string]any)["app.kubernetes.io/name"] = "other"
 			},
-			want: []string{driftWantDifference(t, "metadata.labels.app.kubernetes.io/name", "daemon", "other")},
+			want: []string{driftWantLine(t, "metadata.labels.app.kubernetes.io/name", driftHiddenMarker, "daemon", "other")},
 		},
 		{
 			name: "a pod-template annotation",
 			live: func(t *testing.T, live map[string]any) {
 				driftTemplateMeta(live)["annotations"].(map[string]any)["gastown.dev/pod-template"] = "v2"
 			},
-			want: []string{driftWantDifference(t, "spec.template.metadata.annotations.gastown.dev/pod-template", "v1", "v2")},
+			want: []string{driftWantLine(t, "spec.template.metadata.annotations.gastown.dev/pod-template", driftPrints, "v1", "v2")},
 		},
 		{
 			name: "an annotation that is named image",
@@ -460,7 +477,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["annotations"].(map[string]any)["image"] = "other"
 			},
-			want: []string{driftWantDifference(t, "metadata.annotations.image", "daemon", "other")},
+			want: []string{driftWantLine(t, "metadata.annotations.image", driftHiddenMarker, "daemon", "other")},
 		},
 		{
 			name: "a label named like a server-set key",
@@ -470,7 +487,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["labels"].(map[string]any)["uid"] = "b"
 			},
-			want: []string{driftWantDifference(t, "metadata.labels.uid", "a", "b")},
+			want: []string{driftWantLine(t, "metadata.labels.uid", driftHiddenMarker, "a", "b")},
 		},
 		{
 			name: "a quantity exponent past the bound, spelled as digits",
@@ -480,7 +497,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "100000000000000000000"
 			},
-			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu",
+			want: []string{driftWantLine(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu", driftPrints,
 				"1e20", "100000000000000000000")},
 		},
 		{
@@ -489,7 +506,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				ports := driftContainer(t, live, "daemon")["ports"].([]any)
 				ports[0].(map[string]any)["containerPort"] = 9090
 			},
-			want: []string{driftWantAbsent(t, "spec.template.spec.containers[name=daemon].ports[containerPort=8080]",
+			want: []string{driftWantAbsentLine(t, "spec.template.spec.containers[name=daemon].ports[containerPort=8080]", driftHiddenMarker,
 				map[string]any{"containerPort": 8080})},
 		},
 		{
@@ -498,7 +515,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				container := driftContainer(t, live, "daemon")
 				container["env"] = []any{driftEnvOf(t, container, "GT_TOWN_ROOT")}
 			},
-			want: []string{driftWantAbsent(t, "spec.template.spec.containers[name=daemon].env[name=TZ]",
+			want: []string{driftWantAbsentLine(t, "spec.template.spec.containers[name=daemon].env[name=TZ]", driftHiddenMarker,
 				map[string]any{"name": "TZ", "value": "America/Chicago"})},
 		},
 		{
@@ -506,7 +523,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				delete(driftPodSpec(live), "serviceAccountName")
 			},
-			want: []string{driftWantAbsent(t, "spec.template.spec.serviceAccountName", "daemon")},
+			want: []string{driftWantAbsentLine(t, "spec.template.spec.serviceAccountName", driftHiddenMarker, "daemon")},
 		},
 	}
 
@@ -968,14 +985,14 @@ func TestDriftReadableFingerprintsASecretArg(t *testing.T) {
 			name:     "an observed argument names a token",
 			rendered: "--max-workers=2",
 			observed: "--token=abc",
-			want:     driftWantDifference(t, arg, "--max-workers=2", "--token=abc"),
+			want:     driftWantLine(t, arg, driftSecretMarker, "--max-workers=2", "--token=abc"),
 			leaks:    []string{"--token=abc", "--max-workers=2"},
 		},
 		{
 			name:     "a rendered argument names a password",
 			rendered: "--db-password=s3cr3t",
 			observed: "--db-password=hunter2",
-			want:     driftWantDifference(t, arg, "--db-password=s3cr3t", "--db-password=hunter2"),
+			want:     driftWantLine(t, arg, driftSecretMarker, "--db-password=s3cr3t", "--db-password=hunter2"),
 			leaks:    []string{"s3cr3t", "hunter2"},
 		},
 		{
@@ -1008,6 +1025,35 @@ func TestDriftReadableFingerprintsASecretArg(t *testing.T) {
 						t.Errorf("drift line %q carries the argument %q", line, leak)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestDriftMarkerLineShape holds the shape check to the marker rule: a line whose
+// sides are fingerprints carries one of the two hidden markers, and a line with no
+// marker prints its values (gt-2h7fjc). Each row states its shape literally.
+func TestDriftMarkerLineShape(t *testing.T) {
+	t.Parallel()
+	const fingerprint = "sha256:0123456789ab"
+	cases := []struct {
+		name string
+		line string
+		ok   bool
+	}{
+		{name: "fingerprints under the path marker", line: "a.b: rendered " + fingerprint + ", observed " + fingerprint + driftHiddenMarker, ok: true},
+		{name: "fingerprints under the secret marker", line: "a.b: rendered " + fingerprint + ", observed " + fingerprint + driftSecretMarker, ok: true},
+		{name: "an absent side under a marker", line: "a.b: rendered " + fingerprint + ", observed absent" + driftSecretMarker, ok: true},
+		{name: "fingerprints with no marker", line: "a.b: rendered " + fingerprint + ", observed " + fingerprint, ok: false},
+		{name: "a fingerprint and an absent side with no marker", line: "a.b: rendered " + fingerprint + ", observed absent", ok: false},
+		{name: "values with no marker", line: `a.b: rendered "8", observed "4"`, ok: true},
+		{name: "values under a marker", line: `a.b: rendered "8", observed "4"` + driftHiddenMarker, ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := driftLineShapeOK(tc.line); got != tc.ok {
+				t.Errorf("driftLineShapeOK(%q) = %t, want %t", tc.line, got, tc.ok)
 			}
 		})
 	}
@@ -1084,13 +1130,23 @@ func TestClusterDriftObjectKinds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			// The leak check below searches the printed line, marker included.
+			// A fixture value inside a marker's words would match the marker
+			// rather than a leak, so the fixture is refused first (gt-2h7fjc).
+			for _, marker := range []string{driftHiddenMarker, driftSecretMarker} {
+				for _, value := range []any{tc.renderedValue, tc.liveValue} {
+					if text := fmt.Sprint(value); strings.Contains(marker, text) {
+						t.Errorf("fixture value %q is a substring of marker %q, so the leak check cannot search for it", text, marker)
+					}
+				}
+			}
 			live := driftJSONDecoded(tc.rendered).(map[string]any)
 			tc.mutate(t, live)
 			got, err := objectDrift(tc.kind, tc.rendered, live)
 			if err != nil {
 				t.Fatalf("objectDrift(%s): %v", tc.kind, err)
 			}
-			want := driftWantDifference(t, tc.path, tc.renderedValue, tc.liveValue)
+			want := driftWantLine(t, tc.path, driftHiddenMarker, tc.renderedValue, tc.liveValue)
 			if !slices.Equal(got, []string{want}) {
 				t.Fatalf("drift = %q, want %q", got, want)
 			}
@@ -1255,7 +1311,7 @@ func TestDriftConfigTextKeepsFingerprintsOffTheRunnerConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("objectDrift(%s): %v", tc.kind, err)
 			}
-			want := []string{driftWantDifference(t, tc.path, tc.rendered, tc.live)}
+			want := []string{driftWantLine(t, tc.path, driftHiddenMarker, tc.rendered, tc.live)}
 			if !slices.Equal(got, want) {
 				t.Errorf("drift = %q, want %q", got, want)
 			}
