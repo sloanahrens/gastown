@@ -344,8 +344,10 @@ func TestCloudCheckPodEnv(t *testing.T) {
 			if len(f.calls) != 1 {
 				t.Fatalf("ran %d checks, want 1", len(f.calls))
 			}
+			// The message names the wanted variable, not the environment: an
+			// entry may later carry a value a failure line must not show.
 			if env := f.calls[0].env; !slices.Contains(env, "CLOUD_CHECK_HOST=pod") {
-				t.Errorf("env = %q, want it to hold CLOUD_CHECK_HOST=pod", env)
+				t.Errorf("the child's environment holds %d entries; want one to be CLOUD_CHECK_HOST=pod", len(env))
 			}
 		})
 	}
