@@ -107,6 +107,72 @@ func TestCollectBDGatewayCapRaises(t *testing.T) {
 	}
 }
 
+// TestCollectBDGatewayCapStatsError: a failed Stats read is returned as the
+// collector's error, raises no item and takes no sample. The error rows carry
+// zero counters, so a collector that sampled the failed read would reset the
+// base to zero, and the next good read would raise from there.
+func TestCollectBDGatewayCapStatsError(t *testing.T) {
+	t.Parallel()
+	errDown := errors.New("gateway down")
+	const raised = "bd gateway refused 2 calls at its concurrency cap (peak in flight 5)"
+	cases := []struct {
+		name  string
+		ticks []capTick
+	}{
+		{
+			name: "the next good read measures from the base before the failure",
+			ticks: []capTick{
+				{stats: bdgateway.GatewayStats{TooManyCalls: 4, PeakInFlight: 2}},
+				{err: errDown},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 6, PeakInFlight: 5}, wantItems: 1, wantSummary: raised},
+			},
+		},
+		{
+			name: "a run of failed reads keeps the base",
+			ticks: []capTick{
+				{stats: bdgateway.GatewayStats{TooManyCalls: 4, PeakInFlight: 2}},
+				{err: errDown},
+				{err: errDown},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 4, PeakInFlight: 2}},
+			},
+		},
+		{
+			name: "a failed read before any good read leaves the first good read as the base",
+			ticks: []capTick{
+				{err: errDown},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 7, PeakInFlight: 3}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cur capTick
+			c := &gatewayCapCollector{stats: func(context.Context) (bdgateway.GatewayStats, error) {
+				s := cur.stats
+				s.CapsPresent = true
+				return s, cur.err
+			}}
+			for i, tk := range tc.ticks {
+				cur = tk
+				items, err := c.collect(context.Background())
+				if !errors.Is(err, tk.err) {
+					t.Fatalf("tick %d: err = %v, want %v", i, err, tk.err)
+				}
+				if len(items) != tk.wantItems {
+					t.Fatalf("tick %d: raised %d items, want %d", i, len(items), tk.wantItems)
+				}
+				if tk.wantItems == 0 {
+					continue
+				}
+				if items[0].Summary != tk.wantSummary {
+					t.Errorf("tick %d: summary = %q, want %q", i, items[0].Summary, tk.wantSummary)
+				}
+			}
+		})
+	}
+}
+
 // TestCollectBDGatewayCapNoSource: a collector with no Stats source raises
 // nothing and reads no error, the same as a daemon with no gateway configured.
 func TestCollectBDGatewayCapNoSource(t *testing.T) {
