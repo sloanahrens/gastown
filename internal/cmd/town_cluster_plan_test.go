@@ -545,6 +545,15 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 			}
 			return d, planKubectl(t)
 		}, "holds a document named"},
+		{"a static object the cluster cannot be read", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
+			kube := planKubectl(t)
+			return clusterRenderDepsAt(t, planTown(t), io.Discard), func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+				if resource, _, ok := planGetOf(name, args); ok && !strings.HasPrefix(resource, "deployment/") {
+					return "", 1, nil
+				}
+				return kube(ctx, dir, env, name, args...)
+			}
+		}, "could not be read"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -565,6 +574,35 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanStaticGetsOnce: with every static object equal to the
+// cluster's, the plan makes one get of each static object, and prints the short id.
+func TestClusterShapePlanStaticGetsOnce(t *testing.T) {
+	t.Parallel()
+	want := map[string]int{}
+	for key := range planStaticLive(t) {
+		want[key] = 1
+	}
+	got := map[string]int{}
+	kube := planKubectl(t)
+	counting := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if resource, namespace, ok := planGetOf(name, args); ok && !strings.HasPrefix(resource, "deployment/") {
+			got[resource+" "+namespace]++
+		}
+		return kube(ctx, dir, env, name, args...)
+	}
+	dir, out := planOut(t), &bytes.Buffer{}
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), counting, out, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the plan's static gets = %v, want %v", got, want)
+	}
+	_, short := planID(planFilesIn(t, dir))
+	if printed := out.String(); !strings.HasSuffix(printed, "\n"+short+"\n") {
+		t.Fatalf("the plan printed %q, want the short id %q last", printed, short)
+	}
+}
+
 // planLiveAnswer is the live Deployment kubectl prints, with revision annotated
 // and resourceVersion set to rv-<revision>, which planWantResourceVersion expects.
 func planLiveAnswer(t *testing.T, resource, revision string) string {
@@ -581,17 +619,59 @@ func planLiveAnswer(t *testing.T, resource, revision string) string {
 	return string(body)
 }
 
-// planKubectlAnswering is the plan's cluster read: each call must be the drift
-// read's get of one Deployment, and answer gives its output and exit.
+// planKubectlAnswering is the plan's cluster read: a get of one Deployment gives
+// answer's output and exit, and a get of one static object gives its own document.
 func planKubectlAnswering(t *testing.T, answer func(resource string) (string, int, error)) update.RunFunc {
 	t.Helper()
+	static := planStaticLive(t)
 	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
-		get := len(args) == 7 && args[0] == "get" && strings.HasPrefix(args[1], "deployment/") && args[2] == "-n" && args[4] == "--ignore-not-found" && args[5] == "-o" && args[6] == "json"
-		if name != "kubectl" || !get {
-			t.Fatalf("the plan ran %s %q, want only a get of one Deployment", name, args)
+		resource, namespace, ok := planGetOf(name, args)
+		if !ok {
+			t.Fatalf("the plan ran %s %q, want only a get", name, args)
 		}
-		return answer(args[1])
+		if strings.HasPrefix(resource, "deployment/") {
+			return answer(resource)
+		}
+		return static[resource+" "+namespace], 0, nil
 	}
+}
+
+// planGetOf reads a call as the drift read's get: its resource and namespace, empty
+// when cluster-scoped. ok is false for any other call.
+func planGetOf(name string, args []string) (resource, namespace string, ok bool) {
+	switch {
+	case name == "kubectl" && len(args) == 5 && args[0] == "get" && args[2] == "--ignore-not-found" && args[3] == "-o" && args[4] == "json":
+		return args[1], "", true
+	case name == "kubectl" && len(args) == 7 && args[0] == "get" && args[2] == "-n" && args[4] == "--ignore-not-found" && args[5] == "-o" && args[6] == "json":
+		return args[1], args[3], true
+	}
+	return "", "", false
+}
+
+// planStaticLive is the answer the fake cluster gives each static object, keyed by
+// resource and namespace: the object's document as JSON. A Secret is not read.
+func planStaticLive(t *testing.T) map[string]string {
+	t.Helper()
+	static, err := k8s.Static()
+	if err != nil {
+		t.Fatalf("reading the embedded static set: %v", err)
+	}
+	live := map[string]string{}
+	for _, object := range static {
+		if object.Kind == secretKind {
+			continue
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(object.Doc, &doc); err != nil {
+			t.Fatalf("decoding the static %s: %v", object.Name, err)
+		}
+		body, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("encoding the static %s: %v", object.Name, err)
+		}
+		live[strings.ToLower(object.Kind)+"/"+object.Name+" "+object.Namespace] = string(body)
+	}
+	return live
 }
 
 // planRevisionOf is the revision the fake cluster holds for a Deployment: a positive
@@ -878,7 +958,8 @@ func TestClusterShapePlanLiveAbsent(t *testing.T) {
 // TestClusterShapePlanLiveGetOnly: every cluster call the plan makes is a get. The
 // runner records each kubectl call and fails any that is not a get, so an apply,
 // patch, delete or dry run would be caught. A Deployment present, absent or
-// unreadable makes no other call, and each ends with the outcome its read names.
+// unreadable makes no other call, and each ends with the outcome its read names;
+// the static objects are read with gets of their own.
 func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -921,8 +1002,8 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 				t.Fatal("the plan made no cluster call, so the read was never exercised")
 			}
 			for _, c := range calls {
-				if !strings.HasPrefix(c, "kubectl get deployment/") {
-					t.Errorf("the plan made cluster call %q, want only a get of one Deployment", c)
+				if !strings.HasPrefix(c, "kubectl get ") {
+					t.Errorf("the plan made cluster call %q, want only a get", c)
 				}
 			}
 		})
