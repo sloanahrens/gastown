@@ -1,15 +1,26 @@
 package landworker
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // BookQueue runs bookkeeping jobs one at a time, in the order they were added,
 // on a goroutine of its own; the zero value is ready to use.
 type BookQueue struct {
+	// Begin runs when the queue goes from empty to busy, before the job that
+	// opened the period starts; End runs when that period's last job returns.
+	// End returns before the next period's Begin runs. Either may be nil; set
+	// both before the queue is used.
+	Begin func()
+	End   func()
+
 	mu     sync.Mutex
 	jobs   []bookJob
 	held   map[string]int // bead -> jobs added and not yet returned
-	active bool           // the drain goroutine is running
+	active bool           // a busy period is open: jobs queued, a job or hook running
 	later  []func()       // stored by Later, run by the next RunLater
+	idle   chan struct{}  // closed when active goes false; non-nil while active
 }
 
 type bookJob struct {
@@ -21,16 +32,28 @@ type bookJob struct {
 // running job; Holds reports beadID from here until job returns.
 func (q *BookQueue) Add(beadID string, job func()) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.held == nil {
 		q.held = map[string]int{}
 	}
 	q.held[beadID]++
 	q.jobs = append(q.jobs, bookJob{beadID: beadID, job: job})
-	if !q.active {
+	busy := !q.active
+	if busy {
 		q.active = true
-		go q.drain()
+		q.idle = make(chan struct{})
 	}
+	q.mu.Unlock()
+
+	if !busy {
+		return
+	}
+	// This Add opens the period, so it runs Begin; every other Add sees active
+	// and leaves Begin to the drain. Running it before the drain starts keeps
+	// it before this period's End, which the drain alone runs.
+	if q.Begin != nil {
+		q.Begin()
+	}
+	go q.drain()
 }
 
 // Holds reports whether beadID's bookkeeping is queued or running: true from
@@ -64,16 +87,44 @@ func (q *BookQueue) RunLater() {
 	}
 }
 
-// drain runs the jobs one at a time and exits once none is left. The lock
-// never covers a job, so Add and Holds answer while one runs; clearing active
-// under the same lock Add takes loses no Add racing the last job.
+// drain runs the jobs one at a time, opening each busy period with Begin and
+// closing it with End, and exits once no job is left and End has returned. The
+// lock never covers a job or a hook, so Add, Holds and Wait answer while one
+// runs.
+//
+// active stays true while End runs, so an Add that lands then queues its job
+// without calling Begin. The loop sees that job with the period already ended
+// and runs Begin itself, so End returns before the next Begin and Wait, which
+// waits on idle, cannot return before End. Clearing active under the lock Add
+// takes loses no Add racing the last job, and closes the idle channel Wait is on.
 func (q *BookQueue) drain() {
+	ended := false
 	for {
 		q.mu.Lock()
 		if len(q.jobs) == 0 {
+			if !ended {
+				q.mu.Unlock()
+				if q.End != nil {
+					q.End()
+				}
+				ended = true
+				continue
+			}
 			q.active = false
+			close(q.idle)
+			q.idle = nil
 			q.mu.Unlock()
 			return
+		}
+		if ended {
+			// A job arrived while End ran; its Add saw active and called no
+			// Begin, so this period opens here.
+			q.mu.Unlock()
+			if q.Begin != nil {
+				q.Begin()
+			}
+			ended = false
+			continue
 		}
 		next := q.jobs[0]
 		q.jobs[0] = bookJob{}
@@ -93,5 +144,24 @@ func (q *BookQueue) drain() {
 			delete(q.held, next.beadID)
 		}
 		q.mu.Unlock()
+	}
+}
+
+// Wait returns nil once the queue holds no job and the last period's End has
+// returned, and ctx's error when ctx ends first. An empty queue returns at once.
+func (q *BookQueue) Wait(ctx context.Context) error {
+	q.mu.Lock()
+	if !q.active {
+		q.mu.Unlock()
+		return nil
+	}
+	idle := q.idle
+	q.mu.Unlock()
+
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

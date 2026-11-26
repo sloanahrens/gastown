@@ -2,8 +2,11 @@ package landworker
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -154,4 +157,175 @@ func TestBookQueueLaterRunsBeforeList(t *testing.T) {
 	if !ran {
 		t.Fatal("the pass listed without running the work stored with Later")
 	}
+}
+
+// TestBookQueueBusyIdle: Begin runs once for two jobs queued together, before
+// the first starts, and End once after the second returns; nil hooks are fine.
+func TestBookQueueBusyIdle(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	var q BookQueue
+
+	// events records each step in causal order: a buffered send never blocks.
+	events := make(chan string, 8)
+	q.Begin = func() { events <- "begin" }
+	q.End = func() { events <- "end" }
+
+	first, firstRelease := make(chan struct{}), make(chan struct{})
+	second, secondRelease := make(chan struct{}), make(chan struct{})
+	q.Add("gt-first", func() { events <- "first start"; close(first); hold(ctx, firstRelease); events <- "first return" })
+	recvBounded(t, ctx, first, "the first job starting")
+
+	// The second is added while the first runs, so both fall under one Begin.
+	q.Add("gt-second", func() { events <- "second start"; close(second); hold(ctx, secondRelease); events <- "second return" })
+	close(firstRelease)
+	recvBounded(t, ctx, second, "the second job starting after the first returned")
+	close(secondRelease)
+
+	var got []string
+	for i := 0; i < 6; i++ {
+		got = append(got, recvBounded(t, ctx, events, "the next recorded step"))
+	}
+	if want := []string{"begin", "first start", "first return", "second start", "second return", "end"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the run recorded %v, want %v", got, want)
+	}
+
+	// A queue whose hooks are nil runs its jobs too.
+	var plain BookQueue
+	ran := make(chan struct{})
+	plain.Add("gt-plain", func() { close(ran) })
+	recvBounded(t, ctx, ran, "a job on a queue with nil hooks")
+}
+
+// TestBookQueueWait: Wait returns nil once the queue is empty and the
+// context's error while a job is still queued. It runs in a synctest bubble so
+// a Wait that returns on the first job to finish is caught, not raced with.
+func TestBookQueueWait(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx := waitCtx(t)
+		// settle is the bubble's barrier: it returns once every goroutine in the
+		// bubble is blocked, so the check that Wait has not returned reads a
+		// settled state instead of racing a goroutine that has not run yet.
+		settle := synctest.Wait
+		var q BookQueue
+		wait := q.Wait
+		first, firstRelease := make(chan struct{}), make(chan struct{})
+		second, secondRelease := make(chan struct{}), make(chan struct{})
+		// Release the last job however the test ends, so a failure does not
+		// leave the drain goroutine blocked in the bubble.
+		var release sync.Once
+		defer release.Do(func() { close(secondRelease) })
+		q.Add("gt-first", func() { close(first); hold(ctx, firstRelease) })
+		recvBounded(t, ctx, first, "the first job starting")
+		q.Add("gt-second", func() { close(second); hold(ctx, secondRelease) })
+
+		waitUntil, cancel := context.WithCancel(ctx)
+		defer cancel()
+		waited := make(chan error, 1)
+		go func() { waited <- wait(waitUntil) }()
+
+		// The waiter is blocked in Wait before the first job returns.
+		settle()
+		close(firstRelease)
+		recvBounded(t, ctx, second, "the second job starting after the first returned")
+		settle()
+		select {
+		case err := <-waited:
+			t.Fatalf("Wait returned %v with the second job still running, want it to keep waiting", err)
+		default:
+		}
+
+		// The last job is still blocked, so Wait reports the context.
+		cancel()
+		settle()
+		if err := recvBounded(t, ctx, waited, "Wait returning on cancel"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Wait with a job still blocked = %v, want context.Canceled", err)
+		}
+
+		// With the last job released, an empty queue returns nil at once.
+		release.Do(func() { close(secondRelease) })
+		settle()
+		if err := wait(ctx); err != nil {
+			t.Errorf("Wait after the last job = %v, want nil", err)
+		}
+	})
+}
+
+// TestBookQueueAddDuringEnd: a job added while End runs opens the next busy
+// period from the drain goroutine, so the previous End returns before the next
+// Begin runs, the new job waits for it, and Wait does not return while End runs.
+func TestBookQueueAddDuringEnd(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx := waitCtx(t)
+		// settle is the bubble's barrier: it returns once every goroutine in the
+		// bubble is blocked, so the "has not run" and "has not returned" checks
+		// below read a settled state instead of racing a goroutine not yet run.
+		settle := synctest.Wait
+
+		var q BookQueue
+		events := make(chan string, 8)
+		q.Begin = func() { events <- "begin" }
+
+		var endCalls int // read and written by the drain goroutine alone
+		firstEnd := make(chan struct{})
+		endRelease := make(chan struct{})
+		var release sync.Once
+		// Release the blocked End however the test ends, so every goroutine in
+		// the bubble can finish.
+		defer release.Do(func() { close(endRelease) })
+		q.End = func() {
+			events <- "end"
+			endCalls++
+			if endCalls == 1 {
+				close(firstEnd)
+				hold(ctx, endRelease)
+			}
+		}
+
+		q.Add("gt-first", func() { events <- "first job" })
+		recvBounded(t, ctx, firstEnd, "the first period reaching End")
+
+		// The queue is still active while End runs, so this Add queues without
+		// calling Begin.
+		secondRan := make(chan struct{})
+		q.Add("gt-second", func() { events <- "second job"; close(secondRan) })
+
+		// waited carries Wait's result; Wait returns on ctx, and the select's
+		// ctx clause lets this goroutine end with it too.
+		waited := make(chan error, 1)
+		go func() {
+			select {
+			case waited <- q.Wait(ctx):
+			case <-ctx.Done():
+			}
+		}()
+
+		settle()
+		select {
+		case <-secondRan:
+			t.Fatal("the job added during End ran before End returned")
+		default:
+		}
+		select {
+		case err := <-waited:
+			t.Fatalf("Wait returned %v while End still ran, want it to keep waiting", err)
+		default:
+		}
+
+		release.Do(func() { close(endRelease) })
+		settle()
+
+		var got []string
+		for i := 0; i < 6; i++ {
+			got = append(got, recvBounded(t, ctx, events, "the next recorded step"))
+		}
+		if want := []string{"begin", "first job", "end", "begin", "second job", "end"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("the run recorded %v, want %v", got, want)
+		}
+		if err := recvBounded(t, ctx, waited, "Wait returning after the last End"); err != nil {
+			t.Errorf("Wait after the queue emptied = %v, want nil", err)
+		}
+	})
 }
