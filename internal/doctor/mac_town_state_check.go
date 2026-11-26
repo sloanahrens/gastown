@@ -40,6 +40,10 @@ type MacTownStateCheck struct {
 
 	// listing is the path of the pod claim's listing file.
 	listing string
+
+	// data is the listing from standard input, read instead of listing when fromData is set.
+	data     []byte
+	fromData bool
 }
 
 // NewMacTownStateCheck creates the check against the pod claim listing at listing.
@@ -54,12 +58,23 @@ func NewMacTownStateCheck(listing string) *MacTownStateCheck {
 	}
 }
 
+// NewMacTownStateCheckFromListing creates the check against a listing already read into data.
+func NewMacTownStateCheckFromListing(data []byte) *MacTownStateCheck {
+	c := NewMacTownStateCheck("standard input")
+	c.data, c.fromData = data, true
+	return c
+}
+
 // Run lists the town files the pod claim lacks and the ones it holds with other bytes.
 func (c *MacTownStateCheck) Run(ctx *CheckContext) *CheckResult {
-	data, err := os.ReadFile(c.listing)
-	if err != nil {
-		return c.result(StatusError, "Cannot read the pod claim listing "+c.listing,
-			[]string{err.Error()}, "Write the listing from the pod's claim and pass its path to --pod-town")
+	data := c.data
+	if !c.fromData {
+		var err error
+		data, err = os.ReadFile(c.listing)
+		if err != nil {
+			return c.result(StatusError, "Cannot read the pod claim listing "+c.listing,
+				[]string{err.Error()}, "Write the listing from the pod's claim and pass its path to --pod-town")
+		}
 	}
 	pod, err := parsePodTownListing(data)
 	if err != nil {

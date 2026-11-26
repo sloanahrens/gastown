@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -140,7 +141,6 @@ blocks end-to-end — slow, token-cost-bearing, not run by default).
 Use --check mac-town-state --pod-town <listing> to compare the Mac town's
 configuration files with the pod claim. The listing has one line per file in
 the claim, each line ` + doctor.PodTownListingFormat + `. The check refuses to run without --pod-town.
-
 Use --check mac-crew-hooks to find a crew clone whose core.hooksPath points at
 a missing directory or whose .git/config cannot be read. It reads each main
 clone's .git/config without running git, needs no --pod-town, and never
@@ -176,7 +176,7 @@ func init() {
 	doctorCmd.Flags().Lookup("slow").NoOptDefVal = "1s"
 	doctorCmd.Flags().BoolVar(&doctorLiveFire, "live-fire", false, "Include hooks-live-fire (spawns a real claude -p session; slow, token-cost-bearing)")
 	doctorCmd.Flags().StringArrayVar(&doctorCheck, "check", nil, "Run only the named check (repeatable)")
-	doctorCmd.Flags().StringVar(&doctorPodTown, "pod-town", "", "Pod claim listing that mac-town-state compares the Mac town with")
+	doctorCmd.Flags().StringVar(&doctorPodTown, "pod-town", "", "Pod claim listing that mac-town-state compares the Mac town with (- reads it from standard input)")
 	doctorCmd.Flags().StringVar(&doctorKubeconfig, "kubeconfig", "", "Host kubeconfig that --check admin-kubeconfig reads (default $KUBECONFIG else $HOME/.kube/config)")
 	doctorCmd.AddCommand(doctorFixCmd)
 	rootCmd.AddCommand(doctorCmd)
@@ -208,7 +208,14 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// as part of a default (unwrapped) 'gt doctor' invocation.
 		d.Register(doctor.NewHooksLiveFireCheck())
 	}
-	if doctorPodTown != "" {
+	if doctorPodTown == "-" {
+		// Opt-in: the pod claim listing comes from standard input, not a file.
+		listing, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return fmt.Errorf("reading the pod claim listing from standard input: %w", err)
+		}
+		d.Register(doctor.NewMacTownStateCheckFromListing(listing))
+	} else if doctorPodTown != "" {
 		// Opt-in: the check needs the pod claim's listing, which only the
 		// cutover operator has, so a default run never registers it.
 		d.Register(doctor.NewMacTownStateCheck(doctorPodTown))
@@ -265,7 +272,7 @@ func doctorCheckNames(flagNames, args []string) []string {
 // skipped into a clean run.
 func podTownRefusal(names []string, podTown string) error {
 	if podTown == "" && slices.Contains(names, doctor.MacTownStateCheckName) {
-		return fmt.Errorf("%s needs --pod-town <listing> naming the pod claim's listing file", doctor.MacTownStateCheckName)
+		return fmt.Errorf("%s needs --pod-town <listing> naming the pod claim's listing file, or - for standard input", doctor.MacTownStateCheckName)
 	}
 	return nil
 }
