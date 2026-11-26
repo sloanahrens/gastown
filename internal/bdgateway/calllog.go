@@ -73,6 +73,12 @@ const (
 	otherActor = "(other)"
 	// noneActor is the key a call that named no actor is counted under.
 	noneActor = "(none)"
+	// namedNoneActor is the key an actor the caller named "(none)" is counted
+	// under, so it never merges with noneActor's bucket (gt-1eqwnn).
+	namedNoneActor = "(named:none)"
+	// namedOtherActor is the key an actor the caller named "(other)" is counted
+	// under, so it never merges with otherActor's bucket (gt-1eqwnn).
+	namedOtherActor = "(named:other)"
 )
 
 // CallLogOptions configures a CallLog.
@@ -448,6 +454,20 @@ func countRefusal(counts map[string]uint64, reason string) {
 		reason = otherRefusal
 	}
 	counts[reason]++
+}
+
+// sentinelNamedKey maps an actor whose name is one of the call log's sentinel
+// buckets to a key of its own, so a caller cannot be counted as that sentinel.
+// It reports false for every other actor, the empty one included, so the empty
+// actor's meaning stays with the caller.
+func sentinelNamedKey(actor string) (string, bool) {
+	switch actor {
+	case noneActor:
+		return namedNoneActor, true
+	case otherActor:
+		return namedOtherActor, true
+	}
+	return "", false
 }
 
 // countActor counts one call under its actor: a read or a write by write, and a
