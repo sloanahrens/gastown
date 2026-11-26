@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,6 +25,8 @@ var townDeployerServeCmd = &cobra.Command{
 	Short: "Answer one request from the deployer's inbox and exit",
 	Long: `Answer the oldest request in --inbox once: run its plan, apply or rollback
 steps, write the answer into --answers and move the request into <state>/done.
+A request that is not valid is refused without a step: it is answered refused
+and moved into <state>/rejected, and the run exits non-zero.
 
 Examples:
   gt town deployer serve --once --as-user deployer --inbox ~deployer/.gt/deployer/inbox --answers ~deployer/.gt/deployer/answers --state ~deployer/.gt/deployer/state`,
@@ -131,7 +134,7 @@ func runTownDeployerServeIn(ctx context.Context, env townDeployerServeEnv) error
 	}
 	req, err := deployerinbox.ParseRequest(name, data)
 	if err != nil {
-		return fmt.Errorf("the oldest request is not valid, so it is left in the inbox: %w", err)
+		return refuseInvalidRequest(env, path, name, err)
 	}
 
 	// An answer already published for this request means an earlier run answered it and its move
@@ -162,4 +165,41 @@ func runTownDeployerServeIn(ctx context.Context, env townDeployerServeEnv) error
 		return fmt.Errorf("the request %s is answered, but printing its status failed: %w", req.ID, err)
 	}
 	return nil
+}
+
+// detailInvalidRequest is the fixed detail of the refusal an invalid request earns. The answer
+// file sits where others read, so it carries no part of the request's content, and the reason
+// the request failed goes to the command's error instead.
+const detailInvalidRequest = "the request file is not valid"
+
+// refuseInvalidRequest answers the oldest request refused and moves it into <state>/rejected, so
+// it stops holding the inbox, and it returns an error so the run exits non-zero. Nothing is
+// planned or applied. The id is the file's stem, which IsRequestName has held to the id pattern,
+// so the answer path is never built from the file's content.
+func refuseInvalidRequest(env townDeployerServeEnv, path, name string, cause error) error {
+	rejected := filepath.Join(env.state, "rejected")
+	info, err := os.Stat(rejected)
+	if err != nil {
+		return fmt.Errorf("gt town deployer serve needs the directory %s to move an invalid request into: %w", rejected, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("gt town deployer serve needs %s to be a directory to move an invalid request into", rejected)
+	}
+
+	id := strings.TrimSuffix(name, ".json")
+	answerPath := filepath.Join(env.answers, id+".json")
+	// An answer already published means an earlier run answered this request and its move failed;
+	// WriteAnswer would refuse to publish over it, so the move alone finishes the refusal.
+	if _, err := os.Stat(answerPath); errors.Is(err, fs.ErrNotExist) {
+		answer := deployerinbox.Answer{ID: id, Status: deployerinbox.StatusRefused, Detail: detailInvalidRequest, At: env.now()}
+		if err := deployerinbox.WriteAnswer(deployerinbox.OSAnswerFS{}, env.answers, answer); err != nil {
+			return fmt.Errorf("writing the refusal of the invalid request %s: %w", id, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("checking whether the invalid request %s already has an answer at %s: %w", id, answerPath, err)
+	}
+	if err := os.Rename(path, filepath.Join(rejected, name)); err != nil {
+		return fmt.Errorf("moving the invalid request %s into %s: %w", path, rejected, err)
+	}
+	return fmt.Errorf("the oldest request %s is not valid, so it is refused: answer %s, moved to %s: %w", name, answerPath, rejected, cause)
 }
