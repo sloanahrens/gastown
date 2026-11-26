@@ -225,6 +225,46 @@ func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	}
 }
 
+// TestReviewPoolNotStartedTwice checks that a bead already under review is not
+// started again however often the list is offered: the pool has room for more
+// works than the list holds, so only the running check keeps a later offer from
+// starting a second review of a bead.
+func TestReviewPoolNotStartedTwice(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	works := []land.Work{
+		{BeadID: "gt-alpha", Head: "1111111"},
+		{BeadID: "gt-beta", Head: "2222222"},
+		{BeadID: "gt-gamma", Head: "3333333"},
+	}
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// Room for every work: the cap refuses nothing, so the running check is the
+	// only thing that can keep an offer from starting a bead twice. Every
+	// duplicate a defective pool might start must fit in rev.entered too, so the
+	// failure names the count instead of a review stuck on a full channel.
+	rev.entered = make(chan land.Work, len(works)*3)
+	pool := &ReviewPool{Reviewer: rev, Max: len(works) + 1}
+
+	pool.Offer(context.Background(), works)
+	for n := 0; n < len(works); n++ {
+		recvBounded(t, ctx, rev.entered, "a review start")
+	}
+
+	// Every review is held, so every bead is still running when the list is
+	// offered twice more.
+	pool.Offer(context.Background(), works)
+	pool.Offer(context.Background(), works)
+
+	// Let every review the pool started finish. Each start reaches the reviewer,
+	// so the count of calls is what tells a second review of a bead apart.
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	if got, want := reviewCounts(rev), map[string]int{"gt-alpha": 1, "gt-beta": 1, "gt-gamma": 1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reviews per bead %v after offering the list three times, want each bead once: %v", got, want)
+	}
+}
+
 // TestReviewPoolFree checks how many more reviews may start: Max less the
 // entries running, never below 0. It fills the running set directly: a pool
 // holds one entry per review under way, and the past-the-cap row tests the
