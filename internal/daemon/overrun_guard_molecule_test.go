@@ -114,9 +114,15 @@ func (s *molStore) status(t *testing.T, id string) string {
 // handBack runs the production hand-back over s and returns its log.
 func (s *molStore) handBack(t *testing.T) (string, error) {
 	t.Helper()
+	return s.handBackAs(t, stopSeat)
+}
+
+// handBackAs runs the production hand-back of seat over s and returns its log.
+func (s *molStore) handBackAs(t *testing.T, seat overrunSeat) (string, error) {
+	t.Helper()
 	var buf bytes.Buffer
 	logf := func(format string, args ...any) { fmt.Fprintf(&buf, format+"\n", args...) }
-	err := handBackEndingMolecule(context.Background(), s, logf, stopSeat, 20*time.Minute, "")
+	err := handBackEndingMolecule(context.Background(), s, logf, seat, 20*time.Minute, "")
 	return buf.String(), err
 }
 
@@ -344,6 +350,84 @@ func TestHandBackEndingMolecule_RepeatedHandBackIsQuiet(t *testing.T) {
 	if strings.Contains(log, "ended molecule") || strings.Contains(log, "left open") {
 		t.Errorf("repeat hand-back touched the ended molecule:\n%s", log)
 	}
+}
+
+// A seat that made no commit goes back through HandBackNoWork: open, unassigned,
+// unlabelled, with the no-work comment, and its molecule ended. A seat without
+// NoWork keeps the needs-split hand-back.
+func TestHandBackEndingMoleculeNoWork(t *testing.T) {
+	t.Parallel()
+	noWork := stopSeat
+	noWork.NoWork, noWork.EmptyBranchTarget = true, "main"
+
+	t.Run("no-work seat goes back unlabelled and ends its molecule", func(t *testing.T) {
+		t.Parallel()
+		s := newMolStore(t)
+		if _, err := s.handBackAs(t, noWork); err != nil {
+			t.Fatalf("hand-back: %v", err)
+		}
+		if work := s.work(t); work.Status != "open" || work.Assignee != "" || len(work.Labels) != 0 {
+			t.Errorf("bead = status %q assignee %q labels %v, want open, unassigned, unlabelled", work.Status, work.Assignee, work.Labels)
+		}
+		if got := commentTexts(t, s, molWorkBead); len(got) != 1 || !strings.Contains(got[0], "not a size finding") {
+			t.Errorf("comments = %q, want the no-work comment", got)
+		}
+		for _, id := range append([]string{molRoot}, molSteps...) {
+			if st := s.status(t, id); st != "closed" {
+				t.Errorf("%s status = %q, want closed", id, st)
+			}
+		}
+	})
+
+	t.Run("a seat without NoWork keeps needs-split", func(t *testing.T) {
+		t.Parallel()
+		s := newMolStore(t)
+		if _, err := s.handBack(t); err != nil {
+			t.Fatalf("hand-back: %v", err)
+		}
+		if work := s.work(t); !beads.HasLabel(work, polecat.NeedsSplitLabel) {
+			t.Errorf("bead labels = %v, want %s", work.Labels, polecat.NeedsSplitLabel)
+		}
+	})
+
+	t.Run("a skipped no-work hand-back ends nothing", func(t *testing.T) {
+		t.Parallel()
+		s := newMolStore(t)
+		other := "gastown/polecats/someone-else"
+		if err := s.Update(molWorkBead, beads.UpdateOptions{Assignee: &other}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.handBackAs(t, noWork); !errors.Is(err, polecat.ErrHandBackSkipped) {
+			t.Fatalf("hand-back error = %v, want ErrHandBackSkipped", err)
+		}
+		if st := s.status(t, molRoot); st != "open" {
+			t.Errorf("molecule root status = %q, want open", st)
+		}
+	})
+
+	// The first read of the bead is the molecule's; the second is the hand-back's
+	// own state read, which fails: the error is returned and nothing is ended.
+	t.Run("an unreadable bead returns its error and ends nothing", func(t *testing.T) {
+		t.Parallel()
+		s := newMolStore(t)
+		s.showFails = 2
+		if _, err := s.handBackAs(t, noWork); err == nil || !strings.Contains(err.Error(), "read bead") {
+			t.Fatalf("hand-back error = %v, want the bead read error", err)
+		}
+		if st := s.status(t, molRoot); st != "open" {
+			t.Errorf("molecule root status = %q, want open", st)
+		}
+	})
+}
+
+// work reads the work bead, failing the test on a read error.
+func (s *molStore) work(t *testing.T) *beads.Issue {
+	t.Helper()
+	is, err := s.Show(molWorkBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return is
 }
 
 func strPtr(s string) *string { return &s }

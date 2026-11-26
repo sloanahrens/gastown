@@ -2128,12 +2128,12 @@ func TestStop_FinishedBranchAlreadyOnOriginIsHandedBackAsRework(t *testing.T) {
 // goes back rather than back as finished work, which the next polecat's
 // stand-down would turn into another wasted session. A head the rig's target
 // already contains is no work to resume either: the bead goes back with no
-// label and says the branch is empty, so it is slung fresh. A head the seat did
+// label and says it made no commit, so it is slung fresh. A head the seat did
 // commit after its sling and beyond the target still goes back as rework.
 func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	t.Parallel()
 	// keptText is what a stop with unfinished work writes, reworkText what a
-	// stop with finished work writes. The empty-branch row writes neither.
+	// stop with finished work writes. The no-work row writes neither.
 	keptText := "work kept on branch " + stopSeat.Branch + ". Split the bead, then remove the needs-split label."
 	reworkText := "its finished work at abc1234 is already on origin as branch " + stopSeat.Branch + ". " +
 		"The next polecat must reuse branch " + stopSeat.Branch + " and run gt done; do not split the bead."
@@ -2156,7 +2156,7 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			// A branch cut from main at the spawn holds main's commit and
 			// nothing of its own: the head was committed after the sling, but
 			// main already contains it, so resuming it is a wasted session and
-			// the bead starts clean instead of being split.
+			// the bead is handed back as no-work instead of being split.
 			name:      "origin's head is one main already contains",
 			committed: overrunSlung.Add(5 * time.Minute),
 			mainHolds: true,
@@ -2246,7 +2246,7 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 			}
 			switch {
 			case tc.wantLabel == "":
-				for _, part := range []string{"holds no commits beyond main", "nothing to resume", "starts clean"} {
+				for _, part := range []string{"with no commit on its branch", "not a size finding", "starts it fresh"} {
 					if !strings.Contains(comments, part) {
 						t.Errorf("comment %q lacks %q", comments, part)
 					}

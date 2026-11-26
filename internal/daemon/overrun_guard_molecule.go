@@ -28,9 +28,9 @@ type overrunHandBackStore interface {
 
 // handBackEndingMolecule hands the stopped seat's bead back (polecat.HandBackNoted,
 // polecat.HandBackRework when seat.ReworkSHA names finished work already on
-// origin, or polecat.HandBackEmptyBranch when seat.EmptyBranchTarget names a
-// target the branch holds nothing beyond) and then ends the molecule the bead
-// carried, so a stopped run
+// origin, polecat.HandBackEmptyBranch when seat.EmptyBranchTarget names a
+// target the branch holds nothing beyond, or polecat.HandBackNoWork when seat.NoWork
+// is set) and then ends the molecule the bead carried, so a stopped run
 // leaves no open molecule beside the one a re-dispatch pours. The bead is
 // closed by neither step, which is why the closeMoleculeOfClosedBead path
 // (gt-x1d8s) never sees it.
@@ -58,6 +58,8 @@ func handBackEndingMolecule(ctx context.Context, store overrunHandBackStore, log
 	assignee := overrunSeatAssignee(seat)
 	var err error
 	switch {
+	case seat.NoWork:
+		err = polecat.HandBackNoWork(ctx, w, seat.Bead, assignee, elapsed, note)
 	case seat.ReworkSHA != "":
 		err = polecat.HandBackRework(ctx, w, seat.Bead, assignee, seat.Branch, seat.ReworkSHA, elapsed, note)
 	case seat.EmptyBranchTarget != "":
