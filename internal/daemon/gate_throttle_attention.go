@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -42,4 +43,24 @@ func gateThrottleItems(runs []land.GateRun, rig string) []attention.Item {
 		Summary: fmt.Sprintf("%s: the last %d gate runs could not read the runner throttle",
 			rig, gateThrottleWindow),
 	}}
+}
+
+// collectGateThrottle raises the gate-throttle-unread items of every rig the run
+// log names. An unreadable log is the error, so collectAttention keeps the
+// previous items and logs it, rather than reading the log as a rig whose last
+// runs read the throttle (gt-oe1mqo).
+func (s *attentionSources) collectGateThrottle(_ context.Context) ([]attention.Item, error) {
+	runs, _, err := land.ReadGateRuns(s.d.config.TownRoot)
+	if err != nil {
+		return nil, err
+	}
+	var out []attention.Item
+	seen := make(map[string]bool)
+	for _, r := range runs {
+		if !seen[r.Rig] {
+			seen[r.Rig] = true
+			out = append(out, gateThrottleItems(runs, r.Rig)...)
+		}
+	}
+	return out, nil
 }
