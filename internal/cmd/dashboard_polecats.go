@@ -135,6 +135,9 @@ type dashPolecatInputs struct {
 	Seats    []dashSeat
 	Ready    map[string]bool      // beads submitted and waiting to land
 	Sessions map[string]time.Time // tmux session -> last window activity
+	// Heartbeats is a sandboxed seat's session heartbeat, keyed by session name.
+	// It clocks only a running seat the host tmux neither lists nor clocks.
+	Heartbeats map[string]time.Time
 	// SessionsKnown is false when tmux could not be read. The session list is
 	// then empty by failure, not by fact, and a polecat with work and no
 	// session is unknown, not stalled.
@@ -269,9 +272,13 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			p.LastActive = &at
 		} else if s.Item.SessionRunning {
 			// The session is up where the host tmux neither lists nor clocks it
-			// (inside a sandbox), so the row says it has one and leaves its
-			// silence unknown rather than zero (gt-43k7c).
+			// (inside a sandbox), so the row says it has one. Its last activity is
+			// the seat's heartbeat when it has one, and unknown (nil) otherwise,
+			// never zero (gt-43k7c, gt-09j5gz).
 			p.HasSession = true
+			if at, ok := in.Heartbeats[s.Session]; ok && !at.IsZero() {
+				p.LastActive = &at
+			}
 		}
 		var labels []string
 		hasWork := s.Issue != nil
