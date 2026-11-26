@@ -93,7 +93,7 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	if env["GOCACHE"] != "/cache/gocache" || env["GOMODCACHE"] != "/cache/gomodcache" {
 		t.Errorf("env = %d entries, want the two caches under /cache", len(env))
 	}
-	if want := "-p=4 -modcacherw " + GoCompileFlags; env["GOFLAGS"] != want {
+	if want := "-p=4 -modcacherw " + GoTrimpathFlag + " " + GoCompileFlags; env["GOFLAGS"] != want {
 		t.Errorf("GOFLAGS = %q, want %q so cache keys match", env["GOFLAGS"], want)
 	}
 	if got, want := seed.Args[0], "--pins"; got != want {
@@ -109,8 +109,9 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	}
 }
 
-// TestSeedContainerGOFLAGS pins the seed's compile flags: -gcflags is part of Go's build cache
-// key, so a seed entry written without the seats' flag is one no seat can reuse (gt-pk7noy).
+// TestSeedContainerGOFLAGS pins the seed's compile flags: -gcflags and -trimpath are part of Go's
+// build cache key, so a seed entry written without the seats' flags is one no seat can reuse
+// (gt-pk7noy, gt-gd5ith).
 func TestSeedContainerGOFLAGS(t *testing.T) {
 	t.Parallel()
 	job, err := BuildSeedJob(seedInput())
@@ -120,12 +121,18 @@ func TestSeedContainerGOFLAGS(t *testing.T) {
 	if got, want := GoCompileFlags, "-gcflags=all=-dwarf=false"; got != want {
 		t.Errorf("GoCompileFlags = %q, want %q: DWARF is about a third of a package archive", got, want)
 	}
+	if got, want := GoTrimpathFlag, "-trimpath"; got != want {
+		t.Errorf("GoTrimpathFlag = %q, want %q: it makes the cache key independent of the worktree path", got, want)
+	}
 	goflags := envValue(job.Spec.Template.Spec.Containers[0].Env, "GOFLAGS")
-	if want := "-p=4 -modcacherw -gcflags=all=-dwarf=false"; goflags != want {
+	if want := "-p=4 -modcacherw -trimpath -gcflags=all=-dwarf=false"; goflags != want {
 		t.Errorf("seed GOFLAGS = %q, want %q", goflags, want)
 	}
 	if !strings.Contains(goflags, GoCompileFlags) {
 		t.Errorf("seed GOFLAGS = %q does not hold GoCompileFlags %q: the seed writes entries no seat with the flag can reuse", goflags, GoCompileFlags)
+	}
+	if !strings.Contains(goflags, GoTrimpathFlag) {
+		t.Errorf("seed GOFLAGS = %q does not hold GoTrimpathFlag %q: the seed writes entries keyed by its worktree path", goflags, GoTrimpathFlag)
 	}
 }
 
