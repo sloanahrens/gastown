@@ -240,15 +240,64 @@ func TestReconcilerObserveTownStateUnsetIsOverdue(t *testing.T) {
 	}
 }
 
-func TestReconcilerObserveTownStateNilRoot(t *testing.T) {
+func TestReconcilerObserveTownStateReadsNights(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
-	got := observeTownStateDuty(now, &config.ReconcilerConfig{}, "/home/gt/.gt/town-state", nil, fstest.MapFS{})
-	if len(got) != 1 || got[0].Duty != config.ReconcilerDutyTownState {
-		t.Fatalf("observeTownStateDuty = %+v, want one %s observation", got, config.ReconcilerDutyTownState)
+	const (
+		root = "/home/gt/.gt/town-state"
+		// The fake filesystem stands for os.DirFS("/"), so the root is named
+		// without its leading slash.
+		relRoot = "home/gt/.gt/town-state"
+	)
+	// night is one complete town-state night committed age before now.
+	night := func(age time.Duration) fstest.MapFS {
+		return fstest.MapFS{relRoot + "/2026-11-25/state.tar.gz": {Data: []byte("x"), ModTime: now.Add(-age)}}
 	}
-	if obs := got[0]; obs.Verdict != reconcile.VerdictOverdue || !errors.Is(obs.Err, reconcile.ErrNoResult) || !obs.LastGood.IsZero() {
-		t.Errorf("observation = %+v, want overdue with ErrNoResult and no LastGood until the nights are read", obs)
+	readErr := errors.New("reading the town-state nights failed")
+	tests := []struct {
+		name       string
+		cfg        *config.ReconcilerConfig
+		fsys       fs.FS
+		want       reconcile.Verdict
+		wantAge    time.Duration
+		wantErr    error
+		wantAnyErr bool // want an error whose identity the row does not name
+	}{
+		{name: "a night 5h old is ok", fsys: night(5 * time.Hour), want: reconcile.VerdictOK, wantAge: 5 * time.Hour},
+		{name: "a configured limit is the one judged", cfg: &config.ReconcilerConfig{TownStateLimit: "2h"}, fsys: night(3 * time.Hour), want: reconcile.VerdictDue, wantAge: 3 * time.Hour},
+		{name: "past the limit plus grace is overdue", fsys: night(27 * time.Hour), want: reconcile.VerdictOverdue, wantAge: 27 * time.Hour},
+		{name: "no complete night is overdue with no result", fsys: fstest.MapFS{relRoot: {Mode: fs.ModeDir}}, want: reconcile.VerdictOverdue, wantErr: reconcile.ErrNoResult},
+		{name: "a missing root is overdue with no result", fsys: fstest.MapFS{}, want: reconcile.VerdictOverdue, wantErr: reconcile.ErrNoResult},
+		{name: "an unreadable root is unknown with its error", fsys: observeFailingFS{err: readErr}, want: reconcile.VerdictUnknown, wantErr: readErr},
+		{name: "no filesystem is unknown", fsys: nil, want: reconcile.VerdictUnknown, wantAnyErr: true},
+		{name: "unparseable town-state limit is unknown", cfg: &config.ReconcilerConfig{TownStateLimit: "soon"}, fsys: night(5 * time.Hour), want: reconcile.VerdictUnknown, wantAnyErr: true},
+		{name: "unparseable grace is unknown", cfg: &config.ReconcilerConfig{Grace: "later"}, fsys: night(5 * time.Hour), want: reconcile.VerdictUnknown, wantAnyErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := observeTownStateDuty(now, tt.cfg, root, nil, tt.fsys)
+			if len(got) != 1 || got[0].Duty != config.ReconcilerDutyTownState {
+				t.Fatalf("%s: observeTownStateDuty = %+v, want one %s observation", tt.name, got, config.ReconcilerDutyTownState)
+			}
+			obs := got[0]
+			if obs.Verdict != tt.want {
+				t.Errorf("%s: verdict = %q, want %q (observation %+v)", tt.name, obs.Verdict, tt.want, obs)
+			}
+			if tt.wantAge != 0 && obs.Age != tt.wantAge {
+				t.Errorf("%s: Age = %v, want %v", tt.name, obs.Age, tt.wantAge)
+			}
+			if tt.wantErr != nil && !errors.Is(obs.Err, tt.wantErr) {
+				t.Errorf("%s: Err = %v, want it to wrap %v", tt.name, obs.Err, tt.wantErr)
+			}
+			wantErr := tt.wantErr != nil || tt.wantAnyErr
+			if (obs.Err != nil) != wantErr {
+				t.Errorf("%s: Err = %v, want an error present: %v", tt.name, obs.Err, wantErr)
+			}
+			if wantErr && !obs.LastGood.IsZero() {
+				t.Errorf("%s: LastGood = %v, want the zero time on an error", tt.name, obs.LastGood)
+			}
+		})
 	}
 }
 
