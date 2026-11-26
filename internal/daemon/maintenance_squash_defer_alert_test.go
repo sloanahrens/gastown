@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -450,6 +451,103 @@ func TestSquashDeferAlertRaise(t *testing.T) {
 			}
 			if wantKey := "squash:gc-flag-held:" + tt.db; alert.Fingerprint != wantKey {
 				t.Errorf("alert fingerprint = %q, want %q", alert.Fingerprint, wantKey)
+			}
+		})
+	}
+}
+
+// TestSquashDeferAlertRaisesOnce pins the mark a delivered alert leaves: a call
+// a day after the database's first deferral raises one alert and stamps the
+// alert clock under squash-alerted:<db> at the call's instant. A call that
+// raises nothing and one whose delivery failed leave no mark (gt-jyjnxd).
+func TestSquashDeferAlertRaisesOnce(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	refused := errors.New("the notifier refused the alert")
+	tests := []struct {
+		name string
+		db   string
+		now  time.Time
+		// deliveryErr is what the notifier fake returns for the escalation.
+		deliveryErr error
+		// blockMark puts a directory where the mark's entry goes.
+		blockMark bool
+		// wantCalls counts the escalation attempts; wantErr requires an error
+		// (the delivery's when deliveryErr is set); wantMarked is whether the
+		// clock holds squash-alerted:<db> at now.
+		wantCalls  int
+		wantErr    bool
+		wantMarked bool
+	}{
+		{
+			name:       "a call a day after the first deferral raises one alert and marks the database",
+			db:         "gt",
+			now:        first.Add(24 * time.Hour),
+			wantCalls:  1,
+			wantMarked: true,
+		},
+		{
+			name: "a call before the day is up raises nothing and leaves no mark",
+			db:   "gt",
+			now:  first.Add(23*time.Hour + 59*time.Minute),
+		},
+		{
+			name:        "a delivery the notifier refused returns its error and leaves no mark",
+			db:          "gt",
+			now:         first.Add(24 * time.Hour),
+			deliveryErr: refused,
+			wantCalls:   1,
+			wantErr:     true,
+		},
+		{
+			name:      "a mark that cannot be written returns its error and leaves the database unmarked",
+			db:        "gt",
+			now:       first.Add(24 * time.Hour),
+			wantCalls: 1,
+			wantErr:   true,
+			blockMark: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			clock := alertClock{dir: alertClockPath(d.config.TownRoot)}
+			stampSquashDefer(t, clock.dir, squashDeferClockKey("gt"), first)
+			recorder := d.notifier.(*notifyfake.Recorder)
+			if tc.deliveryErr != nil {
+				recorder.Fail(notifyfake.KindEscalate, tc.deliveryErr)
+			}
+			// The literal key, not the helper's answer, so a renamed key fails.
+			key := "squash-alerted:" + tc.db
+			if tc.blockMark {
+				if err := os.MkdirAll(filepath.Join(clock.dir, key), 0o700); err != nil {
+					t.Fatalf("blocking the mark's entry: %v", err)
+				}
+			}
+
+			err := d.raiseSquashDeferAlert(tc.db, tc.now)
+			if tc.wantErr && err == nil {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v) err = nil, want an error", tc.db, tc.now)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v): %v", tc.db, tc.now, err)
+			}
+			if tc.deliveryErr != nil && !errors.Is(err, tc.deliveryErr) {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v) err = %v, want %v", tc.db, tc.now, err, tc.deliveryErr)
+			}
+
+			if raised := recorder.Escalations(); len(raised) != tc.wantCalls {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v) made %d escalation attempts, want %d",
+					tc.db, tc.now, len(raised), tc.wantCalls)
+			}
+
+			marked, ok := clock.last(key)
+			if ok != tc.wantMarked {
+				t.Fatalf("the alert clock holds %s = %t, want marked %t", key, ok, tc.wantMarked)
+			}
+			if tc.wantMarked && !marked.Equal(tc.now) {
+				t.Errorf("%s = %v, want the call's instant %v", key, marked, tc.now)
 			}
 		})
 	}

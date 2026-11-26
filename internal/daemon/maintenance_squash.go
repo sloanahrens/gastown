@@ -1430,18 +1430,33 @@ func squashDeferAlertMessage(db string, held time.Duration) string {
 	return fmt.Sprintf("squash: %s deferred by the gc flag for %dh", db, int(held/time.Hour))
 }
 
+// squashAlertedClockKey is the alert clock key marking db's squash deferral
+// alert as raised: one entry per database (gt-jyjnxd). db is a name
+// config.ParseSquash accepted, so it holds only letters, digits, underscore and
+// hyphen before it reaches this entry's path.
+func squashAlertedClockKey(db string) string {
+	return "squash-alerted:" + db
+}
+
 // raiseSquashDeferAlert raises the deferral alert for db when the gc flag has
 // held its squash checks for squashDeferAlertAfter, and returns the delivery
 // error when it does. A database with no deferral stamp and one deferred for
 // less than a day raise nothing. The stamp is read from the alert clock, so a
 // daemon roll does not restart the wait (gt-b8na21).
-// Whether the database was already alerted is not read yet: the mark is
-// gt-jyjnxd, so the due decision is asked with alerted false. The deferral site
-// (gt-2o03sg) is the caller; until it lands this function has none.
+//
+// A delivered alert is marked under squashAlertedClockKey, so the alerted fact
+// is on disk; reading the mark to raise no second alert is gt-w9z5ob. A failed
+// delivery, and a mark that cannot be written, return their error and leave no
+// mark, so the next deferral asks again (gt-7z081y) rather than losing the
+// alert. The deferral site (gt-2o03sg) is the caller; until it lands this
+// function has none, and this bead's test is what drives it.
 func (d *Daemon) raiseSquashDeferAlert(db string, now time.Time) error {
 	first := d.squashDeferredSince(db)
 	if !squashDeferAlertDueSince(first, now, false) {
 		return nil
 	}
-	return d.escalateAlertErr("squash:gc-flag-held:"+db, "squash", squashDeferAlertMessage(db, now.Sub(first)))
+	if err := d.escalateAlertErr("squash:gc-flag-held:"+db, "squash", squashDeferAlertMessage(db, now.Sub(first))); err != nil {
+		return err
+	}
+	return alertClock{dir: alertClockPath(d.config.TownRoot)}.stamp(squashAlertedClockKey(db), now)
 }
