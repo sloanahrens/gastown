@@ -175,7 +175,8 @@ func planWantPhase(static map[string]bool, f planFile) string {
 // TestClusterShapePlanPhases: plan.json gives every file its phase, P for the
 // static set and W for the workloads; each embedded static document is one P
 // file, and no Deployment is P. The output names P then W, in that order, before
-// the plan id.
+// the plan id. One static object differs (planKubectl), so both phases stay, in
+// plan.json, in the id and in the output.
 func TestClusterShapePlanPhases(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
@@ -213,6 +214,51 @@ func TestClusterShapePlanPhases(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanPhasesPOmitted: when no static object differs from the
+// cluster's, plan.json lists no phase P file, though the render wrote the static
+// documents beside it. The id and the short id printed cover exactly the listed W
+// files in apply order, and the output names only W.
+func TestClusterShapePlanPhasesPOmitted(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlStaticEqual(t), out, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	for _, rf := range rec.Files {
+		if rf.Phase != planPhaseWorkloads {
+			t.Errorf("plan.json lists %s as phase %q, want no phase P file when no static object differs", rf.Name, rf.Phase)
+		}
+	}
+	listed := planListedFiles(t, dir)
+	static := planStaticDocs(t)
+	var workloads []planFile
+	for _, f := range planFilesIn(t, dir) {
+		if planWantPhase(static, f) == planPhaseWorkloads {
+			workloads = append(workloads, f)
+		}
+	}
+	if written := len(planFilesIn(t, dir)) - len(workloads); written != len(static) {
+		t.Fatalf("the render wrote %d static files, want the %d embedded static documents it must still write", written, len(static))
+	}
+	if len(listed) != len(workloads) {
+		t.Fatalf("plan.json lists %d files, want the %d workload files the render wrote", len(listed), len(workloads))
+	}
+	for i := range listed {
+		if listed[i].Name != workloads[i].Name {
+			t.Fatalf("plan.json file %d = %s, want %s in apply order", i, listed[i].Name, workloads[i].Name)
+		}
+	}
+	full, short := planID(listed)
+	if rec.ID != full {
+		t.Fatalf("plan.json id = %q, want the id of the listed files %q", rec.ID, full)
+	}
+	want := fmt.Sprintf("Phases in apply order: W (workloads, %d files)\n%s\n", len(listed), short)
+	if got := out.String(); got != want {
+		t.Fatalf("the plan printed %q, want only the W phase and the short id:\n%s", got, want)
+	}
+}
+
 // planFilesIn reads the files of the plan in dir, in apply order. plan.json is
 // left out: it records the plan, and the plan id does not name it.
 func planFilesIn(t *testing.T, dir string) []planFile {
@@ -247,6 +293,23 @@ func readPlanRecord(t *testing.T, dir string) (planRecord, []byte) {
 		t.Fatalf("decoding %s: %v", planFileName, err)
 	}
 	return rec, body
+}
+
+// planListedFiles reads the files plan.json lists in dir, in the order it lists
+// them: the files the plan id names. A phase P file the plan omits is on disk
+// beside them but not listed.
+func planListedFiles(t *testing.T, dir string) []planFile {
+	t.Helper()
+	rec, _ := readPlanRecord(t, dir)
+	files := make([]planFile, 0, len(rec.Files))
+	for _, rf := range rec.Files {
+		body, err := os.ReadFile(filepath.Join(dir, rf.Name))
+		if err != nil {
+			t.Fatalf("reading the listed file %s: %v", rf.Name, err)
+		}
+		files = append(files, planFile{Name: rf.Name, Data: body})
+	}
+	return files
 }
 
 // TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne: plan.json holds the
@@ -583,7 +646,7 @@ func TestClusterShapePlanStaticGetsOnce(t *testing.T) {
 		want[key] = 1
 	}
 	got := map[string]int{}
-	kube := planKubectl(t)
+	kube := planKubectlStaticEqual(t)
 	counting := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
 		if resource, namespace, ok := planGetOf(name, args); ok && !strings.HasPrefix(resource, "deployment/") {
 			got[resource+" "+namespace]++
@@ -597,7 +660,7 @@ func TestClusterShapePlanStaticGetsOnce(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("the plan's static gets = %v, want %v", got, want)
 	}
-	_, short := planID(planFilesIn(t, dir))
+	_, short := planID(planListedFiles(t, dir))
 	if printed := out.String(); !strings.HasSuffix(printed, "\n"+short+"\n") {
 		t.Fatalf("the plan printed %q, want the short id %q last", printed, short)
 	}
@@ -619,11 +682,38 @@ func planLiveAnswer(t *testing.T, resource, revision string) string {
 	return string(body)
 }
 
+// planStaticLiveOneDrifted is planStaticLive with the live value of the gt-ci
+// PriorityClass changed from its rendered 100, so exactly one static object differs.
+func planStaticLiveOneDrifted(t *testing.T) map[string]string {
+	t.Helper()
+	live := planStaticLive(t)
+	const key = "priorityclass/gt-ci "
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(live[key]), &doc); err != nil {
+		t.Fatalf("decoding the live %s: %v", key, err)
+	}
+	doc["value"] = 101
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the live %s: %v", key, err)
+	}
+	live[key] = string(body)
+	return live
+}
+
 // planKubectlAnswering is the plan's cluster read: a get of one Deployment gives
-// answer's output and exit, and a get of one static object gives its own document.
+// answer's output and exit, and a get of one static object gives its document as
+// planStaticLiveOneDrifted holds it, so one static object differs and the plan
+// keeps phase P.
 func planKubectlAnswering(t *testing.T, answer func(resource string) (string, int, error)) update.RunFunc {
 	t.Helper()
-	static := planStaticLive(t)
+	return planKubectlReading(t, planStaticLiveOneDrifted(t), answer)
+}
+
+// planKubectlReading is the plan's cluster read with static as the answer to each
+// static object's get, keyed as planStaticLive keys it.
+func planKubectlReading(t *testing.T, static map[string]string, answer func(resource string) (string, int, error)) update.RunFunc {
+	t.Helper()
 	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 		resource, namespace, ok := planGetOf(name, args)
 		if !ok {
@@ -681,12 +771,26 @@ func planRevisionOf(name string) string {
 }
 
 // planKubectl answers each Deployment with the revision planRevisionOf gives its
-// name, which planWantRevision expects for the rendered Deployment.
+// name, which planWantRevision expects for the rendered Deployment. One static
+// object differs, so the plan keeps phase P.
 func planKubectl(t *testing.T) update.RunFunc {
 	t.Helper()
-	return planKubectlAnswering(t, func(resource string) (string, int, error) {
+	return planKubectlAnswering(t, planRevisionAnswer(t))
+}
+
+// planKubectlStaticEqual is planKubectl over a cluster whose static objects all
+// equal the rendered set, so no static object differs and the plan omits phase P.
+func planKubectlStaticEqual(t *testing.T) update.RunFunc {
+	t.Helper()
+	return planKubectlReading(t, planStaticLive(t), planRevisionAnswer(t))
+}
+
+// planRevisionAnswer answers a Deployment's get with the revision planRevisionOf
+// gives its name.
+func planRevisionAnswer(t *testing.T) func(resource string) (string, int, error) {
+	return func(resource string) (string, int, error) {
 		return planLiveAnswer(t, resource, planRevisionOf(strings.TrimPrefix(resource, "deployment/"))), 0, nil
-	})
+	}
 }
 
 // planWantDeployment is the resource a rendered file names when it is a Deployment,
@@ -1011,13 +1115,17 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 }
 
 // TestClusterShapePlanLongText: the command's help says the plan reads the
-// cluster's Deployments with get only and writes nothing to any cluster, and no
-// longer says that no cluster is contacted.
+// cluster's Deployments and the static objects with get only and writes nothing
+// to any cluster, says a phase P file is listed only when a static object differs,
+// and no longer says that no cluster is contacted.
 func TestClusterShapePlanLongText(t *testing.T) {
 	t.Parallel()
 	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
-	if !strings.Contains(long, "reads the cluster's Deployments with get only and writes nothing to any cluster") {
-		t.Errorf("Long text = %q, want it to say the plan reads the cluster's Deployments with get only and writes nothing to any cluster", long)
+	if !strings.Contains(long, "reads the cluster's Deployments and the static objects with get only and writes nothing to any cluster") {
+		t.Errorf("Long text = %q, want it to say the plan reads the cluster's Deployments and the static objects with get only and writes nothing to any cluster", long)
+	}
+	if !strings.Contains(long, "phase P file is listed only when a static object differs") {
+		t.Errorf("Long text = %q, want it to say a phase P file is listed only when a static object differs", long)
 	}
 	if strings.Contains(long, "no cluster is contacted") {
 		t.Errorf("Long text = %q, still says no cluster is contacted", long)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -90,15 +91,16 @@ var townClusterPlanCmd = &cobra.Command{
 	Short: "Render the desired set into a directory and print its plan id",
 	Long: `Render the desired set into --out from the flags the last live render recorded,
 with --include-static, and print the short form of the plan's id. Nothing is
-applied. The plan reads the cluster's Deployments with get only and writes nothing
-to any cluster.
+applied. The plan reads the cluster's Deployments and the static objects with get
+only and writes nothing to any cluster.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
-plan writes plan.json into --out with the full id, each file's name and SHA-256,
-and the revision the cluster holds for each Deployment; a Deployment the cluster
-does not hold is recorded absent, with no revision. A plan that fails before that
-leaves no plan.json.`,
+plan writes plan.json into --out with the full id, each file's name, phase and
+SHA-256, and the revision the cluster holds for each Deployment; a Deployment the
+cluster does not hold is recorded absent, with no revision. A phase P file is
+listed only when a static object differs from the cluster's, and then the id
+names it too. A plan that fails before that leaves no plan.json.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runTownClusterPlan(cmd.Context(), realClusterRenderDeps(io.Discard), realRunFunc(), cmd.OutOrStdout(), clusterPlanOut, atomicfile.WriteJSON)
@@ -192,7 +194,8 @@ func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
 
 // planStaticDiffers reports whether any target differs from the cluster's live
 // object, compared by driftTarget.differences. Every target is read even after one
-// differs, so a failed read refuses the plan. The plan does not use the result yet.
+// differs, so a failed read refuses the plan. runTownClusterPlan lists phase P only
+// when this reports true.
 func planStaticDiffers(ctx context.Context, encode func(io.Writer, any) error, kube update.RunFunc, targets []driftTarget) (bool, error) {
 	d := clusterDriftDeps{render: clusterRenderDeps{encode: encode}, kubectl: kube}
 	differs := false
@@ -212,9 +215,11 @@ func planStaticDiffers(ctx context.Context, encode func(io.Writer, any) error, k
 // and the short plan id to out. The plan takes the file set, its apply order and
 // its bytes from the render's own writes, so the id names exactly what the render
 // wrote; the render's own output is dropped, so only the phases and the id are
-// printed. plan.json is written only after every read succeeds, and the output
-// only after it is written, so a refusal, a render error, a failed read or a
-// failed write prints nothing.
+// printed. Phase P is listed only when a static object differs from the cluster's:
+// when none does, plan.json and the id name the workloads alone, and the phases
+// line names only W. plan.json is written only after every read succeeds, and the
+// output only after it is written, so a refusal, a render error, a failed read or
+// a failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -255,41 +260,55 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	if err := runClusterRender(d, f); err != nil {
 		return err
 	}
-	files := make([]planFile, len(names))
-	record := planRecord{Files: make([]planRecordFile, len(names))}
+	// Every static object builds its target through the drift walk's builder, so a
+	// static document that names another object refuses the plan here, before
+	// plan.json is written. Each target is then read, and a read that fails refuses
+	// the plan the same way. Whether any target differs decides whether phase P is
+	// listed.
+	targets, err := planStaticTargets(staticObjects)
+	if err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+	}
+	differs, err := planStaticDiffers(ctx, d.encode, kube, targets)
+	if err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+	}
+	files := make([]planFile, 0, len(names))
+	record := planRecord{Files: make([]planRecordFile, 0, len(names))}
 	counts := map[string]int{}
 	for i, name := range names {
-		files[i] = planFile{Name: name, Data: bodies[i]}
+		phase := planPhaseWorkloads
+		if staticDocs[string(bodies[i])] {
+			phase = planPhaseStatic
+		}
+		// With no static object differing, the static documents change nothing, so
+		// phase P is dropped from plan.json and from the id together.
+		if phase == planPhaseStatic && !differs {
+			continue
+		}
+		files = append(files, planFile{Name: name, Data: bodies[i]})
 		sum := sha256.Sum256(bodies[i])
 		revision, resourceVersion, absent, err := planLiveVersions(ctx, kube, bodies[i])
 		if err != nil {
 			return err
 		}
-		phase := planPhaseWorkloads
-		if staticDocs[string(bodies[i])] {
-			phase = planPhaseStatic
-		}
 		counts[phase]++
-		record.Files[i] = planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent}
-	}
-	// Every static object builds its target through the drift walk's builder, so a
-	// static document that names another object refuses the plan here, before
-	// plan.json is written. Each target is then read, and a read that fails refuses
-	// the plan the same way.
-	targets, err := planStaticTargets(staticObjects)
-	if err != nil {
-		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
-	}
-	if _, err := planStaticDiffers(ctx, d.encode, kube, targets); err != nil {
-		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+		record.Files = append(record.Files, planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent})
 	}
 	full, short := planID(files)
 	record.ID = full
 	if err := writeJSON(filepath.Join(outDir, planFileName), record); err != nil {
 		return fmt.Errorf("gt town cluster plan: cannot write %s, so the plan is not whole and no id was printed: %w", filepath.Join(outDir, planFileName), err)
 	}
-	fmt.Fprintf(out, "Phases in apply order: %s (static, %d files), then %s (workloads, %d files)\n",
-		planPhaseStatic, counts[planPhaseStatic], planPhaseWorkloads, counts[planPhaseWorkloads])
+	// The phases line names only the phases the plan holds, each with its file count.
+	var held []string
+	if counts[planPhaseStatic] > 0 {
+		held = append(held, fmt.Sprintf("%s (static, %d files)", planPhaseStatic, counts[planPhaseStatic]))
+	}
+	if counts[planPhaseWorkloads] > 0 {
+		held = append(held, fmt.Sprintf("%s (workloads, %d files)", planPhaseWorkloads, counts[planPhaseWorkloads]))
+	}
+	fmt.Fprintf(out, "Phases in apply order: %s\n", strings.Join(held, ", then "))
 	fmt.Fprintln(out, short)
 	return nil
 }
