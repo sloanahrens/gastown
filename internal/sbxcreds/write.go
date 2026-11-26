@@ -8,9 +8,9 @@ import (
 )
 
 // writeKubeconfig creates path with mode 0600 and refuses a path that exists.
-// The bytes go to a temporary beside path and are hard-linked into place, so path
-// never holds a partial kubeconfig, and a name that appears in between fails the
-// link. Errors name paths, never the content.
+// The bytes go to a temporary beside path and are hard-linked into place, so a
+// name that appears in between fails the link instead of being replaced, and path
+// never holds a partial kubeconfig. Errors name paths, never the content.
 func writeKubeconfig(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -24,9 +24,12 @@ func writeKubeconfig(path string, data []byte) error {
 	if werr == nil && cerr == nil && derr == nil {
 		perr = os.Link(temp, path)
 	}
-	cause := errors.Join(werr, cerr, derr, perr)
-	if cause != nil {
-		cause = fmt.Errorf("could not write the kubeconfig %s: %w", path, cause)
+	rerr := os.Remove(temp)
+	if cause := errors.Join(werr, cerr, derr, perr); cause != nil {
+		return errors.Join(fmt.Errorf("could not write the kubeconfig %s: %w", path, cause), rerr)
 	}
-	return errors.Join(cause, os.Remove(temp))
+	if rerr != nil {
+		return fmt.Errorf("kubeconfig %s is written, but its temporary %s was not removed: %w", path, temp, rerr)
+	}
+	return nil
 }
