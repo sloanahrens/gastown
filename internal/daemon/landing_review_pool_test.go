@@ -595,6 +595,66 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWiringHoldStopsReviews pins that a listed rig's pool starts no
+// ahead review while the daemon holds new landing passes off: the pool's Begin
+// is the daemon's own landing-pass gate, so each hold a job takes answers false,
+// and the released daemon answers true (gt-zajcg2).
+func TestReviewPoolWiringHoldStopsReviews(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		hold string
+	}{
+		{name: "upgrade restart hold", hold: landingHoldUpgradeRestart},
+		{name: "shutdown drain hold", hold: landingHoldShutdownDrain},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+			env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
+			if worker.Pool == nil {
+				t.Fatal("the pool is on for the rig but the Worker got no pool")
+			}
+			if worker.Pool.Begin == nil {
+				t.Fatal("Pool.Begin is nil; want the daemon's landing-pass gate so a hold stops new ahead reviews")
+			}
+			if worker.Pool.End == nil {
+				t.Fatal("Pool.End is nil; want the daemon's landing-pass end so the slot a true Begin takes is given back")
+			}
+
+			d.landingHolds.hold(tc.hold)
+			if worker.Pool.Begin() {
+				t.Fatalf("Begin returned true with the %s taken; want false so no ahead review starts", tc.hold)
+			}
+
+			d.landingHolds.release(tc.hold)
+			if !worker.Pool.Begin() {
+				t.Fatalf("Begin returned false after the %s was released; want true", tc.hold)
+			}
+			if got := d.landingPasses.Load(); got != 1 {
+				t.Fatalf("in-flight count = %d after a true Begin, want 1: the review holds a landing pass", got)
+			}
+			worker.Pool.End()
+			if got := d.landingPasses.Load(); got != 0 {
+				t.Fatalf("in-flight count = %d after Pool.End, want 0: the review gave its landing pass back", got)
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
+			}
+		})
+	}
+}
+
 // TestReviewPoolWiringNoOMConfigLeavesTheWorker pins that a listed rig whose
 // om config file is missing or cannot be named leaves the Worker exactly as it
 // was built: Pool and Stored stay nil, so a landing whose queue-time review

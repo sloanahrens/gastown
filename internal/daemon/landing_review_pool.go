@@ -78,11 +78,18 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	// The Worker gets the pool that fills the store and the store itself as its
 	// hints, so a review that finishes while the bead queues is the verdict its
 	// landing finds. Its lines go to the log the landing writes to (gt-sywmws).
+	// Begin is the daemon's landing-pass gate, so an ahead review counts as a
+	// landing pass: while a hold or drain is on Begin answers false and the pool
+	// starts nothing. End gives back the slot that a true Begin took, once per
+	// review, so the in-flight count returns to zero when the pool is idle
+	// (gt-zajcg2).
 	w.Stored = l.Ahead
 	w.Pool = &landworker.ReviewPool{
 		Reviewer: l,
 		Hints:    l.Ahead,
 		Max:      max,
+		Begin:    d.beginLandingPass,
+		End:      d.landingPassEnded,
 		Logf:     w.Logf,
 	}
 	return nil
