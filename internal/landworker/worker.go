@@ -692,6 +692,12 @@ func (w *Worker) landReady(ctx context.Context) Report {
 			rep.Skipped++
 			continue
 		}
+		// The pool reviews this bead while the pass lands the beads ahead of it,
+		// so the landing reuses that verdict instead of starting a second om run:
+		// it waits for the review of the head it is about to land (gt-m9gfv9).
+		if !w.waitForReview(ctx, issue) {
+			return rep
+		}
 		w.process(ctx, issue, &rep)
 		w.rememberOutcome(issue)
 		// A landing takes minutes, and a bead made ready while it ran must land
@@ -1029,6 +1035,28 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true, nil
 	}
 	return land.Work{}, false, nil
+}
+
+// waitForReview waits for the review pool's review of the head issue's own
+// submission names, the head this pass is about to land, so the landing reuses
+// that verdict instead of starting a second om run (gt-m9gfv9). It reports
+// false when ctx is done once the wait ends, and the caller then returns from
+// the pass without landing the bead: ctx is the context Pass was called with,
+// so a daemon stop ends the wait and the pass. It reports true without waiting
+// when no pool is set, or when the bead names no submission — its comments
+// cannot be read, or they name none — since process reports such a bead as it
+// did before the pool existed. A review of the bead at another head returns at
+// once (ReviewPool.Await), as does one that is not running.
+func (w *Worker) waitForReview(ctx context.Context, issue *beads.Issue) bool {
+	if w.Pool == nil {
+		return true
+	}
+	work, ok, err := w.resolveWork(issue)
+	if err != nil || !ok {
+		return true
+	}
+	w.Pool.Await(ctx, issue.ID, work.Head)
+	return ctx.Err() == nil
 }
 
 // offerReview offers the works reviewWorks builds for issues, leaving out the
