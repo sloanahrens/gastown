@@ -508,7 +508,8 @@ func sweepTableLine(t *testing.T, dom *pageDOM, line int) []drawn {
 
 // The pane draws the section's sweeps as a table under the sweep block and
 // above its commit rows (gt-8a819i): one line per sweep, newest first, with the
-// when, the commit and the total, and a dash for a total the record lost.
+// when, the commit, the three tier verdicts and the total, and a dash for a
+// total the record lost.
 func TestSystemUpdatesSweepTable(t *testing.T) {
 	t.Parallel()
 
@@ -522,12 +523,12 @@ func TestSystemUpdatesSweepTable(t *testing.T) {
 	if got := dom.descend(t, "systemupdates", 0).Kids; got != 6 {
 		t.Fatalf("the table drew %d lines, want a header and one per sweep", got)
 	}
-	for i, want := range []string{"When", "Commit", "Total"} {
+	for i, want := range []string{"When", "Commit", "Shell", "Integration", "Race", "Total"} {
 		if got := dom.descend(t, "systemupdates", 0, 0, i).Text; got != want {
 			t.Errorf("header cell %d reads %q, want %q", i, got, want)
 		}
 	}
-	if got := dom.descend(t, "systemupdates", 0, 0, 2).Class; got != "n" {
+	if got := dom.descend(t, "systemupdates", 0, 0, 5).Class; got != "n" {
 		t.Errorf("the Total header wears %q, want the right-aligned column class", got)
 	}
 
@@ -554,8 +555,8 @@ func TestSystemUpdatesSweepTable(t *testing.T) {
 		{"eeee55556666", "60s"},
 	} {
 		cells := sweepTableLine(t, dom, line+1)
-		if len(cells) != 3 {
-			t.Fatalf("sweep line %d drew %d cells, want three", line, len(cells))
+		if len(cells) != 6 {
+			t.Fatalf("sweep line %d drew %d cells, want six", line, len(cells))
 		}
 		if cells[0].Text != whens[line] {
 			t.Errorf("sweep line %d reads the when %q, want %q", line, cells[0].Text, whens[line])
@@ -563,8 +564,8 @@ func TestSystemUpdatesSweepTable(t *testing.T) {
 		if line != 3 && !strings.Contains(cells[0].Title, stamps[line]) {
 			t.Errorf("sweep line %d's when is titled %q, want the feed's stamp %q in it", line, cells[0].Title, stamps[line])
 		}
-		if cells[1].Text != want.sha || cells[2].Text != want.total || cells[2].Class != "n" {
-			t.Errorf("sweep line %d reads the commit %q and total %q wearing %q, want %q and %q wearing n", line, cells[1].Text, cells[2].Text, cells[2].Class, want.sha, want.total)
+		if cells[1].Text != want.sha || cells[5].Text != want.total || cells[5].Class != "n" {
+			t.Errorf("sweep line %d reads the commit %q and total %q wearing %q, want %q and %q wearing n", line, cells[1].Text, cells[5].Text, cells[5].Class, want.sha, want.total)
 		}
 	}
 	// The full sha is kept in the commit cell's title, where the cut one hides it.
@@ -603,5 +604,64 @@ func TestSystemUpdatesSweepTableDrawsNothing(t *testing.T) {
 				t.Errorf("the pane's only line drew %d children, want a commit row rather than a table", got)
 			}
 		})
+	}
+}
+
+// sweepVerdictSweep is one sweep of the verdict test: its stages as the feed
+// sends them, and no stages key for a sweep whose record kept none.
+func sweepVerdictSweep(at string, stages ...any) map[string]any {
+	row := map[string]any{"at": at, "sha": "aa11bb22cc33"}
+	if stages != nil {
+		row["stages"] = stages
+	}
+	return row
+}
+
+// The sweeps table draws each sweep's shell, integration and race verdict
+// (gt-uccxvv): the word the sweep recorded, and a dash for a tier it did not
+// run and for a stage that carries no verdict — never a question mark. A
+// stage for a tier the table has no column for is not drawn as one.
+func TestSystemUpdatesSweepVerdicts(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", sweepTableState(systemUpdatesSources{}, []any{
+		sweepVerdictSweep("2020-03-05T21:40:00Z",
+			systemUpdateStage("shell", "GREEN"),
+			systemUpdateStage("integration", "GREEN"),
+			systemUpdateStage("race", "GREEN")),
+		sweepVerdictSweep("2020-03-05T21:30:00Z",
+			systemUpdateStage("shell", "GREEN"),
+			systemUpdateStage("integration", "RED")),
+		sweepVerdictSweep("2020-03-05T21:20:00Z",
+			map[string]any{"tier": "shell"},
+			map[string]any{"tier": "integration", "verdict": ""},
+			map[string]any{"tier": "race", "verdict": "  "}),
+		sweepVerdictSweep("2020-03-05T21:10:00Z"),
+		sweepVerdictSweep("2020-03-05T21:00:00Z", systemUpdateStage("e2e", "RED")),
+	}))
+
+	for i, want := range []string{"When", "Commit", "Shell", "Integration", "Race", "Total"} {
+		if got := dom.descend(t, "systemupdates", 0, 0, i).Text; got != want {
+			t.Errorf("header cell %d reads %q, want %q", i, got, want)
+		}
+	}
+	tiers := []string{"shell", "integration", "race"}
+	for line, want := range [][3]string{
+		{"GREEN", "GREEN", "GREEN"},
+		{"GREEN", "RED", "–"},
+		{"–", "–", "–"},
+		{"–", "–", "–"},
+		{"–", "–", "–"},
+	} {
+		cells := sweepTableLine(t, dom, line+1)
+		if len(cells) != 6 {
+			t.Fatalf("sweep line %d drew %d cells, want six", line, len(cells))
+		}
+		for col, tier := range tiers {
+			if got := cells[col+2].Text; got != want[col] {
+				t.Errorf("sweep line %d's %s cell reads %q, want %q", line, tier, got, want[col])
+			}
+		}
 	}
 }

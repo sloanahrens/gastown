@@ -2989,6 +2989,9 @@ const SYSTEM_UPDATE_STAGES = ["post-land", "shell", "integration", "race", "imag
 // A partial roll wears amber with the failure mark rather than failed's red:
 // the install and restart happened, the run did not pass (gt-c8yqh9).
 const SYSTEM_UPDATE_CHIPS = {ok: ["good", "✓", "passed"], failed: ["badc", "✗", "failed"], partial: ["warnc", "✗", "partial"], running: ["warnc", "◌", "running"], absent: ["absent", "–", "not run"], unknown: ["warnc", "?", "not read"]};
+// SYSTEM_UPDATE_SWEEP_TIERS is the tier list the sweeps table draws a verdict
+// column for, in the order the columns sit (gt-uccxvv).
+const SYSTEM_UPDATE_SWEEP_TIERS = ["shell", "integration", "race"];
 
 // The pair chip (gt-jug4e0) sits between the images and roll chips and reads the
 // row's own Pair, as the hub classified it: a ready pair waits amber for its
@@ -3196,22 +3199,34 @@ function systemUpdateSweepWhen(at) {
   return day + clock(at).slice(0, 5);
 }
 
+// systemUpdateSweepVerdict is one sweep's verdict for one tier as the table
+// draws it (gt-uccxvv): the word the sweep's stage recorded, or a dash for a
+// tier the sweep did not run and for a stage that carries no verdict.
+function systemUpdateSweepVerdict(stages, tier) {
+  const stage = (stages || []).find(st => st.tier === tier);
+  const word = stage && stage.verdict != null ? String(stage.verdict).trim() : "";
+  return word || "–";
+}
+
 // systemUpdateSweepsTable is the table of the section's sweeps (gt-8a819i): one
 // line per sweep, in the feed's order, which is newest first, with the when,
-// the commit and the cycle's total. fmtDur draws a dash for a total the record
-// lost. An unread sweep source draws no table, and neither does a reading with
-// no sweeps: an unread section is not one that says there were none. It draws
-// no verdicts and no failed packages.
+// the commit, the verdict of each tier in SYSTEM_UPDATE_SWEEP_TIERS and the
+// cycle's total. A tier column draws the verdict word the sweep recorded, and a
+// dash for a tier the sweep did not run and for a stage that carries no
+// verdict, never a question mark (gt-uccxvv). fmtDur draws a dash for a total
+// the record lost. An unread sweep source draws no table, and neither does a
+// reading with no sweeps: an unread section is not one that says there were
+// none. It draws no failed packages.
 function systemUpdateSweepsTable(su) {
   if (!su || systemUpdateStageUnknown(su, "sweep")) return null;
   const sweeps = su.sweeps || [];
   if (!sweeps.length) return null;
   const table = el("table"), head = el("tr");
-  [["When"], ["Commit"], ["Total", "the whole cycle, every tier the sweep ran", 1]].forEach(([h, tip, num]) => {
-    const th = el("th", num ? "n" : "", h);
-    if (tip) th.title = tip;
-    head.append(th);
-  });
+  head.append(el("th", "", "When"), el("th", "", "Commit"));
+  for (const tier of SYSTEM_UPDATE_SWEEP_TIERS) head.append(el("th", "", tier[0].toUpperCase() + tier.slice(1)));
+  const total = el("th", "n", "Total");
+  total.title = "the whole cycle, every tier the sweep ran";
+  head.append(total);
   table.append(head);
   for (const row of sweeps) {
     const tr = el("tr");
@@ -3222,6 +3237,7 @@ function systemUpdateSweepsTable(su) {
     const commit = el("td", "title", sha.slice(0, 12) || "–");
     if (sha.length > 12) commit.title = sha;
     tr.append(commit);
+    for (const tier of SYSTEM_UPDATE_SWEEP_TIERS) tr.append(el("td", "", systemUpdateSweepVerdict(row.stages, tier)));
     tr.append(el("td", "n", fmtDur(row.secs)));
     table.append(tr);
   }
