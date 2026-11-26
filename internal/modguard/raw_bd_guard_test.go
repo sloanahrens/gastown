@@ -2,7 +2,6 @@ package modguard
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -269,10 +268,10 @@ func TestRawBdSharedTreeParity(t *testing.T) {
 	}
 }
 
-// rawBdRealScan reads the module root for TestNoNewRawBdSites; a test replaces it to skip the walk.
-var rawBdRealScan = func() (map[rawBdKey]int, int, error) {
-	root := filepath.Join("..", "..")
-	r, err := os.OpenRoot(root)
+// rawBdRealScan takes the counts of the module root's raw bd sites and the Go
+// files they were read from.
+func rawBdRealScan() (map[rawBdKey]int, int, error) {
+	r, err := os.OpenRoot(filepath.Join("..", ".."))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -280,14 +279,14 @@ var rawBdRealScan = func() (map[rawBdKey]int, int, error) {
 	return scanRawBdTree(r.FS())
 }
 
-// rawBdRealScanProblems compares the module root's counts against baseline. A
-// failed scan returns its error, so the caller fails rather than passes.
-func rawBdRealScanProblems(baseline map[rawBdKey]int, floor int) ([]string, error) {
-	counts, files, err := rawBdRealScan()
+// rawBdScanProblems compares the counts scan takes against baseline. A failed
+// scan is one problem, never a pass.
+func rawBdScanProblems(scan func() (map[rawBdKey]int, int, error), baseline map[rawBdKey]int, floor int) []string {
+	counts, files, err := scan()
 	if err != nil {
-		return nil, err
+		return []string{fmt.Sprintf("walk stopped before the counts were complete: %v", err)}
 	}
-	return rawBdProblemsOf(counts, files, baseline, floor), nil
+	return rawBdProblemsOf(counts, files, baseline, floor)
 }
 
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
@@ -308,37 +307,35 @@ func TestNoNewRawBdSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	problems, err := rawBdRealScanProblems(baseline, rawBdFileFloor)
+	// Open the root first so a root that cannot be opened fails the test, not a problem line.
+	root, err := os.OpenRoot(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, problem := range problems {
+	_ = root.Close()
+	for _, problem := range rawBdScanProblems(rawBdRealScan, baseline, rawBdFileFloor) {
 		t.Error(problem)
 	}
 }
 
-// TestRawBdRealScanSeam drives TestNoNewRawBdSites's comparison through a
-// stubbed rawBdRealScan: an excess site is a problem, and a failed scan is an error.
-//
-//testpolicy:allow parallel — it swaps rawBdRealScan, a package variable, so no other test may run beside it
+// TestRawBdRealScanSeam drives the comparison through stubbed scans: an excess
+// site is a problem, and a failed scan is a problem, never a pass.
 func TestRawBdRealScanSeam(t *testing.T) {
-	real := rawBdRealScan
-	defer func() { rawBdRealScan = real }()
-
+	t.Parallel()
 	t.Run("an excess site is a problem", func(t *testing.T) {
-		rawBdRealScan = func() (map[rawBdKey]int, int, error) {
+		stub := func() (map[rawBdKey]int, int, error) {
 			return map[rawBdKey]int{{"internal/cmd/run.go", "argv"}: 2}, 1, nil
 		}
-		problems, err := rawBdRealScanProblems(nil, 0)
-		if err != nil || len(problems) != 1 || !strings.Contains(problems[0], "internal/cmd/run.go: 2 raw bd argv site(s)") {
-			t.Errorf("problems = %q, err = %v; want one excess-site problem for internal/cmd/run.go", problems, err)
+		problems := rawBdScanProblems(stub, nil, 0)
+		if len(problems) != 1 || !strings.Contains(problems[0], "internal/cmd/run.go: 2 raw bd argv site(s)") {
+			t.Errorf("problems = %q; want one excess-site problem for internal/cmd/run.go", problems)
 		}
 	})
-	t.Run("a failed scan is an error, not a pass", func(t *testing.T) {
-		scanErr := errors.New("no root")
-		rawBdRealScan = func() (map[rawBdKey]int, int, error) { return nil, 0, scanErr }
-		if problems, err := rawBdRealScanProblems(nil, 0); !errors.Is(err, scanErr) || problems != nil {
-			t.Errorf("problems = %q, err = %v; want the seam's error and no problems", problems, err)
+	t.Run("a failed scan is a problem, not a pass", func(t *testing.T) {
+		stub := func() (map[rawBdKey]int, int, error) { return nil, 0, fmt.Errorf("no root") }
+		problems := rawBdScanProblems(stub, nil, 0)
+		if len(problems) != 1 || !strings.Contains(problems[0], "no root") {
+			t.Errorf("problems = %q; want one problem naming the scan error", problems)
 		}
 	})
 }
