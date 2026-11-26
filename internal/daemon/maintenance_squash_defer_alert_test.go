@@ -278,6 +278,107 @@ func TestSquashDeferredSince(t *testing.T) {
 	}
 }
 
+// TestClearSquashDeferred pins the clear of the persisted deferral stamp: after
+// a mark, a clear returns squashDeferredSince to the zero time, a second clear
+// is a no-op, a mark after the clear stamps a new time, another database's
+// stamp survives, and a stamp that cannot be removed returns its error
+// (gt-jykwan).
+func TestClearSquashDeferred(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 24, 9, 30, 0, 0, time.UTC)
+	later := first.Add(48 * time.Hour)
+	stamped := func(t *testing.T, dir string) { stampSquashDefer(t, dir, "squash-defer:gt", first) }
+	tests := []struct {
+		name      string
+		db        string
+		setup     func(t *testing.T, dir string)
+		clears    int
+		remark    *time.Time
+		otherDB   string
+		wantOther time.Time
+		wantErr   bool
+		want      time.Time
+	}{
+		{
+			name:  "a mark is cleared back to the zero time",
+			db:    "gt",
+			setup: stamped,
+			want:  time.Time{},
+		},
+		{
+			name:   "a second clear is a no-op",
+			db:     "gt",
+			setup:  stamped,
+			clears: 2,
+			want:   time.Time{},
+		},
+		{
+			name:   "a mark after the clear stamps a new time",
+			db:     "gt",
+			setup:  stamped,
+			remark: &later,
+			want:   later,
+		},
+		{
+			name:  "a database with no stamp clears without error",
+			db:    "gt",
+			setup: func(t *testing.T, dir string) {},
+			want:  time.Time{},
+		},
+		{
+			name: "another database's stamp is left in place",
+			db:   "gt",
+			setup: func(t *testing.T, dir string) {
+				stamped(t, dir)
+				stampSquashDefer(t, dir, "squash-defer:hq", later)
+			},
+			otherDB:   "hq",
+			wantOther: later,
+			want:      time.Time{},
+		},
+		{
+			name: "a stamp that cannot be removed returns the error",
+			db:   "gt",
+			setup: func(t *testing.T, dir string) {
+				entry := filepath.Join(dir, "squash-defer:gt")
+				if err := os.MkdirAll(entry, 0o700); err != nil {
+					t.Fatalf("creating the entry directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(entry, "held"), nil, 0o600); err != nil {
+					t.Fatalf("writing the entry's child: %v", err)
+				}
+			},
+			wantErr: true,
+			want:    time.Time{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+			dir := alertClockPath(d.config.TownRoot)
+			tc.setup(t, dir)
+
+			for i := 0; i < max(tc.clears, 1); i++ {
+				if err := d.clearSquashDeferred(tc.db); (err != nil) != tc.wantErr {
+					t.Fatalf("clear %d of %q: err = %v, wantErr %t", i+1, tc.db, err, tc.wantErr)
+				}
+			}
+			if tc.remark != nil {
+				stampSquashDefer(t, dir, squashDeferClockKey(tc.db), *tc.remark)
+			}
+			if got := d.squashDeferredSince(tc.db); !got.Equal(tc.want) {
+				t.Fatalf("squashDeferredSince(%q) after clear = %v, want %v", tc.db, got, tc.want)
+			}
+			if tc.otherDB != "" {
+				if got := d.squashDeferredSince(tc.otherDB); !got.Equal(tc.wantOther) {
+					t.Fatalf("squashDeferredSince(%q) after clearing %q = %v, want %v", tc.otherDB, tc.db, got, tc.wantOther)
+				}
+			}
+		})
+	}
+}
+
 // stampSquashDefer writes at on the alert clock under dir, the way the
 // deferral's mark will, so a row reads a real clock entry and not a file the
 // test made up.
