@@ -1183,6 +1183,28 @@ func TestReviewPoolWorkerSweepStopsOnDrain(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWorkerSweepRecordsOutcomeMemo pins that a swept landing leaves
+// the outcome memo the loop leaves around an ordinary landing. A stored-only
+// attempt that fails at read-back waits without parking the bead, so the memo is
+// the only hold a later pass reads; with it, the bead stays ready and the second
+// pass does not land it again (gt-9nco9r).
+func TestReviewPoolWorkerSweepRecordsOutcomeMemo(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-abc": true}}
+	h.lander.fn = func(_ int, _ land.Work) (land.Result, error) {
+		return land.Result{}, &land.InfraError{Stage: "read-back", Err: fmt.Errorf("%w: tip is x", land.ErrReadBack)}
+	}
+
+	h.w.Pass(context.Background())
+	h.w.Pass(context.Background())
+
+	if got, want := landingCalls(h.lander.calls), "gt-abc:true"; got != want {
+		t.Fatalf("landings = %s; want %s: the outcome memo holds the bead until its wait comes due", got, want)
+	}
+}
+
 // TestReviewPoolWorkerSweepHintErrorStopsThePass pins that a hint that cannot
 // be read is never read as "not rejecting": the pass counts the failure and lands nothing (gt-9nco9r).
 func TestReviewPoolWorkerSweepHintErrorStopsThePass(t *testing.T) {

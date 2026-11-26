@@ -941,9 +941,10 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 // submissions already offered, and a bead the sweep counted an outcome for is
 // marked handled so the loop does not attempt it again while it stays ready; a
 // bead with nothing stored to consume counts nothing and keeps its ordinary
-// turn. With Stored nil nothing is swept (gt-5q8ayw). A hint that cannot be
-// read is unknown, never "not rejecting", so the sweep returns its error
-// (gt-9nco9r).
+// turn. Each landing it makes records the first-sight record and the outcome
+// memo the loop records around its own. With Stored nil nothing is swept
+// (gt-5q8ayw). A hint that cannot be read is unknown, never "not rejecting", so
+// the sweep returns its error (gt-9nco9r).
 func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled, swept map[string]bool, rep *Report) error {
 	if w.Stored == nil {
 		return nil
@@ -992,7 +993,13 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 		}
 		swept[key] = true
 		before := *rep
+		// The loop records a submission before it lands and what it left the
+		// bead on after, so a swept landing leaves the same trail: the first-sight
+		// record the battery reads, and the outcome memo the next pass reads in
+		// place of the bead's row (gt-9nco9r).
+		w.recordFirstSight(issue)
 		w.processWith(ctx, issue, rep, true)
+		w.rememberOutcome(issue)
 		// An outcome the pass counted — a rejection, a skip or a failure — has
 		// spent the bead's turn, so the loop must not attempt it again while it
 		// stays ready (gt-9nco9r).
