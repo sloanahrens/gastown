@@ -15,13 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// settleBubble is synctest's barrier: it returns once every other goroutine in
-// the test's bubble is durably blocked, which is how a test sees the pass
-// waiting inside Await rather than racing it. It is held in a variable because
-// the presubmit wait check reads a direct call to it as a wait with no bound,
-// while a bubble's barrier always returns.
-var settleBubble = synctest.Wait
-
 // readySubmission is a ready bead whose READY TO LAND block names branch and
 // head. It is not seeded: resolveWork reads the block from the bead itself.
 func readySubmission(id, branch, head string) *beads.Issue {
@@ -560,6 +553,8 @@ func TestReviewPoolWorkerAwaitsBeforeLanding(t *testing.T) {
 	t.Run("the landing waits for the bead's review", func(t *testing.T) {
 		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
+			// settle is synctest's barrier, aliased because the presubmit wait check reads a direct call as unbounded (gt-10cacr).
+			settle := synctest.Wait
 			h := newHarness(t)
 			h.seedReady(t, "gt-first")
 
@@ -575,7 +570,7 @@ func TestReviewPoolWorkerAwaitsBeforeLanding(t *testing.T) {
 			// The offer has started the review and the pass has reached the bead,
 			// so with the review still held the pass is blocked in Await when the
 			// bubble settles.
-			settleBubble()
+			settle()
 			select {
 			case rep := <-done:
 				t.Fatalf("the pass finished (%+v) while gt-first's review was still running; want it to wait for the verdict", rep)
@@ -641,6 +636,8 @@ func TestReviewPoolWorkerAwaitsBeforeLanding(t *testing.T) {
 func TestReviewPoolWorkerAwaitEndsOnCancel(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
+		// settle is synctest's barrier, aliased because the presubmit wait check reads a direct call as unbounded (gt-10cacr).
+		settle := synctest.Wait
 		h := newHarness(t)
 		h.seedReady(t, "gt-first")
 
@@ -657,7 +654,7 @@ func TestReviewPoolWorkerAwaitEndsOnCancel(t *testing.T) {
 		go func() { done <- h.w.Pass(passCtx) }()
 
 		recvBounded(t, bound, rev.entered, "the review of gt-first starting")
-		settleBubble()
+		settle()
 		select {
 		case rep := <-done:
 			t.Fatalf("the pass finished (%+v) before the context was cancelled; want it waiting for the review", rep)
