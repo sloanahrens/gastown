@@ -1007,6 +1007,137 @@ func TestVerdictReuseLandLockNotHeldAcrossReview(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseLandLockNotHeldAcrossGate: the landing's gate wait takes no
+// part of the shared git lock, so a pool review that locks a ref or a worktree
+// while the gate runs cannot deadlock the landing. The fake gate takes gitMu
+// from inside its run; a landing that held the lock across the wait would block
+// it forever, so the gate takes the lock with TryLock and reports a lock it
+// could not take on a guard channel, and the test fails on the report instead
+// of hanging. A landing that holds the lock over the gate turns it red, and so
+// does one that never runs the gate the guard observes (gt-havcnw).
+func TestVerdictReuseLandLockNotHeldAcrossGate(t *testing.T) {
+	t.Parallel()
+	f, l, _, _ := reuseLandSetup(t)
+	guard := make(chan struct{}, 1)
+	f.gate.fn = func(string) GateResult {
+		if !l.gitMu.TryLock() {
+			guard <- struct{}{}
+			return GateResult{Passed: false, Err: errors.New("the gate ran with the shared git lock held")}
+		}
+		l.gitMu.Unlock()
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+	}
+	res, err := l.Land(context.Background(), f.work)
+	select {
+	case <-guard:
+		t.Fatal("the gate ran with the shared git lock held; a pool review's ref or worktree lock would deadlock the landing")
+	default:
+	}
+	if err != nil {
+		t.Fatalf("Land error = %v; want nil", err)
+	}
+	if n := len(f.gate.dirs); n != 1 {
+		t.Fatalf("gate ran %d time(s); want 1, the run the guard observes", n)
+	}
+	if res.Verdict.Verdict != VerdictApprove {
+		t.Errorf("Land verdict = %q; want %q", res.Verdict.Verdict, VerdictApprove)
+	}
+}
+
+// reuseLandWorktreeProbe is the landing's clone with a seam over its worktree
+// add: it records whether the lander's gitMu was held while the add ran and,
+// when err is set, fails the add the way git refuses a ref it cannot check out.
+// Every other call is delegated untouched.
+type reuseLandWorktreeProbe struct {
+	Repo
+	l    *Lander
+	err  error
+	ran  bool // the worktree add ran
+	held bool // gitMu was held while it ran
+}
+
+func (p *reuseLandWorktreeProbe) WorktreeAddDetached(path, ref string) error {
+	p.ran = true
+	// TryLock succeeding from inside the add means the landing holds nothing:
+	// the add is not serialized against the pool's git calls.
+	if p.l.gitMu.TryLock() {
+		p.l.gitMu.Unlock()
+	} else {
+		p.held = true
+	}
+	if p.err != nil {
+		return p.err
+	}
+	return p.Repo.WorktreeAddDetached(path, ref)
+}
+
+// reuseLandWorktreeProbeAt puts the probe in front of the lander's clone, the
+// repository Land cuts its worktree through.
+func reuseLandWorktreeProbeAt(t *testing.T, f *landFixture, l *Lander) *reuseLandWorktreeProbe {
+	t.Helper()
+	open := l.openRepo
+	probe := &reuseLandWorktreeProbe{Repo: open(f.repo), l: l}
+	l.openRepo = func(dir string) Repo {
+		if dir == f.repo {
+			return probe
+		}
+		return open(dir)
+	}
+	return probe
+}
+
+// TestVerdictReuseLandLockReleasedAfterWorktreeError: a worktree add that fails
+// leaves gitMu takable, so the next landing or review is not blocked forever.
+// The probe shows the lock was held while the add ran, so the release is the
+// helper's and not an untaken lock's. A helper that locks without a deferred
+// unlock leaves the lock held after the failure and turns this red (gt-havcnw).
+func TestVerdictReuseLandLockReleasedAfterWorktreeError(t *testing.T) {
+	t.Parallel()
+	f, l, _, _ := reuseLandSetup(t)
+	probe := reuseLandWorktreeProbeAt(t, f, l)
+	probe.err = errors.New("fatal: invalid reference")
+	_, err := l.Land(context.Background(), f.work)
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "worktree" {
+		t.Fatalf("Land error = %v; want the failed worktree add as an InfraError at stage \"worktree\"", err)
+	}
+	if !probe.ran || !probe.held {
+		t.Fatal("the worktree add did not run with gitMu held, so the release this test pins is untested")
+	}
+	if !l.gitMu.TryLock() {
+		t.Fatal("gitMu is still held after a failed worktree add")
+	}
+	l.gitMu.Unlock()
+}
+
+// TestVerdictReuseLandWorktreeTakesTheLock: the landing's worktree add and the
+// cleanup that removes it run with the lander's gitMu held, so a pool review's
+// ref or worktree lock cannot collide with them. The probe fails the test on
+// any worktree call made without the lock, and the call list shows the cleanup
+// ran before Land returned (gt-havcnw).
+func TestVerdictReuseLandWorktreeTakesTheLock(t *testing.T) {
+	t.Parallel()
+	f, l, _, _ := reuseLandSetup(t)
+	probe := &gitMuProbe{Repo: l.open(f.repo), t: t, l: l}
+	open := l.openRepo
+	l.openRepo = func(dir string) Repo {
+		if dir == f.repo {
+			return probe
+		}
+		return open(dir)
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land error = %v; want nil", err)
+	}
+	if got, want := strings.Join(probe.ops, ","), "WorktreeAddDetached,WorktreeRemove,WorktreePrune"; got != want {
+		t.Errorf("git calls = %s; want %s (the add, then the cleanup)", got, want)
+	}
+	if !l.gitMu.TryLock() {
+		t.Fatal("gitMu is still held after the landing")
+	}
+	l.gitMu.Unlock()
+}
+
 // reuseOffReadyNote is the work bead's note before a landing touches it, as the
 // fixture seeds it, with the head reuseOffVolatile blanks.
 const reuseOffReadyNote = "READY TO LAND\n" +

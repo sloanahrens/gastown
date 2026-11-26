@@ -1608,8 +1608,18 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if err != nil {
 		return Result{}, &InfraError{Stage: "head author", Err: fmt.Errorf("head %s: %w", shortSHA(w.Head), err)}
 	}
-	dir, id, cleanup, err := l.addWorktree(g, base)
-	if err != nil {
+	// The worktree calls share gitMu with the review pool's git calls, so a
+	// review's ref or worktree lock cannot collide with the add or with the
+	// cleanup that removes the worktree (gt-havcnw). The lock is held only for
+	// the add here and for the removal at the end, never over the merge, the om
+	// run or the gate wait.
+	var dir, id string
+	var cleanup func()
+	if err := l.withGitMu(func() error {
+		var addErr error
+		dir, id, cleanup, addErr = l.addWorktree(g, base)
+		return addErr
+	}); err != nil {
 		return Result{}, &InfraError{Stage: "worktree", Err: err}
 	}
 	defer cleanup()
@@ -1926,12 +1936,13 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 const fetchTimeout = 2 * time.Minute
 
 // withGitMu runs fn with gitMu held and releases it on every return path,
-// including a panic's unwind. The landing's fetches — the target fetch in Land
-// and the branch fetch in checkHeadPushed — share the lock with the review
-// pool's git calls, so a ref or worktree lock a review holds between its own
-// steps cannot collide with them. A fetch keeps its own timeout, and no other
-// lock is taken while gitMu is held. A caller that already holds gitMu must not
-// call this: it would deadlock.
+// including a panic's unwind. The landing's git calls that can collide with the
+// review pool — the target fetch in Land, the branch fetch in checkHeadPushed,
+// and the worktree add in addWorktree — share the lock with the pool's git
+// calls, so a ref or worktree lock a review holds between its own steps cannot
+// collide with them. A fetch keeps its own timeout, and no other lock is taken
+// while gitMu is held. A caller that already holds gitMu must not call this: it
+// would deadlock.
 func (l *Lander) withGitMu(fn func() error) error {
 	l.gitMu.Lock()
 	defer l.gitMu.Unlock()
@@ -2255,7 +2266,9 @@ func WithLandingID(ctx context.Context, id string) context.Context {
 const landWorktreeName = "wt"
 
 // addWorktree adds a detached worktree at base at WorkRoot/wt, clearing one a
-// dead landing left there, and returns it with this landing's ID.
+// dead landing left there, and returns it with this landing's ID. The caller
+// holds gitMu for the calls this makes; the cleanup it returns takes the lock
+// itself (gt-havcnw).
 func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(), err error) {
 	if err := os.MkdirAll(l.WorkRoot, 0o700); err != nil {
 		return "", "", nil, err
@@ -2283,6 +2296,10 @@ func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(
 		return "", "", nil, err
 	}
 	return dir, filepath.Base(parent), func() {
+		// The removal is git work like the add, so it holds gitMu too: a
+		// review's ref or worktree lock cannot collide with it (gt-havcnw).
+		l.gitMu.Lock()
+		defer l.gitMu.Unlock()
 		removeWorktree()
 		_ = os.RemoveAll(parent)
 	}, nil
