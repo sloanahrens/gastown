@@ -2,6 +2,7 @@ package forgejo
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -98,6 +99,75 @@ func (c *Client) ListRuns(ctx context.Context, owner, repo string, f RunFilter) 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// taskPage is one page of a repository's Actions tasks; its pointers make a
+// body without total_count or workflow_runs an error, not an empty answer.
+type taskPage struct {
+	TotalCount   *int         `json:"total_count"`
+	WorkflowRuns *[]taskEntry `json:"workflow_runs"`
+}
+
+// taskEntry is one entry of a tasks page: the id the API sends for the task.
+type taskEntry struct {
+	ID *int64 `json:"id"`
+}
+
+// taskPageSize is the page size the walk asks for; maxTaskPages bounds it.
+const (
+	taskPageSize = 50
+	maxTaskPages = 200
+)
+
+// RunningTaskIDs returns the running Actions task ids, page by page until the
+// ids read equal the server's total_count; a count that moves mid-walk is
+// refused, and an id the server repeats is returned once. A set whose unique
+// ids pass total_count never reads equal, so maxTaskPages ends that walk with
+// an error. Offset pages cannot see one task replaced by another with an
+// unchanged count, so that one task may go unread until the next call.
+func (c *Client) RunningTaskIDs(ctx context.Context, owner, repo string) ([]int64, error) {
+	path := repoPath(owner, repo, "/actions/tasks")
+	ids := make([]int64, 0, taskPageSize)
+	seen := make(map[int64]struct{})
+	total := 0
+	for page := 1; page <= maxTaskPages; page++ {
+		q := url.Values{}
+		q.Set("status", "running")
+		q.Set("page", strconv.Itoa(page))
+		q.Set("limit", strconv.Itoa(taskPageSize))
+		var out taskPage
+		if err := c.call(ctx, http.MethodGet, path, q, nil, &out); err != nil {
+			return nil, err
+		}
+		if out.TotalCount == nil {
+			return nil, fmt.Errorf("forgejo: %s page %d has no total_count", path, page)
+		}
+		if page == 1 {
+			total = *out.TotalCount
+		} else if *out.TotalCount != total {
+			return nil, fmt.Errorf("forgejo: %s page %d counts %d tasks, page 1 counted %d; the running set moved", path, page, *out.TotalCount, total)
+		}
+		if out.WorkflowRuns == nil {
+			return nil, fmt.Errorf("forgejo: %s page %d has no workflow_runs", path, page)
+		}
+		for i, task := range *out.WorkflowRuns {
+			if task.ID == nil {
+				return nil, fmt.Errorf("forgejo: %s page %d entry %d has no id", path, page, i)
+			}
+			if _, dup := seen[*task.ID]; dup {
+				continue
+			}
+			seen[*task.ID] = struct{}{}
+			ids = append(ids, *task.ID)
+		}
+		if len(ids) == total {
+			return ids, nil
+		}
+		if len(*out.WorkflowRuns) == 0 {
+			return nil, fmt.Errorf("forgejo: %s page %d was empty after %d of %d tasks", path, page, len(ids), total)
+		}
+	}
+	return nil, fmt.Errorf("forgejo: %s is still short of its %d tasks after %d pages", path, total, maxTaskPages)
 }
 
 // DeleteRun removes workflow run runID. A non-2xx answer comes back as an
