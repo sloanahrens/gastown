@@ -353,6 +353,12 @@ type Issue struct {
 	DependentCount  int `json:"dependent_count,omitempty"`
 	BlockedByCount  int `json:"blocked_by_count,omitempty"`
 
+	// DependenciesUnread is bd's report that it could not read this issue's
+	// dependency list, so the list below is not the whole set. parseShowIssues
+	// turns it into a blocking entry, so no reader takes it for unblocked
+	// (gt-rxlpuq).
+	DependenciesUnread bool `json:"dependencies_unread,omitempty"`
+
 	// Detailed dependency info from show output
 	Dependencies []IssueDep `json:"dependencies,omitempty"`
 	Dependents   []IssueDep `json:"dependents,omitempty"`
@@ -730,6 +736,12 @@ func knownDependencyRelation(depType string) string {
 	}
 	return ""
 }
+
+// UnreadDependencyID is the id of the blocking entry parseShowIssues appends
+// to an issue whose dependency list bd could not read. It is not a bead: it
+// names the failed read, so a caller that prints the blocker says why it
+// refused the issue (gt-rxlpuq).
+const UnreadDependencyID = "(dependency list unread)"
 
 // HasUnresolvedBlockers reports whether an issue has any unresolved blocking
 // dependencies. Detailed dependency data takes precedence over list counters.
@@ -3890,6 +3902,16 @@ func parseShowIssues(out []byte) ([]*Issue, error) {
 	for i, issue := range issues {
 		if issue == nil {
 			return nil, fmt.Errorf("parsing bd show output: element %d is null, not an issue", i)
+		}
+		if issue.DependenciesUnread {
+			// bd could not read the whole list, so the entries it did print
+			// are not the set: one blocking entry marks the read failed, and
+			// HasUnresolvedBlockers refuses the issue (gt-rxlpuq).
+			issue.Dependencies = append(issue.Dependencies, IssueDep{
+				ID:             UnreadDependencyID,
+				Status:         "unread",
+				DependencyType: "blocks",
+			})
 		}
 	}
 	return issues, nil
