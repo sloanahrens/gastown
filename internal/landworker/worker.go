@@ -1306,7 +1306,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			// finishes it and runs the four landing steps off this goroutine when
 			// a queue is set, and the bead stays held (booksHold) until the
 			// record is written, so no later pass lands it again (gt-c3vl2u).
-			w.finishDeferredQueued(work, res)
+			w.finishDeferredQueued(work, res, wasRepair)
 		} else {
 			w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
 		}
@@ -1431,12 +1431,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	}
 }
 
-// finishDeferred finishes a deferred landing's record, queues the revert call a
-// revert owes, then reaps its branches, refreshes the authors' seats, writes
-// sp-actual and runs the after-landed hook, in that order. It runs on
-// BookQueue's goroutine, so any Worker state it must write goes through Later
-// to w's own goroutine; a finish it cannot make leaves the work in pendingRepair
-// for the next pass (gt-k78e8j, gt-dci9k8).
+// finishDeferred finishes a deferred landing's record, then reaps its branches,
+// refreshes the authors' seats, writes sp-actual and runs the after-landed hook,
+// in that order. It runs on BookQueue's goroutine, so any Worker state it must
+// write goes through Later to w's own goroutine; a finish it cannot make leaves
+// the work in pendingRepair for the next pass (gt-k78e8j, gt-dci9k8).
 func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 	f, ok := w.Lander.(finisher)
 	if !ok {
@@ -1449,7 +1448,6 @@ func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 		w.repairLater(work)
 		return
 	}
-	w.finishRevert(work, res)
 	w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
 	w.writeSPActual(work.BeadID, res.LandedCommit)
 	if w.AfterLanded != nil {
@@ -1458,11 +1456,12 @@ func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 }
 
 // finishRevert queues a deferred revert landing's RevertLanded for the worker's
-// own goroutine, after FinishLanding has made the record whole. IsRevert reads
-// the bead, so the queue goroutine may ask it; RevertLanded writes red-main
-// state the pass also writes, so with a queue it goes through Later and runs at
-// the next pass. With no queue the steps already run on the worker's goroutine,
-// and it runs there directly (gt-dci9k8).
+// own goroutine. It runs for the new landing whatever its finish returned, and a
+// repair pass skips it, so the call happens exactly once. IsRevert reads the
+// bead, so the queue goroutine may ask it; RevertLanded writes red-main state
+// the pass also writes, so with a queue it goes through Later and runs at the
+// next pass. With no queue the steps already run on the worker's goroutine, and
+// it runs there directly (gt-dci9k8).
 func (w *Worker) finishRevert(work land.Work, res land.Result) {
 	if w.Reverts == nil || !w.Reverts.IsRevert(work.BeadID) {
 		return
@@ -1480,12 +1479,21 @@ func (w *Worker) finishRevert(work land.Work, res land.Result) {
 // finishDeferredQueued runs a deferred landing's finishing steps on BookQueue's
 // goroutine when a queue is set, so the pass lands the next bead meanwhile; with
 // no queue it runs them here, so a deferred result is never dropped (gt-c3vl2u).
-func (w *Worker) finishDeferredQueued(work land.Work, res land.Result) {
-	if w.Books == nil {
+// finishRevert follows the finish attempt whatever it returned, and only for a
+// new landing: a repair pass made after a failed finish must not call
+// RevertLanded a second time (gt-dci9k8).
+func (w *Worker) finishDeferredQueued(work land.Work, res land.Result, wasRepair bool) {
+	steps := func() {
 		w.finishDeferred(work, res)
+		if !wasRepair {
+			w.finishRevert(work, res)
+		}
+	}
+	if w.Books == nil {
+		steps()
 		return
 	}
-	w.Books.Add(work.BeadID, func() { w.finishDeferred(work, res) })
+	w.Books.Add(work.BeadID, steps)
 }
 
 // repairLater puts work in pendingRepair: through Books.Later (the worker's own

@@ -295,12 +295,12 @@ func TestBookQueueWorkerRevert(t *testing.T) {
 
 	// nextPass drops the ready label a landing would have taken off and runs
 	// the next pass, which is where a call the queue stored runs.
-	nextPass := func(t *testing.T, ctx context.Context, h *harness) {
+	nextPass := func(t *testing.T, ctx context.Context, h *harness) Report {
 		t.Helper()
 		if err := h.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
 			t.Fatal(err)
 		}
-		h.w.Pass(ctx)
+		return h.w.Pass(ctx)
 	}
 
 	t.Run("a deferred revert's RevertLanded runs once, on the next pass", func(t *testing.T) {
@@ -338,6 +338,42 @@ func TestBookQueueWorkerRevert(t *testing.T) {
 		nextPass(t, ctx, h)
 		if len(hooks.landed) != 0 {
 			t.Fatalf("RevertLanded ran %v for a landing that is no revert", hooks.landed)
+		}
+	})
+
+	t.Run("a failed finish still calls it once, and the repair does not call it again", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, _, _ := deferredWorker(t, q, deferred)
+		dl, ok := h.w.Lander.(*deferredLander)
+		if !ok {
+			t.Fatalf("lander %T; want the deferred fake", h.w.Lander)
+		}
+		// The deferred finish fails, so the first pass leaves the record to a
+		// repair. RevertLanded must still be stored by that first landing.
+		dl.finishErr = errors.New("finish failed")
+		hooks := &fakeRevertHooks{isRevert: true}
+		h.w.Reverts = hooks
+
+		if rep := h.w.Pass(ctx); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		queueIdle(ctx, t, q)
+
+		rep := nextPass(t, ctx, h)
+		if rep.Repaired != 1 {
+			t.Fatalf("report %v; want the repair to run", rep)
+		}
+		queueIdle(ctx, t, q)
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v once, on the next pass", hooks.landed, want)
+		}
+		// The repair's job must have stored no second call: running what the
+		// queue holds now leaves the count at one.
+		q.RunLater()
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v once, not again by the repair", hooks.landed, want)
 		}
 	})
 
