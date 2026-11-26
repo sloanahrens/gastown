@@ -1515,3 +1515,68 @@ func TestExtractTarRefusesAnEntryOutsideItsDirectory(t *testing.T) {
 		t.Fatal("the escaping file was written")
 	}
 }
+
+// reusableNow is a fixed local time, so its day is 2026-11-24 on any host zone.
+var reusableNow = time.Date(2026, 11, 24, 18, 55, 0, 0, time.Local)
+
+// TestReusableExtract holds which day directories reusableExtract accepts. The
+// day is the local date of now, named the way the in-process extract names it.
+func TestReusableExtract(t *testing.T) {
+	t.Parallel()
+	today := reusableNow.Format(time.DateOnly)
+	yesterday := reusableNow.AddDate(0, 0, -1).Format(time.DateOnly)
+	weekly := reusableWeeklyCSV(t)
+	complete := map[string]string{footerName: `{"rows_read":{"ledger":2}}`, weeklyName: weekly}
+	cases := []struct {
+		name string
+		// dated is the day directory the case writes, and files what it writes
+		// there. A nil files map writes nothing, so the day has no directory.
+		dated  string
+		files  map[string]string
+		wantOK bool
+	}{
+		{name: "a day's complete extract is reused", dated: today, files: complete, wantOK: true},
+		{name: "no directory for the day", dated: today},
+		{
+			name:  "data files without a footer",
+			dated: today,
+			files: map[string]string{weeklyName: weekly, landingsName: "week\n"},
+		},
+		{
+			name:  "a footer that does not parse",
+			dated: today,
+			files: map[string]string{footerName: `{"rows_read":`, weeklyName: weekly},
+		},
+		{name: "yesterday's extract is not today's", dated: yesterday, files: complete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			metricsDir := t.TempDir()
+			for name, body := range tc.files {
+				writeTownFile(t, filepath.Join(metricsDir, tc.dated, name), body)
+			}
+			got, ok := reusableExtract(Env{ReadFile: os.ReadFile}, metricsDir, reusableNow)
+			if ok != tc.wantOK {
+				t.Fatalf("reusableExtract ok = %v, want %v", ok, tc.wantOK)
+			}
+			want := ""
+			if tc.wantOK {
+				want = filepath.Join(metricsDir, today)
+			}
+			if got != want {
+				t.Errorf("reusableExtract dir = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// reusableWeeklyCSV is a weekly.csv that LoadResult reads, so the cases differ
+// only in their footer and their other files.
+func reusableWeeklyCSV(t *testing.T) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteCSV(&buf, []Row{loadResultRow(t, loadResultWeekly())}, WeeklyColumns); err != nil {
+		t.Fatalf("WriteCSV: %v", err)
+	}
+	return buf.String()
+}

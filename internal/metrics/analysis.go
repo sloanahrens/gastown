@@ -433,6 +433,20 @@ func inProcessExtract(now time.Time, home string, run RunnerDir, bdGateway BdGat
 	}
 }
 
+// reusableExtract returns the local day's extract directory under metricsDir,
+// the parent inProcessExtract writes into, when LoadResult reads a complete
+// extract there. The footer is the last file an extract writes, so a footer that
+// reads means the day's extract finished. A missing or unreadable footer, or a
+// weekly.csv that does not read, is ok false: the caller runs the extract again
+// rather than reuse a partial one. It reads the directory and never writes.
+func reusableExtract(env Env, metricsDir string, now time.Time) (dayDir string, ok bool) {
+	dayDir = filepath.Join(metricsDir, now.Local().Format(time.DateOnly))
+	if _, err := LoadResult(env, dayDir); err != nil {
+		return "", false
+	}
+	return dayDir, true
+}
+
 // runEnv runs argv through the RunEnv seam. A seam that is unset is an error
 // rather than a command that never ran.
 func runEnv(ctx context.Context, env Env, argv []string) ([]byte, error) {
