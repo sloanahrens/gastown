@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/deploy/k8s"
@@ -83,11 +84,26 @@ func planSecretFields(object k8s.StaticObject) (map[string]any, []string) {
 		declared[key] = value
 	}
 	var carried []string
-	if _, ok := doc.body["data"]; ok {
-		carried = append(carried, "data")
-	}
-	if _, ok := doc.body["stringData"]; ok {
-		carried = append(carried, "stringData")
+	for _, field := range []string{"data", "stringData"} {
+		value, ok := doc.body[field]
+		if !ok {
+			continue
+		}
+		// Name each key the Secret carries, never its value. A field that is not
+		// a name-to-value map has no keys to name, so the field itself is named.
+		keys, isMap := value.(map[string]any)
+		if !isMap || len(keys) == 0 {
+			carried = append(carried, field)
+			continue
+		}
+		names := make([]string, 0, len(keys))
+		for name := range keys {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			carried = append(carried, fmt.Sprintf("%s key %q", field, name))
+		}
 	}
 	return declared, carried
 }

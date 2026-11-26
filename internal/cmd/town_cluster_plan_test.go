@@ -2000,7 +2000,7 @@ func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 				plantReviewedSecretField(t, m, "data", map[string]any{"token": "ZGVjbGFyZWQ="})
 			},
 			refuse: "Secret gt-sweeps/sweep-runner-token",
-			key:    "carrying data",
+			key:    `data key "token"`,
 			value:  "ZGVjbGFyZWQ=",
 		},
 		{
@@ -2009,7 +2009,7 @@ func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 				plantReviewedSecretField(t, m, "stringData", map[string]any{"token": "planted-string-data-value"})
 			},
 			refuse: "Secret gt-sweeps/sweep-runner-token",
-			key:    "carrying stringData",
+			key:    `stringData key "token"`,
 			value:  "planted-string-data-value",
 		},
 		{
@@ -2100,11 +2100,11 @@ func plantReviewedSecretField(t *testing.T, m *k8sdaemon.Manifests, field string
 	t.Fatalf("the render holds no reviewed Secret sweep-runner-token to plant %q on", field)
 }
 
-// TestClusterShapePlanAcceptsReviewedSecretDocument: the reviewed static Secret
+// TestClusterShapePlanRefuseSecretDocAcceptsReviewed: the reviewed static Secret
 // carries no data and declares the reviewed fields, so a plan holding it plans:
 // the guard accepts the reviewed document and plan.json lists it as a phase P
 // file.
-func TestClusterShapePlanAcceptsReviewedSecretDocument(t *testing.T) {
+func TestClusterShapePlanRefuseSecretDocAcceptsReviewed(t *testing.T) {
 	t.Parallel()
 	dir := planOut(t)
 	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
@@ -2129,11 +2129,11 @@ func TestClusterShapePlanAcceptsReviewedSecretDocument(t *testing.T) {
 	}
 }
 
-// TestClusterShapePlanRefuseSecretUnreadableSet: a plan that cannot read the
+// TestClusterShapePlanRefuseSecretDocUnreadableSet: a plan that cannot read the
 // static set deploy/k8s reviews refuses, naming the read, printing nothing and
 // writing no plan.json: no Secret can be shown reviewed, so the plan fails closed
 // rather than pass one.
-func TestClusterShapePlanRefuseSecretUnreadableSet(t *testing.T) {
+func TestClusterShapePlanRefuseSecretDocUnreadableSet(t *testing.T) {
 	t.Parallel()
 	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
 	d.reviewedStatic = func() ([]k8s.StaticObject, error) {
