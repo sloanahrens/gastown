@@ -138,6 +138,14 @@ type Work struct {
 	// Gate is what the seat's local presubmit gate cost, one bounded "Gate:"
 	// line so the gate's minutes can be read from the bead (gt-urrk8u).
 	Gate string
+	// StoredOnly makes Land consume a stored review in place of running om: a
+	// review pool's pass between landings, which has no review or gate budget of
+	// its own. The landing runs as usual up to the om stage and ends there: a
+	// stored rejection rejects as an inline one would, and every other answer —
+	// an approve, another head's record, an unreadable record, a waived head, no
+	// store — ends the pass with ErrNoStoredVerdict, om never run, no gate
+	// started. The worker sets it; a READY TO LAND block carries none (gt-6r4exl).
+	StoredOnly bool
 	// CandidateBranch and CandidateHead name the merge candidate: the branch
 	// Land pushes it as and the merged commit on it. A READY TO LAND block
 	// carries neither — Candidate derives the branch from BeadID — and Land

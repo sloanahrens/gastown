@@ -1706,6 +1706,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// timed like a review (gt-uebmq).
 	reviewStart := time.Now()
 	waived := OverseerReviewed(issue, w.Head)
+	if w.StoredOnly && (waived || l.Ahead == nil) {
+		// A stored-only pass consumes a stored verdict and nothing else: a waived
+		// head needs no review and no store leaves nothing to consume, so both end
+		// it here, before the om config refusal and the reuse lookup (gt-6r4exl).
+		return Result{}, ErrNoStoredVerdict
+	}
 	if waived {
 		// The overseer reviewed this exact head in place of om, which could
 		// not return a verdict (gt-g8t3m): record that and do not pay for om
@@ -1734,6 +1740,29 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// miss, or an answer reuseAhead could not give, runs om as it does with no
 		// store; reuseAhead has logged why. An unknown answer is never a hit.
 		rec, key, reused, reuseErr := l.reuseAhead(omCtx, g, wt, w, in, base, merged)
+		if w.StoredOnly {
+			// A stored-only pass runs nothing itself: it consumes a stored
+			// rejection and nothing else, falling through to the reject path
+			// below exactly as a fresh rejection would (gt-6r4exl). An approve
+			// waits for the bead's own turn; an unknown answer keeps the record
+			// and a definite miss deletes it. Every case but the rejection ends
+			// the pass with ErrNoStoredVerdict, so om never runs and no gate starts.
+			switch {
+			case reuseErr != nil:
+				omDone()
+				return Result{}, ErrNoStoredVerdict
+			case !reused:
+				if err := l.Ahead.Delete(w.BeadID); err != nil {
+					omDone()
+					return Result{}, &InfraError{Stage: "stored review", Err: err}
+				}
+				omDone()
+				return Result{}, ErrNoStoredVerdict
+			case !rec.rejecting():
+				omDone()
+				return Result{}, ErrNoStoredVerdict
+			}
+		}
 		reused = reused && reuseErr == nil
 		if reused {
 			verdict = rec.Verdict
