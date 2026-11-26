@@ -114,14 +114,12 @@ func planSecretFields(object k8s.StaticObject) (map[string]any, []string) {
 	return declared, carried
 }
 
-// planMountedSecret is one Secret a rendered Deployment mounts, in its namespace.
 type planMountedSecret struct{ namespace, name string }
 
 // planMountedSecrets returns the Secrets the rendered Deployments mount by
 // volume, once each, in file order, each in its Deployment's namespace. A
 // document whose spec or volumes cannot be read is an error, since its Secrets
-// would otherwise pass unchecked; planLiveVersions refuses a Deployment that
-// names no namespace.
+// would otherwise pass unchecked; planLiveVersions refuses one with no namespace.
 func planMountedSecrets(bodies [][]byte) ([]planMountedSecret, error) {
 	var mounted []planMountedSecret
 	seen := map[planMountedSecret]bool{}
@@ -149,8 +147,7 @@ func planMountedSecrets(bodies [][]byte) ([]planMountedSecret, error) {
 	return mounted, nil
 }
 
-// planDeploymentSecretVolumes returns the Secret names a rendered Deployment's
-// volumes mount, in their order: anything it cannot read as an object is an error.
+// planDeploymentSecretVolumes returns the Secret names a Deployment's volumes mount.
 func planDeploymentSecretVolumes(doc map[string]any) ([]string, error) {
 	object := doc
 	for _, field := range []string{"spec", "template", "spec"} {
@@ -195,9 +192,8 @@ func planDeploymentSecretVolumes(doc map[string]any) ([]string, error) {
 const planSecretContext = "apply"
 
 // planSecretPreflight refuses a plan whose Deployments mount a Secret the
-// cluster does not hold, naming it, and returns an error for a Secret it could
-// not judge, never one read as missing. It asks internal/secretpreflight with
-// the names alone, once per namespace, under the apply kubeconfig: no value is read.
+// cluster does not hold, naming it, and errors for a Secret it could not judge,
+// never one read as missing. It asks the names alone under the apply kubeconfig.
 func planSecretPreflight(ctx context.Context, kube update.RunFunc, kubeconfig string, mounted []planMountedSecret) error {
 	if len(mounted) == 0 {
 		return nil
@@ -228,9 +224,8 @@ func planSecretPreflight(ctx context.Context, kube update.RunFunc, kubeconfig st
 	return nil
 }
 
-// planSecretRunner turns the plan's read runner into the secretpreflight Runner.
-// It drops the `--context` pair Missing builds for the apply kubeconfig it was
-// given, and carries a failed exit's status so only NotFound reads as absent.
+// planSecretRunner turns the plan's read runner into the secretpreflight Runner:
+// it reads under the apply kubeconfig and carries a failed exit's status.
 func planSecretRunner(kube update.RunFunc, kubeconfig string) secretpreflight.Runner {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "--context" {

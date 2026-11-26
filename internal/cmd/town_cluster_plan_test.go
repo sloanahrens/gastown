@@ -2198,10 +2198,10 @@ func plantMountedSecret(t *testing.T, d clusterRenderDeps) (clusterRenderDeps, f
 }
 
 // TestClusterShapePlanRefuseSecretMissing: a Secret the rendered Deployments
-// mount that the cluster does not hold refuses the plan, naming the Secret and
-// its namespace, printing nothing and writing no plan.json; a get the check
-// could not judge is an error naming the Secret, never one read as missing. Each
-// name is read under the apply kubeconfig with no output flag.
+// mount that the cluster does not hold refuses the plan, naming it, printing
+// nothing and writing no plan.json; a get the check could not judge is an error
+// naming the Secret, never one read as missing. Each name is read under the apply
+// kubeconfig with no output flag.
 func TestClusterShapePlanRefuseSecretMissing(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -2259,9 +2259,8 @@ func TestClusterShapePlanRefuseSecretMissing(t *testing.T) {
 }
 
 // TestClusterShapePlanRefuseSecretMissingRefusals: the mount scan refuses each
-// body, spec, volume or Secret name it cannot read; with no mounted Secret the
-// preflight asks nothing and needs no kubeconfig, and with no --apply-kubeconfig
-// it refuses naming the flag.
+// body, spec, volume or Secret name it cannot read, at the plan too; the
+// preflight refuses no --apply-kubeconfig and one that is not a path.
 func TestClusterShapePlanRefuseSecretMissingRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ name, doc, want string }{
@@ -2280,9 +2279,21 @@ func TestClusterShapePlanRefuseSecretMissingRefusals(t *testing.T) {
 			}
 		})
 	}
-	if err := planSecretPreflight(context.Background(), planKubectl(t), "", nil); err != nil {
-		t.Fatalf("planSecretPreflight with no mounted Secret = %v, want no refusal and no read", err)
-	}
+	t.Run("the walk refuses the plan", func(t *testing.T) {
+		t.Parallel()
+		d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+		render := d.render
+		d.render = func(w io.Writer, m k8sdaemon.Manifests) error {
+			if err := render(w, m); err != nil {
+				return err
+			}
+			_, err := io.WriteString(w, "\n---\nkind: Deployment\nmetadata:\n  name: planted-unreadable\n  namespace: gt\nspec: unreadable\n")
+			return err
+		}
+		if err := runTownClusterPlan(context.Background(), d, planKubectl(t), &bytes.Buffer{}, planOut(t), planTestKubeconfigs, atomicfile.WriteJSON); err == nil || !strings.Contains(err.Error(), "planted-unreadable") {
+			t.Fatalf("runTownClusterPlan = %v, want the unreadable-Deployment refusal", err)
+		}
+	})
 	err := planSecretPreflight(context.Background(), planKubectl(t), "", []planMountedSecret{{namespace: "gt", name: "gt-secret"}})
 	if err == nil || !strings.Contains(err.Error(), "--apply-kubeconfig") {
 		t.Fatalf("planSecretPreflight with no kubeconfig = %v, want a refusal naming --apply-kubeconfig", err)
