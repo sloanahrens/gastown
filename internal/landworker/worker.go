@@ -602,17 +602,8 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// The pool reviews this list while the pass lands it, so the landing has a
 	// verdict to reuse instead of running om inline. It is offered on ctx, the
 	// run context the pass was called with, which outlives one landing and one
-	// pass: a review must keep running past both. An error building the works
-	// offers nothing this time and the pass goes on, since the pool can only
-	// save time (gt-mdv8eq).
-	if w.Pool != nil {
-		works, err := w.reviewWorks(issues, "")
-		if err != nil {
-			w.logf("the review pool: building the works: %v; offering none this pass", err)
-		} else {
-			w.Pool.Offer(ctx, works)
-		}
-	}
+	// pass: a review must keep running past both (gt-mdv8eq).
+	w.offerReview(ctx, issues, "")
 	// The submissions this pass has looked at, whatever it left them on: a bead
 	// that stays ready after its attempt is not tried twice in one pass, and the
 	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
@@ -699,6 +690,15 @@ func (w *Worker) landReady(ctx context.Context) Report {
 			rep.Failed++
 			return rep
 		}
+		// The fresh list is offered again: a bead made ready while the landing
+		// ran, and a work that did not fit the pool's cap until a review ended,
+		// are reviewed without a queue (gt-20kjw5). The bead about to be landed
+		// is left out, since its review would be spent on a landing now due.
+		landing := ""
+		if next := nextReady(issues, handled); next != nil {
+			landing = next.ID
+		}
+		w.offerReview(ctx, issues, landing)
 	}
 }
 
@@ -1015,6 +1015,23 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true, nil
 	}
 	return land.Work{}, false, nil
+}
+
+// offerReview offers the works reviewWorks builds for issues, leaving out the
+// bead named by landing (empty for none), to the review pool. A nil pool
+// offers nothing; an error building the works offers nothing that time and is
+// named on one line, since the pool can only save time and a broken offer must
+// never stop the pass landing the beads it can (gt-mdv8eq).
+func (w *Worker) offerReview(ctx context.Context, issues []*beads.Issue, landing string) {
+	if w.Pool == nil {
+		return
+	}
+	works, err := w.reviewWorks(issues, landing)
+	if err != nil {
+		w.logf("the review pool: building the works: %v; offering none this pass", err)
+		return
+	}
+	w.Pool.Offer(ctx, works)
 }
 
 // reviewWorks builds a work for each issue the pool may review ahead of a
