@@ -368,6 +368,147 @@ func TestVerdictReuseKeyConfigUnreadable(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseKeyOMJSONUnreadable: a key that cannot read om's .om.json
+// at the base, or the context_file it names, is an error, which the caller
+// treats as a miss: never a key with an empty or partial digest (gt-5u2pmc).
+func TestVerdictReuseKeyOMJSONUnreadable(t *testing.T) {
+	t.Parallel()
+	const (
+		withContext = `{"threshold":0.8,"context_file":"docs/rubric.md"}`
+		contextPath = "docs/rubric.md"
+	)
+	readRefused := errors.New("read refused")
+	tests := []struct {
+		name   string
+		repo   func(Repo) Repo
+		wantIs error
+	}{
+		{
+			name:   "no .om.json at the base",
+			repo:   func(wt Repo) Repo { return omConfigRepo{Repo: wt} },
+			wantIs: git.ErrNotAtRef,
+		},
+		{
+			name: "an unreadable .om.json",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, failPath: omConfigFile, failErr: readRefused}
+			},
+			wantIs: readRefused,
+		},
+		{
+			name: "an invalid .om.json",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: `{"threshold":`}}
+			},
+		},
+		{
+			name: "a context_file the base does not have",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: withContext}}
+			},
+			wantIs: git.ErrNotAtRef,
+		},
+		{
+			name: "an unreadable context_file",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{
+					Repo:     wt,
+					files:    map[string]string{omConfigFile: withContext},
+					failPath: contextPath,
+					failErr:  readRefused,
+				}
+			},
+			wantIs: readRefused,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, wt := keyFixture(t)
+			key, touched, err := l.reviewKey(context.Background(), tc.repo(wt), wt, f.work, ReviewInput{}, f.base, f.work.Head)
+			if err == nil {
+				t.Fatalf("reviewKey = %+v, %v, nil; want an error when %s", key, touched, tc.name)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("reviewKey error = %v; want it to wrap %v", err, tc.wantIs)
+			}
+			if key != (ReviewKey{}) || touched != nil {
+				t.Errorf("reviewKey on error = %+v, %v; want the zero key and no paths", key, touched)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseKeyBarUnreadable: a key that cannot read the review bar at
+// the base is an error, which the caller treats as a miss: never a key with
+// an empty or partial digest (gt-5u2pmc).
+func TestVerdictReuseKeyBarUnreadable(t *testing.T) {
+	t.Parallel()
+	readRefused := errors.New("read refused")
+	tests := []struct {
+		name   string
+		repo   func(Repo) Repo
+		wantIs error
+	}{
+		{
+			// The texts read and parse, so only the bar's own read refuses this.
+			name: "a threshold that is not a number",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: `{"threshold":"high"}`}}
+			},
+		},
+		{
+			name: "an unreadable .om.json",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, failPath: omConfigFile, failErr: readRefused}
+			},
+			wantIs: readRefused,
+		},
+		{
+			name: "no repository to read from",
+			repo: func(Repo) Repo { return nil },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, wt := keyFixture(t)
+			key, touched, err := l.reviewKey(context.Background(), tc.repo(wt), wt, f.work, ReviewInput{}, f.base, f.work.Head)
+			if err == nil {
+				t.Fatalf("reviewKey = %+v, %v, nil; want an error when %s", key, touched, tc.name)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("reviewKey error = %v; want it to wrap %v", err, tc.wantIs)
+			}
+			if key != (ReviewKey{}) || touched != nil {
+				t.Errorf("reviewKey on error = %+v, %v; want the zero key and no paths", key, touched)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseKeyDigestFails: a key whose input digest cannot be computed
+// is an error, which the caller treats as a miss: never a key with an empty
+// InputDigest (gt-5u2pmc).
+func TestVerdictReuseKeyDigestFails(t *testing.T) {
+	t.Parallel()
+	f, l, wt := keyFixture(t)
+	digestRefused := errors.New("digest refused")
+	refusing := func(ReviewInput, []string, string, string, string) (string, error) {
+		return "", digestRefused
+	}
+	key, touched, err := l.reviewKeyFrom(refusing, context.Background(), wt, wt, f.work, ReviewInput{}, f.base, f.work.Head)
+	if err == nil {
+		t.Fatalf("reviewKeyFrom = %+v, %v, nil; want an error when the input digest fails", key, touched)
+	}
+	if !errors.Is(err, digestRefused) {
+		t.Errorf("reviewKeyFrom error = %v; want it to wrap %v", err, digestRefused)
+	}
+	if key != (ReviewKey{}) || touched != nil {
+		t.Errorf("reviewKeyFrom on error = %+v, %v; want the zero key and no paths", key, touched)
+	}
+}
+
 // TestVerdictReuseKeyNoProbe: a reviewer that cannot be asked om's version
 // makes the key an error, which the caller treats as a miss, rather than a key
 // with an empty version that the reuse predicate would refuse anyway.

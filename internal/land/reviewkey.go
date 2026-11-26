@@ -69,6 +69,12 @@ func omRepoConfigAt(g Repo, base string) (omJSON, contextFile string, err error)
 	return omJSON, contextFile, nil
 }
 
+// reviewDigestFn is how a review key turns the input om is given into
+// InputDigest. reviewKey passes ReviewInputDigest; reviewKeyFrom takes another
+// so a test can make the digest fail, which no ReviewInput value can
+// (gt-5u2pmc).
+type reviewDigestFn func(in ReviewInput, flags []string, omJSON, contextFile, target string) (string, error)
+
 // reviewKey is the key a stored review of w must match, and the paths the
 // bead's diff touches: the git facts, the om binary, and the digest of the
 // input om is given (gt-0lys4u). wt is checked out at merged, the merge of
@@ -78,6 +84,12 @@ func omRepoConfigAt(g Repo, base string) (omJSON, contextFile string, err error)
 // Every failure returns an error, which a caller treats as a miss: a key it
 // could not compute is never a key it may reuse (gt-pdusl8).
 func (l *Lander) reviewKey(ctx context.Context, g, wt Repo, w Work, in ReviewInput, base, merged string) (ReviewKey, []string, error) {
+	return l.reviewKeyFrom(ReviewInputDigest, ctx, g, wt, w, in, base, merged)
+}
+
+// reviewKeyFrom is reviewKey with the digest injected, the way fileSHAFrom is
+// fileSHA over its read (gt-5u2pmc).
+func (l *Lander) reviewKeyFrom(digestFn reviewDigestFn, ctx context.Context, g, wt Repo, w Work, in ReviewInput, base, merged string) (ReviewKey, []string, error) {
 	patchID, err := wt.PatchIDZeroContext(base, merged)
 	if err != nil {
 		return ReviewKey{}, nil, fmt.Errorf("review key: patch-id of %s..%s: %w", base, merged, err)
@@ -103,7 +115,7 @@ func (l *Lander) reviewKey(ctx context.Context, g, wt Repo, w Work, in ReviewInp
 	var digest string
 	omJSON, contextFile, err := omRepoConfigAt(g, base)
 	if err == nil {
-		digest, err = ReviewInputDigest(in, ExpectedReviewFlags(in, bar), omJSON, contextFile, w.Target)
+		digest, err = digestFn(in, ExpectedReviewFlags(in, bar), omJSON, contextFile, w.Target)
 	}
 	if err != nil {
 		return ReviewKey{}, nil, fmt.Errorf("review key: om's input at %s: %w", base, err)
