@@ -2725,6 +2725,14 @@ func (d *Daemon) Run() (err error) {
 			patrolScanCheckTick(pc), interval)
 	}
 
+	// Start the escalation-close ticker (gt-bba7kq): a seat whose escalation
+	// was answered but has no session otherwise waits for the next patrol_scan
+	// pass, up to ten minutes away; this ticker cuts that to a minute. Its
+	// select case below consumes the channel and the next bead runs the close
+	// pass there (gt-7o6wyb).
+	escalationCloseChan, stopEscalationClose := d.openEscalationCloseTicker()
+	defer stopEscalationClose()
+
 	// Start the resource sampler ticker if enabled (default on, gt-qqwey). Its
 	// own ticker, not the heartbeat: the heartbeat is minutes apart and a row's
 	// cpu_pct is the delta over the interval since the previous row.
@@ -3055,6 +3063,12 @@ func (d *Daemon) Run() (err error) {
 					func() { d.triggerPatrolScan() },
 					func() { d.triggerPatrolScanIfDue() })
 			}
+
+		case <-escalationCloseChan:
+			// Escalation close tick — the next bead (gt-7o6wyb) calls the close
+			// pass here. The case consumes the channel from this ticker's first
+			// tick so the declaration is used and the loop keeps its behavior
+			// (gt-bba7kq).
 
 		case <-landingInfraChan:
 			// Landing-infrastructure probe — asks the Forgejo instance and the
