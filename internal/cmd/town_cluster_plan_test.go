@@ -1954,3 +1954,131 @@ func TestClusterShapePlanLongText(t *testing.T) {
 		t.Errorf("Long text = %q, still says no cluster is contacted", long)
 	}
 }
+
+// TestClusterShapePlanRefuseSecretDocument: a plan holding a Secret document
+// deploy/k8s does not review refuses, naming the document, printing nothing and
+// writing no plan.json. A Secret reusing the reviewed name with a declared field
+// the operator never reviewed refuses too: the reviewed name alone is not the
+// reviewed document.
+func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		plant  func(t *testing.T, m *k8sdaemon.Manifests)
+		refuse string
+	}{
+		{
+			name: "a Secret document deploy/k8s does not review",
+			plant: func(_ *testing.T, m *k8sdaemon.Manifests) {
+				m.Static = append(m.Static, k8s.StaticObject{
+					APIVersion:   "v1",
+					Kind:         secretKind,
+					Name:         "planted-secret",
+					Namespace:    "gt",
+					SecretNoData: true,
+					Doc:          []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: planted-secret\n  namespace: gt\ntype: Opaque\n"),
+				})
+			},
+			refuse: "Secret gt/planted-secret",
+		},
+		{
+			name: "the reviewed Secret with a field the operator never reviewed",
+			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
+				for i := range m.Static {
+					if m.Static[i].Kind != secretKind || m.Static[i].Name != "sweep-runner-token" {
+						continue
+					}
+					var doc map[string]any
+					if err := yaml.Unmarshal(m.Static[i].Doc, &doc); err != nil {
+						t.Fatalf("decoding the reviewed Secret: %v", err)
+					}
+					doc["type"] = "Opaque"
+					body, err := yaml.Marshal(doc)
+					if err != nil {
+						t.Fatalf("encoding the changed Secret: %v", err)
+					}
+					m.Static[i].Doc = body
+				}
+			},
+			refuse: "Secret gt-sweeps/sweep-runner-token",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			build := d.build
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				m, err := build(v)
+				if err != nil {
+					return m, err
+				}
+				tc.plant(t, &m)
+				return m, nil
+			}
+			dir, out := planOut(t), &bytes.Buffer{}
+			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+			if err == nil || !strings.Contains(err.Error(), tc.refuse) || !strings.Contains(err.Error(), "Secrets stay operator-created") {
+				t.Fatalf("runTownClusterPlan = %v, want a refusal naming %s and the operator-created rule", err, tc.refuse)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+			}
+		})
+	}
+}
+
+// TestClusterShapePlanAcceptsReviewedSecretDocument: the reviewed static Secret
+// carries no data and declares the reviewed fields, so a plan holding it plans:
+// the guard accepts the reviewed document and plan.json lists it as a phase P
+// file.
+func TestClusterShapePlanAcceptsReviewedSecretDocument(t *testing.T) {
+	t.Parallel()
+	dir := planOut(t)
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	found := false
+	for _, rf := range rec.Files {
+		body, err := os.ReadFile(filepath.Join(dir, rf.Name))
+		if err != nil {
+			t.Fatalf("reading the planned file %s: %v", rf.Name, err)
+		}
+		if strings.Contains(string(body), "name: sweep-runner-token") {
+			found = true
+			if rf.Phase != planPhaseStatic {
+				t.Errorf("the reviewed Secret is listed in phase %q, want phase %s", rf.Phase, planPhaseStatic)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("plan.json lists no file holding the reviewed Secret sweep-runner-token, so the guard's acceptance was not exercised")
+	}
+}
+
+// TestClusterShapePlanRefuseSecretUnreadableSet: a plan that cannot read the
+// static set deploy/k8s reviews refuses, naming the read, printing nothing and
+// writing no plan.json: no Secret can be shown reviewed, so the plan fails closed
+// rather than pass one.
+func TestClusterShapePlanRefuseSecretUnreadableSet(t *testing.T) {
+	t.Parallel()
+	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+	d.reviewedStatic = func() ([]k8s.StaticObject, error) {
+		return nil, errors.New("planted: the embedded set cannot be read")
+	}
+	dir, out := planOut(t), &bytes.Buffer{}
+	err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+	if err == nil || !strings.Contains(err.Error(), "cannot read the static documents deploy/k8s reviews") {
+		t.Fatalf("runTownClusterPlan = %v, want a refusal naming the unreadable reviewed set", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a refused plan printed %q, want nothing", out.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+	}
+}

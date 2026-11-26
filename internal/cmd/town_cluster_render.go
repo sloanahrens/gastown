@@ -244,6 +244,11 @@ type clusterRenderDeps struct {
 	// writeTownValues writes the town's running values file, the one the pair-ready
 	// check reads. A caller that must not settle a running pair replaces it.
 	writeTownValues func(path string, v imagevalues.Values) error
+	// reviewedStatic reads the static set deploy/k8s reviews, the set the plan's
+	// Secret guard compares the render's static set against. Nil reads k8s.Static;
+	// a test supplies a failing read to drive the guard's refusal of a set it
+	// cannot read, since the embedded FS has no failing seam of its own.
+	reviewedStatic func() ([]k8s.StaticObject, error)
 }
 
 // realClusterRenderDeps is the host's. The environment is the one the compose
