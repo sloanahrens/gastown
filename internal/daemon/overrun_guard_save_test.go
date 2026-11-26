@@ -1414,7 +1414,34 @@ func TestOverrunSaveGaveUpText_NoteNamesThePushStage(t *testing.T) {
 	t.Parallel()
 	checkUnsavedText(t, gaveUpNote(t, func(overrunSeat) (string, string, error) { return "gt-sbx", "/sandbox/clone", nil }),
 		"sandbox gt-sbx", "/sandbox/clone", stopSeat.Branch, "The push failed", "remote unreachable",
-		"openshell sandbox exec -n gt-sbx --no-tty --no-login-shell -- git -C /sandbox/clone push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+		"openshell sandbox exec -n 'gt-sbx' --no-tty --no-login-shell -- git -C '/sandbox/clone' push origin HEAD:refs/heads/polecat/'capable'/'gt-aaa11'+rescue")
+}
+
+// TestOverrunSaveGaveUpText_RescueCommandQuotesEachValue: each value in the rescue command is one shell
+// word, so a clone path with a space, a semicolon, a command substitution or a single quote pastes as
+// one argument. The identity helper fails the semicolon row.
+func TestOverrunSaveGaveUpText_RescueCommandQuotesEachValue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, workDir, quotedDir string
+	}{
+		{"clean path", "/sandbox/clone", `'/sandbox/clone'`},
+		{"space", "/sandbox/my clone", `'/sandbox/my clone'`},
+		{"semicolon", "/sandbox/x;touch /tmp/pwn", `'/sandbox/x;touch /tmp/pwn'`},
+		{"command substitution", "/sandbox/$(touch /tmp/pwn)", `'/sandbox/$(touch /tmp/pwn)'`},
+		{"embedded single quote", "/sandbox/it's", `'/sandbox/it'\''s'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			note := overrunUnsavedWorkText(overrunState{SaveStage: "push", SaveFailure: "remote unreachable"},
+				"gt-sbx", tc.workDir, "polecat/capable/gt-aaa11", "capable", "gt-aaa11")
+			want := "openshell sandbox exec -n 'gt-sbx' --no-tty --no-login-shell -- git -C " + tc.quotedDir +
+				" push origin HEAD:refs/heads/polecat/'capable'/'gt-aaa11'+rescue"
+			if !strings.Contains(note, want) {
+				t.Errorf("note = %q, want the rescue command %q", note, want)
+			}
+		})
+	}
 }
 
 // TestOverrunSaveGaveUpText_NoteAddsTheCommitStageCommands: a stop whose
@@ -1435,7 +1462,7 @@ func TestOverrunSaveGaveUpText_NoteAddsTheCommitStageCommands(t *testing.T) {
 		t.Fatalf("hand-back notes = %q, want one note", f.handBackNotes)
 	}
 	note := f.handBackNotes[0]
-	add, commit, push := "git -C /sandbox/clone add -A", "git -C /sandbox/clone commit -m ", "git -C /sandbox/clone push"
+	add, commit, push := "git -C '/sandbox/clone' add -A", "git -C '/sandbox/clone' commit -m ", "git -C '/sandbox/clone' push"
 	checkUnsavedText(t, note, "The commit failed", add, commit, push)
 	if i, j, k := strings.Index(note, add), strings.Index(note, commit), strings.Index(note, push); i < 0 || j < i || k < j {
 		t.Errorf("note = %q, want the add, then the commit, then the push command", note)
@@ -1484,7 +1511,7 @@ func TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown(t *testing.T) {
 	if len(f.handBackNotes) != 1 {
 		t.Fatalf("hand-back notes = %q, want the seat parked with one note", f.handBackNotes)
 	}
-	checkUnsavedText(t, f.handBackNotes[0], "the step is unknown", "push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+	checkUnsavedText(t, f.handBackNotes[0], "the step is unknown", "push origin HEAD:refs/heads/polecat/'capable'/'gt-aaa11'+rescue")
 }
 
 // TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown: with no clone found the note keeps today's
@@ -1624,7 +1651,7 @@ func TestOverrunSaveGaveUpText_ParkedItemNamesThePushStage(t *testing.T) {
 	st := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "remote unreachable", SaveStage: "push"}
 	summary := parkedItemSummary(t, st, nil)
 	checkUnsavedText(t, summary, "The push failed", "remote unreachable", "/sandbox/gt/gastown/polecats/capable/gastown",
-		"push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+		"push origin HEAD:refs/heads/polecat/'capable'/'gt-aaa11'+rescue")
 	if !strings.Contains(summary, "gt polecat check-recovery gastown/capable") {
 		t.Errorf("summary = %q, want today's recovery commands kept", summary)
 	}
