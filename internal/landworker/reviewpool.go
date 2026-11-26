@@ -38,19 +38,24 @@ type ReviewPool struct {
 	running map[string]*aheadRun
 }
 
-// aheadRun is one review under way: the head it reviews, and the channel
-// closed when it ends.
+// aheadRun is one review under way: the head it reviews, the cancel that stops
+// it, and the channel closed when it ends. canceled records that an Offer at a
+// later head stopped it, so a repeat Offer of that head logs nothing more.
 type aheadRun struct {
-	head string
-	done chan struct{}
+	head     string
+	cancel   context.CancelFunc
+	canceled bool
+	done     chan struct{}
 }
 
 // Offer starts one review per work while fewer than Max are running, launching
 // the goroutines in the order given; Go does not promise that the reviews enter
 // the Reviewer in that order. A work that does not fit starts nothing and is
 // not queued: the landing offers the list again after a review ends. A work
-// whose bead already has a review running is a no-op: no second reviewer and
-// no second goroutine. Nothing is started when no Reviewer is set, so every
+// whose bead already has a review running at its head is a no-op: no second
+// reviewer and no second goroutine; at another head that review is canceled and
+// nothing is started in its place until the pool is offered the list again.
+// Nothing is started when no Reviewer is set, so every
 // submission is a miss and the landing runs om inline.
 func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	if p.Reviewer == nil {
@@ -62,39 +67,49 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	}
 }
 
-// start registers w as running and launches its review, unless the pool is at
-// Max or w's bead already has one running. The cap is checked under p.mu so
-// two Offers racing cannot both start a review on the same free slot.
+// start registers w as running and launches its review, unless w's bead already
+// has one running or the pool is at Max. A bead running at another head is
+// reviewed at a head its seat has replaced, so that review is canceled (om ends
+// with its process group) and the new head is left for the next Offer
+// (gt-sor91y). The running check comes before the cap: a full pool still
+// cancels a stale review. Everything is checked under p.mu so two Offers racing
+// cannot both start a review on the same free slot.
 func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.free() == 0 {
+	if run, ok := p.running[w.BeadID]; ok {
+		if run.head == w.Head || run.canceled {
+			return
+		}
+		run.canceled = true
+		run.cancel()
+		p.logf("ahead review of %s at %s: canceled, the bead is now at %s", w.BeadID, run.head, w.Head)
 		return
 	}
-	if _, ok := p.running[w.BeadID]; ok {
+	if p.free() == 0 {
 		return
 	}
 	if p.running == nil {
 		p.running = map[string]*aheadRun{}
 	}
-	run := &aheadRun{head: w.Head, done: make(chan struct{})}
+	rctx, cancel := context.WithCancel(ctx)
+	run := &aheadRun{head: w.Head, cancel: cancel, done: make(chan struct{})}
 	p.running[w.BeadID] = run
-	go p.review(ctx, w, run)
+	go p.review(rctx, w, run)
 }
 
-// review makes one review under its own child of ctx. The entry leaves the
-// map before done closes, so Wait sees the review end. The guard in start
-// makes the entry under w.BeadID this run's own.
+// review makes one review under the child of ctx that start made. The entry
+// leaves the map before done closes, so Wait sees the review end. The guard in
+// start makes the entry under w.BeadID this run's own.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
 		p.mu.Lock()
 		delete(p.running, w.BeadID)
 		p.mu.Unlock()
+		run.cancel()
 		close(run.done)
 	}()
-	rctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if _, err := p.Reviewer.ReviewAhead(rctx, w); err != nil && !errors.Is(err, context.Canceled) {
+	if _, err := p.Reviewer.ReviewAhead(ctx, w); err != nil && !errors.Is(err, context.Canceled) {
 		p.logf("ahead review of %s at %s: %v", w.BeadID, w.Head, err)
 	}
 }
