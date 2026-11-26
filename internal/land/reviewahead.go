@@ -214,6 +214,10 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 		Outcome:      aheadOutcomeVerdict,
 		Verdict:      v,
 		Source:       aheadSourcePool,
+		// Verdict.Rescore is not serialised, so this field is the record's only
+		// trace of a borderline rejection that was re-scored: true exactly when
+		// rescoreBorderline stamped the standing verdict with a Rescore.
+		Rescored: v.Rescore != nil,
 	}
 	if err := l.Ahead.Put(rec); err != nil {
 		return "", aheadBuilt{}, &InfraError{Stage: "store record", Err: err}

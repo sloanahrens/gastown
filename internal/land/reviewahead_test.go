@@ -1446,6 +1446,88 @@ func TestVerdictReuseAheadStoresReject(t *testing.T) {
 		Findings: []Finding{{ID: "f1", Severity: omSeverityMajor, Path: "b.txt", Title: "breaks the tree"}}})
 }
 
+// aheadStoredRecord reads back the record a review stored for the fixture's bead.
+func aheadStoredRecord(t *testing.T, f *landFixture) AheadRecord {
+	t.Helper()
+	data, err := os.ReadFile(aheadTestPath(f.town, "gastown", f.work.BeadID))
+	if err != nil {
+		t.Fatalf("reading the stored record: %v", err)
+	}
+	var rec AheadRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("the stored record is not an AheadRecord: %v\n%s", err, data)
+	}
+	return rec
+}
+
+// TestVerdictReuseAheadStoresRejectAfterRescore: a first verdict inside the
+// rescore margin and a rerun that rejects with a higher score leave the record
+// holding the rerun's verdict and rescored true. Verdict.Rescore is not
+// serialised, so the flag is the record's only trace of the second run, which
+// a landing reusing the record needs to avoid scoring it again.
+func TestVerdictReuseAheadStoresRejectAfterRescore(t *testing.T) {
+	t.Parallel()
+	// keyOMConfig's bar is 0.8, so 0.78 with no major finding is borderline.
+	first := Verdict{Verdict: VerdictRequestChanges, Score: 0.78,
+		Findings: []Finding{{ID: "first", Severity: omSeverityMinor, Path: "b.txt", Title: "the name is vague"}}}
+	rerun := Verdict{Verdict: VerdictRequestChanges, Score: 0.79,
+		Findings: []Finding{{ID: "rerun", Severity: omSeverityMinor, Path: "b.txt", Title: "the branch repeats the condition"}}}
+	f, l, _ := keyFixture(t)
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	rev := &aheadPoolReviewer{t: t, verdicts: []Verdict{first, rerun}}
+	l.Reviewer = rev
+	got, _, err := l.reviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("reviewAhead: %v", err)
+	}
+	if got != AheadStored {
+		t.Fatalf("reviewAhead = %q, want %q", got, AheadStored)
+	}
+	if len(rev.runs) != 2 {
+		t.Fatalf("isolated reviewer runs = %d, want 2: one review and its re-score", len(rev.runs))
+	}
+	rec := aheadStoredRecord(t, f)
+	if !rec.Rescored {
+		t.Errorf("record rescored = false, want true after the re-score")
+	}
+	if rec.Verdict.Verdict != VerdictRequestChanges || rec.Verdict.Score != rerun.Score {
+		t.Errorf("record verdict = %q at %.2f, want the rerun's rejection at %.2f", rec.Verdict.Verdict, rec.Verdict.Score, rerun.Score)
+	}
+	if len(rec.Verdict.Findings) != 1 || rec.Verdict.Findings[0].ID != "rerun" {
+		t.Errorf("record findings = %+v, want the rerun's, so the standing verdict is the higher-scoring run", rec.Verdict.Findings)
+	}
+}
+
+// TestVerdictReuseAheadNoRescoreOutsideMargin: a rejection past the rescore
+// margin stands on one om run, and the record says it was not re-scored.
+func TestVerdictReuseAheadNoRescoreOutsideMargin(t *testing.T) {
+	t.Parallel()
+	// keyOMConfig's bar is 0.8; 0.40 is far outside rescoreMargin below it.
+	verdict := Verdict{Verdict: VerdictRequestChanges, Score: 0.40,
+		Findings: []Finding{{ID: "f1", Severity: omSeverityMinor, Path: "b.txt", Title: "the name is vague"}}}
+	f, l, _ := keyFixture(t)
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	rev := &aheadPoolReviewer{t: t, verdicts: []Verdict{verdict}}
+	l.Reviewer = rev
+	got, _, err := l.reviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("reviewAhead: %v", err)
+	}
+	if got != AheadStored {
+		t.Fatalf("reviewAhead = %q, want %q", got, AheadStored)
+	}
+	if len(rev.runs) != 1 {
+		t.Errorf("isolated reviewer runs = %d, want 1: a rejection past the margin is not re-scored", len(rev.runs))
+	}
+	rec := aheadStoredRecord(t, f)
+	if rec.Rescored {
+		t.Errorf("record rescored = true for a verdict outside the margin, want false")
+	}
+	if rec.Verdict.Verdict != VerdictRequestChanges || rec.Verdict.Score != verdict.Score {
+		t.Errorf("record verdict = %q at %.2f, want the one run's rejection at %.2f", rec.Verdict.Verdict, rec.Verdict.Score, verdict.Score)
+	}
+}
+
 // TestVerdictReuseAheadPutFails: a verdict whose record the store cannot write
 // is returned as an error naming the store stage, never as AheadStored. A
 // verdict nobody can read back must not read as one that was kept.
