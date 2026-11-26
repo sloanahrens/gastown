@@ -1685,6 +1685,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// reusedSuffix is the ", om reused (...)" stage suffix when the om stage
 	// reused a stored review; it is empty when om ran or the head was waived.
 	var reusedSuffix string
+	// reusedRec is the stored record a reused om verdict came from; it is nil
+	// when om ran, and the bead gets commentVerdict's comment (gt-bydaep).
+	var reusedRec *AheadRecord
 	// reviewStart opens the window the review leaves on the work bead: it
 	// covers the overseer check and the om attempt alike, so a waiver is
 	// timed like a review (gt-uebmq).
@@ -1722,6 +1725,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		if reused {
 			verdict = rec.Verdict
 			verdict.Version = key.OMVersion
+			reusedRec = &rec
 			omDone()
 			l.recordAcceptedRisks(w, used)
 			reusedSuffix = omReusedSuffix(time.Duration(rec.ReviewSecs*float64(time.Second)), l.now().Sub(rec.ReviewedAt))
@@ -1782,7 +1786,11 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	findingsRej := findingsRejection(verdict)
 	l.logReview(issue, w, comments, g, base, merged, verdict, findingsRej != nil)
 	l.logRounds(issue, w, verdict)
-	l.commentVerdict(w, verdict, reviewStart, time.Now())
+	if reusedRec != nil {
+		l.commentReused(w, verdict, *reusedRec)
+	} else {
+		l.commentVerdict(w, verdict, reviewStart, time.Now())
+	}
 	if verdict.Verdict == VerdictRequestChanges {
 		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried)+reusedSuffix)
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}

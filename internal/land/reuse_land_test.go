@@ -673,3 +673,78 @@ func TestVerdictReuseLandStageLineSaysReused(t *testing.T) {
 		})
 	}
 }
+
+// TestVerdictReuseLandCommentSaysReused: a landing that reuses a stored review
+// writes its one bead comment through commentReused, which names the reused
+// review and its base. A landing that runs om, whether no record matched or the
+// store could not be read, writes commentVerdict's comment with no "reused
+// from". Routing every landing to commentVerdict turns the hit row red (gt-bydaep).
+func TestVerdictReuseLandCommentSaysReused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// seed stores the record edited by edit; without it the store is empty.
+		seed bool
+		edit func(l *Lander, rec *AheadRecord)
+		// reused: the stored approve answers the landing and om does not run.
+		reused bool
+	}{
+		{name: "a stored approve is reused", seed: true, reused: true},
+		{
+			name: "a different head runs om",
+			seed: true,
+			edit: func(_ *Lander, rec *AheadRecord) { rec.Head = strings.Repeat("cd", 20) },
+		},
+		{
+			name: "an unreadable record runs om",
+			edit: func(l *Lander, _ *AheadRecord) {
+				l.Ahead.readFile = func(string) ([]byte, error) { return []byte("{not a record"), nil }
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, store, key := reuseLandSetup(t)
+			rec := reuseAskRecord(key, f.base, l.now().Add(-time.Minute))
+			if tc.edit != nil {
+				tc.edit(l, &rec)
+			}
+			if tc.seed {
+				if err := store.Put(rec); err != nil {
+					t.Fatalf("Put error = %v; want nil", err)
+				}
+			}
+			res, err := l.Land(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("Land error = %v; want nil", err)
+			}
+			comments := f.beadComments()
+			if len(comments) != 1 {
+				t.Fatalf("%d comment(s) on the bead; want exactly one verdict comment", len(comments))
+			}
+			text := comments[0].Text
+			head := verdictCommentHead(res.LandedCommit)
+			if !strings.Contains(text, head) {
+				t.Fatalf("comment = %q; want it to name the merged head %s", text, head)
+			}
+			if tc.reused {
+				if n := len(f.review.calls); n != 0 {
+					t.Errorf("om ran %d time(s) on a reused approve; want 0", n)
+				}
+				want := "om approve 0.90 " + head + " (reused from " + shortSHA(f.base) + ", 1m0s old)"
+				if text != want {
+					t.Errorf("comment = %q; want the reused comment %q", text, want)
+				}
+				return
+			}
+			if n := len(f.review.calls); n != 1 {
+				t.Errorf("om ran %d time(s) for %s; want 1", n, tc.name)
+			}
+			if strings.Contains(text, "reused from") {
+				t.Errorf("comment = %q; want commentVerdict's comment, not the reused one", text)
+			}
+			parseVerdictComment(t, text)
+		})
+	}
+}
