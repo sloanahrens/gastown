@@ -341,20 +341,66 @@ func TestSystemUpdatesNowRunStartsThePoller(t *testing.T) {
 
 	// Run takes each worker's wake before starting it, so a wake from here can
 	// land before the section's worker parks. Wake again until the read lands;
-	// the loop is bounded, and the guard below names a poller that never ran.
-	var polled bool
-	for i := 0; i < 1000 && !polled; i++ {
-		select {
-		case <-read:
-			polled = true
-		default:
-			h.wakeAll()
-			runtime.Gosched()
-		}
-	}
+	// the wait is bounded by testGuard, not by a yield count a starved poller
+	// can outlast, and the guard below names a poller that never ran.
+	polled := wakeUntilRead(h.wakeAll, read, testGuard)
 	require.True(t, polled, "the section's poller never read the section")
 	stop()
 	wantSignal(t, done, "the hub did not stop")
 
 	assert.NotNil(t, h.State().SystemUpdates, "the poller's read is not in the feed")
+}
+
+// wakeUntilRead wakes and yields until read lands, or until bound passes,
+// reporting whether the read landed. A wait bounded by a yield count fails when
+// the poller's goroutine is not scheduled within that many yields, which a
+// loaded host can starve (gt-iwj6jg); a passing run is woken out of the loop by
+// the read, so the bound is only a watchdog for a poller that never ran.
+func wakeUntilRead(wake func(), read <-chan struct{}, bound time.Duration) bool {
+	//testpolicy:allow no-sleep — failure-only watchdog: the read lands the helper out of the loop long before this bound on a passing run
+	deadline := time.Now().Add(bound)
+	for !time.Now().After(deadline) {
+		select {
+		case <-read:
+			return true
+		default:
+		}
+		wake()
+		runtime.Gosched()
+	}
+	return false
+}
+
+// TestWakeUntilRead pins each way the wait can end: a read ends it in time, a
+// bound with no read reports false, and a read already waiting costs at most
+// one wake.
+func TestWakeUntilRead(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the wake that lands the read on its 1001st call is seen", func(t *testing.T) {
+		t.Parallel()
+		read := make(chan struct{}, 1)
+		calls := 0
+		wake := func() {
+			calls++
+			if calls == 1001 {
+				read <- struct{}{}
+			}
+		}
+		assert.True(t, wakeUntilRead(wake, read, testGuard), "the read landed on the 1001st wake but the wait reported it never did")
+	})
+
+	t.Run("a read that never arrives reports false once the bound passes", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, wakeUntilRead(func() {}, make(chan struct{}), 10*time.Millisecond), "a read that never arrived did not report false")
+	})
+
+	t.Run("a read already waiting is taken without waking more than once", func(t *testing.T) {
+		t.Parallel()
+		read := make(chan struct{}, 1)
+		read <- struct{}{}
+		wakes := 0
+		assert.True(t, wakeUntilRead(func() { wakes++ }, read, testGuard), "an already-waiting read was not taken")
+		assert.LessOrEqual(t, wakes, 1, "an already-waiting read was taken only after waking the hub again")
+	})
 }
