@@ -1201,6 +1201,9 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		if d.gatewayCap.stats == nil {
 			d.gatewayCap.stats = d.gatewayStatsRead
 		}
+		if d.gatewayCap.logf == nil {
+			d.gatewayCap.logf = d.logger.Printf
+		}
 		d.gatewayCap.mu.Unlock()
 		s.gatewayCap = &d.gatewayCap
 	}

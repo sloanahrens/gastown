@@ -59,7 +59,10 @@ func (t *gatewayCapTracker) observe(s bdgateway.GatewayStats) gatewayCapReading 
 // which is not safe for concurrent use. A nil stats source raises nothing, as a
 // daemon with no gateway configured does.
 type gatewayCapCollector struct {
-	stats   func(ctx context.Context) (bdgateway.GatewayStats, error)
+	stats func(ctx context.Context) (bdgateway.GatewayStats, error)
+	// logf receives the one line a run says when the gateway reports no cap
+	// counters; nil says nothing.
+	logf    func(format string, args ...any)
 	mu      sync.Mutex
 	tracker gatewayCapTracker
 }
@@ -78,6 +81,9 @@ func (c *gatewayCapCollector) collect(ctx context.Context) ([]attention.Item, er
 	c.mu.Lock()
 	reading := c.tracker.observe(stats)
 	c.mu.Unlock()
+	if reading.AbsentFirst && c.logf != nil {
+		c.logf("attention: bd gateway does not report its cap counters (/v1/stats has no cap fields); bd_gateway.cap_hit waits for them")
+	}
 	if !reading.Raise {
 		return nil, nil
 	}
