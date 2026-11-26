@@ -11,6 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/deploy/k8s"
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/secretpreflight"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -246,3 +248,131 @@ type planSecretExit struct{ code int }
 func (e *planSecretExit) Error() string { return fmt.Sprintf("the Secret read exited %d", e.code) }
 
 func (e *planSecretExit) ExitCode() int { return e.code }
+
+// planNestedObject is doc's field at path as an object, and false when the
+// document lacks one of the fields. A field present but not an object is an
+// error, since a value the compare cannot read cannot be shown to differ or to
+// match.
+func planNestedObject(doc map[string]any, path ...string) (map[string]any, bool, error) {
+	object := doc
+	walked := ""
+	for _, field := range path {
+		walked = joinPath(walked, field)
+		raw, ok := object[field]
+		if !ok {
+			return nil, false, nil
+		}
+		child, ok := raw.(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("%s is not an object", walked)
+		}
+		object = child
+	}
+	return object, true, nil
+}
+
+// planContainerImages is the image every container of a Deployment's pod
+// template names, keyed by its list and name. The lists are the ones
+// containerEntryPath reads an image in, so this compare sees exactly what the
+// drift compare skips. A container whose name or image is not a non-empty
+// string is an error: an image that cannot be read cannot be shown to differ
+// from the cluster's or to match it.
+func planContainerImages(doc map[string]any) (map[string]string, error) {
+	pod, ok, err := planNestedObject(doc, "spec", "template", "spec")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("the Deployment has no spec.template.spec, so its container images cannot be read")
+	}
+	images := map[string]string{}
+	for _, list := range []string{"initContainers", "containers", "ephemeralContainers"} {
+		raw, ok := pod[list]
+		if !ok {
+			continue
+		}
+		entries, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("the pod template's %s is not a list", list)
+		}
+		for _, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("a pod template %s entry is not an object", list)
+			}
+			name, _ := entry["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("a pod template %s entry names no container", list)
+			}
+			image, _ := entry["image"].(string)
+			if image == "" {
+				return nil, fmt.Errorf("a pod template %s entry names no image, so an image roll cannot be told from a match", list)
+			}
+			images[list+"/"+name] = image
+		}
+	}
+	return images, nil
+}
+
+// planPolecatImage is a Deployment pod template's gastown.dev/polecat-image
+// annotation, and "" when it names none: the render carries the annotation only
+// when it was given a polecat image. A present annotations field that is not an
+// object, and a present value that is not a string, are errors, so an
+// unreadable annotation never reads as absent.
+func planPolecatImage(doc map[string]any) (string, error) {
+	object := doc
+	for _, path := range [][]string{{"spec", "template"}, {"metadata"}, {"annotations"}} {
+		next, ok, err := planNestedObject(object, path...)
+		if err != nil || !ok {
+			return "", err
+		}
+		object = next
+	}
+	raw, ok := object[k8sdaemon.PolecatImageAnnotation]
+	if !ok {
+		return "", nil
+	}
+	image, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("the pod template's %s annotation is not a string", k8sdaemon.PolecatImageAnnotation)
+	}
+	return image, nil
+}
+
+// planImageRollDiffers reports whether an image roll would change a Deployment:
+// a container image, or the pod template's gastown.dev/polecat-image annotation,
+// differs between the rendered object and the live one. The drift compare skips
+// both, so it cannot answer this and the plan asks here. A container the live
+// object lacks is left to that compare, which reports the entry absent.
+func planImageRollDiffers(rendered, live map[string]any) (bool, error) {
+	renderedImages, err := planContainerImages(rendered)
+	if err != nil {
+		return false, err
+	}
+	liveImages, err := planContainerImages(live)
+	if err != nil {
+		return false, err
+	}
+	for key, image := range renderedImages {
+		if liveImage, ok := liveImages[key]; ok && liveImage != image {
+			return true, nil
+		}
+	}
+	renderedPolecat, err := planPolecatImage(rendered)
+	if err != nil {
+		return false, err
+	}
+	livePolecat, err := planPolecatImage(live)
+	if err != nil {
+		return false, err
+	}
+	return renderedPolecat != livePolecat, nil
+}
+
+// planImageRollRefusal refuses a plan whose only differences are an image roll.
+// The roll belongs to the update Job, whose waits and record an operator's
+// apply would not reach. The refusal is a stopgap: revisit it after the first
+// five deployer applies (gt-s3vqzy).
+func planImageRollRefusal() error {
+	return fmt.Errorf("gt town cluster plan: the plan's only differences are container image digests and the %s annotation, so it is an image roll; roll an image with the %s Job (Role %s), not a plan apply, and no plan.json was written", k8sdaemon.PolecatImageAnnotation, updatejob.Name, updateRoleName)
+}
