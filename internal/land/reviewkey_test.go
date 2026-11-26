@@ -485,6 +485,75 @@ func TestVerdictReuseKeyDigestFollowsInputs(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseKeyChangesWithTheRounds: appending a round to the bead's
+// rounds ledger changes the key's input digest, and nothing else in the key.
+// An ahead review writes nothing to the ledger, so the text it read is the one
+// the landing reads back; a round added between them is a real change to what
+// om is given and must force a fresh review (gt-kalg0s).
+func TestVerdictReuseKeyChangesWithTheRounds(t *testing.T) {
+	t.Parallel()
+	f, l, wt := keyFixture(t)
+	l.RoundsDir = t.TempDir()
+	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: f.work.BeadID, Now: l.now}
+	must(t, ledger.Append(1, "first", []Finding{{ID: "F1", Severity: omSeverityMinor, Path: "b.txt", Title: "a minor"}}))
+	in := ReviewInput{Dir: f.workRoot, BeadID: f.work.BeadID, RoundsText: l.roundsText(f.work.BeadID)}
+	before, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	firstText := in.RoundsText
+	must(t, ledger.Append(2, "second", nil))
+	in.RoundsText = l.roundsText(f.work.BeadID)
+	if in.RoundsText == firstText {
+		t.Fatalf("roundsText = %q before and after a round was appended; want the appended round in the text", firstText)
+	}
+	after, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	if after.InputDigest == before.InputDigest {
+		t.Errorf("InputDigest = %q before and after a round was appended; want it to change with the rounds text", after.InputDigest)
+	}
+	// The rounds are the only input that moved, so the rest of the key must stand.
+	after.InputDigest = before.InputDigest
+	if after != before {
+		t.Errorf("reviewKey = %+v; want it to differ from %+v in InputDigest alone", after, before)
+	}
+}
+
+// TestVerdictReuseKeyChangesWithOMJSON: changing the threshold in the .om.json
+// at base changes the key's input digest, and the change is the bar's text
+// rather than the diff: the merge's patch-id is the same. The bar is part of the
+// key only through the text om is given (gt-kalg0s).
+func TestVerdictReuseKeyChangesWithOMJSON(t *testing.T) {
+	t.Parallel()
+	f, l, wt := keyFixture(t)
+	in := ReviewInput{Dir: f.workRoot}
+	before, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	// The same diff, on a main whose .om.json sets a higher bar.
+	raised := f.git.Commit(t, f.origin, "main", "main: raise the bar", map[string]string{omConfigFile: `{"threshold":0.9}`})
+	f.git.SetRef(t, f.origin, "refs/heads/raised-bar", raised)
+	merged := f.git.Commit(t, f.origin, "raised-bar", "merge: add b", map[string]string{"b.txt": "work\n"})
+	w := f.work
+	w.Head = merged
+	after, touched, err := l.reviewKey(context.Background(), wt, wt, w, in, raised, merged)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	if !slices.Equal(touched, []string{"b.txt"}) {
+		t.Errorf("touched = %v; want [b.txt], the paths the diff changes", touched)
+	}
+	if after.PatchID != before.PatchID {
+		t.Fatalf("PatchID = %q at the raised bar, %q before; want the same diff", after.PatchID, before.PatchID)
+	}
+	if after.InputDigest == before.InputDigest {
+		t.Errorf("InputDigest = %q before and after the .om.json at base changed its threshold; want it to change with the bar's text", after.InputDigest)
+	}
+}
+
 // TestVerdictReuseKeyOMConfigRefused: a key that cannot read the bar or the two
 // texts om is given is an error, which the caller treats as a miss, and never a
 // key built from empty texts: an unreadable, absent or invalid .om.json, a
