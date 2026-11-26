@@ -72,8 +72,9 @@ type fakeAheadReviewer struct {
 	stopped         chan land.Work
 	heldAfterCancel chan struct{}
 
-	mu    sync.Mutex
-	calls []land.Work
+	mu       sync.Mutex
+	calls    []land.Work
+	returned bool
 }
 
 func newFakeAheadReviewer(t *testing.T, ctx context.Context, fail map[string]error) *fakeAheadReviewer {
@@ -99,18 +100,35 @@ func (f *fakeAheadReviewer) ReviewAhead(ctx context.Context, w land.Work) (land.
 				select {
 				case <-f.heldAfterCancel:
 				case <-f.bound:
-					return "", errors.New("review held past the test's bound")
+					return f.returnFrom("", errors.New("review held past the test's bound"))
 				}
 			}
 		}
-		return "", ctx.Err()
+		return f.returnFrom("", ctx.Err())
 	case <-f.bound:
-		return "", errors.New("review held past the test's bound")
+		return f.returnFrom("", errors.New("review held past the test's bound"))
 	}
 	if err := f.fail[w.BeadID]; err != nil {
-		return "", err
+		return f.returnFrom("", err)
 	}
-	return land.AheadSkipped, nil
+	return f.returnFrom(land.AheadSkipped, nil)
+}
+
+// returnFrom records that the review is returning and yields its result. It
+// runs after the review's work, so a test can tell an End called before the
+// reviewer returned from one called after.
+func (f *fakeAheadReviewer) returnFrom(out land.AheadOutcome, err error) (land.AheadOutcome, error) {
+	f.mu.Lock()
+	f.returned = true
+	f.mu.Unlock()
+	return out, err
+}
+
+// hasReturned reports whether any review has returned from ReviewAhead.
+func (f *fakeAheadReviewer) hasReturned() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.returned
 }
 
 // reviewed returns the works the reviewer was asked to review.
@@ -802,6 +820,64 @@ func TestReviewPoolHoldStartsNothing(t *testing.T) {
 				t.Errorf("Begin called %d times and End %d under a hold, want Begin 1 and End 0: the offer starts nothing more and ends no review it did not start", begins, ends)
 			}
 			recvBounded(t, ctx, idleOf(pool), "the pool going idle under a hold")
+		})
+	}
+}
+
+// TestReviewPoolEndAlwaysCalled pins that every started review calls End
+// exactly once, after the reviewer returned, on each way a review can end: a
+// normal return, an error and a cancelled context. The reviewer records its own
+// return, so an End called before the reviewer left fails by name; a nil End is
+// the no-op every other pool test here leaves unset (gt-oi5mmf).
+func TestReviewPoolEndAlwaysCalled(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		fail   error
+		cancel bool
+	}{
+		{name: "normal return"},
+		{name: "error", fail: errors.New("om unreachable")},
+		{name: "cancelled context", cancel: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			if tt.fail != nil {
+				rev.fail = map[string]error{"gt-ended": tt.fail}
+			}
+			var mu sync.Mutex
+			var endedAfterReturn []bool
+			pool := &ReviewPool{Reviewer: rev, Max: 1, End: func() {
+				mu.Lock()
+				defer mu.Unlock()
+				endedAfterReturn = append(endedAfterReturn, rev.hasReturned())
+			}}
+
+			offerCtx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			pool.Offer(offerCtx, []land.Work{{BeadID: "gt-ended", Head: "1111111"}})
+			recvBounded(t, ctx, rev.entered, "the review start")
+			if tt.cancel {
+				cancel()
+			} else {
+				close(rev.release)
+			}
+			// Wait returning means the review left the pool, which the pool does
+			// only after End, so the count below is settled.
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+			mu.Lock()
+			got := append([]bool(nil), endedAfterReturn...)
+			mu.Unlock()
+			if len(got) != 1 {
+				t.Fatalf("End called %d times for one review, want exactly once", len(got))
+			}
+			if !got[0] {
+				t.Errorf("End ran before the reviewer returned, want it after")
+			}
 		})
 	}
 }
