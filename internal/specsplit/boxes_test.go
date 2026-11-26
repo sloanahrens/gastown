@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// specWith is a spec over testDirs with the given Constraints text and boxes.
+func specWith(constraints string, list ...Box) Spec {
+	return Spec{Constraints: constraints, Acceptance: acceptanceText(list...), Dirs: testDirs}
+}
+
 // threeBoxSpec is a one-package bead with three acceptance boxes.
 func threeBoxSpec() (Spec, []Box) {
 	list := []Box{
@@ -13,14 +18,11 @@ func threeBoxSpec() (Spec, []Box) {
 		{Text: "The default is kept. Run: go test ./internal/config -run TestDefault", Run: "go test ./internal/config -run TestDefault"},
 		{Text: "The guard holds. Run: go test ./internal/config -run TestGuard", Run: "go test ./internal/config -run TestGuard"},
 	}
-	return Spec{
-		Constraints: strings.Join([]string{
-			"- Edit internal/config/env.go to read the new setting.",
-			"- Leave internal/config/defaults.go as it is.",
-		}, "\n"),
-		Acceptance: acceptanceText(list...),
-		Dirs:       testDirs,
-	}, list
+	constraints := strings.Join([]string{
+		"- Edit internal/config/env.go to read the new setting.",
+		"- Leave internal/config/defaults.go as it is.",
+	}, "\n")
+	return specWith(constraints, list...), list
 }
 
 // TestGroupByBoxes: a spec whose bullets name one package or none splits into a
@@ -35,34 +37,23 @@ func TestGroupByBoxes(t *testing.T) {
 		spec            Spec
 		wantPackage     string
 		wantConstraints []string
-		wantBoxes       []Box
 	}{
 		{
 			name:            "bullets name one package",
 			spec:            onePackage,
 			wantPackage:     "internal/config",
 			wantConstraints: []string{"Edit internal/config/env.go to read the new setting.", "Leave internal/config/defaults.go as it is."},
-			wantBoxes:       list,
 		},
 		{
-			name: "bullets name no package",
-			spec: Spec{
-				Constraints: "- Make the documentation better.",
-				Acceptance:  acceptanceText(list...),
-				Dirs:        testDirs,
-			},
+			name:            "bullets name no package",
+			spec:            specWith("- Make the documentation better.", list...),
 			wantPackage:     ".",
 			wantConstraints: []string{"Make the documentation better."},
-			wantBoxes:       list,
 		},
 		{
-			name: "no bullets",
-			spec: Spec{
-				Acceptance: acceptanceText(list...),
-				Dirs:       testDirs,
-			},
+			name:        "no bullets",
+			spec:        specWith("", list...),
 			wantPackage: ".",
-			wantBoxes:   list,
 		},
 	}
 	for _, tc := range tests {
@@ -84,14 +75,14 @@ func TestGroupByBoxes(t *testing.T) {
 			if !reflect.DeepEqual(got[0].Constraints, tc.wantConstraints) {
 				t.Errorf("group 1 Constraints = %q, want %q", got[0].Constraints, tc.wantConstraints)
 			}
-			if !reflect.DeepEqual(got[0].Boxes, tc.wantBoxes[:1]) {
-				t.Errorf("group 1 Boxes = %+v, want only the first box %+v", got[0].Boxes, tc.wantBoxes[:1])
+			if !reflect.DeepEqual(got[0].Boxes, list[:1]) {
+				t.Errorf("group 1 Boxes = %+v, want only the first box %+v", got[0].Boxes, list[:1])
 			}
 			if len(got[1].Constraints) != 0 {
 				t.Errorf("group 2 Constraints = %q, want none", got[1].Constraints)
 			}
-			if !reflect.DeepEqual(got[1].Boxes, tc.wantBoxes[1:]) {
-				t.Errorf("group 2 Boxes = %+v, want the remaining boxes %+v", got[1].Boxes, tc.wantBoxes[1:])
+			if !reflect.DeepEqual(got[1].Boxes, list[1:]) {
+				t.Errorf("group 2 Boxes = %+v, want the remaining boxes %+v", got[1].Boxes, list[1:])
 			}
 		})
 	}
@@ -103,7 +94,6 @@ func TestGroupByBoxes(t *testing.T) {
 func TestGroupByBoxesRefuses(t *testing.T) {
 	t.Parallel()
 	_, list := threeBoxSpec()
-	twoBoxes := acceptanceText(list[:2]...)
 	rootDirs := append([]string{"."}, testDirs...)
 	tests := []struct {
 		name    string
@@ -111,57 +101,40 @@ func TestGroupByBoxesRefuses(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "one box",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.",
-				Acceptance:  acceptanceText(list[0]),
-				Dirs:        testDirs,
-			},
+			name:    "one box",
+			spec:    specWith("- Edit internal/config/env.go.", list[0]),
 			wantErr: "needs at least two",
 		},
 		{
-			name: "a box with no Run command",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.",
-				Acceptance:  "- [ ] A test shows the setting.\n" + twoBoxes,
-				Dirs:        testDirs,
-			},
+			name:    "a box with no Run command",
+			spec:    specWith("- Edit internal/config/env.go.", list[0], Box{Text: "A test shows the setting."}),
 			wantErr: "no Run command",
 		},
 		{
 			name: "a box whose Run names no go test command",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.",
-				Acceptance:  "- [ ] A test shows the setting. Run: make gate\n" + twoBoxes,
-				Dirs:        testDirs,
-			},
+			spec: specWith("- Edit internal/config/env.go.", list[0],
+				Box{Text: "A test shows the setting. Run: make gate"}),
 			wantErr: "names no go test command",
 		},
 		{
 			name: "bullets naming two packages",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.\n- Edit internal/specsplit/specsplit.go.",
-				Acceptance:  twoBoxes,
-				Dirs:        testDirs,
-			},
+			spec: specWith("- Edit internal/config/env.go.\n- Edit internal/specsplit/specsplit.go.",
+				list[0], list[1]),
 			wantErr: "is for Group",
 		},
 		{
-			name: "a bullet naming the root package",
-			spec: Spec{
-				Constraints: "- Update the root package .",
-				Acceptance:  twoBoxes,
-				Dirs:        rootDirs,
-			},
+			name:    "a bullet naming the root package",
+			spec:    Spec{Constraints: "- Update the root package .", Acceptance: acceptanceText(list[0], list[1]), Dirs: rootDirs},
 			wantErr: "names the root package .",
 		},
 		{
-			name: "the same box twice",
-			spec: Spec{
-				Constraints: "- Edit internal/config/env.go.",
-				Acceptance:  acceptanceText(list[0], list[0]),
-				Dirs:        testDirs,
-			},
+			name:    "a spec that names no directories",
+			spec:    Spec{Constraints: "- Edit internal/config/env.go.", Acceptance: acceptanceText(list[0], list[1])},
+			wantErr: "names no package directories",
+		},
+		{
+			name:    "the same box twice",
+			spec:    specWith("- Edit internal/config/env.go.", list[0], list[0]),
 			wantErr: "more than one file group",
 		},
 	}
