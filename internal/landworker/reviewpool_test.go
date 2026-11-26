@@ -138,6 +138,34 @@ func (l *logRecorder) get() []string {
 	return append([]string(nil), l.lines...)
 }
 
+// holdFake is a pool's Begin/End pair for a landing hold: begin answers with
+// reply, and the counters show what Offer asked of it.
+type holdFake struct {
+	mu     sync.Mutex
+	reply  bool
+	begins int
+	ends   int
+}
+
+func (h *holdFake) begin() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.begins++
+	return h.reply
+}
+
+func (h *holdFake) end() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ends++
+}
+
+func (h *holdFake) counts() (begins, ends int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.begins, h.ends
+}
+
 func TestReviewPoolReviewsEachWorkOnce(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
@@ -726,6 +754,56 @@ func reviewCounts(f *fakeAheadReviewer) map[string]int {
 		counts[w.BeadID]++
 	}
 	return counts
+}
+
+// TestReviewPoolHoldStartsNothing pins that a landing hold stops ahead reviews:
+// while Begin answers false, an offer starts no review, asks Begin only for the
+// first review it would have started, and calls no End for a review it did not
+// start. The rows offer one work and several, so a pool that started any of them
+// fails by name.
+func TestReviewPoolHoldStartsNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		max   int
+		works []land.Work
+	}{
+		{name: "one work", max: 1, works: []land.Work{
+			{BeadID: "gt-held", Head: "1111111"},
+		}},
+		{name: "several works", max: 3, works: []land.Work{
+			{BeadID: "gt-held", Head: "1111111"},
+			{BeadID: "gt-also", Head: "2222222"},
+			{BeadID: "gt-third", Head: "3333333"},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			hold := &holdFake{reply: false}
+			pool := &ReviewPool{Reviewer: rev, Max: tt.max, Begin: hold.begin, End: hold.end}
+
+			pool.Offer(context.Background(), tt.works)
+
+			// The pool records a review under p.mu before it launches the
+			// goroutine, so an entry here is a review started, not one merely
+			// not yet scheduled.
+			for _, w := range tt.works {
+				if head, ok := runningHeadAt(t, pool, w.BeadID); ok {
+					t.Errorf("under a hold the pool started a review of %s at %s, want none", w.BeadID, head)
+				}
+			}
+			if got := rev.reviewed(); len(got) != 0 {
+				t.Errorf("reviewer called %d times under a hold, want 0: %v", len(got), got)
+			}
+			if begins, ends := hold.counts(); begins != 1 || ends != 0 {
+				t.Errorf("Begin called %d times and End %d under a hold, want Begin 1 and End 0: the offer starts nothing more and ends no review it did not start", begins, ends)
+			}
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle under a hold")
+		})
+	}
 }
 
 func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
