@@ -505,3 +505,23 @@ func TestPatrolScanMovedOnRotates(t *testing.T) {
 		}
 	})
 }
+
+// One patrol_scan tick drops the kept record of a seat that has moved on to
+// another bead: runPatrolScanOn calls the moved-on pass after the sandbox
+// record walk, so the record is gone once the tick returns (gt-i72us8).
+func TestPatrolScanTickDropsMovedOnKeptSeat(t *testing.T) {
+	t.Parallel()
+	p, path := movedOnPatrol(t, movedOnOther, true)
+	d := p.host.d
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		PatrolScan: &PatrolScanConfig{Enabled: true},
+	}}
+	d.rogueBDRun.record(d.clk().Now())
+	p.host.gateCheck = func(string, string) (string, error) { return "", nil }
+
+	d.runPatrolScanOn(p.host)
+
+	if _, err := os.Stat(path); err == nil {
+		t.Errorf("the kept record of the moved-on seat survived one patrol_scan tick; want the tick to drop it")
+	}
+}

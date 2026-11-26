@@ -197,6 +197,7 @@ func (d *Daemon) runPatrolScanOn(env *patrolScanHost) {
 	checks.answered += ghChecks.answered
 	d.patrolScanRogueBD()
 	env.patrolScanSandboxRecords()
+	env.dropMovedOnKeptSeats()
 	// The tick reached its end, so record the run: gt jobs reads the row as
 	// never_run until one is (gt-xittvy). The early returns above, and a tick
 	// whose every gate check failed, are not runs.
