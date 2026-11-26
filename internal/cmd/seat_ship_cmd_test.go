@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -131,6 +132,56 @@ func TestSeatShipCmdExitCode(t *testing.T) {
 			t.Errorf("runSeatShip ran %d time(s) without --bead, want none", r.calls)
 		}
 	})
+}
+
+// TestSeatShipCmdFlagsReachTheDeps: each of --projects, --outbox and --deadline
+// given a value reaches the deps runSeatShip is called with.
+func TestSeatShipCmdFlagsReachTheDeps(t *testing.T) {
+	t.Parallel()
+	required := []string{"--rig", "r", "--polecat", "p", "--bead", "b"}
+	open := func() (beads.Client, error) { return beadsfake.New(), nil }
+	rows := []struct {
+		name string
+		flag []string
+		want func(d seatShipDeps) bool
+	}{
+		{"projects reaches the deps", []string{"--projects", "/seat/projects"}, func(d seatShipDeps) bool { return d.Projects == "/seat/projects" }},
+		{"outbox reaches the deps", []string{"--outbox", "/seat/outbox"}, func(d seatShipDeps) bool { return d.Outbox == "/seat/outbox" }},
+		{"deadline reaches the deps", []string{"--deadline", "5s"}, func(d seatShipDeps) bool { return d.Deadline == 5*time.Second }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			r := &seatShipRun{}
+			out, err := seatShipExec(t, open, r, append(append([]string{}, required...), row.flag...)...)
+			if err != nil {
+				t.Fatalf("Execute() = %v (%s), want nil", err, out)
+			}
+			if r.calls != 1 || !row.want(r.deps) {
+				t.Errorf("runSeatShip got deps %+v over %d call(s), want the flag's value in it", r.deps, r.calls)
+			}
+		})
+	}
+}
+
+// TestSeatShipCmdRefusesANonPositiveDeadline: a deadline of zero or less is a
+// usage error, named by the flag, and runSeatShip never runs.
+func TestSeatShipCmdRefusesANonPositiveDeadline(t *testing.T) {
+	t.Parallel()
+	for _, deadline := range []string{"0s", "-1s"} {
+		t.Run(deadline, func(t *testing.T) {
+			t.Parallel()
+			r := &seatShipRun{}
+			open := func() (beads.Client, error) { return beadsfake.New(), nil }
+			_, err := seatShipExec(t, open, r, "--rig", "r", "--polecat", "p", "--bead", "b", "--deadline="+deadline)
+			if err == nil || !strings.Contains(err.Error(), "--deadline") {
+				t.Errorf("--deadline=%s: Execute() = %v, want a refusal naming --deadline", deadline, err)
+			}
+			if r.calls != 0 {
+				t.Errorf("--deadline=%s: runSeatShip ran %d time(s), want none", deadline, r.calls)
+			}
+		})
+	}
 }
 
 // TestSeatShipCmdHasItsTaskPlacement: the task map places gt seat ship in the
