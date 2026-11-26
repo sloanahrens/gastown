@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -152,6 +153,55 @@ func TestSpecDispatchSkipsACandidateItsBlockersRefuse(t *testing.T) {
 	}
 }
 
+// unreadDependencyBeads is a bd whose show answers every id with
+// dependencies_unread set and no listed edge. Its reads go through the real
+// reader, so the one blocking entry the consumers refuse on is the one
+// parseShowIssues appends; deleting that append leaves the bead unblocked
+// (gt-rxlpuq).
+func unreadDependencyBeads(t *testing.T) *beads.Beads {
+	t.Helper()
+	return beads.NewPinned(t.TempDir(), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) == 0 || args[0] != "show" {
+			return nil, nil, fmt.Errorf("unexpected bd call %v", args)
+		}
+		var rows []string
+		for _, arg := range args[1:] {
+			if arg == "--json" {
+				continue
+			}
+			rows = append(rows, fmt.Sprintf(`{"id":%q,"title":"unread","status":"open","issue_type":"task","dependencies_unread":true}`, arg))
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil, nil
+	}))
+}
+
+// A bead whose dependency list bd could not read is a skip, not a dispatch: the
+// board's detail read carries the entry the reader appends, so the tick names
+// it and slings nothing (gt-rxlpuq).
+func TestSpecDispatchSkipsABeadWhoseDependencyListIsUnread(t *testing.T) {
+	t.Parallel()
+	store := newCountingStore(unreadDependencyBeads(t))
+	f := newFakeSpecTown(cleanSpec("gt-acn51", 2, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	board := env.Candidates
+	env.Candidates = func() specBoardRead {
+		return specBoardDetails(newSpecTickReads(), func(string) beads.Client { return store }, board(), nil)
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if len(store.multis) != 1 {
+		t.Errorf("board detail reads = %v, want the one batch that answered the edges", store.multis)
+	}
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+		t.Fatalf("slung %v with %d dispatched, want the bead left ready", f.slung, len(r.Dispatched))
+	}
+	const want = "gt-acn51: blocked by (dependency list unread) (unread)"
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+		t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+	}
+}
+
 // TestSpecSlingRefusesABeadBlockedAfterTheBoardRead is gt-ewrtm: the ready
 // board is read at the start of a tick that can run for minutes, so a blocker
 // added after it is only visible in the bead the sling reads.
@@ -199,6 +249,31 @@ func TestSpecSlingRefusesABeadBlockedAfterTheBoardRead(t *testing.T) {
 			h.wantNo("hook")
 		})
 	}
+}
+
+// A sling whose first read carries an unread dependency list refuses with the
+// sling-refusal marker, so the tick defers the bead and the next board asks
+// again (gt-rxlpuq). The read is the production reader's, not a stub's.
+func TestSpecSlingRefusesABeadWhoseDependencyListIsUnread(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{})
+	store := unreadDependencyBeads(t)
+	h.run.beadInfoInTown = refuseOpenBlockers(func(_, id string) (*beadInfo, error) {
+		issue, err := store.Show(id)
+		if err != nil {
+			return nil, err
+		}
+		return beadInfoOf(issue), nil
+	})
+
+	_, err := h.run.executeSling(executeParams())
+	wantSlingErr(t, err, "blocked by (dependency list unread)")
+	if !isSpecSlingRefusal(err) {
+		t.Errorf("%q is not read as a deferral: the tick would label the bead dispatch-failed", err)
+	}
+	h.wantNo("spawn")
+	h.wantNo("hook")
 }
 
 // A degraded duplicate pool only warns: the bead's own show answered and shows
