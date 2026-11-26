@@ -463,10 +463,29 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			d.logger.Printf("squash: %s: %s", db, archive.covered(dec.Cut))
 		}
 		res, err := d.runSquashDatabaseExclusive(ctx, db, dec.Cut, step.settings)
-		switch {
-		case errors.Is(err, errSquashGCRunning):
+		if errors.Is(err, errSquashGCRunning) {
+			// The gc flag deferred this run: its stamp starts the deferral's day, and
+			// the alert waits for that day (gt-2o03sg). A failure is logged and the
+			// check is due again after squashCheckRetryAfter, so the next one asks again.
 			undecided = true
-			d.logger.Printf("squash: %s: %v — the run waits for the next check", db, err)
+			if err := d.markSquashDeferred(db); err != nil {
+				d.logger.Printf("squash: WARNING: %s: %v — the deferral is not stamped, so the alert cannot count it", db, err)
+				continue
+			}
+			d.logger.Printf("squash: %s: %v — the run waits for the next check, deferred since %s",
+				db, err, d.squashDeferredSince(db).UTC().Format(time.RFC3339))
+			if err := d.raiseSquashDeferAlert(db, now); err != nil {
+				d.logger.Printf("squash: WARNING: %s: the deferral alert was not delivered: %v", db, err)
+			}
+			continue
+		}
+		// Any other outcome of the run ends the deferral (gt-2o03sg). A clear that
+		// fails leaves the stamp standing, so the check is due again.
+		if err := d.clearSquashDeferred(db); err != nil {
+			undecided = true
+			d.logger.Printf("squash: WARNING: %s: %v", db, err)
+		}
+		switch {
 		case errors.Is(err, errSquashDoltTaskInFlight):
 			undecided = true
 			d.logger.Printf("squash: %s: %v — the run waits for the next check", db, err)
@@ -1474,8 +1493,7 @@ func squashAlertedClockKey(db string) string {
 // condition (alert_clock.go).
 // A failed delivery, and a mark that cannot be written, return their error and
 // leave no mark, so the next deferral asks again (gt-7z081y) rather than losing
-// the alert. The deferral site (gt-2o03sg) is the caller; until it lands this
-// function has none, and this bead's test is what drives it.
+// the alert. runSquashCheck's gc-flag deferral is the caller (gt-2o03sg).
 func (d *Daemon) raiseSquashDeferAlert(db string, now time.Time) error {
 	clock := alertClock{dir: alertClockPath(d.config.TownRoot)}
 	first := d.squashDeferredSince(db)
