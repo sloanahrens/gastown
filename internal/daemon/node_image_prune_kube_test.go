@@ -493,10 +493,11 @@ func TestNodeImagePruneKubeListJSONToleratesWarnings(t *testing.T) {
 // TestNodeImagePruneKubeErrorsCarryTheHead: a non-zero exit carries the verb, the
 // exit status and the first 300 bytes of kubectl's answer, control bytes turned to spaces
 // and "..." where it was cut, so a Forbidden, an AlreadyExists and a policy refusal
-// read apart in the log (gt-d4zhkq). Every verb's exit branch asserts the head in its
-// own table above.
+// read apart in the log (gt-d4zhkq). Every verb's non-zero exit goes through that head,
+// so every row runs through each verb's call site, not Delete alone.
 func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 	t.Parallel()
+	const job = "node-prune-abc123"
 	const refusal = "Error from server (Forbidden): jobs.batch is forbidden\n"
 	const tail = "TAILMARK"
 	// Exactly 1000 bytes, so the head is the first 300 and the tail is past it.
@@ -520,27 +521,54 @@ func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 		// rune early and stays valid UTF-8.
 		{name: "cut inside a rune", out: "a" + strings.Repeat("世", 100), want: "a" + strings.Repeat("世", 99) + "...", cut: true},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			run := func(context.Context, string, []string, string, ...string) (string, int, error) {
-				return tt.out, 1, nil
-			}
-			err := kubectlNodePrune{dir: t.TempDir(), run: run}.Delete(context.Background(), "node-prune-abc123")
+	// Every verb whose non-zero exit carries the head. WaitComplete's fake exits
+	// non-zero for both waits, so its error carries the head of each.
+	verbs := []struct {
+		name string
+		call func(kubectlNodePrune) error
+	}{
+		{name: "ListJSON", call: func(k kubectlNodePrune) error {
+			_, err := k.ListJSON(context.Background())
+			return err
+		}},
+		{name: "Apply", call: func(k kubectlNodePrune) error {
+			return k.Apply(context.Background(), []byte("kind: Job\n"))
+		}},
+		{name: "WaitComplete", call: func(k kubectlNodePrune) error {
+			return k.WaitComplete(context.Background(), job)
+		}},
+		{name: "Logs", call: func(k kubectlNodePrune) error {
+			_, err := k.Logs(context.Background(), job)
+			return err
+		}},
+		{name: "Delete", call: func(k kubectlNodePrune) error {
+			return k.Delete(context.Background(), job)
+		}},
+	}
+	for _, v := range verbs {
+		t.Run(v.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+						return tt.out, 1, nil
+					}
+					err := v.call(kubectlNodePrune{dir: t.TempDir(), run: run})
 
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "kubectl delete of the node-prune Job exited 1")
-			assert.Contains(t, err.Error(), tt.want)
-			if !tt.cut {
-				assert.NotContains(t, err.Error(), "...", "an answer under the bound was cut")
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), tt.want)
+					if !tt.cut {
+						assert.NotContains(t, err.Error(), "...", "an answer under the bound was cut")
+					}
+					assert.NotContains(t, err.Error(), tail, "the error carries the answer past the 300-byte head")
+					assert.NotContains(t, err.Error(), "\n", "a newline reached the log line")
+					assert.NotContains(t, err.Error(), "\t", "a tab reached the log line")
+					assert.NotContains(t, err.Error(), "\r", "a carriage return reached the log line")
+					assert.NotContains(t, err.Error(), "\x1b", "an escape byte reached the log line")
+					assert.NotContains(t, err.Error(), "\x00", "a NUL reached the log line")
+					assert.NotContains(t, err.Error(), "\x7f", "a DEL reached the log line")
+					assert.True(t, utf8.ValidString(err.Error()), "the cut left half a rune")
+				})
 			}
-			assert.NotContains(t, err.Error(), tail, "the error carries the answer past the 300-byte head")
-			assert.NotContains(t, err.Error(), "\n", "a newline reached the log line")
-			assert.NotContains(t, err.Error(), "\t", "a tab reached the log line")
-			assert.NotContains(t, err.Error(), "\r", "a carriage return reached the log line")
-			assert.NotContains(t, err.Error(), "\x1b", "an escape byte reached the log line")
-			assert.NotContains(t, err.Error(), "\x00", "a NUL reached the log line")
-			assert.NotContains(t, err.Error(), "\x7f", "a DEL reached the log line")
-			assert.True(t, utf8.ValidString(err.Error()), "the cut left half a rune")
 		})
 	}
 }
