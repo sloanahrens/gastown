@@ -622,6 +622,123 @@ func TestFailureExcerptShowsTheFailureNotTheEndOfTheLog(t *testing.T) {
 	}
 }
 
+// TestFailureExcerptReadsTheWholeLogForASummaryOnlyTail: every red ends with
+// the same summary -- the gate's own FAILED line, make's Error 1, the runner's
+// exit code -- so a tail holding only those names no failing test, and the
+// test that did fail can sit far above the tail. The excerpt must read the
+// whole log then, or the note carries the summary and hides the cause
+// (gt-8bpwpx).
+func TestFailureExcerptReadsTheWholeLogForASummaryOnlyTail(t *testing.T) {
+	t.Parallel()
+	log := gateJobLog(
+		"⭐ Run Main actions/checkout@v4",
+		"--- FAIL: TestX (0.01s)",
+		"    x_test.go:9: want 3, got 1",
+		"FAIL\tgithub.com/x/a\t0.2s") +
+		strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateTailBytes/40+1) +
+		gateJobLog(
+			"gate: FAILED at unit tier (unit): exit status 1",
+			"make: *** [Makefile:290: gate] Error 1",
+			"[runner]: exitcode 2")
+	if len(log) <= candidateTailBytes {
+		t.Fatalf("log is %d bytes; want it past the %d-byte tail cap", len(log), candidateTailBytes)
+	}
+	if tail := log[len(log)-candidateTailBytes:]; strings.Contains(tail, "--- FAIL") {
+		t.Fatalf("the tail holds the failing test already; the fixture does not exercise the summary-only tail")
+	}
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+		log:      log,
+	}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidateFailed {
+		t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+	}
+	for _, want := range []string{"--- FAIL: TestX", "x_test.go:9: want 3, got 1"} {
+		if !strings.Contains(res.Tail, want) {
+			t.Errorf("tail %q; want it to name %q", res.Tail, want)
+		}
+	}
+	if strings.Contains(res.Tail, "2026-10-04T") {
+		t.Errorf("tail keeps the Forgejo timestamps: %q", res.Tail)
+	}
+	if n := strings.Count(res.Tail, "\n"); n > gateTailLines {
+		t.Errorf("tail is %d lines, over the %d-line budget: %q", n, gateTailLines, res.Tail)
+	}
+}
+
+// TestFailureExcerptKeepsATailThatHoldsATestFailure: the excerpt is still read
+// from the capped tail while that tail names a failing test -- a "--- FAIL"
+// block, a bare panic, a FAIL package line, or a unit-tier rule report -- so an
+// earlier failure this red already answered stays out of the note (gt-8bpwpx).
+func TestFailureExcerptKeepsATailThatHoldsATestFailure(t *testing.T) {
+	t.Parallel()
+	rule := strings.Repeat("=", 72)
+	filler := strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateTailBytes/40+1)
+	tests := []struct {
+		name string
+		tail []string
+		want []string
+	}{
+		{
+			name: "a --- FAIL block",
+			// The FAIL package line a real log prints under the block is left
+			// out here so this row goes red on the --- FAIL regex alone; the
+			// FAIL package line is the next row's claim.
+			tail: []string{"--- FAIL: TestLate (0.02s)", "    late_test.go:4: boom"},
+			want: []string{"TestLate", "late_test.go:4: boom"},
+		},
+		{
+			name: "a bare panic",
+			// The FAIL package line is left out so this row goes red on the
+			// panic regex alone; that marker is the FAIL package row's claim.
+			tail: []string{"=== RUN   TestLate", "panic: runtime error: index out of range [3] with length 2", "goroutine 12 [running]:"},
+			want: []string{"panic: runtime error", "goroutine 12 [running]:"},
+		},
+		{
+			name: "a FAIL package line",
+			tail: []string{"# github.com/x/c", "=== RUN   TestLate", "    late_test.go:9: want 2, got 3", "FAIL\tgithub.com/x/c\t0.4s"},
+			want: []string{"=== RUN   TestLate", "late_test.go:9: want 2, got 3", "FAIL\tgithub.com/x/c"},
+		},
+		{
+			name: "a unit-tier rule report",
+			tail: []string{rule, "GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests", "goroutine 12 [chan receive]:", rule},
+			want: []string{"GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests", "goroutine 12 [chan receive]:"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			log := gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestEarly (0.01s)", "FAIL\tgithub.com/x/early\t0.1s") +
+				filler + gateJobLog(tt.tail...)
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := &fakeForgejo{
+				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+				log:      log,
+			}
+			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.State != CandidateFailed {
+				t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(res.Tail, want) {
+					t.Errorf("tail %q; want it to carry %q", res.Tail, want)
+				}
+			}
+			if strings.Contains(res.Tail, "TestEarly") {
+				t.Errorf("tail %q; want the tail's failure, not the one above it", res.Tail)
+			}
+		})
+	}
+}
+
 // TestFailureExcerptCarriesEveryShapeOfRed: each marker a gate log can go red
 // on keeps the output that explains it (gt-fn9e6.25).
 func TestFailureExcerptCarriesEveryShapeOfRed(t *testing.T) {
