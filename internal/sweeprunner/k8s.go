@@ -466,6 +466,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 				// the host. A run that wrote none leaves the source absent,
 				// which is not a failure (gt-4lj2q).
 				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+LogsDirName, filepath.Join(spec.OutDir, LogsDirName)), MissingSourcePath: OutputDir + "/" + LogsDirName},
+				// The cache trim record sits beside the result, written after it by
+				// sweep-run. A run that ended under its cap leaves none, which is not
+				// a failure, the same as the logs (gt-4lj2q).
+				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+CacheTrimFileName, filepath.Join(spec.OutDir, CacheTrimFileName)), MissingSourcePath: OutputDir + "/" + CacheTrimFileName},
 			},
 			// The runner mounts the output claim, where the progress record is
 			// rewritten after each tier, so the exec reads it while the Job runs;
