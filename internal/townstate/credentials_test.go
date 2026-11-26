@@ -236,6 +236,58 @@ func TestFindCredentialsReadsYAMLLines(t *testing.T) {
 	})
 }
 
+// A block scalar under a credential name is judged by its body, not its header
+// (gt-ultan3). The body is the value: a secret body is a finding for every header
+// form, and an empty, reference-only or comment-only body is clean. The body ends
+// at the first line at or below the key's indent. The rule names the key only.
+func TestFindCredentialsYAMLBlockScalar(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"the exact leak: a secret body under a literal header", "password: |\n  hunter2\n", []string{"yaml:password"}},
+		{"a literal header with a strip sign", "password: |-\n  hunter2\n", []string{"yaml:password"}},
+		{"a literal header with a keep sign", "password: |+\n  hunter2\n", []string{"yaml:password"}},
+		{"a folded header", "password: >\n  hunter2\n", []string{"yaml:password"}},
+		{"a folded header with a strip sign", "password: >-\n  hunter2\n", []string{"yaml:password"}},
+		{"a folded header with a keep sign", "password: >+\n  hunter2\n", []string{"yaml:password"}},
+		{"an indentation digit before the sign", "password: |2-\n  hunter2\n", []string{"yaml:password"}},
+		{"an indentation digit after the sign", "password: >-2\n  hunter2\n", []string{"yaml:password"}},
+		{"an indentation digit alone", "password: |2\n  hunter2\n", []string{"yaml:password"}},
+		{"a folded header with a digit and a sign", "password: >1-\n  hunter2\n", []string{"yaml:password"}},
+		{"a list item's key", "- password: |\n    hunter2\n", []string{"yaml:password"}},
+		{"a nested key's body", "dolt:\n  password: |\n    hunter2\n", []string{"yaml:password"}},
+		{"a secret body ends at the dedent", "password: |\n  hunter2\nprefix: gt\n", []string{"yaml:password"}},
+		{"a reference line beside a literal is judged by the literal", "password: |\n  ${A}\n  hunter2\n", []string{"yaml:password"}},
+		{"an empty body is clean", "password: |\n", nil},
+		{"an empty body before a sibling is clean", "password: |\nprefix: gt\n", nil},
+		{"a body of one environment reference is clean", "password: |\n  ${DOLT_PASSWORD}\n", nil},
+		{"a multi-line reference body is clean", "password: |\n  ${A}\n  ${B}\n", nil},
+		{"a comment-only body is clean", "password: |\n  # rotate me\n", nil},
+		{"a folded comment-only body is clean", "password: >-\n  # rotate me\n  # and me\n", nil},
+		{"a '#'-prefixed line in a body that is not comment-only is content", "password: |\n  # hunter2\n  ${A}\n", []string{"yaml:password"}},
+		{"a sibling key is not read as body", "password: |\ntoken: abc123\n", []string{"yaml:token"}},
+		{"a sibling key at the key's indent ends the body", "dolt:\n  password: |\n    hunter2\n  token: abc123\n", []string{"yaml:password", "yaml:token"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	t.Run("a rule names the key and never the body", func(t *testing.T) {
+		for _, rule := range FindCredentials([]byte("password: |\n  hunter2\n")) {
+			if strings.Contains(rule, "hunter2") {
+				t.Fatalf("rule %q holds a body line", rule)
+			}
+		}
+	})
+}
+
 // TestFlaggedContentRefusesYAMLCredential walks the new rule through a caller:
 // FlaggedContent is the check the export and the backup archive verifier share,
 // so a YAML config must be omitted there, not only found by FindCredentials. It
@@ -250,6 +302,7 @@ func TestFlaggedContentRefusesYAMLCredential(t *testing.T) {
 		{"a plain password", "prefix: gt\npassword: hunter2\n"},
 		{"an indented nested key", "dolt:\n  password: hunter2\n"},
 		{"a quoted token", "token: \"abc123\"\n"},
+		{"a block scalar secret", "password: |\n  hunter2\n"},
 	}
 	for _, c := range refused {
 		t.Run(c.name, func(t *testing.T) {
@@ -264,6 +317,7 @@ func TestFlaggedContentRefusesYAMLCredential(t *testing.T) {
 	}{
 		{"a commented-out line", "prefix: gt\n# password: hunter2\n"},
 		{"an environment reference", "password: ${DOLT_PASSWORD}\n"},
+		{"an empty block scalar", "password: |\nprefix: gt\n"},
 	}
 	for _, c := range clean {
 		t.Run(c.name, func(t *testing.T) {
