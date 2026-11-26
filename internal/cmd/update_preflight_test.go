@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,11 +56,60 @@ func (p *preflightRunningProbes) Health(context.Context) (string, error) {
 	return "", errors.New("the gate read the health line")
 }
 
+// descendingAncestry reports every pair commit as a descendant of the running
+// one, so a gate fixture that does not test the downgrade check passes it.
+func descendingAncestry(string, string, string) (bool, error) { return true, nil }
+
+// preflightAncestry is the ancestry read a downgrade row steers: it answers the
+// row's result and records the commits the gate asked about.
+type preflightAncestry struct {
+	ancestor bool
+	err      error
+	calls    int
+	from, to string
+}
+
+func (a *preflightAncestry) read(_, from, to string) (bool, error) {
+	a.calls++
+	a.from, a.to = from, to
+	return a.ancestor, a.err
+}
+
+// preflightRefusal asserts err is the preflight check's refusal of the pair,
+// naming every string in want and wrapping wantErr when one is given.
+func preflightRefusal(t *testing.T, err error, want []string, wantErr error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("PreSwap accepted a pair the downgrade check refused")
+	}
+	var pc update.PairCheckError
+	if !errors.As(err, &pc) || pc.Check != update.CheckPreflight {
+		t.Errorf("PreSwap error = %v, want a PairCheckError naming %q", err, update.CheckPreflight)
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("PreSwap error = %q, want it to name %q", err, w)
+		}
+	}
+	if wantErr != nil && !errors.Is(err, wantErr) {
+		t.Errorf("PreSwap error = %v, want it to wrap %v", err, wantErr)
+	}
+}
+
 // preflightDigestInstaller builds the installer digestInstaller wires for a
 // digest install over one town root, so a test drives its pre-swap gate. run is
 // the check seam (nil: none); verify is the daemon probe the running commit is
-// read through (nil: unwired).
+// read through (nil: unwired). The downgrade check is given a descendant, so a
+// row that tests another guard is decided by that guard alone.
 func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult, verify update.VerifyProbes) *update.DigestInstaller {
+	t.Helper()
+	return preflightDigestInstallerOf(t, townRoot, run, verify, false, descendingAncestry)
+}
+
+// preflightDigestInstallerOf is preflightDigestInstaller with the downgrade
+// check's inputs: allowRollback is the run's flag, and ancestry is the read that
+// answers whether the pair descends from the running commit (nil: unwired).
+func preflightDigestInstallerOf(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead) *update.DigestInstaller {
 	t.Helper()
 	path, _ := podPairValuesFile(t)
 	seams := updateSeams{
@@ -77,10 +127,11 @@ func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Co
 		// The derivation answers the pair the fixture installs, so the registry
 		// match passes and a row is decided by the guard it tests.
 		PairDerive: pairHeldDerive(podPairPair),
+		Ancestry:   ancestry,
 	}
 	target := podPairTarget()
 	deps := update.Deps{Verify: verify}
-	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
+	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard, allowRollback)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}
@@ -275,7 +326,7 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 			// These rows never reach the pair-level reads: each stops the gate at
 			// the check seam. Zero reads would refuse if one were reached, and the
 			// row's want names the guard it expects instead.
-			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair), &preflightRunningProbes{commit: preflightRunningCommit})
+			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair), &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
 
 			err := gate.check(context.Background(), podPairPair)
 			if err == nil {
@@ -364,7 +415,7 @@ func TestPreSwapPairMatchesRegistry(t *testing.T) {
 				seen = append(seen, sha)
 				return derived, nil
 			}
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive, &preflightRunningProbes{commit: preflightRunningCommit})
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
 
 			err := gate.check(context.Background(), pair)
 			if len(seen) != 1 || seen[0] != pair.Commit {
@@ -411,7 +462,7 @@ func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil, &preflightRunningProbes{commit: preflightRunningCommit})
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
 
 			err := gate.check(context.Background(), tt.pair)
 			if err == nil {
@@ -516,7 +567,7 @@ func TestPreSwapRunningCommit(t *testing.T) {
 func TestPreSwapRunningCommitRecords(t *testing.T) {
 	t.Parallel()
 	probe := &preflightRunningProbes{commit: preflightRunningCommit}
-	gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(podPairPair), probe)
+	gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(podPairPair), probe, false, descendingAncestry)
 
 	if err := gate.check(context.Background(), podPairPair); err != nil {
 		t.Fatalf("PreSwap = %v, want the pair accepted", err)
@@ -532,5 +583,131 @@ func TestPreSwapRunningCommitRecords(t *testing.T) {
 	}
 	if gate.running != "" {
 		t.Errorf("recorded running commit = %q after a refused read, want none", gate.running)
+	}
+}
+
+// TestPreSwapNoDowngrade holds the pre-swap gate to the downgrade check: a pair
+// whose commit descends from the running one passes, and an ancestor is refused
+// as the preflight check, naming the running commit and the pair's. A run given
+// --allow-rollback lets the ancestor through without asking the ancestry read.
+// The read is asked whether the running commit is an ancestor of the pair's
+// commit, in that order, so a swap of the arguments would invert the guard.
+func TestPreSwapNoDowngrade(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		ancestor      bool
+		allowRollback bool
+		// want is empty when the pair is accepted; otherwise every string must
+		// appear in the refusal.
+		want []string
+	}{
+		{
+			name:     "a descendant passes",
+			ancestor: true,
+		},
+		{
+			name: "an ancestor is refused naming both commits",
+			want: []string{
+				"refusing downgrade of " + preflightRunningCommit,
+				"to " + podPairCommit,
+			},
+		},
+		{
+			name:          "an ancestor passes with allowRollback",
+			allowRollback: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			read := &preflightAncestry{ancestor: tt.ancestor}
+			install := preflightDigestInstallerOf(t, t.TempDir(), preflightPassing, &preflightRunningProbes{commit: preflightRunningCommit}, tt.allowRollback, read.read)
+
+			err := install.PreSwap(context.Background(), podPairPair)
+			wantRead := 1
+			if tt.allowRollback {
+				wantRead = 0
+			}
+			if read.calls != wantRead {
+				t.Errorf("the ancestry read was asked %d times, want %d", read.calls, wantRead)
+			}
+			if read.calls > 0 && (read.from != preflightRunningCommit || read.to != podPairPair.Commit) {
+				t.Errorf("the ancestry read was asked whether %q is an ancestor of %q, want (%q, %q)",
+					read.from, read.to, preflightRunningCommit, podPairPair.Commit)
+			}
+			if len(tt.want) == 0 {
+				if err != nil {
+					t.Fatalf("PreSwap = %v, want the pair accepted", err)
+				}
+				return
+			}
+			preflightRefusal(t, err, tt.want, nil)
+		})
+	}
+}
+
+// TestPreSwapNoDowngradeAncestryFails holds the gate to refusing a downgrade it
+// could not rule out: an ancestry read that fails is refused as the preflight
+// check, naming both commits and wrapping the read's error, and an unwired
+// ancestry read is refused rather than passing the pair.
+func TestPreSwapNoDowngradeAncestryFails(t *testing.T) {
+	t.Parallel()
+	unreadable := errors.New("git merge-base --is-ancestor: exit status 128")
+	tests := []struct {
+		name    string
+		unwired bool
+		err     error
+		// want is empty when the pair is accepted; otherwise every string must
+		// appear in the refusal.
+		want    []string
+		wantErr error
+	}{
+		{
+			name: "a failed ancestry read is refused",
+			err:  unreadable,
+			want: []string{
+				"refusing downgrade of " + preflightRunningCommit,
+				"to " + podPairCommit,
+				unreadable.Error(),
+			},
+			wantErr: unreadable,
+		},
+		{
+			name:    "an unwired ancestry read is refused",
+			unwired: true,
+			want:    []string{"no ancestry reader is wired"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			read := &preflightAncestry{err: tt.err}
+			var ancestry ancestryRead = read.read
+			if tt.unwired {
+				ancestry = nil
+			}
+			install := preflightDigestInstallerOf(t, t.TempDir(), preflightPassing, &preflightRunningProbes{commit: preflightRunningCommit}, false, ancestry)
+
+			err := install.PreSwap(context.Background(), podPairPair)
+			if tt.unwired && read.calls != 0 {
+				t.Errorf("the unwired ancestry read was asked %d times, want none", read.calls)
+			}
+			preflightRefusal(t, err, tt.want, tt.wantErr)
+		})
+	}
+}
+
+// TestPreRollGuardProductionWiresTheAncestry pins that the production seams
+// carry the downgrade check's ancestry read, and that it is the town's reader:
+// a nil or stub read would refuse every digest install of another commit.
+func TestPreRollGuardProductionWiresTheAncestry(t *testing.T) {
+	t.Parallel()
+	read := productionUpdateSeams().Ancestry
+	if read == nil {
+		t.Fatal("productionUpdateSeams wires no ancestry read: every digest install of another commit would be refused")
+	}
+	if got, want := reflect.ValueOf(read).Pointer(), reflect.ValueOf(townAncestry).Pointer(); got != want {
+		t.Error("productionUpdateSeams wires an ancestry read other than townAncestry")
 	}
 }

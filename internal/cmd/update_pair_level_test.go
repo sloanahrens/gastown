@@ -151,7 +151,7 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, tt.reads, pairHeldDerive(tt.pair), &preflightRunningProbes{commit: preflightRunningCommit})
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, tt.reads, pairHeldDerive(tt.pair), &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
 
 			err := gate.check(context.Background(), tt.pair)
 			if len(tt.want) == 0 {

@@ -240,6 +240,9 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		// The derivation answers the values file's pair, so the gate reaches the
 		// swap.
 		PairDerive: pairHeldDerive(update.ImagePair{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}),
+		// The pair's commit is reported as a descendant, so the downgrade check
+		// passes and the gate reaches the swap.
+		Ancestry: descendingAncestry,
 	}
 	args := append([]string{"--images", values}, extra...)
 	if _, err := runPodCommand(t, seams, args...); err != nil {

@@ -578,6 +578,9 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 		// The derivation answers the values file's pair, so the gate reaches the
 		// swap.
 		PairDerive: pairHeldDerive(newPair),
+		// The pair's commit is reported as a descendant, so the downgrade check
+		// passes and the gate reaches the swap.
+		Ancestry: descendingAncestry,
 	}
 	c := newUpdateCmdWith(seams)
 	c.SetArgs([]string{"--images", values})
