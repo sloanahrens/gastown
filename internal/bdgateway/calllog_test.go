@@ -1629,3 +1629,53 @@ func TestCallLogSentinelNamedKey(t *testing.T) {
 		t.Fatalf("sentinel keys collide: %q", noneKey)
 	}
 }
+
+// TestCallLogRefusalCodes: each of the gateway's ten refusal codes is logged
+// and counted as written, and any other refusal value is logged as the fixed
+// placeholder (unknown), which Stats counts under its own key, not (other).
+func TestCallLogRefusalCodes(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		refusal string
+		want    string
+	}{
+		{codeBadRequest, "bad_request"},
+		{codeUnauthorized, "unauthorized"},
+		{codeForbidden, "forbidden"},
+		{codeTooManyCalls, "too_many_calls"},
+		{codeUnavailable, "unavailable"},
+		{codeRefusalsSuppressed, "refusals_suppressed"},
+		{codeStdinTooLarge, "stdin_too_large"},
+		{codeMethod, "method_not_allowed"},
+		{codeNotFound, "not_found"},
+		{codeInternal, "gateway_failed"},
+		{"Forbidden", "(unknown)"},
+		{"rm -rf /", "(unknown)"},
+	}
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	wantCounts := map[string]uint64{}
+	for _, row := range rows {
+		l.Log(CallRecord{Class: "read", Caller: "c", Argv: []string{"show", "gt-abc"}, ExitCode: ExitRefused, Refusal: row.refusal})
+		wantCounts[row.want]++
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	lines := readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))
+	if len(lines) != len(rows) {
+		t.Fatalf("wrote %d lines, want %d", len(lines), len(rows))
+	}
+	for i, row := range rows {
+		if got := decodeLine(t, lines[i])["refusal"]; got != row.want {
+			t.Errorf("refusal %q logged as %v, want %s", row.refusal, got, row.want)
+		}
+	}
+	if got := l.Stats().Refusals; !reflect.DeepEqual(got, wantCounts) {
+		t.Errorf("Refusals = %v, want %v", got, wantCounts)
+	}
+}

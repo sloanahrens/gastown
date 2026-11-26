@@ -38,32 +38,23 @@ func TestCallRefusalLine(t *testing.T) {
 }
 
 // TestCallRefusalStatsCap: the reason past maxRefusalKeys is counted under
-// otherRefusal, and each refusal still counts as a call and as an error.
+// otherRefusal. The log writes only the gateway's codes, so the cap is driven
+// through countRefusal, the function Log counts a refusal with.
 func TestCallRefusalStatsCap(t *testing.T) {
 	t.Parallel()
 	const reasons = maxRefusalKeys + 1
-	l, err := newCallLog(testOptions(t), func([]byte) error { return nil })
-	if err != nil {
-		t.Fatalf("newCallLog: %v", err)
-	}
+	counts := map[string]uint64{}
 	for i := 0; i < reasons; i++ {
-		l.Log(CallRecord{Class: "read", Caller: "c", Argv: []string{"show", "gt-abc"}, ExitCode: ExitRefused, Refusal: fmt.Sprintf("reason%02d", i)})
-	}
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+		countRefusal(counts, fmt.Sprintf("reason%02d", i))
 	}
 
-	got := l.Stats()
-	if len(got.Refusals) != maxRefusalKeys+1 {
-		t.Errorf("kept %d refusal keys, want %d", len(got.Refusals), maxRefusalKeys+1)
+	if len(counts) != maxRefusalKeys+1 {
+		t.Errorf("kept %d refusal keys, want %d", len(counts), maxRefusalKeys+1)
 	}
-	if n := got.Refusals[otherRefusal]; n != 1 {
+	if n := counts[otherRefusal]; n != 1 {
 		t.Errorf("refusals[%s] = %d, want 1", otherRefusal, n)
 	}
-	if _, ok := got.Refusals[fmt.Sprintf("reason%02d", maxRefusalKeys)]; ok {
+	if _, ok := counts[fmt.Sprintf("reason%02d", maxRefusalKeys)]; ok {
 		t.Errorf("reason%02d kept its own key past the cap", maxRefusalKeys)
-	}
-	if got.Calls != reasons || got.Errors != reasons {
-		t.Errorf("Calls, Errors = %d, %d; want %d, %d", got.Calls, got.Errors, reasons, reasons)
 	}
 }

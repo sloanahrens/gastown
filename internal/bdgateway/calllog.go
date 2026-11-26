@@ -64,6 +64,27 @@ const (
 	otherRefusal = "(other)"
 )
 
+// unknownRefusal is the refusal a line carries when the value is not one of the
+// gateway's refusal codes. It is kept apart from otherRefusal, the stats key for
+// a reason past maxRefusalKeys.
+const unknownRefusal = "(unknown)"
+
+// refusalCodes is the set of refusal codes the gateway writes, named from the
+// code constants of server.go. A code the gateway adds belongs here too: a value
+// missing from the set is logged as unknownRefusal.
+var refusalCodes = map[string]bool{
+	codeBadRequest:         true,
+	codeUnauthorized:       true,
+	codeForbidden:          true,
+	codeStdinTooLarge:      true,
+	codeTooManyCalls:       true,
+	codeUnavailable:        true,
+	codeMethod:             true,
+	codeNotFound:           true,
+	codeInternal:           true,
+	codeRefusalsSuppressed: true,
+}
+
 // The per-actor counter map's bound, as the verb map's is: an actor is the
 // caller's own word, so a long run of distinct names cannot grow Stats.
 const (
@@ -144,8 +165,8 @@ type CallRecord struct {
 	Conflict bool
 	// Refusal is the reason code of a call the gateway refused before exec, such
 	// as forbidden or too_many_calls. The line carries it only when it is set,
-	// and Stats counts it per reason. The code is the gateway's own word, never
-	// text from the request.
+	// and Stats counts it per reason. The code is the gateway's own word: a value
+	// that is not one of its codes is logged as unknownRefusal, never as written.
 	Refusal string
 }
 
@@ -377,7 +398,7 @@ func (l *CallLog) log(rec CallRecord, counted, write bool) {
 		DurationMS:  rec.Duration.Milliseconds(),
 		CPUMS:       rec.CPUMS,
 		Error:       boundTextTo(rec.Error, maxErrorBytes),
-		Refusal:     boundText(rec.Refusal),
+		Refusal:     refusalValue(rec.Refusal),
 		RefusedFlag: parsed.refusedFlag,
 		Conflict:    rec.Conflict,
 	}
@@ -445,6 +466,16 @@ func countVerb(counts map[string]uint64, verb string) {
 		verb = otherVerb
 	}
 	counts[verb]++
+}
+
+// refusalValue is the refusal a line carries for a call's code: the code as
+// written when it is one of refusalCodes, empty when the call was not refused,
+// and unknownRefusal for any other value, so request text never reaches a line.
+func refusalValue(code string) string {
+	if code == "" || refusalCodes[code] {
+		return code
+	}
+	return unknownRefusal
 }
 
 // countRefusal counts one refused call under its reason in counts, keeping the
