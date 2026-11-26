@@ -67,6 +67,31 @@ func TestDiskMaintenanceLastRunSkipsATickThatOnlyTrims(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceLastRunCacheTrimOnlyIsNotARun: a tick outside the window
+// where only the cache trim was due runs no daily pass, so the patrol record
+// holds no disk_maintenance entry at all, not even a zero one. gt jobs reads the
+// absent key as never_run, so a trim must not write one.
+func TestDiskMaintenanceLastRunCacheTrimOnlyIsNotARun(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	now := diskMaintNow.Add(8 * time.Hour) // 12:45, outside the 04:30 window
+	d.diskMaint.now = func() time.Time { return now }
+
+	d.runDiskMaintenance()
+
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times, want 1: the fixture must run the trim to be about a trim-only tick", *trims)
+	}
+	runs, err := ReadPatrolLastRuns(d.config.TownRoot)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadPatrolLastRuns: %v", err)
+	}
+	if at, ok := runs["disk_maintenance"]; ok {
+		t.Errorf("the record holds a disk_maintenance entry (%v) after a tick that only trimmed the cache", at)
+	}
+}
+
 // TestDiskMaintenanceLastRunSkipsADeferredPass: a pass whose apply deferred
 // leaves the window open for a retry, so it records no last run: the retry is
 // the daily pass.
