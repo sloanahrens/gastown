@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -188,25 +189,70 @@ func TestReviewPoolWorkerReviewWorksReturnsUnreadableSubmission(t *testing.T) {
 	}
 }
 
-// TestReviewPoolWorkerReviewWorksRefusesUnresolvedSubmission pins that an
-// issue whose comments read cleanly but name no submission (no READY TO LAND
-// block, no submission comment) fails the offer naming that bead, rather than
-// being dropped (gt-uuvtbv).
-func TestReviewPoolWorkerReviewWorksRefusesUnresolvedSubmission(t *testing.T) {
+// TestReviewPoolWorkerReviewWorksSkipsUnresolvable pins that an issue whose
+// comments read cleanly but name no submission (no READY TO LAND block, no
+// submission comment) is left out of the offer with one log line naming it,
+// while the other issues are still offered in landing order; a comments read
+// that fails is still returned as an error with no works, since what such a
+// bead asks for is unknown rather than absent (gt-p3qyg3).
+func TestReviewPoolWorkerReviewWorksSkipsUnresolvable(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t)
-	readable := readySubmission("gt-first", "polecat/opal/gt-first+x1", noteHead)
-	bare := beads.Issue{ID: "gt-bare", Title: "work", Status: "hooked", Type: "task",
-		Labels: []string{land.LabelReadyToLand}}
-	h.bd.Seed(bare)
 
-	works, err := h.w.reviewWorks([]*beads.Issue{readable, &bare}, "")
-	if err == nil {
-		t.Fatalf("reviewWorks returned %d works and no error for an issue naming no submission", len(works))
-	}
-	if !strings.Contains(err.Error(), "gt-bare") {
-		t.Fatalf("reviewWorks error = %v; want it to name gt-bare", err)
-	}
+	t.Run("skips the bead that names no submission", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var logs []string
+		h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+		first := readyIssue("gt-first", 0, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z")
+		last := readyIssue("gt-last", 0, "2026-09-30T12:00:00Z", "2026-09-30T12:00:00Z")
+		// gt-bare sits between them by submission time and names nothing: it is
+		// seeded so its comments read cleanly, with no READY TO LAND block.
+		bare := beads.Issue{ID: "gt-bare", Title: "work", Status: "hooked", Type: "task",
+			Labels: []string{land.LabelReadyToLand}, UpdatedAt: "2026-09-30T11:00:00Z"}
+		h.bd.Seed(bare)
+
+		works, err := h.w.reviewWorks([]*beads.Issue{last, &bare, first}, "")
+		if err != nil {
+			t.Fatalf("reviewWorks: %v: an issue naming no submission is left out, not an error", err)
+		}
+		if got, want := workOrder(works), "gt-first,gt-last"; got != want {
+			t.Fatalf("reviewWorks offered %s; want %s, leaving out gt-bare", got, want)
+		}
+		var named []string
+		for _, line := range logs {
+			if strings.Contains(line, "gt-bare") {
+				named = append(named, line)
+			}
+		}
+		if len(named) != 1 {
+			t.Fatalf("reviewWorks logged %d lines naming gt-bare; want exactly one: %v", len(named), logs)
+		}
+	})
+
+	t.Run("returns the error for comments that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		first := readyIssue("gt-first", 0, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z")
+		last := readyIssue("gt-last", 0, "2026-09-30T12:00:00Z", "2026-09-30T12:00:00Z")
+		// gt-unreadable is not in the store, so its comments read fails; it sorts
+		// between the two by submission time.
+		unreadable := &beads.Issue{ID: "gt-unreadable", Labels: []string{land.LabelReadyToLand},
+			UpdatedAt: "2026-09-30T11:00:00Z"}
+
+		works, err := h.w.reviewWorks([]*beads.Issue{first, unreadable, last}, "")
+		if err == nil {
+			t.Fatalf("reviewWorks returned %d works and no error for an issue whose comments cannot be read", len(works))
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("reviewWorks error = %v; want the store's not-found error", err)
+		}
+		if !strings.Contains(err.Error(), "gt-unreadable") {
+			t.Fatalf("reviewWorks error = %v; want it to name gt-unreadable", err)
+		}
+		if len(works) != 0 {
+			t.Fatalf("reviewWorks returned %d works with the error; want none, so an unreadable bead never makes a shorter list", len(works))
+		}
+	})
 }
 
 // TestLandingWorkerParksABeadWhoseCommentsCannotBeRead pins that process parks

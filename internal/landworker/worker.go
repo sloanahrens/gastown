@@ -968,9 +968,11 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 // the issues in place into the order the landing will take them
 // (sortByLandingOrder), from the same resolveWork process reads, so the pool
 // starts its reviews in landing order and reviews the head the submission
-// names. An issue left out is never resolved. One the pool must review whose
-// work cannot be resolved, or whose comments cannot be read, is returned as an
-// error with no works at all rather than dropped from a shorter list.
+// names. An issue left out is never resolved. One the pool would review whose
+// comments read cleanly but name no submission is left out of the offer, named
+// in one log line, and the other issues are still offered in landing order; one
+// whose comments cannot be read is returned as an error with no works at all,
+// since what such a bead asks for is unknown rather than absent.
 func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work, error) {
 	sortByLandingOrder(issues)
 	works := make([]land.Work, 0, len(issues))
@@ -994,7 +996,8 @@ func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work
 			return nil, err
 		}
 		if !ok {
-			return nil, fmt.Errorf("%s: no READY TO LAND block and no submission comment say what to land", issue.ID)
+			w.logf("%s: no READY TO LAND block and no submission comment say what to land; leaving it out of the review pool", issue.ID)
+			continue
 		}
 		works = append(works, work)
 	}
