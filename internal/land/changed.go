@@ -418,7 +418,7 @@ var treeWideGuards = []treeWideGuard{
 		// always: its input is every test file in the tree (gt-t4rchq).
 		pkg: "internal/testpolicy",
 		tests: []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit",
-			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists", "TestEnvArgsGuardOnTree"},
+			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists"},
 		always: true,
 	},
 	{
@@ -522,8 +522,10 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestEnvArgsGuardOnTree reads every *_test.go in the module, so any
+		// Go change trips it (gt-6lh6sr).
 		pkg:     "internal/modguard",
-		tests:   []string{"TestNoNewRawBdSites"},
+		tests:   []string{"TestEnvArgsGuardOnTree", "TestNoNewRawBdSites"},
 		judges:  goFile,
 		removal: true,
 	},
