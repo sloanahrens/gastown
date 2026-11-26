@@ -211,25 +211,59 @@ func (w *driftWalk) difference(path string, rendered, live any) {
 	if w.runnerConfig && path == runnerConfigPath && w.configText(path, rendered, live) {
 		return
 	}
-	renderedText, ok := w.fingerprint(path, rendered)
+	texts, hidden, ok := w.lineSides(path, rendered, live)
 	if !ok {
 		return
 	}
-	liveText, ok := w.fingerprint(path, live)
-	if !ok {
-		return
-	}
-	w.record(path, renderedText, liveText)
+	w.record(path, texts[0], texts[1], hidden)
 }
 
 // absent records a field or list entry the render names and the live object
 // lacks. The path says which it is: a keyed list's entry path carries the key.
 func (w *driftWalk) absent(path string, rendered any) {
-	renderedText, ok := w.fingerprint(path, rendered)
+	texts, hidden, ok := w.lineSides(path, rendered)
 	if !ok {
 		return
 	}
-	w.record(path, renderedText, "absent")
+	w.record(path, texts[0], "absent", hidden)
+}
+
+// lineSides is each side's text for a drift line and whether the line hides its
+// values. A path driftValueSafe reviewed prints each side as its compact JSON,
+// unless a side names a secret word: an argument can carry a token, so one
+// such side hides the whole line (gt-2h7fjc). Any other path prints each side
+// as its fingerprint (gt-wi4885). A side with no text fails the run, since a
+// line cannot stand in for a value it could not print or fingerprint.
+func (w *driftWalk) lineSides(path string, values ...any) ([]string, bool, bool) {
+	hidden := !driftValueSafe(path)
+	readable := make([]string, len(values))
+	for i, value := range values {
+		if hidden {
+			break
+		}
+		text, err := driftReadableValue(value)
+		if err != nil {
+			w.err = fmt.Errorf("%s: %w", path, err)
+			return nil, false, false
+		}
+		if configTextSecretWord.MatchString(text) {
+			hidden = true
+		}
+		readable[i] = text
+	}
+	texts := make([]string, len(values))
+	for i, value := range values {
+		if !hidden {
+			texts[i] = readable[i]
+			continue
+		}
+		text, ok := w.fingerprint(path, value)
+		if !ok {
+			return nil, false, false
+		}
+		texts[i] = text
+	}
+	return texts, hidden, true
 }
 
 // fingerprint is one side's text for a drift line, or false when the value has
@@ -244,11 +278,22 @@ func (w *driftWalk) fingerprint(path string, value any) (string, bool) {
 	return text, true
 }
 
-// record adds one line: the path and a fingerprint of each side. It never
-// carries a value, since a Deployment's spec can hold a secret and the line
-// reaches a terminal and a log (gt-wi4885).
-func (w *driftWalk) record(path, renderedText, observed string) {
-	w.drift = append(w.drift, path+": rendered "+renderedText+", observed "+observed)
+// driftHiddenMarker ends a drift line whose sides are fingerprints, so a reader
+// can tell a withheld value from a short one. Its words name the reviewed list,
+// so a line hidden by the secret guard on a listed path carries it too.
+const driftHiddenMarker = " (values hidden: path not on the reviewed list)"
+
+// record adds one line: the path and each side's text, the value on a path the
+// reviewed list allows and a fingerprint elsewhere (gt-graamb). A hidden line
+// carries driftHiddenMarker. A line never carries a value it hides, since a
+// Deployment's spec can hold a secret and the line reaches a terminal and a log
+// (gt-wi4885).
+func (w *driftWalk) record(path, renderedText, observed string, hidden bool) {
+	line := path + ": rendered " + renderedText + ", observed " + observed
+	if hidden {
+		line += driftHiddenMarker
+	}
+	w.drift = append(w.drift, line)
 }
 
 // runnerConfigPath is the gate runner's config.yml, whose changed lines print.
