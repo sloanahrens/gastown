@@ -57,11 +57,12 @@ func poolIdle(pool *ReviewPool) (started, idle <-chan struct{}) {
 }
 
 // fakeAheadReviewer records each review it is asked for and holds it until
-// the test closes release or its bound passes. A review whose bead is in fail
-// returns that error.
+// the test closes release, or the bead's own channel in perWork when it has
+// one, or its bound passes. A review whose bead is in fail returns that error.
 type fakeAheadReviewer struct {
 	entered chan land.Work
 	release chan struct{}
+	perWork map[string]chan struct{}
 	bound   <-chan struct{}
 	fail    map[string]error
 
@@ -79,8 +80,12 @@ func (f *fakeAheadReviewer) ReviewAhead(_ context.Context, w land.Work) (land.Ah
 	f.calls = append(f.calls, w)
 	f.mu.Unlock()
 	f.entered <- w
+	release := f.release
+	if ch, ok := f.perWork[w.BeadID]; ok {
+		release = ch
+	}
 	select {
-	case <-f.release:
+	case <-release:
 	case <-f.bound:
 		return "", errors.New("review held past the test's bound")
 	}
@@ -321,6 +326,101 @@ func TestReviewPoolZeroMaxIsOne(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReviewPoolLandingOrder pins that the pool keeps no queue: with Max 2 and
+// four works the first two start and the rest are dropped, so the third starts
+// only at the later Offer that follows a review's end, and the fourth waits for
+// the second slot.
+func TestReviewPoolLandingOrder(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	works := []land.Work{
+		{BeadID: "gt-first", Head: "1111111"},
+		{BeadID: "gt-second", Head: "2222222"},
+		{BeadID: "gt-third", Head: "3333333"},
+		{BeadID: "gt-fourth", Head: "4444444"},
+	}
+	// One release channel per work, so the test ends one review and leaves the
+	// rest running.
+	release := map[string]chan struct{}{}
+	for _, w := range works {
+		release[w.BeadID] = make(chan struct{})
+	}
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	rev.perWork = release
+	pool := &ReviewPool{Reviewer: rev, Max: 2}
+
+	// At the cap the first two works start; the third and fourth are not
+	// queued.
+	pool.Offer(context.Background(), works)
+	for n := 0; n < 2; n++ {
+		recvBounded(t, ctx, rev.entered, "a review start")
+	}
+	if got, want := reviewCounts(rev), map[string]int{"gt-first": 1, "gt-second": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviews per bead %v after the first offer, want the first two works only: %v", got, want)
+	}
+
+	// The first review ends and frees its slot. Nothing starts on its own.
+	firstDone := reviewEnded(t, pool, "gt-first")
+	close(release["gt-first"])
+	recvBounded(t, ctx, firstDone, "the first review ending")
+	if got, want := reviewCounts(rev), map[string]int{"gt-first": 1, "gt-second": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviews per bead %v after the first review ended, want nothing new: %v", got, want)
+	}
+
+	// The list is offered again: the third takes the freed slot and the fourth
+	// still does not fit.
+	pool.Offer(context.Background(), works[1:])
+	if w := recvBounded(t, ctx, rev.entered, "the third review start"); w.BeadID != "gt-third" {
+		t.Fatalf("started %s after the list was offered again, want the third work gt-third", w.BeadID)
+	}
+	if got, want := reviewCounts(rev), map[string]int{"gt-first": 1, "gt-second": 1, "gt-third": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviews per bead %v after the list was offered again, want the third and not the fourth: %v", got, want)
+	}
+
+	// The second review ends; at the next offer the fourth takes that slot.
+	secondDone := reviewEnded(t, pool, "gt-second")
+	close(release["gt-second"])
+	recvBounded(t, ctx, secondDone, "the second review ending")
+	pool.Offer(context.Background(), works[2:])
+	if w := recvBounded(t, ctx, rev.entered, "the fourth review start"); w.BeadID != "gt-fourth" {
+		t.Fatalf("started %s after the second slot freed, want the fourth work gt-fourth", w.BeadID)
+	}
+	if got, want := reviewCounts(rev), map[string]int{"gt-first": 1, "gt-second": 1, "gt-third": 1, "gt-fourth": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviews per bead %v after the second slot freed, want each work once: %v", got, want)
+	}
+
+	close(release["gt-third"])
+	close(release["gt-fourth"])
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+}
+
+// reviewEnded returns the channel the pool closes when bead's review has ended
+// and left it. Wait covers every review at once, and the pool has no per-review
+// event, so a test that must let exactly one review finish waits on its done:
+// the entry exists by the time its start has been received, and it leaves
+// before the channel closes.
+func reviewEnded(t *testing.T, pool *ReviewPool, bead string) <-chan struct{} {
+	t.Helper()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	run, ok := pool.running[bead]
+	if !ok {
+		t.Fatalf("no review running for %s, so none can be waited for", bead)
+	}
+	return run.done
+}
+
+// reviewCounts returns how many reviews the reviewer was asked for, per bead:
+// the pool launches its reviews in the order given, but Go promises no order
+// for their entry into the reviewer.
+func reviewCounts(f *fakeAheadReviewer) map[string]int {
+	counts := map[string]int{}
+	for _, w := range f.reviewed() {
+		counts[w.BeadID]++
+	}
+	return counts
 }
 
 func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
