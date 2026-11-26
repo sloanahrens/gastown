@@ -2413,21 +2413,30 @@ func (d *Daemon) overrunUnsavedWorkLocation(seat overrunSeat) (session, workDir 
 	return sb.Session, rec.WorkDir, nil
 }
 
+// overrunShellQuote is v as one POSIX shell word: wrapped in single quotes,
+// with each embedded single quote closed, escaped with a backslash, and
+// reopened, so a value with spaces or shell metacharacters pastes as one argument.
+func overrunShellQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
 // overrunUnsavedWorkText is the note of a save that gave up on a sandbox seat:
 // the sandbox is not to be removed, where the clone is, and the commands that
 // rescue it. The step comes from SaveStage and is unknown when it is empty; a
 // failed commit is rescued by staging and committing the work before the push.
+// The values in the rescue commands are shell-quoted; the note text is not.
 func overrunUnsavedWorkText(st overrunState, session, workDir, branch, seat, bead string) string {
 	step := "The save did not complete and the step is unknown"
 	exec := func(git string) string {
-		return fmt.Sprintf("openshell sandbox exec -n %s --no-tty --no-login-shell -- %s", session, git)
+		return fmt.Sprintf("openshell sandbox exec -n %s --no-tty --no-login-shell -- %s", overrunShellQuote(session), git)
 	}
-	rescue := exec(fmt.Sprintf("git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue", workDir, seat, bead))
+	rescue := exec(fmt.Sprintf("git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue",
+		overrunShellQuote(workDir), overrunShellQuote(seat), overrunShellQuote(bead)))
 	switch st.SaveStage {
 	case "commit":
 		step = "The commit failed"
-		rescue = exec(fmt.Sprintf("git -C %s add -A", workDir)) + "; " +
-			exec(fmt.Sprintf("git -C %s commit -m \"overrun save: the stopped seat's work\"", workDir)) + "; " + rescue
+		rescue = exec(fmt.Sprintf("git -C %s add -A", overrunShellQuote(workDir))) + "; " +
+			exec(fmt.Sprintf("git -C %s commit -m \"overrun save: the stopped seat's work\"", overrunShellQuote(workDir))) + "; " + rescue
 	case "push":
 		step = "The push failed"
 	}
