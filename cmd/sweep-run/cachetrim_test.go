@@ -780,3 +780,106 @@ func assertPresent(t *testing.T, name string) {
 		t.Errorf("%s is gone, want it kept: %v", name, err)
 	}
 }
+
+// trimOfModuleCache is a trim whose claim holds one 100-byte module-cache file,
+// which the plan keeps, so a cap of 50 is over by 50 bytes and a cap of 1<<20 is
+// met with nothing removed.
+func trimOfModuleCache(capBytes int64) func(root string) *CacheTrim {
+	return func(root string) *CacheTrim {
+		claim := fakeClaim(map[string]*fstest.MapFile{"gomodcache/mod": fakeFile(100, sweepTrimNow().Add(-time.Hour))})
+		return &CacheTrim{Root: root, CapBytes: capBytes, Claim: fakeClaimOf(claim), Remove: removeSweepCacheFile, Now: sweepTrimNow}
+	}
+}
+
+// cacheTrimRun runs one passing sweep whose claim trim is trim, after setup has
+// prepared the output directory, and fails the test unless the run exits 0 with
+// its result written.
+func cacheTrimRun(t *testing.T, trim func(root string) *CacheTrim, setup func(out string)) *harness {
+	t.Helper()
+	h := failingTrimHarness(t, trim)
+	if setup != nil {
+		setup(h.out)
+	}
+	code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 with the result written (stderr %q)", code, h.stderr.String())
+	}
+	if !h.resultFileExists(t) {
+		t.Fatal("the result was not written")
+	}
+	return h
+}
+
+// TestCacheTrimRecord: a run that ends over its cap writes cache-trim.json with
+// the cap and the bytes it is over by, a run that ends at or under the cap
+// removes a record an earlier run left, and a record that cannot be written or
+// removed is logged without changing the run's result.
+func TestCacheTrimRecord(t *testing.T) {
+	t.Parallel()
+	t.Run("an over-cap plan writes the record with its two figures", func(t *testing.T) {
+		t.Parallel()
+		h := cacheTrimRun(t, trimOfModuleCache(50), nil)
+		got, found, err := sweeprunner.ReadCacheTrim(h.out)
+		if err != nil {
+			t.Fatalf("read the cache trim: %v", err)
+		}
+		if want := (sweeprunner.CacheTrimRecord{CapBytes: 50, OverBytes: 50}); !found || got != want {
+			t.Errorf("cache trim = %+v (found %v), want %+v", got, found, want)
+		}
+	})
+	t.Run("an under-cap run removes a stale record", func(t *testing.T) {
+		t.Parallel()
+		h := cacheTrimRun(t, trimOfModuleCache(1<<20), func(out string) {
+			if err := os.MkdirAll(out, 0o755); err != nil {
+				t.Fatalf("making the output directory: %v", err)
+			}
+			if err := sweeprunner.WriteCacheTrim(out, sweeprunner.CacheTrimRecord{CapBytes: 50, OverBytes: 50}); err != nil {
+				t.Fatalf("writing the stale record: %v", err)
+			}
+		})
+		if _, found, err := sweeprunner.ReadCacheTrim(h.out); err != nil || found {
+			t.Errorf("the stale record survived an under-cap run: found %v, err %v", found, err)
+		}
+	})
+	t.Run("an under-cap run with no stale record writes none", func(t *testing.T) {
+		t.Parallel()
+		h := cacheTrimRun(t, trimOfModuleCache(1<<20), nil)
+		if _, found, err := sweeprunner.ReadCacheTrim(h.out); err != nil || found {
+			t.Errorf("an under-cap run left a record: found %v, err %v", found, err)
+		}
+	})
+	t.Run("a record that cannot be written is logged and the result stands", func(t *testing.T) {
+		t.Parallel()
+		h := cacheTrimRun(t, trimOfModuleCache(50), func(out string) {
+			// A directory at the record's path makes the rename fail.
+			if err := os.MkdirAll(filepath.Join(out, sweeprunner.CacheTrimFileName), 0o755); err != nil {
+				t.Fatalf("making the record path a directory: %v", err)
+			}
+		})
+		logData, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+		if err != nil {
+			t.Fatalf("read the trim log: %v", err)
+		}
+		if !strings.Contains(string(logData), sweeprunner.CacheTrimFileName) {
+			t.Errorf("trim log %q does not name the record that failed to write", logData)
+		}
+	})
+	t.Run("a stale record that cannot be removed is logged and the result stands", func(t *testing.T) {
+		t.Parallel()
+		h := cacheTrimRun(t, trimOfModuleCache(1<<20), func(out string) {
+			// A non-empty directory at the record's path cannot be removed.
+			stale := filepath.Join(out, sweeprunner.CacheTrimFileName)
+			if err := os.MkdirAll(stale, 0o755); err != nil {
+				t.Fatalf("making the record path a directory: %v", err)
+			}
+			writeFile(t, filepath.Join(stale, "kept"), 1, time.Now())
+		})
+		logData, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+		if err != nil {
+			t.Fatalf("read the trim log: %v", err)
+		}
+		if !strings.Contains(string(logData), sweeprunner.CacheTrimFileName) {
+			t.Errorf("trim log %q does not name the stale record that failed to clear", logData)
+		}
+	})
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
 const (
@@ -55,14 +56,56 @@ func diskCacheTrim(root string) *CacheTrim {
 	return &CacheTrim{Root: root, CapBytes: sweepCacheCapBytes, Claim: diskClaim, Remove: removeSweepCacheFile, Now: time.Now}
 }
 
-// recordTrim trims the cache claim and writes a failure to the run's log
-// directory. The result is already on disk, so the run's verdict stands
-// whatever the trim does: a failure here is evidence beside the result, not a
-// change to it (gt-hlo07.2).
+// recordTrim trims the cache claim and records the outcome beside the run's
+// result. A trim that cannot reach the cap writes its two figures into
+// cache-trim.json, and a trim that returns no error (the claim is at or under the
+// cap, or is not mounted) clears one an earlier run left there. A failure writes
+// to the run's log directory. The result is already on disk, so the run's verdict
+// stands whatever the trim does: a failure here is evidence beside the result, not
+// a change to it (gt-hlo07.2, gt-fp66p0).
 func recordTrim(trim *CacheTrim, logDir string, stderr io.Writer) {
-	if err := trimSweepCache(trim); err != nil {
+	// logDir is the output directory's logs subdirectory (options.logDir), so the
+	// record goes in its parent, the directory the result is written into.
+	outDir := filepath.Dir(logDir)
+	err := trimSweepCache(trim)
+	var over *cacheOverCapError
+	switch {
+	case errors.As(err, &over):
+		record := sweeprunner.CacheTrimRecord{CapBytes: over.CapBytes, OverBytes: over.OverBytes}
+		if writeErr := sweeprunner.WriteCacheTrim(outDir, record); writeErr != nil {
+			recordTrimError(logDir, writeErr, stderr)
+		}
+	case err == nil:
+		if clearErr := clearCacheTrim(outDir); clearErr != nil {
+			recordTrimError(logDir, clearErr, stderr)
+		}
+	}
+	if err != nil {
 		recordTrimError(logDir, err, stderr)
 	}
+}
+
+// cacheOverCapError is the trim's report that the claim is still over its cap
+// after every removal the rules allow. recordTrim reads its figures for the
+// run's cache-trim.json, and its message is the sentence the trim log carries.
+type cacheOverCapError struct {
+	OverBytes int64
+	CapBytes  int64
+}
+
+func (e *cacheOverCapError) Error() string {
+	return fmt.Sprintf("the cache claim is still %d bytes over its %d-byte cap after every removal the rules allow", e.OverBytes, e.CapBytes)
+}
+
+// clearCacheTrim removes the record an earlier run left in dir, since this run's
+// trim returned no error. A record that is already absent is the goal, not a
+// failure.
+func clearCacheTrim(dir string) error {
+	err := os.Remove(filepath.Join(dir, sweeprunner.CacheTrimFileName)) //nolint:gosec // G703: dir is the run's own output directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // trimSweepCache brings the shared cache claim under its cap. The runner calls it
@@ -120,7 +163,7 @@ func trimSweepCache(trim *CacheTrim) error {
 		}
 	}
 	if plan.Overflow {
-		errs = append(errs, fmt.Errorf("the cache claim is still %d bytes over its %d-byte cap after every removal the rules allow", plan.OverBytes, trim.CapBytes))
+		errs = append(errs, &cacheOverCapError{OverBytes: plan.OverBytes, CapBytes: trim.CapBytes})
 	}
 	return errors.Join(errs...)
 }
