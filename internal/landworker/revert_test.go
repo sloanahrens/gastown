@@ -991,6 +991,29 @@ func (f *failingWrites) CloseWithReason(reason string, ids ...string) error {
 	return f.RedMainBeads.CloseWithReason(reason, ids...)
 }
 
+// stoppingWrites stops the process inside RevertLanded: the write its field
+// names panics, and the test recovers it, leaving the state file and the beads
+// where a killed process left them.
+type stoppingWrites struct {
+	RedMainBeads
+	stopAtComment bool
+	stopAtReopen  bool
+}
+
+func (s *stoppingWrites) AddComment(id, text string) error {
+	if s.stopAtComment {
+		panic("the process stops before the revert's comment is written")
+	}
+	return s.RedMainBeads.AddComment(id, text)
+}
+
+func (s *stoppingWrites) Update(id string, opts beads.UpdateOptions) error {
+	if s.stopAtReopen && slices.Contains(opts.AddLabels, land.LabelRework) {
+		panic("the process stops before the culprit is reopened")
+	}
+	return s.RedMainBeads.Update(id, opts)
+}
+
 // gt-th4gu: a failed ready-label write left the revert bead open and
 // unqueued, the id was counted as queued, and every later red run reported it
 // "already open" while the landing worker never saw it.
@@ -1256,7 +1279,9 @@ func TestRevertOwed(t *testing.T) {
 			if err := state.Save(MainState{Revert: tc.revert}); err != nil {
 				t.Fatal(err)
 			}
-			r := &RedMain{State: state, Landings: &fakeLandings{recs: tc.recs, err: tc.filesErr}, Logf: t.Logf}
+			var logs []string
+			r := &RedMain{State: state, Landings: &fakeLandings{recs: tc.recs, err: tc.filesErr},
+				Logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
 			if tc.stateErr != nil {
 				r.State = failingMainState{loadErr: tc.stateErr}
 			}
@@ -1264,6 +1289,11 @@ func TestRevertOwed(t *testing.T) {
 				r.State, r.Landings = nil, nil
 			}
 			work, res, owed, err := r.RevertOwed()
+			if tc.off && !slices.ContainsFunc(logs, func(l string) bool {
+				return strings.Contains(l, "no main state or landings file")
+			}) {
+				t.Errorf("logs %q; a check that cannot look for the revert must say so", logs)
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || owed {
 					t.Fatalf("RevertOwed = (%+v, owed=%v, %v); want the error %q", work, owed, err, tc.wantErr)
@@ -1372,5 +1402,80 @@ func TestBookQueueWorkerRevertOwedRetry(t *testing.T) {
 	h.w.Pass(ctx)
 	if want := []string{"gt-abc@" + revertOwedLanded}; !slices.Equal(hooks.landed, want) {
 		t.Fatalf("RevertLanded ran %v over two passes; want %v once", hooks.landed, want)
+	}
+}
+
+// TestBookQueueWorkerRevertCrashInsideTheCallIsOwedAgain: a process that stops
+// inside RevertLanded's own writes, at the comment or at the reopen, leaves the
+// in-flight record on disk, so the restarted worker still finds the revert owed
+// and finishes telling it. The record must outlive those writes: were it
+// cleared first, a stop between them would drop the reopen with nothing left
+// saying it is owed (gt-qxm7y3).
+func TestBookQueueWorkerRevertCrashInsideTheCallIsOwedAgain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		stop func(*stoppingWrites)
+	}{
+		{name: "the process stops before the comment", stop: func(s *stoppingWrites) { s.stopAtComment = true }},
+		{name: "the process stops before the reopen", stop: func(s *stoppingWrites) { s.stopAtReopen = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			h := newRevertHarness(t, greenSHA)
+			id := seedRevertBead(t, h)
+			rec := landedRevertRec(id)
+			h.files.recs = append(h.files.recs, rec)
+			stopping := &stoppingWrites{RedMainBeads: h.bd}
+			tc.stop(stopping)
+			h.r.Beads = stopping
+
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("RevertLanded returned; want the process to stop inside it")
+					}
+				}()
+				h.r.RevertLanded(ctx, land.Work{BeadID: id}, land.Result{LandedCommit: rec.LandedCommit})
+			}()
+
+			// The stopped run left the revert in flight: the record on disk is
+			// what a restart has to find it owed by.
+			st, err := h.state.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Revert == nil || st.Revert.Bead != id {
+				t.Fatalf("state %+v; the stopped run must leave the revert in flight", st)
+			}
+			// The bead landed before the stop, so the restart lands nothing.
+			if err := h.bd.Update(id, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.bd.CloseWithReason("landed", id); err != nil {
+				t.Fatal(err)
+			}
+			stopping.stopAtComment, stopping.stopAtReopen = false, false
+
+			wh := revertWorker(t, h)
+			if rep := wh.w.Pass(ctx); rep.Landed != 0 || len(wh.lander.calls) != 0 {
+				t.Fatalf("the restarted worker landed %d beads (report %v); want none", len(wh.lander.calls), rep)
+			}
+			cul, err := h.bd.Show("gt-cul")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cul.Status != string(beads.StatusOpen) || !beads.HasLabel(cul, land.LabelRework) {
+				t.Fatalf("culprit %+v; the restarted worker must reopen it for rework", cul)
+			}
+			cs := wh.comments(t, "gt-cul")
+			if len(cs) == 0 || !strings.Contains(cs[len(cs)-1], "Reverted by "+id+" ("+rec.LandedCommit+")") {
+				t.Fatalf("culprit comments %q; want the revert told after the restart", cs)
+			}
+			if st, err := h.state.Load(); err != nil || st.Revert != nil {
+				t.Fatalf("state %+v, %v; the tell finished, so none is in flight", st, err)
+			}
+		})
 	}
 }
