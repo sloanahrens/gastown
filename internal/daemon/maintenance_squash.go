@@ -1382,6 +1382,20 @@ func (d *Daemon) squashDeferredSince(db string) time.Time {
 	return at
 }
 
+// clearSquashDeferred removes db's persisted deferral stamp, so its next
+// deferral starts a new run rather than continuing the one the stamp began. A
+// database with no stamp is already clear, so its removal reports no error; any
+// other failure is returned, because a stamp that outlives the run it started
+// would keep that run's window alive (gt-jykwan).
+func (d *Daemon) clearSquashDeferred(db string) error {
+	path := filepath.Join(alertClockPath(d.config.TownRoot), squashDeferClockKey(db))
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("clearing the squash deferral stamp for %q: %w", db, err)
+}
+
 // squashDeferAlertAfter is how long the gc flag may defer a database's squash
 // checks before the alert is raised: a day. The two holders of the flag release
 // it by deferring and run far shorter than a day, so a day of deferrals means
