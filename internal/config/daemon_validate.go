@@ -18,7 +18,8 @@ const (
 // change budget's lint_budget_max_lines, the container names, the polecat image
 // source, the container_off names the step audit does not classify, the
 // tier_sweep runner and its interval and restart_stale_after, the reconciler's
-// interval and grace, the disk maintenance cadences and percent, the update
+// interval, grace and four duty limits, the disk maintenance cadences and
+// percent, the update
 // patrol's window, min_interval and max_runtime, and every scheduled_slings
 // entry.
 // The writer paths and the command that edits settings/config.json call it
@@ -62,16 +63,27 @@ func ValidateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 		}
 	}
 	if r := c.Patrols.Reconciler; r != nil {
-		// The patrol reads its interval and grace with these parsers, which
-		// refuse a value outside their bounds rather than clamping it. The
-		// write, load and boot paths all run this check, so each refuses the
-		// same values. The parse errors name patrols.reconciler.<key>; daemon.
-		// prefixes it to the path the operator edits, as the update block does.
+		// The patrol reads its interval, grace and each duty's limit with these
+		// parsers, which refuse a value outside their bounds rather than
+		// clamping it. The write, load and boot paths all run this check, so
+		// each refuses the same values. The parse errors name
+		// patrols.reconciler.<key>; daemon. prefixes it to the path the operator
+		// edits, as the update block does.
 		if _, err := r.ParseInterval(); err != nil {
 			return fmt.Errorf("daemon.%w", err)
 		}
 		if _, err := r.ParseGrace(); err != nil {
 			return fmt.Errorf("daemon.%w", err)
+		}
+		for _, duty := range []string{
+			ReconcilerDutyBackup,
+			ReconcilerDutyArchive,
+			ReconcilerDutyGC,
+			ReconcilerDutyTownState,
+		} {
+			if _, err := r.ParseLimit(duty); err != nil {
+				return fmt.Errorf("daemon.%w", err)
+			}
 		}
 	}
 	if dm := c.Patrols.DiskMaintenance; dm != nil {
