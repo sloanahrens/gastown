@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -87,6 +89,98 @@ func TestTierSweepCacheNoteRecordWindow(t *testing.T) {
 	const want = " cache over cap by 110.3MB (cap 5.0GB)"
 	if got := tierSweepCacheNote(dir); got != want {
 		t.Fatalf("tierSweepCacheNote after the record was written = %q, want %q", got, want)
+	}
+}
+
+// TestTierSweepCacheAttention pins the attention item a finished sweep run raises
+// when its cache claim ended over its cap (gt-ym0o68). It folds the run through
+// tierSweepRunnerStageResult, the production call site, so removing the call
+// turns the over-cap row red. A repeat fold over the cap keeps one item, and a
+// run with no record, a zero record, or an unreadable record raises none: the
+// finished line carries the unreadable note for that last case.
+func TestTierSweepCacheAttention(t *testing.T) {
+	t.Parallel()
+	const wantSummary = "the tier sweep's cache claim for gastown ended 110.3MB over its 5.0GB cap after every removal the rules allow"
+	const capBytes = int64(5) << 30
+	rows := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		folds int
+		want  int
+	}{
+		{
+			name: "an over-cap record raises one item",
+			setup: func(t *testing.T, dir string) {
+				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 115661635})
+			},
+			folds: 1,
+			want:  1,
+		},
+		{
+			name: "a repeat fold over the cap keeps one item",
+			setup: func(t *testing.T, dir string) {
+				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 115661635})
+			},
+			folds: 2,
+			want:  1,
+		},
+		{
+			name:  "no record raises none",
+			setup: func(t *testing.T, dir string) {},
+			folds: 1,
+			want:  0,
+		},
+		{
+			name: "a zero record raises none",
+			setup: func(t *testing.T, dir string) {
+				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes})
+			},
+			folds: 1,
+			want:  0,
+		},
+		{
+			name: "an unreadable record raises none",
+			setup: func(t *testing.T, dir string) {
+				path := filepath.Join(dir, sweeprunner.CacheTrimFileName)
+				if err := os.WriteFile(path, []byte("{not a record"), 0o600); err != nil {
+					t.Fatalf("writing an unreadable record: %v", err)
+				}
+			},
+			folds: 1,
+			want:  0,
+		},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+			st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA}
+			spec, ok, err := d.tierSweepRunnerSpec(st)
+			if err != nil || !ok {
+				t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+			}
+			if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+				t.Fatalf("making the run's output directory: %v", err)
+			}
+			r.setup(t, spec.OutDir)
+			for range r.folds {
+				d.tierSweepRunnerStageResult(st, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
+			}
+			items := d.cacheTrimNoOp.observed()
+			if len(items) != r.want {
+				t.Fatalf("attention items after %d fold(s) = %d, want %d: %+v", r.folds, len(items), r.want, items)
+			}
+			if r.want == 0 {
+				return
+			}
+			got := items[0]
+			if got.Key != "cache-trim-sweep-gastown" || got.Kind != attention.KindCacheTrimNoOp ||
+				got.Severity != attention.SeverityLow || got.Summary != wantSummary {
+				t.Fatalf("attention item = %+v, want key cache-trim-sweep-gastown, kind %s, severity %s, summary %q",
+					got, attention.KindCacheTrimNoOp, attention.SeverityLow, wantSummary)
+			}
+		})
 	}
 }
 
