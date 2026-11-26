@@ -271,11 +271,6 @@ func TestBookQueueWorkerDefers(t *testing.T) {
 	})
 }
 
-// IsRevert is the read a deferred landing's bookkeeping job makes before it
-// stores RevertLanded for the worker's own goroutine; the fake itself is
-// declared in revert_test.go with the rest of the revert hooks (gt-dci9k8).
-func (f *fakeRevertHooks) IsRevert(string) bool { return f.isRevert }
-
 // queueIdle waits until every job the queue held when it was called has
 // returned: the marker job added behind them runs last, so its channel closing
 // is the queue reaching that point.

@@ -762,6 +762,8 @@ func (f *fakeRevertHooks) RevertRejected(w land.Work, _ *land.Rejection) bool {
 	return f.isRevert
 }
 
+func (f *fakeRevertHooks) IsRevert(string) bool { return f.isRevert }
+
 func TestPassTellsTheRevertHooks(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
