@@ -982,8 +982,15 @@ func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return CommittingGit(dir).WithEnv(l.beadsEnv()).WithoutAllHooks()
+	return CommittingGit(dir).WithEnv(l.beadsEnv()).WithTimeout(gitCallTimeout).WithoutAllHooks()
 }
+
+// gitCallTimeout bounds every git call the handle open builds makes that sets
+// no deadline of its own. Those calls include the worktree add, remove and
+// prune the landing and the review pool make under gitMu, so a hung git cannot
+// hold the lock every landing and ahead review share for ever. The two
+// fetches keep their own fetchTimeout.
+const gitCallTimeout = 2 * time.Minute
 
 // openLanding opens the merge candidate's worktree through a handle whose every
 // call carries env (CommittingEnv), so the merge commit's committer and author

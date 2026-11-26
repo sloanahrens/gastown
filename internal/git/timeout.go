@@ -32,6 +32,10 @@ func (g *Git) WithTimeout(d time.Duration) *Git {
 	return &c
 }
 
+// Timeout reports the WithTimeout default the handle's calls run under, zero
+// meaning none.
+func (g *Git) Timeout() time.Duration { return g.timeout }
+
 // deadline is the timeout a call runs under: the method's own when it sets
 // one, else the WithTimeout default (0 means none).
 func (g *Git) deadline(own time.Duration) time.Duration {
