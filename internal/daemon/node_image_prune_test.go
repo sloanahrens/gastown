@@ -190,12 +190,15 @@ func TestNodeImagePruneOnceDryRowLedgerRefused(t *testing.T) {
 	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart))
 
 	// The dry run logs its report lines as well; the refused ledger adds exactly one.
-	assert.Equal(t, 1, strings.Count(r.logs.String(), "job ledger"), "the refused ledger logs one line")
+	var ledgerLines []string
 	for _, line := range strings.Split(r.logs.String(), "\n") {
 		if strings.Contains(line, "job ledger") {
-			assert.Contains(t, line, "node_image_prune")
+			ledgerLines = append(ledgerLines, line)
 		}
 	}
+	require.Len(t, ledgerLines, 1, "the refused ledger logs one line")
+	assert.Contains(t, ledgerLines[0], "node_image_prune")
+	assert.Contains(t, ledgerLines[0], "not a directory", "the log carries the ledger's error")
 }
 
 // TestNodeImagePruneRecordLedgerFailsToOpen: a ledger the town root cannot open
