@@ -1330,6 +1330,40 @@ func (l *Lander) operatorConfig(bead string) *config.OperatorConfig {
 	return op
 }
 
+// reviewInputFor assembles the input om is given for the review of w's merge of
+// head onto base in the checkout dir, and the reads behind it: the bead's
+// comments and the accepted-risk entries the review records. Land's om stage and
+// ReviewAhead both call it, so the pool's input and the key it makes are the
+// landing's (gt-ff359z).
+//
+// strict decides what a bead comment or town settings file that cannot be read
+// does. Land reviews the diff without it and logs the read it could not make, so
+// a lenient read never fails; the pool makes no key for an input it cannot read
+// in full, so strict returns the error instead. The rounds text is the same
+// either way: roundsText turns a ledger read error into "", which is the input
+// om is given on both sides.
+func (l *Lander) reviewInputFor(issue *beads.Issue, w Work, base, merged, dir string, g Repo, strict bool) (in ReviewInput, comments []beads.Comment, used []AcceptedRisk, err error) {
+	var op *config.OperatorConfig
+	var accepted string
+	if strict {
+		comments, err = l.Beads.Comments(issue.ID)
+		if err != nil {
+			return in, nil, nil, &InfraError{Stage: "read comments", Err: err}
+		}
+		op, err = config.LoadOperatorConfig(l.TownRoot)
+		if err != nil {
+			return in, nil, nil, &InfraError{Stage: "read operator config", Err: err}
+		}
+		accepted, used = AcceptedRisksText(comments, op), AcceptedRisksUsed(comments, op)
+	} else {
+		op = l.operatorConfig(w.BeadID)
+		accepted, used = l.acceptedRisks(w.BeadID, op)
+		comments = l.beadComments(issue)
+	}
+	in = BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
+	return in, comments, used, nil
+}
+
 // AcceptedRiskUsedMarker opens the landing note a review leaves when it was
 // given accepted risks (gt-tvhg8). It is a note, not a comment, so the
 // accepted-risk filter never reads it back as a decision.
@@ -1667,10 +1701,15 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
-		op := l.operatorConfig(w.BeadID)
-		accepted, used := l.acceptedRisks(w.BeadID, op)
-		comments = l.beadComments(issue)
-		in := BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
+		// The input is assembled by the helper ReviewAhead calls too, so the
+		// pool's review is made for the input this stage would hand om
+		// (gt-ff359z). A lenient read never fails: the read it could not make
+		// is logged and the review still judges the diff.
+		in, readComments, used, err := l.reviewInputFor(issue, w, base, merged, dir, g, false)
+		if err != nil {
+			return Result{}, &InfraError{Stage: "review input", Err: err}
+		}
+		comments = readComments
 		// A stored review may stand in for om (gt-er929x). On a hit the verdict is
 		// the record's, stamped with the om its key names, and no review runs. A
 		// miss, or an answer reuseAhead could not give, runs om as it does with no

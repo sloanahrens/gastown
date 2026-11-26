@@ -7,12 +7,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // aheadReadyIssue is the bead a landing of w finds ready: actionable, labelled
@@ -82,9 +84,10 @@ func TestVerdictReuseAheadSkips(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newLandFixture(t)
+			f, l, _ := keyFixture(t)
 			aheadSeedBead(f, tc.issue(f.work))
-			l := f.lander()
+			// aheadSeedBead replaces the store the fixture's lander was built with.
+			l.Beads = f.bd
 			reads := 0
 			if tc.store {
 				l.Ahead = TownAheadStore(f.town, "gastown")
@@ -309,9 +312,7 @@ func (r *aheadWorktreeRecorder) WorktreeAddDetached(path, ref string) error {
 // returns, and never adds a worktree at the landing's own WorkRoot/wt.
 func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	aheadSeedBead(f, aheadReadyIssue(f.work))
-	l := f.lander()
+	f, l, _ := keyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	rec := &aheadWorktreeAdds{}
 	l.openRepo = func(dir string) Repo {
@@ -345,9 +346,7 @@ func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
 // from the head under review.
 func TestVerdictReuseAheadWorktreeAtBase(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	aheadSeedBead(f, aheadReadyIssue(f.work))
-	l := f.lander()
+	f, l, _ := keyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	rec := &aheadWorktreeAdds{}
 	l.openRepo = func(dir string) Repo {
@@ -394,9 +393,7 @@ func (p *aheadLockProbe) CommitIdentity(string) (string, string, error) {
 // itself finds it free.
 func TestVerdictReuseAheadLockFreeAtWorktreeAdd(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	aheadSeedBead(f, aheadReadyIssue(f.work))
-	l := f.lander()
+	f, l, _ := keyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	// gitfake records no authors, so the probe answers the author read the way
 	// the fixture's seam does, and the read reaches the handle.
@@ -908,14 +905,13 @@ func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newLandFixture(t)
+			f, l, _ := keyFixture(t)
 			// branchEditing re-seeds the fixture's bead and work, so the row's
 			// setup runs before the bead is seeded from f.work.
 			if tc.setup != nil {
 				tc.setup(f)
 			}
 			aheadSeedBead(f, tc.issue(f.work))
-			l := f.lander()
 			if tc.store {
 				l.Ahead = TownAheadStore(f.town, "gastown")
 			}
@@ -974,5 +970,227 @@ func TestVerdictReuseAheadChangedPathsReadFails(t *testing.T) {
 		t.Errorf("gitMu is still held after ReviewAhead returned an error")
 	} else {
 		l.gitMu.Unlock()
+	}
+}
+
+// aheadKeyReviewer is a bead reviewer that also answers om's version probe, so
+// a review key can be computed from the input it is handed. Land calls ReviewBead
+// and records each input it is given.
+type aheadKeyReviewer struct {
+	recordBeadReviewer
+	version string
+}
+
+func (r *aheadKeyReviewer) OMVersion(context.Context, ReviewInput) string { return r.version }
+
+// comparableInput clears the fields the review digest leaves out: the checkout,
+// the range, the repository and the log sink. What remains is what om is given,
+// so two inputs equal here digest equal.
+func comparableInput(in ReviewInput) ReviewInput {
+	in.Dir, in.Base, in.Head = "", "", ""
+	in.Repo = nil
+	in.Logf = nil
+	return in
+}
+
+// aheadTownOperator writes the town settings that name one operator identity, the
+// entitlement a decision or an accepted risk must carry to count.
+func aheadTownOperator(t *testing.T, town, name string) {
+	t.Helper()
+	path := config.TownSettingsPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"operator":{"names":["` + name + `"]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// aheadRoundsDir is a rounds directory holding one round for bead, so the rounds
+// text a review is given is not empty.
+func aheadRoundsDir(t *testing.T, bead string) string {
+	t.Helper()
+	dir := t.TempDir()
+	ledger := &RoundsLedger{OutDir: dir, Bead: bead}
+	if err := ledger.Append(1, "head0", []Finding{{ID: "f1", Severity: "major", Path: "b.txt", Title: "first"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	return dir
+}
+
+// TestVerdictReuseAheadBuildsTheLandingsInput: for the same bead and merge, the
+// input ReviewAhead builds is the input Land's om stage gives om, and the key
+// ReviewAhead computes equals the key the landing's reuse path computes from its
+// own input. Land runs for real and its input is captured, so the comparison is
+// with what the landing builds rather than with a copy of it.
+func TestVerdictReuseAheadBuildsTheLandingsInput(t *testing.T) {
+	t.Parallel()
+	f, l, _ := keyFixture(t)
+	rev := &aheadKeyReviewer{
+		recordBeadReviewer: recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}},
+		version:            stubOMVersion,
+	}
+	l.Reviewer = rev
+	l.RoundsDir = aheadRoundsDir(t, f.work.BeadID)
+	// An operator named in the town settings, and an accepted risk that operator
+	// recorded: the input then carries text that depends on the operator names
+	// and on the bead's comments, so the comparison sees both.
+	l.TownRoot = f.town
+	aheadTownOperator(t, f.town, "overseer")
+	if err := f.bd.AddCommentAs(f.work.BeadID, "overseer", "ACCEPTED-RISK: b.txt is accepted as written"); err != nil {
+		t.Fatalf("AddCommentAs: %v", err)
+	}
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	got, built, err := l.reviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("reviewAhead: unexpected error: %v", err)
+	}
+	if got != AheadSkipped {
+		t.Fatalf("reviewAhead = %q, want %q at the point before om runs", got, AheadSkipped)
+	}
+	if built.In.RoundsText == "" {
+		t.Fatal("reviewAhead built no rounds text: the comparison would not see the ledger")
+	}
+	if built.In.AcceptedRisksText == "" {
+		t.Fatal("reviewAhead built no accepted-risk text: the comparison would not see the operator or the comments")
+	}
+	// The review worktree is removed before reviewAhead returns, so the input it
+	// hands back names no checkout.
+	if built.In.Dir != "" {
+		t.Errorf("built input names the review checkout %q, which the returned worktree no longer has", built.In.Dir)
+	}
+	// Land runs after the pool and with no store, so its own review is the
+	// inline one the landing makes without a review-ahead record.
+	l.Ahead = nil
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(rev.inputs) != 1 {
+		t.Fatalf("landing reviewer calls = %d, want 1", len(rev.inputs))
+	}
+	landIn := rev.inputs[0]
+	// The landing's key is computed by the reuse path Land's review stage will
+	// call, over the clone that stage reads om's config from, at the merge
+	// commit the landing made. reviewKey's checkout argument is used only for
+	// the commit-to-commit reads, which the clone answers.
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	landRepo := l.open(l.Repo)
+	_, landKey, hit, err := l.reuseAhead(context.Background(), landRepo, landRepo, f.work, landIn, f.base, res.LandedCommit)
+	if err != nil {
+		t.Fatalf("reuseAhead over the landing's input: %v", err)
+	}
+	if hit {
+		t.Fatal("reuseAhead hit on a store holding no record")
+	}
+	if !reflect.DeepEqual(comparableInput(built.In), comparableInput(landIn)) {
+		t.Errorf("reviewAhead's input differs from the landing's:\n pool:    %+v\n landing: %+v", comparableInput(built.In), comparableInput(landIn))
+	}
+	if built.Key != landKey {
+		t.Errorf("reviewAhead's key = %+v, want the landing's key %+v", built.Key, landKey)
+	}
+}
+
+// aheadCommentsFails is the bead store with its comment read failing.
+type aheadCommentsFails struct{ *beadsfake.Fake }
+
+func (aheadCommentsFails) Comments(string) ([]beads.Comment, error) {
+	return nil, errors.New("bd comments: read failed")
+}
+
+// writeAheadOMConfig writes a readable om config file and returns its path, the
+// file a review key reads the config from.
+func writeAheadOMConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "om.json")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestVerdictReuseAheadKeyErrorReturned: a key or input that cannot be built is
+// returned as the error, with no outcome, no stored record and no bead write, so
+// a caller never reads a failed build as a skipped review.
+func TestVerdictReuseAheadKeyErrorReturned(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name  string
+		stage string
+		setup func(t *testing.T) (*landFixture, *Lander)
+	}{
+		{"reviewer cannot report its om version", "review key", func(t *testing.T) (*landFixture, *Lander) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &recordBeadReviewer{}
+			return f, l
+		}},
+		{"om config unreadable", "review key", func(t *testing.T) (*landFixture, *Lander) {
+			f, l, _ := keyFixture(t)
+			// A directory: the config read fails, which is not an absent file.
+			l.OMConfigPath = t.TempDir()
+			return f, l
+		}},
+		{"base has no .om.json", "review key", func(t *testing.T) (*landFixture, *Lander) {
+			f := newLandFixture(t)
+			l := f.lander()
+			l.Reviewer = &aheadKeyReviewer{version: stubOMVersion}
+			l.OMConfigPath = writeAheadOMConfig(t)
+			return f, l
+		}},
+		{"operator settings unreadable", "read operator config", func(t *testing.T) (*landFixture, *Lander) {
+			f, l, _ := keyFixture(t)
+			path := config.TownSettingsPath(f.town)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			l.TownRoot = f.town
+			return f, l
+		}},
+		{"bead comments unreadable", "read comments", func(t *testing.T) (*landFixture, *Lander) {
+			f, l, _ := keyFixture(t)
+			l.Beads = aheadCommentsFails{f.bd}
+			return f, l
+		}},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l := tc.setup(t)
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			before := aheadBeadWrites(t, f.bd)
+			got, built, err := l.reviewAhead(context.Background(), f.work)
+			if err == nil {
+				t.Fatalf("reviewAhead: got outcome %q and no error, want the %q error", got, tc.stage)
+			}
+			var infra *InfraError
+			if !errors.As(err, &infra) {
+				t.Fatalf("reviewAhead error = %v, want an *InfraError", err)
+			}
+			if infra.Stage != tc.stage {
+				t.Errorf("error stage = %q, want %q", infra.Stage, tc.stage)
+			}
+			if got != "" {
+				t.Errorf("reviewAhead outcome = %q on error, want empty (not %q)", got, AheadSkipped)
+			}
+			if !reflect.DeepEqual(built, aheadBuilt{}) {
+				t.Errorf("reviewAhead built %+v on error, want nothing", built)
+			}
+			if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+				t.Errorf("a record was stored for a review whose key could not be built (stat err %v)", err)
+			}
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("reviewAhead wrote %d bead records, want 0", n)
+			}
+			aheadNoReviewDir(t, f)
+			if !l.gitMu.TryLock() {
+				t.Errorf("gitMu is still held after reviewAhead returned an error")
+			} else {
+				l.gitMu.Unlock()
+			}
+		})
 	}
 }
