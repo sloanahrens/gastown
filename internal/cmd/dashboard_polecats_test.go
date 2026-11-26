@@ -465,6 +465,70 @@ func TestBuildDashPolecatsSandboxSeatLiveness(t *testing.T) {
 	}
 }
 
+// A running sandbox seat's last activity is its session heartbeat, so the quiet
+// warning can fire for the seats that do the work. Without a heartbeat it stays
+// unknown, and a seat not running is never clocked by one (gt-09j5gz).
+func TestBuildDashPolecatsSandboxActivity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	beat := now.Add(-20 * time.Minute)
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
+	tests := []struct {
+		name      string
+		live      bool // the seat's session is running (the item's SessionRunning)
+		beats     map[string]time.Time
+		wantSess  bool
+		wantAfter time.Time // the LastActive the row carries; zero means nil
+	}{
+		{"running seat with a heartbeat is clocked by it", true, map[string]time.Time{"gt-ember": beat}, true, beat},
+		{"running seat without a heartbeat entry is unclocked", true, map[string]time.Time{"gt-other": beat}, true, time.Time{}},
+		{"running seat with a zero heartbeat is unclocked", true, map[string]time.Time{"gt-ember": {}}, true, time.Time{}},
+		{"seat not running gets no heartbeat clock", false, map[string]time.Time{"gt-ember": beat}, false, time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			item := dashItem(polecat.StateStalled, cap1)
+			item.SessionRunning = tt.live
+			s := dashSeat{Rig: "gastown", Name: "ember", Session: "gt-ember", Item: item,
+				Issue: &beads.Issue{ID: "gt-1", Title: "one"}, Sandbox: dashSandboxSeat{Seat: true, Sampled: true},
+				HookedAt: now.Add(-8 * time.Minute)}
+			got := buildDashPolecats(dashPolecatInputs{Now: now, SessionsKnown: true, Seats: []dashSeat{s}, Heartbeats: tt.beats})
+			if len(got) != 1 {
+				t.Fatalf("rows = %d, want 1", len(got))
+			}
+			if got[0].HasSession != tt.wantSess {
+				t.Errorf("HasSession = %v, want %v", got[0].HasSession, tt.wantSess)
+			}
+			switch {
+			case tt.wantAfter.IsZero() && got[0].LastActive != nil:
+				t.Errorf("LastActive = %v, want nil", *got[0].LastActive)
+			case !tt.wantAfter.IsZero() && (got[0].LastActive == nil || !got[0].LastActive.Equal(tt.wantAfter)):
+				t.Errorf("LastActive = %v, want %v", got[0].LastActive, tt.wantAfter)
+			}
+		})
+	}
+}
+
+// The host tmux's clock beats a heartbeat for the same seat: a seat tmux lists
+// keeps the time tmux reports (gt-09j5gz).
+func TestBuildDashPolecatsTmuxTimeWins(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	tmuxAt := now.Add(-time.Minute)
+	beat := now.Add(-20 * time.Minute)
+	item := dashItem(polecat.StateWorking, polecat.WorkstateDisposition{CountsTowardCapacity: true})
+	item.SessionRunning = true
+	s := dashSeat{Rig: "gastown", Name: "ember", Session: "gt-ember", Item: item,
+		Issue: &beads.Issue{ID: "gt-1", Title: "one"}}
+	got := buildDashPolecats(dashPolecatInputs{Now: now, SessionsKnown: true, Seats: []dashSeat{s},
+		Sessions:   map[string]time.Time{"gt-ember": tmuxAt},
+		Heartbeats: map[string]time.Time{"gt-ember": beat}})
+	if len(got) != 1 || got[0].LastActive == nil || !got[0].LastActive.Equal(tmuxAt) {
+		t.Fatalf("row = %+v, want LastActive = the tmux time %v", got, tmuxAt)
+	}
+}
+
 // The Age column's clock is the bead's first dispatch across seats, which the
 // overrun guard judges too, so the two readings cannot disagree (gt-tzbtf). An
 // unreadable event log is an error, not a town where no bead was ever
