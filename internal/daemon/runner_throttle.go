@@ -63,3 +63,29 @@ func ReadRunnerThrottle(ctx context.Context, exec func(ctx context.Context, args
 	}
 	return RunnerThrottle{}, fmt.Errorf("reading the runner's cpu.stat: %w", err)
 }
+
+// runnerPodArgs lists the forgejo-runner pods by the label the CI cache trim selects them with.
+var runnerPodArgs = []string{"get", "pods", "-n", ciCacheNamespace, "-l", ciCachePodLabel, "-o", "name"}
+
+// runnerPodName returns the one forgejo-runner pod the label lookup names through
+// exec, the caller's seam. Zero or several pods is an error naming the count, and
+// a failed lookup is wrapped, never read as a runner that does not exist.
+func runnerPodName(ctx context.Context, exec func(ctx context.Context, args ...string) (string, error)) (string, error) {
+	if exec == nil {
+		return "", errors.New("no exec seam, so the runner pod cannot be found")
+	}
+	out, err := exec(ctx, slices.Clone(runnerPodArgs)...)
+	if err != nil {
+		return "", fmt.Errorf("finding the runner pod: %w", err)
+	}
+	var pods []string
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimPrefix(strings.TrimSpace(line), "pod/"); name != "" {
+			pods = append(pods, name)
+		}
+	}
+	if len(pods) != 1 {
+		return "", fmt.Errorf("found %d runner pods, want exactly one", len(pods))
+	}
+	return pods[0], nil
+}
