@@ -531,7 +531,7 @@ func TestTownClusterDriftStaticComparesAPriorityClassThroughTheCompare(t *testin
 			if slices.Contains(notCompared, line) {
 				continue
 			}
-			if !strings.HasPrefix(line, resource+": ") || !strings.HasSuffix(line, "observed absent") {
+			if !strings.HasPrefix(line, resource+": ") || !strings.HasSuffix(line, "observed absent"+driftHiddenMarker) {
 				t.Errorf("line %q does not name %s's field as absent", line, resource)
 			}
 			absent++
