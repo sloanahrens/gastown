@@ -218,6 +218,10 @@ var ruleOwners = map[string]Owner{
 	// A failing gate-run log is the town's own file to read and repair: the
 	// overseer reads the error before a person is woken (gt-nwea8n).
 	RuleGateRunLog: OwnerOverseer,
+	// A throttle nobody could read is the town's own read to unblock: the
+	// overseer reads why the counters were not taken before a person is woken
+	// (gt-rqodz6).
+	RuleGateThrottle: OwnerOverseer,
 	// A finished seat left in the walk is the town's own seat to end: the
 	// overseer reads why the end did not happen and ends it (gt-klpqb3).
 	RuleSeatFinishedLingering: OwnerOverseer,
