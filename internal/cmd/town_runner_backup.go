@@ -121,10 +121,7 @@ func runnerBackupApplyJSON(raw []byte, kind, name string) ([]byte, error) {
 	}
 	delete(object, "status")
 	out, err := json.Marshal(object)
-	if err != nil {
-		return nil, fmt.Errorf("re-encoding the %s: %w", kind, err)
-	}
-	return append(out, '\n'), nil
+	return append(out, '\n'), err
 }
 
 // writeRunnerBackupFile writes one backup file at 0600. The mode a new file gets
