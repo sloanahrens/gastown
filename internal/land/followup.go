@@ -359,10 +359,21 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	// What an earlier landing's bound held back is older work than this
 	// landing's findings, so it goes out first, while the bound leaves it room
 	// (gt-3arxj).
-	var consumed int
-	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips, pinDoc, base)
-	if consumed > 0 {
+	var waiting []QueuedFollowup
+	lines, existing, waiting = l.drainQueue(queued, existing, lines, skips, pinDoc, base)
+	if len(waiting) < len(queued) {
 		lines = append(lines, l.compactQueue(w.Rig, existing, skips, base)...)
+	}
+	// The bead bound counts beads, so it can hold at 40 while held findings pile
+	// up behind it with no bead of their own: a queue longer than
+	// followupQueueAlertOver findings after this landing's drain is that, and one
+	// alert per landing names it (gt-rkew3w). The count is over the lines the
+	// drain left waiting, not the lines after the consumed ones: the drain skips
+	// past a held line and still consumes a line behind it, so the two are not
+	// the same (gt-rkew3w). A nil sink reports nothing, and a queue the feed
+	// could not read is empty here, its line already logged.
+	if n := queuedFindingCount(waiting); n > followupQueueAlertOver && l.FollowupAlert != nil {
+		l.FollowupAlert(fmt.Sprintf("%d follow-up findings are queued with no bead, at the %d-bead bound", n, l.followupBackpressure()))
 	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
@@ -444,20 +455,23 @@ func queuedFindingCount(queued []QueuedFollowup) int {
 // file again (gt-3arxj). A line the feed holds back again — by the bound, the
 // week's budget, or a write — stays where it is rather than being queued twice.
 // It returns the lines it wants logged, the beads the drain filed so the caller
-// de-duplicates against them too, and how many queue lines are now consumed:
-// every finding on them is covered, so the compaction may drop them (gt-3arxj).
-func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips, pinDoc, base string) ([]string, []ExistingFollowup, int) {
+// de-duplicates against them too, and the queue lines the feed is not done with:
+// a line every finding of which is covered may be compacted away, while a line
+// still waiting stays for a landing with room. The waiting lines need not be a
+// tail of the queue — a held line can sit ahead of a consumed one — so the alert
+// counts them rather than the lines after the consumed ones (gt-3arxj,
+// gt-rkew3w).
+func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips, pinDoc, base string) ([]string, []ExistingFollowup, []QueuedFollowup) {
 	bound := l.followupBackpressure()
-	consumed := 0
-	for _, q := range queued {
+	var waiting []QueuedFollowup
+	for i, q := range queued {
 		if openFollowups(existing) >= bound {
 			// A landing with no room files nothing from the queue, and the queue
 			// waits for the count to fall.
-			return lines, existing, consumed
+			return lines, existing, append(waiting, queued[i:]...)
 		}
 		fresh := l.queuedCandidates(q, base, existing, skips)
 		if len(fresh) == 0 {
-			consumed++
 			continue
 		}
 		w := Work{BeadID: q.Bead, Rig: q.Rig}
@@ -474,11 +488,11 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 		// A line is consumed only once every finding on it is covered: a bead
 		// that could not be filed leaves its line waiting, whatever the feed
 		// logged about it (gt-3arxj).
-		if len(l.queuedCandidates(q, base, existing, skips)) == 0 {
-			consumed++
+		if len(l.queuedCandidates(q, base, existing, skips)) > 0 {
+			waiting = append(waiting, q)
 		}
 	}
-	return lines, existing, consumed
+	return lines, existing, waiting
 }
 
 // compactQueue drops the queue lines the feed is done with from the review log,
