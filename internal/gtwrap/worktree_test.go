@@ -44,11 +44,12 @@ func TestReadWorktreeFacts(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name: "detached HEAD adds nothing",
+			name: "detached HEAD adds nothing, marked detached",
 			git: answers(map[string]string{
 				"branch --show-current": "\n",
 				"rev-parse HEAD":        sha + "\n",
 			}, nil),
+			want: WorktreeFacts{Detached: true},
 		},
 		{
 			name: "not a worktree adds nothing",
