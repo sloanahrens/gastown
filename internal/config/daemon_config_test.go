@@ -1955,6 +1955,53 @@ func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
 	})
 }
 
+// TestCIEngineOrphanJobAge: the orphan job age is 12h when the setting is absent
+// and an explicit value otherwise, and a value under 6h or not a duration is
+// refused naming the key, at the accessor and at config load alike (gt-cd2oqm).
+func TestCIEngineOrphanJobAge(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty is 12h and 24h is read", func(t *testing.T) {
+		t.Parallel()
+		age, err := DiskMaintenanceConfig{}.CIEngineOrphanJobAgeDuration()
+		if err != nil || age != 12*time.Hour {
+			t.Fatalf("empty orphan job age = %v, %v; want 12h0m0s", age, err)
+		}
+		age, err = DiskMaintenanceConfig{CIEngineOrphanJobAge: "24h"}.CIEngineOrphanJobAgeDuration()
+		if err != nil || age != 24*time.Hour {
+			t.Fatalf("orphan job age 24h = %v, %v; want 24h0m0s", age, err)
+		}
+	})
+
+	t.Run("1h and soon are refused naming the key", func(t *testing.T) {
+		t.Parallel()
+		for bad, want := range map[string]string{
+			"1h":   "want at least",
+			"soon": "is not a Go duration",
+		} {
+			_, err := DiskMaintenanceConfig{CIEngineOrphanJobAge: bad}.CIEngineOrphanJobAgeDuration()
+			if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_orphan_job_age") ||
+				!strings.Contains(err.Error(), want) {
+				t.Errorf("orphan job age %q: error %v, want one naming the key and saying %q", bad, err, want)
+			}
+		}
+	})
+
+	// The patrol block's decode runs Validate, so config load refuses the same
+	// values the accessor does.
+	t.Run("the patrol block refuses a bad value at decode", func(t *testing.T) {
+		t.Parallel()
+		for _, bad := range []string{"1h", "soon"} {
+			var p PatrolsConfig
+			doc := `{"disk_maintenance": {"ci_engine_orphan_job_age": "` + bad + `"}}`
+			if err := json.Unmarshal([]byte(doc), &p); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_orphan_job_age") {
+				t.Errorf("orphan job age %q decoded with error %v, want a refusal naming the key", bad, err)
+			}
+		}
+	})
+}
+
 // TestDiskMaintenanceCIEnginePruneCap: the engine prune's per-kind candidate cap
 // is 50 when the setting is absent and the explicit value otherwise, at the
 // accessor and at config load alike, so an absent key is never an error

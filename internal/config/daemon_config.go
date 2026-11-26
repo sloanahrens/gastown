@@ -1795,6 +1795,12 @@ type DiskMaintenanceConfig struct {
 	// removes them. Empty means DiskMaintenanceDefaultCIEngineUnusedAge; a value
 	// under DiskMaintenanceMinCIEngineUnusedAge is refused, never read as the age.
 	CIEngineUnusedAge string `json:"ci_engine_unused_age,omitempty"` // Go duration such as "6h"
+	// CIEngineOrphanJobAge is how long a CI job container may run past its job
+	// before the engine prune treats it as an orphan. Empty means
+	// DiskMaintenanceDefaultCIEngineOrphanJobAge; a value under
+	// DiskMaintenanceMinCIEngineOrphanJobAge is refused, never read as the age,
+	// because the runner's own job limit must stay well under it.
+	CIEngineOrphanJobAge string `json:"ci_engine_orphan_job_age,omitempty"` // Go duration such as "12h"
 	// CIEnginePruneMaxPerKind bounds how many candidates of each kind one engine
 	// prune run may remove; the rest wait for the next run. Nil means
 	// DiskMaintenanceDefaultCIEnginePruneMaxPerKind; zero or less is refused,
@@ -2059,6 +2065,27 @@ func (c DiskMaintenanceConfig) CIEngineUnusedAgeDuration() (time.Duration, error
 	return age, nil
 }
 
+// CIEngineOrphanJobAgeDuration returns how long a CI job container may run past
+// its job before the engine prune treats it as an orphan: the default when the
+// setting is empty, and an error naming the setting for a value that is not a Go
+// duration or is under the minimum. It never falls back to the default on an
+// error.
+func (c DiskMaintenanceConfig) CIEngineOrphanJobAgeDuration() (time.Duration, error) {
+	raw := c.CIEngineOrphanJobAge
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIEngineOrphanJobAge
+	}
+	age, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_orphan_job_age: %q is not a Go duration such as \"12h\"", raw)
+	}
+	if age < DiskMaintenanceMinCIEngineOrphanJobAge {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_orphan_job_age = %q: want at least %s",
+			raw, DiskMaintenanceMinCIEngineOrphanJobAge)
+	}
+	return age, nil
+}
+
 // CIEnginePruneCap returns how many candidates of each kind one engine prune
 // run may remove: the default when the setting is nil, and an error naming the
 // setting for zero or less. It never falls back to the default on an error.
@@ -2274,6 +2301,12 @@ const (
 	// DiskMaintenanceMinCIEngineUnusedAge is the lowest accepted unused age: below
 	// it a job that just stopped would lose what it could resume from (gt-w9nv86).
 	DiskMaintenanceMinCIEngineUnusedAge = time.Hour
+	// DiskMaintenanceDefaultCIEngineOrphanJobAge is how long a CI job container
+	// may run past its job before the engine prune treats it as an orphan.
+	DiskMaintenanceDefaultCIEngineOrphanJobAge = "12h"
+	// DiskMaintenanceMinCIEngineOrphanJobAge is the lowest accepted orphan job
+	// age: the runner's own job limit must stay well under it.
+	DiskMaintenanceMinCIEngineOrphanJobAge = 6 * time.Hour
 	// DiskMaintenanceDefaultCIEnginePruneMaxPerKind is how many candidates of
 	// each kind one engine prune run may remove when the setting is absent
 	// (gt-ul5n4r).
@@ -2376,6 +2409,9 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CIEngineUnusedAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.CIEngineOrphanJobAgeDuration(); err != nil {
 		return err
 	}
 	if _, err := c.CIEnginePruneCap(); err != nil {
