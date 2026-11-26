@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/doltsquash"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -883,5 +884,159 @@ func TestSquashDeferAlertSurvivesARoll(t *testing.T) {
 	if raised := rolled.notifier.(*notifyfake.Recorder).Escalations(); len(raised) != 0 {
 		t.Fatalf("the rolled daemon raised %d alerts, want none: the first alert's mark did not survive the roll: %+v",
 			len(raised), raised)
+	}
+}
+
+// TestSquashDeferAlertAtTheSite pins the deferral site: a run the gc flag holds
+// stamps the deferral and logs its day, and the alert is raised by the check a
+// day later, with the flag held across both checks (gt-2o03sg).
+func TestSquashDeferAlertAtTheSite(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		blockStamp  bool  // a file where the alert clock's directory goes
+		deliveryErr error // what the notifier fake returns for the alert
+		wantAlerts  int   // escalations the last check attempts
+		wantLog     string
+	}{
+		{
+			name:       "the last check a day after the first raises one alert",
+			wantAlerts: 1,
+			wantLog:    "squash: gt: the maintenance gc flag is held — the run waits for the next check, deferred since 2026-11-16T12:00:00Z",
+		},
+		{
+			name:       "a stamp that cannot be written raises no alert",
+			blockStamp: true,
+			wantAlerts: 0,
+			wantLog:    "squash: WARNING: gt: marking the squash deferral of \"gt\"",
+		},
+		{
+			name:        "a refused alert delivery is logged",
+			deliveryErr: errors.New("the notifier refused the alert"),
+			wantAlerts:  1,
+			wantLog:     "squash: WARNING: gt: the deferral alert was not delivered: the notifier refused the alert",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			fake := clockwork.NewFakeClockAt(squashTestNow)
+			d.clock = fake
+			d.maint.now = fake.Now
+			if tc.blockStamp {
+				clockPath := alertClockPath(d.config.TownRoot)
+				if err := os.MkdirAll(filepath.Dir(clockPath), 0o700); err != nil {
+					t.Fatalf("creating the clock's parent: %v", err)
+				}
+				if err := os.WriteFile(clockPath, nil, 0o600); err != nil {
+					t.Fatalf("putting a file where the clock's directory goes: %v", err)
+				}
+			}
+			if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+				t.Fatal("the maintenance gc flag was already held")
+			}
+			defer d.maintenanceGCRunning.Store(false)
+			recorder := d.notifier.(*notifyfake.Recorder)
+			if tc.deliveryErr != nil {
+				recorder.Fail(notifyfake.KindEscalate, tc.deliveryErr)
+			}
+
+			writeSquashBackup(t, squashBackupRoot(t, d), fake.Now().Add(-6*time.Hour), fake.Now().Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.runScheduledMaintenance()
+			if n := len(recorder.Escalations()); n != 0 {
+				t.Fatalf("the first check raised %d alerts, want none: %+v", n, recorder.Escalations())
+			}
+
+			fake.Advance(24 * time.Hour)
+			writeSquashBackup(t, squashBackupRoot(t, d), fake.Now().Add(-6*time.Hour), fake.Now().Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.runScheduledMaintenance()
+
+			// A deferral is never logged with the zero time as its stamp.
+			if got := logs.String(); !strings.Contains(got, tc.wantLog) || strings.Contains(got, "deferred since 0001") {
+				t.Errorf("the check's log lacks %q or reports a zero stamp: %q", tc.wantLog, got)
+			}
+			raised := recorder.Escalations()
+			if len(raised) != tc.wantAlerts {
+				t.Fatalf("the last check raised %d alerts, want %d: %+v", len(raised), tc.wantAlerts, raised)
+			}
+			if tc.wantAlerts == 1 && tc.deliveryErr == nil {
+				alert := raised[0].Escalation
+				if want := "squash: gt deferred by the gc flag for 24h"; alert.Reason != want {
+					t.Errorf("alert reason = %q, want %q", alert.Reason, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSquashRunClearsTheDeferral pins the run's outcome after a deferral: the
+// run's clear takes the stamp, and a clear that fails keeps it and makes the
+// check due again (gt-2o03sg).
+func TestSquashRunClearsTheDeferral(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		blockClear bool      // a directory with a child where the alerted mark goes
+		wantStamp  time.Time // squashDeferredSince("gt") after the run
+		wantLog    string
+	}{
+		{
+			name:      "a run clears the deferral's stamp",
+			wantStamp: time.Time{},
+		},
+		{
+			name:       "a clear that fails keeps the stamp and the check is due again",
+			blockClear: true,
+			wantStamp:  squashTestNow,
+			wantLog:    "squash: WARNING: gt: clearing the squash deferral entry",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			fake := clockwork.NewFakeClockAt(squashTestNow)
+			d.clock = fake
+			d.maint.now = fake.Now
+			var calls int
+			scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+			if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+				t.Fatal("the maintenance gc flag was already held")
+			}
+			writeSquashBackup(t, squashBackupRoot(t, d), fake.Now().Add(-6*time.Hour), fake.Now().Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.runScheduledMaintenance()
+			if got := d.squashDeferredSince("gt"); !got.Equal(squashTestNow) {
+				t.Fatalf("squashDeferredSince(\"gt\") after the held check = %v, want %v", got, squashTestNow)
+			}
+			d.maintenanceGCRunning.Store(false)
+
+			if tc.blockClear {
+				entry := filepath.Join(alertClockPath(d.config.TownRoot), squashAlertedClockKey("gt"))
+				if err := os.MkdirAll(entry, 0o700); err != nil {
+					t.Fatalf("creating the mark's directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(entry, "held"), nil, 0o600); err != nil {
+					t.Fatalf("writing the mark's child: %v", err)
+				}
+			}
+
+			fake.Advance(24 * time.Hour)
+			writeSquashBackup(t, squashBackupRoot(t, d), fake.Now().Add(-6*time.Hour), fake.Now().Add(-6*time.Hour+7*time.Second), 1<<20)
+			d.runScheduledMaintenance()
+
+			if calls != 1 {
+				t.Fatalf("the check started %d run(s) with the flag free, want 1", calls)
+			}
+			if tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog) {
+				t.Errorf("the check's log lacks %q: %q", tc.wantLog, logs.String())
+			}
+			if got := d.squashDeferredSince("gt"); !got.Equal(tc.wantStamp) {
+				t.Fatalf("squashDeferredSince(\"gt\") after the run = %v, want %v", got, tc.wantStamp)
+			}
+			if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), fake.Now().Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); due.due != tc.blockClear {
+				t.Errorf("due again after the retry delay = %t, want %t", due.due, tc.blockClear)
+			}
+		})
 	}
 }
