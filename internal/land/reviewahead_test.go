@@ -1260,8 +1260,9 @@ func (c *aheadPoolCopy) ReviewBead(_ context.Context, in ReviewInput) (Verdict, 
 
 // TestVerdictReuseAheadRunsIsolated: a clean merge is reviewed by the reviewer
 // isolated under the review directory, over the base and the merged commit, with
-// the landing's own re-score of a borderline rejection. A review that fails, and
-// a reviewer that cannot be isolated, are errors with no outcome.
+// the landing's own re-score of a borderline rejection. A review that fails is an
+// error with no outcome; a reviewer that cannot be isolated is skipped instead,
+// which TestVerdictReuseAheadNotIsolatorSkips holds.
 func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 	t.Parallel()
 	approve := Verdict{Verdict: VerdictApprove, Score: 0.9}
@@ -1272,7 +1273,6 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 		name     string
 		verdicts []Verdict
 		err      error
-		plain    bool // the Lander's reviewer cannot be isolated
 		runs     int
 		wantErr  string
 		wantLog  string
@@ -1280,7 +1280,6 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 		{name: "approval", verdicts: []Verdict{approve}, runs: 1},
 		{name: "borderline rejection is scored again", verdicts: []Verdict{borderline, approve}, runs: 2, wantLog: "om runs once more"},
 		{name: "review error", err: failed, runs: 1, wantErr: "om: no verdict"},
-		{name: "reviewer cannot be isolated", plain: true, wantErr: "cannot be isolated"},
 	}
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1291,13 +1290,6 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 			l.Out = &log
 			rev := &aheadPoolReviewer{t: t, verdicts: tc.verdicts, err: tc.err}
 			l.Reviewer = rev
-			if tc.plain {
-				// Embedding the two interfaces leaves Isolated behind.
-				l.Reviewer = struct {
-					Reviewer
-					VersionProber
-				}{rev, rev}
-			}
 			got, built, err := l.reviewAhead(context.Background(), f.work)
 			if len(rev.runs) != tc.runs {
 				t.Fatalf("isolated reviewer runs = %d, want %d (outcome %q, err %v)", len(rev.runs), tc.runs, got, err)
@@ -1334,5 +1326,71 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 				t.Errorf("reviewAhead = %q with built %+v on error, want neither", got, built)
 			}
 		})
+	}
+}
+
+// aheadPlainReviewer is a Reviewer the pool cannot isolate: it has no Isolated
+// method. It records each review it is handed and fails the test, so a skip that
+// let a review through is red rather than quietly observed. It answers the
+// version probe, so the review key is built and the skip is the reviewer's
+// isolation, not a key that could not be made.
+type aheadPlainReviewer struct {
+	t    *testing.T
+	runs []ReviewInput
+}
+
+func (r *aheadPlainReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	r.t.Error("the Lander's plain reviewer ran a review it cannot isolate beside a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadPlainReviewer) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
+	r.runs = append(r.runs, in)
+	r.t.Error("the Lander's plain reviewer ran a review it cannot isolate beside a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadPlainReviewer) OMVersion(context.Context, ReviewInput) string { return stubOMVersion }
+
+// TestVerdictReuseAheadNotIsolatorSkips: a reviewer the pool cannot isolate
+// cannot run beside a landing, so ReviewAhead makes no review and reports
+// AheadSkipped with no built value and nothing stored; the landing runs om
+// inline, as it does with no review-ahead store.
+func TestVerdictReuseAheadNotIsolatorSkips(t *testing.T) {
+	t.Parallel()
+	f, l, _ := keyFixture(t)
+	rev := &aheadPlainReviewer{t: t}
+	l.Reviewer = rev
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	var log bytes.Buffer
+	l.Out = &log
+	before := aheadBeadWrites(t, f.bd)
+	got, built, err := l.reviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("reviewAhead: %v, want %q and no error", err, AheadSkipped)
+	}
+	if got != AheadSkipped {
+		t.Errorf("reviewAhead = %q, want %q", got, AheadSkipped)
+	}
+	if len(rev.runs) != 0 {
+		t.Errorf("the reviewer ran %d review(s), want none", len(rev.runs))
+	}
+	if !reflect.DeepEqual(built, aheadBuilt{}) {
+		t.Errorf("reviewAhead built %+v for a review it did not make, want nothing", built)
+	}
+	if !strings.Contains(log.String(), "cannot be isolated") {
+		t.Errorf("land log %q does not say the reviewer cannot be isolated", log.String())
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored for a review that was skipped (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("reviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned")
+	} else {
+		l.gitMu.Unlock()
 	}
 }
