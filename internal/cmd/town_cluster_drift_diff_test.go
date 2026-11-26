@@ -1318,3 +1318,194 @@ func TestDriftConfigTextKeepsFingerprintsOffTheRunnerConfig(t *testing.T) {
 		})
 	}
 }
+
+// driftWithSecretEnv adds an env var the render sources from key in the omtoken
+// Secret to object's daemon container, so a row can change the key the cluster names.
+func driftWithSecretEnv(t *testing.T, object map[string]any, key string) {
+	t.Helper()
+	container := driftContainer(t, object, "daemon")
+	container["env"] = append(container["env"].([]any), map[string]any{
+		"name": "OM_TOKEN",
+		"valueFrom": map[string]any{
+			"secretKeyRef": map[string]any{"name": "omtoken", "key": key},
+		},
+	})
+}
+
+// TestDriftReadableHidesUnreviewedValues holds a changed env value, a changed
+// volume and a changed Secret key on a Deployment, none of them on the reviewed
+// list, to one fingerprint line under the hidden marker each: no side's value is
+// printed, and the line is its path with fingerprints only (gt-k5j8ee).
+func TestDriftReadableHidesUnreviewedValues(t *testing.T) {
+	t.Parallel()
+	const (
+		tz     = "spec.template.spec.containers[name=daemon].env[name=TZ].value"
+		volume = "spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName"
+		secret = "spec.template.spec.containers[name=daemon].env[name=OM_TOKEN].valueFrom.secretKeyRef.key"
+	)
+	cases := []struct {
+		name     string
+		path     string
+		rendered string
+		observed string
+		change   func(t *testing.T, live map[string]any)
+	}{
+		{
+			name: "a changed env value", path: tz, rendered: "America/Chicago", observed: "Europe/Paris",
+			change: func(t *testing.T, live map[string]any) {
+				driftEnvOf(t, driftContainer(t, live, "daemon"), "TZ")["value"] = "Europe/Paris"
+			},
+		},
+		{
+			name: "a changed volume", path: volume, rendered: "town-state", observed: "town-state-old",
+			change: func(t *testing.T, live map[string]any) {
+				driftEntry(t, live, "volumes", "town-state")["persistentVolumeClaim"].(map[string]any)["claimName"] = "town-state-old"
+			},
+		},
+		{
+			name: "a changed Secret key", path: secret, rendered: "om-token", observed: "om-token-rotated",
+			change: func(t *testing.T, live map[string]any) {
+				driftEnvOf(t, driftContainer(t, live, "daemon"), "OM_TOKEN")["valueFrom"].(map[string]any)["secretKeyRef"].(map[string]any)["key"] = "om-token-rotated"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rendered := driftRendered()
+			driftWithSecretEnv(t, rendered, "om-token")
+			live := driftLive(rendered)
+			tc.change(t, live)
+			got, err := objectDrift("Deployment", rendered, live)
+			if err != nil {
+				t.Fatalf("objectDrift: %v", err)
+			}
+			want := []string{driftWantLine(t, tc.path, driftHiddenMarker, tc.rendered, tc.observed)}
+			if !slices.Equal(got, want) {
+				t.Fatalf("drift =\n%q\nwant\n%q", got, want)
+			}
+			if !driftLineShapeOK(got[0]) {
+				t.Errorf("drift line %q is not its path and fingerprints under the hidden marker", got[0])
+			}
+			rest := strings.TrimPrefix(got[0], tc.path)
+			for _, value := range []string{tc.rendered, tc.observed} {
+				if strings.Contains(rest, value) {
+					t.Errorf("drift line %q carries the value %q", got[0], value)
+				}
+			}
+		})
+	}
+}
+
+// TestDriftReadableHidesAConfigMapDataKey holds a ConfigMap data key that is not the
+// runner's config.yml to fingerprints under the hidden marker, both when the key
+// changed and when the live object lacks it: no data value is printed (gt-k5j8ee).
+func TestDriftReadableHidesAConfigMapDataKey(t *testing.T) {
+	t.Parallel()
+	const (
+		name     = "daemon-motd"
+		path     = "data.motd"
+		rendered = "welcome to the town"
+		observed = "closed for maintenance"
+	)
+	cases := []struct {
+		name string
+		live map[string]any
+		want func(t *testing.T) string
+	}{
+		{
+			name: "a changed data key",
+			live: driftRunnerConfigMap(name, "motd", observed),
+			want: func(t *testing.T) string {
+				return driftWantLine(t, path, driftHiddenMarker, rendered, observed)
+			},
+		},
+		{
+			name: "a data key the live object lacks",
+			live: driftRunnerConfigMap(name, "other", "unrendered"),
+			want: func(t *testing.T) string {
+				return driftWantAbsentLine(t, path, driftHiddenMarker, rendered)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := objectDrift("ConfigMap", driftRunnerConfigMap(name, "motd", rendered), tc.live)
+			if err != nil {
+				t.Fatalf("objectDrift: %v", err)
+			}
+			want := []string{tc.want(t)}
+			if !slices.Equal(got, want) {
+				t.Fatalf("drift =\n%q\nwant\n%q", got, want)
+			}
+			if !driftLineShapeOK(got[0]) {
+				t.Errorf("drift line %q is not its path and fingerprints under the hidden marker", got[0])
+			}
+			for _, value := range []string{rendered, observed} {
+				if strings.Contains(got[0], value) {
+					t.Errorf("drift line %q carries the value %q", got[0], value)
+				}
+			}
+		})
+	}
+}
+
+// TestDeploymentDriftHidesAnUnreviewedValue holds a Deployment whose only change is
+// an unreviewed value to exactly one fingerprint line under the hidden marker, with
+// neither side's value anywhere on that line (gt-k5j8ee).
+func TestDeploymentDriftHidesAnUnreviewedValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		path     string
+		rendered any
+		observed any
+		leaks    []string
+		change   func(t *testing.T, live map[string]any)
+	}{
+		{
+			name:     "an env value",
+			path:     "spec.template.spec.containers[name=daemon].env[name=TZ].value",
+			rendered: "America/Chicago",
+			observed: "Europe/Paris",
+			leaks:    []string{"America/Chicago", "Europe/Paris"},
+			change: func(t *testing.T, live map[string]any) {
+				driftEnvOf(t, driftContainer(t, live, "daemon"), "TZ")["value"] = "Europe/Paris"
+			},
+		},
+		{
+			name:     "a probe period",
+			path:     "spec.template.spec.containers[name=daemon].readinessProbe.periodSeconds",
+			rendered: 10,
+			observed: 20,
+			change: func(t *testing.T, live map[string]any) {
+				driftContainer(t, live, "daemon")["readinessProbe"].(map[string]any)["periodSeconds"] = 20
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rendered := driftRendered()
+			live := driftLive(rendered)
+			tc.change(t, live)
+			got, err := objectDrift("Deployment", rendered, live)
+			if err != nil {
+				t.Fatalf("objectDrift: %v", err)
+			}
+			want := []string{driftWantLine(t, tc.path, driftHiddenMarker, tc.rendered, tc.observed)}
+			if !slices.Equal(got, want) {
+				t.Fatalf("drift =\n%q\nwant\n%q", got, want)
+			}
+			if !driftLineShapeOK(got[0]) {
+				t.Errorf("drift line %q is not its path and fingerprints under the hidden marker", got[0])
+			}
+			for _, leak := range tc.leaks {
+				if strings.Contains(got[0], leak) {
+					t.Errorf("drift line %q carries the value %q", got[0], leak)
+				}
+			}
+		})
+	}
+}
