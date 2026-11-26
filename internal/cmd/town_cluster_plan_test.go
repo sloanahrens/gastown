@@ -626,6 +626,28 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 			}
 			return d, planKubectl(t)
 		}, "holds a document named"},
+		{"a static Secret that carries data", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			build := d.build
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				m, err := build(v)
+				if err != nil {
+					return m, err
+				}
+				for i := range m.Static {
+					if m.Static[i].Kind == secretKind {
+						m.Static[i].SecretNoData = false
+						break
+					}
+				}
+				return m, nil
+			}
+			// Any cluster read fails, so a plan that read the Secret before
+			// refusing would report the read's cause instead of the guard's.
+			return d, func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "", 1, nil
+			}
+		}, "carries data and was not read"},
 		{"a static object the cluster cannot be read", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
 			kube := planKubectl(t)
 			return clusterRenderDepsAt(t, planTown(t), io.Discard), func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
@@ -1365,7 +1387,8 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 // TestClusterShapePlanLongText: the command's help says the plan reads the
 // cluster's Deployments and the static objects with get only and writes nothing
 // to any cluster, says a phase P file is listed only when a static object differs,
-// and no longer says that no cluster is contacted.
+// says a Secret is compared on its declared fields and never on its data, and no
+// longer says that no cluster is contacted.
 func TestClusterShapePlanLongText(t *testing.T) {
 	t.Parallel()
 	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
@@ -1374,6 +1397,9 @@ func TestClusterShapePlanLongText(t *testing.T) {
 	}
 	if !strings.Contains(long, "phase P file is listed only when a static object differs") {
 		t.Errorf("Long text = %q, want it to say a phase P file is listed only when a static object differs", long)
+	}
+	if !strings.Contains(long, "Secret is compared on the fields its document declares and never on its data, which the cluster fills") {
+		t.Errorf("Long text = %q, want it to say a Secret is compared on the fields its document declares and never on its data, which the cluster fills", long)
 	}
 	if strings.Contains(long, "no cluster is contacted") {
 		t.Errorf("Long text = %q, still says no cluster is contacted", long)

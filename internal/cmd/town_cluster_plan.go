@@ -92,7 +92,8 @@ var townClusterPlanCmd = &cobra.Command{
 	Long: `Render the desired set into --out from the flags the last live render recorded,
 with --include-static, and print the short form of the plan's id. Nothing is
 applied. The plan reads the cluster's Deployments and the static objects with get
-only and writes nothing to any cluster.
+only and writes nothing to any cluster. A Secret is compared on the fields its
+document declares and never on its data, which the cluster fills.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
@@ -200,10 +201,15 @@ func planStaticTarget(object k8s.StaticObject) (driftTarget, error) {
 
 // planSecretTarget is the drift target of a static Secret: its document without
 // its data and stringData, which the cluster owns and fills, so a Secret is
-// compared on the fields its document declares and never on its data. The
-// document is validated by staticObjectDoc, so one that names another object
-// refuses the plan. A Secret the cluster does not hold is drift.
+// compared on the fields its document declares and never on its data. A Secret
+// that carries data refuses the plan: the plan compares declared fields only, so
+// it would not compare what the cluster fills. The document is validated by
+// staticObjectDoc, so one that names another object refuses the plan. A Secret
+// the cluster does not hold is drift.
 func planSecretTarget(object k8s.StaticObject) (driftTarget, error) {
+	if !object.SecretNoData {
+		return driftTarget{}, fmt.Errorf("the static %s carries data and was not read, so the plan would not compare what the cluster fills", staticObjectLabel(object))
+	}
 	doc, err := staticObjectDoc(object)
 	if err != nil {
 		return driftTarget{}, err
