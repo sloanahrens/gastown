@@ -1044,6 +1044,46 @@ func TestVerdictReuseLandLockNotHeldAcrossGate(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseLandLockNotHeldAcrossMerge: the landing's merge takes no
+// part of the shared git lock, so a pool review that locks a ref or a worktree
+// while the merge runs cannot deadlock the landing. The fake merger takes gitMu
+// from inside its run; a landing that held the lock across the merge would
+// block it forever, so the merger takes the lock with TryLock and reports a
+// lock it could not take on a guard channel, and the test fails on the report
+// instead of hanging. A landing that holds the lock over the merge turns it
+// red, and so does one that never runs the merge the guard observes (gt-6unboc).
+func TestVerdictReuseLandLockNotHeldAcrossMerge(t *testing.T) {
+	t.Parallel()
+	f, l, _, _ := reuseLandSetup(t)
+	guard := make(chan struct{}, 1)
+	f.merger.fn = func(req MergeRequest) error {
+		if !l.gitMu.TryLock() {
+			guard <- struct{}{}
+			return errors.New("the merge ran with the shared git lock held")
+		}
+		l.gitMu.Unlock()
+		// The merge a green landing makes: the target's tip becomes the
+		// candidate, which is what the read-back after it checks.
+		f.setMain(req.Head)
+		return nil
+	}
+	res, err := l.Land(context.Background(), f.work)
+	select {
+	case <-guard:
+		t.Fatal("the merge ran with the shared git lock held; a pool review's ref or worktree lock would deadlock the landing")
+	default:
+	}
+	if err != nil {
+		t.Fatalf("Land error = %v; want nil", err)
+	}
+	if n := len(f.merger.calls); n != 1 {
+		t.Fatalf("the merger ran %d time(s); want 1, the run the guard observes", n)
+	}
+	if res.Verdict.Verdict != VerdictApprove {
+		t.Errorf("Land verdict = %q; want %q", res.Verdict.Verdict, VerdictApprove)
+	}
+}
+
 // reuseLandWorktreeProbe is the landing's clone with a seam over its worktree
 // add: it records whether the lander's gitMu was held while the add ran and,
 // when err is set, fails the add the way git refuses a ref it cannot check out.
