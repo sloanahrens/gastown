@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -32,6 +34,10 @@ func TestAttentionTickGatewayCap(t *testing.T) {
 		reads := []uint64{0, 3}
 		var tick int
 		f.src.gatewayCap = &gatewayCapCollector{stats: func(context.Context) (bdgateway.GatewayStats, error) {
+			if tick >= len(reads) {
+				t.Errorf("gateway stats read %d, but the test scripts %d reads", tick+1, len(reads))
+				return bdgateway.GatewayStats{}, errors.New("unscripted gateway read")
+			}
 			st := bdgateway.GatewayStats{TooManyCalls: reads[tick], PeakInFlight: 5}
 			tick++
 			return st, nil
@@ -83,5 +89,40 @@ func TestAttentionTickGatewayCapWiredPerDaemon(t *testing.T) {
 	f.d.getenv = func(string) string { return "" }
 	if none := f.d.attentionSources(refusalsTick); none.gatewayCap != nil {
 		t.Fatalf("tick with no gateway configured holds a cap collector, want nil")
+	}
+}
+
+// refusingDoer fails every gateway call, so a test that reaches the HTTP seam
+// fails without touching the network.
+type refusingDoer struct{}
+
+func (refusingDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, errors.New("gateway call reached the HTTP seam")
+}
+
+// TestAttentionSourcesBindGatewayCapOnce: a later tick's sources keep the stats
+// read the Daemon's collector already holds. The read is bound once, so a tick
+// never rewrites the field a collect may be reading.
+func TestAttentionSourcesBindGatewayCapOnce(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, refusalsTick)
+	f.d.getenv = func(key string) string {
+		if key == bdgateway.WorkspaceURLEnv {
+			return "http://gateway.test"
+		}
+		return ""
+	}
+	f.d.workspaceHTTP = refusingDoer{}
+	const held = 7
+	f.d.gatewayCap.stats = func(context.Context) (bdgateway.GatewayStats, error) {
+		return bdgateway.GatewayStats{TooManyCalls: held}, nil
+	}
+	s := f.d.attentionSources(refusalsTick.Add(time.Minute))
+	got, err := s.gatewayCap.stats(context.Background())
+	if err != nil {
+		t.Fatalf("the held stats read was replaced: %v", err)
+	}
+	if got.TooManyCalls != held {
+		t.Fatalf("TooManyCalls = %d, want the held read's %d", got.TooManyCalls, held)
 	}
 }

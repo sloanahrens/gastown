@@ -1194,8 +1194,14 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	if d.env(bdgateway.WorkspaceURLEnv) != "" {
 		s.gatewayStats = d.gatewayStatsRead
 		// The cap tracker's base outlives the tick, so the collector is the
-		// Daemon's, as the refusal window is (gt-01bka3).
-		d.gatewayCap.stats = d.gatewayStatsRead
+		// Daemon's, as the refusal window is (gt-01bka3). Its stats read is bound
+		// once, under the collector's lock, so a later tick never rewrites a
+		// field a collect may be reading.
+		d.gatewayCap.mu.Lock()
+		if d.gatewayCap.stats == nil {
+			d.gatewayCap.stats = d.gatewayStatsRead
+		}
+		d.gatewayCap.mu.Unlock()
 		s.gatewayCap = &d.gatewayCap
 	}
 	// The extract read walks the town's .runtime/metrics, where the daily run
