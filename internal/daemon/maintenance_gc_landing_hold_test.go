@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -162,5 +163,121 @@ func TestGCLandingHoldReleasedOnEveryDeferral(t *testing.T) {
 				t.Error("the maintenance-gc hold is still held after the deferred cycle returned")
 			}
 		})
+	}
+}
+
+// TestGCLandingHoldTimeoutDefers: a wait that reports the landing passes did
+// not end within maintenanceGCHoldBound defers the cycle with the bound named,
+// runs no gc, and releases the hold on that exit. The seam answers, so no real
+// time passes (gt-eysfig).
+func TestGCLandingHoldTimeoutDefers(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	waited := 0
+	heldForWait := false
+	d.maint.waitIdle = func(dd *Daemon, _ <-chan struct{}) bool {
+		waited++
+		heldForWait = dd.landingHolds.heldBy(landingHoldMaintenanceGC)
+		return false
+	}
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
+	if out.outcome != gcOutcomeDeferred {
+		t.Fatalf("outcome = %v, want deferred: the wait gave up", out.outcome)
+	}
+	if want := "landing pass did not end within 15m0s"; out.reason != want {
+		t.Errorf("reason = %q, want %q", out.reason, want)
+	}
+	if waited != 1 {
+		t.Errorf("waitIdle called %d times, want once before the gc", waited)
+	}
+	if !heldForWait {
+		t.Error("the maintenance-gc hold was not held when the wait ran")
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none after a timed-out wait", f.gcCalls)
+	}
+	if d.landingHolds.heldBy(landingHoldMaintenanceGC) {
+		t.Error("the maintenance-gc hold is still held after the deferred cycle returned")
+	}
+}
+
+// TestGCLandingHoldReleasedOnEveryExit: the maintenance-gc hold is released
+// after a gc that fails, and a cycle with nothing due returns before the hold,
+// leaving a hold another caller took as it found it (gt-eysfig).
+func TestGCLandingHoldReleasedOnEveryExit(t *testing.T) {
+	t.Parallel()
+	t.Run("a gc that fails", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+		f.gcErr["hq"] = errors.New("dolt_gc failed")
+
+		out := d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
+		if out.outcome != gcOutcomeFailed {
+			t.Fatalf("outcome = %v, want failed", out.outcome)
+		}
+		if d.landingHolds.heldBy(landingHoldMaintenanceGC) {
+			t.Error("the maintenance-gc hold is still held after a failed gc returned")
+		}
+	})
+	t.Run("nothing due", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+		recordRun(t, d, "hq", 1, 0) // a patrol gc yesterday: not due
+		// Another caller holds maintenance-gc; a cycle with nothing due returns
+		// before it takes the hold, so it cannot release this one.
+		d.landingHolds.hold(landingHoldMaintenanceGC)
+
+		out := d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
+		if out.outcome != gcOutcomeCompleted {
+			t.Fatalf("outcome = %v, want completed", out.outcome)
+		}
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v, want none for a database that is not due", f.gcCalls)
+		}
+		if !d.landingHolds.heldBy(landingHoldMaintenanceGC) {
+			t.Error("a cycle with nothing due took and released the maintenance-gc hold")
+		}
+		d.landingHolds.release(landingHoldMaintenanceGC)
+	})
+}
+
+// TestGCLandingHoldQuietStillGuards: with the landing wait satisfied, a gate
+// slot held by another role still defers the database — a satisfied wait does
+// not skip the guard, and the gc's own hold is not hard work to it (gt-eysfig).
+func TestGCLandingHoldQuietStillGuards(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	d.maint.waitIdle = func(*Daemon, <-chan struct{}) bool { return true }
+	d.maint.slotHolders = func(string) ([]string, error) { return []string{"refinery"}, nil }
+	heldForQuiet := false
+	d.maint.quiet = func(dd *Daemon) (bool, string) { // the real guard, watched
+		heldForQuiet = dd.landingHolds.heldBy(landingHoldMaintenanceGC)
+		return dd.maintenanceQuiet()
+	}
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
+	if out.outcome != gcOutcomeDeferred {
+		t.Fatalf("outcome = %v, want deferred by the quiet check", out.outcome)
+	}
+	if want := "slot held by refinery"; out.reason != want {
+		t.Errorf("reason = %q, want %q", out.reason, want)
+	}
+	if !heldForQuiet {
+		t.Error("the maintenance-gc hold was not held when the quiet check ran")
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none while a gate slot is held", f.gcCalls)
+	}
+	if d.landingHolds.heldBy(landingHoldMaintenanceGC) {
+		t.Error("the maintenance-gc hold is still held after the deferred cycle returned")
 	}
 }
