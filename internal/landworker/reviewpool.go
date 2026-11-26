@@ -21,11 +21,11 @@ type AheadHints interface {
 }
 
 // ReviewPool runs reviews ahead of landings, so the serial landing can reuse
-// a verdict instead of running om inline. Offer starts the reviews; Wait
-// returns when none is running.
+// a verdict instead of running om inline. Offer starts the reviews, up to Max
+// at once; Wait returns when none is running.
 //
-// Max is read by free. Begin, End and Hints are stored here and not yet read:
-// the begin and end hooks and the hint check land with the beads that use them.
+// Begin, End and Hints are stored here and not yet read: the begin and end
+// hooks and the hint check land with the beads that use them.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -45,11 +45,13 @@ type aheadRun struct {
 	done chan struct{}
 }
 
-// Offer starts one review per work, launching the goroutines in the order
-// given; Go does not promise that the reviews enter the Reviewer in that
-// order. A work whose bead already has a review running is a no-op: no second
-// reviewer and no second goroutine. Nothing is started when no Reviewer is
-// set, so every submission is a miss and the landing runs om inline.
+// Offer starts one review per work while fewer than Max are running, launching
+// the goroutines in the order given; Go does not promise that the reviews enter
+// the Reviewer in that order. A work that does not fit starts nothing and is
+// not queued: the landing offers the list again after a review ends. A work
+// whose bead already has a review running is a no-op: no second reviewer and
+// no second goroutine. Nothing is started when no Reviewer is set, so every
+// submission is a miss and the landing runs om inline.
 func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	if p.Reviewer == nil {
 		p.logf("ahead review: no reviewer set; %d submissions not reviewed ahead", len(works))
@@ -60,11 +62,15 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	}
 }
 
-// start registers w as running and launches its review, unless its bead
-// already has one running.
+// start registers w as running and launches its review, unless the pool is at
+// Max or w's bead already has one running. The cap is checked under p.mu so
+// two Offers racing cannot both start a review on the same free slot.
 func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.free() == 0 {
+		return
+	}
 	if _, ok := p.running[w.BeadID]; ok {
 		return
 	}
@@ -77,7 +83,7 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 }
 
 // review makes one review under its own child of ctx. The entry leaves the
-// map before done closes, so Wait sees the review end. The guard in Offer
+// map before done closes, so Wait sees the review end. The guard in start
 // makes the entry under w.BeadID this run's own.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
