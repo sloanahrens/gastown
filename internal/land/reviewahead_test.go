@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // aheadReadyIssue is the bead a landing of w finds ready: actionable, labelled
@@ -50,36 +51,37 @@ func TestVerdictReuseAheadSkips(t *testing.T) {
 		name  string
 		store bool // whether the lander has a review-ahead store
 		issue func(w Work) beads.Issue
+		want  AheadOutcome
 		// clockReads is how many times ReviewAhead reads the store's clock: the
-		// review's start is taken once it proceeds past the skips, and not at
-		// all when it skips.
+		// review's start is taken once it proceeds past the skips, and its verdict
+		// is dated when the review returns; a skip reads neither.
 		clockReads int
 	}{
-		{"nil Ahead", false, aheadReadyIssue, 0},
+		{"nil Ahead", false, aheadReadyIssue, AheadSkipped, 0},
 		{"bead not actionable", true, func(w Work) beads.Issue {
 			i := aheadReadyIssue(w)
 			i.Status = "closed"
 			return i
-		}, 0},
+		}, AheadSkipped, 0},
 		{"bead lacks ready label", true, func(w Work) beads.Issue {
 			i := aheadReadyIssue(w)
 			i.Labels = nil
 			return i
-		}, 0},
+		}, AheadSkipped, 0},
 		{"policy refusal", true, func(w Work) beads.Issue {
 			i := aheadReadyIssue(w)
 			i.AcceptanceCriteria = "- [ ] add b"
 			return i
-		}, 0},
+		}, AheadSkipped, 0},
 		{"waived head", true, func(w Work) beads.Issue {
 			i := aheadReadyIssue(w)
 			i.Labels = append(i.Labels, LabelOverseerReviewed)
 			i.Notes = FormatReadyNote(w) + "\n" + FormatOverseerReviewedNote(w.Head)
 			return i
-		}, 0},
+		}, AheadSkipped, 0},
 		// The healthy path: past every guard, through both fetches, to the
-		// marked point where the worktree is added.
-		{"ready submission", true, aheadReadyIssue, 1},
+		// review the isolated reviewer makes and the record it stores.
+		{"ready submission", true, aheadReadyIssue, AheadStored, 2},
 	}
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,8 +107,8 @@ func TestVerdictReuseAheadSkips(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReviewAhead: unexpected error: %v", err)
 			}
-			if got != AheadSkipped {
-				t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+			if got != tc.want {
+				t.Errorf("ReviewAhead = %q, want %q", got, tc.want)
 			}
 			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
 				t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
@@ -322,8 +324,8 @@ func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReviewAhead: unexpected error: %v", err)
 	}
-	if got != AheadSkipped {
-		t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+	if got != AheadStored {
+		t.Errorf("ReviewAhead = %q, want %q", got, AheadStored)
 	}
 	if len(rec.adds) != 1 {
 		t.Fatalf("worktree adds = %q, want exactly one", rec.adds)
@@ -407,8 +409,8 @@ func TestVerdictReuseAheadLockFreeAtWorktreeAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReviewAhead: unexpected error: %v", err)
 	}
-	if got != AheadSkipped {
-		t.Errorf("ReviewAhead = %q, want %q", got, AheadSkipped)
+	if got != AheadStored {
+		t.Errorf("ReviewAhead = %q, want %q", got, AheadStored)
 	}
 	if !probe.called {
 		t.Fatal("ReviewAhead called no worktree fake, so the lock was never observed at the worktree step")
@@ -873,7 +875,7 @@ func (b *aheadBeadWriteLog) CloseWithReason(reason string, ids ...string) error 
 }
 
 // TestVerdictReuseAheadWritesNoBeadState: on every path the pool has built so
-// far — a skip before the review, a conflict, and a clean merge — ReviewAhead
+// far — a skip before the review, a conflict, and a stored verdict — ReviewAhead
 // makes no bead write and calls no reject. The store counts the writes, so a
 // bead whose state the pool changed would be named by the record it left.
 func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
@@ -894,7 +896,7 @@ func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
 		{"conflict", true, aheadReadyIssue, func(f *landFixture) {
 			aheadConflictMain(f)
 		}, AheadConflict},
-		{"clean merge", true, aheadReadyIssue, nil, AheadSkipped},
+		{"clean merge", true, aheadReadyIssue, nil, AheadStored},
 		{"clean merge leaving the target's tree unchanged", true, aheadReadyIssue, func(f *landFixture) {
 			f.pushMain("b.txt", "work\n")
 		}, AheadSkipped},
@@ -1064,8 +1066,8 @@ func TestVerdictReuseAheadBuildsTheLandingsInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reviewAhead: unexpected error: %v", err)
 	}
-	if got != AheadSkipped {
-		t.Fatalf("reviewAhead = %q, want %q at the point before om runs", got, AheadSkipped)
+	if got != AheadStored {
+		t.Fatalf("reviewAhead = %q, want %q after the review's verdict is stored", got, AheadStored)
 	}
 	if built.In.RoundsText == "" {
 		t.Fatal("reviewAhead built no rounds text: the comparison would not see the ledger")
@@ -1260,9 +1262,10 @@ func (c *aheadPoolCopy) ReviewBead(_ context.Context, in ReviewInput) (Verdict, 
 
 // TestVerdictReuseAheadRunsIsolated: a clean merge is reviewed by the reviewer
 // isolated under the review directory, over the base and the merged commit, with
-// the landing's own re-score of a borderline rejection. A review that fails is an
-// error with no outcome; a reviewer that cannot be isolated is skipped instead,
-// which TestVerdictReuseAheadNotIsolatorSkips holds.
+// the landing's own re-score of a borderline rejection, and the verdict is
+// stored. A review that fails is an error with no outcome; a reviewer that
+// cannot be isolated is skipped instead, which
+// TestVerdictReuseAheadNotIsolatorSkips holds.
 func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 	t.Parallel()
 	approve := Verdict{Verdict: VerdictApprove, Score: 0.9}
@@ -1310,8 +1313,8 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 			}
 			aheadNoReviewDir(t, f)
 			if tc.wantErr == "" {
-				if err != nil || got != AheadSkipped {
-					t.Fatalf("reviewAhead = %q, %v; want %q and no error", got, err, AheadSkipped)
+				if err != nil || got != AheadStored {
+					t.Fatalf("reviewAhead = %q, %v; want %q and no error", got, err, AheadStored)
 				}
 				if built.In.Head != rev.runs[0].Head {
 					t.Errorf("reviewed head %s, want the merged commit %s the key was built for", rev.runs[0].Head, built.In.Head)
@@ -1326,6 +1329,159 @@ func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
 				t.Errorf("reviewAhead = %q with built %+v on error, want neither", got, built)
 			}
 		})
+	}
+}
+
+// aheadStoringFixture is keyFixture with a reviewer the pool can isolate that
+// reaches verdict, and a store whose clock steps a minute per read, so a stored
+// record's start and review time are told apart. t0 is the first reading; the
+// review begins at t0+1m and is dated at t0+2m.
+func aheadStoringFixture(t *testing.T, verdict Verdict) (*landFixture, *Lander, time.Time) {
+	t.Helper()
+	f, l, _ := keyFixture(t)
+	l.Reviewer = &aheadKeyReviewer{
+		recordBeadReviewer: recordBeadReviewer{verdict: verdict},
+		version:            stubOMVersion,
+	}
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	reads := 0
+	store := TownAheadStore(f.town, "gastown")
+	store.Now = func() time.Time {
+		reads++
+		return t0.Add(time.Duration(reads) * time.Minute)
+	}
+	l.Ahead = store
+	return f, l, t0
+}
+
+// aheadStoredVerdict runs reviewAhead and holds the record it stored against
+// the key the same call built: every key field, the base, both times, the
+// verdict, and one minute of review time. The review logs no line and writes no
+// round: the landing writes those when it consumes a verdict.
+func aheadStoredVerdict(t *testing.T, verdict Verdict) {
+	t.Helper()
+	f, l, t0 := aheadStoringFixture(t, verdict)
+	reviewsPath := filepath.Join(testutil.PrivateTempDir(t), "reviews.jsonl")
+	l.Reviews = &ReviewsFile{Path: reviewsPath}
+	rounds := testutil.PrivateTempDir(t)
+	l.RoundsDir = rounds
+	before := aheadBeadWrites(t, f.bd)
+	got, built, err := l.reviewAhead(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("reviewAhead: %v", err)
+	}
+	if got != AheadStored {
+		t.Fatalf("reviewAhead = %q, want %q", got, AheadStored)
+	}
+	data, err := os.ReadFile(aheadTestPath(f.town, "gastown", f.work.BeadID))
+	if err != nil {
+		t.Fatalf("reading the stored record: %v", err)
+	}
+	var rec AheadRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("the stored record is not an AheadRecord: %v\n%s", err, data)
+	}
+	if rec.Outcome != aheadOutcomeVerdict || rec.Source != aheadSourcePool {
+		t.Errorf("record outcome/source = %q/%q, want %q/%q", rec.Outcome, rec.Source, aheadOutcomeVerdict, aheadSourcePool)
+	}
+	if rec.Rig != "gastown" {
+		t.Errorf("record rig = %q, want gastown", rec.Rig)
+	}
+	stored := ReviewKey{Bead: rec.Bead, Head: rec.Head, PatchID: rec.PatchID, OMVersion: rec.OMVersion,
+		OMConfigHash: rec.OMConfigHash, InputDigest: rec.InputDigest}
+	if stored != built.Key {
+		t.Errorf("stored key = %+v, want the key reviewAhead built %+v", stored, built.Key)
+	}
+	if rec.Base != f.base {
+		t.Errorf("record base = %s, want the target tip %s", rec.Base, f.base)
+	}
+	if want := t0.Add(time.Minute); !rec.StartedAt.Equal(want) {
+		t.Errorf("record started_at = %s, want the review's start %s", rec.StartedAt, want)
+	}
+	if want := t0.Add(2 * time.Minute); !rec.ReviewedAt.Equal(want) {
+		t.Errorf("record reviewed_at = %s, want the review's return %s", rec.ReviewedAt, want)
+	}
+	if rec.ReviewSecs != 60 {
+		t.Errorf("record review_secs = %v, want 60", rec.ReviewSecs)
+	}
+	if !reflect.DeepEqual(rec.Verdict, verdict) {
+		t.Errorf("record verdict = %+v, want %+v", rec.Verdict, verdict)
+	}
+	if _, err := os.Stat(reviewsPath); !os.IsNotExist(err) {
+		t.Errorf("ReviewAhead wrote the reviews log (stat err %v)", err)
+	}
+	entries, err := os.ReadDir(rounds)
+	if err != nil {
+		t.Fatalf("reading the rounds directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("ReviewAhead wrote %d rounds entries, want none", len(entries))
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned")
+	} else {
+		l.gitMu.Unlock()
+	}
+}
+
+// TestVerdictReuseAheadStoresApprove: a review that approves stores a verdict
+// record carrying every key field, the base and the approval, so the landing
+// can reuse the verdict instead of running om again.
+func TestVerdictReuseAheadStoresApprove(t *testing.T) {
+	t.Parallel()
+	aheadStoredVerdict(t, Verdict{Verdict: VerdictApprove, Score: 0.9})
+}
+
+// TestVerdictReuseAheadStoresReject: a review that requests changes stores the
+// same record with the rejection and its findings, so the landing reuses a
+// refusal as it reuses an approval.
+func TestVerdictReuseAheadStoresReject(t *testing.T) {
+	t.Parallel()
+	aheadStoredVerdict(t, Verdict{Verdict: VerdictRequestChanges, Score: 0.4,
+		Findings: []Finding{{ID: "f1", Severity: omSeverityMajor, Path: "b.txt", Title: "breaks the tree"}}})
+}
+
+// TestVerdictReuseAheadPutFails: a verdict whose record the store cannot write
+// is returned as an error naming the store stage, never as AheadStored. A
+// verdict nobody can read back must not read as one that was kept.
+func TestVerdictReuseAheadPutFails(t *testing.T) {
+	t.Parallel()
+	f, l, _ := aheadStoringFixture(t, Verdict{Verdict: VerdictApprove, Score: 0.9})
+	writeErr := errors.New("disk full")
+	l.Ahead.writeFile = func(string, []byte, os.FileMode) error { return writeErr }
+	before := aheadBeadWrites(t, f.bd)
+	got, built, err := l.reviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("reviewAhead: got outcome %q and no error, want the store error", got)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("reviewAhead error = %v, want it to wrap %v", err, writeErr)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("reviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "store record" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "store record")
+	}
+	if got != "" || !reflect.DeepEqual(built, aheadBuilt{}) {
+		t.Errorf("reviewAhead = %q with built %+v on error, want neither", got, built)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record exists although the write failed (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
 	}
 }
 
