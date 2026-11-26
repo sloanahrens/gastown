@@ -79,6 +79,10 @@ var (
 	// differs from the hash of the files it carries: the pusher sent content
 	// other than what it hashed.
 	ErrWorkspaceManifestMismatch = errors.New("bdgateway: workspace manifest does not match the files")
+	// ErrWorkspaceExternalProject is a document whose rig config names an external
+	// project that does not resolve to a .beads directory in the tree, so a
+	// cross-rig wait on it could never end.
+	ErrWorkspaceExternalProject = errors.New("bdgateway: workspace external project refused")
 	// ErrWorkspacePathCollision is two paths of one document that a single tree
 	// cannot hold, because one of them would be a directory of the other.
 	ErrWorkspacePathCollision = errors.New("bdgateway: workspace paths collide")
@@ -250,6 +254,9 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 	manifest := WorkspaceManifest(doc.Files)
 	if doc.ManifestSHA != manifest {
 		return "", fmt.Errorf("%w: sent %q, files hash to %s", ErrWorkspaceManifestMismatch, shown(doc.ManifestSHA), manifest)
+	}
+	if err := checkExternalProjects(doc.Files); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrWorkspaceExternalProject, err)
 	}
 	return manifest, nil
 }
