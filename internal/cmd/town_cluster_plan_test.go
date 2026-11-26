@@ -1451,16 +1451,30 @@ func TestClusterShapePlanDiffRefuses(t *testing.T) {
 	}
 }
 
-// TestClusterShapePlanSecretDataIsNotCompared: a Secret whose document carries
-// data the cluster does not hold, and whose every other declared field is in
-// step, does not differ, so the plan lists no phase P file. The embedded Secret
-// carries no data, so the row plants it to exercise the strip. The Secret is
-// still read once, so its declared fields were compared and its data was not.
+// TestClusterShapePlanSecretDataIsNotCompared: the cluster fills the reviewed
+// Secret, so its live object carries data the render's document does not. The
+// Secret's every other declared field is in step, so it does not differ and the
+// plan lists no phase P file: the plan compares the declared fields and never the
+// data the cluster owns. The render cannot carry the data itself, since the guard
+// refuses a plan Secret that does, so the row plants it on the live object. The
+// Secret is still read once, so its declared fields were compared and its data
+// was not.
 func TestClusterShapePlanSecretDataIsNotCompared(t *testing.T) {
 	t.Parallel()
 	key := planStaticKey(secretKind, "sweep-runner-token", "gt-sweeps")
 	reads := 0
-	kube := planKubectlReading(t, planStaticLive(t), planRevisionAnswer(t))
+	live := planStaticLive(t)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(live[key]), &doc); err != nil {
+		t.Fatalf("decoding the live %s: %v", key, err)
+	}
+	doc["data"] = map[string]any{"token": "ZGVjbGFyZWQ="}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the live %s: %v", key, err)
+	}
+	live[key] = string(body)
+	kube := planKubectlReading(t, live, planRevisionAnswer(t))
 	counting := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
 		if resource, namespace, ok := planGetOf(name, args); ok && planStaticResourceKey(resource, namespace) == key {
 			reads++
@@ -1468,19 +1482,6 @@ func TestClusterShapePlanSecretDataIsNotCompared(t *testing.T) {
 		return kube(ctx, dir, env, name, args...)
 	}
 	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
-	build := d.build
-	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
-		m, err := build(v)
-		if err != nil {
-			return m, err
-		}
-		for i := range m.Static {
-			if m.Static[i].Kind == secretKind {
-				m.Static[i].Doc = append(append([]byte{}, m.Static[i].Doc...), "\ndata:\n  token: ZGVjbGFyZWQ=\n"...)
-			}
-		}
-		return m, nil
-	}
 	dir := planOut(t)
 	if err := runTownClusterPlan(context.Background(), d, counting, &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
@@ -1958,14 +1959,19 @@ func TestClusterShapePlanLongText(t *testing.T) {
 // TestClusterShapePlanRefuseSecretDocument: a plan holding a Secret document
 // deploy/k8s does not review refuses, naming the document, printing nothing and
 // writing no plan.json. A Secret reusing the reviewed name with a declared field
-// the operator never reviewed refuses too: the reviewed name alone is not the
-// reviewed document.
+// the operator never reviewed refuses too, and one carrying data or stringData
+// refuses naming the key and never a value, whatever the shape of that key. The
+// reviewed Secret itself, which carries neither, plans.
 func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
 		plant  func(t *testing.T, m *k8sdaemon.Manifests)
 		refuse string
+		// key is the carried key the refusal must name, and value a planted value
+		// it must never name. Both are empty for a refusal that names no key.
+		key   string
+		value string
 	}{
 		{
 			name: "a Secret document deploy/k8s does not review",
@@ -1984,23 +1990,45 @@ func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 		{
 			name: "the reviewed Secret with a field the operator never reviewed",
 			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
-				for i := range m.Static {
-					if m.Static[i].Kind != secretKind || m.Static[i].Name != "sweep-runner-token" {
-						continue
-					}
-					var doc map[string]any
-					if err := yaml.Unmarshal(m.Static[i].Doc, &doc); err != nil {
-						t.Fatalf("decoding the reviewed Secret: %v", err)
-					}
-					doc["type"] = "Opaque"
-					body, err := yaml.Marshal(doc)
-					if err != nil {
-						t.Fatalf("encoding the changed Secret: %v", err)
-					}
-					m.Static[i].Doc = body
-				}
+				plantReviewedSecretField(t, m, "type", "Opaque")
 			},
 			refuse: "Secret gt-sweeps/sweep-runner-token",
+		},
+		{
+			name: "the reviewed Secret carrying data the operator never reviewed",
+			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
+				plantReviewedSecretField(t, m, "data", map[string]any{"token": "ZGVjbGFyZWQ="})
+			},
+			refuse: "Secret gt-sweeps/sweep-runner-token",
+			key:    "carrying data",
+			value:  "ZGVjbGFyZWQ=",
+		},
+		{
+			name: "the reviewed Secret carrying stringData the operator never reviewed",
+			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
+				plantReviewedSecretField(t, m, "stringData", map[string]any{"token": "planted-string-data-value"})
+			},
+			refuse: "Secret gt-sweeps/sweep-runner-token",
+			key:    "carrying stringData",
+			value:  "planted-string-data-value",
+		},
+		{
+			name: "the reviewed Secret whose data is not a name-to-string map",
+			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
+				plantReviewedSecretField(t, m, "data", "planted-data-not-a-map")
+			},
+			refuse: "Secret gt-sweeps/sweep-runner-token",
+			key:    "carrying data",
+			value:  "planted-data-not-a-map",
+		},
+		{
+			name: "the reviewed Secret whose stringData is not a name-to-string map",
+			plant: func(t *testing.T, m *k8sdaemon.Manifests) {
+				plantReviewedSecretField(t, m, "stringData", []any{"planted-list-value"})
+			},
+			refuse: "Secret gt-sweeps/sweep-runner-token",
+			key:    "carrying stringData",
+			value:  "planted-list-value",
 		},
 	}
 	for _, tc := range cases {
@@ -2021,6 +2049,12 @@ func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.refuse) || !strings.Contains(err.Error(), "Secrets stay operator-created") {
 				t.Fatalf("runTownClusterPlan = %v, want a refusal naming %s and the operator-created rule", err, tc.refuse)
 			}
+			if tc.key != "" && !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("runTownClusterPlan = %v, want the refusal to name %s", err, tc.key)
+			}
+			if tc.value != "" && strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("the refusal names the value %q, want the key only", tc.value)
+			}
 			if out.Len() != 0 {
 				t.Fatalf("a refused plan printed %q, want nothing", out.String())
 			}
@@ -2029,6 +2063,41 @@ func TestClusterShapePlanRefuseSecretDocument(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the reviewed Secret itself plans", func(t *testing.T) {
+		t.Parallel()
+		dir, out := planOut(t), &bytes.Buffer{}
+		if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+			t.Fatalf("running the plan with the reviewed Secret: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, planFileName)); statErr != nil {
+			t.Fatalf("the reviewed Secret's plan wrote no plan.json: %v", statErr)
+		}
+	})
+}
+
+// plantReviewedSecretField sets field to value in the reviewed static Secret's
+// document, as a render that reintroduced a field or a value the operator never
+// reviewed would. The object keeps SecretNoData true, so only the plan's Secret
+// guard can refuse it: the target builder reads it as the cluster-filled Secret.
+func plantReviewedSecretField(t *testing.T, m *k8sdaemon.Manifests, field string, value any) {
+	t.Helper()
+	for i := range m.Static {
+		if m.Static[i].Kind != secretKind || m.Static[i].Name != "sweep-runner-token" {
+			continue
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(m.Static[i].Doc, &doc); err != nil {
+			t.Fatalf("decoding the reviewed Secret: %v", err)
+		}
+		doc[field] = value
+		body, err := yaml.Marshal(doc)
+		if err != nil {
+			t.Fatalf("encoding the changed Secret: %v", err)
+		}
+		m.Static[i].Doc = body
+		return
+	}
+	t.Fatalf("the render holds no reviewed Secret sweep-runner-token to plant %q on", field)
 }
 
 // TestClusterShapePlanAcceptsReviewedSecretDocument: the reviewed static Secret
