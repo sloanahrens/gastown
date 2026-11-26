@@ -117,6 +117,10 @@ type runnerApplier struct {
 	// the manifests again to find the Deployment.
 	applied *appliedRunnerDeployment
 	out     io.Writer
+	// sweepPreflight is the tier sweep's capacity preflight for the Job its plan
+	// renders, which Verify reads against the live cluster. Unset until the roll
+	// binds it to the sweep plan; Verify refuses an unset seam, never passes (gt-q6sarm).
+	sweepPreflight sweepPreflightSeam
 }
 
 // rolloutBound is the rollout wait WaitReady enforces. The roll prints it in

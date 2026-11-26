@@ -8,6 +8,7 @@ import (
 	"time"
 
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/update"
 	"gopkg.in/yaml.v3"
 )
@@ -17,9 +18,19 @@ import (
 // landing hold open (gt-wvicts).
 const engineReadWait = 30 * time.Second
 
+// capacityReadWait bounds the sweep preflight's one cluster listing, which runs
+// under the same deadline-less signal context (gt-q6sarm).
+const capacityReadWait = 30 * time.Second
+
+// sweepPreflightSeam is the seam a runnerApplier carries for the tier sweep's
+// capacity preflight. It is an alias, so town_runner.go names the seam without
+// importing sweeprunner.
+type sweepPreflightSeam = func() *sweeprunner.Preflight
+
 // Verify checks the live runner against its render: each label whose image has
 // no registry host must be held by the engine, and a label on a registry host
-// is not checked (gt-wvicts).
+// is not checked (gt-wvicts). It then checks that the tier sweep Job still fits
+// beside the control plane's requests (gt-q6sarm).
 func (a runnerApplier) Verify(ctx context.Context) ([]string, error) {
 	if a.kubectl == nil {
 		return nil, errors.New("no cluster client is wired, so the runner's images cannot be checked")
@@ -36,7 +47,7 @@ func (a runnerApplier) Verify(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := make([]string, 0, len(labels))
+	lines := make([]string, 0, len(labels)+1)
 	for _, label := range labels {
 		name, image, err := runnerLabelImage(label)
 		if err != nil {
@@ -48,7 +59,51 @@ func (a runnerApplier) Verify(ctx context.Context) ([]string, error) {
 		}
 		lines = append(lines, line)
 	}
-	return lines, nil
+	line, err := a.checkSweepCapacity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(lines, line), nil
+}
+
+// checkSweepCapacity runs the sweep preflight's Step through the applier's kubectl
+// seam and judges its listing with the preflight's own Read, so the Job's amount
+// and tolerations come from the sweep plan and are never copied here. A decline
+// is an error carrying the report's own line. A check that did not answer is an
+// error too, never a pass (gt-q6sarm).
+func (a runnerApplier) checkSweepCapacity(ctx context.Context) (string, error) {
+	if a.sweepPreflight == nil {
+		return "", errors.New("the sweep capacity preflight is not wired, so the roll cannot check that the tier sweep Job fits beside the control plane")
+	}
+	pre := a.sweepPreflight()
+	if pre == nil || pre.Read == nil {
+		return "", errors.New("the sweep capacity preflight names no listing reader, so the roll cannot check that the tier sweep Job fits")
+	}
+	argv := pre.Step.Argv
+	if len(argv) == 0 {
+		return "", errors.New("the sweep capacity preflight names no command to read the cluster, so the roll cannot check that the tier sweep Job fits")
+	}
+	if argv[0] != "kubectl" {
+		return "", fmt.Errorf("the sweep capacity preflight reads the cluster with %q, not kubectl, so the roll cannot check the tier sweep Job", argv[0])
+	}
+	ctx, cancel := context.WithTimeout(withRunStdin(ctx, pre.Step.Stdin), capacityReadWait)
+	defer cancel()
+	out, exit, err := a.kubectl(ctx, "", nil, argv[0], argv[1:]...)
+	if err != nil {
+		return "", fmt.Errorf("the sweep capacity preflight could not run its cluster read: %w", err)
+	}
+	if exit != 0 {
+		return "", fmt.Errorf("the sweep capacity preflight's cluster read exited %d, so the node listing is unread", exit)
+	}
+	report, err := pre.Read([]byte(out))
+	var noRoom *sweeprunner.NoRoomError
+	switch {
+	case errors.As(err, &noRoom):
+		return "", fmt.Errorf("the tier sweep Job does not fit beside the control plane: %w", err)
+	case err != nil:
+		return "", fmt.Errorf("the sweep capacity preflight could not read the node listing: %w", err)
+	}
+	return "tier sweep capacity: " + report.String(), nil
 }
 
 // runnerConfigLabels is the labels the rendered ConfigMap carries, decoded from
