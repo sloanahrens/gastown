@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // TestSquashDeferAlertCounter pins the per-database count of consecutive gc-flag
@@ -285,5 +287,69 @@ func stampSquashDefer(t *testing.T, dir, key string, at time.Time) {
 	t.Helper()
 	if err := (alertClock{dir: dir}).stamp(key, at); err != nil {
 		t.Fatalf("stamping the alert clock: %v", err)
+	}
+}
+
+// TestSquashDeferAlertRaise pins the one function that raises the deferral
+// alert: it reads the database's persisted since-stamp, and a call before the
+// day is up raises nothing while a call a day after it raises one alert naming
+// the database and the hours held (gt-ehjn9r).
+func TestSquashDeferAlertRaise(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		db   string
+		now  time.Time
+		// want is the alert's reason; empty means no alert is raised.
+		want string
+	}{
+		{
+			name: "23h59m after the first deferral raises nothing",
+			db:   "gt",
+			now:  first.Add(23*time.Hour + 59*time.Minute),
+		},
+		{
+			name: "24h after the first deferral raises one alert",
+			db:   "gt",
+			now:  first.Add(24 * time.Hour),
+			want: "squash: gt deferred by the gc flag for 24h",
+		},
+		{
+			name: "a database the flag never deferred raises nothing",
+			db:   "hq",
+			now:  first.Add(48 * time.Hour),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			stampSquashDefer(t, alertClockPath(d.config.TownRoot), squashDeferClockKey("gt"), first)
+
+			if err := d.raiseSquashDeferAlert(tt.db, tt.now); err != nil {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v): %v", tt.db, tt.now, err)
+			}
+
+			raised := d.notifier.(*notifyfake.Recorder).Escalations()
+			if tt.want == "" {
+				if len(raised) != 0 {
+					t.Fatalf("raiseSquashDeferAlert(%q, %v) raised %d alerts, want none: %+v",
+						tt.db, tt.now, len(raised), raised)
+				}
+				return
+			}
+			if len(raised) != 1 {
+				t.Fatalf("raiseSquashDeferAlert(%q, %v) raised %d alerts, want one: %+v",
+					tt.db, tt.now, len(raised), raised)
+			}
+			alert := raised[0].Escalation
+			if alert.Reason != tt.want {
+				t.Errorf("alert reason = %q, want %q", alert.Reason, tt.want)
+			}
+			if wantKey := "squash:gc-flag-held:" + tt.db; alert.Fingerprint != wantKey {
+				t.Errorf("alert fingerprint = %q, want %q", alert.Fingerprint, wantKey)
+			}
+		})
 	}
 }

@@ -1415,3 +1415,19 @@ func squashDeferAlertMessage(db string, held time.Duration) string {
 	}, db)
 	return fmt.Sprintf("squash: %s deferred by the gc flag for %dh", db, int(held/time.Hour))
 }
+
+// raiseSquashDeferAlert raises the deferral alert for db when the gc flag has
+// held its squash checks for squashDeferAlertAfter, and returns the delivery
+// error when it does. A database with no deferral stamp and one deferred for
+// less than a day raise nothing. The stamp is read from the alert clock, so a
+// daemon roll does not restart the wait (gt-b8na21).
+// Whether the database was already alerted is not read yet: the mark is
+// gt-jyjnxd, so the due decision is asked with alerted false. The deferral site
+// (gt-2o03sg) is the caller; until it lands this function has none.
+func (d *Daemon) raiseSquashDeferAlert(db string, now time.Time) error {
+	first := d.squashDeferredSince(db)
+	if !squashDeferAlertDueSince(first, now, false) {
+		return nil
+	}
+	return d.escalateAlertErr("squash:gc-flag-held:"+db, "squash", squashDeferAlertMessage(db, now.Sub(first)))
+}
