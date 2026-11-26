@@ -429,6 +429,9 @@ var (
 	// ciEngineAnonymousVolumeRE is an anonymous volume's name: the 64 hex digits
 	// docker gives one. Named volumes never match.
 	ciEngineAnonymousVolumeRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// ciEngineTaskNameRE is a Forgejo Actions job container's name: docker's leading
+	// slash, FORGEJO-ACTIONS-TASK-, the task id, then the runner's suffix.
+	ciEngineTaskNameRE = regexp.MustCompile(`^/FORGEJO-ACTIONS-TASK-([0-9]+)_`)
 )
 
 // ciEngineListing is the JSON the list program prints.
@@ -446,8 +449,12 @@ type ciEngineContainer struct {
 	ID      string `json:"Id"`
 	Image   string `json:"Image"`
 	Created string `json:"Created"`
-	State   struct {
+	// Name is the container's name as docker prints it, with its leading slash.
+	Name  string `json:"Name"`
+	State struct {
 		Status string `json:"Status"`
+		// StartedAt is when the container's process started, as docker prints it.
+		StartedAt string `json:"StartedAt"`
 		// FinishedAt is when the container last stopped. docker prints the zero
 		// time for one that is not stopped, a container in "created" state that
 		// never ran included.
@@ -908,6 +915,44 @@ func ciEngineStoppedAt(c ciEngineContainer, created time.Time) (time.Time, error
 		return time.Time{}, errors.New("a container's finish time precedes its creation")
 	}
 	return finished, nil
+}
+
+// ciEngineJobContainer is a running Actions job container older than the age, with
+// the task id its name carries; whether that task still runs is a later step's.
+type ciEngineJobContainer struct {
+	Container ciEngineContainer
+	TaskID    int64
+}
+
+// ciEngineOrphanCandidates returns, in the listing's order, each running Actions
+// job container whose process started more than age before now, with the task id
+// its name carries. A started time docker's format cannot read, or a task id too
+// large for an int64, is an error naming the container: a running job is never
+// skipped as if it were not one.
+func ciEngineOrphanCandidates(cs []ciEngineContainer, now time.Time, age time.Duration) ([]ciEngineJobContainer, error) {
+	var out []ciEngineJobContainer
+	for _, c := range cs {
+		if c.State.Status != "running" {
+			continue
+		}
+		m := ciEngineTaskNameRE.FindStringSubmatch(c.Name)
+		if m == nil {
+			continue
+		}
+		taskID, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("container %s: its task id does not fit an int64", c.Name)
+		}
+		started, err := time.Parse(time.RFC3339Nano, c.State.StartedAt)
+		if err != nil {
+			return nil, fmt.Errorf("container %s: its start time is not RFC 3339", c.Name)
+		}
+		if now.Sub(started) <= age {
+			continue
+		}
+		out = append(out, ciEngineJobContainer{Container: c, TaskID: taskID})
+	}
+	return out, nil
 }
 
 // parseCIEngineTime reads a time docker prints, RFC 3339 with its fraction. A
