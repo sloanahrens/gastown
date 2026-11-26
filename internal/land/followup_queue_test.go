@@ -1055,10 +1055,17 @@ func TestFollowupQueueAlert(t *testing.T) {
 		nilSink bool
 		broken  bool
 		own     []Finding
-		want    []string
+		// held is findings on a first line the weekly budget holds back;
+		// cover is the title of a second line's finding an existing bead
+		// already carries, so the drain consumes that second line while the
+		// first waits (gt-rkew3w).
+		held  int
+		cover string
+		want  []string
 	}{
 		{name: "41 findings at the bead bound", rig: "gastown", queue: over, open: DefaultFollowupBackpressure, want: []string{alert(over)}},
 		{name: "42 findings on two lines", rig: "gastown", queue: over + 1, lines: 2, open: DefaultFollowupBackpressure, want: []string{alert(over + 1)}},
+		{name: "a held line ahead of a consumed line", rig: "gastown", held: over, cover: "an earlier bead carries this finding", want: []string{alert(over)}},
 		{name: "40 findings at the bead bound", rig: "gastown", queue: followupQueueAlertOver, open: DefaultFollowupBackpressure},
 		{name: "41 findings the drain files", rig: "gastown", queue: over, open: 1},
 		{name: "a nil FollowupAlert", rig: "gastown", queue: over, open: DefaultFollowupBackpressure, nilSink: true},
@@ -1069,16 +1076,33 @@ func TestFollowupQueueAlert(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFollowupFixture(t, 0.9, tc.own)
-			texts := queuedTexts(tc.queue)
-			lines := max(tc.lines, 1)
-			per := (len(texts) + lines - 1) / lines
-			for from := 0; from < len(texts); from += per {
-				if err := f.reviews.AppendQueue(queueLine("gt-held", tc.rig, texts[from:min(from+per, len(texts))]...)); err != nil {
+			if tc.held > 0 {
+				// The week's budget is full, so the first line waits. The
+				// second line's finding is already on a bead, so the drain
+				// consumes that line without filing anything, while the line
+				// ahead of it stays queued (gt-rkew3w).
+				covered := ReviewFindingText{ID: "c-1", Severity: "minor", File: "internal/land/note.go", Line: 500, Title: tc.cover, Claim: queuedClaim, Class: FindingClassBehaviour}
+				if err := f.reviews.AppendQueue(queueLine("gt-held", tc.rig, queuedTexts(tc.held)...)); err != nil {
 					t.Fatal(err)
 				}
+				if err := f.reviews.AppendQueue(queueLine("gt-covered", tc.rig, covered)); err != nil {
+					t.Fatal(err)
+				}
+				f.lander.Landings = budgetWeek(t, 8)
+				f.fake.existing = append(filedThisWeek(5), ExistingFollowup{ID: "gt-carrier", Title: "an earlier finding", Status: "open",
+					Labels: []string{Fingerprint(covered.File, covered.Title)}})
+			} else {
+				texts := queuedTexts(tc.queue)
+				lines := max(tc.lines, 1)
+				per := (len(texts) + lines - 1) / lines
+				for from := 0; from < len(texts); from += per {
+					if err := f.reviews.AppendQueue(queueLine("gt-held", tc.rig, texts[from:min(from+per, len(texts))]...)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+				f.fake.existing = openFollowupBeads(tc.open)
 			}
-			f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
-			f.fake.existing = openFollowupBeads(tc.open)
 			var alerts []string
 			if !tc.nilSink {
 				f.lander.FollowupAlert = func(message string) { alerts = append(alerts, message) }
