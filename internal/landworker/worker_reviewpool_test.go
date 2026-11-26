@@ -994,24 +994,28 @@ func TestReviewPoolWorkerNilStoredIsToday(t *testing.T) {
 }
 
 // TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips pins that the sweep leaves a
-// bead alone when the landing loop would: not actionable, parked, a repair
-// pending, or held by its outcome memo. Each is hinted rejecting, so only the
-// skip keeps it from a stored-only landing (gt-9nco9r).
+// bead alone when the landing loop would: not actionable, carrying the retry
+// label the loop clears, parked, a repair pending, its bookkeeping still queued,
+// or held by its outcome memo. Each is hinted rejecting, so only the skip keeps
+// it from a stored-only landing (gt-9nco9r).
 func TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(*beads.Issue)
-		hold   func(*harness, string)
+		hold   func(*testing.T, *harness, string)
 	}{
 		{name: "not actionable", change: func(dropped *beads.Issue) {
 			dropped.Status = string(beads.StatusDeferred)
 		}},
-		{name: "parked", hold: func(h *harness, id string) {
+		{name: "landing retry label", change: func(dropped *beads.Issue) {
+			dropped.Labels = append(dropped.Labels, LabelLandingRetry)
+		}},
+		{name: "parked", hold: func(_ *testing.T, h *harness, id string) {
 			st := h.w.bead(id)
 			st.parked, st.until = true, h.w.now().Add(time.Hour)
 		}},
-		{name: "pending repair", hold: func(h *harness, id string) {
+		{name: "pending repair", hold: func(_ *testing.T, h *harness, id string) {
 			h.w.pendingRepair = map[string]land.Work{id: {BeadID: id, Branch: branch, Head: noteHead, Target: "main", Worker: "opal"}}
 			h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
 				// A race leaves the repair queued, so the bead stays pending
@@ -1022,7 +1026,13 @@ func TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips(t *testing.T) {
 				return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
 			}
 		}},
-		{name: "outcome memo held", hold: func(h *harness, id string) {
+		{name: "bookkeeping still queued", hold: func(t *testing.T, h *harness, id string) {
+			ctx := waitCtx(t)
+			q, release := holdQueue(ctx, t, id)
+			h.w.Books = q
+			t.Cleanup(func() { releaseBeadJob(ctx, t, q, id, release) })
+		}},
+		{name: "outcome memo held", hold: func(_ *testing.T, h *harness, id string) {
 			h.w.outcomeMemo().record(id, seededRowAt, h.w.now().Add(time.Hour))
 		}},
 	} {
@@ -1038,7 +1048,7 @@ func TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips(t *testing.T) {
 			}
 			h.bd.Seed(*dropped)
 			if tc.hold != nil {
-				tc.hold(h, dropped.ID)
+				tc.hold(t, h, dropped.ID)
 			}
 			h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-dropped": true}}
 
@@ -1071,7 +1081,7 @@ func TestReviewPoolWorkerSweepSkipsALabellessBead(t *testing.T) {
 	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-abc": true}}
 
 	rep := Report{}
-	if err := h.w.sweepStored(context.Background(), []*beads.Issue{labelless}, map[string]bool{}, &rep); err != nil {
+	if err := h.w.sweepStored(context.Background(), []*beads.Issue{labelless}, map[string]bool{}, map[string]bool{}, &rep); err != nil {
 		t.Fatalf("sweepStored: %v", err)
 	}
 	if got := landingCalls(h.lander.calls); got != "" {
@@ -1101,6 +1111,53 @@ func TestReviewPoolWorkerSweepSkipsHandled(t *testing.T) {
 
 	if got, want := landingCalls(h.lander.calls), "gt-abc:false"; got != want {
 		t.Fatalf("landings = %s; want %s: a bead the pass already looked at is not swept", got, want)
+	}
+}
+
+// TestReviewPoolWorkerSweepRejectionIsNotTriedTwice pins that a bead the sweep
+// rejected is not attempted again in the same pass while it stays ready: the
+// fake lander removes no label, so only the handled record keeps the loop from
+// landing the same rejected submission again (gt-9nco9r).
+func TestReviewPoolWorkerSweepRejectionIsNotTriedTwice(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-abc": true}}
+	h.lander.fn = func(_ int, _ land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om asked for changes", Rework: true}
+	}
+
+	rep := h.w.Pass(context.Background())
+
+	if got, want := landingCalls(h.lander.calls), "gt-abc:true"; got != want {
+		t.Fatalf("landings = %s; want %s: a bead the sweep rejected is not attempted again while it stays ready", got, want)
+	}
+	if rep.Rejected != 1 {
+		t.Fatalf("pass report = %+v; want one rejection", rep)
+	}
+}
+
+// TestReviewPoolWorkerSweepNoStoredKeepsTheTurn pins that a stored-only call
+// that consumed nothing counts nothing: the bead is not marked handled, lands
+// at its ordinary turn, and — though it stays ready and rejecting — is not swept
+// a second time in a later round of the same pass (gt-ixvxt5, gt-9nco9r).
+func TestReviewPoolWorkerSweepNoStoredKeepsTheTurn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
+	h.seedReadyAt(t, "gt-late", 2, "2026-09-30T11:00:00Z")
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-late": true}}
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		if work.StoredOnly {
+			return land.Result{}, land.ErrNoStoredVerdict
+		}
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
+
+	h.w.Pass(context.Background())
+
+	if got, want := landingCalls(h.lander.calls), "gt-late:true,gt-early:false,gt-late:false"; got != want {
+		t.Fatalf("landings = %s; want %s: a stored-only pass with nothing to consume sweeps the bead once and leaves it its ordinary turn", got, want)
 	}
 }
 
