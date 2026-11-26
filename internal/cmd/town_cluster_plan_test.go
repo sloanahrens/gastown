@@ -311,6 +311,87 @@ func TestClusterShapePlanDryRunFailureIsTheFilesResult(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanDryRunIssuesNoWriteBeyondTheDryRun: a runner that fails any
+// call that is neither a get nor a server-side dry run never fails the plan, and
+// the plan records no other call, so it issues no write.
+func TestClusterShapePlanDryRunIssuesNoWriteBeyondTheDryRun(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	answer := planKubectl(t)
+	dry := 0
+	var others []string
+	kube := func(ctx context.Context, cwd string, env []string, name string, args ...string) (string, int, error) {
+		if _, _, ok := planDryRunOf(name, args); ok {
+			dry++
+			return answer(ctx, cwd, env, name, args...)
+		}
+		if _, _, ok := planGetOf(name, args); ok {
+			return answer(ctx, cwd, env, name, args...)
+		}
+		others = append(others, name+" "+strings.Join(args, " "))
+		return "refused by the test", 1, errors.New("the test refuses a call that is not a read or a server-side dry run")
+	}
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v, want no refusal from a runner that fails every other call", err)
+	}
+	if len(others) != 0 {
+		t.Errorf("the plan issued %d calls that are neither a read nor a server-side dry run: %q", len(others), others)
+	}
+	if dry == 0 {
+		t.Errorf("the plan sent no server-side dry run, so the check above proves nothing")
+	}
+}
+
+// TestClusterShapePlanDryRunReturnsEachFilesResult: planDryRuns returns each file's
+// own kubectl output and error text, in the order the files are sent.
+func TestClusterShapePlanDryRunReturnsEachFilesResult(t *testing.T) {
+	t.Parallel()
+	files := []planRecordFile{{Name: "a.yaml", Phase: planPhaseStatic}, {Name: "b.yaml", Phase: planPhaseWorkloads}, {Name: "c.yaml", Phase: planPhaseWorkloads}}
+	answers := map[string]struct {
+		output  string
+		exit    int
+		runErr  error
+		wantErr string
+	}{
+		"a.yaml": {output: "configured (server dry run)"},
+		"b.yaml": {output: "error: forbidden: cannot apply", exit: 1, wantErr: "kubectl exited 1"},
+		"c.yaml": {runErr: errors.New("exec: kubectl: not found"), wantErr: "could not run"},
+	}
+	kube := func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+		file, _, ok := planDryRunOf(name, args)
+		if !ok {
+			t.Fatalf("the plan ran %s %q, want only a server-side dry run", name, args)
+		}
+		answer := answers[filepath.Base(file)]
+		return answer.output, answer.exit, answer.runErr
+	}
+	results, err := planDryRuns(context.Background(), kube, t.TempDir(), files, planTestKubeconfigs)
+	if err != nil {
+		t.Fatalf("planDryRuns = %v, want each file's result and no refusal", err)
+	}
+	if len(results) != len(files) {
+		t.Fatalf("planDryRuns returned %d results, want %d", len(results), len(files))
+	}
+	for i, r := range results {
+		want := answers[files[i].Name]
+		if r.Name != files[i].Name {
+			t.Errorf("result %d is for %s, want %s", i, r.Name, files[i].Name)
+		}
+		if r.Output != want.output {
+			t.Errorf("%s: Output = %q, want kubectl's %q", r.Name, r.Output, want.output)
+		}
+		if want.wantErr == "" {
+			if r.Err != nil {
+				t.Errorf("%s: Err = %v, want none for a passing dry run", r.Name, r.Err)
+			}
+			continue
+		}
+		if r.Err == nil || !strings.Contains(r.Err.Error(), want.wantErr) || !strings.Contains(r.Err.Error(), r.Name) {
+			t.Errorf("%s: Err = %v, want an error naming the file and %q", r.Name, r.Err, want.wantErr)
+		}
+	}
+}
+
 // TestClusterShapePlanKubeconfigHelpSaysItDoesNotRunInTheDaemonPod: the help text
 // says, beside the per-phase flags, that the command does not run inside the
 // daemon pod, so an operator does not expect the plan to run there.
