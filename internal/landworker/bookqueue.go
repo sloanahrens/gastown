@@ -9,6 +9,7 @@ type BookQueue struct {
 	jobs   []bookJob
 	held   map[string]int // bead -> jobs added and not yet returned
 	active bool           // the drain goroutine is running
+	later  []func()       // stored by Later, run by the next RunLater
 }
 
 type bookJob struct {
@@ -38,6 +39,29 @@ func (q *BookQueue) Holds(beadID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.held[beadID] > 0
+}
+
+// Later stores fn to run at the next RunLater, in the order the jobs stored
+// them: a job uses it for work that touches Worker or RedMain state, which only
+// the worker's own goroutine may run (gt-rx2kl7).
+func (q *BookQueue) Later(fn func()) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.later = append(q.later, fn)
+}
+
+// RunLater runs, in the order they were stored and once each, the functions
+// Later stored, on the calling goroutine. The lock never covers a function, so
+// one that adds to the queue does not deadlock; work it stores waits for the
+// next RunLater.
+func (q *BookQueue) RunLater() {
+	q.mu.Lock()
+	later := q.later
+	q.later = nil
+	q.mu.Unlock()
+	for _, fn := range later {
+		fn()
+	}
 }
 
 // drain runs the jobs one at a time and exits once none is left. The lock

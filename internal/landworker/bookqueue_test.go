@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // hold waits for release, or returns at the test's bound.
@@ -92,5 +94,64 @@ func TestBookQueueHolds(t *testing.T) {
 	recvBounded(t, ctx, thirdEntered, "the third job starting after the second returned")
 	if q.Holds("gt-second") {
 		t.Error("Holds(gt-second) = true after its job returned, want false")
+	}
+}
+
+// TestBookQueueLaterRunsInRunLater: Later stores fn without running it, and
+// RunLater runs each stored fn once, in the order the jobs stored them.
+func TestBookQueueLaterRunsInRunLater(t *testing.T) {
+	t.Parallel()
+
+	var q BookQueue
+	var order []string
+	q.Later(func() { order = append(order, "first") })
+	q.Later(func() { order = append(order, "second") })
+	if len(order) != 0 {
+		t.Fatalf("Later ran %v; want nothing until RunLater", order)
+	}
+
+	q.RunLater()
+	if want := []string{"first", "second"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("RunLater ran %v; want %v", order, want)
+	}
+	q.RunLater()
+	if want := []string{"first", "second"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("a second RunLater ran %v; want each function once, %v", order, want)
+	}
+}
+
+// laterListBeads checks the work stored with Later ran before the pass listed.
+type laterListBeads struct {
+	Beads
+	ran    *bool
+	listed *bool
+	t      *testing.T
+}
+
+func (b *laterListBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	*b.listed = true
+	if !*b.ran {
+		b.t.Error("the pass listed the ready board before running the work stored with Later")
+	}
+	return b.Beads.List(opts)
+}
+
+// TestBookQueueLaterRunsBeforeList: a pass with a queue runs the work a job
+// stored with Later before it lists the ready board.
+func TestBookQueueLaterRunsBeforeList(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var q BookQueue
+	var ran, listed bool
+	q.Later(func() { ran = true })
+	h.w.Books = &q
+	h.w.Beads = &laterListBeads{Beads: h.w.Beads, ran: &ran, listed: &listed, t: t}
+
+	h.w.Pass(context.Background())
+	if !listed {
+		t.Fatal("the pass did not list the ready board")
+	}
+	if !ran {
+		t.Fatal("the pass listed without running the work stored with Later")
 	}
 }
