@@ -19,11 +19,13 @@ type redHoldPushFake struct {
 	acks      attention.Acks
 	marker    RedHoldMarker
 	texts     []string
+	mails     []string
 	holdErr   error
 	acksErr   error
 	markerErr error
 	writeErr  error
 	pushErr   error
+	mailErr   error
 }
 
 func (f *redHoldPushFake) run(name string) RedHoldPushRun {
@@ -44,6 +46,12 @@ func (f *redHoldPushFake) run(name string) RedHoldPushRun {
 			return f.pushErr
 		},
 		Name: name,
+		Mail: func(line string) error {
+			if f.mailErr == nil {
+				f.mails = append(f.mails, line)
+			}
+			return f.mailErr
+		},
 	}
 }
 
@@ -77,25 +85,22 @@ func TestRedHoldPushText(t *testing.T) {
 		{"no red hold reads nothing further", "imessage", dispatch.RedHoldRecord{}, attention.Acks{}, RedHoldMarker{}, nil, RedHoldMarker{}},
 		{"text owed: sent with the age and item", "imessage", redHoldAt(ago(45*time.Minute), "sweep-red", "main-red"), attention.Acks{}, RedHoldMarker{},
 			[]string{"Red hold unacknowledged for 45 min: hold:red sweep-red, main-red"}, RedHoldMarker{Since: ago(45 * time.Minute), TextedAt: now}},
-		{"text and email owed: only the text is sent", "imessage", redHoldAt(ago(3*time.Hour), "sweep-red"), attention.Acks{}, RedHoldMarker{},
-			[]string{"Red hold unacknowledged for 3h: hold:red sweep-red"}, RedHoldMarker{Since: ago(3 * time.Hour), TextedAt: now}},
+		{"text and email owed: both sent", "imessage", redHoldAt(ago(3*time.Hour), "sweep-red"), attention.Acks{}, RedHoldMarker{},
+			[]string{"Red hold unacknowledged for 3h: hold:red sweep-red"}, RedHoldMarker{Since: ago(3 * time.Hour), TextedAt: now, MailedAt: now}},
 		{"the oldest reason sets the age, a zero Since is skipped", "imessage", dispatch.RedHoldRecord{Reasons: []dispatch.RedHoldReason{
 			{Kind: "sweep-red", Since: ago(10 * time.Minute)}, {Kind: "main-red", Since: ago(3 * time.Hour)}, {Kind: "behind-main"}}},
 			attention.Acks{}, RedHoldMarker{},
 			[]string{"Red hold unacknowledged for 3h: hold:red sweep-red, main-red, behind-main"},
-			RedHoldMarker{Since: ago(3 * time.Hour), TextedAt: now}},
+			RedHoldMarker{Since: ago(3 * time.Hour), TextedAt: now, MailedAt: now}},
 		{"acknowledged: nothing owed", "imessage", redHoldAt(ago(3*time.Hour), "sweep-red"), acked, RedHoldMarker{}, nil, RedHoldMarker{}},
 		{"a different ack does not acknowledge it", "imessage", redHoldAt(ago(45*time.Minute), "sweep-red"), attention.Acks{Acks: []attention.Ack{{Key: "hold:landing"}}}, RedHoldMarker{},
 			[]string{"Red hold unacknowledged for 45 min: hold:red sweep-red"}, RedHoldMarker{Since: ago(45 * time.Minute), TextedAt: now}},
-		{"no notify command reads and sends nothing", "", redHoldAt(ago(time.Hour), "sweep-red"), attention.Acks{}, RedHoldMarker{}, nil, RedHoldMarker{}},
-		{"an owed email alone is not sent or recorded", "imessage", redHoldAt(ago(3*time.Hour), "sweep-red"), attention.Acks{}, sent, nil, sent},
+		{"no notify command texts nothing and records nothing", "", redHoldAt(ago(time.Hour), "sweep-red"), attention.Acks{}, RedHoldMarker{}, nil, RedHoldMarker{}},
+		{"an owed email alone is sent and recorded", "imessage", redHoldAt(ago(3*time.Hour), "sweep-red"), attention.Acks{}, sent, nil, RedHoldMarker{Since: ago(3 * time.Hour), TextedAt: ago(150 * time.Minute), MailedAt: now}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &redHoldPushFake{hold: tc.hold, acks: tc.acks, marker: tc.marker}
-			if tc.command == "" {
-				f.holdErr = errors.New("read the red hold with no command configured")
-			}
 			if len(tc.hold.Reasons) == 0 {
 				f.acksErr = errors.New("read the acks with no red hold")
 			}
@@ -139,6 +144,93 @@ func TestRedHoldPushFailures(t *testing.T) {
 			}
 			if !sameMarker(tc.fake.marker, unchanged) {
 				t.Errorf("marker = %+v, want it unchanged", tc.fake.marker)
+			}
+		})
+	}
+}
+
+// An owed email is sent once at three hours with the text's line, and the marker
+// records MailedAt; a later pass sends nothing more.
+func TestRedHoldPushMail(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-3 * time.Hour)
+	const line = "Red hold unacknowledged for 3h: hold:red sweep-red"
+	f := &redHoldPushFake{hold: redHoldAt(since, "sweep-red"), marker: RedHoldMarker{Since: since, TextedAt: now.Add(-150 * time.Minute)}}
+	if err := f.run("imessage").Run(now); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if strings.Join(f.mails, "\n") != line || !sameMarker(f.marker, RedHoldMarker{Since: since, TextedAt: now.Add(-150 * time.Minute), MailedAt: now}) {
+		t.Errorf("mails = %q, marker = %+v; want the line once and MailedAt recorded", f.mails, f.marker)
+	}
+	if err := f.run("imessage").Run(now); err != nil || len(f.mails) != 1 {
+		t.Errorf("second Run = %v, mails = %q; want no email sent again", err, f.mails)
+	}
+}
+
+// The email goes out as the hold's escalation: its item key at high severity, with
+// the text's line as the description.
+func TestRedHoldPushMailSendsTheLine(t *testing.T) {
+	t.Parallel()
+	cfg := &config.EscalationConfig{}
+	cfg.Contacts.HumanEmail, cfg.Contacts.SMTPHost = "operator@example.test", "smtp.example.test"
+	const line = "Red hold unacknowledged for 3h: hold:red sweep-red"
+	var bead, severity, description string
+	send := func(_ *config.EscalationConfig, b, s, d string) error {
+		bead, severity, description = b, s, d
+		return nil
+	}
+	err := redHoldEmail(cfg, send, line)
+	if err != nil || bead != "hold:red" || severity != "high" || description != line {
+		t.Errorf("redHoldEmail = %v, sent %q %q %q; want hold:red, high, %q", err, bead, severity, description, line)
+	}
+}
+
+// A failed email leaves MailedAt unset and the text is still recorded; a failed
+// text does not hold back the email; a town with no email contact returns an error
+// that names it, sends nothing, and still records the text.
+func TestRedHoldPushMailFailures(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-3 * time.Hour)
+	const line = "Red hold unacknowledged for 3h: hold:red sweep-red"
+	cases := []struct {
+		name       string
+		fake       redHoldPushFake
+		noContact  bool
+		want       string
+		wantTexts  []string
+		wantMails  []string
+		wantMarker RedHoldMarker
+	}{
+		{"failed email leaves MailedAt unset, the text is recorded", redHoldPushFake{mailErr: errors.New("smtp refused")}, false,
+			"smtp refused", []string{line}, nil, RedHoldMarker{Since: since, TextedAt: now}},
+		{"a failed text does not hold back the email", redHoldPushFake{pushErr: errors.New("timed out")}, false,
+			"timed out", nil, []string{line}, RedHoldMarker{Since: since, MailedAt: now}},
+		{"no email contact: error naming it, nothing sent, text recorded", redHoldPushFake{}, true,
+			"no email contact", []string{line}, nil, RedHoldMarker{Since: since, TextedAt: now}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.fake.hold, tc.fake.marker = redHoldAt(since, "sweep-red"), RedHoldMarker{Since: since}
+			run := tc.fake.run("imessage")
+			if tc.noContact {
+				run.Mail = func(line string) error {
+					return redHoldEmail(&config.EscalationConfig{}, func(*config.EscalationConfig, string, string, string) error {
+						t.Error("sent an email with no email contact")
+						return nil
+					}, line)
+				}
+			}
+			err := run.Run(now)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Run = %v, want an error naming %q", err, tc.want)
+			}
+			if strings.Join(tc.fake.texts, "\n") != strings.Join(tc.wantTexts, "\n") || strings.Join(tc.fake.mails, "\n") != strings.Join(tc.wantMails, "\n") {
+				t.Errorf("texts = %q, mails = %q; want %q, %q", tc.fake.texts, tc.fake.mails, tc.wantTexts, tc.wantMails)
+			}
+			if !sameMarker(tc.fake.marker, tc.wantMarker) {
+				t.Errorf("marker = %+v, want %+v", tc.fake.marker, tc.wantMarker)
 			}
 		})
 	}
