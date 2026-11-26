@@ -325,8 +325,8 @@ func TestDeferredBookkeepingOverdue(t *testing.T) {
 		})
 		waitForSignal(t, started, "the queued job starting")
 
-		// The drain waits on the clock for the bound, so advance only once it
-		// does; bound that wait so a drain that stops waiting fails, not hangs.
+		// Advance only once the drain waits on the clock, and bound that wait
+		// so a drain that stops waiting fails here instead of hanging.
 		waitCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 		if err := clk.BlockUntilContext(waitCtx, 1); err != nil {
