@@ -2,6 +2,8 @@ package landworker
 
 import (
 	"context"
+	"log"
+	"runtime/debug"
 	"sync"
 )
 
@@ -14,6 +16,11 @@ type BookQueue struct {
 	// both before the queue is used.
 	Begin func()
 	End   func()
+
+	// Logf logs a job that panicked, with the bead it was for, the panic
+	// value and the stack. nil logs through the standard log package; set it
+	// before the queue is used.
+	Logf func(string, ...any)
 
 	mu     sync.Mutex
 	jobs   []bookJob
@@ -87,6 +94,16 @@ func (q *BookQueue) RunLater() {
 	}
 }
 
+// logf logs a panicking job: through Logf when it is set, and through the
+// standard log package otherwise, so a failed job is never silent.
+func (q *BookQueue) logf(format string, args ...any) {
+	if q.Logf != nil {
+		q.Logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 // drain runs the jobs one at a time, opening each busy period with Begin and
 // closing it with End, and exits once no job is left and End has returned. The
 // lock never covers a job or a hook, so Add, Holds and Wait answer while one
@@ -131,9 +148,14 @@ func (q *BookQueue) drain() {
 		q.jobs = q.jobs[1:]
 		q.mu.Unlock()
 
-		// A panicking job must not stop the queue: recover it, run the next.
+		// A panicking job must not stop the queue: recover it, log it with the
+		// bead it was for and the stack, and run the next job.
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					q.logf("bookqueue: job for %s panicked: %v\n%s", next.beadID, r, debug.Stack())
+				}
+			}()
 			next.job()
 		}()
 
