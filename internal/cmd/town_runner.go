@@ -69,6 +69,17 @@ func (t runnerTarget) Apply(ctx context.Context) error { return t.applier.Apply(
 
 func (t runnerTarget) WaitReady(ctx context.Context) error { return t.applier.WaitReady(ctx) }
 
+// Verify runs the applier's live checks, so the roll's Verifier step reaches
+// runnerApplier.Verify; an applier without checks adds none (the roll's Verifier
+// is optional, and the production applier always has them).
+func (t runnerTarget) Verify(ctx context.Context) ([]string, error) {
+	v, ok := t.applier.(runnerroll.Verifier)
+	if !ok {
+		return nil, nil
+	}
+	return v.Verify(ctx)
+}
+
 // readyConditionJSONPath reads the Deployment's Available condition: the one
 // the API server sets when the Deployment has its minimum availability.
 const readyConditionJSONPath = `jsonpath={.status.conditions[?(@.type=="Available")].status}`
