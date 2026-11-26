@@ -938,6 +938,45 @@ func TestRunnerRollDepsForWiresThePodHoldStore(t *testing.T) {
 	}
 }
 
+// TestRunnerRollDepsForWiresTheSweepPreflight: the production deps build the
+// sweep preflight from the town settings the daemon pod holds. Building the deps
+// reads nothing, and the seam's call runs exactly one cat of the settings path
+// through the exec the deps were given.
+func TestRunnerRollDepsForWiresTheSweepPreflight(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	exec := func(_ context.Context, argv []string, _ []byte) ([]byte, int, error) {
+		calls = append(calls, argv)
+		settings := `{"daemon": {"patrols": {"tier_sweep": {"runner": {"backend": "kubernetes", "cpus": 8, "memory": 16, "jobs": 4, "output_root": "/out", "context": "k3s-sweep"}}}}}`
+		return []byte(settings), 0, nil
+	}
+	var out bytes.Buffer
+	deps := runnerRollDepsFor("/town", exec, fixedRunsSeam(), &out, time.Minute, time.Minute, time.Minute, false)
+	if deps.err != nil {
+		t.Fatalf("deps error = %v, want none", deps.err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("building the deps ran %d pod calls, want none", len(calls))
+	}
+	applier, ok := deps.apply.(runnerApplier)
+	if !ok {
+		t.Fatalf("deps.apply is %T, want runnerApplier", deps.apply)
+	}
+	if applier.sweepPreflight == nil {
+		t.Fatal("the production applier carries no sweep preflight seam")
+	}
+	if p := applier.sweepPreflight(); p == nil {
+		t.Fatalf("the seam built no preflight from the pod's settings; out: %s", out.String())
+	}
+	if len(calls) != 1 {
+		t.Fatalf("the seam ran %d pod calls, want one", len(calls))
+	}
+	wantTail := []string{"cat", "--", config.TownSettingsPath("/town")}
+	if got := calls[0]; len(got) < len(wantTail) || !slices.Equal(got[len(got)-len(wantTail):], wantTail) {
+		t.Errorf("pod argv = %q, want it to end with a cat of %q", got, config.TownSettingsPath("/town"))
+	}
+}
+
 // TestRunnerRollDepsForCarriesAStoreErrorBeforeTheHold: a town root with no hold
 // store is carried as the deps error, and a real roll refuses on it before it
 // takes the hold or runs any step.
