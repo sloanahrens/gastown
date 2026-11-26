@@ -121,13 +121,16 @@ func TestNodePruneFlightClearsTheMarkBeforeReporting(t *testing.T) {
 		}) {
 		t.Fatal("Start = false, want true")
 	}
+	// Keep the blocked run's channel: the second Start replaces f.finished, so
+	// f.done() after it would wait on the second run, which ends at once.
+	blocked := f.done()
 	awaitNodePruneFlight(t, reporting, "the panic report to start")
 	// The report is blocked, so only a mark cleared before it can accept this.
 	if !f.Start(context.Background(), func(context.Context) {}, nil) {
 		t.Fatal("Start while the report blocks = false, want true: the mark was cleared after the report")
 	}
 	close(release)
-	awaitNodePruneFlight(t, f.done(), "the run whose report blocked to end")
+	awaitNodePruneFlight(t, blocked, "the run whose report blocked to end")
 }
 
 // TestNodePruneFlightSurvivesAPanicWithNilReport: a nil report does not turn the
