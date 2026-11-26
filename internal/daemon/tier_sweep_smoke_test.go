@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -79,10 +81,21 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 			if tc.setup != nil {
 				tc.setup(d)
 			}
-			launches, stops, st := 0, 0, tierSweepStage{}
-			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
+			// A run that waited would read the run's status through a subprocess
+			// and write its launch record into the output directory; the smoke does
+			// neither, so either one is a failure here (om finding 337a6914fe0f).
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				t.Errorf("the smoke ran %v: it only launches and never reads a run's status", cmd.Args)
+				return nil, nil, errors.New("unexpected command")
+			}
+			// A spent budget ends any wait at once, so a smoke that waited returns
+			// with its launch record on disk and fails the directory check below
+			// instead of hanging; the hang guard stays as the backstop.
+			d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) { return runnerBudgetSpent(0) }
+			launches, stops, st, outDir := 0, 0, tierSweepStage{}, ""
+			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, sp sweeprunner.Spec) tierSweepLaunch {
 				launches++
-				st = s
+				st, outDir = s, sp.OutDir
 				l := tc.launch
 				l.stop = func() { stops++ }
 				return l
@@ -101,6 +114,9 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 			}
 			if (launches == 1) != (tc.tiers != "") || strings.Join(st.tiers, ",") != tc.tiers || launches == 1 && st.tested != runnerTestSHA {
 				t.Errorf("launches = %d, stage %+v; want the launch of tiers %q at the main tip, or none", launches, st, tc.tiers)
+			}
+			if entries, err := os.ReadDir(outDir); outDir != "" && err == nil && len(entries) > 0 {
+				t.Errorf("the output directory %s holds %d entries after the smoke, want none: a launch record means the smoke ran the waiting stage", outDir, len(entries))
 			}
 			if checkStops && stops != tc.stops {
 				t.Errorf("stop ran %d times, want %d", stops, tc.stops)
