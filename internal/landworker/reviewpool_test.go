@@ -365,6 +365,79 @@ func TestReviewPoolSupersededHeadStartsTheNewOne(t *testing.T) {
 	}
 }
 
+// TestReviewPoolSupersededRespectsMax pins that replacing a head never lifts the
+// count over Max: with Max 1 the old review is held in the pool after its cancel,
+// so an offer of the new head starts nothing while that entry remains, and the
+// new head's review starts only from an offer after the old review has returned.
+// A pool that freed the slot at the cancel would run the two reviews at once.
+func TestReviewPoolSupersededRespectsMax(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// The old review ends only on its cancel, and then stays in ReviewAhead until
+	// the test lets it go, so its pool entry is still there for the later offers.
+	rev.stopped = make(chan land.Work, 1)
+	rev.heldAfterCancel = make(chan struct{})
+	pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the old head's review start")
+	oldDone := reviewEnded(t, pool, bead)
+
+	// The new head cancels the old review; the cancel is held, so the old entry
+	// is still in the pool.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	recvBounded(t, ctx, rev.stopped, "the cancelled review seeing its context end")
+
+	// At Max 1 that entry alone keeps the new head back: a pool that gave the
+	// slot up at the cancel would start a second review beside the running one.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	if head, ok := runningHeadAt(t, pool, bead); !ok || head != oldHead {
+		t.Fatalf("with Max 1 the pool holds the bead's review at head %q (running %v) while the old review is still in ReviewAhead, want the old head %s", head, ok, oldHead)
+	}
+	if n := len(rev.reviewed()); n != 1 {
+		t.Fatalf("reviewer called %d times while the old head's review was still running, want 1: two reviews ran at once with Max 1", n)
+	}
+	select {
+	case w := <-rev.entered:
+		t.Fatalf("a review of %s at %s started while the old head's review was still running, want nothing: two reviews run at once with Max 1", w.BeadID, w.Head)
+	default:
+	}
+
+	// The old review returns and leaves the pool. Only an offer after that starts
+	// the new head, and that review runs alone.
+	close(rev.heldAfterCancel)
+	recvBounded(t, ctx, oldDone, "the old review ending")
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+	if head, ok := runningHeadAt(t, pool, bead); !ok || head != newHead {
+		t.Errorf("the pool holds the bead's review at head %q (running %v), want the new head %s", head, ok, newHead)
+	}
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	got := rev.reviewed()
+	if len(got) != 2 {
+		t.Fatalf("reviewer called %d times, want the old head then the new head: %v", len(got), got)
+	}
+	if got[0] != (land.Work{BeadID: bead, Head: oldHead}) {
+		t.Errorf("first review was %+v, want the old head %s", got[0], oldHead)
+	}
+	if got[1] != (land.Work{BeadID: bead, Head: newHead}) {
+		t.Errorf("second review was %+v, want the new head %s", got[1], newHead)
+	}
+}
+
 func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
