@@ -288,6 +288,11 @@ type Worker struct {
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
 	startupDone   bool
+	// revertChecked is whether this run's check for a revert completion a
+	// restart dropped has answered: either the call was made or none is owed.
+	// A check that could not read leaves it false, and the next pass asks
+	// again (gt-qxm7y3).
+	revertChecked bool
 	// lastSeen is the WatchTarget tip the worker last saw or landed.
 	lastSeen string
 	// sweptAt is when the leftover-branch sweep last ran; zero on the run's
@@ -318,12 +323,18 @@ type Worker struct {
 // RevertHooks is the red-main owner's side of an automatic revert.
 type RevertHooks interface {
 	// RevertLanded is called after every new landing that is not deferred; a
-	// deferred landing's bookkeeping job calls it at the next pass instead.
+	// deferred landing's bookkeeping job calls it at the next pass instead, and
+	// a run that starts before that pass asks RevertOwed and calls it there.
 	RevertLanded(ctx context.Context, work land.Work, res land.Result)
 	// IsRevert reports whether beadID is one of this owner's reverts. It reads
 	// only, so a deferred landing's bookkeeping job may call it on the queue
 	// goroutine, where RevertLanded must not run.
 	IsRevert(beadID string) bool
+	// RevertOwed returns the revert whose landing is recorded while it is
+	// still in flight, and false for none: the call a restart dropped between
+	// finishing the record and telling the owner (gt-qxm7y3). An unreadable
+	// state or landings file is an error, never a false.
+	RevertOwed() (land.Work, land.Result, bool, error)
 	// RevertRejected is called on every rework rejection; true means the
 	// work was a revert and has been dealt with, so no rework comment.
 	RevertRejected(work land.Work, rej *land.Rejection) bool
@@ -557,6 +568,9 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		w.startupDone = true
 		w.queueRecentRepairs()
 	}
+	// Before anything lands: a revert whose landing a restart left incomplete
+	// is told first, so its culprit is reopened before a new landing is counted.
+	w.recoverRevertLanded(ctx)
 	for id, work := range w.pendingRepair {
 		if ctx.Err() != nil {
 			return rep
@@ -1488,6 +1502,29 @@ func (w *Worker) finishRevert(work land.Work, res land.Result) {
 		return
 	}
 	run()
+}
+
+// recoverRevertLanded makes the RevertLanded a restart dropped. A deferred
+// revert's call waits in the queue for the worker's next pass, and a process
+// that stops first leaves it only in the red-main owner's in-flight record on
+// disk; the owner answers with the landing it recorded, and the call runs here,
+// on the worker's own goroutine, once per run (gt-qxm7y3). A check that could
+// not read makes nothing and is asked again on the next pass, since nothing
+// else holds the call.
+func (w *Worker) recoverRevertLanded(ctx context.Context) {
+	if w.revertChecked || w.Reverts == nil {
+		return
+	}
+	work, res, owed, err := w.Reverts.RevertOwed()
+	if err != nil {
+		w.logf("checking for a revert whose completion a restart dropped: %v; checking again next pass", err)
+		return
+	}
+	w.revertChecked = true
+	if owed {
+		w.logf("%s: landed before a restart dropped its revert's completion; telling the owner now", work.BeadID)
+		w.Reverts.RevertLanded(ctx, work, res)
+	}
 }
 
 // finishDeferredQueued runs a deferred landing's finishing steps on BookQueue's

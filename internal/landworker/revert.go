@@ -722,6 +722,35 @@ func (r *RedMain) IsRevert(beadID string) bool {
 	return ok
 }
 
+// RevertOwed reports the revert whose landing the landings file records while
+// this owner still has it in flight: RevertLanded never ran, because the
+// process stopped between finishing the record and the call. The in-flight
+// record is what survived the restart, and RevertLanded clears it, so a revert
+// told once is never owed again (gt-qxm7y3). It writes nothing.
+func (r *RedMain) RevertOwed() (land.Work, land.Result, bool, error) {
+	if r.State == nil || r.Landings == nil {
+		return land.Work{}, land.Result{}, false, nil
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		return land.Work{}, land.Result{}, false, fmt.Errorf("reading the main state for the revert in flight: %w", err)
+	}
+	// A record with no bead is a build that filed none: nothing landed.
+	if st.Revert == nil || st.Revert.Bead == "" {
+		return land.Work{}, land.Result{}, false, nil
+	}
+	rec, found, err := r.Landings.LatestForBead(st.Revert.Bead)
+	if err != nil {
+		return land.Work{}, land.Result{}, false, fmt.Errorf("reading the landing record of the revert %s: %w", st.Revert.Bead, err)
+	}
+	if !found {
+		// No record: the revert has not landed, so there is nothing to tell.
+		return land.Work{}, land.Result{}, false, nil
+	}
+	return land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Worker: RevertWorker},
+		land.Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID}, true, nil
+}
+
 // RevertLanded finishes a revert once the landing worker has landed it: the
 // culprit is commented on and reopened with the rework label. Any other
 // landing is ignored.

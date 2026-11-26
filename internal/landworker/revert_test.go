@@ -777,6 +777,16 @@ type fakeRevertHooks struct {
 	landed   []string
 	rejected []string
 	isRevert bool
+	// The startup check's answer: owed, the landing it names, and owedErr
+	// while it cannot be read.
+	owed     bool
+	owedWork land.Work
+	owedRes  land.Result
+	owedErr  error
+}
+
+func (f *fakeRevertHooks) RevertOwed() (land.Work, land.Result, bool, error) {
+	return f.owedWork, f.owedRes, f.owed, f.owedErr
 }
 
 func (f *fakeRevertHooks) RevertLanded(_ context.Context, w land.Work, res land.Result) {
@@ -1198,5 +1208,169 @@ func TestRedMainClearsTheFlightWhenAnUnrequestedRevertBeadCannotBeClosed(t *test
 	}
 	if st, _ := h.state.Load(); st.Revert != nil {
 		t.Fatalf("state %+v; an unqueued revert is not in flight", st)
+	}
+}
+
+// revertOwedLanded is the commit a landed revert is recorded at.
+const revertOwedLanded = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// landedRevertRec is the landings-file record of the revert bead id landing at
+// revertOwedLanded.
+func landedRevertRec(id string) land.LandingRecord {
+	return land.LandingRecord{BeadID: id, Rig: "gastown", Branch: RevertBranch("gt-cul", redSHA), Head: revertSHA,
+		Target: "main", LandedCommit: revertOwedLanded, Route: "daemon"}
+}
+
+// TestRevertOwed: the owner answers with the revert whose landing is recorded
+// while the in-flight record still names it, and with no other; a state or
+// landings file it cannot read is an error, never the "not owed" that would
+// drop the call (gt-qxm7y3).
+func TestRevertOwed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		revert   *PendingRevert
+		recs     []land.LandingRecord
+		stateErr error
+		filesErr error
+		off      bool // no state and no landings file
+		want     string
+		wantErr  string
+	}{
+		{name: "a revert not landed yet is not owed", revert: &PendingRevert{Culprit: "gt-cul", Bead: "gt-rev"}},
+		{name: "a landed revert still in flight is owed", revert: &PendingRevert{Culprit: "gt-cul", Bead: "gt-rev"},
+			recs: []land.LandingRecord{landedRevertRec("gt-rev")}, want: revertOwedLanded},
+		{name: "a build that filed no bead is not owed", revert: &PendingRevert{Culprit: "gt-cul"},
+			recs: []land.LandingRecord{landedRevertRec("gt-rev")}},
+		{name: "another bead's record is not the revert's", revert: &PendingRevert{Bead: "gt-rev"},
+			recs: []land.LandingRecord{landedRevertRec("gt-other")}},
+		{name: "an owner with no state and no landings file is not owed", off: true,
+			recs: []land.LandingRecord{landedRevertRec("gt-rev")}},
+		{name: "an unreadable state is an error", stateErr: errors.New("state unreadable"), wantErr: "state unreadable"},
+		{name: "an unreadable landings file is an error", revert: &PendingRevert{Bead: "gt-rev"},
+			filesErr: errors.New("file unreadable"), wantErr: "file unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := &MemoryMainState{}
+			if err := state.Save(MainState{Revert: tc.revert}); err != nil {
+				t.Fatal(err)
+			}
+			r := &RedMain{State: state, Landings: &fakeLandings{recs: tc.recs, err: tc.filesErr}, Logf: t.Logf}
+			if tc.stateErr != nil {
+				r.State = failingMainState{loadErr: tc.stateErr}
+			}
+			if tc.off {
+				r.State, r.Landings = nil, nil
+			}
+			work, res, owed, err := r.RevertOwed()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || owed {
+					t.Fatalf("RevertOwed = (%+v, owed=%v, %v); want the error %q", work, owed, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RevertOwed: %v", err)
+			}
+			if !owed {
+				if tc.want != "" {
+					t.Fatalf("RevertOwed = not owed (%+v); want the landing %s", work, tc.want)
+				}
+				return
+			}
+			if work.BeadID != "gt-rev" || res.LandedCommit != tc.want {
+				t.Fatalf("RevertOwed = (%+v, %+v); want bead gt-rev at %s", work, res, tc.want)
+			}
+		})
+	}
+}
+
+// revertWorker starts a landing worker over h's beads, landings file and
+// red-main owner: what a restart builds, with none of the earlier process's
+// queue or memory.
+func revertWorker(t *testing.T, h *revertHarness) *harness {
+	t.Helper()
+	wh := newHarness(t)
+	wh.bd, wh.guard = h.bd, &guardedBeads{Fake: h.bd, t: t}
+	wh.w.Beads, wh.w.Landings, wh.w.Reverts = wh.guard, h.files, h.r
+	return wh
+}
+
+// TestBookQueueWorkerRevertAcrossRestart: a deferred revert's RevertLanded is
+// stored for the worker's next pass, and a process that stops before it drops
+// the call; the restarted worker finds the revert still in flight and its
+// landing in the landings file, and makes the call exactly once (gt-qxm7y3).
+func TestBookQueueWorkerRevertAcrossRestart(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	rec := landedRevertRec(id)
+	work := land.Work{BeadID: id, Branch: rec.Branch, Head: rec.Head, Target: "main", Worker: RevertWorker}
+	res := land.Result{LandedCommit: rec.LandedCommit, Deferred: &rec}
+
+	// The landing's job finishes the record and stores the call for the pass
+	// that follows.
+	wh := revertWorker(t, h)
+	q := &BookQueue{}
+	wh.w.Lander, wh.w.Books = &deferredLander{fakeLander: wh.lander, steps: &[]string{}}, q
+	wh.w.finishDeferredQueued(work, res, false)
+	queueIdle(ctx, t, q)
+	if cs := wh.comments(t, "gt-cul"); len(cs) != 0 {
+		t.Fatalf("culprit comments %q before the pass that runs the stored call", cs)
+	}
+	// The finish closed the bead, and the process stops before that pass: the
+	// record is in the file and the stored call is gone with the queue.
+	if err := h.bd.Update(id, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.bd.CloseWithReason("landed", id); err != nil {
+		t.Fatal(err)
+	}
+	h.files.recs = append(h.files.recs, rec)
+
+	wh2 := revertWorker(t, h)
+	if rep := wh2.w.Pass(ctx); rep.Landed != 0 || len(wh2.lander.calls) != 0 {
+		t.Fatalf("the restarted worker landed %d beads (report %v); want none", len(wh2.lander.calls), rep)
+	}
+	cs := wh2.comments(t, "gt-cul")
+	if len(cs) != 1 || !strings.Contains(cs[0], "Reverted by "+id+" ("+rec.LandedCommit+")") {
+		t.Fatalf("culprit comments %q; want one naming %s at %s", cs, id, rec.LandedCommit)
+	}
+	st, err := h.state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Revert != nil {
+		t.Fatalf("state %+v; the revert was told, so none is in flight", st)
+	}
+	// The next pass finds nothing owed: the call was made once.
+	wh2.w.Pass(ctx)
+	if cs := wh2.comments(t, "gt-cul"); len(cs) != 1 {
+		t.Fatalf("culprit comments %q after a second pass; want the one comment", cs)
+	}
+}
+
+// TestBookQueueWorkerRevertOwedRetry: a startup check that cannot read makes no
+// call and is asked again the next pass, and the call it then makes is made
+// once even though the owner keeps answering owed (gt-qxm7y3).
+func TestBookQueueWorkerRevertOwedRetry(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	h := newHarness(t)
+	hooks := &fakeRevertHooks{isRevert: true, owed: true, owedWork: land.Work{BeadID: "gt-abc"},
+		owedRes: land.Result{LandedCommit: revertOwedLanded}, owedErr: errors.New("state unreadable")}
+	h.w.Reverts = hooks
+
+	h.w.Pass(ctx)
+	if len(hooks.landed) != 0 {
+		t.Fatalf("RevertLanded ran %v after a check that could not read; want it kept for the next pass", hooks.landed)
+	}
+	hooks.owedErr = nil
+	h.w.Pass(ctx)
+	h.w.Pass(ctx)
+	if want := []string{"gt-abc@" + revertOwedLanded}; !slices.Equal(hooks.landed, want) {
+		t.Fatalf("RevertLanded ran %v over two passes; want %v once", hooks.landed, want)
 	}
 }
