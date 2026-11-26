@@ -439,14 +439,26 @@ func TestBookQueueOverdue(t *testing.T) {
 		logged := make(chan string, 1)
 		q.Logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
 
-		ran := make(chan struct{})
-		q.Add("gt-quick", func() { close(ran) })
-		recvBounded(t, ctx, ran, "the job running")
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		// Release the job however the test ends, so the queue's drain finishes.
+		t.Cleanup(releaseJob)
+		q.Add("gt-quick", func() { close(started); hold(ctx, release) })
+		recvBounded(t, ctx, started, "the job starting")
+
+		// Move the clock to just short of the bound while the job is still
+		// running: the drain waits on the clock for the bound, and a job that
+		// ends before the timer fires is never reported.
+		if err := clk.BlockUntilContext(ctx, 1); err != nil {
+			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
+		}
+		clk.Advance(bookJobBound - 1)
+
+		releaseJob()
 		if err := waitDrained(t, ctx, q.Wait); err != nil {
 			t.Fatalf("Wait after the job ended = %v, want nil", err)
 		}
-
-		clk.Advance(bookJobBound)
 		select {
 		case got := <-logged:
 			t.Errorf("a job that ended within the bound was reported: %q", got)
