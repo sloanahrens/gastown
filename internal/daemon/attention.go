@@ -401,6 +401,15 @@ type attentionSources struct {
 	// collectHostForgejo updates it.
 	forgejoProbeFails int
 
+	// clusterDriftEnabled is the cluster_drift patrol's setting
+	// (PatrolsConfig.ClusterDriftEnabled). A nil func is a sources value that
+	// carries no setting, and the patrol's default is off (gt-b6j1k5).
+	clusterDriftEnabled func() bool
+	// clusterDriftAnswer is the drift compare's answer, injected so the
+	// collector reads no cluster. nil is the unreadable item, never a clear:
+	// the wiring bead supplies it (gt-b6j1k5).
+	clusterDriftAnswer func(ctx context.Context) (clusterDriftResult, error)
+
 	// questions is the overseer-question collectors' read of the town
 	// database (attention_questions.go).
 	questions questionReads
@@ -763,6 +772,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostNodeDisk, collect: s.collectHostNodeDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
+		// The drift compare's answer, off until the overseer turns the patrol
+		// on after the read grant is applied (gt-b6j1k5).
+		{kind: attention.KindClusterDrift, collect: s.collectClusterDrift},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
@@ -1017,6 +1029,13 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		s.jobList = func(now time.Time) ([]JobReading, error) { return list(root, now) }
 	}
 	s.patrolOff = func(name string) bool { return d.patrolOffReason(name) != "" }
+	// The drift compare itself is wired by a later bead. Until then a setting
+	// turned on raises the unreadable item rather than a false clear
+	// (gt-b6j1k5).
+	s.clusterDriftEnabled = func() bool {
+		cfg := d.patrol()
+		return cfg != nil && cfg.Patrols.ClusterDriftEnabled()
+	}
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
 	s.pairReady = d.pairReady.observed
