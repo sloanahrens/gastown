@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -111,6 +112,12 @@ func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Co
 // answers whether the pair descends from the running commit (nil: unwired).
 func preflightDigestInstallerOf(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead) *update.DigestInstaller {
 	t.Helper()
+	return preflightDigestInstallerTo(t, townRoot, run, verify, allowRollback, ancestry, pairHeldDerive(podPairPair), io.Discard)
+}
+
+// preflightDigestInstallerTo is preflightDigestInstallerOf with the registry derivation and the swap's writer.
+func preflightDigestInstallerTo(t *testing.T, townRoot string, run func(context.Context, string) []PreflightResult, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead, derive deriveFunc, out io.Writer) *update.DigestInstaller {
+	t.Helper()
 	path, _ := podPairValuesFile(t)
 	seams := updateSeams{
 		// The installer is built for a pod target, the update Job's own; the gate
@@ -124,14 +131,14 @@ func preflightDigestInstallerOf(t *testing.T, townRoot string, run func(context.
 		// The pair-level check reads agreeing levels, so a row that tests the
 		// town checks is decided by them alone.
 		PairLevel: agreeingPairLevels(),
-		// The derivation answers the pair the fixture installs, so the registry
-		// match passes and a row is decided by the guard it tests.
-		PairDerive: pairHeldDerive(podPairPair),
+		// The derivation is the row's: preflightDigestInstallerOf answers the
+		// pair the fixture installs, so a row is decided by the guard it tests.
+		PairDerive: derive,
 		Ancestry:   ancestry,
 	}
 	target := podPairTarget()
 	deps := update.Deps{Verify: verify}
-	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard, allowRollback)
+	installer, err := digestInstaller(seams, townRoot, deps, path, &target, out, allowRollback)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}
@@ -326,7 +333,7 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 			// These rows never reach the pair-level reads: each stops the gate at
 			// the check seam. Zero reads would refuse if one were reached, and the
 			// row's want names the guard it expects instead.
-			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair), &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
+			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{}, pairHeldDerive(podPairPair), &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry, io.Discard)
 
 			err := gate.check(context.Background(), podPairPair)
 			if err == nil {
@@ -415,7 +422,7 @@ func TestPreSwapPairMatchesRegistry(t *testing.T) {
 				seen = append(seen, sha)
 				return derived, nil
 			}
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), derive, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry, io.Discard)
 
 			err := gate.check(context.Background(), pair)
 			if len(seen) != 1 || seen[0] != pair.Commit {
@@ -462,7 +469,7 @@ func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry)
+			gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), nil, &preflightRunningProbes{commit: preflightRunningCommit}, false, descendingAncestry, io.Discard)
 
 			err := gate.check(context.Background(), tt.pair)
 			if err == nil {
@@ -476,6 +483,86 @@ func TestPreSwapPairMatchesRegistryUnwired(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("PreSwap error = %q, want it to name %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// matchLine is the line a passed registry match writes, naming the pair
+// pairMatchPair derives.
+const matchLine = "pre-swap: the pair matches the registry: commit c0ffee0c0ffee0c0ffee0c0ffee0c0ffee0c0ffe, daemon registry.internal:5000/town/gastown-daemon@sha256:dddddddddddd0000000000000000000000000000000000000000000000000000, polecat registry.internal:5000/town/gastown-polecat@sha256:eeeeeeeeeeee0000000000000000000000000000000000000000000000000000, bd registry.internal:5000/town/gastown-bd@sha256:bbbbbbbbbbbb0000000000000000000000000000000000000000000000000000\n"
+
+// TestPreSwapPairMatchesRegistryLogs holds the gate's registry match to the log
+// it leaves in the swap: the writer the install was built with receives one
+// literal line naming the commit and the three images the file names when the
+// match passes, and nothing when the registry refuses the pair, when an earlier
+// check refuses it, or when a later check does. The install is driven through
+// digestInstaller, so a gate built without the swap's writer leaves the log
+// empty.
+func TestPreSwapPairMatchesRegistryLogs(t *testing.T) {
+	t.Parallel()
+	matched := pairOfValues(pairMatchPair())
+	tests := []struct {
+		name string
+		// run is the check seam.
+		run func(context.Context, string) []PreflightResult
+		// ancestor is the downgrade check's answer.
+		ancestor bool
+		// edit changes the pair the install is given.
+		edit func(p *update.ImagePair)
+		// want is the line written; empty when the gate refuses and writes nothing.
+		want string
+	}{
+		{
+			name:     "an accepted pair writes the match line",
+			run:      preflightPassing,
+			ancestor: true,
+			want:     matchLine,
+		},
+		{
+			name:     "a pair the registry does not match writes nothing",
+			run:      preflightPassing,
+			ancestor: true,
+			edit:     func(p *update.ImagePair) { p.Daemon = pairMatchRef(imagevalues.DaemonImage, "111111111111") },
+		},
+		{
+			name: "an earlier check that refuses writes nothing",
+			run: func(context.Context, string) []PreflightResult {
+				return []PreflightResult{{Name: preflightNameTownConfig, Err: errors.New("the town config does not load")}}
+			},
+			ancestor: true,
+		},
+		{
+			name: "a downgrade the gate refuses writes nothing",
+			run:  preflightPassing,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pair := matched
+			if tt.edit != nil {
+				tt.edit(&pair)
+			}
+			var out bytes.Buffer
+			install := preflightDigestInstallerTo(t, t.TempDir(), tt.run, &preflightRunningProbes{commit: preflightRunningCommit}, false,
+				(&preflightAncestry{ancestor: tt.ancestor}).read, pairHeldDerive(matched), &out)
+
+			err := install.PreSwap(context.Background(), pair)
+			if tt.want == "" {
+				if err == nil {
+					t.Fatal("PreSwap accepted a pair the gate refuses")
+				}
+				if out.Len() != 0 {
+					t.Errorf("the pre-swap log = %q, want no line on a refusal", out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PreSwap = %v, want the pair accepted", err)
+			}
+			if got := out.String(); got != tt.want {
+				t.Errorf("the pre-swap log = %q, want the line %q", got, tt.want)
 			}
 		})
 	}
@@ -567,7 +654,7 @@ func TestPreSwapRunningCommit(t *testing.T) {
 func TestPreSwapRunningCommitRecords(t *testing.T) {
 	t.Parallel()
 	probe := &preflightRunningProbes{commit: preflightRunningCommit}
-	gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(podPairPair), probe, false, descendingAncestry)
+	gate := preSwapPreflight(t.TempDir(), preflightPassing, agreeingPairLevels(), pairHeldDerive(podPairPair), probe, false, descendingAncestry, io.Discard)
 
 	if err := gate.check(context.Background(), podPairPair); err != nil {
 		t.Fatalf("PreSwap = %v, want the pair accepted", err)
