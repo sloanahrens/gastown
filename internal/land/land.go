@@ -299,8 +299,10 @@ type Lander struct {
 	// OMConfigPath is the rig checkout's .om.json path the review key reads
 	// the config from. Nothing reads it yet (gt-vq81d1).
 	OMConfigPath string
-	// gitMu serializes the git reads the review key makes on this lander. Nothing
-	// takes it yet (gt-vq81d1).
+	// gitMu serializes the git calls the review pool and the landing make on
+	// this lander, so a ref or worktree lock a review holds between its own
+	// steps cannot collide with the landing's fetch. It is not reentrant: no
+	// path takes it while holding it.
 	gitMu sync.Mutex
 
 	openRepo func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
@@ -1512,7 +1514,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, l.reject(ctx, issue, w, rej, nil)
 	}
 
-	if err := l.fetchTarget(g, w.Target); err != nil {
+	if err := l.withGitMu(func() error { return l.fetchTarget(g, w.Target) }); err != nil {
 		return Result{}, &InfraError{Stage: "fetch target", Err: err}
 	}
 	base, err := g.Rev(remote + "/" + w.Target)
@@ -1922,6 +1924,18 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 }
 
 const fetchTimeout = 2 * time.Minute
+
+// withGitMu runs fn with gitMu held and releases it on every return path,
+// including a panic's unwind. The landing's target fetch shares the lock with
+// the review pool's git calls, so a ref or worktree lock a review holds
+// between its own steps cannot collide with the fetch. The fetch keeps its own
+// timeout, and no other lock is taken while gitMu is held. A caller that
+// already holds gitMu must not call this: it would deadlock.
+func (l *Lander) withGitMu(fn func() error) error {
+	l.gitMu.Lock()
+	defer l.gitMu.Unlock()
+	return fn()
+}
 
 func (l *Lander) fetchTarget(g Repo, target string) error {
 	remote := l.remote()
