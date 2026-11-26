@@ -779,6 +779,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// on after the read grant is applied (gt-b6j1k5).
 		{kind: attention.KindClusterDrift, collect: s.collectClusterDrift},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
+		// Raises nothing when no gateway is configured: gatewayCap is nil then
+		// (gt-01bka3).
+		{kind: attention.KindBDGatewayCapHit, collect: s.collectBDGatewayCap},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
 		{kind: attention.KindPostLandUnknown, collect: s.collectPostLandUnknown},
@@ -1190,6 +1193,10 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.refusalWindow = &d.gatewayRefusals
 	if d.env(bdgateway.WorkspaceURLEnv) != "" {
 		s.gatewayStats = d.gatewayStatsRead
+		// The cap tracker's base outlives the tick, so the collector is the
+		// Daemon's, as the refusal window is (gt-01bka3).
+		d.gatewayCap.stats = d.gatewayStatsRead
+		s.gatewayCap = &d.gatewayCap
 	}
 	// The extract read walks the town's .runtime/metrics, where the daily run
 	// writes one directory per day (internal/metrics/extract.go).
