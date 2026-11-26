@@ -2961,6 +2961,23 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 	return l.recordBead(w, rec)
 }
 
+// FinishLanding writes the half of a landing record a deferred landing left
+// for a later pass: recordBead's note, label changes and close, then the
+// follow-up feed the recorded landing earned. A Result with no Deferred record
+// is a caller bug, not a landing to finish, so it is an error rather than a
+// silent no-op (gt-w36i8z). A failed bead write is a *RecordError carrying res,
+// and the feed does not run: it files findings of a landing that is recorded.
+func (l *Lander) FinishLanding(w Work, res Result) error {
+	if res.Deferred == nil {
+		return fmt.Errorf("%s: no deferred landing record to finish", w.BeadID)
+	}
+	if err := l.recordBead(w, *res.Deferred); err != nil {
+		return &RecordError{Result: res, Err: err}
+	}
+	l.fileFollowups(l.open(l.Repo), res.Base, w, res)
+	return nil
+}
+
 // recordDurable writes the half of a landing record that survives any bd
 // failure: it builds the record, fills its size from the landed diff, writes
 // refs/landed/<bead>, then appends the rig's landings file. It returns the
