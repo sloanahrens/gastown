@@ -473,7 +473,9 @@ func sentinelNamedKey(actor string) (string, bool) {
 // countActor counts one call under its actor: a read or a write by write, and a
 // conflict too when conflict is set. An empty actor counts under noneActor, and
 // a named actor that would be the maxActorKeys+1st counts under otherActor. The
-// caller holds l.mu.
+// actor is the bounded value the line carries (boundText: control characters
+// stripped, cut to maxFieldBytes), so two longer names that share that prefix
+// share one counter (gt-s0u1v5). The caller holds l.mu.
 func (l *CallLog) countActor(actor string, write, conflict bool) {
 	key := actor
 	_, known := l.actors[key]

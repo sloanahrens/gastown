@@ -720,6 +720,56 @@ func TestCallActorStatsCap(t *testing.T) {
 	}
 }
 
+// TestCallLogTruncatedActorKey pins the actor key: a named actor is counted under
+// the value its line carries, cut to maxFieldBytes, so two longer names that
+// share that prefix share one counter. A pair that differs inside the bound
+// keeps two.
+func TestCallLogTruncatedActorKey(t *testing.T) {
+	t.Parallel()
+	bounded := strings.Repeat("a", maxFieldBytes)
+	inside := strings.Repeat("a", maxFieldBytes-1)
+	tests := []struct {
+		name   string
+		first  string
+		second string
+		want   map[string]ActorStats
+	}{
+		{
+			name:   "over-length names with one prefix share a counter",
+			first:  bounded + "-alpha",
+			second: bounded + "-beta",
+			want:   map[string]ActorStats{bounded: {Reads: 1, Writes: 1}},
+		},
+		{
+			name:   "names that differ inside the bound keep their own counters",
+			first:  inside + "x",
+			second: inside + "y",
+			want: map[string]ActorStats{
+				inside + "x": {Reads: 1},
+				inside + "y": {Writes: 1},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			l, err := NewCallLog(testOptions(t))
+			if err != nil {
+				t.Fatalf("NewCallLog: %v", err)
+			}
+			l.Log(CallRecord{Class: "daemon", Caller: "c", Actor: tt.first, Argv: []string{"show", "gt-a"}})
+			l.Log(CallRecord{Class: "daemon", Caller: "c", Actor: tt.second, Argv: []string{"update", "gt-b"}, Write: true})
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			if got := l.Stats().Actors; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Actors = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCallLogUnparsedCounted checks an argv the scanner refuses is counted, so
 // a call the log cannot read is visible in Stats rather than silently absent.
 func TestCallLogUnparsedCounted(t *testing.T) {
