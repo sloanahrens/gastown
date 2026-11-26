@@ -37,10 +37,15 @@ func reusedDuration(d time.Duration) string {
 // or review time, or a landing without a merged head, is refused and logged,
 // because a comment built from it would name a head, a base or an age that is
 // not there.
-func (l *Lander) commentReused(w Work, v Verdict, rec AheadRecord) {
+//
+// It reports whether it adopted the reused form. False writes nothing, and the
+// landing comments the bead through commentVerdict instead: a refused record is
+// still a review the bead must name, just one whose base and age it cannot
+// (gt-bydaep).
+func (l *Lander) commentReused(w Work, v Verdict, rec AheadRecord) bool {
 	if w.CandidateHead == "" || rec.Base == "" || rec.ReviewedAt.IsZero() {
 		l.logf("%s: the reused om verdict is not commented: the merged head, the reviewed base or the review time is missing", w.BeadID)
-		return
+		return false
 	}
 	head, prefix := verdictCommentHead(w.CandidateHead), "om "+verdictCommentWord(v)+" "
 	text := fmt.Sprintf("%s%.2f %s (reused from %s, %s old)", prefix, v.Score, head,
@@ -65,6 +70,7 @@ func (l *Lander) commentReused(w Work, v Verdict, rec AheadRecord) {
 		l.logf("%s: commenting the reused om verdict on the bead did not finish in %s; the landing is unaffected", w.BeadID, budget)
 		l.queueVerdictComment(w.BeadID, text, w.CandidateHead)
 	}
+	return true
 }
 
 // applyBar applies the rig's bar to v: an approve scored below bar becomes a
