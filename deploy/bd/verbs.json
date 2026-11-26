@@ -18,6 +18,7 @@
     {"path": "config get", "class": "read"},
     {"path": "config list", "class": "read"},
     {"path": "count", "class": "read"},
+    {"path": "dep cycles", "class": "read"},
     {"path": "dep list", "class": "read"},
     {"path": "dep tree", "class": "read"},
     {"path": "events tail", "class": "read"},
