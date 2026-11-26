@@ -35,10 +35,11 @@ func TestRunnerThrottleParses(t *testing.T) {
 	}
 }
 
-// TestRunnerThrottleRead: the read the recorder takes is the lookup of the
-// runner pod, then the cpu.stat read inside that pod's dind container. No
-// argument names a deployment: that get is what the sweep-runner role refuses.
-func TestRunnerThrottleRead(t *testing.T) {
+// TestRunnerThrottleReadsThroughThePodByLabel: the read the recorder takes is
+// the lookup of the runner pod by label, then the cpu.stat read inside that
+// pod's dind container, and the counters it parses come back. No argument
+// names a deployment: that get is what the sweep-runner role refuses.
+func TestRunnerThrottleReadsThroughThePodByLabel(t *testing.T) {
 	t.Parallel()
 	var calls [][]string
 	exec := func(_ context.Context, args ...string) (string, error) {
@@ -48,8 +49,12 @@ func TestRunnerThrottleRead(t *testing.T) {
 		}
 		return throttledCPUStat, nil
 	}
-	if _, err := ReadRunnerThrottle(context.Background(), exec); err != nil {
+	got, err := ReadRunnerThrottle(context.Background(), exec)
+	if err != nil {
 		t.Fatalf("ReadRunnerThrottle: %v", err)
+	}
+	if want := (RunnerThrottle{Periods: 480, Throttled: 12, ThrottledUsec: 3400000}); got != want {
+		t.Errorf("ReadRunnerThrottle = %+v, want the pod's counters %+v", got, want)
 	}
 	want := []string{
 		"get pods -n forgejo -l app.kubernetes.io/name=forgejo-runner -o name",
