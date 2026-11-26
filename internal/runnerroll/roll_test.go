@@ -473,6 +473,123 @@ func TestRunDryRunRefusesAnUnreadableDiff(t *testing.T) {
 	}
 }
 
+// verifyingTarget is the fake target with a Verifier: it records the check and
+// returns the configured lines or error.
+type verifyingTarget struct {
+	*recordingTarget
+	lines     []string
+	verifyErr error
+}
+
+func (v *verifyingTarget) Verify(context.Context) ([]string, error) {
+	v.log.add("verify")
+	return v.lines, v.verifyErr
+}
+
+// TestRollVerifyFailureKeepsTheHoldTaken: a check that fails is the roll's
+// error, names the target, and leaves the landing hold for the overseer instead
+// of releasing it.
+func TestRollVerifyFailureKeepsTheHoldTaken(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	checkErr := errors.New("ci-base:latest is in no registry")
+	v := &verifyingTarget{
+		recordingTarget: f.target,
+		lines:           []string{"label ci-base: not found"},
+		verifyErr:       checkErr,
+	}
+
+	err := Run(context.Background(), f.deps, v, f.opts)
+
+	if !errors.Is(err, checkErr) || !strings.Contains(err.Error(), "verifying the runner") {
+		t.Fatalf("error = %v, want it to wrap the check's error and name the target", err)
+	}
+	if want := []string{"hold:take", "landing", "runs", "apply", "ready", "verify"}; !slices.Equal(f.log.calls, want) {
+		t.Errorf("calls = %v, want %v: the roll must not release the hold", f.log.calls, want)
+	}
+	if !f.store.present {
+		t.Error("the landing hold was released after a failing verify")
+	}
+	out := f.out.String()
+	if !strings.Contains(out, "stays taken until the overseer restores or releases it") {
+		t.Errorf("output does not say the landing hold stays taken; got:\n%s", out)
+	}
+	if strings.Contains(out, "step 5/5") {
+		t.Errorf("output claims the release step after a failing verify; got:\n%s", out)
+	}
+	if strings.Contains(out, "label ci-base: not found") {
+		t.Errorf("output printed the failing check's lines; got:\n%s", out)
+	}
+}
+
+// TestRollVerifyPrintsItsLinesAndReleasesTheHold: a check that passes prints
+// each check it ran, and the roll releases the hold as it always did.
+func TestRollVerifyPrintsItsLinesAndReleasesTheHold(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	lines := []string{"Deployment forgejo-runner: image present", "serviceaccount: token issued"}
+	v := &verifyingTarget{recordingTarget: f.target, lines: lines}
+
+	if err := Run(context.Background(), f.deps, v, f.opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	want := []string{"hold:take", "landing", "runs", "apply", "ready", "verify", "hold:release"}
+	if !slices.Equal(f.log.calls, want) {
+		t.Errorf("calls = %v, want %v: the check runs after the ready wait and before the release", f.log.calls, want)
+	}
+	if f.store.present {
+		t.Error("the landing hold was not released after a passing verify")
+	}
+	out := f.out.String()
+	for _, line := range lines {
+		if !strings.Contains(out, line) {
+			t.Errorf("output lacks the check line %q; got:\n%s", line, out)
+		}
+	}
+	if !strings.Contains(out, "step 5/5") {
+		t.Errorf("output lacks step 5/5 after a passing verify; got:\n%s", out)
+	}
+}
+
+// TestRollVerifyAbsentTargetIsUnchanged: a target without Verify runs no check
+// and releases the hold as it did before the interface existed.
+func TestRollVerifyAbsentTargetIsUnchanged(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+
+	if err := Run(context.Background(), f.deps, f.target, f.opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if slices.Contains(f.log.calls, "verify") {
+		t.Errorf("calls = %v: a target without Verify had a check run", f.log.calls)
+	}
+	if f.store.present {
+		t.Error("the landing hold was not released")
+	}
+}
+
+// TestRollVerifyDryRunNeverCallsVerify: a dry run compares and prints, and
+// neither checks the live target nor takes the hold.
+func TestRollVerifyDryRunNeverCallsVerify(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	f.opts.DryRun = true
+	v := &verifyingTarget{recordingTarget: f.target, verifyErr: errors.New("the live runner is unreachable")}
+
+	if err := Run(context.Background(), f.deps, v, f.opts); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+
+	if want := []string{"diff"}; !slices.Equal(f.log.calls, want) {
+		t.Errorf("calls = %v, want %v: a dry run never verifies", f.log.calls, want)
+	}
+	if f.store.present {
+		t.Error("dry run wrote the landing hold")
+	}
+}
+
 // TestRunRefusesARollItCannotRun: every seam and bound the run reads has a nil
 // or zero value that refuses before the hold instead of failing mid-roll.
 func TestRunRefusesARollItCannotRun(t *testing.T) {
