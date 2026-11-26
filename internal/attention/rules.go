@@ -259,6 +259,11 @@ const (
 	// so the overseer is woken to read the error (gt-nwea8n).
 	RuleGateRunLog = "gate.run_log"
 
+	// RuleGateThrottle is a rig whose last gate runs could not read the runner
+	// throttle: their counters say nothing about how the runner was throttled,
+	// so the overseer is woken to read why (gt-rqodz6).
+	RuleGateThrottle = "gate.throttle"
+
 	// RuleSeatFinishedLingering is a finished seat the town still wants
 	// running: its last turn ended and its bead is closed, and it has been left
 	// in recovery past the linger bound (gt-klpqb3).
@@ -501,6 +506,10 @@ var ruleFlags = map[string]RuleFlags{
 	// The gate-run log failing is loud for the same reason: runs go unrecorded
 	// until someone reads the error (gt-nwea8n).
 	RuleGateRunLog: flagsWake,
+	// A throttle read failing for every run of a rig is loud the same way: the
+	// counters say nothing about a runner that may be throttled until someone
+	// reads why (gt-rqodz6).
+	RuleGateThrottle: flagsWake,
 	// A drifted cluster is the overseer's next look, not a page: it rolls the
 	// cluster or reads the hand edit against the render, and no image roll is
 	// blocked while it waits (gt-y705n1).
@@ -625,6 +634,7 @@ var kindRules = map[Kind]string{
 	KindImagePinsDeadLayer:            RuleImagePinsDeadLayer,
 	KindGateSlow:                      RuleGateSlow,
 	KindGateRunLog:                    RuleGateRunLog,
+	KindGateThrottleUnread:            RuleGateThrottle,
 	KindClusterDrift:                  RuleClusterDrift,
 	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
 	KindBDGatewayCapHit:               RuleBDGatewayCapHit,

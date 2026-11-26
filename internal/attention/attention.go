@@ -237,6 +237,10 @@ const (
 	// KindGateRunLog: the last append to the gate-run log failed, a write or a
 	// rotation error, and no later append has succeeded (gt-nwea8n).
 	KindGateRunLog Kind = "gate-run-log"
+	// KindGateThrottleUnread: a rig's last gate runs all carry the recorder's
+	// not-read counters, so how the runner was throttled is unknown
+	// (gt-rqodz6).
+	KindGateThrottleUnread Kind = "gate-throttle-unread"
 	// KindSeatFinishedLingering: a seat whose last turn ended and whose bead is
 	// closed is still in the walk past the linger bound, so the town wants it
 	// running and nothing is running it (gt-klpqb3).
@@ -285,7 +289,7 @@ func Kinds() []Kind {
 		KindHoldStale, KindStoryPoints, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
-		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindSeatFinishedLingering,
+		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindGateThrottleUnread, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
 		KindBDGatewayCapHit,
 		KindBdGatewayRefusals,
