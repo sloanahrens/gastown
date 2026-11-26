@@ -26,12 +26,10 @@ import (
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// newTierSweepDaemon is a daemon over a temp town whose rigs.json lists rigs,
-// with the log, the feed and the outside effects faked. Each rig gets the
-// .repo.git directory the cycle looks for, and the daemon's git seam reads a
-// fake world rather than starting git (the cycle resolves each rig's
-// repo-committed settings tier, gt-yj6g1).
-func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *tierSweepRunRecorder, *tierSweepFakeBeads, *bytes.Buffer) {
+// newTierSweepTown is a temp town whose rigs.json lists rigs. Each rig gets the
+// .repo.git directory the cycle looks for. A family of cases can share one town
+// and build each case's daemon on it with newTierSweepDaemonOn.
+func newTierSweepTown(t *testing.T, rigs ...string) string {
 	t.Helper()
 	town := t.TempDir()
 	entries := make([]string, 0, len(rigs))
@@ -47,6 +45,44 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(`{"rigs": {`+strings.Join(entries, ",")+`}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return town
+}
+
+// tierSweepFailer is the part of *testing.T the rigs-file check uses. It is an
+// interface so the failure branch has a test of its own: a *testing.T cannot be
+// failed and then keep running.
+type tierSweepFailer interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// checkTierSweepRigsFile fails the calling test, naming the path, when the town
+// has no mayor/rigs.json, so a town built without its rigs file stops at the
+// build rather than at a read later in the cycle.
+func checkTierSweepRigsFile(t tierSweepFailer, town string) {
+	t.Helper()
+	path := filepath.Join(town, "mayor", "rigs.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("tier sweep town %s has no rigs file at %s: %v", town, path, err)
+	}
+}
+
+// newTierSweepDaemon is a daemon over a temp town whose rigs.json lists rigs,
+// with the log, the feed and the outside effects faked. Each rig gets the
+// .repo.git directory the cycle looks for, and the daemon's git seam reads a
+// fake world rather than starting git (the cycle resolves each rig's
+// repo-committed settings tier, gt-yj6g1).
+func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *tierSweepRunRecorder, *tierSweepFakeBeads, *bytes.Buffer) {
+	t.Helper()
+	return newTierSweepDaemonOn(t, newTierSweepTown(t, rigs...), now)
+}
+
+// newTierSweepDaemonOn is the per-case half of newTierSweepDaemon: a daemon over
+// a town newTierSweepTown built, with the same faked log, feed and outside
+// effects. Cases built on one town share its rigs and their .repo.git dirs.
+func newTierSweepDaemonOn(t *testing.T, town string, now time.Time) (*Daemon, *tierSweepRunRecorder, *tierSweepFakeBeads, *bytes.Buffer) {
+	t.Helper()
+	checkTierSweepRigsFile(t, town)
 
 	var logs bytes.Buffer
 	rec := &tierSweepRunRecorder{}
@@ -90,6 +126,56 @@ func TestNewTierSweepDaemonIsolatesTheSweepWorkRoot(t *testing.T) {
 	}
 	if !landingPathWithin(dir, cfg.WorkRoot) {
 		t.Errorf("sweep work dir = %q, want it under the test's work root %q", dir, cfg.WorkRoot)
+	}
+}
+
+// Two cases built on one town each get a daemon over that town, so a family of
+// cases can share the town rather than write it once per case.
+func TestTierSweepTownSharedByDaemons(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	town := newTierSweepTown(t, "gastown")
+	first, _, _, _ := newTierSweepDaemonOn(t, town, now)
+	second, _, _, _ := newTierSweepDaemonOn(t, town, now)
+	for i, d := range []*Daemon{first, second} {
+		if d.config.TownRoot != town {
+			t.Fatalf("daemon %d TownRoot = %q, want the shared town %q", i, d.config.TownRoot, town)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(town, "gastown", ".repo.git")); err != nil {
+		t.Fatalf("shared town lost the gastown rig's .repo.git: %v", err)
+	}
+}
+
+// A town with no rigs file fails the calling test with the rigs path, so the
+// failure is not a nil read later in the cycle. The fake target stops the
+// check where a real Fatalf would, and the test reads what it reported.
+type rigsFileFailFake struct{ msg string }
+
+var rigsFileFailSentinel = errors.New("checkTierSweepRigsFile called Fatalf")
+
+func (f *rigsFileFailFake) Helper() {}
+
+func (f *rigsFileFailFake) Fatalf(format string, args ...any) {
+	f.msg = fmt.Sprintf(format, args...)
+	panic(rigsFileFailSentinel)
+}
+
+func TestTierSweepRigsFileMissingFailsWithPath(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f := &rigsFileFailFake{}
+	func() {
+		defer func() {
+			if r := recover(); r != rigsFileFailSentinel {
+				t.Fatalf("checkTierSweepRigsFile passed a town with no rigs file: %v", r)
+			}
+		}()
+		checkTierSweepRigsFile(f, town)
+	}()
+	want := filepath.Join(town, "mayor", "rigs.json")
+	if !strings.Contains(f.msg, want) {
+		t.Fatalf("failure message %q does not name the rigs path %q", f.msg, want)
 	}
 }
 
