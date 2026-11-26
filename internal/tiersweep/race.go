@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// racePkg is the one package the race tier runs its test in.
+// racePkg is the package the race tier's one entry runs its test in.
 const racePkg = "./internal/cmd"
 
 // raceArgs are the go test arguments for the race tier: the race detector on
@@ -20,16 +20,17 @@ var raceArgs = []string{"-race", "-tags", "integration", "-run", "^TestCommandTr
 // name as a path and refuses a space or bracket (tierSweepUnitRE).
 var raceLabelRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// raceRun is one package the race tier runs, with its own go test arguments.
+// raceRun is one entry of the race tier: the packages it runs with its own go
+// test arguments.
 type raceRun struct {
-	pkg  string
+	pkgs []string
 	args []string
 	// label keeps two entries on one package's log and resume key apart.
 	label string
 }
 
 // raceRuns is the race tier's table: the packages the race detector covers.
-var raceRuns = []raceRun{{racePkg, raceArgs, "integration-walk"}}
+var raceRuns = []raceRun{{[]string{racePkg}, raceArgs, "integration-walk"}}
 
 // raceExcluded names the race tier's packages that are not run. It is empty:
 // a test race is a defect to fix, never a skip, and an entry needs a bead and
@@ -73,10 +74,16 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	// so both are refused before anything runs.
 	seen := make(map[string]bool, len(runs))
 	for _, run := range runs {
+		// An entry with no package has no name to log or resume under, and
+		// Runner.Tier would run no command for it, so the tier would report
+		// GREEN having run nothing.
+		if len(run.pkgs) == 0 {
+			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: entry %q has no package (logs %s) in %s", run.label, s.Opts.LogDir, FormatDuration(elapsed())), true
+		}
 		if run.label != "" && !raceLabelRE.MatchString(run.label) {
 			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: label %q is not [A-Za-z0-9._-]+ (logs %s) in %s", run.label, s.Opts.LogDir, FormatDuration(elapsed())), true
 		}
-		name := run.pkg
+		name := run.pkgs[0]
 		if run.label != "" {
 			name += "~" + run.label
 		}
@@ -102,7 +109,7 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	var names []string
 	for _, run := range runs {
 		runner.Label = run.label
-		c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), run.args, []string{run.pkg})
+		c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), run.args, run.pkgs)
 		passed += c.Passed
 		failed += c.Failed
 		skipped += c.Skipped
