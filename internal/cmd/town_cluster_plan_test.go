@@ -174,13 +174,14 @@ func planWantPhase(static map[string]bool, f planFile) string {
 
 // TestClusterShapePlanPhases: plan.json gives every file its phase, P for the
 // static set and W for the workloads; each embedded static document is one P
-// file, and no Deployment is P. The output names P then W, in that order, before
-// the plan id. One static object differs (planKubectl), so both phases stay, in
-// plan.json, in the id and in the output.
+// file, and no Deployment is P. The output names P then W, in that order, then
+// the one static difference, then the plan id. One static object differs
+// (planStaticLiveOneDrifted), so both phases stay, in plan.json, in the id and in
+// the output.
 func TestClusterShapePlanPhases(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLiveOneDrifted(t), nil), out, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -207,10 +208,10 @@ func TestClusterShapePlanPhases(t *testing.T) {
 		t.Fatal("plan.json holds no phase W file, so the workloads are missing from the plan")
 	}
 	_, short := planID(files)
-	want := fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n%s\n",
-		counts[planPhaseStatic], counts[planPhaseWorkloads], short)
+	want := fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n%s\n%s\n",
+		counts[planPhaseStatic], counts[planPhaseWorkloads], planPriorityClassLine(), short)
 	if got := out.String(); got != want {
-		t.Fatalf("the plan printed %q, want the phases in order P then W and the short id:\n%s", got, want)
+		t.Fatalf("the plan printed %q, want the phases in order P then W, the static difference and the short id:\n%s", got, want)
 	}
 }
 
@@ -221,7 +222,7 @@ func TestClusterShapePlanPhases(t *testing.T) {
 func TestClusterShapePlanPhasesPOmitted(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlStaticEqual(t), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLive(t), nil), out, dir, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -957,7 +958,7 @@ func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 				live[key] = string(body)
 			}
 			dir, out := planOut(t), &bytes.Buffer{}
-			kube := planKubectlReading(t, live, planRevisionAnswer(t))
+			kube := planKubectlRendered(t, dir, live, nil)
 			if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON); err != nil {
 				t.Fatalf("running the plan: %v", err)
 			}
@@ -975,8 +976,69 @@ func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 				}
 			}
 			_, short := planID(files)
-			if got, want := out.String(), fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n%s\n", counts[planPhaseStatic], counts[planPhaseWorkloads], short); got != want {
-				t.Fatalf("the plan printed %q, want both phases in apply order and the short id:\n%s", got, want)
+			got, resource := out.String(), strings.ToLower(tc.kind)+"/"+tc.object
+			if phases := fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n", counts[planPhaseStatic], counts[planPhaseWorkloads]); !strings.HasPrefix(got, phases) || !strings.HasSuffix(got, "\n"+short+"\n") || !strings.Contains(got, resource+": ") {
+				t.Fatalf("the plan printed %q, want both phases, the compare's line for the changed %s, then the short id %q", got, resource, short)
+			}
+		})
+	}
+}
+
+// TestClusterShapePlanDiff: the plan prints the drift compare's line for a
+// rendered Deployment field the live object carries differently, after the phases
+// and before the short id. spec.replicas is on the compare's reviewed print list,
+// so the line carries each side's value.
+func TestClusterShapePlanDiff(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	kube := planKubectlRendered(t, dir, planStaticLive(t), func(t *testing.T, doc map[string]any) {
+		planObjectField(t, doc, "spec")["replicas"] = 3
+	})
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	_, short := planID(planListedFiles(t, dir))
+	want := fmt.Sprintf("deployment/%s: spec.replicas: rendered 1, observed 3", k8sdaemon.Name)
+	if got := out.String(); !strings.HasPrefix(got, "Phases in apply order: ") || !strings.HasSuffix(got, "\n"+short+"\n") || !strings.Contains(got, "\n"+want+"\n") {
+		t.Fatalf("the plan printed %q, want the phases line, then the compare's line %q, then the short id %q", got, want, short)
+	}
+}
+
+// TestClusterShapePlanDiffRefuses: a get that fails for a Deployment or for a
+// static object refuses the plan, naming the object it could not read, printing
+// nothing and writing no plan.json.
+func TestClusterShapePlanDiffRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		fails func(resource string) bool
+	}{
+		{"a Deployment's read fails", func(resource string) bool { return strings.HasPrefix(resource, "deployment/") }},
+		{"a static object's read fails", func(resource string) bool { return !strings.HasPrefix(resource, "deployment/") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, out, failed := planOut(t), &bytes.Buffer{}, ""
+			rendered := planKubectlRendered(t, dir, planStaticLive(t), nil)
+			kube := func(ctx context.Context, name string, env []string, binary string, args ...string) (string, int, error) {
+				if resource, _, ok := planGetOf(binary, args); ok && tc.fails(resource) {
+					if failed == "" {
+						failed = resource
+					}
+					return "", 1, nil
+				}
+				return rendered(ctx, name, env, binary, args...)
+			}
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			if err == nil || failed == "" || !strings.Contains(err.Error(), failed) {
+				t.Fatalf("runTownClusterPlan = %v, want an error naming the unread %s", err, failed)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
 			}
 		})
 	}
@@ -1070,6 +1132,53 @@ func planKubectl(t *testing.T) update.RunFunc {
 func planKubectlStaticEqual(t *testing.T) update.RunFunc {
 	t.Helper()
 	return planKubectlReading(t, planStaticLive(t), planRevisionAnswer(t))
+}
+
+// planKubectlRendered answers each Deployment's read with the Deployment the plan
+// rendered into dir, as the cluster reports it: the rendered fields, the revision
+// planRevisionOf stamps and rv-<revision>, so the compare finds nothing. Each
+// static object's read is answered from static, and mutate changes what a row
+// needs to differ.
+func planKubectlRendered(t *testing.T, dir string, static map[string]string, mutate func(t *testing.T, doc map[string]any)) update.RunFunc {
+	t.Helper()
+	return planKubectlReading(t, static, func(resource string) (string, int, error) {
+		for _, f := range planFilesIn(t, dir) {
+			if planWantDeployment(t, f) != resource {
+				continue
+			}
+			var doc map[string]any
+			if err := yaml.Unmarshal(f.Data, &doc); err != nil {
+				t.Fatalf("decoding the planned Deployment %s: %v", f.Name, err)
+			}
+			metadata := planObjectField(t, doc, "metadata")
+			revision := planRevisionOf(strings.TrimPrefix(resource, "deployment/"))
+			metadata["resourceVersion"] = "rv-" + revision
+			if annotations, ok := metadata["annotations"].(map[string]any); ok {
+				annotations[planRevisionAnnotation] = revision
+			} else {
+				metadata["annotations"] = map[string]any{planRevisionAnnotation: revision}
+			}
+			if mutate != nil {
+				mutate(t, doc)
+			}
+			body, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("encoding the live %s: %v", resource, err)
+			}
+			return string(body), 0, nil
+		}
+		t.Fatalf("the plan rendered no %s", resource)
+		return "", 0, nil
+	})
+}
+
+// planPriorityClassLine is the line the compare prints for the fake's one static
+// difference: the gt-ci PriorityClass's value, 101 live against the render's 100.
+// The path is not on the compare's reviewed print list, so each side prints as the
+// first twelve hex digits of the SHA-256 of its JSON and the line says the values
+// are hidden.
+func planPriorityClassLine() string {
+	return "priorityclass/gt-ci: value: rendered sha256:ad5736686512, observed sha256:16dc368a89b4 (values hidden: path not on the reviewed list)"
 }
 
 // planRevisionAnswer answers a Deployment's get with the revision planRevisionOf
@@ -1199,6 +1308,7 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 		want   string
 	}{
 		{"the live read exits nonzero", func(string) (string, int, error) { return "", 1, nil }, "could not be read"},
+		{"the live answer is an empty object", func(string) (string, int, error) { return `{}`, 0, nil }, "has no fields, so it was not read"},
 		{"the live object has no revision", func(string) (string, int, error) { return `{"metadata":{}}`, 0, nil }, "has no revision annotation"},
 		{"the live object has no resourceVersion", func(string) (string, int, error) {
 			return `{"metadata":{"annotations":{"deployment.kubernetes.io/revision":"1"}}}`, 0, nil
@@ -1224,8 +1334,15 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 	}
 	t.Run("a rendered file has no readable kind", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
+		_, _, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
 		if err == nil || !strings.Contains(err.Error(), "cannot read a rendered file's kind") {
+			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
+		}
+	})
+	t.Run("a rendered file's kind is not a string", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: {a: b}"))
+		if err == nil || !strings.Contains(err.Error(), "has no kind to read") {
 			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
 	})
@@ -1403,14 +1520,21 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 
 // TestClusterShapePlanLongText: the command's help says the plan reads the
 // cluster's Deployments and the static objects with get only and writes nothing
-// to any cluster, says a phase P file is listed only when a static object differs,
-// says a Secret is compared on its declared fields and never on its data, and no
-// longer says that no cluster is contacted.
+// to any cluster, says it prints the drift compare's lines after the phases, says
+// a phase P file is listed only when a static object differs, says a Secret is
+// compared on its declared fields and never on its data, and no longer says that
+// no cluster is contacted.
 func TestClusterShapePlanLongText(t *testing.T) {
 	t.Parallel()
 	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
 	if !strings.Contains(long, "reads the cluster's Deployments and the static objects with get only and writes nothing to any cluster") {
 		t.Errorf("Long text = %q, want it to say the plan reads the cluster's Deployments and the static objects with get only and writes nothing to any cluster", long)
+	}
+	if !strings.Contains(long, "After the phases, the plan prints, in the drift command's form, the compare's lines for the Deployments and static objects that differ from the live cluster") {
+		t.Errorf("Long text = %q, want it to say the plan prints the compare's lines for what differs after the phases", long)
+	}
+	if strings.Contains(long, "never either value") {
+		t.Errorf("Long text = %q, says no value is printed, but the compare prints a reviewed path's value", long)
 	}
 	if !strings.Contains(long, "phase P file is listed only when a static object differs") {
 		t.Errorf("Long text = %q, want it to say a phase P file is listed only when a static object differs", long)
