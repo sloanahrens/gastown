@@ -476,3 +476,70 @@ func TestVerdictReuseLandMissRunsInline(t *testing.T) {
 		})
 	}
 }
+
+// TestVerdictReuseLandFindingsStillReject: a stored approve whose findings
+// refuse the landing is refused as a review rejection with no gate run, exactly
+// as an inline approve is (gt-vu18r, gt-oi4je). Ignoring findingsRejection on
+// the reuse path lands the approve and turns the rejection red.
+func TestVerdictReuseLandFindingsStillReject(t *testing.T) {
+	t.Parallel()
+	minors := make([]Finding, maxMinorFindings+1)
+	for i := range minors {
+		minors[i] = Finding{Severity: "minor", Path: "b.txt", Line: 1, Title: "a minor"}
+	}
+	tests := []struct {
+		name     string
+		findings []Finding
+	}{
+		{name: "a major finding", findings: []Finding{{ID: "f-1", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}},
+		{name: "more than five minors", findings: minors},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, store, key := reuseLandSetup(t)
+			rec := reuseAskRecord(key, f.base, l.now().Add(-time.Minute))
+			rec.Verdict.Findings = tc.findings
+			if err := store.Put(rec); err != nil {
+				t.Fatalf("Put error = %v; want nil", err)
+			}
+			_, err := l.Land(context.Background(), f.work)
+			f.assertRejected(t, err, RejectReview, LabelRework)
+			if n := len(f.review.calls); n != 0 {
+				t.Errorf("om ran %d time(s) on a reused approve; want 0", n)
+			}
+			if n := len(f.gate.dirs); n != 0 {
+				t.Errorf("gate ran %d time(s) on a refused reused approve; want 0", n)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseLandRejectingRecordRejects: a stored request_changes is
+// refused as a review rejection carrying its score and findings, and its
+// findings are written to the MERGE REJECTION note, with no om run and no gate
+// run (gt-er929x).
+func TestVerdictReuseLandRejectingRecordRejects(t *testing.T) {
+	t.Parallel()
+	f, l, store, key := reuseLandSetup(t)
+	rec := reuseAskRecord(key, f.base, l.now().Add(-time.Minute))
+	rec.Verdict = Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Summary: "b.txt is wrong.",
+		Findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}}
+	if err := store.Put(rec); err != nil {
+		t.Fatalf("Put error = %v; want nil", err)
+	}
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelRework)
+	if !rej.Rework || rej.ReviewScore != 0.3 || len(rej.Findings) != 1 {
+		t.Errorf("rejection = %+v; want the stored score 0.3 and its one finding", rej)
+	}
+	if !strings.Contains(f.bead().Notes, "abc123") {
+		t.Errorf("MERGE REJECTION note does not carry the stored finding:\n%s", f.bead().Notes)
+	}
+	if n := len(f.review.calls); n != 0 {
+		t.Errorf("om ran %d time(s) on a reused request_changes; want 0", n)
+	}
+	if n := len(f.gate.dirs); n != 0 {
+		t.Errorf("gate ran %d time(s) on a refused reused request_changes; want 0", n)
+	}
+}
