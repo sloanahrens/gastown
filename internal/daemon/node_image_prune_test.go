@@ -213,6 +213,7 @@ func TestNodeImagePruneRecordLedgerFailsToOpen(t *testing.T) {
 	require.Len(t, lines, 1, "the ledger that cannot be opened logs one line")
 	assert.Contains(t, lines[0], "node_image_prune")
 	assert.Contains(t, lines[0], "job ledger")
+	assert.Contains(t, lines[0], "jobledger: town root is empty", "the log carries the ledger's error")
 }
 
 // TestNodeImagePruneRecordLedgerFailsToAppend: an Append that fails leaves the
@@ -230,6 +231,7 @@ func TestNodeImagePruneRecordLedgerFailsToAppend(t *testing.T) {
 	require.Len(t, lines, 1, "a failing Append logs one line")
 	assert.Contains(t, lines[0], "node_image_prune")
 	assert.Contains(t, lines[0], "job ledger")
+	assert.Contains(t, lines[0], "not a directory", "the log carries the ledger's error")
 }
 
 // nodeImagePruneLogApplied is an applied run's log as the helper writes it: 7
