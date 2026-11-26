@@ -990,7 +990,7 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	// match re-derives the pair for the file's commit, so a file the registry
 	// does not publish is refused before anything changes. The install holds the
 	// gate, so the commit it records has one owner.
-	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify, allowRollback, seams.Ancestry)
+	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify, allowRollback, seams.Ancestry, out)
 	install := &update.DigestInstaller{
 		Inner:   inner,
 		Path:    path,
@@ -1041,7 +1041,9 @@ func townAncestry(townRoot, a, b string) (bool, error) {
 // read returned, and the downgrade check's inputs. One gate belongs to one
 // install's PreSwap.
 type preSwapGate struct {
-	townRoot      string
+	townRoot string
+	// out receives the one line the gate writes when every check passes.
+	out           io.Writer
 	run           func(context.Context, string) []PreflightResult
 	reads         pairLevelReads
 	derive        deriveFunc
@@ -1058,13 +1060,18 @@ type preSwapGate struct {
 // bd pin carries another schema level than the live database; refuses a pair the
 // registry does not derive for its commit, through pairMatchesRegistry; and
 // finally refuses a pair whose commit does not descend from the running one,
-// through refuseDowngrade, unless allowRollback is set. A gate that cannot run —
-// no town root, no check seam, no daemon probe, or a seam that reports no
-// results — is a failure, never a pass: an install nothing checked is not an
-// install the checks passed. A nil derive is refused by pairMatchesRegistry
-// itself, and a nil ancestry by refuseDowngrade.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead) *preSwapGate {
-	return &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify, allowRollback: allowRollback, ancestry: ancestry}
+// through refuseDowngrade, unless allowRollback is set. Once every check has
+// passed it writes one line to out naming the pair it compared; a refusal
+// writes nothing. A gate that cannot run — no town root, no check seam, no
+// daemon probe, or a seam that reports no results — is a failure, never a pass:
+// an install nothing checked is not an install the checks passed. A nil derive
+// is refused by pairMatchesRegistry itself, a nil ancestry by refuseDowngrade,
+// and a nil out discards the line.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead, out io.Writer) *preSwapGate {
+	if out == nil {
+		out = io.Discard
+	}
+	return &preSwapGate{townRoot: townRoot, out: out, run: run, reads: reads, derive: derive, verify: verify, allowRollback: allowRollback, ancestry: ancestry}
 }
 
 // check refuses a pair the gate cannot pass, as the preflight check, and records
@@ -1072,7 +1079,8 @@ func preSwapPreflight(townRoot string, run func(context.Context, string) []Prefl
 // the gate never reports a commit that run did not read. A pair whose commit
 // does not descend from that commit is refused as a downgrade, unless the run
 // allows a rollback; a nil ancestry read is left to refuseDowngrade, which
-// refuses it.
+// refuses it. When every check passes, one line records the pair the registry
+// matched; a refusal on any check writes nothing.
 func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
 	g.running = ""
 	switch {
@@ -1107,6 +1115,8 @@ func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
 	if err := refuseDowngrade(running, pair.Commit, g.allowRollback, isAncestor); err != nil {
 		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
 	}
+	fmt.Fprintf(g.out, "pre-swap: the pair matches the registry: commit %s, daemon %s, polecat %s, bd %s\n",
+		pair.Commit, pair.Daemon, pair.Polecat, pair.Bd)
 	return nil
 }
 
