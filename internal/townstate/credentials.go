@@ -137,21 +137,28 @@ func leadingIndent(line []byte) int {
 }
 
 // blockScalarSecret reports whether the value of a block scalar under key is a
-// secret. The value is the body, its lines joined by a newline. Blank lines,
-// comment-only lines and lines that are only an environment reference name no
-// secret, so a body made of those is clean. The rest is judged by isSecret.
+// secret. The value is the body, its lines joined by a newline. An empty body, a
+// body of only comment lines, and a body of only environment-reference lines name
+// no secret, so they are clean. Any other body is judged by isSecret as written:
+// inside a literal or folded block a '#' line is content, not a comment, so a
+// '#'-prefixed line is left out only when every line is a comment (gt-ultan3).
 func blockScalarSecret(key string, body []string) bool {
-	var lines []string
-	for _, line := range body {
-		if strings.HasPrefix(line, "#") || envRefOnly.MatchString(line) {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
+	if len(body) == 0 {
 		return false
 	}
-	return isSecret(key, strings.Join(lines, "\n"))
+	comments, refs := true, true
+	for _, line := range body {
+		if !strings.HasPrefix(line, "#") {
+			comments = false
+		}
+		if !envRefOnly.MatchString(line) {
+			refs = false
+		}
+	}
+	if comments || refs {
+		return false
+	}
+	return isSecret(key, strings.Join(body, "\n"))
 }
 
 // splitNameWords splits a name into lower-case words at an underscore, a hyphen

@@ -267,6 +267,7 @@ func TestFindCredentialsYAMLBlockScalar(t *testing.T) {
 		{"a multi-line reference body is clean", "password: |\n  ${A}\n  ${B}\n", nil},
 		{"a comment-only body is clean", "password: |\n  # rotate me\n", nil},
 		{"a folded comment-only body is clean", "password: >-\n  # rotate me\n  # and me\n", nil},
+		{"a '#'-prefixed line in a body that is not comment-only is content", "password: |\n  # hunter2\n  ${A}\n", []string{"yaml:password"}},
 		{"a sibling key is not read as body", "password: |\ntoken: abc123\n", []string{"yaml:token"}},
 		{"a sibling key at the key's indent ends the body", "dolt:\n  password: |\n    hunter2\n  token: abc123\n", []string{"yaml:password", "yaml:token"}},
 	}
