@@ -1024,8 +1024,8 @@ func TestK8sPollCopiesTheResultOutOfTheClaim(t *testing.T) {
 		t.Errorf("the reader's volumes = %+v, want only the output claim, read-only", pod.Spec.Volumes)
 	}
 
-	if len(plan.Poll.Collect) != 4 {
-		t.Fatalf("the copy renders %d steps, want the reader's apply, its readiness wait, the result copy and the logs copy", len(plan.Poll.Collect))
+	if len(plan.Poll.Collect) != 5 {
+		t.Fatalf("the copy renders %d steps, want the reader's apply, its readiness wait, the result copy, the logs copy and the cache trim copy", len(plan.Poll.Collect))
 	}
 	dst := filepath.Join(spec.OutDir, ResultFileName)
 	if cp := plan.Poll.Collect[2].Argv; !slices.Contains(cp, "cp") || !slices.Contains(cp, readerName(spec)+":"+OutputDir+"/"+ResultFileName) || cp[len(cp)-1] != dst {
@@ -1076,6 +1076,46 @@ func TestK8sCollectCopiesTheLogsDirectory(t *testing.T) {
 	}
 	if logsCopy.MissingSource([]byte("error: open /root/.kube/config: no such file or directory\n")) {
 		t.Error("the logs copy tolerates another file's absence; that failure would not RED the run")
+	}
+}
+
+// TestK8sCollectCopiesTheCacheTrimRecord holds the cache trim record to the same
+// reader: cache-trim.json is copied into the run's host directory after the logs
+// copy, so the daemon reads the cache over-cap record on the host. A run that
+// ended under its cap leaves no record, and that absence is not a failure.
+func TestK8sCollectCopiesTheCacheTrimRecord(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Poll == nil {
+		t.Fatal("the Kubernetes plan renders no poll; the run's cache trim record is never copied out")
+	}
+	src := readerName(spec) + ":" + OutputDir + "/" + CacheTrimFileName
+	dst := filepath.Join(spec.OutDir, CacheTrimFileName)
+	at := slices.IndexFunc(plan.Poll.Collect, func(step Step) bool {
+		return slices.Contains(step.Argv, "cp") && slices.Contains(step.Argv, src) && step.Argv[len(step.Argv)-1] == dst
+	})
+	if at < 0 {
+		t.Fatalf("the copy steps %+v hold no kubectl cp of %s into %q", plan.Poll.Collect, src, dst)
+	}
+	logsCopy := slices.IndexFunc(plan.Poll.Collect, func(step Step) bool {
+		return slices.Contains(step.Argv, "cp") && slices.Contains(step.Argv, readerName(spec)+":"+OutputDir+"/"+LogsDirName)
+	})
+	if logsCopy < 0 {
+		t.Fatalf("the copy steps %+v hold no kubectl cp of %s", plan.Poll.Collect, LogsDirName)
+	}
+	if at < logsCopy {
+		t.Errorf("the cache trim copy is step %d, before the logs copy at %d", at, logsCopy)
+	}
+	trimCopy := plan.Poll.Collect[at]
+	if !trimCopy.MissingSource([]byte("error: tar: " + OutputDir + "/" + CacheTrimFileName + ": Cannot stat: No such file or directory\n")) {
+		t.Error("the cache trim copy does not tolerate an absent cache-trim.json; a run that ended under its cap would be RED")
+	}
+	if trimCopy.MissingSource([]byte("error: open /root/.kube/config: no such file or directory\n")) {
+		t.Error("the cache trim copy tolerates another file's absence; that failure would not RED the run")
 	}
 }
 
