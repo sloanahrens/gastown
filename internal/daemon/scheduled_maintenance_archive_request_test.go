@@ -368,7 +368,7 @@ func TestArchiveRequestDoesNotConsumeTheWindow(t *testing.T) {
 	}
 	lastRun := outsideRequestNow.Add(-48 * time.Hour)
 	d.lastMaintenanceRun = lastRun
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, d.clk().Now(), func(st *maintenanceGCState) {
 		st.PendingDeferral = &gcDeferral{WindowEnd: outsideRequestNow.Add(-time.Hour), Reason: "town busy"}
 		st.ConsecutiveDeferredWindows = 3
 	}); err != nil {

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -41,16 +42,23 @@ func TestOverrunPassStartMarker(t *testing.T) {
 			t.Fatalf("RunningSince before any pass = %v, want zero", got)
 		}
 
-		before := time.Now()
+		start := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+		fc := clockwork.NewFakeClockAt(start)
+		d.clock = fc
 		var during time.Time
-		d.runOverrunGuardPass(func() { during = d.overrunGuardRun.RunningSince() })
-		after := time.Now()
+		d.runOverrunGuardPass(func() {
+			during = d.overrunGuardRun.RunningSince()
+			fc.Advance(time.Minute)
+		})
 
 		if during.IsZero() {
 			t.Fatal("RunningSince inside a started pass = zero, want the pass start")
 		}
-		if during.Before(before) || during.After(after) {
-			t.Errorf("RunningSince inside the pass = %v, want a time between %v and %v", during, before, after)
+		if !during.Equal(start) {
+			t.Errorf("RunningSince inside the pass = %v, want the fake clock's reading %v", during, start)
+		}
+		if got := d.overrunGuardRun.last(); !got.Equal(start.Add(time.Minute)) {
+			t.Errorf("the completion record = %v, want the clock reading at the pass's end %v", got, start.Add(time.Minute))
 		}
 		if got := d.overrunGuardRun.RunningSince(); !got.IsZero() {
 			t.Errorf("RunningSince after the pass ended = %v, want zero", got)
@@ -206,16 +214,16 @@ func TestOverrunPassTicksFillRunningSince(t *testing.T) {
 	}
 	d := passDaemon(t)
 	d.patrolConfig.Patrols.WispReaper = &WispReaperConfig{Enabled: true}
-	if err := SaveState(d.config.TownRoot, &State{StartedAt: time.Now().Add(-time.Hour)}); err != nil {
+	start := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+	d.clock = clockwork.NewFakeClockAt(start)
+	if err := SaveState(d.config.TownRoot, &State{StartedAt: start.Add(-time.Hour)}); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
 
-	before := time.Now()
 	var during map[string]time.Time
 	d.runOverrunGuardPass(func() { during = read(t, d) })
-	after := time.Now()
-	if s := during["overrun_guard"]; s.IsZero() || s.Before(before) || s.After(after) {
-		t.Errorf("RunningSince for overrun_guard in its pass = %v, want a time between %v and %v", s, before, after)
+	if s := during["overrun_guard"]; !s.Equal(start) {
+		t.Errorf("RunningSince for overrun_guard in its pass = %v, want the fake clock's reading %v", s, start)
 	}
 	if got, ok := during["wisp_reaper"]; !ok || !got.IsZero() {
 		t.Errorf("RunningSince for wisp_reaper = %v (listed %v), want it listed and zero", got, ok)

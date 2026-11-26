@@ -705,9 +705,9 @@ func (d *Daemon) triggerOverrunGuard() {
 func (d *Daemon) runOverrunGuardPass(cycle func()) {
 	defer d.overrunGuardRunning.Store(false)
 	defer func() {
-		d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", time.Now())
+		d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", d.clk().Now())
 	}()
-	d.recordPatrolStart(&d.overrunGuardRun, "overrun_guard", time.Now())
+	d.recordPatrolStart(&d.overrunGuardRun, "overrun_guard", d.clk().Now())
 	cycle()
 }
 

@@ -369,7 +369,7 @@ func (d *Daemon) rememberRequestAnswer(runID string, outcome maintenanceGCOutcom
 	if outcome != gcOutcomeCompleted && outcome != gcOutcomeFailed {
 		return
 	}
-	_, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	_, err := updateMaintenanceGCState(d.config.TownRoot, at, func(st *maintenanceGCState) {
 		st.LastRequestAnswer = &gcRequestAnswer{RunID: runID, Outcome: outcome.String(), At: at, Detail: detail}
 	})
 	if err != nil {

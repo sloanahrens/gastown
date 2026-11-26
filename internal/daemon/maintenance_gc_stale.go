@@ -232,7 +232,7 @@ func (d *Daemon) clearStaleGCStateUnreadable(reason string) {
 // noteStaleGCAlert records key as open or closed in the state file. A write
 // that fails costs at most one repeat or one redundant clear on the next tick.
 func (d *Daemon) noteStaleGCAlert(key string, open bool) {
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, d.clk().Now(), func(st *maintenanceGCState) {
 		if open {
 			st.StaleGCAlerts[key] = true
 			return

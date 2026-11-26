@@ -401,7 +401,7 @@ func restartedUpdateAlertDaemon(t *testing.T, d *Daemon) (*Daemon, *notifyfake.R
 // way a daemon that raised it leaves the maintenance state.
 func persistAnnouncedRun(t *testing.T, townRoot, runID string) {
 	t.Helper()
-	if _, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(townRoot, gcTestNow, func(st *maintenanceGCState) {
 		st.LastUpdateAlertRunID = runID
 	}); err != nil {
 		t.Fatalf("persist announced run: %v", err)

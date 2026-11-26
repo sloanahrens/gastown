@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -283,17 +284,17 @@ func TestMaintenanceGCStateReplacementKeepsACopy(t *testing.T) {
 	if err := os.WriteFile(path, first, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	before := time.Now().UTC()
-	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+	fc := clockwork.NewFakeClockAt(gcTestNow)
+	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, fc.Now()); err != nil {
 		t.Fatalf("record over corrupt file: %v", err)
 	}
-	after := time.Now().UTC()
+	fc.Advance(time.Hour)
 	st, err := loadMaintenanceGCState(town)
 	if err != nil || st.PostGCBytes["hq"] != mib {
 		t.Fatalf("after the replacement: state=%v err=%v", st, err)
 	}
-	if st.StateResetAt.Before(before) || st.StateResetAt.After(after) || st.StateResetCopy != path+squashStateCorruptSuffix {
-		t.Errorf("the stamp = %v and copy %q, want a time in [%v, %v] and %q", st.StateResetAt, st.StateResetCopy, before, after, path+squashStateCorruptSuffix)
+	if !st.StateResetAt.Equal(gcTestNow) || st.StateResetCopy != path+squashStateCorruptSuffix {
+		t.Errorf("the stamp = %v and copy %q, want the run's clock reading %v and %q", st.StateResetAt, st.StateResetCopy, gcTestNow, path+squashStateCorruptSuffix)
 	}
 	if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, first) {
 		t.Errorf("the kept copy = %q, %v, want the first corrupt bytes", got, err)
@@ -372,7 +373,7 @@ func TestMaintenanceGCStateReplacementEdges(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
 		stamp := gcTestNow.Add(-time.Hour)
-		if _, err := updateMaintenanceGCState(town, func(st *maintenanceGCState) { st.StateResetAt, st.StateResetCopy = stamp, "kept" }); err != nil {
+		if _, err := updateMaintenanceGCState(town, gcTestNow, func(st *maintenanceGCState) { st.StateResetAt, st.StateResetCopy = stamp, "kept" }); err != nil {
 			t.Fatal(err)
 		}
 		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
@@ -430,16 +431,17 @@ func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
 		if err := os.WriteFile(path, corrupt, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		before := time.Now().UTC()
-		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+		fc := clockwork.NewFakeClockAt(gcTestNow)
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, fc.Now()); err != nil {
 			t.Fatalf("record over an unparseable file: %v", err)
 		}
+		fc.Advance(time.Hour)
 		st, err := loadMaintenanceGCState(town)
 		if err != nil || st.PostGCBytes["hq"] != mib {
 			t.Fatalf("after the replacement: state=%v err=%v", st, err)
 		}
-		if st.StateResetAt.Before(before) || st.StateResetCopy != path+squashStateCorruptSuffix {
-			t.Errorf("the stamp = %v and copy %q, want a time at or after %v and %q", st.StateResetAt, st.StateResetCopy, before, path+squashStateCorruptSuffix)
+		if !st.StateResetAt.Equal(gcTestNow) || st.StateResetCopy != path+squashStateCorruptSuffix {
+			t.Errorf("the stamp = %v and copy %q, want the run's clock reading %v and %q", st.StateResetAt, st.StateResetCopy, gcTestNow, path+squashStateCorruptSuffix)
 		}
 		if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, corrupt) {
 			t.Errorf("the kept copy = %q, %v, want the unparseable bytes", got, err)
