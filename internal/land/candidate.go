@@ -622,15 +622,18 @@ func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forg
 }
 
 // excerptSource is the text failureExcerpt reads: the capped tail when that tail
-// already names a failure, so the note carries the failure the verdict rested on
-// and not the earlier ones, and the whole log when the tail names none, so a
-// failure far enough from the end is still named (gt-fn9e6.25).
+// already names a failing test, so the note carries the failure the verdict
+// rested on and not the earlier ones, and the whole log when the tail names
+// none, so a failure far enough from the end is still named (gt-fn9e6.25). A
+// tail holding only the summary lines every red ends with -- the gate's FAILED
+// line, make's Error line, the build-failed marker -- names no failing test, so
+// it is not a source: the cause sits above it (gt-8bpwpx).
 func excerptSource(log string) string {
 	if len(log) <= candidateTailBytes {
 		return log
 	}
 	tail := log[len(log)-candidateTailBytes:]
-	if logHasFailure(tail) {
+	if logHasTestFailure(tail) {
 		return tail
 	}
 	return log
@@ -706,9 +709,9 @@ func failureExcerpt(log string, budget int) string {
 	return strings.Join(out, "\n") + "\n"
 }
 
-// logHasFailure reports whether a job log names a failure at all: what decides
-// whether the note's excerpt can be read from the capped tail or needs the
-// whole log.
+// logHasFailure reports whether a job log names a failure at all: a failing
+// test, a unit-tier rule report, make's closing error, or the build-failed
+// marker.
 func logHasFailure(log string) bool {
 	for _, line := range logLines(log) {
 		if isFailureMarker(line) {
@@ -716,6 +719,28 @@ func logHasFailure(log string) bool {
 		}
 	}
 	return false
+}
+
+// logHasTestFailure reports whether a job log names a failing test or a
+// unit-tier rule report: a marker whose own line says what failed. A log ending
+// only in the summary lines every red ends with -- make's Error line, the
+// build-failed marker -- names no failing test, so it cannot stand as the
+// excerpt's source (gt-8bpwpx).
+func logHasTestFailure(log string) bool {
+	for _, line := range logLines(log) {
+		if isTestFailureMarker(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTestFailureMarker reports whether line is the first line of a failure that
+// names a test or a rule: the markers a capped tail must hold to be read as the
+// excerpt's source.
+func isTestFailureMarker(line string) bool {
+	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
+		panicLineRE.MatchString(line) || ruleReportRE.MatchString(line)
 }
 
 // failureLines is the excerpt's line indices: every failure marker with the
