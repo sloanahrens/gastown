@@ -1686,7 +1686,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// reused a stored review; it is empty when om ran or the head was waived.
 	var reusedSuffix string
 	// reusedRec is the stored record a reused om verdict came from; it is nil
-	// when om ran, and the bead gets commentVerdict's comment (gt-bydaep).
+	// when om ran or the head was waived. A record commentReused cannot use is
+	// commented the way a nil one is (gt-bydaep).
 	var reusedRec *AheadRecord
 	// reviewStart opens the window the review leaves on the work bead: it
 	// covers the overseer check and the om attempt alike, so a waiver is
@@ -1786,9 +1787,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	findingsRej := findingsRejection(verdict)
 	l.logReview(issue, w, comments, g, base, merged, verdict, findingsRej != nil)
 	l.logRounds(issue, w, verdict)
-	if reusedRec != nil {
-		l.commentReused(w, verdict, *reusedRec)
-	} else {
+	// A reused verdict is commented in the form that names its stored review; a
+	// record too incomplete for that form falls back to commentVerdict's rather
+	// than going uncommented (gt-bydaep).
+	if reusedRec == nil || !l.commentReused(w, verdict, *reusedRec) {
 		l.commentVerdict(w, verdict, reviewStart, time.Now())
 	}
 	if verdict.Verdict == VerdictRequestChanges {

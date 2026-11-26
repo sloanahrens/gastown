@@ -674,11 +674,33 @@ func TestVerdictReuseLandStageLineSaysReused(t *testing.T) {
 	}
 }
 
+// noBaseRepo is the repository a stored record with no reviewed base is read
+// through: it reports an empty base as an ancestor of any commit and as touching
+// nothing, so such a record reaches the landing's comment routing rather than a
+// base-unreadable miss. The reuse predicate's own tests own the miss (gt-bydaep).
+type noBaseRepo struct{ Repo }
+
+func (r noBaseRepo) IsAncestor(ancestor, descendant string) (bool, error) {
+	if ancestor == "" {
+		return true, nil
+	}
+	return r.Repo.IsAncestor(ancestor, descendant)
+}
+
+func (r noBaseRepo) DiffNameOnly(base, head string) ([]string, error) {
+	if base == "" {
+		return nil, nil
+	}
+	return r.Repo.DiffNameOnly(base, head)
+}
+
 // TestVerdictReuseLandCommentSaysReused: a landing that reuses a stored review
 // writes its one bead comment through commentReused, which names the reused
 // review and its base. A landing that runs om, whether no record matched or the
 // store could not be read, writes commentVerdict's comment with no "reused
-// from". Routing every landing to commentVerdict turns the hit row red (gt-bydaep).
+// from"; a reused record commentReused refuses gets that same comment rather
+// than none. Taking the reused form out of the routing turns the hit row red,
+// and letting a refused record write nothing turns its row red (gt-bydaep).
 func TestVerdictReuseLandCommentSaysReused(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -686,19 +708,32 @@ func TestVerdictReuseLandCommentSaysReused(t *testing.T) {
 		// seed stores the record edited by edit; without it the store is empty.
 		seed bool
 		edit func(l *Lander, rec *AheadRecord)
-		// reused: the stored approve answers the landing and om does not run.
-		reused bool
+		// omRuns: the stored review does not answer, so the landing runs om.
+		omRuns bool
+		// reusedForm: the comment is commentReused's, naming the stored review.
+		reusedForm bool
 	}{
-		{name: "a stored approve is reused", seed: true, reused: true},
+		{name: "a stored approve is reused", seed: true, reusedForm: true},
 		{
-			name: "a different head runs om",
-			seed: true,
-			edit: func(_ *Lander, rec *AheadRecord) { rec.Head = strings.Repeat("cd", 20) },
+			name:   "a different head runs om",
+			seed:   true,
+			edit:   func(_ *Lander, rec *AheadRecord) { rec.Head = strings.Repeat("cd", 20) },
+			omRuns: true,
 		},
 		{
 			name: "an unreadable record runs om",
 			edit: func(l *Lander, _ *AheadRecord) {
 				l.Ahead.readFile = func(string) ([]byte, error) { return []byte("{not a record"), nil }
+			},
+			omRuns: true,
+		},
+		{
+			name: "a record with no reviewed base is commented as this landing's own",
+			seed: true,
+			edit: func(l *Lander, rec *AheadRecord) {
+				rec.Base = ""
+				open := l.openRepo
+				l.openRepo = func(dir string) Repo { return noBaseRepo{Repo: open(dir)} }
 			},
 		},
 	}
@@ -728,18 +763,19 @@ func TestVerdictReuseLandCommentSaysReused(t *testing.T) {
 			if !strings.Contains(text, head) {
 				t.Fatalf("comment = %q; want it to name the merged head %s", text, head)
 			}
-			if tc.reused {
-				if n := len(f.review.calls); n != 0 {
-					t.Errorf("om ran %d time(s) on a reused approve; want 0", n)
-				}
+			wantOM := 0
+			if tc.omRuns {
+				wantOM = 1
+			}
+			if n := len(f.review.calls); n != wantOM {
+				t.Errorf("om ran %d time(s) for %s; want %d", n, tc.name, wantOM)
+			}
+			if tc.reusedForm {
 				want := "om approve 0.90 " + head + " (reused from " + shortSHA(f.base) + ", 1m0s old)"
 				if text != want {
 					t.Errorf("comment = %q; want the reused comment %q", text, want)
 				}
 				return
-			}
-			if n := len(f.review.calls); n != 1 {
-				t.Errorf("om ran %d time(s) for %s; want 1", n, tc.name)
 			}
 			if strings.Contains(text, "reused from") {
 				t.Errorf("comment = %q; want commentVerdict's comment, not the reused one", text)
