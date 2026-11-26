@@ -26,8 +26,8 @@ type AheadHints interface {
 //
 // Begin, when set, reports whether a review may start: false means a landing
 // hold or drain is on; End, when set, is called once by every review that
-// began, before that review leaves the pool. Hints is stored here and not yet
-// read: the hint check lands with the bead that uses it.
+// began, before that review leaves the pool. Hints, when set, reports whether
+// the bead already has a stored review at the head offered: see Offer.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -63,9 +63,12 @@ type aheadRun struct {
 // nothing is started in its place until the pool is offered the list again.
 // A work at the head the bead's last review ended at starts nothing: the pool
 // tried that head, so starting it again would repeat a failed review on every
-// pass, while a new head of the same bead is reviewed (gt-xa01yc). Nothing is
-// started when no Reviewer is set, so every submission is a miss and the
-// landing runs om inline.
+// pass, while a new head of the same bead is reviewed (gt-xa01yc). A work whose
+// bead already has a stored review at its head starts nothing either: the
+// landing reuses that verdict, while a stored review at another head judged a
+// submission the seat has replaced, so that work is reviewed (gt-548kiy).
+// Nothing is started when no Reviewer is set, so every submission is a miss and
+// the landing runs om inline.
 //
 // A refused Begin means a landing hold or drain is on (gt-vb9qod): the call
 // starts nothing more and asks no further Begin, while a work at a head its
@@ -94,6 +97,15 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 // the offer of a tried head must start nothing and cancel nothing, so it can
 // never stop the review of the head that replaced it (gt-bnc6ah).
 //
+// A stored review at the offered head (Hints) skips the work: the landing
+// already holds a verdict for it. The hint is asked after the running check, so
+// a work at a head its seat replaced still has its stale review canceled, and
+// before Begin, so a skip owes no End and leaves no hold waiting on one. A Hint
+// error counts as tried at that head and is logged once (gt-548kiy): starting
+// nothing leaves the bead to the landing's inline review, whereas reading an
+// unreadable record as no record would start a review the store may already
+// hold.
+//
 // A review certain to start asks Begin, when set, with p.mu held: no other
 // Offer can take the slot in between, so a true Begin never outlives the review
 // that owes its End. Begin false means a landing hold or drain is on (gt-vb9qod):
@@ -117,6 +129,20 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	}
 	if !starts || p.free() == 0 {
 		return true
+	}
+	if p.Hints != nil {
+		head, _, err := p.Hints.Hint(w.BeadID)
+		if err != nil {
+			if p.tried == nil {
+				p.tried = map[string]string{}
+			}
+			p.tried[w.BeadID] = w.Head
+			p.logf("ahead review of %s at %s: hint: %v; the landing reviews it inline", w.BeadID, w.Head, err)
+			return true
+		}
+		if head == w.Head {
+			return true
+		}
 	}
 	if p.Begin != nil && !p.Begin() {
 		return false

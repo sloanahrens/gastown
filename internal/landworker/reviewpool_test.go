@@ -189,6 +189,34 @@ func (h *holdFake) counts() (begins, ends int) {
 	return h.begins, h.ends
 }
 
+// fakeAheadHints answers Hint from a fixed table: a bead in heads answers that
+// head, a bead in fail answers its error, and every other bead has no stored
+// review. It records every bead it is asked about.
+type fakeAheadHints struct {
+	heads map[string]string
+	fail  map[string]error
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (f *fakeAheadHints) Hint(bead string) (string, bool, error) {
+	f.mu.Lock()
+	f.asked = append(f.asked, bead)
+	f.mu.Unlock()
+	if err := f.fail[bead]; err != nil {
+		return "", false, err
+	}
+	return f.heads[bead], false, nil
+}
+
+// askedBeads returns the beads Hint was asked about.
+func (f *fakeAheadHints) askedBeads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
+}
+
 func TestReviewPoolReviewsEachWorkOnce(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
@@ -1059,5 +1087,96 @@ func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 
 	if n := len(logs.get()); n != 1 {
 		t.Errorf("logged %d lines with no reviewer, want 1", n)
+	}
+}
+
+// TestReviewPoolHintSkips checks that Offer reuses a stored review: a hint at
+// the offered head starts nothing, a hint at another head leaves that work to be
+// reviewed, a hint error starts nothing and is logged once, and no hints at all
+// review the work. The error row offers the list twice: the head it recorded as
+// tried is what keeps the second offer from asking and logging again.
+func TestReviewPoolHintSkips(t *testing.T) {
+	t.Parallel()
+	const (
+		bead = "gt-stored"
+		head = "1111111"
+		old  = "2222222"
+	)
+	tests := []struct {
+		name       string
+		hints      *fakeAheadHints
+		offers     int
+		wantReview bool
+		wantAsked  int
+		wantLogs   int
+	}{
+		{
+			name:      "a hint at the same head is skipped",
+			hints:     &fakeAheadHints{heads: map[string]string{bead: head}},
+			offers:    1,
+			wantAsked: 1,
+		},
+		{
+			name:       "a hint at another head is reviewed",
+			hints:      &fakeAheadHints{heads: map[string]string{bead: old}},
+			offers:     1,
+			wantReview: true,
+			wantAsked:  1,
+		},
+		{
+			name:      "a hint error is skipped and logged once",
+			hints:     &fakeAheadHints{fail: map[string]error{bead: errors.New("unreadable record")}},
+			offers:    2,
+			wantAsked: 1,
+			wantLogs:  1,
+		},
+		{
+			name:       "no hints reviews",
+			offers:     1,
+			wantReview: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			logs := &logRecorder{}
+			pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
+			if tt.hints != nil {
+				pool.Hints = tt.hints
+			}
+
+			for n := 0; n < tt.offers; n++ {
+				pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+			}
+			if tt.wantReview {
+				if w := recvBounded(t, ctx, rev.entered, "the review to start"); w.BeadID != bead || w.Head != head {
+					t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, head)
+				}
+				close(rev.release)
+			}
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+			gotReviews := len(rev.reviewed())
+			if tt.wantReview && gotReviews != 1 {
+				t.Errorf("reviewer called %d times, want the work reviewed once", gotReviews)
+			}
+			if !tt.wantReview && gotReviews != 0 {
+				t.Errorf("reviewer called %d times, want the stored review reused", gotReviews)
+			}
+			asked := 0
+			if tt.hints != nil {
+				asked = len(tt.hints.askedBeads())
+			}
+			if asked != tt.wantAsked {
+				t.Errorf("hint asked %d times, want %d", asked, tt.wantAsked)
+			}
+			if lines := logs.get(); len(lines) != tt.wantLogs {
+				t.Errorf("logged %d lines, want %d: %v", len(lines), tt.wantLogs, lines)
+			} else if tt.wantLogs > 0 && !strings.Contains(lines[0], bead) {
+				t.Errorf("log line %q does not name %s", lines[0], bead)
+			}
+		})
 	}
 }
