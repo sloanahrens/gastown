@@ -204,6 +204,17 @@ func TestClusterShapePlanKubeconfigNeedsTheFlagOfEachPhaseWithFiles(t *testing.T
 	}
 }
 
+// TestClusterShapePlanKubeconfigHelpSaysItDoesNotRunInTheDaemonPod: the help text
+// says, beside the per-phase flags, that the command does not run inside the
+// daemon pod, so an operator does not expect the plan to run there.
+func TestClusterShapePlanKubeconfigHelpSaysItDoesNotRunInTheDaemonPod(t *testing.T) {
+	t.Parallel()
+	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
+	if !strings.Contains(long, "The command does not run inside the daemon pod.") {
+		t.Errorf("Long text = %q, want it to say the command does not run inside the daemon pod", long)
+	}
+}
+
 // TestClusterShapePlanIdPrintsTheShortId: the plan prints the phases line, then
 // the 12-hex short form of planID over the files it rendered, as the last line.
 func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
