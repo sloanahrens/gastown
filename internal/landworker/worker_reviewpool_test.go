@@ -913,3 +913,242 @@ func TestReviewPoolWorkerNilPoolIsToday(t *testing.T) {
 		}
 	}
 }
+
+// sweepHints is the Stored hint source these tests install: a bead in rejecting
+// is hinted rejecting, a bead in fail answers that error, and other beads are
+// not rejected. rejecting may change while a pass runs.
+type sweepHints struct {
+	rejecting map[string]bool
+	fail      map[string]error
+}
+
+func (s *sweepHints) Hint(bead string) (string, bool, error) {
+	if err := s.fail[bead]; err != nil {
+		return "", false, err
+	}
+	return "", s.rejecting[bead], nil
+}
+
+// landingCalls names each Land call as bead:stored-only, in call order.
+func landingCalls(calls []land.Work) string {
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, fmt.Sprintf("%s:%v", call.BeadID, call.StoredOnly))
+	}
+	return strings.Join(out, ",")
+}
+
+// TestReviewPoolWorkerSweepsRejectionsFirst pins that the pass consumes a ready
+// bead's stored rejection before it lands the beads queued ahead of it: the
+// third bead's stored-only landing comes first (gt-9nco9r).
+func TestReviewPoolWorkerSweepsRejectionsFirst(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-first", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-second", 2, "2026-09-30T11:00:00Z")
+	h.seedReadyAt(t, "gt-third", 2, "2026-09-30T12:00:00Z")
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-third": true}}
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		if !work.StoredOnly {
+			return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+		}
+		// The real rejection sets the bead open and takes the label off.
+		if err := h.bd.Update(work.BeadID, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+			t.Fatalf("removing %s from %s: %v", land.LabelReadyToLand, work.BeadID, err)
+		}
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om asked for changes", Rework: true}
+	}
+
+	h.w.Pass(context.Background())
+
+	if got, want := landingCalls(h.lander.calls), "gt-third:true,gt-first:false,gt-second:false"; got != want {
+		t.Fatalf("landings = %s; want %s: the stored rejection is consumed before the next landing and the order of ordinary landings is unchanged", got, want)
+	}
+}
+
+// TestReviewPoolWorkerNilStoredIsToday pins that a worker with no hint source
+// lands exactly as it did before the sweep existed: a pass over three ready
+// beads makes the same ordinary Land calls as one whose hints reject
+// nothing (gt-9nco9r).
+func TestReviewPoolWorkerNilStoredIsToday(t *testing.T) {
+	t.Parallel()
+	run := func(hints bool) string {
+		h := newHarness(t)
+		if hints {
+			h.w.Stored = &sweepHints{}
+		}
+		h.seedReadyAt(t, "gt-late", 2, "2026-09-30T11:00:00Z")
+		h.seedReadyAt(t, "gt-hot", 0, "2026-09-30T13:00:00Z")
+		h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
+		rep := h.w.Pass(context.Background())
+		if want := (Report{Landed: 3}); rep != want {
+			t.Fatalf("pass report = %+v; want %+v", rep, want)
+		}
+		return landingCalls(h.lander.calls)
+	}
+
+	nilStored, hinted := run(false), run(true)
+	if nilStored != hinted {
+		t.Fatalf("nil Stored landed %s; hints that reject nothing landed %s; want today's calls either way", nilStored, hinted)
+	}
+}
+
+// TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips pins that the sweep leaves a
+// bead alone when the landing loop would: not actionable, parked, a repair
+// pending, or held by its outcome memo. Each is hinted rejecting, so only the
+// skip keeps it from a stored-only landing (gt-9nco9r).
+func TestReviewPoolWorkerSweepSkipsWhatTheLoopSkips(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		change func(*beads.Issue)
+		hold   func(*harness, string)
+	}{
+		{name: "not actionable", change: func(dropped *beads.Issue) {
+			dropped.Status = string(beads.StatusDeferred)
+		}},
+		{name: "parked", hold: func(h *harness, id string) {
+			st := h.w.bead(id)
+			st.parked, st.until = true, h.w.now().Add(time.Hour)
+		}},
+		{name: "pending repair", hold: func(h *harness, id string) {
+			h.w.pendingRepair = map[string]land.Work{id: {BeadID: id, Branch: branch, Head: noteHead, Target: "main", Worker: "opal"}}
+			h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+				// A race leaves the repair queued, so the bead stays pending
+				// through the sweep.
+				if work.BeadID == id {
+					return land.Result{}, &land.RaceError{}
+				}
+				return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+			}
+		}},
+		{name: "outcome memo held", hold: func(h *harness, id string) {
+			h.w.outcomeMemo().record(id, seededRowAt, h.w.now().Add(time.Hour))
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReadyAt(t, "gt-kept", 2, "2026-09-30T09:00:00Z")
+			dropped := readySubmission("gt-dropped", branch, noteHead)
+			dropped.UpdatedAt = seededRowAt
+			if tc.change != nil {
+				tc.change(dropped)
+			}
+			h.bd.Seed(*dropped)
+			if tc.hold != nil {
+				tc.hold(h, dropped.ID)
+			}
+			h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-dropped": true}}
+
+			h.w.Pass(context.Background())
+
+			kept := false
+			for _, call := range h.lander.calls {
+				if call.StoredOnly {
+					t.Fatalf("swept %s stored-only; want it left alone: it is a bead the loop skips (%s)", call.BeadID, tc.name)
+				}
+				kept = kept || call.BeadID == "gt-kept"
+			}
+			if !kept {
+				t.Fatalf("gt-kept did not land; the pass made %d calls: %+v", len(h.lander.calls), h.lander.calls)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWorkerSweepSkipsALabellessBead pins that the sweep leaves a
+// bead alone once its ready label is gone. The list filters on the label, so
+// the sweep is called directly with a bead a read before the label came off
+// would hold (gt-9nco9r).
+func TestReviewPoolWorkerSweepSkipsALabellessBead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	labelless := readySubmission("gt-abc", branch, noteHead)
+	labelless.Labels = nil
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-abc": true}}
+
+	rep := Report{}
+	if err := h.w.sweepStored(context.Background(), []*beads.Issue{labelless}, map[string]bool{}, &rep); err != nil {
+		t.Fatalf("sweepStored: %v", err)
+	}
+	if got := landingCalls(h.lander.calls); got != "" {
+		t.Fatalf("landed %s; want nothing: a bead with no ready label is not swept", got)
+	}
+	if want := (Report{}); rep != want {
+		t.Fatalf("report = %+v; want %+v", rep, want)
+	}
+}
+
+// TestReviewPoolWorkerSweepSkipsHandled pins that a bead this pass has already
+// looked at is not swept in a later round when the store then hints it rejecting (gt-9nco9r).
+func TestReviewPoolWorkerSweepSkipsHandled(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	hints := &sweepHints{}
+	h.w.Stored = hints
+	// The bead's own attempt leaves it ready with nothing holding it, and the
+	// rejection appears only after that attempt.
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		hints.rejecting = map[string]bool{work.BeadID: true}
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om asked for changes", Rework: true}
+	}
+
+	h.w.Pass(context.Background())
+
+	if got, want := landingCalls(h.lander.calls), "gt-abc:false"; got != want {
+		t.Fatalf("landings = %s; want %s: a bead the pass already looked at is not swept", got, want)
+	}
+}
+
+// TestReviewPoolWorkerSweepStopsOnDrain pins that a drain stops the sweep
+// between two rejected beads and the pass with it: no landing after the drain (gt-9nco9r).
+func TestReviewPoolWorkerSweepStopsOnDrain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-first", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-second", 2, "2026-09-30T11:00:00Z")
+	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-first": true, "gt-second": true}}
+	draining := false
+	h.w.Draining = func() bool { return draining }
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		draining = true
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om asked for changes", Rework: true}
+	}
+
+	h.w.Pass(context.Background())
+
+	if len(h.lander.calls) != 1 || !h.lander.calls[0].StoredOnly {
+		t.Fatalf("landings = %s; want one stored-only landing: a drain stops the sweep and the pass", landingCalls(h.lander.calls))
+	}
+}
+
+// TestReviewPoolWorkerSweepHintErrorStopsThePass pins that a hint that cannot
+// be read is never read as "not rejecting": the pass counts the failure and lands nothing (gt-9nco9r).
+func TestReviewPoolWorkerSweepHintErrorStopsThePass(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.w.Stored = &sweepHints{fail: map[string]error{"gt-abc": errors.New("record unreadable")}}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	rep := h.w.Pass(context.Background())
+
+	if want := (Report{Failed: 1}); rep != want {
+		t.Fatalf("pass report = %+v; want %+v", rep, want)
+	}
+	if got := landingCalls(h.lander.calls); got != "" {
+		t.Fatalf("landed %s; want nothing: an unreadable hint stops the pass", got)
+	}
+	named := false
+	for _, line := range logs {
+		named = named || (strings.Contains(line, "gt-abc") && strings.Contains(line, "record unreadable"))
+	}
+	if !named {
+		t.Fatalf("logs %q; want one naming gt-abc and the read error", logs)
+	}
+}

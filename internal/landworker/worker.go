@@ -631,6 +631,19 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if w.draining() {
 			return rep
 		}
+		// The stored rejections are consumed before the next bead is chosen, so
+		// a bead's author is told the review refused it without waiting behind
+		// the landings queued ahead of it (gt-9nco9r).
+		if err := w.sweepStored(ctx, issues, handled, &rep); err != nil {
+			w.logf("sweeping stored reviews: %v", err)
+			rep.Failed++
+			return rep
+		}
+		// The sweep may have learned that the run was canceled or a drain
+		// started; nothing more is started once either is true.
+		if ctx.Err() != nil || w.draining() {
+			return rep
+		}
 		issue := nextReady(issues, handled)
 		if issue == nil {
 			return rep
@@ -912,6 +925,51 @@ func (w *Worker) recordSubmission(work land.Work) {
 // process resolves what to land for issue and lands it.
 func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	w.processWith(ctx, issue, rep, false)
+}
+
+// sweepStored lands, as a stored-only pass, each ready bead's stored rejection
+// before the next landing is chosen, so a rejected bead's author is told before
+// the beads queued ahead of it run their gates; a rejection merges nothing, so
+// no landing order changes. It leaves a bead alone when the landing loop's own
+// turn for it is not due yet, and stops between beads once the run is canceled
+// or a drain is on. With Stored nil nothing is swept (gt-5q8ayw). A hint that
+// cannot be read is unknown, never "not rejecting", so the sweep returns its
+// error (gt-9nco9r).
+func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled map[string]bool, rep *Report) error {
+	if w.Stored == nil {
+		return nil
+	}
+	for _, issue := range issues {
+		// A bead the pass has already looked at keeps its turn: sweeping it now
+		// would land it a second time (gt-wgvu6p).
+		if issue == nil || handled[handledKey(issue)] {
+			continue
+		}
+		if ctx.Err() != nil || w.draining() {
+			return nil
+		}
+		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
+			continue
+		}
+		if w.parked(issue.ID) {
+			continue
+		}
+		if _, pending := w.pendingRepair[issue.ID]; pending {
+			continue
+		}
+		if w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
+			continue
+		}
+		_, rejecting, err := w.Stored.Hint(issue.ID)
+		if err != nil {
+			return fmt.Errorf("reading the stored review of %s: %w", issue.ID, err)
+		}
+		if !rejecting {
+			continue
+		}
+		w.processWith(ctx, issue, rep, true)
+	}
+	return nil
 }
 
 // processWith resolves what to land for issue and lands it. storedOnly marks the
