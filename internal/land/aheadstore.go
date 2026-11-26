@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -81,6 +82,12 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 	return &AheadStore{TownRoot: townRoot, Rig: rig}
 }
 
+// aheadStoreMu is held across each Put's read-compare-write and each Delete, so
+// a Put that read before a later review's Put wrote cannot then write over it
+// and a Delete cannot be undone by a Put already past its read (gt-guahwz). It
+// is package-level: Put takes a copy of the store, so a field mutex is copied.
+var aheadStoreMu sync.Mutex
+
 // Put stores rec as its bead's record unless the record already stored began
 // its review later: a slow review of an old head finishes after a new head's
 // review, and only the start can tell them apart. A stored file that does not
@@ -99,6 +106,11 @@ func (s AheadStore) Put(rec AheadRecord) error {
 	if err := ensureLandingsDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	// The comparison and the write are one step: a Put for the same bead that
+	// reads between them would write first, and this Put would replace a record
+	// whose review started later (gt-guahwz).
+	aheadStoreMu.Lock()
+	defer aheadStoreMu.Unlock()
 	stored, err := s.recordAt(path)
 	if err != nil {
 		return err
@@ -192,6 +204,10 @@ func (s AheadStore) Delete(bead string) error {
 	if err != nil {
 		return err
 	}
+	// Delete takes Put's lock, so a remove that ran between a Put's read and its
+	// write cannot be undone by that Put writing the record back (gt-guahwz).
+	aheadStoreMu.Lock()
+	defer aheadStoreMu.Unlock()
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

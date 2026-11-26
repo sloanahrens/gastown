@@ -1,6 +1,7 @@
 package land
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -896,5 +900,103 @@ func assertNoRecord(t *testing.T, town, bead string) {
 	path := aheadTestPath(town, "gastown", bead)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a refused Put left a record at %s (stat error %v)", path, err)
+	}
+}
+
+// aheadRunBetween runs firstOp with its record read held, starts secondOp there,
+// then releases both, failing if secondOp reached the store first (gt-guahwz).
+func aheadRunBetween(t *testing.T, first *AheadStore, firstOp, secondOp func() error, touched *atomic.Int32, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	inRead, block := make(chan struct{}), make(chan struct{})
+	var readOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(block) }) }
+	t.Cleanup(release)
+	first.readFile = func(path string) ([]byte, error) {
+		data, err := os.ReadFile(path) //nolint:gosec // G304: the path is under the town root
+		readOnce.Do(func() { close(inRead) })
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return data, err
+	}
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		if err := firstOp(); err != nil {
+			t.Errorf("first operation: %v", err)
+		}
+	}()
+	awaitGateRun(t, inRead, "the first operation's read")
+	secondStarted, secondDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		close(secondStarted)
+		if err := secondOp(); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+	}()
+	awaitGateRun(t, secondStarted, what+" to start")
+	for i := 0; i < 20000 && touched.Load() == 0; i++ {
+		runtime.Gosched()
+	}
+	if n := touched.Load(); n != 0 {
+		t.Errorf("%s reached the store %d time(s) while the first Put held the lock, want 0", what, n)
+	}
+	release()
+	awaitGateRun(t, firstDone, "the first operation")
+	awaitGateRun(t, secondDone, "the second operation")
+}
+
+// TestAheadStorePutKeepsNewerUnderRace: a Put that read the store before a later
+// review's Put wrote writes only after it, so the later record stays (gt-guahwz).
+//
+//testpolicy:allow parallel — holds the package-wide review-ahead lock that every Put and Delete in this package also takes
+func TestAheadStorePutKeepsNewerUnderRace(t *testing.T) {
+	town := t.TempDir()
+	base := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	older, newer := TownAheadStore(town, "gastown"), TownAheadStore(town, "gastown")
+	var newerReads atomic.Int32
+	newer.readFile = func(path string) ([]byte, error) {
+		newerReads.Add(1)
+		return os.ReadFile(path) //nolint:gosec // G304: the path is under the town root
+	}
+	oldRec, newRec := aheadTestRecord("gt-abc", aheadTestHead), aheadTestRecord("gt-abc", aheadTestNewHead)
+	oldRec.StartedAt, oldRec.ReviewedAt = base, base.Add(30*time.Minute) // the slow review, finishing last
+	newRec.StartedAt, newRec.ReviewedAt = base.Add(5*time.Minute), base.Add(6*time.Minute)
+	aheadRunBetween(t, older,
+		func() error { return older.Put(oldRec) },
+		func() error { return newer.Put(newRec) },
+		&newerReads, "the later Put")
+	got, ok, err := TownAheadStore(town, "gastown").Get("gt-abc")
+	if err != nil || !ok || got.Head != aheadTestNewHead {
+		t.Errorf("Get after both Puts = (head %q, ok %v, err %v), want the later review's %s",
+			got.Head, ok, err, aheadTestNewHead)
+	}
+}
+
+// TestAheadStoreDeleteHoldsThePutLock: a Delete started between a Put's read and
+// its write runs after that Put writes, so no record is left stored (gt-guahwz).
+//
+//testpolicy:allow parallel — holds the package-wide review-ahead lock that every Put and Delete in this package also takes
+func TestAheadStoreDeleteHoldsThePutLock(t *testing.T) {
+	town := t.TempDir()
+	base := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	seed := aheadTestRecord("gt-abc", aheadTestHead)
+	seed.StartedAt = base
+	seedAheadRecord(t, town, seed)
+	putter, deleter := TownAheadStore(town, "gastown"), TownAheadStore(town, "gastown")
+	var removes atomic.Int32
+	deleter.removeFile = func(path string) error { removes.Add(1); return os.Remove(path) }
+	incoming := aheadTestRecord("gt-abc", aheadTestNewHead)
+	incoming.StartedAt = base.Add(5 * time.Minute)
+	aheadRunBetween(t, putter,
+		func() error { return putter.Put(incoming) },
+		func() error { return deleter.Delete("gt-abc") },
+		&removes, "the Delete")
+	if _, ok, err := deleter.Get("gt-abc"); err != nil || ok {
+		t.Errorf("Get after the Delete = (ok %v, err %v), want a miss", ok, err)
 	}
 }
