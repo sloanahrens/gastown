@@ -196,7 +196,9 @@ func TestVerdictReuseStoredOnlyMissDeletes(t *testing.T) {
 // TestVerdictReuseStoredOnlyErrorKeeps: an answer reuseAhead could not give ends
 // the pass with ErrNoStoredVerdict and KEEPS the record: the pass runs between
 // every landing, so a transient failure must not throw a verdict away (gt-6r4exl).
-// Deleting on an error turns this red.
+// Deleting on an error turns this red. A record that will not read fails earlier,
+// in the conflict check before the merge, as infrastructure (gt-1yvte7); it is
+// still kept.
 func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -205,12 +207,15 @@ func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 		// reviewer replaces the lander's reviewer when set, and counts the
 		// reviews it ran; nil keeps the setup's (f.review).
 		reviewer func() (Reviewer, func() int)
+		// wantInfra: the pass fails as infrastructure rather than with the sentinel.
+		wantInfra bool
 	}{
 		{
 			name: "a record that will not read",
 			edit: func(l *Lander) {
 				l.Ahead.readFile = func(string) ([]byte, error) { return nil, errors.New("record unreadable") }
 			},
+			wantInfra: true,
 		},
 		{
 			name: "a review key that cannot be computed",
@@ -237,7 +242,12 @@ func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 			f.work.StoredOnly = true
 			writes := aheadBeadWrites(t, f.bd)
 			_, err := l.Land(context.Background(), f.work)
-			if !errors.Is(err, ErrNoStoredVerdict) {
+			if tc.wantInfra {
+				var infra *InfraError
+				if !errors.As(err, &infra) || errors.Is(err, ErrNoStoredVerdict) {
+					t.Fatalf("Land error = %T %v; want an *InfraError that is not ErrNoStoredVerdict", err, err)
+				}
+			} else if !errors.Is(err, ErrNoStoredVerdict) {
 				t.Fatalf("Land error = %v; want ErrNoStoredVerdict", err)
 			}
 			if !storedOnlyHasRecord(t, f) {
@@ -303,9 +313,9 @@ func TestVerdictReuseStoredOnlyConflictGone(t *testing.T) {
 	t.Parallel()
 	f, l, store, key := reuseLandSetup(t)
 	storedOnlyPut(t, store, storedOnlyConflict(key, f.base, l.now().Add(-time.Minute)))
-	// A reviewer with no version probe leaves the review key uncomputable, so
-	// only the clean merge here can consume the record: leaving it to the reuse
-	// lookup keeps it and turns this red.
+	// Only the clean merge may consume the record here: a pass that reached the
+	// review could not answer from a conflict record, and the review assertions
+	// below turn red if om runs.
 	l.Reviewer = f.review
 	// Main moves and the conflict is gone: the file main added over the work's
 	// path is dropped again, so the merge adds the work's file cleanly.
@@ -326,9 +336,10 @@ func TestVerdictReuseStoredOnlyConflictGone(t *testing.T) {
 // TestVerdictReuseStoredOnlyConflictStale: a stored conflict that cannot answer
 // for this landing — another head, an expired record — is deleted and ends the
 // pass with ErrNoStoredVerdict before it cuts a worktree or merges. A record
-// that cannot be read is kept and ends the pass with the same sentinel, and a
-// delete that fails is infrastructure, not "nothing to consume" (gt-1yvte7).
-// Merging before the answer turns each row into a conflict rejection instead.
+// that cannot be read is kept and fails the pass as infrastructure, not as
+// "nothing to consume", and a delete that fails is infrastructure too
+// (gt-1yvte7). Merging before the answer turns each row into a conflict
+// rejection instead.
 func TestVerdictReuseStoredOnlyConflictStale(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -346,7 +357,7 @@ func TestVerdictReuseStoredOnlyConflictStale(t *testing.T) {
 		{name: "an expired record", editRecord: func(rec *AheadRecord) {
 			rec.ReviewedAt = rec.ReviewedAt.Add(-2 * time.Hour)
 		}},
-		{name: "a record that will not read", kept: true, editLander: func(l *Lander) {
+		{name: "a record that will not read", wantErr: true, kept: true, editLander: func(l *Lander) {
 			l.Ahead.readFile = func(string) ([]byte, error) { return nil, errors.New("record unreadable") }
 		}},
 		{name: "a record that will not delete", wantErr: true, kept: true,
