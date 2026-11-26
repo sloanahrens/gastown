@@ -667,6 +667,10 @@ type tierSweepStageResult struct {
 	// tail (tierSweepRunnerTimingNote); empty for a host stage, or when the
 	// result's stamps give no split (gt-qc72jj).
 	timingNote string
+	// cacheNote is the over-cap figure the run's cache trim record names, or
+	// that the record could not be read (tierSweepCacheNote); empty for a host
+	// stage, and for a runner whose output directory has no record yet.
+	cacheNote string
 }
 
 // tierSweepSeams replace the sweep's outside effects in tests; the zero value
@@ -1786,9 +1790,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
 		}
 		// The runner's note sits between the elapsed time and any slot wait
-		// (gt-qc72jj).
-		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s%s; last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), res.timingNote, waitNote, lastLines(res.output))
+		// (gt-qc72jj); the cache note ends the line (gt-fa3pkl).
+		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s%s%s; last lines:\n%s",
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), res.timingNote, waitNote, res.cacheNote, lastLines(res.output))
 	}
 
 	if len(results) == 0 {
@@ -3347,7 +3351,8 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		exitCode = tierSweepRedExit
 	}
 	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true,
-		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now())}
+		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now()),
+		cacheNote:  tierSweepCacheNote(spec.OutDir)}
 }
 
 // tierSweepRunnerHostSummary returns a tier's summary line with its "(logs
@@ -4493,4 +4498,28 @@ func tierSweepRunnerTimingNote(stageStart, started, finished, now time.Time) str
 	}
 	return fmt.Sprintf(" (start lag %s, tests %s, tail %s)",
 		lag.Round(time.Second), finished.Sub(started).Round(time.Second), tail.Round(time.Second))
+}
+
+// tierSweepCacheNote is the finished line's note for the cache trim record the
+// run left beside its result (gt-fa3pkl): how far the sweep cache ended over
+// its cap, and the cap itself, so a trim that could not reach the cap says so
+// on the sweep's own line. A run with no record, or one that ended within its
+// cap, gets the empty note; a record the daemon cannot read gets a note saying
+// so, never the clean case.
+//
+// sweep-run writes cache-trim.json after result.json on purpose, since the trim
+// is slow and must not delay the verdict. A backend whose result is written
+// into the output directory can therefore have its result folded while the
+// trim still runs: no record then is the empty note, not an error, and the
+// sweep does not wait for it.
+func tierSweepCacheNote(dir string) string {
+	rec, ok, err := sweeprunner.ReadCacheTrim(dir)
+	if err != nil {
+		return " cache-trim record unreadable"
+	}
+	if !ok || rec.OverBytes <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" cache over cap by %s (cap %s)",
+		polecatimage.Human(rec.OverBytes), polecatimage.Human(rec.CapBytes))
 }
