@@ -736,6 +736,78 @@ func TestDriftValueSafe(t *testing.T) {
 	}
 }
 
+// TestDriftReadableCutsAValueAtTheLimit holds a printed value to
+// driftReadableLimit bytes: a value at the limit prints whole, a longer one is cut
+// with an ellipsis, and the cut never splits a rune (gt-b8mgln).
+func TestDriftReadableCutsAValueAtTheLimit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{
+			name:  "a value of exactly 200 bytes is printed whole",
+			value: strings.Repeat("a", 198),
+			want:  `"` + strings.Repeat("a", 198) + `"`,
+		},
+		{
+			name:  "a value one byte over the limit is cut to 197 bytes and an ellipsis",
+			value: strings.Repeat("a", 199),
+			want:  `"` + strings.Repeat("a", 196) + "...",
+		},
+		{
+			name:  "a map prints as compact JSON with its keys sorted",
+			value: map[string]any{"b": 1, "a": "x"},
+			want:  `{"a":"x","b":1}`,
+		},
+		{
+			name:  "a cut that would split a two-byte rune stops before the rune",
+			value: strings.Repeat("a", 195) + "é" + strings.Repeat("a", 10),
+			want:  `"` + strings.Repeat("a", 195) + "...",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := driftReadableValue(tc.value)
+			if err != nil {
+				t.Fatalf("driftReadableValue returned error %v, want %q", err, tc.want)
+			}
+			if got != tc.want {
+				t.Errorf("driftReadableValue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDriftReadableRefusesAValueItCannotPrint holds a value with no JSON to an
+// error and no text, since an empty string would read as a value that printed
+// (gt-b8mgln).
+func TestDriftReadableRefusesAValueItCannotPrint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value any
+	}{
+		{name: "a channel", value: make(chan int)},
+		{name: "a func", value: func() {}},
+		{name: "a NaN float", value: math.NaN()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := driftReadableValue(tc.value)
+			if err == nil {
+				t.Fatalf("driftReadableValue(%s) = %q, want an error", tc.name, got)
+			}
+			if got != "" {
+				t.Errorf("driftReadableValue(%s) returned %q with its error, want no text", tc.name, got)
+			}
+		})
+	}
+}
+
 // TestClusterDriftObjectKinds holds the compare to every kind it walks, not only
 // a Deployment: a Role's changed rule field and a ValidatingAdmissionPolicy's
 // changed validation are reported as their path and a fingerprint of each side,
