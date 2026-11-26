@@ -43,6 +43,19 @@ func (h *patrolScanHost) movedOnSeat(rig, name, path string) (movedOn bool, land
 	return fields != nil && seatMovedOn(strings.TrimSpace(fields.Branch), rec.Landing.BeadID), rec.Landing.BeadID, nil
 }
 
+// movedOnAfter reports whether seat sorts after the rig/name cursor in the order
+// KeptSandboxSeats returns seats: by rig, then by name. Comparing the joined
+// key would disagree with that order when one rig name prefixes another
+// ("gastown" and "gastown-2": '-' sorts before '/'), and the search over the
+// seats would then start behind the cursor's record (gt-qo9sb5).
+func movedOnAfter(seat KeptSandboxSeat, cursor string) bool {
+	rig, name, _ := strings.Cut(cursor, "/")
+	if seat.Rig != rig {
+		return seat.Rig > rig
+	}
+	return seat.Name > name
+}
+
 // dropMovedOnKeptSeats drops the kept record of every seat that has moved on
 // to another bead (gt-qrzhot, gt-i72us8). The branch guard keeps a landed seat
 // while it works its own polecat branch rather than the branch that landed; a
@@ -80,7 +93,7 @@ func (h *patrolScanHost) dropMovedOnKeptSeats() {
 	// The start is the first seat after the last record the previous tick read,
 	// wrapping. Searching the key rather than an index keeps the walk rotating
 	// when the cursor's record was dropped since.
-	start := sort.Search(n, func(i int) bool { return seats[i].Rig+"/"+seats[i].Name > h.d.movedOnCursor }) % max(n, 1)
+	start := sort.Search(n, func(i int) bool { return movedOnAfter(seats[i], h.d.movedOnCursor) }) % max(n, 1)
 	read := 0
 	for i := 0; i < n; i++ {
 		seat := seats[(start+i)%n]

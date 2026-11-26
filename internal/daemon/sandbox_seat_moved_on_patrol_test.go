@@ -303,11 +303,11 @@ func TestPatrolScanDropsMovedOnKeptSeat(t *testing.T) {
 // always the one read first.
 const movedOnWaitedPolecat = "beryl"
 
-// seedMovedOnSeatBead writes seat name's agent bead on the branch that names
-// another bead than the landed one, so the seat is a moved-on keep.
-func seedMovedOnSeatBead(t *testing.T, f *seatEndFake, name string) {
+// seedMovedOnSeatBead writes seat rig/name's agent bead with the branch the
+// caller set, so the seat is a moved-on keep or a takeover.
+func seedMovedOnSeatBead(t *testing.T, f *seatEndFake, rig, name string) {
 	t.Helper()
-	id := beads.AgentBeadIDFor(constants.RolePolecat, endRig, name, f.town)
+	id := beads.AgentBeadIDFor(constants.RolePolecat, rig, name, f.town)
 	if _, err := f.agentDB.Create(beads.CreateOptions{
 		ID: id, Title: id, Labels: []string{"gt:agent"}, Priority: -1,
 		Description: beads.FormatAgentDescription(id, &f.seatFields),
@@ -335,7 +335,7 @@ func TestPatrolScanMovedOnIsBounded(t *testing.T) {
 	t.Parallel()
 	p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
 	for _, name := range []string{endPolecat, movedOnWaitedPolecat} {
-		seedMovedOnSeatBead(t, p.seatEndFake, name)
+		seedMovedOnSeatBead(t, p.seatEndFake, endRig, name)
 		if err := writeKeptSandboxSeat(p.town, endRig, name, movedOnRec()); err != nil {
 			t.Fatal(err)
 		}
@@ -367,16 +367,20 @@ func TestPatrolScanMovedOnIsBounded(t *testing.T) {
 // record the pass reads and leaves.
 const movedOnFarPolecat = "coral"
 
-// seedSeatOnBranch writes seat name's agent bead on the landed bead's branch
+// movedOnSiblingRig is endRig extended by "-2". The record walk orders seats by
+// rig, so endRig's seats come first; the joined key orders them the other way.
+const movedOnSiblingRig = endRig + "-2"
+
+// seedSeatOnBranch writes seat rig/name's agent bead on the landed bead's branch
 // when takenOver, and on the branch of another bead otherwise: a seat taken
 // over onto the landed bead keeps its record.
-func seedSeatOnBranch(t *testing.T, f *seatEndFake, name string, takenOver bool) {
+func seedSeatOnBranch(t *testing.T, f *seatEndFake, rig, name string, takenOver bool) {
 	t.Helper()
 	f.seatFields.Branch = movedOnOther
 	if takenOver {
 		f.seatFields.Branch = movedOnLanded
 	}
-	seedMovedOnSeatBead(t, f, name)
+	seedMovedOnSeatBead(t, f, rig, name)
 }
 
 // The pass continues where the last tick stopped. With a budget of 1 and two
@@ -390,7 +394,7 @@ func TestPatrolScanMovedOnRotates(t *testing.T) {
 		t.Parallel()
 		p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
 		for _, name := range []string{endPolecat, movedOnWaitedPolecat} {
-			seedSeatOnBranch(t, p.seatEndFake, name, false)
+			seedSeatOnBranch(t, p.seatEndFake, endRig, name, false)
 			if err := writeKeptSandboxSeat(p.town, endRig, name, movedOnRec()); err != nil {
 				t.Fatal(err)
 			}
@@ -410,8 +414,41 @@ func TestPatrolScanMovedOnRotates(t *testing.T) {
 			t.Errorf("the next tick did not drop the second moved-on record")
 		}
 	})
+	t.Run("a rig name that prefixes another", func(t *testing.T) {
+		t.Parallel()
+		// endRig sorts before movedOnSiblingRig, but the joined key
+		// "gastown-2/coral" sorts before "gastown/agate" ('-' is below '/'). The
+		// cursor after agate must still reach coral.
+		if !(endRig < movedOnSiblingRig) {
+			t.Fatalf("rig %q does not sort before %q: the subtest's order is wrong", endRig, movedOnSiblingRig)
+		}
+		p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+		seedSeatOnBranch(t, p.seatEndFake, endRig, endPolecat, true)
+		if err := writeKeptSandboxSeat(p.town, endRig, endPolecat, movedOnRec()); err != nil {
+			t.Fatal(err)
+		}
+		seedSeatOnBranch(t, p.seatEndFake, movedOnSiblingRig, movedOnFarPolecat, false)
+		if err := writeKeptSandboxSeat(p.town, movedOnSiblingRig, movedOnFarPolecat, movedOnRec()); err != nil {
+			t.Fatal(err)
+		}
+		p.host.sandboxRecordBudget = 1
+
+		p.host.dropMovedOnKeptSeats() // agate: taken over onto the landed bead, kept
+		if !keptRecordPresent(t, p.town, endRig, endPolecat) {
+			t.Fatal("the takeover's record was dropped; want it kept")
+		}
+		p.host.dropMovedOnKeptSeats() // the next tick reads past agate to coral
+		if keptRecordPresent(t, p.town, movedOnSiblingRig, movedOnFarPolecat) {
+			t.Errorf("the tick after the kept record did not reach the moved-on record in the rig that prefixes its own")
+		}
+	})
 	t.Run("a kept record does not starve the next", func(t *testing.T) {
 		t.Parallel()
+		// The walk reads the seats in rig and name order; the subtest's story
+		// needs them in the order agate, beryl, coral.
+		if !(endPolecat < movedOnWaitedPolecat && movedOnWaitedPolecat < movedOnFarPolecat) {
+			t.Fatalf("fixture names %q, %q, %q do not sort in the order the subtest reads them", endPolecat, movedOnWaitedPolecat, movedOnFarPolecat)
+		}
 		p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
 		for _, seat := range []struct {
 			name      string
@@ -421,7 +458,7 @@ func TestPatrolScanMovedOnRotates(t *testing.T) {
 			{name: movedOnWaitedPolecat, takenOver: true},
 			{name: movedOnFarPolecat},
 		} {
-			seedSeatOnBranch(t, p.seatEndFake, seat.name, seat.takenOver)
+			seedSeatOnBranch(t, p.seatEndFake, endRig, seat.name, seat.takenOver)
 			if err := writeKeptSandboxSeat(p.town, endRig, seat.name, movedOnRec()); err != nil {
 				t.Fatal(err)
 			}
