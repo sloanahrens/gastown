@@ -96,33 +96,38 @@ func TestTierSweepCacheNoteRecordWindow(t *testing.T) {
 // when its cache claim ended over its cap (gt-ym0o68). It folds the run through
 // tierSweepRunnerStageResult, the production call site, so removing the call
 // turns the over-cap row red. A repeat fold over the cap keeps one item, and a
-// run with no record, a zero record, or an unreadable record raises none: the
-// finished line carries the unreadable note for that last case.
+// run with no record or a zero record raises none. An unreadable record raises
+// the same item, with a summary that says the figure is unknown, rather than
+// reading as the clean case.
 func TestTierSweepCacheAttention(t *testing.T) {
 	t.Parallel()
-	const wantSummary = "the tier sweep's cache claim for gastown ended 110.3MB over its 5.0GB cap after every removal the rules allow"
+	const overSummary = "the tier sweep's cache claim for gastown ended 110.3MB over its 5.0GB cap after every removal the rules allow"
+	const unreadableSummary = "the tier sweep's cache-trim record for gastown is unreadable, so whether its cache claim ended over the cap is unknown"
 	const capBytes = int64(5) << 30
 	rows := []struct {
-		name  string
-		setup func(t *testing.T, dir string)
-		folds int
-		want  int
+		name    string
+		setup   func(t *testing.T, dir string)
+		folds   int
+		want    int
+		summary string
 	}{
 		{
 			name: "an over-cap record raises one item",
 			setup: func(t *testing.T, dir string) {
 				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 115661635})
 			},
-			folds: 1,
-			want:  1,
+			folds:   1,
+			want:    1,
+			summary: overSummary,
 		},
 		{
 			name: "a repeat fold over the cap keeps one item",
 			setup: func(t *testing.T, dir string) {
 				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 115661635})
 			},
-			folds: 2,
-			want:  1,
+			folds:   2,
+			want:    1,
+			summary: overSummary,
 		},
 		{
 			name:  "no record raises none",
@@ -139,15 +144,16 @@ func TestTierSweepCacheAttention(t *testing.T) {
 			want:  0,
 		},
 		{
-			name: "an unreadable record raises none",
+			name: "an unreadable record raises one item that says the figure is unknown",
 			setup: func(t *testing.T, dir string) {
 				path := filepath.Join(dir, sweeprunner.CacheTrimFileName)
 				if err := os.WriteFile(path, []byte("{not a record"), 0o600); err != nil {
 					t.Fatalf("writing an unreadable record: %v", err)
 				}
 			},
-			folds: 1,
-			want:  0,
+			folds:   1,
+			want:    1,
+			summary: unreadableSummary,
 		},
 	}
 	for _, r := range rows {
@@ -176,9 +182,9 @@ func TestTierSweepCacheAttention(t *testing.T) {
 			}
 			got := items[0]
 			if got.Key != "cache-trim-sweep-gastown" || got.Kind != attention.KindCacheTrimNoOp ||
-				got.Severity != attention.SeverityLow || got.Summary != wantSummary {
+				got.Severity != attention.SeverityLow || got.Summary != r.summary {
 				t.Fatalf("attention item = %+v, want key cache-trim-sweep-gastown, kind %s, severity %s, summary %q",
-					got, attention.KindCacheTrimNoOp, attention.SeverityLow, wantSummary)
+					got, attention.KindCacheTrimNoOp, attention.SeverityLow, r.summary)
 			}
 		})
 	}

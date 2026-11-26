@@ -4531,13 +4531,23 @@ func tierSweepCacheNote(dir string) string {
 // run whose cache claim ended over its cap after every removal the rules allow
 // (gt-ym0o68), so the reading reaches the operator beyond the sweep's own line.
 // It is keyed by rig, so a repeat fold of the same run, or a later run over the
-// cap, replaces the item rather than adding one. A run with no record, a zero
-// record, or a record the daemon cannot read raises nothing: the finished line
-// already says an unreadable record was unreadable. A missing record is the
+// cap, replaces the item rather than adding one. A run with no record or a zero
+// record raises nothing. A record the daemon cannot read raises an item that
+// says the figure is unknown, never the clean case. A missing record is the
 // window sweep-run's ordering leaves open, and not an error.
 func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
 	rec, ok, err := sweeprunner.ReadCacheTrim(dir)
-	if err != nil || !ok || rec.OverBytes <= 0 {
+	if err != nil {
+		d.cacheTrimNoOp.raise(attention.Item{
+			Key:      "cache-trim-sweep-" + rig,
+			Kind:     attention.KindCacheTrimNoOp,
+			Severity: attention.SeverityLow,
+			Summary: fmt.Sprintf("the tier sweep's cache-trim record for %s is unreadable, so whether its cache claim ended over the cap is unknown",
+				rig),
+		})
+		return
+	}
+	if !ok || rec.OverBytes <= 0 {
 		return
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
