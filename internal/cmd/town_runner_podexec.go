@@ -40,17 +40,26 @@ func productionPodExec(ctx context.Context, argv []string, stdin []byte) ([]byte
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = bytes.NewReader(stdin)
+	return collectPodExec(ctx, cmd, argv[0], (*exec.Cmd).Run)
+}
+
+// collectPodExec points cmd's stdout at its own buffer and stderr at a tailWriter,
+// runs the child through run, and only then reads both: taking the bytes as the
+// arguments to podExecOutcome before run gives an empty reply with the right
+// status (gt-czrolh). It splits from productionPodExec so the read order is
+// pinned by a unit row that starts no process.
+func collectPodExec(ctx context.Context, cmd *exec.Cmd, name string, run func(*exec.Cmd) error) ([]byte, int, error) {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	stderr := &tailWriter{max: podExecStderrBuffer}
 	cmd.Stderr = stderr
-	err := cmd.Run()
+	err := run(cmd)
 	status := -1
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		status = exit.ExitCode()
 	}
-	return podExecOutcome(ctx, argv[0], stdout.Bytes(), stderr.buf, status, err)
+	return podExecOutcome(ctx, name, stdout.Bytes(), stderr.buf, status, err)
 }
 
 // tailWriter keeps the last max bytes written to it, so a child that writes

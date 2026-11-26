@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -14,6 +16,63 @@ func TestProductionPodExecRefusesAnEmptyArgv(t *testing.T) {
 	t.Parallel()
 	if _, _, err := productionPodExec(t.Context(), nil, nil); err == nil {
 		t.Error("an empty argv gave no error")
+	}
+}
+
+// writeToPodExecStream writes to a stream collectPodExec wired, and does nothing
+// when it wired none, so a row fails on the empty answer instead of a nil panic.
+func writeToPodExecStream(w io.Writer, s string) {
+	if w != nil {
+		fmt.Fprint(w, s)
+	}
+}
+
+// TestCollectPodExecReadsAfterTheRun pins that collectPodExec reads the child's
+// stdout and stderr after run has filled them: taking the bytes as arguments to
+// podExecOutcome before run gives the right status with an empty reply
+// (gt-czrolh).
+func TestCollectPodExecReadsAfterTheRun(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		run        func(*exec.Cmd) error
+		wantOut    string
+		wantStatus int
+		wantErr    string
+	}{
+		{
+			name: "success returns the stdout written during the run",
+			run: func(cmd *exec.Cmd) error {
+				writeToPodExecStream(cmd.Stdout, "out\n")
+				writeToPodExecStream(cmd.Stderr, "refused")
+				return nil
+			},
+			wantOut: "out\n",
+		},
+		{
+			name: "a failing run's error carries the stderr written during the run",
+			run: func(cmd *exec.Cmd) error {
+				writeToPodExecStream(cmd.Stdout, "out\n")
+				writeToPodExecStream(cmd.Stderr, "refused")
+				return errors.New("exit status 1")
+			},
+			wantErr: "refused",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, status, err := collectPodExec(t.Context(), &exec.Cmd{}, "kubectl", tt.run)
+			if tt.wantErr == "" {
+				if err != nil || string(out) != tt.wantOut || status != tt.wantStatus {
+					t.Fatalf("collectPodExec = %q, %d, %v; want %q, %d, no error", out, status, err, tt.wantOut, tt.wantStatus)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || string(out) != tt.wantOut || status != tt.wantStatus {
+				t.Fatalf("collectPodExec = %q, %d, %v; want %q, %d and an error containing %q", out, status, err, tt.wantOut, tt.wantStatus, tt.wantErr)
+			}
+		})
 	}
 }
 
