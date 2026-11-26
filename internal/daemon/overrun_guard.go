@@ -176,13 +176,19 @@ type overrunKeptReadStore struct {
 	// the guard tick stores it (setBlind); a caller that lists the seats for
 	// another purpose leaves it alone.
 	blind int
+	// blindErr is the first of those beads' read errors in the tick's walk
+	// order, so the alarm can say why the guard was blind rather than only how
+	// often (gt-32qsly). It is empty exactly when blind is zero.
+	blindErr string
 }
 
-// setBlind stores the count the guard tick just made, zero when it dropped none.
-func (s *overrunKeptReadStore) setBlind(n int) {
+// setBlind stores the count and first error the guard tick just made; both are
+// zero and empty when it dropped none.
+func (s *overrunKeptReadStore) setBlind(n int, firstErr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blind = n
+	s.blindErr = firstErr
 }
 
 // blindSeats is the count the last guard tick stored.
@@ -190,6 +196,13 @@ func (s *overrunKeptReadStore) blindSeats() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.blind
+}
+
+// blindError is the first read error the last guard tick stored.
+func (s *overrunKeptReadStore) blindError() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blindErr
 }
 
 // keep records st, read at at, as bead's last good read.
@@ -1161,24 +1174,25 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 // work, is idle and absent. It has other callers than the guard (the overseer
 // report), so it records nothing about the guard's tick.
 func (d *Daemon) overrunWorkingSeats() []overrunSeat {
-	seats, _ := d.overrunWalkSeats()
+	seats, _, _ := d.overrunWalkSeats()
 	return seats
 }
 
 // overrunTickSeats is the seat list the guard's tick judges: the same walk, and
-// the count of seats it dropped for an unreadable bead with no usable kept read,
-// stored for overrunBlindSeats. Only the tick takes this path, so another
-// caller of overrunWorkingSeats cannot wipe the count.
+// the count of seats it dropped for an unreadable bead with no usable kept read
+// and the first such error, stored for overrunBlindSeats and overrunBlindError.
+// Only the tick takes this path, so another caller of overrunWorkingSeats cannot
+// wipe them.
 func (d *Daemon) overrunTickSeats() ([]overrunSeat, error) {
-	seats, blind := d.overrunWalkSeats()
-	d.overrunKeptReads.setBlind(blind)
+	seats, blind, firstErr := d.overrunWalkSeats()
+	d.overrunKeptReads.setBlind(blind, firstErr)
 	return seats, nil
 }
 
-// overrunWalkSeats walks the known rigs' polecats and returns the working seats
-// and how many it dropped because the seat's bead could not be read and no
-// usable kept read stood in.
-func (d *Daemon) overrunWalkSeats() (seats []overrunSeat, blind int) {
+// overrunWalkSeats walks the known rigs' polecats and returns the working seats,
+// how many it dropped because the seat's bead could not be read and no usable
+// kept read stood in, and the first such error in walk order.
+func (d *Daemon) overrunWalkSeats() (seats []overrunSeat, blind int, firstErr string) {
 	for _, rigName := range d.getKnownRigs() {
 		polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
 		names, err := listPolecatWorktrees(polecatsDir)
@@ -1186,16 +1200,19 @@ func (d *Daemon) overrunWalkSeats() (seats []overrunSeat, blind int) {
 			continue // a rig without polecats
 		}
 		for _, name := range names {
-			seat, ok, wasBlind := d.overrunSeatRead(polecatsDir, rigName, name)
-			if wasBlind {
+			seat, ok, blindErr := d.overrunSeatRead(polecatsDir, rigName, name)
+			if blindErr != "" {
 				blind++
+				if firstErr == "" {
+					firstErr = blindErr
+				}
 			}
 			if ok {
 				seats = append(seats, seat)
 			}
 		}
 	}
-	return seats, blind
+	return seats, blind, firstErr
 }
 
 // overrunSeatFor reads one polecat's seat state, false when it is idle or
@@ -1206,34 +1223,44 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	return seat, ok
 }
 
-// overrunSeatRead is overrunSeatFor and whether the seat was dropped because its
-// bead could not be read and no usable kept read stood in (gt-tqv1dk).
-func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overrunSeat, ok, blind bool) {
+// blindText is the text the tick keeps for a blind seat. An error with no text
+// still marks the seat blind, so the count and the text never disagree.
+func blindText(err error) string {
+	if msg := err.Error(); msg != "" {
+		return msg
+	}
+	return "bead read failed with no error text"
+}
+
+// overrunSeatRead is overrunSeatFor and, when the seat was dropped because its
+// bead could not be read and no usable kept read stood in, that read's error
+// text; otherwise the text is empty (gt-tqv1dk).
+func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overrunSeat, ok bool, blindErr string) {
 	seat = overrunSeat{Rig: rigName, Polecat: name}
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(
 		supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, name)))
 	if err != nil {
 		d.logger.Printf("overrun_guard: %s/%s: cannot read intent record: %v", rigName, name, err)
-		return seat, false, false
+		return seat, false, ""
 	}
 	seat.Parked = rec.Held()
 	seat.Submitted = rec.Submitted()
 	seat.RestartedAt = latestRestart(rec.Restarts)
 	if seat.Parked || seat.Submitted {
-		return seat, false, false // nothing to time, and no reason to spend a bd read
+		return seat, false, "" // nothing to time, and no reason to spend a bd read
 	}
 
 	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), name)
 	alive, err := d.tmux.HasSession(sessionName)
 	if err != nil || !alive {
-		return seat, false, false
+		return seat, false, ""
 	}
 	if created, err := d.tmux.GetSessionCreatedTime(sessionName); err == nil {
 		seat.SessionStart = created
 	}
 	if d.gtDoneInFlight(sessionName) {
 		seat.Submitted = true
-		return seat, false, false // gt done is running; its intent record and label come minutes later
+		return seat, false, "" // gt done is running; its intent record and label come minutes later
 	}
 
 	bead := rec.WorkBead
@@ -1241,11 +1268,11 @@ func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overru
 		bead, err = d.assignedActiveWorkBead(rigName, fmt.Sprintf("%s/polecats/%s", rigName, name))
 		if err != nil {
 			d.logger.Printf("overrun_guard: %s/%s: cannot read assigned work: %v", rigName, name, err)
-			return seat, false, false
+			return seat, false, ""
 		}
 	}
 	if bead == "" {
-		return seat, false, false
+		return seat, false, ""
 	}
 	// One read answers the seat's whole bead: whether its work is over, its
 	// labels, and the end of the run a submission made. A bead that cannot be
@@ -1257,7 +1284,7 @@ func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overru
 		kept, age, ok := d.overrunKeptReads.judgeable(bead, d.clk().Now())
 		if !ok {
 			d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, not judging it this tick: %v", rigName, name, bead, err)
-			return seat, false, true
+			return seat, false, blindText(err)
 		}
 		d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, judged on a read %d minutes old: %v", rigName, name, bead, int(age.Minutes()), err)
 		st = kept
@@ -1267,7 +1294,7 @@ func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overru
 		d.overrunKeptReads.keep(bead, st, d.clk().Now())
 	}
 	if st.closed {
-		return seat, false, false
+		return seat, false, ""
 	}
 	seat.Bead = bead
 	seat.Submitted = st.submitted
@@ -1280,14 +1307,17 @@ func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overru
 			seat.Branch = branch
 		}
 	}
-	return seat, true, false
+	return seat, true, ""
 }
 
 // overrunBlindSeats is the number of seats the guard's last tick dropped
-// because their bead could not be read and no usable kept read stood in. Nothing
-// reads it yet: the alarm that will, after three such ticks in a row, is the
-// next bead of the split, gt-35d8ae.
+// because their bead could not be read and no usable kept read stood in, and
+// overrunBlindError is the first such read error in that tick. Nothing reads
+// either yet: the alarm that will, after three such ticks in a row, is the next
+// bead of the split, gt-35d8ae.
 func (d *Daemon) overrunBlindSeats() int { return d.overrunKeptReads.blindSeats() }
+
+func (d *Daemon) overrunBlindError() string { return d.overrunKeptReads.blindError() }
 
 // gtDoneInFlight reports whether the session's heartbeat says gt done is
 // running. gt done writes state exiting first (internal/done/done.go) and renews
