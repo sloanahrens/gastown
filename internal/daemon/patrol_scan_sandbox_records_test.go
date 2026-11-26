@@ -37,7 +37,12 @@ type recordReap struct {
 	copied       []session.SandboxRecord // the records the outbox copy was asked to copy
 	copyErr      error                   // the outbox copy's failure, read on each call: a test may change it between passes
 	logs         strings.Builder
+	agents       *beadsfake.Fake // the town's bead store: the seat's agent bead and the seat's own bead
 }
+
+// recordReapResult is the seat's result.json as the outbox copy writes it: a done
+// result that carries one finding, so the seat end has something to apply.
+const recordReapResult = `{"bead_id":"gt-x","status":"done","findings":["the retry never resets its counter"]}`
 
 type recordReapOpts struct {
 	age        time.Duration // the record's age at the fixed clock; negative leaves CreatedAt zero
@@ -85,6 +90,7 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	r.agents = agents
 	openRecoveryBeads := func([]string) beads.Client { return agents }
 	if o.agentErr != nil {
 		openRecoveryBeads = func([]string) beads.Client {
@@ -119,7 +125,7 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(dir, "result.json"), []byte(`{"bead_id":"gt-x"}`), 0o600)
+		return os.WriteFile(filepath.Join(dir, "result.json"), []byte(recordReapResult), 0o600)
 	}
 	if !o.noDeleter {
 		r.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
@@ -369,6 +375,44 @@ func TestPatrolScanSandboxRecordsDeletesOnALaterPassOnceTheCopySucceeds(t *testi
 	}
 	if r.recorded() {
 		t.Error("the record is still there after the later pass deleted the sandbox")
+	}
+}
+
+// A sandbox whose outbox copy failed on one pass is copied and deleted on a later
+// pass, and the seat end that reads the host copy afterwards applies the outbox to
+// its bead: the seat's finding is the bead's comment, and the applied record names
+// the bead as escalated and ready (gt-dytj5h).
+func TestPatrolScanSandboxRecordsSeatEndAppliesTheOutboxCopiedOnALaterPass(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, copyErr: errors.New("exec: transport error")})
+	if _, err := r.agents.Create(beads.CreateOptions{ID: "gt-x", Title: "the seat's task", Priority: 1}); err != nil {
+		t.Fatal(err)
+	}
+	r.host.patrolScanSandboxRecords()
+	if !r.recorded() {
+		t.Fatal("the first pass removed the record although the outbox copy failed")
+	}
+	r.copyErr = nil
+	r.host.patrolScanSandboxRecords()
+	if r.recorded() {
+		t.Fatal("the later pass kept the record after its outbox copy succeeded")
+	}
+	if reason := r.host.applySeatOutbox("gastown", "capable", "gt-x"); reason != "" {
+		t.Fatalf("the seat end kept the seat for the outbox copied on a later pass: %s", reason)
+	}
+	comments, err := r.agents.Comments("gt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Text != "the retry never resets its counter" {
+		t.Errorf("the bead's comments = %+v, want the seat's one finding", comments)
+	}
+	applied, have, err := readAppliedSeatOutbox(r.town, "gastown", "capable")
+	if err != nil || !have {
+		t.Fatalf("applied record (have=%v, err=%v), want one for the outbox the seat end applied", have, err)
+	}
+	if applied.Bead != "gt-x" || !applied.Escalated || !applied.Ready {
+		t.Errorf("applied record = %+v, want bead gt-x escalated and ready", applied)
 	}
 }
 
