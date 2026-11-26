@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // AheadOutcome is what one review made ahead of a landing came to.
@@ -36,30 +37,47 @@ const aheadSourcePool = "pool"
 // The outcome is empty when err is set, so a caller that switches on it
 // cannot mistake a failed read for a skipped review.
 func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) {
+	outcome, _, err := l.reviewAhead(ctx, w)
+	return outcome, err
+}
+
+// aheadBuilt is the review input and key a clean merge's review is made for:
+// In is the input Land's om stage hands om for the same bead and merge, and Key
+// is the key reviewKey computes from it. reviewAhead returns it so a test can
+// hold both against what the landing builds.
+type aheadBuilt struct {
+	In  ReviewInput
+	Key ReviewKey
+}
+
+// reviewAhead is ReviewAhead with the input and key it built. Only a clean merge
+// that reaches the review point returns a built value; every other outcome and
+// every error returns the zero aheadBuilt.
+func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBuilt, error) {
 	if l.Ahead == nil {
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	issue, err := l.Beads.Show(w.BeadID)
 	if err != nil {
-		return "", &InfraError{Stage: "read bead", Err: err}
+		return "", aheadBuilt{}, &InfraError{Stage: "read bead", Err: err}
 	}
 	if issue == nil {
-		return "", &InfraError{Stage: "read bead", Err: errors.New("no bead returned for " + w.BeadID)}
+		return "", aheadBuilt{}, &InfraError{Stage: "read bead", Err: errors.New("no bead returned for " + w.BeadID)}
 	}
 	// The same readiness tests Land makes, in the same order, so a bead the
 	// pool reviews is one the landing would not skip.
 	if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	if !beads.HasLabel(issue, LabelReadyToLand) {
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	if policyRejection(issue) != nil {
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	// The overseer reviewed this head in place of om, so it needs no review.
 	if OverseerReviewed(issue, w.Head) {
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	// started is when this review began: the land log dates it, and a conflict
 	// record stores it as started_at.
@@ -67,20 +85,20 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
 	g := l.open(l.Repo)
 	if err := l.aheadFetches(g, w); err != nil {
-		return "", err
+		return "", aheadBuilt{}, err
 	}
 	// The base is the target tip the fetch just brought in, resolved the way
 	// Land resolves it before it cuts its own worktree.
 	base, err := g.Rev(l.remote() + "/" + w.Target)
 	if err != nil {
-		return "", &InfraError{Stage: "resolve target", Err: err}
+		return "", aheadBuilt{}, &InfraError{Stage: "resolve target", Err: err}
 	}
 	// addReviewWorktree takes gitMu for the git calls it makes, and the lock is
 	// not reentrant: aheadFetches has released it, so this call takes it
 	// itself. Holding it here would deadlock the add.
 	wt, dir, cleanup, err := l.addReviewWorktree(g, w, base)
 	if err != nil {
-		return "", &InfraError{Stage: "review worktree", Err: err}
+		return "", aheadBuilt{}, &InfraError{Stage: "review worktree", Err: err}
 	}
 	// Every return below this line, and a panic's unwind, removes the worktree
 	// and the review directory that holds it.
@@ -90,7 +108,7 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	// nil error and the merge aborted.
 	out, err := mergeWork(wt, w, base)
 	if err != nil {
-		return "", err
+		return "", aheadBuilt{}, err
 	}
 	if out.Rejection != nil {
 		// The submission does not merge onto the target, so no verdict can be
@@ -108,20 +126,20 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 			Source:     aheadSourcePool,
 		}
 		if err := l.Ahead.Put(rec); err != nil {
-			return "", &InfraError{Stage: "store record", Err: err}
+			return "", aheadBuilt{}, &InfraError{Stage: "store record", Err: err}
 		}
-		return AheadConflict, nil
+		return AheadConflict, aheadBuilt{}, nil
 	}
 	merged := out.Commit
 	// A merge that leaves the target's tree unchanged is what Land refuses as
 	// empty, so om has nothing to judge and there is nothing to store.
 	same, err := wt.TreesIdentical(base, merged)
 	if err != nil {
-		return "", &InfraError{Stage: "compare trees", Err: err}
+		return "", aheadBuilt{}, &InfraError{Stage: "compare trees", Err: err}
 	}
 	if same {
 		l.logf("%s: ahead merge of %s leaves %s/%s unchanged", w.BeadID, shortSHA(w.Head), l.remote(), w.Target)
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	// A landing that edits the root .om.json changes the bar om judges it
 	// against, so it waits for the overseer rather than om (gt-93hf4): the
@@ -132,16 +150,53 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 	// submission with nothing to review.
 	paths, err := g.DiffNameOnly(base, merged)
 	if err != nil {
-		return "", &InfraError{Stage: "read changed paths", Err: err}
+		return "", aheadBuilt{}, &InfraError{Stage: "read changed paths", Err: err}
 	}
 	if slices.Contains(paths, omConfigFile) {
 		l.logf("%s: ahead merge of %s edits %s, which waits for the overseer", w.BeadID, shortSHA(w.Head), omConfigFile)
-		return AheadSkipped, nil
+		return AheadSkipped, aheadBuilt{}, nil
+	}
+	// The input and key are built for the review the next bead runs, so a key
+	// that cannot be computed is returned here rather than when om runs.
+	// reviewKey runs off gitMu. Its git reads are of the base and merged commits,
+	// which do not change, and the om config it reads is a file, not a git
+	// write. Its om version probe is a subprocess that must not hold the lock.
+	in, err := l.aheadInput(issue, w, base, merged, dir, g)
+	if err != nil {
+		return "", aheadBuilt{}, err
+	}
+	key, _, err := l.reviewKey(ctx, g, wt, w, in, base, merged)
+	if err != nil {
+		return "", aheadBuilt{}, &InfraError{Stage: "review key", Err: err}
 	}
 	// NEXT BEAD: here the review runs om on the merged tree and stores the
 	// verdict. Until that lands, a clean merge that reaches this point is
-	// AheadSkipped and the landing runs om inline; ctx is unused.
-	return AheadSkipped, nil
+	// AheadSkipped and the landing runs om inline.
+	return AheadSkipped, aheadBuilt{In: in, Key: key}, nil
+}
+
+// aheadInput assembles the review input for w the way Land's om stage does: the
+// bead's comments, the operator identities, the accepted-risk text the comments
+// carry, the rounds text, and BuildReviewInput over them, with the work's
+// branch and the review directory. The equality test runs Land and compares the
+// two inputs, so a change to either copy fails it.
+//
+// Where Land logs an unreadable comment or settings file and reviews without
+// it, this returns the error: the pool makes no key for an input it cannot read
+// in full. The rounds text is the exception, by design: roundsText turns a
+// ledger read error into "", on both sides, which is the input om is given.
+func (l *Lander) aheadInput(issue *beads.Issue, w Work, base, merged, dir string, g Repo) (in ReviewInput, err error) {
+	comments, err := l.Beads.Comments(issue.ID)
+	if err != nil {
+		return in, &InfraError{Stage: "read comments", Err: err}
+	}
+	op, err := config.LoadOperatorConfig(l.TownRoot)
+	if err != nil {
+		return in, &InfraError{Stage: "read operator config", Err: err}
+	}
+	accepted := AcceptedRisksText(comments, op)
+	in = BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
+	return in, nil
 }
 
 // aheadNow is the clock a review is dated by: the store's clock when it sets
@@ -157,8 +212,7 @@ func (l *Lander) aheadNow() time.Time {
 // the two fetches Land makes before it checks the head out. They run under the
 // shared git lock, which the deferred unlock releases on every return path and
 // on a panic's unwind. The lock lives here, not in ReviewAhead, because it is
-// not reentrant and the worktree add a later bead makes after the fetches takes
-// it for itself.
+// not reentrant and the worktree add that follows takes it for itself.
 //
 // A submission the landing would refuse as not pushed has no head to review, so
 // its rejection is returned as an error: the pool writes no bead and rejects
