@@ -18,9 +18,8 @@ func readySubmission(id, branch, head string) *beads.Issue {
 }
 
 // TestReviewPoolWorkerReviewWorksBuilds pins that reviewWorks builds one work
-// for each issue given, in the order given, each with the branch and head of
-// its own submission, so the pool reviews the head the landing will take
-// (gt-uuvtbv).
+// for each issue given, each with the branch and head of its own submission,
+// so the pool reviews the head the landing will take (gt-uuvtbv).
 func TestReviewPoolWorkerReviewWorksBuilds(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -47,6 +46,40 @@ func TestReviewPoolWorkerReviewWorksBuilds(t *testing.T) {
 			t.Fatalf("work %d rig = %q; want the worker's rig %q", i, got.Rig, h.w.Rig)
 		}
 	}
+}
+
+// TestReviewPoolWorkerReviewWorksOrder pins that reviewWorks offers the works
+// in the order the landing takes them, whatever order the issues arrive in: a
+// P0 first, then the earliest submission, priority and then ID breaking a tie
+// (gt-vh5psa).
+func TestReviewPoolWorkerReviewWorksOrder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	// Given newest first with the P0 in the middle, so the input order is
+	// neither the landing order nor its reverse.
+	issues := []*beads.Issue{
+		readyIssue("gt-late", 2, "2026-09-30T13:00:00Z", "2026-09-30T13:00:00Z"),
+		readyIssue("gt-hot", 0, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+		readyIssue("gt-tie-b", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-tie-a", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-old", 3, "2026-09-30T09:00:00Z", "2026-09-30T09:00:00Z"),
+	}
+
+	works, err := h.w.reviewWorks(issues, "")
+	if err != nil {
+		t.Fatalf("reviewWorks: %v", err)
+	}
+	if got, want := workOrder(works), "gt-hot,gt-old,gt-tie-a,gt-tie-b,gt-late"; got != want {
+		t.Fatalf("reviewWorks order = %s; want %s", got, want)
+	}
+}
+
+func workOrder(works []land.Work) string {
+	ids := make([]string, 0, len(works))
+	for _, w := range works {
+		ids = append(ids, w.BeadID)
+	}
+	return strings.Join(ids, ",")
 }
 
 // TestReviewPoolWorkerReviewWorksReturnsUnreadableSubmission pins that an
