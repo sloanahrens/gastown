@@ -320,12 +320,21 @@ func TestRosterResultEqualsTheSequentialRead(t *testing.T) {
 }
 
 // TestTickEffRosterRigsWithSeats is gt-vg9vyi: only the rigs with a polecat are
-// read, so a five-rig town with seats in two reads the batch for those two.
+// read, so a five-rig town with seats in two reads the batch for those two. The
+// seat picture over those two is the picture over every rig, so the filter
+// changes what is read, not what is seen (gt-08ba12).
 func TestTickEffRosterRigsWithSeats(t *testing.T) {
 	t.Parallel()
 	town, dbs, lister := rosterTown(t, map[string][]string{
 		"arig": {"p1"}, "brig": {"p1"}, "crig": {}, "drig": {}, "erig": {},
 	})
+	lister.sessions["ar-p1"] = map[string]string{"GT_ROLE": "arig/polecats/p1", "GT_AGENT": "deepseek-flash"}
+	lister.created = map[string]time.Time{
+		"ar-p1": time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC),
+	}
+	at := func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }
+	pool := seatPool("deepseek-flash", 10)
+
 	var mu sync.Mutex
 	var read []string
 	storeFor := func(dir string) beads.Client {
@@ -334,12 +343,37 @@ func TestTickEffRosterRigsWithSeats(t *testing.T) {
 		mu.Unlock()
 		return dbs[filepath.Base(dir)]
 	}
-	if _, err := rosterSnapshotOn(rosterBatch(town, storeFor, 4), nil, town, seatPool("deepseek-flash", 10), lister, time.Now); err != nil {
+	filtered, err := rosterSnapshotOn(rosterBatch(town, storeFor, 4), nil, town, pool, lister, at)
+	if err != nil {
 		t.Fatalf("roster read: %v", err)
 	}
 	sort.Strings(read)
 	if want := []string{"arig", "brig"}; !reflect.DeepEqual(read, want) {
 		t.Errorf("the batch was read for %v, want %v", read, want)
+	}
+
+	every := rosterBatch(town, func(rigName string) beads.Client { return dbs[rigName] }, 4)
+	if err := every.readRigs([]string{"arig", "brig", "crig", "drig", "erig"}); err != nil {
+		t.Fatalf("every-rig batch read: %v", err)
+	}
+	all, err := poolSeatSnapshotWith(lister, town, every.disposition, nil, pool, at)
+	if err != nil {
+		t.Fatalf("all-rigs roster read: %v", err)
+	}
+
+	sorted := func(sessions []poolSession) []poolSession {
+		out := append([]poolSession(nil), sessions...)
+		sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+		return out
+	}
+	if len(filtered.sessions) == 0 {
+		t.Fatalf("the fixture's seat picture is empty, so equality proves nothing")
+	}
+	if !reflect.DeepEqual(sorted(filtered.sessions), sorted(all.sessions)) {
+		t.Errorf("filtered seats = %+v, want the all-rigs seats %+v", filtered.sessions, all.sessions)
+	}
+	if !reflect.DeepEqual(filtered.released, all.released) {
+		t.Errorf("filtered released seats = %v, want %v", filtered.released, all.released)
 	}
 }
 
