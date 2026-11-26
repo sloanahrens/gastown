@@ -1040,6 +1040,50 @@ else
   fail "lint-lock-wait: a lint contended twice is retried and passes (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
 fi
 
+# A clock that steps backward across the wait bound (gt-ez0s65): whole seconds
+# 100, then 99. Without the clamp the elapsed time is -1, a zero bound never
+# ends, and the lint runs a second time (gt-0ygn63).
+cat >"$TMP/backstep-clock" <<'STUB'
+#!/usr/bin/env bash
+n=$(( $(wc -l <"$STUB_CLOCK_LOG") ))
+echo "tick" >>"$STUB_CLOCK_LOG"
+echo $(( 100 - n ))
+STUB
+chmod +x "$TMP/backstep-clock"
+: >"$TMP/clocks"
+rc=$(lock_wait 0 STUB_CONTEND=1 LINT_LOCK_CLOCK="$TMP/backstep-clock" STUB_CLOCK_LOG="$TMP/clocks")
+if [[ "$rc" == 3 ]] && [[ $(wc -l <"$TMP/calls") -eq 1 ]] && grep -q -F 'nothing was linted' "$TMP/err"; then
+  pass "lint-lock-wait: a backward clock step is clamped, so a zero wait still lints once and exits with the lint's code"
+else
+  fail "lint-lock-wait: a backward clock step is clamped, so a zero wait still lints once and exits with the lint's code (rc=$rc)" "$(cat "$TMP/calls" "$TMP/clocks" "$TMP/out" "$TMP/err")"
+fi
+
+rc=$(lock_wait 0 STUB_CONTEND=99 LINT_LOCK_CLOCK="$TMP/no-such-clock")
+if [[ "$rc" == 2 ]] && [[ ! -s "$TMP/calls" ]] && grep -q -F 'LINT_LOCK_CLOCK' "$TMP/err"; then
+  pass "lint-lock-wait: a clock seam that cannot run is refused instead of leaving the wait at 0s"
+else
+  fail "lint-lock-wait: a clock seam that cannot run is refused instead of leaving the wait at 0s (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
+fi
+
+# The same backward step under a positive bound: the clock never gets back to
+# its start, so only the pauses already slept can end the wait. A recording
+# sleep on PATH keeps the row from waiting (gt-0ygn63).
+mkdir -p "$TMP/sleep-bin"
+cat >"$TMP/sleep-bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "$1" >>"$STUB_SLEEP_LOG"
+STUB
+chmod +x "$TMP/sleep-bin/sleep"
+: >"$TMP/clocks"
+: >"$TMP/slept"
+rc=0
+env PATH="$TMP/sleep-bin:$PATH" STUB_LOG="$TMP/calls" STUB_CONTEND=5 STUB_SLEEP_LOG="$TMP/slept" STUB_CLOCK_LOG="$TMP/clocks" LINT_LOCK_POLL=10 LINT_LOCK_CLOCK="$TMP/backstep-clock" bash "$ROOT/scripts/lint-lock-wait.sh" 30 "$TMP/contended-lint" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 3 ]] && [[ $(wc -l <"$TMP/calls") -eq 3 ]] && [[ $(wc -l <"$TMP/slept") -eq 2 ]] && grep -q -F 'nothing was linted' "$TMP/err"; then
+  pass "lint-lock-wait: a backward clock step does not stretch a positive wait bound; the pauses slept still count"
+else
+  fail "lint-lock-wait: a backward clock step does not stretch a positive wait bound; the pauses slept still count (rc=$rc)" "$(cat "$TMP/calls" "$TMP/slept" "$TMP/out" "$TMP/err")"
+fi
+
 rc=$(lock_wait 0 STUB_CONTEND=99)
 if [[ "$rc" == 3 ]] && [[ $(wc -l <"$TMP/calls") -eq 1 ]] && grep -q -F 'parallel golangci-lint is running' "$TMP/out" && grep -q -F 'nothing was linted' "$TMP/err"; then
   pass "lint-lock-wait: still contended at the wait bound exits with the lint's code and keeps the lock line"
