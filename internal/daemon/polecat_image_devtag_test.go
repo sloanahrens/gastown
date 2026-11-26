@@ -606,6 +606,10 @@ func TestPolecatImageDevTagRunsBesideTheLoop(t *testing.T) {
 		"landing_infra":    true,
 		"resource_sampler": true,
 		"spec_dispatch":    true,
+		// Run starts the sweep smoke launch for an active tier_sweep (gt-r2497d): a
+		// real git in the rig's .repo.git and a record written into the town, in a
+		// goroutine nothing waits for. The test is about the dev tag copy.
+		"tier_sweep": true,
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
