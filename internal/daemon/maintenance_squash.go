@@ -1456,23 +1456,29 @@ func squashAlertedClockKey(db string) string {
 
 // raiseSquashDeferAlert raises the deferral alert for db when the gc flag has
 // held its squash checks for squashDeferAlertAfter, and returns the delivery
-// error when it does. A database with no deferral stamp and one deferred for
-// less than a day raise nothing. The stamp is read from the alert clock, so a
-// daemon roll does not restart the wait (gt-b8na21).
+// error when it does. A database with no deferral stamp, one deferred for less
+// than a day and one already marked alerted raise nothing. The stamp is read
+// from the alert clock, so a daemon roll does not restart the wait (gt-b8na21).
 //
-// A delivered alert is marked under squashAlertedClockKey, so the alerted fact
-// is on disk; reading the mark to raise no second alert is gt-w9z5ob. A failed
-// delivery, and a mark that cannot be written, return their error and leave no
-// mark, so the next deferral asks again (gt-7z081y) rather than losing the
-// alert. The deferral site (gt-2o03sg) is the caller; until it lands this
+// A delivered alert is marked under squashAlertedClockKey, and the mark is read
+// back here, so a marked database raises no second alert however often the
+// deferral asks (gt-w9z5ob). A mark that cannot be read or parsed reads as not
+// alerted, so once the day is up the alert is raised again and the mark
+// rewritten: the clock's contract puts one extra alert ahead of hiding the
+// condition (alert_clock.go).
+// A failed delivery, and a mark that cannot be written, return their error and
+// leave no mark, so the next deferral asks again (gt-7z081y) rather than losing
+// the alert. The deferral site (gt-2o03sg) is the caller; until it lands this
 // function has none, and this bead's test is what drives it.
 func (d *Daemon) raiseSquashDeferAlert(db string, now time.Time) error {
+	clock := alertClock{dir: alertClockPath(d.config.TownRoot)}
 	first := d.squashDeferredSince(db)
-	if !squashDeferAlertDueSince(first, now, false) {
+	_, alerted := clock.last(squashAlertedClockKey(db))
+	if !squashDeferAlertDueSince(first, now, alerted) {
 		return nil
 	}
 	if err := d.escalateAlertErr("squash:gc-flag-held:"+db, "squash", squashDeferAlertMessage(db, now.Sub(first))); err != nil {
 		return err
 	}
-	return alertClock{dir: alertClockPath(d.config.TownRoot)}.stamp(squashAlertedClockKey(db), now)
+	return clock.stamp(squashAlertedClockKey(db), now)
 }

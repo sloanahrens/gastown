@@ -592,7 +592,9 @@ func TestSquashDeferAlertRaise(t *testing.T) {
 // TestSquashDeferAlertRaisesOnce pins the mark a delivered alert leaves: a call
 // a day after the database's first deferral raises one alert and stamps the
 // alert clock under squash-alerted:<db> at the call's instant. A call that
-// raises nothing and one whose delivery failed leave no mark (gt-jyjnxd).
+// raises nothing and one whose delivery failed leave no mark (gt-jyjnxd). A
+// database holding the mark raises no second alert, however many times it is
+// asked (gt-w9z5ob).
 func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 	t.Parallel()
 	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
@@ -601,10 +603,15 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 		name string
 		db   string
 		now  time.Time
+		// calls is how many times the function is called at now; zero means
+		// once.
+		calls int
 		// deliveryErr is what the notifier fake returns for the escalation.
 		deliveryErr error
 		// blockMark puts a directory where the mark's entry goes.
 		blockMark bool
+		// strangeMark puts a mark that is not a timestamp where the entry goes.
+		strangeMark bool
 		// wantCalls counts the escalation attempts; wantErr requires an error
 		// (the delivery's when deliveryErr is set); wantMarked is whether the
 		// clock holds squash-alerted:<db> at now.
@@ -618,6 +625,31 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 			now:        first.Add(24 * time.Hour),
 			wantCalls:  1,
 			wantMarked: true,
+		},
+		{
+			name:       "two calls a day after the first deferral raise one alert",
+			db:         "gt",
+			now:        first.Add(24 * time.Hour),
+			calls:      2,
+			wantCalls:  1,
+			wantMarked: true,
+		},
+		{
+			name: "two calls a week after the first deferral raise one alert",
+			db:   "gt",
+			now:  first.Add(7 * 24 * time.Hour),
+			// The week's first call raises, later ones read the mark and wait.
+			calls:      5,
+			wantCalls:  1,
+			wantMarked: true,
+		},
+		{
+			name:        "a mark that is not a timestamp raises the alert again",
+			db:          "gt",
+			now:         first.Add(24 * time.Hour),
+			strangeMark: true,
+			wantCalls:   1,
+			wantMarked:  true,
 		},
 		{
 			name: "a call before the day is up raises nothing and leaves no mark",
@@ -658,8 +690,21 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 					t.Fatalf("blocking the mark's entry: %v", err)
 				}
 			}
+			if tc.strangeMark {
+				if err := os.MkdirAll(clock.dir, 0o700); err != nil {
+					t.Fatalf("creating the clock directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(clock.dir, key), []byte("not a timestamp\n"), 0o600); err != nil {
+					t.Fatalf("writing the strange mark: %v", err)
+				}
+			}
 
-			err := d.raiseSquashDeferAlert(tc.db, tc.now)
+			var err error
+			for i := 0; i < max(tc.calls, 1); i++ {
+				if err = d.raiseSquashDeferAlert(tc.db, tc.now); err != nil {
+					break
+				}
+			}
 			if tc.wantErr && err == nil {
 				t.Fatalf("raiseSquashDeferAlert(%q, %v) err = nil, want an error", tc.db, tc.now)
 			}
