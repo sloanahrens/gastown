@@ -424,7 +424,7 @@ func seedSquashArchiveThrough(t *testing.T, d *Daemon, at time.Time) {
 	if !at.IsZero() {
 		wm = ArchiveWatermark{Date: at, Hashes: []string{"seed"}}
 	}
-	if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm, squashTestNow); err != nil {
 		t.Fatalf("seeding the archive's through-date: %v", err)
 	}
 }
@@ -1535,7 +1535,7 @@ func TestSquashArchiveRefusesAThroughDateItCannotBound(t *testing.T) {
 	d, _, logs := squashDueDaemon(t)
 	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
 	through := squashTestNow.Add(-time.Hour)
-	if err := recordArchiveWatermark(d.config.TownRoot, "gt", ArchiveWatermark{Date: through}); err != nil {
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", ArchiveWatermark{Date: through}, squashTestNow); err != nil {
 		t.Fatal(err)
 	}
 	withSquashArchive(t, d, t.TempDir(), nil, 0)
@@ -2363,7 +2363,7 @@ func TestSquashRecordUnreadableStateFailsClosed(t *testing.T) {
 
 	// A readable state file, its one run recorded two hours back, so no
 	// database is due when the next check reads it.
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, squashTestNow, func(st *maintenanceGCState) {
 		st.Squash["gt"] = squashRunRecord{LastRun: squashTestNow, Outcome: squashOutcomeCompleted}
 		// The write over the corrupt file stamped the replacement with the real
 		// time, which is ahead of this test's fixed clock: this test is about a
@@ -2466,7 +2466,7 @@ func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
 			// cannot read now fails closed, so the write is made to fail under
 			// the run: the path becomes a directory, which no rename writes over.
 			setup: func(t *testing.T, d *Daemon) {
-				if _, err := updateMaintenanceGCState(d.config.TownRoot, func(*maintenanceGCState) {}); err != nil {
+				if _, err := updateMaintenanceGCState(d.config.TownRoot, squashTestNow, func(*maintenanceGCState) {}); err != nil {
 					t.Fatalf("writing the readable state: %v", err)
 				}
 				d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
@@ -3434,7 +3434,7 @@ var (
 // holds when it holds one (gt-cbm58l).
 func resetState(t *testing.T, d *Daemon, stamp time.Time, copyPath string, record time.Time) {
 	t.Helper()
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, squashTestNow, func(st *maintenanceGCState) {
 		st.StateResetAt, st.StateResetCopy = stamp, copyPath
 		if !record.IsZero() {
 			st.Squash["gt"] = squashRunRecord{LastRun: record, Outcome: squashOutcomeCompleted}
@@ -3681,7 +3681,7 @@ func TestSquashCheckRunsNothingOnAFutureRecord(t *testing.T) {
 	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
 	calls := 0
 	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, squashTestNow, func(st *maintenanceGCState) {
 		st.Squash["gt"] = squashRunRecord{LastRun: squashTestNow.Add(24 * time.Hour), Outcome: squashOutcomeCompleted}
 	}); err != nil {
 		t.Fatal(err)

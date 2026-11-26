@@ -258,7 +258,7 @@ func TestMaintenanceCommitCursorSurvivesAFlatten(t *testing.T) {
 	// commits no longer exist, and a height cursor would now be far ahead of
 	// the rebuilt history's heights.
 	if err := recordArchiveWatermark(d.config.TownRoot, "gt",
-		ArchiveWatermark{Date: gcTestNow.Add(-72 * time.Hour), Hashes: []string{"old-boundary"}}); err != nil {
+		ArchiveWatermark{Date: gcTestNow.Add(-72 * time.Hour), Hashes: []string{"old-boundary"}}, gcTestNow); err != nil {
 		t.Fatalf("seeding the pre-flatten watermark: %v", err)
 	}
 
@@ -336,7 +336,7 @@ func TestMaintenanceCommitExportSelectsByArchivedHashSet(t *testing.T) {
 	if err := recordArchiveWatermark(d.config.TownRoot, "gt", ArchiveWatermark{
 		Date:   gcTestNow.Add(-time.Hour),
 		Hashes: []string{"h1"},
-	}); err != nil {
+	}, gcTestNow); err != nil {
 		t.Fatalf("seeding the watermark: %v", err)
 	}
 
@@ -603,7 +603,7 @@ func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.
 	d.patrolConfig = archiveConfig(dir)
 
 	old := ArchiveWatermark{Date: gcTestNow.Add(-48 * time.Hour), Hashes: []string{"old-gt"}}
-	if err := recordArchiveWatermark(d.config.TownRoot, "gt", old); err != nil {
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", old, d.clk().Now()); err != nil {
 		t.Fatalf("seeding gt's watermark: %v", err)
 	}
 	withArchiveFakes(d, f,
@@ -816,14 +816,14 @@ func TestLoadArchiveWatermarks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	wm := ArchiveWatermark{Date: gcTestNow, Hashes: []string{"abc123", "def456"}}
-	if err := recordArchiveWatermark(town, "gt", wm); err != nil {
+	if err := recordArchiveWatermark(town, "gt", wm, gcTestNow); err != nil {
 		t.Fatalf("recording commit watermark: %v", err)
 	}
 	events := EventsArchiveWatermark{
 		CreatedAt: "2026-10-01 03:00:00",
 		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 03:00:00", ID: "42"}},
 	}
-	if err := recordEventsArchiveWatermark(town, "gt", events); err != nil {
+	if err := recordEventsArchiveWatermark(town, "gt", events, gcTestNow); err != nil {
 		t.Fatalf("recording events watermark: %v", err)
 	}
 	got, err := LoadArchiveWatermarks(town)
@@ -1144,7 +1144,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 			CreatedAt: "2026-09-01 00:00:00",
 			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-09-01 00:00:00", ID: "7"}},
 		}
-		if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", old); err != nil {
+		if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", old, d.clk().Now()); err != nil {
 			t.Fatalf("seeding the events watermark: %v", err)
 		}
 		withArchiveFakes(d, f,
@@ -1239,7 +1239,7 @@ func TestMaintenanceEventsCursorReadsBackThroughTheLookbackWindow(t *testing.T) 
 		CreatedAt: "2026-10-01 02:00:00",
 		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 02:00:00", ID: "archived-at-cursor"}},
 	}
-	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded, d.clk().Now()); err != nil {
 		t.Fatalf("seeding the events watermark: %v", err)
 	}
 
@@ -2588,7 +2588,7 @@ func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
 	for _, row := range rows[:5] {
 		seeded.Archived = append(seeded.Archived, ArchivedEventsRow{CreatedAt: row[1], ID: row[0]})
 	}
-	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded, d.clk().Now()); err != nil {
 		t.Fatalf("seeding the events watermark: %v", err)
 	}
 	// A page bounded by rows, archived ones included: what a read over the
@@ -2669,7 +2669,7 @@ func TestArchiveEventsOneTimestampFillingAPageFailsVisibly(t *testing.T) {
 	for _, row := range rows[:5] {
 		seeded.Archived = append(seeded.Archived, ArchivedEventsRow{CreatedAt: row[1], ID: row[0]})
 	}
-	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded, d.clk().Now()); err != nil {
 		t.Fatalf("seeding the events watermark: %v", err)
 	}
 	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
@@ -2710,7 +2710,7 @@ func TestArchiveEventsRefusesAnUndateableArchivedPage(t *testing.T) {
 		CreatedAt: "2026-10-01 02:00:00",
 		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 02:00:00", ID: "h1"}},
 	}
-	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded, d.clk().Now()); err != nil {
 		t.Fatalf("seeding the events watermark: %v", err)
 	}
 	// The only row the read returns is already archived, and it is the whole
@@ -2839,7 +2839,7 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 		d.maint.now = func() time.Time { return gcTestNow }
 		withEventsFake(d, nil, nil, nil)
 		wm := ArchiveWatermark{Date: gcTestNow, Hashes: []string{"h1"}}
-		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm, d.clk().Now()); err != nil {
 			t.Fatal(err)
 		}
 		reads := 0
@@ -3179,7 +3179,7 @@ func TestMaintenanceArchiveNoProgressStopLeavesDatabaseUnmarked(t *testing.T) {
 		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
 		d.maint.now = func() time.Time { return gcTestNow }
 		wm := ArchiveWatermark{Date: gcTestNow, Hashes: []string{"h1"}}
-		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm, d.clk().Now()); err != nil {
 			t.Fatalf("seeding the watermark: %v", err)
 		}
 		commits := map[string][]archiveCommit{"gt": {
@@ -3276,7 +3276,7 @@ func TestMaintenanceArchiveStopRaisesNoAttentionItem(t *testing.T) {
 		d.patrolConfig = archiveConfig(dir)
 		withEventsFake(d, nil, nil, nil)
 		wm := ArchiveWatermark{Date: gcTestNow.Add(-time.Hour), Hashes: []string{"kept"}}
-		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm, d.clk().Now()); err != nil {
 			t.Fatalf("seeding the watermark: %v", err)
 		}
 		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {

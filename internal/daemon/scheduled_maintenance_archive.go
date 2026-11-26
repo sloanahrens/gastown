@@ -752,7 +752,7 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 		return 0, 0, wm, exp.fail(fmt.Errorf("writing %s: %w", path, err))
 	}
 
-	if err := recordArchiveWatermark(d.config.TownRoot, db, next); err != nil {
+	if err := recordArchiveWatermark(d.config.TownRoot, db, next, d.clk().Now()); err != nil {
 		return 0, 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 	}
 	d.logger.Printf("scheduled_maintenance: archive %s: %d commit(s) to %s, through %s (%d hash(es) at that date)",
@@ -913,7 +913,7 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		if err != nil {
 			return 0, 0, wm, exp.fail(err)
 		}
-		if err := recordEventsArchiveWatermark(d.config.TownRoot, db, next); err != nil {
+		if err := recordEventsArchiveWatermark(d.config.TownRoot, db, next, d.clk().Now()); err != nil {
 			return 0, 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 		}
 		d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
@@ -1172,8 +1172,8 @@ func writeArchiveMember(dst io.Writer, columns []string, rows [][]string, newFil
 }
 
 // recordArchiveWatermark advances one database's commit archive watermark.
-func recordArchiveWatermark(townRoot, db string, wm ArchiveWatermark) error {
-	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+func recordArchiveWatermark(townRoot, db string, wm ArchiveWatermark, now time.Time) error {
+	_, err := updateMaintenanceGCState(townRoot, now, func(st *maintenanceGCState) {
 		st.ArchiveWatermarks[db] = wm
 	})
 	return err
@@ -1181,8 +1181,8 @@ func recordArchiveWatermark(townRoot, db string, wm ArchiveWatermark) error {
 
 // recordEventsArchiveWatermark advances one database's events archive
 // watermark.
-func recordEventsArchiveWatermark(townRoot, db string, wm EventsArchiveWatermark) error {
-	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+func recordEventsArchiveWatermark(townRoot, db string, wm EventsArchiveWatermark, now time.Time) error {
+	_, err := updateMaintenanceGCState(townRoot, now, func(st *maintenanceGCState) {
 		st.ArchiveEventsWatermarks[db] = wm
 	})
 	return err

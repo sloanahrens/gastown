@@ -280,7 +280,7 @@ func (d *Daemon) recordGCDeferral(windowEnd time.Time, reason string, pending []
 	for _, c := range pending {
 		dbs = append(dbs, gcDeferredDB{Name: c.name, Bytes: c.before.total})
 	}
-	_, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	_, err := updateMaintenanceGCState(d.config.TownRoot, d.clk().Now(), func(st *maintenanceGCState) {
 		st.PendingDeferral = &gcDeferral{WindowEnd: windowEnd, Reason: reason, Databases: dbs}
 		st.LastDeferralReason = reason
 		if st.DeferralReasons == nil {
@@ -300,7 +300,7 @@ func (d *Daemon) resetGCDeferralStreak() {
 	if err == nil && st.PendingDeferral == nil && st.ConsecutiveDeferredWindows == 0 && len(st.DeferralReasons) == 0 {
 		return // nothing to reset; skip the write
 	}
-	_, err = updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+	_, err = updateMaintenanceGCState(d.config.TownRoot, d.clk().Now(), func(st *maintenanceGCState) {
 		st.PendingDeferral = nil
 		st.ConsecutiveDeferredWindows = 0
 		st.DeferralReasons = nil
@@ -320,7 +320,7 @@ func (d *Daemon) closeDeferredGCWindow(now time.Time) {
 		return
 	}
 	var closed gcDeferral
-	st, err = updateMaintenanceGCState(d.config.TownRoot, func(s *maintenanceGCState) {
+	st, err = updateMaintenanceGCState(d.config.TownRoot, d.clk().Now(), func(s *maintenanceGCState) {
 		if s.PendingDeferral == nil {
 			return
 		}

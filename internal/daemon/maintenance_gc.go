@@ -389,8 +389,9 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 // replaced rather than failing forever; a file that could not be read is not
 // replaced, and its error is returned with nothing written, because it may
 // still hold records a later read will find (gt-tv0919). fn's view is the state
-// fn writes; the returned copy is what landed.
-func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (maintenanceGCState, error) {
+// fn writes; the returned copy is what landed. now is the stamp a replacement
+// records: the caller's clock reading, so a test can drive it.
+func updateMaintenanceGCState(townRoot string, now time.Time, fn func(*maintenanceGCState)) (maintenanceGCState, error) {
 	maintenanceGCStateMu.Lock()
 	defer maintenanceGCStateMu.Unlock()
 
@@ -405,7 +406,7 @@ func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (ma
 		if copyErr != nil && !errors.Is(copyErr, errStateCopyStands) {
 			copyPath = "not kept: " + copyErr.Error()
 		}
-		st.StateResetAt, st.StateResetCopy = time.Now().UTC(), copyPath
+		st.StateResetAt, st.StateResetCopy = now.UTC(), copyPath
 	case err != nil:
 		return st, fmt.Errorf("update maintenance state: %w", err)
 	}
@@ -421,7 +422,7 @@ func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (ma
 // after, and what it reclaimed, keeping the other entries. A corrupt file is
 // replaced rather than failing forever.
 func recordMaintenanceGCRun(townRoot, db string, before, after gcMeasure, at time.Time) error {
-	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+	_, err := updateMaintenanceGCState(townRoot, at, func(st *maintenanceGCState) {
 		st.PostGCBytes[db] = after.total
 		st.PostGCOldGenBytes[db] = after.oldGen
 		st.ReclaimedBytes[db] = before.total - after.total
@@ -437,7 +438,7 @@ func recordMaintenanceGCRun(townRoot, db string, before, after gcMeasure, at tim
 // read the directory, whose growth trigger would then fire on any old gen at
 // all (gt-lc16x3).
 func recordMaintenanceGCRunTime(townRoot, db string, at time.Time) error {
-	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+	_, err := updateMaintenanceGCState(townRoot, at, func(st *maintenanceGCState) {
 		st.LastGC[db] = at
 	})
 	return err
