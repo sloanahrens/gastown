@@ -207,27 +207,23 @@ func (p *ReviewPool) Wait() {
 	}
 }
 
-// Await returns when bead has no review running, or when ctx is done. A bead
-// with no review running returns at once. A wait ended by ctx leaves the review
-// running: only the review's own end removes it. It looks again after a review
-// ends, so a review of the bead started while it waits is waited for too, as
-// Wait does for every review.
-//
-// head is the submission the caller means to land. This Await waits for a
-// review of the bead at any head; gt-rudbr6 narrows it to that head, because a
-// verdict on another head is no verdict on the head the landing holds.
+// Await returns when bead has no review running at head, or when ctx is done. A
+// review of the bead at another head returns at once (gt-rudbr6): its verdict
+// judges a submission the caller is not landing, so waiting could not make a
+// usable verdict appear. head is the submission the caller means to land. A
+// wait ended by ctx leaves the review running: only the review's own end
+// removes it. It looks again after a review ends, so a review of the bead at
+// head started while it waits is waited for too, as Wait does for every review.
 func (p *ReviewPool) Await(ctx context.Context, bead, head string) {
 	for {
 		p.mu.Lock()
 		run, ok := p.running[bead]
-		var done chan struct{}
-		if ok {
-			done = run.done
-		}
-		p.mu.Unlock()
-		if !ok {
+		if !ok || run.head != head {
+			p.mu.Unlock()
 			return
 		}
+		done := run.done
+		p.mu.Unlock()
 		select {
 		case <-done:
 		case <-ctx.Done():
