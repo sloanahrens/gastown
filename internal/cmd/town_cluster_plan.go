@@ -174,9 +174,10 @@ plan writes plan.json into --out with the full id, each file's name, phase,
 SHA-256 and server-side dry-run output, and the revision the cluster holds for
 each Deployment; a Deployment the cluster does not hold is recorded absent, with
 no revision. A dry run that fails for any file ends the plan non-zero, and no
-plan.json is written. A phase P file is listed only when a static object differs
-from the cluster's, and then the id names it too. A plan that fails before that
-leaves no plan.json.
+plan.json is written. A plan holding a Secret document deploy/k8s does not review
+is refused the same way, since Secrets stay operator-created. A phase P file is
+listed only when a static object differs from the cluster's, and then the id names
+it too. A plan that fails before that leaves no plan.json.
 
 Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
 the deployer-policy certificate, and phase W --apply-kubeconfig, the
@@ -369,11 +370,14 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // kubeconfig flag is missing (phaseKubeconfig) is refused. Each file is then sent
 // as a server-side dry run under its phase's kubeconfig, its output recorded on
 // the file in plan.json; a dry run that fails for any file ends the plan non-zero
-// and writes no plan.json (gt-f1p2fw). The differences print after the phases, the
-// static objects' then each Deployment's in apply order, and the short id is the
-// last line. plan.json is written only after every read succeeds and every dry run
-// passed, and the output only after it is written, so a refusal, a render error, a
-// failed read, a failed dry run or a failed write prints nothing.
+// and writes no plan.json (gt-f1p2fw). A plan whose rendered static set holds a
+// Secret document deploy/k8s does not review is refused before the static objects
+// are read, since Secrets stay operator-created (gt-8bck5o). The differences
+// print after the phases, the static objects' then each Deployment's in apply
+// order, and the short id is the last line. plan.json is written only after every
+// read succeeds and every dry run passed, and the output only after it is
+// written, so a refusal, a render error, a failed read, a failed dry run or a
+// failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, kubeconfigs planFlags, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -422,6 +426,16 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	targets, err := planStaticTargets(staticObjects)
 	if err != nil {
 		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+	}
+	// The plan may hold only the static Secret documents deploy/k8s reviews, and
+	// it refuses before the static objects are read, so a read's cause cannot
+	// stand in for the guard's. Secrets stay operator-created.
+	unreviewed, err := planUnreviewedStaticSecret(staticObjects, d.reviewedStatic)
+	if err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan.json was written", err)
+	}
+	if unreviewed != "" {
+		return fmt.Errorf("gt town cluster plan: the plan holds %s, which deploy/k8s does not review, and Secrets stay operator-created, so no plan.json was written", unreviewed)
 	}
 	differences, err := planStaticDifferences(ctx, d.encode, kube, targets)
 	if err != nil {
