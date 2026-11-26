@@ -1525,6 +1525,72 @@ func TestVerdictReuseAheadStoresRejectAfterRescore(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseAheadReportsUsageOnce: a review that ran is told to the usage
+// sink once, with the checkout om judged and the window from the review's start
+// to its return, whether it stored a verdict, failed, or degraded in a way the
+// pool refuses. A submission skipped before om ran reports no usage (gt-fz846s).
+func TestVerdictReuseAheadReportsUsageOnce(t *testing.T) {
+	t.Parallel()
+	omErr := errors.New("om: no verdict")
+	rows := []struct {
+		name string
+		// review swaps the fixture's reviewer, whose isolated copy the pool runs.
+		review func(t *testing.T, l *Lander)
+		calls  int
+	}{
+		{"stored", func(*testing.T, *Lander) {}, 1},
+		{"failed", func(t *testing.T, l *Lander) {
+			l.Reviewer = &aheadPoolReviewer{t: t, err: omErr}
+		}, 1},
+		{"degraded", func(t *testing.T, l *Lander) {
+			l.Reviewer = &aheadDegradedReviewer{t: t, edit: func(flags []string) []string {
+				return append(flags, "--prior-findings")
+			}}
+		}, 1},
+		{"skipped before om", func(t *testing.T, l *Lander) {
+			l.Reviewer = &aheadPlainReviewer{t: t}
+		}, 0},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The store clock steps a minute per read: the review's start is the
+			// first read and its return the second.
+			f, l, t0 := aheadStoringFixture(t, Verdict{Verdict: VerdictApprove, Score: 0.9})
+			tc.review(t, l)
+			var got []ReviewUsage
+			existed := make(map[string]bool)
+			l.UsageSink = func(_ context.Context, u ReviewUsage) {
+				got = append(got, u)
+				_, err := os.Stat(u.Dir)
+				existed[u.Dir] = err == nil
+			}
+			// The outcome and error are other tests' subject: this one counts and
+			// checks the usage reports.
+			_, _, _ = l.reviewAhead(context.Background(), f.work)
+			if len(got) != tc.calls {
+				t.Fatalf("usage sink calls = %d, want %d", len(got), tc.calls)
+			}
+			if tc.calls == 0 {
+				return
+			}
+			u := got[0]
+			if u.BeadID != f.work.BeadID || u.Rig != f.work.Rig {
+				t.Errorf("usage names bead %q rig %q, want %q %q", u.BeadID, u.Rig, f.work.BeadID, f.work.Rig)
+			}
+			if filepath.Dir(filepath.Dir(u.Dir)) != f.workRoot || !existed[u.Dir] {
+				t.Errorf("usage dir = %q (existed %v), want the review checkout in a review directory under %s", u.Dir, existed[u.Dir], f.workRoot)
+			}
+			if want := t0.Add(time.Minute); !u.Start.Equal(want) {
+				t.Errorf("usage start = %s, want the review's start %s", u.Start, want)
+			}
+			if want := t0.Add(2 * time.Minute); !u.End.Equal(want) {
+				t.Errorf("usage end = %s, want the review's return %s", u.End, want)
+			}
+		})
+	}
+}
+
 // TestVerdictReuseAheadNoRescoreOutsideMargin: a rejection past the rescore
 // margin stands on one om run, and the record says it was not re-scored.
 func TestVerdictReuseAheadNoRescoreOutsideMargin(t *testing.T) {
