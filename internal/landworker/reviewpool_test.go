@@ -119,7 +119,8 @@ func TestReviewPoolReviewsEachWorkOnce(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
 	rev := newFakeAheadReviewer(t, ctx, nil)
-	pool := &ReviewPool{Reviewer: rev}
+	// Room for both: the pool starts no more than Max reviews at once (gt-ginbeo).
+	pool := &ReviewPool{Reviewer: rev, Max: 2}
 
 	pool.Offer(context.Background(), []land.Work{
 		{BeadID: "gt-first", Head: "1111111"},
@@ -146,7 +147,7 @@ func TestReviewPoolWaitReturnsWhenIdle(t *testing.T) {
 	ctx := waitCtx(t)
 	rev := newFakeAheadReviewer(t, ctx, map[string]error{"gt-bad": errors.New("om unreachable")})
 	logs := &logRecorder{}
-	pool := &ReviewPool{Reviewer: rev, Logf: logs.logf}
+	pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
 
 	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-bad", Head: "3333333"}})
 	recvBounded(t, ctx, rev.entered, "the review start")
@@ -171,7 +172,7 @@ func TestReviewPoolLogsNothingForCancelledReview(t *testing.T) {
 	ctx := waitCtx(t)
 	rev := newFakeAheadReviewer(t, ctx, map[string]error{"gt-stop": context.Canceled})
 	logs := &logRecorder{}
-	pool := &ReviewPool{Reviewer: rev, Logf: logs.logf}
+	pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
 
 	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-stop", Head: "4444444"}})
 	recvBounded(t, ctx, rev.entered, "the review start")
@@ -187,7 +188,8 @@ func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
 	rev := newFakeAheadReviewer(t, ctx, nil)
-	pool := &ReviewPool{Reviewer: rev}
+	// One slot: the later offer starts only because the first review has ended.
+	pool := &ReviewPool{Reviewer: rev, Max: 1}
 	first := land.Work{BeadID: "gt-once", Head: "5555555"}
 
 	pool.Offer(context.Background(), []land.Work{first})
@@ -250,6 +252,42 @@ func TestReviewPoolFree(t *testing.T) {
 				t.Errorf("free() with %d entries running and Max %d = %d, want %d", tt.running, pool.Max, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestReviewPoolCapsAtMax checks that Offer starts at most Max reviews: with
+// Max 2 and four works, the first two start and the last two are neither
+// started nor queued, so the reviewer is asked only for the first two.
+func TestReviewPoolCapsAtMax(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	pool := &ReviewPool{Reviewer: rev, Max: 2}
+
+	pool.Offer(context.Background(), []land.Work{
+		{BeadID: "gt-one", Head: "1111111"},
+		{BeadID: "gt-two", Head: "2222222"},
+		{BeadID: "gt-three", Head: "3333333"},
+		{BeadID: "gt-four", Head: "4444444"},
+	})
+	for n := 0; n < 2; n++ {
+		recvBounded(t, ctx, rev.entered, "a review start")
+	}
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	got := rev.reviewed()
+	if len(got) != 2 {
+		t.Fatalf("reviewer called %d times with Max 2 and four works, want 2", len(got))
+	}
+	// The works that fit are the first two of the list; their reviews enter
+	// the reviewer in no promised order.
+	gotBeads := map[string]bool{}
+	for _, w := range got {
+		gotBeads[w.BeadID] = true
+	}
+	if want := map[string]bool{"gt-one": true, "gt-two": true}; !reflect.DeepEqual(gotBeads, want) {
+		t.Errorf("reviewed beads %v, want the first two of the list %v", gotBeads, want)
 	}
 }
 
