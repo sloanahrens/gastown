@@ -12,16 +12,18 @@ import (
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
-// sweepSmokeRecord is what the daemon's startup smoke launch proved about
+// SweepSmokeRecord is what the daemon's startup smoke launch proved about
 // launching the sweeper: the outcome, the first line of the error when it
 // failed, when the launch was classified, and the daemon start it belongs to,
 // so the verify probe can tell a stale record from this daemon's (gt-ohgh0v).
-type sweepSmokeRecord struct {
+type SweepSmokeRecord struct {
 	Time        time.Time `json:"time"`
 	DaemonStart time.Time `json:"daemon_start"`
 	Outcome     string    `json:"outcome"`
 	Detail      string    `json:"detail"`
 }
+
+type sweepSmokeRecord = SweepSmokeRecord
 
 // classifySweepSmoke names the outcome a sweep launch reported: busy while a
 // sweep Job of the rig holds the claim guard, declined when the capacity
