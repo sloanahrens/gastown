@@ -13,6 +13,7 @@ import (
 // sandbox is named session.PolecatSessionName, so the guard is keyed by that
 // name, not by the bare seat name.
 func TestSeatNameAvoider(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
 	sandboxName := func(seat string) string { return session.PolecatSessionName("gt", seat) }
 
@@ -35,6 +36,7 @@ func TestSeatNameAvoider(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			avoid := seatNameAvoider(tc.guard, sandboxName)
 			if got := avoid(tc.seat); got != tc.want {
 				t.Errorf("avoid(%q) = %v, want %v", tc.seat, got, tc.want)
@@ -47,6 +49,7 @@ func TestSeatNameAvoider(t *testing.T) {
 // way to name a seat's sandbox, the avoider cannot rule a stale sandbox out, so
 // it refuses every seat rather than drawing one that may be stale.
 func TestSeatNameAvoiderAvoidsEverySeatWithoutASandboxName(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
 	guard := daemon.NewSeatNameGuard([]sandbox.Entry{{Name: "gt-dag", Phase: "Error"}}, now)
 	avoid := seatNameAvoider(guard, nil)
