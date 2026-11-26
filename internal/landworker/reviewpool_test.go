@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
@@ -267,6 +268,158 @@ func TestReviewPoolWaitReturnsWhenIdle(t *testing.T) {
 	if got := logs.get(); len(got) != 1 || !strings.Contains(got[0], "gt-bad") || !strings.Contains(got[0], "om unreachable") {
 		t.Errorf("logged %q, want one line naming the bead and the error", got)
 	}
+}
+
+// TestReviewPoolAwaitReturnsWhenDone pins that Await waits while the bead's
+// review runs and returns once that review has ended. It runs in a synctest
+// bubble: the bubble's barrier shows Await still waiting after the review
+// started, so a wait that returns at once is caught, not raced with.
+func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead = "gt-await"
+			head = "1111111"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		awaited := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, head)
+			close(awaited)
+		}()
+
+		// The review is held, so the waiter is blocked in Await when the
+		// bubble settles.
+		settle()
+		select {
+		case <-awaited:
+			t.Fatalf("Await returned with the bead's review still running, want it to wait")
+		default:
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, awaited, "Await returning after the review ended")
+		settle()
+		if headAt, running := runningHeadAt(t, pool, bead); running {
+			t.Errorf("Await returned with the bead's review still in the pool at %s, want the review gone", headAt)
+		}
+	})
+}
+
+// TestReviewPoolAwaitNothingRunning pins that Await returns at once for a bead
+// with no review running: the rows cover an idle pool and a pool busy with
+// another bead's review, so a wait on the pool rather than on the bead's own
+// entry is caught.
+func TestReviewPoolAwaitNothingRunning(t *testing.T) {
+	t.Parallel()
+	const (
+		bead = "gt-await"
+		head = "1111111"
+	)
+	tests := []struct {
+		name string
+		// other is a bead whose review runs while Await is called; empty
+		// leaves the pool idle.
+		other string
+	}{
+		{name: "idle pool"},
+		{name: "another bead's review running", other: "gt-other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx := waitCtx(t)
+				settle := synctest.Wait
+				rev := newFakeAheadReviewer(t, ctx, nil)
+				pool := &ReviewPool{Reviewer: rev, Max: 2}
+				if tt.other != "" {
+					pool.Offer(context.Background(), []land.Work{{BeadID: tt.other, Head: head}})
+					recvBounded(t, ctx, rev.entered, "the other bead's review start")
+				}
+
+				awaited := make(chan struct{})
+				go func() {
+					pool.Await(context.Background(), bead, head)
+					close(awaited)
+				}()
+				settle()
+				select {
+				case <-awaited:
+				default:
+					t.Fatalf("Await did not return at once for a bead with no review running")
+				}
+
+				if tt.other != "" {
+					close(rev.release)
+					recvBounded(t, ctx, idleOf(pool), "the other bead's review ending")
+				}
+			})
+		})
+	}
+}
+
+// TestReviewPoolAwaitReturnsOnCancel pins that a cancelled ctx ends the wait
+// while the bead's review still runs: Await returns, the pool still holds that
+// review, and the review returns only at its own release.
+func TestReviewPoolAwaitReturnsOnCancel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead = "gt-await"
+			head = "1111111"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		waitUntil, cancel := context.WithCancel(ctx)
+		awaited := make(chan struct{})
+		go func() {
+			pool.Await(waitUntil, bead, head)
+			close(awaited)
+		}()
+
+		settle()
+		select {
+		case <-awaited:
+			t.Fatalf("Await returned before its context was cancelled, want it to wait")
+		default:
+		}
+
+		cancel()
+		settle()
+		select {
+		case <-awaited:
+		default:
+			t.Fatalf("Await did not return after its context was cancelled")
+		}
+		if headAt, running := runningHeadAt(t, pool, bead); !running {
+			t.Errorf("the bead's review left the pool with the cancelled wait, want it still running")
+		} else if headAt != head {
+			t.Errorf("the pool holds the bead's review at %s, want %s still running", headAt, head)
+		}
+		if rev.hasReturned() {
+			t.Errorf("the review returned with the cancelled wait, want it to keep running until its release")
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, idleOf(pool), "the review ending at the test's release")
+		if !rev.hasReturned() {
+			t.Errorf("the reviewer never returned after its release")
+		}
+	})
 }
 
 // TestReviewPoolErrorNotRetried pins that the head whose review failed is not
