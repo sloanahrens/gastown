@@ -596,17 +596,23 @@ func pairWriteTownOwner(t *testing.T, townRoot, owner string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "town.json"), []byte(body), 0o600))
 }
 
-// TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded: a pins file that writes
-// config.ForgeOwnerPlaceholder in each URL's owner position, as the real
-// deploy/daemon/image-pins does, reads the bd pin that follows it and raises the
-// pair-ready item and no unreadable one. The fixture's town names the owner in
-// its own mayor/town.json, so the placeholder is expanded through the pass's
-// production owner closure, config.ResolveForgeOwner(townRoot), and not an
-// injected one.
-func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
+// TestPreRollGuardThePinsFileOwnerPlaceholderExpandsToTheTownOwner: a pins file
+// that writes config.ForgeOwnerPlaceholder in each URL's owner position, as the
+// real deploy/daemon/image-pins does, is expanded with the town's own
+// forge.owner and raises the pair-ready item and no unreadable one. The fixture
+// town names an owner that is also a full commit sha, and the file writes the
+// placeholder where the bd commit goes, so the bd pin the guard reads is the
+// expanded owner itself: the test asserts the value the placeholder expanded
+// to, not only that an expansion was made. The owner is read from the town's
+// own mayor/town.json through the pass's production owner closure,
+// config.ResolveForgeOwner(townRoot), and not an injected one.
+func TestPreRollGuardThePinsFileOwnerPlaceholderExpandsToTheTownOwner(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
-	pairWriteTownOwner(t, fx.town, "townown")
+	// A Forgejo owner name and a full 40-character lowercase hex sha, so it is
+	// both a usable owner for the town to name and a pin parseImagePins reads.
+	const owner = "aabbccddeeff00112233445566778899aabbccdd"
+	pairWriteTownOwner(t, fx.town, owner)
 	var readPins []string
 	fx.check.skew = &pairReadySkewReads{
 		LevelAt: func(_ context.Context, commit string) (int, error) {
@@ -616,7 +622,7 @@ func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
 		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
 	}
 	fx.pins = func(string) (string, error) {
-		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, pairBdPin), nil
+		return pairImagePinsOwnedBy(config.ForgeOwnerPlaceholder, config.ForgeOwnerPlaceholder), nil
 	}
 
 	fx.run(pairT0)
@@ -624,7 +630,7 @@ func TestPreRollGuardThePinsFileOwnerPlaceholderIsExpanded(t *testing.T) {
 	items := fx.check.observed()
 	require.Len(t, items, 1, "a pins file holding the owner placeholder raised %v; want the pair-ready item alone", pairSkewItemKinds(items))
 	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
-	assert.Equal(t, []string{pairBdPin}, readPins, "the level was not read for the bd pin the placeholder expanded to")
+	assert.Equal(t, []string{owner}, readPins, "the level was not read for the owner the placeholder expanded to, so the expansion value is not asserted")
 }
 
 // TestPreRollGuardAnOwnerThatFailsToResolveIsUnreadable: a pins file that holds
