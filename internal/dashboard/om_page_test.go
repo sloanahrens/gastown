@@ -25,6 +25,101 @@ func TestReviewPoolOMWindowReusedJSON(t *testing.T) {
 	}
 }
 
+// omWindowsTable reads every row of the om panel's windows table as its cells'
+// text — the table whose header carries a Landed column — so a test reads the
+// rendered table rather than the source that draws it (gt-q83zwr).
+func omWindowsTable(t *testing.T, dom *pageDOM) [][]string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((function () {
+		var out = null;
+		(function walk(n) {
+			if (out) return;
+			if (n.tagName === "TABLE") {
+				var head = n.children[0], heads = [];
+				if (head && head.tagName === "TR") for (var i = 0; i < head.children.length; i++) heads.push(String(head.children[i].textContent));
+				if (heads.indexOf("Landed") >= 0) {
+					out = [];
+					for (var r = 0; r < n.children.length; r++) {
+						var cells = [];
+						for (var c = 0; c < n.children[r].children.length; c++) cells.push(String(n.children[r].children[c].textContent));
+						out.push(cells);
+					}
+					return;
+				}
+			}
+			for (var i = 0; i < n.children.length; i++) walk(n.children[i]);
+		})(__byId["om"]);
+		return out || [];
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the om windows table: %v", err)
+	}
+	var rows [][]string
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
+		t.Fatalf("reading the om windows table: %v", err)
+	}
+	return rows
+}
+
+// A window that reused a stored review draws its count beside the other counts
+// (gt-q83zwr): the column appears once any window has one, so each window reads
+// its own number and a window with none reads 0. A table with no reused landing
+// is the table it drew before the count existed.
+func TestReviewPoolOMPanelRendersReused(t *testing.T) {
+	t.Parallel()
+
+	omState := func(windows ...map[string]any) map[string]any {
+		ws := make([]any, len(windows))
+		for i, w := range windows {
+			ws[i] = w
+		}
+		return map[string]any{"om": map[string]any{
+			"model": "haiku", "depth": "standard", "timeout_s": 900,
+			"windows": ws, "days": []any{}, "scores": make([]any, 10),
+			"rejects": map[string]any{}, "routes": map[string]any{},
+		}}
+	}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderOM", omState(
+		map[string]any{"label": "1h", "landed": 2, "approved": 2, "skipped": 0, "errors": 0, "rejected": 0, "reused": 0},
+		map[string]any{"label": "24h", "landed": 11, "approved": 6, "skipped": 1, "errors": 0, "rejected": 3, "reused": 4},
+	))
+	rows := omWindowsTable(t, dom)
+	if len(rows) != 3 {
+		t.Fatalf("the windows table drew %d rows, want a header and one row per window: %v", len(rows), rows)
+	}
+	if got, want := strings.Join(rows[0], ","), ",Landed,Approved,No review,Errors,Rejected,Reused,Avg score,om median,om p95"; got != want {
+		t.Errorf("the windows table's header reads %q, want %q", got, want)
+	}
+	for i, want := range []string{"1h,2,2,0,0,0,0,–,–,–", "24h,11,6,1,0,3,4,–,–,–"} {
+		if got := strings.Join(rows[i+1], ","); got != want {
+			t.Errorf("window row %d reads %q, want %q", i, got, want)
+		}
+	}
+
+	// A zero count and a server too old to send the field both leave the table
+	// as it was.
+	plain := newPageDOM(t)
+	plain.call(t, "renderOM", omState(
+		map[string]any{"label": "1h", "landed": 2, "approved": 2, "skipped": 0, "errors": 0, "rejected": 0, "reused": 0},
+		map[string]any{"label": "24h", "landed": 11, "approved": 6, "skipped": 1, "errors": 0, "rejected": 3},
+	))
+	rows = omWindowsTable(t, plain)
+	if len(rows) != 3 {
+		t.Fatalf("the windows table drew %d rows, want a header and one row per window: %v", len(rows), rows)
+	}
+	if got, want := strings.Join(rows[0], ","), ",Landed,Approved,No review,Errors,Rejected,Avg score,om median,om p95"; got != want {
+		t.Errorf("a table with no reused landing changed its header: %q, want %q", got, want)
+	}
+	for i, want := range []string{"1h,2,2,0,0,0,–,–,–", "24h,11,6,1,0,3,–,–,–"} {
+		if got := strings.Join(rows[i+1], ","); got != want {
+			t.Errorf("window row %d with no reused landing reads %q, want %q", i, got, want)
+		}
+	}
+}
+
 // The om panel opens with what is running now and the last five om ran, then
 // folds its Stats, Rework and Scores sections under details/summary lines built
 // like the polecats panel's idle line (gt-hmthk).
