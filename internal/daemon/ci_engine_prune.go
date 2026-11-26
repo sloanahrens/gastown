@@ -955,6 +955,21 @@ func ciEngineOrphanCandidates(cs []ciEngineContainer, now time.Time, age time.Du
 	return out, nil
 }
 
+// ciEngineSplitOrphans splits candidate job containers, already past the age, by
+// whether the set holds their task as running: a task that no longer runs is what
+// makes an orphan safe to remove, and a candidate whose task still runs is kept so
+// the verdict can name why a container past the age stayed.
+func ciEngineSplitOrphans(cands []ciEngineJobContainer, running map[int64]bool) (orphans, keptRunning []ciEngineContainer) {
+	for _, cand := range cands {
+		if running[cand.TaskID] {
+			keptRunning = append(keptRunning, cand.Container)
+			continue
+		}
+		orphans = append(orphans, cand.Container)
+	}
+	return orphans, keptRunning
+}
+
 // parseCIEngineTime reads a time docker prints, RFC 3339 with its fraction. A
 // zero time is refused: it would read as created long ago, and every age check
 // would then remove the item.

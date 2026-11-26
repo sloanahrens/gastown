@@ -3499,6 +3499,64 @@ func TestCIEngineOrphanCandidatesRefuses(t *testing.T) {
 	}
 }
 
+// TestCIEngineSplitOrphans: a candidate whose task no longer runs is an orphan
+// and one whose task the set holds as running is kept, both in the listing's
+// order; an empty candidate list gives neither.
+func TestCIEngineSplitOrphans(t *testing.T) {
+	t.Parallel()
+	const cancelled, live = 22148, 22149
+	job := func(id byte, taskID int64) ciEngineJobContainer {
+		return ciEngineJobContainer{
+			Container: engTaskCtr(t, id, fmt.Sprintf("/FORGEJO-ACTIONS-TASK-%d_WORKFLOW-abc_JOB-check", taskID), "running", engAgo(72*time.Hour)),
+			TaskID:    taskID,
+		}
+	}
+	ids := func(cs []ciEngineContainer) []string {
+		out := make([]string, 0, len(cs))
+		for _, c := range cs {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		cands       []ciEngineJobContainer
+		running     map[int64]bool
+		wantOrphans []string
+		wantKept    []string
+	}{
+		"a cancelled task is an orphan": {
+			cands:       []ciEngineJobContainer{job('1', cancelled)},
+			running:     map[int64]bool{live: true},
+			wantOrphans: []string{engHex64('1')},
+		},
+		"a running task is kept": {
+			cands:    []ciEngineJobContainer{job('2', live)},
+			running:  map[int64]bool{live: true},
+			wantKept: []string{engHex64('2')},
+		},
+		"no candidates": {
+			running: map[int64]bool{live: true},
+		},
+		"a mixed list keeps the listing's order": {
+			cands:       []ciEngineJobContainer{job('3', cancelled), job('4', live), job('5', cancelled)},
+			running:     map[int64]bool{live: true},
+			wantOrphans: []string{engHex64('3'), engHex64('5')},
+			wantKept:    []string{engHex64('4')},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			orphans, kept := ciEngineSplitOrphans(tc.cands, tc.running)
+			if got := ids(orphans); !slices.Equal(got, tc.wantOrphans) {
+				t.Errorf("orphans = %q, want %q", got, tc.wantOrphans)
+			}
+			if got := ids(kept); !slices.Equal(got, tc.wantKept) {
+				t.Errorf("keptRunning = %q, want %q", got, tc.wantKept)
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneCapImagesRemaining: a run removes at most
 // ci_engine_prune_max_per_kind images, the plan's first ones, and the images it
 // leaves are not a failure: the run is recorded ok with the usual next due,
