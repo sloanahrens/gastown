@@ -15,7 +15,8 @@ import (
 
 // dutyInputs are the reads one observation pass makes. The backup duty reads
 // databases, backupRoot and fsys; the archive duty reads archiveDir and fsys;
-// the other fields feed the duties observed later.
+// the gc duty reuses databases and reads readGCState; the other fields feed the
+// duties observed later.
 type dutyInputs struct {
 	databases   func(ctx context.Context) ([]string, error)
 	backupRoot  string
@@ -25,9 +26,9 @@ type dutyInputs struct {
 }
 
 // observeDatabaseDuties judges the maintenance duties at now against the limits
-// and grace in cfg. The databases are listed once for the backup duty; the
-// archive duty is judged too when archiving is on. A failed listing makes the
-// backup observation unknown and does not stop the archive read.
+// and grace in cfg. The databases are listed once for the backup and gc duties;
+// the archive duty is judged too when archiving is on. A failed listing makes
+// the backup and gc observations unknown and does not stop the archive read.
 func observeDatabaseDuties(ctx context.Context, now time.Time, cfg *config.ReconcilerConfig, in dutyInputs) []reconcile.Observation {
 	var databases []string
 	var listErr error
@@ -40,7 +41,47 @@ func observeDatabaseDuties(ctx context.Context, now time.Time, cfg *config.Recon
 	if in.archiveDir != "" {
 		obs = append(obs, observeArchiveDuty(now, cfg, in))
 	}
-	return obs
+	return append(obs, observeGCDuties(now, cfg, in, databases, listErr)...)
+}
+
+// observeGCDuties judges each listed database's gc duty from the daemon's
+// maintenance state file. A missing state file is an empty map, so every
+// database reads overdue; a failed listing, an unreadable or unparseable state
+// and a refused setting are one duty-wide unknown observation with that error.
+func observeGCDuties(now time.Time, cfg *config.ReconcilerConfig, in dutyInputs, databases []string, listErr error) []reconcile.Observation {
+	duty := reconcile.Duty{Name: config.ReconcilerDutyGC}
+	fail := func(err error) []reconcile.Observation {
+		return []reconcile.Observation{reconcile.Evaluate(duty, now, time.Time{}, err)}
+	}
+	if listErr != nil {
+		return fail(listErr)
+	}
+	limit, err := cfg.ParseLimit(config.ReconcilerDutyGC)
+	if err != nil {
+		return fail(err)
+	}
+	grace, err := cfg.ParseGrace()
+	if err != nil {
+		return fail(err)
+	}
+	duty.Limit, duty.Grace = limit, grace
+	if in.readGCState == nil {
+		return fail(errors.New("no gc state to read"))
+	}
+	data, err := in.readGCState()
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fail(err)
+	}
+	var lastGC map[string]time.Time
+	if err == nil {
+		if lastGC, err = reconcile.ParseGCState(data); err != nil {
+			return fail(err)
+		}
+	}
+	if lastGC == nil {
+		lastGC = map[string]time.Time{}
+	}
+	return reconcile.GCObservations(duty, now, lastGC, databases)
 }
 
 // observeBackupDuty judges the backup duty from the newest complete dated
