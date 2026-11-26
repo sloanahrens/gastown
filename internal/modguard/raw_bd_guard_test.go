@@ -268,6 +268,27 @@ func TestRawBdSharedTreeParity(t *testing.T) {
 	}
 }
 
+// rawBdRealScan takes the counts of the module root's raw bd sites and the Go
+// files they were read from.
+func rawBdRealScan() (map[rawBdKey]int, int, error) {
+	r, err := os.OpenRoot(filepath.Join("..", ".."))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = r.Close() }()
+	return scanRawBdTree(r.FS())
+}
+
+// rawBdScanProblems compares the counts scan takes against baseline. A failed
+// scan is one problem, never a pass.
+func rawBdScanProblems(scan func() (map[rawBdKey]int, int, error), baseline map[rawBdKey]int, floor int) []string {
+	counts, files, err := scan()
+	if err != nil {
+		return []string{fmt.Sprintf("walk stopped before the counts were complete: %v", err)}
+	}
+	return rawBdProblemsOf(counts, files, baseline, floor)
+}
+
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
 // (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
 // beads.Client and the other typed methods, not argv. The sites still
@@ -286,16 +307,37 @@ func TestNoNewRawBdSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join("..", "..")
-	r, err := os.OpenRoot(root)
+	// Open the root first so a root that cannot be opened fails the test, not a problem line.
+	root, err := os.OpenRoot(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = r.Close() }()
-
-	for _, problem := range rawBdProblems(r.FS(), baseline, rawBdFileFloor) {
+	_ = root.Close()
+	for _, problem := range rawBdScanProblems(rawBdRealScan, baseline, rawBdFileFloor) {
 		t.Error(problem)
 	}
+}
+
+// TestRawBdRealScanSeam drives the comparison through stubbed scans: an excess
+// site is a problem, and a failed scan is a problem, never a pass.
+func TestRawBdRealScanSeam(t *testing.T) {
+	t.Parallel()
+	t.Run("an excess site is a problem", func(t *testing.T) {
+		stub := func() (map[rawBdKey]int, int, error) {
+			return map[rawBdKey]int{{"internal/cmd/run.go", "argv"}: 2}, 1, nil
+		}
+		problems := rawBdScanProblems(stub, nil, 0)
+		if len(problems) != 1 || !strings.Contains(problems[0], "internal/cmd/run.go: 2 raw bd argv site(s)") {
+			t.Errorf("problems = %q; want one excess-site problem for internal/cmd/run.go", problems)
+		}
+	})
+	t.Run("a failed scan is a problem, not a pass", func(t *testing.T) {
+		stub := func() (map[rawBdKey]int, int, error) { return nil, 0, fmt.Errorf("no root") }
+		problems := rawBdScanProblems(stub, nil, 0)
+		if len(problems) != 1 || !strings.Contains(problems[0], "no root") {
+			t.Errorf("problems = %q; want one problem naming the scan error", problems)
+		}
+	})
 }
 
 // TestRawBdPolicy drives the rule behind TestNoNewRawBdSites over in-memory
