@@ -3067,7 +3067,7 @@ func (d *Daemon) Run() (err error) {
 		case <-escalationCloseChan:
 			// Escalation close tick — the next bead (gt-7o6wyb) calls the close
 			// pass here. The case consumes the channel from this ticker's first
-			// tick so the declaration is used and the loop keeps its behaviour
+			// tick so the declaration is used and the loop keeps its behavior
 			// (gt-bba7kq).
 
 		case <-landingInfraChan:
