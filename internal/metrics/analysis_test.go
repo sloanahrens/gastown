@@ -1547,6 +1547,11 @@ func TestReusableExtract(t *testing.T) {
 			dated: today,
 			files: map[string]string{footerName: `{"rows_read":`, weeklyName: weekly},
 		},
+		{
+			name:  "a readable footer with no weekly.csv",
+			dated: today,
+			files: map[string]string{footerName: `{"rows_read":{"ledger":2}}`},
+		},
 		{name: "yesterday's extract is not today's", dated: yesterday, files: complete},
 	}
 	for _, tc := range cases {
