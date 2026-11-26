@@ -336,3 +336,66 @@ func TestPreloadRigSeatsRefusal(t *testing.T) {
 		}
 	}
 }
+
+// TestPreloadRigSeatsRefusalOnlyForbidden is gt-iq4kaa: three preloads run
+// back to back on the one process memory, each failing differently — a store
+// that cannot be reached, a timeout, a 403 the gateway gives for another verb
+// — and each still reaches bd and still warns. Because nothing resets the
+// memory between them, the second and third calls also show that the failure
+// before them set none: a preload that remembered every error would silence
+// the call after it.
+//
+//testpolicy:allow parallel — sets the process-wide refusal memory, which a parallel seat-build test in this package would see mid-run; the test resets it before and after, and the parallel tests run only once it has finished
+func TestPreloadRigSeatsRefusalOnlyForbidden(t *testing.T) {
+	preloadSeatsRefused.Store(false)
+	t.Cleanup(func() { preloadSeatsRefused.Store(false) })
+
+	rigPath := routeRigTown(t, "")
+	preload := preloadSeatArgs(t)
+
+	var fail struct {
+		stderr string
+		err    error
+	}
+	calls := 0
+	run := func(_ context.Context, _ string, args []string) ([]byte, []byte, error) {
+		if sameBDCall(args, preload) {
+			calls++
+			return nil, []byte(fail.stderr), fail.err
+		}
+		return []byte("[]"), nil, nil
+	}
+	bd := beads.New(rigPath, beads.WithDirRunner(run))
+
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		err    error
+	}{
+		{
+			name:   "store unavailable",
+			stderr: "store unavailable",
+			err:    errors.New("exit status 25"),
+		},
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+		},
+		{
+			name:   "403 for another verb",
+			stderr: "gtwrap: the bd gateway at http://gateway.test refused the call with HTTP 403: forbidden: bdgateway: token class may not run this verb (list)",
+			err:    errors.New("exit status 125"),
+		},
+	} {
+		fail.stderr, fail.err = tc.stderr, tc.err
+		before := calls
+		var warn bytes.Buffer
+		preloadRigSeats(&warn, bd, "gastown")
+		if n := calls - before; n != 1 {
+			t.Errorf("%s: the preload reached bd %d time(s), want 1: a failure that is not the forbidden refusal must not stop the read", tc.name, n)
+		}
+		if n := strings.Count(warn.String(), "warning: failed to preload beads in gastown"); n != 1 {
+			t.Errorf("%s: the preload warned %d time(s), want 1:\n%s", tc.name, n, warn.String())
+		}
+	}
+}
