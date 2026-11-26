@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +40,58 @@ func TestReconcilerPatrolInterval(t *testing.T) {
 			t.Parallel()
 			if got := reconcilerInterval(tt.pc); got != tt.want {
 				t.Fatalf("reconcilerInterval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReconcilerPatrolPass covers what one pass does: a disabled patrol logs
+// nothing and records no run, and an active one logs its mode (shadow unless
+// the block sets shadow false) and records the run it completed.
+func TestReconcilerPatrolPass(t *testing.T) {
+	t.Parallel()
+
+	live := false
+
+	tests := []struct {
+		name     string
+		disabled bool
+		shadow   *bool
+		wantLog  string
+		wantRun  bool
+	}{
+		{"a disabled patrol logs nothing and records no run", true, nil, "", false},
+		{"an active shadow pass logs shadow and records its run", false, nil, "reconciler: pass (shadow)", true},
+		{"an active live pass logs live and records its run", false, &live, "reconciler: pass (live)", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			logs := &bytes.Buffer{}
+			d := &Daemon{
+				config: &Config{TownRoot: t.TempDir()},
+				logger: log.New(logs, "", 0),
+				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+					Reconciler: &config.ReconcilerConfig{Enabled: true, Shadow: tt.shadow},
+				}},
+			}
+			if tt.disabled {
+				d.disabledPatrols = map[string]bool{"reconciler": true}
+			}
+
+			before := time.Now()
+			d.runReconciler()
+
+			if got := strings.TrimSpace(logs.String()); got != tt.wantLog {
+				t.Errorf("log = %q, want %q", got, tt.wantLog)
+			}
+			last := d.reconcilerRun.last()
+			if tt.wantRun && last.Before(before) {
+				t.Errorf("last run = %v, want a run recorded at or after %v", last, before)
+			}
+			if !tt.wantRun && !last.IsZero() {
+				t.Errorf("last run = %v, want none recorded", last)
 			}
 		})
 	}
