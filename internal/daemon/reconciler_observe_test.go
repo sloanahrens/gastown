@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -184,6 +185,70 @@ func TestReconcilerObserveDatabaseArchive(t *testing.T) {
 				t.Errorf("Err = nil, want the refusal kept (observation %+v)", obs)
 			}
 		})
+	}
+}
+
+func TestReconcilerObserveTownStateExplicitOff(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		rootErr error
+	}{
+		{name: "the off error", rootErr: errTownStateNightlyOff},
+		{name: "a wrapped off error", rootErr: fmt.Errorf("reading the nightly root: %w", errTownStateNightlyOff)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := observeTownStateDuty(now, &config.ReconcilerConfig{}, "/home/gt/.gt/town-state", tt.rootErr, fstest.MapFS{})
+			if len(got) != 0 {
+				t.Fatalf("observeTownStateDuty = %+v, want no observation for an explicitly empty root", got)
+			}
+		})
+	}
+}
+
+func TestReconcilerObserveTownStateUnsetIsOverdue(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		rootErr error
+	}{
+		{name: "an unset root", rootErr: fmt.Errorf("%s is unset", config.MaintenanceTownStateBackupRootKey)},
+		{name: "a relative root", rootErr: fmt.Errorf("%s = %q: want an absolute path", config.MaintenanceTownStateBackupRootKey, "relative/town-state")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := observeTownStateDuty(now, &config.ReconcilerConfig{}, "", tt.rootErr, fstest.MapFS{})
+			if len(got) != 1 || got[0].Duty != config.ReconcilerDutyTownState {
+				t.Fatalf("%s: observeTownStateDuty = %+v, want one %s observation", tt.name, got, config.ReconcilerDutyTownState)
+			}
+			obs := got[0]
+			if obs.Verdict != reconcile.VerdictOverdue {
+				t.Errorf("%s: verdict = %q, want %q (observation %+v)", tt.name, obs.Verdict, reconcile.VerdictOverdue, obs)
+			}
+			if !errors.Is(obs.Err, reconcile.ErrNoResult) {
+				t.Errorf("%s: Err = %v, want ErrNoResult", tt.name, obs.Err)
+			}
+			if !obs.LastGood.IsZero() {
+				t.Errorf("%s: LastGood = %v, want the zero time", tt.name, obs.LastGood)
+			}
+		})
+	}
+}
+
+func TestReconcilerObserveTownStateNilRoot(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	got := observeTownStateDuty(now, &config.ReconcilerConfig{}, "/home/gt/.gt/town-state", nil, fstest.MapFS{})
+	if len(got) != 1 || got[0].Duty != config.ReconcilerDutyTownState {
+		t.Fatalf("observeTownStateDuty = %+v, want one %s observation", got, config.ReconcilerDutyTownState)
+	}
+	if obs := got[0]; obs.Verdict != reconcile.VerdictOverdue || !errors.Is(obs.Err, reconcile.ErrNoResult) || !obs.LastGood.IsZero() {
+		t.Errorf("observation = %+v, want overdue with ErrNoResult and no LastGood until the nights are read", obs)
 	}
 }
 

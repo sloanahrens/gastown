@@ -84,6 +84,22 @@ func observeGCDuties(now time.Time, cfg *config.ReconcilerConfig, in dutyInputs,
 	return reconcile.GCObservations(duty, now, lastGC, databases)
 }
 
+// observeTownStateDuty judges the nightly town-state backup duty from the root
+// townStateNightlyRoot read. An explicitly empty root (errTownStateNightlyOff)
+// is the operator's off, so nothing is observed. Any other root error (unset,
+// relative, no section) and a nil error both read overdue with ErrNoResult
+// here: the nights are read by the next piece (gt-6ogbqv), so nothing reads ok
+// before then.
+//
+//nolint:unparam // cfg, root and fsys are read on the nights path the next piece (gt-6ogbqv) adds
+func observeTownStateDuty(now time.Time, cfg *config.ReconcilerConfig, root string, rootErr error, fsys fs.FS) []reconcile.Observation {
+	if errors.Is(rootErr, errTownStateNightlyOff) {
+		return nil
+	}
+	duty := reconcile.Duty{Name: config.ReconcilerDutyTownState}
+	return []reconcile.Observation{reconcile.Evaluate(duty, now, time.Time{}, reconcile.ErrNoResult)}
+}
+
 // observeBackupDuty judges the backup duty from the newest complete dated
 // backup night. A failed listing, a refused setting, a relative root and a
 // missing filesystem are kept as the read error, so none of them reads as fresh.
