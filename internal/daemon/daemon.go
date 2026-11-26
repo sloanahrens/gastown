@@ -1189,9 +1189,11 @@ type Daemon struct {
 	reapAlertState reapAlertState
 	reapAlertSink  reapAlertSink
 
-	// landingPasses counts landing-worker passes in flight, one per rig at
-	// most: a restart mid-pass kills the merged-tree gate of the bead being
-	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
+	// landingPasses counts landing passes in flight: a landing worker's pass
+	// (one per rig at most, since a restart mid-pass kills the merged-tree
+	// gate of the bead being landed, gt-u641b) and a queued deferred-
+	// bookkeeping job (gt-k7glkk), so isIdleForUpgrade waits for both to
+	// reach zero. A queued job's duration is unbounded until gt-2hqjbi.
 	landingPasses atomic.Int32
 
 	// landingPassFn, when non-nil, is called on the landing loop's goroutine
