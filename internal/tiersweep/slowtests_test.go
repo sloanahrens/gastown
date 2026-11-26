@@ -121,7 +121,7 @@ func TestIntegrationRunsWithJSON(t *testing.T) {
 
 	race := &fakeTier{}
 	rs := raceSweep(t, race)
-	rs.Race()
+	rs.raceTier(raceRuns)
 	if len(race.calls) != 1 {
 		t.Fatalf("race ran %d commands, want 1: %v", len(race.calls), race.calls)
 	}

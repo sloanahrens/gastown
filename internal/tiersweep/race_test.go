@@ -30,7 +30,7 @@ func TestRaceCommandLine(t *testing.T) {
 	t.Parallel()
 	fake := &fakeTier{}
 	s := raceSweep(t, fake)
-	s.Race()
+	s.raceTier(raceRuns)
 	want := []string{
 		"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1",
 		"go", "test", "-count=1", "-timeout", "7m",
@@ -52,7 +52,7 @@ func TestRaceRunsInTheSweepEnvironment(t *testing.T) {
 	s := raceSweep(t, fake)
 	s.Environ = []string{"PATH=/usr/bin"}
 	s.Opts.Tested = "abc123"
-	s.Race()
+	s.raceTier(raceRuns)
 	want := []string{"PATH=/usr/bin", "TIER_SWEEP_TESTED=abc123", "TIER_SWEEP_SKIP="}
 	if len(fake.calls) != 1 {
 		t.Fatalf("race ran %d commands, want 1: %v", len(fake.calls), fake.calls)
@@ -88,10 +88,10 @@ func TestRaceSummary(t *testing.T) {
 			t.Parallel()
 			fake := &fakeTier{codes: map[string]int{". ./internal/cmd": c.code}}
 			s := raceSweep(t, fake)
-			line, red := s.Race()
+			line, red := s.raceTier(raceRuns)
 			want := fmt.Sprintf(c.want, s.Opts.LogDir)
 			if line != want || red != c.red {
-				t.Errorf("Race() = %q, %v; want %q, %v", line, red, want, c.red)
+				t.Errorf("raceTier(raceRuns) = %q, %v; want %q, %v", line, red, want, c.red)
 			}
 		})
 	}
