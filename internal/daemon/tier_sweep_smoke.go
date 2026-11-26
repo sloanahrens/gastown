@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -37,4 +38,43 @@ func classifySweepSmoke(l tierSweepLaunch) sweepSmokeRecord {
 		return sweepSmokeRecord{Outcome: "failed", Detail: detail}
 	}
 	return sweepSmokeRecord{Outcome: "started"}
+}
+
+// sweepSmokeLaunch launches the rig's first sweep stage the runner takes and
+// reports the outcome without waiting for the run (gt-ohgh0v). The stop runs
+// once the launch returns, except for a busy launch: it created nothing, and
+// its stop could end the run already going.
+func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRecord {
+	l := d.sweepSmokeRun(ctx, rig)
+	rec := classifySweepSmoke(l)
+	if l.stop != nil && rec.Outcome != "busy" {
+		l.stop()
+	}
+	rec.Time = d.clk().Now()
+	return rec
+}
+
+// sweepSmokeRun renders each sweep stage at origin/main and launches the first
+// the runner takes off the host. A stage the config keeps on the host has no
+// Spec. A failure before the launch is a failed launch that created nothing.
+func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch {
+	sha, err := d.tierSweepLocalMain(rig)
+	if err != nil {
+		return tierSweepLaunch{exitCode: -1, err: err}
+	}
+	for _, st := range tierSweepStages(rig) {
+		st.tested = sha
+		spec, offHost, err := d.tierSweepRunnerSpec(st)
+		if err != nil {
+			return tierSweepLaunch{exitCode: -1, err: err}
+		}
+		if offHost {
+			launch := d.tierSweepSeams.launch
+			if launch == nil {
+				launch = d.tierSweepLaunchRunner
+			}
+			return launch(ctx, st, spec)
+		}
+	}
+	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}
 }
