@@ -148,7 +148,7 @@ func TestCloudCheckRunsEachTickWithTheKeyAndRewritesTheStatus(t *testing.T) {
 		if !slices.Equal(call.args, wantArgs) {
 			t.Errorf("tick %d argv = %q, want %q", i, call.args, wantArgs)
 		}
-		if want := []string{cloudCheckKeyEnv + "=" + key}; !slices.Equal(call.env, want) {
+		if want := []string{cloudCheckHostEnv, cloudCheckKeyEnv + "=" + key}; !slices.Equal(call.env, want) {
 			t.Errorf("tick %d env = %q, want %q", i, call.env, want)
 		}
 		body, err := os.ReadFile(status)
@@ -247,7 +247,7 @@ func TestCloudCheckKeyless(t *testing.T) {
 			keyFile:         "",
 			stat:            defaultAbsent,
 			wantRuns:        2,
-			wantEnv:         nil,
+			wantEnv:         []string{cloudCheckHostEnv},
 			wantKeylessLogs: 1,
 		},
 		{
@@ -255,7 +255,7 @@ func TestCloudCheckKeyless(t *testing.T) {
 			keyFile:  present,
 			stat:     os.Stat,
 			wantRuns: 2,
-			wantEnv:  []string{cloudCheckKeyEnv + "=" + present},
+			wantEnv:  []string{cloudCheckHostEnv, cloudCheckKeyEnv + "=" + present},
 		},
 		{
 			name:        "named key file missing runs nothing",
@@ -302,6 +302,50 @@ func TestCloudCheckKeyless(t *testing.T) {
 			}
 			if got := refused > 0; got != tt.wantRefused {
 				t.Errorf("logged a refusal = %v, want %v:\n%s", got, tt.wantRefused, logs.String())
+			}
+		})
+	}
+}
+
+// TestCloudCheckPodEnv: the daemon runs only in the pod, so every check its
+// child starts says so: CLOUD_CHECK_HOST=pod is in the environment the patrol
+// passes, whether or not a key file is passed beside it.
+func TestCloudCheckPodEnv(t *testing.T) {
+	t.Parallel()
+	key := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(key, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	cases := []struct {
+		name    string
+		keyFile string
+		stat    func(string) (fs.FileInfo, error)
+	}{
+		{
+			name:    "with a key file",
+			keyFile: key,
+			stat:    os.Stat,
+		},
+		{
+			// The pod's normal state: no key file, and the check still runs.
+			name:    "without a key file",
+			keyFile: "",
+			stat:    func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist },
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", tt.keyFile),
+				func(c *agentconfig.CloudCheckConfig) string { return c.KeyFilePath() }, tt.stat)
+
+			d.runCloudCheckPatrol()
+
+			if len(f.calls) != 1 {
+				t.Fatalf("ran %d checks, want 1", len(f.calls))
+			}
+			if env := f.calls[0].env; !slices.Contains(env, "CLOUD_CHECK_HOST=pod") {
+				t.Errorf("env = %q, want it to hold CLOUD_CHECK_HOST=pod", env)
 			}
 		})
 	}

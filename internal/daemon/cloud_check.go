@@ -6,6 +6,11 @@ package daemon
 // (gt-c57pax). A warn or fail item the status file records for the release bot
 // is raised as its own attention item on a run that passed (gt-ai62q7).
 //
+// The check runs only in the daemon pod, and every run's child carries
+// CLOUD_CHECK_HOST=pod in its environment, which the binary reads to run only
+// the checks that make sense there. A binary that does not know the variable
+// ignores it, so the patrol and the image land in either order (gt-mwks7g).
+//
 // The patrol is opt-in. It runs a program on a timer, so only an explicit
 // daemon.patrols.cloud_check.enabled turns it on. The GCP service-account key
 // is read from the file the daemon-gcp-key Secret mounts; the patrol stats the
@@ -56,6 +61,10 @@ const (
 	// key from. The key's path is the only thing set; the file's contents stay
 	// in the file.
 	cloudCheckKeyEnv = "GOOGLE_APPLICATION_CREDENTIALS"
+
+	// cloudCheckHostEnv is the variable that says the check is in the daemon
+	// pod. The daemon never runs elsewhere, so every run carries it.
+	cloudCheckHostEnv = "CLOUD_CHECK_HOST=pod"
 
 	// cloudCheckAlertKey is the one escalation a failing run raises. A repeated
 	// failure refreshes it, not a second one; a run exiting 0 that wrote clears it.
@@ -308,14 +317,15 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	// default path the pod mounts, which the check in the pod can run without.
 	named := settings != nil && settings.KeyFile != ""
 
-	// The key entry is passed only when a key file is there. The binary never
-	// calls GCP, so an absent default key is no reason to skip the check; a
-	// key the operator named must exist, because naming one meant it.
-	var keyEnv []string
+	// Every run's child says it is in the daemon pod. The key entry is passed
+	// only when a key file is there: the binary never calls GCP, so an absent
+	// default key is no reason to skip the check; a key the operator named must
+	// exist, because naming one meant it.
+	extraEnv := []string{cloudCheckHostEnv}
 	_, statErr := s.stat(keyFile)
 	switch {
 	case statErr == nil:
-		keyEnv = []string{cloudCheckKeyEnv + "=" + keyFile}
+		extraEnv = append(extraEnv, cloudCheckKeyEnv+"="+keyFile)
 	case errors.Is(statErr, fs.ErrNotExist) && named:
 		d.cloudCheckUnconfigured(fmt.Sprintf("no key file at %s; not running (mount the daemon-gcp-key Secret, or set patrols.cloud_check.key_file)", keyFile))
 		return
@@ -332,7 +342,7 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	statusPath := cloudCheckStatusPath(d.config.TownRoot)
 	command := cloudCheckCommand(pc)
 	before := cloudCheckStatusFileOf(statusPath)
-	err := s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, keyEnv)
+	err := s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, extraEnv)
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.cloudCheckLastRun.Store(s.now().UnixNano())
 
