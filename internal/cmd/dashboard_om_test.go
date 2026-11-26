@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -833,6 +834,65 @@ func TestReviewPoolOMStageReusedFlag(t *testing.T) {
 			}
 			if tc.reused && st.OM != nil {
 				t.Errorf("reused form om = %v, want nil", *st.OM)
+			}
+		})
+	}
+}
+
+// TestReviewPoolOMPanelCountsReused: each window reports the stage records in it
+// that reused a stored review, and its om median covers only the records om ran.
+// The panel's start covers a reused record that is older than every review om ran.
+func TestReviewPoolOMPanelCountsReused(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.Local)
+	h := func(n int) time.Time { return now.Add(-time.Duration(n) * time.Hour) }
+	om30s, om90s := 30*time.Second, 90*time.Second
+	timed := []omStage{
+		{At: h(2), Bead: "gt-1", OM: &om30s},
+		{At: h(3), Bead: "gt-2", OM: &om90s},
+	}
+	rows := []struct {
+		name   string
+		stages []omStage
+		want   map[string]int // reused count by window label
+	}{
+		{"one reused", append(slices.Clone(timed), omStage{At: h(4), Bead: "gt-3", Reused: true}),
+			map[string]int{"1h": 0, "6h": 1, "24h": 1, "7d": 1, "all": 1}},
+		// A second reused record would move the median if either counted as a
+		// review of no time.
+		{"two reused", append(slices.Clone(timed), omStage{At: h(4), Bead: "gt-3", Reused: true}, omStage{At: h(5), Bead: "gt-4", Reused: true}),
+			map[string]int{"1h": 0, "6h": 2, "24h": 2, "7d": 2, "all": 2}},
+		{"reused before the shorter windows", append(slices.Clone(timed), omStage{At: h(48), Bead: "gt-3", Reused: true}),
+			map[string]int{"1h": 0, "6h": 0, "24h": 0, "7d": 1, "all": 1}},
+		{"none reused", timed,
+			map[string]int{"1h": 0, "6h": 0, "24h": 0, "7d": 0, "all": 0}},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			om := buildOM(now, nil, tc.stages, nil, omConfig{})
+			got := map[string]int{}
+			for _, w := range om.Windows {
+				got[w.Label] = w.Reused
+				if w.Label == "6h" {
+					if w.MedianSecs == nil {
+						t.Error("6h om median is absent, want 30s from the two reviews om ran")
+					} else if *w.MedianSecs != 30 {
+						t.Errorf("6h om median = %v, want 30, the lower of the two reviews om ran", *w.MedianSecs)
+					}
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("reused by window = %v, want %v", got, tc.want)
+			}
+			earliest := tc.stages[0].At
+			for _, st := range tc.stages {
+				if st.At.Before(earliest) {
+					earliest = st.At
+				}
+			}
+			if !om.Since.Equal(earliest) {
+				t.Errorf("Since = %v, want %v, the oldest record counted", om.Since, earliest)
 			}
 		})
 	}

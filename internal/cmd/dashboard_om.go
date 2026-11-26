@@ -1200,6 +1200,16 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 	}
 
 	for _, st := range stages {
+		// Counted before the skip below: a reused landing carries no om time,
+		// so it adds to this count and to no om duration.
+		if st.Reused {
+			note(st.At)
+			for i := range wins {
+				if inWin(i, st.At) {
+					out[i].Reused++
+				}
+			}
+		}
 		if st.OM == nil {
 			continue
 		}
