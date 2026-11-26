@@ -3,7 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -124,5 +127,84 @@ func TestStartDriftChildRefusesWhatCannotRun(t *testing.T) {
 				t.Errorf("startDriftChild kept output %q %q from a child that never ran", stdout, stderr)
 			}
 		})
+	}
+}
+
+// TestDriftChildCancel: the cancel the command installs ends the whole process
+// group. A group signal that succeeds is one call with a negative pid and
+// SIGKILL, and the child alone is never killed; a group signal that fails falls
+// back to killing the child alone once and returns that result, so a sandbox
+// that refuses the group still ends the child.
+func TestDriftChildCancel(t *testing.T) {
+	t.Parallel()
+	const pid = 4242
+	groupErr := errors.New("no such process group")
+	killErr := errors.New("kill refused")
+	tests := []struct {
+		name     string
+		groupErr error
+		killErr  error
+		wantKill int
+		wantErr  error
+	}{
+		{"the group signal succeeds", nil, killErr, 0, nil},
+		{"the group signal fails, so the child is killed", groupErr, killErr, 1, killErr},
+		{"the group signal fails and the kill succeeds", groupErr, nil, 1, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var (
+				signalPids []int
+				signalSigs []syscall.Signal
+				killCalls  int
+			)
+			signal := func(p int, sig syscall.Signal) error {
+				signalPids = append(signalPids, p)
+				signalSigs = append(signalSigs, sig)
+				return tt.groupErr
+			}
+			kill := func() error {
+				killCalls++
+				return tt.killErr
+			}
+			err := driftChildCancel(pid, signal, kill)
+			if len(signalPids) != 1 || signalPids[0] != -pid || signalSigs[0] != syscall.SIGKILL {
+				t.Errorf("signal calls = %v %v, want one call with (%d, SIGKILL)", signalPids, signalSigs, -pid)
+			}
+			if killCalls != tt.wantKill {
+				t.Errorf("kill called %d times, want %d", killCalls, tt.wantKill)
+			}
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Errorf("driftChildCancel = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("driftChildCancel = %v, want the kill result %v", err, tt.wantErr)
+			}
+			if errors.Is(err, groupErr) {
+				t.Errorf("driftChildCancel = %v, want the kill result rather than the group error", err)
+			}
+		})
+	}
+}
+
+// TestDriftChildCmd: the command startDriftChild runs leads its own process
+// group and installs a cancel for it. The cancel on a command that never
+// started has no process to end, so it reports the process already done rather
+// than dereferencing the nil Process exec's default cancel would.
+func TestDriftChildCmd(t *testing.T) {
+	t.Parallel()
+	cmd := driftChildCmd(&exec.Cmd{})
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Errorf("driftChildCmd SysProcAttr = %#v, want Setpgid true", cmd.SysProcAttr)
+	}
+	if cmd.Cancel == nil {
+		t.Fatal("driftChildCmd Cancel = nil, want the group-kill cancel")
+	}
+	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("driftChildCmd Cancel on an unstarted command = %v, want os.ErrProcessDone", err)
 	}
 }
