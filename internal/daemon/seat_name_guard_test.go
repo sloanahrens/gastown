@@ -174,6 +174,26 @@ func TestSeatNameGuardItemWarnsBeforeTheDeleteCommand(t *testing.T) {
 	}
 }
 
+// TestSeatNameGuardPointsAPendingDeleteAtTheRunbook: a delete the gateway
+// refuses as pending has no other way forward, so the line and the item name
+// the runbook section after the delete command (gt-nv1ulr).
+func TestSeatNameGuardPointsAPendingDeleteAtTheRunbook(t *testing.T) {
+	t.Parallel()
+	const pointer = `; if the delete answers "driver operation is still pending", follow docs/sandbox-rescue-runbook.md, "A delete refused as pending"`
+	guard := NewSeatNameGuard([]sandbox.Entry{{Name: "gt-dag", Phase: "Error"}}, seatNameGuardNow)
+	finding, ok := guard.Stale("gt-dag")
+	items := guard.Items(seatNameGuardNow)
+	if !ok || len(items) != 1 {
+		t.Fatalf("Stale = %v, items = %+v, want the Error sandbox", ok, items)
+	}
+	const del = "openshell sandbox delete 'gt-dag'"
+	for _, text := range []string{finding.Line(), items[0].Summary} {
+		if d, p := strings.Index(text, del), strings.Index(text, pointer); d < 0 || p < d {
+			t.Errorf("%q, want the runbook pointer %q after the quoted delete command", text, pointer)
+		}
+	}
+}
+
 // TestGatewaySandboxListingBoundsTheReadWithTheCallersTimeout: the one listing
 // the attention collector and the sling tick share applies the caller's bound
 // to the gateway call (gt-xrt3pb).

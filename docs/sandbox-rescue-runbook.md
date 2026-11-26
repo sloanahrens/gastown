@@ -85,6 +85,61 @@ gt polecat nuke gastown/cheedo
 
 The delete answered `Deleted sandbox gt-cheedo` and takes the volume through the PVC's ownerReference and the PV's `Delete` policy. The plain nuke is the `gt` wrapper's command in the pod; the dry-run read Verdict clear (hook empty), and the nuke's preserve step confirmed origin held the tip, answering `already reachable from origin/crew/merlin/gt-3jad9w, nothing to preserve` and `Nuked 1 polecat(s)`.
 
+## A delete refused as pending
+
+Read this when `openshell sandbox delete <name>` answers `previous driver operation is still pending; retry and deletion are blocked`, the sandbox is in phase Error, `kubectl get sandbox default--<name>` answers NotFound, and no PVC or pod holds the name. If a PVC or pod exists, follow the steps above instead.
+
+The gateway restarted between dispatch and the Sandbox CR, which left the sandbox row in phase Error with no CR. Its driver operation record has no expiry, so the gateway retries it about every 2.6 s. `sandbox delete` has no force flag, so the refusal holds while that record stands, and waiting does not clear it.
+
+The clear deletes three rows from the gateway's sqlite store with the gateway scaled to zero: every live seat loses its gateway link for about a minute and reconnects. It is the operator's attended step, opened by the overseer, who says so first. The steps are the gt-2r7agv OPERATOR CLEAR for the `gt-dag` row of 2026-11-22 (sandbox id `3c588be9-0ef1-4185-b03e-9d63c6490f33`); a later seat re-reads its own id, PV path and rows before any step.
+
+```bash
+KC='docker --context colima-gt-sbx exec gt-sbx-control-plane kubectl --kubeconfig /etc/kubernetes/admin.conf'
+D=/var/local-path-provisioner/pvc-49defbc2-a3f2-415c-8042-55697f1c40d7_openshell_openshell-data-openshell-0
+W=~/gt/.runtime/rescue/gw-fix-$(date +%Y%m%d%H%M)
+```
+
+The store is sqlite in `$D` on node `gt-sbx-worker` (`openshell.db`, `-wal`, `-shm`; owner 1000, mode 600). The gateway image has no shell or sqlite3, so the edit runs on a Mac copy.
+
+0. **Window.** Confirm the dispatch hold is on and no seat is mid-landing. Tell nux, rictus and dv-anchor (and any later seat) their gateway link drops for about a minute. Continue only on the overseer's word.
+1. **Pre-checks.** Each must print what is shown; any other row, or a CR, PVC or pod for `gt-dag`, is a STOP.
+
+   ```bash
+   $KC -n openshell get sandbox default--gt-dag    # NotFound
+   $KC -n openshell get pvc,pod | grep -c gt-dag    # 0
+   docker --context colima-gt-sbx cp gt-sbx-worker:$D/. $W/
+   sqlite3 -readonly $W/openshell.db "select object_type,id from objects where id like '%3c588be9-0ef1-4185-b03e-9d63c6490f33%' or (object_type='sandbox_policy' and scope='3c588be9-0ef1-4185-b03e-9d63c6490f33')"
+   ```
+
+   The query prints exactly three rows: `sandbox|3c588be9-...`, `sandbox_ssh_identity_v1|sandbox-ssh:3c588be9-...` and `sandbox_policy|07c81916-b29a-4db0-9b2f-f8157be8b1ea`.
+2. **Backup.** `cp -R $W $W.orig`; keep both until the next day.
+3. **Stop the gateway.** `$KC -n openshell scale statefulset openshell --replicas=0`; continue when `$KC -n openshell get pod openshell-0` answers NotFound.
+4. **Final copy** (the gateway is down, so the files are consistent): `rm -rf $W && mkdir $W && docker --context colima-gt-sbx cp gt-sbx-worker:$D/. $W/`
+5. **Edit the copy.**
+
+   ```bash
+   sqlite3 $W/openshell.db "begin; delete from objects where object_type='sandbox' and id='3c588be9-0ef1-4185-b03e-9d63c6490f33' and name='gt-dag'; delete from objects where object_type='sandbox_ssh_identity_v1' and id='sandbox-ssh:3c588be9-0ef1-4185-b03e-9d63c6490f33'; delete from objects where object_type='sandbox_policy' and scope='3c588be9-0ef1-4185-b03e-9d63c6490f33'; select changes(); commit; pragma wal_checkpoint(truncate); pragma integrity_check;"
+   sqlite3 -readonly $W/openshell.db "select count(*) from objects where name='gt-dag' or id like '%3c588be9%' or scope='3c588be9-0ef1-4185-b03e-9d63c6490f33'"
+   sqlite3 -readonly $W/openshell.db "select count(*) from objects where object_type='sandbox'"
+   ```
+
+   Each delete removes one row and `integrity_check` prints `ok`. The first count reads 0; the last reads one fewer than in step 1.
+6. **Put the copy back.**
+
+   ```bash
+   docker --context colima-gt-sbx exec gt-sbx-worker rm -f $D/openshell.db-wal $D/openshell.db-shm
+   docker --context colima-gt-sbx cp $W/openshell.db gt-sbx-worker:$D/openshell.db
+   docker --context colima-gt-sbx exec gt-sbx-worker chown 1000:0 $D/openshell.db
+   docker --context colima-gt-sbx exec gt-sbx-worker chmod 600 $D/openshell.db
+   docker --context colima-gt-sbx exec gt-sbx-worker ls -ln $D
+   ```
+
+   The listing shows one file, owner 1000, mode `-rw-------`.
+7. **Start the gateway.** `$KC -n openshell scale statefulset openshell --replicas=1`; continue when `openshell-0` reads `1/1 Running`.
+8. **Verify.** `kubectl --context colima-gt-control -n gt exec deploy/daemon -c daemon -- openshell -g k8s sandbox list` shows no `gt-dag` and every running seat Ready within two minutes; the gateway log, from its previous line count, shows no `reclamation` retries. Then the overseer lifts the hold, and the first sling to the name `dag` (a trial bead) must reach Ready.
+
+**Rollback:** scale the gateway to 0, remove the node's `-wal` and `-shm`, copy `$W.orig/.` back to `$D` (the original files), set owner 1000:0, and scale to 1. The `gt-dag` row returns as it was.
+
 ## Not verified
 
 - The copy is taken from the node's disk while the pod is gone; a running pod needs the sandbox stopped first, so nothing writes the volume mid-copy.
