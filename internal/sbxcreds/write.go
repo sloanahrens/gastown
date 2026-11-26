@@ -24,12 +24,9 @@ func writeKubeconfig(path string, data []byte) error {
 	if werr == nil && cerr == nil && derr == nil {
 		perr = os.Link(temp, path)
 	}
-	rerr := os.Remove(temp)
-	if cause := errors.Join(werr, cerr, derr, perr); cause != nil {
-		return errors.Join(fmt.Errorf("could not write the kubeconfig %s: %w", path, cause), rerr)
+	cause := errors.Join(werr, cerr, derr, perr)
+	if cause != nil {
+		cause = fmt.Errorf("could not write the kubeconfig %s: %w", path, cause)
 	}
-	if rerr != nil {
-		return fmt.Errorf("kubeconfig %s is written, but its temporary %s was not removed: %w", path, temp, rerr)
-	}
-	return nil
+	return errors.Join(cause, os.Remove(temp))
 }
