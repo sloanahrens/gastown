@@ -1,9 +1,13 @@
 package landworker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -328,4 +332,79 @@ func TestBookQueueAddDuringEnd(t *testing.T) {
 			t.Errorf("Wait after the queue emptied = %v, want nil", err)
 		}
 	})
+}
+
+// TestBookQueuePanicIsLogged: a panicking job logs one entry whose first line
+// names its bead and the panic value and that carries the stack, and the job
+// after it runs.
+func TestBookQueuePanicIsLogged(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	var q BookQueue
+
+	logged := make(chan string, 4)
+	q.Logf = func(format string, args ...any) {
+		logged <- fmt.Sprintf(format, args...)
+	}
+	q.Add("gt-panic", func() { panic("bookkeeping blew up") })
+	next := make(chan struct{})
+	q.Add("gt-next", func() { close(next) })
+	recvBounded(t, ctx, next, "the job after the panicking one starting")
+
+	entry := recvBounded(t, ctx, logged, "the log entry for the panicking job")
+	first, rest, _ := strings.Cut(entry, "\n")
+	if !strings.Contains(first, "gt-panic") || !strings.Contains(first, "bookkeeping blew up") {
+		t.Errorf("the log entry starts %q, want its first line to name gt-panic and the panic value", first)
+	}
+	if !strings.Contains(rest, "goroutine ") {
+		t.Errorf("the log entry after its first line is %q, want the stack", rest)
+	}
+	select {
+	case second := <-logged:
+		t.Errorf("the panicking job logged twice; the second entry is %q", second)
+	default:
+	}
+}
+
+// lockedBuffer keeps a log.Logger's output readable while the drain goroutine
+// writes it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestBookQueuePanicWithNilLogfGoesToTheStandardLogger: with no Logf set, a
+// panicking job is still logged, through the standard log package, with its
+// bead and the panic value, and the job after it runs.
+//
+//testpolicy:allow parallel — captures the process-wide standard logger, which another test must not write mid-run
+func TestBookQueuePanicWithNilLogfGoesToTheStandardLogger(t *testing.T) {
+	ctx := waitCtx(t)
+	var q BookQueue
+
+	var logged lockedBuffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	q.Add("gt-nil-panic", func() { panic("no Logf set") })
+	next := make(chan struct{})
+	q.Add("gt-next", func() { close(next) })
+	recvBounded(t, ctx, next, "the job after the panicking one starting")
+
+	if got := logged.String(); !strings.Contains(got, "gt-nil-panic") || !strings.Contains(got, "no Logf set") {
+		t.Errorf("the standard logger got %q, want a line naming gt-nil-panic and the panic value", got)
+	}
 }
