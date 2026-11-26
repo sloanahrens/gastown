@@ -5762,24 +5762,7 @@ func TestTickEffHeadsRead(t *testing.T) {
 // read each time (gt-wdpcy8).
 func TestTickEffQuietWiring(t *testing.T) {
 	t.Parallel()
-	town := specTown(t)
-	rigs := map[string]config.RigEntry{"gastown": {}, "beads": {}}
-	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: rigs})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for rig, db := range map[string]string{"gastown": "gt", "beads": "be"} {
-		dir := filepath.Join(town, rig, ".beads")
-		if err := os.MkdirAll(filepath.Join(dir, "dolt"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"`+db+`"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	town := quietWiringTown(t)
 	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
 	memory.noteRigRead("gastown", beadsql.RigHash{Head: "g1", Working: "g2"}, now.Add(-time.Minute), 0)
@@ -5818,6 +5801,81 @@ func TestTickEffQuietWiring(t *testing.T) {
 	}
 	if ready["beads"] != 2 {
 		t.Errorf("the live rig beads got %d ready read(s) over two board reads, want 2 (reads = %v)", ready["beads"], ready)
+	}
+}
+
+// quietWiringTown is the town the quiet-wiring tests drive: rigs gastown (db gt) and beads (db be).
+func quietWiringTown(t *testing.T) string {
+	t.Helper()
+	town := specTown(t)
+	rigs := map[string]config.RigEntry{"gastown": {}, "beads": {}}
+	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: rigs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for rig, db := range map[string]string{"gastown": "gt", "beads": "be"} {
+		dir := filepath.Join(town, rig, ".beads")
+		if err := os.MkdirAll(filepath.Join(dir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"`+db+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return town
+}
+
+// TestTickEffQuietWiringHashFailure: over a failing hashes read the tick holds no
+// hashes, so the board closure's quiet answer skips no rig, even the one memory
+// calls quiet, and the failed read is asked once per tick (gt-9jd76i).
+func TestTickEffQuietWiringHashFailure(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	memory.noteRigRead("gastown", beadsql.RigHash{Head: "g1", Working: "g2"}, now.Add(-time.Minute), 0)
+	store := &sqlChildrenClient{sqlErr: errors.New("connection refused")}
+	heads := specTickHeadsHold(town, []string{"beads", "gastown"}, slingStores{pinned: func(string) slingStore { return store }}, func(string, ...any) {})
+	quiet := quietSkip(memory, heads(), now)
+	for _, rig := range []string{"gastown", "beads"} {
+		if quiet != nil && quiet(rig) {
+			t.Errorf("the quiet answer skips %s after a failed hash read, want every rig read", rig)
+		}
+	}
+
+	var mu sync.Mutex
+	ready := map[string]int{}
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    town,
+		maxPriority: 2,
+		reads:       newSpecTickReads(),
+		ready: func(rigPath string) ([]*beads.Issue, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			ready[filepath.Base(rigPath)]++
+			return nil, nil
+		},
+		rigStatus:   func(string, string) (bool, string) { return false, "" },
+		heads:       heads,
+		memory:      memory,
+		now:         func() time.Time { return now },
+		detailStore: func(string) beads.Client { return nil },
+	})
+	for i := 0; i < 2; i++ {
+		if got := board(nil, nil, nil); len(got.Errors) != 0 {
+			t.Fatalf("board read %d: Errors = %v, want none", i+1, got.Errors)
+		}
+	}
+	if store.sql != 1 {
+		t.Errorf("the failed hash read was asked %d times across two board reads, want 1", store.sql)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ready["gastown"] != 2 || ready["beads"] != 2 {
+		t.Errorf("ready reads over two board reads = %v, want 2 each: a failed hash read must skip no rig", ready)
 	}
 }
 
