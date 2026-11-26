@@ -4549,6 +4549,11 @@ func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
 		return
 	}
 	if !ok || rec.OverBytes <= 0 {
+		// A missing record clears as well as a zero one. On a backend with no
+		// Poll the run writes its result into dir itself, so sweep-run may not
+		// have written cache-trim.json yet when the daemon reads; the clear is
+		// then early. The next over-cap run raises the item again. Accepted
+		// risk (gt-gi6o1j, overseer): the item is low severity.
 		d.cacheTrimNoOp.clear("cache-trim-sweep-" + rig)
 		return
 	}
