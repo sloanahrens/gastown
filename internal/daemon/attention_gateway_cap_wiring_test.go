@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +92,39 @@ func TestAttentionTickGatewayCapWiredPerDaemon(t *testing.T) {
 	f.d.getenv = func(string) string { return "" }
 	if none := f.d.attentionSources(refusalsTick); none.gatewayCap != nil {
 		t.Fatalf("tick with no gateway configured holds a cap collector, want nil")
+	}
+}
+
+// TestAttentionSourcesGatewayCapAbsentLogsOnce: through the production sources,
+// the Daemon's cap collector says the gateway reports no cap counters once
+// across two ticks, in the daemon logger, and raises no item.
+func TestAttentionSourcesGatewayCapAbsentLogsOnce(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, refusalsTick)
+	var logs bytes.Buffer
+	f.d.logger = log.New(&logs, "", 0)
+	f.d.getenv = func(key string) string {
+		if key == bdgateway.WorkspaceURLEnv {
+			return "http://gateway.test"
+		}
+		return ""
+	}
+	f.d.workspaceHTTP = refusingDoer{}
+	f.d.gatewayCap.stats = func(context.Context) (bdgateway.GatewayStats, error) {
+		return bdgateway.GatewayStats{}, nil
+	}
+	for _, at := range []time.Time{refusalsTick, refusalsTick.Add(time.Minute)} {
+		items, err := f.d.attentionSources(at).collectBDGatewayCap(context.Background())
+		if err != nil {
+			t.Fatalf("tick at %s: err = %v, want nil", at, err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("tick at %s raised %d items, want none", at, len(items))
+		}
+	}
+	const said = "attention: bd gateway does not report its cap counters"
+	if got := strings.Count(logs.String(), said); got != 1 {
+		t.Fatalf("daemon log holds %d lines naming the absent counters, want 1: %q", got, logs.String())
 	}
 }
 

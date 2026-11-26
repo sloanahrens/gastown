@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -184,5 +185,98 @@ func TestCollectBDGatewayCapNoSource(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("collect with no source raised %d items, want none", len(items))
+	}
+}
+
+// TestCollectBDGatewayCapAbsentNoLogger: a collector with no logf still reads an
+// absent body as no item and no error; the line is skipped, not a panic.
+func TestCollectBDGatewayCapAbsentNoLogger(t *testing.T) {
+	t.Parallel()
+	c := &gatewayCapCollector{stats: func(context.Context) (bdgateway.GatewayStats, error) {
+		return bdgateway.GatewayStats{}, nil
+	}}
+	for i := range 2 {
+		items, err := c.collect(context.Background())
+		if err != nil {
+			t.Fatalf("tick %d: err = %v, want nil", i, err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("tick %d raised %d items, want none", i, len(items))
+		}
+	}
+}
+
+// TestCollectBDGatewayCapAbsent: a stats body with no cap fields raises no item,
+// and the collector says once in the run that the gateway does not report its
+// cap counters. The first absent read of a run logs; later absent reads do not.
+// A present read before the absent ones does not stop the line.
+func TestCollectBDGatewayCapAbsent(t *testing.T) {
+	t.Parallel()
+	const said = "attention: bd gateway does not report its cap counters (/v1/stats has no cap fields); bd_gateway.cap_hit waits for them"
+	cases := []struct {
+		name      string
+		ticks     []capTick
+		wantLines int
+	}{
+		{
+			name: "two absent reads raise no item and say it once",
+			ticks: []capTick{
+				{absent: true},
+				{absent: true},
+			},
+			wantLines: 1,
+		},
+		{
+			name: "a present read before the absent ones still says it once",
+			ticks: []capTick{
+				{stats: bdgateway.GatewayStats{TooManyCalls: 0, PeakInFlight: 2}},
+				{absent: true},
+				{absent: true},
+			},
+			wantLines: 1,
+		},
+		{
+			name: "present reads say nothing",
+			ticks: []capTick{
+				{stats: bdgateway.GatewayStats{TooManyCalls: 0, PeakInFlight: 2}},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 3, PeakInFlight: 5}, wantItems: 1},
+			},
+			wantLines: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cur capTick
+			var lines []string
+			c := &gatewayCapCollector{
+				stats: func(context.Context) (bdgateway.GatewayStats, error) {
+					s := cur.stats
+					s.CapsPresent = !cur.absent
+					return s, cur.err
+				},
+				logf: func(format string, args ...any) {
+					lines = append(lines, fmt.Sprintf(format, args...))
+				},
+			}
+			for i, tk := range tc.ticks {
+				cur = tk
+				items, err := c.collect(context.Background())
+				if err != nil {
+					t.Fatalf("tick %d: err = %v, want nil", i, err)
+				}
+				if len(items) != tk.wantItems {
+					t.Fatalf("tick %d: raised %d items, want %d", i, len(items), tk.wantItems)
+				}
+			}
+			if len(lines) != tc.wantLines {
+				t.Fatalf("logged %d lines, want %d: %q", len(lines), tc.wantLines, lines)
+			}
+			for _, line := range lines {
+				if line != said {
+					t.Errorf("line = %q, want %q", line, said)
+				}
+			}
+		})
 	}
 }
