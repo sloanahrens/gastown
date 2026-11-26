@@ -1375,11 +1375,27 @@ func squashDeferClockKey(db string) string {
 // squashDeferClockKey. A database with no stamp, an entry that cannot be read
 // and an entry that is not a timestamp all read as the zero time, so the
 // caller treats the database as not yet deferred. The clock sits under the
-// town root, so the stamp survives the daemon's rolls. The write is the next
-// piece (gt-n6kgco).
+// town root, so the stamp survives the daemon's rolls. markSquashDeferred is
+// its write.
 func (d *Daemon) squashDeferredSince(db string) time.Time {
 	at, _ := alertClock{dir: alertClockPath(d.config.TownRoot)}.last(squashDeferClockKey(db))
 	return at
+}
+
+// markSquashDeferred stamps when the gc flag first deferred db's squash checks
+// on the alert clock, under squashDeferClockKey. A database already stamped
+// keeps its time, so the alert's day counts from the start of the run rather
+// than from the latest deferral, and a daemon roll does not restart it. A stamp
+// that cannot be written is returned, because a lost stamp hides the run from
+// the alert (gt-n6kgco).
+func (d *Daemon) markSquashDeferred(db string) error {
+	if !d.squashDeferredSince(db).IsZero() {
+		return nil
+	}
+	if err := (alertClock{dir: alertClockPath(d.config.TownRoot)}).stamp(squashDeferClockKey(db), d.clk().Now()); err != nil {
+		return fmt.Errorf("marking the squash deferral of %q: %w", db, err)
+	}
+	return nil
 }
 
 // clearSquashDeferred removes db's persisted deferral stamp, so its next

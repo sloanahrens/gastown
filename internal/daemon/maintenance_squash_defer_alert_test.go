@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -376,6 +377,92 @@ func TestClearSquashDeferred(t *testing.T) {
 			if tc.otherDB != "" {
 				if got := d.squashDeferredSince(tc.otherDB); !got.Equal(tc.wantOther) {
 					t.Fatalf("squashDeferredSince(%q) after clearing %q = %v, want %v", tc.otherDB, tc.db, got, tc.wantOther)
+				}
+			}
+		})
+	}
+}
+
+// TestMarkSquashDeferred pins the stamp of the first deferral: a first mark
+// makes squashDeferredSince return the daemon clock's time, a mark later keeps
+// that first time, one database's mark leaves another database unstamped, and
+// a stamp that cannot be written returns its error (gt-n6kgco).
+func TestMarkSquashDeferred(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 24, 9, 30, 0, 0, time.UTC)
+	later := first.Add(90 * time.Minute)
+	tests := []struct {
+		name string
+		db   string
+		// marks holds each mark's time as an offset from first, in order, so
+		// the fake clock reaches each mark without a sleep.
+		marks []time.Duration
+		// blockClock puts a file where the clock's directory goes, so the
+		// stamp cannot be written.
+		blockClock bool
+		otherDB    string
+		want       time.Time
+		wantOther  time.Time
+		wantErr    bool
+	}{
+		{
+			name:  "a first mark stamps the clock's time",
+			db:    "gt",
+			marks: []time.Duration{0},
+			want:  first,
+		},
+		{
+			name:  "a second mark later keeps the first time",
+			db:    "gt",
+			marks: []time.Duration{0, later.Sub(first)},
+			want:  first,
+		},
+		{
+			name:      "a mark of one database leaves another unstamped",
+			db:        "gt",
+			marks:     []time.Duration{0},
+			otherDB:   "hq",
+			want:      first,
+			wantOther: time.Time{},
+		},
+		{
+			name:       "a stamp that cannot be written returns the error",
+			db:         "gt",
+			marks:      []time.Duration{0},
+			blockClock: true,
+			wantErr:    true,
+			want:       time.Time{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+			fake := clockwork.NewFakeClockAt(first)
+			d.clock = fake
+			if tc.blockClock {
+				clockPath := alertClockPath(d.config.TownRoot)
+				if err := os.MkdirAll(filepath.Dir(clockPath), 0o700); err != nil {
+					t.Fatalf("creating the clock's parent: %v", err)
+				}
+				if err := os.WriteFile(clockPath, nil, 0o600); err != nil {
+					t.Fatalf("putting a file where the clock's directory goes: %v", err)
+				}
+			}
+			var prev time.Duration
+			for i, at := range tc.marks {
+				fake.Advance(at - prev)
+				prev = at
+				if err := d.markSquashDeferred(tc.db); (err != nil) != tc.wantErr {
+					t.Fatalf("mark %d of %q: err = %v, wantErr %t", i+1, tc.db, err, tc.wantErr)
+				}
+			}
+			if got := d.squashDeferredSince(tc.db); !got.Equal(tc.want) {
+				t.Fatalf("squashDeferredSince(%q) after the marks = %v, want %v", tc.db, got, tc.want)
+			}
+			if tc.otherDB != "" {
+				if got := d.squashDeferredSince(tc.otherDB); !got.Equal(tc.wantOther) {
+					t.Fatalf("squashDeferredSince(%q) after marking %q = %v, want %v", tc.otherDB, tc.db, got, tc.wantOther)
 				}
 			}
 		})
