@@ -722,6 +722,38 @@ func (r *RedMain) IsRevert(beadID string) bool {
 	return ok
 }
 
+// RevertOwed reports the revert whose landing the landings file records while
+// this owner still has it in flight: RevertLanded never finished, because the
+// process stopped between finishing the record and the call. The in-flight
+// record is what survived the restart. RevertLanded clears it after the comment
+// and the reopen, so a stop inside those writes leaves the revert owed and the
+// call is made again; only once that clear is saved is a told revert never owed
+// again (gt-qxm7y3). It writes nothing.
+func (r *RedMain) RevertOwed() (land.Work, land.Result, bool, error) {
+	if r.State == nil || r.Landings == nil {
+		r.logf("no main state or landings file, so a revert whose completion a restart dropped cannot be found")
+		return land.Work{}, land.Result{}, false, nil
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		return land.Work{}, land.Result{}, false, fmt.Errorf("reading the main state for the revert in flight: %w", err)
+	}
+	// A record with no bead is a build that filed none: nothing landed.
+	if st.Revert == nil || st.Revert.Bead == "" {
+		return land.Work{}, land.Result{}, false, nil
+	}
+	rec, found, err := r.Landings.LatestForBead(st.Revert.Bead)
+	if err != nil {
+		return land.Work{}, land.Result{}, false, fmt.Errorf("reading the landing record of the revert %s: %w", st.Revert.Bead, err)
+	}
+	if !found {
+		// No record: the revert has not landed, so there is nothing to tell.
+		return land.Work{}, land.Result{}, false, nil
+	}
+	return land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Worker: RevertWorker},
+		land.Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID}, true, nil
+}
+
 // RevertLanded finishes a revert once the landing worker has landed it: the
 // culprit is commented on and reopened with the rework label. Any other
 // landing is ignored.
@@ -730,9 +762,6 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 	if !ok {
 		return
 	}
-	// The revert is on main now, so the red-main beads are a dispatcher's
-	// again: the fix forward is the reopened culprit's, not theirs (gt-zkdwt).
-	r.clearRevertInFlight()
 	msg := fmt.Sprintf("Reverted by %s (%s): main went red at %s and this landing was the only change since the last green commit. "+
 		"Reopened for rework. The reverted commits are still in main's history, so a plain re-merge of the old branch brings nothing back: "+
 		"start from main, re-apply the change (git revert %s), fix it, and submit again.",
@@ -759,6 +788,15 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 	if err := r.Beads.Update(culprit, update); err != nil {
 		r.logf("reopening %s for rework: %v", culprit, err)
 	}
+	// The revert is told, so the red-main beads are a dispatcher's again: the
+	// fix forward is the reopened culprit's, not theirs (gt-zkdwt). The clear
+	// runs last, after the comment and the reopen whether or not they returned
+	// an error: while the record stands, a restart still sees the revert owed
+	// and tells it again, so a stop between these writes repeats the comment
+	// instead of losing the reopen. A bd call that failed is cleared too, or a
+	// revert it cannot write to would be retold on every start for ever
+	// (gt-qxm7y3).
+	r.clearRevertInFlight()
 	r.status(fmt.Sprintf("main reverted %s's landing %s as %s; %s reopened for rework", culprit, short(landed), short(res.LandedCommit), culprit))
 }
 
