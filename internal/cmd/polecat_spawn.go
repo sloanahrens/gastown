@@ -1149,6 +1149,13 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// GH#2215) and the named path (AddNamedWithOptions, gt-2w4f9) both hold the
 	// pool lock through directory creation, so no concurrent process can be
 	// handed the same name.
+	//
+	// A pool draw passes over a name whose gateway sandbox is stale (gt-y113l8).
+	// A named sling draws no pool name, so it reads no listing.
+	if opts.Name == "" {
+		stale := newSpecStaleSeats(&specSlingTraces{}, time.Now, specTownRunsSandboxes(townRoot))
+		setSlingNameAvoider(os.Stdout, polecatMgr, stale, townRegistry().PrefixForRig(rigName))
+	}
 	polecatName, err := allocatePolecatForSling(polecatMgr, rigName, opts.Name, addOpts)
 	if err != nil {
 		return nil, fmt.Errorf("allocating and creating polecat: %w", err)
@@ -1627,4 +1634,26 @@ func getRigGit(rigPath string) (*git.Git, error) {
 		return nil, fmt.Errorf("no .repo.git under %s", rigPath)
 	}
 	return git.NewGitWithDir(bareRepoPath, ""), nil
+}
+
+// setSlingNameAvoider sets the rig pool's name avoider for a sling that draws a
+// pool name (gt-y113l8): a name whose gateway sandbox is stale is passed over,
+// so the sling does not land on a seat that dies at session start. The listing
+// is read through stale, the memo the spec dispatcher reads (gt-zapy97). A
+// listing that cannot be read, or a town with no sandbox profile, sets no
+// avoider and prints one line saying the check was skipped.
+func setSlingNameAvoider(out io.Writer, mgr *polecat.Manager, stale *specStaleSeats, rigPrefix string) {
+	guard := stale.get()
+	for _, line := range stale.traces.notices() {
+		fmt.Fprintln(out, line)
+	}
+	if guard == nil {
+		if !stale.sandboxed {
+			fmt.Fprintln(out, "stale seat sandbox check skipped: the town names no sandbox profile")
+		}
+		return
+	}
+	mgr.SetNameAvoider(seatNameAvoider(guard, func(seat string) string {
+		return session.PolecatSessionName(rigPrefix, seat)
+	}))
 }
