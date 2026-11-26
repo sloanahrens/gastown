@@ -1514,6 +1514,16 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, l.reject(ctx, issue, w, rej, nil)
 	}
 
+	// A stored-only pass consumes a stored answer and nothing else. A stored
+	// conflict that cannot answer for this landing — another head, or past
+	// ReuseExpiry — is deleted here, before the target fetch and the merge, and
+	// the pass ends; only a conflict for this head goes on to the merge, which
+	// decides whether it is still there (gt-1yvte7).
+	storedConflict, err := l.storedOnlyConflictBeforeMerge(w)
+	if err != nil {
+		return Result{}, err
+	}
+
 	if err := l.withGitMu(func() error { return l.fetchTarget(g, w.Target) }); err != nil {
 		return Result{}, &InfraError{Stage: "fetch target", Err: err}
 	}
@@ -1663,8 +1673,29 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
 				return res, err
 			}
+			// A stored conflict for this head that the merge still finds is
+			// spent: the rejection is its answer, and the record must not
+			// outlive it (gt-1yvte7). A delete that fails is logged and the
+			// rejection stands: the author's note is what the queue needs, and
+			// a later pass deletes the record as a mismatch once a new head is
+			// pushed.
+			if storedConflict {
+				if err := l.Ahead.Delete(w.BeadID); err != nil {
+					l.logf("%s: the rejected conflict record could not be deleted (%v); the rejection stands", w.BeadID, err)
+				}
+			}
 		}
 		return Result{}, l.reject(ctx, issue, w, rej, nil)
+	}
+	// The stored conflict was for this head and the merge no longer conflicts,
+	// so the record is consumed and the pass ends before any review or gate
+	// (gt-1yvte7).
+	if storedConflict {
+		if err := l.Ahead.Delete(w.BeadID); err != nil {
+			return Result{}, &InfraError{Stage: "stored review", Err: err}
+		}
+		l.logf("%s: the stored conflict is gone; the clean merge consumes its record", w.BeadID)
+		return Result{}, ErrNoStoredVerdict
 	}
 	if same, err := wt.TreesIdentical(base, "HEAD"); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
