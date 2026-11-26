@@ -340,8 +340,9 @@ type Result struct {
 	// RiskPathReviewSkippedBy is the label that left RiskPaths empty (RiskPathsRecorded).
 	RiskPathReviewSkippedBy string
 	// Deferred is the record a deferred landing wrote durably and did not write
-	// onto its bead: set when the Lander's DeferBookkeeping is on, nil when the
-	// landing recorded both halves in one pass (gt-i4kqoa).
+	// onto its bead: set when DeferBookkeeping is on and that write succeeded,
+	// nil when the landing recorded both halves in one pass or its durable
+	// write failed (gt-i4kqoa).
 	Deferred *LandingRecord
 }
 
@@ -2010,6 +2011,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// the bead half reads the record back, so it is the later pass's work.
 		rec, err := l.recordDurable(g, w, res)
 		if err != nil {
+			// Deferred stays nil on error: the repair path finishes only a record
+			// the landings file holds.
 			return res, &RecordError{Result: res, Err: err}
 		}
 		res.Deferred = &rec
@@ -2961,8 +2964,9 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 // recordDurable writes the half of a landing record that survives any bd
 // failure: it builds the record, fills its size from the landed diff, writes
 // refs/landed/<bead>, then appends the rig's landings file. It returns the
-// record even when a write fails, so a caller deferring the bead half keeps
-// what was built. The ref precedes the file because the file marks the bead
+// record it built even when a write fails; a failed write is not a deferred
+// record, since the repair path finishes only a record the landings file holds
+// (gt-i4kqoa). The ref precedes the file because the file marks the bead
 // done for the leftover-branch sweep: a crash between them leaves a kept
 // branch the ref answers ancestry for, never a swept branch nothing proves
 // landed (gt-as9v8).
