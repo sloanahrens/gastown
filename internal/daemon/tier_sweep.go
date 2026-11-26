@@ -663,9 +663,10 @@ type tierSweepStageResult struct {
 	// hold, so a stage that sat out a queue reads as its own work alone
 	// (gt-sy14g).
 	slotWait time.Duration
-	// timingNote splits a runner stage's wall time into its start lag, tests and
-	// tail (tierSweepRunnerTimingNote); empty for a host stage, or when the
-	// result's stamps give no split (gt-qc72jj).
+	// timingNote is the start lag, tests and tail split of a runner stage's wall
+	// time (tierSweepRunnerTimingNote). It is empty for a host stage, and also
+	// when the result's stamps give no split, so the line may carry no split at
+	// all (gt-qc72jj).
 	timingNote string
 	// cacheNote is the over-cap figure the run's cache trim record names, or
 	// that the record could not be read (tierSweepCacheNote); empty for a host
