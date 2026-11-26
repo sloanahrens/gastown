@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runnerroll"
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -529,11 +530,35 @@ func runnerRollDepsFor(townRoot string, exec podExec, seam runnerRollRunsSeam, o
 			rolloutWait: rolloutWait,
 			applied:     &appliedRunnerDeployment{},
 			out:         out,
+			// The preflight is built from the settings the daemon pod holds: the
+			// host's copy may be stale, and the builder reads it only when Verify
+			// runs (gt-qhfs3h).
+			sweepPreflight: sweeprunner.SettingsPreflight(townRoot, podSweepSettingsRead(townRoot, exec), out),
 		},
 		landingWait: landingWait,
 		runsWait:    runsWait,
 		dryRun:      dryRun,
 		out:         out,
+	}
+}
+
+// sweepSettingsReadWait bounds the pod read of the town settings that builds the
+// sweep preflight: Verify runs under the roll's deadline-less signal context, so
+// the read carries its own bound rather than let a wedged kubectl exec hold the
+// landing hold open (gt-qhfs3h).
+const sweepSettingsReadWait = 30 * time.Second
+
+// podSweepSettingsRead reads the town settings through the daemon pod for the
+// sweep preflight's builder, which calls it only when Verify runs, so a roll
+// that never reaches Verify reads nothing. A failed read is the builder's line
+// on out and a nil preflight, which Verify refuses, never a pass.
+func podSweepSettingsRead(townRoot string, exec podExec) func() ([]byte, error) {
+	run := newPodRunner(exec)
+	path := config.TownSettingsPath(townRoot)
+	return func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), sweepSettingsReadWait)
+		defer cancel()
+		return run(ctx, []string{"cat", "--", path}, nil)
 	}
 }
 
