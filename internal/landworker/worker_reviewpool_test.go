@@ -929,6 +929,28 @@ func (s *sweepHints) Hint(bead string) (string, bool, error) {
 	return "", s.rejecting[bead], nil
 }
 
+// headSweepHints is a Stored hint source whose review for a bead names the next
+// head each time it is read, so a record the pool replaced mid-pass looks like
+// one: the last head repeats once the sequence runs out. A bead with no
+// sequence has no stored review.
+type headSweepHints struct {
+	heads map[string][]string
+	reads map[string]int
+}
+
+func (s *headSweepHints) Hint(bead string) (string, bool, error) {
+	seq := s.heads[bead]
+	if len(seq) == 0 {
+		return "", false, nil
+	}
+	i := s.reads[bead]
+	if i >= len(seq) {
+		i = len(seq) - 1
+	}
+	s.reads[bead] = i + 1
+	return seq[i], true, nil
+}
+
 // landingCalls names each Land call as bead:stored-only, in call order.
 func landingCalls(calls []land.Work) string {
 	out := make([]string, 0, len(calls))
@@ -1137,14 +1159,16 @@ func TestReviewPoolWorkerSweepRejectionIsNotTriedTwice(t *testing.T) {
 	}
 }
 
-// TestReviewPoolWorkerSweepNoStoredKeepsTheTurn pins that a stored-only call
-// that consumed nothing counts nothing: the bead is not marked handled, lands
-// at its ordinary turn, and — though it stays ready and rejecting — is not swept
-// a second time in a later round of the same pass (gt-ixvxt5, gt-9nco9r).
-func TestReviewPoolWorkerSweepNoStoredKeepsTheTurn(t *testing.T) {
+// TestReviewPoolWorkerSweepsOncePerPass pins that one bead and head gets one
+// stored-only attempt in a pass: a stored-only call that consumed nothing counts
+// nothing, so the bead is not marked handled and lands at its ordinary turn, and
+// — though it stays ready and rejecting through three rounds — is not swept a
+// second time (gt-ixvxt5, gt-9nco9r).
+func TestReviewPoolWorkerSweepsOncePerPass(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
+	h.seedReadyAt(t, "gt-mid", 2, "2026-09-30T10:00:00Z")
 	h.seedReadyAt(t, "gt-late", 2, "2026-09-30T11:00:00Z")
 	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-late": true}}
 	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
@@ -1156,8 +1180,40 @@ func TestReviewPoolWorkerSweepNoStoredKeepsTheTurn(t *testing.T) {
 
 	h.w.Pass(context.Background())
 
-	if got, want := landingCalls(h.lander.calls), "gt-late:true,gt-early:false,gt-late:false"; got != want {
-		t.Fatalf("landings = %s; want %s: a stored-only pass with nothing to consume sweeps the bead once and leaves it its ordinary turn", got, want)
+	if got, want := landingCalls(h.lander.calls), "gt-late:true,gt-early:false,gt-mid:false,gt-late:false"; got != want {
+		t.Fatalf("landings = %s; want %s: a stored-only pass with nothing to consume sweeps one bead and head once and leaves it its ordinary turn", got, want)
+	}
+}
+
+// TestReviewPoolWorkerSweepsNewHeadOnce pins that the sweep follows the head the
+// hint names: a bead unhandled after a stored-only attempt for head A is swept
+// once more when the pool has replaced its record with one for head B, and not
+// again for head B (gt-k5s380).
+func TestReviewPoolWorkerSweepsNewHeadOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	// The rejecting bead is last in landing order, so the earlier beads' turns
+	// give the pool time to replace its stored review mid-pass.
+	h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
+	h.seedReadyAt(t, "gt-mid", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-abc", 2, "2026-09-30T11:00:00Z")
+	h.w.Stored = &headSweepHints{
+		heads: map[string][]string{"gt-abc": {noteHead, tipHead}},
+		reads: map[string]int{},
+	}
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		if work.StoredOnly {
+			return land.Result{}, land.ErrNoStoredVerdict
+		}
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
+
+	h.w.Pass(context.Background())
+
+	// Two stored-only attempts for gt-abc — one per head — then its ordinary
+	// turn. Keyed by bead alone, the second head is skipped.
+	if got, want := landingCalls(h.lander.calls), "gt-abc:true,gt-early:false,gt-abc:true,gt-mid:false,gt-abc:false"; got != want {
+		t.Fatalf("landings = %s; want %s: a new head for an unhandled bead is swept once and the same head is not swept again", got, want)
 	}
 }
 

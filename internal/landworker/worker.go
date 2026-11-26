@@ -623,10 +623,10 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// that stays ready after its attempt is not tried twice in one pass, and the
 	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
 	handled := make(map[string]bool, len(issues))
-	// The submissions this pass has already swept: one bead is offered to the
-	// stored-review sweep at most once per pass, even when the sweep counted
-	// nothing for it, so a kept record is not landed stored-only every round
-	// (gt-9nco9r).
+	// The bead and head pairs this pass has already swept: one stored review is
+	// offered at most once per pass, even when the sweep counted nothing for it,
+	// so a kept record is not landed stored-only every round (gt-9nco9r). A new
+	// head for the bead is its own pair and is swept once (gt-k5s380).
 	swept := make(map[string]bool)
 	for {
 		if ctx.Err() != nil {
@@ -937,14 +937,15 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 // the beads queued ahead of it run their gates; a rejection merges nothing, so
 // no landing order changes. It leaves a bead alone when the landing loop's own
 // turn for it is not due yet, and stops between beads once the run is canceled
-// or a drain is on. A bead is swept at most once per pass: swept names the
-// submissions already offered, and a bead the sweep counted an outcome for is
-// marked handled so the loop does not attempt it again while it stays ready; a
-// bead with nothing stored to consume counts nothing and keeps its ordinary
-// turn. Each landing it makes records the first-sight record and the outcome
-// memo the loop records around its own. With Stored nil nothing is swept
-// (gt-5q8ayw). A hint that cannot be read is unknown, never "not rejecting", so
-// the sweep returns its error (gt-9nco9r).
+// or a drain is on. One bead and head is swept at most once per pass: swept
+// names the pairs already offered, and a bead the sweep counted an outcome for
+// is marked handled so the loop does not attempt it again while it stays ready;
+// a bead with nothing stored to consume counts nothing and keeps its ordinary
+// turn, so a stored review the pool replaced for a new head while that turn
+// waits is swept once for the new head too. Each landing it makes records the
+// first-sight record and the outcome memo the loop records around its own. With
+// Stored nil nothing is swept (gt-5q8ayw). A hint that cannot be read is
+// unknown, never "not rejecting", so the sweep returns its error (gt-9nco9r).
 func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled, swept map[string]bool, rep *Report) error {
 	if w.Stored == nil {
 		return nil
@@ -953,10 +954,10 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 		if issue == nil {
 			continue
 		}
-		// A bead the pass has already looked at, or already swept, keeps its
-		// turn: sweeping it again would land it a second time (gt-wgvu6p).
-		key := handledKey(issue)
-		if handled[key] || swept[key] {
+		// A bead the pass has already looked at keeps its turn: sweeping it again
+		// would land it a second time (gt-wgvu6p).
+		submission := handledKey(issue)
+		if handled[submission] {
 			continue
 		}
 		if ctx.Err() != nil || w.draining() {
@@ -984,11 +985,18 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 		if w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
 			continue
 		}
-		_, rejecting, err := w.Stored.Hint(issue.ID)
+		head, rejecting, err := w.Stored.Hint(issue.ID)
 		if err != nil {
 			return fmt.Errorf("reading the stored review of %s: %w", issue.ID, err)
 		}
 		if !rejecting {
+			continue
+		}
+		// The head joins the key after the hint, so a record replaced for a new
+		// head while the bead waits its turn is swept once for that head; the
+		// same pair is offered only once per pass (gt-k5s380).
+		key := sweptKey(issue.ID, head)
+		if swept[key] {
 			continue
 		}
 		swept[key] = true
@@ -1004,7 +1012,7 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 		// spent the bead's turn, so the loop must not attempt it again while it
 		// stays ready (gt-9nco9r).
 		if *rep != before {
-			handled[key] = true
+			handled[submission] = true
 		}
 	}
 	return nil
@@ -2304,6 +2312,14 @@ func sortByLandingOrder(issues []*beads.Issue) {
 // which moves with every write to the bead.
 func handledKey(issue *beads.Issue) string {
 	return issue.ID + "@" + land.ReadyBlockTime(issue.Notes).Format(time.RFC3339Nano)
+}
+
+// sweptKey names one stored review the pass has already offered to the sweep:
+// the bead and the head the hint named. A bead whose stored-only attempt found
+// nothing stays unhandled, so a record the pool replaced for a new head while
+// its ordinary turn waits is swept once for that head too (gt-k5s380).
+func sweptKey(bead, head string) string {
+	return bead + "@" + head
 }
 
 // nextReady returns the first bead of a listed ready board whose submission
