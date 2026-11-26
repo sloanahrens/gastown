@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -74,11 +75,34 @@ type AheadStore struct {
 	// removeFile is the test seam for the remove Delete makes; nil means
 	// os.Remove.
 	removeFile func(path string) error
+	// betweenReadAndWrite is the test seam Put calls once, under the lock, between
+	// its read and its write; nil means nothing.
+	betweenReadAndWrite func()
 }
 
 // TownAheadStore is the review-ahead store for one rig's landings.
 func TownAheadStore(townRoot, rig string) *AheadStore {
 	return &AheadStore{TownRoot: townRoot, Rig: rig}
+}
+
+// aheadStoreLocks holds one lock per record path, under aheadStoreMu. Put's
+// read-compare-write and Delete hold their bead's lock, so an older Put cannot
+// overwrite a newer record and a Delete is not undone by a Put (gt-guahwz).
+// Package-level, since Put takes a store copy; it orders writers in this process
+// only (a second process writing the same file is not ordered by it). The map
+// holds one small mutex per bead the process has stored and is never pruned: its
+// size is bounded by the number of beads, which the landing worker closes out.
+var aheadStoreMu sync.Mutex
+var aheadStoreLocks = map[string]*sync.Mutex{}
+
+// aheadStoreLock returns the lock for one record path.
+func aheadStoreLock(path string) *sync.Mutex {
+	aheadStoreMu.Lock()
+	defer aheadStoreMu.Unlock()
+	if aheadStoreLocks[path] == nil {
+		aheadStoreLocks[path] = &sync.Mutex{}
+	}
+	return aheadStoreLocks[path]
 }
 
 // Put stores rec as its bead's record unless the record already stored began
@@ -99,9 +123,16 @@ func (s AheadStore) Put(rec AheadRecord) error {
 	if err := ensureLandingsDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	// The comparison and the write share one lock hold (gt-guahwz).
+	lock := aheadStoreLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 	stored, err := s.recordAt(path)
 	if err != nil {
 		return err
+	}
+	if s.betweenReadAndWrite != nil {
+		s.betweenReadAndWrite()
 	}
 	if stored != nil && stored.StartedAt.After(rec.StartedAt) {
 		return nil
@@ -192,6 +223,11 @@ func (s AheadStore) Delete(bead string) error {
 	if err != nil {
 		return err
 	}
+	// Delete takes its bead's Put lock, so a remove that ran between a Put's read
+	// and its write cannot be undone by that Put writing the record back (gt-guahwz).
+	lock := aheadStoreLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
