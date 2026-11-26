@@ -607,6 +607,80 @@ func TestSystemUpdatesSweepTableDrawsNothing(t *testing.T) {
 	}
 }
 
+// sweepFailedStage is one stage of a sweep in the failed-packages tests: its tier
+// and verdict as the feed sends them, and its failed package names when the feed
+// carries them. A nil failed leaves the key out, as the feed does for a stage
+// that names none.
+func sweepFailedStage(tier, verdict string, failed any) map[string]any {
+	st := systemUpdateStage(tier, verdict)
+	if failed != nil {
+		st["failed"] = failed
+	}
+	return st
+}
+
+// A RED sweep that carries failed packages draws their names on one line under
+// the sweeps table and above the commit rows (gt-2y5tti): the sweep's commit,
+// then each tier's failed packages.
+func TestSystemUpdatesRedPackagesDrawTheNames(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderSystemUpdates", sweepTableState(systemUpdatesSources{}, []any{
+		sweepVerdictSweep("2020-03-05T21:40:00Z",
+			sweepFailedStage("shell", "GREEN", nil),
+			sweepFailedStage("integration", "RED", []any{"pkg/alpha", "pkg/beta"})),
+	}))
+
+	if got := dom.element(t, "systemupdates").Kids; got != 3 {
+		t.Fatalf("the pane drew %d lines, want the table, the failed line and the commit row", got)
+	}
+	line := dom.descend(t, "systemupdates", 1)
+	for _, name := range []string{"pkg/alpha", "pkg/beta"} {
+		if !strings.Contains(line.Text, name) {
+			t.Errorf("the failed line reads %q, want it to name %s", line.Text, name)
+		}
+	}
+}
+
+// A sweep draws no failed line unless it is RED and names a package: a RED sweep
+// the feed sends no names for, a names list that is empty or blank or not a list,
+// a GREEN sweep that carries names, and an unread sweep source all draw none
+// (gt-2y5tti). The pane keeps the table and the commit row, or the commit row alone
+// when the sweep source is unread.
+func TestSystemUpdatesRedPackagesDrawNoLine(t *testing.T) {
+	t.Parallel()
+
+	red := func(failed any) []any {
+		return []any{sweepVerdictSweep("2020-03-05T21:40:00Z", sweepFailedStage("race", "RED", failed))}
+	}
+	for _, tc := range []struct {
+		name   string
+		src    systemUpdatesSources
+		sweeps []any
+		kids   int
+	}{
+		{"a RED sweep the feed sends no names for", systemUpdatesSources{}, red(nil), 2},
+		{"a RED sweep with an empty names list", systemUpdatesSources{}, red([]any{}), 2},
+		{"a RED sweep whose names are all blank", systemUpdatesSources{}, red([]any{" ", ""}), 2},
+		{"a RED sweep whose names are not a list", systemUpdatesSources{}, red("pkg/alpha"), 2},
+		{"a GREEN sweep that carries names", systemUpdatesSources{}, []any{
+			sweepVerdictSweep("2020-03-05T21:40:00Z", sweepFailedStage("race", "GREEN", []any{"pkg/alpha"})),
+		}, 2},
+		{"a sweep source that could not be read", systemUpdatesSources{sweepUnknown: true}, red([]any{"pkg/alpha"}), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderSystemUpdates", sweepTableState(tc.src, tc.sweeps))
+			if got := dom.element(t, "systemupdates").Kids; got != tc.kids {
+				t.Fatalf("the pane drew %d lines, want %d and no failed line", got, tc.kids)
+			}
+		})
+	}
+}
+
 // sweepVerdictSweep is one sweep of the verdict test: its stages as the feed
 // sends them, and no stages key for a sweep whose record kept none.
 func sweepVerdictSweep(at string, stages ...any) map[string]any {
