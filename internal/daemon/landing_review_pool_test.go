@@ -194,6 +194,49 @@ func TestReviewPoolWiringOff(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWiringOffLeavesTheWorker pins that the off path gives the
+// Worker no review pool at all: Pool and Stored stay nil, so a landing for a
+// rig without the pool runs no queue-time review and sweeps no stored verdict.
+// Every way the pool reads as off is a row, and none of them reads om's config,
+// which reviewPoolTestEnv fails the test on (gt-1xc93t).
+func TestReviewPoolWiringOffLeavesTheWorker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  *config.LandingWorkerConfig
+	}{
+		{name: "no review_pool key", cfg: &config.LandingWorkerConfig{}},
+		{name: "rig not listed", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"other"}},
+		}},
+		{name: "unparseable reuse_expiry", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}, ReuseExpiryStr: "soon"},
+		}},
+		{name: "max_concurrent out of range", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}, MaxConcurrent: 9},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			worker := reviewPoolTestWorker()
+
+			if err := d.wireReviewPool("gastown", tc.cfg, reviewPoolTestLander(), worker, "/sentinel/reviews", reviewPoolTestEnv(t)); err != nil {
+				t.Fatalf("pool off for the rig returned %v; want nil, the pool off", err)
+			}
+
+			if worker.Pool != nil {
+				t.Fatalf("pool off for the rig gave the Worker Pool %+v; want nil so no review runs before the landing", worker.Pool)
+			}
+			if worker.Stored != nil {
+				t.Fatalf("pool off for the rig gave the Worker Stored %+v; want nil so no stored verdict is swept", worker.Stored)
+			}
+		})
+	}
+}
+
 func TestReviewPoolWiringBadConfigStaysOff(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
