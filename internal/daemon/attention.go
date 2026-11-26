@@ -292,6 +292,9 @@ type attentionSources struct {
 	// refusalWindow is the window it grows from (gt-xu8fkg).
 	gatewayStats  func(ctx context.Context) (bdgateway.GatewayStats, error)
 	refusalWindow *RefusalWindow
+	// gatewayCap is the cap collector the bd_gateway.cap_hit read runs; nil
+	// leaves that read a no-op, as a daemon with no gateway configured has it.
+	gatewayCap *gatewayCapCollector
 	// landingState reads the rig's in-flight landing, the landing-stuck
 	// collector's subject.
 	landingState func(rig string) landingState
@@ -950,6 +953,16 @@ func (s *attentionSources) collectGatewayRefusals(ctx context.Context) ([]attent
 		Severity: attention.SeverityMedium,
 		Summary:  fmt.Sprintf("bd gateway refused %d calls in the last hour: %s", total, strings.Join(named, ", ")),
 	}}, nil
+}
+
+// collectBDGatewayCap runs the cap collector this source holds. A nil
+// collector raises nothing and reads no error. A failed read is returned
+// unchanged for the queue to treat as a failed collector.
+func (s *attentionSources) collectBDGatewayCap(ctx context.Context) ([]attention.Item, error) {
+	if s.gatewayCap == nil {
+		return nil, nil
+	}
+	return s.gatewayCap.collect(ctx)
 }
 
 // gatewayStatsRead reads the bd gateway's counters through the workspace
