@@ -43,11 +43,13 @@ const (
 	planPhaseWorkloads = "W"
 )
 
-// planRecordFile is one file of a plan record: its name, its phase (P or W) and
-// the hex SHA-256 of its bytes. A rendered Deployment also records the revision
-// the cluster holds for it, as the annotation reads, and the object's
-// resourceVersion, beside that hash. A Deployment the cluster does not hold is
-// marked absent with neither.
+// planRecordFile is one file of a plan record: its name, its phase (P or W), the
+// hex SHA-256 of its bytes, and the output of its server-side dry run. A rendered
+// Deployment also records the revision the cluster holds for it, as the annotation
+// reads, and the object's resourceVersion, beside that hash. A Deployment the
+// cluster does not hold is marked absent with neither. The dry-run output is
+// recorded only for a run that passed: a failed dry run ends the plan before
+// plan.json is written (gt-f1p2fw).
 type planRecordFile struct {
 	Name            string `json:"name"`
 	Phase           string `json:"phase"`
@@ -55,6 +57,7 @@ type planRecordFile struct {
 	Revision        string `json:"revision,omitempty"`
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 	Absent          bool   `json:"absent,omitempty"`
+	DryRun          string `json:"dry_run"`
 }
 
 // planFlags holds the plan's own flags: policyKubeconfig is phase P's (the
@@ -167,11 +170,13 @@ that differ from the live cluster.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
-plan writes plan.json into --out with the full id, each file's name, phase and
-SHA-256, and the revision the cluster holds for each Deployment; a Deployment the
-cluster does not hold is recorded absent, with no revision. A phase P file is
-listed only when a static object differs from the cluster's, and then the id
-names it too. A plan that fails before that leaves no plan.json.
+plan writes plan.json into --out with the full id, each file's name, phase,
+SHA-256 and server-side dry-run output, and the revision the cluster holds for
+each Deployment; a Deployment the cluster does not hold is recorded absent, with
+no revision. A dry run that fails for any file ends the plan non-zero, and no
+plan.json is written. A phase P file is listed only when a static object differs
+from the cluster's, and then the id names it too. A plan that fails before that
+leaves no plan.json.
 
 Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
 the deployer-policy certificate, and phase W --apply-kubeconfig, the
@@ -362,12 +367,13 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // differs from the cluster's: when none does, plan.json and the id name the
 // workloads alone, and the phases line names only W. A phase with files whose
 // kubeconfig flag is missing (phaseKubeconfig) is refused. Each file is then sent
-// as a server-side dry run under its phase's kubeconfig, and the results come back
-// in memory without failing this plan (gt-f1p2fw). The differences print after the
-// phases, the static objects' then each Deployment's in apply order, and the short
-// id is the last line. plan.json is written only after every read succeeds and
-// every dry run has run, and the output only after it is written, so a refusal, a
-// render error, a failed read or a failed write prints nothing.
+// as a server-side dry run under its phase's kubeconfig, its output recorded on
+// the file in plan.json; a dry run that fails for any file ends the plan non-zero
+// and writes no plan.json (gt-f1p2fw). The differences print after the phases, the
+// static objects' then each Deployment's in apply order, and the short id is the
+// last line. plan.json is written only after every read succeeds and every dry run
+// passed, and the output only after it is written, so a refusal, a render error, a
+// failed read, a failed dry run or a failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, kubeconfigs planFlags, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -456,9 +462,20 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 	}
 	record.ID = full
-	// Each file's server-side dry run comes back in memory (gt-f1p2fw records it).
-	if _, err := planDryRuns(ctx, kube, outDir, record.Files, kubeconfigs); err != nil {
+	// Each file's server-side dry run runs before plan.json is written, and a run
+	// that fails for any file ends the plan here: plan.json is written last, so its
+	// presence means every file it names passed its dry run (gt-f1p2fw).
+	results, err := planDryRuns(ctx, kube, outDir, record.Files, kubeconfigs)
+	if err != nil {
 		return err
+	}
+	for i := range results {
+		if results[i].Err != nil {
+			return fmt.Errorf("%w, so no plan.json was written", results[i].Err)
+		}
+		// planDryRuns returns one result per file in files order, so result i is the
+		// dry run of record.Files[i].
+		record.Files[i].DryRun = results[i].Output
 	}
 	if err := writeJSON(filepath.Join(outDir, planFileName), record); err != nil {
 		return fmt.Errorf("gt town cluster plan: cannot write %s, so the plan is not whole and no id was printed: %w", filepath.Join(outDir, planFileName), err)
