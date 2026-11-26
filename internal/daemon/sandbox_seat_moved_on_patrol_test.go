@@ -298,6 +298,35 @@ func TestPatrolScanDropsMovedOnKeptSeat(t *testing.T) {
 	}
 }
 
+// The pass re-judges the seat under the lock: the first read judges the seat
+// moved on to another bead, and a takeover onto the landed bead inside the
+// sandboxSeatLock seam leaves the kept record KEPT (gt-t3cfp5).
+func TestPatrolScanMovedOnRejudgedUnderLock(t *testing.T) {
+	t.Parallel()
+	p, path := movedOnPatrol(t, movedOnOther, true)
+	locked := false
+	p.host.sandboxSeatLock = func(_, _ string, fn func() error) error {
+		locked = true
+		p.seatFields.Branch = movedOnLanded
+		p.setAgent()
+		return fn()
+	}
+	var logs strings.Builder
+	p.host.d.logger = log.New(&logs, "", 0)
+
+	p.host.dropMovedOnKeptSeats()
+
+	if !locked {
+		t.Fatalf("the pass did not take the seat lock, so the first read did not judge the seat moved on:\n%s", logs.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the kept record is gone; the pass re-read the seat under the lock and kept a seat taken over onto the landed bead (stat: %v)", err)
+	}
+	if out := logs.String(); strings.Contains(out, "dropped") {
+		t.Errorf("the pass logged a drop for a seat taken over onto the landed bead:\n%s", out)
+	}
+}
+
 // movedOnWaitedPolecat is the second seat whose moved-on keep one budgeted tick
 // does not reach. It sorts after the fixture seat, so that seat's record is
 // always the one read first.
