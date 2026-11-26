@@ -325,6 +325,66 @@ func driftFingerprint(value any) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:])[:driftFingerprintHexLen], nil
 }
 
+// driftPodSpecPath is where a Deployment's pod spec sits, the root of every
+// container path the reviewed safe list names.
+const driftPodSpecPath = "spec.template.spec"
+
+// driftPodTemplateMetadataPath is where the pod template's own metadata sits.
+const driftPodTemplateMetadataPath = "spec.template.metadata"
+
+// driftValueSafe reports whether a drift line may print the values at path. The
+// list is reviewed: each entry is a place where the rendered and the observed
+// value both help a reader and printing them is safe (gt-graamb). Every other
+// path, such as an env value, a volume, a Secret or a data key, keeps its
+// fingerprints, since a spec can hold a secret (gt-wi4885). The object's own
+// metadata labels and annotations are not on the list: every kind carries them,
+// and the gt-sbx compare reports a Service label that can hold a token
+// (gt-fl4i45).
+func driftValueSafe(path string) bool {
+	if path == "spec.replicas" || path == driftPodSpecPath+".terminationGracePeriodSeconds" {
+		return true
+	}
+	if driftValueAtOrUnder(path, "spec.strategy") ||
+		driftValueAtOrUnder(path, driftPodTemplateMetadataPath+".labels") ||
+		driftValueAtOrUnder(path, driftPodTemplateMetadataPath+".annotations") {
+		return true
+	}
+	return driftContainerValue(path)
+}
+
+// driftValueAtOrUnder reports whether path is field itself or a path beneath it.
+// A map's child continues with '.' and a list entry's with '['.
+func driftValueAtOrUnder(path, field string) bool {
+	return path == field || strings.HasPrefix(path, field+".") || strings.HasPrefix(path, field+"[")
+}
+
+// driftContainerField matches what the reviewed safe list names below a
+// container entry: the args list and its entries, the resources map, its
+// requests and limits maps, and one quantity under them. A quantity's name may
+// hold '.', as nvidia.com/gpu does, but never a bracket, which only a list path
+// carries.
+var driftContainerField = regexp.MustCompile(`^\.(args|args\[[0-9]+\]|resources|resources\.(requests|limits)(\.[^\[\]]+)?)$`)
+
+// driftContainerValue reports whether path names a container's args or
+// resources, or what sits under them, in one of the pod spec's container
+// lists. It matches the whole path below the container entry rather than a
+// prefix of it, because a container name can carry a ']' and make an env path
+// read as an args path, which would print a value the list withholds (gt-graamb).
+func driftContainerValue(path string) bool {
+	for _, list := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		prefix := driftPodSpecPath + "." + list + "["
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		closing := strings.IndexByte(path[len(prefix):], ']')
+		if closing < 0 {
+			return false
+		}
+		return driftContainerField.MatchString(path[len(prefix)+closing+1:])
+	}
+	return false
+}
+
 // joinPath appends key to path as a JSON object path.
 func joinPath(path, key string) string {
 	if path == "" {
