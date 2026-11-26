@@ -321,7 +321,7 @@ func rawBdScanProblems(scan func() (map[rawBdKey]int, int, error), baseline map[
 // the contract when none fits), never by raising a count.
 func TestNoNewRawBdSites(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile(filepath.Join("..", "beads", "beadsfake", "raw-bd-baseline.txt"))
+	src, err := rawBdBaselineRead(filepath.Join("..", "beads", "beadsfake", "raw-bd-baseline.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +337,38 @@ func TestNoNewRawBdSites(t *testing.T) {
 	_ = root.Close()
 	for _, problem := range rawBdScanProblems(rawBdRealScan, baseline, rawBdFileFloor) {
 		t.Error(problem)
+	}
+}
+
+// rawBdBaselineRead reads the raw-bd baseline through the shared tree, so the
+// file is read once for the package (TestRawBdBaselineReadThroughTree).
+var rawBdBaselineRead = tree.Source
+
+// TestRawBdBaselineReadThroughTree checks the ratchet reads its baseline through
+// the shared tree: the bytes it gets are the slice tree.Source holds, so the
+// file is read once for the package.
+func TestRawBdBaselineReadThroughTree(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join("..", "beads", "beadsfake", "raw-bd-baseline.txt")
+	got, err := rawBdBaselineRead(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := tree.Source(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || len(want) == 0 || &got[0] != &want[0] {
+		t.Errorf("baseline read returned its own %d bytes; want the shared tree's slice", len(got))
+	}
+}
+
+// TestRawBdBaselineMissingFails checks a missing baseline is a read error, never
+// an empty baseline that every count would then exceed.
+func TestRawBdBaselineMissingFails(t *testing.T) {
+	t.Parallel()
+	if _, err := rawBdBaselineRead(filepath.Join(t.TempDir(), "raw-bd-baseline.txt")); err == nil {
+		t.Errorf("a missing baseline read without an error")
 	}
 }
 
