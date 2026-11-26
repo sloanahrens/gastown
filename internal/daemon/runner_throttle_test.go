@@ -86,3 +86,44 @@ func TestReadRunnerThrottleArgvIsCopied(t *testing.T) {
 		}
 	}
 }
+
+// podsAnswer is an exec seam whose kubectl listing prints out and succeeds.
+func podsAnswer(out string) func(context.Context, ...string) (string, error) {
+	return func(context.Context, ...string) (string, error) { return out, nil }
+}
+
+func TestRunnerPodNameReturnsTheOnePod(t *testing.T) {
+	t.Parallel()
+	var argv []string
+	got, err := runnerPodName(context.Background(), func(_ context.Context, args ...string) (string, error) {
+		argv = args
+		return "pod/forgejo-runner-7d9f6b8c4-x2k9p\n", nil
+	})
+	if err != nil || got != "forgejo-runner-7d9f6b8c4-x2k9p" {
+		t.Fatalf("runnerPodName = %q, %v, want the one pod name", got, err)
+	}
+	want := "get pods -n forgejo -l app.kubernetes.io/name=forgejo-runner -o name"
+	if gotArgs := strings.Join(argv, " "); gotArgs != want {
+		t.Fatalf("runnerPodName ran %q, want %q", gotArgs, want)
+	}
+}
+
+func TestRunnerPodNameErrors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		exec func(context.Context, ...string) (string, error)
+		want string
+	}{
+		{"no pod", podsAnswer(""), "found 0 runner pods"},
+		{"two pods", podsAnswer("pod/forgejo-runner-a\npod/forgejo-runner-b\n"), "found 2 runner pods"},
+		{"no exec seam", nil, "no exec seam"},
+		{"a lookup error", func(context.Context, ...string) (string, error) { return "", errors.New("kubectl is unreachable") }, "kubectl is unreachable"},
+	}
+	for _, c := range cases {
+		_, err := runnerPodName(context.Background(), c.exec)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want an error naming %q", c.name, err, c.want)
+		}
+	}
+}
