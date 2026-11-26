@@ -293,3 +293,40 @@ func TestJobOverdueOffWiring(t *testing.T) {
 		t.Errorf("patrolOff nil or not reading disabled_patrols; want main_branch_test off, dolt_gc on")
 	}
 }
+
+// The skip keeps what it must: a nil patrolOff skips nothing, an off job raises
+// nothing even when it failed or is a wake job, and a wake job with no skip
+// still raises its wake key (gt-wenfxj).
+func TestJobOverdueOffKeeps(t *testing.T) {
+	t.Parallel()
+	off := func(string) bool { return true }
+	for _, tc := range []struct {
+		name    string
+		off     func(string) bool
+		reading JobReading
+		want    string
+	}{
+		{"nil patrolOff keeps the overdue item", nil, JobReading{Name: "cache_trim", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: time.Hour}, "job-overdue:cache_trim"},
+		{"off job both overdue and failed raises none", off, JobReading{Name: "cache_trim", State: jobStateOverdue, Outcome: jobOutcomeFailed, LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: time.Hour}, ""},
+		{"off failed job raises none", off, JobReading{Name: "cache_trim", State: "ok", Outcome: jobOutcomeFailed, LastRun: jobOverdueNow.Add(-2 * time.Hour), Cadence: 24 * time.Hour}, ""},
+		{"off wake job raises none", off, JobReading{Name: "dolt_gc", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-3 * MaintenanceGCCadence), Cadence: MaintenanceGCCadence}, ""},
+		{"nil patrolOff keeps the dolt_gc wake key", nil, JobReading{Name: "dolt_gc", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-3 * MaintenanceGCCadence), Cadence: MaintenanceGCCadence}, jobOverdueWakePrefix + "dolt_gc"},
+		{"nil patrolOff keeps the dolt_backup wake key", nil, JobReading{Name: "dolt_backup", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-3 * 24 * time.Hour), Cadence: 24 * time.Hour}, jobOverdueWakePrefix + "dolt_backup"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, jobOverdueNow)
+			f.src.patrolOff = tc.off
+			items := jobOverdueItems(t, f, []JobReading{tc.reading})
+			if tc.want == "" {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Key != tc.want {
+				t.Fatalf("items = %+v, want one keyed %q", items, tc.want)
+			}
+		})
+	}
+}
