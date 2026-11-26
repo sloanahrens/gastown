@@ -88,6 +88,16 @@ func buildTrendIn(now time.Time, recs []omRecord, stages []omStage, rejs []omRej
 			hours[i].Landed++
 		}
 	}
+	// The last-hour figure is a rolling 60 minutes up to now, not the clock hour
+	// the buckets cut: a landing 59 minutes back is in, one 61 minutes back and
+	// one still ahead of now are out (gt-n89i71).
+	lastHourFloor := now.Add(-time.Hour)
+	lastHour := 0
+	for _, rec := range recs {
+		if rec.LandedAt.After(lastHourFloor) && !rec.LandedAt.After(now) {
+			lastHour++
+		}
+	}
 	for _, rj := range rejs {
 		if i, ok := bucket(rj.At); ok {
 			hours[i].Rejected++
@@ -120,7 +130,7 @@ func buildTrendIn(now time.Time, recs []omRecord, stages []omStage, rejs []omRej
 		hours[i].LoadAvg, hours[i].LoadMax = &avg, &max
 	}
 
-	tr := &dashboard.Trend{Hours: hours}
+	tr := &dashboard.Trend{Hours: hours, LandedLastHour: lastHour}
 	for _, st := range stages {
 		if _, ok := bucket(st.At); !ok {
 			continue
