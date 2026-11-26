@@ -469,6 +469,52 @@ func TestMarkSquashDeferred(t *testing.T) {
 	}
 }
 
+// TestSquashDeferStampSurvivesARoll pins the persisted deferral stamp against a
+// daemon roll: a second Daemon built on the alert clock directory the first one
+// marked reads the first's since time, and its own mark keeps that time rather
+// than restarting the run's day (gt-h5sb8s).
+func TestSquashDeferStampSurvivesARoll(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 24, 9, 30, 0, 0, time.UTC)
+	later := first.Add(48 * time.Hour)
+	tests := []struct {
+		name string
+		// remark is when the rolled daemon marks the database; nil means it
+		// only reads the first daemon's stamp.
+		remark *time.Time
+	}{
+		{name: "a rolled daemon reads the first daemon's stamp"},
+		{name: "a rolled daemon's mark keeps the first stamp", remark: &later},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			marked := &Daemon{config: &Config{TownRoot: town}}
+			marked.clock = clockwork.NewFakeClockAt(first)
+			if err := marked.markSquashDeferred("gt"); err != nil {
+				t.Fatalf("the first daemon's mark: %v", err)
+			}
+
+			rolled := &Daemon{config: &Config{TownRoot: town}}
+			rolled.clock = clockwork.NewFakeClockAt(later)
+			if got := rolled.squashDeferredSince("gt"); !got.Equal(first) {
+				t.Fatalf("a second daemon's squashDeferredSince(%q) = %v, want the first daemon's %v",
+					"gt", got, first)
+			}
+			if tt.remark != nil {
+				if err := rolled.markSquashDeferred("gt"); err != nil {
+					t.Fatalf("the rolled daemon's mark: %v", err)
+				}
+				if got := rolled.squashDeferredSince("gt"); !got.Equal(first) {
+					t.Fatalf("squashDeferredSince(%q) after the rolled daemon's mark = %v, want the first stamp %v",
+						"gt", got, first)
+				}
+			}
+		})
+	}
+}
+
 // stampSquashDefer writes at on the alert clock under dir, the way the
 // deferral's mark will, so a row reads a real clock entry and not a file the
 // test made up.
