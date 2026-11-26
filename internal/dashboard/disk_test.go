@@ -2,9 +2,13 @@ package dashboard
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -422,4 +426,105 @@ func TestDiskGrowthFieldsAreOnTheWire(t *testing.T) {
 			t.Errorf("the row's payload has no %q key: %s", key, raw)
 		}
 	}
+}
+
+// TestDiskNamesMatchTheWriter pins the reader's directory and ring names to the
+// writer's. The writer's names are unexported in internal/daemon, so this
+// package cannot import them: the test reads the writer's source instead. It
+// takes the diskGrowthDir constant and the diskGrowthRings map, resolves each
+// map entry through the disk-name constants, and compares. Changing a value on
+// either side, or giving a disk the other disk's ring, fails the test.
+func TestDiskNamesMatchTheWriter(t *testing.T) {
+	t.Parallel()
+
+	consts, rings := readWriterDiskNames(t, "../daemon/disk_maintenance_growth.go", "../daemon/disk_maintenance_disks.go")
+	if got := consts["diskGrowthDir"]; got != diskGrowthDir {
+		t.Errorf("the writer's diskGrowthDir is %q, the reader's is %q", got, diskGrowthDir)
+	}
+	if len(rings) != 2 {
+		t.Fatalf("the writer keeps %d disks' rings, the reader reads two", len(rings))
+	}
+	// Each ring is looked up by its disk, so swapping the two rings fails both.
+	if got := rings[consts["diskMaintDiskControl"]]; got != diskRingControl {
+		t.Errorf("the writer's control disk writes ring %q, the reader reads %q", got, diskRingControl)
+	}
+	if got := rings[consts["diskMaintDiskColima"]]; got != diskRingSandbox {
+		t.Errorf("the writer's colima disk writes ring %q, the reader reads %q", got, diskRingSandbox)
+	}
+}
+
+// readWriterDiskNames parses the writer's files and returns the string constants
+// they declare, and the ring each disk writes to, keyed by disk name. A map entry
+// it cannot resolve to a string stops the test rather than comparing as empty.
+func readWriterDiskNames(t *testing.T, paths ...string) (map[string]string, map[string]string) {
+	t.Helper()
+	consts := map[string]string{}
+	var ringMap *ast.CompositeLit
+	for _, path := range paths {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("reading the writer's source: %v", err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range vs.Names {
+					if i >= len(vs.Values) {
+						continue
+					}
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						s, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							t.Fatalf("the writer's %s is not a string: %v", name.Name, err)
+						}
+						consts[name.Name] = s
+					}
+					if name.Name == "diskGrowthRings" {
+						lit, ok := vs.Values[i].(*ast.CompositeLit)
+						if !ok {
+							t.Fatal("the writer's diskGrowthRings is not a map literal")
+						}
+						ringMap = lit
+					}
+				}
+			}
+		}
+	}
+	if ringMap == nil {
+		t.Fatal("the writer declares no diskGrowthRings map")
+	}
+	rings := map[string]string{}
+	for _, elt := range ringMap.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			t.Fatal("the writer's diskGrowthRings has an entry that is not a key: value pair")
+		}
+		rings[writerString(t, kv.Key, consts)] = writerString(t, kv.Value, consts)
+	}
+	return consts, rings
+}
+
+// writerString is the string a diskGrowthRings key or value names in the
+// writer's source: a string literal, or a string constant the writer declares.
+func writerString(t *testing.T, expr ast.Expr, consts map[string]string) string {
+	t.Helper()
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if s, err := strconv.Unquote(e.Value); err == nil {
+			return s
+		}
+	case *ast.Ident:
+		if s, ok := consts[e.Name]; ok {
+			return s
+		}
+	}
+	t.Fatal("the writer's diskGrowthRings has an entry the test cannot resolve to a name")
+	return ""
 }
