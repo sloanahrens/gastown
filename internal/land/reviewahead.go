@@ -206,18 +206,17 @@ func (l *Lander) aheadNow() time.Time {
 }
 
 // aheadFetches brings the target and the work branch into the lander's clone,
-// the two fetches Land makes before it checks the head out. They run under the
-// shared git lock, which the deferred unlock releases on every return path and
-// on a panic's unwind. The lock lives here, not in ReviewAhead, because it is
-// not reentrant and the worktree add that follows takes it for itself.
+// the two fetches Land makes before it checks the head out. Each fetch takes
+// the shared git lock for its own run: fetchTarget is wrapped in withGitMu
+// here, and checkHeadPushed takes the lock for its branch fetch itself. The
+// lock is not held across both calls, because withGitMu is not reentrant; the
+// worktree add that follows takes it the same way.
 //
 // A submission the landing would refuse as not pushed has no head to review, so
 // its rejection is returned as an error: the pool writes no bead and rejects
 // nothing, and the serial landing's own check runs the rejection for real.
 func (l *Lander) aheadFetches(g Repo, w Work) error {
-	l.gitMu.Lock()
-	defer l.gitMu.Unlock()
-	if err := l.fetchTarget(g, w.Target); err != nil {
+	if err := l.withGitMu(func() error { return l.fetchTarget(g, w.Target) }); err != nil {
 		return &InfraError{Stage: "fetch target", Err: err}
 	}
 	rej, err := l.checkHeadPushed(g, w)

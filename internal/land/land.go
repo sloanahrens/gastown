@@ -1926,11 +1926,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 const fetchTimeout = 2 * time.Minute
 
 // withGitMu runs fn with gitMu held and releases it on every return path,
-// including a panic's unwind. The landing's target fetch shares the lock with
-// the review pool's git calls, so a ref or worktree lock a review holds
-// between its own steps cannot collide with the fetch. The fetch keeps its own
-// timeout, and no other lock is taken while gitMu is held. A caller that
-// already holds gitMu must not call this: it would deadlock.
+// including a panic's unwind. The landing's fetches — the target fetch in Land
+// and the branch fetch in checkHeadPushed — share the lock with the review
+// pool's git calls, so a ref or worktree lock a review holds between its own
+// steps cannot collide with them. A fetch keeps its own timeout, and no other
+// lock is taken while gitMu is held. A caller that already holds gitMu must not
+// call this: it would deadlock.
 func (l *Lander) withGitMu(fn func() error) error {
 	l.gitMu.Lock()
 	defer l.gitMu.Unlock()
@@ -2197,7 +2198,9 @@ func omConfigRefusal(what, head string) *Rejection {
 
 // checkHeadPushed asserts <remote>/<branch> — the rig's configured landing
 // remote (gt-fn9e6.9), origin by default — carries the declared head, so Land
-// never merges a commit the author did not push (gt-sda9).
+// never merges a commit the author did not push (gt-sda9). Its branch fetch
+// takes gitMu like the target fetch does, so a review's ref or worktree lock
+// cannot collide with it (gt-d9pvf6).
 func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	remote := l.remote()
 	tip, err := g.PushRemoteBranchTip(remote, w.Branch)
@@ -2207,7 +2210,9 @@ func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	if tip == "" {
 		return &Rejection{Kind: RejectNotPushed, Rework: true, Reason: fmt.Sprintf("%s has no branch %s, so it cannot carry head %s", remote, w.Branch, shortSHA(w.Head))}, nil
 	}
-	if err := g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", w.Branch, remote, w.Branch), fetchTimeout); err != nil {
+	if err := l.withGitMu(func() error {
+		return g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", w.Branch, remote, w.Branch), fetchTimeout)
+	}); err != nil {
 		return nil, &InfraError{Stage: "fetch branch", Err: err}
 	}
 	if _, err := g.Rev(w.Head + "^{commit}"); err != nil {
