@@ -574,16 +574,22 @@ func resolveOMConfig(user omConfig, rigName string, rr omRigRead) (omConfig, str
 	return out, source
 }
 
-// omConfigPath is the reviewer's own config, in the home of whoever runs the
-// dashboard: what backend it reviews with, how deep, how strict. Empty when
-// there is no home to look in, which every reader of it reads as "no config".
+// omConfigPath is the reviewer's own config, where om keeps it: what backend
+// it reviews with, how deep, how strict. Empty when there is no home to look
+// in, which every reader of it reads as "no config".
 func omConfigPath() string {
-	return omConfigPathIn(os.UserHomeDir)
+	return omConfigPathIn(os.LookupEnv, os.UserHomeDir)
 }
 
-// omConfigPathIn is omConfigPath with the home directory injected, so a test
-// drives the no-home case without the real one.
-func omConfigPathIn(home func() (string, error)) string {
+// omConfigPathIn is omConfigPath with the environment and home directory
+// injected, so a test drives the XDG and no-home cases without the real ones.
+// om reads its user config from $XDG_CONFIG_HOME/om/config.json when
+// XDG_CONFIG_HOME is set and non-empty, and from the home directory otherwise;
+// this follows the same rule so the panel reads the file om does.
+func omConfigPathIn(lookup func(string) (string, bool), home func() (string, error)) string {
+	if xdg, ok := lookup("XDG_CONFIG_HOME"); ok && xdg != "" {
+		return filepath.Join(xdg, "om", "config.json")
+	}
 	h, err := home()
 	if err != nil {
 		return ""
