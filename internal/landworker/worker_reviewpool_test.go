@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -309,4 +311,172 @@ func TestReviewPoolWorkerStoredDefaultsNil(t *testing.T) {
 	if want := (Report{Landed: 2}); rep != want {
 		t.Fatalf("pass report = %+v, want %+v", rep, want)
 	}
+}
+
+// poolReviewer is the reviewer these tests' pool reviews through: it records
+// each work it is asked for and the context that review runs under, and holds
+// the review open until the test releases it, so a review can be seen still
+// running after the pass that offered it has returned. Its one wait is bounded
+// by the test's own context, so a review never outlives the test that made it.
+type poolReviewer struct {
+	hold    chan struct{}
+	bound   <-chan struct{}
+	once    sync.Once
+	entered chan land.Work
+
+	mu    sync.Mutex
+	works []land.Work
+	ctxs  []context.Context
+}
+
+func newPoolReviewer(bound context.Context) *poolReviewer {
+	return &poolReviewer{hold: make(chan struct{}), bound: bound.Done(), entered: make(chan land.Work, 8)}
+}
+
+func (r *poolReviewer) ReviewAhead(ctx context.Context, w land.Work) (land.AheadOutcome, error) {
+	r.mu.Lock()
+	r.works = append(r.works, w)
+	r.ctxs = append(r.ctxs, ctx)
+	r.mu.Unlock()
+	r.entered <- w
+	select {
+	case <-r.hold:
+	case <-r.bound:
+	}
+	return land.AheadSkipped, nil
+}
+
+// release lets every held review return; the test cleanup calls it too, so a
+// test that fails before releasing them leaves no review running.
+func (r *poolReviewer) release() { r.once.Do(func() { close(r.hold) }) }
+
+// reviewed returns the works the reviewer was asked for, in the order its
+// reviews entered it, which Go does not promise to be the offer's order.
+func (r *poolReviewer) reviewed() []land.Work {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]land.Work(nil), r.works...)
+}
+
+// reviewCtxs returns the context each review runs under, one per reviewed work.
+func (r *poolReviewer) reviewCtxs() []context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]context.Context(nil), r.ctxs...)
+}
+
+// reviewedSet names the reviewed beads sorted, so a test pins what was offered
+// without depending on the order the reviews entered the reviewer.
+func reviewedSet(works []land.Work) string {
+	ids := make([]string, 0, len(works))
+	for _, w := range works {
+		ids = append(ids, w.BeadID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
+}
+
+// commentsFailFor hides one bead's comments from a worker's store: reviewWorks
+// and process get a read error for that bead alone, so a test can see one
+// unreadable submission answered while the other beads still land.
+type commentsFailFor struct {
+	Beads
+	id string
+}
+
+func (c commentsFailFor) Comments(id string) ([]beads.Comment, error) {
+	if id == c.id {
+		return nil, beads.ErrNotFound
+	}
+	return c.Beads.Comments(id)
+}
+
+// TestReviewPoolWorkerOffersAfterList pins that a pass hands the review pool
+// the ready beads it just listed, once, in the landing order the pass will take
+// them, under the context the pass runs on: the reviews are still running after
+// the pass and its landings have ended, and their context is not cancelled, so
+// a verdict outlives a landing and a pass. A works error offers nothing and
+// never stops the pass landing the beads it can (gt-mdv8eq).
+func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the listed beads are offered in landing order", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		// Seeded newest first, so the list's order is not the landing order:
+		// the P0 leads whatever the store returns.
+		h.seedReadyAt(t, "gt-late", 2, "2026-09-30T13:00:00Z")
+		h.seedReadyAt(t, "gt-hot", 0, "2026-09-30T11:00:00Z")
+
+		bound := waitCtx(t)
+		rev := newPoolReviewer(bound)
+		t.Cleanup(rev.release)
+		// Hints is asked for each work a start would review, in the order the
+		// pool is given them, so it records what the worker offered and in what
+		// order; the reviewer's own entry order belongs to Go's scheduler.
+		hints := &fakeAheadHints{}
+		pool := &ReviewPool{Reviewer: rev, Hints: hints, Max: 2}
+		h.w.Pool = pool
+
+		rep := h.w.Pass(context.Background())
+		if want := (Report{Landed: 2}); rep != want {
+			t.Fatalf("pass report = %+v; want %+v", rep, want)
+		}
+		for n := 0; n < 2; n++ {
+			recvBounded(t, bound, rev.entered, "a review started from the first list")
+		}
+		if got, want := strings.Join(hints.askedBeads(), ","), "gt-hot,gt-late"; got != want {
+			t.Fatalf("the pool was offered %q; want the landing order %q", got, want)
+		}
+		if got, want := reviewedSet(rev.reviewed()), "gt-hot,gt-late"; got != want {
+			t.Fatalf("the reviewer saw %q; want both ready beads %q", got, want)
+		}
+		// The pass has landed both beads, so each landing has ended; a review
+		// is still running and its context is alive, parented on the context
+		// the pass ran under rather than on a landing's or the pass's own.
+		for i, rctx := range rev.reviewCtxs() {
+			if err := rctx.Err(); err != nil {
+				t.Fatalf("review %d runs after the pass and its landings ended but its context is done (%v); want the pass's run context, which outlives both", i, err)
+			}
+		}
+		rev.release()
+		recvBounded(t, bound, idleOf(pool), "the pool going idle once the reviews are released")
+	})
+
+	t.Run("a works error offers nothing and the pass still lands", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var logs []string
+		h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+		// gt-bad sorts first and names no submission, so building the works
+		// fails on it before any work is offered.
+		h.bd.Seed(beads.Issue{ID: "gt-bad", Title: "work", Status: "hooked", Type: "task",
+			Priority: 0, Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt})
+		h.seedReadyAt(t, "gt-good", 2, "2026-09-30T13:00:00Z")
+		h.w.Beads = commentsFailFor{Beads: h.w.Beads, id: "gt-bad"}
+
+		rev := newPoolReviewer(waitCtx(t))
+		t.Cleanup(rev.release)
+		h.w.Pool = &ReviewPool{Reviewer: rev, Max: 2}
+
+		rep := h.w.Pass(context.Background())
+		if got := len(h.lander.calls); got != 1 || h.lander.calls[0].BeadID != "gt-good" {
+			t.Fatalf("landed %+v; want gt-good alone: a works error offers no review but never stops the pass", h.lander.calls)
+		}
+		if want := (Report{Landed: 1, Failed: 1}); rep != want {
+			t.Fatalf("pass report = %+v; want %+v", rep, want)
+		}
+		if got := len(rev.reviewed()); got != 0 {
+			t.Fatalf("the reviewer was asked for %d works over a works error; want none", got)
+		}
+		var said []string
+		for _, line := range logs {
+			if strings.Contains(line, "the review pool") {
+				said = append(said, line)
+			}
+		}
+		if len(said) != 1 {
+			t.Fatalf("the works error was logged on %d lines; want exactly one: %v", len(said), logs)
+		}
+	})
 }
