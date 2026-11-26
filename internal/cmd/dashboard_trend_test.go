@@ -154,6 +154,34 @@ func TestTrendBucketsMatchVelocityAcrossAFallBack(t *testing.T) {
 	}
 }
 
+// The last-hour figure is the rolling 60 minutes up to now, not the clock hour
+// the buckets cut: a landing 59 minutes back is in, one 61 minutes back and one
+// still ahead of now are out (gt-n89i71).
+func TestBuildTrendLandedLastHour(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 3, 18, 30, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		at   time.Time
+		want int
+	}{
+		{"59 minutes back counts", now.Add(-59 * time.Minute), 1},
+		{"61 minutes back does not count", now.Add(-61 * time.Minute), 0},
+		{"after now does not count", now.Add(time.Minute), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recs := []omRecord{omTestRec("gt-a", "approve", 0.9, "daemon", tc.at)}
+			tr := buildTrendIn(now, recs, nil, nil, nil, time.UTC)
+			if tr.LandedLastHour != tc.want {
+				t.Errorf("landed last hour = %d, want %d for a landing at %v", tr.LandedLastHour, tc.want, tc.at)
+			}
+		})
+	}
+}
+
 // Loads average and max per hour, and an hour with no sample keeps nil load
 // fields.
 func TestBuildTrendLoadPerHour(t *testing.T) {

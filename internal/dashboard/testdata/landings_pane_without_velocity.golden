@@ -12,6 +12,16 @@ div
             "6"
           span
             "landed"
+        div title="the last 24 hours' landings, averaged per hour"
+          b
+            "0.3"
+          span
+            "landings/h 24h"
+        div title="landings in the rolling 60 minutes up to now, not the last clock hour"
+          b
+            "–"
+          span
+            "last hour"
         div title="rejections in the last 24 hours, whatever the reason"
           b class="warnc"
             "1"

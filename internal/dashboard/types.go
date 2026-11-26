@@ -682,6 +682,10 @@ type PolecatAttempt struct {
 type Trend struct {
 	Hours  []TrendHour  `json:"hours"`
 	Stages []TrendPoint `json:"stages,omitempty"`
+	// LandedLastHour counts the landings in the rolling hour up to now, which
+	// is not the last clock hour: the pane reads the landing rate at a glance
+	// (gt-n89i71).
+	LandedLastHour int `json:"landed_last_hour"`
 	// Recent is the newest landings and rejections, newest first.
 	Recent []LandingRow `json:"recent,omitempty"`
 	// Velocity is the story-point velocity the Landings pane shows, nil until

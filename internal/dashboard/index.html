@@ -1885,6 +1885,11 @@ function renderTrend(s) {
   const kv = el("div", "kv");
   const add = (v, k, tip, cls) => { const x = el("div"); if (tip) x.title = tip; x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
   add(String(landed), "landed");
+  // The landing rate: the day's average per hour, then the rolling hour up to
+  // now. A feed that leaves the last-hour count unset reads as a dash, never as
+  // a count of zero (gt-n89i71).
+  add((landed / 24).toFixed(1), "landings/h 24h", "the last 24 hours' landings, averaged per hour");
+  add(t.landed_last_hour != null ? String(t.landed_last_hour) : "–", "last hour", "landings in the rolling 60 minutes up to now, not the last clock hour");
   add(String(rejected), "rejected", "rejections in the last 24 hours, whatever the reason", rejected ? "warnc" : "");
   const attempts = landed + rejected;
   if (attempts) add(Math.round(landed / attempts * 100) + "%", "first-pass", "landings as a share of landing attempts (landed + rejected)");
