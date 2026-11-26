@@ -293,6 +293,78 @@ func TestReviewPoolSupersededHeadIsCancelled(t *testing.T) {
 	}
 }
 
+// TestReviewPoolSupersededHeadStartsTheNewOne pins that the head which replaced a
+// running review is reviewed once that review has gone: with Max 2 the cap has
+// room, so the running entry alone keeps the new head back. Offering the new head
+// cancels the old review and starts nothing while it is still in the pool; the
+// offer after it has returned starts the new head's review with the new work.
+func TestReviewPoolSupersededHeadStartsTheNewOne(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// The old review is held by the test, so only a cancel ends it, and it then
+	// stays in the pool until the test lets it go.
+	rev.perWork = map[string]chan struct{}{bead: make(chan struct{})}
+	rev.stopped = make(chan land.Work, 1)
+	rev.heldAfterCancel = make(chan struct{})
+	// Two slots: with one review running the cap has room, so only the running
+	// check keeps the new head from starting.
+	pool := &ReviewPool{Reviewer: rev, Max: 2}
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the old head's review start")
+	oldDone := reviewEnded(t, pool, bead)
+
+	// The new head cancels the old review; it is held after its cancel, so its
+	// entry is still in the pool when the new head is offered again. Neither
+	// offer may start a review of the new head while that entry remains.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	recvBounded(t, ctx, rev.stopped, "the cancelled review seeing its context end")
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+
+	// The cancelled review is still in the pool, and the pool still holds it at
+	// the old head: the new head has not been started in its place.
+	if head, ok := runningHeadAt(t, pool, bead); !ok || head != oldHead {
+		t.Fatalf("after the new head was offered twice, the pool holds the bead's review at head %q (running %v), want the old head %s still in place: the new head starts only once that review has gone", head, ok, oldHead)
+	}
+
+	// Let the cancelled review leave. The old review's channel is closed too, so
+	// the new head's later review ends as soon as it starts.
+	close(rev.perWork[bead])
+	close(rev.heldAfterCancel)
+	recvBounded(t, ctx, oldDone, "the old review ending")
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	if got := rev.reviewed(); len(got) != 1 {
+		t.Fatalf("reviewer called %d times while the old review was still in the pool, want only the old head: %v", len(got), got)
+	}
+
+	// The old review has returned and left the pool: this offer starts the new
+	// head's review with the new work.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	got := rev.reviewed()
+	if len(got) != 2 {
+		t.Fatalf("reviewer called %d times, want the old head then the new head: %v", len(got), got)
+	}
+	if got[0] != (land.Work{BeadID: bead, Head: oldHead}) {
+		t.Errorf("first review was %+v, want the old head %s", got[0], oldHead)
+	}
+	if got[1] != (land.Work{BeadID: bead, Head: newHead}) {
+		t.Errorf("second review was %+v, want the new head %s", got[1], newHead)
+	}
+}
+
 func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
@@ -538,6 +610,22 @@ func TestReviewPoolLandingOrder(t *testing.T) {
 	close(release["gt-third"])
 	close(release["gt-fourth"])
 	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+}
+
+// runningHeadAt returns the head the pool has registered as running for bead,
+// and whether it has one. start registers the entry under p.mu before it
+// launches the review, so the entry is settled the moment Offer returns. A
+// review under way may not yet have reached the reviewer, so the reviewer's own
+// record cannot tell "never started" from "not scheduled yet".
+func runningHeadAt(t *testing.T, pool *ReviewPool, bead string) (string, bool) {
+	t.Helper()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	run, ok := pool.running[bead]
+	if !ok {
+		return "", false
+	}
+	return run.head, true
 }
 
 // reviewEnded returns the channel the pool closes when bead's review has ended
