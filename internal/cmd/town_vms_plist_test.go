@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +50,25 @@ func TestTownVMsPlistWriteFailure(t *testing.T) {
 	err := writeTownVMsPlist(forwardPlistFailingWriter{}, "/Users/x/.local/bin/gt", "/Users/x")
 	if err == nil {
 		t.Fatal("a failed write of the plist was reported as success")
+	}
+}
+
+// TestTownVMsPlistRenderFailureReturnsNoBytes: a render that fails after writing a
+// prefix returns no bytes with its error, so a partial job never travels with it.
+func TestTownVMsPlistRenderFailureReturnsNoBytes(t *testing.T) {
+	t.Parallel()
+	partialThenFail := func(w io.Writer, _, _ string) error {
+		if _, err := w.Write([]byte("<?xml version=\"1.0\"?>")); err != nil {
+			return err
+		}
+		return errors.New("disk full")
+	}
+	got, err := renderTownVMsPlistWith(partialThenFail, "/Users/x/.local/bin/gt", "/Users/x")
+	if err == nil {
+		t.Fatal("a failed render was reported as success")
+	}
+	if len(got) != 0 {
+		t.Errorf("a failed render returned %q with its error, want no bytes", got)
 	}
 }
 

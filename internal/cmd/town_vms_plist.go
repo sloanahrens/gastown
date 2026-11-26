@@ -65,9 +65,18 @@ type townVMsPlistView struct {
 // gt is the binary's absolute path; home sets the job's PATH, HOME and the log
 // both its output streams go to. It only renders the plist.
 func renderTownVMsPlist(gt, home string) ([]byte, error) {
+	return renderTownVMsPlistWith(writeTownVMsPlist, gt, home)
+}
+
+// renderTownVMsPlistWith renders the job through write: writeTownVMsPlist in
+// production, a failing writer in a test. A failed render returns no bytes, so a
+// partial job never travels with its error.
+func renderTownVMsPlistWith(write func(io.Writer, string, string) error, gt, home string) ([]byte, error) {
 	var buf bytes.Buffer
-	err := writeTownVMsPlist(&buf, gt, home)
-	return buf.Bytes(), err
+	if err := write(&buf, gt, home); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // writeTownVMsPlist writes the job to w. The template writes straight to w, so a
