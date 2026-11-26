@@ -784,3 +784,144 @@ func TestVerdictReuseLandCommentSaysReused(t *testing.T) {
 		})
 	}
 }
+
+// reuseOffReadyNote is the work bead's note before a landing touches it, as the
+// fixture seeds it, with the head reuseOffVolatile blanks.
+const reuseOffReadyNote = "READY TO LAND\n" +
+	"Branch: polecat/opal/gt-abc+x1\n" +
+	"Head: <sha>\n" +
+	"Target: main\n" +
+	"Worker: opal"
+
+// The values two runs of one landing cannot share, blanked by reuseOffVolatile
+// so the rest of a landing's log, comment and notes can be pinned to a
+// literal: the clock's RFC3339 stamps, the durations real time yields, the
+// host's load sample, and the commit and patch ids a repository mints.
+var (
+	reuseOffTime     = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z`)
+	reuseOffDuration = regexp.MustCompile(`\d+(?:\.\d+)?(?:h\d+m\d+s|m\d+s|ms|µs|ns|s)\b`)
+	reuseOffLoad     = regexp.MustCompile(` \(load1 [0-9.]+\)`)
+	reuseOffID       = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
+)
+
+func reuseOffVolatile(s string) string {
+	s = reuseOffTime.ReplaceAllString(s, "<time>")
+	s = reuseOffDuration.ReplaceAllString(s, "<dur>")
+	s = reuseOffLoad.ReplaceAllString(s, "")
+	return reuseOffID.ReplaceAllString(s, "<sha>")
+}
+
+// TestVerdictReuseLandOffIsToday: a review pool that is switched off (Ahead
+// nil) and a pool that holds no record for the bead each leave a landing
+// exactly as main left it before the pool. The landing's whole log output, its
+// bead comment and its bead notes equal each other byte for byte once the
+// clock, the durations, the host load and the ids are blanked, and equal the
+// literals below, which are the strings main prints for this fixture that the
+// approve-landing tests assert the shape of. A reused verdict's log line,
+// comment or "om reused" suffix reaching either path turns that path's row red
+// (gt-bmcjpa).
+func TestVerdictReuseLandOffIsToday(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		verdict Verdict
+		// wantLog is the landing's whole log, one literal line per logf call.
+		wantLog string
+		// wantComment is the one comment the landing leaves on the bead.
+		wantComment string
+		// wantNotes is the bead's whole notes: the ready note and what the
+		// landing appends to it.
+		wantNotes string
+	}{
+		{
+			name:    "an approve",
+			verdict: Verdict{Verdict: VerdictApprove, Score: 0.9},
+			wantLog: "[land] gt-abc: merged <sha> onto origin/main (<sha>) as <sha>; reviewing the merge candidate, then pushing it for its CI verdict\n" +
+				"[land] gt-abc: no town root, so no operator.names is read; no operator decision or accepted risk is entitled\n" +
+				"[land] gt-abc: stages: ci <dur>, om <dur>\n" +
+				"[land] gt-abc: landed <sha> on origin/main (patch-id <sha>)\n",
+			wantComment: "om approve 0.90 (om unknown, <time>–<time>) [head <sha>]",
+			wantNotes: reuseOffReadyNote + "\nLANDING RECORD\n" +
+				"landed_commit: <sha>\n" +
+				"patch_id: <sha>\n" +
+				"target: main\n" +
+				"base: <sha>\n" +
+				"branch: polecat/opal/gt-abc+x1\n" +
+				"head: <sha>\n" +
+				"gate_result: pass (ci exit 0 <dur>)\n" +
+				"om_verdict: approve\n" +
+				"om_score: 0.9000\n" +
+				"route: daemon\n" +
+				"landed_at: <time>",
+		},
+		{
+			name: "a request_changes",
+			verdict: Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Summary: "b.txt is wrong.",
+				Findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}},
+			wantLog: "[land] gt-abc: merged <sha> onto origin/main (<sha>) as <sha>; reviewing the merge candidate, then pushing it for its CI verdict\n" +
+				"[land] gt-abc: no town root, so no operator.names is read; no operator decision or accepted risk is entitled\n" +
+				"[land] gt-abc: stages: ci skipped (om rejected), om <dur>\n" +
+				"[land] gt-abc: rejected (review): om requested changes (score 0.30, 1 finding(s))\n",
+			wantComment: "om request_changes 0.30 (om unknown, <time>–<time>) [head <sha>]",
+			wantNotes: reuseOffReadyNote + "\nMERGE REJECTION (attempt 1): review - om requested changes (score 0.30, 1 finding(s))\n" +
+				"Branch: polecat/opal/gt-abc+x1\n" +
+				"Target: main\n" +
+				"MR: gt-abc\n" +
+				"- id:abc123 sev:major b.txt:1 — wrong\n" +
+				"Score: 0.3000\n" +
+				"Head: <sha>",
+		},
+	}
+	// offRun lands the row's verdict on its own fixture and returns the
+	// landing's log, the bead's one comment and the bead's notes, blanked.
+	// pool false leaves Ahead nil, as a lander built before the pool has it;
+	// pool true gives the landing a store that holds no record for the bead.
+	offRun := func(t *testing.T, pool bool, verdict Verdict) (log, comment, notes string) {
+		t.Helper()
+		f, l, _, _ := reuseLandSetup(t)
+		f.review.fn = func(string) (Verdict, error) { return verdict, nil }
+		if !pool {
+			l.Ahead = nil
+		}
+		var out bytes.Buffer
+		l.Out = &out
+		_, err := l.Land(context.Background(), f.work)
+		if verdict.Verdict == VerdictRequestChanges {
+			if err == nil {
+				t.Fatalf("Land error = nil; want %s refused", verdict.Verdict)
+			}
+		} else if err != nil {
+			t.Fatalf("Land error = %v; want nil", err)
+		}
+		comments := f.beadComments()
+		if len(comments) != 1 {
+			t.Fatalf("%d comment(s) on the bead; want the one verdict comment", len(comments))
+		}
+		return reuseOffVolatile(out.String()), reuseOffVolatile(comments[0].Text), reuseOffVolatile(f.bead().Notes)
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			offLog, offComment, offNotes := offRun(t, false, tc.verdict)
+			poolLog, poolComment, poolNotes := offRun(t, true, tc.verdict)
+			if offLog != poolLog {
+				t.Errorf("an empty pool changed the landing log:\noff:  %q\npool: %q", offLog, poolLog)
+			}
+			if offComment != poolComment {
+				t.Errorf("an empty pool changed the bead comment:\noff:  %q\npool: %q", offComment, poolComment)
+			}
+			if offNotes != poolNotes {
+				t.Errorf("an empty pool changed the bead notes:\noff:  %q\npool: %q", offNotes, poolNotes)
+			}
+			if offLog != tc.wantLog {
+				t.Errorf("landing log = %q; want main's %q", offLog, tc.wantLog)
+			}
+			if offComment != tc.wantComment {
+				t.Errorf("bead comment = %q; want main's %q", offComment, tc.wantComment)
+			}
+			if offNotes != tc.wantNotes {
+				t.Errorf("bead notes = %q; want main's %q", offNotes, tc.wantNotes)
+			}
+		})
+	}
+}
