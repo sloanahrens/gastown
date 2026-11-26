@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
@@ -232,6 +236,41 @@ func podTargetDevTag(target podDaemonTarget, run update.RunFunc) func(context.Co
 			return "", errors.New("the sandbox registry holds no dev tag for the polecat image")
 		}
 		return read.Digest, nil
+	}
+}
+
+const (
+	// podSweepSmokeReadScript prints the record when its file exists and exits
+	// podSweepSmokeAbsent when not. The path is $1, never spliced in.
+	podSweepSmokeReadScript = `if [ -f "$1" ]; then cat "$1"; else exit 3; fi`
+	podSweepSmokeAbsent     = 3
+)
+
+// podSweepSmokeRecord reads and decodes the daemon's launch-smoke record in the
+// daemon pod through run (gt-r2497d). A missing record is not an error. No error
+// names the output, which can hold a secret.
+func podSweepSmokeRecord(target podDaemonTarget, run update.RunFunc) func(context.Context) (daemon.SweepSmokeRecord, bool, error) {
+	path := filepath.Join(constants.TownRuntimePath(k8sdaemon.TownRootPath), "tier-sweep", "launch-smoke.json")
+	return func(ctx context.Context) (daemon.SweepSmokeRecord, bool, error) {
+		ctx, cancel := context.WithTimeout(ctx, podProbeBound)
+		defer cancel()
+		argv := append(podKubectlPrefix(target.Context, target.Namespace, target.InCluster),
+			"exec", "deployment/"+target.Deployment, "-c", k8sdaemon.Name, "--", "sh", "-c", podSweepSmokeReadScript, "sh", path)
+		out, exit, err := run(ctx, "", nil, "kubectl", argv...)
+		if err != nil {
+			return daemon.SweepSmokeRecord{}, false, fmt.Errorf("pod sweep smoke record: running kubectl exec in deployment %s: %w", target.Deployment, err)
+		}
+		if exit == podSweepSmokeAbsent {
+			return daemon.SweepSmokeRecord{}, false, nil
+		}
+		if exit != 0 {
+			return daemon.SweepSmokeRecord{}, false, fmt.Errorf("pod sweep smoke record: kubectl exec in deployment %s exited %d", target.Deployment, exit)
+		}
+		var rec daemon.SweepSmokeRecord
+		if err := json.Unmarshal([]byte(out), &rec); err != nil {
+			return daemon.SweepSmokeRecord{}, false, fmt.Errorf("pod sweep smoke record: the record in deployment %s is not JSON", target.Deployment)
+		}
+		return rec, true, nil
 	}
 }
 
