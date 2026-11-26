@@ -14,6 +14,7 @@ func TestScanDirFixtures(t *testing.T) {
 		"sleep":                 {RuleNoSleep},
 		"env":                   {RuleNoEnv, RuleNoEnv},               // os.Setenv and t.Setenv
 		"chdir":                 {RuleNoChdir, RuleNoChdir},           // os.Chdir and t.Chdir
+		"caller":                {RuleNoCaller},                       // runtime.Caller(0) names the source path that -trimpath removes
 		"skip":                  {RuleNoSkip, RuleNoSkip, RuleNoSkip}, // Skip, Skipf, SkipNow
 		"exec_other":            {RuleNoSubprocess},
 		"exec_go":               {RuleNoBuild},
