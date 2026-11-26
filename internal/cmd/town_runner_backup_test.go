@@ -32,12 +32,21 @@ type backupAnswer struct {
 	err  error
 }
 
-// backupKubectl answers the reads by resource and fails any other call.
+// backupKubectl is a cluster on the context the restore command names.
 func backupKubectl(t *testing.T, deployment, configmap backupAnswer) *recordingKubectl {
+	return backupKubectlOn(t, backupAnswer{body: "colima-gt-control\n"}, deployment, configmap)
+}
+
+// backupKubectlOn answers the current-context read with current, the two live
+// reads by resource, and fails any other call.
+func backupKubectlOn(t *testing.T, current, deployment, configmap backupAnswer) *recordingKubectl {
 	answers := map[string]backupAnswer{"deployment/forgejo-runner": deployment, "configmap/forgejo-runner-config": configmap}
 	return &recordingKubectl{answer: func(call recordedKubectlCall) (string, int, error) {
+		if len(call.args) == 2 && call.args[0] == "config" && call.args[1] == "current-context" {
+			return current.body, current.exit, current.err
+		}
 		if len(call.args) < 2 || call.args[0] != "get" {
-			t.Errorf("unexpected cluster call %v: a backup reads the two live objects", call.args)
+			t.Errorf("unexpected cluster call %v: a backup reads the current context and the two live objects", call.args)
 			return "", 0, nil
 		}
 		answer, ok := answers[call.args[1]]
@@ -182,6 +191,49 @@ func TestRunnerBackup(t *testing.T) {
 			want := "kubectl --context colima-gt-control -n forgejo apply -f " + dir + "/configmap.json -f " + dir + "/deployment.json"
 			if got := strings.TrimSpace(out.String()); got != want {
 				t.Errorf("printed %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestRunnerBackupContext: a backup reads nothing and writes nothing unless the
+// current kubectl context is the one the restore command names.
+func TestRunnerBackupContext(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("kubectl config: no kubeconfig")
+	liveDeployment, liveConfigMap := backupAnswer{body: backupDeploymentLiveJSON}, backupAnswer{body: backupConfigMapLiveJSON}
+	for _, tc := range []struct {
+		name    string
+		current backupAnswer
+		wantErr string
+	}{
+		{name: "refuses a context that differs", current: backupAnswer{body: "colima-other\n"}, wantErr: `"colima-other", not colima-gt-control`},
+		{name: "refuses an empty context", current: backupAnswer{body: "\n"}, wantErr: `"", not colima-gt-control`},
+		{name: "refuses a context that fails to read", current: backupAnswer{err: failure}, wantErr: "reading the current kubectl context: kubectl config: no kubeconfig"},
+		{name: "refuses a context read that exits nonzero", current: backupAnswer{exit: 1}, wantErr: "kubectl exited 1"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k := backupKubectlOn(t, tc.current, liveDeployment, liveConfigMap)
+			applier := testRunnerApplier(k)
+			out := &bytes.Buffer{}
+			applier.out = out
+			dir := filepath.Join(testutil.PrivateTempDir(t), "backup")
+
+			_, err := applier.Backup(context.Background(), dir)
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+			if len(k.calls) != 1 {
+				t.Errorf("calls = %v, want only the current-context read: a refused context reads no object", k.calls)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a refused backup printed %q: a refusal reports no restore command", out.String())
+			}
+			if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("stat %s = %v, want nothing written after a refusal", dir, statErr)
 			}
 		})
 	}

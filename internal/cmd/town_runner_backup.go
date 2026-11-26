@@ -42,9 +42,15 @@ func runnerBackupObjects(m forgejorunner.Manifests) []runnerBackupObject {
 // Backup writes the live Deployment and ConfigMap the roll is about to replace
 // as JSON that applies back cleanly under dir, then prints the command that
 // applies them. It reads both before writing any, so a failed read writes nothing.
+// The roll's calls run on the current kubectl context, so Backup checks that
+// context first and refuses to read unless it is runnerRollKubeContext: the files
+// must come from the cluster the printed command names.
 func (a runnerApplier) Backup(ctx context.Context, dir string) ([]string, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("the backup directory %q is not absolute, so its files would land where the process runs", dir)
+	}
+	if err := a.checkRunnerBackupContext(ctx); err != nil {
+		return nil, err
 	}
 	m, err := a.manifests()
 	if err != nil {
@@ -72,6 +78,24 @@ func (a runnerApplier) Backup(ctx context.Context, dir string) ([]string, error)
 	}
 	fmt.Fprintln(a.out, runnerRestoreCommand(dir, objects[0].namespace, objects))
 	return []string{objects[0].file, objects[1].file}, nil
+}
+
+// checkRunnerBackupContext refuses unless the current kubectl context is
+// runnerRollKubeContext. An unreadable context is a refusal too, never a pass.
+// The error names the context found and the one required; kubectl's output is
+// not echoed on a nonzero exit.
+func (a runnerApplier) checkRunnerBackupContext(ctx context.Context) error {
+	out, exit, err := a.kubectl(ctx, "", nil, "kubectl", "config", "current-context")
+	if err != nil {
+		return fmt.Errorf("reading the current kubectl context: %w; the backup needs %s", err, runnerRollKubeContext)
+	}
+	if exit != 0 {
+		return fmt.Errorf("reading the current kubectl context: kubectl exited %d; the backup needs %s", exit, runnerRollKubeContext)
+	}
+	if found := strings.TrimSpace(out); found != runnerRollKubeContext {
+		return fmt.Errorf("the current kubectl context is %q, not %s, so the backup would read a cluster the restore command does not name", found, runnerRollKubeContext)
+	}
+	return nil
 }
 
 // readRunnerBackupObject reads one live object as the JSON a backup writes. The
