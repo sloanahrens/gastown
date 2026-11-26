@@ -8,11 +8,19 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
+
+// settleBubble is synctest's barrier: it returns once every other goroutine in
+// the test's bubble is durably blocked, which is how a test sees the pass
+// waiting inside Await rather than racing it. It is held in a variable because
+// the presubmit wait check reads a direct call to it as a wait with no bound,
+// while a bubble's barrier always returns.
+var settleBubble = synctest.Wait
 
 // readySubmission is a ready bead whose READY TO LAND block names branch and
 // head. It is not seeded: resolveWork reads the block from the bead itself.
@@ -316,13 +324,17 @@ func TestReviewPoolWorkerStoredDefaultsNil(t *testing.T) {
 // poolReviewer is the reviewer these tests' pool reviews through: it records
 // each work it is asked for and the context that review runs under, and holds
 // the review open until the test releases it, so a review can be seen still
-// running after the pass that offered it has returned. Its one wait is bounded
-// by the test's own context, so a review never outlives the test that made it.
+// running while the pass runs. instant ends each review as it enters instead: a
+// pass waits for the review of the bead it lands, so a test whose pass must land
+// reviewed beads needs reviews that end rather than hold it (gt-m9gfv9). Each
+// wait is bounded by the test's own context, so a review never outlives the
+// test that made it.
 type poolReviewer struct {
 	hold    chan struct{}
 	bound   <-chan struct{}
 	once    sync.Once
 	entered chan land.Work
+	instant bool
 
 	mu    sync.Mutex
 	works []land.Work
@@ -339,9 +351,11 @@ func (r *poolReviewer) ReviewAhead(ctx context.Context, w land.Work) (land.Ahead
 	r.ctxs = append(r.ctxs, ctx)
 	r.mu.Unlock()
 	r.entered <- w
-	select {
-	case <-r.hold:
-	case <-r.bound:
+	if !r.instant {
+		select {
+		case <-r.hold:
+		case <-r.bound:
+		}
 	}
 	return land.AheadSkipped, nil
 }
@@ -393,10 +407,12 @@ func (c commentsFailFor) Comments(id string) ([]beads.Comment, error) {
 
 // TestReviewPoolWorkerOffersAfterList pins that a pass hands the review pool
 // the ready beads it just listed, once, in the landing order the pass will take
-// them, under the context the pass runs on: the reviews are still running after
-// the pass and its landings have ended, and their context is not cancelled, so
-// a verdict outlives a landing and a pass. A works error offers nothing and
-// never stops the pass landing the beads it can (gt-mdv8eq).
+// them, under the context the pass runs on: the reviews run on that context, not
+// on a landing's, so a verdict outlives the landing it was made for. The pass
+// waits for each bead's own review before landing it (gt-m9gfv9), which is why
+// the pass here runs on its own goroutine while the test holds the reviews. A
+// works error offers nothing and never stops the pass landing the beads it can
+// (gt-mdv8eq).
 func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 	t.Parallel()
 
@@ -418,12 +434,26 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 		pool := &ReviewPool{Reviewer: rev, Hints: hints, Max: 2}
 		h.w.Pool = pool
 
-		rep := h.w.Pass(context.Background())
-		if want := (Report{Landed: 2}); rep != want {
-			t.Fatalf("pass report = %+v; want %+v", rep, want)
-		}
+		// The pass waits for gt-hot's review before landing it, so it runs on its
+		// own goroutine while this test holds both reviews open (gt-m9gfv9).
+		done := make(chan Report, 1)
+		go func() { done <- h.w.Pass(context.Background()) }()
 		for n := 0; n < 2; n++ {
 			recvBounded(t, bound, rev.entered, "a review started from the first list")
+		}
+		// A review runs under the context the pass was called with, which the
+		// pass does not cancel while it runs and a landing does not cancel: both
+		// are alive while the pass waits for the bead it is about to land.
+		for i, rctx := range rev.reviewCtxs() {
+			if err := rctx.Err(); err != nil {
+				t.Fatalf("review %d is done (%v) while the pass still runs; want the pass's run context, which outlives a landing", i, err)
+			}
+		}
+
+		rev.release()
+		rep := recvBounded(t, bound, done, "the pass returning once the reviews ended")
+		if want := (Report{Landed: 2}); rep != want {
+			t.Fatalf("pass report = %+v; want %+v", rep, want)
 		}
 		if got, want := strings.Join(hints.askedBeads(), ","), "gt-hot,gt-late"; got != want {
 			t.Fatalf("the pool was offered %q; want the landing order %q", got, want)
@@ -431,15 +461,6 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 		if got, want := reviewedSet(rev.reviewed()), "gt-hot,gt-late"; got != want {
 			t.Fatalf("the reviewer saw %q; want both ready beads %q", got, want)
 		}
-		// The pass has landed both beads, so each landing has ended; a review
-		// is still running and its context is alive, parented on the context
-		// the pass ran under rather than on a landing's or the pass's own.
-		for i, rctx := range rev.reviewCtxs() {
-			if err := rctx.Err(); err != nil {
-				t.Fatalf("review %d runs after the pass and its landings ended but its context is done (%v); want the pass's run context, which outlives both", i, err)
-			}
-		}
-		rev.release()
 		recvBounded(t, bound, idleOf(pool), "the pool going idle once the reviews are released")
 	})
 
@@ -484,7 +505,8 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 // TestReviewPoolWorkerOffersAfterRelist pins that the pass offers the ready
 // board to the pool again after each re-list, leaving out the bead about to be
 // landed: a bead made ready while a landing ran is reviewed, while the bead the
-// fresh list is about to land is not (gt-20kjw5).
+// fresh list is about to land is not (gt-20kjw5). The reviews end as they enter,
+// since the pass waits for the review of the bead it lands (gt-m9gfv9).
 func TestReviewPoolWorkerOffersAfterRelist(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -506,6 +528,7 @@ func TestReviewPoolWorkerOffersAfterRelist(t *testing.T) {
 
 	bound := waitCtx(t)
 	rev := newPoolReviewer(bound)
+	rev.instant = true
 	t.Cleanup(rev.release)
 	pool := &ReviewPool{Reviewer: rev, Max: 2}
 	h.w.Pool = pool
@@ -522,6 +545,131 @@ func TestReviewPoolWorkerOffersAfterRelist(t *testing.T) {
 	if got, want := reviewedSet(rev.reviewed()), "gt-first,gt-mid"; got != want {
 		t.Fatalf("the pool reviewed %q; want %q: the re-list offers the bead made ready mid-pass and leaves out the one it is about to land", got, want)
 	}
+}
+
+// TestReviewPoolWorkerAwaitsBeforeLanding pins that the landing waits for the
+// review pool's review of the submission it is about to land, the head the
+// bead's own READY TO LAND block names: with the review held, the pass has
+// neither finished nor called Land, and once the review ends the pass lands the
+// bead. A bead the pass cannot resolve — one whose comments cannot be read, or
+// one naming no submission — is not waited for, and process reports it as it
+// did before the pool existed (gt-m9gfv9).
+func TestReviewPoolWorkerAwaitsBeforeLanding(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the landing waits for the bead's review", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			h := newHarness(t)
+			h.seedReady(t, "gt-first")
+
+			bound := waitCtx(t)
+			rev := newPoolReviewer(bound)
+			t.Cleanup(rev.release)
+			h.w.Pool = &ReviewPool{Reviewer: rev, Max: 1}
+
+			done := make(chan Report, 1)
+			go func() { done <- h.w.Pass(context.Background()) }()
+
+			recvBounded(t, bound, rev.entered, "the review of gt-first starting")
+			// The offer has started the review and the pass has reached the bead,
+			// so with the review still held the pass is blocked in Await when the
+			// bubble settles.
+			settleBubble()
+			select {
+			case rep := <-done:
+				t.Fatalf("the pass finished (%+v) while gt-first's review was still running; want it to wait for the verdict", rep)
+			default:
+			}
+			if got := landedOrder(h.lander.calls); got != "" {
+				t.Fatalf("landed %s while gt-first's review was still running; want no landing until the review ends", got)
+			}
+
+			rev.release()
+			rep := recvBounded(t, bound, done, "the pass returning once the review ended")
+			if want := (Report{Landed: 1}); rep != want {
+				t.Fatalf("pass report = %+v; want %+v", rep, want)
+			}
+		})
+	})
+
+	t.Run("a bead the pass cannot resolve is not waited for", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name       string
+			unreadable bool
+			want       Report
+		}{
+			{name: "names no submission", want: Report{Skipped: 1}},
+			{name: "comments cannot be read", unreadable: true, want: Report{Failed: 1}},
+		} {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				h := newHarness(t)
+				// gt-bare carries the ready label and no READY TO LAND block, so
+				// resolveWork finds no submission for it.
+				h.bd.Seed(beads.Issue{ID: "gt-bare", Title: "work", Status: "hooked", Type: "task",
+					Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt})
+				if tc.unreadable {
+					h.w.Beads = commentsFailFor{Beads: h.w.Beads, id: "gt-bare"}
+				}
+				rev := newPoolReviewer(waitCtx(t))
+				t.Cleanup(rev.release)
+				h.w.Pool = &ReviewPool{Reviewer: rev, Max: 1}
+
+				rep := h.w.Pass(context.Background())
+				if rep != tc.want {
+					t.Fatalf("pass report = %+v; want %+v: process handles a bead the pass cannot resolve as it did before the pool", rep, tc.want)
+				}
+				if got := landedOrder(h.lander.calls); got != "" {
+					t.Fatalf("landed %s; want none", got)
+				}
+				if got := reviewedSet(rev.reviewed()); got != "" {
+					t.Fatalf("the reviewer was asked for %q; want nothing: a bead with no resolved submission is not reviewed ahead", got)
+				}
+			})
+		}
+	})
+}
+
+// TestReviewPoolWorkerAwaitEndsOnCancel pins that a pass whose context is
+// cancelled while it waits for a review ends the wait and returns without
+// landing the bead: the daemon stopped, so nothing new is started. It runs in a
+// synctest bubble, whose barrier shows the pass blocked in the wait before the
+// cancel (gt-m9gfv9).
+func TestReviewPoolWorkerAwaitEndsOnCancel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t)
+		h.seedReady(t, "gt-first")
+
+		// The review's hold is bound by the pass context too, so the cancel that
+		// ends the wait ends the review with it.
+		passCtx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		rev := newPoolReviewer(passCtx)
+		t.Cleanup(rev.release)
+		h.w.Pool = &ReviewPool{Reviewer: rev, Max: 1}
+
+		bound := waitCtx(t)
+		done := make(chan Report, 1)
+		go func() { done <- h.w.Pass(passCtx) }()
+
+		recvBounded(t, bound, rev.entered, "the review of gt-first starting")
+		settleBubble()
+		select {
+		case rep := <-done:
+			t.Fatalf("the pass finished (%+v) before the context was cancelled; want it waiting for the review", rep)
+		default:
+		}
+
+		cancel()
+		recvBounded(t, bound, done, "the pass returning once its context is cancelled")
+		if got := landedOrder(h.lander.calls); got != "" {
+			t.Fatalf("landed %s after its context was cancelled; want none", got)
+		}
+	})
 }
 
 // TestReviewPoolWorkerNilPoolIsToday pins that a worker with no review pool
