@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1694,5 +1695,62 @@ func TestVerdictReuseAheadErrorStoresNothing(t *testing.T) {
 				l.gitMu.Unlock()
 			}
 		})
+	}
+}
+
+// aheadCountReviewer is a reviewer the pool can isolate whose isolated copy
+// counts the om runs it is handed and fails each with err. A retry of a failed
+// run would run it again, so the count says whether one om run was made or two.
+type aheadCountReviewer struct {
+	t   *testing.T
+	err error
+	// runs is how many times the isolated copy ran om.
+	runs int
+}
+
+func (r *aheadCountReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	r.t.Error("the Lander's own reviewer ran a review made ahead of a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadCountReviewer) OMVersion(context.Context, ReviewInput) string { return stubOMVersion }
+
+func (r *aheadCountReviewer) Isolated(string) Reviewer { return &aheadCountCopy{of: r} }
+
+type aheadCountCopy struct{ of *aheadCountReviewer }
+
+func (c *aheadCountCopy) Review(context.Context, string, string, string) (Verdict, error) {
+	c.of.t.Error("the isolated copy was run without the bead's input")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (c *aheadCountCopy) ReviewBead(context.Context, ReviewInput) (Verdict, error) {
+	c.of.runs++
+	return Verdict{}, c.of.err
+}
+
+// TestVerdictReuseAheadNoRetry: an om execution error is returned after the
+// reviewer ran once. The pool must not retry it as the landing does: a failed
+// ahead review costs nothing because the landing reviews inline, and a retry
+// would double the om load of a broken om. A retry on ErrOMExecution added to
+// aheadReview runs the reviewer twice and turns this test red.
+func TestVerdictReuseAheadNoRetry(t *testing.T) {
+	t.Parallel()
+	f, l, _ := keyFixture(t)
+	errOM := fmt.Errorf("%w: exited 2", ErrOMExecution)
+	rev := &aheadCountReviewer{t: t, err: errOM}
+	l.Reviewer = rev
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	var log bytes.Buffer
+	l.Out = &log
+	got, built, err := l.reviewAhead(context.Background(), f.work)
+	if !errors.Is(err, ErrOMExecution) {
+		t.Fatalf("reviewAhead = %q, %v; want the om execution error, so the failed-run path is what ran", got, err)
+	}
+	if rev.runs != 1 {
+		t.Errorf("the reviewer ran %d times for one failed om run, want 1: a retry doubles the om load of a broken om", rev.runs)
+	}
+	if got != "" || !reflect.DeepEqual(built, aheadBuilt{}) {
+		t.Errorf("reviewAhead = %q with built %+v on error, want neither", got, built)
 	}
 }
