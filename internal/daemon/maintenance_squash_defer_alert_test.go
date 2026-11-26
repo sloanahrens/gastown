@@ -858,3 +858,30 @@ func TestSquashDeferAlertRaisesAgainAfterClear(t *testing.T) {
 		t.Fatalf("after the next run's day, %d alerts raised, want 2: the first run's mark suppressed it", n)
 	}
 }
+
+// TestSquashDeferAlertSurvivesARoll pins the alert's mark against a daemon roll:
+// a second Daemon on the alert clock directory the first one alerted from reads
+// the mark that alert left, so a day after the first deferral it raises no
+// second alert for the database (gt-wr0j0c).
+func TestSquashDeferAlertSurvivesARoll(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	d, _, _ := squashDueDaemon(t)
+	stampSquashDefer(t, alertClockPath(d.config.TownRoot), squashDeferClockKey("gt"), first)
+	if err := d.raiseSquashDeferAlert("gt", first.Add(24*time.Hour)); err != nil {
+		t.Fatalf("the first daemon's alert: %v", err)
+	}
+	if raised := d.notifier.(*notifyfake.Recorder).Escalations(); len(raised) != 1 {
+		t.Fatalf("the first daemon raised %d alerts, want one: %+v", len(raised), raised)
+	}
+
+	rolled := &Daemon{config: &Config{TownRoot: d.config.TownRoot}, notifier: notifyfake.New()}
+	rolled.clock = clockwork.NewFakeClockAt(first.Add(24 * time.Hour))
+	if err := rolled.raiseSquashDeferAlert("gt", first.Add(24*time.Hour)); err != nil {
+		t.Fatalf("the rolled daemon's alert: %v", err)
+	}
+	if raised := rolled.notifier.(*notifyfake.Recorder).Escalations(); len(raised) != 0 {
+		t.Fatalf("the rolled daemon raised %d alerts, want none: the first alert's mark did not survive the roll: %+v",
+			len(raised), raised)
+	}
+}
