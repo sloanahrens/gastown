@@ -38,7 +38,7 @@ func TestAttentionTickGatewayCap(t *testing.T) {
 				t.Errorf("gateway stats read %d, but the test scripts %d reads", tick+1, len(reads))
 				return bdgateway.GatewayStats{}, errors.New("unscripted gateway read")
 			}
-			st := bdgateway.GatewayStats{TooManyCalls: reads[tick], PeakInFlight: 5}
+			st := bdgateway.GatewayStats{TooManyCalls: reads[tick], PeakInFlight: 5, CapsPresent: true}
 			tick++
 			return st, nil
 		}}
