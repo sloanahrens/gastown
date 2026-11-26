@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -26,7 +27,7 @@ func listDatabases(dbs []string) func(context.Context) ([]string, error) {
 func observationsFor(got []reconcile.Observation, duty string) []reconcile.Observation {
 	var found []reconcile.Observation
 	for _, obs := range got {
-		if obs.Duty == duty {
+		if obs.Duty == duty || strings.HasPrefix(obs.Duty, duty+":") {
 			found = append(found, obs)
 		}
 	}
@@ -181,6 +182,76 @@ func TestReconcilerObserveDatabaseArchive(t *testing.T) {
 			}
 			if tt.wantAnyErr && obs.Err == nil {
 				t.Errorf("Err = nil, want the refusal kept (observation %+v)", obs)
+			}
+		})
+	}
+}
+
+func TestReconcilerObserveDatabaseGC(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	const backupRoot = "/home/gt/.gt/backups"
+	dbs := []string{"hq", "gastown"}
+	// state is a daemon maintenance state file holding the given last_gc entries.
+	state := func(lastGC string) []byte { return []byte(`{"last_gc":{` + lastGC + `}}`) }
+	read := func(data []byte, err error) func() ([]byte, error) {
+		return func() ([]byte, error) { return data, err }
+	}
+	// Ages are named against now, 2026-11-26T12:00:00Z. ok is inside a 2h limit;
+	// stale is past it and its grace.
+	const ok, stale = `"hq":"2026-11-26T10:00:00Z"`, `"gastown":"2026-11-26T07:00:00Z"`
+	listErr := errors.New("listing the databases failed")
+	readErr := errors.New("reading the maintenance state failed")
+	tests := []struct {
+		name       string
+		cfg        *config.ReconcilerConfig
+		read       func() ([]byte, error)
+		databases  func(context.Context) ([]string, error)
+		want       map[string]reconcile.Verdict // database name, or "" for the duty-wide observation
+		wantErr    error
+		wantAnyErr bool // want an error whose identity the row does not name
+	}{
+		{name: "each database is judged by its own last gc under the configured limit", cfg: &config.ReconcilerConfig{GCLimit: "2h"}, read: read(state(ok+","+stale), nil), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"hq": reconcile.VerdictOK, "gastown": reconcile.VerdictOverdue}},
+		{name: "an absent state file is overdue for every database", read: read(nil, &fs.PathError{Op: "open", Path: "maintenance_state.json", Err: fs.ErrNotExist}), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"hq": reconcile.VerdictOverdue, "gastown": reconcile.VerdictOverdue}, wantErr: reconcile.ErrNoResult},
+		{name: "an unparseable state is unknown", read: read([]byte(`{"last_gc": `), nil), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantAnyErr: true},
+		{name: "a failed listing is unknown", read: read(state(ok), nil), databases: func(context.Context) ([]string, error) { return nil, listErr }, want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantErr: listErr},
+		{name: "an unreadable state file is unknown", read: read(nil, readErr), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantErr: readErr},
+		{name: "no gc state reader is unknown", databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantAnyErr: true},
+		{name: "unparseable gc limit is unknown", cfg: &config.ReconcilerConfig{GCLimit: "soon"}, read: read(state(ok), nil), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantAnyErr: true},
+		{name: "unparseable grace is unknown", cfg: &config.ReconcilerConfig{Grace: "later"}, read: read(state(ok), nil), databases: listDatabases(dbs), want: map[string]reconcile.Verdict{"": reconcile.VerdictUnknown}, wantAnyErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := observeDatabaseDuties(t.Context(), now, tt.cfg, dutyInputs{
+				databases: tt.databases, backupRoot: backupRoot, readGCState: tt.read,
+			})
+			gc := observationsFor(got, config.ReconcilerDutyGC)
+			if len(gc) != len(tt.want) {
+				t.Fatalf("observeDatabaseDuties returned %d gc observations, want %d: %+v", len(gc), len(tt.want), gc)
+			}
+			byDuty := make(map[string]reconcile.Observation, len(gc))
+			for _, obs := range gc {
+				byDuty[obs.Duty] = obs
+			}
+			for db, verdict := range tt.want {
+				duty := config.ReconcilerDutyGC
+				if db != "" {
+					duty += ":" + db
+				}
+				obs, ok := byDuty[duty]
+				if !ok {
+					t.Fatalf("no observation named %q in %+v", duty, gc)
+				}
+				if obs.Verdict != verdict {
+					t.Errorf("%s verdict = %q, want %q (observation %+v)", duty, obs.Verdict, verdict, obs)
+				}
+				if wantErr := tt.wantErr != nil || tt.wantAnyErr; (obs.Err != nil) != wantErr {
+					t.Errorf("%s Err = %v, want an error present: %v", duty, obs.Err, wantErr)
+				}
+				if tt.wantErr != nil && !errors.Is(obs.Err, tt.wantErr) {
+					t.Errorf("%s Err = %v, want it to wrap %v", duty, obs.Err, tt.wantErr)
+				}
 			}
 		})
 	}
