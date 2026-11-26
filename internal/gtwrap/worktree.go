@@ -30,13 +30,16 @@ type Git func(dir string, args ...string) (string, error)
 type WorktreeFacts struct {
 	Branch string
 	Head   string
+	// Detached is true when dir is a worktree whose HEAD is detached; the empty
+	// branch answer alone cannot tell that from a plain directory.
+	Detached bool
 }
 
 // ReadWorktreeFacts reads the branch and HEAD of the worktree at dir. It reports
-// ok false, with no error, when dir is not a worktree or HEAD is detached: the
-// caller then adds nothing, and gt done refuses the call in the pod. Any other
-// failure is an error, so the call is refused here and never reaches gt done
-// with facts it could not read.
+// ok false, with no error, when dir is not a worktree, and Detached true when it
+// is a worktree whose HEAD is detached: the caller then adds nothing, and gt done
+// refuses the call in the pod. Any other failure is an error, so the call is
+// refused here and never reaches gt done with facts it could not read.
 func ReadWorktreeFacts(git Git, dir string) (facts WorktreeFacts, ok bool, err error) {
 	branch, err := git(dir, "branch", "--show-current")
 	if errors.Is(err, ErrNotWorktree) {
@@ -47,7 +50,7 @@ func ReadWorktreeFacts(git Git, dir string) (facts WorktreeFacts, ok bool, err e
 	}
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
-		return WorktreeFacts{}, false, nil
+		return WorktreeFacts{Detached: true}, false, nil
 	}
 	head, err := git(dir, "rev-parse", "HEAD")
 	if err != nil {
