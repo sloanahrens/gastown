@@ -374,8 +374,8 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // Secret document deploy/k8s does not review is refused before the static objects
 // are read, since Secrets stay operator-created (gt-8bck5o). Every Secret the
 // Deployments mount is then checked with internal/secretpreflight under the apply
-// kubeconfig: a missing Secret refuses the plan by name, and a read it could not
-// judge is an error naming the Secrets, never a missing one (gt-ettl5f). The differences
+// kubeconfig: a missing one refuses the plan by name, a read it could not judge
+// is an error, never a missing Secret (gt-ettl5f). The differences
 // print after the phases, the static objects' then each Deployment's in apply
 // order, and the short id is the last line. plan.json is written only after every
 // read succeeds and every dry run passed, and the output only after it is

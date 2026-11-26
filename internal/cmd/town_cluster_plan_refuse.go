@@ -116,10 +116,9 @@ func planSecretFields(object k8s.StaticObject) (map[string]any, []string) {
 
 type planMountedSecret struct{ namespace, name string }
 
-// planMountedSecrets returns the Secrets the rendered Deployments mount by
-// volume, once each, in file order, each in its Deployment's namespace. A
-// document whose spec or volumes cannot be read is an error, since its Secrets
-// would otherwise pass unchecked; planLiveVersions refuses one with no namespace.
+// planMountedSecrets returns the Secrets the rendered Deployments mount by volume,
+// once each, in its Deployment's namespace. A document whose spec or volumes
+// cannot be read is an error, since its Secrets would otherwise pass unchecked.
 func planMountedSecrets(bodies [][]byte) ([]planMountedSecret, error) {
 	var mounted []planMountedSecret
 	seen := map[planMountedSecret]bool{}
@@ -191,9 +190,8 @@ func planDeploymentSecretVolumes(doc map[string]any) ([]string, error) {
 // planSecretContext is the context name Missing requires; the runner replaces it.
 const planSecretContext = "apply"
 
-// planSecretPreflight refuses a plan whose Deployments mount a Secret the
-// cluster does not hold, naming it, and errors for a Secret it could not judge,
-// never one read as missing. It asks the names alone under the apply kubeconfig.
+// planSecretPreflight refuses a plan whose Deployments mount a Secret the cluster
+// does not hold, naming it, and errors for one it could not judge, never as missing.
 func planSecretPreflight(ctx context.Context, kube update.RunFunc, kubeconfig string, mounted []planMountedSecret) error {
 	if len(mounted) == 0 {
 		return nil
@@ -224,8 +222,8 @@ func planSecretPreflight(ctx context.Context, kube update.RunFunc, kubeconfig st
 	return nil
 }
 
-// planSecretRunner turns the plan's read runner into the secretpreflight Runner:
-// it reads under the apply kubeconfig and carries a failed exit's status.
+// planSecretRunner reads through kube under the apply kubeconfig, carrying a
+// failed exit's status so only NotFound reads as absent.
 func planSecretRunner(kube update.RunFunc, kubeconfig string) secretpreflight.Runner {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "--context" {

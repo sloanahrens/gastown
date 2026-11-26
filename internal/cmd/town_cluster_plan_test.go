@@ -2178,8 +2178,7 @@ func TestClusterShapePlanRefuseSecretDocUnreadableSet(t *testing.T) {
 }
 
 // plantMountedSecret answers the render with the daemon Deployment mounting one
-// more of the render's own Secrets, and returns a reader of that Secret's name:
-// the volume mounts a Secret the render wrote, so its create-line check accepts it.
+// more of the render's own Secrets and returns a reader of its name.
 func plantMountedSecret(t *testing.T, d clusterRenderDeps) (clusterRenderDeps, func() string) {
 	t.Helper()
 	planted := ""
@@ -2197,11 +2196,9 @@ func plantMountedSecret(t *testing.T, d clusterRenderDeps) (clusterRenderDeps, f
 	return d, func() string { return planted }
 }
 
-// TestClusterShapePlanRefuseSecretMissing: a Secret the rendered Deployments
-// mount that the cluster does not hold refuses the plan, naming it, printing
-// nothing and writing no plan.json; a get the check could not judge is an error
-// naming the Secret, never one read as missing. Each name is read under the apply
-// kubeconfig with no output flag.
+// TestClusterShapePlanRefuseSecretMissing: a Secret the rendered Deployments mount
+// that the cluster does not hold refuses the plan by name, printing nothing and
+// writing no plan.json; a get the check could not judge is an error naming it.
 func TestClusterShapePlanRefuseSecretMissing(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -2259,8 +2256,8 @@ func TestClusterShapePlanRefuseSecretMissing(t *testing.T) {
 }
 
 // TestClusterShapePlanRefuseSecretMissingRefusals: the mount scan refuses each
-// body, spec, volume or Secret name it cannot read, at the plan too; the
-// preflight refuses no --apply-kubeconfig and one that is not a path.
+// body, spec, volume or Secret name it cannot read, at the plan too; the preflight
+// refuses no --apply-kubeconfig or one that is not a path.
 func TestClusterShapePlanRefuseSecretMissingRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ name, doc, want string }{
