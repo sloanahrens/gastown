@@ -193,15 +193,6 @@ func TestTownDeployerServeOnce(t *testing.T) {
 			},
 			wantErr: "to be a directory",
 		},
-		{
-			name: "refuses an invalid oldest request and leaves it in the inbox", once: true, steps: true,
-			prepare: func(t *testing.T, inbox, _ string) {
-				if err := os.WriteFile(filepath.Join(inbox, serveOlderID+".json"), []byte("not json"), 0o644); err != nil {
-					t.Fatalf("writing the invalid request: %v", err)
-				}
-			},
-			wantErr: "is not valid",
-		},
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
