@@ -22,6 +22,7 @@ import (
 	"github.com/gofrs/flock"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -3351,6 +3352,7 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		// command's (gt-z4ppb).
 		exitCode = tierSweepRedExit
 	}
+	d.tierSweepCacheAttention(spec.Rig, spec.OutDir)
 	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true,
 		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now()),
 		cacheNote:  tierSweepCacheNote(spec.OutDir)}
@@ -4523,4 +4525,36 @@ func tierSweepCacheNote(dir string) string {
 	}
 	return fmt.Sprintf(" cache over cap by %s (cap %s)",
 		polecatimage.Human(rec.OverBytes), polecatimage.Human(rec.CapBytes))
+}
+
+// tierSweepCacheAttention raises the low attention item for a finished sweep
+// run whose cache claim ended over its cap after every removal the rules allow
+// (gt-ym0o68), so the reading reaches the operator beyond the sweep's own line.
+// It is keyed by rig, so a repeat fold of the same run, or a later run over the
+// cap, replaces the item rather than adding one. A run with no record or a zero
+// record raises nothing. A record the daemon cannot read raises an item that
+// says the figure is unknown, never the clean case. A missing record is the
+// window sweep-run's ordering leaves open, and not an error.
+func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
+	rec, ok, err := sweeprunner.ReadCacheTrim(dir)
+	if err != nil {
+		d.cacheTrimNoOp.raise(attention.Item{
+			Key:      "cache-trim-sweep-" + rig,
+			Kind:     attention.KindCacheTrimNoOp,
+			Severity: attention.SeverityLow,
+			Summary: fmt.Sprintf("the tier sweep's cache-trim record for %s is unreadable, so whether its cache claim ended over the cap is unknown",
+				rig),
+		})
+		return
+	}
+	if !ok || rec.OverBytes <= 0 {
+		return
+	}
+	d.cacheTrimNoOp.raise(attention.Item{
+		Key:      "cache-trim-sweep-" + rig,
+		Kind:     attention.KindCacheTrimNoOp,
+		Severity: attention.SeverityLow,
+		Summary: fmt.Sprintf("the tier sweep's cache claim for %s ended %s over its %s cap after every removal the rules allow",
+			rig, polecatimage.Human(rec.OverBytes), polecatimage.Human(rec.CapBytes)),
+	})
 }
