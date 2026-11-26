@@ -687,7 +687,16 @@ func (r *RedMain) requeueStranded(id string) strandedOutcome {
 // returns what it reverts, when it is one of this owner's reverts.
 func (r *RedMain) revertOf(beadID string) (culprit, landed string, ok bool) {
 	is, err := r.Beads.Show(beadID)
-	if err != nil || is == nil || !beads.HasLabel(is, LabelRevert) {
+	if err != nil {
+		return "", "", false
+	}
+	return r.revertIn(is)
+}
+
+// revertIn returns what the bead read as is reverts, when it is one of this
+// owner's reverts.
+func (r *RedMain) revertIn(is *beads.Issue) (culprit, landed string, ok bool) {
+	if is == nil || !beads.HasLabel(is, LabelRevert) {
 		return "", "", false
 	}
 	culprit, landed, ok = ParseRevertNote(is.Notes)
@@ -695,6 +704,22 @@ func (r *RedMain) revertOf(beadID string) (culprit, landed string, ok bool) {
 		return "", "", false
 	}
 	return culprit, landed, ok
+}
+
+// IsRevert reports whether beadID may be one of this owner's revert beads. It
+// reads the bead and writes nothing, so a deferred landing's bookkeeping job may
+// call it on the queue goroutine, where RevertLanded must not run (gt-dci9k8).
+// A bead it cannot read answers true: RevertLanded reads it again on the
+// worker's goroutine and ignores any landing that is not a revert, while false
+// would leave a landed revert unfinished for good.
+func (r *RedMain) IsRevert(beadID string) bool {
+	is, err := r.Beads.Show(beadID)
+	if err != nil {
+		r.logf("reading %s to see whether it is a revert: %v; treating it as one", beadID, err)
+		return true
+	}
+	_, _, ok := r.revertIn(is)
+	return ok
 }
 
 // RevertLanded finishes a revert once the landing worker has landed it: the

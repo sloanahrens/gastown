@@ -582,6 +582,32 @@ func TestRevertLandedClearsTheRevertInFlight(t *testing.T) {
 	}
 }
 
+// unreadableShow is the harness beads with every read of a bead failing.
+type unreadableShow struct{ RedMainBeads }
+
+func (unreadableShow) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("bd show failed")
+}
+
+// TestRevertIsRevert: a revert bead answers true, any other bead false, and a
+// bead that cannot be read true, so its revert is not left unfinished
+// (gt-dci9k8).
+func TestRevertIsRevert(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	if !h.r.IsRevert(id) {
+		t.Errorf("IsRevert(%s) = false for a revert bead; want true", id)
+	}
+	if h.r.IsRevert("gt-cul") {
+		t.Error("IsRevert(gt-cul) = true for a bead that is no revert; want false")
+	}
+	h.r.Beads = unreadableShow{h.r.Beads}
+	if !h.r.IsRevert("gt-cul") {
+		t.Error("IsRevert of an unreadable bead = false; want true so RevertLanded reads it again")
+	}
+}
+
 func TestRevertRejectedClearsTheRevertInFlight(t *testing.T) {
 	t.Parallel()
 	h := newRevertHarness(t, greenSHA)
@@ -761,6 +787,8 @@ func (f *fakeRevertHooks) RevertRejected(w land.Work, _ *land.Rejection) bool {
 	f.rejected = append(f.rejected, w.BeadID)
 	return f.isRevert
 }
+
+func (f *fakeRevertHooks) IsRevert(string) bool { return f.isRevert }
 
 func TestPassTellsTheRevertHooks(t *testing.T) {
 	t.Parallel()

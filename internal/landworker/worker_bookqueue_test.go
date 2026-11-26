@@ -271,6 +271,132 @@ func TestBookQueueWorkerDefers(t *testing.T) {
 	})
 }
 
+// queueIdle waits until every job the queue held when it was called has
+// returned: the marker job added behind them runs last, so its channel closing
+// is the queue reaching that point.
+func queueIdle(ctx context.Context, t *testing.T, q *BookQueue) {
+	t.Helper()
+	done := make(chan struct{})
+	q.Add("queue-idle", func() { close(done) })
+	recvBounded(t, ctx, done, "the queued bookkeeping returning")
+}
+
+// TestBookQueueWorkerRevert: a deferred landing's revert call is stored by its
+// bookkeeping job and runs on the worker's own goroutine at the next pass, so
+// RevertLanded never runs on the queue goroutine; a deferred landing that is no
+// revert never calls it, and an inline landing is told inline as before
+// (gt-dci9k8).
+func TestBookQueueWorkerRevert(t *testing.T) {
+	t.Parallel()
+	rec := land.LandingRecord{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: noteHead,
+		Target: "main", LandedCommit: "cccccccccc", Route: "daemon"}
+	deferred := land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp", Deferred: &rec}
+	inline := land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}
+
+	// nextPass drops the ready label a landing would have taken off and runs
+	// the next pass, which is where a call the queue stored runs.
+	nextPass := func(t *testing.T, ctx context.Context, h *harness) Report {
+		t.Helper()
+		if err := h.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+			t.Fatal(err)
+		}
+		return h.w.Pass(ctx)
+	}
+
+	t.Run("a deferred revert's RevertLanded runs once, on the next pass", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, _, _ := deferredWorker(t, q, deferred)
+		hooks := &fakeRevertHooks{isRevert: true}
+		h.w.Reverts = hooks
+
+		if rep := h.w.Pass(ctx); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		queueIdle(ctx, t, q)
+		if len(hooks.landed) != 0 {
+			t.Fatalf("RevertLanded ran %v while the queue job ran; want it stored for the worker's goroutine", hooks.landed)
+		}
+
+		nextPass(t, ctx, h)
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v once, on the next pass", hooks.landed, want)
+		}
+	})
+
+	t.Run("a deferred landing that is no revert never calls it", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, _, _ := deferredWorker(t, q, deferred)
+		hooks := &fakeRevertHooks{isRevert: false}
+		h.w.Reverts = hooks
+
+		h.w.Pass(ctx)
+		queueIdle(ctx, t, q)
+		nextPass(t, ctx, h)
+		if len(hooks.landed) != 0 {
+			t.Fatalf("RevertLanded ran %v for a landing that is no revert", hooks.landed)
+		}
+	})
+
+	t.Run("a failed finish still calls it once, and the repair does not call it again", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, _, _ := deferredWorker(t, q, deferred)
+		dl, ok := h.w.Lander.(*deferredLander)
+		if !ok {
+			t.Fatalf("lander %T; want the deferred fake", h.w.Lander)
+		}
+		// The deferred finish fails, so the first pass leaves the record to a
+		// repair. RevertLanded must still be stored by that first landing.
+		dl.finishErr = errors.New("finish failed")
+		hooks := &fakeRevertHooks{isRevert: true}
+		h.w.Reverts = hooks
+
+		if rep := h.w.Pass(ctx); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		queueIdle(ctx, t, q)
+
+		rep := nextPass(t, ctx, h)
+		if rep.Repaired != 1 {
+			t.Fatalf("report %v; want the repair to run", rep)
+		}
+		queueIdle(ctx, t, q)
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v once, on the next pass", hooks.landed, want)
+		}
+		// The repair's job must have stored no second call: running what the
+		// queue holds now leaves the count at one.
+		q.RunLater()
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v once, not again by the repair", hooks.landed, want)
+		}
+	})
+
+	t.Run("an inline landing calls it inline as before", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, _, _ := deferredWorker(t, q, inline)
+		hooks := &fakeRevertHooks{isRevert: true}
+		h.w.Reverts = hooks
+
+		if rep := h.w.Pass(ctx); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		if want := []string{"gt-abc@cccccccccc"}; !slices.Equal(hooks.landed, want) {
+			t.Fatalf("RevertLanded ran %v; want %v inline, as before", hooks.landed, want)
+		}
+		if q.Holds("gt-abc") {
+			t.Fatal("gt-abc was queued though its landing was not deferred")
+		}
+	})
+}
+
 // TestBookQueueFinishDeferred: the four landing steps run in order after the
 // record is finished; a finish it cannot make queues the repair instead, and
 // none of the four runs (gt-k78e8j).
