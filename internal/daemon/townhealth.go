@@ -348,6 +348,7 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		{"overrun_guard", overrunGuardInterval(cfg)},
 		{"git_hygiene", gitHygieneInterval(cfg)},
 		{"events_prune", pruneEvery},
+		{"reconciler", reconcilerInterval(cfg)},
 	}
 	// One read of the record serves every patrol. A missing file is an empty
 	// record: no run recorded and no pass in flight.
