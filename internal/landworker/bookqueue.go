@@ -5,10 +5,20 @@ import (
 	"log"
 	"runtime/debug"
 	"sync"
+	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
+// bookJobBound is how long one job may run before the queue reports it as
+// still running. A job writes a bead's record and reaps its branch, so one
+// past this is hung; naming its bead lets an operator see what a hold or a
+// maintenance pass is waiting on instead of only that something is (gt-2hqjbi).
+const bookJobBound = 10 * time.Minute
+
 // BookQueue runs bookkeeping jobs one at a time, in the order they were added,
-// on a goroutine of its own; the zero value is ready to use.
+// on a goroutine of its own; the zero value is ready to use. A job that runs
+// past bookJobBound is reported once, through Logf, naming its bead.
 type BookQueue struct {
 	// Begin runs when the queue goes from empty to busy, before the job that
 	// opened the period starts; End runs when that period's last job returns.
@@ -18,9 +28,14 @@ type BookQueue struct {
 	End   func()
 
 	// Logf logs a job that panicked, with the bead it was for, the panic
-	// value and the stack. nil logs through the standard log package; set it
-	// before the queue is used.
+	// value and the stack, and a job still running past bookJobBound. It may be
+	// called from more than one goroutine. nil logs through the standard log
+	// package; set it before the queue is used.
 	Logf func(string, ...any)
+
+	// Clock is the time source the queue waits a job's bound on. nil uses the
+	// wall clock; set it before the queue is used.
+	Clock clockwork.Clock
 
 	mu     sync.Mutex
 	jobs   []bookJob
@@ -94,6 +109,15 @@ func (q *BookQueue) RunLater() {
 	}
 }
 
+// clock is the time source the queue waits a job's bound on: Clock when it is
+// set, the wall clock otherwise.
+func (q *BookQueue) clock() clockwork.Clock {
+	if q.Clock != nil {
+		return q.Clock
+	}
+	return clockwork.NewRealClock()
+}
+
 // logf logs a panicking job: through Logf when it is set, and through the
 // standard log package otherwise, so a failed job is never silent.
 func (q *BookQueue) logf(format string, args ...any) {
@@ -148,9 +172,14 @@ func (q *BookQueue) drain() {
 		q.jobs = q.jobs[1:]
 		q.mu.Unlock()
 
-		// A panicking job must not stop the queue: recover it, log it with the
-		// bead it was for and the stack, and run the next job.
-		func() {
+		// The job runs on its own goroutine so the drain can report it once it
+		// outlives the bound; the drain still runs one job at a time, and moves
+		// on only after this one returns.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			// A panicking job must not stop the queue: recover it, log it with the
+			// bead it was for and the stack, and run the next job.
 			defer func() {
 				if r := recover(); r != nil {
 					q.logf("bookqueue: job for %s panicked: %v\n%s", next.beadID, r, debug.Stack())
@@ -158,6 +187,18 @@ func (q *BookQueue) drain() {
 			}()
 			next.job()
 		}()
+
+		bound := q.clock().NewTimer(bookJobBound)
+		select {
+		case <-done:
+			bound.Stop()
+		case <-bound.Chan():
+			// The job is still running: name its bead once, then keep waiting for
+			// it, so the queue's order is unchanged and the report is never
+			// repeated for the same job.
+			q.logf("bookqueue: the job for %s has run longer than %s and is still running", next.beadID, bookJobBound)
+			<-done
+		}
 
 		q.mu.Lock()
 		if n := q.held[next.beadID]; n > 1 {
