@@ -50,6 +50,10 @@ type Deps struct {
 	Maint *MaintenanceRequest
 	// Verify reports what the town is running once the restart is done.
 	Verify VerifyProbes
+	// RenderDrift counts the objects the cluster's render differs by. The run
+	// asks once after the verify step and prints one read-only line; it changes
+	// neither the step's outcome nor the run's. A nil RenderDrift skips the line.
+	RenderDrift func(ctx context.Context) (differing int, err error)
 	// NewRunID names the run.
 	NewRunID func() string
 	// Log receives the plan and each step's own note; a nil Log discards it.
@@ -248,6 +252,9 @@ func (r *runner) walk(start int) (Outcome, error) {
 				continue
 			}
 			outcome, err = r.verify(i)
+			if err == nil && r.ctx.Err() == nil {
+				err = r.renderDrift(i)
+			}
 		case StepInstall:
 			outcome, err = r.install(i)
 		case StepLift:
@@ -673,6 +680,42 @@ func townHealthDetail(checks []Check) string {
 			line = line[:cut]
 		}
 		return "town health: " + line
+	}
+	return ""
+}
+
+// renderDrift asks the render-drift hook after the verify step and adds its one
+// line to that step's note and to the log. A nil hook asks nothing. The hook
+// never fails the run: its answer only decides what the line says.
+func (r *runner) renderDrift(i int) error {
+	if r.d.RenderDrift == nil {
+		return nil
+	}
+	line := renderDriftLine(r.d.RenderDrift(r.ctx))
+	if line == "" {
+		return nil
+	}
+	logf(r.d.Log, "%s\n", line)
+	_, err := r.mutate(func(st *State) {
+		detail := st.Steps[i].Detail
+		if detail != "" {
+			detail += "; "
+		}
+		st.Steps[i].Detail = detail + line
+	})
+	return err
+}
+
+// renderDriftLine is the line for the hook's answer: "" for a count of zero, the
+// count when it is above zero, and the unreadable line for an error or a count
+// below zero, which is no count at all. The error's text is never printed, since
+// it can name what the hook read.
+func renderDriftLine(differing int, err error) string {
+	switch {
+	case err != nil, differing < 0:
+		return "render drift: unreadable"
+	case differing > 0:
+		return fmt.Sprintf("render differs: %d objects (run gt town cluster roll)", differing)
 	}
 	return ""
 }
