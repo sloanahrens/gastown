@@ -488,6 +488,13 @@ func (m *Manager) GetNamePool() *NamePool {
 	return m.namePool
 }
 
+// SetNameAvoider installs avoid as the pool's view of names the draw must not
+// take, nil to clear it: AllocateName and AllocateAndAdd skip a name avoid
+// reports true, leaving it free and unbound. It is memory only and not saved.
+func (m *Manager) SetNameAvoider(avoid func(string) bool) {
+	m.namePool.setNameAvoider(avoid)
+}
+
 // lockPolecat acquires an exclusive file lock for a specific polecat.
 // This prevents concurrent gt processes from racing on the same polecat's
 // filesystem operations (Add, Remove, RepairWorktree).
