@@ -9,10 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -903,73 +900,52 @@ func assertNoRecord(t *testing.T, town, bead string) {
 	}
 }
 
-// aheadRunBetween runs firstOp with its record read held, starts secondOp there,
-// then releases both, failing if secondOp reached the store first (gt-guahwz).
-func aheadRunBetween(t *testing.T, first *AheadStore, firstOp, secondOp func() error, touched *atomic.Int32, what string) {
+// aheadRunInWindow runs first, and from the window between its read of the
+// stored record and its write starts second. While first holds the store lock,
+// second cannot reach the store, so the check made in that window is that the
+// lock is held: TryLock must fail. The check takes no sleep and no yield, and
+// it fails at once when the lock is removed (gt-guahwz).
+func aheadRunInWindow(t *testing.T, store *AheadStore, first, second func() error, what string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
-	inRead, block := make(chan struct{}), make(chan struct{})
-	var readOnce, releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(block) }) }
-	t.Cleanup(release)
-	first.readFile = func(path string) ([]byte, error) {
-		data, err := os.ReadFile(path) //nolint:gosec // G304: the path is under the town root
-		readOnce.Do(func() { close(inRead) })
-		select {
-		case <-block:
-		case <-ctx.Done():
+	defer cancel()
+	secondDone := make(chan struct{})
+	store.betweenReadAndWrite = func() {
+		go func() {
+			defer close(secondDone)
+			if err := second(); err != nil {
+				t.Errorf("%s: %v", what, err)
+			}
+		}()
+		if aheadStoreMu.TryLock() {
+			aheadStoreMu.Unlock()
+			t.Errorf("%s started while the first operation held no store lock between its read and its write", what)
 		}
-		return data, err
 	}
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		if err := firstOp(); err != nil {
-			t.Errorf("first operation: %v", err)
-		}
-	}()
-	awaitGateRun(t, inRead, "the first operation's read")
-	secondStarted, secondDone := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		close(secondStarted)
-		if err := secondOp(); err != nil {
-			t.Errorf("%s: %v", what, err)
-		}
-	}()
-	awaitGateRun(t, secondStarted, what+" to start")
-	for i := 0; i < 20000 && touched.Load() == 0; i++ {
-		runtime.Gosched()
+	if err := first(); err != nil {
+		t.Fatalf("first operation: %v", err)
 	}
-	if n := touched.Load(); n != 0 {
-		t.Errorf("%s reached the store %d time(s) while the first Put held the lock, want 0", what, n)
+	select {
+	case <-secondDone:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s", what)
 	}
-	release()
-	awaitGateRun(t, firstDone, "the first operation")
-	awaitGateRun(t, secondDone, "the second operation")
 }
 
 // TestAheadStorePutKeepsNewerUnderRace: a Put that read the store before a later
 // review's Put wrote writes only after it, so the later record stays (gt-guahwz).
-//
-//testpolicy:allow parallel — holds the package-wide review-ahead lock that every Put and Delete in this package also takes
 func TestAheadStorePutKeepsNewerUnderRace(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	base := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
 	older, newer := TownAheadStore(town, "gastown"), TownAheadStore(town, "gastown")
-	var newerReads atomic.Int32
-	newer.readFile = func(path string) ([]byte, error) {
-		newerReads.Add(1)
-		return os.ReadFile(path) //nolint:gosec // G304: the path is under the town root
-	}
 	oldRec, newRec := aheadTestRecord("gt-abc", aheadTestHead), aheadTestRecord("gt-abc", aheadTestNewHead)
 	oldRec.StartedAt, oldRec.ReviewedAt = base, base.Add(30*time.Minute) // the slow review, finishing last
 	newRec.StartedAt, newRec.ReviewedAt = base.Add(5*time.Minute), base.Add(6*time.Minute)
-	aheadRunBetween(t, older,
+	aheadRunInWindow(t, older,
 		func() error { return older.Put(oldRec) },
 		func() error { return newer.Put(newRec) },
-		&newerReads, "the later Put")
+		"the later Put")
 	got, ok, err := TownAheadStore(town, "gastown").Get("gt-abc")
 	if err != nil || !ok || got.Head != aheadTestNewHead {
 		t.Errorf("Get after both Puts = (head %q, ok %v, err %v), want the later review's %s",
@@ -979,24 +955,40 @@ func TestAheadStorePutKeepsNewerUnderRace(t *testing.T) {
 
 // TestAheadStoreDeleteHoldsThePutLock: a Delete started between a Put's read and
 // its write runs after that Put writes, so no record is left stored (gt-guahwz).
-//
-//testpolicy:allow parallel — holds the package-wide review-ahead lock that every Put and Delete in this package also takes
 func TestAheadStoreDeleteHoldsThePutLock(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	base := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
 	seed := aheadTestRecord("gt-abc", aheadTestHead)
 	seed.StartedAt = base
 	seedAheadRecord(t, town, seed)
 	putter, deleter := TownAheadStore(town, "gastown"), TownAheadStore(town, "gastown")
-	var removes atomic.Int32
-	deleter.removeFile = func(path string) error { removes.Add(1); return os.Remove(path) }
 	incoming := aheadTestRecord("gt-abc", aheadTestNewHead)
 	incoming.StartedAt = base.Add(5 * time.Minute)
-	aheadRunBetween(t, putter,
+	aheadRunInWindow(t, putter,
 		func() error { return putter.Put(incoming) },
 		func() error { return deleter.Delete("gt-abc") },
-		&removes, "the Delete")
-	if _, ok, err := deleter.Get("gt-abc"); err != nil || ok {
-		t.Errorf("Get after the Delete = (ok %v, err %v), want a miss", ok, err)
+		"the Delete")
+	assertNoRecord(t, town, "gt-abc")
+}
+
+// TestAheadStoreDeleteRemovesUnderTheStoreLock: Delete removes the record only
+// while it holds the store lock, so a remove cannot race a Put's read-to-write
+// window (gt-guahwz). The check runs inside the remove, where the lock is held.
+func TestAheadStoreDeleteRemovesUnderTheStoreLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seedAheadRecord(t, town, aheadTestRecord("gt-abc", aheadTestHead))
+	deleter := TownAheadStore(town, "gastown")
+	deleter.removeFile = func(path string) error {
+		if aheadStoreMu.TryLock() {
+			aheadStoreMu.Unlock()
+			t.Error("Delete removed the record without holding the store lock")
+		}
+		return os.Remove(path)
 	}
+	if err := deleter.Delete("gt-abc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	assertNoRecord(t, town, "gt-abc")
 }

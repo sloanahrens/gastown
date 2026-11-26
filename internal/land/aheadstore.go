@@ -75,6 +75,9 @@ type AheadStore struct {
 	// removeFile is the test seam for the remove Delete makes; nil means
 	// os.Remove.
 	removeFile func(path string) error
+	// betweenReadAndWrite is the test seam Put calls once, inside the store
+	// lock, between its read and its write; nil means nothing.
+	betweenReadAndWrite func()
 }
 
 // TownAheadStore is the review-ahead store for one rig's landings.
@@ -86,6 +89,8 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 // a Put that read before a later review's Put wrote cannot then write over it
 // and a Delete cannot be undone by a Put already past its read (gt-guahwz). It
 // is package-level: Put takes a copy of the store, so a field mutex is copied.
+// It orders writers in this process only: a second process writing the same
+// town's records is not serialized by it.
 var aheadStoreMu sync.Mutex
 
 // Put stores rec as its bead's record unless the record already stored began
@@ -114,6 +119,9 @@ func (s AheadStore) Put(rec AheadRecord) error {
 	stored, err := s.recordAt(path)
 	if err != nil {
 		return err
+	}
+	if s.betweenReadAndWrite != nil {
+		s.betweenReadAndWrite()
 	}
 	if stored != nil && stored.StartedAt.After(rec.StartedAt) {
 		return nil
