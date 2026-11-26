@@ -1502,6 +1502,55 @@ func TestBdGatewayAllowStaleProbeAnswersLocally(t *testing.T) {
 	}
 }
 
+// TestBdGatewayAllowStaleProbeOnlyThatArgv: the local --allow-stale answer
+// (gt-9idlu7) covers the bare probe argv alone. A call that carries the flag
+// with other words, a bare bd version, and a gateway refusal of such a call each
+// reach the gateway as one request; only the probe makes none (gt-577319).
+func TestBdGatewayAllowStaleProbeOnlyThatArgv(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "gastown"), 0o755); err != nil {
+		t.Fatalf("make the rig directory: %v", err)
+	}
+	beadsDir := filepath.Join(town, "gastown", ".beads")
+	tests := []struct {
+		name          string
+		argv          []string
+		gatewayStatus int
+		wantRequests  int
+		wantErr       string
+	}{
+		{name: "the flag on a list reaches the gateway", argv: []string{"bd", "--allow-stale", "list"}, gatewayStatus: http.StatusOK, wantRequests: 1},
+		{name: "a bare version reaches the gateway", argv: []string{"bd", "version"}, gatewayStatus: http.StatusOK, wantRequests: 1},
+		{name: "a version with the flag and --json reaches the gateway", argv: []string{"bd", "--allow-stale", "version", "--json"}, gatewayStatus: http.StatusForbidden, wantRequests: 1, wantErr: "refused the call with HTTP 403"},
+		{name: "the bare probe makes no request", argv: []string{"bd", "--allow-stale", "version"}, gatewayStatus: http.StatusOK, wantRequests: 0, wantErr: "no request was sent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			requests := 0
+			doer := doerFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				if tt.gatewayStatus == http.StatusForbidden {
+					return statusResponse(http.StatusForbidden, `{"code":"forbidden","message":"refused"}`), nil
+				}
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			_, err := g.Launch(Call{Argv: tt.argv, Env: []string{"BEADS_DIR=" + beadsDir}, Dir: town})
+			if requests != tt.wantRequests {
+				t.Errorf("the gateway was asked %d times, want %d", requests, tt.wantRequests)
+			}
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("Launch: %v, want no error", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("Launch error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestBdGatewayDoctor: the doctor names the URL, the token file and the first
 // step that fails, and asks /readyz with the token, never /v1/exec.
 func TestBdGatewayDoctor(t *testing.T) {
