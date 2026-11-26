@@ -49,7 +49,7 @@ type DiffNamer interface {
 
 // RollDeps is what a roll runs with: the landing hold and its owner, the two
 // waits' reads, the clock they poll on, the reading the hold is stamped with,
-// and where the roll prints.
+// the town a backup is written under, and where the roll prints.
 type RollDeps struct {
 	Store    HoldStore
 	HoldPath string
@@ -59,6 +59,9 @@ type RollDeps struct {
 	Runs     func(ctx context.Context) ([]WorkflowRun, error)
 	Clock    Clock
 	Now      func() time.Time
+	// TownRoot is the town a target that implements Backer writes its backup
+	// under.
+	TownRoot string
 	Out      io.Writer
 }
 
@@ -73,15 +76,18 @@ type RollOptions struct {
 }
 
 // Run runs the roll's five steps against t: take the landing hold, wait for the
-// landing pass, wait for the gate and post-land runs, apply, wait for the target
-// to be ready, and release the hold.
+// landing pass, wait for the gate and post-land runs, back up what a Backer
+// target is about to replace, apply, wait for the target to be ready, and
+// release the hold.
 //
-// Every exit after the take releases the hold, a canceled context and a failing
-// step included, except a target whose Verify fails: that error is returned and
-// the hold stays taken for the overseer to restore or release. The release runs
-// on a context the cancel does not reach. A release that fails is returned
-// unless a step already failed. A dry run takes no hold, applies nothing, calls
-// no Verify, and prints the steps and t's diff lines.
+// A backup that fails returns its error before anything is applied, so the live
+// target is untouched. Every exit after the take releases the hold, a canceled
+// context and a failing step included, except a target whose Verify fails: that
+// error is returned and the hold stays taken for the overseer to restore or
+// release. The release runs on a context the cancel does not reach. A release
+// that fails is returned unless a step already failed. A dry run takes no hold,
+// backs up nothing, applies nothing, calls no Verify, and prints the steps and
+// t's diff lines.
 func Run(ctx context.Context, deps RollDeps, t Target, opts RollOptions) (err error) {
 	if err := checkRoll(deps, t, opts); err != nil {
 		return err
@@ -118,6 +124,17 @@ func Run(ctx context.Context, deps RollDeps, t Target, opts RollOptions) (err er
 	}
 
 	fmt.Fprintf(deps.Out, "step 4/5: %s\n", opts.Step(4))
+	if b, ok := t.(Backer); ok {
+		dir := BackupDir(deps.TownRoot, deps.Now())
+		files, err := b.Backup(ctx, dir)
+		if err != nil {
+			return fmt.Errorf("backing up the %s to %s: %w", t.Name(), dir, err)
+		}
+		fmt.Fprintf(deps.Out, "backup: %s\n", dir)
+		for _, file := range files {
+			fmt.Fprintln(deps.Out, file)
+		}
+	}
 	if err := t.Apply(ctx); err != nil {
 		return fmt.Errorf("applying the %s: %w", t.Name(), err)
 	}
@@ -169,7 +186,8 @@ func dryRun(ctx context.Context, deps RollDeps, t Target, opts RollOptions) erro
 
 // checkRoll refuses a roll that cannot run before it takes the hold: a bound
 // that cannot end, a step name or a target that is missing, and, for a real
-// roll, every seam its steps read.
+// roll, every seam its steps read and the town root a Backer target writes its
+// backup under.
 func checkRoll(deps RollDeps, t Target, opts RollOptions) error {
 	if opts.LandingWait <= 0 || opts.RunsWait <= 0 {
 		return fmt.Errorf("the waits must be longer than zero: --landing-wait %s, --runs-wait %s", opts.LandingWait, opts.RunsWait)
@@ -197,6 +215,11 @@ func checkRoll(deps RollDeps, t Target, opts RollOptions) error {
 		return errors.New("the roll has no clock, so its waits cannot be bounded")
 	case deps.Now == nil:
 		return errors.New("the roll has no clock reading, so the hold it takes cannot be stamped")
+	}
+	if _, ok := t.(Backer); ok && deps.TownRoot == "" {
+		// A relative BackupDir would write where the roll happens to run, not
+		// into the town whose live objects it reads.
+		return errors.New("the roll has no town root, so a target that backs up the live objects has nowhere to write them")
 	}
 	return nil
 }
