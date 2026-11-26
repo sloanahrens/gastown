@@ -176,14 +176,22 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 
 // planStaticTargets is the drift target of every static object of the render, in
 // the render's order, each built by planStaticTarget. A target that cannot be
-// built refuses the plan.
+// built refuses the plan. A resource and namespace the set holds twice also
+// refuses it: the plan would read one object twice and compare the second copy
+// against nothing that could differ.
 func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
 	targets := make([]driftTarget, 0, len(objects))
+	seen := make(map[string]bool, len(objects))
 	for _, object := range objects {
 		target, err := planStaticTarget(object)
 		if err != nil {
 			return nil, err
 		}
+		key := target.resource + " " + target.namespace
+		if seen[key] {
+			return nil, fmt.Errorf("the static %s is compared twice, so the set holds it twice", staticObjectLabel(object))
+		}
+		seen[key] = true
 		targets = append(targets, target)
 	}
 	return targets, nil

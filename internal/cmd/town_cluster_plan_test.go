@@ -648,6 +648,23 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 				return "", 1, nil
 			}
 		}, "carries data and was not read"},
+		{"a static set that holds one object twice", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			build := d.build
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				m, err := build(v)
+				if err != nil {
+					return m, err
+				}
+				m.Static = append(m.Static, m.Static[0])
+				return m, nil
+			}
+			// Any cluster read fails, so a plan that read the objects before
+			// refusing would report the read's cause instead of the guard's.
+			return d, func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "", 1, nil
+			}
+		}, "compared twice"},
 		{"a static object the cluster cannot be read", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
 			kube := planKubectl(t)
 			return clusterRenderDepsAt(t, planTown(t), io.Discard), func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
