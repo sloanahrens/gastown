@@ -59,7 +59,8 @@ func poolIdle(pool *ReviewPool) (started, idle <-chan struct{}) {
 // fakeAheadReviewer records each review it is asked for and holds it until
 // the test closes release, or the bead's own channel in perWork when it has
 // one, or its context is cancelled, or its bound passes. A review whose bead is
-// in fail returns that error. When stopped is set it receives each work whose
+// in fail returns that error; one whose bead is in panics panics with that
+// value instead of returning. When stopped is set it receives each work whose
 // context ended, and when heldAfterCancel is set the review then stays in
 // ReviewAhead until the test closes it, so a test can act on a cancelled review
 // that has not yet left the pool.
@@ -69,6 +70,7 @@ type fakeAheadReviewer struct {
 	perWork         map[string]chan struct{}
 	bound           <-chan struct{}
 	fail            map[string]error
+	panics          map[string]string
 	stopped         chan land.Work
 	heldAfterCancel chan struct{}
 
@@ -87,6 +89,9 @@ func (f *fakeAheadReviewer) ReviewAhead(ctx context.Context, w land.Work) (land.
 	f.calls = append(f.calls, w)
 	f.mu.Unlock()
 	f.entered <- w
+	if msg, ok := f.panics[w.BeadID]; ok {
+		panic(msg)
+	}
 	release := f.release
 	if ch, ok := f.perWork[w.BeadID]; ok {
 		release = ch
@@ -879,6 +884,55 @@ func TestReviewPoolEndAlwaysCalled(t *testing.T) {
 				t.Errorf("End ran before the reviewer returned, want it after")
 			}
 		})
+	}
+}
+
+// TestReviewPoolPanicIsRecovered pins that a panicking review is contained: the
+// pool logs one line naming the bead and the panic, calls End once as for any
+// review that began, drops the entry so Wait returns, and still starts a later
+// offer. Without the recover the panic in the review goroutine ends the test
+// process, so no pool that does not contain it can pass (gt-4m0ccu).
+func TestReviewPoolPanicIsRecovered(t *testing.T) {
+	t.Parallel()
+	const boom = "reviewer exploded"
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	rev.panics = map[string]string{"gt-boom": boom}
+	logs := &logRecorder{}
+	hold := &holdFake{reply: true}
+	pool := &ReviewPool{Reviewer: rev, Max: 1, Begin: hold.begin, End: hold.end, Logf: logs.logf}
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-boom", Head: "1111111"}})
+	recvBounded(t, ctx, rev.entered, "the panicking review start")
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the panic")
+
+	if begins, ends := hold.counts(); begins != 1 || ends != 1 {
+		t.Fatalf("Begin called %d times and End %d for one panicking review, want 1 and 1", begins, ends)
+	}
+	got := logs.get()
+	if len(got) != 1 {
+		t.Fatalf("logged %q for one panicking review, want one line", got)
+	}
+	for _, want := range []string{"gt-boom", boom} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("logged %q, want it to name %q", got[0], want)
+		}
+	}
+	if head, ok := runningHeadAt(t, pool, "gt-boom"); ok {
+		t.Errorf("after the panic the pool still holds a review of gt-boom at %s", head)
+	}
+
+	// The slot the panicking review held is free: a later offer starts a review.
+	pool.Offer(context.Background(), []land.Work{{BeadID: "gt-after", Head: "2222222"}})
+	w := recvBounded(t, ctx, rev.entered, "the review after the panic")
+	if w.BeadID != "gt-after" || w.Head != "2222222" {
+		t.Errorf("started a review of %s at %s, want gt-after at 2222222", w.BeadID, w.Head)
+	}
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	if n := len(rev.reviewed()); n != 2 {
+		t.Errorf("reviewer called %d times, want the panicking review then the later one", n)
 	}
 }
 

@@ -117,12 +117,18 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	return true
 }
 
-// review makes one review under the child of ctx that start made. End runs
-// before the entry leaves the map and before done closes, so a Wait released
-// by the empty map already sees the review's End. The guard in start makes the
-// entry under w.BeadID this run's own.
+// review makes one review under the child of ctx that start made. A panic in
+// the reviewer is recovered and logged on one line naming the bead (gt-4m0ccu),
+// so a broken review takes down neither the daemon nor the hold waiting on it.
+// End runs once for every review that began, panic or not, before the entry
+// leaves the map and before done closes, so a Wait released by the empty map
+// already sees the review's End. The guard in start makes the entry under
+// w.BeadID this run's own.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
+		if r := recover(); r != nil {
+			p.logf("ahead review of %s at %s: panic: %v", w.BeadID, w.Head, r)
+		}
 		p.end()
 		p.mu.Lock()
 		delete(p.running, w.BeadID)
