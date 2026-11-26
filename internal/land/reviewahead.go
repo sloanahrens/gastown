@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -197,6 +198,20 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 		l.logf("%s: ahead review of %s skipped: verdict %q is not approve or request_changes", w.BeadID, shortSHA(w.Head), v.Verdict)
 		return AheadSkipped, aheadBuilt{}, nil
 	}
+	// A stored verdict is reused under the key computed for in, whose input
+	// digest covers the flags ExpectedReviewFlags names. A run the installed om
+	// trimmed, or one carrying a flag in does not name, judged a different
+	// input than that key digests, so storing it under the key would reuse a
+	// verdict for an input om never saw: the pool refuses it and the landing
+	// reviews inline (gt-jf7ewt).
+	bar, err := OMThresholdAt(g, base)
+	if err != nil {
+		return "", aheadBuilt{}, &InfraError{Stage: "review bar", Err: err}
+	}
+	ranFlags := slices.Sorted(slices.Values(v.Flags))
+	if expected := ExpectedReviewFlags(in, bar); !slices.Equal(ranFlags, expected) {
+		return "", aheadBuilt{}, &InfraError{Stage: "review flags", Err: flagMismatchError(ranFlags, expected)}
+	}
 	// The verdict is kept for a later landing to reuse. It is not logged and no
 	// round is written: the landing writes a review when it consumes a verdict.
 	reviewed := l.aheadNow()
@@ -246,6 +261,36 @@ func (l *Lander) aheadReview(ctx context.Context, in ReviewInput) (Verdict, bool
 		return Verdict{}, false, &InfraError{Stage: "review", Err: err}
 	}
 	return pool.rescoreBorderline(ctx, v, in), true, nil
+}
+
+// flagMismatchError names the flags an om run carried that its input does not
+// give it and the flags the input gives that the run dropped, so a reader can
+// tell which flag made the run degraded.
+func flagMismatchError(ran, expected []string) error {
+	var missing, extra []string
+	for _, flag := range expected {
+		if !slices.Contains(ran, flag) {
+			missing = append(missing, flag)
+		}
+	}
+	for _, flag := range ran {
+		if !slices.Contains(expected, flag) {
+			extra = append(extra, flag)
+		}
+	}
+	var parts []string
+	if len(missing) > 0 {
+		parts = append(parts, "om ran without "+strings.Join(missing, ", "))
+	}
+	if len(extra) > 0 {
+		parts = append(parts, "om ran with "+strings.Join(extra, ", ")+", which the input does not name")
+	}
+	if len(parts) == 0 {
+		// The lists differ and neither is missing or extra: a flag is listed
+		// twice, so name both lists.
+		parts = append(parts, fmt.Sprintf("om ran with %s, want %s", strings.Join(ran, ", "), strings.Join(expected, ", ")))
+	}
+	return errors.New("the run does not match the review's input: " + strings.Join(parts, "; "))
 }
 
 // aheadInput assembles the review input for w through the helper Land's om stage
