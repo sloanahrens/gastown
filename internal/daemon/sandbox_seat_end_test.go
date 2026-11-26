@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -71,10 +72,28 @@ type seatEndFake struct {
 	origin *pushStubGit
 }
 
-func newSeatEndFake(t *testing.T) *seatEndFake {
+// newSeatEndTown is the town a seat end runs in: a fresh directory holding the
+// settings file the seat's backends are read from. It writes only what the seat
+// end reads from disk, so a family of cases can share one built town.
+func newSeatEndTown(t *testing.T) string {
 	t.Helper()
 	town := t.TempDir()
 	writeTownFile(t, town, "settings/config.json", endSettings)
+	return town
+}
+
+// newSeatEndFake is the one-case fake: its own town, with the seat's fake on it.
+func newSeatEndFake(t *testing.T) *seatEndFake {
+	t.Helper()
+	return newSeatEndFakeOn(t, newSeatEndTown(t))
+}
+
+// newSeatEndFakeOn is the per-case fake on a town newSeatEndTown built. The town
+// must already exist: writeTownFile would create a missing directory, and a case
+// would then read an empty town as its own.
+func newSeatEndFakeOn(t *testing.T, town string) *seatEndFake {
+	t.Helper()
+	checkSeatEndTown(t, town)
 	f := &seatEndFake{
 		t:       t,
 		town:    town,
@@ -131,6 +150,37 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 		},
 	}
 	return f
+}
+
+// seatEndFailer is the part of *testing.T the town check uses. It is an
+// interface so the failure branch has a test of its own: a *testing.T cannot be
+// failed and then keep running.
+type seatEndFailer interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// checkSeatEndTown fails the calling test, naming the path, when town cannot
+// carry a seat-end fake, so a fake built on a missing town stops at the build
+// rather than reading an empty town later.
+func checkSeatEndTown(t seatEndFailer, town string) {
+	t.Helper()
+	if err := seatEndTownErr(town); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+// seatEndTownErr says why town cannot carry a seat-end fake: it must be an
+// existing directory. The error names the path.
+func seatEndTownErr(town string) error {
+	info, err := os.Stat(town)
+	if err != nil {
+		return fmt.Errorf("seat end town %s: %w", town, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("seat end town %s is not a directory", town)
+	}
+	return nil
 }
 
 // seedAgent writes the seat's agent bead from f.seatFields.
@@ -244,6 +294,70 @@ func dirExists(t *testing.T, path string) bool {
 	}
 	t.Fatalf("stat %s: %v", path, err)
 	return false
+}
+
+// A town that is not an existing directory fails the calling test with the
+// path, so a fake is never built on a town it would then read as empty. The
+// fake target stops the check where a real Fatalf would, and the test reads
+// what it reported; a *testing.T cannot be failed and then keep running.
+type seatEndFailFake struct{ msg string }
+
+var seatEndFailSentinel = errors.New("checkSeatEndTown called Fatalf")
+
+func (f *seatEndFailFake) Helper() {}
+
+func (f *seatEndFailFake) Fatalf(format string, args ...any) {
+	f.msg = fmt.Sprintf(format, args...)
+	panic(seatEndFailSentinel)
+}
+
+func TestSeatEndTownCheckNamesTheTownItRefuses(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "town-file")
+	if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "no-such-town")
+	tests := []struct {
+		name     string
+		town     string
+		wantFail bool
+	}{
+		{name: "an existing directory passes", town: dir},
+		{name: "a missing path is refused with its name", town: missing, wantFail: true},
+		{name: "a file is refused with its name", town: file, wantFail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &seatEndFailFake{}
+			func() {
+				defer func() {
+					r := recover()
+					if !tt.wantFail {
+						if r != nil {
+							t.Fatalf("checkSeatEndTown(%s) failed the test: %v", tt.town, r)
+						}
+						return
+					}
+					if r != seatEndFailSentinel {
+						t.Fatalf("checkSeatEndTown(%s) passed a town it must refuse: %v", tt.town, r)
+					}
+				}()
+				checkSeatEndTown(f, tt.town)
+			}()
+			if !tt.wantFail {
+				if f.msg != "" {
+					t.Fatalf("checkSeatEndTown(%s) reported %q, want no failure", tt.town, f.msg)
+				}
+				return
+			}
+			if !strings.Contains(f.msg, tt.town) {
+				t.Fatalf("failure message %q does not name the town path %q", f.msg, tt.town)
+			}
+		})
+	}
 }
 
 // TestEndFinishedSandboxSeat is the seat's end: the host directories go when
