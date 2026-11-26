@@ -2916,14 +2916,26 @@ func gateRecord(res Result) string {
 	return strings.Join(append([]string{res.Gate.Summary()}, res.Gate.Warnings()...), "; ")
 }
 
-// record writes the landing: refs/landed/<bead>, then the rig's landings
-// file (the record that survives any bd failure), then the bead's LANDING
-// RECORD block, then the close carrying landed_commit and patch_id. The ref
-// precedes the file because the file marks the bead done for the
-// leftover-branch sweep: a crash between them leaves a kept branch the ref
-// answers ancestry for, never a swept branch nothing proves landed
-// (gt-as9v8).
+// record writes the landing: recordDurable's ref and landings file (the record
+// that survives any bd failure), then the bead's LANDING RECORD block and the
+// close carrying landed_commit and patch_id.
 func (l *Lander) record(g Repo, w Work, res Result) error {
+	rec, err := l.recordDurable(g, w, res)
+	if err != nil {
+		return err
+	}
+	return l.recordBead(w, rec)
+}
+
+// recordDurable writes the half of a landing record that survives any bd
+// failure: it builds the record, fills its size from the landed diff, writes
+// refs/landed/<bead>, then appends the rig's landings file. It returns the
+// record even when a write fails, so a caller deferring the bead half keeps
+// what was built. The ref precedes the file because the file marks the bead
+// done for the leftover-branch sweep: a crash between them leaves a kept
+// branch the ref answers ancestry for, never a swept branch nothing proves
+// landed (gt-as9v8).
+func (l *Lander) recordDurable(g Repo, w Work, res Result) (LandingRecord, error) {
 	route := l.Route
 	if route == "" {
 		route = "daemon"
@@ -2938,12 +2950,12 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 	}
 	l.landingSize(g, &rec, res.Base, res.LandedCommit)
 	if err := l.writeLandedRef(g, rec); err != nil {
-		return err
+		return rec, err
 	}
 	if err := l.Landings.AppendSubmitted(rec, w.seat(), w.Submitted); err != nil {
-		return fmt.Errorf("landings file: %w", err)
+		return rec, fmt.Errorf("landings file: %w", err)
 	}
-	return l.recordBead(w, rec)
+	return rec, nil
 }
 
 // landingCommitScanLimit bounds the walk that counts a landing's commits (gt-dhun8o).
