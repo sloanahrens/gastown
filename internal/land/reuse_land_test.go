@@ -875,6 +875,99 @@ func TestVerdictReuseLandLockReleasedOnFetchError(t *testing.T) {
 	l.gitMu.Unlock()
 }
 
+// reuseLandBranchFetchProbe is the landing's clone with a seam over its branch
+// fetch: it records whether the lander's gitMu was held while that fetch ran
+// and fails it when err is set. The target fetch is delegated untouched, so the
+// probe only sees the fetch checkHeadPushed makes.
+type reuseLandBranchFetchProbe struct {
+	Repo
+	l      *Lander
+	branch string
+	err    error
+	ran    bool // the branch fetch ran
+	held   bool // gitMu was held while it ran
+}
+
+func (p *reuseLandBranchFetchProbe) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	if p.ran || !strings.HasPrefix(refspec, "+refs/heads/"+p.branch+":") {
+		return p.Repo.FetchRefspecWithTimeout(remote, refspec, timeout)
+	}
+	p.ran = true
+	// TryLock succeeding from inside the fetch means the landing holds nothing:
+	// the branch fetch is not serialized against the pool's git calls.
+	if p.l.gitMu.TryLock() {
+		p.l.gitMu.Unlock()
+	} else {
+		p.held = true
+	}
+	if p.err != nil {
+		return p.err
+	}
+	return p.Repo.FetchRefspecWithTimeout(remote, refspec, timeout)
+}
+
+// reuseLandBranchFetchProbeAt puts the probe in front of the lander's clone, the
+// repository Land opens its branch fetch through.
+func reuseLandBranchFetchProbeAt(t *testing.T, f *landFixture, l *Lander) *reuseLandBranchFetchProbe {
+	t.Helper()
+	open := l.openRepo
+	probe := &reuseLandBranchFetchProbe{Repo: open(f.repo), l: l, branch: f.work.Branch}
+	l.openRepo = func(dir string) Repo {
+		if dir == f.repo {
+			return probe
+		}
+		return open(dir)
+	}
+	return probe
+}
+
+// TestVerdictReuseLandBranchFetchTakesTheLock: checkHeadPushed's branch fetch
+// runs with the lander's gitMu held, so a pool review's ref or worktree lock
+// cannot collide with it, and a failed branch fetch leaves the lock takable so
+// the next landing or review is not blocked forever. The probe observes the
+// lock from inside the fetch; a branch fetch made without the helper leaves the
+// lock free and turns both rows red, and a helper that locks without a deferred
+// unlock leaves the lock held after the error row (gt-d9pvf6).
+func TestVerdictReuseLandBranchFetchTakesTheLock(t *testing.T) {
+	t.Parallel()
+	branchErr := errors.New("the branch is unreachable")
+	tests := []struct {
+		name    string
+		err     error // the branch fetch's error; nil lands
+		wantErr bool
+	}{
+		{name: "the branch fetch holds the lock"},
+		{name: "a failed branch fetch releases the lock", err: branchErr, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, _, _ := reuseLandSetup(t)
+			probe := reuseLandBranchFetchProbeAt(t, f, l)
+			probe.err = tc.err
+			_, err := l.Land(context.Background(), f.work)
+			if tc.wantErr {
+				var infra *InfraError
+				if !errors.As(err, &infra) || infra.Stage != "fetch branch" {
+					t.Fatalf("Land error = %v; want the failed branch fetch as an InfraError at stage \"fetch branch\"", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Land error = %v; want nil", err)
+			}
+			if !probe.ran {
+				t.Fatal("the landing never fetched its branch")
+			}
+			if !probe.held {
+				t.Error("the branch fetch ran without gitMu held; a review's git lock could collide with it")
+			}
+			if !l.gitMu.TryLock() {
+				t.Fatal("gitMu is still held after the branch fetch")
+			}
+			l.gitMu.Unlock()
+		})
+	}
+}
+
 // reuseOffReadyNote is the work bead's note before a landing touches it, as the
 // fixture seeds it, with the head reuseOffVolatile blanks.
 const reuseOffReadyNote = "READY TO LAND\n" +
