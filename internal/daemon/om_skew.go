@@ -94,6 +94,11 @@ type omSkewMonitor struct {
 	// repeats the same line every hour otherwise, and the log stops being a
 	// record of what changed (gt-8n9hj).
 	lastCloneErr string
+	// lastLagErr is the same suppression for the lag reads. It is apart from
+	// lastCloneErr, which the diff answering clears on the reading that then
+	// fails to measure the lag. A reading that reads no lag leaves it as it is,
+	// so the same failure after such a reading is not logged again.
+	lastLagErr string
 }
 
 // startOMSkewMonitor starts the check, once per daemon, from the landing
@@ -141,6 +146,9 @@ type omSkewReading struct {
 	// them is in omSkewNonBinaryPaths. It is false whenever that could not be
 	// established: the alert fails toward alarming.
 	binaryUnchanged bool
+	// belowThresholds is true when the installed om is under both of the
+	// image-pins planner's measures. It is false whenever that was not read.
+	belowThresholds bool
 	err             error
 }
 
@@ -159,7 +167,12 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 	}
 	r := omSkewReading{installed: installed, remote: remote}
 	if installed != remote {
-		r.binaryUnchanged = d.omSkewBinaryUnchanged(townRoot, installed, remote)
+		unchanged, answered := d.omSkewBinaryUnchanged(townRoot, installed, remote)
+		r.binaryUnchanged = unchanged
+		// The lag matters only to a diff known to reach the binary.
+		if answered && !unchanged {
+			r.belowThresholds = d.omSkewBelowThresholds(townRoot, installed, remote)
+		}
 	}
 	return r
 }
@@ -168,11 +181,29 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 // origin/main can change the binary. The diff runs in the rebuild_om job's own
 // clone, read-only: never in om's canonical worktree, which an om build runs
 // in. When the clone cannot answer (missing, unreadable, or without either
-// sha) the answer is false, so the alert still fires.
-func (d *Daemon) omSkewBinaryUnchanged(townRoot, installed, remote string) bool {
+// sha) answered and unchanged are both false, so the alert still fires.
+func (d *Daemon) omSkewBinaryUnchanged(townRoot, installed, remote string) (unchanged, answered bool) {
 	unchanged, err := d.omSkewNoFileCanChangeTheBinary(townRoot, installed, remote)
-	d.omSkewNoteCloneErr(err)
-	return err == nil && unchanged
+	d.omSkewNoteCloneErr(&d.omSkew.lastCloneErr, err)
+	return err == nil && unchanged, err == nil
+}
+
+// omSkewBelowThresholds reports whether the installed om is under both measures
+// the image-pins planner files a refresh at, imagePinsFileBehind commits and
+// imagePinsFileAge, read in the rebuild_om clone. A lag that cannot be read is
+// false, so the alert still fires.
+func (d *Daemon) omSkewBelowThresholds(townRoot, installed, remote string) bool {
+	var commits int
+	var age time.Duration
+	src, err := omSkewCloneDir(townRoot)
+	if err == nil {
+		commits, age, err = d.skewLag(src, installed, remote)
+	}
+	if err != nil {
+		err = fmt.Errorf("cannot measure how far behind the installed om is: %w", err)
+	}
+	d.omSkewNoteCloneErr(&d.omSkew.lastLagErr, err)
+	return err == nil && commits < imagePinsFileBehind && age < imagePinsFileAge
 }
 
 // omSkewNoFileCanChangeTheBinary answers the question in full: what the clone
@@ -193,23 +224,24 @@ func (d *Daemon) omSkewNoFileCanChangeTheBinary(townRoot, installed, remote stri
 	return d.omSkewNoEmbedReaches(townRoot, remote, changed)
 }
 
-// omSkewNoteCloneErr records the clone's answer to the questions a reading asks
-// of it. err nil is a clone that answered, which clears the suppression; an
-// error is logged once per distinct message, since an hourly check over a clone
-// that stays unreadable would otherwise write the same line an hour (gt-8n9hj).
-func (d *Daemon) omSkewNoteCloneErr(err error) {
+// omSkewNoteCloneErr records the clone's answer to one question a reading asks
+// of it, last being that question's suppression under omSkew.mu. err nil is a
+// clone that answered, which clears it; an error is logged once per distinct
+// message, since an hourly check over a clone that stays unreadable would
+// otherwise write the same line an hour (gt-8n9hj).
+func (d *Daemon) omSkewNoteCloneErr(last *string, err error) {
 	m := &d.omSkew
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err == nil {
-		m.lastCloneErr = ""
+		*last = ""
 		return
 	}
 	msg := err.Error()
-	if msg == m.lastCloneErr {
+	if msg == *last {
 		return
 	}
-	m.lastCloneErr = msg
+	*last = msg
 	d.logger.Printf("om_skew: %s; treating the skew as real", msg)
 }
 
