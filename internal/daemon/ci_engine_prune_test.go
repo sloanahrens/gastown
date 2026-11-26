@@ -3447,6 +3447,7 @@ func engTaskCtr(t *testing.T, id byte, name, status, startedAt string) ciEngineC
 // Actions job's and whose process started more than the age ago is a candidate, and
 // it carries the task id from its name.
 func TestCIEngineOrphanCandidates(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		ctr        ciEngineContainer
 		wantTaskID int64 // 0: not a candidate
@@ -3459,6 +3460,7 @@ func TestCIEngineOrphanCandidates(t *testing.T) {
 		"an exited task container":   {ctr: engTaskCtr(t, '6', "/FORGEJO-ACTIONS-TASK-22151_WORKFLOW-abc_JOB-check", "exited", engAgo(72*time.Hour))},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			got, err := ciEngineOrphanCandidates([]ciEngineContainer{tc.ctr}, ciCacheTestStart, 12*time.Hour)
 			if err != nil {
 				t.Fatalf("candidates: %v", err)
@@ -3479,11 +3481,13 @@ func TestCIEngineOrphanCandidates(t *testing.T) {
 // TestCIEngineOrphanCandidatesRefuses: a running job's inspect that does not read is
 // an error naming the container, never a container skipped as if it were not a job.
 func TestCIEngineOrphanCandidatesRefuses(t *testing.T) {
+	t.Parallel()
 	for name, ctr := range map[string]ciEngineContainer{
 		"started at that is not RFC 3339": engTaskCtr(t, '7', "/FORGEJO-ACTIONS-TASK-22152_WORKFLOW-abc_JOB-check", "running", "three days ago"),
 		"task id past an int64":           engTaskCtr(t, '8', "/FORGEJO-ACTIONS-TASK-99999999999999999999_WORKFLOW-abc_JOB-check", "running", engAgo(72*time.Hour)),
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			_, err := ciEngineOrphanCandidates([]ciEngineContainer{ctr}, ciCacheTestStart, 12*time.Hour)
 			if err == nil {
 				t.Fatalf("the container %s was not refused", ctr.Name)
