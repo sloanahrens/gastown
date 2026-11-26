@@ -481,6 +481,49 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 	})
 }
 
+// TestReviewPoolWorkerOffersAfterRelist pins that the pass offers the ready
+// board to the pool again after each re-list, leaving out the bead about to be
+// landed: a bead made ready while a landing ran is reviewed, while the bead the
+// fresh list is about to land is not (gt-20kjw5).
+func TestReviewPoolWorkerOffersAfterRelist(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-first", 2, "2026-09-30T10:00:00Z")
+	// The landing removes the ready label, as the real one does; the fake
+	// lander leaves it, and the re-list would keep returning the landed bead.
+	h.lander.fn = func(n int, work land.Work) (land.Result, error) {
+		if n == 1 {
+			// gt-second is the bead the next re-list will land, gt-mid one the
+			// operator made ready while the first landing ran.
+			h.seedReadyAt(t, "gt-second", 2, "2026-09-30T10:01:00Z")
+			h.seedReadyAt(t, "gt-mid", 2, "2026-09-30T10:02:00Z")
+		}
+		if err := h.bd.Update(work.BeadID, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+			t.Fatalf("removing %s from %s: %v", land.LabelReadyToLand, work.BeadID, err)
+		}
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
+
+	bound := waitCtx(t)
+	rev := newPoolReviewer(bound)
+	t.Cleanup(rev.release)
+	pool := &ReviewPool{Reviewer: rev, Max: 2}
+	h.w.Pool = pool
+
+	rep := h.w.Pass(context.Background())
+	if want := (Report{Landed: 3}); rep != want {
+		t.Fatalf("pass report = %+v; want %+v", rep, want)
+	}
+	if got, want := landedOrder(h.lander.calls), "gt-first,gt-second,gt-mid"; got != want {
+		t.Fatalf("landed %s; want %s", got, want)
+	}
+	rev.release()
+	recvBounded(t, bound, idleOf(pool), "the pool going idle once the reviews are released")
+	if got, want := reviewedSet(rev.reviewed()), "gt-first,gt-mid"; got != want {
+		t.Fatalf("the pool reviewed %q; want %q: the re-list offers the bead made ready mid-pass and leaves out the one it is about to land", got, want)
+	}
+}
+
 // TestReviewPoolWorkerNilPoolIsToday pins that a worker with no review pool
 // passes exactly as it did before the pool existed: a pass over three ready
 // beads does not panic, lands them in the landing order (a P0 first, then the
