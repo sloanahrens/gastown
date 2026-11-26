@@ -968,6 +968,45 @@ func TestVerdictReuseLandBranchFetchTakesTheLock(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseLandLockNotHeldAcrossReview: the landing's om run takes no
+// part of the shared git lock, so a pool review that locks a ref or a worktree
+// while om judges the merge candidate cannot deadlock the landing. The fake
+// reviewer takes gitMu from inside its review; a landing that held the lock
+// across that call would block the reviewer forever, so the reviewer takes the
+// lock with TryLock and reports a lock it could not take on a guard channel,
+// and the test fails on the report instead of hanging. A landing that holds
+// the lock over the review turns it red, and so does one that never runs the
+// review the guard observes (gt-l4j79d).
+func TestVerdictReuseLandLockNotHeldAcrossReview(t *testing.T) {
+	t.Parallel()
+	f, l, _, _ := reuseLandSetup(t)
+	guard := make(chan struct{}, 1)
+	approve := f.review.fn
+	f.review.fn = func(dir string) (Verdict, error) {
+		if !l.gitMu.TryLock() {
+			guard <- struct{}{}
+			return Verdict{}, errors.New("the om run was called with the shared git lock held")
+		}
+		l.gitMu.Unlock()
+		return approve(dir)
+	}
+	res, err := l.Land(context.Background(), f.work)
+	select {
+	case <-guard:
+		t.Fatal("the om run ran with the shared git lock held; a pool review's ref or worktree lock would deadlock the landing")
+	default:
+	}
+	if err != nil {
+		t.Fatalf("Land error = %v; want nil", err)
+	}
+	if n := len(f.review.calls); n != 1 {
+		t.Fatalf("om ran %d time(s); want 1, the review the guard observes", n)
+	}
+	if res.Verdict.Verdict != VerdictApprove {
+		t.Errorf("Land verdict = %q; want %q", res.Verdict.Verdict, VerdictApprove)
+	}
+}
+
 // reuseOffReadyNote is the work bead's note before a landing touches it, as the
 // fixture seeds it, with the head reuseOffVolatile blanks.
 const reuseOffReadyNote = "READY TO LAND\n" +
