@@ -174,8 +174,7 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 // planStaticTargets is the drift target of every static object of the render, in
 // the render's order, each built by the drift walk's own builder so no rule is
 // copied here. A Secret builds no target and is skipped, as the drift walk skips
-// it: the cluster fills its data. runTownClusterPlan does not compare the targets
-// yet; only a target that cannot be built refuses the plan.
+// it: the cluster fills its data. A target that cannot be built refuses the plan.
 func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
 	targets := make([]driftTarget, 0, len(objects))
 	for _, object := range objects {
@@ -189,6 +188,22 @@ func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
 		targets = append(targets, target)
 	}
 	return targets, nil
+}
+
+// planStaticDiffers reports whether any target differs from the cluster's live
+// object, compared by driftTarget.differences. Every target is read even after one
+// differs, so a failed read refuses the plan. The plan does not use the result yet.
+func planStaticDiffers(ctx context.Context, encode func(io.Writer, any) error, kube update.RunFunc, targets []driftTarget) (bool, error) {
+	d := clusterDriftDeps{render: clusterRenderDeps{encode: encode}, kubectl: kube}
+	differs := false
+	for _, target := range targets {
+		lines, err := target.differences(ctx, d)
+		if err != nil {
+			return false, err
+		}
+		differs = differs || len(lines) > 0
+	}
+	return differs, nil
 }
 
 // runTownClusterPlan renders the recorded flags' desired set with
@@ -259,8 +274,13 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	}
 	// Every static object builds its target through the drift walk's builder, so a
 	// static document that names another object refuses the plan here, before
-	// plan.json is written. The targets are not compared yet.
-	if _, err := planStaticTargets(staticObjects); err != nil {
+	// plan.json is written. Each target is then read, and a read that fails refuses
+	// the plan the same way.
+	targets, err := planStaticTargets(staticObjects)
+	if err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+	}
+	if _, err := planStaticDiffers(ctx, d.encode, kube, targets); err != nil {
 		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
 	full, short := planID(files)
