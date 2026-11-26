@@ -1,6 +1,7 @@
 package land
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 
@@ -386,6 +387,80 @@ func TestVerdictReuseDigestRefusesBadInput(t *testing.T) {
 			}
 			if got != "" {
 				t.Errorf("reviewDigestOf() digest = %q; want empty with the error", got)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseDigestRefusesUnknownKind: a field the digest cannot hash by
+// value, outside reviewDigestExcluded, returns an error and no digest. Without
+// the refusal a nil interface encodes as null and a func or chan field can be
+// skipped, so a field added later would be silently left out of the digest
+// (gt-wtt1b8).
+func TestVerdictReuseDigestRefusesUnknownKind(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		v    any
+	}{
+		{"a func field", struct{ Callback func() }{Callback: func() {}}},
+		{"a nil func field", struct{ Callback func() }{}},
+		{"an interface field", struct{ Any any }{Any: "value"}},
+		{"a nil interface field", struct{ Any any }{}},
+		{"a chan field", struct{ Ch chan int }{Ch: make(chan int)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := reviewDigestOf(tc.v, nil)
+			if err == nil {
+				t.Fatalf("reviewDigestOf() = %q, nil; want an error", got)
+			}
+			if got != "" {
+				t.Errorf("reviewDigestOf() digest = %q; want empty with the error", got)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseDigestCoversEveryField is the guard on ReviewInput: every
+// exported field outside reviewDigestExcluded changes the digest when it is
+// cleared, so a field added later is digested, refused or fails this test, never
+// silently left out (gt-wtt1b8). The base sets every such field, so clearing one
+// changes its JSON.
+func TestVerdictReuseDigestCoversEveryField(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	issue := &beads.Issue{ID: "gt-abc", AcceptanceCriteria: "- [ ] one"}
+	in := BuildReviewInput(issue, nil, op, "risk: one", "[]", "base-sha", "head-sha", "polecat/x/gt-abc", "dir", baseRepo{})
+	in.BriefText = "# Work item\n"
+	in.PolicyText = "# Landing policy"
+	in.PriorFindings = []Finding{{ID: "gt-abc.1", Severity: "major", Path: "x.go", Line: 9, Title: "x"}}
+	in.Round = 1
+	flags := []string{"-C", "--base", "--head", "--out"}
+	const om = `{"threshold":0.8}`
+	const target = "main"
+	inputs := func(changed ReviewInput) reviewDigestInputs {
+		return reviewDigestInputs{in: changed, flags: flags, om: om, context: "context text", target: target}
+	}
+	baseDigest := digest(t, inputs(in))
+
+	excluded := make(map[string]bool, len(reviewDigestExcluded))
+	for _, name := range reviewDigestExcluded {
+		excluded[name] = true
+	}
+	typ := reflect.TypeOf(in)
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		if f.PkgPath != "" || excluded[f.Name] {
+			continue
+		}
+		t.Run(f.Name, func(t *testing.T) {
+			t.Parallel()
+			changed := in
+			field := reflect.ValueOf(&changed).Elem().Field(i)
+			field.Set(reflect.Zero(field.Type()))
+			if got := digest(t, inputs(changed)); got == baseDigest {
+				t.Errorf("clearing ReviewInput.%s left the digest unchanged; digest it or add it to reviewDigestExcluded", f.Name)
 			}
 		})
 	}
