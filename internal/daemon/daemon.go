@@ -507,6 +507,11 @@ type Daemon struct {
 	// since attentionSources is rebuilt every tick (gt-xu8fkg).
 	gatewayRefusals RefusalWindow
 
+	// gatewayCap is the cap collector the bd_gateway.cap_hit read runs. It lives
+	// on the Daemon for the same reason: its tracker's base must outlive the
+	// attentionSources rebuilt each tick (gt-01bka3).
+	gatewayCap gatewayCapCollector
+
 	// workspaceDrift checks each gateway answer for drift and signals the reconcile
 	// loop. startWorkspaceReconcile creates it; the installed pusher and the loop's
 	// probe feed it, and a test calls observe on it to stand in for a gateway answer.
