@@ -219,13 +219,24 @@ func (r *keyReviewer) OMVersion(context.Context, ReviewInput) string {
 	return r.version
 }
 
+// keyOMConfig is the .om.json the fixture's base carries: a bar above zero, so
+// the review's flags carry --threshold and the digest covers both.
+const keyOMConfig = `{"threshold":0.8}`
+
 // keyFixture is a lander whose reviewer answers the version probe and whose om
 // config is a readable file holding "hello", with the origin repository a key's
-// git facts are read through. The commits are made on origin, so the handle
-// must be opened there rather than on the fixture's stale clone.
+// git facts and om texts are read through. The base carries an .om.json and the
+// work branch sits on it, so base..head is still b.txt only. The commits are
+// made on origin, so the handle must be opened there rather than on the
+// fixture's stale clone.
 func keyFixture(t *testing.T) (*landFixture, *Lander, Repo) {
 	t.Helper()
 	f := newLandFixture(t)
+	base := f.git.Commit(t, f.origin, "main", "main: add the om config", map[string]string{omConfigFile: keyOMConfig})
+	f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, base)
+	head := f.git.Commit(t, f.origin, fixtureBranch, "feat: add b on the om config", map[string]string{"b.txt": "work\n"})
+	f.base = base
+	f.ready(head)
 	l := f.lander()
 	l.Reviewer = &keyReviewer{t: t, version: stubOMVersion}
 	config := filepath.Join(t.TempDir(), "om.json")
@@ -236,9 +247,21 @@ func keyFixture(t *testing.T) (*landFixture, *Lander, Repo) {
 	return f, l, f.git.Open(f.origin)
 }
 
+// keyDigest is the input digest a key carries for in at the fixture's base: the
+// digest of the inputs om is given, with the fixture's .om.json text, no
+// context_file and w's target.
+func keyDigest(t *testing.T, in ReviewInput) string {
+	t.Helper()
+	digest, err := ReviewInputDigest(in, ExpectedReviewFlags(in, 0.8), keyOMConfig, "", "main")
+	if err != nil {
+		t.Fatalf("ReviewInputDigest(%+v): %v", in, err)
+	}
+	return digest
+}
+
 // TestVerdictReuseKeyGitFacts: the key carries w's bead and head, the patch-id
-// of the merge and the paths it touches, the reviewer's om version and the om
-// config's digest, with the input digest left to the caller. A base that moves
+// of the merge and the paths it touches, the reviewer's om version, the om
+// config's digest and the digest of the input om is given. A base that moves
 // to a later commit touching none of the diff's paths leaves the patch-id
 // alone: that equality is why a stored review is matched by the patch-id rather
 // than the head (gt-pdusl8).
@@ -261,9 +284,9 @@ func TestVerdictReuseKeyGitFacts(t *testing.T) {
 		t.Errorf("touched = %v; want [b.txt], the paths the diff changes", touched)
 	}
 	want := ReviewKey{Bead: f.work.BeadID, Head: f.work.Head, PatchID: first.PatchID,
-		OMVersion: stubOMVersion, OMConfigHash: helloSHA}
+		OMVersion: stubOMVersion, OMConfigHash: helloSHA, InputDigest: keyDigest(t, in)}
 	if first != want {
-		t.Errorf("reviewKey = %+v; want %+v, with InputDigest left empty", first, want)
+		t.Errorf("reviewKey = %+v; want %+v", first, want)
 	}
 	// The later base changes only a.txt, which the branch does not touch, so
 	// the merge's zero-context patch-id is the same change.
@@ -361,5 +384,166 @@ func TestVerdictReuseKeyNoProbe(t *testing.T) {
 	}
 	if key != (ReviewKey{}) || touched != nil {
 		t.Errorf("reviewKey on error = %+v, %v; want the zero key and no paths", key, touched)
+	}
+}
+
+// TestVerdictReuseKeyStable: two keys built from the same inputs are the same
+// key, with a non-empty input digest. A key that changes between calls could
+// never match a stored review, and a key with no digest would match one whose
+// input om was given has changed (gt-0lys4u).
+func TestVerdictReuseKeyStable(t *testing.T) {
+	t.Parallel()
+	f, l, wt := keyFixture(t)
+	in := ReviewInput{
+		Dir:               f.workRoot,
+		BeadID:            f.work.BeadID,
+		CriteriaText:      "- [ ] b.txt is added\n",
+		AcceptedRisksText: "the risk was accepted\n",
+		PriorFindings:     []Finding{{Severity: omSeverityMinor, Title: "a minor"}},
+		BriefText:         "the work item\n",
+		PolicyText:        "the policy\n",
+		Round:             2,
+		RoundsText:        "[]",
+	}
+	first, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	again, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("second reviewKey error = %v; want nil", err)
+	}
+	if first != again {
+		t.Errorf("reviewKey = %+v on the second call; want the first key %+v", again, first)
+	}
+	if first.InputDigest == "" {
+		t.Error("InputDigest is empty; want the digest of the input om is given")
+	}
+}
+
+// TestVerdictReuseKeyDigestFollowsInputs: the key's input digest changes when
+// an input om is given changes, and nothing else in the key does: the review
+// round, the .om.json text with the bar it sets, and the context_file text. A
+// digest that ignored one of these would reuse a verdict for an input om never
+// judged (gt-0lys4u).
+func TestVerdictReuseKeyDigestFollowsInputs(t *testing.T) {
+	t.Parallel()
+	const (
+		withContext = `{"threshold":0.8,"context_file":"docs/rubric.md"}`
+		contextPath = "docs/rubric.md"
+	)
+	tests := []struct {
+		name string
+		// repo is the key's g for the variant, built from the fixture's wt.
+		repo   func(wt Repo) Repo
+		mutate func(*ReviewInput)
+	}{
+		{
+			name:   "another round",
+			repo:   func(wt Repo) Repo { return wt },
+			mutate: func(in *ReviewInput) { in.Round = 1 },
+		},
+		{
+			name: "another .om.json text and bar",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: `{"threshold":0.9}`}}
+			},
+			mutate: func(*ReviewInput) {},
+		},
+		{
+			name: "another context_file text",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: withContext, contextPath: "another rubric"}}
+			},
+			mutate: func(*ReviewInput) {},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, wt := keyFixture(t)
+			in := ReviewInput{Dir: f.workRoot, BeadID: f.work.BeadID}
+			base, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+			if err != nil {
+				t.Fatalf("reviewKey error = %v; want nil", err)
+			}
+			changed := in
+			tc.mutate(&changed)
+			variant, _, err := l.reviewKey(context.Background(), tc.repo(wt), wt, f.work, changed, f.base, f.work.Head)
+			if err != nil {
+				t.Fatalf("reviewKey error = %v; want nil", err)
+			}
+			if variant.InputDigest == base.InputDigest {
+				t.Errorf("InputDigest = %q; want it to change when %s changes", variant.InputDigest, tc.name)
+			}
+			// g feeds nothing but the digest, so the rest of the key must stand.
+			variant.InputDigest = base.InputDigest
+			if variant != base {
+				t.Errorf("reviewKey = %+v; want it to differ from %+v in InputDigest alone", variant, base)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseKeyOMConfigRefused: a key that cannot read the bar or the two
+// texts om is given is an error, which the caller treats as a miss, and never a
+// key built from empty texts: an unreadable, absent or invalid .om.json, a
+// context_file the base does not have, and no repository to read from
+// (gt-0lys4u).
+func TestVerdictReuseKeyOMConfigRefused(t *testing.T) {
+	t.Parallel()
+	readRefused := errors.New("read refused")
+	tests := []struct {
+		name string
+		repo func(Repo) Repo
+	}{
+		{
+			name: "an unreadable .om.json",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, failPath: omConfigFile, failErr: readRefused}
+			},
+		},
+		{
+			name: "no .om.json at the base",
+			repo: func(wt Repo) Repo { return omConfigRepo{Repo: wt} },
+		},
+		{
+			name: "an invalid .om.json",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: `{"threshold":`}}
+			},
+		},
+		{
+			// The texts read fine, so only the bar's own read refuses this.
+			name: "a threshold that is not a number",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{omConfigFile: `{"threshold":"high"}`}}
+			},
+		},
+		{
+			name: "a context_file the base does not have",
+			repo: func(wt Repo) Repo {
+				return omConfigRepo{Repo: wt, files: map[string]string{
+					omConfigFile: `{"threshold":0.8,"context_file":"docs/rubric.md"}`,
+				}}
+			},
+		},
+		{
+			name: "no repository to read from",
+			repo: func(Repo) Repo { return nil },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, wt := keyFixture(t)
+			key, touched, err := l.reviewKey(context.Background(), tc.repo(wt), wt, f.work, ReviewInput{}, f.base, f.work.Head)
+			if err == nil {
+				t.Fatalf("reviewKey = %+v, %v, nil; want an error when %s", key, touched, tc.name)
+			}
+			if key != (ReviewKey{}) || touched != nil {
+				t.Errorf("reviewKey on error = %+v, %v; want the zero key and no paths", key, touched)
+			}
+		})
 	}
 }
