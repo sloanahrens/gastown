@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -18,9 +19,10 @@ import (
 // computed, hit or miss.
 //
 // err is non-nil only when the answer is unknown: the key could not be computed,
-// the record could not be read, or the bar could not be read. A caller must then
-// neither reuse the record nor delete it. A record that simply does not match is
-// a miss with a nil error.
+// the record could not be read, the base's ancestry or the diff since it could
+// not be read, or the bar could not be read. A caller must then neither reuse
+// the record nor delete it. A record that simply does not match is a miss with a
+// nil error.
 //
 // Every miss that had a record and every error logs one line through l.Out
 // naming the bead and the reason. A missing record and a nil Ahead log nothing.
@@ -49,6 +51,15 @@ func (l *Lander) reuseAhead(ctx context.Context, g, wt Repo, w Work, in ReviewIn
 	}
 	if reason := ReuseMiss(g, rec, key, base, touched, l.aheadNow(), l.ReuseExpiry); reason != "" {
 		l.logf("%s: the stored review is not reused: %s", w.BeadID, reason)
+		// The base ancestry and diff checks are git reads: a failure there is
+		// an unknown answer, so the caller must neither reuse nor delete the
+		// record (gt-dreojy).
+		switch reason {
+		case missBaseUnreadable:
+			return rec, key, false, fmt.Errorf("the base ancestry read failed (%s)", reason)
+		case missDiffUnreadable:
+			return rec, key, false, fmt.Errorf("the diff since the review's base failed (%s)", reason)
+		}
 		return rec, key, false, nil
 	}
 	bar, err := OMThresholdAt(g, base)
