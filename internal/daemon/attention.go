@@ -2386,6 +2386,28 @@ func riskPathSummary(rec land.LandingRecord, paths, wanted string) string {
 	return fmt.Sprintf("%s landed %s touching %s; %s", rec.BeadID, sha12(rec.Head), paths, wanted)
 }
 
+// riskReadChunkSize is how many landing records one risk-path bead read
+// carries. A rig's qualified records can name hundreds of beads, and one bd
+// read of every id at once timed out under load (gt-4vuv24); a chunk at a
+// time keeps one slow read to one chunk.
+const riskReadChunkSize = 50
+
+// riskReadChunks cuts need into consecutive chunks of at most
+// riskReadChunkSize records, keeping their order and every record once. An
+// empty need gives no chunk: there is nothing to read.
+func riskReadChunks(need []land.LandingRecord) [][]land.LandingRecord {
+	var chunks [][]land.LandingRecord
+	for len(need) > 0 {
+		n := len(need)
+		if n > riskReadChunkSize {
+			n = riskReadChunkSize
+		}
+		chunks = append(chunks, need[:n])
+		need = need[n:]
+	}
+	return chunks
+}
+
 // riskReads reads rig's qualifying landing beads for the collector: each
 // distinct bead once, from the audit's read of this tick when it has one,
 // otherwise in one batched call for all the rest. A bead the batch could not
