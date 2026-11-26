@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
@@ -115,6 +116,49 @@ func TestReviewPoolWorkerReviewWorksLeavesOutNotReady(t *testing.T) {
 			}
 			if got, want := workOrder(works), "gt-kept"; got != want {
 				t.Fatalf("reviewWorks offered %s; want only %s, leaving out %s", got, want, dropped.ID)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWorkerReviewWorksLeavesOutParked pins that reviewWorks offers
+// no work for an issue the worker's own state holds back from landing: one
+// parked on an infrastructure failure, one held by its last outcome, and one
+// whose landing record is waiting to be repaired. A review now is spent on a
+// bead the pass will not reach for a while (gt-u8s6m7).
+func TestReviewPoolWorkerReviewWorksLeavesOutParked(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		hold func(h *harness, id string)
+	}{
+		{name: "parked", hold: func(h *harness, id string) {
+			st := h.w.bead(id)
+			st.parked, st.until = true, h.w.now().Add(time.Hour)
+		}},
+		{name: "held by its last outcome", hold: func(h *harness, id string) {
+			h.w.outcomeMemo().record(id, seededRowAt, h.w.now().Add(time.Hour))
+		}},
+		{name: "pending repair", hold: func(h *harness, id string) {
+			h.w.pendingRepair = map[string]land.Work{id: {BeadID: id, Branch: branch, Head: noteHead}}
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			kept := readySubmission("gt-kept", "polecat/opal/gt-kept+x1", noteHead)
+			dropped := readySubmission("gt-dropped", "polecat/opal/gt-dropped+x1", tipHead)
+			// The held row keys its hold on the list row's updated_at.
+			dropped.UpdatedAt = seededRowAt
+			tc.hold(h, dropped.ID)
+
+			works, err := h.w.reviewWorks([]*beads.Issue{kept, dropped}, "")
+			if err != nil {
+				t.Fatalf("reviewWorks: %v", err)
+			}
+			if got, want := workOrder(works), "gt-kept"; got != want {
+				t.Fatalf("reviewWorks offered %s for a %s bead; want only %s, leaving out %s", got, tc.name, want, dropped.ID)
 			}
 		})
 	}

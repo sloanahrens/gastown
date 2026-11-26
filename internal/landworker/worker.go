@@ -962,8 +962,10 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 
 // reviewWorks builds a work for each issue the pool may review ahead of a
 // landing: one whose status is still actionable, that carries the ready label,
-// and that is not the bead named by landing, the one being landed. It sorts the
-// issues in place into the order the landing will take them
+// that is not the bead named by landing, the one being landed, and that this
+// pass is not holding back — one parked on an infrastructure failure, one held
+// by its last outcome, or one whose landing record is being repaired. It sorts
+// the issues in place into the order the landing will take them
 // (sortByLandingOrder), from the same resolveWork process reads, so the pool
 // starts its reviews in landing order and reviews the head the submission
 // names. An issue left out is never resolved. One the pool must review whose
@@ -976,6 +978,15 @@ func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work
 		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() ||
 			!beads.HasLabel(issue, land.LabelReadyToLand) ||
 			(landing != "" && issue.ID == landing) {
+			continue
+		}
+		// The holds landReady keeps a bead under, read from the same in-memory
+		// state: the pass skips such a bead, so a review of it now is spent on
+		// a landing this pass will not make (gt-u8s6m7).
+		if w.parked(issue.ID) || w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
+			continue
+		}
+		if _, pending := w.pendingRepair[issue.ID]; pending {
 			continue
 		}
 		work, ok, err := w.resolveWork(issue)
