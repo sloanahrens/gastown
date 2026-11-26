@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -62,10 +63,10 @@ func TestPatrolLastRunScanDispatchFieldsRecord(t *testing.T) {
 }
 
 // scanRecorderDaemon is a daemon whose patrol_scan is on and whose town has no
-// rigs to scan. bdPath names a path that does not exist, so a tick that uses the
-// real host's gate check fails it without starting a tool, and the rogue-bd walk
-// is dated to now so it is not due.
-func scanRecorderDaemon(t *testing.T) *Daemon {
+// rigs to scan, on the given fake clock. bdPath names a path that does not
+// exist, so a tick that uses the real host's gate check fails it without
+// starting a tool, and the rogue-bd walk is dated to now so it is not due.
+func scanRecorderDaemon(t *testing.T, clock clockwork.Clock) *Daemon {
 	t.Helper()
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
@@ -74,6 +75,7 @@ func scanRecorderDaemon(t *testing.T) *Daemon {
 			PatrolScan: &PatrolScanConfig{Enabled: true},
 		}},
 		bdPath: filepath.Join(t.TempDir(), "no-such-bd"),
+		clock:  clock,
 	}
 	d.rogueBDRun.record(d.clk().Now())
 	return d
@@ -100,11 +102,17 @@ func TestPatrolLastRunScanDispatchRecordsAScan(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := scanRecorderDaemon(t)
-
-			before := d.clk().Now()
-			d.runPatrolScanOn(hostWith(d, tc.gateErr))
-			after := d.clk().Now()
+			clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 6, 45, 0, 0, time.UTC))
+			d := scanRecorderDaemon(t, clock)
+			// Each gate check moves the fake clock on, as a real check takes
+			// time, so the run's record must be the instant it read, not the
+			// instant the tick started.
+			host := &patrolScanHost{d: d, gateCheck: func(string, string) (string, error) {
+				clock.Advance(40 * time.Second)
+				return "", tc.gateErr
+			}}
+			d.runPatrolScanOn(host)
+			want := clock.Now()
 
 			at, ok, err := loadPatrolLastRun(d.config.TownRoot, "patrol_scan")
 			if err != nil {
@@ -113,8 +121,8 @@ func TestPatrolLastRunScanDispatchRecordsAScan(t *testing.T) {
 			if ok != tc.want {
 				t.Fatalf("patrol_scan recorded a run at %v: recorded = %v, want %v", at, ok, tc.want)
 			}
-			if ok && (at.Before(before) || at.After(after)) {
-				t.Errorf("patrol_scan last run = %v, want a time within the scan (%v..%v)", at, before, after)
+			if ok && !at.Equal(want) {
+				t.Errorf("patrol_scan last run = %v, want the fake clock's instant %v", at, want)
 			}
 		})
 	}
@@ -145,17 +153,24 @@ func TestPatrolLastRunScanDispatchRecordsATick(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 6, 45, 0, 0, time.UTC))
+			// The fake CLI moves the clock inside the tick, as a real tick takes
+			// time, so the record must be the instant the tick read.
+			fake := newFakeCLI(func([]string) cliReply {
+				clock.Advance(40 * time.Second)
+				return tc.reply
+			})
 			logger, _ := lineLogger()
-			d := specDispatchFake(t, newFakeCLI(func([]string) cliReply { return tc.reply }), logger)
+			d := specDispatchFake(t, fake, logger)
+			d.clock = clock
 			if tc.patrolOff {
 				d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 					SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(false)},
 				}}
 			}
 
-			before := d.clk().Now()
 			d.runSpecDispatch()
-			after := d.clk().Now()
+			want := clock.Now()
 
 			at, ok, err := loadPatrolLastRun(d.config.TownRoot, "spec_dispatch")
 			if err != nil {
@@ -164,8 +179,8 @@ func TestPatrolLastRunScanDispatchRecordsATick(t *testing.T) {
 			if ok != tc.want {
 				t.Fatalf("spec_dispatch recorded a run at %v: recorded = %v, want %v", at, ok, tc.want)
 			}
-			if ok && (at.Before(before) || at.After(after)) {
-				t.Errorf("spec_dispatch last run = %v, want a time within the tick (%v..%v)", at, before, after)
+			if ok && !at.Equal(want) {
+				t.Errorf("spec_dispatch last run = %v, want the fake clock's instant %v", at, want)
 			}
 			if mem := d.specDispatchRun.last(); mem.IsZero() == tc.want {
 				t.Errorf("in-memory last run = %v, want recorded = %v", mem, tc.want)

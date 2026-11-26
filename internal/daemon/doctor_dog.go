@@ -301,7 +301,7 @@ func (d *Daemon) runDoctorDog() {
 	// with findings, so gt jobs reads doctor_dog's last run instead of
 	// never_run (gt-nhz95j). The record sits below the lock: a tick skipped
 	// for a gc made no run and records none.
-	defer d.recordPatrolRun(&d.doctorDogRun, "doctor_dog", time.Now())
+	defer d.recordPatrolRun(&d.doctorDogRun, "doctor_dog", d.clk().Now())
 
 	probes := doctorDogProbes(d.config.TownRoot, slot.Reap)
 	if d.doctorDogProbesFn != nil {
