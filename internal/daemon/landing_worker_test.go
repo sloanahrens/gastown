@@ -2239,14 +2239,18 @@ func recorderLanding(t *testing.T, runner *config.TierSweepRunnerConfig, run cmd
 	return gate, townRoot
 }
 
-// throttleKubectl answers the runner's cpu.stat read as a control cluster's
-// kubectl would, and records each argv. Any other command is refused.
+// throttleKubectl answers the runner pod lookup and its cpu.stat read as a
+// control cluster's kubectl would, and records each argv. Any other command is
+// refused.
 func throttleKubectl(argvs *[][]string) cmdRunFunc {
 	return func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		if len(cmd.Args) == 0 || cmd.Args[0] != "kubectl" {
 			return nil, nil, fmt.Errorf("unexpected command %q", cmd.Args)
 		}
 		*argvs = append(*argvs, cmd.Args)
+		if slices.Contains(cmd.Args, "get") {
+			return []byte("pod/" + runnerPod + "\n"), nil, nil
+		}
 		return []byte("nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n"), nil, nil
 	}
 }
@@ -2270,14 +2274,17 @@ func TestLandingWorkerGateRecorderIsSet(t *testing.T) {
 	if p, th, us := runs[0].RunnerPeriods, runs[0].RunnerThrottled, runs[0].RunnerThrottledUsec; p != 40 || th != 7 || us != 3100 {
 		t.Errorf("counters = (%d, %d, %d), want (40, 7, 3100)", p, th, us)
 	}
-	if len(argvs) != 1 {
-		t.Fatalf("the recorder ran kubectl %d time(s), want 1", len(argvs))
+	if len(argvs) != 2 {
+		t.Fatalf("the recorder ran kubectl %d time(s), want a pod lookup then the read", len(argvs))
 	}
-	if i := slices.Index(argvs[0], "--context"); i < 0 || i+1 >= len(argvs[0]) || argvs[0][i+1] != "control" {
-		t.Errorf("kubectl argv %q does not name the control cluster's context", argvs[0])
+	for _, argv := range argvs {
+		if i := slices.Index(argv, "--context"); i < 0 || i+1 >= len(argv) || argv[i+1] != "control" {
+			t.Errorf("kubectl argv %q does not name the control cluster's context", argv)
+		}
 	}
-	if !slices.Equal(argvs[0][len(argvs[0])-len(runnerThrottleArgs):], runnerThrottleArgs) {
-		t.Errorf("kubectl argv %q does not end with the runner's cpu.stat read", argvs[0])
+	wantRead := runnerThrottleArgs(runnerPod)
+	if !slices.Equal(argvs[1][len(argvs[1])-len(wantRead):], wantRead) {
+		t.Errorf("kubectl argv %q does not end with the read into the named runner pod", argvs[1])
 	}
 }
 
@@ -2451,7 +2458,7 @@ func TestLandingWorkerControlClusterExecReadsThroughPatrol(t *testing.T) {
 		}
 	}()
 	for i := 0; i < rounds; i++ {
-		if _, err := exec(context.Background(), runnerThrottleArgs...); err == nil {
+		if _, err := exec(context.Background(), runnerThrottleArgs(runnerPod)...); err == nil {
 			t.Fatal("controlClusterExec: want the failed kubectl's error, got none")
 		}
 	}

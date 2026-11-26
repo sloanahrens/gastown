@@ -72,9 +72,8 @@ func TestGateRunRecorderAppends(t *testing.T) {
 	root := gateRunRecorderRoot(t)
 	var log recorderLog
 	var reports []error
-	rec := NewGateRunRecorder(func(context.Context, ...string) (string, error) {
-		return "nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n", nil
-	}, root, log.logf, func(err error) { reports = append(reports, err) })
+	rec := NewGateRunRecorder(runnerExec("pod/"+runnerPod+"\n", "nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n"),
+		root, log.logf, func(err error) { reports = append(reports, err) })
 	rec(land.GateRun{Rig: "gastown", Bead: "gt-a", SHA: "c0ffee", RunID: "bob/42", Passed: true})
 	if len(reports) != 1 || reports[0] != nil {
 		t.Errorf("the recorder reported %v after a successful append, want one nil (the attention item is cleared by it, gt-nwea8n)", reports)
@@ -127,9 +126,7 @@ func TestGateRunRecorderBlockedRead(t *testing.T) {
 // at -1 and logs; a failed append logs and returns.
 func TestGateRunRecorderFailures(t *testing.T) {
 	t.Parallel()
-	okExec := func(context.Context, ...string) (string, error) {
-		return "nr_periods 4\nnr_throttled 1\nthrottled_usec 20\n", nil
-	}
+	okExec := runnerExec("pod/"+runnerPod+"\n", "nr_periods 4\nnr_throttled 1\nthrottled_usec 20\n")
 	notADir := filepath.Join(t.TempDir(), "town")
 	if err := os.WriteFile(notADir, []byte("not a directory"), 0o644); err != nil {
 		t.Fatalf("seed a file where the town root goes: %v", err)
@@ -140,7 +137,7 @@ func TestGateRunRecorderFailures(t *testing.T) {
 		townRoot string
 		wantLog  string
 	}{
-		{"read fails", func(context.Context, ...string) (string, error) { return "", errors.New("cpu.stat is unreadable") }, "", "cpu.stat is unreadable"},
+		{"read fails", readError(errors.New("cpu.stat is unreadable")), "", "cpu.stat is unreadable"},
 		{"append fails", okExec, notADir, "appending"},
 	}
 	for _, tc := range cases {

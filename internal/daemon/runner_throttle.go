@@ -19,8 +19,12 @@ type RunnerThrottle struct {
 // runnerThrottleKeys are the counters a reading needs, in missing-key order.
 var runnerThrottleKeys = []string{"nr_periods", "nr_throttled", "throttled_usec"}
 
-// runnerThrottleArgs reads the forgejo-runner container's cpu.stat through kubectl.
-var runnerThrottleArgs = []string{"-n", "forgejo", "exec", "deploy/forgejo-runner", "-c", "dind", "--", "cat", "/sys/fs/cgroup/cpu.stat"}
+// runnerThrottleArgs reads the named runner pod's dind cpu.stat through kubectl.
+// The pod is named outright: execing into deploy/forgejo-runner gets the
+// Deployment, which the sweep-runner Role does not grant (gt-3g3nm4).
+func runnerThrottleArgs(pod string) []string {
+	return []string{"-n", "forgejo", "exec", pod, "-c", "dind", "--", "cat", "/sys/fs/cgroup/cpu.stat"}
+}
 
 // ParseCPUStat reads cgroup v2 cpu.stat's three throttle counters. A missing
 // counter or a line that is not one count errors naming the key, never zero.
@@ -48,13 +52,18 @@ func ParseCPUStat(text string) (RunnerThrottle, error) {
 	return RunnerThrottle{Periods: counts["nr_periods"], Throttled: counts["nr_throttled"], ThrottledUsec: counts["throttled_usec"]}, nil
 }
 
-// ReadRunnerThrottle reads the runner container's cpu.stat through exec, the
-// caller's seam; a missing seam or a failed read is an error, never a zero.
+// ReadRunnerThrottle reads the runner pod's cpu.stat through exec, the caller's
+// seam: the pod lookup first, then the read inside the pod it names. A missing
+// seam, a failed lookup or a failed read is an error, never a zero.
 func ReadRunnerThrottle(ctx context.Context, exec func(ctx context.Context, args ...string) (string, error)) (RunnerThrottle, error) {
 	if exec == nil {
 		return RunnerThrottle{}, errors.New("no exec seam, so the runner's cpu.stat cannot be read")
 	}
-	text, err := exec(ctx, slices.Clone(runnerThrottleArgs)...)
+	pod, err := runnerPodName(ctx, exec)
+	if err != nil {
+		return RunnerThrottle{}, fmt.Errorf("reading the runner's cpu.stat: %w", err)
+	}
+	text, err := exec(ctx, runnerThrottleArgs(pod)...)
 	if err == nil {
 		var t RunnerThrottle
 		if t, err = ParseCPUStat(text); err == nil {
