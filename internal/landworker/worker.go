@@ -639,11 +639,7 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		// The stored rejections are consumed before the next bead is chosen, so
 		// a bead's author is told the review refused it without waiting behind
 		// the landings queued ahead of it (gt-9nco9r).
-		if err := w.sweepStored(ctx, issues, handled, swept, &rep); err != nil {
-			w.logf("sweeping stored reviews: %v", err)
-			rep.Failed++
-			return rep
-		}
+		w.sweepStored(ctx, issues, handled, swept, &rep)
 		// The sweep may have learned that the run was canceled or a drain
 		// started; nothing more is started once either is true.
 		if ctx.Err() != nil || w.draining() {
@@ -945,10 +941,12 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 // waits is swept once for the new head too. Each landing it makes records the
 // first-sight record and the outcome memo the loop records around its own. With
 // Stored nil nothing is swept (gt-5q8ayw). A hint that cannot be read is
-// unknown, never "not rejecting", so the sweep returns its error (gt-9nco9r).
-func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled, swept map[string]bool, rep *Report) error {
+// unknown, never "not rejecting": the error is logged in one line naming the
+// bead and the bead is left for its ordinary turn while the sweep goes on with
+// the rest (gt-end632).
+func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled, swept map[string]bool, rep *Report) {
 	if w.Stored == nil {
-		return nil
+		return
 	}
 	for _, issue := range issues {
 		if issue == nil {
@@ -961,7 +959,7 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 			continue
 		}
 		if ctx.Err() != nil || w.draining() {
-			return nil
+			return
 		}
 		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
 			continue
@@ -987,7 +985,10 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 		}
 		head, rejecting, err := w.Stored.Hint(issue.ID)
 		if err != nil {
-			return fmt.Errorf("reading the stored review of %s: %w", issue.ID, err)
+			// The hint is unknown, not "not rejecting": the bead keeps its
+			// ordinary turn and the sweep goes on with the rest (gt-end632).
+			w.logf("%s: reading the stored review: %v; the bead keeps its turn", issue.ID, err)
+			continue
 		}
 		if !rejecting {
 			continue
@@ -1015,7 +1016,6 @@ func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled
 			handled[submission] = true
 		}
 	}
-	return nil
 }
 
 // processWith resolves what to land for issue and lands it. storedOnly marks the

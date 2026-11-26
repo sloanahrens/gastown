@@ -1103,9 +1103,7 @@ func TestReviewPoolWorkerSweepSkipsALabellessBead(t *testing.T) {
 	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-abc": true}}
 
 	rep := Report{}
-	if err := h.w.sweepStored(context.Background(), []*beads.Issue{labelless}, map[string]bool{}, map[string]bool{}, &rep); err != nil {
-		t.Fatalf("sweepStored: %v", err)
-	}
+	h.w.sweepStored(context.Background(), []*beads.Issue{labelless}, map[string]bool{}, map[string]bool{}, &rep)
 	if got := landingCalls(h.lander.calls); got != "" {
 		t.Fatalf("landed %s; want nothing: a bead with no ready label is not swept", got)
 	}
@@ -1261,29 +1259,47 @@ func TestReviewPoolWorkerSweepRecordsOutcomeMemo(t *testing.T) {
 	}
 }
 
-// TestReviewPoolWorkerSweepHintErrorStopsThePass pins that a hint that cannot
-// be read is never read as "not rejecting": the pass counts the failure and lands nothing (gt-9nco9r).
-func TestReviewPoolWorkerSweepHintErrorStopsThePass(t *testing.T) {
+// TestReviewPoolWorkerHintErrorWaits pins that a hint that cannot be read is
+// never read as "not rejecting": the error is logged in one line naming the
+// bead, the bead gets no stored-only landing and keeps its ordinary turn, and
+// the sweep goes on to the next hinted bead (gt-end632).
+func TestReviewPoolWorkerHintErrorWaits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.seedReady(t, "gt-abc")
-	h.w.Stored = &sweepHints{fail: map[string]error{"gt-abc": errors.New("record unreadable")}}
+	// The list names the later seed first, so gt-bad heads the pass's list: the
+	// sweep meets its unreadable hint before gt-other's rejection, and a sweep
+	// that stops there never reaches the bead it must still sweep.
+	h.seedReadyAt(t, "gt-other", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-bad", 2, "2026-09-30T09:00:00Z")
+	h.w.Stored = &sweepHints{
+		rejecting: map[string]bool{"gt-other": true},
+		fail:      map[string]error{"gt-bad": errors.New("record unreadable")},
+	}
+	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+		if work.StoredOnly {
+			return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om asked for changes", Rework: true}
+		}
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
 	rep := h.w.Pass(context.Background())
 
-	if want := (Report{Failed: 1}); rep != want {
-		t.Fatalf("pass report = %+v; want %+v", rep, want)
+	// The next hinted bead is swept stored-only, then gt-bad lands at its own
+	// turn: an unreadable hint is no stored-only landing for gt-bad, and it does
+	// not stop the sweep.
+	if got, want := landingCalls(h.lander.calls), "gt-other:true,gt-bad:false"; got != want {
+		t.Fatalf("landings = %s; want %s: the failing-hint bead keeps its turn and the sweep goes on", got, want)
 	}
-	if got := landingCalls(h.lander.calls); got != "" {
-		t.Fatalf("landed %s; want nothing: an unreadable hint stops the pass", got)
+	if want := (Report{Landed: 1, Rejected: 1}); rep != want {
+		t.Fatalf("pass report = %+v; want %+v", rep, want)
 	}
 	named := false
 	for _, line := range logs {
-		named = named || (strings.Contains(line, "gt-abc") && strings.Contains(line, "record unreadable"))
+		named = named || (strings.Contains(line, "gt-bad") && strings.Contains(line, "record unreadable"))
 	}
 	if !named {
-		t.Fatalf("logs %q; want one naming gt-abc and the read error", logs)
+		t.Fatalf("logs %q; want one naming gt-bad and the read error", logs)
 	}
 }
