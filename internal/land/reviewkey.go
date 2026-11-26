@@ -98,13 +98,15 @@ func (l *Lander) reviewKey(ctx context.Context, g, wt Repo, w Work, in ReviewInp
 	if err != nil {
 		return ReviewKey{}, nil, fmt.Errorf("review key: review bar at %s: %w", base, err)
 	}
+	// The texts om is given and the digest of its input are one thing: a text
+	// that will not read leaves no digest, so both failures return together.
+	var digest string
 	omJSON, contextFile, err := omRepoConfigAt(g, base)
-	if err != nil {
-		return ReviewKey{}, nil, fmt.Errorf("review key: om's config texts at %s: %w", base, err)
+	if err == nil {
+		digest, err = ReviewInputDigest(in, ExpectedReviewFlags(in, bar), omJSON, contextFile, w.Target)
 	}
-	digest, err := ReviewInputDigest(in, ExpectedReviewFlags(in, bar), omJSON, contextFile, w.Target)
 	if err != nil {
-		return ReviewKey{}, nil, fmt.Errorf("review key: input digest: %w", err)
+		return ReviewKey{}, nil, fmt.Errorf("review key: om's input at %s: %w", base, err)
 	}
 	return ReviewKey{
 		Bead:         w.BeadID,
