@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 )
 
 // restartedAtAnnotation is what `kubectl rollout restart` stamps on a pod
@@ -40,9 +41,9 @@ var serverSetRootKeys = map[string]bool{
 // objectDrift lists every rendered field of a kind object the live one lacks or
 // carries differently, one sorted line per field naming its JSON path and a
 // fingerprint of each side, never either value, and refuses either side that
-// decoded to nothing (gt-jqfk62, gt-wi4885). It compares Deployments and,
-// since the gate runner has one, its ConfigMap, whose data.config.yml is
-// therefore reported by path and fingerprint and never printed (gt-pkz70c).
+// decoded to nothing (gt-jqfk62, gt-wi4885). It compares Deployments and the
+// gate runner's ConfigMap (gt-pkz70c), whose config.yml prints its changed
+// lines after the sorted ones (gt-svm7ds).
 func objectDrift(kind string, rendered, live map[string]any) ([]string, error) {
 	if len(rendered) == 0 {
 		return nil, fmt.Errorf("%s drift: the rendered %s has no fields, so it was not read; an unreadable render is not a cluster in step", strings.ToLower(kind), kind)
@@ -50,7 +51,7 @@ func objectDrift(kind string, rendered, live map[string]any) ([]string, error) {
 	if len(live) == 0 {
 		return nil, fmt.Errorf("%s drift: the live %s has no fields, so it was not read; an unreadable object is not a cluster in step", strings.ToLower(kind), kind)
 	}
-	return objectDriftLines(rendered, live)
+	return objectDriftLines(rendered, live, runnerConfigObject(kind, rendered))
 }
 
 // objectAbsent lists every rendered field of an object the cluster does not
@@ -60,19 +61,20 @@ func objectAbsent(kind string, rendered map[string]any) ([]string, error) {
 	if len(rendered) == 0 {
 		return nil, fmt.Errorf("%s drift: the rendered %s has no fields, so it was not read; an unreadable render is not a cluster in step", strings.ToLower(kind), kind)
 	}
-	return objectDriftLines(rendered, map[string]any{})
+	return objectDriftLines(rendered, map[string]any{}, false)
 }
 
-// objectDriftLines walks rendered against live and returns its sorted lines, or
-// the first value it could not fingerprint.
-func objectDriftLines(rendered, live map[string]any) ([]string, error) {
-	w := &driftWalk{}
+// objectDriftLines walks rendered against live and returns its sorted lines,
+// then the runner config's changed lines when runnerConfig is set, or the first
+// value it could not fingerprint.
+func objectDriftLines(rendered, live map[string]any, runnerConfig bool) ([]string, error) {
+	w := &driftWalk{runnerConfig: runnerConfig}
 	w.object("", rendered, live)
 	if w.err != nil {
 		return nil, w.err
 	}
 	slices.Sort(w.drift)
-	return w.drift, nil
+	return append(w.drift, w.text...), nil
 }
 
 // driftWalk collects the differences a nested comparison finds, and the first
@@ -80,6 +82,10 @@ func objectDriftLines(rendered, live map[string]any) ([]string, error) {
 type driftWalk struct {
 	drift []string
 	err   error
+	// runnerConfig marks the gate runner's ConfigMap, whose config.yml prints
+	// changed lines; text holds those lines, after drift.
+	runnerConfig bool
+	text         []string
 }
 
 // object compares the rendered object at path against the live object and walks
@@ -200,8 +206,12 @@ func (w *driftWalk) keyedList(path, keyField string, rendered, live []any) bool 
 	return true
 }
 
-// difference records a field the two decodings carry differently.
+// difference records a field the two decodings carry differently, or the
+// changed lines of the runner config's text.
 func (w *driftWalk) difference(path string, rendered, live any) {
+	if w.runnerConfig && path == runnerConfigPath && w.configText(path, rendered, live) {
+		return
+	}
 	renderedText, ok := w.fingerprint(path, rendered)
 	if !ok {
 		return
@@ -240,6 +250,128 @@ func (w *driftWalk) fingerprint(path string, value any) (string, bool) {
 // reaches a terminal and a log (gt-wi4885).
 func (w *driftWalk) record(path, renderedText, observed string) {
 	w.drift = append(w.drift, path+": rendered "+renderedText+", observed "+observed)
+}
+
+// runnerConfigPath is the gate runner's config.yml, the one text a drift line
+// prints (gt-svm7ds).
+const runnerConfigPath = "data.config.yml"
+
+// runnerConfigMapName is the gate runner's ConfigMap, as the render names it.
+const runnerConfigMapName = forgejorunner.Name + "-config"
+
+// configTextLineLimit is how many changed lines a runner config drift prints.
+const configTextLineLimit = 40
+
+// configTextCellLimit bounds the line-diff table (rows times columns); a larger
+// diff is fingerprinted instead.
+const configTextCellLimit = 1 << 20
+
+// configTextSecretWord matches a line naming a token, secret, password or key,
+// case-insensitively, so FORGEJO_TOKEN counts.
+var configTextSecretWord = regexp.MustCompile(`(?i)token|secret|password|key`)
+
+// runnerConfigObject reports whether rendered is the gate runner's ConfigMap,
+// the one object whose config.yml may print its changed lines (gt-svm7ds).
+func runnerConfigObject(kind string, rendered map[string]any) bool {
+	if kind != "ConfigMap" {
+		return false
+	}
+	metadata, ok := rendered["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, ok := metadata["name"].(string)
+	return ok && name == runnerConfigMapName
+}
+
+// configChange is one changed line: "-" for observed, or "+" for rendered.
+type configChange struct{ sign, line string }
+
+// configText records the runner config's changed lines under path, at most
+// configTextLineLimit and a count of the rest. A line naming a token is
+// fingerprinted (gt-wi4885). It reports false, recording nothing, when a side is
+// not text or the diff is too large, so the caller fingerprints the value.
+func (w *driftWalk) configText(path string, rendered, live any) bool {
+	renderedText, renderedOK := rendered.(string)
+	liveText, liveOK := live.(string)
+	if !renderedOK || !liveOK {
+		return false
+	}
+	renderedLines := strings.Split(renderedText, "\n")
+	liveLines := strings.Split(liveText, "\n")
+	if len(renderedLines)*len(liveLines) > configTextCellLimit {
+		return false
+	}
+	changes := configLineChanges(liveLines, renderedLines)
+	w.text = append(w.text, path+":")
+	for i, change := range changes {
+		if i == configTextLineLimit {
+			break
+		}
+		text := change.line
+		if configTextSecretWord.MatchString(text) {
+			fingerprint, ok := w.fingerprint(path, text)
+			if !ok {
+				return true
+			}
+			text = fingerprint
+		}
+		w.text = append(w.text, change.sign+" "+text)
+	}
+	if rest := len(changes) - configTextLineLimit; rest > 0 {
+		w.text = append(w.text, fmt.Sprintf("... %d more changed lines not shown", rest))
+	}
+	return true
+}
+
+// configLineChanges diffs observed against rendered by longest common
+// subsequence. Each run of changes between unchanged lines pairs its observed
+// and rendered lines in turn, so a replaced line reads as '-' then '+'.
+func configLineChanges(observed, rendered []string) []configChange {
+	// common[i][j] is the LCS length of observed[i:] and rendered[j:].
+	common := make([][]int, len(observed)+1)
+	for i := range common {
+		common[i] = make([]int, len(rendered)+1)
+	}
+	for i := len(observed) - 1; i >= 0; i-- {
+		for j := len(rendered) - 1; j >= 0; j-- {
+			if observed[i] == rendered[j] {
+				common[i][j] = common[i+1][j+1] + 1
+			} else {
+				common[i][j] = max(common[i+1][j], common[i][j+1])
+			}
+		}
+	}
+	var changes, removed, added []configChange
+	// flush emits a pending run, pairing its k-th lines and keeping any extra.
+	flush := func() {
+		for k := range max(len(removed), len(added)) {
+			if k < len(removed) {
+				changes = append(changes, removed[k])
+			}
+			if k < len(added) {
+				changes = append(changes, added[k])
+			}
+		}
+		removed, added = removed[:0], added[:0]
+	}
+	i, j := 0, 0
+	for i < len(observed) || j < len(rendered) {
+		switch {
+		case i < len(observed) && j < len(rendered) && observed[i] == rendered[j]:
+			flush()
+			i++
+			j++
+		case j == len(rendered) || (i < len(observed) && common[i+1][j] >= common[i][j+1]):
+			removed = append(removed, configChange{"-", observed[i]})
+			i++
+		default:
+			added = append(added, configChange{"+", rendered[j]})
+			j++
+		}
+	}
+	flush()
+	return changes
 }
 
 // driftIgnoresKey reports whether the compare skips key in the object at
