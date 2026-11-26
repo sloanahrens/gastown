@@ -57,6 +57,33 @@ type planRecordFile struct {
 	Absent          bool   `json:"absent,omitempty"`
 }
 
+// planFlags holds the plan's own flags: policyKubeconfig is phase P's (the
+// deployer-policy certificate), applyKubeconfig phase W's (the deployer-apply one).
+type planFlags struct {
+	policyKubeconfig string
+	applyKubeconfig  string
+}
+
+// phaseKubeconfig is the kubeconfig a phase reads: phase P's is
+// --policy-kubeconfig and phase W's --apply-kubeconfig; no other phase exists.
+// A phase whose flag is missing is refused naming the flag, since the command
+// hard-codes no identity and reads no operator login or default kubeconfig. A
+// phase with no files is never asked, so it needs none.
+func phaseKubeconfig(phase string, f planFlags) (string, error) {
+	flag, kubeconfig := "--policy-kubeconfig", f.policyKubeconfig
+	switch phase {
+	case planPhaseStatic:
+	case planPhaseWorkloads:
+		flag, kubeconfig = "--apply-kubeconfig", f.applyKubeconfig
+	default:
+		return "", fmt.Errorf("gt town cluster plan: %q is not a plan phase, so it has no kubeconfig", phase)
+	}
+	if kubeconfig == "" {
+		return "", fmt.Errorf("gt town cluster plan: phase %s has files but no %s, and the plan takes no other cluster identity", phase, flag)
+	}
+	return kubeconfig, nil
+}
+
 // planRecordedFlags is the render flags a plan replays: the flags the last live
 // render recorded under the town, with the static control-cluster set included
 // and the plan's own --out directory in place of the recorded one. It returns
@@ -103,18 +130,31 @@ plan writes plan.json into --out with the full id, each file's name, phase and
 SHA-256, and the revision the cluster holds for each Deployment; a Deployment the
 cluster does not hold is recorded absent, with no revision. A phase P file is
 listed only when a static object differs from the cluster's, and then the id
-names it too. A plan that fails before that leaves no plan.json.`,
+names it too. A plan that fails before that leaves no plan.json.
+
+Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
+the deployer-policy certificate, and phase W --apply-kubeconfig, the
+deployer-apply certificate; the plan hard-codes no phase identity. A phase with
+files whose flag is missing is refused, naming the flag. The command does not
+run inside the daemon pod.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		return runTownClusterPlan(cmd.Context(), realClusterRenderDeps(io.Discard), realRunFunc(), cmd.OutOrStdout(), clusterPlanOut, atomicfile.WriteJSON)
+		return runTownClusterPlan(cmd.Context(), realClusterRenderDeps(io.Discard), realRunFunc(), cmd.OutOrStdout(), clusterPlanOut, clusterPlanKubeconfigs, atomicfile.WriteJSON)
 	},
 }
 
-var clusterPlanOut string
+var (
+	clusterPlanOut         string
+	clusterPlanKubeconfigs planFlags
+)
 
 func init() {
 	townClusterPlanCmd.Flags().StringVar(&clusterPlanOut, "out", "",
 		"the directory the rendered files are written to; it must be empty or absent (required)")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.policyKubeconfig, "policy-kubeconfig", "",
+		"phase P's kubeconfig, the deployer-policy certificate's: required when phase P has files")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.applyKubeconfig, "apply-kubeconfig", "",
+		"phase W's kubeconfig, the deployer-apply certificate's: required when phase W has files")
 	townClusterCmd.AddCommand(townClusterPlanCmd)
 }
 
@@ -279,12 +319,13 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // from the render's own writes, so the id names exactly what the render wrote; the
 // render's own output is dropped. Phase P is listed only when a static object
 // differs from the cluster's: when none does, plan.json and the id name the
-// workloads alone, and the phases line names only W. The differences print after
+// workloads alone, and the phases line names only W. A phase with files whose
+// kubeconfig flag is missing (phaseKubeconfig) is refused. The differences print after
 // the phases, the static objects' then each Deployment's in apply order, and the
 // short id is the last line. plan.json is written only after every read succeeds,
 // and the output only after it is written, so a refusal, a render error, a failed
 // read or a failed write prints nothing.
-func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, writeJSON func(path string, v any) error) error {
+func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, kubeconfigs planFlags, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
 		return err
@@ -362,6 +403,15 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		record.Files = append(record.Files, planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent})
 	}
 	full, short := planID(files)
+	// A phase with files but no kubeconfig flag is refused: no identity is left to fall back on.
+	for _, phase := range []string{planPhaseStatic, planPhaseWorkloads} {
+		if counts[phase] == 0 {
+			continue
+		}
+		if _, err := phaseKubeconfig(phase, kubeconfigs); err != nil {
+			return err
+		}
+	}
 	record.ID = full
 	if err := writeJSON(filepath.Join(outDir, planFileName), record); err != nil {
 		return fmt.Errorf("gt town cluster plan: cannot write %s, so the plan is not whole and no id was printed: %w", filepath.Join(outDir, planFileName), err)

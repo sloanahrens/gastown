@@ -133,12 +133,83 @@ func planTown(t *testing.T) string {
 // planOut is a fresh plan directory under a temporary parent.
 func planOut(t *testing.T) string { return filepath.Join(t.TempDir(), "plan") }
 
+// planTestKubeconfigs are the two flags a plan holding both phases takes.
+var planTestKubeconfigs = planFlags{policyKubeconfig: "/kube/policy.yaml", applyKubeconfig: "/kube/apply.yaml"}
+
+// TestClusterShapePlanKubeconfig: phase P reads --policy-kubeconfig and phase W
+// --apply-kubeconfig, no other phase has a kubeconfig, and a phase whose flag is
+// missing is refused naming it, since the plan takes no other cluster identity.
+func TestClusterShapePlanKubeconfig(t *testing.T) {
+	t.Parallel()
+	const policy, apply = "/kube/policy.yaml", "/kube/apply.yaml"
+	cases := []struct {
+		phase   string
+		f       planFlags
+		want    string
+		wantErr string
+	}{
+		{planPhaseStatic, planTestKubeconfigs, policy, ""},
+		{planPhaseWorkloads, planTestKubeconfigs, apply, ""},
+		{"X", planTestKubeconfigs, "", "is not a plan phase"},
+		{planPhaseStatic, planFlags{applyKubeconfig: apply}, "", "--policy-kubeconfig"},
+		{planPhaseWorkloads, planFlags{policyKubeconfig: policy}, "", "--apply-kubeconfig"},
+	}
+	for _, tc := range cases {
+		got, err := phaseKubeconfig(tc.phase, tc.f)
+		if tc.wantErr == "" {
+			if err != nil || got != tc.want {
+				t.Errorf("phaseKubeconfig(%q) = %q, %v; want %q", tc.phase, got, err, tc.want)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) || got != "" {
+			t.Errorf("phaseKubeconfig(%q) = %q, %v; want a refusal naming %q and no kubeconfig", tc.phase, got, err, tc.wantErr)
+		}
+	}
+}
+
+// TestClusterShapePlanKubeconfigNeedsTheFlagOfEachPhaseWithFiles: a plan with phase
+// P refuses without --policy-kubeconfig, one with W without --apply-kubeconfig, each
+// naming the flag and writing no plan.json; dropping phase P needs none.
+func TestClusterShapePlanKubeconfigNeedsTheFlagOfEachPhaseWithFiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		flags   planFlags
+		drifted bool
+		wantErr string
+	}{
+		{planFlags{}, true, "--policy-kubeconfig"},
+		{planFlags{policyKubeconfig: "/kube/policy.yaml"}, true, "--apply-kubeconfig"},
+		{planFlags{applyKubeconfig: "/kube/apply.yaml"}, false, ""},
+	}
+	for _, tc := range cases {
+		dir := planOut(t)
+		static := planStaticLive(t)
+		if tc.drifted {
+			static = planStaticLiveOneDrifted(t)
+		}
+		kube := planKubectlReading(t, static, planRevisionAnswer(t))
+		err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, tc.flags, atomicfile.WriteJSON)
+		if tc.wantErr == "" {
+			if err != nil {
+				t.Errorf("flags %+v: running the plan: %v", tc.flags, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("flags %+v: runTownClusterPlan = %v, want an error naming %q", tc.flags, err, tc.wantErr)
+		} else if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("flags %+v: plan.json exists (stat error %v) after a refusal, want none written", tc.flags, statErr)
+		}
+	}
+}
+
 // TestClusterShapePlanIdPrintsTheShortId: the plan prints the phases line, then
 // the 12-hex short form of planID over the files it rendered, as the last line.
 func TestClusterShapePlanIdPrintsTheShortId(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	_, short := planID(planFilesIn(t, dir))
@@ -181,7 +252,7 @@ func planWantPhase(static map[string]bool, f planFile) string {
 func TestClusterShapePlanPhases(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLiveOneDrifted(t), nil), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLiveOneDrifted(t), nil), out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -222,7 +293,7 @@ func TestClusterShapePlanPhases(t *testing.T) {
 func TestClusterShapePlanPhasesPOmitted(t *testing.T) {
 	t.Parallel()
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLive(t), nil), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectlRendered(t, dir, planStaticLive(t), nil), out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -320,7 +391,7 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	t.Parallel()
 	town := planTown(t)
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	files := planFilesIn(t, dir)
@@ -344,7 +415,7 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 		}
 	}
 	again := planOut(t)
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, again, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, again, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan again: %v", err)
 	}
 	if _, againBody := readPlanRecord(t, again); !bytes.Equal(body, againBody) {
@@ -403,7 +474,7 @@ func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T)
 			t.Parallel()
 			d, dir, writeJSON := tc.setup(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, writeJSON)
+			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, planTestKubeconfigs, writeJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
 			}
@@ -432,7 +503,7 @@ func TestClusterShapePlanIdMakesOnlyReadCalls(t *testing.T) {
 		}
 		return []byte(sbxEngineHelmOutput), nil
 	}
-	if err := runTownClusterPlan(context.Background(), d, planKubectl(t), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), d, planKubectl(t), &bytes.Buffer{}, planOut(t), planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("the plan failed under a runner that fails every non-read call: %v", err)
 	}
 	for _, c := range calls {
@@ -475,7 +546,7 @@ func TestClusterShapePlanIdRefusesAndFailsClosed(t *testing.T) {
 			t.Parallel()
 			d, dir := tc.setup(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), d, planKubectl(t), out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan(%q) = %v, want an error holding %q", dir, err, tc.want)
 			}
@@ -525,7 +596,7 @@ func TestClusterShapePlanIdWritesNothingOutsideOut(t *testing.T) {
 	t.Parallel()
 	town := planTown(t)
 	before := townSnapshot(t, town)
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, planOut(t), planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	if after := townSnapshot(t, town); !reflect.DeepEqual(after, before) {
@@ -545,7 +616,7 @@ func TestClusterShapePlanIdIncludesTheStaticSet(t *testing.T) {
 		t.Fatalf("recording the render flags: %v", err)
 	}
 	dir := planOut(t)
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	for _, f := range planFilesIn(t, dir) {
@@ -570,7 +641,7 @@ func TestClusterShapePlanIdRefusesAnEmptyOut(t *testing.T) {
 	town := planTown(t)
 	before := townSnapshot(t, town)
 	out := &bytes.Buffer{}
-	err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, "", atomicfile.WriteJSON)
+	err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, town, io.Discard), planKubectl(t), out, "", planTestKubeconfigs, atomicfile.WriteJSON)
 	if err == nil || !strings.Contains(err.Error(), "--out is required") {
 		t.Fatalf("runTownClusterPlan with an empty --out = %v, want the --out is required refusal", err)
 	}
@@ -681,7 +752,7 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 			t.Parallel()
 			d, kube := tc.setup(t)
 			dir, out := planOut(t), &bytes.Buffer{}
-			err := runTownClusterPlan(context.Background(), d, kube, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), d, kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.want)
 			}
@@ -712,7 +783,7 @@ func TestClusterShapePlanStaticGetsOnce(t *testing.T) {
 		return kube(ctx, dir, env, name, args...)
 	}
 	dir, out := planOut(t), &bytes.Buffer{}
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), counting, out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), counting, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -959,7 +1030,7 @@ func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 			}
 			dir, out := planOut(t), &bytes.Buffer{}
 			kube := planKubectlRendered(t, dir, live, nil)
-			if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON); err != nil {
+			if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 				t.Fatalf("running the plan: %v", err)
 			}
 			rec, _ := readPlanRecord(t, dir)
@@ -994,7 +1065,7 @@ func TestClusterShapePlanDiff(t *testing.T) {
 	kube := planKubectlRendered(t, dir, planStaticLive(t), func(t *testing.T, doc map[string]any) {
 		planObjectField(t, doc, "spec")["replicas"] = 3
 	})
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	_, short := planID(planListedFiles(t, dir))
@@ -1030,7 +1101,7 @@ func TestClusterShapePlanDiffRefuses(t *testing.T) {
 				}
 				return rendered(ctx, name, env, binary, args...)
 			}
-			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if err == nil || failed == "" || !strings.Contains(err.Error(), failed) {
 				t.Fatalf("runTownClusterPlan = %v, want an error naming the unread %s", err, failed)
 			}
@@ -1075,7 +1146,7 @@ func TestClusterShapePlanSecretDataIsNotCompared(t *testing.T) {
 		return m, nil
 	}
 	dir := planOut(t)
-	if err := runTownClusterPlan(context.Background(), d, counting, &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), d, counting, &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	if reads != 1 {
@@ -1236,7 +1307,7 @@ func planWantResourceVersion(t *testing.T, f planFile) string {
 func TestClusterShapePlanLiveResourceVersion(t *testing.T) {
 	t.Parallel()
 	dir := planOut(t)
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), planKubectl(t), &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -1272,7 +1343,7 @@ func TestClusterShapePlanLiveRevisions(t *testing.T) {
 		return planLiveAnswer(t, resource, planRevisionOf(strings.TrimPrefix(resource, "deployment/"))), 0, nil
 	})
 	dir := planOut(t)
-	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
 		t.Fatalf("running the plan: %v", err)
 	}
 	rec, _ := readPlanRecord(t, dir)
@@ -1320,7 +1391,7 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 			dir := planOut(t)
 			out := &bytes.Buffer{}
 			kube := planKubectlAnswering(t, tc.answer)
-			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.want)
 			}
@@ -1380,7 +1451,7 @@ func TestClusterShapePlanRevisionRefuses(t *testing.T) {
 			})
 			dir := planOut(t)
 			out := &bytes.Buffer{}
-			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if len(reads) == 0 {
 				t.Fatal("the plan read no Deployment, so the refusal was never reached")
 			}
@@ -1418,7 +1489,7 @@ func TestClusterShapePlanLiveAbsent(t *testing.T) {
 			dir := planOut(t)
 			out := &bytes.Buffer{}
 			kube := planKubectlAnswering(t, tc.answer)
-			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("runTownClusterPlan = %v, want an error holding %q", err, tc.wantErr)
@@ -1499,7 +1570,7 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 				}
 				return []byte(sbxEngineHelmOutput), nil
 			}
-			err := runTownClusterPlan(context.Background(), d, kube, &bytes.Buffer{}, planOut(t), atomicfile.WriteJSON)
+			err := runTownClusterPlan(context.Background(), d, kube, &bytes.Buffer{}, planOut(t), planTestKubeconfigs, atomicfile.WriteJSON)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("running the plan: %v", err)
 			}
