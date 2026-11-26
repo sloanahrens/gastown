@@ -1318,3 +1318,105 @@ func TestVerdictReuseLandOffIsToday(t *testing.T) {
 		})
 	}
 }
+
+// unreadableReuseRepo is the repository a stored review is read through when the
+// base it names cannot be checked: IsAncestor and DiffNameOnly fail for that
+// base and every other read goes to the real repository (gt-dreojy).
+type unreadableReuseRepo struct {
+	Repo
+	base        string
+	ancestorErr bool
+}
+
+func (r unreadableReuseRepo) IsAncestor(ancestor, descendant string) (bool, error) {
+	if ancestor != r.base {
+		return r.Repo.IsAncestor(ancestor, descendant)
+	}
+	if r.ancestorErr {
+		return false, errors.New("the base could not be read")
+	}
+	return true, nil
+}
+
+func (r unreadableReuseRepo) DiffNameOnly(base, head string) ([]string, error) {
+	if base != r.base {
+		return r.Repo.DiffNameOnly(base, head)
+	}
+	return nil, errors.New("the diff could not be read")
+}
+
+// TestVerdictReuseAheadUnreadableReadIsUnknown: a git read ReuseMiss could not
+// make — the base's ancestry or the diff since it — is an unknown answer, so
+// reuseAhead returns an error with hit false and the record is neither reused
+// nor deleted. An ordinary mismatch keeps its nil-error miss. A stored-only
+// landing on the unreadable base ends with ErrNoStoredVerdict and keeps the
+// record (gt-dreojy).
+func TestVerdictReuseAheadUnreadableReadIsUnknown(t *testing.T) {
+	t.Parallel()
+	// unreadableBase is a stored review's base that is not the landing's.
+	const unreadableBase = "unreadable-base"
+	tests := []struct {
+		name    string
+		readErr string // "ancestry", "diff", or "" for the landing's own base
+		edit    func(rec *AheadRecord)
+		wantErr []string // fragments the error must carry; nil wants a miss
+	}{
+		{name: "failed base read", readErr: "ancestry", wantErr: []string{missBaseUnreadable, "ancestry"}},
+		{name: "failed diff read", readErr: "diff", wantErr: []string{missDiffUnreadable, "diff"}},
+		{name: "another head", edit: func(rec *AheadRecord) { rec.Head = strings.Repeat("cd", 20) }},
+		{name: "expired", edit: func(rec *AheadRecord) { rec.ReviewedAt = rec.ReviewedAt.Add(-2 * time.Hour) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, wt := keyFixture(t)
+			store, key := reuseAskSetup(t, f, l, wt)
+			base := f.base
+			if tc.readErr != "" {
+				base = unreadableBase
+			}
+			rec := reuseAskRecord(key, base, l.now().Add(-time.Minute))
+			if tc.edit != nil {
+				tc.edit(&rec)
+			}
+			if err := store.Put(rec); err != nil {
+				t.Fatalf("Put error = %v; want nil", err)
+			}
+			g := Repo(unreadableReuseRepo{Repo: wt, base: unreadableBase, ancestorErr: tc.readErr == "ancestry"})
+			_, _, hit, err := l.reuseAhead(context.Background(), g, wt, f.work, ReviewInput{}, f.base, f.work.Head)
+			if hit {
+				t.Fatalf("reuseAhead hit = true; want false for %s", tc.name)
+			}
+			if (err != nil) != (tc.wantErr != nil) {
+				t.Fatalf("reuseAhead error = %v; wantErr %v for %s", err, tc.wantErr != nil, tc.name)
+			}
+			for _, frag := range tc.wantErr {
+				if !strings.Contains(err.Error(), frag) {
+					t.Errorf("reuseAhead error = %v; want it to carry %q", err, frag)
+				}
+			}
+		})
+	}
+	t.Run("a stored-only landing keeps the record", func(t *testing.T) {
+		t.Parallel()
+		f, l, store, key := reuseLandSetup(t)
+		storedOnlyPut(t, store, reuseAskRecord(key, unreadableBase, l.now().Add(-time.Minute)))
+		l.openRepo = func(dir string) Repo {
+			r := f.git.Open(dir)
+			if dir == l.Repo {
+				return unreadableReuseRepo{Repo: r, base: unreadableBase, ancestorErr: true}
+			}
+			return r
+		}
+		f.work.StoredOnly = true
+		writes := aheadBeadWrites(t, f.bd)
+		_, err := l.Land(context.Background(), f.work)
+		if !errors.Is(err, ErrNoStoredVerdict) {
+			t.Fatalf("Land error = %v; want ErrNoStoredVerdict", err)
+		}
+		if !storedOnlyHasRecord(t, f) {
+			t.Error("the record was deleted on a base read that failed; only a definite miss may delete it")
+		}
+		storedOnlyUntouched(t, f, func() int { return len(f.review.calls) }, writes)
+	})
+}
