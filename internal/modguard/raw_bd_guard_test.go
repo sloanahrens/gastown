@@ -271,12 +271,34 @@ func TestRawBdSharedTreeParity(t *testing.T) {
 // rawBdRealScan takes the counts of the module root's raw bd sites and the Go
 // files they were read from.
 func rawBdRealScan() (map[rawBdKey]int, int, error) {
-	r, err := os.OpenRoot(filepath.Join("..", ".."))
+	return rawBdSharedScan()
+}
+
+// rawBdSharedScan takes the same counts through the shared tree, which reads the
+// module once for every test in the package.
+func rawBdSharedScan() (map[rawBdKey]int, int, error) {
+	root, err := filepath.EvalSymlinks(moduleRoot())
 	if err != nil {
 		return nil, 0, err
 	}
-	defer func() { _ = r.Close() }()
-	return scanRawBdTree(r.FS())
+	return scanRawBdSharedTree(root, tree.Walk, tree.Source)
+}
+
+// TestRawBdRealScanIsTheSharedTree checks the ratchet's real scan is the shared
+// tree's scan of the module root: both take the same counts and file count.
+func TestRawBdRealScanIsTheSharedTree(t *testing.T) {
+	t.Parallel()
+	want, wantFiles, err := rawBdSharedScan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, files, err := rawBdRealScan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != wantFiles || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("real scan read %d Go files with counts %v; the shared tree reads %d with %v", files, got, wantFiles, want)
+	}
 }
 
 // rawBdScanProblems compares the counts scan takes against baseline. A failed
