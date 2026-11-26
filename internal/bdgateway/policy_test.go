@@ -408,6 +408,30 @@ func TestPolicyShowFlagsStillRefused(t *testing.T) {
 	}
 }
 
+// TestPolicyDepCycles: deploy/bd/verbs.json serves dep cycles as a read verb,
+// so the read, daemon and operator classes may all run it, and the row does not
+// widen flag handling: a flag the policy cannot place before the verb is still
+// refused as it is for every verb.
+func TestPolicyDepCycles(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+
+	for _, class := range []TokenClass{TokenRead, TokenDaemon, TokenOperator} {
+		v, err := p.Authorize(class, []string{"dep", "cycles"})
+		if err != nil {
+			t.Errorf("Authorize(%s, dep cycles) = %v, want it allowed", class, err)
+			continue
+		}
+		if v.Name() != "dep cycles" || v.Class != ClassRead {
+			t.Errorf("Authorize(%s, dep cycles) matched %q (%s), want dep cycles (read)", class, v.Name(), v.Class)
+		}
+	}
+
+	if _, err := p.Authorize(TokenRead, []string{"--frobnicate", "dep", "cycles"}); !errors.Is(err, ErrAmbiguousVerb) {
+		t.Errorf("Authorize(read, --frobnicate dep cycles) = %v, want ErrAmbiguousVerb", err)
+	}
+}
+
 // TestPolicyShorthandValue: -C takes the next argument as its value, so a
 // directory named like a verb is not read as one. The policy here does not
 // refuse -C, so the matched verb shows how the scan read it.
