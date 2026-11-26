@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -85,4 +87,95 @@ func TestDeferredBookkeepingWiring(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wiredBookQueue builds a daemon whose listed rig has its landing worker wired
+// the way the daemon wires it, with the daemon's log discarded.
+func wiredBookQueue(t *testing.T, cfg *config.LandingWorkerConfig) (*Daemon, *landworker.Worker) {
+	t.Helper()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	worker := &landworker.Worker{}
+	d.wireBookQueue("gastown", cfg, &land.Lander{}, worker)
+	if worker.Books == nil {
+		t.Fatal("the listed rig's Worker was given no BookQueue")
+	}
+	return d, worker
+}
+
+// TestDeferredBookkeepingHold: the queue's first job takes a landing pass slot
+// and its last job gives it back, so a hold taken while a queued job runs waits
+// for it to end, and a job added under a hold is counted as a pass in flight so
+// the hold waits for that job too (gt-k7glkk).
+func TestDeferredBookkeepingHold(t *testing.T) {
+	t.Parallel()
+	cfg := &config.LandingWorkerConfig{DeferredBookkeeping: &config.DeferredBookkeepingConfig{
+		Rigs: []string{"gastown"},
+	}}
+
+	t.Run("a hold taken while a job runs is idle only after it ends", func(t *testing.T) {
+		t.Parallel()
+		d, worker := wiredBookQueue(t, cfg)
+
+		ctx := t.Context()
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseJob) // unblock the drain however the test ends
+		worker.Books.Add("gt-abc", func() {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		waitForSignal(t, started, "the queued job starting")
+
+		if got := d.landingPasses.Load(); got != 1 {
+			t.Fatalf("in-flight count = %d while a queued job runs, want 1", got)
+		}
+		idle := d.landingHolds.hold(landingHoldUpgradeRestart)
+		select {
+		case <-idle:
+			t.Fatal("the hold woke with the queued job still running")
+		default:
+		}
+
+		releaseJob()
+		waitForSignal(t, idle, "the hold waking after the queued job ended")
+		if got := d.landingPasses.Load(); got != 0 {
+			t.Errorf("in-flight count = %d after the queue drained, want 0", got)
+		}
+	})
+
+	t.Run("a job added under a hold is counted", func(t *testing.T) {
+		t.Parallel()
+		d, worker := wiredBookQueue(t, cfg)
+
+		idle := d.landingHolds.hold(landingHoldRebuildOM)
+		ctx := t.Context()
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseJob) // unblock the drain however the test ends
+		worker.Books.Add("gt-abc", func() {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		waitForSignal(t, started, "the queued job starting under a hold")
+
+		if got := d.landingPasses.Load(); got != 1 {
+			t.Fatalf("in-flight count = %d for a job added under a hold, want 1", got)
+		}
+		select {
+		case <-idle:
+			t.Fatal("the hold woke with the queued job still running")
+		default:
+		}
+
+		releaseJob()
+		waitForSignal(t, idle, "the hold waking after the queued job ended")
+	})
 }
