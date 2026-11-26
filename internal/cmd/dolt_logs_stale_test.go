@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func cannedTail(_ []string, out, _ io.Writer) error {
 // cannedContainerLog is the container reader of a town whose Dolt runs in a
 // container: it prints the container's two lines, to out. The text differs
 // from cannedTail's so a test tells a container read from a host tail.
-func cannedContainerLog(_ string, _ int, out, _ io.Writer) error {
+func cannedContainerLog(_ string, _ int, _ bool, out, _ io.Writer) error {
 	_, err := io.WriteString(out, "container line one\ncontainer line two\n")
 	return err
 }
@@ -251,12 +252,13 @@ func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
 
 	var gotContainer string
 	var gotLines int
+	var gotFollow bool
 	tailed := false
 	reads := doltLogReads{
 		now:  func() time.Time { return now },
 		tail: func([]string, io.Writer, io.Writer) error { tailed = true; return nil },
-		containerLog: func(container string, lines int, out, _ io.Writer) error {
-			gotContainer, gotLines = container, lines
+		containerLog: func(container string, lines int, follow bool, out, _ io.Writer) error {
+			gotContainer, gotLines, gotFollow = container, lines, follow
 			_, err := io.WriteString(out, "container line one\ncontainer line two\n")
 			return err
 		},
@@ -269,6 +271,9 @@ func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
 
 	if gotContainer != "gt-dolt" || gotLines != 60 {
 		t.Errorf("container reader called with (%q, %d), want (\"gt-dolt\", 60)", gotContainer, gotLines)
+	}
+	if gotFollow {
+		t.Error("container reader called with follow set, want false")
 	}
 	if tailed {
 		t.Error("the stale host dolt.log was tailed")
@@ -391,5 +396,30 @@ func TestDoltLogStaleNoticeOnLogsCommandUnreadableLogIsAnError(t *testing.T) {
 	}
 	if tailed || out.Len() != 0 || errw.Len() != 0 {
 		t.Errorf("tailed=%v out=%q err=%q, want nothing printed and no tail", tailed, out.String(), errw.String())
+	}
+}
+
+// TestDoltLogContainerArgs: the container reader's docker logs arguments carry
+// --tail with the line count and the container name last, and -f only when
+// follow is set (gt-rtiyhh).
+func TestDoltLogContainerArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		lines  int
+		follow bool
+		want   []string
+	}{
+		{name: "no follow reads the last lines and exits", lines: 50, want: []string{"logs", "--tail", "50", "gt-dolt"}},
+		{name: "follow adds -f before the container", lines: 50, follow: true, want: []string{"logs", "--tail", "50", "-f", "gt-dolt"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := doltLogContainerArgs("gt-dolt", tc.lines, tc.follow)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("doltLogContainerArgs = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
