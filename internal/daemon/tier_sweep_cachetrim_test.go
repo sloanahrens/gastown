@@ -164,7 +164,7 @@ func TestTierSweepCacheAttention(t *testing.T) {
 				t.Fatalf("making the run's output directory: %v", err)
 			}
 			r.setup(t, spec.OutDir)
-			for range r.folds {
+			for i := 0; i < r.folds; i++ {
 				d.tierSweepRunnerStageResult(st, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
 			}
 			items := d.cacheTrimNoOp.observed()
