@@ -472,12 +472,12 @@ func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]strin
 	return paths, nil
 }
 
-// omSkewJudge applies one reading to the alert state: a mismatch raises
-// om-skew once, an equal pair, or a differing one whose files cannot change
-// the binary, clears an open one (one a previous daemon process left open
-// too: this process's first such reading clears once), and a reading that could not
-// be taken does neither — an unreadable om or an unreachable remote is not
-// evidence that a skew ended.
+// omSkewJudge applies one reading to the alert state. A mismatch raises om-skew
+// once. An equal pair, or a differing one whose files cannot change the binary
+// or whose lag is under the image-pins planner's thresholds, clears an open
+// alert (one a previous daemon process left open too: this process's first such
+// reading clears once). A reading that could not be taken does neither: an
+// unreadable om or an unreachable remote is not evidence that a skew ended.
 func (d *Daemon) omSkewJudge(r omSkewReading) {
 	m := &d.omSkew
 	m.mu.Lock()
@@ -494,11 +494,16 @@ func (d *Daemon) omSkewJudge(r omSkewReading) {
 	}
 	m.lastReadErr = ""
 
-	if r.installed == r.remote || r.binaryUnchanged {
+	if r.installed == r.remote || r.binaryUnchanged || r.belowThresholds {
 		if !m.raised && m.settled {
 			return
 		}
-		if err := d.clearAlertsErr("the installed om is current with the om rig's origin/main: nothing between them changes the binary", omSkewAlertKey); err != nil {
+		why := "the installed om is current with the om rig's origin/main: nothing between them changes the binary"
+		if r.belowThresholds {
+			why = fmt.Sprintf("the installed om is behind the om rig's origin/main but within the image-pins planner's thresholds: under %d commits and under %s",
+				imagePinsFileBehind, imagePinsFileAge)
+		}
+		if err := d.clearAlertsErr(why, omSkewAlertKey); err != nil {
 			// The clear never reached the town: stay raised so the next check
 			// retries it, rather than leaving an alert nothing will close.
 			d.logger.Printf("om_skew: clearing the alert did not reach the town; retrying next check: %v", err)

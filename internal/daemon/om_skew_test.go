@@ -833,6 +833,94 @@ func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
 	}
 }
 
+// omSkewLaggingDaemon is an omSkewDaemon whose clone diffs a Go file and puts
+// the installed om *commits commits behind. A test moves the count between
+// checks it calls itself, so the fake reads it on that goroutine: no lock.
+func omSkewLaggingDaemon(t *testing.T, commits *int) (*Daemon, *notifyfake.Recorder) {
+	t.Helper()
+	d, rec := omSkewDaemon(t)
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "diff") {
+			return cliReply{stdout: "internal/review/review.go\x00"}
+		}
+		reply, _ := omSkewLagReply(c, *commits, 0)
+		return reply
+	})
+	return d, rec
+}
+
+// TestOMSkewBelowThresholdsRaisesNothing: an om under the planner's thresholds
+// raises no alert, and an open one is cleared with a message saying why
+// (gt-hjw7jv).
+func TestOMSkewBelowThresholdsRaisesNothing(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no alert is raised", func(t *testing.T) {
+		t.Parallel()
+		commits := 3
+		d, rec := omSkewLaggingDaemon(t, &commits)
+
+		d.omSkewOnce()
+		d.omSkewOnce()
+
+		if esc := rec.Escalations(); len(esc) != 0 {
+			t.Errorf("escalations = %+v, want none under the thresholds", esc)
+		}
+		// The one clear is for an alert a previous process may have left open.
+		if clears := rec.Clears(); len(clears) != 1 {
+			t.Errorf("clears = %+v, want one across two readings", clears)
+		}
+	})
+
+	t.Run("an open alert is cleared saying why", func(t *testing.T) {
+		t.Parallel()
+		commits := imagePinsFileBehind
+		d, rec := omSkewLaggingDaemon(t, &commits)
+		d.omSkewOnce()
+		commits = 3
+		d.omSkewOnce()
+
+		if esc := rec.Escalations(); len(esc) != 1 {
+			t.Fatalf("escalations = %+v, want the one raised at the threshold", esc)
+		}
+		clears := rec.Clears()
+		if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, omSkewAlertKey) {
+			t.Fatalf("clears = %+v, want one under %s", clears, omSkewAlertKey)
+		}
+		if got := clears[0].Reason; !strings.Contains(got, "within the image-pins planner's thresholds") {
+			t.Errorf("clear reason = %q, want it to say the installed om is within the planner's thresholds", got)
+		}
+	})
+}
+
+// TestOMSkewBelowThresholdsClearFails: a clear that does not reach the town
+// leaves the alert raised, and the next check under the thresholds retries it
+// (gt-hjw7jv).
+func TestOMSkewBelowThresholdsClearFails(t *testing.T) {
+	t.Parallel()
+	commits := imagePinsFileBehind
+	d, rec := omSkewLaggingDaemon(t, &commits)
+	d.omSkewOnce()
+
+	commits = 3
+	rec.Fail(notifyfake.KindClear, errors.New("gt escalate: Dolt is unreachable"))
+	d.omSkewOnce()
+	commits = imagePinsFileBehind
+	d.omSkewOnce() // still raised, so nothing new is escalated
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Errorf("escalations = %+v, want the alert still raised after a dropped clear", esc)
+	}
+
+	commits = 3
+	rec.Fail(notifyfake.KindClear, nil)
+	d.omSkewOnce()
+	d.omSkewOnce()
+	if clears := rec.Clears(); len(clears) != 2 || clears[1].Err != nil {
+		t.Errorf("clears = %+v, want the dropped attempt and one retry that reached the town", clears)
+	}
+}
+
 // TestOMSkewNonBinaryPath pins the match rule: a directory entry is a prefix,
 // every other entry the whole path.
 func TestOMSkewNonBinaryPath(t *testing.T) {
