@@ -174,22 +174,51 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (st
 }
 
 // planStaticTargets is the drift target of every static object of the render, in
-// the render's order, each built by the drift walk's own builder so no rule is
-// copied here. A Secret builds no target and is skipped, as the drift walk skips
-// it: the cluster fills its data. A target that cannot be built refuses the plan.
+// the render's order, each built by planStaticTarget. A target that cannot be
+// built refuses the plan.
 func planStaticTargets(objects []k8s.StaticObject) ([]driftTarget, error) {
 	targets := make([]driftTarget, 0, len(objects))
 	for _, object := range objects {
-		if object.Kind == secretKind {
-			continue
-		}
-		target, err := staticObjectTarget(object)
+		target, err := planStaticTarget(object)
 		if err != nil {
 			return nil, err
 		}
 		targets = append(targets, target)
 	}
 	return targets, nil
+}
+
+// planStaticTarget is the drift target of one static object: a Secret's declared
+// fields, read by planSecretTarget, and any other kind's by the drift walk's own
+// builder, so no rule is copied here.
+func planStaticTarget(object k8s.StaticObject) (driftTarget, error) {
+	if object.Kind == secretKind {
+		return planSecretTarget(object)
+	}
+	return staticObjectTarget(object)
+}
+
+// planSecretTarget is the drift target of a static Secret: its document without
+// its data and stringData, which the cluster owns and fills, so a Secret is
+// compared on the fields its document declares and never on its data. The
+// document is validated by staticObjectDoc, so one that names another object
+// refuses the plan. A Secret the cluster does not hold is drift.
+func planSecretTarget(object k8s.StaticObject) (driftTarget, error) {
+	doc, err := staticObjectDoc(object)
+	if err != nil {
+		return driftTarget{}, err
+	}
+	declared := make(map[string]any, len(doc.body))
+	for key, value := range doc.body {
+		switch key {
+		case "data", "stringData":
+			continue
+		}
+		declared[key] = value
+	}
+	target := namespacedDriftTarget(secretKind, object.Name, object.Namespace, declared)
+	target.absentIsDrift = true
+	return target, nil
 }
 
 // planStaticDiffers reports whether any target differs from the cluster's live

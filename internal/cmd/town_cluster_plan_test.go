@@ -608,6 +608,24 @@ func TestClusterShapePlanStaticRefuses(t *testing.T) {
 			}
 			return d, planKubectl(t)
 		}, "holds a document named"},
+		{"a Secret document that names another object", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
+			d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+			build := d.build
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				m, err := build(v)
+				if err != nil {
+					return m, err
+				}
+				for i := range m.Static {
+					if m.Static[i].Kind == secretKind {
+						m.Static[i].Name = "planted"
+						break
+					}
+				}
+				return m, nil
+			}
+			return d, planKubectl(t)
+		}, "holds a document named"},
 		{"a static object the cluster cannot be read", func(t *testing.T) (clusterRenderDeps, update.RunFunc) {
 			kube := planKubectl(t)
 			return clusterRenderDepsAt(t, planTown(t), io.Discard), func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
@@ -778,6 +796,11 @@ func planGetOf(name string, args []string) (resource, namespace string, ok bool)
 // planKindScope is whether a kind/name resource is cluster-scoped, and whether its kind is one the reads name.
 func planKindScope(resource string) (cluster, known bool) {
 	kind, _, named := strings.Cut(resource, "/")
+	// A Secret is namespaced, and the plan reads it although the drift compare's
+	// static kinds do not name it.
+	if named && kind == strings.ToLower(secretKind) {
+		return false, true
+	}
 	for k, scoped := range staticTargetKinds {
 		if named && strings.ToLower(k) == kind {
 			return scoped, true
@@ -868,6 +891,11 @@ func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 		{"a ClusterRole's rules", clusterRoleKind, "gt-drift-reader", "", plantedRules},
 		{"a ValidatingAdmissionPolicy's spec", validatingPolicyKind, "gt-update-jobs", "", func(t *testing.T, doc map[string]any) { planObjectField(t, doc, "spec")["failurePolicy"] = "Ignore" }},
 		{"a ServiceAccount's name", serviceAccountKind, "gt-update", "gt", func(t *testing.T, doc map[string]any) { planObjectField(t, doc, "metadata")["name"] = "planted" }},
+		{"a Secret's type", secretKind, "sweep-runner-token", "gt-sweeps", func(_ *testing.T, doc map[string]any) { doc["type"] = "Opaque" }},
+		{"a Secret's declared annotation", secretKind, "sweep-runner-token", "gt-sweeps", func(t *testing.T, doc map[string]any) {
+			planObjectField(t, planObjectField(t, doc, "metadata"), "annotations")["kubernetes.io/service-account.uid"] = "planted"
+		}},
+		{"a Secret the cluster does not hold", secretKind, "sweep-runner-token", "gt-sweeps", nil},
 		{"a PriorityClass the cluster does not hold", priorityClassKind, "gt-ci", "", nil},
 	}
 	for _, tc := range cases {
@@ -915,8 +943,54 @@ func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanSecretDataIsNotCompared: a Secret whose document carries
+// data the cluster does not hold, and whose every other declared field is in
+// step, does not differ, so the plan lists no phase P file. The embedded Secret
+// carries no data, so the row plants it to exercise the strip. The Secret is
+// still read once, so its declared fields were compared and its data was not.
+func TestClusterShapePlanSecretDataIsNotCompared(t *testing.T) {
+	t.Parallel()
+	key := planStaticKey(secretKind, "sweep-runner-token", "gt-sweeps")
+	reads := 0
+	kube := planKubectlReading(t, planStaticLive(t), planRevisionAnswer(t))
+	counting := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if resource, namespace, ok := planGetOf(name, args); ok && planStaticResourceKey(resource, namespace) == key {
+			reads++
+		}
+		return kube(ctx, dir, env, name, args...)
+	}
+	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+	build := d.build
+	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+		m, err := build(v)
+		if err != nil {
+			return m, err
+		}
+		for i := range m.Static {
+			if m.Static[i].Kind == secretKind {
+				m.Static[i].Doc = append(append([]byte{}, m.Static[i].Doc...), "\ndata:\n  token: ZGVjbGFyZWQ=\n"...)
+			}
+		}
+		return m, nil
+	}
+	dir := planOut(t)
+	if err := runTownClusterPlan(context.Background(), d, counting, &bytes.Buffer{}, dir, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	if reads != 1 {
+		t.Fatalf("the plan read the Secret %d times, want its declared fields compared once", reads)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	for _, rf := range rec.Files {
+		if rf.Phase != planPhaseWorkloads {
+			t.Errorf("plan.json lists %s as phase %q, want no phase P file when only the Secret's data differs", rf.Name, rf.Phase)
+		}
+	}
+}
+
 // planStaticLive is the answer the fake cluster gives each static object, keyed by
-// resource and namespace: the object's document as JSON. A Secret is not read.
+// resource and namespace: the object's document as JSON, every declared field in
+// step with the render. The Secret is answered too, as its document alone.
 func planStaticLive(t *testing.T) map[string]string {
 	t.Helper()
 	static, err := k8s.Static()
@@ -925,9 +999,6 @@ func planStaticLive(t *testing.T) map[string]string {
 	}
 	live := map[string]string{}
 	for _, object := range static {
-		if object.Kind == secretKind {
-			continue
-		}
 		var doc map[string]any
 		if err := yaml.Unmarshal(object.Doc, &doc); err != nil {
 			t.Fatalf("decoding the static %s: %v", object.Name, err)
