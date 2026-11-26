@@ -286,6 +286,73 @@ func TestReviewPoolErrorNotRetried(t *testing.T) {
 	}
 }
 
+// TestReviewPoolCancelledDoesNotBlockNewHead pins that a review cancelled for a
+// new head leaves the new head reviewable. The cancelled review records only
+// its own head as tried, so the next offer starts the new head; an offer of the
+// old head while the new review runs is a head the pool tried, so it starts
+// nothing and cancels nothing (gt-bnc6ah). A pool that read the running entry
+// before the tried memo would cancel the new head's review here.
+func TestReviewPoolCancelledDoesNotBlockNewHead(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// The old review is held by the test, so only the cancel for the new head
+	// ends it.
+	rev.perWork = map[string]chan struct{}{bead: make(chan struct{})}
+	logs := &logRecorder{}
+	pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
+
+	// The old head's review starts, and the offer of the new head cancels it.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the old head's review start")
+	oldDone := reviewEnded(t, pool, bead)
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	recvBounded(t, ctx, oldDone, "the cancelled old review leaving the pool")
+	if got := logs.get(); len(got) != 1 {
+		t.Fatalf("logged %q for the replaced head, want one cancel line", got)
+	}
+
+	// The cancelled review does not block the head that replaced it: the next
+	// offer starts the new head's review.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Fatalf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+
+	// The old head is a head the pool has tried: offering it again while the new
+	// head is under review starts nothing, cancels nothing and logs nothing.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	if head, ok := runningHeadAt(t, pool, bead); !ok || head != newHead {
+		t.Errorf("after the tried old head was offered again the pool holds the bead's review at head %q (running %v), want the new head %s still in place", head, ok, newHead)
+	}
+	if got := logs.get(); len(got) != 1 {
+		t.Errorf("offering the tried old head changed the log to %q, want the one cancel line: it must not cancel the new head's review", got)
+	}
+	if n := len(rev.reviewed()); n != 2 {
+		t.Fatalf("reviewer called %d times before the new review ended, want the old head then the new head", n)
+	}
+
+	// Let the new head's review end; it is the only one left.
+	close(rev.perWork[bead])
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the new head")
+	got := rev.reviewed()
+	if len(got) != 2 {
+		t.Fatalf("reviewer called %d times, want the old head then the new head: %v", len(got), got)
+	}
+	if got[0] != (land.Work{BeadID: bead, Head: oldHead}) {
+		t.Errorf("first review was %+v, want the old head %s", got[0], oldHead)
+	}
+	if got[1] != (land.Work{BeadID: bead, Head: newHead}) {
+		t.Errorf("second review was %+v, want the new head %s", got[1], newHead)
+	}
+}
+
 func TestReviewPoolLogsNothingForCancelledReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
