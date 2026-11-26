@@ -12,6 +12,7 @@ const (
 	RuleNoEnv          = "no-env"
 	RuleNoHostEnv      = "no-host-env"
 	RuleNoChdir        = "no-chdir"
+	RuleNoCaller       = "no-caller"
 	RuleNoSkip         = "no-skip"
 	RuleNoSubprocess   = "no-subprocess"
 	RuleNoNetwork      = "no-network"
@@ -31,6 +32,8 @@ var bannedTestCalls = map[string]string{
 	"time.NewTimer": RuleNoSleep, "time.NewTicker": RuleNoSleep, "time.Tick": RuleNoSleep,
 	"os.Setenv": RuleNoEnv, "os.Unsetenv": RuleNoEnv,
 	"os.Chdir": RuleNoChdir,
+	// runtime.Caller's source path is what -trimpath removes; find the root with modroot.Root.
+	"runtime.Caller": RuleNoCaller,
 	// NewFakeClock starts at time.Now(), so a test's clock depends on when it
 	// runs; start fakes at a fixed epoch with NewFakeClockAt.
 	"github.com/jonboulle/clockwork.NewFakeClock": RuleFakeClockEpoch,
