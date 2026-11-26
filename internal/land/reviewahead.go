@@ -187,6 +187,16 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 		l.logf("%s: ahead review of %s skipped: the reviewer cannot be isolated", w.BeadID, shortSHA(w.Head))
 		return AheadSkipped, aheadBuilt{}, nil
 	}
+	// Only a verdict om itself reached may be reused: an approval or a request
+	// for changes. Any other word (a skipped review, an om that could not run,
+	// an empty or unknown value) decided nothing the landing can reuse, so
+	// nothing is stored and the landing runs om inline as it does without a
+	// store. The store would refuse such a record too; skipping here is what
+	// makes the outcome AheadSkipped rather than a store error.
+	if v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges {
+		l.logf("%s: ahead review of %s skipped: verdict %q is not approve or request_changes", w.BeadID, shortSHA(w.Head), v.Verdict)
+		return AheadSkipped, aheadBuilt{}, nil
+	}
 	// The verdict is kept for a later landing to reuse. It is not logged and no
 	// round is written: the landing writes a review when it consumes a verdict.
 	reviewed := l.aheadNow()
