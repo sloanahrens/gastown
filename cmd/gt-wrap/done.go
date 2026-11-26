@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -22,8 +23,10 @@ const (
 // withWorktreeFacts appends the branch and HEAD of the caller's worktree to a
 // gt done call, since the pod cannot read the Mac's tree. Only gt done is changed.
 // A flag the caller already passed is kept as given, and a caller who passed
-// both leaves git unasked. A directory that git says is outside any repository,
-// or a detached HEAD, adds nothing, and gt done refuses in the pod.
+// both leaves git unasked. A directory that git says is outside any repository
+// adds nothing and says nothing, and gt done refuses in the pod. A detached HEAD
+// adds nothing either, and says so on stderr, since the pod's refusal would
+// otherwise leave the caller to guess why no facts came with the call.
 func withWorktreeFacts(name string, args []string, dir string, s surface) ([]string, error) {
 	if name != gtTool || len(args) == 0 || args[0] != doneSubcommand {
 		return args, nil
@@ -39,6 +42,9 @@ func withWorktreeFacts(name string, args []string, dir string, s surface) ([]str
 		return nil, err
 	}
 	if !ok {
+		if facts.Detached {
+			fmt.Fprintf(s.stderr, "gt-wrap: gt done: %s is on a detached HEAD, so no --branch and --head were added; run git switch -c crew/<agent>/<bead> there, or pass --bead <id> --branch <b> --head <sha> yourself\n", dir)
+		}
 		return args, nil
 	}
 	out := slices.Clone(args)
