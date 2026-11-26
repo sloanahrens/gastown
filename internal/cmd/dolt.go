@@ -1452,7 +1452,7 @@ type doltLogReads struct {
 	tail func(args []string, out, errw io.Writer) error
 	// containerLog prints a container town's last lines from the container,
 	// since its Dolt writes there and not to the host dolt.log (gt-rpoii1).
-	containerLog func(container string, lines int, out, errw io.Writer) error
+	containerLog func(container string, lines int, follow bool, out, errw io.Writer) error
 	// sessions lists a container town's live sessions. A nil reader makes the
 	// dump say it cannot list them, never that there are none (gt-f4uyom).
 	sessions func() ([]string, error)
@@ -1470,11 +1470,21 @@ func execDoltLogTail(args []string, out, errw io.Writer) error {
 	return tailCmd.Run()
 }
 
+// doltLogContainerArgs is the docker logs argument list that reads container's
+// log: the last lines, and with follow the live stream (gt-rtiyhh).
+func doltLogContainerArgs(container string, lines int, follow bool) []string {
+	args := []string{"logs", "--tail", strconv.Itoa(lines)}
+	if follow {
+		args = append(args, "-f")
+	}
+	return append(args, container)
+}
+
 // execDoltLogContainerTail prints the last lines of container's log, which
 // holds a container town's Dolt output in place of the stale host dolt.log
-// (gt-rpoii1).
-func execDoltLogContainerTail(container string, lines int, out, errw io.Writer) error {
-	logsCmd := exec.Command("docker", "logs", "--tail", strconv.Itoa(lines), container)
+// (gt-rpoii1), or follows it when follow is set.
+func execDoltLogContainerTail(container string, lines int, follow bool, out, errw io.Writer) error {
+	logsCmd := exec.Command("docker", doltLogContainerArgs(container, lines, follow)...)
 	logsCmd.Stdout = out
 	logsCmd.Stderr = errw
 	return logsCmd.Run()
@@ -1501,7 +1511,7 @@ func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines 
 	}
 
 	if container != "" {
-		return reads.containerLog(container, lines, out, errw)
+		return reads.containerLog(container, lines, false, out, errw)
 	}
 
 	// Use tail -n for last N lines
