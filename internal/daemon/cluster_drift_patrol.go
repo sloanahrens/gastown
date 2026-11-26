@@ -29,3 +29,16 @@ func (s *attentionSources) collectClusterDrift(ctx context.Context) ([]attention
 	res, err := s.clusterDriftAnswer(ctx)
 	return clusterDriftItems(res, err), nil
 }
+
+// clusterDriftRun is the compare the cache runs: the injected one, or the
+// unreadable answer a nil compare stands for, so a setting that is on with no
+// compare wired raises the unreadable item rather than a false clear
+// (gt-menvlj).
+func (d *Daemon) clusterDriftRun() func(context.Context) (clusterDriftResult, error) {
+	if d.clusterDriftCompare != nil {
+		return d.clusterDriftCompare
+	}
+	return func(context.Context) (clusterDriftResult, error) {
+		return clusterDriftResult{}, errClusterDriftNoAnswer
+	}
+}
