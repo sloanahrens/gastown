@@ -655,6 +655,16 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 		h.seedReadyAt(t, "gt-good", 2, "2026-09-30T13:00:00Z")
 		h.w.Beads = commentsFailFor{Beads: h.w.Beads, id: "gt-bad"}
 
+		// The real Land takes the ready label off. Without that, gt-good would
+		// be listed and offered again after it lands, and that review would
+		// race the count below (gt-hlsdiw).
+		h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
+			if err := h.bd.Update(work.BeadID, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+				t.Errorf("removing %s from %s: %v", land.LabelReadyToLand, work.BeadID, err)
+			}
+			return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+		}
+
 		rev := newPoolReviewer(waitCtx(t))
 		t.Cleanup(rev.release)
 		h.w.Pool = &ReviewPool{Reviewer: rev, Max: 2}
