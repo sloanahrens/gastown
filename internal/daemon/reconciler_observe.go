@@ -85,19 +85,41 @@ func observeGCDuties(now time.Time, cfg *config.ReconcilerConfig, in dutyInputs,
 }
 
 // observeTownStateDuty judges the nightly town-state backup duty from the root
-// townStateNightlyRoot read. An explicitly empty root (errTownStateNightlyOff)
-// is the operator's off, so nothing is observed. Any other root error (unset,
-// relative, no section) and a nil error both read overdue with ErrNoResult
-// here: the nights are read by the next piece (gt-6ogbqv), so nothing reads ok
-// before then.
-//
-//nolint:unparam // cfg, root and fsys are read on the nights path the next piece (gt-6ogbqv) adds
+// townStateNightlyRoot read and the nights under it. An explicitly empty root
+// (errTownStateNightlyOff) is the operator's off, so nothing is observed. Any
+// other root error (unset, relative, no section) reads overdue with ErrNoResult:
+// no root means no night can exist. With a root, the newest night's archive
+// decides, and its read error is judged as that error, never as fresh.
 func observeTownStateDuty(now time.Time, cfg *config.ReconcilerConfig, root string, rootErr error, fsys fs.FS) []reconcile.Observation {
 	if errors.Is(rootErr, errTownStateNightlyOff) {
 		return nil
 	}
 	duty := reconcile.Duty{Name: config.ReconcilerDutyTownState}
-	return []reconcile.Observation{reconcile.Evaluate(duty, now, time.Time{}, reconcile.ErrNoResult)}
+	if rootErr != nil {
+		return []reconcile.Observation{reconcile.Evaluate(duty, now, time.Time{}, reconcile.ErrNoResult)}
+	}
+	fail := func(err error) []reconcile.Observation {
+		return []reconcile.Observation{reconcile.Evaluate(duty, now, time.Time{}, err)}
+	}
+	limit, err := cfg.ParseLimit(config.ReconcilerDutyTownState)
+	if err != nil {
+		return fail(err)
+	}
+	grace, err := cfg.ParseGrace()
+	if err != nil {
+		return fail(err)
+	}
+	duty.Limit, duty.Grace = limit, grace
+	if fsys == nil {
+		return fail(errors.New("no filesystem to read the town-state nights from"))
+	}
+	// os.DirFS("/") names paths without the leading slash.
+	rel := strings.TrimPrefix(filepath.Clean(root), "/")
+	if rel == "" {
+		rel = "."
+	}
+	lastGood, err := reconcile.TownStateLastGood(fsys, rel)
+	return []reconcile.Observation{reconcile.Evaluate(duty, now, lastGood, err)}
 }
 
 // observeBackupDuty judges the backup duty from the newest complete dated
