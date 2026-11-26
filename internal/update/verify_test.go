@@ -476,6 +476,27 @@ func TestVerifyWithSettleFailsAtOnceOnARedLine(t *testing.T) {
 	}
 }
 
+// TestVerifyWithSettleFailsAtOnceOnAMidLoopRedLine: a settling line that turns
+// RED on a re-read inside the settle loop fails at once with that line, so the
+// loop neither sleeps nor reads again after it.
+func TestVerifyWithSettleFailsAtOnceOnAMidLoopRedLine(t *testing.T) {
+	t.Parallel()
+	const red = "RED tick 1m ago: landing=stuck"
+	probes := greenProbes()
+	checks, sleeps := settleProbes(t, probes, verifyTestTimeout, verifyTestSettling, red)
+
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != red {
+		t.Errorf("health detail = %q, want the mid-loop red line as read, with no settle time or bound", health.Detail)
+	}
+	if probes.healthCalls != 2 {
+		t.Errorf("read the health line %d times, want 2: the first read and the one re-read that turns red", probes.healthCalls)
+	}
+	if len(*sleeps) != 1 {
+		t.Errorf("slept %d times, want 1: the sleep before the red re-read and none after it", len(*sleeps))
+	}
+}
+
 // TestVerifyWithSettleDoesNotRetryAProbeError: a health probe that errors is
 // not read again and does not wait.
 func TestVerifyWithSettleDoesNotRetryAProbeError(t *testing.T) {
