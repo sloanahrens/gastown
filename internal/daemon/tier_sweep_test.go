@@ -690,16 +690,43 @@ func TestTierSweepAgeCountsFromWhenTheSweepBecameOwed(t *testing.T) {
 	}
 }
 
+// newTierSweepCaseTown is a per-case TownRoot over a shared town that
+// newTierSweepTown built. The case's mayor/ and rig dirs are symlinks into the
+// shared town, which the sweep only reads (its git and bead seams are fakes), so
+// the rigs file and .repo.git dirs are built once. The runtime and patrol state
+// the sweep writes stay in the case's own root, so one hour's green record never
+// makes another hour skip.
+func newTierSweepCaseTown(t *testing.T, shared string, rigs ...string) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, name := range append([]string{"mayor"}, rigs...) {
+		if err := os.Symlink(filepath.Join(shared, name), filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
 // TestTierSweepStages_EveryHourRunsEveryTier: the hour of day decides nothing,
 // so each of the day's 24 hours plans the shell stage and then the integration
 // and race stage, and the cycle's "sweep started" line names all three tiers.
+// Hours 0 to 11 share one built town; hours 12 to 23 still build their own
+// (gt-u5rirr moves them onto the shared town).
 func TestTierSweepStages_EveryHourRunsEveryTier(t *testing.T) {
 	t.Parallel()
+	shared := newTierSweepTown(t, "gastown")
 	for hour := 0; hour < 24; hour++ {
 		t.Run(fmt.Sprintf("hour %02d", hour), func(t *testing.T) {
 			t.Parallel()
 			now := atHour(time.Now(), hour)
-			d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+			var d *Daemon
+			var rec *tierSweepRunRecorder
+			var logs *bytes.Buffer
+			if hour < 12 {
+				d, rec, _, logs = newTierSweepDaemonOn(t, newTierSweepCaseTown(t, shared, "gastown"), now)
+			} else {
+				d, rec, _, logs = newTierSweepDaemon(t, now, "gastown")
+			}
 			rec.green()
 			sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
@@ -711,7 +738,11 @@ func TestTierSweepStages_EveryHourRunsEveryTier(t *testing.T) {
 			if len(rec.stages) != 2 ||
 				strings.Join(rec.stages[0].tiers, " ") != "shell" ||
 				strings.Join(rec.stages[1].tiers, " ") != "integration race" {
-				t.Fatalf("stages = %+v, want shell then integration race", rec.stages)
+				got := make([]string, 0, len(rec.stages))
+				for _, st := range rec.stages {
+					got = append(got, "["+strings.Join(st.tiers, " ")+"]")
+				}
+				t.Fatalf("hour %02d ran tiers %s, want [shell] then [integration race]", hour, strings.Join(got, " then "))
 			}
 			if want := "sweep started aaaaaaaa (shell, integration, race)"; !strings.Contains(logs.String(), want) {
 				t.Errorf("log missing %q; got:\n%s", want, logs.String())
