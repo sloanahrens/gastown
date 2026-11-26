@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +17,15 @@ import (
 // through the in-flight count a queued job holds (gt-k7glkk): a job still
 // running at the bound is left to the landings-file repair at the next start.
 const bookQueueShutdownWait = 5 * time.Second
+
+// bookOverdueAlertSource names the escalations a hung bookkeeping job raises.
+const bookOverdueAlertSource = "deferred_bookkeeping"
+
+// bookOverdueAlertKey is one hung job's alert identity: per bead, so two beads'
+// hung jobs stay two escalations and a repeat for one bead is one (gt-mxfezc).
+func bookOverdueAlertKey(beadID string) string {
+	return bookOverdueAlertSource + ":overdue:" + beadID
+}
 
 // wireBookQueue gives a rig's landing worker deferred bookkeeping (gt-jz0tp6).
 // The switch is per rig, so a rig the config does not list keeps the inline
@@ -37,6 +47,13 @@ func (d *Daemon) wireBookQueue(rig string, cfg *config.LandingWorkerConfig, l *l
 		Logf:  d.logger.Printf,
 		Begin: func() { d.landingPasses.Add(1) },
 		End:   d.landingPassEnded,
+		// The alert goes out on its own goroutine: gt escalate retries for
+		// minutes under load, and the drain this hook runs on is what the rig's
+		// holds, upgrade, rebuild and maintenance paths wait for (gt-mxfezc).
+		Overdue: func(beadID string, bound time.Duration) {
+			go d.escalateAlert(bookOverdueAlertKey(beadID), bookOverdueAlertSource,
+				fmt.Sprintf("the bookkeeping job for %s in rig %s has run longer than %s and is still running; the rig's upgrade, rebuild, maintenance and hold paths are waiting on it", beadID, rig, bound))
+		},
 	}
 	w.Books = books
 	d.bookQueuesMu.Lock()
