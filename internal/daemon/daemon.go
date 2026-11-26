@@ -1538,6 +1538,11 @@ type Daemon struct {
 	// recorded there (gt-y872pt).
 	patrolScanRun   patrolLastRunMemory
 	specDispatchRun patrolLastRunMemory
+
+	// reconcilerTickerFn is where the reconciler patrol's ticker comes from:
+	// nil is time.NewTicker, and a test sets it to record the cadence
+	// (reconciler_wiring.go).
+	reconcilerTickerFn func(interval time.Duration) (ticks <-chan time.Time, stop func())
 	// landingWorkerRun is the rig workers' last completed pass. They pass every
 	// minute but recorded no run, so gt jobs read the row as never_run
 	// (gt-zv3ndb).
