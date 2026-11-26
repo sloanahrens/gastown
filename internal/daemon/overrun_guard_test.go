@@ -39,16 +39,27 @@ func (b workBeadStore) Show(id string) (*beads.Issue, error) {
 
 func (b workBeadStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
 
-// unreadableBeads is a work-bead store that cannot be read.
+// unreadableBeads is a work-bead store that cannot be read; the error names the
+// bead, so a test can tell which read a tick kept.
 type unreadableBeads struct{}
 
 func (unreadableBeads) open([]string, time.Duration) workBeadReader { return unreadableBeads{} }
 
-func (unreadableBeads) Show(string) (*beads.Issue, error) {
-	return nil, errors.New("bd show: store unavailable")
+func (unreadableBeads) Show(id string) (*beads.Issue, error) {
+	return nil, errors.New("bd show: " + id + " unavailable")
 }
 
 func (unreadableBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
+// emptyErrBeads is a work-bead store whose reads fail with an error that has no
+// text, so the tick has no message to keep.
+type emptyErrBeads struct{}
+
+func (emptyErrBeads) open([]string, time.Duration) workBeadReader { return emptyErrBeads{} }
+
+func (emptyErrBeads) Show(string) (*beads.Issue, error) { return nil, errors.New("") }
+
+func (emptyErrBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
 
 // readyNote is the READY TO LAND block gt done writes when it submits a bead
 // for landing at submitted.
@@ -1659,14 +1670,42 @@ func addBlindTestSeat(t *testing.T, d *Daemon, name, bead string) {
 	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), name), "node", testEpoch)
 }
 
+// readableBlindBeads is the store a tick reads when both seats' beads answer.
+func readableBlindBeads() workBeadStore {
+	return workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}, "gt-bbb22": {ID: "gt-bbb22"}}
+}
+
+// blindTick runs the guard's tick and returns the seats it judged.
+func blindTick(t *testing.T, d *Daemon) []overrunSeat {
+	t.Helper()
+	seats, err := d.overrunTickSeats()
+	if err != nil {
+		t.Fatalf("overrunTickSeats: %v", err)
+	}
+	return seats
+}
+
+// checkBlind asserts the last tick's stored count and first read error.
+func checkBlind(t *testing.T, d *Daemon, wantSeats int, wantErr string) {
+	t.Helper()
+	if got := d.overrunBlindSeats(); got != wantSeats {
+		t.Errorf("blind seats = %d, want %d", got, wantSeats)
+	}
+	if got := d.overrunBlindError(); got != wantErr {
+		t.Errorf("blind error = %q, want %q", got, wantErr)
+	}
+}
+
 // TestOverrunGuardBlindCount: each guard tick counts the seats it dropped
-// because their bead could not be read and no usable kept read stood in, and a
-// tick that drops none counts zero; another caller of overrunWorkingSeats (the
-// overseer report) leaves the guard's count alone (gt-tqv1dk). Nothing reads
-// the count yet: its alarm is the next bead of the split, gt-35d8ae.
+// because their bead could not be read and no usable kept read stood in, keeps
+// the first such error in walk order, and does not count a seat judged on its
+// kept read; a tick that drops none resets the count and the text, and another
+// caller of overrunWorkingSeats (the overseer report) leaves both alone
+// (gt-tqv1dk, gt-32qsly). Nothing reads them yet: their alarm is the next bead
+// of the split, gt-35d8ae.
 func TestOverrunGuardBlindCount(t *testing.T) {
 	t.Parallel()
-	d, buf, _ := newOverrunSeatDaemon(t)
+	d, buf, clk := newOverrunSeatDaemon(t)
 	addBlindTestSeat(t, d, "furiosa", "gt-bbb22")
 	writeRigsJSON(t, d.config.TownRoot, []string{"gastown"})
 	for _, name := range []string{"capable", "furiosa"} {
@@ -1675,30 +1714,69 @@ func TestOverrunGuardBlindCount(t *testing.T) {
 		}
 	}
 
-	d.openWorkBeads = unreadableBeads{}.open
-	seats, err := d.overrunTickSeats()
-	if err != nil {
-		t.Fatalf("overrunTickSeats: %v", err)
-	}
-	if len(seats) != 0 {
-		t.Fatalf("judged %d seats with no readable bead and no kept read:\n%s", len(seats), buf.String())
-	}
-	if got := d.overrunBlindSeats(); got != 2 {
-		t.Errorf("blind seats after a tick with two unreadable beads = %d, want 2:\n%s", got, buf.String())
-	}
+	t.Run("two unreadable beads keep the first error text", func(t *testing.T) {
+		d.openWorkBeads = unreadableBeads{}.open
+		if seats := blindTick(t, d); len(seats) != 0 {
+			t.Fatalf("judged %d seats with no readable bead and no kept read:\n%s", len(seats), buf.String())
+		}
+		// capable sorts before furiosa, so its read error is the tick's first.
+		checkBlind(t, d, 2, "bd show: gt-aaa11 unavailable")
+	})
 
-	// Another caller walks the same seats, here with the beads readable again:
-	// it must not store its own count over the guard's.
-	d.openWorkBeads = workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}, "gt-bbb22": {ID: "gt-bbb22"}}.open
-	d.overrunWorkingSeats()
-	if got := d.overrunBlindSeats(); got != 2 {
-		t.Errorf("blind seats after another caller's walk = %d, want the guard's 2 left intact", got)
-	}
+	t.Run("a seat judged on its kept read is not counted", func(t *testing.T) {
+		d.openWorkBeads = workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}}.open
+		if _, ok := d.overrunSeatFor(t.TempDir(), "gastown", "capable"); !ok {
+			t.Fatalf("the readable seat was dropped:\n%s", buf.String())
+		}
+		d.openWorkBeads = unreadableBeads{}.open
+		seats := blindTick(t, d)
+		if len(seats) != 1 || seats[0].Polecat != "capable" || !seats[0].Stale {
+			t.Fatalf("seats = %+v, want capable alone, judged on its kept read:\n%s", seats, buf.String())
+		}
+		checkBlind(t, d, 1, "bd show: gt-bbb22 unavailable")
+	})
 
-	if _, err := d.overrunTickSeats(); err != nil {
-		t.Fatalf("overrunTickSeats: %v", err)
-	}
-	if got := d.overrunBlindSeats(); got != 0 {
-		t.Errorf("blind seats after a tick where every bead reads = %d, want 0", got)
-	}
+	t.Run("another caller of overrunWorkingSeats leaves the tick's count alone", func(t *testing.T) {
+		d.openWorkBeads = unreadableBeads{}.open
+		blindTick(t, d)
+		before, errText := d.overrunBlindSeats(), d.overrunBlindError()
+		if before == 0 {
+			t.Fatalf("the blind tick counted nothing:\n%s", buf.String())
+		}
+
+		// The beads read again, and the overseer's walk must not store its own
+		// count or text over the guard's.
+		d.openWorkBeads = readableBlindBeads().open
+		d.overrunWorkingSeats()
+		if got := d.overrunBlindSeats(); got != before {
+			t.Errorf("blind seats after another caller's walk = %d, want the guard's %d left intact:\n%s", got, before, buf.String())
+		}
+		if got := d.overrunBlindError(); got != errText {
+			t.Errorf("blind error after another caller's walk = %q, want the guard's %q left intact", got, errText)
+		}
+	})
+
+	t.Run("a clean tick resets the count and the text", func(t *testing.T) {
+		// Earlier rows left kept reads young enough to judge; age them out so
+		// this row's blind count is its own.
+		clk.Advance(overrunKeptReadMaxAge + time.Minute)
+		d.openWorkBeads = unreadableBeads{}.open
+		blindTick(t, d)
+		if d.overrunBlindSeats() == 0 {
+			t.Fatalf("no seat was blind before the clean tick:\n%s", buf.String())
+		}
+
+		d.openWorkBeads = readableBlindBeads().open
+		if seats := blindTick(t, d); len(seats) != 2 {
+			t.Fatalf("judged %d seats where every bead reads, want 2:\n%s", len(seats), buf.String())
+		}
+		checkBlind(t, d, 0, "")
+	})
+
+	t.Run("a read error with no text still counts the seats", func(t *testing.T) {
+		clk.Advance(overrunKeptReadMaxAge + time.Minute)
+		d.openWorkBeads = emptyErrBeads{}.open
+		blindTick(t, d)
+		checkBlind(t, d, 2, "bead read failed with no error text")
+	})
 }
