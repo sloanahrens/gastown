@@ -3216,7 +3216,8 @@ function systemUpdateSweepVerdict(stages, tier) {
 // verdict, never a question mark (gt-uccxvv). fmtDur draws a dash for a total
 // the record lost. An unread sweep source draws no table, and neither does a
 // reading with no sweeps: an unread section is not one that says there were
-// none. It draws no failed packages.
+// none. The failed packages of a RED sweep get their own line under it
+// (systemUpdateSweepFailedLines).
 function systemUpdateSweepsTable(su) {
   if (!su || systemUpdateStageUnknown(su, "sweep")) return null;
   const sweeps = su.sweeps || [];
@@ -3242,6 +3243,31 @@ function systemUpdateSweepsTable(su) {
     table.append(tr);
   }
   return [table];
+}
+
+// systemUpdateSweepFailedLines is the line each RED sweep draws under the sweeps
+// table (gt-2y5tti): the sweep's commit, then each tier's failed package names.
+// A sweep is RED when a stage carries the RED verdict. A RED sweep the feed sends
+// no names for, a names list that is not a list or holds only blanks, and a sweep
+// that is not RED draw no line. It draws none either while the sweep source is
+// unread, the same gate the table keeps.
+function systemUpdateSweepFailedLines(su) {
+  if (!su || systemUpdateStageUnknown(su, "sweep")) return [];
+  const lines = [];
+  for (const row of su.sweeps || []) {
+    const stages = row.stages || [];
+    if (!stages.some(st => st.verdict === "RED")) continue;
+    const parts = [];
+    for (const st of stages) {
+      if (!Array.isArray(st.failed)) continue;
+      const names = [...new Set(st.failed.map(n => String(n).trim()).filter(Boolean))];
+      if (names.length) parts.push(st.tier + " " + names.join(", "));
+    }
+    if (!parts.length) continue;
+    const sha = String(row.sha || "").slice(0, 12) || "–";
+    lines.push(el("div", "surow sufailed", sha + " failed: " + parts.join(" · ")));
+  }
+  return lines;
 }
 
 // The pane header's icon follows the worst chip the pane drew, red above amber.
@@ -3358,6 +3384,7 @@ function renderSystemUpdates(s) {
   const lastGreen = su && systemUpdateLastGreenLine(su);
   if (lastGreen) box.append(lastGreen);
   for (const line of systemUpdateSweepsTable(su) || []) box.append(line);
+  for (const line of systemUpdateSweepFailedLines(su)) box.append(line);
   if (!rows.length) { paintSystemUpdatesIcon(chips); box.append(el("div", "empty", su ? "no landed commits yet" : "reading the system updates…")); $("systemupdatesnote").textContent = ""; return; }
   for (const row of rows) {
     const line = el("div", "surow");
