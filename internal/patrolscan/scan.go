@@ -1402,6 +1402,19 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 	}
 
+	// A recovery restart is not held by the pool (above), but the pool is
+	// named beside it: an answered seat resumed on a pool the operator closed
+	// must not read as an ordinary restart. The read is informational only —
+	// a failure is named, never allowed to stop or change the restart
+	// (gt-14qk4q).
+	closedNote := ""
+	if recovery != "" && s.o.SeatCap != nil {
+		cap, capErr := s.o.SeatCap(rig, name)
+		if note := closedPoolResumeNote(&cap, capErr); note != "" {
+			closedNote = "; " + note
+		}
+	}
+
 	reason := fmt.Sprintf("patrol scan: %s with %s hooked (%d dead samples)", res.Reason, work.ID, samples)
 	switch recovery {
 	case ExitDeferred:
@@ -1428,7 +1441,7 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		f.Outcome, f.Detail = OutcomeFailed, err.Error()+spanNote
 		return f, true
 	}
-	f.Outcome, f.Detail = OutcomeRestarted, reason+spanNote
+	f.Outcome, f.Detail = OutcomeRestarted, reason+spanNote+closedNote
 	return f, true
 }
 
