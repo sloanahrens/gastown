@@ -351,7 +351,8 @@ type beadState struct {
 	// health field (gt-fn9e6.44).
 	stage   string
 	lastErr string
-	// ciSilences counts consecutive candidate-gate silences; any other outcome
+	// ciSilences counts consecutive candidate-gate silences; every outcome but
+	// an infrastructure failure, and a pass that consumed no stored verdict,
 	// resets it.
 	ciSilences int
 	// escalated marks that this run of failures has raised an escalation
@@ -1310,6 +1311,7 @@ const (
 	outNotReady
 	outReadBack
 	outCanceled
+	outNoStored
 	outInfra
 )
 
@@ -1338,6 +1340,12 @@ func classify(ctx context.Context, err error) outcome {
 		return outReadBack
 	case ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled):
 		return outCanceled
+	case errors.Is(err, land.ErrNoStoredVerdict):
+		// A stored-only pass found no stored verdict to consume: the pass asked
+		// and was answered, so nothing failed and nothing is owed. The bead
+		// keeps its ordinary turn rather than being parked on a verdict the
+		// pass was never going to find (gt-ixvxt5).
+		return outNoStored
 	case errors.Is(err, land.ErrCISilence):
 		// The candidate gate reported nothing: infrastructure, never a
 		// verdict on the work. CI red comes back as a *Rejection, so the two
@@ -1373,7 +1381,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	// landing an earlier pass already accounted for (gt-3qmv4.2).
 	installNow := st.installNow && !wasRepair
 	oc := classify(ctx, err)
-	if oc != outInfra {
+	// A stored-only pass that consumed nothing attempted no landing, so it
+	// neither answers nor resets the CI-silence run the ready pass counts.
+	if oc != outInfra && oc != outNoStored {
 		st.ciSilences = 0
 	}
 	switch oc {
@@ -1512,6 +1522,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.announce(work.BeadID, "read-back", fmt.Sprintf("Landing worker: the push of %s reported success but %s's tip was not the landed commit on read-back (%v). Whether it landed is unknown; not retrying for %s. A human should compare origin/%s with the landings file.", work.Branch, work.Target, err, readBackBackoff, work.Target))
 	case outCanceled:
 		w.logf("%s: stopped: %v", work.BeadID, err)
+	case outNoStored:
+		// Nothing was stored to consume, so there is nothing to count, write,
+		// wait or hold: no report line either, since a stored-only sweep
+		// crosses every ready bead each interval and the ordinary pass owns
+		// the bead's turn (gt-ixvxt5).
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
 		w.countCISilence(work, err)
