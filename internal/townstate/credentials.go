@@ -38,6 +38,11 @@ var (
 	// line as the value. The key starts with a letter or underscore, so a JSON
 	// member, whose key is quoted, is left to jsonMember.
 	yamlLine = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:[ \t]+(.*)$`)
+	// blockScalarHeader matches the header of a literal (|) or folded (>) block
+	// scalar: an indentation digit and a chomping sign in either order, and an
+	// optional trailing comment. The value is the body below it, so the header
+	// alone is never a verdict (gt-ultan3).
+	blockScalarHeader = regexp.MustCompile(`^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?$`)
 	// tokensSegment: the plural word as a whole name segment; countOrFlag: a number or a switch.
 	tokensSegment = regexp.MustCompile(`(?i)(^|[^a-z0-9])tokens([^a-z0-9]|$)`)
 	countOrFlag   = regexp.MustCompile(`(?i)^(\d+|on|off|true|false)$`)
@@ -92,6 +97,61 @@ func yamlValue(raw string) (value string, quoted bool) {
 		}
 	}
 	return strings.TrimSpace(v), false
+}
+
+// blockScalarBody returns the trimmed, non-blank lines of the body of a block
+// scalar whose header ends at data[headerEnd], under a key whose column is keyCol.
+// The body is the lines indented deeper than the key. Blank lines do not end it
+// and are left out. The first non-blank line at or below the key's indent ends
+// it, so a sibling key is never read as body.
+func blockScalarBody(data []byte, headerEnd, keyCol int) []string {
+	var body []string
+	// data[headerEnd] is the header line's end, so the first line read is empty.
+	rest := data[headerEnd:]
+	for len(rest) > 0 {
+		var line []byte
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			line, rest = rest, nil
+		}
+		text := strings.TrimSpace(string(line))
+		if text == "" {
+			continue
+		}
+		if leadingIndent(line) <= keyCol {
+			break
+		}
+		body = append(body, text)
+	}
+	return body
+}
+
+// leadingIndent counts the spaces and tabs that start a line.
+func leadingIndent(line []byte) int {
+	n := 0
+	for n < len(line) && (line[n] == ' ' || line[n] == '\t') {
+		n++
+	}
+	return n
+}
+
+// blockScalarSecret reports whether the value of a block scalar under key is a
+// secret. The value is the body, its lines joined by a newline. Blank lines,
+// comment-only lines and lines that are only an environment reference name no
+// secret, so a body made of those is clean. The rest is judged by isSecret.
+func blockScalarSecret(key string, body []string) bool {
+	var lines []string
+	for _, line := range body {
+		if strings.HasPrefix(line, "#") || envRefOnly.MatchString(line) {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return false
+	}
+	return isSecret(key, strings.Join(lines, "\n"))
 }
 
 // splitNameWords splits a name into lower-case words at an underscore, a hyphen
@@ -476,14 +536,23 @@ func FindCredentials(data []byte) []string {
 			found = append(found, "json:"+name)
 		}
 	}
-	for _, m := range yamlLine.FindAllSubmatch(data, -1) {
-		name := lastSegment(string(m[1]))
-		value, _ := yamlValue(string(m[2]))
-		// A block scalar header (| or >) is a non-empty value under a credential
-		// name, so it is a finding: the secret sits in the lines below it, which
-		// this loop cannot read as the value, and refusing the header fails closed.
+	for _, loc := range yamlLine.FindAllSubmatchIndex(data, -1) {
+		key := string(data[loc[2]:loc[3]])
+		name := lastSegment(key)
+		raw := string(data[loc[4]:loc[5]])
+		// A block scalar header (| or >) opens a value made of the lines below it,
+		// indented deeper than the key. The header alone is not a verdict: that
+		// body is judged as the value, so a clean block under a credential name
+		// does not refuse the file (gt-ultan3).
+		if blockScalarHeader.MatchString(strings.TrimSpace(raw)) {
+			if credentialName(name) && blockScalarSecret(name, blockScalarBody(data, loc[5], loc[2]-loc[0])) {
+				found = append(found, "yaml:"+key)
+			}
+			continue
+		}
+		value, _ := yamlValue(raw)
 		if credentialName(name) && isSecret(name, value) {
-			found = append(found, "yaml:"+string(m[1]))
+			found = append(found, "yaml:"+key)
 		}
 	}
 	return found
