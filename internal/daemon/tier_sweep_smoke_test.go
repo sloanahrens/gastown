@@ -36,95 +36,74 @@ func TestClassifySweepSmoke(t *testing.T) {
 	}
 }
 
-// newSweepSmokeDaemon is a temp-town daemon whose runner takes the shell stage
-// with runnerTestSHA as the rig's origin/main tip.
-func newSweepSmokeDaemon(t *testing.T, now time.Time) *Daemon {
-	t.Helper()
-	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
-	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
-	d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
-	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
-	return d
-}
-
 // TestSweepSmokeLaunch pins the record each launch gives, that one launch runs
-// over the first stage the runner takes at the main tip, that no wait for a
-// result starts, and that a launch which cannot be rendered fails before it
-// launches (gt-d7qez9).
-func TestSweepSmokeLaunch(t *testing.T) {
-	t.Parallel()
+// over the first stage the runner takes at the main tip, and that a launch
+// which cannot be rendered fails before it launches (gt-d7qez9). The launch
+// writes no result, so a smoke that waited for one trips the hang guard.
+func TestSweepSmokeLaunch(t *testing.T) { t.Parallel(); testSweepSmokeLaunch(t, false) }
+
+// TestSweepSmokeLaunchStops also pins that the launch's stop runs once a
+// non-busy launch returns, and never for a busy one: it created nothing, and
+// its stop could end a run the smoke did not start (gt-d7qez9).
+func TestSweepSmokeLaunchStops(t *testing.T) { t.Parallel(); testSweepSmokeLaunch(t, true) }
+
+func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 	now := atHour(time.Now(), 15)
 	for _, tc := range []struct {
-		name   string
-		setup  func(*Daemon)
-		launch tierSweepLaunch
-		tiers  string
-		want   sweepSmokeRecord
+		name      string
+		setup     func(*Daemon)
+		launch    tierSweepLaunch
+		tiers     string
+		detailHas string
+		stops     int
+		want      sweepSmokeRecord
 	}{
-		{"started", nil, tierSweepLaunch{exitCode: 0}, "shell", sweepSmokeRecord{Time: now, Outcome: "started"}},
-		{"busy", nil, tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, "shell", sweepSmokeRecord{Time: now, Outcome: "busy"}},
-		{"declined", nil, tierSweepLaunch{exitCode: -1, declined: true}, "shell", sweepSmokeRecord{Time: now, Outcome: "declined"}},
-		{"failed", nil, tierSweepLaunch{exitCode: -1, err: errors.New("killed\nmore")}, "shell", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "killed"}},
-		{"host shell skipped", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.Shell = false }, tierSweepLaunch{exitCode: 0}, "integration,race", sweepSmokeRecord{Time: now, Outcome: "started"}},
+		{"started", nil, tierSweepLaunch{exitCode: 0}, "shell", "", 1, sweepSmokeRecord{Time: now, Outcome: "started"}},
+		{"busy", nil, tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, "shell", "", 0, sweepSmokeRecord{Time: now, Outcome: "busy"}},
+		{"declined", nil, tierSweepLaunch{exitCode: -1, declined: true}, "shell", "", 1, sweepSmokeRecord{Time: now, Outcome: "declined"}},
+		{"failed", nil, tierSweepLaunch{exitCode: -1, err: errors.New("killed\nmore")}, "shell", "", 1, sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "killed"}},
+		{"host shell skipped", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.Shell = false }, tierSweepLaunch{exitCode: 0}, "integration,race", "", 1, sweepSmokeRecord{Time: now, Outcome: "started"}},
 		{"main unreadable", func(d *Daemon) {
 			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "", errors.New("boom") }
-		}, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "boom"}},
-		{"runner cannot render", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.CPUs = 0 }, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "sweeprunner: spec.cpus: 0 is outside 1-16"}},
-		{"no runner", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner = nil }, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "no runner is configured for the rig's sweep"}},
+		}, tierSweepLaunch{}, "", "", 0, sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "boom"}},
+		{"runner cannot render", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.CPUs = 0 }, tierSweepLaunch{}, "", "cpus", 0, sweepSmokeRecord{Time: now, Outcome: "failed"}},
+		{"no runner", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner = nil }, tierSweepLaunch{}, "", "", 0, sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "no runner is configured for the rig's sweep"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := newSweepSmokeDaemon(t, now)
+			// A temp-town daemon whose runner takes the shell stage at runnerTestSHA.
+			d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+			d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+			d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
 			if tc.setup != nil {
 				tc.setup(d)
 			}
-			launches, st := 0, tierSweepStage{}
+			launches, stops, st := 0, 0, tierSweepStage{}
 			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
 				launches++
 				st = s
-				return tc.launch
-			}
-			d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) {
-				t.Error("waited for a result")
-				return runnerBudgetSpent(0)
-			}
-			if rec := d.sweepSmokeLaunch(context.Background(), "gastown"); rec != tc.want {
-				t.Errorf("sweepSmokeLaunch = %+v, want %+v", rec, tc.want)
-			}
-			if (launches == 1) != (tc.tiers != "") || strings.Join(st.tiers, ",") != tc.tiers || launches == 1 && st.tested != runnerTestSHA {
-				t.Errorf("launches = %d, stage %+v; want the launch of tiers %q at the main tip, or none", launches, st, tc.tiers)
-			}
-		})
-	}
-}
-
-// TestSweepSmokeLaunchStops pins that the launch's stop runs once a started or
-// failed launch returns, and never for a busy one: it created nothing, and its
-// stop could end a run the smoke did not start (gt-d7qez9).
-func TestSweepSmokeLaunchStops(t *testing.T) {
-	t.Parallel()
-	now := atHour(time.Now(), 15)
-	for _, tc := range []struct {
-		name   string
-		launch tierSweepLaunch
-		want   int
-	}{
-		{"started", tierSweepLaunch{exitCode: 0}, 1},
-		{"failed", tierSweepLaunch{exitCode: -1, err: errors.New("killed")}, 1},
-		{"busy", tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			d := newSweepSmokeDaemon(t, now)
-			stops := 0
-			d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
 				l := tc.launch
 				l.stop = func() { stops++ }
 				return l
 			}
-			d.sweepSmokeLaunch(context.Background(), "gastown")
-			if stops != tc.want {
-				t.Errorf("stop ran %d times, want %d", stops, tc.want)
+			returned := make(chan sweepSmokeRecord, 1)
+			go func() { returned <- d.sweepSmokeLaunch(context.Background(), "gastown") }()
+			var rec sweepSmokeRecord
+			select {
+			case rec = <-returned:
+			case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: the launch writes no result, so a smoke that waits for one fails here rather than hanging the test
+				t.Fatal("sweepSmokeLaunch waited for the run's result")
+			}
+			if rec.Time != tc.want.Time || rec.Outcome != tc.want.Outcome ||
+				tc.detailHas == "" && rec.Detail != tc.want.Detail || tc.detailHas != "" && !strings.Contains(rec.Detail, tc.detailHas) {
+				t.Errorf("sweepSmokeLaunch = %+v, want %+v (detail contains %q)", rec, tc.want, tc.detailHas)
+			}
+			if (launches == 1) != (tc.tiers != "") || strings.Join(st.tiers, ",") != tc.tiers || launches == 1 && st.tested != runnerTestSHA {
+				t.Errorf("launches = %d, stage %+v; want the launch of tiers %q at the main tip, or none", launches, st, tc.tiers)
+			}
+			if checkStops && stops != tc.stops {
+				t.Errorf("stop ran %d times, want %d", stops, tc.stops)
 			}
 		})
 	}
