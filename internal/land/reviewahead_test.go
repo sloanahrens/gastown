@@ -1550,3 +1550,149 @@ func TestVerdictReuseAheadNotIsolatorSkips(t *testing.T) {
 		l.gitMu.Unlock()
 	}
 }
+
+// aheadContextReviewer is a reviewer the pool can isolate whose copy answers the
+// context's error once the context is done, and verdict or err otherwise: a
+// cancelled or expired context reaches the pool the way it reaches om, as the
+// review's own error. The original fails the test when it is run, so a row can
+// only pass on the copy the pool isolated.
+type aheadContextReviewer struct {
+	t       *testing.T
+	verdict Verdict
+	err     error
+}
+
+func (r *aheadContextReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	r.t.Error("the Lander's own reviewer ran a review made ahead of a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadContextReviewer) OMVersion(context.Context, ReviewInput) string { return stubOMVersion }
+
+func (r *aheadContextReviewer) Isolated(string) Reviewer { return &aheadContextCopy{of: r} }
+
+type aheadContextCopy struct{ of *aheadContextReviewer }
+
+func (c *aheadContextCopy) Review(context.Context, string, string, string) (Verdict, error) {
+	c.of.t.Error("the isolated copy was run without the bead's input")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (c *aheadContextCopy) ReviewBead(ctx context.Context, _ ReviewInput) (Verdict, error) {
+	if err := ctx.Err(); err != nil {
+		return Verdict{}, err
+	}
+	return c.of.verdict, c.of.err
+}
+
+// TestVerdictReuseAheadErrorStoresNothing: a review the pool cannot stand on
+// returns its error with no outcome, and a verdict word that is neither approve
+// nor request_changes is no decision a landing can reuse and is skipped
+// instead. In every row nothing is stored, no bead is written and the review
+// directory is removed, so the landing runs om inline as it does without a
+// store.
+func TestVerdictReuseAheadErrorStoresNothing(t *testing.T) {
+	t.Parallel()
+	omErr := errors.New("om: no verdict")
+	rows := []struct {
+		name  string
+		setup func(t *testing.T) (*landFixture, *Lander, context.Context)
+		// stage is the InfraError stage a failed row names; "" is a row that is
+		// skipped rather than failed.
+		stage string
+		// wantErr is the cause the error must wrap; nil checks only the stage.
+		wantErr error
+	}{
+		{"om execution error", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &aheadContextReviewer{t: t, err: omErr}
+			return f, l, context.Background()
+		}, "review", omErr},
+		{"timeout", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &aheadContextReviewer{t: t}
+			// The zero time is already past, so the context is done with
+			// DeadlineExceeded before the review runs, without a timer.
+			ctx, cancel := context.WithDeadline(context.Background(), time.Time{})
+			t.Cleanup(cancel)
+			return f, l, ctx
+		}, "review", context.DeadlineExceeded},
+		{"cancelled context", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &aheadContextReviewer{t: t}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return f, l, ctx
+		}, "review", context.Canceled},
+		{"key error", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			// A directory: the om config read fails, which is not an absent file.
+			l.OMConfigPath = t.TempDir()
+			return f, l, context.Background()
+		}, "review key", nil},
+		{"non-om verdict word", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &aheadContextReviewer{t: t, verdict: Verdict{Verdict: VerdictSkipped}}
+			return f, l, context.Background()
+		}, "", nil},
+		{"unknown verdict word", func(t *testing.T) (*landFixture, *Lander, context.Context) {
+			f, l, _ := keyFixture(t)
+			l.Reviewer = &aheadContextReviewer{t: t, verdict: Verdict{Verdict: "maybe"}}
+			return f, l, context.Background()
+		}, "", nil},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, ctx := tc.setup(t)
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			var log bytes.Buffer
+			l.Out = &log
+			before := aheadBeadWrites(t, f.bd)
+			got, built, err := l.reviewAhead(ctx, f.work)
+			if tc.stage == "" {
+				if err != nil {
+					t.Fatalf("reviewAhead: %v, want no error and outcome %q", err, AheadSkipped)
+				}
+				if got != AheadSkipped {
+					t.Errorf("reviewAhead = %q, want %q", got, AheadSkipped)
+				}
+				if !reflect.DeepEqual(built, aheadBuilt{}) {
+					t.Errorf("reviewAhead built %+v for a verdict it did not store, want nothing", built)
+				}
+				if !strings.Contains(log.String(), "skipped") {
+					t.Errorf("land log %q does not say the review was skipped", log.String())
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("reviewAhead: got outcome %q and no error, want the %q error", got, tc.stage)
+				}
+				var infra *InfraError
+				if !errors.As(err, &infra) || infra.Stage != tc.stage {
+					t.Fatalf("reviewAhead error = %v, want an *InfraError at %q", err, tc.stage)
+				}
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+					t.Errorf("reviewAhead error = %v, want it to wrap %v", err, tc.wantErr)
+				}
+				if got != "" {
+					t.Errorf("reviewAhead outcome = %q on error, want empty (not %q)", got, AheadSkipped)
+				}
+				if !reflect.DeepEqual(built, aheadBuilt{}) {
+					t.Errorf("reviewAhead built %+v on error, want nothing", built)
+				}
+			}
+			if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+				t.Errorf("a record was stored for a review that decided nothing (stat err %v)", err)
+			}
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("reviewAhead wrote %d bead records, want 0", n)
+			}
+			aheadNoReviewDir(t, f)
+			if !l.gitMu.TryLock() {
+				t.Errorf("gitMu is still held after reviewAhead returned")
+			} else {
+				l.gitMu.Unlock()
+			}
+		})
+	}
+}
