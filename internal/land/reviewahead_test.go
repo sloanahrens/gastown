@@ -1463,7 +1463,7 @@ func aheadStoredRecord(t *testing.T, f *landFixture) AheadRecord {
 // TestVerdictReuseAheadStoresRejectAfterRescore: a first verdict inside the
 // rescore margin and a rerun that rejects with a higher score leave the record
 // holding the rerun's verdict and rescored true. Verdict.Rescore is not
-// serialised, so the flag is the record's only trace of the second run, which
+// serialized, so the flag is the record's only trace of the second run, which
 // a landing reusing the record needs to avoid scoring it again.
 func TestVerdictReuseAheadStoresRejectAfterRescore(t *testing.T) {
 	t.Parallel()
