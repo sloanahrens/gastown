@@ -841,3 +841,145 @@ func TestClusterDriftObjectKinds(t *testing.T) {
 		})
 	}
 }
+
+// driftRunnerConfigText is the gate runner's config.yml the compare reads: the
+// label its jobs run on and the container options it passes.
+func driftRunnerConfigText(label, options string) string {
+	return "log:\n  level: info\nrunner:\n  labels:\n    - \"" + label + "\"\ncontainer:\n  options: " + options + "\n"
+}
+
+// driftRunnerConfigMap is a ConfigMap holding value under key, as the compare reads it.
+func driftRunnerConfigMap(name, key string, value any) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": name, "namespace": "forgejo"},
+		"data":       map[string]any{key: value},
+	}
+}
+
+// TestDriftConfigTextPrintsChangedLinesAsPairs holds each changed line to a '-'
+// observed and a '+' rendered pair, in file order, with no unchanged line (gt-svm7ds).
+func TestDriftConfigTextPrintsChangedLinesAsPairs(t *testing.T) {
+	t.Parallel()
+	rendered := driftRunnerConfigMap(runnerConfigMapName, "config.yml", driftRunnerConfigText("ci-base:docker://registry.example.test/ci-base:latest", "--cpus 4"))
+	live := driftRunnerConfigMap(runnerConfigMapName, "config.yml", driftRunnerConfigText("ci-base:docker://registry.example.test/ci-base:old", "--cpus 8"))
+	got, err := objectDrift("ConfigMap", rendered, live)
+	if err != nil {
+		t.Fatalf("objectDrift: %v", err)
+	}
+	want := []string{
+		"data.config.yml:",
+		`-     - "ci-base:docker://registry.example.test/ci-base:old"`,
+		`+     - "ci-base:docker://registry.example.test/ci-base:latest"`,
+		"-   options: --cpus 8",
+		"+   options: --cpus 4",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("drift =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestDriftConfigTextPrintsNothingWhenUnchanged holds an unchanged config to no line (gt-svm7ds).
+func TestDriftConfigTextPrintsNothingWhenUnchanged(t *testing.T) {
+	t.Parallel()
+	text := driftRunnerConfigText("ci-base:docker://registry.example.test/ci-base:latest", "--cpus 4")
+	rendered := driftRunnerConfigMap(runnerConfigMapName, "config.yml", text)
+	live := driftRunnerConfigMap(runnerConfigMapName, "config.yml", text)
+	got, err := objectDrift("ConfigMap", rendered, live)
+	if err != nil {
+		t.Fatalf("objectDrift: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("drift = %q, want none for an unchanged config", got)
+	}
+}
+
+// TestDriftConfigTextFingerprintsATokenLine fingerprints a changed token line on
+// each side and still prints its neighbour (gt-wi4885, gt-svm7ds).
+func TestDriftConfigTextFingerprintsATokenLine(t *testing.T) {
+	t.Parallel()
+	const renderedToken = `  FORGEJO_TOKEN: "rendered-token-value"`
+	const observedToken = `  FORGEJO_TOKEN: "observed-token-value"`
+	rendered := driftRunnerConfigMap(runnerConfigMapName, "config.yml", "runner:\n  labels:\n    - \"ci-base:latest\"\nenvs:\n"+renderedToken+"\n")
+	live := driftRunnerConfigMap(runnerConfigMapName, "config.yml", "runner:\n  labels:\n    - \"ci-base:old\"\nenvs:\n"+observedToken+"\n")
+	got, err := objectDrift("ConfigMap", rendered, live)
+	if err != nil {
+		t.Fatalf("objectDrift: %v", err)
+	}
+	want := []string{
+		"data.config.yml:",
+		`-     - "ci-base:old"`,
+		`+     - "ci-base:latest"`,
+		"- " + driftFingerprintOf(t, observedToken),
+		"+ " + driftFingerprintOf(t, renderedToken),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("drift =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestDriftConfigTextStopsAtFortyLines holds the printed changes to forty lines
+// and counts the rest, so a fully changed config cannot flood a terminal.
+func TestDriftConfigTextStopsAtFortyLines(t *testing.T) {
+	t.Parallel()
+	var renderedText, liveText strings.Builder
+	for i := range 45 {
+		fmt.Fprintf(&renderedText, "option-%02d: rendered-%02d\n", i, i)
+		fmt.Fprintf(&liveText, "option-%02d: observed-%02d\n", i, i)
+	}
+	rendered := driftRunnerConfigMap(runnerConfigMapName, "config.yml", renderedText.String())
+	live := driftRunnerConfigMap(runnerConfigMapName, "config.yml", liveText.String())
+	got, err := objectDrift("ConfigMap", rendered, live)
+	if err != nil {
+		t.Fatalf("objectDrift: %v", err)
+	}
+	want := []string{"data.config.yml:"}
+	for i := range 20 {
+		want = append(want,
+			fmt.Sprintf("- option-%02d: observed-%02d", i, i),
+			fmt.Sprintf("+ option-%02d: rendered-%02d", i, i))
+	}
+	want = append(want, "... 50 more changed lines not shown")
+	if !slices.Equal(got, want) {
+		t.Errorf("drift =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestDriftConfigTextKeepsFingerprintsOffTheRunnerConfig holds the text compare to
+// the runner's config.yml alone; every other input keeps a fingerprint (gt-svm7ds).
+func TestDriftConfigTextKeepsFingerprintsOffTheRunnerConfig(t *testing.T) {
+	t.Parallel()
+	const renderedText = "runner:\n  labels:\n    - \"ci-base:latest\"\n"
+	const liveText = "runner:\n  labels:\n    - \"ci-base:old\"\n"
+	cases := []struct {
+		name     string
+		kind     string
+		object   string
+		key      string
+		rendered any
+		live     any
+		path     string
+	}{
+		{name: "another ConfigMap", kind: "ConfigMap", object: "other-config", key: "config.yml", rendered: renderedText, live: liveText, path: "data.config.yml"},
+		{name: "another key", kind: "ConfigMap", object: runnerConfigMapName, key: "other.yml", rendered: renderedText, live: liveText, path: "data.other.yml"},
+		{name: "another kind", kind: "Secret", object: runnerConfigMapName, key: "config.yml", rendered: renderedText, live: liveText, path: "data.config.yml"},
+		{name: "a live value that is not text", kind: "ConfigMap", object: runnerConfigMapName, key: "config.yml", rendered: renderedText, live: map[string]any{"labels": "ci-base:old"}, path: "data.config.yml"},
+		{name: "a diff too large to build", kind: "ConfigMap", object: runnerConfigMapName, key: "config.yml", rendered: strings.Repeat("rendered line\n", 1024), live: strings.Repeat("observed line\n", 1024), path: "data.config.yml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rendered := driftRunnerConfigMap(tc.object, tc.key, tc.rendered)
+			live := driftRunnerConfigMap(tc.object, tc.key, tc.live)
+			got, err := objectDrift(tc.kind, rendered, live)
+			if err != nil {
+				t.Fatalf("objectDrift(%s): %v", tc.kind, err)
+			}
+			want := []string{driftWantDifference(t, tc.path, tc.rendered, tc.live)}
+			if !slices.Equal(got, want) {
+				t.Errorf("drift = %q, want %q", got, want)
+			}
+		})
+	}
+}
