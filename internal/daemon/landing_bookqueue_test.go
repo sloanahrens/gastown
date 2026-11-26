@@ -240,8 +240,8 @@ func TestDeferredBookkeepingHold(t *testing.T) {
 	})
 }
 
-// escalatingNotifier records sends in a notifyfake.Recorder and signals each
-// escalation that reached the town, so a test waits instead of polling.
+// escalatingNotifier forwards each escalation to the embedded notifier and
+// signals sent for each one it accepts, so a test waits instead of polling.
 type escalatingNotifier struct {
 	notify.Notifier
 	sent chan struct{}
@@ -325,8 +325,11 @@ func TestDeferredBookkeepingOverdue(t *testing.T) {
 		})
 		waitForSignal(t, started, "the queued job starting")
 
-		// The drain waits on the clock for the bound, so advance only once it does.
-		if err := clk.BlockUntilContext(ctx, 1); err != nil {
+		// The drain waits on the clock for the bound, so advance only once it
+		// does; bound that wait so a drain that stops waiting fails, not hangs.
+		waitCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if err := clk.BlockUntilContext(waitCtx, 1); err != nil {
 			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
 		}
 		clk.Advance(24 * time.Hour)
