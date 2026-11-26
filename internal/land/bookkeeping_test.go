@@ -1,11 +1,14 @@
 package land
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestBookkeepingRecordDurable: recordDurable writes the durable half of a
@@ -124,5 +127,122 @@ func TestBookkeepingRecordDurable(t *testing.T) {
 			t.Errorf("landings records = %d, want none: the append failed", n)
 		}
 		readyToLand(t, f)
+	})
+}
+
+// TestBookkeepingDeferred: DeferBookkeeping ends Land after the durable half of
+// the record — the landed ref and the landings line — and hands the record back
+// in Result.Deferred, leaving the bead open and un-noted and the follow-up feed
+// unrun. The same landing with the flag off records both halves in one pass and
+// files the follow-up its approved review earned (gt-i4kqoa).
+func TestBookkeepingDeferred(t *testing.T) {
+	t.Parallel()
+
+	// land runs the fixture's landing with the flag as given and a review that
+	// approves with one minor finding, so a follow-up feed that ran is visible.
+	land := func(t *testing.T, deferBookkeeping bool) (*landFixture, *followupFake, Result) {
+		t.Helper()
+		f := newLandFixture(t)
+		l := f.lander()
+		l.DeferBookkeeping = deferBookkeeping
+		followups := &followupFake{}
+		l.Followups = followups
+		f.review.fn = func(string) (Verdict, error) {
+			return Verdict{Verdict: VerdictApprove, Score: 0.9,
+				Findings: []Finding{minorFinding("name the error")}}, nil
+		}
+		res, err := l.Land(context.Background(), f.work)
+		if err != nil {
+			t.Fatalf("Land: %v", err)
+		}
+		return f, followups, res
+	}
+	// durable reads the half of the record the landing wrote before any bead
+	// write: the ref in the lander's clone and the one landings line, decoded.
+	durable := func(t *testing.T, f *landFixture) LandingRecord {
+		t.Helper()
+		if got := f.refAt(f.repo, LandedRef(f.work.BeadID)); got != f.work.Head {
+			t.Errorf("%s in the lander's clone = %q, want the landed head %q", LandedRef(f.work.BeadID), got, f.work.Head)
+		}
+		lines := f.landingLines()
+		if len(lines) != 1 {
+			t.Fatalf("landings lines = %q, want one", lines)
+		}
+		var rec LandingRecord
+		if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+			t.Fatalf("decoding the landing record: %v", err)
+		}
+		return rec
+	}
+
+	t.Run("the flag on returns the record and leaves the bead to a later pass", func(t *testing.T) {
+		t.Parallel()
+		f, followups, res := land(t, true)
+		rec := durable(t, f)
+		if rec.BeadID != f.work.BeadID || rec.Head != f.work.Head || rec.LandedCommit != res.LandedCommit {
+			t.Errorf("landings record = %s at %s landed %s; want %s at %s landed %s",
+				rec.BeadID, rec.Head, rec.LandedCommit, f.work.BeadID, f.work.Head, res.LandedCommit)
+		}
+		if res.Deferred == nil {
+			t.Fatal("Result.Deferred is nil; want the record the durable half wrote")
+		}
+		if got := *res.Deferred; got.BeadID != rec.BeadID || got.Head != rec.Head || got.LandedCommit != rec.LandedCommit ||
+			got.PatchID != rec.PatchID || !got.LandedAt.Equal(rec.LandedAt) {
+			t.Errorf("Result.Deferred = %+v, want the landings record %+v", got, rec)
+		}
+		b := f.bead()
+		if b.Status == "closed" || !beads.HasLabel(b, LabelReadyToLand) || strings.Contains(b.Notes, LandingNoteMarker) {
+			t.Errorf("the bead was written during a deferred landing: status=%s labels=%v notes=%q", b.Status, b.Labels, b.Notes)
+		}
+		if n := len(followups.created); n != 0 {
+			t.Errorf("the deferred landing filed %d follow-up bead(s); want none before the bead half", n)
+		}
+	})
+
+	t.Run("the flag off records and files in one pass", func(t *testing.T) {
+		t.Parallel()
+		f, followups, res := land(t, false)
+		durable(t, f) // the durable half is written on this path too
+		if res.Deferred != nil {
+			t.Errorf("Result.Deferred = %+v on a landing that was not deferred; want nil", *res.Deferred)
+		}
+		b := f.bead()
+		if b.Status != "closed" || beads.HasLabel(b, LabelReadyToLand) || !strings.Contains(b.Notes, LandingNoteMarker) {
+			t.Errorf("bead status=%s labels=%v notes=%q; want the landing recorded and the bead closed", b.Status, b.Labels, b.Notes)
+		}
+		if n := len(followups.created); n != 1 {
+			t.Errorf("filed %d follow-up bead(s) for an approved landing with one minor; want 1", n)
+		}
+	})
+
+	t.Run("the flag on with a failed landings append leaves Deferred nil", func(t *testing.T) {
+		t.Parallel()
+		f := newLandFixture(t)
+		l := f.lander()
+		l.DeferBookkeeping = true
+		followups := &followupFake{}
+		l.Followups = followups
+		lf, err := RigLandingsFile(f.town, "gastown")
+		if err != nil {
+			t.Fatal(err)
+		}
+		lf.write = func(*os.File, []byte) (int, error) { return 0, errors.New("disk full") }
+		l.Landings = lf
+
+		res, err := l.Land(context.Background(), f.work)
+		var recErr *RecordError
+		if !errors.As(err, &recErr) {
+			t.Fatalf("Land = %v, want a *RecordError from the failed durable write", err)
+		}
+		if res.Deferred != nil {
+			t.Errorf("Result.Deferred = %+v after the durable write failed; want nil", *res.Deferred)
+		}
+		b := f.bead()
+		if b.Status == "closed" || !beads.HasLabel(b, LabelReadyToLand) || strings.Contains(b.Notes, LandingNoteMarker) {
+			t.Errorf("the bead was written after the durable write failed: status=%s labels=%v notes=%q", b.Status, b.Labels, b.Notes)
+		}
+		if n := len(followups.created); n != 0 {
+			t.Errorf("filed %d follow-up bead(s) after the durable write failed; want none", n)
+		}
 	})
 }
