@@ -1829,11 +1829,11 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 			if stage.reason != "" {
 				t.Fatalf("stage = %+v, want the copied result folded", stage)
 			}
-			// The sync stage copies into the repo claim; then the result and
-			// its logs come home, the result first.
+			// The sync stage copies into the repo claim; then the result, its
+			// logs and the cache trim record come home, the result first.
 			copies := runnerCalls(cmds.ran, "cp")
-			if len(copies) != 3 {
-				t.Fatalf("copies = %d, want the sync copy, the result and the logs: %q", len(copies), cmds.ran)
+			if len(copies) != 4 {
+				t.Fatalf("copies = %d, want the sync copy, the result, the logs and the cache trim record: %q", len(copies), cmds.ran)
 			}
 			lastCopy := copies[len(copies)-1]
 			deletes := runnerCalls(cmds.ran, "delete")
@@ -2234,8 +2234,8 @@ func TestK8sCollectToleratesNoLogsDirectory(t *testing.T) {
 	if _, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err != nil {
 		t.Errorf("the result was not brought home past the absent logs directory: %v", err)
 	}
-	if n := len(runnerCalls(cmds.ran, "cp")); n != 3 {
-		t.Errorf("copies = %d, want the sync copy, the result and the attempted logs copy: %q", n, cmds.ran)
+	if n := len(runnerCalls(cmds.ran, "cp")); n != 4 {
+		t.Errorf("copies = %d, want the sync copy, the result, the attempted logs copy and the cache trim copy: %q", n, cmds.ran)
 	}
 }
 
