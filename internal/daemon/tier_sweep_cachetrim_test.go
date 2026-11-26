@@ -190,6 +190,79 @@ func TestTierSweepCacheAttention(t *testing.T) {
 	}
 }
 
+// TestTierSweepCacheAttentionClears pins the item a finished run clears (gt-gi6o1j):
+// after an over-cap run raised it, a later finished run whose record is zero or
+// missing clears it, and a later run still over the cap keeps one item carrying
+// its new reading. Both runs fold through tierSweepRunnerStageResult, the
+// production call site, so removing the clear turns the clearing rows red.
+func TestTierSweepCacheAttentionClears(t *testing.T) {
+	t.Parallel()
+	const capBytes = int64(5) << 30
+	rows := []struct {
+		name    string
+		next    func(t *testing.T, dir string)
+		want    int
+		summary string
+	}{
+		{
+			name: "a zero record clears the raised item",
+			next: func(t *testing.T, dir string) {
+				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes})
+			},
+			want: 0,
+		},
+		{
+			name: "a missing record clears the raised item",
+			next: func(t *testing.T, dir string) {
+				if err := os.Remove(filepath.Join(dir, sweeprunner.CacheTrimFileName)); err != nil {
+					t.Fatalf("removing the record: %v", err)
+				}
+			},
+			want: 0,
+		},
+		{
+			name: "a still-over record keeps one item with its new reading",
+			next: func(t *testing.T, dir string) {
+				writeCacheTrim(t, dir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 100 << 20})
+			},
+			want:    1,
+			summary: "the tier sweep's cache claim for gastown ended 100.0MB over its 5.0GB cap after every removal the rules allow",
+		},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+			st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA}
+			spec, ok, err := d.tierSweepRunnerSpec(st)
+			if err != nil || !ok {
+				t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+			}
+			if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+				t.Fatalf("making the run's output directory: %v", err)
+			}
+			writeCacheTrim(t, spec.OutDir, sweeprunner.CacheTrimRecord{CapBytes: capBytes, OverBytes: 115661635})
+			d.tierSweepRunnerStageResult(st, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
+			if n := len(d.cacheTrimNoOp.observed()); n != 1 {
+				t.Fatalf("attention items after the over-cap run = %d, want the one it raises", n)
+			}
+			r.next(t, spec.OutDir)
+			d.tierSweepRunnerStageResult(st, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
+			items := d.cacheTrimNoOp.observed()
+			if len(items) != r.want {
+				t.Fatalf("attention items after the later run = %d, want %d: %+v", len(items), r.want, items)
+			}
+			if r.want == 0 {
+				return
+			}
+			if got := items[0]; got.Key != "cache-trim-sweep-gastown" || got.Summary != r.summary {
+				t.Fatalf("attention item = %+v, want key cache-trim-sweep-gastown, summary %q", got, r.summary)
+			}
+		})
+	}
+}
+
 // writeCacheTrim writes r into dir as the record sweep-run leaves, failing the
 // test rather than returning, since every row that uses it is about the note.
 func writeCacheTrim(t *testing.T, dir string, r sweeprunner.CacheTrimRecord) {

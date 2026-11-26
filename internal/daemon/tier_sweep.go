@@ -4531,10 +4531,11 @@ func tierSweepCacheNote(dir string) string {
 // run whose cache claim ended over its cap after every removal the rules allow
 // (gt-ym0o68), so the reading reaches the operator beyond the sweep's own line.
 // It is keyed by rig, so a repeat fold of the same run, or a later run over the
-// cap, replaces the item rather than adding one. A run with no record or a zero
-// record raises nothing. A record the daemon cannot read raises an item that
-// says the figure is unknown, never the clean case. A missing record is the
-// window sweep-run's ordering leaves open, and not an error.
+// cap, replaces the item rather than adding one. A zero or missing record clears
+// it (gt-gi6o1j). sweep-run writes the record after the result, so a run folded
+// in that window clears an earlier item until its own record lands. A record the
+// daemon cannot read raises an item that says the figure is unknown, never the
+// clean case.
 func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
 	rec, ok, err := sweeprunner.ReadCacheTrim(dir)
 	if err != nil {
@@ -4548,6 +4549,7 @@ func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
 		return
 	}
 	if !ok || rec.OverBytes <= 0 {
+		d.cacheTrimNoOp.clear("cache-trim-sweep-" + rig)
 		return
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
