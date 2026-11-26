@@ -2,6 +2,8 @@ package landworker
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -108,6 +110,105 @@ func TestBookQueueWorkerSkips(t *testing.T) {
 		rep = h.w.Pass(ctx)
 		if len(h.lander.calls) != 1 || rep.Repaired != 1 {
 			t.Fatalf("repaired %d beads (report %v) after the queue let gt-abc go; want one repair", len(h.lander.calls), rep)
+		}
+	})
+}
+
+// deferredFakes logs the reap (Remote listing) and sp-actual (Landings read).
+type deferredFakes struct {
+	*fakeRemote
+	*fakeLandings
+	steps []string
+}
+
+func (f *deferredFakes) ListRemoteRefs(prefix string) ([]RemoteRef, error) {
+	f.steps = append(f.steps, "reap")
+	return f.fakeRemote.ListRemoteRefs(prefix)
+}
+
+func (f *deferredFakes) LatestForBead(id string) (land.LandingRecord, bool, error) {
+	f.steps = append(f.steps, "sp-actual")
+	return f.fakeLandings.LatestForBead(id)
+}
+
+type deferredLander struct {
+	*fakeLander
+	steps     *[]string
+	finishErr error
+}
+
+func (l *deferredLander) FinishLanding(land.Work, land.Result) error {
+	*l.steps = append(*l.steps, "finish")
+	return l.finishErr
+}
+
+func deferredHarness(t *testing.T, finishErr error) (*harness, *deferredFakes) {
+	t.Helper()
+	h := newHarness(t)
+	f := &deferredFakes{fakeRemote: h.remote, fakeLandings: h.files}
+	h.w.Remote, h.w.Landings = f, f
+	h.w.Lander = &deferredLander{fakeLander: h.lander, steps: &f.steps, finishErr: finishErr}
+	h.w.RefreshAuthorSeat = func(string) error { f.steps = append(f.steps, "seat"); return nil }
+	h.w.AfterLanded = func(land.Work) { f.steps = append(f.steps, "after") }
+	return h, f
+}
+
+// TestBookQueueFinishDeferred: the four landing steps run in order after the
+// record is finished; a finish it cannot make queues the repair instead, and
+// none of the four runs (gt-k78e8j).
+func TestBookQueueFinishDeferred(t *testing.T) {
+	t.Parallel()
+	res := land.Result{LandedCommit: "cccccccccc"}
+	work := land.Work{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: noteHead, Target: "main", Worker: "opal"}
+
+	t.Run("the steps run after the record is finished, in order", func(t *testing.T) {
+		t.Parallel()
+		h, f := deferredHarness(t, nil)
+		h.w.Books = &BookQueue{}
+		h.w.finishDeferred(work, res)
+		if want := []string{"finish", "reap", "seat", "sp-actual", "after"}; !slices.Equal(f.steps, want) {
+			t.Fatalf("steps %v; want %v", f.steps, want)
+		}
+	})
+
+	t.Run("a finish error runs none and RunLater queues the repair", func(t *testing.T) {
+		t.Parallel()
+		h, f := deferredHarness(t, errors.New("finish failed"))
+		h.w.Books = &BookQueue{}
+		h.w.finishDeferred(work, res)
+		if !slices.Equal(f.steps, []string{"finish"}) {
+			t.Fatalf("steps %v; want only the finish attempt", f.steps)
+		}
+		if len(h.w.pendingRepair) != 0 {
+			t.Fatalf("pendingRepair %v before RunLater; want the repair stored with Later", h.w.pendingRepair)
+		}
+		h.w.Books.RunLater()
+		if _, ok := h.w.pendingRepair["gt-abc"]; !ok {
+			t.Fatalf("pendingRepair %v after RunLater; want gt-abc", h.w.pendingRepair)
+		}
+	})
+
+	t.Run("a lander with no finisher queues the repair", func(t *testing.T) {
+		t.Parallel()
+		h, f := deferredHarness(t, nil)
+		h.w.Lander = h.lander // the harness's fakeLander cannot finish a record
+		h.w.Books = &BookQueue{}
+		h.w.finishDeferred(work, res)
+		if len(f.steps) != 0 {
+			t.Fatalf("steps %v; want none", f.steps)
+		}
+		h.w.Books.RunLater()
+		if _, ok := h.w.pendingRepair["gt-abc"]; !ok {
+			t.Fatalf("pendingRepair %v; want gt-abc queued", h.w.pendingRepair)
+		}
+	})
+
+	t.Run("with no queue the repair is written directly", func(t *testing.T) {
+		t.Parallel()
+		h, _ := deferredHarness(t, errors.New("finish failed"))
+		h.w.finishDeferred(work, res)
+		if _, ok := h.w.pendingRepair["gt-abc"]; !ok {
+			t.Fatalf("pendingRepair %v; want the repair written directly", h.w.pendingRepair)
 		}
 	})
 }

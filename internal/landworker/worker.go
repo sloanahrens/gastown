@@ -76,6 +76,11 @@ type Lander interface {
 	Land(ctx context.Context, w land.Work) (land.Result, error)
 }
 
+// finisher finishes a deferred landing's record; *land.Lander implements it (gt-k78e8j).
+type finisher interface {
+	FinishLanding(w land.Work, res land.Result) error
+}
+
 // Landings is the rig's landings file, read to repair incomplete records.
 type Landings interface {
 	LatestForBead(beadID string) (land.LandingRecord, bool, error)
@@ -1409,6 +1414,46 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.countCISilence(work, err)
 		w.countFailingLanding(work, err)
 	}
+}
+
+// finishDeferred finishes a deferred landing's record, then reaps its branches,
+// refreshes the authors' seats, writes sp-actual and runs the after-landed hook,
+// in that order. It runs on BookQueue's goroutine, so any Worker state it must
+// write goes through Later to w's own goroutine; a finish it cannot make leaves
+// the work in pendingRepair for the next pass (gt-k78e8j).
+func (w *Worker) finishDeferred(work land.Work, res land.Result) {
+	f, ok := w.Lander.(finisher)
+	if !ok {
+		w.logf("%s: the lander cannot finish a deferred landing; the next pass repairs its record", work.BeadID)
+		w.repairLater(work)
+		return
+	}
+	if err := f.FinishLanding(work, res); err != nil {
+		w.logf("%s: finishing the deferred landing record: %v; the next pass repairs it", work.BeadID, err)
+		w.repairLater(work)
+		return
+	}
+	w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+	w.writeSPActual(work.BeadID, res.LandedCommit)
+	if w.AfterLanded != nil {
+		w.AfterLanded(work)
+	}
+}
+
+// repairLater puts work in pendingRepair: through Books.Later (the worker's own
+// goroutine) when a queue is set, directly when it is nil (gt-k78e8j).
+func (w *Worker) repairLater(work land.Work) {
+	repair := func() {
+		if w.pendingRepair == nil {
+			w.pendingRepair = map[string]land.Work{}
+		}
+		w.pendingRepair[work.BeadID] = work
+	}
+	if w.Books != nil {
+		w.Books.Later(repair)
+		return
+	}
+	repair()
 }
 
 // supersededRejection ends a landing whose bead was closed or changed hands
