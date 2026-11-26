@@ -2017,3 +2017,113 @@ func writeNamepoolFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestNamePoolAvoid pins the allocator's skip of a name the caller reports
+// unusable (gt-1sj0qy): the draw passes it over, leaving it free and unbound,
+// and takes it once the caller stops avoiding it. The manager row is the path
+// the hand sling allocates on (gt-mfnsho), where the caller installs the
+// avoider through Manager.SetNameAvoider.
+func TestNamePoolAvoid(t *testing.T) {
+	t.Parallel()
+
+	t.Run("theme skips the avoided name", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+		avoided := "furiosa"
+		pool.setNameAvoider(func(name string) bool { return name == avoided })
+
+		name, err := pool.AllocateFor("claude-sonnet")
+		if err != nil {
+			t.Fatalf("AllocateFor: %v", err)
+		}
+		if name != "nux" {
+			t.Fatalf("drew %q, want the second themed name nux", name)
+		}
+		if pool.IsInUse(avoided) {
+			t.Errorf("%q is marked in use after being skipped", avoided)
+		}
+		if got := pool.ModelOf(avoided); got != "" {
+			t.Errorf("ModelOf(%q) = %q after being skipped, want unbound", avoided, got)
+		}
+
+		pool.setNameAvoider(nil)
+		back, err := pool.AllocateFor("claude-sonnet")
+		if err != nil {
+			t.Fatalf("AllocateFor after clearing the avoider: %v", err)
+		}
+		if back != avoided {
+			t.Fatalf("drew %q after clearing the avoider, want the freed %q", back, avoided)
+		}
+	})
+
+	t.Run("nil avoid changes nothing", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+
+		for i, want := range []string{"furiosa", "nux", "slit"} {
+			got, err := pool.AllocateFor("claude-sonnet")
+			if err != nil {
+				t.Fatalf("AllocateFor #%d: %v", i+1, err)
+			}
+			if got != want {
+				t.Fatalf("AllocateFor #%d drew %q, want %q", i+1, got, want)
+			}
+		}
+	})
+
+	t.Run("seat list skips the avoided name", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+		pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel", "mica"}})
+		pool.setNameAvoider(func(name string) bool { return name == "kestrel" })
+
+		name, err := pool.AllocateFor("claude-haiku")
+		if err != nil {
+			t.Fatalf("AllocateFor: %v", err)
+		}
+		if name != "mica" {
+			t.Fatalf("drew %q, want the seat's next listed name mica", name)
+		}
+		if pool.IsInUse("kestrel") {
+			t.Errorf("kestrel is marked in use after being skipped")
+		}
+		if got := pool.ModelOf("kestrel"); got != "" {
+			t.Errorf("ModelOf(kestrel) = %q after being skipped, want unbound", got)
+		}
+	})
+
+	t.Run("overflow is not avoided", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, 1)
+		pool.setNameAvoider(func(name string) bool { return name == "furiosa" })
+
+		name, err := pool.Allocate()
+		if err != nil {
+			t.Fatalf("Allocate: %v", err)
+		}
+		if name != "2" {
+			t.Fatalf("drew %q, want overflow 2 when the only themed name is avoided", name)
+		}
+	})
+
+	t.Run("manager reaches AllocateName", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _, _ := canonicalRig(t)
+		names, err := mgr.GetNamePool().themeNames()
+		if err != nil {
+			t.Fatalf("theme names: %v", err)
+		}
+		if len(names) < 2 {
+			t.Fatalf("theme names = %v, want at least two to tell an avoided draw from the next", names)
+		}
+		mgr.SetNameAvoider(func(name string) bool { return name == names[0] })
+
+		name, err := mgr.AllocateName()
+		if err != nil {
+			t.Fatalf("AllocateName: %v", err)
+		}
+		if name != names[1] {
+			t.Fatalf("AllocateName drew %q, want the next free name %q", name, names[1])
+		}
+	})
+}

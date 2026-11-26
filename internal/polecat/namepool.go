@@ -130,6 +130,14 @@ type NamePool struct {
 	// Configuration from polecat_pool.seats, never persisted (SetSeatNames).
 	SeatNames map[string][]string `json:"-"`
 
+	// Avoid, when non-nil, reports a name this pool must not draw: the caller's
+	// live view of names it cannot use, such as the dispatcher's stale-seat
+	// guard. An avoided name is not eligible, so the draw skips it in a seat's
+	// list and in the theme, leaving it free and unbound. A nil Avoid, the zero
+	// value, avoids nothing. It is held in memory, never saved, and is called
+	// under the pool lock, so it must not call back into the pool.
+	Avoid func(name string) bool `json:"-"`
+
 	// stateFile is the path to persist pool state.
 	stateFile string
 
@@ -372,11 +380,15 @@ func (p *NamePool) AllocateFor(model string) (string, error) {
 	return name, nil
 }
 
-// eligibleForLocked reports whether the seat on model may take name. A bound
-// name belongs to its model alone, and that binding outranks a seat list: a
-// name bound before the list named it stays with the model it was bound to. An
-// unbound name is anyone's unless another seat lists it.
+// eligibleForLocked reports whether the seat on model may take name. A name
+// the caller's Avoid rejects is not eligible, whatever its binding or a seat's
+// list says. A bound name belongs to its model alone, and that binding outranks
+// a seat list: a name bound before the list named it stays with the model it
+// was bound to. An unbound name is anyone's unless another seat lists it.
 func (p *NamePool) eligibleForLocked(name, model string) bool {
+	if p.Avoid != nil && p.Avoid(name) {
+		return false
+	}
 	if bound := p.Bindings[name]; bound != "" {
 		return model != "" && sameModel(bound, model)
 	}
@@ -412,6 +424,14 @@ func (p *NamePool) SetSeatNames(seatNames map[string][]string) {
 			p.SeatNames[agent] = append([]string(nil), names...)
 		}
 	}
+}
+
+// setNameAvoider installs fn as the pool's Avoid, nil to clear it. It holds
+// the pool lock so a draw never reads the field while it is being replaced.
+func (p *NamePool) setNameAvoider(fn func(string) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Avoid = fn
 }
 
 // Bind records model as the model of name. It reports an error when the name
