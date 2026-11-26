@@ -58,13 +58,19 @@ func poolIdle(pool *ReviewPool) (started, idle <-chan struct{}) {
 
 // fakeAheadReviewer records each review it is asked for and holds it until
 // the test closes release, or the bead's own channel in perWork when it has
-// one, or its bound passes. A review whose bead is in fail returns that error.
+// one, or its context is cancelled, or its bound passes. A review whose bead is
+// in fail returns that error. When stopped is set it receives each work whose
+// context ended, and when heldAfterCancel is set the review then stays in
+// ReviewAhead until the test closes it, so a test can act on a cancelled review
+// that has not yet left the pool.
 type fakeAheadReviewer struct {
-	entered chan land.Work
-	release chan struct{}
-	perWork map[string]chan struct{}
-	bound   <-chan struct{}
-	fail    map[string]error
+	entered         chan land.Work
+	release         chan struct{}
+	perWork         map[string]chan struct{}
+	bound           <-chan struct{}
+	fail            map[string]error
+	stopped         chan land.Work
+	heldAfterCancel chan struct{}
 
 	mu    sync.Mutex
 	calls []land.Work
@@ -75,7 +81,7 @@ func newFakeAheadReviewer(t *testing.T, ctx context.Context, fail map[string]err
 	return &fakeAheadReviewer{entered: make(chan land.Work, 8), release: make(chan struct{}), bound: ctx.Done(), fail: fail}
 }
 
-func (f *fakeAheadReviewer) ReviewAhead(_ context.Context, w land.Work) (land.AheadOutcome, error) {
+func (f *fakeAheadReviewer) ReviewAhead(ctx context.Context, w land.Work) (land.AheadOutcome, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, w)
 	f.mu.Unlock()
@@ -86,6 +92,18 @@ func (f *fakeAheadReviewer) ReviewAhead(_ context.Context, w land.Work) (land.Ah
 	}
 	select {
 	case <-release:
+	case <-ctx.Done():
+		if f.stopped != nil {
+			f.stopped <- w
+			if f.heldAfterCancel != nil {
+				select {
+				case <-f.heldAfterCancel:
+				case <-f.bound:
+					return "", errors.New("review held past the test's bound")
+				}
+			}
+		}
+		return "", ctx.Err()
 	case <-f.bound:
 		return "", errors.New("review held past the test's bound")
 	}
@@ -189,6 +207,92 @@ func TestReviewPoolLogsNothingForCancelledReview(t *testing.T) {
 	}
 }
 
+// TestReviewPoolSupersededHeadIsCancelled pins that a bead offered at a head
+// its seat has replaced stops that review: the reviewer returns on its context,
+// one line names the bead and both heads, and the offer starts nothing in its
+// place. The rows cover a pool with room and one at Max, where the cancel must
+// come before the cap, a repeat offer of the running head, which must leave the
+// review alone, and a repeat offer of the new head while the cancelled review is
+// still leaving, which must not cancel or log a second time.
+func TestReviewPoolSupersededHeadIsCancelled(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	tests := []struct {
+		name     string
+		max      int
+		offers   []string
+		wantStop bool
+		// holdCancelled keeps the cancelled review in the pool between the
+		// offers, so the later offer meets a run that is already cancelled.
+		holdCancelled bool
+	}{
+		{name: "room in the pool", max: 2, offers: []string{newHead}, wantStop: true},
+		{name: "at Max", max: 1, offers: []string{newHead}, wantStop: true},
+		{name: "same head again", max: 1, offers: []string{oldHead}},
+		{name: "new head offered twice", max: 1, offers: []string{newHead, newHead}, wantStop: true, holdCancelled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			// The old review is held by the test, so only a cancel ends it.
+			rev.perWork = map[string]chan struct{}{bead: make(chan struct{})}
+			if tt.holdCancelled {
+				rev.stopped = make(chan land.Work, 1)
+				rev.heldAfterCancel = make(chan struct{})
+			}
+			logs := &logRecorder{}
+			pool := &ReviewPool{Reviewer: rev, Max: tt.max, Logf: logs.logf}
+
+			pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+			recvBounded(t, ctx, rev.entered, "the old head's review start")
+			oldDone := reviewEnded(t, pool, bead)
+
+			for i, head := range tt.offers {
+				pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+				if i == 0 && tt.holdCancelled {
+					recvBounded(t, ctx, rev.stopped, "the cancelled review seeing its context end")
+				}
+			}
+
+			if !tt.wantStop {
+				if got := logs.get(); len(got) != 0 {
+					t.Fatalf("offering the same head again logged %q, want nothing", got)
+				}
+				close(rev.perWork[bead])
+				recvBounded(t, ctx, oldDone, "the review ending at the test's release")
+				if n := len(rev.reviewed()); n != 1 {
+					t.Errorf("reviewer called %d times, want the one review of the old head", n)
+				}
+				return
+			}
+
+			if tt.holdCancelled {
+				close(rev.heldAfterCancel)
+			}
+			recvBounded(t, ctx, oldDone, "the old review ending when its context is cancelled")
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+			if n := len(rev.reviewed()); n != 1 {
+				t.Errorf("reviewer called %d times after the new head was offered, want only the old head: the new head starts at the next offer", n)
+			}
+			got := logs.get()
+			if len(got) != 1 {
+				t.Fatalf("logged %q, want one line for the cancelled review", got)
+			}
+			for _, want := range []string{bead, oldHead, newHead} {
+				if !strings.Contains(got[0], want) {
+					t.Errorf("logged %q, want it to name %q", got[0], want)
+				}
+			}
+		})
+	}
+}
+
 func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
@@ -200,9 +304,9 @@ func TestReviewPoolSameBeadRunsOneReview(t *testing.T) {
 	pool.Offer(context.Background(), []land.Work{first})
 	recvBounded(t, ctx, rev.entered, "the first review start")
 
-	// A second offer for the same bead while the first is held starts nothing,
-	// and Wait does not return until the first review ends.
-	pool.Offer(context.Background(), []land.Work{{BeadID: first.BeadID, Head: "6666666"}})
+	// A second offer for the same bead at the same head while the first is held
+	// starts nothing, and Wait does not return until the first review ends.
+	pool.Offer(context.Background(), []land.Work{{BeadID: first.BeadID, Head: first.Head}})
 	started, idle := poolIdle(pool)
 	recvBounded(t, ctx, started, "Wait starting")
 	select {
