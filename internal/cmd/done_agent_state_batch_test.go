@@ -90,18 +90,29 @@ func TestDoneAgentStateWritesTheAgentBeadOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("show agent bead: %v", err)
 	}
-	fields := beads.ParseAgentFields(agent.Description)
-	if fields.AgentState != string(beads.AgentStateDone) {
-		t.Errorf("agent_state = %q, want done", fields.AgentState)
+	// The turn's end, its exit type and cleanup status, and the work bead are
+	// read from the seat's intent record; the agent bead mirrors them.
+	rec := readDoneIntent(t, townRoot)
+	if rec.TurnState != string(beads.AgentStateDone) {
+		t.Errorf("turn_state = %q, want done", rec.TurnState)
 	}
+	if rec.CleanupStatus != "clean" {
+		t.Errorf("cleanup_status = %q, want clean", rec.CleanupStatus)
+	}
+	if rec.ExitType != done.ExitCompleted {
+		t.Errorf("exit_type = %q, want %s", rec.ExitType, done.ExitCompleted)
+	}
+	if rec.LastWorkBead != "gt-base-123" {
+		t.Errorf("last_work_bead = %q, want gt-base-123", rec.LastWorkBead)
+	}
+	fields := beads.ParseAgentFields(agent.Description)
 	if fields.HookBead != "" {
 		t.Errorf("hook_bead = %q, want it cleared", fields.HookBead)
 	}
-	if fields.CleanupStatus != "clean" {
-		t.Errorf("cleanup_status = %q, want clean", fields.CleanupStatus)
-	}
-	if fields.ExitType != done.ExitCompleted || fields.Branch != "polecat/nux/gt-base-123+abc" || fields.LastSourceIssue != "gt-base-123" || fields.CompletionTime != "2026-10-13T12:00:00Z" {
-		t.Errorf("completion metadata not recorded: %+v", fields)
+	// Branch and completion time have no field in the intent record, so they
+	// stay read from the agent bead.
+	if fields.Branch != "polecat/nux/gt-base-123+abc" || fields.CompletionTime != "2026-10-13T12:00:00Z" {
+		t.Errorf("completion metadata not recorded on the agent bead: %+v", fields)
 	}
 }
 
@@ -142,15 +153,21 @@ func TestDoneAgentStateStillRecordsCompletionWhenTheCloseIsRefused(t *testing.T)
 	if err != nil {
 		t.Fatalf("show agent bead: %v", err)
 	}
-	fields := beads.ParseAgentFields(agent.Description)
-	if fields.CleanupStatus != "clean" || fields.ExitType != done.ExitCompleted {
-		t.Errorf("completion metadata not recorded: %+v", fields)
+	// The refused close ends no turn, so the record keeps an empty turn state
+	// while still carrying the attempt's exit, cleanup status and work bead.
+	rec := readDoneIntent(t, townRoot)
+	if rec.CleanupStatus != "clean" || rec.ExitType != done.ExitCompleted {
+		t.Errorf("completion metadata not recorded on the intent record: %+v", rec)
 	}
+	if rec.TurnState != "" {
+		t.Errorf("turn_state = %q, want empty: a refused close ends no turn", rec.TurnState)
+	}
+	if rec.LastWorkBead != "gt-base-123" {
+		t.Errorf("last_work_bead = %q, want gt-base-123", rec.LastWorkBead)
+	}
+	fields := beads.ParseAgentFields(agent.Description)
 	if fields.HookBead != "gt-base-123" {
 		t.Errorf("hook_bead = %q, want it left at gt-base-123", fields.HookBead)
-	}
-	if fields.AgentState == string(beads.AgentStateDone) {
-		t.Error("gt done marked the agent done over a bead it could not read")
 	}
 }
 

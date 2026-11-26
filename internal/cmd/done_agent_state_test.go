@@ -11,8 +11,22 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 )
+
+// readDoneIntent reads the nux seat's intent record from townRoot. gt done
+// records a turn's end there before the agent bead that mirrors it (ADR 0003,
+// gt-ijldj7), so the finished-turn facts below are read from the record: the
+// agent bead is a copy of them, not where they live.
+func readDoneIntent(t *testing.T, townRoot string) intent.Record {
+	t.Helper()
+	rec, err := intent.Read(townRoot, doneIntentSeat)
+	if err != nil {
+		t.Fatalf("read the intent record of %s: %v", doneIntentSeat, err)
+	}
+	return rec
+}
 
 // TestClearDoneCheckpoints verifies that clearDoneCheckpoints removes
 // only done-cp labels while preserving other labels.
@@ -111,9 +125,9 @@ func TestDeferredDoneLeavesReadyToLandBeadUntouched(t *testing.T) {
 }
 
 // TestDeferredDoneClearsTheHookInTheSameStateWrite: a DEFERRED exit clears the
-// agent bead's hook_bead in the one write that also carries the completion
-// metadata (cleanup_status). The seat reads stuck, not done: patrol_scan
-// restarts a stuck seat from its DEFERRED exit (gt-ks62m).
+// agent bead's hook_bead and records the turn's end — stuck, exit DEFERRED and
+// the cleanup status — on the seat's intent record. The seat reads stuck, not
+// done: patrol_scan restarts a stuck seat from its DEFERRED exit (gt-ks62m).
 func TestDeferredDoneClearsTheHookInTheSameStateWrite(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -148,15 +162,18 @@ func TestDeferredDoneClearsTheHookInTheSameStateWrite(t *testing.T) {
 		t.Fatalf("deferred gt done: %v", err)
 	}
 
+	// hook_bead has no field in the intent record, so it stays read from the
+	// agent bead; the turn's end is read from the record (gt-i06qvi).
 	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
 	if fields.HookBead != "" {
 		t.Errorf("hook_bead = %q, want it cleared by the DEFERRED exit", fields.HookBead)
 	}
-	if fields.CleanupStatus != clean {
-		t.Errorf("cleanup_status = %q, want %q: the completion metadata rides in the same write as the hook clear", fields.CleanupStatus, clean)
+	rec := readDoneIntent(t, townRoot)
+	if rec.CleanupStatus != clean {
+		t.Errorf("cleanup_status = %q, want %q: the turn's end records it with the hook clear", rec.CleanupStatus, clean)
 	}
-	if fields.AgentState != string(beads.AgentStateStuck) {
-		t.Errorf("agent_state = %q, want stuck: patrol_scan recovers a seat from its DEFERRED exit", fields.AgentState)
+	if rec.TurnState != string(beads.AgentStateStuck) {
+		t.Errorf("turn_state = %q, want stuck: patrol_scan recovers a seat from its DEFERRED exit", rec.TurnState)
 	}
 }
 
@@ -292,15 +309,17 @@ func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
 				t.Fatalf("completed gt done: %v", err)
 			}
 
-			fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
-			if fields.AgentState != string(beads.AgentStateStuck) {
-				t.Errorf("agent_state = %q, want stuck: a stood-down seat is not finished, and patrol_scan skips a done seat", fields.AgentState)
+			// The turn's end is read from the seat's intent record: the agent
+			// bead only mirrors it (ADR 0003).
+			rec := readDoneIntent(t, townRoot)
+			if rec.TurnState != string(beads.AgentStateStuck) {
+				t.Errorf("turn_state = %q, want stuck: a stood-down seat is not finished, and patrol_scan skips a done seat", rec.TurnState)
 			}
-			if fields.ExitType != done.ExitDeferred {
-				t.Errorf("exit_type = %q, want %s: patrol_scan restarts a stuck seat only after a DEFERRED exit", fields.ExitType, done.ExitDeferred)
+			if rec.ExitType != done.ExitDeferred {
+				t.Errorf("exit_type = %q, want %s: patrol_scan restarts a stuck seat only after a DEFERRED exit", rec.ExitType, done.ExitDeferred)
 			}
-			if fields.CleanupStatus != unpushed {
-				t.Errorf("cleanup_status = %q, want %q: the DEFERRED restart names it as the preserved work", fields.CleanupStatus, unpushed)
+			if rec.CleanupStatus != unpushed {
+				t.Errorf("cleanup_status = %q, want %q: the DEFERRED restart names it as the preserved work", rec.CleanupStatus, unpushed)
 			}
 			if got := mustShowBead(t, db, "gt-rework").Status; got == string(beads.StatusClosed) {
 				t.Error("gt done closed a rework bead whose head was unchanged")
@@ -358,13 +377,14 @@ func TestReworkStandDownLeavesTheAttachedMoleculeOpen(t *testing.T) {
 
 	// The molecule checks below mean something only if the stand-down ran: the
 	// seat is stuck on a DEFERRED exit, which is what keeps the bead and its
-	// molecule open for the restart.
-	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
-	if fields.AgentState != string(beads.AgentStateStuck) {
-		t.Fatalf("agent_state = %q, want stuck: the rework stand-down did not run", fields.AgentState)
+	// molecule open for the restart. Those facts are read from the seat's
+	// intent record, where gt done records a turn's end first (ADR 0003).
+	rec := readDoneIntent(t, townRoot)
+	if rec.TurnState != string(beads.AgentStateStuck) {
+		t.Fatalf("turn_state = %q, want stuck: the rework stand-down did not run", rec.TurnState)
 	}
-	if fields.ExitType != done.ExitDeferred {
-		t.Fatalf("exit_type = %q, want %s: the rework stand-down did not run", fields.ExitType, done.ExitDeferred)
+	if rec.ExitType != done.ExitDeferred {
+		t.Fatalf("exit_type = %q, want %s: the rework stand-down did not run", rec.ExitType, done.ExitDeferred)
 	}
 	if got := mustShowBead(t, db, "gt-rework").Status; got == string(beads.StatusClosed) {
 		t.Fatal("gt done closed the rework bead the stand-down left open")
@@ -417,13 +437,15 @@ func TestCompletedDoneOnSubmittedWorkRecordsDone(t *testing.T) {
 		t.Fatalf("completed gt done: %v", err)
 	}
 
+	rec := readDoneIntent(t, townRoot)
+	if rec.TurnState != string(beads.AgentStateDone) {
+		t.Errorf("turn_state = %q, want done: a submitted completion is finished", rec.TurnState)
+	}
+	if rec.ExitType != done.ExitCompleted {
+		t.Errorf("exit_type = %q, want %s: a submitted completion must not read as a stand-down", rec.ExitType, done.ExitCompleted)
+	}
+	// hook_bead has no field in the intent record, so it is read from the bead.
 	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
-	if fields.AgentState != string(beads.AgentStateDone) {
-		t.Errorf("agent_state = %q, want done: a submitted completion is finished", fields.AgentState)
-	}
-	if fields.ExitType != done.ExitCompleted {
-		t.Errorf("exit_type = %q, want %s: a submitted completion must not read as a stand-down", fields.ExitType, done.ExitCompleted)
-	}
 	if fields.HookBead != "" {
 		t.Errorf("hook_bead = %q, want it cleared", fields.HookBead)
 	}
@@ -563,8 +585,17 @@ func TestDoneAgentStateLeavesTheHookOnAnUnreadableHookedBead(t *testing.T) {
 	if fields.HookBead != "gt-base-123" {
 		t.Errorf("hook_bead = %q, want it left at gt-base-123", fields.HookBead)
 	}
-	if fields.AgentState == string(beads.AgentStateDone) {
-		t.Error("gt done marked the agent done over a bead it could not read")
+	// No turn ended: the refusal leaves the session up to retry the same turn,
+	// so the record keeps an empty turn state while still carrying the attempt.
+	rec := readDoneIntent(t, townRoot)
+	if rec.TurnState != "" {
+		t.Errorf("turn_state = %q, want empty: a refused close ends no turn", rec.TurnState)
+	}
+	if rec.ExitType != done.ExitCompleted {
+		t.Errorf("exit_type = %q, want %s: the refused attempt still records its exit", rec.ExitType, done.ExitCompleted)
+	}
+	if rec.LastWorkBead != "gt-base-123" {
+		t.Errorf("last_work_bead = %q, want gt-base-123", rec.LastWorkBead)
 	}
 
 	work, err := db.Show("gt-base-123")
@@ -729,11 +760,12 @@ func TestDoneAgentStateToleratesAFailingTownPurge(t *testing.T) {
 		t.Fatalf("show agent bead: %v", err)
 	}
 	fields := beads.ParseAgentFields(agent.Description)
-	if fields.AgentState != string(beads.AgentStateDone) {
-		t.Errorf("agent_state = %q, want %q despite the failing town purge", fields.AgentState, beads.AgentStateDone)
-	}
 	if fields.HookBead != "" {
 		t.Errorf("hook_bead = %q, want it cleared despite the failing town purge", fields.HookBead)
+	}
+	rec := readDoneIntent(t, townRoot)
+	if rec.TurnState != string(beads.AgentStateDone) {
+		t.Errorf("turn_state = %q, want %q despite the failing town purge", rec.TurnState, beads.AgentStateDone)
 	}
 }
 
