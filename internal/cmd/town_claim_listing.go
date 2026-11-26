@@ -11,8 +11,11 @@ import (
 )
 
 var townClaimListingCmd = &cobra.Command{
-	Use:   "claim-listing",
-	Short: "Print the pod claim listing of the town, for the mac-town-state check",
+	Use: "claim-listing",
+	// Plumbing the mac-town-state check runs through the pod wrapper; no agent is
+	// told to reach for it, so it stays out of the task map.
+	Hidden: true,
+	Short:  "Print the pod claim listing of the town, for the mac-town-state check",
 	Long: `Print the claim listing of the town this command runs in, for the Mac-side
 mac-town-state check. Stdout is the listing only; an error exits 1 with nothing on stdout.`,
 	Args:         cobra.NoArgs,

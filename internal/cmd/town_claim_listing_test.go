@@ -45,6 +45,14 @@ func TestTownClaimListingPrintsOnlyTheListing(t *testing.T) {
 	}
 }
 
+// TestTownClaimListingIsHidden: the command stays out of help and the task map, as plumbing does.
+func TestTownClaimListingIsHidden(t *testing.T) {
+	t.Parallel()
+	if !townClaimListingCmd.Hidden {
+		t.Fatal("townClaimListingCmd.Hidden = false, want true")
+	}
+}
+
 // TestTownClaimListingError: each refusal returns an error and writes nothing to stdout.
 func TestTownClaimListingError(t *testing.T) {
 	t.Parallel()
