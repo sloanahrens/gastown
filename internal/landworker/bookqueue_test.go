@@ -383,6 +383,13 @@ func waitDrained(t *testing.T, ctx context.Context, wait func(context.Context) e
 	}
 }
 
+// overdueCall is one Overdue callback: the bead it named and the bound it
+// passed.
+type overdueCall struct {
+	beadID string
+	bound  time.Duration
+}
+
 // TestBookQueueOverdue: a job still running past bookJobBound is reported once
 // with its bead, and a job that ends within the bound is not reported at all
 // (gt-2hqjbi).
@@ -436,6 +443,8 @@ func TestBookQueueOverdue(t *testing.T) {
 		clk := clockwork.NewFakeClockAt(epoch)
 		var q BookQueue
 		q.Clock = clk
+		overdue := make(chan overdueCall, 1)
+		q.Overdue = func(beadID string, bound time.Duration) { overdue <- overdueCall{beadID: beadID, bound: bound} }
 		logged := make(chan string, 1)
 		q.Logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
 
@@ -462,6 +471,57 @@ func TestBookQueueOverdue(t *testing.T) {
 		select {
 		case got := <-logged:
 			t.Errorf("a job that ended within the bound was reported: %q", got)
+		default:
+		}
+		select {
+		case call := <-overdue:
+			t.Errorf("a job that ended within the bound called Overdue: %+v", call)
+		default:
+		}
+	})
+
+	// Overdue and Logf both learn of the same moment; Overdue's bead and bound
+	// are what the daemon needs to raise the job's bead (gt-d8rj48).
+	t.Run("a job past the bound calls Overdue once with its bead and the bound", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		clk := clockwork.NewFakeClockAt(epoch)
+		var q BookQueue
+		q.Clock = clk
+		overdue := make(chan overdueCall, 2)
+		q.Overdue = func(beadID string, bound time.Duration) { overdue <- overdueCall{beadID: beadID, bound: bound} }
+		logged := make(chan string, 4)
+		q.Logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
+
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		// Release the job however the test ends, so the queue's drain finishes.
+		t.Cleanup(releaseJob)
+		q.Add("gt-overdue", func() { close(started); hold(ctx, release) })
+		recvBounded(t, ctx, started, "the job starting")
+
+		if err := clk.BlockUntilContext(ctx, 1); err != nil {
+			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
+		}
+		clk.Advance(bookJobBound)
+
+		call := recvBounded(t, ctx, overdue, "the Overdue callback for the job past the bound")
+		if call.beadID != "gt-overdue" || call.bound != bookJobBound {
+			t.Errorf("Overdue got (%q, %v), want (%q, %v)", call.beadID, call.bound, "gt-overdue", bookJobBound)
+		}
+		// Overdue supplements Logf, it does not replace it.
+		if entry := recvBounded(t, ctx, logged, "the log entry for the job past the bound"); !strings.Contains(entry, "gt-overdue") {
+			t.Errorf("the report %q does not name the bead gt-overdue", entry)
+		}
+
+		releaseJob()
+		if err := waitDrained(t, ctx, q.Wait); err != nil {
+			t.Fatalf("Wait after the job ended = %v, want nil", err)
+		}
+		select {
+		case second := <-overdue:
+			t.Errorf("Overdue ran a second time for the same job: %+v", second)
 		default:
 		}
 	})
