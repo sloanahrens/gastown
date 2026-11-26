@@ -161,6 +161,15 @@ type Daemon struct {
 	// attention is the background attention tick (attention_background.go,
 	// gt-zszj0).
 	attention attentionRun
+	// bookQueues are the rigs' deferred-bookkeeping queues (landing_bookqueue.go),
+	// keyed by queue so rebuilding a rig's worker keeps an older busy one: shutdown
+	// waits for each, so the exit does not kill a job mid-record (gt-yzgory).
+	// bookQueueBound and bookQueueWaitFn are test seams (the bound, and a hook that
+	// must not block, run once the wait has begun).
+	bookQueuesMu    sync.Mutex
+	bookQueues      map[*landworker.BookQueue]string
+	bookQueueBound  time.Duration
+	bookQueueWaitFn func()
 	// bootGate is the boot standby (boot_gate.go, gt-niooz0): the poller's last
 	// answer, which standbyReason reads. New builds it from the real probe set;
 	// a daemon built without one (a test that does not set it) reads healthy.
@@ -4053,6 +4062,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 
 	// The background attention tick stops on that cancel; wait for it, bounded.
 	d.waitForAttention()
+
+	// A queued bookkeeping job runs on the queue's own goroutine and does not
+	// watch d.ctx, so the cancel does not stop it: wait for the queues too,
+	// bounded, and name the rigs still busy. This is before the Dolt stop,
+	// which a job that writes a bead record needs (gt-yzgory).
+	d.waitForBookQueues()
 
 	// Join the sandbox seat ends the cancel just stopped (their remaining
 	// reads go through Dolt, so this comes before the stop) and refuse any
