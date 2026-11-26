@@ -4232,6 +4232,12 @@ type LandingWorkerConfig struct {
 	// depends on has changed. Nothing reads it yet; the reader that comes
 	// later treats nil and an empty block alike as off.
 	ReviewPool *ReviewPoolConfig `json:"review_pool,omitempty"`
+
+	// DeferredBookkeeping is the per-rig switch for deferred bookkeeping
+	// (gt-bkw3f2): a listed rig's landing worker hands bookkeeping to a queue
+	// after the durable writes instead of finishing it inline.
+	// DeferredBookkeepingFor reads it; nil and an empty block are both off.
+	DeferredBookkeeping *DeferredBookkeepingConfig `json:"deferred_bookkeeping,omitempty"`
 }
 
 // ReviewPoolConfig is the review_pool block of the landing worker. Its Rigs
@@ -4303,6 +4309,24 @@ func (c *LandingWorkerConfig) ReviewPoolFor(rig string) (on bool, max int, expir
 		return false, 0, 0, nil
 	}
 	return true, max, expiry, nil
+}
+
+// DeferredBookkeepingConfig is the deferred_bookkeeping block of the landing
+// worker: bookkeeping is deferred for the listed rigs only, so unlike
+// LandingWorkerConfig.Rigs an empty list means no rig.
+type DeferredBookkeepingConfig struct {
+	// Rigs are the rigs whose bookkeeping is deferred. A rig not listed keeps
+	// the inline path.
+	Rigs []string `json:"rigs,omitempty"`
+}
+
+// DeferredBookkeepingFor reports whether rig's landing worker defers its
+// bookkeeping; a nil config, a nil block and a rig absent from Rigs are off.
+func (c *LandingWorkerConfig) DeferredBookkeepingFor(rig string) bool {
+	if c == nil || c.DeferredBookkeeping == nil {
+		return false
+	}
+	return slices.Contains(c.DeferredBookkeeping.Rigs, rig)
 }
 
 // ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The
