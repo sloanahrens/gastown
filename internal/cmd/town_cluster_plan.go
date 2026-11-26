@@ -84,6 +84,46 @@ func phaseKubeconfig(phase string, f planFlags) (string, error) {
 	return kubeconfig, nil
 }
 
+// planDryRunResult is one file's server-side dry run and why it failed, if it did.
+type planDryRunResult struct {
+	Name   string
+	Output string
+	Err    error
+}
+
+// planDryRuns sends every file to the cluster as `kubectl apply --dry-run=server`
+// under the kubeconfig phaseKubeconfig gives its phase, returning one result per
+// file. Kubeconfigs that are not paths, and phases without one, refuse before any
+// file is sent; a failed dry run is that file's result, not an error (gt-f1p2fw).
+func planDryRuns(ctx context.Context, kube update.RunFunc, dir string, files []planRecordFile, kubeconfigs planFlags) ([]planDryRunResult, error) {
+	byPhase := map[string]string{}
+	for _, file := range files {
+		if _, ok := byPhase[file.Phase]; !ok {
+			kubeconfig, err := phaseKubeconfig(file.Phase, kubeconfigs)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkClusterKubeconfig(kubeconfig); err != nil {
+				return nil, err
+			}
+			byPhase[file.Phase] = kubeconfig
+		}
+	}
+	results := make([]planDryRunResult, 0, len(files))
+	for _, file := range files {
+		out, exit, err := kube(ctx, "", nil, "kubectl", "--kubeconfig", byPhase[file.Phase], "apply", "--dry-run=server", "-f", filepath.Join(dir, file.Name))
+		result := planDryRunResult{Name: file.Name, Output: out}
+		switch {
+		case err != nil:
+			result.Err = fmt.Errorf("gt town cluster plan: the server-side dry run of %s could not run: %w", file.Name, err)
+		case exit != 0:
+			result.Err = fmt.Errorf("gt town cluster plan: the server-side dry run of %s failed: kubectl exited %d", file.Name, exit)
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
 // planRecordedFlags is the render flags a plan replays: the flags the last live
 // render recorded under the town, with the static control-cluster set included
 // and the plan's own --out directory in place of the recorded one. It returns
@@ -119,7 +159,8 @@ var townClusterPlanCmd = &cobra.Command{
 	Long: `Render the desired set into --out from the flags the last live render recorded,
 with --include-static, and print the short form of the plan's id. Nothing is
 applied. The plan reads the cluster's Deployments and the static objects with get
-only and writes nothing to any cluster. A Secret is compared on the fields its
+only and writes nothing to any cluster, and sends each file as a server-side dry
+run. A Secret is compared on the fields its
 document declares and never on its data, which the cluster fills. After the phases,
 the plan prints, in the drift command's form, the compare's lines for the
 Deployments and static objects that differ from the live cluster.
@@ -320,11 +361,13 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // render's own output is dropped. Phase P is listed only when a static object
 // differs from the cluster's: when none does, plan.json and the id name the
 // workloads alone, and the phases line names only W. A phase with files whose
-// kubeconfig flag is missing (phaseKubeconfig) is refused. The differences print after
-// the phases, the static objects' then each Deployment's in apply order, and the
-// short id is the last line. plan.json is written only after every read succeeds,
-// and the output only after it is written, so a refusal, a render error, a failed
-// read or a failed write prints nothing.
+// kubeconfig flag is missing (phaseKubeconfig) is refused. Each file is then sent
+// as a server-side dry run under its phase's kubeconfig, and the results come back
+// in memory without failing this plan (gt-f1p2fw). The differences print after the
+// phases, the static objects' then each Deployment's in apply order, and the short
+// id is the last line. plan.json is written only after every read succeeds and
+// every dry run has run, and the output only after it is written, so a refusal, a
+// render error, a failed read or a failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, kubeconfigs planFlags, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -413,6 +456,10 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 	}
 	record.ID = full
+	// Each file's server-side dry run comes back in memory (gt-f1p2fw records it).
+	if _, err := planDryRuns(ctx, kube, outDir, record.Files, kubeconfigs); err != nil {
+		return err
+	}
 	if err := writeJSON(filepath.Join(outDir, planFileName), record); err != nil {
 		return fmt.Errorf("gt town cluster plan: cannot write %s, so the plan is not whole and no id was printed: %w", filepath.Join(outDir, planFileName), err)
 	}

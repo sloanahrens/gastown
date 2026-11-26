@@ -204,6 +204,59 @@ func TestClusterShapePlanKubeconfigNeedsTheFlagOfEachPhaseWithFiles(t *testing.T
 	}
 }
 
+// TestClusterShapePlanDryRunKubeconfig: every listed file is sent as a server-side
+// dry run from the file the render wrote, under its phase's kubeconfig (P's
+// --policy-kubeconfig, W's --apply-kubeconfig).
+func TestClusterShapePlanDryRunKubeconfig(t *testing.T) {
+	t.Parallel()
+	dir, out, dry := planOut(t), &bytes.Buffer{}, map[string]string{}
+	kube := planKubectlRecording(planKubectl(t), dry)
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	want, static := map[string]string{}, 0
+	for _, f := range rec.Files {
+		kubeconfig := planTestKubeconfigs.applyKubeconfig
+		if f.Phase == planPhaseStatic {
+			kubeconfig, static = planTestKubeconfigs.policyKubeconfig, static+1
+		}
+		want[filepath.Join(dir, f.Name)] = kubeconfig
+	}
+	if static == 0 || static == len(rec.Files) {
+		t.Fatalf("plan.json holds %d of %d phase P files, want both phases", static, len(rec.Files))
+	}
+	if !reflect.DeepEqual(dry, want) {
+		t.Fatalf("the dry runs carried %v, want each listed file under its phase's kubeconfig: %v", dry, want)
+	}
+}
+
+// TestClusterShapePlanDryRunRefusesAKubeconfigThatIsNotAPath: a phase kubeconfig
+// that reads as a flag refuses before any dry run is sent.
+func TestClusterShapePlanDryRunRefusesAKubeconfigThatIsNotAPath(t *testing.T) {
+	t.Parallel()
+	dir, dry := planOut(t), map[string]string{}
+	kube := planKubectlRecording(planKubectl(t), dry)
+	kubeconfigs := planFlags{policyKubeconfig: "-x", applyKubeconfig: "/kube/apply.yaml"}
+	err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, &bytes.Buffer{}, dir, kubeconfigs, atomicfile.WriteJSON)
+	if err == nil || !strings.Contains(err.Error(), `--kubeconfig "-x" starts with '-'`) {
+		t.Fatalf("runTownClusterPlan = %v, want a refusal naming the value that is not a path", err)
+	}
+	if len(dry) != 0 {
+		t.Errorf("the plan sent %d dry runs, want none before the refusal", len(dry))
+	}
+}
+
+// planDryRuns refuses a file whose phase the plan does not hold, rather than
+// sending it under no kubeconfig.
+func TestClusterShapePlanDryRunRefusesAPhaseItCannotRead(t *testing.T) {
+	t.Parallel()
+	_, err := planDryRuns(context.Background(), planKubectl(t), t.TempDir(), []planRecordFile{{Name: "f", Phase: "X"}}, planTestKubeconfigs)
+	if err == nil || !strings.Contains(err.Error(), "is not a plan phase") {
+		t.Fatalf("planDryRuns = %v, want a refusal naming the phase", err)
+	}
+}
+
 // TestClusterShapePlanKubeconfigHelpSaysItDoesNotRunInTheDaemonPod: the help text
 // says, beside the per-phase flags, that the command does not run inside the
 // daemon pod, so an operator does not expect the plan to run there.
@@ -500,8 +553,8 @@ func TestClusterShapePlanIdWritesNoPlanJSONOnARefusalOrRenderError(t *testing.T)
 }
 
 // TestClusterShapePlanIdMakesOnlyReadCalls: a runner that fails every helm call
-// but `helm template`, the render's one read, never fails the plan, because the
-// plan makes no other call. Every call the runner sees is a read.
+// but `helm template`, the render's one read, never fails the plan. Every call
+// the helm runner sees is that read.
 func TestClusterShapePlanIdMakesOnlyReadCalls(t *testing.T) {
 	t.Parallel()
 	var calls []string
@@ -883,13 +936,17 @@ type planFailer interface {
 }
 
 // planKubectlReading is the plan's cluster read with static as the answer to each
-// static object's get, keyed as planStaticLive keys it.
+// static object's get, keyed as planStaticLive keys it. A server-side dry run
+// succeeds; any other call fails the test.
 func planKubectlReading(t planFailer, static map[string]string, answer func(resource string) (string, int, error)) update.RunFunc {
 	t.Helper()
 	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+		if _, _, ok := planDryRunOf(name, args); ok {
+			return "configured (server dry run)", 0, nil
+		}
 		resource, namespace, ok := planGetOf(name, args)
 		if !ok {
-			t.Fatalf("the plan ran %s %q, want only a get", name, args)
+			t.Fatalf("the plan ran %s %q, want only a get or a server-side dry run", name, args)
 			return "", 0, nil // a recording reporter returns where *testing.T does not
 		}
 		if strings.HasPrefix(resource, "deployment/") {
@@ -897,6 +954,28 @@ func planKubectlReading(t planFailer, static map[string]string, answer func(reso
 		}
 		return static[planStaticResourceKey(resource, namespace)], 0, nil
 	}
+}
+
+// planKubectlRecording is kube with every server-side dry run's file and
+// kubeconfig recorded in dry, answered as a success.
+func planKubectlRecording(kube update.RunFunc, dry map[string]string) update.RunFunc {
+	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if file, kubeconfig, ok := planDryRunOf(name, args); ok {
+			dry[file] = kubeconfig
+			return "configured (server dry run)", 0, nil
+		}
+		return kube(ctx, dir, env, name, args...)
+	}
+}
+
+// planDryRunOf reads a call as the plan's server-side dry run of a file, and the
+// kubeconfig it carries; ok is false for any other call.
+func planDryRunOf(name string, args []string) (file, kubeconfig string, ok bool) {
+	if name != "kubectl" || len(args) != 6 || args[0] != "--kubeconfig" ||
+		args[2] != "apply" || args[3] != "--dry-run=server" || args[4] != "-f" {
+		return "", "", false
+	}
+	return args[5], args[1], true
 }
 
 // planGetOf reads a call as the drift read's get: its resource and namespace, empty
@@ -967,14 +1046,14 @@ func (*planFatalRecorder) Helper() {}
 func (r *planFatalRecorder) Fatalf(format string, args ...any) { r.msg = fmt.Sprintf(format, args...) }
 
 // TestClusterShapePlanStaticDiffersKeepsPhasePFakeRefusesNonGet: the shared fake
-// fails a call that is not the drift read's get, so a plan reaching the cluster
-// any other way cannot pass the tests built on it.
+// fails a call that is neither the drift read's get nor a server-side dry run, so
+// a plan reaching the cluster any other way cannot pass the tests built on it.
 func TestClusterShapePlanStaticDiffersKeepsPhasePFakeRefusesNonGet(t *testing.T) {
 	t.Parallel()
 	rec := &planFatalRecorder{}
 	kube := planKubectlReading(rec, planStaticLive(t), planRevisionAnswer(t))
 	out, code, err := kube(context.Background(), "", nil, "kubectl", "apply", "-f", "-")
-	if want := `the plan ran kubectl ["apply" "-f" "-"], want only a get`; rec.msg != want {
+	if want := `the plan ran kubectl ["apply" "-f" "-"], want only a get or a server-side dry run`; rec.msg != want {
 		t.Fatalf("the fake refused with %q, want %q", rec.msg, want)
 	}
 	if out != "" || code != 0 || err != nil {
@@ -1545,12 +1624,11 @@ func TestClusterShapePlanLiveAbsent(t *testing.T) {
 	}
 }
 
-// TestClusterShapePlanLiveGetOnly: every cluster call the plan makes is a get. The
-// runner records each kubectl call and fails any that is not a get, so an apply,
-// patch, delete or dry run would be caught. A Deployment present, absent or
-// unreadable makes no other call, and each ends with the outcome its read names;
-// the static objects are read with gets of their own.
-func TestClusterShapePlanLiveGetOnly(t *testing.T) {
+// TestClusterShapePlanLiveGetOrDryRun: every cluster call the plan makes is a get
+// or a server-side dry run, and the runner fails any that is neither, so an apply,
+// a patch or a delete would be caught. A Deployment present, absent or unreadable
+// makes no other call, and each ends with the outcome its read names.
+func TestClusterShapePlanLiveGetOrDryRun(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
@@ -1569,7 +1647,11 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 			var calls []string
 			kube := func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 				calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+				if _, _, ok := planDryRunOf(name, args); ok {
+					return "configured (server dry run)", 0, nil
+				}
 				if name != "kubectl" || len(args) < 2 || args[0] != "get" {
+					t.Errorf("the plan made cluster call %q, want only a get or a server-side dry run", calls[len(calls)-1])
 					return "", 1, errors.New("planted non-get call: " + name + " " + strings.Join(args, " "))
 				}
 				return tc.answer(args[1])
@@ -1590,11 +1672,6 @@ func TestClusterShapePlanLiveGetOnly(t *testing.T) {
 			}
 			if len(calls) == 0 {
 				t.Fatal("the plan made no cluster call, so the read was never exercised")
-			}
-			for _, c := range calls {
-				if !strings.HasPrefix(c, "kubectl get ") {
-					t.Errorf("the plan made cluster call %q, want only a get", c)
-				}
 			}
 		})
 	}
