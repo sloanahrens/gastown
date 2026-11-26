@@ -87,6 +87,8 @@ func workspaceRefusal(err error) (int, string) {
 		return http.StatusBadRequest, "workspace_no_files"
 	case errors.Is(err, ErrWorkspaceManifestMismatch):
 		return http.StatusBadRequest, "workspace_manifest_mismatch"
+	case errors.Is(err, ErrWorkspaceExternalProject):
+		return http.StatusBadRequest, "workspace_external_project_refused"
 	case errors.Is(err, ErrWorkspaceLiveTreeLost):
 		return http.StatusInternalServerError, "workspace_live_tree_lost"
 	case errors.Is(err, ErrWorkspaceLockTimeout):
