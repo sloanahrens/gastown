@@ -278,6 +278,102 @@ func TestLandingWorkerParksABeadWhoseCommentsCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWorkerProcessWithStoredOnly pins processWith's stored-only pass
+// (gt-t3fgce): with storedOnly true the landing carries StoredOnly, so Land
+// consumes the bead's stored review, and the recorded-landing repair is left to
+// the ready pass even though the landings file holds a record the remote
+// contains; processWith writes no outcome memo, so a bead its landing left held
+// is read again by the next ready pass. With storedOnly false the landing
+// carries StoredOnly false and nothing about today's call changes.
+func TestReviewPoolWorkerProcessWithStoredOnly(t *testing.T) {
+	t.Parallel()
+
+	// repairRecord is a landing of the seeded bead the remote holds: the ready
+	// pass repairs such a bead instead of landing it again.
+	repairRecord := func(h *harness) {
+		h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Rig: "gastown", Branch: branch,
+			Head: "a932cb5a", Target: "main", LandedCommit: "6db29a35"}}
+		h.remote.contains["6db29a35"] = true
+	}
+
+	t.Run("stored only leaves the recorded landing alone", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.seedReady(t, "gt-abc")
+		repairRecord(h)
+		issue, err := h.bd.Show("gt-abc")
+		if err != nil {
+			t.Fatalf("reading the seeded bead: %v", err)
+		}
+
+		rep := Report{}
+		h.w.processWith(context.Background(), issue, &rep, true)
+
+		if len(h.lander.calls) != 1 {
+			t.Fatalf("landed %d times; want once: a stored-only pass lands the bead's submission", len(h.lander.calls))
+		}
+		got := h.lander.calls[0]
+		if !got.StoredOnly {
+			t.Fatalf("the landing carries StoredOnly false; want true, so Land consumes the stored review")
+		}
+		if got.Head != tipHead {
+			t.Fatalf("the landing took head %s; want the submitted tip %s: a stored-only pass leaves the earlier landing's record to the ready pass", got.Head, tipHead)
+		}
+		if len(h.w.pendingRepair) != 0 {
+			t.Fatalf("the pass left %d pending repairs; want none: the repair branch is the ready pass's", len(h.w.pendingRepair))
+		}
+		if want := (Report{Landed: 1}); rep != want {
+			t.Fatalf("report = %+v; want %+v", rep, want)
+		}
+	})
+
+	t.Run("stored only writes no outcome memo", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.seedReady(t, "gt-abc")
+		// A landing that leaves the bead held: the ready pass records that hold
+		// in the outcome memo, and a stored-only pass must not.
+		h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, land.ErrNotReady }
+		issue, err := h.bd.Show("gt-abc")
+		if err != nil {
+			t.Fatalf("reading the seeded bead: %v", err)
+		}
+
+		rep := Report{}
+		h.w.processWith(context.Background(), issue, &rep, true)
+
+		if want := (Report{Skipped: 1}); rep != want {
+			t.Fatalf("report = %+v; want %+v", rep, want)
+		}
+		if h.w.outcomeMemo().held("gt-abc", issue.UpdatedAt) {
+			t.Fatalf("the pass recorded an outcome memo for gt-abc; want none: the memo is landReady's")
+		}
+	})
+
+	t.Run("not stored only carries StoredOnly false", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.seedReady(t, "gt-abc")
+		issue, err := h.bd.Show("gt-abc")
+		if err != nil {
+			t.Fatalf("reading the seeded bead: %v", err)
+		}
+
+		rep := Report{}
+		h.w.processWith(context.Background(), issue, &rep, false)
+
+		if len(h.lander.calls) != 1 {
+			t.Fatalf("landed %d times; want once", len(h.lander.calls))
+		}
+		if h.lander.calls[0].StoredOnly {
+			t.Fatalf("the landing carries StoredOnly true; want false for today's process")
+		}
+		if want := (Report{Landed: 1}); rep != want {
+			t.Fatalf("report = %+v; want %+v", rep, want)
+		}
+	})
+}
+
 // TestReviewPoolWorkerPoolDefaultsNil pins that the harness Worker leaves Pool
 // nil and that a pass over two ready beads still lands both with today's
 // report: the field is storage for later beads, and a nil pool changes nothing

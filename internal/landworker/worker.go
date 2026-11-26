@@ -910,6 +910,16 @@ func (w *Worker) recordSubmission(work land.Work) {
 
 // process resolves what to land for issue and lands it.
 func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
+	w.processWith(ctx, issue, rep, false)
+}
+
+// processWith resolves what to land for issue and lands it. storedOnly marks the
+// landing as a stored-only pass: it consumes the bead's stored review in place of
+// running om (land.Work.StoredOnly), and the recorded-landing repair is left to
+// the ready pass — a stored-only pass lands what the bead asks for now, never
+// finishes an earlier landing's record. It touches neither the ready pass's
+// handled set nor rememberOutcome, which belong to landReady (gt-t3fgce).
+func (w *Worker) processWith(ctx context.Context, issue *beads.Issue, rep *Report, storedOnly bool) {
 	if w.Active != nil {
 		w.Active(issue.ID)
 		defer w.Active("")
@@ -931,22 +941,26 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	}
 
 	// A landing already on the target with an incomplete record is repaired,
-	// never landed twice, whatever the branch holds now.
-	if rec, found, err := w.Landings.LatestForBead(issue.ID); err != nil {
-		w.infraFailure(issue.ID, "reading the landings file", err, rep)
-		return
-	} else if found && !resubmittedAfter(issue.Notes, rec.LandedCommit) {
-		on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
-		if err != nil {
-			w.infraFailure(issue.ID, "checking a recorded landing", err, rep)
+	// never landed twice, whatever the branch holds now. A stored-only pass
+	// leaves the repair to the ready pass, and so reads no landing record: it
+	// lands the submission the bead carries now (gt-t3fgce).
+	if !storedOnly {
+		if rec, found, err := w.Landings.LatestForBead(issue.ID); err != nil {
+			w.infraFailure(issue.ID, "reading the landings file", err, rep)
 			return
-		}
-		if on {
-			w.logf("%s: already landed as %s; repairing its record only", issue.ID, short(rec.LandedCommit))
-			work := workFromRecord(rec, issue)
-			w.pendingRepair[issue.ID] = work
-			w.landOne(ctx, work, rep)
-			return
+		} else if found && !resubmittedAfter(issue.Notes, rec.LandedCommit) {
+			on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
+			if err != nil {
+				w.infraFailure(issue.ID, "checking a recorded landing", err, rep)
+				return
+			}
+			if on {
+				w.logf("%s: already landed as %s; repairing its record only", issue.ID, short(rec.LandedCommit))
+				work := workFromRecord(rec, issue)
+				w.pendingRepair[issue.ID] = work
+				w.landOne(ctx, work, rep)
+				return
+			}
 		}
 	}
 
@@ -988,6 +1002,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	work.Agent = w.seatAgent(work.Worker)
 	work.Priority = w.beadPriority(issue.ID)
 	work.SPEstimate, work.SPMinutes, work.SPSlung = w.beadSPLabels(issue.ID)
+	work.StoredOnly = storedOnly
 	w.landOne(ctx, work, rep)
 }
 
