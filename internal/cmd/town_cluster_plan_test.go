@@ -392,6 +392,117 @@ func TestClusterShapePlanDryRunReturnsEachFilesResult(t *testing.T) {
 	}
 }
 
+// TestClusterShapePlanDryRunResultIsRecordedPerFile: plan.json holds each listed
+// file's own server-side dry-run output, so the record says what the cluster's dry
+// run of that file said.
+func TestClusterShapePlanDryRunResultIsRecordedPerFile(t *testing.T) {
+	t.Parallel()
+	dir := planOut(t)
+	gets := planKubectl(t)
+	kube := func(ctx context.Context, cwd string, env []string, name string, args ...string) (string, int, error) {
+		if file, _, ok := planDryRunOf(name, args); ok {
+			return "dry run of " + filepath.Base(file) + ": configured (server dry run)", 0, nil
+		}
+		return gets(ctx, cwd, env, name, args...)
+	}
+	if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, io.Discard, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+		t.Fatalf("running the plan: %v", err)
+	}
+	rec, _ := readPlanRecord(t, dir)
+	if len(rec.Files) == 0 {
+		t.Fatal("plan.json lists no file, so no dry-run result was recorded")
+	}
+	seen := map[string]bool{}
+	for _, rf := range rec.Files {
+		want := "dry run of " + rf.Name + ": configured (server dry run)"
+		if rf.DryRun != want {
+			t.Errorf("plan.json dry_run for %s = %q, want its own dry run's output %q", rf.Name, rf.DryRun, want)
+		}
+		seen[rf.Name] = true
+	}
+	if len(seen) != len(rec.Files) {
+		t.Fatalf("plan.json lists %d files but %d distinct names, so a result cannot be told apart", len(rec.Files), len(seen))
+	}
+}
+
+// TestClusterShapePlanDryRunFailureWritesNoPlan: a server-side dry run that fails
+// for any file ends the plan non-zero, prints no id and writes no plan.json.
+func TestClusterShapePlanDryRunFailureWritesNoPlan(t *testing.T) {
+	t.Parallel()
+	dir, out := planOut(t), &bytes.Buffer{}
+	gets := planKubectl(t)
+	failed := ""
+	kube := func(ctx context.Context, cwd string, env []string, name string, args ...string) (string, int, error) {
+		if file, _, ok := planDryRunOf(name, args); ok {
+			if failed == "" {
+				failed = filepath.Base(file)
+			}
+			return "error: forbidden: cannot apply", 1, nil
+		}
+		return gets(ctx, cwd, env, name, args...)
+	}
+	err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+	if err == nil || !strings.Contains(err.Error(), "kubectl exited 1") || !strings.Contains(err.Error(), failed) {
+		t.Fatalf("runTownClusterPlan = %v, want a failed dry run of %s naming kubectl's exit", err, failed)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a plan whose dry run failed printed %q, want no id", out.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("plan.json exists after a failed dry run (stat error %v), want none written", statErr)
+	}
+}
+
+// TestClusterShapePlanDryRunLeavesAnEarlierPlanStanding: a plan.json an earlier run
+// left in --out is not replaced or presented as this run's when a dry run fails.
+// The plan writes plan.json last, after every dry run passed, so a failing run
+// writes none and the earlier record is exactly as the earlier run left it.
+func TestClusterShapePlanDryRunLeavesAnEarlierPlanStanding(t *testing.T) {
+	t.Parallel()
+	earlier := []byte(`{"id":"an earlier run's plan","files":[]}`)
+	dir := planOut(t)
+	d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+	write := d.writeFile
+	placed := false
+	// The render refuses a non-empty --out before it writes, so the earlier record
+	// is placed by the render's first write: it is in the directory, as one an
+	// earlier run left, while this run's dry runs run.
+	d.writeFile = func(path string, data []byte) error {
+		if !placed {
+			placed = true
+			if err := os.WriteFile(filepath.Join(dir, planFileName), earlier, 0o644); err != nil {
+				return err
+			}
+		}
+		return write(path, data)
+	}
+	gets := planKubectl(t)
+	kube := func(ctx context.Context, cwd string, env []string, name string, args ...string) (string, int, error) {
+		if _, _, ok := planDryRunOf(name, args); ok {
+			return "error: forbidden", 1, nil
+		}
+		return gets(ctx, cwd, env, name, args...)
+	}
+	out := &bytes.Buffer{}
+	err := runTownClusterPlan(context.Background(), d, kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+	if err == nil || !strings.Contains(err.Error(), "kubectl exited 1") {
+		t.Fatalf("runTownClusterPlan = %v, want the failed dry run's error", err)
+	}
+	if !placed {
+		t.Fatal("the render wrote no file, so the earlier plan.json was never placed")
+	}
+	if out.Len() != 0 {
+		t.Errorf("the failed plan printed %q, want no id", out.String())
+	}
+	body, readErr := os.ReadFile(filepath.Join(dir, planFileName))
+	if readErr != nil {
+		t.Fatalf("reading the earlier plan.json: %v", readErr)
+	}
+	if !bytes.Equal(body, earlier) {
+		t.Fatalf("plan.json = %s, want the earlier run's record unchanged", body)
+	}
+}
+
 // TestClusterShapePlanKubeconfigHelpSaysItDoesNotRunInTheDaemonPod: the help text
 // says, beside the per-phase flags, that the command does not run inside the
 // daemon pod, so an operator does not expect the plan to run there.
@@ -608,7 +719,7 @@ func TestClusterShapePlanIdWritesTheFullIdAndPrintsTheShortOne(t *testing.T) {
 	static := planStaticDocs(t)
 	for i, f := range files {
 		sum := sha256.Sum256(f.Data)
-		want := planRecordFile{Name: f.Name, Phase: planWantPhase(static, f), SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f), ResourceVersion: planWantResourceVersion(t, f)}
+		want := planRecordFile{Name: f.Name, Phase: planWantPhase(static, f), SHA256: hex.EncodeToString(sum[:]), Revision: planWantRevision(t, f), ResourceVersion: planWantResourceVersion(t, f), DryRun: "configured (server dry run)"}
 		if rec.Files[i] != want {
 			t.Errorf("plan.json file %d = %+v, want %+v", i, rec.Files[i], want)
 		}
@@ -1815,9 +1926,9 @@ func TestClusterShapePlanLiveGetOrDryRun(t *testing.T) {
 // TestClusterShapePlanLongText: the command's help says the plan reads the
 // cluster's Deployments and the static objects with get only and writes nothing
 // to any cluster, says it prints the drift compare's lines after the phases, says
-// a phase P file is listed only when a static object differs, says a Secret is
-// compared on its declared fields and never on its data, and no longer says that
-// no cluster is contacted.
+// a failed dry run writes no plan.json, says a phase P file is listed only when a
+// static object differs, says a Secret is compared on its declared fields and
+// never on its data, and no longer says that no cluster is contacted.
 func TestClusterShapePlanLongText(t *testing.T) {
 	t.Parallel()
 	long := strings.Join(strings.Fields(townClusterPlanCmd.Long), " ")
@@ -1829,6 +1940,9 @@ func TestClusterShapePlanLongText(t *testing.T) {
 	}
 	if strings.Contains(long, "never either value") {
 		t.Errorf("Long text = %q, says no value is printed, but the compare prints a reviewed path's value", long)
+	}
+	if !strings.Contains(long, "A dry run that fails for any file ends the plan non-zero, and no plan.json is written") {
+		t.Errorf("Long text = %q, want it to say a failed dry run writes no plan.json", long)
 	}
 	if !strings.Contains(long, "phase P file is listed only when a static object differs") {
 		t.Errorf("Long text = %q, want it to say a phase P file is listed only when a static object differs", long)
