@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // doctorRecorderDaemon is a daemon whose doctor_dog patrol is on and whose
@@ -78,9 +80,9 @@ func TestPatrolLastRunRecordersDoctorDog(t *testing.T) {
 }
 
 // overseerRecorderDaemon is a daemon on the package's fixture town whose
-// overseer_report patrol is as given, with the fixture's report sources: no
-// live store, seat or health read is made.
-func overseerRecorderDaemon(t *testing.T, enabled bool) *Daemon {
+// overseer_report patrol is as given, on the given fake clock, with the
+// fixture's report sources: no live store, seat or health read is made.
+func overseerRecorderDaemon(t *testing.T, enabled bool, clock clockwork.Clock) *Daemon {
 	t.Helper()
 	w := newOverseerWorld(t, "2026-10-14T20:15:00Z")
 	return &Daemon{
@@ -90,6 +92,7 @@ func overseerRecorderDaemon(t *testing.T, enabled bool) *Daemon {
 			OverseerReport: &OverseerReportConfig{Enabled: enabled},
 		}},
 		overseerReportSeams: w.seams(),
+		clock:               clock,
 	}
 }
 
@@ -101,11 +104,11 @@ func TestPatrolLastRunRecordersOverseerReportAndHMSync(t *testing.T) {
 
 	t.Run("an overseer_report run records a run", func(t *testing.T) {
 		t.Parallel()
-		d := overseerRecorderDaemon(t, true)
+		clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 6, 45, 0, 0, time.UTC))
+		d := overseerRecorderDaemon(t, true, clock)
 
-		before := time.Now()
 		d.runOverseerReport()
-		after := time.Now()
+		want := clock.Now()
 
 		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
 		if err != nil {
@@ -115,14 +118,15 @@ func TestPatrolLastRunRecordersOverseerReportAndHMSync(t *testing.T) {
 		if !ok {
 			t.Fatal("overseer_report recorded no run; gt jobs reads it as never_run")
 		}
-		if got.Before(before) || got.After(after) {
-			t.Errorf("overseer_report last run = %v, want a time within the run (%v..%v)", got, before, after)
+		if !got.Equal(want) {
+			t.Errorf("overseer_report last run = %v, want the fake clock's instant %v", got, want)
 		}
 	})
 
 	t.Run("a disabled overseer_report records no run", func(t *testing.T) {
 		t.Parallel()
-		d := overseerRecorderDaemon(t, false)
+		clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 6, 45, 0, 0, time.UTC))
+		d := overseerRecorderDaemon(t, false, clock)
 
 		d.runOverseerReport()
 
