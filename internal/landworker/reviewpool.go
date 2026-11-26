@@ -24,8 +24,9 @@ type AheadHints interface {
 // a verdict instead of running om inline. Offer starts the reviews, up to Max
 // at once, where a Max below 1 counts as 1; Wait returns when none is running.
 //
-// Begin, End and Hints are stored here and not yet read: the begin and end
-// hooks and the hint check land with the beads that use them.
+// Begin, when set, reports whether a review may start: false means a landing
+// hold or drain is on. End and Hints are stored here and not yet read: the end
+// hook and the hint check land with the beads that use them.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -57,37 +58,53 @@ type aheadRun struct {
 // nothing is started in its place until the pool is offered the list again.
 // Nothing is started when no Reviewer is set, so every
 // submission is a miss and the landing runs om inline.
+//
+// A refused Begin means a landing hold or drain is on (gt-vb9qod): the call
+// starts nothing more and asks no further Begin, while a work at a head its
+// seat has replaced still has its stale review canceled.
 func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 	if p.Reviewer == nil {
 		p.logf("ahead review: no reviewer set; %d submissions not reviewed ahead", len(works))
 		return
 	}
+	starts := true
 	for _, w := range works {
-		p.start(ctx, w)
+		if !p.start(ctx, w, starts) {
+			starts = false
+		}
 	}
 }
 
-// start registers w as running and launches its review, unless w's bead already
-// has one running or the pool is at Max. A bead running at another head is
-// reviewed at a head its seat has replaced, so that review is canceled (om ends
-// with its process group) and the new head is left for the next Offer
-// (gt-sor91y). The running check comes before the cap: a full pool still
-// cancels a stale review. Everything is checked under p.mu so two Offers racing
-// cannot both start a review on the same free slot.
-func (p *ReviewPool) start(ctx context.Context, w land.Work) {
+// start handles one work. A bead running at another head is reviewed at a head
+// its seat has replaced, so that review is canceled (om ends with its process
+// group) and the new head is left for the next Offer (gt-sor91y); the running
+// check comes before the cap, so a full pool still cancels a stale review, and
+// it comes before a hold, so a hold never leaves a stale review running. With
+// starts false the call only reaches that cancel and begins nothing else.
+//
+// A review certain to start asks Begin, when set, with p.mu held: no other
+// Offer can take the slot in between, so a true Begin never outlives the review
+// that owes its End. Begin false means a landing hold or drain is on (gt-vb9qod):
+// start returns false with nothing started and no End owed. Everything is
+// decided under p.mu so two Offers racing cannot both start a review on the same
+// free slot.
+func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if run, ok := p.running[w.BeadID]; ok {
 		if run.head == w.Head || run.canceled {
-			return
+			return true
 		}
 		run.canceled = true
 		run.cancel()
 		p.logf("ahead review of %s at %s: canceled, the bead is now at %s", w.BeadID, run.head, w.Head)
-		return
+		return true
 	}
-	if p.free() == 0 {
-		return
+	if !starts || p.free() == 0 {
+		return true
+	}
+	if p.Begin != nil && !p.Begin() {
+		return false
 	}
 	if p.running == nil {
 		p.running = map[string]*aheadRun{}
@@ -96,6 +113,7 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work) {
 	run := &aheadRun{head: w.Head, cancel: cancel, done: make(chan struct{})}
 	p.running[w.BeadID] = run
 	go p.review(rctx, w, run)
+	return true
 }
 
 // review makes one review under the child of ctx that start made. The entry
