@@ -26,6 +26,15 @@ type Target interface {
 	WaitReady(ctx context.Context) error
 }
 
+// Verifier is an optional Target interface: a target that checks the live town
+// after it is ready. Run calls Verify after WaitReady succeeds and before it
+// releases the landing hold, so a roll that cannot confirm what it applied
+// leaves the hold taken for the overseer (gt-ie1tau).
+type Verifier interface {
+	// Verify checks the live target and returns the checks it ran, one per line.
+	Verify(ctx context.Context) ([]string, error)
+}
+
 // DiffNamer is an optional Target interface: a target whose Diff compares only
 // part of what it applies names what it compared, so the roll's summary lines
 // never report a wider match than the compare made. A target without it is
@@ -68,9 +77,11 @@ type RollOptions struct {
 // to be ready, and release the hold.
 //
 // Every exit after the take releases the hold, a canceled context and a failing
-// step included; the release runs on a context the cancel does not reach. A
-// release that fails is returned unless a step already failed. A dry run takes
-// no hold, applies nothing, and prints the steps and t's diff lines.
+// step included, except a target whose Verify fails: that error is returned and
+// the hold stays taken for the overseer to restore or release. The release runs
+// on a context the cancel does not reach. A release that fails is returned
+// unless a step already failed. A dry run takes no hold, applies nothing, calls
+// no Verify, and prints the steps and t's diff lines.
 func Run(ctx context.Context, deps RollDeps, t Target, opts RollOptions) (err error) {
 	if err := checkRoll(deps, t, opts); err != nil {
 		return err
@@ -84,7 +95,12 @@ func Run(ctx context.Context, deps RollDeps, t Target, opts RollOptions) (err er
 	if err != nil {
 		return fmt.Errorf("taking the landing hold: %w", err)
 	}
+	keepHold := false
 	defer func() {
+		if keepHold {
+			// The step line would claim a release the roll did not make.
+			return
+		}
 		fmt.Fprintf(deps.Out, "step 5/5: %s\n", opts.Step(5))
 		if rerr := releaseHold(ctx, deps, hold); rerr != nil && err == nil {
 			err = rerr
@@ -107,6 +123,17 @@ func Run(ctx context.Context, deps RollDeps, t Target, opts RollOptions) (err er
 	}
 	if err := t.WaitReady(ctx); err != nil {
 		return fmt.Errorf("waiting for the %s to be ready: %w", t.Name(), err)
+	}
+	if v, ok := t.(Verifier); ok {
+		lines, err := v.Verify(ctx)
+		if err != nil {
+			keepHold = true
+			fmt.Fprintf(deps.Out, "verifying the %s failed, so the landing hold stays taken until the overseer restores or releases it\n", t.Name())
+			return fmt.Errorf("verifying the %s: %w", t.Name(), err)
+		}
+		for _, line := range lines {
+			fmt.Fprintln(deps.Out, line)
+		}
 	}
 	return nil
 }
