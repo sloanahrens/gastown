@@ -11,7 +11,9 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -364,6 +366,105 @@ func TestBookQueuePanicIsLogged(t *testing.T) {
 		t.Errorf("the panicking job logged twice; the second entry is %q", second)
 	default:
 	}
+}
+
+// waitDrained runs wait until it returns, failing the test when ctx's bound
+// passes first, so a Wait that never returns fails by name.
+func waitDrained(t *testing.T, ctx context.Context, wait func(context.Context) error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- wait(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		t.Fatalf("Wait did not return within the test's bound: %v", ctx.Err())
+		return ctx.Err()
+	}
+}
+
+// TestBookQueueOverdue: a job still running past bookJobBound is reported once
+// with its bead, and a job that ends within the bound is not reported at all
+// (gt-2hqjbi).
+func TestBookQueueOverdue(t *testing.T) {
+	t.Parallel()
+	epoch := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a job held past the bound is reported once with its bead", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		clk := clockwork.NewFakeClockAt(epoch)
+		var q BookQueue
+		q.Clock = clk
+		logged := make(chan string, 4)
+		q.Logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
+
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		// Release the job however the test ends, so the queue's drain finishes.
+		t.Cleanup(releaseJob)
+		q.Add("gt-hung", func() { close(started); hold(ctx, release) })
+		recvBounded(t, ctx, started, "the job starting")
+
+		// The drain waits on the clock for the bound, so advancing before it
+		// does reports nothing.
+		if err := clk.BlockUntilContext(ctx, 1); err != nil {
+			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
+		}
+		clk.Advance(bookJobBound)
+
+		entry := recvBounded(t, ctx, logged, "the report for the job held past the bound")
+		if !strings.Contains(entry, "gt-hung") {
+			t.Errorf("the report %q does not name the bead gt-hung", entry)
+		}
+
+		releaseJob()
+		if err := waitDrained(t, ctx, q.Wait); err != nil {
+			t.Fatalf("Wait after the job ended = %v, want nil", err)
+		}
+		select {
+		case second := <-logged:
+			t.Errorf("the job was reported a second time: %q", second)
+		default:
+		}
+	})
+
+	t.Run("a job that ends within the bound reports nothing", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		clk := clockwork.NewFakeClockAt(epoch)
+		var q BookQueue
+		q.Clock = clk
+		logged := make(chan string, 1)
+		q.Logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
+
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		// Release the job however the test ends, so the queue's drain finishes.
+		t.Cleanup(releaseJob)
+		q.Add("gt-quick", func() { close(started); hold(ctx, release) })
+		recvBounded(t, ctx, started, "the job starting")
+
+		// Move the clock to just short of the bound while the job is still
+		// running: the drain waits on the clock for the bound, and a job that
+		// ends before the timer fires is never reported.
+		if err := clk.BlockUntilContext(ctx, 1); err != nil {
+			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
+		}
+		clk.Advance(bookJobBound - 1)
+
+		releaseJob()
+		if err := waitDrained(t, ctx, q.Wait); err != nil {
+			t.Fatalf("Wait after the job ended = %v, want nil", err)
+		}
+		select {
+		case got := <-logged:
+			t.Errorf("a job that ended within the bound was reported: %q", got)
+		default:
+		}
+	})
 }
 
 // lockedBuffer keeps a log.Logger's output readable while the drain goroutine
