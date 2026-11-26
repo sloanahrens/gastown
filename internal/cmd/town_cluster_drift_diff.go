@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
@@ -450,6 +451,32 @@ func driftFingerprint(value any) (string, error) {
 	}
 	sum := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(sum[:])[:driftFingerprintHexLen], nil
+}
+
+// driftReadableLimit bounds what a drift line prints of one value: its compact
+// JSON, at most this many bytes, ellipsis included.
+const driftReadableLimit = 200
+
+// driftReadableEllipsis marks a value cut at driftReadableLimit.
+const driftReadableEllipsis = "..."
+
+// driftReadableValue returns value as compact JSON for a drift line: the whole
+// JSON when it fits driftReadableLimit, else its leading bytes and an ellipsis.
+// The cut backs off to a rune boundary so the text stays valid UTF-8. A value
+// with no JSON is refused: an empty string would read as a value that printed.
+func driftReadableValue(value any) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("the value has no JSON to print: %w", err)
+	}
+	if len(encoded) <= driftReadableLimit {
+		return string(encoded), nil
+	}
+	cut := driftReadableLimit - len(driftReadableEllipsis)
+	for !utf8.RuneStart(encoded[cut]) {
+		cut--
+	}
+	return string(encoded[:cut]) + driftReadableEllipsis, nil
 }
 
 // driftPodSpecPath is where a Deployment's pod spec sits, the root of every
