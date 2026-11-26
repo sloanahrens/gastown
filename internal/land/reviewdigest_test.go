@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -86,6 +87,66 @@ func TestVerdictReuseExpectedFlagsMatchArgvMinimal(t *testing.T) {
 	slices.Sort(want)
 	if got := ExpectedReviewFlags(in, 0); !slices.Equal(got, want) {
 		t.Errorf("ExpectedReviewFlags() = %q, want the argv's flags %q", got, want)
+	}
+}
+
+// TestVerdictReuseExpectedFlagsMatchArgv pins ExpectedReviewFlags to the argv a
+// review was actually run with and to the Flags its verdict recorded, over the
+// inputs a landing varies: the full input, then the same input with the prior
+// findings, the bar and the round each cleared. A flag ExpectedReviewFlags
+// claims that the argv lacks, or an argv flag it omits, makes an ahead review
+// look degraded and throws the stored verdict away (gt-ya9uw8).
+func TestVerdictReuseExpectedFlagsMatchArgv(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	const criteria = "- [ ] the review tool runs"
+	const accepted = "risk: a stale cache is accepted"
+	prior := []Finding{{ID: "gt-abc.1", Severity: "major", Path: "internal/land/x.go", Line: 9, Title: "x"}}
+	for _, tc := range []struct {
+		name  string
+		prior []Finding
+		round int
+		bar   float64
+	}{
+		{"full input", prior, 1, 0.7},
+		{"no prior findings", nil, 1, 0.7},
+		{"bar 0", prior, 1, 0},
+		{"round 0", prior, 0, 0.7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The bar the review is held to is the base commit's .om.json, so
+			// the base carries the row's bar and the check below is given the
+			// same value the review read.
+			omJSON := ""
+			if tc.bar > 0 {
+				omJSON = fmt.Sprintf(`{"threshold":%v}`, tc.bar)
+			}
+			issue := &beads.Issue{ID: "gt-abc", AcceptanceCriteria: criteria}
+			in := BuildReviewInput(issue, nil, op, accepted, "[]", "base", "head", "polecat/x/gt-abc", t.TempDir(), baseRepo{omJSON: omJSON})
+			in.BriefText = "# Work item\n"
+			in.PolicyText = "# Landing policy"
+			in.PriorFindings = tc.prior
+			in.Round = tc.round
+			stub := &contextOM{t: t, help: omHelpWithEveryFlag}
+			r := OMReviewer{OutDir: t.TempDir(), run: stub.run}
+			v, err := r.ReviewBead(context.Background(), in)
+			if err != nil {
+				t.Fatalf("ReviewBead: %v", err)
+			}
+			if stub.argv == nil {
+				t.Fatal("om was never run")
+			}
+			want := flagNames(stub.argv)
+			slices.Sort(want)
+			got := ExpectedReviewFlags(in, tc.bar)
+			if !slices.Equal(got, want) {
+				t.Errorf("ExpectedReviewFlags() = %q, want the argv's flags %q", got, want)
+			}
+			if !slices.Equal(got, v.Flags) {
+				t.Errorf("ExpectedReviewFlags() = %q, want the verdict's flags %q", got, v.Flags)
+			}
+		})
 	}
 }
 
