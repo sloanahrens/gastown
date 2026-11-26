@@ -175,9 +175,12 @@ SHA-256 and server-side dry-run output, and the revision the cluster holds for
 each Deployment; a Deployment the cluster does not hold is recorded absent, with
 no revision. A dry run that fails for any file ends the plan non-zero, and no
 plan.json is written. A plan holding a Secret document deploy/k8s does not review
-is refused the same way, since Secrets stay operator-created. A phase P file is
-listed only when a static object differs from the cluster's, and then the id names
-it too. A plan that fails before that leaves no plan.json.
+is refused the same way, since Secrets stay operator-created. A plan whose only
+differences are container image digests and the gastown.dev/polecat-image
+annotation is refused, naming the gt-update Job (Role gt-update) that rolls an
+image; revisit that refusal after the first five deployer applies. A phase P file
+is listed only when a static object differs from the cluster's, and then the id
+names it too. A plan that fails before that leaves no plan.json.
 
 Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
 the deployer-policy certificate, and phase W --apply-kubeconfig, the
@@ -213,6 +216,22 @@ func planRevisionIsNumber(revision string) bool {
 	return err == nil && n > 0
 }
 
+// planLiveDeployment is one rendered file read against the cluster: its kind,
+// the revision and resourceVersion a Deployment holds, whether the cluster lacks
+// it, the drift compare's lines for the rendered fields that differ, and the two
+// objects the compare read. A file of another kind carries its kind alone, since
+// the plan reads Deployments only; Rendered and Live are set only for a
+// Deployment the cluster holds.
+type planLiveDeployment struct {
+	Kind            string
+	Revision        string
+	ResourceVersion string
+	Absent          bool
+	Lines           []string
+	Rendered        map[string]any
+	Live            map[string]any
+}
+
 // planLiveVersions reads the Deployment a rendered file names with one get
 // through the drift command's read: the revision and resourceVersion the cluster
 // holds for it, as the annotation and the metadata read, beside the drift
@@ -222,20 +241,21 @@ func planRevisionIsNumber(revision string) bool {
 // with no revision annotation, a revision that is not a positive whole number, no
 // resourceVersion, or an answer that is no object at all, is an error: an empty
 // or unreadable value would let a later apply pass as unchanged.
-func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (revision, resourceVersion string, absent bool, lines []string, err error) {
+func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (planLiveDeployment, error) {
 	// The file's own fields are the rendered side of the compare, decoded as the
 	// drift compare decodes a rendered object, so the lines name the fields the
 	// apply would change.
 	var rendered map[string]any
 	if err := yaml.Unmarshal(body, &rendered); err != nil {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
 	}
 	kind, ok := rendered["kind"].(string)
 	if !ok {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: a rendered file has no kind to read, so no plan was written")
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: a rendered file has no kind to read, so no plan was written")
 	}
+	read := planLiveDeployment{Kind: kind}
 	if kind != "Deployment" {
-		return "", "", false, nil, nil
+		return read, nil
 	}
 	metadata, _ := rendered["metadata"].(map[string]any)
 	name, _ := metadata["name"].(string)
@@ -243,33 +263,38 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (re
 	resource := "deployment/" + name
 	live, absent, err := readLiveObject(ctx, clusterDriftDeps{kubectl: kube}, resource, namespace, false)
 	if err != nil {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
 	if absent {
-		return "", "", true, nil, nil
+		read.Absent = true
+		return read, nil
 	}
 	diff, err := objectDrift(kind, rendered, live)
 	if err != nil {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: cannot compare %s with its live object, so no plan was written: %w", resource, err)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: cannot compare %s with its live object, so no plan was written: %w", resource, err)
 	}
 	liveMetadata, _ := live["metadata"].(map[string]any)
 	annotations, _ := liveMetadata["annotations"].(map[string]any)
-	revision, _ = annotations[planRevisionAnnotation].(string)
+	revision, _ := annotations[planRevisionAnnotation].(string)
 	if revision == "" {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, namespace)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, namespace)
 	}
 	if !planRevisionIsNumber(revision) {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has revision %q, which is not a positive whole number, so no plan was written", resource, namespace, revision)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: %s in %s has revision %q, which is not a positive whole number, so no plan was written", resource, namespace, revision)
 	}
-	resourceVersion, _ = liveMetadata["resourceVersion"].(string)
+	resourceVersion, _ := liveMetadata["resourceVersion"].(string)
 	if resourceVersion == "" {
-		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, namespace)
+		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, namespace)
 	}
-	lines = make([]string, len(diff))
+	read.Revision = revision
+	read.ResourceVersion = resourceVersion
+	read.Lines = make([]string, len(diff))
 	for i, line := range diff {
-		lines[i] = planDiffLine(resource, line)
+		read.Lines[i] = planDiffLine(resource, line)
 	}
-	return revision, resourceVersion, false, lines, nil
+	read.Rendered = rendered
+	read.Live = live
+	return read, nil
 }
 
 // planDiffLine is one line the plan prints after the phases: the resource the
@@ -375,7 +400,10 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // are read, since Secrets stay operator-created (gt-8bck5o). Every Secret the
 // Deployments mount is then checked with internal/secretpreflight under the apply
 // kubeconfig: a missing one refuses the plan by name, a read it could not judge
-// is an error, never a missing Secret (gt-ettl5f). The differences
+// is an error, never a missing Secret (gt-ettl5f). A plan whose only differences
+// are container images and the polecat-image annotation is refused, naming the
+// update Job that rolls an image, since an apply the plan drives would be a roll
+// with no wait and no record (gt-s3vqzy). The differences
 // print after the phases, the static objects' then each Deployment's in apply
 // order, and the short id is the last line. plan.json is written only after every
 // read succeeds and every dry run passed, and the output only after it is
@@ -448,6 +476,11 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	files := make([]planFile, 0, len(names))
 	record := planRecord{Files: make([]planRecordFile, 0, len(names))}
 	counts := map[string]int{}
+	// deployments counts the phase W Deployments and comparable the ones the
+	// compare found no difference in; rolls counts the comparable ones whose
+	// images differ. The plan compares no other workload kind, so the refusal
+	// needs every Deployment comparable and every static object untouched.
+	var deployments, comparable, rolls int
 	for i, name := range names {
 		phase := planPhaseWorkloads
 		if staticDocs[string(bodies[i])] {
@@ -460,13 +493,33 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 		files = append(files, planFile{Name: name, Data: bodies[i]})
 		sum := sha256.Sum256(bodies[i])
-		revision, resourceVersion, absent, lines, err := planLiveVersions(ctx, kube, bodies[i])
+		read, err := planLiveVersions(ctx, kube, bodies[i])
 		if err != nil {
 			return err
 		}
-		differences = append(differences, lines...)
+		differences = append(differences, read.Lines...)
 		counts[phase]++
-		record.Files = append(record.Files, planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent})
+		record.Files = append(record.Files, planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: read.Revision, ResourceVersion: read.ResourceVersion, Absent: read.Absent})
+		if phase != planPhaseWorkloads || read.Kind != "Deployment" {
+			continue
+		}
+		deployments++
+		if read.Absent || len(read.Lines) > 0 {
+			continue
+		}
+		comparable++
+		roll, err := planImageRollDiffers(read.Rendered, read.Live)
+		if err != nil {
+			return fmt.Errorf("gt town cluster plan: cannot compare the images %s names with the cluster's, so no plan.json was written: %w", name, err)
+		}
+		if roll {
+			rolls++
+		}
+	}
+	// The update Job owns an image roll, with the waits and the record an apply
+	// does not reach, so a plan holding nothing but a roll refuses (gt-s3vqzy).
+	if !differs && rolls > 0 && comparable == deployments {
+		return planImageRollRefusal()
 	}
 	full, short := planID(files)
 	// A phase with files but no kubeconfig flag is refused: no identity is left to fall back on.

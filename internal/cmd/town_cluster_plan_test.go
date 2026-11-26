@@ -1764,14 +1764,14 @@ func TestClusterShapePlanLiveRefusesAndWritesNoPlan(t *testing.T) {
 	}
 	t.Run("a rendered file has no readable kind", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
+		_, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: ["))
 		if err == nil || !strings.Contains(err.Error(), "cannot read a rendered file's kind") {
 			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
 	})
 	t.Run("a rendered file's kind is not a string", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, _, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: {a: b}"))
+		_, err := planLiveVersions(context.Background(), planKubectl(t), []byte("kind: {a: b}"))
 		if err == nil || !strings.Contains(err.Error(), "has no kind to read") {
 			t.Fatalf("planLiveVersions = %v, want the unreadable-kind refusal", err)
 		}
@@ -2298,4 +2298,219 @@ func TestClusterShapePlanRefuseSecretMissingRefusals(t *testing.T) {
 	if err := planSecretPreflight(context.Background(), planKubectl(t), "-x", []planMountedSecret{{namespace: "gt", name: "gt-secret"}}); err == nil || !strings.Contains(err.Error(), "starts with '-'") {
 		t.Fatalf("planSecretPreflight with a kubeconfig that is not a path = %v, want the refusal", err)
 	}
+}
+
+// planTownWithPolecatImage is planTown with a recorded render that carries the
+// polecat-image annotation, so a row compares one and rolls it.
+func planTownWithPolecatImage(t *testing.T) string {
+	t.Helper()
+	town := clusterRenderTestTown(t)
+	flags := clusterRenderFixture(t)
+	flags.polecatImage = clusterRenderPolecatDigest
+	if err := saveRenderFlags(renderFlagsPathIn(town), flags); err != nil {
+		t.Fatalf("recording the render flags: %v", err)
+	}
+	return town
+}
+
+// planTownWithDashboardImage is planTownWithPolecatImage with the dashboard
+// enabled, so the render writes two Deployments and a row can leave one absent
+// while the other rolls.
+func planTownWithDashboardImage(t *testing.T) string {
+	t.Helper()
+	town := clusterRenderTestTown(t)
+	flags := clusterRenderFixture(t)
+	flags.polecatImage = clusterRenderPolecatDigest
+	flags.dashboard = true
+	if err := saveRenderFlags(renderFlagsPathIn(town), flags); err != nil {
+		t.Fatalf("recording the render flags: %v", err)
+	}
+	return town
+}
+
+// planOldImageDigest and planOldPolecatDigest are the images a cluster one roll
+// behind the render reports: distinct from the render's, so only an image roll
+// differs.
+const (
+	planOldImageDigest   = "registry.example.test/gastown/daemon@sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
+	planOldPolecatDigest = "registry.example.test/gastown/polecat@sha256:" + "3333333333333333333333333333333333333333333333333333333333333333"
+)
+
+// planLiveContainer is the entry named name in the live Deployment document's
+// pod template list, failing the test when the document holds none.
+func planLiveContainer(t *testing.T, doc map[string]any, list, name string) map[string]any {
+	t.Helper()
+	pod := planObjectField(t, planObjectField(t, planObjectField(t, doc, "spec"), "template"), "spec")
+	entries, ok := pod[list].([]any)
+	if !ok {
+		t.Fatalf("the live Deployment's %s is %T, want a list", list, pod[list])
+	}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if ok && entry["name"] == name {
+			return entry
+		}
+	}
+	t.Fatalf("the live Deployment holds no %s entry %q", list, name)
+	return nil
+}
+
+// planRollLiveImage changes the live daemon container's image, as a cluster one
+// image roll behind the render reports it.
+func planRollLiveImage(t *testing.T, doc map[string]any) {
+	t.Helper()
+	planLiveContainer(t, doc, "containers", k8sdaemon.Name)["image"] = planOldImageDigest
+}
+
+// planRollDaemonImage is planRollLiveImage for a render holding more than one
+// Deployment: only the daemon's image moves, since the others name no container
+// called daemon.
+func planRollDaemonImage(t *testing.T, doc map[string]any) {
+	t.Helper()
+	if metadata, ok := doc["metadata"].(map[string]any); !ok || metadata["name"] != k8sdaemon.Name {
+		return
+	}
+	planRollLiveImage(t, doc)
+}
+
+// planRollLivePolecatImage changes the live pod template's polecat-image
+// annotation alone, as a live object the render no longer matches reports it.
+func planRollLivePolecatImage(t *testing.T, doc map[string]any) {
+	t.Helper()
+	template := planObjectField(t, planObjectField(t, doc, "spec"), "template")
+	metadata := planObjectField(t, template, "metadata")
+	annotations, ok := metadata["annotations"].(map[string]any)
+	if !ok {
+		annotations = map[string]any{}
+		metadata["annotations"] = annotations
+	}
+	annotations[k8sdaemon.PolecatImageAnnotation] = planOldPolecatDigest
+}
+
+// planChangeLiveEnv changes the live daemon container's town-root env var, a
+// field the drift compare reads, so the plan holds a difference that is not an
+// image roll.
+func planChangeLiveEnv(t *testing.T, doc map[string]any) {
+	t.Helper()
+	container := planLiveContainer(t, doc, "containers", k8sdaemon.Name)
+	entries, ok := container["env"].([]any)
+	if !ok {
+		t.Fatalf("the live daemon container's env is %T, want a list", container["env"])
+	}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok || entry["name"] != k8sdaemon.TownRootEnv {
+			continue
+		}
+		entry["value"] = "/planted/town"
+		return
+	}
+	t.Fatalf("the live daemon container names no %s env var", k8sdaemon.TownRootEnv)
+}
+
+// TestClusterShapePlanRefuseImageOnly: a plan whose only differences are container
+// image digests and the gastown.dev/polecat-image annotation is an image roll the
+// update Job owns, so it is refused naming the Job and the Role that runs it,
+// printing nothing and writing no plan.json. A plan that also differs in an env
+// var, whose images are in step, or that holds a static difference plans: the
+// refusal covers an image roll alone.
+func TestClusterShapePlanRefuseImageOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, doc map[string]any)
+		refuse bool
+	}{
+		{"only the image digests differ", planRollLiveImage, true},
+		{"only the polecat annotation differs", planRollLivePolecatImage, true},
+		{"the images and the polecat annotation differ", func(t *testing.T, doc map[string]any) {
+			planRollLiveImage(t, doc)
+			planRollLivePolecatImage(t, doc)
+		}, true},
+		{"an env var also differs", func(t *testing.T, doc map[string]any) {
+			planRollLiveImage(t, doc)
+			planChangeLiveEnv(t, doc)
+		}, false},
+		{"the images are in step", func(*testing.T, map[string]any) {}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, out := planOut(t), &bytes.Buffer{}
+			kube := planKubectlRendered(t, dir, planStaticLive(t), tc.mutate)
+			err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTownWithPolecatImage(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+			if !tc.refuse {
+				if err != nil {
+					t.Fatalf("running the plan: %v", err)
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, planFileName)); statErr != nil {
+					t.Fatalf("the plan wrote no plan.json: %v", statErr)
+				}
+				return
+			}
+			switch {
+			case err == nil:
+				t.Fatalf("runTownClusterPlan = nil, want an image-roll refusal naming the gt-update Job")
+			case !strings.Contains(err.Error(), "gt-update Job"):
+				t.Fatalf("the refusal = %v, want it to name the gt-update Job", err)
+			case !strings.Contains(err.Error(), "Role gt-update"):
+				t.Fatalf("the refusal = %v, want it to name the Role that runs the Job", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+			}
+		})
+	}
+	t.Run("one Deployment is absent while another rolls", func(t *testing.T) {
+		t.Parallel()
+		dir, out := planOut(t), &bytes.Buffer{}
+		base := planKubectlRendered(t, dir, planStaticLive(t), planRollDaemonImage)
+		kube := func(ctx context.Context, workdir string, env []string, name string, args ...string) (string, int, error) {
+			if resource, _, ok := planGetOf(name, args); ok && resource == "deployment/"+k8sdaemon.DashboardName {
+				return "", 0, nil
+			}
+			return base(ctx, workdir, env, name, args...)
+		}
+		if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTownWithDashboardImage(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+			t.Fatalf("running the plan with an absent Deployment and an image roll: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, planFileName)); statErr != nil {
+			t.Fatalf("the plan wrote no plan.json: %v", statErr)
+		}
+	})
+	t.Run("a static object also differs", func(t *testing.T) {
+		t.Parallel()
+		dir, out := planOut(t), &bytes.Buffer{}
+		kube := planKubectlRendered(t, dir, planStaticLiveOneDrifted(t), planRollLiveImage)
+		if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTownWithPolecatImage(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON); err != nil {
+			t.Fatalf("running the plan with a static difference and an image roll: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, planFileName)); statErr != nil {
+			t.Fatalf("the plan wrote no plan.json: %v", statErr)
+		}
+	})
+}
+
+// TestClusterShapePlanRefuseImageOnlyRefusals: an image the compare cannot read
+// refuses the plan through the plan run itself, so an unreadable image never
+// passes as a match.
+func TestClusterShapePlanRefuseImageOnlyRefusals(t *testing.T) {
+	t.Parallel()
+	t.Run("a live container whose image cannot be read", func(t *testing.T) {
+		t.Parallel()
+		dir, out := planOut(t), &bytes.Buffer{}
+		kube := planKubectlRendered(t, dir, planStaticLive(t), func(t *testing.T, doc map[string]any) {
+			delete(planLiveContainer(t, doc, "containers", k8sdaemon.Name), "image")
+		})
+		err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTownWithPolecatImage(t), io.Discard), kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+		if err == nil || !strings.Contains(err.Error(), "cannot compare the images") {
+			t.Fatalf("runTownClusterPlan = %v, want the unreadable-image refusal", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+		}
+	})
 }
