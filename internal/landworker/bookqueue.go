@@ -1,15 +1,25 @@
 package landworker
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // BookQueue runs bookkeeping jobs one at a time, in the order they were added,
 // on a goroutine of its own; the zero value is ready to use.
 type BookQueue struct {
+	// Begin runs as the queue goes from empty to busy, in Add before its first
+	// job starts; End runs as it empties again, on the drain goroutine after its
+	// last job returns. Either may be nil; set both before the queue is used.
+	Begin func()
+	End   func()
+
 	mu     sync.Mutex
 	jobs   []bookJob
 	held   map[string]int // bead -> jobs added and not yet returned
 	active bool           // the drain goroutine is running
 	later  []func()       // stored by Later, run by the next RunLater
+	idle   chan struct{}  // closed when active goes false; non-nil while active
 }
 
 type bookJob struct {
@@ -21,16 +31,27 @@ type bookJob struct {
 // running job; Holds reports beadID from here until job returns.
 func (q *BookQueue) Add(beadID string, job func()) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.held == nil {
 		q.held = map[string]int{}
 	}
 	q.held[beadID]++
 	q.jobs = append(q.jobs, bookJob{beadID: beadID, job: job})
-	if !q.active {
+	busy := !q.active
+	if busy {
 		q.active = true
-		go q.drain()
+		q.idle = make(chan struct{})
 	}
+	q.mu.Unlock()
+
+	if !busy {
+		return
+	}
+	// Begin runs before the drain starts, so it cannot come after the End of
+	// the period it opens.
+	if q.Begin != nil {
+		q.Begin()
+	}
+	go q.drain()
 }
 
 // Holds reports whether beadID's bookkeeping is queued or running: true from
@@ -64,16 +85,19 @@ func (q *BookQueue) RunLater() {
 	}
 }
 
-// drain runs the jobs one at a time and exits once none is left. The lock
-// never covers a job, so Add and Holds answer while one runs; clearing active
-// under the same lock Add takes loses no Add racing the last job.
+// drain runs the jobs one at a time and exits once none is left, running End
+// as it goes. The lock never covers a job or a hook, so Add, Holds and Wait
+// answer while one runs; clearing active under the same lock Add takes loses no
+// Add racing the last job, and closes the idle channel Wait is on.
 func (q *BookQueue) drain() {
 	for {
 		q.mu.Lock()
 		if len(q.jobs) == 0 {
 			q.active = false
+			close(q.idle)
+			q.idle = nil
 			q.mu.Unlock()
-			return
+			break
 		}
 		next := q.jobs[0]
 		q.jobs[0] = bookJob{}
@@ -93,5 +117,27 @@ func (q *BookQueue) drain() {
 			delete(q.held, next.beadID)
 		}
 		q.mu.Unlock()
+	}
+	if q.End != nil {
+		q.End()
+	}
+}
+
+// Wait returns nil once the queue holds no job, queued or running, and ctx's
+// error when ctx ends first. An empty queue returns at once.
+func (q *BookQueue) Wait(ctx context.Context) error {
+	q.mu.Lock()
+	if !q.active {
+		q.mu.Unlock()
+		return nil
+	}
+	idle := q.idle
+	q.mu.Unlock()
+
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
