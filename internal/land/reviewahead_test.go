@@ -84,7 +84,7 @@ func TestVerdictReuseAheadSkips(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f, l, _ := keyFixture(t)
+			f, l, _ := aheadKeyFixture(t)
 			aheadSeedBead(f, tc.issue(f.work))
 			// aheadSeedBead replaces the store the fixture's lander was built with.
 			l.Beads = f.bd
@@ -312,7 +312,7 @@ func (r *aheadWorktreeRecorder) WorktreeAddDetached(path, ref string) error {
 // returns, and never adds a worktree at the landing's own WorkRoot/wt.
 func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
 	t.Parallel()
-	f, l, _ := keyFixture(t)
+	f, l, _ := aheadKeyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	rec := &aheadWorktreeAdds{}
 	l.openRepo = func(dir string) Repo {
@@ -346,7 +346,7 @@ func TestVerdictReuseAheadWorktreeRemoved(t *testing.T) {
 // from the head under review.
 func TestVerdictReuseAheadWorktreeAtBase(t *testing.T) {
 	t.Parallel()
-	f, l, _ := keyFixture(t)
+	f, l, _ := aheadKeyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	rec := &aheadWorktreeAdds{}
 	l.openRepo = func(dir string) Repo {
@@ -393,7 +393,7 @@ func (p *aheadLockProbe) CommitIdentity(string) (string, string, error) {
 // itself finds it free.
 func TestVerdictReuseAheadLockFreeAtWorktreeAdd(t *testing.T) {
 	t.Parallel()
-	f, l, _ := keyFixture(t)
+	f, l, _ := aheadKeyFixture(t)
 	l.Ahead = TownAheadStore(f.town, "gastown")
 	// gitfake records no authors, so the probe answers the author read the way
 	// the fixture's seam does, and the read reaches the handle.
@@ -905,7 +905,7 @@ func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f, l, _ := keyFixture(t)
+			f, l, _ := aheadKeyFixture(t)
 			// branchEditing re-seeds the fixture's bead and work, so the row's
 			// setup runs before the bead is seeded from f.work.
 			if tc.setup != nil {
@@ -982,6 +982,24 @@ type aheadKeyReviewer struct {
 }
 
 func (r *aheadKeyReviewer) OMVersion(context.Context, ReviewInput) string { return r.version }
+
+// Isolated returns a reviewer of its own with the same verdict, so the review
+// made ahead of a landing leaves inputs holding the landing's calls alone.
+func (r *aheadKeyReviewer) Isolated(string) Reviewer {
+	return &recordBeadReviewer{verdict: r.verdict}
+}
+
+// aheadKeyFixture is keyFixture for a test whose review reaches om: its
+// reviewer can be isolated, and the isolated copy approves.
+func aheadKeyFixture(t *testing.T) (*landFixture, *Lander, Repo) {
+	t.Helper()
+	f, l, wt := keyFixture(t)
+	l.Reviewer = &aheadKeyReviewer{
+		recordBeadReviewer: recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}},
+		version:            stubOMVersion,
+	}
+	return f, l, wt
+}
 
 // comparableInput clears the fields the review digest leaves out: the checkout,
 // the range, the repository and the log sink. What remains is what om is given,
@@ -1190,6 +1208,130 @@ func TestVerdictReuseAheadKeyErrorReturned(t *testing.T) {
 				t.Errorf("gitMu is still held after reviewAhead returned an error")
 			} else {
 				l.gitMu.Unlock()
+			}
+		})
+	}
+}
+
+// aheadPoolReviewer is a Reviewer that can be isolated. It fails the test when
+// it is run itself: a review made ahead of a landing belongs to the copy
+// Isolated returns, which records what it is handed.
+type aheadPoolReviewer struct {
+	t *testing.T
+	// verdicts are returned by the copy's runs in order; the last repeats.
+	verdicts []Verdict
+	err      error
+	// under holds the directory of each Isolated call, runs each input the copy
+	// was handed, and checkouts whether the input's checkout existed then.
+	under     []string
+	runs      []ReviewInput
+	checkouts []bool
+}
+
+func (r *aheadPoolReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	r.t.Error("the Lander's own reviewer ran a review made ahead of a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadPoolReviewer) OMVersion(context.Context, ReviewInput) string { return stubOMVersion }
+
+func (r *aheadPoolReviewer) Isolated(tmp string) Reviewer {
+	r.under = append(r.under, tmp)
+	return &aheadPoolCopy{r}
+}
+
+type aheadPoolCopy struct{ of *aheadPoolReviewer }
+
+func (c *aheadPoolCopy) Review(context.Context, string, string, string) (Verdict, error) {
+	c.of.t.Error("the isolated copy was run without the bead's input")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (c *aheadPoolCopy) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
+	r := c.of
+	_, err := os.Stat(in.Dir)
+	r.checkouts = append(r.checkouts, err == nil)
+	r.runs = append(r.runs, in)
+	if r.err != nil {
+		return Verdict{}, r.err
+	}
+	return r.verdicts[min(len(r.runs), len(r.verdicts))-1], nil
+}
+
+// TestVerdictReuseAheadRunsIsolated: a clean merge is reviewed by the reviewer
+// isolated under the review directory, over the base and the merged commit, with
+// the landing's own re-score of a borderline rejection. A review that fails, and
+// a reviewer that cannot be isolated, are errors with no outcome.
+func TestVerdictReuseAheadRunsIsolated(t *testing.T) {
+	t.Parallel()
+	approve := Verdict{Verdict: VerdictApprove, Score: 0.9}
+	// keyOMConfig's bar is 0.8, so 0.78 with no finding is borderline.
+	borderline := Verdict{Verdict: VerdictRequestChanges, Score: 0.78}
+	failed := errors.New("om: no verdict")
+	rows := []struct {
+		name     string
+		verdicts []Verdict
+		err      error
+		plain    bool // the Lander's reviewer cannot be isolated
+		runs     int
+		wantErr  string
+		wantLog  string
+	}{
+		{name: "approval", verdicts: []Verdict{approve}, runs: 1},
+		{name: "borderline rejection is scored again", verdicts: []Verdict{borderline, approve}, runs: 2, wantLog: "om runs once more"},
+		{name: "review error", err: failed, runs: 1, wantErr: "om: no verdict"},
+		{name: "reviewer cannot be isolated", plain: true, wantErr: "cannot be isolated"},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, _ := keyFixture(t)
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			var log bytes.Buffer
+			l.Out = &log
+			rev := &aheadPoolReviewer{t: t, verdicts: tc.verdicts, err: tc.err}
+			l.Reviewer = rev
+			if tc.plain {
+				// Embedding the two interfaces leaves Isolated behind.
+				l.Reviewer = struct {
+					Reviewer
+					VersionProber
+				}{rev, rev}
+			}
+			got, built, err := l.reviewAhead(context.Background(), f.work)
+			if len(rev.runs) != tc.runs {
+				t.Fatalf("isolated reviewer runs = %d, want %d (outcome %q, err %v)", len(rev.runs), tc.runs, got, err)
+			}
+			for i, in := range rev.runs {
+				if len(rev.under) != 1 || rev.under[0] != filepath.Dir(in.Dir) || filepath.Dir(rev.under[0]) != f.workRoot {
+					t.Errorf("run %d: isolated under %q for checkout %s, want once, under the review directory in %s", i, rev.under, in.Dir, f.workRoot)
+				}
+				if !rev.checkouts[i] {
+					t.Errorf("run %d: the checkout %s did not exist while om ran", i, in.Dir)
+				}
+				if in.Base != f.base || in.Head == f.base || in.Head == f.work.Head || in.BeadID != f.work.BeadID {
+					t.Errorf("run %d: reviewed %s..%s for %q, want %s to the merged commit for %s", i, in.Base, in.Head, in.BeadID, f.base, f.work.BeadID)
+				}
+			}
+			if !strings.Contains(log.String(), tc.wantLog) {
+				t.Errorf("land log %q does not say %q", log.String(), tc.wantLog)
+			}
+			aheadNoReviewDir(t, f)
+			if tc.wantErr == "" {
+				if err != nil || got != AheadSkipped {
+					t.Fatalf("reviewAhead = %q, %v; want %q and no error", got, err, AheadSkipped)
+				}
+				if built.In.Head != rev.runs[0].Head {
+					t.Errorf("reviewed head %s, want the merged commit %s the key was built for", rev.runs[0].Head, built.In.Head)
+				}
+				return
+			}
+			var infra *InfraError
+			if !errors.As(err, &infra) || infra.Stage != "review" || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("reviewAhead error = %v, want a review *InfraError saying %q", err, tc.wantErr)
+			}
+			if got != "" || !reflect.DeepEqual(built, aheadBuilt{}) {
+				t.Errorf("reviewAhead = %q with built %+v on error, want neither", got, built)
 			}
 		})
 	}
