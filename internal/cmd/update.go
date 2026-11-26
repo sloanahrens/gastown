@@ -21,8 +21,10 @@ import (
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/bdskew"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/installer"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -402,6 +404,12 @@ type updateSeams struct {
 	// wired refuses every pair through pairMatchesRegistry: a missing derivation
 	// is never a match.
 	PairDerive deriveFunc
+	// Ancestry is the pre-swap gate's downgrade read: whether the pair's commit
+	// descends from the running one. productionUpdateSeams binds it to the
+	// gastown rig's bare clone, the repository the pair-level check reads. A
+	// gate with the read unwired refuses every pair whose commit differs from
+	// the running one.
+	Ancestry ancestryRead
 }
 
 // inPod reports whether the run's process is in a pod: a nil InPod is not.
@@ -441,6 +449,9 @@ func productionUpdateSeams() updateSeams {
 			PinLevel: daemon.PairBdLevel,
 			Database: townDatabaseLevel,
 		},
+		// The downgrade check asks the same rig clone whether the pair's commit
+		// descends from the running one.
+		Ancestry: townAncestry,
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -595,7 +606,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		}, *pod, seams.PodRun, deps.Clock)
 	}
 	if req.Images != "" {
-		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out)
+		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out, req.AllowRollback)
 		if err != nil {
 			return fmt.Errorf("preparing the daemon image install: %w", err)
 		}
@@ -955,8 +966,10 @@ const podHostInstallReason = "pod target"
 // at path: the host install the cycle runs first, then the daemon moved to the
 // pair the file names. A run with a pod target skips the host install. The file
 // is read here as well, so a file that does not parse stops the run before any
-// polecat is drained. out receives the swap's progress lines.
-func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget, out io.Writer) (update.Installer, error) {
+// polecat is drained. out receives the swap's progress lines. allowRollback is
+// the run's flag: it lets the pre-swap gate accept a pair older than the running
+// commit.
+func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget, out io.Writer, allowRollback bool) (update.Installer, error) {
 	if _, err := imagevalues.Load(path); err != nil {
 		return nil, fmt.Errorf("the --images values file: %w", err)
 	}
@@ -977,7 +990,7 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	// match re-derives the pair for the file's commit, so a file the registry
 	// does not publish is refused before anything changes. The install holds the
 	// gate, so the commit it records has one owner.
-	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify)
+	gate := preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel, seams.PairDerive, images.Verify, allowRollback, seams.Ancestry)
 	install := &update.DigestInstaller{
 		Inner:   inner,
 		Path:    path,
@@ -1011,35 +1024,55 @@ type pairLevelReads struct {
 	Database func(ctx context.Context, townRoot string) (int, error)
 }
 
+// ancestryRead reports whether commit a is an ancestor of commit b in the town's
+// repository at townRoot. A read that fails is an error, and the pre-swap gate
+// refuses on it: a failure is not a "not an ancestor".
+type ancestryRead func(townRoot, a, b string) (bool, error)
+
+// townAncestry reads ancestry from the gastown rig's bare clone, the repository
+// the pair-level check reads its image pins from. A clone that is missing or
+// unreadable is an error, never a "no".
+func townAncestry(townRoot, a, b string) (bool, error) {
+	return git.NewGit(constants.RigBareRepoPath(filepath.Join(townRoot, "gastown"))).IsAncestor(a, b)
+}
+
 // preSwapGate is a digest install's pre-swap gate: the seams a pair is checked
-// against, the daemon probe the running commit is read through, and the commit
-// that read returned. One gate belongs to one install's PreSwap.
+// against, the daemon probe the running commit is read through, the commit that
+// read returned, and the downgrade check's inputs. One gate belongs to one
+// install's PreSwap.
 type preSwapGate struct {
-	townRoot string
-	run      func(context.Context, string) []PreflightResult
-	reads    pairLevelReads
-	derive   deriveFunc
-	verify   update.VerifyProbes
-	running  string
+	townRoot      string
+	run           func(context.Context, string) []PreflightResult
+	reads         pairLevelReads
+	derive        deriveFunc
+	verify        update.VerifyProbes
+	allowRollback bool
+	ancestry      ancestryRead
+	running       string
 }
 
 // preSwapPreflight builds a digest install's pre-swap gate: it runs the daemon's
 // pre-roll checks over townRoot through run and refuses the pair when any check
 // failed, naming every failed check and its message; reads the running daemon's
-// commit through verify and refuses a build it cannot read; then refuses a pair
-// whose bd pin carries another schema level than the live database; and finally
-// refuses a pair the registry does not derive for its commit, through
-// pairMatchesRegistry. A gate that cannot run — no town root, no check seam, no
-// daemon probe, or a seam that reports no results — is a failure, never a pass:
-// an install nothing checked is not an install the checks passed. A nil derive
-// is refused by pairMatchesRegistry itself.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes) *preSwapGate {
-	return &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify}
+// commit through verify and refuses a build it cannot read; refuses a pair whose
+// bd pin carries another schema level than the live database; refuses a pair the
+// registry does not derive for its commit, through pairMatchesRegistry; and
+// finally refuses a pair whose commit does not descend from the running one,
+// through refuseDowngrade, unless allowRollback is set. A gate that cannot run —
+// no town root, no check seam, no daemon probe, or a seam that reports no
+// results — is a failure, never a pass: an install nothing checked is not an
+// install the checks passed. A nil derive is refused by pairMatchesRegistry
+// itself, and a nil ancestry by refuseDowngrade.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads, derive deriveFunc, verify update.VerifyProbes, allowRollback bool, ancestry ancestryRead) *preSwapGate {
+	return &preSwapGate{townRoot: townRoot, run: run, reads: reads, derive: derive, verify: verify, allowRollback: allowRollback, ancestry: ancestry}
 }
 
 // check refuses a pair the gate cannot pass, as the preflight check, and records
 // the running commit it read. A run that cannot read the commit records none, so
-// the gate never reports a commit that run did not read.
+// the gate never reports a commit that run did not read. A pair whose commit
+// does not descend from that commit is refused as a downgrade, unless the run
+// allows a rollback; a nil ancestry read is left to refuseDowngrade, which
+// refuses it.
 func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
 	g.running = ""
 	switch {
@@ -1065,6 +1098,13 @@ func (g *preSwapGate) check(ctx context.Context, pair update.ImagePair) error {
 		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
 	}
 	if err := pairMatchesRegistry(ctx, g.derive, pairValues(pair)); err != nil {
+		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+	}
+	var isAncestor ancestryFunc
+	if g.ancestry != nil {
+		isAncestor = func(a, b string) (bool, error) { return g.ancestry(g.townRoot, a, b) }
+	}
+	if err := refuseDowngrade(running, pair.Commit, g.allowRollback, isAncestor); err != nil {
 		return update.PairCheckError{Check: update.CheckPreflight, Err: err}
 	}
 	return nil

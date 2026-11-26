@@ -633,7 +633,7 @@ func TestPodPairDevTagNotFromTownRegistry(t *testing.T) {
 		Notifier: func(string) notify.Notifier { return notifyfake.New() },
 	}
 	target := podPairTarget()
-	installer, err := digestInstaller(seams, t.TempDir(), deps, path, &target, io.Discard)
+	installer, err := digestInstaller(seams, t.TempDir(), deps, path, &target, io.Discard, false)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}
@@ -693,9 +693,12 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 		// The derivation answers the values file's pair, so the gate reaches the
 		// swap and the pair check this test drives.
 		PairDerive: pairHeldDerive(update.ImagePair{Daemon: podPairPair.Daemon, Polecat: podPairPair.Polecat, Bd: podSwapBdRef, Commit: podPairPair.Commit}),
+		// The pair's commit is reported as a descendant, so the downgrade check
+		// passes and the gate reaches the swap this test drives.
+		Ancestry: descendingAncestry,
 	}
 	target := podPairTarget()
-	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
+	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard, false)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}
