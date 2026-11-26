@@ -55,16 +55,31 @@ func (h *patrolScanHost) movedOnSeat(rig, name, path string) (movedOn bool, land
 // Every record is judged twice: here, and again inside the seat lock the sling
 // and the seat's end take, where the record and the agent bead are re-read. A
 // seat taken over to the landed bead in between therefore keeps its record.
+//
+// One tick reads at most the record walk's budget of kept records, so a town
+// with many moved-on keeps does not ask the agent store for every seat in one
+// tick. The records it does not reach wait for the next tick, and the stop is
+// logged with the budget spent (gt-52noj3).
 func (h *patrolScanHost) dropMovedOnKeptSeats() {
 	seats, _, err := KeptSandboxSeats(h.town())
 	if err != nil {
 		h.d.logger.Printf("patrol_scan: the kept-seat records cannot be read, so none is dropped: %v", err)
 		return
 	}
+	budget := h.sandboxRecordBudget
+	if budget <= 0 {
+		budget = sandboxRecordsPerTick
+	}
+	read := 0
 	for _, seat := range seats {
 		if !strings.HasPrefix(seat.Reason, seatWorksKeepPrefix) {
 			continue
 		}
+		if read == budget {
+			h.d.logger.Printf("patrol_scan: moved-on kept-record pass stopped at its budget of %d reads; the rest wait for the next tick", budget)
+			return
+		}
+		read++
 		h.dropMovedOnKeptSeat(seat.Rig, seat.Name)
 	}
 }
