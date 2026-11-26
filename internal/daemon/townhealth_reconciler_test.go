@@ -72,3 +72,39 @@ func TestHealthTicksReconcilerEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestHealthTicksReconcilerDisabled: a town that has not turned the reconciler
+// on lists no reconciler tick, so the town health never reports it red for a
+// patrol that is not running (gt-39od6h).
+func TestHealthTicksReconcilerDisabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+	}{
+		{"a disabled reconciler block lists no tick", &DaemonPatrolConfig{Patrols: &PatrolsConfig{Reconciler: &config.ReconcilerConfig{Enabled: false}}}},
+		{"an absent reconciler block lists no tick", &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{
+				config:       &Config{TownRoot: t.TempDir()},
+				logger:       log.New(io.Discard, "", 0),
+				patrolConfig: tt.cfg,
+			}
+
+			ticks, err := (&healthSources{d: d}).Ticks()
+			if err != nil {
+				t.Fatalf("Ticks: %v", err)
+			}
+			for _, tick := range ticks {
+				if tick.Name == "reconciler" {
+					t.Fatalf("Ticks listed a reconciler tick while the patrol is off: %+v", tick)
+				}
+			}
+		})
+	}
+}
