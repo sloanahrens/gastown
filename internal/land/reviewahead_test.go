@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -989,7 +990,33 @@ func (r *aheadKeyReviewer) OMVersion(context.Context, ReviewInput) string { retu
 // Isolated returns a reviewer of its own with the same verdict, so the review
 // made ahead of a landing leaves inputs holding the landing's calls alone.
 func (r *aheadKeyReviewer) Isolated(string) Reviewer {
-	return &recordBeadReviewer{verdict: r.verdict}
+	return aheadFlagReviewer{verdict: r.verdict}
+}
+
+// aheadFixtureBar is the bar keyFixture's base .om.json names (keyOMConfig's
+// threshold), the bar ExpectedReviewFlags is read at for every fake below.
+const aheadFixtureBar = 0.8
+
+// aheadCompleteVerdict returns v with the flags a complete om run of in
+// carries. A fake verdict carries none, and ReviewAhead refuses to store one
+// whose flags do not match its input, so every row that stores a verdict
+// completes it here.
+func aheadCompleteVerdict(v Verdict, in ReviewInput) Verdict {
+	v.Flags = ExpectedReviewFlags(in, aheadFixtureBar)
+	return v
+}
+
+// aheadFlagReviewer is the isolated copy of a fake reviewer: it answers the
+// verdict for the input it is handed, completed with the flags that input's
+// complete run carries.
+type aheadFlagReviewer struct{ verdict Verdict }
+
+func (r aheadFlagReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	return r.verdict, nil
+}
+
+func (r aheadFlagReviewer) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
+	return aheadCompleteVerdict(r.verdict, in), nil
 }
 
 // aheadKeyFixture is keyFixture for a test whose review reaches om: its
@@ -1258,7 +1285,7 @@ func (c *aheadPoolCopy) ReviewBead(_ context.Context, in ReviewInput) (Verdict, 
 	if r.err != nil {
 		return Verdict{}, r.err
 	}
-	return r.verdicts[min(len(r.runs), len(r.verdicts))-1], nil
+	return aheadCompleteVerdict(r.verdicts[min(len(r.runs), len(r.verdicts))-1], in), nil
 }
 
 // TestVerdictReuseAheadRunsIsolated: a clean merge is reviewed by the reviewer
@@ -1777,6 +1804,161 @@ func TestVerdictReuseAheadErrorStoresNothing(t *testing.T) {
 				l.gitMu.Unlock()
 			}
 		})
+	}
+}
+
+// aheadDegradedReviewer is a reviewer the pool can isolate whose copy answers
+// the fixture's approve for the input it is handed, completed with that
+// input's flags, and then edited: a row makes om's run degraded the way an
+// installed om that dropped a flag, or one carrying a flag the input does not
+// name, does.
+type aheadDegradedReviewer struct {
+	t    *testing.T
+	edit func([]string) []string
+}
+
+func (r *aheadDegradedReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	r.t.Error("the Lander's own reviewer ran a review made ahead of a landing")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (r *aheadDegradedReviewer) OMVersion(context.Context, ReviewInput) string { return stubOMVersion }
+
+func (r *aheadDegradedReviewer) Isolated(string) Reviewer { return &aheadDegradedCopy{of: r} }
+
+type aheadDegradedCopy struct{ of *aheadDegradedReviewer }
+
+func (c *aheadDegradedCopy) Review(context.Context, string, string, string) (Verdict, error) {
+	c.of.t.Error("the isolated copy was run without the bead's input")
+	return Verdict{}, errors.New("unreachable")
+}
+
+func (c *aheadDegradedCopy) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
+	v := aheadCompleteVerdict(Verdict{Verdict: VerdictApprove, Score: 0.9}, in)
+	v.Flags = c.of.edit(v.Flags)
+	return v, nil
+}
+
+// aheadRoundTwoFixture is keyFixture with one review rejection in the bead's
+// notes, so the input names round 2 and a complete run carries --round.
+func aheadRoundTwoFixture(t *testing.T) (*landFixture, *Lander) {
+	t.Helper()
+	f, l, _ := keyFixture(t)
+	issue := aheadReadyIssue(f.work)
+	issue.Notes += "\n" + FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: string(RejectReview), Reason: "an earlier refusal",
+		Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID,
+	})
+	aheadSeedBead(f, issue)
+	l.Beads = f.bd
+	return f, l
+}
+
+// TestVerdictReuseAheadDegradedStoresNothing: a run whose flags do not equal
+// the ones its input gives it judged a different input than the key digests,
+// so ReviewAhead stores no record and returns an error naming the missing or
+// unexpected flag. Skipping the comparison stores the verdict and turns every
+// row red.
+func TestVerdictReuseAheadDegradedStoresNothing(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		edit func([]string) []string
+		// want is the flag the error must name, as the part of the message
+		// that names it: the dropped flag and the added one read differently,
+		// and a repeated flag is named by both lists.
+		want string
+	}{
+		{"run missing --round", func(flags []string) []string {
+			return slices.DeleteFunc(flags, func(flag string) bool { return flag == "--round" })
+		}, "om ran without --round"},
+		{"run with an unexpected flag", func(flags []string) []string {
+			return append(flags, "--prior-findings")
+		}, "om ran with --prior-findings, which the input does not name"},
+		{"run listing a flag twice", func(flags []string) []string {
+			return append(flags, "--base")
+		}, "--base, --base"},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l := aheadRoundTwoFixture(t)
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			l.Reviewer = &aheadDegradedReviewer{t: t, edit: tc.edit}
+			before := aheadBeadWrites(t, f.bd)
+			got, err := l.ReviewAhead(context.Background(), f.work)
+			if err == nil {
+				t.Fatalf("ReviewAhead = %q and no error, want the degraded run refused", got)
+			}
+			var infra *InfraError
+			if !errors.As(err, &infra) {
+				t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+			}
+			if infra.Stage != "review flags" {
+				t.Errorf("error stage = %q, want %q", infra.Stage, "review flags")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ReviewAhead error = %q, want it to name %s", err, tc.want)
+			}
+			if got != "" {
+				t.Errorf("ReviewAhead outcome = %q on error, want empty (not %q)", got, AheadStored)
+			}
+			if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+				t.Errorf("a record was stored for a degraded run (stat err %v)", err)
+			}
+			if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+				t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+			}
+			aheadNoReviewDir(t, f)
+			if !l.gitMu.TryLock() {
+				t.Errorf("gitMu is still held after ReviewAhead returned an error")
+			} else {
+				l.gitMu.Unlock()
+			}
+		})
+	}
+}
+
+// TestVerdictReuseAheadBarUnreadableStoresNothing: the bar the expected flags
+// are read at is a git read; one that fails is returned as an error and no
+// record is stored, so a review is never stored against a bar nobody read.
+// barRepo fails the pool's own read after the two reviewKey makes.
+func TestVerdictReuseAheadBarUnreadableStoresNothing(t *testing.T) {
+	t.Parallel()
+	f, l, _ := aheadKeyFixture(t)
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	l.openRepo = func(dir string) Repo {
+		return &barRepo{Repo: f.git.Open(dir), text: keyOMConfig, failFrom: 3}
+	}
+	before := aheadBeadWrites(t, f.bd)
+	got, err := l.ReviewAhead(context.Background(), f.work)
+	if err == nil {
+		t.Fatalf("ReviewAhead = %q and no error, want the unreadable bar returned", got)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("ReviewAhead error = %v, want an *InfraError", err)
+	}
+	if infra.Stage != "review bar" {
+		t.Errorf("error stage = %q, want %q", infra.Stage, "review bar")
+	}
+	if !strings.Contains(err.Error(), "the bar is unreadable") {
+		t.Errorf("ReviewAhead error = %q, want it to carry the read failure", err)
+	}
+	if got != "" {
+		t.Errorf("ReviewAhead outcome = %q on error, want empty (not %q)", got, AheadStored)
+	}
+	if _, err := os.Stat(aheadTestPath(f.town, "gastown", f.work.BeadID)); !os.IsNotExist(err) {
+		t.Errorf("a record was stored although the bar could not be read (stat err %v)", err)
+	}
+	if n := aheadBeadWrites(t, f.bd) - before; n != 0 {
+		t.Errorf("ReviewAhead wrote %d bead records, want 0", n)
+	}
+	aheadNoReviewDir(t, f)
+	if !l.gitMu.TryLock() {
+		t.Errorf("gitMu is still held after ReviewAhead returned an error")
+	} else {
+		l.gitMu.Unlock()
 	}
 }
 
