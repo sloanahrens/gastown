@@ -543,3 +543,69 @@ func TestVerdictReuseLandRejectingRecordRejects(t *testing.T) {
 		t.Errorf("gate ran %d time(s) on a refused reused request_changes; want 0", n)
 	}
 }
+
+// TestVerdictReuseLandLogsTheReviewOnce: a landing that reuses a stored approve
+// or a stored request_changes writes one reviews-log line and one rounds entry
+// for it, runs no om review, and numbers the entry as the line's attempt. The
+// line names the landing's merged commit as the judged head; the rounds entry
+// keeps the submitted head an inline landing writes (gt-jdkzo2). A hit that
+// skips the log leaves both empty and turns this red.
+func TestVerdictReuseLandLogsTheReviewOnce(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		verdict  string
+		score    float64
+		findings []Finding
+	}{
+		{name: "a reused approve", verdict: VerdictApprove, score: 0.9},
+		{name: "a reused rejection", verdict: VerdictRequestChanges, score: 0.3,
+			findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, store, _ := reuseLandSetup(t)
+			reviews := reviewsFileIn(t)
+			l.Reviews = reviews
+			l.RoundsDir = t.TempDir()
+			// The key digests the rounds ledger text, so it is computed once the
+			// rounds dir is set, as the landing will compute it.
+			key := reuseLandKey(t, f, l, f.git.Open(f.origin))
+			rec := reuseAskRecord(key, f.base, l.now().Add(-time.Minute))
+			rec.Verdict = Verdict{Verdict: tc.verdict, Score: tc.score, Findings: tc.findings}
+			if err := store.Put(rec); err != nil {
+				t.Fatalf("Put error = %v; want nil", err)
+			}
+			res, err := l.Land(context.Background(), f.work)
+			if tc.verdict == VerdictRequestChanges {
+				f.assertRejected(t, err, RejectReview, LabelRework)
+			} else if err != nil {
+				t.Fatalf("Land error = %v; want nil", err)
+			}
+			if n := len(f.review.calls); n != 0 {
+				t.Errorf("om ran %d time(s) on a reused verdict; want 0", n)
+			}
+			recs, err := reviews.Since(time.Time{})
+			if err != nil || len(recs) != 1 {
+				t.Fatalf("reviews log = %+v, %v; want exactly one line for the reused review", recs, err)
+			}
+			if recs[0].Verdict != tc.verdict || recs[0].Score != tc.score {
+				t.Errorf("reviews line verdict = %s %.2f; want the stored %s %.2f", recs[0].Verdict, recs[0].Score, tc.verdict, tc.score)
+			}
+			if tc.verdict == VerdictApprove && recs[0].Head != res.LandedCommit {
+				t.Errorf("reviews line head = %s; want the landing's merged commit %s", recs[0].Head, res.LandedCommit)
+			}
+			rounds := renderedOf(t, &RoundsLedger{OutDir: l.RoundsDir, Bead: f.work.BeadID}, 0)
+			if len(rounds) != 1 {
+				t.Fatalf("rounds ledger holds %d round(s); want exactly one for the reused review", len(rounds))
+			}
+			if rounds[0].Round != recs[0].Attempt {
+				t.Errorf("rounds entry is round %d; want the reviews line's attempt %d", rounds[0].Round, recs[0].Attempt)
+			}
+			if rounds[0].Head != f.work.Head {
+				t.Errorf("rounds entry head = %q; want the submitted head %q as an inline landing writes it", rounds[0].Head, f.work.Head)
+			}
+		})
+	}
+}
