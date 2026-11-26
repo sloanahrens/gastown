@@ -84,8 +84,8 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	if OverseerReviewed(issue, w.Head) {
 		return AheadSkipped, aheadBuilt{}, nil
 	}
-	// started is when this review began: the land log dates it, and a stored
-	// record keeps it as started_at.
+	// started is when this review began: the land log dates it, a stored record
+	// keeps it as started_at, and the usage record's window opens with it.
 	started := l.aheadNow()
 	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
 	g := l.open(l.Repo)
@@ -179,6 +179,17 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	built := aheadBuilt{In: in, Key: key}
 	built.In.Dir = ""
 	v, ran, err := l.aheadReview(ctx, in)
+	// Read here whatever the review came to: the usage record below reports the
+	// window this closes, and a stored record keeps it as reviewed_at.
+	reviewed := l.aheadNow()
+	// A review that ran is told to the usage sink once, before any check or
+	// store that can return, so a failed run and a degraded one the checks below
+	// refuse are still attributed (gt-fz846s). aheadReview reports a failed run
+	// as an error with no ran, so an error counts as a run. A submission skipped
+	// before om ran reports no usage.
+	if l.UsageSink != nil && (ran || err != nil) {
+		l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: started, End: reviewed})
+	}
 	if err != nil {
 		return "", aheadBuilt{}, err
 	}
@@ -214,7 +225,6 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	}
 	// The verdict is kept for a later landing to reuse. It is not logged and no
 	// round is written: the landing writes a review when it consumes a verdict.
-	reviewed := l.aheadNow()
 	rec := AheadRecord{
 		Bead:         key.Bead,
 		Head:         key.Head,
