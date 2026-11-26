@@ -219,6 +219,92 @@ func TestRunDoneNoFactsOutsideWorktree(t *testing.T) {
 	}
 }
 
+// detachedGit answers as a worktree whose HEAD is detached. A plain directory
+// and a detached HEAD both leave the branch empty, so only git's answer to the
+// branch query tells them apart.
+func detachedGit() *fakeGit {
+	return &fakeGit{out: map[string]string{
+		"branch --show-current": "\n",
+		"rev-parse HEAD":        headSHA + "\n",
+	}}
+}
+
+// TestRunDoneNotesDetachedHead: gt done from a worktree whose HEAD is detached
+// gets one line saying no --branch and --head were added and how to add them,
+// and the call still runs unchanged. A directory outside any repository, a
+// worktree on a branch, and a call carrying both flags print nothing.
+func TestRunDoneNotesDetachedHead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		git      *fakeGit
+		args     []string
+		want     []string
+		wantNote bool
+	}{
+		{
+			name:     "detached HEAD gets the note",
+			git:      detachedGit(),
+			args:     []string{"gt", "done", "--bead", "gt-x"},
+			want:     []string{"gt", "done", "--bead", "gt-x"},
+			wantNote: true,
+		},
+		{
+			name: "outside any repository stays silent",
+			git: &fakeGit{err: map[string]error{
+				"branch --show-current": gtwrap.ErrNotWorktree,
+			}},
+			args: []string{"gt", "done", "--bead", "gt-x"},
+			want: []string{"gt", "done", "--bead", "gt-x"},
+		},
+		{
+			name: "worktree on a branch stays silent",
+			git:  worktreeOn("crew/a/gt-x"),
+			args: []string{"gt", "done", "--bead", "gt-x"},
+			want: []string{"gt", "done", "--bead", "gt-x", "--branch", "crew/a/gt-x", "--head", headSHA},
+		},
+		{
+			name: "a call with both flags stays silent",
+			git:  detachedGit(),
+			args: []string{"gt", "done", "--bead", "gt-x", "--branch", "mine", "--head", "abc"},
+			want: []string{"gt", "done", "--bead", "gt-x", "--branch", "mine", "--head", "abc"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			caller := t.TempDir()
+			withGit(h, tt.git, caller)
+			if exit := h.run(tt.args...); exit != 0 {
+				t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+			}
+			if !slices.Equal(h.fake.call.Argv, tt.want) {
+				t.Fatalf("target argv = %q, want %q", h.fake.call.Argv, tt.want)
+			}
+			note := h.stderr.String()
+			if !tt.wantNote {
+				if note != "" {
+					t.Fatalf("stderr = %q, want nothing new", note)
+				}
+				return
+			}
+			for _, want := range []string{
+				"gt-wrap: gt done: " + caller + " is on a detached HEAD",
+				"git switch -c crew/<agent>/<bead>",
+				"--bead <id> --branch <b> --head <sha>",
+			} {
+				if !strings.Contains(note, want) {
+					t.Fatalf("stderr %q does not name %q", note, want)
+				}
+			}
+			if n := strings.Count(note, "\n"); n != 1 {
+				t.Fatalf("stderr has %d lines; want the one-line note: %q", n, note)
+			}
+		})
+	}
+}
+
 func TestRunDoneRefusesWhenGitCannotRead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
