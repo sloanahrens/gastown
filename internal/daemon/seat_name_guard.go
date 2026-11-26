@@ -48,7 +48,7 @@ type StaleSeatSandbox struct {
 // The dispatcher logs it once per tick, so a name drawn for three beads does
 // not name the same sandbox three times.
 func (f StaleSeatSandbox) Line() string {
-	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted; the sandbox may hold unsaved work, so check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s)",
+	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted; the sandbox may hold unsaved work, so check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s; if the delete answers \"driver operation is still pending\", follow docs/sandbox-rescue-runbook.md, \"A delete refused as pending\")",
 		f.Sandbox, f.Phase, seatSandboxDeleteCommand(f.Sandbox))
 }
 
@@ -152,7 +152,7 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 			Key:      seatSandboxStaleKeyPrefix + f.Sandbox,
 			Kind:     attention.KindSeatSandboxStale,
 			Severity: attention.SeverityHigh,
-			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted: check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s)",
+			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted: check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s; if the delete answers \"driver operation is still pending\", follow docs/sandbox-rescue-runbook.md, \"A delete refused as pending\")",
 				f.Sandbox, f.Phase, parkedAge(age), seatSandboxDeleteCommand(f.Sandbox)),
 		})
 	}
