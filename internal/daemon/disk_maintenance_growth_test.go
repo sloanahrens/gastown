@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/diskmaint/growth"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // diskMaintGrowthReadings is one pass's readings: the sandbox disk and the
@@ -168,6 +169,72 @@ func TestDiskMaintGrowthUnwritableDirectoryKeepsTheAlerts(t *testing.T) {
 	want := []string{"diskmaint:colima", "diskmaint:control"}
 	if !slices.Equal(gotWritable, want) {
 		t.Fatalf("alerts = %v, want %v", gotWritable, want)
+	}
+}
+
+// TestDiskMaintGrowthLastRingSample: the helper that seeds a restarted daemon's
+// last-sample time returns the final sample's time when the ring has one, and
+// false, with the zero time, for a missing ring, an empty one and one that
+// cannot be read.
+func TestDiskMaintGrowthLastRingSample(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	writeRing := func(times ...time.Time) func(t *testing.T, path string) {
+		return func(t *testing.T, path string) {
+			t.Helper()
+			for _, at := range times {
+				if err := growth.Append(path, growth.Sample{At: at, UsedBytes: 1, TotalBytes: 10}, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	cases := map[string]struct {
+		ring func(t *testing.T, path string)
+		want time.Time
+		ok   bool
+	}{
+		"a ring of three samples returns the third": {
+			ring: writeRing(base, base.Add(5*time.Minute), base.Add(10*time.Minute)),
+			want: base.Add(10 * time.Minute),
+			ok:   true,
+		},
+		"a missing ring": {},
+		"an empty ring": {
+			ring: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		"an unreadable ring": {
+			// A directory where the ring file belongs: it opens, but reading it fails.
+			ring: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(testutil.PrivateTempDir(t), "sandbox.jsonl")
+			if tc.ring != nil {
+				tc.ring(t, path)
+			}
+
+			got, ok := lastRingSample(path)
+
+			if ok != tc.ok {
+				t.Fatalf("lastRingSample ok = %v, want %v (time %v)", ok, tc.ok, got)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("lastRingSample time = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

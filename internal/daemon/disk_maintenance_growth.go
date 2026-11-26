@@ -81,3 +81,14 @@ func (d *Daemon) recordDiskGrowth(now time.Time, readings []disks.Reading) {
 		d.diskGrowth.last[r.Name] = now
 	}
 }
+
+// lastRingSample returns the time of the final sample in the ring at path, and
+// true. A missing or empty ring, or one that cannot be read, reports false with
+// the zero time: a caller must not seed a disk's last-sample time from it.
+func lastRingSample(path string) (time.Time, bool) {
+	samples, err := growth.Read(path)
+	if err != nil || len(samples) == 0 {
+		return time.Time{}, false
+	}
+	return samples[len(samples)-1].At, true
+}
