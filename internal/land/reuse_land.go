@@ -1,6 +1,9 @@
 package land
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // reuseAhead answers whether the landing may reuse the review stored for w
 // instead of running om again (gt-5cfuf2). A nil Ahead turns the question off:
@@ -55,4 +58,51 @@ func (l *Lander) reuseAhead(ctx context.Context, g, wt Repo, w Work, in ReviewIn
 	}
 	rec.Verdict = applyBar(rec.Verdict, bar)
 	return rec, key, true, nil
+}
+
+// storedOnlyConflictBeforeMerge answers, before a stored-only landing's merge,
+// what the store's conflict record means for this pass (gt-1yvte7). current is
+// true for a conflict record naming this bead and head and reviewed no earlier
+// than ReuseExpiry ago: the merge then decides whether the conflict is still
+// there. A conflict record for another head, or past that window, cannot answer
+// for this landing, so it is deleted and the pass ends with ErrNoStoredVerdict
+// before any fetch or merge. A record the store cannot read is kept and ends
+// the pass with the same sentinel: a failed read is unknown, and deleting it
+// could throw away the record the bead's own landing needs.
+//
+// A missing record, a verdict record and a lander with no store all answer
+// (false, nil), so the landing runs as it did before (gt-6r4exl).
+func (l *Lander) storedOnlyConflictBeforeMerge(w Work) (current bool, err error) {
+	if !w.StoredOnly || l.Ahead == nil {
+		return false, nil
+	}
+	rec, ok, err := l.Ahead.Get(w.BeadID)
+	if err != nil {
+		l.logf("%s: stored-only pass: the record could not be read (%v); keeping it", w.BeadID, err)
+		return false, ErrNoStoredVerdict
+	}
+	if !ok || rec.Outcome != aheadOutcomeConflict {
+		return false, nil
+	}
+	if storedConflictCurrent(rec, w, l.aheadNow(), l.ReuseExpiry) {
+		return true, nil
+	}
+	if err := l.Ahead.Delete(w.BeadID); err != nil {
+		return false, &InfraError{Stage: "stored review", Err: err}
+	}
+	l.logf("%s: the stored conflict names another head or is past its reuse window; deleted", w.BeadID)
+	return false, ErrNoStoredVerdict
+}
+
+// storedConflictCurrent reports whether rec, a stored conflict, may answer for
+// w's landing: Get has already checked it names w's bead, so it must name w's
+// head and be no older than expiry. An expiry of zero or less makes nothing
+// current and a record dated in the future is not trusted, the fail-closed
+// reading ReuseMiss gives the same fields.
+func storedConflictCurrent(rec AheadRecord, w Work, now time.Time, expiry time.Duration) bool {
+	if rec.Head != w.Head {
+		return false
+	}
+	age := now.Sub(rec.ReviewedAt)
+	return age >= 0 && expiry > 0 && age <= expiry
 }
