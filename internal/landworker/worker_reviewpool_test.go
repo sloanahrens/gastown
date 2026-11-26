@@ -18,9 +18,8 @@ func readySubmission(id, branch, head string) *beads.Issue {
 }
 
 // TestReviewPoolWorkerReviewWorksBuilds pins that reviewWorks builds one work
-// for each issue given, in the order given, each with the branch and head of
-// its own submission, so the pool reviews the head the landing will take
-// (gt-uuvtbv).
+// for each issue given, each with the branch and head of its own submission,
+// so the pool reviews the head the landing will take (gt-uuvtbv).
 func TestReviewPoolWorkerReviewWorksBuilds(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
