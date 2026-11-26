@@ -84,6 +84,18 @@ func (f *fakeProber) RunningTaskIDs(_ context.Context, _, token, owner, repo str
 	return f.tasks[owner+"/"+repo], nil
 }
 
+// TestForgejoProberRunningTaskIDsRefusesAnEmptyToken: the real prober builds
+// its client from the token it is handed; an empty token fails that build (the
+// empty role is refused before any token file or environment is read), so the
+// read is refused rather than answered from the host's state.
+func TestForgejoProberRunningTaskIDsRefusesAnEmptyToken(t *testing.T) {
+	t.Parallel()
+	got, err := forgejoProber{}.RunningTaskIDs(context.Background(), "https://fj", "", "o", "r")
+	if err == nil || got != nil {
+		t.Fatalf("a read with no token was not refused: ids = %v, err = %v", got, err)
+	}
+}
+
 // infraDaemon is a daemon whose alerts go to a recorder and whose probe is
 // driven by the targets and prober a test supplies.
 func infraDaemon(t *testing.T, tgts []landingInfraTarget, prober infraProber) (*Daemon, *fakeProber, *notifyfake.Recorder) {
