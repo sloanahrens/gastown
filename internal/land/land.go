@@ -145,6 +145,12 @@ type Lander struct {
 	// handles run with every hook off, so no hook of the landing's reads it
 	// (gt-5nmfx4, gt-m0eiwk). Empty exports nothing.
 	BeadsDir string
+	// DeferBookkeeping stops a landing after the durable half of its record:
+	// recordDurable writes refs/landed/<bead> and the landings line, the record
+	// goes in Result.Deferred, and the bead note, the close and the follow-up
+	// feed are left to the pass that reads the record back (gt-i4kqoa). False
+	// records the landing in one pass.
+	DeferBookkeeping bool
 
 	// Candidate is the Forgejo gate that runs on the merged tree: the tree is
 	// pushed as land/<bead> and its CI verdict decides. It is required —
@@ -333,6 +339,10 @@ type Result struct {
 	RiskPaths []string
 	// RiskPathReviewSkippedBy is the label that left RiskPaths empty (RiskPathsRecorded).
 	RiskPathReviewSkippedBy string
+	// Deferred is the record a deferred landing wrote durably and did not write
+	// onto its bead: set when the Lander's DeferBookkeeping is on, nil when the
+	// landing recorded both halves in one pass (gt-i4kqoa).
+	Deferred *LandingRecord
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -1485,6 +1495,10 @@ func acceptedRiskMessage(w Work, used []AcceptedRisk) string {
 //
 // A red gate is a rejection: nothing lands on a red candidate (gt-fn9e6.32).
 //
+// With DeferBookkeeping set, Land ends after the landings file and returns the
+// record in Result.Deferred; the bead half and the follow-up feed wait for the
+// pass that reads the record back (gt-i4kqoa).
+//
 // Errors: *Rejection (written to the bead), *RaceError, *InfraError (nothing
 // written), ErrNotReady, *RecordError (landed, record incomplete).
 func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
@@ -1991,6 +2005,16 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	l.logf("%s: landed %s on %s/%s (patch-id %s)", w.BeadID, shortSHA(merged), remote, w.Target, shortSHA(patchID))
 
+	if l.DeferBookkeeping {
+		// The ref and the landings line are the record a crash must not lose;
+		// the bead half reads the record back, so it is the later pass's work.
+		rec, err := l.recordDurable(g, w, res)
+		if err != nil {
+			return res, &RecordError{Result: res, Err: err}
+		}
+		res.Deferred = &rec
+		return res, nil
+	}
 	if err := l.record(g, w, res); err != nil {
 		return res, &RecordError{Result: res, Err: err}
 	}
