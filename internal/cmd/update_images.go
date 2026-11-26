@@ -265,6 +265,7 @@ func pruneGreenRefs(ctx context.Context, rigName, remote, tokenPath string) (map
 func newUpdateImagesPruneCmd(seams updateImagesSeams) *cobra.Command {
 	var apply bool
 	var maxDeletes int
+	var registryTokenFile string
 	c := &cobra.Command{
 		Use:   "prune",
 		Short: "Print the registry retention plan for the gastown images; --apply deletes a capped number of its tags",
@@ -295,22 +296,42 @@ deleted tags, not the bytes they held. A skipped tag or a refused delete exits
 non-zero.
 
 The command fails closed: a read or plan that fails exits non-zero and prints
-no line, so nothing is deleted. Without --apply nothing changes.`,
+no line, so nothing is deleted. Without --apply nothing changes.
+
+With --apply, --registry-token-file <path> reads the registry bot's credential
+from that file instead of the config directory, so the run can be made by hand
+on a machine that holds the file. The file is read before any request; a missing
+or unreadable file refuses the run, naming the file and never a value. The flag
+is refused without --apply.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateImagesPrune(cmd, seams, apply, maxDeletes)
+			return runUpdateImagesPrune(cmd, seams, apply, maxDeletes, registryTokenFile)
 		},
 	}
 	c.Flags().BoolVar(&apply, "apply", false, "Delete the plan's tags, at most --max of them")
 	c.Flags().IntVar(&maxDeletes, "max", updateImagesPruneMaxDefault, "With --apply, the most tags one run deletes")
+	c.Flags().StringVar(&registryTokenFile, "registry-token-file", "", "With --apply, read the registry bot's credential from this file instead of the config directory")
 	return c
 }
 
 // runUpdateImagesPrune plans the retention and prints it, or with apply deletes
 // the plan's candidates. Nothing is printed unless every read and the plan
-// succeed.
-func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams, apply bool, maxDeletes int) error {
+// succeed. A --registry-token-file given replaces the apply run's registry bot
+// credential with that file's; the flag is refused without apply, since nothing
+// else reads a credential with write access.
+func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams, apply bool, maxDeletes int, registryTokenFile string) error {
+	// The flag is read by whether it was given, never by its value: an operator
+	// whose --registry-token-file expands to an empty path is refused, not
+	// quietly handed the config directory's credential instead.
+	if cmd.Flags().Changed("registry-token-file") {
+		if !apply {
+			return fmt.Errorf("gt update images prune: %w: --registry-token-file is read only with --apply", update.ErrPruneApplyRefused)
+		}
+		seams.PruneCredentials = func() (user, token string, err error) {
+			return forgejo.ReadCredentialFile(registryTokenFile)
+		}
+	}
 	if apply {
 		return runUpdateImagesPruneApply(cmd, seams, maxDeletes)
 	}

@@ -57,8 +57,10 @@ type pruneTestRegistry struct {
 	// fails a delete after earlier ones succeeded.
 	deleteStatus      int
 	deleteStatusByTag map[string]int
-	// deletes is the packages API path of every DELETE the fake answered.
-	deletes []string
+	// deletes is the packages API path of every DELETE the fake answered, and
+	// deleteCredentials the basic-auth credential each DELETE carried, in order.
+	deletes           []string
+	deleteCredentials []fakeCredential
 }
 
 // RoundTrip answers a packages listing request for the image its q names, a
@@ -68,6 +70,9 @@ func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error)
 	f.paths = append(f.paths, req.URL.Path)
 	if req.Method == http.MethodDelete {
 		f.deletes = append(f.deletes, req.URL.Path)
+		var cred fakeCredential
+		cred.user, cred.pass, _ = req.BasicAuth()
+		f.deleteCredentials = append(f.deleteCredentials, cred)
 		status := f.deleteStatus
 		if parts := strings.Split(req.URL.Path, "/"); len(parts) == 8 {
 			if code := f.deleteStatusByTag[parts[6]+":"+parts[7]]; code != 0 {
@@ -862,6 +867,117 @@ func TestUpdateImagesPruneApplyFailedDeleteKeepsTheProgress(t *testing.T) {
 	}
 	if want := "deleted 1, skipped 1 (deleted tags, not freed bytes)"; lines[2] != want {
 		t.Fatalf("counts line = %q, want %q", lines[2], want)
+	}
+}
+
+// pruneTestTokenFile writes a registry credential file holding user and token
+// under a fresh temporary directory, at mode, and returns its path.
+func pruneTestTokenFile(t *testing.T, user, token string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "forgejo-registry.env")
+	body := fmt.Sprintf("FORGEJO_USER=%s\nFORGEJO_TOKEN=%s\n", user, token)
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		t.Fatalf("writing the credential file: %v", err)
+	}
+	// WriteFile's mode is masked by the umask, so set it again to hold the
+	// table's mode whatever the host's umask is.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("setting the credential file's mode: %v", err)
+	}
+	return path
+}
+
+// TestUpdateImagesPruneApplyTokenFile: --registry-token-file makes --apply carry
+// that file's credential on every delete, and a file that is absent or not
+// private refuses before any request, naming the file and never a value.
+func TestUpdateImagesPruneApplyTokenFile(t *testing.T) {
+	t.Parallel()
+	const (
+		fileUser  = "file-registry-bot"
+		fileToken = "file-token-7c1d2e"
+	)
+	t.Run("the deletes carry the file's credential", func(t *testing.T) {
+		t.Parallel()
+		path := pruneTestTokenFile(t, fileUser, fileToken, 0o600)
+		reg := pruneTestApplyPopulated(25)
+		out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg), "--apply", "--max", "2", "--registry-token-file", path)
+		if err != nil {
+			t.Fatalf("prune --apply --registry-token-file: %v\n%s", err, out)
+		}
+		// The seams' own credential reader answers with the fixture's viewer
+		// credential, so a delete that carries the file's proves the flag wins.
+		if len(reg.deletes) != 2 || len(reg.deleteCredentials) != 2 {
+			t.Fatalf("deletes = %v with credentials %v, want the two capped candidates", reg.deletes, reg.deleteCredentials)
+		}
+		for i, got := range reg.deleteCredentials {
+			if got.user != fileUser || got.pass != fileToken {
+				t.Fatalf("delete %d carried %q/%q, want the token file's login and token", i, got.user, got.pass)
+			}
+		}
+	})
+	cases := []struct {
+		name string
+		path func(t *testing.T) string
+		// wantValue is a value the file holds that the refusal must not name.
+		wantValue string
+	}{
+		{"missing file", func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "absent-registry.env")
+		}, ""},
+		{"file the group can read", func(t *testing.T) string {
+			return pruneTestTokenFile(t, fileUser, fileToken, 0o644)
+		}, fileToken},
+		// A flag whose value expanded to nothing names no file, so the run is
+		// refused rather than falling back to the config directory's credential.
+		{"empty path", func(t *testing.T) string { return "" }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+" refuses with no request", func(t *testing.T) {
+			t.Parallel()
+			path := tc.path(t)
+			reg := pruneTestApplyPopulated(25)
+			out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg), "--apply", "--registry-token-file", path)
+			if err == nil {
+				t.Fatal("prune --apply exited zero over an unreadable token file")
+			}
+			if path != "" && !strings.Contains(err.Error(), path) {
+				t.Fatalf("the refusal does not name the token file %s: %v", path, err)
+			}
+			if tc.wantValue != "" && strings.Contains(err.Error(), tc.wantValue) {
+				t.Fatalf("the refusal names a value the file holds: %v", err)
+			}
+			if len(reg.methods) != 0 || len(reg.deletes) != 0 {
+				t.Fatalf("the refusal sent %d requests and %d deletes, want none", len(reg.methods), len(reg.deletes))
+			}
+			if out != "" {
+				t.Fatalf("the refusal printed output:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestUpdateImagesPruneApplyTokenFileNeedsApply: --registry-token-file without
+// --apply is refused before any read, naming both flags and printing no value
+// the file holds.
+func TestUpdateImagesPruneApplyTokenFileNeedsApply(t *testing.T) {
+	t.Parallel()
+	const fileToken = "file-token-7c1d2e"
+	path := pruneTestTokenFile(t, "file-registry-bot", fileToken, 0o600)
+	reg := pruneTestApplyPopulated(25)
+	out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg), "--registry-token-file", path)
+	if err == nil {
+		t.Fatal("prune read --registry-token-file without --apply")
+	}
+	for _, flag := range []string{"--registry-token-file", "--apply"} {
+		if !strings.Contains(err.Error(), flag) {
+			t.Errorf("the refusal does not name %s: %v", flag, err)
+		}
+	}
+	if strings.Contains(err.Error(), fileToken) {
+		t.Fatalf("the refusal names the token file's value: %v", err)
+	}
+	if len(reg.methods) != 0 || out != "" {
+		t.Fatalf("the refusal sent %d requests and printed %q, want no read", len(reg.methods), out)
 	}
 }
 
