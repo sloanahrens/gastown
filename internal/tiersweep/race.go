@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// racePkg is the package the race tier's one entry runs its test in.
+// racePkg is the package raceRuns' entry runs its test in.
 const racePkg = "./internal/cmd"
 
-// raceArgs are the go test arguments for the race tier: the race detector on
+// raceArgs are the go test arguments of raceRuns' entry: the race detector on
 // the integration build, for the one test that walks the command tree under
 // parallel tests. Only -race shows a regression there.
 var raceArgs = []string{"-race", "-tags", "integration", "-run", "^TestCommandTreeWalkIsReadOnlyUnderParallelTests$"}
@@ -29,7 +29,8 @@ type raceRun struct {
 	label string
 }
 
-// raceRuns is the race tier's table: the packages the race detector covers.
+// raceRuns is the race tier's fixed entries; raceRunsWithPackages adds the one
+// that covers every listed package.
 var raceRuns = []raceRun{{[]string{racePkg}, raceArgs, "integration-walk"}}
 
 // raceExcluded names the race tier's packages that are not run. It is empty:
@@ -63,8 +64,7 @@ func racePackageList(s *Sweep) ([]string, error) {
 // followed by every package racePackageList lists, under -race, labeled
 // all-packages. It builds a new table, so raceRuns is neither changed nor
 // appended to and a second call sees the same table. A listing that cannot be
-// read is returned as the error, never as a table missing its entry. No caller
-// yet: gt-quj706 calls this from Race().
+// read is returned as the error, never as a table missing its entry.
 func raceRunsWithPackages(s *Sweep) ([]raceRun, error) {
 	pkgs, err := racePackageList(s)
 	if err != nil {
@@ -73,9 +73,18 @@ func raceRunsWithPackages(s *Sweep) ([]raceRun, error) {
 	return append(slices.Clone(raceRuns), raceRun{pkgs: pkgs, args: []string{"-race"}, label: "all-packages"}), nil
 }
 
-// Race runs the race tier and returns its summary line and whether it is RED.
+// Race runs the race tier, raceRunsWithPackages' table, and returns its summary
+// line and whether it is RED.
 func (s *Sweep) Race() (line string, red bool) {
-	return s.raceTier(raceRuns)
+	start := s.Now()
+	runs, err := raceRunsWithPackages(s)
+	if err != nil {
+		// A table that cannot be built runs nothing, so the tier fails closed:
+		// RED with no names, the cause on stderr.
+		fmt.Fprintf(s.Stderr, "%s: %s: %v\n", Name, TierRace, err)
+		return Summary(TierRace, s.Opts.LogDir, 0, 0, 0, "", int(s.Now().Sub(start)/time.Second))
+	}
+	return s.raceTier(runs)
 }
 
 // raceTier runs each entry in runs and sums their counts into one summary.

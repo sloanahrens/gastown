@@ -275,9 +275,10 @@ func TestSweepTierOrderAndExit(t *testing.T) {
 func TestSweepElapsedTimeFromTheClock(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
+	oneTagged(r.repo)
 	r.goTestTakes = 2*time.Minute + 14*time.Second
 	_, stdout, _ := r.run("race")
-	want := fmt.Sprintf("tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs %s) in 2m14s\n", r.logDir)
+	want := fmt.Sprintf("tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs %s) in 4m28s\n", r.logDir)
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
@@ -288,6 +289,7 @@ func TestSweepElapsedTimeFromTheClock(t *testing.T) {
 func TestSweepRootFlag(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
+	oneTagged(r.repo)
 	if code, _, stderr := r.run("--root", "/repo", "race"); code != 0 {
 		t.Fatalf("exit code = %d, stderr %q", code, stderr)
 	}
