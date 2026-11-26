@@ -36,6 +36,7 @@ func writeReadFile(t *testing.T, path string, data []byte) {
 // TestClusterApplyReadLoadsPlan: a good plan directory returns its plan record and
 // the one Deployment the plan holds, at its resourceVersion and phase kubeconfig.
 func TestClusterApplyReadLoadsPlan(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
 	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
@@ -56,6 +57,7 @@ func TestClusterApplyReadLoadsPlan(t *testing.T) {
 // TestClusterApplyReadRefusesBadPlan: each input that cannot be read or does not
 // name a Deployment ends in an error and no plan, so no read reads as ok.
 func TestClusterApplyReadRefusesBadPlan(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		noDir    bool   // the plan directory does not exist
@@ -113,6 +115,7 @@ func TestClusterApplyReadRefusesBadPlan(t *testing.T) {
 // TestClusterApplyReadApproval: a good approval file returns its record; a missing,
 // unreadable or malformed file ends in an error and no record.
 func TestClusterApplyReadApproval(t *testing.T) {
+	t.Parallel()
 	t.Run("a good approval file returns its record", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "approval.json")
 		writeReadFile(t, path, readApprovalOK)
