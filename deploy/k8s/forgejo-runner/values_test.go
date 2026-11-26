@@ -8,9 +8,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// controlClusterValues is values.control.yaml as the Goal records the control
-// cluster: the values read on 2026-11-18, and the engine's requests as the live
-// cluster was patched to run them below its limit.
+// controlClusterValues is values.control.yaml as the control cluster is meant to
+// run: the values read on 2026-11-18, the engine's requests as the live cluster
+// was patched to run them below its limit, and the operator's capacity of three
+// (gt-jp8axa).
 func controlClusterValues() Values {
 	return Values{
 		Namespace: "forgejo",
@@ -19,7 +20,7 @@ func controlClusterValues() Values {
 			"node:docker://data.forgejo.org/oci/node:20.19",
 			"ci-base:docker://ci-base:latest",
 		},
-		Capacity:        2,
+		Capacity:        3,
 		ForgejoHostIP:   "10.43.130.32",
 		DindStorage:     "40Gi",
 		RunnerStorage:   "1Gi",
@@ -64,9 +65,9 @@ func TestControlValuesRenderTheEngineBelowItsLimit(t *testing.T) {
 	}
 }
 
-// TestControlValuesMatchTheCluster pins the file to the values the Goal records
-// from the control cluster, so an edit that changes one is a deliberate change
-// to what the town believes the cluster runs.
+// TestControlValuesMatchTheCluster pins the file to the values the town means the
+// control cluster to run, so an edit that changes one is a deliberate change to
+// what the town asks the cluster for.
 func TestControlValuesMatchTheCluster(t *testing.T) {
 	t.Parallel()
 	got, err := ControlValues()
@@ -75,6 +76,23 @@ func TestControlValuesMatchTheCluster(t *testing.T) {
 	}
 	if want := controlClusterValues(); !reflect.DeepEqual(got, want) {
 		t.Errorf("ControlValues() = %+v, want the cluster's values %+v", got, want)
+	}
+}
+
+// TestControlValuesCapacity holds the control values' capacity to the three jobs
+// the operator asked the control cluster for, both as the file sets it and as the
+// config.yml the runner mounts carries it (gt-jp8axa).
+func TestControlValuesCapacity(t *testing.T) {
+	t.Parallel()
+	v, err := ControlValues()
+	if err != nil {
+		t.Fatalf("ControlValues: %v", err)
+	}
+	if v.Capacity != 3 {
+		t.Errorf("ControlValues().Capacity = %d, want 3", v.Capacity)
+	}
+	if got := decodeConfig(t, mustBuild(t, v)).Runner.Capacity; got != 3 {
+		t.Errorf("the rendered config.yml capacity = %d, want 3", got)
 	}
 }
 
