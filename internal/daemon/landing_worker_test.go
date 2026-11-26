@@ -1573,6 +1573,56 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	}
 }
 
+// TestNewRigLandingWorker_UsesTheConfiguredLandingRemote: every remote the
+// landing path names is the rig's configured remote, not an assumed origin:
+// the lander, the branch-tip reads through gitRemote, and the candidate gate
+// that pushes land/<bead> (gt-fn9e6.9). This is the unit-tier twin of
+// TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote, which runs
+// real git and only under make test-integration, so the gate checks it here.
+func TestNewRigLandingWorker_UsesTheConfiguredLandingRemote(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.Remote != "forgejo" {
+		t.Errorf("Lander.Remote = %q, want forgejo (the URL's remote)", lander.Remote)
+	}
+	gate, ok := lander.Candidate.(*land.CandidateGate)
+	if !ok {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate", lander.Candidate)
+	}
+	if gate.Remote != "forgejo" {
+		t.Errorf("CandidateGate.Remote = %q, want forgejo so the candidate reaches the CI that gates it", gate.Remote)
+	}
+	remote, ok := w.Remote.(gitRemote)
+	if !ok {
+		t.Fatalf("Remote = %T, want the daemon's gitRemote", w.Remote)
+	}
+	if remote.remote != "forgejo" {
+		t.Errorf("gitRemote.remote = %q, want forgejo so the branch-tip reads match what gt done pushed", remote.remote)
+	}
+}
+
 // TestNewRigLandingWorker_AgentBeadIDNamesTheSeatsAgent: a landing records the
 // agent it ran on, so the worker needs the polecat seat's own agent bead id.
 // The id carries the rig's routed prefix, not the "gt" default, because a rig
