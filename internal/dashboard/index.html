@@ -3897,17 +3897,21 @@ function renderOM(s) {
   };
 
   // Stats: the windows table and the rejected, routes and risk-paths chips.
+  // The reused count joins the counts only once a window has one, so a server
+  // that sends none draws the table it drew before (gt-q83zwr).
   const wins = om.windows || [];
   const day = wins.find(w => w.label === "24h") || wins[0];
+  const reusedCol = wins.some(w => w.reused);
   const t = el("table");
   const hr = el("tr");
-  ["", "Landed", "Approved", "No review", "Errors", "Rejected", "Avg score", "om median", "om p95"].forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
+  ["", "Landed", "Approved", "No review", "Errors", "Rejected"].concat(reusedCol ? ["Reused"] : [], ["Avg score", "om median", "om p95"]).forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
   t.append(hr);
   for (const w of wins) {
     const tr = el("tr");
     tr.append(el("td", "", w.label));
     const rej = w.rejected, err = w.errors;
     [w.landed, w.approved, w.skipped, err, rej].forEach((v, i) => tr.append(el("td", "n" + (i === 3 && v ? " warnc" : "") + (i === 4 && v ? " badc" : ""), String(v))));
+    if (reusedCol) tr.append(el("td", "n", String(w.reused || 0)));
     tr.append(el("td", "n", w.avg_score == null ? "–" : w.avg_score.toFixed(2)), el("td", "n", sec(w.median_secs)), el("td", "n" + (w.p95_secs > 240 ? " warnc" : ""), sec(w.p95_secs)));
     t.append(tr);
   }
