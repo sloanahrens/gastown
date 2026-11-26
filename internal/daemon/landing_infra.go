@@ -190,6 +190,9 @@ type infraProber interface {
 	// HoldingRun reports the run holding owner/repo's runner, the run an
 	// operator cancels when the queue stalls (gt-koxwa).
 	HoldingRun(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunHolder, error)
+	// RunningTaskIDs reports the Actions task ids running in owner/repo, the
+	// read the daemon's runningTasks seam makes (gt-unko5a).
+	RunningTaskIDs(ctx context.Context, apiBase, token, owner, repo string) ([]int64, error)
 }
 
 // forgejoProber is infraProber over the Forgejo client. Every probe call gets
@@ -235,6 +238,17 @@ func (p forgejoProber) HoldingRun(ctx context.Context, apiBase, token, owner, re
 		return forgejo.RunHolder{}, err
 	}
 	return c.HoldingRun(ctx, owner, repo)
+}
+
+func (p forgejoProber) RunningTaskIDs(ctx context.Context, apiBase, token, owner, repo string) ([]int64, error) {
+	c, err := forgejo.NewClient("",
+		forgejo.WithBaseURL(apiBase),
+		forgejo.WithToken(token),
+		forgejo.WithHTTPClient(p.http))
+	if err != nil {
+		return nil, err
+	}
+	return c.RunningTaskIDs(ctx, owner, repo)
 }
 
 // infraResult is one probe's raw outcome for one rig, before the recorder

@@ -36,6 +36,10 @@ type fakeProber struct {
 	// holderRepos the repositories it asked for.
 	holderTokens []string
 	holderRepos  []string
+	// tasks maps "owner/repo" to the running ids a running-task read answers;
+	// taskTokens is every token it was handed, in order.
+	tasks      map[string][]int64
+	taskTokens []string
 }
 
 // fakeRunPickup is one repository's run queue: the oldest run waiting on a
@@ -73,6 +77,11 @@ func (f *fakeProber) HoldingRun(_ context.Context, apiBase, token, owner, repo s
 	f.holderRepos = append(f.holderRepos, owner+"/"+repo)
 	h := f.holders[owner+"/"+repo]
 	return h.holder, h.err
+}
+
+func (f *fakeProber) RunningTaskIDs(_ context.Context, _, token, owner, repo string) ([]int64, error) {
+	f.taskTokens = append(f.taskTokens, token)
+	return f.tasks[owner+"/"+repo], nil
 }
 
 // infraDaemon is a daemon whose alerts go to a recorder and whose probe is

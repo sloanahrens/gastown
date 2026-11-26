@@ -1709,3 +1709,26 @@ func ciEngineCacheOverKeep(reclaimable int64, reclaimableKnown bool, reclaimed i
 	}
 	return over, true
 }
+
+// ciEngineRunningTasks is the production runningTasks seam: the Actions tasks
+// running in every repository the landing_infra patrol watches, read through
+// that patrol's prober. The viewer token is one town-level file, so the read
+// refuses targets naming more than one Forgejo instance rather than send a
+// credential minted for one host to another, and uses the first target's.
+// Nothing plans from the set yet (gt-unko5a).
+func (d *Daemon) ciEngineRunningTasks(ctx context.Context) (map[int64]bool, error) {
+	targets := d.landingInfraTargets()
+	if len(targets) == 0 {
+		return nil, errors.New("the running task ids cannot be read with no watched repository")
+	}
+	for _, t := range targets {
+		if t.APIBase != targets[0].APIBase {
+			return nil, fmt.Errorf("%s: the targets name more than one Forgejo instance, so one viewer token cannot read them all", t.Rig)
+		}
+	}
+	token, err := readInfraViewerToken(targets[0])
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", targets[0].Rig, err)
+	}
+	return ciEngineRunningTaskSet(ctx, targets, token, d.infraProberOrDefault().RunningTaskIDs)
+}

@@ -3703,3 +3703,71 @@ func TestCIEnginePruneCapImagesRemaining(t *testing.T) {
 		t.Errorf("recorded next due = %v, want the usual %v", runs[0].NextDue, want)
 	}
 }
+
+// TestCIEngineRunningTasksWired: the production runningTasks seam reads every
+// watched repository's running task ids through the landing_infra prober, unions
+// them, and sends the first target's viewer token, the one file a town has. It
+// refuses a target with no viewer token file, no watched repository and targets
+// naming two instances, and asks no repository in each refusal.
+func TestCIEngineRunningTasksWired(t *testing.T) {
+	t.Parallel()
+	viewer := infraTokenFile(t, "viewer", "viewer-token")
+	other := infraTokenFile(t, "viewer", "another-file")
+	// fjTarget is a target on apiBase whose viewer token file is viewer.
+	fjTarget := func(rig, apiBase, viewer string) landingInfraTarget {
+		return landingInfraTarget{Rig: rig, Owner: "o", Repo: rig, APIBase: apiBase, ViewerTokenPath: viewer}
+	}
+	for name, tc := range map[string]struct {
+		targets    []landingInfraTarget
+		tasks      map[string][]int64
+		wantSet    map[int64]bool
+		wantTokens []string
+		wantErr    string
+	}{
+		"the seam unions the targets' running task ids with the viewer token": {
+			targets:    []landingInfraTarget{fjTarget("alpha", "https://fj", viewer), fjTarget("beta", "https://fj", other)},
+			tasks:      map[string][]int64{"o/alpha": {11, 12}, "o/beta": {12, 13}},
+			wantSet:    map[int64]bool{11: true, 12: true, 13: true},
+			wantTokens: []string{"viewer-token", "viewer-token"},
+		},
+		"a target with no viewer token file refuses": {
+			targets: []landingInfraTarget{{Rig: "alpha", Owner: "o", Repo: "alpha", APIBase: "https://fj"}},
+			wantErr: "viewer token file",
+		},
+		"no watched repository refuses": {
+			wantErr: "no watched repository",
+		},
+		"targets on two Forgejo instances refuse rather than send one token to both": {
+			targets: []landingInfraTarget{fjTarget("alpha", "https://fj", viewer), fjTarget("beta", "https://fj-b", viewer)},
+			wantErr: "beta: the targets name more than one Forgejo instance",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			prober := &fakeProber{tasks: tc.tasks}
+			d, _, _ := infraDaemon(t, tc.targets, prober)
+
+			got, err := d.diskMaintenanceSeams().runningTasks(context.Background())
+
+			switch {
+			case tc.wantErr != "":
+				if err == nil || got != nil {
+					t.Fatalf("not refused: set = %v, err = %v", got, err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("the refusal reads %q, want it to name %q", err, tc.wantErr)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("running tasks: %v", err)
+				}
+				if !maps.Equal(got, tc.wantSet) {
+					t.Errorf("set = %v, want %v", got, tc.wantSet)
+				}
+			}
+			if !slices.Equal(prober.taskTokens, tc.wantTokens) {
+				t.Errorf("read tokens = %q, want %q", prober.taskTokens, tc.wantTokens)
+			}
+		})
+	}
+}
