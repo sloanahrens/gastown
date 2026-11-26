@@ -696,6 +696,46 @@ func TestDeploymentDriftRefusesAValueItCannotFingerprint(t *testing.T) {
 	}
 }
 
+// TestDriftValueSafe holds the reviewed safe list to what the operator accepted:
+// the paths whose values a drift line may print, and none that can hold a secret
+// (gt-graamb). The rows are written out rather than derived from driftValueSafe,
+// so widening the list, as marking an env path safe would, turns a row red.
+func TestDriftValueSafe(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path string
+		safe bool
+	}{
+		{"spec.replicas", true},
+		{"spec.strategy.rollingUpdate.maxSurge", true},
+		{"spec.template.spec.terminationGracePeriodSeconds", true},
+		{"spec.template.spec.containers[name=daemon].resources", true},
+		{"spec.template.spec.containers[name=daemon].resources.requests.cpu", true},
+		{"spec.template.spec.initContainers[name=dind].resources.limits.nvidia.com/gpu", true},
+		{"spec.template.spec.containers[name=daemon].args", true},
+		{"spec.template.spec.ephemeralContainers[name=debug].args[1]", true},
+		{"spec.template.metadata.labels.app.kubernetes.io/name", true},
+		{"spec.template.metadata.annotations.gastown.dev/pod-template", true},
+		{"spec.template.spec.containers[name=daemon].env[name=TZ].value", false},
+		{"spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName", false},
+		{"spec.template.spec.containers[name=daemon].env[name=TOKEN].valueFrom.secretKeyRef.key", false},
+		{"data.config.yml", false},
+		{"spec.template.spec.containers[name=daemon].command[0]", false},
+		{"spec.template.spec.containers[name=daemon].args[0].value", false},
+		{"spec.template.spec.containers[name=daemon", false},
+		{"spec.template.spec.containers[name=x].args[0].env[name=TZ].value", false},
+		{"metadata.labels.app", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			if got := driftValueSafe(tc.path); got != tc.safe {
+				t.Errorf("driftValueSafe(%q) = %v, want %v", tc.path, got, tc.safe)
+			}
+		})
+	}
+}
+
 // TestClusterDriftObjectKinds holds the compare to every kind it walks, not only
 // a Deployment: a Role's changed rule field and a ValidatingAdmissionPolicy's
 // changed validation are reported as their path and a fingerprint of each side,
