@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,16 +22,18 @@ type RedHoldPushRun struct {
 	Marker func() (RedHoldMarker, error)
 	Write  func(RedHoldMarker) error
 	Push   func(name, title, body string) error
-	// Name is the notify command to push through; "" pushes nothing.
+	// Name is the notify command to push the text through; "" texts nothing.
 	Name string
+	// Mail sends the email with the text's line; nil emails nothing.
+	Mail func(line string) error
 }
 
-// Run sends the owed red-hold text once and records it. An owed email is the
-// next bead's push, so MailedAt is left as the marker had it and a pass with no
-// owed text writes nothing; a failed send leaves the marker for the next pass,
-// and a marker that cannot be written after a send is returned, not hidden.
+// Run sends the owed red-hold text and email, each on its own, and records each
+// one that is made: a failed send leaves its stamp unset for the next pass. A
+// marker that cannot be written after a send is returned, not hidden.
 func (r RedHoldPushRun) Run(now time.Time) error {
-	if r.Name == "" || r.Push == nil {
+	texts := r.Name != "" && r.Push != nil
+	if !texts && r.Mail == nil {
 		return nil
 	}
 	rec, err := r.Hold()
@@ -50,22 +53,51 @@ func (r RedHoldPushRun) Run(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("reading the red-hold push marker: %w", err)
 	}
-	owed, next := RedHoldPushesOwed(since, acked, m, now)
-	if !owed.Text {
+	owed, _ := RedHoldPushesOwed(since, acked, m, now)
+	textOwed, mailOwed := owed.Text && texts, owed.Mail && r.Mail != nil
+	if !textOwed && !mailOwed {
 		return nil
 	}
-	if err := r.Push(r.Name, redHoldPushLine(since, rec.Reasons, now), ""); err != nil {
-		return fmt.Errorf("texting the red hold: %w", err)
+	// RedHoldPushesOwed stamps pushes this pass cannot make, so its marker is not
+	// used: each stamp is set below only once its send succeeds.
+	next, sent := m, false
+	if !m.Since.Equal(since) {
+		next = RedHoldMarker{Since: since}
 	}
-	if owed.Mail {
-		// The text goes alone on this pass: recording MailedAt now would keep
-		// the email from ever being sent.
-		next.MailedAt = time.Time{}
+	line := redHoldPushLine(since, rec.Reasons, now)
+	var errs []error
+	if textOwed {
+		if err := r.Push(r.Name, line, ""); err != nil {
+			errs = append(errs, fmt.Errorf("texting the red hold: %w", err))
+		} else {
+			next.TextedAt, sent = now, true
+		}
 	}
-	if err := r.Write(next); err != nil {
-		return fmt.Errorf("recording the red-hold text: %w", err)
+	if mailOwed {
+		if err := r.Mail(line); err != nil {
+			errs = append(errs, fmt.Errorf("emailing the red hold: %w", err))
+		} else {
+			next.MailedAt, sent = now, true
+		}
 	}
-	return nil
+	if sent {
+		if err := r.Write(next); err != nil {
+			errs = append(errs, fmt.Errorf("recording the red-hold push: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// emailSender is sendEscalationEmail's shape, so a test can stand in for it.
+type emailSender func(cfg *config.EscalationConfig, beadID, severity, description string) error
+
+// redHoldEmail emails the red hold's line through send, or returns an error and
+// sends nothing when the town names no email contact.
+func redHoldEmail(cfg *config.EscalationConfig, send emailSender, line string) error {
+	if cfg.Contacts.HumanEmail == "" || cfg.Contacts.SMTPHost == "" {
+		return errors.New("no email contact configured (contacts.human_email, contacts.smtp_host): the red hold was not emailed")
+	}
+	return send(cfg, redHoldAckKey, "high", line)
 }
 
 // oldestRedHoldSince is the earliest nonzero reason Since, or the zero time when
@@ -111,5 +143,6 @@ func PushRedHold(townRoot string, now time.Time) error {
 		Write:  func(m RedHoldMarker) error { return WriteRedHoldMarker(townRoot, m) },
 		Push:   func(name, title, body string) error { return pushThrough(runNotifyCommand, cfg, name, title, body) },
 		Name:   pushName,
+		Mail:   func(line string) error { return redHoldEmail(cfg, sendEscalationEmail, line) },
 	}.Run(now)
 }
