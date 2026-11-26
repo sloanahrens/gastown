@@ -1,12 +1,18 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/steveyegge/gastown/deploy/k8s"
+	"github.com/steveyegge/gastown/internal/secretpreflight"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // planUnreviewedStaticSecret names the first Secret document the render's static
@@ -107,3 +113,143 @@ func planSecretFields(object k8s.StaticObject) (map[string]any, []string) {
 	}
 	return declared, carried
 }
+
+// planMountedSecret is one Secret a rendered Deployment mounts, in its namespace.
+type planMountedSecret struct{ namespace, name string }
+
+// planMountedSecrets returns the Secrets the rendered Deployments mount by
+// volume, once each, in file order, each in its Deployment's namespace. A
+// document whose spec or volumes cannot be read is an error, since its Secrets
+// would otherwise pass unchecked; planLiveVersions refuses a Deployment that
+// names no namespace.
+func planMountedSecrets(bodies [][]byte) ([]planMountedSecret, error) {
+	var mounted []planMountedSecret
+	seen := map[planMountedSecret]bool{}
+	for _, body := range bodies {
+		var doc map[string]any
+		if err := yaml.Unmarshal(body, &doc); err != nil {
+			return nil, fmt.Errorf("cannot read a rendered file to find the Secrets its Deployment mounts: %w", err)
+		}
+		if kind, _ := doc["kind"].(string); kind != "Deployment" {
+			continue
+		}
+		metadata, _ := doc["metadata"].(map[string]any)
+		namespace, _ := metadata["namespace"].(string)
+		names, err := planDeploymentSecretVolumes(doc)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read the Secrets the Deployment %v mounts: %w", metadata["name"], err)
+		}
+		for _, name := range names {
+			if mount := (planMountedSecret{namespace, name}); !seen[mount] {
+				seen[mount] = true
+				mounted = append(mounted, mount)
+			}
+		}
+	}
+	return mounted, nil
+}
+
+// planDeploymentSecretVolumes returns the Secret names a rendered Deployment's
+// volumes mount, in their order: anything it cannot read as an object is an error.
+func planDeploymentSecretVolumes(doc map[string]any) ([]string, error) {
+	object := doc
+	for _, field := range []string{"spec", "template", "spec"} {
+		next, ok := object[field].(map[string]any)
+		if !ok {
+			return nil, errors.New("its spec is not an object")
+		}
+		object = next
+	}
+	raw, ok := object["volumes"]
+	if !ok {
+		return nil, nil
+	}
+	volumes, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("its spec.template.spec.volumes is not a list")
+	}
+	var names []string
+	for _, rawVolume := range volumes {
+		volume, ok := rawVolume.(map[string]any)
+		if !ok {
+			return nil, errors.New("a spec.template.spec.volumes entry is not an object")
+		}
+		rawSecret, ok := volume["secret"]
+		if !ok {
+			continue
+		}
+		secret, ok := rawSecret.(map[string]any)
+		if !ok {
+			return nil, errors.New("a volume's secret is not an object")
+		}
+		name, _ := secret["secretName"].(string)
+		if name == "" {
+			return nil, errors.New("a volume's secret names no Secret")
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// planSecretContext is the context name Missing requires; the runner replaces it.
+const planSecretContext = "apply"
+
+// planSecretPreflight refuses a plan whose Deployments mount a Secret the
+// cluster does not hold, naming it, and returns an error for a Secret it could
+// not judge, never one read as missing. It asks internal/secretpreflight with
+// the names alone, once per namespace, under the apply kubeconfig: no value is read.
+func planSecretPreflight(ctx context.Context, kube update.RunFunc, kubeconfig string, mounted []planMountedSecret) error {
+	if len(mounted) == 0 {
+		return nil
+	}
+	if err := checkClusterKubeconfig(kubeconfig); err != nil {
+		return err
+	}
+	if kubeconfig == "" {
+		return errors.New("the Deployments mount Secrets and the plan has no --apply-kubeconfig, so they were not checked")
+	}
+	names := map[string][]string{}
+	var order []string
+	for _, mount := range mounted {
+		if _, ok := names[mount.namespace]; !ok {
+			order = append(order, mount.namespace)
+		}
+		names[mount.namespace] = append(names[mount.namespace], mount.name)
+	}
+	for _, namespace := range order {
+		missing, err := secretpreflight.Missing(ctx, planSecretRunner(kube, kubeconfig), planSecretContext, namespace, names[namespace])
+		if err != nil {
+			return fmt.Errorf("checking the Secrets the Deployments mount in namespace %s (%s): %w", namespace, strings.Join(names[namespace], ", "), err)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("the Deployment in namespace %s mounts Secret %s, which the cluster does not hold, so no plan.json was written", namespace, strings.Join(missing, ", "))
+		}
+	}
+	return nil
+}
+
+// planSecretRunner turns the plan's read runner into the secretpreflight Runner.
+// It drops the `--context` pair Missing builds for the apply kubeconfig it was
+// given, and carries a failed exit's status so only NotFound reads as absent.
+func planSecretRunner(kube update.RunFunc, kubeconfig string) secretpreflight.Runner {
+	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "--context" {
+			args = args[2:]
+		}
+		out, exit, err := kube(ctx, "", nil, name, append([]string{"--kubeconfig", kubeconfig}, args...)...)
+		if err != nil {
+			return nil, err
+		}
+		if exit != 0 {
+			return []byte(out), &planSecretExit{code: exit}
+		}
+		return []byte(out), nil
+	}
+}
+
+// planSecretExit carries a failed Secret read's status, and never its output.
+type planSecretExit struct{ code int }
+
+func (e *planSecretExit) Error() string { return fmt.Sprintf("the Secret read exited %d", e.code) }
+
+func (e *planSecretExit) ExitCode() int { return e.code }
