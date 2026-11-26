@@ -114,6 +114,96 @@ func TestMetricsHourRefusesStepsWithNoWeeklyJob(t *testing.T) {
 	}
 }
 
+// fakeStepClock is the clock the step timing lines are read on. Each fake step
+// advances it by the duration the test gives that step, so a line's duration is
+// exact and no test sleeps.
+type fakeStepClock struct{ at time.Time }
+
+func (c *fakeStepClock) now() time.Time { return c.at }
+
+func (c *fakeStepClock) advance(d time.Duration) { c.at = c.at.Add(d) }
+
+// The hour prints one line per step, in step order, naming the duration the
+// injected clock measured. A step that fails still prints its line, because the
+// slow hour's record is the timing whatever the outcome.
+func TestMetricsHourStepTimes(t *testing.T) {
+	t.Parallel()
+	errFailed := errors.New("step failed")
+	const wantLines = "[town-metrics] snapshot took 1.5s\n" +
+		"[town-metrics] regime took 2s\n" +
+		"[town-metrics] analyse took 3s\n" +
+		"[town-metrics] weekly took 4s\n"
+	tests := []struct {
+		name                    string
+		snapshotErr, analyseErr error
+		want                    error
+	}{
+		{name: "every step succeeds", want: nil},
+		{name: "the snapshot fails and still prints its line", snapshotErr: errFailed, want: errFailed},
+		{name: "the analysis fails and still prints its line", analyseErr: errFailed, want: errFailed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeStepClock{at: time.Date(2026, 11, 26, 1, 0, 0, 0, time.UTC)}
+			steps := metricsHourSteps{
+				now: clock.now,
+				snapshot: func(context.Context, io.Writer, string) error {
+					clock.advance(1500 * time.Millisecond)
+					return tc.snapshotErr
+				},
+				regime: func(io.Writer, string) error {
+					clock.advance(2 * time.Second)
+					return nil
+				},
+				analyse: func(context.Context, io.Writer, string, func(context.Context, string)) (metrics.AnalysisResult, error) {
+					clock.advance(3 * time.Second)
+					return metrics.AnalysisResult{}, tc.analyseErr
+				},
+				weekly: func(context.Context, io.Writer, string) error {
+					clock.advance(4 * time.Second)
+					return nil
+				},
+			}
+			var out bytes.Buffer
+			err := runMetricsHourWith(context.Background(), &out, t.TempDir(), steps)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if got := out.String(); got != wantLines {
+				t.Fatalf("output = %q, want %q", got, wantLines)
+			}
+		})
+	}
+}
+
+// A run that finds the lock held runs no step, so it prints no step line: the
+// skipped hour carries no timing it did not measure.
+func TestMetricsHourStepTimesLockHeld(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	held, err := metrics.AcquireTownLock(filepath.Join(town, ".runtime", "town-metrics.lock"))
+	if err != nil {
+		t.Fatalf("hold the lock: %v", err)
+	}
+	defer held.Release()
+
+	var calls []string
+	clock := &fakeStepClock{at: time.Date(2026, 11, 26, 1, 0, 0, 0, time.UTC)}
+	steps := fakeHourSteps(&calls, false, nil)
+	steps.now = clock.now
+	var out bytes.Buffer
+	if err := runMetricsHourWith(context.Background(), &out, town, steps); err != nil {
+		t.Fatalf("runMetricsHourWith with the lock held: %v", err)
+	}
+	if strings.Contains(out.String(), " took ") {
+		t.Errorf("output = %q, want no step timing line", out.String())
+	}
+	if len(calls) != 0 {
+		t.Errorf("steps ran %v, want none while the lock is held", calls)
+	}
+}
+
 // writeHourFile writes content at the town-relative path under town.
 func writeHourFile(t *testing.T, town, rel, content string) {
 	t.Helper()

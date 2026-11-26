@@ -75,6 +75,8 @@ type metricsHourSteps struct {
 	// adoption when story_points.auto_adopt is on. It runs after the analysis, so a
 	// day the analysis extracts has the landings table the retrain reads.
 	weekly func(ctx context.Context, out io.Writer, town string) error
+	// now is the clock each step's timing line is read on. Nil means time.Now.
+	now func() time.Time
 }
 
 // hostMetricsHourSteps are the hour's jobs over the town it runs in.
@@ -141,7 +143,10 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 // an hour that analyses has today's extract in place for it, and it runs whatever
 // the analysis decided. An hour whose analysis extracted is also refused when
 // its footer carries a gap, after the analysis wrote the day's tables and its
-// receipt (gt-t9ll9c).
+// receipt (gt-t9ll9c). Each step prints one timing line after it runs, failed or
+// not, so the plugin log shows how long each finished step took. A step the
+// plugin's time cap kills prints no line, so the gap after the last line names
+// it. A run that finds the lock held runs no step and prints none.
 func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps metricsHourSteps) error {
 	if steps.weekly == nil {
 		return errors.New("metrics hour: the steps have no weekly job, so the story-point weights would never be retrained")
@@ -162,17 +167,31 @@ func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps m
 		}
 	}()
 
+	now := steps.now
+	if now == nil {
+		now = time.Now
+	}
+	step := func(name string, run func() error) error {
+		start := now()
+		err := run()
+		fmt.Fprintf(out, "[town-metrics] %s took %s\n", name, now().Sub(start).Round(time.Millisecond))
+		return err
+	}
 	refresh := func(ctx context.Context, period string) {
 		refreshDatasets(ctx, out, town, period, steps.dataset)
 	}
-	snapshotErr := steps.snapshot(ctx, out, town)
-	regimeErr := steps.regime(out, town)
-	analysis, analyseErr := steps.analyse(ctx, out, town, refresh)
+	snapshotErr := step("snapshot", func() error { return steps.snapshot(ctx, out, town) })
+	regimeErr := step("regime", func() error { return steps.regime(out, town) })
+	var analysis metrics.AnalysisResult
+	analyseErr := step("analyse", func() (err error) {
+		analysis, err = steps.analyse(ctx, out, town, refresh)
+		return err
+	})
 	var gapsErr error
 	if analyseErr == nil {
 		gapsErr = extractGaps(town, analysis.DayDir)
 	}
-	weeklyErr := steps.weekly(ctx, out, town)
+	weeklyErr := step("weekly", func() error { return steps.weekly(ctx, out, town) })
 	if snapshotErr != nil {
 		return snapshotErr
 	}
