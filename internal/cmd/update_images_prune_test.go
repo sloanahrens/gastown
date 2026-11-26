@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -49,13 +51,25 @@ type pruneTestRegistry struct {
 	manifestsSeen map[string]int
 	// bodies overrides the manifest bytes a tag answers with, keyed by image:tag.
 	bodies map[string][]byte
+	// deleteStatus is the status the packages API answers a DELETE with; zero
+	// answers 204.
+	deleteStatus int
+	// deletes is the packages API path of every DELETE the fake answered.
+	deletes []string
 }
 
-// RoundTrip answers a packages listing request for the image its q names, and a
-// manifest read for the tag its path names.
+// RoundTrip answers a packages listing request for the image its q names, a
+// manifest read for the tag its path names, and a packages API delete.
 func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.methods = append(f.methods, req.Method)
 	f.paths = append(f.paths, req.URL.Path)
+	if req.Method == http.MethodDelete {
+		f.deletes = append(f.deletes, req.URL.Path)
+		if f.deleteStatus != 0 {
+			return pruneTestResponse(req, f.deleteStatus, nil, 0), nil
+		}
+		return pruneTestResponse(req, http.StatusNoContent, nil, 0), nil
+	}
 	if parts := strings.Split(req.URL.Path, "/"); len(parts) == 6 && parts[4] == "manifests" {
 		return f.manifest(req, parts[3], parts[5]), nil
 	}
@@ -189,20 +203,55 @@ func pruneTestSeams(reg *pruneTestRegistry) updateImagesSeams {
 		PruneGreen: func(context.Context, string) (map[string]bool, error) {
 			return map[string]bool{pruneTestName(1): true}, nil
 		},
-		PlanPrune: update.PlanPrune,
+		PlanPrune:        update.PlanPrune,
+		PruneCredentials: func() (string, string, error) { return testUpdateImagesUser, testUpdateImagesToken, nil },
 	}
 }
 
-// runUpdateImagesPruneCmd runs `gt update images prune` over seams and returns
-// what it printed to stdout and its error. Stderr is kept apart, so a refusal's
-// message is not read as a plan line.
-func runUpdateImagesPruneCmd(t *testing.T, seams updateImagesSeams) (string, error) {
+// pruneTestApplyPopulated is pruneTestPopulated with count daemon tags instead
+// of 22, so every tag from 2 to count-20 is a delete candidate, newest first.
+func pruneTestApplyPopulated(count int) *pruneTestRegistry {
+	reg := pruneTestPopulated()
+	base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	daemon := reg.tags[imagevalues.DaemonImage]
+	for n := len(daemon) + 1; n <= count; n++ {
+		daemon = append(daemon, pruneTestTag{name: pruneTestName(n), pushed: base.Add(time.Duration(n-1) * time.Hour)})
+	}
+	reg.tags[imagevalues.DaemonImage] = daemon
+	return reg
+}
+
+// pruneTestCredentialReader is the production registry bot credential reader
+// over one token path, so a test drives the file's refusals.
+func pruneTestCredentialReader(path string) func() (string, string, error) {
+	return roleCredentialReader(func(string) (string, error) { return path, nil }, config.ForgejoRoleRegistry)
+}
+
+// pruneTestDeletePath is the packages API path one image's tag delete reaches.
+func pruneTestDeletePath(image, tag string) string {
+	return "/api/v1/packages/" + testUpdateImagesOwner + "/container/" + image + "/" + tag
+}
+
+// pruneTestCandidateNames is the newest-first tags of a 52-tag daemon listing
+// the plan deletes, cut to the first n.
+func pruneTestCandidateNames(n int) []string {
+	var names []string
+	for tag := 52 - updateImagesPruneKeepNewest; len(names) < n; tag-- {
+		names = append(names, pruneTestName(tag))
+	}
+	return names
+}
+
+// runUpdateImagesPruneCmd runs `gt update images prune` over seams with args and
+// returns what it printed to stdout and its error. Stderr is kept apart, so a
+// refusal's message is not read as a plan line.
+func runUpdateImagesPruneCmd(t *testing.T, seams updateImagesSeams, args ...string) (string, error) {
 	t.Helper()
 	c := newUpdateImagesCmd(seams)
 	var out, errOut bytes.Buffer
 	c.SetOut(&out)
 	c.SetErr(&errOut)
-	c.SetArgs([]string{"prune"})
+	c.SetArgs(append([]string{"prune"}, args...))
 	err := c.Execute()
 	return out.String(), err
 }
@@ -250,10 +299,10 @@ func TestUpdateImagesPruneFailsClosedOnAnUnreadableInput(t *testing.T) {
 }
 
 // TestUpdateImagesPruneSendsOnlyReads: with no flag the command makes only GET
-// requests to the registry and has no flag that could delete.
+// requests to the registry, whatever delete candidates its plan holds.
 func TestUpdateImagesPruneSendsOnlyReads(t *testing.T) {
 	t.Parallel()
-	reg := pruneTestPopulated()
+	reg := pruneTestApplyPopulated(25)
 	seams := pruneTestSeams(reg)
 	if _, err := runUpdateImagesPruneCmd(t, seams); err != nil {
 		t.Fatalf("prune over readable inputs: %v", err)
@@ -266,8 +315,8 @@ func TestUpdateImagesPruneSendsOnlyReads(t *testing.T) {
 			t.Fatalf("request %d is %s %s, want only GET reads", i, m, reg.paths[i])
 		}
 	}
-	if flags := newUpdateImagesPruneCmd(seams).Flags(); flags.HasFlags() {
-		t.Fatal("prune has a flag, so it is not the read-only plan")
+	if len(reg.deletes) != 0 {
+		t.Fatalf("prune without --apply deleted %v", reg.deletes)
 	}
 }
 
@@ -494,6 +543,7 @@ func TestUpdateImagesPruneRefusesAnUnwiredSeam(t *testing.T) {
 		{"digest install record", func(s *updateImagesSeams) { s.PruneLedger = nil }},
 		{"green refs reader", func(s *updateImagesSeams) { s.PruneGreen = nil }},
 		{"retention planner", func(s *updateImagesSeams) { s.PlanPrune = nil }},
+		{"registry bot credential", func(s *updateImagesSeams) { s.PruneCredentials = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -589,4 +639,165 @@ func TestUpdateImagesPruneGreenRefsNeedAnImageRig(t *testing.T) {
 	if refs != nil {
 		t.Fatalf("green refs returned with an error: %v", refs)
 	}
+}
+
+// TestUpdateImagesPruneApplyRefusesBeforeAnyDelete: a missing registry bot
+// credential file names the file and sends no request at all; a refused plan and
+// a negative --max each end the run before any delete.
+func TestUpdateImagesPruneApplyRefusesBeforeAnyDelete(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "forgejo-registry.env")
+	cases := []struct {
+		name     string
+		args     []string
+		setup    func(s *updateImagesSeams)
+		wantFile string
+	}{
+		{"credential file missing", []string{"--apply"}, func(s *updateImagesSeams) {
+			s.PruneCredentials = pruneTestCredentialReader(path)
+		}, path},
+		{"plan refused", []string{"--apply"}, func(s *updateImagesSeams) {
+			s.PlanPrune = func(update.PruneInput) (update.PrunePlan, error) {
+				return update.PrunePlan{}, fmt.Errorf("%w: test refusal", update.ErrPruneRefused)
+			}
+		}, ""},
+		{"negative max", []string{"--apply", "--max=-1"}, nil, ""},
+		{"seam unwired", []string{"--apply"}, func(s *updateImagesSeams) { s.PruneCredentials = nil }, ""},
+		{"town root unreadable", []string{"--apply"}, func(s *updateImagesSeams) {
+			s.FindTownRoot = func() (string, error) { return "", errors.New("no town here") }
+		}, ""},
+		{"registry not resolved", []string{"--apply"}, func(s *updateImagesSeams) {
+			s.Registry = func(string) (imagevalues.Registry, error) {
+				return imagevalues.Registry{}, errors.New("no registry rig")
+			}
+		}, ""},
+		{"registry owner unusable", []string{"--apply"}, func(s *updateImagesSeams) {
+			s.Registry = func(string) (imagevalues.Registry, error) {
+				return imagevalues.Registry{Scheme: "https", Host: "forgejo.test", Owner: "Bad Owner"}, nil
+			}
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := pruneTestApplyPopulated(25)
+			seams := pruneTestSeams(reg)
+			if tc.setup != nil {
+				tc.setup(&seams)
+			}
+			out, err := runUpdateImagesPruneCmd(t, seams, tc.args...)
+			if err == nil {
+				t.Fatal("prune --apply exited zero over a refusal")
+			}
+			if out != "" {
+				t.Fatalf("prune --apply printed output over a refusal:\n%s", out)
+			}
+			if len(reg.deletes) != 0 {
+				t.Fatalf("prune --apply deleted %v over a refusal", reg.deletes)
+			}
+			if tc.wantFile == "" {
+				return
+			}
+			if !strings.Contains(err.Error(), tc.wantFile) {
+				t.Fatalf("refusal does not name the credential file %s: %v", tc.wantFile, err)
+			}
+			if len(reg.methods) != 0 {
+				t.Fatalf("prune --apply made %d registry requests before the credential refusal: %v", len(reg.methods), reg.methods)
+			}
+		})
+	}
+}
+
+// TestUpdateImagesPruneApplyDeletesAtMostMax: --apply deletes at most --max
+// candidates (the default 30 with no flag), newest first, one line per deleted
+// tag and then the counts of deleted and skipped tags.
+func TestUpdateImagesPruneApplyDeletesAtMostMax(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		count int
+		args  []string
+		tags  []string
+	}{
+		{"capped at 2 of 4", 25, []string{"--max", "2"}, []string{pruneTestName(5), pruneTestName(4)}},
+		{"default 30 of 31", 52, nil, pruneTestCandidateNames(30)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := pruneTestApplyPopulated(tc.count)
+			out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg), append([]string{"--apply"}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("prune --apply: %v\n%s", err, out)
+			}
+			var wantDeletes []string
+			var want strings.Builder
+			for _, tag := range tc.tags {
+				wantDeletes = append(wantDeletes, pruneTestDeletePath(imagevalues.DaemonImage, tag))
+				fmt.Fprintf(&want, "deleted %s:%s\n", imagevalues.DaemonImage, tag)
+			}
+			fmt.Fprintf(&want, "deleted %d, skipped 0 (deleted tags, not freed bytes)\n", len(tc.tags))
+			if !slices.Equal(reg.deletes, wantDeletes) {
+				t.Fatalf("deletes = %v, want %v", reg.deletes, wantDeletes)
+			}
+			if out != want.String() {
+				t.Fatalf("prune --apply output:\n%s\nwant:\n%s", out, want.String())
+			}
+		})
+	}
+}
+
+// TestUpdateImagesPruneApplySkipsAndFailuresExitNonZero: a candidate the
+// re-check protects is named and skipped with no delete, and a refused delete
+// stops the run at once; each exits non-zero.
+func TestUpdateImagesPruneApplySkipsAndFailuresExitNonZero(t *testing.T) {
+	t.Parallel()
+	t.Run("re-check protects every candidate", func(t *testing.T) {
+		t.Parallel()
+		reg := pruneTestApplyPopulated(25)
+		seams := pruneTestSeams(reg)
+		reads := 0
+		seams.PruneGreen = func(context.Context, string) (map[string]bool, error) {
+			reads++
+			green := map[string]bool{pruneTestName(1): true}
+			if reads > 1 {
+				// A green ref appears for every candidate after the plan was made.
+				for n := 2; n <= 5; n++ {
+					green[pruneTestName(n)] = true
+				}
+			}
+			return green, nil
+		}
+		out, err := runUpdateImagesPruneCmd(t, seams, "--apply")
+		if err == nil {
+			t.Fatal("prune --apply exited zero with every delete skipped by the re-check")
+		}
+		if len(reg.deletes) != 0 {
+			t.Fatalf("prune --apply deleted %v after the re-check protected every tag", reg.deletes)
+		}
+		var want strings.Builder
+		for n := 5; n >= 2; n-- {
+			fmt.Fprintf(&want, "skipped %s:%s: the re-check of %s/%s: the keep rule protects it now (green/%s ref)\n",
+				imagevalues.DaemonImage, pruneTestName(n), imagevalues.DaemonImage, pruneTestName(n), pruneTestName(n))
+		}
+		fmt.Fprintf(&want, "deleted 0, skipped 4 (deleted tags, not freed bytes)\n")
+		if out != want.String() {
+			t.Fatalf("prune --apply output:\n%s\nwant:\n%s", out, want.String())
+		}
+	})
+	t.Run("delete refused", func(t *testing.T) {
+		t.Parallel()
+		reg := pruneTestApplyPopulated(25)
+		reg.deleteStatus = http.StatusInternalServerError
+		out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg), "--apply", "--max", "3")
+		if err == nil {
+			t.Fatal("prune --apply exited zero after a refused delete")
+		}
+		if len(reg.deletes) != 1 {
+			t.Fatalf("the run sent %d deletes after a refused one, want one with no retry", len(reg.deletes))
+		}
+		if out != "" {
+			t.Fatalf("prune --apply printed output over a refused delete:\n%s", out)
+		}
+	})
 }

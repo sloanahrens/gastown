@@ -52,6 +52,9 @@ const (
 	// retention plan keeps, on top of the installed and previous pairs and the
 	// green refs.
 	updateImagesPruneKeepNewest = 20
+	// updateImagesPruneMaxDefault is the most tags one --apply run deletes; the
+	// first live run keeps well under it (--apply --max 3).
+	updateImagesPruneMaxDefault = 30
 )
 
 // updateImagesSeams are the subcommand's dependencies: the town's registry,
@@ -73,6 +76,9 @@ type updateImagesSeams struct {
 	PruneGreen func(ctx context.Context, townRoot string) (map[string]bool, error)
 	// PlanPrune decides the retention plan; production is update.PlanPrune.
 	PlanPrune func(in update.PruneInput) (update.PrunePlan, error)
+	// PruneCredentials is the registry bot's login and token, which the prune's
+	// delete requests carry; production reads the registry role's token file.
+	PruneCredentials func() (user, token string, err error)
 }
 
 // productionUpdateImagesSeams wires the real town, registry, viewer credential
@@ -89,15 +95,24 @@ func productionUpdateImagesSeams() updateImagesSeams {
 		},
 		PruneGreen: productionPruneGreen,
 		PlanPrune:  update.PlanPrune,
+		// The delete requests need the bot that may write packages, not the
+		// read-only viewer the plan's reads use.
+		PruneCredentials: roleCredentialReader(forgejo.TokenPath, config.ForgejoRoleRegistry),
 	}
 }
 
 // viewerCredentialReader reads the read-only viewer bot's login and token from
-// its token file; neither value reaches an error. The token path lookup is
-// passed in, so a test drives both refusals.
+// its token file.
 func viewerCredentialReader(tokenPath func(role string) (string, error)) func() (user, token string, err error) {
+	return roleCredentialReader(tokenPath, config.ForgejoRoleViewer)
+}
+
+// roleCredentialReader reads role's bot login and token from its token file;
+// neither value reaches an error. The token path lookup is passed in, so a test
+// drives both refusals.
+func roleCredentialReader(tokenPath func(role string) (string, error), role string) func() (user, token string, err error) {
 	return func() (string, string, error) {
-		path, err := tokenPath(config.ForgejoRoleViewer)
+		path, err := tokenPath(role)
 		if err != nil {
 			return "", "", err
 		}
@@ -234,13 +249,14 @@ func pruneGreenRefs(ctx context.Context, rigName, remote, tokenPath string) (map
 }
 
 // newUpdateImagesPruneCmd builds `gt update images prune`: the registry
-// retention plan, printed and not applied. It has no flag that deletes, and
-// its reads are the GET requests the readers make.
+// retention plan, printed, or with --apply deleted at most --max tags of it.
 func newUpdateImagesPruneCmd(seams updateImagesSeams) *cobra.Command {
-	return &cobra.Command{
+	var apply bool
+	var maxDeletes int
+	c := &cobra.Command{
 		Use:   "prune",
-		Short: "Print the registry retention plan for the gastown images; deletes nothing",
-		Long: `Print the registry retention plan for the gastown images; deletes nothing.
+		Short: "Print the registry retention plan for the gastown images; --apply deletes a capped number of its tags",
+		Long: `Print the registry retention plan for the gastown images; --apply deletes a capped number of its tags.
 
 The plan reads the digest install's record for the installed and previous
 pairs, the registry's tags of the daemon, polecat and bd images, and the green
@@ -257,20 +273,35 @@ a tag whose manifest cannot be read leaves its image's figure out and is named
 in a "bytes unknown" line. Forgejo's own cleanup must run before the disk
 returns.
 
+With --apply the command plans as above and then deletes the plan's tags instead
+of printing the plan, at most --max of them, newest candidate first. It reads the
+registry bot's credential file before any request, so a missing file refuses the
+run with nothing sent. Before each delete it re-checks that tag against the
+install record and the green refs, and it stops at the first refused delete. It
+prints one line per deleted tag and then the counts of deleted and skipped tags:
+deleted tags, not the bytes they held. A skipped tag or a refused delete exits
+non-zero. The first live run is --apply --max 3.
+
 The command fails closed: a read or plan that fails exits non-zero and prints
-no line, so nothing is listed for deletion. The command only reads; it has no
-apply path.`,
+no line, so nothing is deleted. Without --apply nothing changes.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateImagesPrune(cmd, seams)
+			return runUpdateImagesPrune(cmd, seams, apply, maxDeletes)
 		},
 	}
+	c.Flags().BoolVar(&apply, "apply", false, "Delete the plan's tags, at most --max of them")
+	c.Flags().IntVar(&maxDeletes, "max", updateImagesPruneMaxDefault, "With --apply, the most tags one run deletes")
+	return c
 }
 
-// runUpdateImagesPrune plans the retention and prints it. Nothing is printed
-// unless every read and the plan succeed.
-func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams) error {
+// runUpdateImagesPrune plans the retention and prints it, or with apply deletes
+// the plan's candidates. Nothing is printed unless every read and the plan
+// succeed.
+func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams, apply bool, maxDeletes int) error {
+	if apply {
+		return runUpdateImagesPruneApply(cmd, seams, maxDeletes)
+	}
 	plan, reader, err := planUpdateImagesPrune(cmd.Context(), seams)
 	if err != nil {
 		return fmt.Errorf("gt update images prune: %w", err)
@@ -281,6 +312,66 @@ func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams) error {
 	}
 	writeUpdateImagesPrunePlan(cmd.OutOrStdout(), plan, figures)
 	return nil
+}
+
+// runUpdateImagesPruneApply deletes the plan's candidates, at most maxDeletes of
+// them. The registry bot's credential is read before the plan, so a run whose
+// credential file is missing makes no request; a plan that fails ends the run
+// before any delete. The deleted lines print as each delete succeeds, so a run
+// that stops names what it changed.
+func runUpdateImagesPruneApply(cmd *cobra.Command, seams updateImagesSeams, maxDeletes int) error {
+	ctx := cmd.Context()
+	if err := validateUpdateImagesPruneSeams(seams); err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	townRoot, err := seams.FindTownRoot()
+	if err != nil {
+		return fmt.Errorf("gt update images prune: finding the town root: %w", err)
+	}
+	user, token, err := seams.PruneCredentials()
+	if err != nil {
+		return fmt.Errorf("gt update images prune: reading the registry bot's credential: %w", err)
+	}
+	registry, err := seams.Registry(townRoot)
+	if err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	if err := registry.Validate(); err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	plan, _, err := planUpdateImagesPruneAt(ctx, seams, townRoot)
+	if err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	green := func() (map[string]bool, error) { return seams.PruneGreen(ctx, townRoot) }
+	recheck := update.PruneRecheck(seams.PruneLedger(townRoot), green, updateImagesPruneKeepNewest)
+	del := func(ctx context.Context, e update.PruneEntry) error {
+		if err := update.DeletePruneTag(ctx, seams.HTTPClient, registry, plaintextHostOf(registry), user, token, e.Image, e.Tag); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "deleted %s:%s\n", e.Image, e.Tag)
+		return nil
+	}
+	res, applyErr := update.ApplyPrune(ctx, plan, maxDeletes, recheck, del)
+	if applyErr != nil {
+		return fmt.Errorf("gt update images prune: %w", applyErr)
+	}
+	writeUpdateImagesPruneApply(cmd.OutOrStdout(), res)
+	if res.Failed {
+		return fmt.Errorf("gt update images prune: the re-check kept %d of the %d tags the plan named for delete", len(res.Skipped), len(plan.Delete))
+	}
+	return nil
+}
+
+// writeUpdateImagesPruneApply prints the skipped tags, then the counts of
+// deleted and skipped tags. The deleted lines are already printed as each
+// delete succeeded. The counts name deleted tags and never the bytes they held,
+// since Forgejo's own cleanup must run before the disk returns.
+func writeUpdateImagesPruneApply(w io.Writer, res update.PruneApplyResult) {
+	for _, s := range res.Skipped {
+		fmt.Fprintf(w, "skipped %s:%s: %v\n", s.Entry.Image, s.Entry.Tag, s.Err)
+	}
+	fmt.Fprintf(w, "deleted %d, skipped %d (deleted tags, not freed bytes)\n", len(res.Deleted), len(res.Skipped))
 }
 
 // planUpdateImagesPrune reads the three inputs the planner decides on and plans
@@ -295,6 +386,13 @@ func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update
 	if err != nil {
 		return update.PrunePlan{}, update.PruneRegistryReader{}, fmt.Errorf("finding the town root: %w", err)
 	}
+	return planUpdateImagesPruneAt(ctx, seams, townRoot)
+}
+
+// planUpdateImagesPruneAt is planUpdateImagesPrune over a town root already
+// found, so an --apply run reads the town once for its plan and its deletes. Its
+// callers validate the seams first.
+func planUpdateImagesPruneAt(ctx context.Context, seams updateImagesSeams, townRoot string) (update.PrunePlan, update.PruneRegistryReader, error) {
 	installed, previous, err := update.ReadPrunePairs(seams.PruneLedger(townRoot))
 	if err != nil {
 		return update.PrunePlan{}, update.PruneRegistryReader{}, err
@@ -363,6 +461,8 @@ func validateUpdateImagesPruneSeams(s updateImagesSeams) error {
 		return errors.New("no green refs reader is wired")
 	case s.PlanPrune == nil:
 		return errors.New("no retention planner is wired")
+	case s.PruneCredentials == nil:
+		return errors.New("no registry bot credential reader is wired")
 	}
 	return nil
 }
