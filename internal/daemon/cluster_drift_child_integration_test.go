@@ -127,3 +127,31 @@ func TestIntegrationStartDriftChildKeepsTheFirstBytesOfAFlood(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", stderr, note)
 	}
 }
+
+// TestIntegrationDriftChildGrandchildDeadline: a child whose grandchild holds
+// the output pipes is ended at a real deadline with exit -1 and the context
+// error, and the call returns promptly. Only the group kill (driftChildCmd)
+// reaches the grandchild; a deadline that killed the child alone would leave
+// Run blocked on the pipes until the grandchild exits, 30 seconds here (gt-tduwd3).
+func TestIntegrationDriftChildGrandchildDeadline(t *testing.T) {
+	t.Parallel()
+	// The background sleep is the grandchild: it inherits the child's stdout and
+	// stderr. The foreground sleep is the child, blocking. Neither ends before
+	// the deadline, so only the group kill can return the call promptly.
+	const promptly = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, exit, err := startDriftChild(ctx, "/bin/sh",
+		[]string{"-c", "sleep 30 & sleep 30"}, 64)
+	elapsed := time.Since(start)
+	if exit != -1 {
+		t.Errorf("startDriftChild = exit %d, want -1 for a child the deadline ended", exit)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("startDriftChild error = %v, want the context deadline error", err)
+	}
+	if elapsed > promptly {
+		t.Errorf("startDriftChild returned after %v, want it back within %v of the 300ms deadline: a grandchild held the pipes", elapsed, promptly)
+	}
+}
