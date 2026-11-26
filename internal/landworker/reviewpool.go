@@ -25,8 +25,9 @@ type AheadHints interface {
 // at once, where a Max below 1 counts as 1; Wait returns when none is running.
 //
 // Begin, when set, reports whether a review may start: false means a landing
-// hold or drain is on. End and Hints are stored here and not yet read: the end
-// hook and the hint check land with the beads that use them.
+// hold or drain is on; End, when set, is called once by every review that
+// began, before that review leaves the pool. Hints is stored here and not yet
+// read: the hint check lands with the bead that uses it.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -116,11 +117,13 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	return true
 }
 
-// review makes one review under the child of ctx that start made. The entry
-// leaves the map before done closes, so Wait sees the review end. The guard in
-// start makes the entry under w.BeadID this run's own.
+// review makes one review under the child of ctx that start made. End runs
+// before the entry leaves the map and before done closes, so a Wait released
+// by the empty map already sees the review's End. The guard in start makes the
+// entry under w.BeadID this run's own.
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
+		p.end()
 		p.mu.Lock()
 		delete(p.running, w.BeadID)
 		p.mu.Unlock()
@@ -164,6 +167,14 @@ func (p *ReviewPool) free() int {
 		return 0
 	}
 	return n
+}
+
+// end calls End when one is set, so a pool built without the hook stays
+// valid.
+func (p *ReviewPool) end() {
+	if p.End != nil {
+		p.End()
+	}
 }
 
 // logf logs through Logf when one is set.
