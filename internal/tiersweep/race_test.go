@@ -1,12 +1,14 @@
 package tiersweep
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -237,4 +239,89 @@ func TestRaceTierRefusesTwoEntriesWithOnePackageAndLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// raceRepo is a fake repository with the race tier's test listing and nested
+// module listing.
+func raceRepo(testFiles, goMods []string) *fakeRepo {
+	repo := baseRepo()
+	repo.lists[". *_test.go"] = testFiles
+	repo.lists[". */go.mod"] = goMods
+	return repo
+}
+
+// TestRacePackageList covers the race tier's package list: every root-module
+// test package RacePackages finds, in its order, less raceExcluded. A listing
+// that cannot be read is an error, while no test file is an empty list.
+//
+//testpolicy:allow parallel — swaps the package-level raceExcluded that racePackageList reads, so no parallel test may run beside it
+func TestRacePackageList(t *testing.T) {
+	t.Run("the production exclusion list drops nothing", func(t *testing.T) {
+		got, err := racePackageList(&Sweep{Src: raceRepo([]string{"alpha/a_test.go", "beta/b_test.go"}, nil)})
+		if err != nil {
+			t.Fatalf("racePackageList() error = %v, want nil", err)
+		}
+		if want := []string{"./alpha", "./beta"}; !slices.Equal(got, want) {
+			t.Errorf("racePackageList() = %q, want %q: a test race is a defect to fix, not a skip", got, want)
+		}
+	})
+	t.Run("two tracked test dirs give both packages", func(t *testing.T) {
+		got, err := racePackageList(&Sweep{Src: raceRepo([]string{"zeta/z_test.go", "pkg.go", "alpha/a_test.go"}, nil)})
+		if err != nil {
+			t.Fatalf("racePackageList() error = %v, want nil", err)
+		}
+		if want := []string{"./alpha", "./zeta"}; !slices.Equal(got, want) {
+			t.Errorf("racePackageList() = %q, want %q", got, want)
+		}
+	})
+	t.Run("a test in a nested module is left out", func(t *testing.T) {
+		got, err := racePackageList(&Sweep{Src: raceRepo([]string{"alpha/a_test.go", "tracker/y_test.go"}, []string{"tracker/go.mod"})})
+		if err != nil {
+			t.Fatalf("racePackageList() error = %v, want nil", err)
+		}
+		if want := []string{"./alpha"}; !slices.Equal(got, want) {
+			t.Errorf("racePackageList() = %q, want %q: a nested module's test is not the root tier's", got, want)
+		}
+	})
+	t.Run("an unreadable module listing is an error", func(t *testing.T) {
+		repo := baseRepo()
+		repo.listErr[". */go.mod"] = errors.New("git listing: boom")
+		_, err := racePackageList(&Sweep{Src: repo})
+		if err == nil || !strings.Contains(err.Error(), "list nested modules") || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("racePackageList() error = %v, want it to name the read and its cause", err)
+		}
+	})
+	t.Run("an unreadable test listing is an error", func(t *testing.T) {
+		repo := baseRepo()
+		repo.listErr[". *_test.go"] = errors.New("git listing: boom")
+		_, err := racePackageList(&Sweep{Src: repo})
+		if err == nil || !strings.Contains(err.Error(), "list test files") || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("racePackageList() error = %v, want it to name the read and its cause", err)
+		}
+	})
+	t.Run("no test file is an empty list", func(t *testing.T) {
+		got, err := racePackageList(&Sweep{Src: baseRepo()})
+		if err != nil {
+			t.Fatalf("racePackageList() error = %v, want nil", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("racePackageList() = %q, want no packages", got)
+		}
+	})
+	t.Run("an excluded name is dropped", func(t *testing.T) {
+		repo := raceRepo([]string{"alpha/a_test.go", "beta/b_test.go"}, nil)
+		//testpolicy:allow no-global-swap — the exclusion list is the input under test
+		raceExcluded = []string{"./beta"}
+		t.Cleanup(func() {
+			//testpolicy:allow no-global-swap — restores the exclusion list for later tests
+			raceExcluded = nil
+		})
+		got, err := racePackageList(&Sweep{Src: repo})
+		if err != nil {
+			t.Fatalf("racePackageList() error = %v, want nil", err)
+		}
+		if want := []string{"./alpha"}; !slices.Equal(got, want) {
+			t.Errorf("racePackageList() = %q, want %q", got, want)
+		}
+	})
 }

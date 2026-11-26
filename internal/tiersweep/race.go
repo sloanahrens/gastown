@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -29,6 +30,33 @@ type raceRun struct {
 
 // raceRuns is the race tier's table: the packages the race detector covers.
 var raceRuns = []raceRun{{racePkg, raceArgs, "integration-walk"}}
+
+// raceExcluded names the race tier's packages that are not run. It is empty:
+// a test race is a defect to fix, never a skip, and an entry needs a bead and
+// a reason.
+var raceExcluded []string
+
+// racePackageList lists the root module's test packages the race tier runs:
+// every package RacePackages finds, less raceExcluded. The nested modules are
+// read as planIntegration reads them, so a test in a nested module never
+// enters the root race run. A listing that cannot be read is an error naming
+// the read, not an empty list: an empty list would pass without a run. No
+// caller yet: gt-quj706 calls this from Race() once gt-yznnu5 lands.
+func racePackageList(s *Sweep) ([]string, error) {
+	goMods, err := s.Src.LsFiles(".", "*/go.mod")
+	if err != nil {
+		return nil, fmt.Errorf("list nested modules: %w", err)
+	}
+	files, err := s.Src.LsFiles(".", "*_test.go")
+	if err != nil {
+		return nil, fmt.Errorf("list test files: %w", err)
+	}
+	pkgs := RacePackages(slices.Concat(files, goMods))
+	if len(raceExcluded) > 0 {
+		pkgs = slices.DeleteFunc(pkgs, func(pkg string) bool { return slices.Contains(raceExcluded, pkg) })
+	}
+	return pkgs, nil
+}
 
 // Race runs the race tier and returns its summary line and whether it is RED.
 func (s *Sweep) Race() (line string, red bool) {
