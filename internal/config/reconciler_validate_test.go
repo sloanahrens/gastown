@@ -74,3 +74,66 @@ func TestReconcilerValidate(t *testing.T) {
 		}
 	})
 }
+
+// TestReconcilerValidateLimits: ValidateDaemonPatrolConfig refuses a present
+// reconciler block whose limit for any of the four duties the patrol grades is
+// out of range, naming that duty's settings key, and accepts the defaults
+// (gt-vh4noj). The refusal rows leave Enabled unset: a present block is refused
+// whether or not the patrol is on.
+func TestReconcilerValidateLimits(t *testing.T) {
+	t.Parallel()
+
+	const (
+		backupKey    = "daemon.patrols.reconciler.backup_limit"
+		archiveKey   = "daemon.patrols.reconciler.archive_limit"
+		gcKey        = "daemon.patrols.reconciler.gc_limit"
+		townStateKey = "daemon.patrols.reconciler.town_state_limit"
+	)
+
+	cases := []struct {
+		what string
+		fill func(*ReconcilerConfig)
+		want string
+	}{
+		{"refuses the backup limit below the 1h floor", func(r *ReconcilerConfig) { r.BackupLimit = "59m" }, backupKey},
+		{"refuses the backup limit above the 30d ceiling", func(r *ReconcilerConfig) { r.BackupLimit = "721h" }, backupKey},
+		{"refuses the archive limit below the 1h floor", func(r *ReconcilerConfig) { r.ArchiveLimit = "59m" }, archiveKey},
+		{"refuses the archive limit above the 30d ceiling", func(r *ReconcilerConfig) { r.ArchiveLimit = "721h" }, archiveKey},
+		{"refuses the gc limit below the 1h floor", func(r *ReconcilerConfig) { r.GCLimit = "59m" }, gcKey},
+		{"refuses the gc limit above the 30d ceiling", func(r *ReconcilerConfig) { r.GCLimit = "721h" }, gcKey},
+		{"refuses the town_state limit below the 1h floor", func(r *ReconcilerConfig) { r.TownStateLimit = "59m" }, townStateKey},
+		{"refuses the town_state limit above the 30d ceiling", func(r *ReconcilerConfig) { r.TownStateLimit = "721h" }, townStateKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.what, func(t *testing.T) {
+			t.Parallel()
+			c := patrolDoc(func(p *PatrolsConfig) {
+				r := &ReconcilerConfig{}
+				tc.fill(r)
+				p.Reconciler = r
+			})
+			checkPatrolConfig(t, c, tc.what, tc.want)
+		})
+	}
+
+	t.Run("accepts the limits unset", func(t *testing.T) {
+		t.Parallel()
+		c := patrolDoc(func(p *PatrolsConfig) {
+			p.Reconciler = &ReconcilerConfig{Enabled: true}
+		})
+		checkPatrolConfig(t, c, "reconciler with unset limits", "")
+	})
+
+	t.Run("accepts each limit at its bounds", func(t *testing.T) {
+		t.Parallel()
+		c := patrolDoc(func(p *PatrolsConfig) {
+			p.Reconciler = &ReconcilerConfig{
+				BackupLimit:    "1h",
+				ArchiveLimit:   "720h",
+				GCLimit:        "1h",
+				TownStateLimit: "720h",
+			}
+		})
+		checkPatrolConfig(t, c, "reconciler limits at their bounds", "")
+	})
+}
