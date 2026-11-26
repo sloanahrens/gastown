@@ -333,6 +333,9 @@ func (d *Daemon) readImagePinsFile(ctx context.Context) ([]byte, error) {
 // cannot tell a fresh pin from a trailing one, so it reports that rather than a
 // file of fresh pins. A failed read comes back as its last good state until its
 // failures pass imagePinHoldTicks, so one failed read raises no item.
+//
+// The file is parsed once, here, and each pin is read from that parse: a second
+// parse would resolve the {owner} placeholder again (gt-wdg0a3).
 func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinState, error) {
 	cmp, err := d.imagePinsCompare()
 	if err != nil {
@@ -340,13 +343,15 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 	}
 	ownerOf := func() (string, error) { return config.ResolveForgeOwner(d.config.TownRoot) }
 	pins, err := parseImagePins(data, ownerOf)
-	var states []ImagePinState
-	start := d.clk().Now()
-	if err == nil {
-		states, err = ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), d.imagePinsPathCount(ctx), cmp)
-	}
 	if err != nil {
 		return nil, err
+	}
+	tipGit := d.imagePinsTipGit(ctx)
+	pathCount := d.imagePinsPathCount(ctx)
+	start := d.clk().Now()
+	states := make([]ImagePinState, 0, len(pins))
+	for _, pin := range pins {
+		states = append(states, readImagePin(ctx, cmp, tipGit, pathCount, pin))
 	}
 	urls := make(map[string]string, len(pins))
 	for _, pin := range pins {

@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -1546,6 +1547,85 @@ func TestImagePinsForgejoAnswersTheBDFloor(t *testing.T) {
 	}
 	if _, err := cmp.CompareCommits(ctx, pinsReadOwner, "beads", pinsReadBDTip, daemonimage.BDSamplesFloor); err == nil {
 		t.Error("a compare without the viewer token read as an answer, want a refusal")
+	}
+}
+
+// ownerRewritingClock is the daemon clock for a read whose first Now runs
+// between the pins file's parse and its tip reads: first runs once, then the
+// clock answers as the fake clock does.
+type ownerRewritingClock struct {
+	clockwork.Clock
+	first func()
+}
+
+func (c *ownerRewritingClock) Now() time.Time {
+	if c.first != nil {
+		c.first()
+		c.first = nil
+	}
+	return c.Clock.Now()
+}
+
+// TestImagePinsParsedOnce: the pins file is parsed once per read, so its {owner}
+// placeholder resolves once. The clock is read after the parse and before any
+// tip read, and the hook there rewrites the town's forge owner; a second parse
+// would address the tip reads at the new owner. Every tip read must address the
+// owner the one parse resolved (gt-wdg0a3).
+func TestImagePinsParsedOnce(t *testing.T) {
+	t.Parallel()
+	d := newImagePinsForgejo(t)
+	writeImagePinsTownDolt(t, d.config.TownRoot, `,"forge":{"owner":"alpha"}`)
+	d.clock = &ownerRewritingClock{
+		Clock: clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)),
+		first: func() { writeImagePinsTownDolt(t, d.config.TownRoot, `,"forge":{"owner":"beta"}`) },
+	}
+	tips := map[string]string{}
+	for repo, tip := range map[string]string{
+		"beads":            pinsReadBDCommit,
+		"organic-mechanic": pinsReadOMCommit,
+		"history-man":      pinsReadHMCommit,
+		"devops":           pinsReadDevopsTip,
+	} {
+		tips["http://forgejo:3000/alpha/"+repo+".git"] = tip
+	}
+	var asked []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			url := cmd.Args[len(cmd.Args)-2]
+			asked = append(asked, url)
+			return []byte(pinsReadLS(tips[url])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return []byte("3\n"), nil, nil
+		case slices.Contains(cmd.Args, "show"):
+			return []byte("100\n518500\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+	file := pinsReadFixture(func(repo string) string {
+		return "http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git"
+	})
+	states, err := d.readImagePinTips(context.Background(), file)
+	if err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	if len(asked) != 4 {
+		t.Fatalf("the tip reads asked %d URLs, want one per pin: %v", len(asked), asked)
+	}
+	for _, url := range asked {
+		if !strings.HasPrefix(url, "http://forgejo:3000/alpha/") {
+			t.Errorf("tip read of %s addresses an owner the file was not parsed with, want alpha: the pins file was parsed again", url)
+		}
+	}
+	if len(states) != 4 {
+		t.Fatalf("the read answered %d states, want the file's four pins", len(states))
+	}
+	for _, st := range states {
+		if st.Err != nil {
+			t.Errorf("pin %s read: %v", st.Name, st.Err)
+		}
 	}
 }
 
