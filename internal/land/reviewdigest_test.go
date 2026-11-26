@@ -252,3 +252,141 @@ func TestVerdictReuseExpectedFlagsBeadPolicyRounds(t *testing.T) {
 		})
 	}
 }
+
+// reviewDigestInputs is one call's arguments to ReviewInputDigest, so a row can
+// change any one of the inputs om is given.
+type reviewDigestInputs struct {
+	in                  ReviewInput
+	flags               []string
+	om, context, target string
+}
+
+// digest is ReviewInputDigest over the inputs, failing the calling test when it
+// refuses them.
+func digest(t *testing.T, d reviewDigestInputs) string {
+	t.Helper()
+	got, err := ReviewInputDigest(d.in, d.flags, d.om, d.context, d.target)
+	if err != nil {
+		t.Fatalf("ReviewInputDigest() error = %v; want nil", err)
+	}
+	return got
+}
+
+// TestVerdictReuseDigestChangesWithEachInput: each exported field, the flags,
+// both om config texts and the target change the digest when set alone, so a
+// digest that leaves one out would let a verdict made under the other value be
+// reused (gt-0cdbz6).
+func TestVerdictReuseDigestChangesWithEachInput(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	issue := &beads.Issue{ID: "gt-abc", AcceptanceCriteria: "- [ ] one"}
+	in := BuildReviewInput(issue, nil, op, "risk: one", "[]", "base-sha", "head-sha", "polecat/x/gt-abc", "dir", baseRepo{})
+	in.BriefText = "# Work item\n"
+	in.PolicyText = "# Landing policy"
+	in.Round = 1
+	base := reviewDigestInputs{
+		in:      in,
+		flags:   []string{"-C", "--base", "--head", "--out"},
+		om:      `{"threshold":0.8}`,
+		context: "context text",
+		target:  "main",
+	}
+	baseDigest := digest(t, base)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*reviewDigestInputs)
+	}{
+		{"BeadID", func(d *reviewDigestInputs) { d.in.BeadID = "gt-other" }},
+		{"CriteriaText", func(d *reviewDigestInputs) { d.in.CriteriaText += "\n- [ ] two" }},
+		{"AcceptedRisksText", func(d *reviewDigestInputs) { d.in.AcceptedRisksText += "\nrisk: two" }},
+		{"PriorFindings", func(d *reviewDigestInputs) {
+			d.in.PriorFindings = []Finding{{ID: "gt-abc.1", Severity: "major", Path: "x.go", Line: 9, Title: "x"}}
+		}},
+		{"BriefText", func(d *reviewDigestInputs) { d.in.BriefText += "more\n" }},
+		{"PolicyText", func(d *reviewDigestInputs) { d.in.PolicyText += "\nmore" }},
+		{"Round", func(d *reviewDigestInputs) { d.in.Round++ }},
+		{"RoundsText", func(d *reviewDigestInputs) { d.in.RoundsText = "[{}]" }},
+		{"flags", func(d *reviewDigestInputs) { d.flags = append(slices.Clone(d.flags), "--round") }},
+		{"omRepoConfig", func(d *reviewDigestInputs) { d.om = `{"threshold":0.9}` }},
+		{"contextFile", func(d *reviewDigestInputs) { d.context += "x" }},
+		{"target", func(d *reviewDigestInputs) { d.target = "release" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			changed := base
+			tc.mutate(&changed)
+			if got := digest(t, changed); got == baseDigest {
+				t.Errorf("ReviewInputDigest() did not change when %s changed", tc.name)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseDigestIgnoresDirBaseHead: the checkout, the range and the
+// repository om's config is read from are not given to om, so they leave the
+// digest unchanged and two calls on one input agree (gt-0cdbz6).
+func TestVerdictReuseDigestIgnoresDirBaseHead(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	issue := &beads.Issue{ID: "gt-abc"}
+	in := BuildReviewInput(issue, nil, op, "", "", "base-sha", "head-sha", "polecat/x/gt-abc", "dir", baseRepo{})
+	base := reviewDigestInputs{
+		in:     in,
+		flags:  []string{"-C", "--base", "--head", "--out"},
+		om:     `{"threshold":0.8}`,
+		target: "main",
+	}
+	baseDigest := digest(t, base)
+	if again := digest(t, base); again != baseDigest {
+		t.Errorf("ReviewInputDigest() = %q on a second call; want %q", again, baseDigest)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ReviewInput)
+	}{
+		{"Dir", func(in *ReviewInput) { in.Dir = "another-dir" }},
+		{"Base", func(in *ReviewInput) { in.Base = "another-base" }},
+		{"Head", func(in *ReviewInput) { in.Head = "another-head" }},
+		{"Repo", func(in *ReviewInput) { in.Repo = nil }},
+		{"Logf", func(in *ReviewInput) { in.Logf = func(string, ...any) {} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			changed := base
+			tc.mutate(&changed.in)
+			if got := digest(t, changed); got != baseDigest {
+				t.Errorf("ReviewInputDigest() changed when %s changed: %q; want %q", tc.name, got, baseDigest)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseDigestRefusesBadInput: every input reviewDigestOf cannot hash
+// as a whole returns an error and no digest, so it never reads as a value a
+// stored verdict could be matched against (gt-0cdbz6).
+func TestVerdictReuseDigestRefusesBadInput(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		call func() (string, error)
+	}{
+		{"a value that is not a struct", func() (string, error) { return reviewDigestOf(42, nil) }},
+		{"an extra name that is also a field", func() (string, error) {
+			return reviewDigestOf(struct{ Flags string }{}, map[string]any{"Flags": "x"})
+		}},
+		{"a field JSON cannot encode", func() (string, error) {
+			return reviewDigestOf(struct{ Callback func() }{Callback: func() {}}, nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tc.call()
+			if err == nil {
+				t.Fatalf("reviewDigestOf() = %q, nil; want an error", got)
+			}
+			if got != "" {
+				t.Errorf("reviewDigestOf() digest = %q; want empty with the error", got)
+			}
+		})
+	}
+}

@@ -1,6 +1,14 @@
 package land
 
-import "slices"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"reflect"
+	"slices"
+)
 
 // ExpectedReviewFlags is the sorted flag names a complete om review run carries
 // for in and bar, as flagNames gives them for reviewOnce's argv: -C, --base,
@@ -49,4 +57,60 @@ func ExpectedReviewFlags(in ReviewInput, bar float64) []string {
 	}
 	slices.Sort(flags)
 	return flags
+}
+
+// reviewDigestExcluded names the ReviewInput fields the input digest leaves
+// out: the checkout and the range om runs in, the repository a caller reads om's
+// config from, and the log sink are not given to om on its command line, so a
+// verdict made in one checkout or at one base stays reusable in another
+// (gt-0cdbz6).
+var reviewDigestExcluded = []string{"Dir", "Base", "Head", "Repo", "Logf"}
+
+// ReviewInputDigest is the sha256 of one review's inputs as om is given them:
+// the exported ReviewInput fields reviewDigestExcluded does not name, the flag
+// names, the .om.json text read at base, the context_file text it names and the
+// target branch (gt-0cdbz6).
+func ReviewInputDigest(in ReviewInput, flags []string, omRepoConfig, contextFile, target string) (string, error) {
+	return reviewDigestOf(in, map[string]any{
+		"flags":        flags,
+		"omRepoConfig": omRepoConfig,
+		"contextFile":  contextFile,
+		"target":       target,
+	})
+}
+
+// reviewDigestOf is the digest of any struct's exported fields outside
+// reviewDigestExcluded, with extra's entries added, as canonical JSON: the
+// object's keys are sorted and PriorFindings is encoded as its JSON, so equal
+// inputs always digest equal. It takes any value so a test can digest a struct
+// with a field ReviewInput does not have (gt-0cdbz6). A value that is not a
+// struct, an extra name that is also a field, and a field JSON cannot encode
+// are errors, never a partial digest.
+func reviewDigestOf(v any, extra map[string]any) (string, error) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Struct {
+		return "", fmt.Errorf("review input digest: %T is not a struct", v)
+	}
+	excluded := make(map[string]bool, len(reviewDigestExcluded))
+	for _, name := range reviewDigestExcluded {
+		excluded[name] = true
+	}
+	fields := make(map[string]any, rv.NumField()+len(extra))
+	for i := range rv.NumField() {
+		f := rv.Type().Field(i)
+		if f.PkgPath != "" || excluded[f.Name] {
+			continue
+		}
+		if _, dup := extra[f.Name]; dup {
+			return "", fmt.Errorf("review input digest: %s is a field and an extra input", f.Name)
+		}
+		fields[f.Name] = rv.Field(i).Interface()
+	}
+	maps.Copy(fields, extra)
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return "", fmt.Errorf("review input digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
