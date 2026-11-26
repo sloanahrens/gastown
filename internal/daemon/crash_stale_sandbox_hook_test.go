@@ -177,7 +177,7 @@ func TestReapStaleSandboxHookClearsAHookWhoseBeadWentToAnotherSeat(t *testing.T)
 }
 
 // A dead seat whose work bead is closed has its hook cleared: nothing is left
-// to run.
+// to run. The sandbox-gone check runs first, as it does for a handed-back bead.
 func TestReapStaleSandboxHookClearsAHookWhoseBeadIsClosed(t *testing.T) {
 	t.Parallel()
 	s := newStaleHook(t, staleHookOpts{
@@ -188,6 +188,9 @@ func TestReapStaleSandboxHookClearsAHookWhoseBeadIsClosed(t *testing.T) {
 	}
 	if got := s.hook(); got != "" {
 		t.Errorf("agent bead hook = %q after the reap, want cleared", got)
+	}
+	if len(s.gateway) != 1 || s.gateway[0] != "gw1|"+staleHookSession {
+		t.Errorf("gateway asked %v, want the seat profile's gateway and the session's sandbox name", s.gateway)
 	}
 }
 
