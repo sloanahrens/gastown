@@ -480,3 +480,62 @@ func TestReviewPoolWorkerOffersAfterList(t *testing.T) {
 		}
 	})
 }
+
+// TestReviewPoolWorkerNilPoolIsToday pins that a worker with no review pool
+// passes exactly as it did before the pool existed: a pass over three ready
+// beads does not panic, lands them in the landing order (a P0 first, then the
+// earliest submission) with the landing requests written out here, and reports
+// three landed (gt-mxy9yb).
+func TestReviewPoolWorkerNilPoolIsToday(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if h.w.Pool != nil {
+		t.Fatalf("Worker Pool = %#v; want nil: this test pins the pass with no pool set", h.w.Pool)
+	}
+	// Seeded in neither landing order nor its reverse: the P0 comes last and
+	// the two older submissions arrive out of order.
+	h.seedReadyAt(t, "gt-late", 2, "2026-09-30T11:00:00Z")
+	h.seedReadyAt(t, "gt-hot", 0, "2026-09-30T13:00:00Z")
+	h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
+
+	rep := h.w.Pass(context.Background())
+
+	if want := (Report{Landed: 3}); rep != want {
+		t.Fatalf("pass report = %+v; want %+v", rep, want)
+	}
+	want := []struct {
+		bead      string
+		rig       string
+		branch    string
+		head      string
+		target    string
+		worker    string
+		priority  int
+		submitted string
+	}{
+		{bead: "gt-hot", rig: "gastown", branch: branch, head: tipHead, target: "main", worker: "opal", priority: 0, submitted: "2026-09-30T13:00:00Z"},
+		{bead: "gt-early", rig: "gastown", branch: branch, head: tipHead, target: "main", worker: "opal", priority: 2, submitted: "2026-09-30T09:00:00Z"},
+		{bead: "gt-late", rig: "gastown", branch: branch, head: tipHead, target: "main", worker: "opal", priority: 2, submitted: "2026-09-30T11:00:00Z"},
+	}
+	if len(h.lander.calls) != len(want) {
+		t.Fatalf("landed %d beads; want %d: %+v", len(h.lander.calls), len(want), h.lander.calls)
+	}
+	for i, want := range want {
+		got := h.lander.calls[i]
+		if got.BeadID != want.bead || got.Rig != want.rig || got.Branch != want.branch ||
+			got.Head != want.head || got.Target != want.target || got.Worker != want.worker {
+			t.Fatalf("landing %d = %+v; want bead %s of %s at %s onto %s by %s in %s",
+				i, got, want.bead, want.branch, want.head, want.target, want.worker, want.rig)
+		}
+		if got.Priority == nil || *got.Priority != want.priority {
+			t.Fatalf("landing %d priority = %v; want %d", i, got.Priority, want.priority)
+		}
+		submitted, err := time.Parse(time.RFC3339, want.submitted)
+		if err != nil {
+			t.Fatalf("parsing the expected submission time %q: %v", want.submitted, err)
+		}
+		if !got.Submitted.Equal(submitted) {
+			t.Fatalf("landing %d submitted = %v; want %s", i, got.Submitted, want.submitted)
+		}
+	}
+}
