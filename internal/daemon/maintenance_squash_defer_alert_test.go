@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -199,5 +201,89 @@ func TestSquashDeferAlertCounterConcurrent(t *testing.T) {
 	}
 	if got := d.squashDeferrals.deferred("gt"); got != deferrals+1 {
 		t.Fatalf("deferred after %d concurrent deferrals = %d, want %d", deferrals, got, deferrals+1)
+	}
+}
+
+// TestSquashDeferredSince pins the read of the persisted deferral stamp: a
+// database stamped under its own key on the alert clock reads back that
+// instant, and a database with no stamp, a stamp for another database, an
+// entry that cannot be read and an entry that is not a timestamp all read as
+// the zero time (gt-b8na21).
+func TestSquashDeferredSince(t *testing.T) {
+	t.Parallel()
+	raised := time.Date(2026, 11, 24, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		db    string
+		setup func(t *testing.T, dir string)
+		want  time.Time
+	}{
+		{
+			name: "a stamp for the database reads back its instant",
+			db:   "gt",
+			setup: func(t *testing.T, dir string) {
+				stampSquashDefer(t, dir, "squash-defer:gt", raised)
+			},
+			want: raised,
+		},
+		{
+			name:  "a database with no stamp reads as the zero time",
+			db:    "gt",
+			setup: func(t *testing.T, dir string) {},
+			want:  time.Time{},
+		},
+		{
+			name: "another database's stamp is not this database's",
+			db:   "hq",
+			setup: func(t *testing.T, dir string) {
+				stampSquashDefer(t, dir, "squash-defer:gt", raised)
+			},
+			want: time.Time{},
+		},
+		{
+			name: "an entry that cannot be read reads as the zero time",
+			db:   "gt",
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "squash-defer:gt"), 0o700); err != nil {
+					t.Fatalf("creating the entry directory: %v", err)
+				}
+			},
+			want: time.Time{},
+		},
+		{
+			name: "an entry that is not a timestamp reads as the zero time",
+			db:   "gt",
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatalf("creating the clock directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "squash-defer:gt"), []byte("not a timestamp\n"), 0o600); err != nil {
+					t.Fatalf("writing the garbage entry: %v", err)
+				}
+			},
+			want: time.Time{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+			tc.setup(t, alertClockPath(d.config.TownRoot))
+
+			got := d.squashDeferredSince(tc.db)
+			if !got.Equal(tc.want) {
+				t.Fatalf("squashDeferredSince(%q) = %v, want %v", tc.db, got, tc.want)
+			}
+		})
+	}
+}
+
+// stampSquashDefer writes at on the alert clock under dir, the way the
+// deferral's mark will, so a row reads a real clock entry and not a file the
+// test made up.
+func stampSquashDefer(t *testing.T, dir, key string, at time.Time) {
+	t.Helper()
+	if err := (alertClock{dir: dir}).stamp(key, at); err != nil {
+		t.Fatalf("stamping the alert clock: %v", err)
 	}
 }
