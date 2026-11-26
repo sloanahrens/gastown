@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +88,61 @@ func TestDeferredBookkeepingWiring(t *testing.T) {
 			}
 		})
 	}
+}
+
+// builtWorker runs the daemon's production construction (newRigLandingWorker)
+// for rig "gastown" with deferred bookkeeping listed for rigs, and returns the
+// worker it built.
+func builtWorker(t *testing.T, rigs ...string) *landworker.Worker {
+	t.Helper()
+	townRoot := t.TempDir()
+	promoteRigConfig(t, townRoot, "gastown", filepath.Join(t.TempDir(), "promote-gastown.key"))
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+	d.patrolConfig.Patrols.LandingWorker.DeferredBookkeeping = &config.DeferredBookkeepingConfig{Rigs: rigs}
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	return w
+}
+
+// TestDeferredBookkeepingBuilt: the worker the daemon builds for a rig the
+// switch lists carries the queue and a Lander that defers, while a rig it does
+// not list carries neither (gt-libhdq). It drives newRigLandingWorker, the
+// production construction path, so deleting the wiring turns the listed case
+// red.
+func TestDeferredBookkeepingBuilt(t *testing.T) {
+	t.Parallel()
+	landerOf := func(t *testing.T, w *landworker.Worker) *land.Lander {
+		t.Helper()
+		lander, ok := w.Lander.(*land.Lander)
+		if !ok {
+			t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+		}
+		return lander
+	}
+
+	t.Run("a listed rig's built worker has the queue", func(t *testing.T) {
+		t.Parallel()
+		w := builtWorker(t, "gastown", "longeye")
+		if w.Books == nil {
+			t.Fatal("the worker the daemon built for a listed rig has no BookQueue; its bookkeeping runs inline")
+		}
+		if !landerOf(t, w).DeferBookkeeping {
+			t.Error("the listed rig's Lander keeps the inline path; the queue would never be fed")
+		}
+	})
+
+	t.Run("an unlisted rig's built worker has none", func(t *testing.T) {
+		t.Parallel()
+		w := builtWorker(t, "longeye")
+		if w.Books != nil {
+			t.Fatal("the worker the daemon built for an unlisted rig carries a BookQueue; want the inline path")
+		}
+		if landerOf(t, w).DeferBookkeeping {
+			t.Error("the unlisted rig's Lander was given DeferBookkeeping")
+		}
+	})
 }
 
 // wiredBookQueue builds a daemon whose listed rig has its landing worker wired
