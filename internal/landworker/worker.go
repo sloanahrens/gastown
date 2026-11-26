@@ -594,6 +594,20 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// the whole list, not the beads this pass still has to land, because the
 	// column it answers counts what waits.
 	w.Queue.Publish(w.Rig, len(issues))
+	// The pool reviews this list while the pass lands it, so the landing has a
+	// verdict to reuse instead of running om inline. It is offered on ctx, the
+	// run context the pass was called with, which outlives one landing and one
+	// pass: a review must keep running past both. An error building the works
+	// offers nothing this time and the pass goes on, since the pool can only
+	// save time (gt-mdv8eq).
+	if w.Pool != nil {
+		works, err := w.reviewWorks(issues, "")
+		if err != nil {
+			w.logf("the review pool: building the works: %v; offering none this pass", err)
+		} else {
+			w.Pool.Offer(ctx, works)
+		}
+	}
 	// The submissions this pass has looked at, whatever it left them on: a bead
 	// that stays ready after its attempt is not tried twice in one pass, and the
 	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
