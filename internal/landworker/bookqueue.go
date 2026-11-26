@@ -18,7 +18,8 @@ const bookJobBound = 10 * time.Minute
 
 // BookQueue runs bookkeeping jobs one at a time, in the order they were added,
 // on a goroutine of its own; the zero value is ready to use. A job that runs
-// past bookJobBound is reported once, through Logf, naming its bead.
+// past bookJobBound is reported once, naming its bead, through Overdue and
+// Logf.
 type BookQueue struct {
 	// Begin runs when the queue goes from empty to busy, before the job that
 	// opened the period starts; End runs when that period's last job returns.
@@ -36,6 +37,12 @@ type BookQueue struct {
 	// Clock is the time source the queue waits a job's bound on. nil uses the
 	// wall clock; set it before the queue is used.
 	Clock clockwork.Clock
+
+	// Overdue is called once, on the drain goroutine, when a job has run past
+	// bookJobBound and is still running: with the bead it was for and the
+	// bound. The same moment is logged through Logf. nil calls nothing; set it
+	// before the queue is used.
+	Overdue func(beadID string, bound time.Duration)
 
 	mu     sync.Mutex
 	jobs   []bookJob
@@ -193,9 +200,12 @@ func (q *BookQueue) drain() {
 		case <-done:
 			bound.Stop()
 		case <-bound.Chan():
-			// The job is still running: name its bead once, then keep waiting for
-			// it, so the queue's order is unchanged and the report is never
-			// repeated for the same job.
+			// The job is still running: tell the queue's owner and name its bead
+			// once, then keep waiting for it, so the queue's order is unchanged
+			// and the report is never repeated for the same job.
+			if q.Overdue != nil {
+				q.Overdue(next.beadID, bookJobBound)
+			}
 			q.logf("bookqueue: the job for %s has run longer than %s and is still running", next.beadID, bookJobBound)
 			<-done
 		}
