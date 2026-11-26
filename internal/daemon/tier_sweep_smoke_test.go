@@ -41,17 +41,16 @@ func TestClassifySweepSmoke(t *testing.T) {
 func newSweepSmokeDaemon(t *testing.T, now time.Time) *Daemon {
 	t.Helper()
 	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
-	cfg := runnerTestConfig(t)
-	cfg.Shell = true
-	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+	d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
 	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
 	return d
 }
 
-// TestSweepSmokeLaunch pins the record each launch result gives, that the
-// launch runs once over the cheapest stage the runner takes at the main tip,
-// and that no wait for a result starts; a launch that cannot be rendered is
-// failed with the first line of why and launches nothing (gt-d7qez9).
+// TestSweepSmokeLaunch pins the record each launch gives, that one launch runs
+// over the first stage the runner takes at the main tip, that no wait for a
+// result starts, and that a launch which cannot be rendered fails before it
+// launches (gt-d7qez9).
 func TestSweepSmokeLaunch(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -59,20 +58,19 @@ func TestSweepSmokeLaunch(t *testing.T) {
 		name   string
 		setup  func(*Daemon)
 		launch tierSweepLaunch
-		runs   bool
 		tiers  string
 		want   sweepSmokeRecord
 	}{
-		{"started", nil, tierSweepLaunch{exitCode: 0}, true, "shell", sweepSmokeRecord{Time: now, Outcome: "started"}},
-		{"busy", nil, tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, true, "shell", sweepSmokeRecord{Time: now, Outcome: "busy"}},
-		{"declined", nil, tierSweepLaunch{exitCode: -1, declined: true}, true, "shell", sweepSmokeRecord{Time: now, Outcome: "declined"}},
-		{"failed", nil, tierSweepLaunch{exitCode: -1, err: errors.New("killed\nmore")}, true, "shell", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "killed"}},
-		{"host shell skipped", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.Shell = false }, tierSweepLaunch{exitCode: 0}, true, "integration,race", sweepSmokeRecord{Time: now, Outcome: "started"}},
+		{"started", nil, tierSweepLaunch{exitCode: 0}, "shell", sweepSmokeRecord{Time: now, Outcome: "started"}},
+		{"busy", nil, tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, "shell", sweepSmokeRecord{Time: now, Outcome: "busy"}},
+		{"declined", nil, tierSweepLaunch{exitCode: -1, declined: true}, "shell", sweepSmokeRecord{Time: now, Outcome: "declined"}},
+		{"failed", nil, tierSweepLaunch{exitCode: -1, err: errors.New("killed\nmore")}, "shell", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "killed"}},
+		{"host shell skipped", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.Shell = false }, tierSweepLaunch{exitCode: 0}, "integration,race", sweepSmokeRecord{Time: now, Outcome: "started"}},
 		{"main unreadable", func(d *Daemon) {
-			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "", errors.New("resolving origin/main: boom") }
-		}, tierSweepLaunch{}, false, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "resolving origin/main: boom"}},
-		{"runner cannot render", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.CPUs = 0 }, tierSweepLaunch{}, false, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "sweeprunner: spec.cpus: 0 is outside 1-16"}},
-		{"no runner", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner = nil }, tierSweepLaunch{}, false, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "no runner is configured for the rig's sweep"}},
+			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "", errors.New("boom") }
+		}, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "boom"}},
+		{"runner cannot render", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner.CPUs = 0 }, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "sweeprunner: spec.cpus: 0 is outside 1-16"}},
+		{"no runner", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner = nil }, tierSweepLaunch{}, "", sweepSmokeRecord{Time: now, Outcome: "failed", Detail: "no runner is configured for the rig's sweep"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -80,40 +78,32 @@ func TestSweepSmokeLaunch(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(d)
 			}
-			launches := 0
-			var st tierSweepStage
+			launches, st := 0, tierSweepStage{}
 			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
 				launches++
 				st = s
 				return tc.launch
 			}
 			d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) {
-				t.Error("sweepSmokeLaunch started a wait for a result")
+				t.Error("waited for a result")
 				return runnerBudgetSpent(0)
 			}
 			if rec := d.sweepSmokeLaunch(context.Background(), "gastown"); rec != tc.want {
 				t.Errorf("sweepSmokeLaunch = %+v, want %+v", rec, tc.want)
 			}
-			if tc.runs && launches != 1 {
-				t.Errorf("launches = %d, want one", launches)
-			}
-			if tc.runs && (strings.Join(st.tiers, ",") != tc.tiers || st.tested != runnerTestSHA) {
-				t.Errorf("launched stage %+v, want tiers %q at the main tip", st, tc.tiers)
-			}
-			if !tc.runs && launches != 0 {
-				t.Errorf("launches = %d, want none", launches)
+			if (launches == 1) != (tc.tiers != "") || strings.Join(st.tiers, ",") != tc.tiers || launches == 1 && st.tested != runnerTestSHA {
+				t.Errorf("launches = %d, stage %+v; want the launch of tiers %q at the main tip, or none", launches, st, tc.tiers)
 			}
 		})
 	}
 }
 
-// TestSweepSmokeLaunchStops pins that a launch's teardown runs once a started
-// or failed launch returns, and never for a busy one: a busy launch created
-// nothing, so its teardown could end a run the smoke did not start (gt-d7qez9).
+// TestSweepSmokeLaunchStops pins that the launch's stop runs once a started or
+// failed launch returns, and never for a busy one: it created nothing, and its
+// stop could end a run the smoke did not start (gt-d7qez9).
 func TestSweepSmokeLaunchStops(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
-	busy := tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}
 	for _, tc := range []struct {
 		name   string
 		launch tierSweepLaunch
@@ -121,7 +111,7 @@ func TestSweepSmokeLaunchStops(t *testing.T) {
 	}{
 		{"started", tierSweepLaunch{exitCode: 0}, 1},
 		{"failed", tierSweepLaunch{exitCode: -1, err: errors.New("killed")}, 1},
-		{"busy", busy, 0},
+		{"busy", tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-gastown-abc"}}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

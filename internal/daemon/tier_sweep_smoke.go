@@ -3,11 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -42,13 +40,10 @@ func classifySweepSmoke(l tierSweepLaunch) sweepSmokeRecord {
 	return sweepSmokeRecord{Outcome: "started"}
 }
 
-// sweepSmokeLaunch starts the first sweep stage of rig the runner takes and
-// reports what the launch did, never waiting for the run's result: the
-// launch's own start steps are the evidence (gt-ohgh0v).
-//
-// The run is taken down once the launch returns, except a busy one: it found
-// a sweep Job of the rig already running and created nothing, so its teardown
-// could end a run the smoke did not start.
+// sweepSmokeLaunch launches the rig's first sweep stage the runner takes and
+// reports the outcome without waiting for the run (gt-ohgh0v). The stop runs
+// once the launch returns, except for a busy launch: it created nothing, and
+// its stop could end the run already going.
 func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRecord {
 	l := d.sweepSmokeRun(ctx, rig)
 	rec := classifySweepSmoke(l)
@@ -59,17 +54,11 @@ func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRec
 	return rec
 }
 
-// sweepSmokeRun renders the rig's sweep stages at origin/main and launches the
-// first one the runner takes: the shell stage when runner.shell sends it off
-// the host, the integration stage when it does not. A stage the config keeps
-// on the host has no Spec and is skipped, never launched off the host. A
-// failure before the launch is a failed launch that created nothing.
+// sweepSmokeRun renders each sweep stage at origin/main and launches the first
+// the runner takes off the host. A stage the config keeps on the host has no
+// Spec. A failure before the launch is a failed launch that created nothing.
 func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch {
-	read := d.tierSweepSeams.localMainSHA
-	if read == nil {
-		read = tierSweepLocalMainSHA
-	}
-	sha, err := read(constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig)))
+	sha, err := d.tierSweepLocalMain(rig)
 	if err != nil {
 		return tierSweepLaunch{exitCode: -1, err: err}
 	}
@@ -79,14 +68,13 @@ func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch 
 		if err != nil {
 			return tierSweepLaunch{exitCode: -1, err: err}
 		}
-		if !offHost {
-			continue
+		if offHost {
+			launch := d.tierSweepSeams.launch
+			if launch == nil {
+				launch = d.tierSweepLaunchRunner
+			}
+			return launch(ctx, st, spec)
 		}
-		launch := d.tierSweepSeams.launch
-		if launch == nil {
-			launch = d.tierSweepLaunchRunner
-		}
-		return launch(ctx, st, spec)
 	}
 	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}
 }
