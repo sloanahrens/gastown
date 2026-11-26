@@ -352,3 +352,43 @@ func TestRacePackageList(t *testing.T) {
 		}
 	})
 }
+
+// TestRaceRunsWithPackages covers the race tier's table with the all-packages
+// entry: raceRuns' own entries unchanged, then one entry running every package
+// racePackageList lists under -race. A listing that cannot be read is returned
+// as the error, never as a table quietly missing that entry.
+func TestRaceRunsWithPackages(t *testing.T) {
+	t.Parallel()
+	t.Run("the all-packages entry follows the existing entries", func(t *testing.T) {
+		t.Parallel()
+		repo := raceRepo([]string{"alpha/a_test.go", "zeta/z_test.go"}, nil)
+		before := slices.Clone(raceRuns)
+		got, err := raceRunsWithPackages(&Sweep{Src: repo})
+		if err != nil {
+			t.Fatalf("raceRunsWithPackages() error = %v, want nil", err)
+		}
+		want := append(slices.Clone(before), raceRun{
+			pkgs:  []string{"./alpha", "./zeta"},
+			args:  []string{"-race"},
+			label: "all-packages",
+		})
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("raceRunsWithPackages() = %v, want %v", got, want)
+		}
+		if !reflect.DeepEqual(raceRuns, before) {
+			t.Errorf("raceRuns = %v after the call, want it unchanged at %v: a caller must not see the entry appear twice", raceRuns, before)
+		}
+	})
+	t.Run("an unreadable list is an error", func(t *testing.T) {
+		t.Parallel()
+		repo := baseRepo()
+		repo.listErr[". *_test.go"] = errors.New("git listing: boom")
+		got, err := raceRunsWithPackages(&Sweep{Src: repo})
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("raceRunsWithPackages() error = %v, want the listing's cause", err)
+		}
+		if got != nil {
+			t.Errorf("raceRunsWithPackages() = %v on error, want nil so no run starts", got)
+		}
+	})
+}

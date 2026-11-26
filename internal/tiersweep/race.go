@@ -41,8 +41,8 @@ var raceExcluded []string
 // every package RacePackages finds, less raceExcluded. The nested modules are
 // read as planIntegration reads them, so a test in a nested module never
 // enters the root race run. A listing that cannot be read is an error naming
-// the read, not an empty list: an empty list would pass without a run. No
-// caller yet: gt-quj706 calls this from Race() once gt-yznnu5 lands.
+// the read, not an empty list: an empty list would pass without a run.
+// raceRunsWithPackages is its caller.
 func racePackageList(s *Sweep) ([]string, error) {
 	goMods, err := s.Src.LsFiles(".", "*/go.mod")
 	if err != nil {
@@ -57,6 +57,20 @@ func racePackageList(s *Sweep) ([]string, error) {
 		pkgs = slices.DeleteFunc(pkgs, func(pkg string) bool { return slices.Contains(raceExcluded, pkg) })
 	}
 	return pkgs, nil
+}
+
+// raceRunsWithPackages is the race tier's table with one entry added: raceRuns
+// followed by every package racePackageList lists, under -race, labeled
+// all-packages. It builds a new table, so raceRuns is neither changed nor
+// appended to and a second call sees the same table. A listing that cannot be
+// read is returned as the error, never as a table missing its entry. No caller
+// yet: gt-quj706 calls this from Race().
+func raceRunsWithPackages(s *Sweep) ([]raceRun, error) {
+	pkgs, err := racePackageList(s)
+	if err != nil {
+		return nil, err
+	}
+	return append(slices.Clone(raceRuns), raceRun{pkgs: pkgs, args: []string{"-race"}, label: "all-packages"}), nil
 }
 
 // Race runs the race tier and returns its summary line and whether it is RED.
