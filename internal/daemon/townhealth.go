@@ -348,7 +348,12 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		{"overrun_guard", overrunGuardInterval(cfg)},
 		{"git_hygiene", gitHygieneInterval(cfg)},
 		{"events_prune", pruneEvery},
+		{"reconciler", reconcilerInterval(cfg)},
 	}
+	// IsPatrolEnabled has no reconciler case, so a town with no reconciler block
+	// reads the patrol as active. Only a block that enables it lists the tick: an
+	// absent block would show a tick that never fires (gt-v71maj).
+	reconcilerOn := cfg != nil && cfg.Patrols != nil && cfg.Patrols.Reconciler != nil && cfg.Patrols.Reconciler.Enabled
 	// One read of the record serves every patrol. A missing file is an empty
 	// record: no run recorded and no pass in flight.
 	rec, err := readPatrolLastRunFile(s.townRoot())
@@ -363,7 +368,7 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 	var out []townhealth.Tick
 	var unknown []string
 	for _, p := range all {
-		if !s.d.isPatrolActive(p.name) {
+		if !s.d.isPatrolActive(p.name) || (p.name == "reconciler" && !reconcilerOn) {
 			continue
 		}
 		tick := townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: rec.LastRun[p.name]}
