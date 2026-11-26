@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +124,96 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 				t.Errorf("stop ran %d times, want %d", stops, tc.stops)
 			}
 		})
+	}
+}
+
+// TestSweepSmokeRecord pins the record the daemon's start writes: with tier_sweep
+// active and a runner, one launch of the first stage leaves launch-smoke.json
+// with its outcome, the launch time and the daemon's start. With tier_sweep
+// disabled, or with no runner, nothing is launched and nothing is written
+// (gt-r2497d).
+func TestSweepSmokeRecord(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	daemonStart := now.Add(-time.Minute)
+	for _, tc := range []struct {
+		name     string
+		setup    func(*Daemon)
+		launches int
+		want     *sweepSmokeRecord
+	}{
+		{"active", nil, 1, &sweepSmokeRecord{Time: now, DaemonStart: daemonStart, Outcome: "started"}},
+		{"disabled", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Enabled = false }, 0, nil},
+		{"no runner", func(d *Daemon) { d.patrolConfig.Patrols.TierSweep.Runner = nil }, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+			d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+			d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+			if tc.setup != nil {
+				tc.setup(d)
+			}
+			launches := 0
+			d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+				launches++
+				return tierSweepLaunch{exitCode: 0}
+			}
+			d.recordSweepSmokeAtStart(context.Background(), daemonStart)
+			if launches != tc.launches {
+				t.Errorf("launches = %d, want %d", launches, tc.launches)
+			}
+			data, err := os.ReadFile(sweepSmokeRecordPath(d.config.TownRoot))
+			if tc.want == nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("record read = %v, want no record file", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read record: %v", err)
+			}
+			var got sweepSmokeRecord
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("decode record %s: %v", data, err)
+			}
+			if !got.Time.Equal(tc.want.Time) || !got.DaemonStart.Equal(tc.want.DaemonStart) ||
+				got.Outcome != tc.want.Outcome || got.Detail != tc.want.Detail {
+				t.Errorf("record = %+v, want %+v", got, *tc.want)
+			}
+		})
+	}
+}
+
+// TestSweepSmokeRecordWriteError pins that a record the daemon cannot write is
+// logged and the start goes on: the launch still ran, and the log names the
+// failed write (gt-r2497d).
+func TestSweepSmokeRecordWriteError(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+	d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+	// The record's directory is a file, so the write cannot create it.
+	runtimeDir := filepath.Dir(sweepSmokeRecordPath(d.config.TownRoot))
+	if err := os.MkdirAll(filepath.Dir(runtimeDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	launches := 0
+	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+		launches++
+		return tierSweepLaunch{exitCode: 0}
+	}
+	d.recordSweepSmokeAtStart(context.Background(), now.Add(-time.Minute))
+	if launches != 1 {
+		t.Errorf("launches = %d, want 1: a failed record write must not stop the launch", launches)
+	}
+	if !strings.Contains(logs.String(), "launch smoke record not written") {
+		t.Errorf("log = %q, want the failed record write", logs.String())
 	}
 }

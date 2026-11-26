@@ -3,9 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -77,4 +80,30 @@ func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch 
 		}
 	}
 	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}
+}
+
+// sweepSmokeRecordPath is the file the startup smoke launch's record is written
+// to under the town root, read by the verify probe (gt-r2497d).
+func sweepSmokeRecordPath(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep", "launch-smoke.json")
+}
+
+// recordSweepSmokeAtStart runs the smoke launch once for the first rig when
+// tier_sweep is active with a runner, and writes its record stamped with the
+// daemon's start. The daemon starts it in its own goroutine, so the launch never
+// holds up the start. A write error is logged and the start goes on
+// (gt-r2497d).
+func (d *Daemon) recordSweepSmokeAtStart(ctx context.Context, daemonStart time.Time) {
+	if d.patrolOffReason("tier_sweep") != "" || tierSweepRunnerConfig(d.patrol()) == nil {
+		return
+	}
+	rigs := tierSweepRigs(d.patrol(), d.getKnownRigs())
+	if len(rigs) == 0 {
+		return
+	}
+	rec := d.sweepSmokeLaunch(ctx, rigs[0])
+	rec.DaemonStart = daemonStart
+	if err := atomicfile.EnsureDirAndWriteJSON(sweepSmokeRecordPath(d.config.TownRoot), rec); err != nil {
+		d.logger.Printf("Warning: tier-sweep launch smoke record not written: %v", err)
+	}
 }
