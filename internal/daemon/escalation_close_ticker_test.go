@@ -19,6 +19,28 @@ func (f *fakeEscalationTicker) start(interval time.Duration) (<-chan time.Time, 
 	return f.ticks, func() { f.stops++ }
 }
 
+func TestEscalationCloseTickInterval(t *testing.T) {
+	t.Parallel()
+
+	if escalationCloseTickInterval != time.Minute {
+		t.Fatalf("escalationCloseTickInterval = %v, want %v", escalationCloseTickInterval, time.Minute)
+	}
+}
+
+func TestStartEscalationCloseTicker(t *testing.T) {
+	t.Parallel()
+
+	ticks, stop := startEscalationCloseTicker(time.Hour)
+	if ticks == nil {
+		t.Fatal("startEscalationCloseTicker returned a nil channel")
+	}
+	if stop == nil {
+		t.Fatal("startEscalationCloseTicker returned a nil stop func")
+	}
+	stop()
+	stop() // a second stop must not panic
+}
+
 func TestStartEscalationCloseTickerWith(t *testing.T) {
 	t.Parallel()
 
