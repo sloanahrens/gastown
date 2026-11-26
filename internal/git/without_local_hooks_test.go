@@ -462,6 +462,68 @@ var runHelperArgvStart = map[string]int{
 	"runMergeCheck":        0,
 }
 
+// notGitNames returns the receiver and parameter names fn declares with a type
+// other than Git. A run helper is a *Git method, so a same-named method on
+// another type is a different call: scripted, configReadRunner and fakeGH each
+// declare a run, whose arguments are not git subcommands this scan holds to
+// hookedSubcommands (om 3b9b1aade54d).
+func notGitNames(fn *ast.FuncDecl) map[string]bool {
+	names := map[string]bool{}
+	mark := func(fields *ast.FieldList) {
+		if fields == nil {
+			return
+		}
+		for _, f := range fields.List {
+			typ := f.Type
+			if star, ok := typ.(*ast.StarExpr); ok {
+				typ = star.X
+			}
+			if id, ok := typ.(*ast.Ident); ok && id.Name == "Git" {
+				continue
+			}
+			for _, n := range f.Names {
+				names[n.Name] = true
+			}
+		}
+	}
+	mark(fn.Recv)
+	mark(fn.Type.Params)
+	return names
+}
+
+// runHelperArgvAt reports whether call is a call to a run helper and returns
+// the index of its first git argument. The receiver counts as well as the
+// method name: a receiver fn declares with another type is that type's method.
+// A receiver the scan cannot place — a field, a call result, a local the body
+// declares — is read by name alone, so a call is over-reported, never skipped.
+func runHelperArgvAt(call *ast.CallExpr, notGit map[string]bool) (int, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return 0, false
+	}
+	start, ok := runHelperArgvStart[sel.Sel.Name]
+	if !ok || start > len(call.Args) {
+		return 0, false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return start, !ok || !notGit[id.Name]
+}
+
+// notGitAt returns the names the function enclosing pos declares with a type
+// other than Git, or nil for a call outside a function.
+func notGitAt(file *ast.File, pos token.Pos) map[string]bool {
+	var notGit map[string]bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if ok && fn.Body != nil && fn.Pos() <= pos && pos < fn.End() {
+			notGit = notGitNames(fn)
+			return false
+		}
+		return true
+	})
+	return notGit
+}
+
 // unhookedRunSubcommands returns "file:line subcommand" for every call of a run
 // helper in src whose literal argv names a git subcommand that is neither in
 // hooked nor push. A call whose argv is not literal (args...) is another scan's:
@@ -479,12 +541,8 @@ func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[st
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		start, ok := runHelperArgvAt(call, notGitAt(file, call.Pos()))
 		if !ok {
-			return true
-		}
-		start, ok := runHelperArgvStart[sel.Sel.Name]
-		if !ok || start > len(call.Args) {
 			return true
 		}
 		var lits []string
@@ -540,6 +598,7 @@ func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[
 		if !ok || fn.Body == nil {
 			return true
 		}
+		notGit := notGitNames(fn)
 		vals := map[string][]ast.Expr{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
@@ -576,11 +635,9 @@ func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					if _, isHelper := runHelperArgvStart[sel.Sel.Name]; isHelper {
-						for _, arg := range call.Args {
-							check(arg, true)
-						}
+				if _, isHelper := runHelperArgvAt(call, notGit); isHelper {
+					for _, arg := range call.Args {
+						check(arg, true)
 					}
 				}
 			}
@@ -629,6 +686,16 @@ func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 		got := unhookedSliceSubcommands(t, "x.go", src, map[string]bool{})
 		if len(got) != 2 || !strings.HasSuffix(got[0], " gc") || !strings.HasSuffix(got[1], " reflog") {
 			t.Fatalf("unhooked = %q, want gc (through argv) and reflog (through the range value cmd)", got)
+		}
+	})
+
+	t.Run("the scans key a run helper on the receiver as well as its name", func(t *testing.T) {
+		src := []byte("package git\nfunc f(g *Git, s *scripted) {\n\tg.run(\"pull\")\n\ts.run(\"gc\")\n\tg.run([]string{\"fetch\"}...)\n\ts.run([]string{\"checkout\"}...)\n}\n")
+		if got := unhookedRunSubcommands(t, "x.go", src, map[string]bool{}); len(got) != 1 || !strings.HasSuffix(got[0], " pull") {
+			t.Errorf("literal scan = %q, want pull on the *Git handle only, not gc on scripted", got)
+		}
+		if got := unhookedSliceSubcommands(t, "x.go", src, map[string]bool{}); len(got) != 1 || !strings.HasSuffix(got[0], " fetch") {
+			t.Errorf("slice scan = %q, want fetch through the *Git handle only, not checkout on scripted", got)
 		}
 	})
 
