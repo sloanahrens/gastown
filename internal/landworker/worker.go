@@ -525,6 +525,14 @@ func (w *Worker) draining() bool {
 	return w.Draining != nil && w.Draining()
 }
 
+// booksHold reports whether beadID's deferred bookkeeping is still queued or
+// running: the bead still reads as ready until that job writes its record and
+// removes the label, so landing or repairing it again would race the write
+// (gt-ppcl1g). False when no queue is set.
+func (w *Worker) booksHold(beadID string) bool {
+	return w.Books != nil && w.Books.Holds(beadID)
+}
+
 func (w *Worker) landReady(ctx context.Context) Report {
 	var rep Report
 	// First, so the work a job stored touches this goroutine's state before the
@@ -542,6 +550,10 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	for id, work := range w.pendingRepair {
 		if ctx.Err() != nil {
 			return rep
+		}
+		if w.booksHold(id) {
+			rep.Skipped++
+			continue
 		}
 		if w.now().Before(w.bead(id).until) {
 			rep.Skipped++
@@ -629,6 +641,13 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		// at the next pass and the fail-loud park would last one pass
 		// (gt-5phoiv).
 		if w.parked(issue.ID) {
+			rep.Skipped++
+			continue
+		}
+		// The bead keeps the label until its queued bookkeeping writes the
+		// record and removes it, so the listed row is the one already landed
+		// (gt-ppcl1g).
+		if w.booksHold(issue.ID) {
 			rep.Skipped++
 			continue
 		}
@@ -721,6 +740,11 @@ func (w *Worker) queueRecentRepairs() {
 	// One call for every bead, not one per record (gt-xzcjh).
 	issues, batched := w.showMultiple(ids)
 	for _, rec := range owned {
+		// The queued job is writing this record; a repair queued now would
+		// race it (gt-ppcl1g).
+		if w.booksHold(rec.BeadID) {
+			continue
+		}
 		// Only while the bead still waits on them: a bead a human reopened
 		// after its landing record was written is theirs, not a record to
 		// finish.
