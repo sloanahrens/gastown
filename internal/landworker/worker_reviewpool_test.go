@@ -82,6 +82,44 @@ func workOrder(works []land.Work) string {
 	return strings.Join(ids, ",")
 }
 
+// TestReviewPoolWorkerReviewWorksLeavesOutNotReady pins that reviewWorks
+// offers no work for an issue the pool must not review ahead: one whose status
+// is not actionable, one that lacks the ready label, and the bead named by the
+// landing parameter, which is being landed now (gt-iyvkxm).
+func TestReviewPoolWorkerReviewWorksLeavesOutNotReady(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		status     string
+		readyLabel bool
+		landing    string
+	}{
+		{name: "not actionable", status: string(beads.StatusDeferred), readyLabel: true},
+		{name: "no ready label", readyLabel: false},
+		{name: "the bead being landed", readyLabel: true, landing: "gt-dropped"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			kept := readySubmission("gt-kept", "polecat/opal/gt-kept+x1", noteHead)
+			dropped := readySubmission("gt-dropped", "polecat/opal/gt-dropped+x1", tipHead)
+			dropped.Status = tc.status
+			if !tc.readyLabel {
+				dropped.Labels = nil
+			}
+
+			works, err := h.w.reviewWorks([]*beads.Issue{kept, dropped}, tc.landing)
+			if err != nil {
+				t.Fatalf("reviewWorks: %v", err)
+			}
+			if got, want := workOrder(works), "gt-kept"; got != want {
+				t.Fatalf("reviewWorks offered %s; want only %s, leaving out %s", got, want, dropped.ID)
+			}
+		})
+	}
+}
+
 // TestReviewPoolWorkerReviewWorksReturnsUnreadableSubmission pins that an
 // issue whose comments cannot be read fails the offer with that read error
 // instead of vanishing from the list: what such a bead asks for is unknown,

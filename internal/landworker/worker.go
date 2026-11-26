@@ -960,17 +960,24 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 	return land.Work{}, false, nil
 }
 
-// reviewWorks builds a work for each issue given, sorting them in place into
-// the order the landing will take them (sortByLandingOrder), from the same
-// resolveWork process reads, so the pool starts its reviews in landing order
-// and reviews the head the submission names. It filters and skips nothing: an
-// issue whose work cannot be resolved, or whose comments cannot be read, is
-// returned as an error with no works at all rather than dropped from a shorter
-// list.
-func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work, error) { //nolint:unparam // landing names the bead being landed; gt-iyvkxm reads it to leave that bead out
+// reviewWorks builds a work for each issue the pool may review ahead of a
+// landing: one whose status is still actionable, that carries the ready label,
+// and that is not the bead named by landing, the one being landed. It sorts the
+// issues in place into the order the landing will take them
+// (sortByLandingOrder), from the same resolveWork process reads, so the pool
+// starts its reviews in landing order and reviews the head the submission
+// names. An issue left out is never resolved. One the pool must review whose
+// work cannot be resolved, or whose comments cannot be read, is returned as an
+// error with no works at all rather than dropped from a shorter list.
+func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work, error) {
 	sortByLandingOrder(issues)
 	works := make([]land.Work, 0, len(issues))
 	for _, issue := range issues {
+		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() ||
+			!beads.HasLabel(issue, land.LabelReadyToLand) ||
+			(landing != "" && issue.ID == landing) {
+			continue
+		}
 		work, ok, err := w.resolveWork(issue)
 		if err != nil {
 			return nil, err
