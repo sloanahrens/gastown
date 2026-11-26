@@ -628,6 +628,9 @@ func TestReviewPoolWiringHoldStopsReviews(t *testing.T) {
 			if worker.Pool.Begin == nil {
 				t.Fatal("Pool.Begin is nil; want the daemon's landing-pass gate so a hold stops new ahead reviews")
 			}
+			if worker.Pool.End == nil {
+				t.Fatal("Pool.End is nil; want the daemon's landing-pass end so the slot a true Begin takes is given back")
+			}
 
 			d.landingHolds.hold(tc.hold)
 			if worker.Pool.Begin() {
@@ -637,6 +640,13 @@ func TestReviewPoolWiringHoldStopsReviews(t *testing.T) {
 			d.landingHolds.release(tc.hold)
 			if !worker.Pool.Begin() {
 				t.Fatalf("Begin returned false after the %s was released; want true", tc.hold)
+			}
+			if got := d.landingPasses.Load(); got != 1 {
+				t.Fatalf("in-flight count = %d after a true Begin, want 1: the review holds a landing pass", got)
+			}
+			worker.Pool.End()
+			if got := d.landingPasses.Load(); got != 0 {
+				t.Fatalf("in-flight count = %d after Pool.End, want 0: the review gave its landing pass back", got)
 			}
 			if got := logs.String(); got != "" {
 				t.Fatalf("wiring logged %q; want nothing", got)
