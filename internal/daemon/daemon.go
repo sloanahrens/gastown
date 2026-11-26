@@ -2405,6 +2405,10 @@ func (d *Daemon) Run() (err error) {
 	// slow or failed push never holds up the start.
 	d.startWorkspaceReconcile()
 
+	// The startup smoke launch of the sweeper, one goroutine: its record is
+	// the verify probe's proof that this daemon's sweeper can launch (gt-r2497d).
+	go d.recordSweepSmokeAtStart(d.ctx, d.clk().Now())
+
 	// The boot gate's poller (gt-niooz0): its own goroutine asks the probes
 	// until they all answer, and ends with the daemon's context. The landing
 	// workers and Dolt supervision do not read its answer.
