@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -60,6 +61,11 @@ func (h *patrolScanHost) movedOnSeat(rig, name, path string) (movedOn bool, land
 // with many moved-on keeps does not ask the agent store for every seat in one
 // tick. The records it does not reach wait for the next tick, and the stop is
 // logged with the budget spent (gt-52noj3).
+//
+// The tick starts at the first record after the one the last tick read, kept as
+// Daemon.movedOnCursor, so a record the pass reads and leaves cannot hold the
+// first read of every tick: the records behind it are still reached within a
+// bounded number of ticks (gt-qo9sb5).
 func (h *patrolScanHost) dropMovedOnKeptSeats() {
 	seats, _, err := KeptSandboxSeats(h.town())
 	if err != nil {
@@ -70,8 +76,14 @@ func (h *patrolScanHost) dropMovedOnKeptSeats() {
 	if budget <= 0 {
 		budget = sandboxRecordsPerTick
 	}
+	n := len(seats)
+	// The start is the first seat after the last record the previous tick read,
+	// wrapping. Searching the key rather than an index keeps the walk rotating
+	// when the cursor's record was dropped since.
+	start := sort.Search(n, func(i int) bool { return seats[i].Rig+"/"+seats[i].Name > h.d.movedOnCursor }) % max(n, 1)
 	read := 0
-	for _, seat := range seats {
+	for i := 0; i < n; i++ {
+		seat := seats[(start+i)%n]
 		if !strings.HasPrefix(seat.Reason, seatWorksKeepPrefix) {
 			continue
 		}
@@ -80,6 +92,7 @@ func (h *patrolScanHost) dropMovedOnKeptSeats() {
 			return
 		}
 		read++
+		h.d.movedOnCursor = seat.Rig + "/" + seat.Name
 		h.dropMovedOnKeptSeat(seat.Rig, seat.Name)
 	}
 }

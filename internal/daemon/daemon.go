@@ -127,6 +127,11 @@ type Daemon struct {
 	// survives records coming and going between ticks.
 	sandboxRecordCursor string
 
+	// movedOnCursor is the rig/name of the last kept record the moved-on pass
+	// read, so the next tick starts after it and a kept record cannot spend
+	// every tick's budget.
+	movedOnCursor string
+
 	// keptDropCursor is the rig/name the last kept-record drop pass ended on, so
 	// the next pass starts after it and a bounded pass cannot starve a record.
 	keptDropCursor string

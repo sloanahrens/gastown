@@ -362,3 +362,80 @@ func TestPatrolScanMovedOnIsBounded(t *testing.T) {
 		t.Errorf("log carries the bound line %d times, want once:\n%s", got, out)
 	}
 }
+
+// movedOnFarPolecat is the third seat, whose moved-on keep waits behind a
+// record the pass reads and leaves.
+const movedOnFarPolecat = "coral"
+
+// seedSeatOnBranch writes seat name's agent bead on the landed bead's branch
+// when takenOver, and on the branch of another bead otherwise: a seat taken
+// over onto the landed bead keeps its record.
+func seedSeatOnBranch(t *testing.T, f *seatEndFake, name string, takenOver bool) {
+	t.Helper()
+	f.seatFields.Branch = movedOnOther
+	if takenOver {
+		f.seatFields.Branch = movedOnLanded
+	}
+	seedMovedOnSeatBead(t, f, name)
+}
+
+// The pass continues where the last tick stopped. With a budget of 1 and two
+// moved-on keeps, tick one drops the first and the next tick drops the second;
+// and a record the pass reads and leaves (a seat taken over onto the landed
+// bead) is not read again on every tick, so the moved-on record behind it is
+// still reached (gt-qo9sb5).
+func TestPatrolScanMovedOnRotates(t *testing.T) {
+	t.Parallel()
+	t.Run("two moved-on keeps", func(t *testing.T) {
+		t.Parallel()
+		p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+		for _, name := range []string{endPolecat, movedOnWaitedPolecat} {
+			seedSeatOnBranch(t, p.seatEndFake, name, false)
+			if err := writeKeptSandboxSeat(p.town, endRig, name, movedOnRec()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p.host.sandboxRecordBudget = 1
+
+		p.host.dropMovedOnKeptSeats()
+		if keptRecordPresent(t, p.town, endRig, endPolecat) {
+			t.Errorf("the first tick did not drop the first moved-on record")
+		}
+		if !keptRecordPresent(t, p.town, endRig, movedOnWaitedPolecat) {
+			t.Errorf("the first tick reached the second moved-on record; want it left for the next tick")
+		}
+
+		p.host.dropMovedOnKeptSeats()
+		if keptRecordPresent(t, p.town, endRig, movedOnWaitedPolecat) {
+			t.Errorf("the next tick did not drop the second moved-on record")
+		}
+	})
+	t.Run("a kept record does not starve the next", func(t *testing.T) {
+		t.Parallel()
+		p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+		for _, seat := range []struct {
+			name      string
+			takenOver bool
+		}{
+			{name: endPolecat},
+			{name: movedOnWaitedPolecat, takenOver: true},
+			{name: movedOnFarPolecat},
+		} {
+			seedSeatOnBranch(t, p.seatEndFake, seat.name, seat.takenOver)
+			if err := writeKeptSandboxSeat(p.town, endRig, seat.name, movedOnRec()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p.host.sandboxRecordBudget = 1
+
+		p.host.dropMovedOnKeptSeats() // agate: moved on, dropped
+		p.host.dropMovedOnKeptSeats() // beryl: taken over, kept
+		if !keptRecordPresent(t, p.town, endRig, movedOnWaitedPolecat) {
+			t.Errorf("the takeover's record was dropped; want it kept")
+		}
+		p.host.dropMovedOnKeptSeats() // coral: the record behind beryl
+		if keptRecordPresent(t, p.town, endRig, movedOnFarPolecat) {
+			t.Errorf("the tick after the kept record did not reach the moved-on record behind it")
+		}
+	})
+}
