@@ -246,3 +246,111 @@ func TestBookkeepingDeferred(t *testing.T) {
 		}
 	})
 }
+
+// updateFails is a beads store whose reads answer and whose update refuses, as
+// a Dolt write outage does: the record's write fails while everything the feed
+// reads through the same store still answers.
+type updateFails struct{ Beads }
+
+func (updateFails) Update(string, beads.UpdateOptions) error { return errors.New("dolt write refused") }
+
+// TestBookkeepingFinish: FinishLanding writes the half of a deferred landing's
+// record the landing left for a later pass — the bead's LANDING RECORD block,
+// the ready label off and the close — and only then runs the follow-up feed the
+// approved landing earned. A Result with no deferred record is an error, and a
+// failed bead write is a *RecordError that leaves the feed unrun and the bead
+// untouched (gt-w36i8z).
+func TestBookkeepingFinish(t *testing.T) {
+	t.Parallel()
+
+	// deferred runs the fixture's landing with the bookkeeping deferred and a
+	// review that approves with one minor, so the feed a finish runs is visible.
+	deferred := func(t *testing.T) (*landFixture, *Lander, *followupFake, Result) {
+		t.Helper()
+		f := newLandFixture(t)
+		l := f.lander()
+		l.DeferBookkeeping = true
+		followups := &followupFake{}
+		l.Followups = followups
+		f.review.fn = func(string) (Verdict, error) {
+			return Verdict{Verdict: VerdictApprove, Score: 0.9,
+				Findings: []Finding{minorFinding("name the error")}}, nil
+		}
+		res, err := l.Land(context.Background(), f.work)
+		if err != nil {
+			t.Fatalf("Land: %v", err)
+		}
+		if res.Deferred == nil {
+			t.Fatal("Result.Deferred is nil after a deferred landing")
+		}
+		return f, l, followups, res
+	}
+	// recorded: the bead carries the landing record for rec and is closed,
+	// with the ready label off.
+	recorded := func(t *testing.T, f *landFixture, rec LandingRecord) {
+		t.Helper()
+		b := f.bead()
+		if b.Status != "closed" {
+			t.Errorf("bead status = %q; want closed", b.Status)
+		}
+		if beads.HasLabel(b, LabelReadyToLand) {
+			t.Errorf("bead still carries %s", LabelReadyToLand)
+		}
+		if !strings.Contains(b.Notes, LandingNoteMarker+"\nlanded_commit: "+rec.LandedCommit) {
+			t.Errorf("bead notes = %q; want the landing record for %s", b.Notes, rec.LandedCommit)
+		}
+	}
+
+	t.Run("writes the bead record and close, then runs the feed", func(t *testing.T) {
+		t.Parallel()
+		f, l, followups, res := deferred(t)
+
+		if err := l.FinishLanding(f.work, res); err != nil {
+			t.Fatalf("FinishLanding: %v", err)
+		}
+		recorded(t, f, *res.Deferred)
+		if n := len(followups.created); n != 1 {
+			t.Errorf("filed %d follow-up bead(s) for an approved landing with one minor; want 1", n)
+		}
+	})
+
+	t.Run("a result with no deferred record is an error", func(t *testing.T) {
+		t.Parallel()
+		f := newLandFixture(t)
+		l := f.lander()
+
+		err := l.FinishLanding(f.work, Result{Base: f.base, LandedCommit: f.work.Head})
+		if err == nil {
+			t.Fatal("FinishLanding = nil; want an error for a result that was not deferred")
+		}
+		b := f.bead()
+		if b.Status == "closed" || !beads.HasLabel(b, LabelReadyToLand) || strings.Contains(b.Notes, LandingNoteMarker) {
+			t.Errorf("the bead changed on a refused finish: status=%s labels=%v notes=%q", b.Status, b.Labels, b.Notes)
+		}
+	})
+
+	t.Run("a failed bead write is a RecordError and files no follow-up", func(t *testing.T) {
+		t.Parallel()
+		f, l, followups, res := deferred(t)
+		// Only the record's write fails: the reads stay answerable, so a feed
+		// that ran before the write would still file, which is the ordering
+		// this case pins.
+		l.Beads = updateFails{f.bd}
+
+		err := l.FinishLanding(f.work, res)
+		var recErr *RecordError
+		if !errors.As(err, &recErr) {
+			t.Fatalf("FinishLanding = %v, want a *RecordError from the failed bead write", err)
+		}
+		if recErr.Result.LandedCommit != res.LandedCommit {
+			t.Errorf("RecordError.Result carries %s; want the landing %s", recErr.Result.LandedCommit, res.LandedCommit)
+		}
+		if n := len(followups.created); n != 0 {
+			t.Errorf("filed %d follow-up bead(s) after the bead write failed; want none", n)
+		}
+		b := f.bead()
+		if b.Status == "closed" || !beads.HasLabel(b, LabelReadyToLand) || strings.Contains(b.Notes, LandingNoteMarker) {
+			t.Errorf("the bead was written after the bead write failed: status=%s labels=%v notes=%q", b.Status, b.Labels, b.Notes)
+		}
+	})
+}
