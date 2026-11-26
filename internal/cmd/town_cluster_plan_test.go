@@ -727,15 +727,112 @@ func planKubectlReading(t *testing.T, static map[string]string, answer func(reso
 }
 
 // planGetOf reads a call as the drift read's get: its resource and namespace, empty
-// when cluster-scoped. ok is false for any other call.
+// when cluster-scoped. ok is false for any other call, which the fake fails on.
 func planGetOf(name string, args []string) (resource, namespace string, ok bool) {
+	if name != "kubectl" || len(args) < 2 || args[0] != "get" {
+		return "", "", false
+	}
+	cluster, known := planKindScope(args[1])
 	switch {
-	case name == "kubectl" && len(args) == 5 && args[0] == "get" && args[2] == "--ignore-not-found" && args[3] == "-o" && args[4] == "json":
+	case known && cluster && len(args) == 5 && args[2] == "--ignore-not-found" && args[3] == "-o" && args[4] == "json":
 		return args[1], "", true
-	case name == "kubectl" && len(args) == 7 && args[0] == "get" && args[2] == "-n" && args[4] == "--ignore-not-found" && args[5] == "-o" && args[6] == "json":
+	case known && !cluster && len(args) == 7 && args[2] == "-n" && args[4] == "--ignore-not-found" && args[5] == "-o" && args[6] == "json":
 		return args[1], args[3], true
 	}
 	return "", "", false
+}
+
+// planKindScope is whether a kind/name resource is cluster-scoped, and whether its kind is one the reads name.
+func planKindScope(resource string) (cluster, known bool) {
+	kind, _, named := strings.Cut(resource, "/")
+	for k, scoped := range staticTargetKinds {
+		if named && strings.ToLower(k) == kind {
+			return scoped, true
+		}
+	}
+	return false, named && kind == "deployment"
+}
+
+// TestClusterShapePlanStaticDiffersKeepsPhasePFakeShape: the fake fails any call but the drift read's get.
+func TestClusterShapePlanStaticDiffersKeepsPhasePFakeShape(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		args      []string
+		ok        bool
+		namespace string
+	}{
+		{"a cluster-scoped get", []string{"get", "priorityclass/gt-ci", "--ignore-not-found", "-o", "json"}, true, ""},
+		{"a namespaced get", []string{"get", "role/gt-update", "-n", "gt", "--ignore-not-found", "-o", "json"}, true, "gt"},
+		{"a kind the compare does not read", []string{"get", "pod/x", "-n", "gt", "--ignore-not-found", "-o", "json"}, false, ""},
+		{"a namespaced get with --namespace", []string{"get", "role/gt-update", "--namespace", "gt", "--ignore-not-found", "-o", "json"}, false, ""},
+		{"a namespaced get with no namespace", []string{"get", "role/gt-update", "--ignore-not-found", "-o", "json"}, false, ""},
+		{"a cluster-scoped get with a namespace", []string{"get", "priorityclass/gt-ci", "-n", "gt", "--ignore-not-found", "-o", "json"}, false, ""},
+		{"a get with yaml output", []string{"get", "priorityclass/gt-ci", "--ignore-not-found", "-o", "yaml"}, false, ""},
+	}
+	for _, tc := range cases {
+		_, namespace, ok := planGetOf("kubectl", tc.args)
+		if ok != tc.ok || namespace != tc.namespace {
+			t.Errorf("%s: planGetOf = namespace %q, ok %v; want namespace %q, ok %v", tc.name, namespace, ok, tc.namespace, tc.ok)
+		}
+	}
+}
+
+// TestClusterShapePlanStaticDiffersKeepsPhaseP: a static object that differs from the
+// cluster's, of any kind the compare reads, or one it does not hold, keeps phase P.
+func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, key string
+		change    func(doc map[string]any) // nil: the cluster does not hold the object
+	}{
+		{"a PriorityClass value", "priorityclass/gt-ci ", func(doc map[string]any) { doc["value"] = 101 }},
+		{"a Namespace name", "namespace/gt-sweeps ", func(doc map[string]any) { doc["metadata"].(map[string]any)["name"] = "planted" }},
+		{"a Role's rules", "role/gt-update gt", func(doc map[string]any) { doc["rules"] = []any{map[string]any{"verbs": []any{"planted"}}} }},
+		{"a ClusterRole's rules", "clusterrole/gt-drift-reader ", func(doc map[string]any) { doc["rules"] = []any{map[string]any{"verbs": []any{"planted"}}} }},
+		{"a ValidatingAdmissionPolicy's spec", "validatingadmissionpolicy/gt-update-jobs ", func(doc map[string]any) { doc["spec"].(map[string]any)["failurePolicy"] = "Ignore" }},
+		{"a ServiceAccount's name", "serviceaccount/gt-update gt", func(doc map[string]any) { doc["metadata"].(map[string]any)["name"] = "planted" }},
+		{"a PriorityClass the cluster does not hold", "priorityclass/gt-ci ", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live := planStaticLive(t) // each object keyed as planStaticLive keys it
+			if tc.change == nil {
+				delete(live, tc.key)
+			} else {
+				var doc map[string]any
+				if err := json.Unmarshal([]byte(live[tc.key]), &doc); err != nil {
+					t.Fatalf("decoding the live %s: %v", tc.key, err)
+				}
+				tc.change(doc)
+				body, _ := json.Marshal(doc) // a decoded JSON object encodes again
+				live[tc.key] = string(body)
+			}
+			dir, out := planOut(t), &bytes.Buffer{}
+			kube := planKubectlReading(t, live, planRevisionAnswer(t))
+			if err := runTownClusterPlan(context.Background(), clusterRenderDepsAt(t, planTown(t), io.Discard), kube, out, dir, atomicfile.WriteJSON); err != nil {
+				t.Fatalf("running the plan: %v", err)
+			}
+			rec, _ := readPlanRecord(t, dir)
+			files := planFilesIn(t, dir)
+			if len(rec.Files) != len(files) {
+				t.Fatalf("plan.json lists %d files, want the %d the plan rendered", len(rec.Files), len(files))
+			}
+			static, counts := planStaticDocs(t), map[string]int{}
+			for i, f := range files {
+				want := planWantPhase(static, f)
+				counts[want]++
+				if rec.Files[i].Name != f.Name || rec.Files[i].Phase != want {
+					t.Errorf("plan.json file %d = %s in phase %q, want %s in phase %q", i, rec.Files[i].Name, rec.Files[i].Phase, f.Name, want)
+				}
+			}
+			_, short := planID(files)
+			if got, want := out.String(), fmt.Sprintf("Phases in apply order: P (static, %d files), then W (workloads, %d files)\n%s\n", counts[planPhaseStatic], counts[planPhaseWorkloads], short); got != want {
+				t.Fatalf("the plan printed %q, want both phases in apply order and the short id:\n%s", got, want)
+			}
+		})
+	}
 }
 
 // planStaticLive is the answer the fake cluster gives each static object, keyed by
