@@ -1,6 +1,7 @@
 package land
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"testing"
@@ -34,6 +35,57 @@ func TestVerdictReuseExpectedFlagsAlways(t *testing.T) {
 				t.Errorf("ExpectedReviewFlags() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// omHelpWithEveryFlag is the help of an om that takes every flag a review can
+// carry: with it, an optional input that reaches the review is never dropped
+// for a missing help line, so a failure in the matching test is
+// ExpectedReviewFlags drifting from the argv rather than the help probe
+// (gt-xb19qs).
+const omHelpWithEveryFlag = `Usage:
+  om review [flags]
+
+Flags:
+  --base string          the base of the range
+  --bead string          the work bead the diff belongs to
+  --bead-file path       the work-item file
+  --context-file path    the accepted-risks file
+  --criteria-file path   the acceptance-criteria file
+  --head string          the head of the range
+  --out path             where to write the verdict file
+  --policy-file path     the town-policy file
+  --prior-findings path  the previous round's findings
+  --round int            the landing attempt this review belongs to
+  --rounds-file path     the rounds ledger, JSON
+  --threshold float      the bar the verdict is held to
+`
+
+// TestVerdictReuseExpectedFlagsMatchArgvMinimal pins ExpectedReviewFlags to the
+// argv a review is actually run with: an input that names its bead and carries
+// nothing optional is run through OMReviewer with a fake om that captures argv,
+// and ExpectedReviewFlags(in, 0) must equal that argv's flags. A flag it claims
+// that the argv lacks, or an argv flag it omits, makes every ahead review look
+// degraded and throws the stored verdict away (gt-xb19qs).
+func TestVerdictReuseExpectedFlagsMatchArgvMinimal(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{}
+	issue := &beads.Issue{ID: "gt-abc"}
+	in := BuildReviewInput(issue, nil, op, "", "", "base", "head", "polecat/x/gt-abc", "dir", baseRepo{})
+	in.BriefText, in.PolicyText, in.RoundsText = "", "", ""
+	in.Round = 0
+	stub := &contextOM{t: t, help: omHelpWithEveryFlag}
+	r := OMReviewer{OutDir: t.TempDir(), run: stub.run}
+	if _, err := r.ReviewBead(context.Background(), in); err != nil {
+		t.Fatalf("ReviewBead: %v", err)
+	}
+	if stub.argv == nil {
+		t.Fatal("om was never run")
+	}
+	want := flagNames(stub.argv)
+	slices.Sort(want)
+	if got := ExpectedReviewFlags(in, 0); !slices.Equal(got, want) {
+		t.Errorf("ExpectedReviewFlags() = %q, want the argv's flags %q", got, want)
 	}
 }
 
