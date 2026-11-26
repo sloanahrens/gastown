@@ -52,8 +52,8 @@ const (
 	// retention plan keeps, on top of the installed and previous pairs and the
 	// green refs.
 	updateImagesPruneKeepNewest = 20
-	// updateImagesPruneMaxDefault is the most tags one --apply run deletes; the
-	// first live run keeps well under it (--apply --max 3).
+	// updateImagesPruneMaxDefault is the most tags one --apply run deletes when
+	// --max names no other limit.
 	updateImagesPruneMaxDefault = 30
 )
 
@@ -84,10 +84,16 @@ type updateImagesSeams struct {
 // productionUpdateImagesSeams wires the real town, registry, viewer credential
 // and values writer, and the readers the prune plan reads.
 func productionUpdateImagesSeams() updateImagesSeams {
+	return updateImagesSeamsWithTokenPath(forgejo.TokenPath)
+}
+
+// updateImagesSeamsWithTokenPath is productionUpdateImagesSeams over a token
+// path lookup, so a test drives which bot's file each credential reader names.
+func updateImagesSeamsWithTokenPath(tokenPath func(role string) (string, error)) updateImagesSeams {
 	return updateImagesSeams{
 		FindTownRoot: workspace.FindFromCwdOrError,
 		Registry:     townImageRegistry,
-		Credentials:  viewerCredentialReader(forgejo.TokenPath),
+		Credentials:  viewerCredentialReader(tokenPath),
 		HTTPClient:   &http.Client{Timeout: updateImagesTimeout},
 		WriteValues:  imagevalues.Write,
 		PruneLedger: func(townRoot string) update.PruneLedger {
@@ -97,8 +103,14 @@ func productionUpdateImagesSeams() updateImagesSeams {
 		PlanPrune:  update.PlanPrune,
 		// The delete requests need the bot that may write packages, not the
 		// read-only viewer the plan's reads use.
-		PruneCredentials: roleCredentialReader(forgejo.TokenPath, config.ForgejoRoleRegistry),
+		PruneCredentials: pruneCredentialReader(tokenPath),
 	}
+}
+
+// pruneCredentialReader reads the registry bot's login and token, which the
+// prune's delete requests carry; the plan's reads use the read-only viewer.
+func pruneCredentialReader(tokenPath func(role string) (string, error)) func() (user, token string, err error) {
+	return roleCredentialReader(tokenPath, config.ForgejoRoleRegistry)
 }
 
 // viewerCredentialReader reads the read-only viewer bot's login and token from
@@ -280,7 +292,7 @@ run with nothing sent. Before each delete it re-checks that tag against the
 install record and the green refs, and it stops at the first refused delete. It
 prints one line per deleted tag and then the counts of deleted and skipped tags:
 deleted tags, not the bytes they held. A skipped tag or a refused delete exits
-non-zero. The first live run is --apply --max 3.
+non-zero.
 
 The command fails closed: a read or plan that fails exits non-zero and prints
 no line, so nothing is deleted. Without --apply nothing changes.`,
@@ -315,12 +327,18 @@ func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams, apply boo
 }
 
 // runUpdateImagesPruneApply deletes the plan's candidates, at most maxDeletes of
-// them. The registry bot's credential is read before the plan, so a run whose
-// credential file is missing makes no request; a plan that fails ends the run
-// before any delete. The deleted lines print as each delete succeeds, so a run
-// that stops names what it changed.
+// them. A negative maxDeletes is refused before any read. The registry bot's
+// credential is read before the plan, so a run whose credential file is missing
+// makes no request; a plan that fails ends the run before any delete. The
+// deleted lines print as each delete succeeds, and the skipped lines and counts
+// print even when a delete fails, so a run that stops names what it changed.
 func runUpdateImagesPruneApply(cmd *cobra.Command, seams updateImagesSeams, maxDeletes int) error {
 	ctx := cmd.Context()
+	// A negative --max is refused before any read, so a mistyped flag sends no
+	// request at all.
+	if maxDeletes < 0 {
+		return fmt.Errorf("gt update images prune: %w: the delete limit is %d", update.ErrPruneApplyRefused, maxDeletes)
+	}
 	if err := validateUpdateImagesPruneSeams(seams); err != nil {
 		return fmt.Errorf("gt update images prune: %w", err)
 	}
@@ -353,10 +371,12 @@ func runUpdateImagesPruneApply(cmd *cobra.Command, seams updateImagesSeams, maxD
 		return nil
 	}
 	res, applyErr := update.ApplyPrune(ctx, plan, maxDeletes, recheck, del)
+	// The result is written first: a delete that fails still leaves the skipped
+	// lines and the counts printed for the deletes that already succeeded.
+	writeUpdateImagesPruneApply(cmd.OutOrStdout(), res)
 	if applyErr != nil {
 		return fmt.Errorf("gt update images prune: %w", applyErr)
 	}
-	writeUpdateImagesPruneApply(cmd.OutOrStdout(), res)
 	if res.Failed {
 		return fmt.Errorf("gt update images prune: the re-check kept %d of the %d tags the plan named for delete", len(res.Skipped), len(plan.Delete))
 	}
