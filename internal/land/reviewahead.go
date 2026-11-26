@@ -55,8 +55,8 @@ type aheadBuilt struct {
 }
 
 // reviewAhead is ReviewAhead with the input and key it built. Only a clean merge
-// that reaches the review point returns a built value; every other outcome and
-// every error returns the zero aheadBuilt.
+// whose review is made returns a built value; every other outcome and every error
+// returns the zero aheadBuilt.
 func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBuilt, error) {
 	if l.Ahead == nil {
 		return AheadSkipped, aheadBuilt{}, nil
@@ -177,8 +177,15 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	// returned input names none.
 	built := aheadBuilt{In: in, Key: key}
 	built.In.Dir = ""
-	if _, err := l.aheadReview(ctx, in); err != nil {
+	_, ran, err := l.aheadReview(ctx, in)
+	if err != nil {
 		return "", aheadBuilt{}, err
+	}
+	if !ran {
+		// A reviewer the pool cannot isolate cannot run beside a landing, so no
+		// review is made: the landing runs om inline as it does without a store.
+		l.logf("%s: ahead review of %s skipped: the reviewer cannot be isolated", w.BeadID, shortSHA(w.Head))
+		return AheadSkipped, aheadBuilt{}, nil
 	}
 	// NEXT BEAD: store the verdict aheadReview returns here. It is dropped
 	// until then, so a reviewed merge is AheadSkipped and the landing runs om
@@ -188,23 +195,25 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 
 // aheadReview runs om over in's checkout: the review, and the re-score of a
 // borderline rejection, both through a copy of the reviewer isolated under the
-// review directory that holds the checkout. It is reached only by a Lander with
-// an Ahead store, so a rig with the review pool off spends no om run here.
+// review directory that holds the checkout. ran is false when the reviewer
+// cannot be isolated: such a reviewer cannot run beside a landing, so no review
+// is made and the landing runs om inline. It is reached only by a Lander with an
+// Ahead store, so a rig with the review pool off spends no om run here.
 //
 // review and rescoreBorderline read only a Lander's Reviewer and Out, so they
 // run on a second Lander holding the isolated reviewer and l.Out. It is built
 // field by field because copying l would copy its gitMu.
-func (l *Lander) aheadReview(ctx context.Context, in ReviewInput) (Verdict, error) {
+func (l *Lander) aheadReview(ctx context.Context, in ReviewInput) (Verdict, bool, error) {
 	iso, ok := l.Reviewer.(Isolator)
 	if !ok {
-		return Verdict{}, &InfraError{Stage: "review", Err: errors.New("the reviewer cannot be isolated from the landing's review")}
+		return Verdict{}, false, nil
 	}
 	pool := &Lander{Reviewer: iso.Isolated(filepath.Dir(in.Dir)), Out: l.Out}
 	v, err := pool.review(ctx, in)
 	if err != nil {
-		return Verdict{}, &InfraError{Stage: "review", Err: err}
+		return Verdict{}, false, &InfraError{Stage: "review", Err: err}
 	}
-	return pool.rescoreBorderline(ctx, v, in), nil
+	return pool.rescoreBorderline(ctx, v, in), true, nil
 }
 
 // aheadInput assembles the review input for w through the helper Land's om stage
