@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -605,6 +606,69 @@ func TestVerdictReuseLandLogsTheReviewOnce(t *testing.T) {
 			}
 			if rounds[0].Head != f.work.Head {
 				t.Errorf("rounds entry head = %q; want the submitted head %q as an inline landing writes it", rounds[0].Head, f.work.Head)
+			}
+		})
+	}
+}
+
+// TestVerdictReuseLandStageLineSaysReused: a landing that reuses a stored review
+// writes its stage line with ", om reused (<cost>, <age> old)" after the om
+// stage on each path that writes one: the landed path, the review-rejection path
+// and the gate-rejection path. The cost is the record's ReviewSecs and the age is
+// the landing's clock less the record's ReviewedAt. om did not run, so the line
+// holds no om duration. A path that drops the suffix leaves its row's line
+// without "om reused (" and turns that row red (gt-nf79k4).
+func TestVerdictReuseLandStageLineSaysReused(t *testing.T) {
+	t.Parallel()
+	const want = ", om reused (2m31s, 14m0s old)"
+	omDuration := regexp.MustCompile(`\bom [0-9]`)
+	tests := []struct {
+		name       string
+		verdict    Verdict
+		gateRed    bool
+		wantReject RejectionKind
+	}{
+		{name: "landed", verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}},
+		{name: "review rejection", verdict: Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Summary: "b.txt is wrong."}, wantReject: RejectReview},
+		{name: "gate rejection", verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}, gateRed: true, wantReject: RejectGate},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, store, key := reuseLandSetup(t)
+			rec := reuseAskRecord(key, f.base, l.now().Add(-14*time.Minute))
+			rec.ReviewSecs = 151
+			rec.Verdict = tc.verdict
+			if err := store.Put(rec); err != nil {
+				t.Fatalf("Put error = %v; want nil", err)
+			}
+			if tc.gateRed {
+				f.gate.fn = func(string) GateResult {
+					return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+				}
+			}
+			var out bytes.Buffer
+			l.Out = &out
+			_, err := l.Land(context.Background(), f.work)
+			if tc.wantReject != "" {
+				f.assertRejected(t, err, tc.wantReject, LabelRework)
+			} else if err != nil {
+				t.Fatalf("Land error = %v; want nil", err)
+			}
+			var stages []string
+			for _, line := range strings.Split(out.String(), "\n") {
+				if strings.Contains(line, "stages: ") {
+					stages = append(stages, line)
+				}
+			}
+			if len(stages) != 1 {
+				t.Fatalf("stage lines = %q; want exactly one for the landing", stages)
+			}
+			if !strings.Contains(stages[0], want) {
+				t.Errorf("stage line = %q; want it to carry %q", stages[0], want)
+			}
+			if omDuration.MatchString(stages[0]) {
+				t.Errorf("stage line = %q; want no om duration on a reused landing", stages[0])
 			}
 		})
 	}

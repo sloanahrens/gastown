@@ -1682,6 +1682,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		omTime    time.Duration
 		omRetried bool
 	)
+	// reusedSuffix is the ", om reused (...)" stage suffix when the om stage
+	// reused a stored review; it is empty when om ran or the head was waived.
+	var reusedSuffix string
 	// reviewStart opens the window the review leaves on the work bead: it
 	// covers the overseer check and the om attempt alike, so a waiver is
 	// timed like a review (gt-uebmq).
@@ -1721,6 +1724,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			verdict.Version = key.OMVersion
 			omDone()
 			l.recordAcceptedRisks(w, used)
+			reusedSuffix = omReusedSuffix(time.Duration(rec.ReviewSecs*float64(time.Second)), l.now().Sub(rec.ReviewedAt))
 		} else {
 			// The usage window opens with the review it measures (gt-6qc3nw.13); it
 			// is read from the landing's clock, so a test can fix it.
@@ -1757,11 +1761,11 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	if reviewErr != nil {
 		if ctx.Err() != nil || (!l.ReviewErrorLands && !l.ReviewErrorRejects) {
-			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omNoVerdictStage, omTime, omRetried))
+			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omNoVerdictStage, omTime, omRetried)+reusedSuffix)
 			return Result{}, &InfraError{Stage: "review", Err: reviewErr}
 		}
 		if !l.ReviewErrorLands && !l.landsUnreviewed(issue) {
-			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
+			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried)+reusedSuffix)
 			rej := &Rejection{Kind: RejectReview, Rework: false,
 				Reason: l.reviewErrorRejectionReason(wt, base, merged, reviewErr)}
 			return Result{}, l.reject(ctx, issue, w, rej, nil)
@@ -1780,7 +1784,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
-		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
+		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried)+reusedSuffix)
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(ctx, issue, w, rej, &verdict)
 	}
@@ -1789,7 +1793,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// land on its score alone (gt-oi4je). The candidate is never pushed for
 	// either refusal, so no gate run pays for it.
 	if rej := findingsRej; rej != nil {
-		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
+		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried)+reusedSuffix)
 		return Result{}, l.reject(ctx, issue, w, rej, &verdict)
 	}
 	if err := ctx.Err(); err != nil {
@@ -1816,7 +1820,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if gateErr != nil {
 		// om ran and its time is logged even though the gate never reached a
 		// verdict, as the red path logs it.
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, omTime, omRetried))
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, omTime, omRetried)+reusedSuffix)
 		l.discardCandidate(ctx, w, candRes)
 		return Result{}, gateErr
 	}
@@ -1828,6 +1832,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if waived {
 		stageLine += ", om skipped (overseer-reviewed)"
 	}
+	stageLine += reusedSuffix
 	l.logf("%s: %s", w.BeadID, stageLine)
 	if !gateRes.Passed {
 		reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
