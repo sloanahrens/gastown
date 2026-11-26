@@ -649,7 +649,7 @@ func TestClusterShapePlanStaticGetsOnce(t *testing.T) {
 	kube := planKubectlStaticEqual(t)
 	counting := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
 		if resource, namespace, ok := planGetOf(name, args); ok && !strings.HasPrefix(resource, "deployment/") {
-			got[resource+" "+namespace]++
+			got[planStaticResourceKey(resource, namespace)]++
 		}
 		return kube(ctx, dir, env, name, args...)
 	}
@@ -682,12 +682,37 @@ func planLiveAnswer(t *testing.T, resource, revision string) string {
 	return string(body)
 }
 
+// planStaticKey is how the fake cluster keys the answer to a static object's get:
+// its resource, kind in lower case then /name, and its namespace, empty for a
+// cluster-scoped kind.
+func planStaticKey(kind, name, namespace string) string {
+	return planStaticResourceKey(strings.ToLower(kind)+"/"+name, namespace)
+}
+
+// planStaticResourceKey is a static read's resource, kind/name as the drift read
+// names it, with its namespace, empty for a cluster-scoped kind.
+func planStaticResourceKey(resource, namespace string) string {
+	return resource + " " + namespace
+}
+
+// planObjectField is doc's field as an object, failing the test when the document
+// holds something else there.
+func planObjectField(t planFailer, doc map[string]any, key string) map[string]any {
+	t.Helper()
+	field, ok := doc[key].(map[string]any)
+	if !ok {
+		t.Fatalf("%q is %T, want an object", key, doc[key])
+		return nil
+	}
+	return field
+}
+
 // planStaticLiveOneDrifted is planStaticLive with the live value of the gt-ci
 // PriorityClass changed from its rendered 100, so exactly one static object differs.
 func planStaticLiveOneDrifted(t *testing.T) map[string]string {
 	t.Helper()
 	live := planStaticLive(t)
-	const key = "priorityclass/gt-ci "
+	key := planStaticKey(priorityClassKind, "gt-ci", "")
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(live[key]), &doc); err != nil {
 		t.Fatalf("decoding the live %s: %v", key, err)
@@ -710,19 +735,27 @@ func planKubectlAnswering(t *testing.T, answer func(resource string) (string, in
 	return planKubectlReading(t, planStaticLiveOneDrifted(t), answer)
 }
 
+// planFailer is the part of *testing.T the shared plan fake refuses a non-get
+// call through, so a row can drive that refusal with a recording reporter.
+type planFailer interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
 // planKubectlReading is the plan's cluster read with static as the answer to each
 // static object's get, keyed as planStaticLive keys it.
-func planKubectlReading(t *testing.T, static map[string]string, answer func(resource string) (string, int, error)) update.RunFunc {
+func planKubectlReading(t planFailer, static map[string]string, answer func(resource string) (string, int, error)) update.RunFunc {
 	t.Helper()
 	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 		resource, namespace, ok := planGetOf(name, args)
 		if !ok {
 			t.Fatalf("the plan ran %s %q, want only a get", name, args)
+			return "", 0, nil // a recording reporter returns where *testing.T does not
 		}
 		if strings.HasPrefix(resource, "deployment/") {
 			return answer(resource)
 		}
-		return static[resource+" "+namespace], 0, nil
+		return static[planStaticResourceKey(resource, namespace)], 0, nil
 	}
 }
 
@@ -750,6 +783,8 @@ func planKindScope(resource string) (cluster, known bool) {
 			return scoped, true
 		}
 	}
+	// A Deployment is the drift read's other get, besides the static objects: it
+	// is namespaced, and the fake answers it from its own answer, not the static set.
 	return false, named && kind == "deployment"
 }
 
@@ -764,6 +799,7 @@ func TestClusterShapePlanStaticDiffersKeepsPhasePFakeShape(t *testing.T) {
 	}{
 		{"a cluster-scoped get", []string{"get", "priorityclass/gt-ci", "--ignore-not-found", "-o", "json"}, true, ""},
 		{"a namespaced get", []string{"get", "role/gt-update", "-n", "gt", "--ignore-not-found", "-o", "json"}, true, "gt"},
+		{"a namespaced deployment get", []string{"get", "deployment/daemon", "-n", "gt", "--ignore-not-found", "-o", "json"}, true, "gt"},
 		{"a kind the compare does not read", []string{"get", "pod/x", "-n", "gt", "--ignore-not-found", "-o", "json"}, false, ""},
 		{"a namespaced get with --namespace", []string{"get", "role/gt-update", "--namespace", "gt", "--ignore-not-found", "-o", "json"}, false, ""},
 		{"a namespaced get with no namespace", []string{"get", "role/gt-update", "--ignore-not-found", "-o", "json"}, false, ""},
@@ -778,36 +814,80 @@ func TestClusterShapePlanStaticDiffersKeepsPhasePFakeShape(t *testing.T) {
 	}
 }
 
+// planFatalRecorder records the fake's refusal instead of ending the test.
+type planFatalRecorder struct{ msg string }
+
+func (*planFatalRecorder) Helper() {}
+
+func (r *planFatalRecorder) Fatalf(format string, args ...any) { r.msg = fmt.Sprintf(format, args...) }
+
+// TestClusterShapePlanStaticDiffersKeepsPhasePFakeRefusesNonGet: the shared fake
+// fails a call that is not the drift read's get, so a plan reaching the cluster
+// any other way cannot pass the tests built on it.
+func TestClusterShapePlanStaticDiffersKeepsPhasePFakeRefusesNonGet(t *testing.T) {
+	t.Parallel()
+	rec := &planFatalRecorder{}
+	kube := planKubectlReading(rec, planStaticLive(t), planRevisionAnswer(t))
+	out, code, err := kube(context.Background(), "", nil, "kubectl", "apply", "-f", "-")
+	if want := `the plan ran kubectl ["apply" "-f" "-"], want only a get`; rec.msg != want {
+		t.Fatalf("the fake refused with %q, want %q", rec.msg, want)
+	}
+	if out != "" || code != 0 || err != nil {
+		t.Fatalf("a refused call answered %q, exit %d, err %v; want no answer", out, code, err)
+	}
+}
+
+// TestClusterShapePlanStaticDiffersKeepsPhasePObjectField: a row that changes a
+// live object fails the test, not panics, when the field it changes is no object.
+func TestClusterShapePlanStaticDiffersKeepsPhasePObjectField(t *testing.T) {
+	t.Parallel()
+	rec := &planFatalRecorder{}
+	if got, want := planObjectField(rec, map[string]any{"metadata": "planted"}, "metadata"), `"metadata" is string, want an object`; got != nil || rec.msg != want {
+		t.Fatalf("a string field = %v, refused with %q; want nil and %q", got, rec.msg, want)
+	}
+	rec.msg = ""
+	if got, want := planObjectField(rec, map[string]any{}, "metadata"), `"metadata" is <nil>, want an object`; got != nil || rec.msg != want {
+		t.Fatalf("a missing field = %v, refused with %q; want nil and %q", got, rec.msg, want)
+	}
+}
+
 // TestClusterShapePlanStaticDiffersKeepsPhaseP: a static object that differs from the
 // cluster's, of any kind the compare reads, or one it does not hold, keeps phase P.
 func TestClusterShapePlanStaticDiffersKeepsPhaseP(t *testing.T) {
 	t.Parallel()
+	plantedRules := func(_ *testing.T, doc map[string]any) {
+		doc["rules"] = []any{map[string]any{"verbs": []any{"planted"}}}
+	}
 	cases := []struct {
-		name, key string
-		change    func(doc map[string]any) // nil: the cluster does not hold the object
+		name, kind, object, namespace string
+		change                        func(t *testing.T, doc map[string]any) // nil: the cluster does not hold the object
 	}{
-		{"a PriorityClass value", "priorityclass/gt-ci ", func(doc map[string]any) { doc["value"] = 101 }},
-		{"a Namespace name", "namespace/gt-sweeps ", func(doc map[string]any) { doc["metadata"].(map[string]any)["name"] = "planted" }},
-		{"a Role's rules", "role/gt-update gt", func(doc map[string]any) { doc["rules"] = []any{map[string]any{"verbs": []any{"planted"}}} }},
-		{"a ClusterRole's rules", "clusterrole/gt-drift-reader ", func(doc map[string]any) { doc["rules"] = []any{map[string]any{"verbs": []any{"planted"}}} }},
-		{"a ValidatingAdmissionPolicy's spec", "validatingadmissionpolicy/gt-update-jobs ", func(doc map[string]any) { doc["spec"].(map[string]any)["failurePolicy"] = "Ignore" }},
-		{"a ServiceAccount's name", "serviceaccount/gt-update gt", func(doc map[string]any) { doc["metadata"].(map[string]any)["name"] = "planted" }},
-		{"a PriorityClass the cluster does not hold", "priorityclass/gt-ci ", nil},
+		{"a PriorityClass value", priorityClassKind, "gt-ci", "", func(_ *testing.T, doc map[string]any) { doc["value"] = 101 }},
+		{"a Namespace name", namespaceKind, "gt-sweeps", "", func(t *testing.T, doc map[string]any) { planObjectField(t, doc, "metadata")["name"] = "planted" }},
+		{"a Role's rules", roleKind, "gt-update", "gt", plantedRules},
+		{"a ClusterRole's rules", clusterRoleKind, "gt-drift-reader", "", plantedRules},
+		{"a ValidatingAdmissionPolicy's spec", validatingPolicyKind, "gt-update-jobs", "", func(t *testing.T, doc map[string]any) { planObjectField(t, doc, "spec")["failurePolicy"] = "Ignore" }},
+		{"a ServiceAccount's name", serviceAccountKind, "gt-update", "gt", func(t *testing.T, doc map[string]any) { planObjectField(t, doc, "metadata")["name"] = "planted" }},
+		{"a PriorityClass the cluster does not hold", priorityClassKind, "gt-ci", "", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			live := planStaticLive(t) // each object keyed as planStaticLive keys it
+			key := planStaticKey(tc.kind, tc.object, tc.namespace)
+			live := planStaticLive(t)
 			if tc.change == nil {
-				delete(live, tc.key)
+				delete(live, key)
 			} else {
 				var doc map[string]any
-				if err := json.Unmarshal([]byte(live[tc.key]), &doc); err != nil {
-					t.Fatalf("decoding the live %s: %v", tc.key, err)
+				if err := json.Unmarshal([]byte(live[key]), &doc); err != nil {
+					t.Fatalf("decoding the live %s: %v", key, err)
 				}
-				tc.change(doc)
-				body, _ := json.Marshal(doc) // a decoded JSON object encodes again
-				live[tc.key] = string(body)
+				tc.change(t, doc)
+				body, err := json.Marshal(doc)
+				if err != nil {
+					t.Fatalf("encoding the live %s: %v", key, err)
+				}
+				live[key] = string(body)
 			}
 			dir, out := planOut(t), &bytes.Buffer{}
 			kube := planKubectlReading(t, live, planRevisionAnswer(t))
@@ -856,7 +936,7 @@ func planStaticLive(t *testing.T) map[string]string {
 		if err != nil {
 			t.Fatalf("encoding the static %s: %v", object.Name, err)
 		}
-		live[strings.ToLower(object.Kind)+"/"+object.Name+" "+object.Namespace] = string(body)
+		live[planStaticKey(object.Kind, object.Name, object.Namespace)] = string(body)
 	}
 	return live
 }
