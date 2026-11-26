@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // AheadOutcome is what one review made ahead of a landing came to.
@@ -45,6 +44,10 @@ func (l *Lander) ReviewAhead(ctx context.Context, w Work) (AheadOutcome, error) 
 // In is the input Land's om stage hands om for the same bead and merge, and Key
 // is the key reviewKey computes from it. reviewAhead returns it so a test can
 // hold both against what the landing builds.
+//
+// In.Dir is empty: it names the review checkout the input was built in, and
+// cleanup removes that worktree before reviewAhead returns, so the returned
+// input names no checkout that has gone.
 type aheadBuilt struct {
 	In  ReviewInput
 	Key ReviewKey
@@ -169,34 +172,28 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	if err != nil {
 		return "", aheadBuilt{}, &InfraError{Stage: "review key", Err: err}
 	}
+	// The checkout goes with the worktree the deferred cleanup removes, so the
+	// returned input names none.
+	built := aheadBuilt{In: in, Key: key}
+	built.In.Dir = ""
 	// NEXT BEAD: here the review runs om on the merged tree and stores the
 	// verdict. Until that lands, a clean merge that reaches this point is
 	// AheadSkipped and the landing runs om inline.
-	return AheadSkipped, aheadBuilt{In: in, Key: key}, nil
+	return AheadSkipped, built, nil
 }
 
-// aheadInput assembles the review input for w the way Land's om stage does: the
-// bead's comments, the operator identities, the accepted-risk text the comments
-// carry, the rounds text, and BuildReviewInput over them, with the work's
-// branch and the review directory. The equality test runs Land and compares the
-// two inputs, so a change to either copy fails it.
+// aheadInput assembles the review input for w through the helper Land's om stage
+// calls (reviewInputFor), so the input and the key made from it are the
+// landing's rather than a copy of them.
 //
 // Where Land logs an unreadable comment or settings file and reviews without
-// it, this returns the error: the pool makes no key for an input it cannot read
-// in full. The rounds text is the exception, by design: roundsText turns a
-// ledger read error into "", on both sides, which is the input om is given.
-func (l *Lander) aheadInput(issue *beads.Issue, w Work, base, merged, dir string, g Repo) (in ReviewInput, err error) {
-	comments, err := l.Beads.Comments(issue.ID)
-	if err != nil {
-		return in, &InfraError{Stage: "read comments", Err: err}
-	}
-	op, err := config.LoadOperatorConfig(l.TownRoot)
-	if err != nil {
-		return in, &InfraError{Stage: "read operator config", Err: err}
-	}
-	accepted := AcceptedRisksText(comments, op)
-	in = BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
-	return in, nil
+// it, this asks for the strict read: the pool makes no key for an input it
+// cannot read in full, so the failure is returned. The rounds text is the
+// exception, by design: roundsText turns a ledger read error into "", on both
+// sides, which is the input om is given.
+func (l *Lander) aheadInput(issue *beads.Issue, w Work, base, merged, dir string, g Repo) (ReviewInput, error) {
+	in, _, _, err := l.reviewInputFor(issue, w, base, merged, dir, g, true)
+	return in, err
 }
 
 // aheadNow is the clock a review is dated by: the store's clock when it sets

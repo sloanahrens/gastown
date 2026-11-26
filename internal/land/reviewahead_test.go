@@ -1021,12 +1021,12 @@ func aheadRoundsDir(t *testing.T, bead string) string {
 
 // TestVerdictReuseAheadBuildsTheLandingsInput: for the same bead and merge, the
 // input ReviewAhead builds is the input Land's om stage gives om, and the key
-// reviewKey computes from it equals the key the landing computes from its own
-// input. Land runs for real and its input is captured, so the comparison is with
-// what the landing builds rather than with a copy of it.
+// ReviewAhead computes equals the key the landing's reuse path computes from its
+// own input. Land runs for real and its input is captured, so the comparison is
+// with what the landing builds rather than with a copy of it.
 func TestVerdictReuseAheadBuildsTheLandingsInput(t *testing.T) {
 	t.Parallel()
-	f, l, wt := keyFixture(t)
+	f, l, _ := keyFixture(t)
 	rev := &aheadKeyReviewer{
 		recordBeadReviewer: recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}},
 		version:            stubOMVersion,
@@ -1055,6 +1055,11 @@ func TestVerdictReuseAheadBuildsTheLandingsInput(t *testing.T) {
 	if built.In.AcceptedRisksText == "" {
 		t.Fatal("reviewAhead built no accepted-risk text: the comparison would not see the operator or the comments")
 	}
+	// The review worktree is removed before reviewAhead returns, so the input it
+	// hands back names no checkout.
+	if built.In.Dir != "" {
+		t.Errorf("built input names the review checkout %q, which the returned worktree no longer has", built.In.Dir)
+	}
 	// Land runs after the pool and with no store, so its own review is the
 	// inline one the landing makes without a review-ahead record.
 	l.Ahead = nil
@@ -1066,9 +1071,18 @@ func TestVerdictReuseAheadBuildsTheLandingsInput(t *testing.T) {
 		t.Fatalf("landing reviewer calls = %d, want 1", len(rev.inputs))
 	}
 	landIn := rev.inputs[0]
-	landKey, _, err := l.reviewKey(context.Background(), wt, wt, f.work, landIn, f.base, res.LandedCommit)
+	// The landing's key is computed by the reuse path Land's review stage will
+	// call, over the clone that stage reads om's config from, at the merge
+	// commit the landing made. reviewKey's checkout argument is used only for
+	// the commit-to-commit reads, which the clone answers.
+	l.Ahead = TownAheadStore(f.town, "gastown")
+	landRepo := l.open(l.Repo)
+	_, landKey, hit, err := l.reuseAhead(context.Background(), landRepo, landRepo, f.work, landIn, f.base, res.LandedCommit)
 	if err != nil {
-		t.Fatalf("reviewKey over the landing's input: %v", err)
+		t.Fatalf("reuseAhead over the landing's input: %v", err)
+	}
+	if hit {
+		t.Fatal("reuseAhead hit on a store holding no record")
 	}
 	if !reflect.DeepEqual(comparableInput(built.In), comparableInput(landIn)) {
 		t.Errorf("reviewAhead's input differs from the landing's:\n pool:    %+v\n landing: %+v", comparableInput(built.In), comparableInput(landIn))
