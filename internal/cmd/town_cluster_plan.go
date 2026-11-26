@@ -93,7 +93,9 @@ var townClusterPlanCmd = &cobra.Command{
 with --include-static, and print the short form of the plan's id. Nothing is
 applied. The plan reads the cluster's Deployments and the static objects with get
 only and writes nothing to any cluster. A Secret is compared on the fields its
-document declares and never on its data, which the cluster fills.
+document declares and never on its data, which the cluster fills. After the phases,
+the plan prints, in the drift command's form, the compare's lines for the
+Deployments and static objects that differ from the live cluster.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
@@ -116,16 +118,6 @@ func init() {
 	townClusterCmd.AddCommand(townClusterPlanCmd)
 }
 
-// planDocument is the part of a rendered file the plan reads back: the kind and
-// the name and namespace a Deployment is read by.
-type planDocument struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name      string `yaml:"name"`
-		Namespace string `yaml:"namespace"`
-	} `yaml:"metadata"`
-}
-
 // planRevisionIsNumber reports whether a revision annotation is a positive whole
 // number. The controller stamps 1, 2, 3 and so on; zero, a sign, a fraction or any
 // other text is not a revision the plan can trust.
@@ -134,44 +126,70 @@ func planRevisionIsNumber(revision string) bool {
 	return err == nil && n > 0
 }
 
-// planLiveVersions returns the revision and the resourceVersion the cluster holds
-// for the Deployment a rendered file names, read with one get through the drift
-// command's read, as the annotation and the metadata read. A file that is not a
-// Deployment reads nothing. A Deployment the cluster does not hold is a normal
-// plan: it returns absent with no revision and no resourceVersion. A Deployment
-// that is held with no revision annotation, a revision that is not a positive
-// whole number, or no resourceVersion, or a get that failed, is an error: an empty
+// planLiveVersions reads the Deployment a rendered file names with one get
+// through the drift command's read: the revision and resourceVersion the cluster
+// holds for it, as the annotation and the metadata read, beside the drift
+// compare's lines (objectDrift) for the rendered fields that differ, each
+// prefixed by the resource. A Deployment the cluster does not hold is a normal
+// plan: absent, with no revision and no lines. A failed get, a held Deployment
+// with no revision annotation, a revision that is not a positive whole number, no
+// resourceVersion, or an answer that is no object at all, is an error: an empty
 // or unreadable value would let a later apply pass as unchanged.
-func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (string, string, bool, error) {
-	var doc planDocument
-	if err := yaml.Unmarshal(body, &doc); err != nil {
-		return "", "", false, fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
+func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (revision, resourceVersion string, absent bool, lines []string, err error) {
+	// The file's own fields are the rendered side of the compare, decoded as the
+	// drift compare decodes a rendered object, so the lines name the fields the
+	// apply would change.
+	var rendered map[string]any
+	if err := yaml.Unmarshal(body, &rendered); err != nil {
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: cannot read a rendered file's kind, so no plan was written: %w", err)
 	}
-	if doc.Kind != "Deployment" {
-		return "", "", false, nil
+	kind, ok := rendered["kind"].(string)
+	if !ok {
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: a rendered file has no kind to read, so no plan was written")
 	}
-	resource := "deployment/" + doc.Metadata.Name
-	live, absent, err := readLiveObject(ctx, clusterDriftDeps{kubectl: kube}, resource, doc.Metadata.Namespace, false)
+	if kind != "Deployment" {
+		return "", "", false, nil, nil
+	}
+	metadata, _ := rendered["metadata"].(map[string]any)
+	name, _ := metadata["name"].(string)
+	namespace, _ := metadata["namespace"].(string)
+	resource := "deployment/" + name
+	live, absent, err := readLiveObject(ctx, clusterDriftDeps{kubectl: kube}, resource, namespace, false)
 	if err != nil {
-		return "", "", false, fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
 	if absent {
-		return "", "", true, nil
+		return "", "", true, nil, nil
 	}
-	metadata, _ := live["metadata"].(map[string]any)
-	annotations, _ := metadata["annotations"].(map[string]any)
-	revision, _ := annotations[planRevisionAnnotation].(string)
+	diff, err := objectDrift(kind, rendered, live)
+	if err != nil {
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: cannot compare %s with its live object, so no plan was written: %w", resource, err)
+	}
+	liveMetadata, _ := live["metadata"].(map[string]any)
+	annotations, _ := liveMetadata["annotations"].(map[string]any)
+	revision, _ = annotations[planRevisionAnnotation].(string)
 	if revision == "" {
-		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, doc.Metadata.Namespace)
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has no revision annotation, so no plan was written", resource, namespace)
 	}
 	if !planRevisionIsNumber(revision) {
-		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has revision %q, which is not a positive whole number, so no plan was written", resource, doc.Metadata.Namespace, revision)
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has revision %q, which is not a positive whole number, so no plan was written", resource, namespace, revision)
 	}
-	resourceVersion, _ := metadata["resourceVersion"].(string)
+	resourceVersion, _ = liveMetadata["resourceVersion"].(string)
 	if resourceVersion == "" {
-		return "", "", false, fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, doc.Metadata.Namespace)
+		return "", "", false, nil, fmt.Errorf("gt town cluster plan: %s in %s has no resourceVersion, so no plan was written", resource, namespace)
 	}
-	return revision, resourceVersion, false, nil
+	lines = make([]string, len(diff))
+	for i, line := range diff {
+		lines[i] = planDiffLine(resource, line)
+	}
+	return revision, resourceVersion, false, lines, nil
+}
+
+// planDiffLine is one line the plan prints after the phases: the resource the
+// drift compare read, then the compare's line as `gt town cluster drift` prints
+// it, value or fingerprint as that command decides.
+func planDiffLine(resource, line string) string {
+	return resource + ": " + line
 }
 
 // planStaticTargets is the drift target of every static object of the render, in
@@ -235,34 +253,37 @@ func planSecretTarget(object k8s.StaticObject) (driftTarget, error) {
 	return target, nil
 }
 
-// planStaticDiffers reports whether any target differs from the cluster's live
-// object, compared by driftTarget.differences. Every target is read even after one
-// differs, so a failed read refuses the plan. runTownClusterPlan lists phase P only
-// when this reports true.
-func planStaticDiffers(ctx context.Context, encode func(io.Writer, any) error, kube update.RunFunc, targets []driftTarget) (bool, error) {
+// planStaticDifferences is the drift compare's lines for the static objects, in
+// the render's order, each prefixed by the resource as the drift command prints
+// it. Every target is read even after one differs, so a failed read refuses the
+// plan. runTownClusterPlan lists phase P only when it returns at least one line.
+func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) error, kube update.RunFunc, targets []driftTarget) ([]string, error) {
 	d := clusterDriftDeps{render: clusterRenderDeps{encode: encode}, kubectl: kube}
-	differs := false
+	var lines []string
 	for _, target := range targets {
-		lines, err := target.differences(ctx, d)
+		diff, err := target.differences(ctx, d)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		differs = differs || len(lines) > 0
+		for _, line := range diff {
+			lines = append(lines, planDiffLine(target.resource, line))
+		}
 	}
-	return differs, nil
+	return lines, nil
 }
 
 // runTownClusterPlan renders the recorded flags' desired set with
-// runClusterRender, reads each rendered Deployment's revision and resourceVersion
-// through kube, writes plan.json into outDir with writeJSON, and prints the phases
-// and the short plan id to out. The plan takes the file set, its apply order and
-// its bytes from the render's own writes, so the id names exactly what the render
-// wrote; the render's own output is dropped, so only the phases and the id are
-// printed. Phase P is listed only when a static object differs from the cluster's:
-// when none does, plan.json and the id name the workloads alone, and the phases
-// line names only W. plan.json is written only after every read succeeds, and the
-// output only after it is written, so a refusal, a render error, a failed read or
-// a failed write prints nothing.
+// runClusterRender, reads each rendered Deployment and each static object through
+// kube, writes plan.json into outDir with writeJSON, and prints the phases, the
+// drift compare's differences and the short plan id to out. The plan takes the file set, its apply order and its bytes
+// from the render's own writes, so the id names exactly what the render wrote; the
+// render's own output is dropped. Phase P is listed only when a static object
+// differs from the cluster's: when none does, plan.json and the id name the
+// workloads alone, and the phases line names only W. The differences print after
+// the phases, the static objects' then each Deployment's in apply order, and the
+// short id is the last line. plan.json is written only after every read succeeds,
+// and the output only after it is written, so a refusal, a render error, a failed
+// read or a failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, writeJSON func(path string, v any) error) error {
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
@@ -306,16 +327,17 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	// Every static object builds its target through the drift walk's builder, so a
 	// static document that names another object refuses the plan here, before
 	// plan.json is written. Each target is then read, and a read that fails refuses
-	// the plan the same way. Whether any target differs decides whether phase P is
-	// listed.
+	// the plan the same way; the lines a target returns are the difference that
+	// decides whether phase P is listed.
 	targets, err := planStaticTargets(staticObjects)
 	if err != nil {
 		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
-	differs, err := planStaticDiffers(ctx, d.encode, kube, targets)
+	differences, err := planStaticDifferences(ctx, d.encode, kube, targets)
 	if err != nil {
 		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
 	}
+	differs := len(differences) > 0
 	files := make([]planFile, 0, len(names))
 	record := planRecord{Files: make([]planRecordFile, 0, len(names))}
 	counts := map[string]int{}
@@ -331,10 +353,11 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 		files = append(files, planFile{Name: name, Data: bodies[i]})
 		sum := sha256.Sum256(bodies[i])
-		revision, resourceVersion, absent, err := planLiveVersions(ctx, kube, bodies[i])
+		revision, resourceVersion, absent, lines, err := planLiveVersions(ctx, kube, bodies[i])
 		if err != nil {
 			return err
 		}
+		differences = append(differences, lines...)
 		counts[phase]++
 		record.Files = append(record.Files, planRecordFile{Name: name, Phase: phase, SHA256: hex.EncodeToString(sum[:]), Revision: revision, ResourceVersion: resourceVersion, Absent: absent})
 	}
@@ -352,6 +375,10 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		held = append(held, fmt.Sprintf("%s (workloads, %d files)", planPhaseWorkloads, counts[planPhaseWorkloads]))
 	}
 	fmt.Fprintf(out, "Phases in apply order: %s\n", strings.Join(held, ", then "))
+	// The differences follow the phases, and the short id stays the last line.
+	for _, line := range differences {
+		fmt.Fprintln(out, line)
+	}
 	fmt.Fprintln(out, short)
 	return nil
 }
