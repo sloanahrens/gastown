@@ -37,11 +37,19 @@ func TestPatrolLastRunRecordersDoctorDog(t *testing.T) {
 
 	t.Run("a tick that takes the Dolt-task lock records a run", func(t *testing.T) {
 		t.Parallel()
+		clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 26, 6, 45, 0, 0, time.UTC))
 		d := doctorRecorderDaemon(t)
+		d.clock = clock
+		// The probes move the fake clock on inside the tick. The run is
+		// recorded at its start, the instant the tick's defer read, so the
+		// record must be that start, not the clock after the probes ran.
+		d.doctorDogProbesFn = func() doctorProbes {
+			clock.Advance(40 * time.Second)
+			return healthyDoctorProbes()
+		}
 
-		before := time.Now()
+		want := clock.Now()
 		d.runDoctorDog()
-		after := time.Now()
 
 		runs, err := ReadPatrolLastRuns(d.config.TownRoot)
 		if err != nil {
@@ -51,8 +59,8 @@ func TestPatrolLastRunRecordersDoctorDog(t *testing.T) {
 		if !ok {
 			t.Fatal("doctor_dog recorded no run; gt jobs reads it as never_run")
 		}
-		if got.Before(before) || got.After(after) {
-			t.Errorf("doctor_dog last run = %v, want a time within the tick (%v..%v)", got, before, after)
+		if !got.Equal(want) {
+			t.Errorf("doctor_dog last run = %v, want the tick's start on the fake clock (%v)", got, want)
 		}
 	})
 
