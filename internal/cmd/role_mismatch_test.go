@@ -51,9 +51,12 @@ func TestRoleMismatchTownRootIsNeutral(t *testing.T) {
 
 // TestRoleFromTheCommonWorkPath pins the sandbox common work path (gt-f80lq2):
 // a seat starts in the link /sandbox/gt/work instead of its real worktree path,
-// and gt must resolve the same identity from both without a mismatch. The town
-// layout is built under t.TempDir() with the production names, so the test
-// never reads the live town tree.
+// and gt must resolve the same identity from both without a mismatch. gt never
+// resolves the link on disk: the cwd is a plain string, cwd detection sees one
+// segment and yields no role, so the identity comes from GT_ROLE alone. The
+// test passes the link path as that string and creates no symlink, because a
+// symlink here would not be read. The town layout is built under t.TempDir()
+// with the production names, so the test never reads the live town tree.
 func TestRoleFromTheCommonWorkPath(t *testing.T) {
 	t.Parallel()
 	const rig, name = "gastown", "slit"
@@ -63,9 +66,6 @@ func TestRoleFromTheCommonWorkPath(t *testing.T) {
 		t.Fatalf("create worktree: %v", err)
 	}
 	commonPath := filepath.Join(townRoot, "work")
-	if err := os.Symlink(worktree, commonPath); err != nil {
-		t.Fatalf("link the common work path: %v", err)
-	}
 
 	vars := map[string]string{EnvGTRole: rig + "/polecats/" + name, "GT_RIG": rig, "GT_POLECAT": name}
 	env := func(k string) string { return vars[k] }
