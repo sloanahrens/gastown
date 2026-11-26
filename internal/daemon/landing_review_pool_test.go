@@ -594,3 +594,85 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 		})
 	}
 }
+
+// TestReviewPoolWiringNoOMConfigLeavesTheWorker pins that a listed rig whose
+// om config file is missing or cannot be named leaves the Worker exactly as it
+// was built: Pool and Stored stay nil, so a landing whose queue-time review
+// could never be reused spends no om run on one (gt-jbirx5).
+func TestReviewPoolWiringNoOMConfigLeavesTheWorker(t *testing.T) {
+	t.Parallel()
+	noXDG := func(string) (string, bool) { return "", false }
+	cases := []struct {
+		name string
+		env  func(t *testing.T) reviewPoolEnv
+	}{
+		{
+			// The production os.Stat runs here: a fresh XDG directory holds no
+			// om/config.json, as on a host that has never run om.
+			name: "config file missing",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: func(key string) (string, bool) {
+						if key == "XDG_CONFIG_HOME" {
+							return t.TempDir(), true
+						}
+						return "", false
+					},
+					home: func() (string, error) { return t.TempDir(), nil },
+				}
+			},
+		},
+		{
+			name: "no XDG and no home",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: noXDG,
+					home:   func() (string, error) { return "", nil },
+				}
+			},
+		},
+		{
+			name: "home directory read fails",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: noXDG,
+					home:   func() (string, error) { return "", errors.New("no home for this process") },
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+
+			err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", tc.env(t))
+
+			if err == nil {
+				t.Fatal("wireReviewPool returned nil with no usable om config file; want the error so the pool stays off")
+			}
+			if !strings.Contains(err.Error(), "gastown") {
+				t.Fatalf("error %q does not name the rig", err)
+			}
+			// The same error undoes the Lander's wiring, so the rig lands
+			// with om inline.
+			if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
+				t.Fatalf("no om config file changed the Lander:\ngot  %+v\nwant %+v", lander, want)
+			}
+			if worker.Pool != nil {
+				t.Fatalf("no om config file gave the Worker Pool %+v; want nil so no review runs before the landing", worker.Pool)
+			}
+			if worker.Stored != nil {
+				t.Fatalf("no om config file gave the Worker Stored %+v; want nil so no stored verdict is swept", worker.Stored)
+			}
+			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
