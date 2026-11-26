@@ -1063,6 +1063,70 @@ func TestPatrolScanKeptRecordNoSandboxIsDropped(t *testing.T) {
 	}
 }
 
+// A gateway-silent kept record whose sandbox record is gone is left when the
+// seat's gateway cannot say its sandbox is gone: an error, a timeout, and a
+// gateway that still has the sandbox each keep it, and a seat whose sandbox
+// record is still there is left to the walk. Dropping on any of them would lose
+// a record that keeps a seat whose sandbox may still hold unsaved work
+// (gt-nd3kgv).
+func TestPatrolScanKeptRecordKeeps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		exists   func(gateway, name string) (bool, error) // nil: the gateway has no sandbox
+		registry bool                                     // the seat's sandbox record is still there
+		wantAsks int
+		wantLog  string // a fragment the pass logs, "" for no assertion
+	}{
+		{"gateway_error_keeps_the_record", func(string, string) (bool, error) { return false, errors.New("gateway down") }, false, 1, `cannot ask gateway "gw1" whether it has its sandbox: gateway down`},
+		{"gateway_timeout_keeps_the_record", func(string, string) (bool, error) { return false, context.DeadlineExceeded }, false, 1, "whether it has its sandbox: context deadline exceeded"},
+		{"gateway_has_the_sandbox_keeps_the_record", func(string, string) (bool, error) { return true, nil }, false, 1, ""},
+		{"sandbox_record_still_present_is_left_to_the_walk", nil, true, 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p, asked, logs := keptNoSandboxPatrol(t, map[string]bool{})
+			p.host.sandboxExists = func(gateway, name string) (bool, error) {
+				*asked = append(*asked, gateway)
+				if tt.exists == nil {
+					return false, nil
+				}
+				return tt.exists(gateway, name)
+			}
+			if tt.registry {
+				p.registryRecord(t)
+			}
+			before, bad, err := KeptSandboxSeats(p.town)
+			if err != nil || len(bad) != 0 || len(before) != 1 {
+				t.Fatalf("kept seats before the pass = %+v, bad %v, %v; want the fixture's one", before, bad, err)
+			}
+			removed := 0
+			p.host.removeKeptSeat = func(string, string, string) error { removed++; return nil }
+			p.host.asks = newGatewayAskBudget(sandboxRecordsPerTick)
+
+			p.host.dropKeptSandboxSeatsWithoutRecord()
+
+			if removed != 0 {
+				t.Errorf("kept records removed = %d, want none", removed)
+			}
+			after, bad, err := KeptSandboxSeats(p.town)
+			if err != nil || len(bad) != 0 || len(after) != 1 {
+				t.Fatalf("kept seats after the pass = %+v, bad %v, %v; want the record left", after, bad, err)
+			}
+			if !reflect.DeepEqual(after[0], before[0]) {
+				t.Errorf("kept record = %+v, want it left as %+v", after[0], before[0])
+			}
+			if len(*asked) != tt.wantAsks {
+				t.Errorf("gateway asks = %v, want %d", *asked, tt.wantAsks)
+			}
+			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log lacks %q:\n%s", tt.wantLog, logs.String())
+			}
+		})
+	}
+}
+
 // A sandbox that lives on the seat's own gateway, which is not the default one,
 // keeps its record: the default gateway has none, and asking it would read the
 // seat as gone and delete the record wrongly (gt-5lel7f).
