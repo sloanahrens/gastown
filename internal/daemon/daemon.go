@@ -1524,6 +1524,7 @@ type Daemon struct {
 	eventsPruneRun     patrolLastRunMemory
 	gitHygieneRun      patrolLastRunMemory
 	checkpointDogRun   patrolLastRunMemory
+	reconcilerRun      patrolLastRunMemory
 	doctorDogRun       patrolLastRunMemory
 	overseerReportRun  patrolLastRunMemory
 	hmSyncPatrolRun    patrolLastRunMemory
