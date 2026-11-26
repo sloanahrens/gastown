@@ -3557,6 +3557,94 @@ func TestCIEngineSplitOrphans(t *testing.T) {
 	}
 }
 
+// TestCIEngineRunningTaskSet: each target is asked once for its repository's
+// running task ids with the pass's token, and the set holds the union of the ids
+// they answer.
+func TestCIEngineRunningTaskSet(t *testing.T) {
+	t.Parallel()
+	const token = "tok-running-set"
+	targets := []landingInfraTarget{
+		{Rig: "alpha", Owner: "o", Repo: "a", APIBase: "https://fj/a"},
+		{Rig: "beta", Owner: "o", Repo: "b", APIBase: "https://fj/b"},
+	}
+	answers := map[string][]int64{"a": {1, 2}, "b": {2, 3}}
+	var asked []string
+	read := func(_ context.Context, apiBase, gotToken, owner, repo string) ([]int64, error) {
+		asked = append(asked, apiBase+" "+owner+"/"+repo+" "+gotToken)
+		return answers[repo], nil
+	}
+	got, err := ciEngineRunningTaskSet(context.Background(), targets, token, read)
+	if err != nil {
+		t.Fatalf("running task set: %v", err)
+	}
+	if want := map[int64]bool{1: true, 2: true, 3: true}; !maps.Equal(got, want) {
+		t.Errorf("set = %v, want the union %v", got, want)
+	}
+	wantAsked := []string{"https://fj/a o/a tok-running-set", "https://fj/b o/b tok-running-set"}
+	if !slices.Equal(asked, wantAsked) {
+		t.Errorf("reads = %q, want %q", asked, wantAsked)
+	}
+}
+
+// TestCIEngineRunningTaskSetRefuses: a failing read, a target whose instance did
+// not resolve, an empty token and no target are each an error with no set, and
+// no error names the token.
+func TestCIEngineRunningTaskSetRefuses(t *testing.T) {
+	t.Parallel()
+	const token = "tok-must-not-leak"
+	ok := []landingInfraTarget{{Rig: "alpha", Owner: "o", Repo: "a", APIBase: "https://fj"}}
+	notAsked := func(t *testing.T) func(context.Context, string, string, string, string) ([]int64, error) {
+		return func(context.Context, string, string, string, string) ([]int64, error) {
+			t.Fatalf("a repository it cannot use was asked")
+			return nil, nil
+		}
+	}
+	for name, tc := range map[string]struct {
+		targets []landingInfraTarget
+		token   string
+		read    func(context.Context, string, string, string, string) ([]int64, error)
+	}{
+		"a failing read": {
+			targets: ok,
+			token:   token,
+			read: func(context.Context, string, string, string, string) ([]int64, error) {
+				return nil, fmt.Errorf("the query was refused for %s", token)
+			},
+		},
+		"a target whose instance did not resolve": {
+			targets: []landingInfraTarget{{Rig: "broken", BaseErr: errors.New("no remote URL")}},
+			token:   token,
+			read:    nil, // set below, per subtest
+		},
+		"an empty token": {
+			targets: ok,
+			read:    nil,
+		},
+		"no target": {
+			token: token,
+			read:  nil,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			read := tc.read
+			if read == nil {
+				read = notAsked(t)
+			}
+			got, err := ciEngineRunningTaskSet(context.Background(), tc.targets, tc.token, read)
+			if err == nil {
+				t.Fatalf("not refused: set = %v", got)
+			}
+			if got != nil {
+				t.Errorf("the refusal returned a set: %v", got)
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Errorf("the refusal names the token: %v", err)
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneCapImagesRemaining: a run removes at most
 // ci_engine_prune_max_per_kind images, the plan's first ones, and the images it
 // leaves are not a failure: the run is recorded ok with the usual next due,
