@@ -153,6 +153,124 @@ func deferredHarness(t *testing.T, finishErr error) (*harness, *deferredFakes) {
 	return h, f
 }
 
+// blockingDeferredLander holds a deferred landing's finish open, so a test can
+// see the pass return while the record is still being written.
+type blockingDeferredLander struct {
+	*deferredLander
+	ctx              context.Context
+	entered, release chan struct{}
+}
+
+func (l *blockingDeferredLander) FinishLanding(land.Work, land.Result) error {
+	*l.steps = append(*l.steps, "finish")
+	close(l.entered)
+	hold(l.ctx, l.release)
+	return l.finishErr
+}
+
+// triggerRecorder records the bead of each inline post-landing trigger.
+type triggerRecorder struct{ signs []string }
+
+func (r *triggerRecorder) Trigger(_ context.Context, pl PostLand) {
+	r.signs = append(r.signs, pl.BeadID)
+}
+func (r *triggerRecorder) PollPending(context.Context) {}
+
+// passSteps records the landings reads a landing makes; the pass's own
+// pre-landing record read is not one of its steps.
+type passSteps struct {
+	*fakeLandings
+	steps  *[]string
+	landed bool
+}
+
+func (p *passSteps) LatestForBead(id string) (land.LandingRecord, bool, error) {
+	if p.landed {
+		*p.steps = append(*p.steps, "sp-actual")
+	}
+	return p.fakeLandings.LatestForBead(id)
+}
+
+// deferredWorker is a harness about to land gt-abc with res; q may be nil.
+func deferredWorker(t *testing.T, q *BookQueue, res land.Result) (*harness, *deferredFakes, *triggerRecorder) {
+	t.Helper()
+	h, f := deferredHarness(t, nil)
+	steps := &passSteps{fakeLandings: f.fakeLandings, steps: &f.steps}
+	h.w.Landings = steps
+	h.lander.fn = func(int, land.Work) (land.Result, error) { steps.landed = true; return res, nil }
+	trig := &triggerRecorder{}
+	h.w.PostLand, h.w.Books = trig, q
+	h.seedReady(t, "gt-abc")
+	return h, f, trig
+}
+
+// TestBookQueueWorkerDefers: a deferred landing's four steps run as one job the
+// pass does not wait for when a queue is set, and run inline when it is not;
+// every other landing runs its steps inline as before (gt-c3vl2u).
+func TestBookQueueWorkerDefers(t *testing.T) {
+	t.Parallel()
+	rec := land.LandingRecord{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: noteHead,
+		Target: "main", LandedCommit: "cccccccccc", Route: "daemon"}
+	deferred := land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp", Deferred: &rec}
+
+	t.Run("the pass returns while the queued finish is blocked", func(t *testing.T) {
+		t.Parallel()
+		ctx := waitCtx(t)
+		q := &BookQueue{}
+		h, f, trig := deferredWorker(t, q, deferred)
+		bl := &blockingDeferredLander{deferredLander: h.w.Lander.(*deferredLander), ctx: ctx,
+			entered: make(chan struct{}), release: make(chan struct{})}
+		h.w.Lander = bl
+
+		passDone := make(chan Report, 1)
+		go func() { passDone <- h.w.Pass(ctx) }()
+		// A pass that finishes the record itself blocks here instead, so this
+		// bounded wait names the missing queue Add.
+		rep := recvBounded(t, ctx, passDone, "the pass returning while the finish is blocked")
+		recvBounded(t, ctx, bl.entered, "the queued job entering FinishLanding")
+
+		if rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted before the record is finished", rep)
+		}
+		if !slices.Equal(h.cleared, []string{"gt-abc@opal"}) || !slices.Equal(trig.signs, []string{"gt-abc"}) {
+			t.Fatalf("cleared %v, triggers %v; want the intent cleared and the verdict started inline", h.cleared, trig.signs)
+		}
+		if !slices.Equal(f.steps, []string{"finish"}) {
+			t.Fatalf("steps %v while the finish is blocked; want only the finish attempt", f.steps)
+		}
+		releaseBeadJob(ctx, t, q, "gt-abc", bl.release)
+		if want := []string{"finish", "reap", "seat", "sp-actual", "after"}; !slices.Equal(f.steps, want) {
+			t.Fatalf("steps %v; want %v", f.steps, want)
+		}
+	})
+
+	t.Run("with no queue the finish runs inline and is never dropped", func(t *testing.T) {
+		t.Parallel()
+		h, f, _ := deferredWorker(t, nil, deferred)
+		if rep := h.w.Pass(waitCtx(t)); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		if want := []string{"finish", "reap", "seat", "sp-actual", "after"}; !slices.Equal(f.steps, want) {
+			t.Fatalf("steps %v; want %v", f.steps, want)
+		}
+	})
+
+	t.Run("a landing with no deferred record runs its steps inline as before", func(t *testing.T) {
+		t.Parallel()
+		q := &BookQueue{}
+		h, f, trig := deferredWorker(t, q, land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"})
+		if rep := h.w.Pass(waitCtx(t)); rep.Landed != 1 {
+			t.Fatalf("report %v; want the landing counted", rep)
+		}
+		if want := []string{"reap", "seat", "sp-actual", "after"}; !slices.Equal(f.steps, want) || !slices.Equal(trig.signs, []string{"gt-abc"}) {
+			t.Fatalf("steps %v, triggers %v; want %v and the verdict started", f.steps, trig.signs, want)
+		}
+		if q.Holds("gt-abc") {
+			t.Fatal("gt-abc was queued though its landing recorded both halves in one pass")
+		}
+	})
+}
+
 // TestBookQueueFinishDeferred: the four landing steps run in order after the
 // record is finished; a finish it cannot make queues the repair instead, and
 // none of the four runs (gt-k78e8j).
