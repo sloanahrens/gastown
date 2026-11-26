@@ -13,12 +13,17 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// The two objects the control values render, as the cluster serves them: a
-// backup writes these bytes unchanged.
+// The two live reads carry the fields the API server assigns, and the two
+// files a backup writes hold the same objects without them.
 const (
-	backupDeploymentJSON = `{"kind":"Deployment","metadata":{"name":"forgejo-runner","namespace":"forgejo"}}` + "\n"
-	backupConfigMapJSON  = `{"kind":"ConfigMap","metadata":{"name":"forgejo-runner-config","namespace":"forgejo"}}` + "\n"
+	backupDeploymentLiveJSON = `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"forgejo-runner","namespace":"forgejo","uid":"0d1f2b3c-4a5b-6c7d-8e9f-0a1b2c3d4e5f","resourceVersion":"4711","generation":12,"creationTimestamp":"2026-11-01T00:00:00Z","managedFields":[{"manager":"kubectl"}],"annotations":{"deployment.kubernetes.io/revision":"12","kubectl.kubernetes.io/last-applied-configuration":"{}","team":"town"}},"spec":{"replicas":1},"status":{"readyReplicas":1}}` + "\n"
+	backupConfigMapLiveJSON  = `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"forgejo-runner-config","namespace":"forgejo","uid":"1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d","resourceVersion":"4712","creationTimestamp":"2026-11-01T00:00:00Z","managedFields":[{"manager":"kubectl"}]},"data":{"config.yml":"runner:\n  capacity: 1\n"}}` + "\n"
+	backupConfigMapSecret    = `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"forgejo-runner-config","namespace":"forgejo"},"data":{}}`
+	backupDeploymentWritten  = `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"team":"town"},"name":"forgejo-runner","namespace":"forgejo"},"spec":{"replicas":1}}` + "\n"
+	backupConfigMapWritten   = `{"apiVersion":"v1","data":{"config.yml":"runner:\n  capacity: 1\n"},"kind":"ConfigMap","metadata":{"name":"forgejo-runner-config","namespace":"forgejo"}}` + "\n"
 )
+
+var backupWrittenFiles = [][2]string{{"deployment.json", backupDeploymentWritten}, {"configmap.json", backupConfigMapWritten}}
 
 // backupAnswer is what one live read returns.
 type backupAnswer struct {
@@ -27,8 +32,7 @@ type backupAnswer struct {
 	err  error
 }
 
-// backupKubectl answers the backup's two reads, and fails any other call so a
-// wrong argv cannot pass.
+// backupKubectl answers the reads by resource and fails any other call.
 func backupKubectl(t *testing.T, deployment, configmap backupAnswer) *recordingKubectl {
 	answers := map[string]backupAnswer{"deployment/forgejo-runner": deployment, "configmap/forgejo-runner-config": configmap}
 	return &recordingKubectl{answer: func(call recordedKubectlCall) (string, int, error) {
@@ -45,124 +49,75 @@ func backupKubectl(t *testing.T, deployment, configmap backupAnswer) *recordingK
 	}}
 }
 
-// crossNamespaceRender renders as build does with the ConfigMap moved to
-// another namespace, so one restore command cannot name both objects.
-func crossNamespaceRender(build func(forgejorunner.Values) (forgejorunner.Manifests, error)) func(forgejorunner.Values) (forgejorunner.Manifests, error) {
-	return func(v forgejorunner.Values) (forgejorunner.Manifests, error) {
-		m, err := build(v)
-		if err != nil {
-			return forgejorunner.Manifests{}, err
-		}
-		m.ConfigMap.Metadata.Namespace = "another"
-		return m, nil
-	}
-}
-
-// TestRunnerBackupWritesBothFilesAsRead: the two files hold the bytes the
-// cluster read returned, at mode 0600, under the directory the roll named.
-func TestRunnerBackupWritesBothFilesAsRead(t *testing.T) {
-	t.Parallel()
-	applier := testRunnerApplier(backupKubectl(t, backupAnswer{body: backupDeploymentJSON}, backupAnswer{body: backupConfigMapJSON}))
-	dir := filepath.Join(testutil.PrivateTempDir(t), "backup")
-
-	names, err := applier.Backup(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("backup: %v", err)
-	}
-	if got := strings.Join(names, ","); got != "configmap.json,deployment.json" {
-		t.Errorf("names = %q, want the ConfigMap file and then the Deployment file", got)
-	}
-	for _, f := range [][2]string{{"deployment.json", backupDeploymentJSON}, {"configmap.json", backupConfigMapJSON}} {
-		file, want := f[0], f[1]
-		path := filepath.Join(dir, file)
-		fi, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", file, err)
-		}
-		if got := fi.Mode().Perm(); got != 0o600 {
-			t.Errorf("%s mode = %04o, want 0600", file, got)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
-		}
-		if string(data) != want {
-			t.Errorf("%s = %q, want the bytes the cluster read returned (%q)", file, data, want)
-		}
-	}
-}
-
-// TestRunnerBackupPrintsTheRestoreCommand: a good backup prints the one command
-// that applies both files back, the ConfigMap before the Deployment.
-func TestRunnerBackupPrintsTheRestoreCommand(t *testing.T) {
-	t.Parallel()
-	applier := testRunnerApplier(backupKubectl(t, backupAnswer{body: backupDeploymentJSON}, backupAnswer{body: backupConfigMapJSON}))
-	out := &bytes.Buffer{}
-	applier.out = out
-
-	if _, err := applier.Backup(context.Background(), filepath.Join(testutil.PrivateTempDir(t), "backup")); err != nil {
-		t.Fatalf("backup: %v", err)
-	}
-
-	got := strings.TrimSpace(out.String())
-	if prefix := "kubectl --context colima-gt-control -n forgejo apply -f "; !strings.HasPrefix(got, prefix) {
-		t.Errorf("printed %q, want it to start with %q", got, prefix)
-	}
-	configmap, deployment := strings.Index(got, "configmap.json"), strings.Index(got, "deployment.json")
-	if configmap < 0 || deployment < 0 {
-		t.Fatalf("printed %q, want it to name both backup files", got)
-	}
-	if configmap > deployment {
-		t.Errorf("printed %q, want the ConfigMap applied before the Deployment that mounts it", got)
-	}
-}
-
-// TestRunnerBackupRefusesWhatItCannotWrite: every refusal a backup makes returns
-// its error, writes no file, and prints no restore command.
-func TestRunnerBackupRefusesWhatItCannotWrite(t *testing.T) {
+// TestRunnerBackup: a backup writes the live objects without the server's
+// fields at 0600, even over files an earlier roll left, prints the restore
+// command, and refuses what it cannot write without writing anything.
+func TestRunnerBackup(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("the cluster is unreachable")
+	liveDeployment, liveConfigMap := backupAnswer{body: backupDeploymentLiveJSON}, backupAnswer{body: backupConfigMapLiveJSON}
 	for _, tc := range []struct {
-		name   string
-		read   func(*testing.T) *recordingKubectl
-		mutate func(*runnerApplier)
-		dir    func(*testing.T) string
-		want   string
+		name    string
+		read    func(*testing.T) *recordingKubectl
+		mutate  func(*runnerApplier)
+		dir     func(*testing.T) string
+		seed    bool
+		wantErr string
 	}{
-		{name: "a relative directory", dir: func(*testing.T) string { return "backup" }, want: "not absolute"},
-		{name: "values that cannot be read", mutate: func(a *runnerApplier) {
+		{name: "writes both files and prints the restore"},
+		{name: "replaces the files an earlier roll left", seed: true},
+		{name: "refuses a relative directory", dir: func(*testing.T) string { return "backup" }, wantErr: "not absolute"},
+		{name: "refuses unreadable values", mutate: func(a *runnerApplier) {
 			a.values = func() (forgejorunner.Values, error) { return forgejorunner.Values{}, failure }
-		}, want: "reading the control cluster's runner values"},
-		{name: "a render that fails", mutate: func(a *runnerApplier) {
+		}, wantErr: "reading the control cluster's runner values"},
+		{name: "refuses a render that fails", mutate: func(a *runnerApplier) {
 			a.build = func(forgejorunner.Values) (forgejorunner.Manifests, error) { return forgejorunner.Manifests{}, failure }
-		}, want: "rendering the runner"},
-		{name: "objects in two namespaces", mutate: func(a *runnerApplier) { a.build = crossNamespaceRender(a.build) }, want: "cannot apply both"},
-		{name: "a deployment read that fails", read: func(t *testing.T) *recordingKubectl {
-			return backupKubectl(t, backupAnswer{err: failure}, backupAnswer{body: backupConfigMapJSON})
-		}, want: "reading the live deployment/forgejo-runner"},
-		{name: "a deployment read that exits nonzero", read: func(t *testing.T) *recordingKubectl {
-			return backupKubectl(t, backupAnswer{exit: 1}, backupAnswer{body: backupConfigMapJSON})
-		}, want: "kubectl exited 1"},
-		{name: "a configmap read that is not JSON", read: func(t *testing.T) *recordingKubectl {
-			return backupKubectl(t, backupAnswer{body: backupDeploymentJSON}, backupAnswer{body: "configmap/forgejo-runner-config updated"})
-		}, want: "printed no JSON"},
-		{name: "a directory that cannot be made", dir: func(t *testing.T) string {
-			file := filepath.Join(t.TempDir(), "file")
+		}, wantErr: "rendering the runner"},
+		{name: "refuses two namespaces", mutate: func(a *runnerApplier) {
+			a.build = func(v forgejorunner.Values) (forgejorunner.Manifests, error) {
+				m, err := forgejorunner.Build(v)
+				m.ConfigMap.Metadata.Namespace = "another"
+				return m, err
+			}
+		}, wantErr: "cannot apply both"},
+		{name: "refuses a deployment read that fails", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, backupAnswer{err: failure}, liveConfigMap)
+		}, wantErr: "reading the live deployment/forgejo-runner"},
+		{name: "refuses a deployment read that exits nonzero", read: func(t *testing.T) *recordingKubectl { return backupKubectl(t, backupAnswer{exit: 1}, liveConfigMap) }, wantErr: "kubectl exited 1"},
+		{name: "refuses a configmap read that is not JSON", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, liveDeployment, backupAnswer{body: "forgejo-runner-config updated"})
+		}, wantErr: "not one object"},
+		{name: "refuses a configmap read that is null", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, liveDeployment, backupAnswer{body: "null"})
+		}, wantErr: "not one object"},
+		{name: "refuses a configmap read of another kind", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, liveDeployment, backupAnswer{body: backupConfigMapSecret})
+		}, wantErr: `kind "Secret", not the ConfigMap`},
+		{name: "refuses a configmap read of another object", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, liveDeployment, backupAnswer{body: `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"another-configmap","namespace":"forgejo"}}`})
+		}, wantErr: `named "another-configmap", not "forgejo-runner-config"`},
+		{name: "refuses a configmap read with no metadata", read: func(t *testing.T) *recordingKubectl {
+			return backupKubectl(t, liveDeployment, backupAnswer{body: `{"apiVersion":"v1","kind":"ConfigMap","metadata":"a string"}`})
+		}, wantErr: `named "", not "forgejo-runner-config"`},
+		{name: "refuses a directory it cannot make", dir: func(t *testing.T) string {
+			file := filepath.Join(testutil.PrivateTempDir(t), "file")
 			if err := os.WriteFile(file, nil, 0o600); err != nil {
 				t.Fatalf("make the blocking file: %v", err)
 			}
 			return filepath.Join(file, "backup")
-		}, want: "making the backup directory"},
-		{name: "a backup file that cannot be written", dir: func(t *testing.T) string {
-			dir := filepath.Join(t.TempDir(), "backup")
+		}, wantErr: "making the backup directory"},
+		{name: "refuses a file it cannot write", dir: func(t *testing.T) string {
+			dir := filepath.Join(testutil.PrivateTempDir(t), "backup")
 			if err := os.MkdirAll(filepath.Join(dir, "configmap.json"), 0o700); err != nil {
 				t.Fatalf("make the occupied path: %v", err)
 			}
 			return dir
-		}, want: "writing the backup file"},
+		}, wantErr: "writing the backup file"},
 	} {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			applier := testRunnerApplier(backupKubectl(t, backupAnswer{body: backupDeploymentJSON}, backupAnswer{body: backupConfigMapJSON}))
+			t.Parallel()
+			applier := testRunnerApplier(backupKubectl(t, liveDeployment, liveConfigMap))
 			if tc.read != nil {
 				applier.kubectl = tc.read(t).run
 			}
@@ -175,17 +130,58 @@ func TestRunnerBackupRefusesWhatItCannotWrite(t *testing.T) {
 			if tc.dir != nil {
 				dir = tc.dir(t)
 			}
-
-			_, err := applier.Backup(context.Background(), dir)
-
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want it to name %q", err, tc.want)
+			if tc.seed {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatalf("make the backup directory: %v", err)
+				}
+				for _, f := range backupWrittenFiles {
+					path := filepath.Join(dir, f[0])
+					if err := os.WriteFile(path, []byte("an earlier roll's backup"), 0o644); err != nil {
+						t.Fatalf("write the earlier %s: %v", f[0], err)
+					}
+					if err := os.Chmod(path, 0o644); err != nil {
+						t.Fatalf("widen the earlier %s: %v", f[0], err)
+					}
+				}
 			}
-			if out.Len() != 0 {
-				t.Errorf("a failed backup printed %q: a refusal reports no restore command", out.String())
+
+			names, err := applier.Backup(context.Background(), dir)
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+				}
+				if out.Len() != 0 {
+					t.Errorf("a failed backup printed %q: a refusal reports no restore command", out.String())
+				}
+				if _, statErr := os.Stat(dir); tc.dir == nil && !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("stat %s = %v, want nothing written after a refusal", dir, statErr)
+				}
+				return
 			}
-			if _, statErr := os.Stat(dir); tc.dir == nil && !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("stat %s = %v, want nothing written after a refusal", dir, statErr)
+			if err != nil {
+				t.Fatalf("backup: %v", err)
+			}
+			if got := strings.Join(names, ","); got != "configmap.json,deployment.json" {
+				t.Errorf("names = %q, want the ConfigMap file and then the Deployment file", got)
+			}
+			for _, f := range backupWrittenFiles {
+				path := filepath.Join(dir, f[0])
+				fi, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("stat %s: %v", f[0], err)
+				}
+				if got := fi.Mode().Perm(); got != 0o600 {
+					t.Errorf("%s mode = %04o, want 0600", f[0], got)
+				}
+				data, err := os.ReadFile(path)
+				if err != nil || string(data) != f[1] {
+					t.Errorf("%s = %q (%v), want %q", f[0], data, err, f[1])
+				}
+			}
+			want := "kubectl --context colima-gt-control -n forgejo apply -f " + dir + "/configmap.json -f " + dir + "/deployment.json"
+			if got := strings.TrimSpace(out.String()); got != want {
+				t.Errorf("printed %q, want %q", got, want)
 			}
 		})
 	}

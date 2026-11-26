@@ -11,7 +11,9 @@ import (
 	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 )
 
-// runnerRollKubeContext is the context the operator's own shell reaches the control cluster through (docs/reference.md).
+// runnerRollKubeContext is the context the operator's shell reaches the control
+// cluster through. Before changing it, read the Tier sweep runner section of
+// docs/reference.md.
 const runnerRollKubeContext = "colima-gt-control"
 
 // The files a backup writes, and the modes it gives them and their directory.
@@ -22,27 +24,24 @@ const (
 	runnerBackupDirMode        = 0o700
 )
 
-// runnerBackupObject is one live object a backup writes: its kubectl noun, the
-// name and namespace the render gives it, and its file under the backup dir.
+// runnerBackupObject is one live object: the kubectl noun and kind, its identity
+// in the render, and its file under the backup dir.
 type runnerBackupObject struct {
-	kind      string
-	name      string
-	namespace string
-	file      string
+	noun, kind, name, namespace, file string
 }
 
-// runnerBackupObjects is the pair a backup writes, in the order the restore
-// command applies them, so the ConfigMap lands before the Deployment mounts it.
+// runnerBackupObjects is the pair a backup writes, the ConfigMap first so the
+// restore applies it before the Deployment that mounts it.
 func runnerBackupObjects(m forgejorunner.Manifests) []runnerBackupObject {
 	return []runnerBackupObject{
-		{kind: "configmap", name: m.ConfigMap.Metadata.Name, namespace: m.ConfigMap.Metadata.Namespace, file: runnerBackupConfigMapFile},
-		{kind: "deployment", name: m.Deployment.Metadata.Name, namespace: m.Deployment.Metadata.Namespace, file: runnerBackupDeploymentFile},
+		{noun: "configmap", kind: "ConfigMap", name: m.ConfigMap.Metadata.Name, namespace: m.ConfigMap.Metadata.Namespace, file: runnerBackupConfigMapFile},
+		{noun: "deployment", kind: "Deployment", name: m.Deployment.Metadata.Name, namespace: m.Deployment.Metadata.Namespace, file: runnerBackupDeploymentFile},
 	}
 }
 
 // Backup writes the live Deployment and ConfigMap the roll is about to replace
-// as JSON under dir, then prints the command that applies them back. It reads
-// both before writing any, so a failed read leaves dir absent; a failed write names its file.
+// as JSON that applies back cleanly under dir, then prints the command that
+// applies them. It reads both before writing any, so a failed read writes nothing.
 func (a runnerApplier) Backup(ctx context.Context, dir string) ([]string, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("the backup directory %q is not absolute, so its files would land where the process runs", dir)
@@ -67,7 +66,7 @@ func (a runnerApplier) Backup(ctx context.Context, dir string) ([]string, error)
 	}
 	for i, object := range objects {
 		path := filepath.Join(dir, object.file)
-		if err := os.WriteFile(path, bodies[i], runnerBackupFileMode); err != nil {
+		if err := writeRunnerBackupFile(path, bodies[i]); err != nil {
 			return nil, fmt.Errorf("writing the backup file %s: %w", path, err)
 		}
 	}
@@ -75,11 +74,10 @@ func (a runnerApplier) Backup(ctx context.Context, dir string) ([]string, error)
 	return []string{objects[0].file, objects[1].file}, nil
 }
 
-// readRunnerBackupObject reads one live object as the JSON kubectl prints. The
-// error names the object, and a nonzero exit its status, never the output, since
-// an object's fields can hold a value that is a secret.
+// readRunnerBackupObject reads one live object as the JSON a backup writes. The
+// error names the object, and a nonzero exit its status, never the output.
 func (a runnerApplier) readRunnerBackupObject(ctx context.Context, object runnerBackupObject) ([]byte, error) {
-	resource := object.kind + "/" + object.name
+	resource := object.noun + "/" + object.name
 	out, exit, err := a.kubectl(ctx, "", nil, "kubectl", "get", resource, "-n", object.namespace, "-o", "json")
 	if err != nil {
 		return nil, fmt.Errorf("reading the live %s: %w", resource, err)
@@ -87,10 +85,63 @@ func (a runnerApplier) readRunnerBackupObject(ctx context.Context, object runner
 	if exit != 0 {
 		return nil, fmt.Errorf("reading the live %s: kubectl exited %d", resource, exit)
 	}
-	if !json.Valid([]byte(out)) {
-		return nil, fmt.Errorf("reading the live %s: kubectl printed no JSON", resource)
+	body, err := runnerBackupApplyJSON([]byte(out), object.kind, object.name)
+	if err != nil {
+		return nil, fmt.Errorf("reading the live %s: %w", resource, err)
 	}
-	return []byte(out), nil
+	return body, nil
+}
+
+// runnerBackupApplyJSON is one live object as a backup writes it: kubectl's JSON
+// without the fields the server and apply own. It refuses any kind or name but
+// the one asked for, so a Secret or another object never reaches a file.
+func runnerBackupApplyJSON(raw []byte, kind, name string) ([]byte, error) {
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, fmt.Errorf("kubectl printed JSON that is not one object")
+	}
+	if got, _ := object["kind"].(string); got != kind {
+		return nil, fmt.Errorf("kubectl printed kind %q, not the %s that was read", got, kind)
+	}
+	metadata, _ := object["metadata"].(map[string]any)
+	if got, _ := metadata["name"].(string); got != name {
+		return nil, fmt.Errorf("kubectl printed the %s named %q, not %q", kind, got, name)
+	}
+	if annotations, ok := metadata["annotations"].(map[string]any); ok {
+		for _, field := range []string{"deployment.kubernetes.io/revision", "kubectl.kubernetes.io/last-applied-configuration"} {
+			delete(annotations, field)
+		}
+		if len(annotations) == 0 {
+			delete(metadata, "annotations")
+		}
+	}
+	// The fields the API server assigns: dropped so the restore's apply sets them.
+	for _, field := range []string{"creationTimestamp", "generation", "managedFields", "resourceVersion", "selfLink", "uid"} {
+		delete(metadata, field)
+	}
+	delete(object, "status")
+	out, err := json.Marshal(object)
+	if err != nil {
+		return nil, fmt.Errorf("re-encoding the %s: %w", kind, err)
+	}
+	return append(out, '\n'), nil
+}
+
+// writeRunnerBackupFile writes one backup file at 0600. The mode a new file gets
+// never reaches one that already exists, so the file is chmod'ed after writing.
+func writeRunnerBackupFile(path string, body []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, runnerBackupFileMode)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(body)
+	if chmodErr := f.Chmod(runnerBackupFileMode); err == nil {
+		err = chmodErr
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // runnerRestoreCommand is the command that applies a backup's files over the
