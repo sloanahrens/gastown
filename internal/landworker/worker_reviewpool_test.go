@@ -49,6 +49,40 @@ func TestReviewPoolWorkerReviewWorksBuilds(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWorkerReviewWorksOrder pins that reviewWorks offers the works
+// in the order the landing takes them, whatever order the issues arrive in: a
+// P0 first, then the earliest submission, priority and then ID breaking a tie
+// (gt-vh5psa).
+func TestReviewPoolWorkerReviewWorksOrder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	// Given newest first with the P0 in the middle, so the input order is
+	// neither the landing order nor its reverse.
+	issues := []*beads.Issue{
+		readyIssue("gt-late", 2, "2026-09-30T13:00:00Z", "2026-09-30T13:00:00Z"),
+		readyIssue("gt-hot", 0, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+		readyIssue("gt-tie-b", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-tie-a", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-old", 3, "2026-09-30T09:00:00Z", "2026-09-30T09:00:00Z"),
+	}
+
+	works, err := h.w.reviewWorks(issues, "")
+	if err != nil {
+		t.Fatalf("reviewWorks: %v", err)
+	}
+	if got, want := workOrder(works), "gt-hot,gt-old,gt-tie-a,gt-tie-b,gt-late"; got != want {
+		t.Fatalf("reviewWorks order = %s; want %s", got, want)
+	}
+}
+
+func workOrder(works []land.Work) string {
+	ids := make([]string, 0, len(works))
+	for _, w := range works {
+		ids = append(ids, w.BeadID)
+	}
+	return strings.Join(ids, ",")
+}
+
 // TestReviewPoolWorkerReviewWorksReturnsUnreadableSubmission pins that an
 // issue whose comments cannot be read fails the offer with that read error
 // instead of vanishing from the list: what such a bead asks for is unknown,
