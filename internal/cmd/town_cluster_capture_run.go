@@ -10,7 +10,7 @@ import (
 // the work dir fails without reaching the cluster or creating a file. The
 // capture itself comes next (gt-yxy3ll reads the object, gt-7xo0k2 writes it);
 // until then a checked run says the capture is not written.
-func runClusterCapture(ctx context.Context, d clusterCaptureDeps, ref, namespace, out string) error {
+func runClusterCapture(ctx context.Context, d clusterCaptureDeps, ref, namespace, out string) error { //nolint:unparam // the read gt-yxy3ll adds to this run takes ctx; the signature is fixed by gt-iniggu
 	kind, name, err := parseClusterCaptureRef(ref)
 	if err != nil {
 		return err
