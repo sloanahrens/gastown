@@ -3802,6 +3802,24 @@ func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 	return initSubmodules(g.runner(), path)
 }
 
+// runnerWithHandleTimeout returns the handle's runner with the handle's
+// WithTimeout default filled in for every call that sets none of its own, so a
+// helper that takes a bare runFunc — initSubmodules — is bounded like the
+// handle's own calls are (gt-665osh). A zero default leaves the runner as it
+// was.
+func (g *Git) runnerWithHandleTimeout() runFunc {
+	run := g.runner()
+	if g.timeout == 0 {
+		return run
+	}
+	return func(c gitCall) (string, string, error) {
+		if c.timeout == 0 {
+			c.timeout = g.timeout
+		}
+		return run(c)
+	}
+}
+
 // WorktreeAddDetached creates a new worktree at the given path with a detached HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).
 func (g *Git) WorktreeAddDetached(path, ref string) error {
@@ -3811,7 +3829,7 @@ func (g *Git) WorktreeAddDetached(path, ref string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path)
+	return initSubmodules(g.runnerWithHandleTimeout(), path)
 }
 
 // WorktreeAddExisting creates a new worktree at the given path for an existing branch.
