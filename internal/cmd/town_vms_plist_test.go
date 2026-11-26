@@ -25,8 +25,9 @@ func TestTownVMsPlistGolden(t *testing.T) {
 	}
 }
 
-// TestTownVMsPlistEscapesValues checks that a path holding an XML special
-// character reaches the plist escaped, so it cannot end a string node early.
+// TestTownVMsPlistEscapesValues checks that both the gt binary path and the
+// home path, each holding an XML special character, reach the plist escaped, so
+// neither can end a string node early.
 func TestTownVMsPlistEscapesValues(t *testing.T) {
 	t.Parallel()
 	got, err := renderTownVMsPlist("/Users/a&b/.local/bin/gt", "/Users/a&b")
@@ -35,7 +36,11 @@ func TestTownVMsPlistEscapesValues(t *testing.T) {
 	}
 	doc := string(got)
 	if strings.Contains(doc, "a&b") {
-		t.Errorf("the plist holds an unescaped home:\n%s", doc)
+		t.Errorf("the plist holds an unescaped value:\n%s", doc)
+	}
+	const wantGT = "<string>/Users/a&amp;b/.local/bin/gt</string>"
+	if !strings.Contains(doc, wantGT) {
+		t.Errorf("the plist lacks %s:\n%s", wantGT, doc)
 	}
 	const wantLog = "<string>/Users/a&amp;b/gt/daemon/colima-vms.log</string>"
 	if !strings.Contains(doc, wantLog) {
