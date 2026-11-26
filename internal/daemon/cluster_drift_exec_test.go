@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +45,7 @@ func TestParseClusterDriftRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseClusterDriftRun(tt.exit, []byte(tt.stdout), tt.runErr)
+			got, err := parseClusterDriftRun(tt.exit, []byte(tt.stdout), nil, tt.runErr)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseClusterDriftRun(%d, %q, %v) = %+v, nil; want an error and no result", tt.exit, tt.stdout, tt.runErr, got)
@@ -59,6 +60,55 @@ func TestParseClusterDriftRun(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got.Differing, tt.want) {
 				t.Errorf("Differing = %q, want %q", got.Differing, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseClusterDriftRunExitTwo: exit 2 is the cannot-say answer, always an
+// error with no result. It names the first non-blank stderr line cut to 200
+// characters, never stdout, and wraps errNoRecordedRender when either stream
+// says no live render has recorded its flags (gt-b7p6jn).
+func TestParseClusterDriftRunExitTwo(t *testing.T) {
+	t.Parallel()
+	recorded := "no live render has recorded its flags, so there is nothing to compare; run gt town cluster render --record-flags"
+	forbidden := "forbidden: the read grant for the control cluster is missing"
+	long := "forbidden " + strings.Repeat("a", 490)
+	objects := "deployment/gt-daemon: spec.replicas fingerprint a1b2 != c3d4\n"
+	tests := []struct {
+		name         string
+		stdout       string
+		stderr       string
+		wantSentinel bool
+		wantSub      string // the error must carry it; empty is not checked
+		notSub       string // the error must not carry it; empty is not checked
+	}{
+		{name: "recorded words in stderr wrap the sentinel", stderr: recorded + "\n", wantSentinel: true, wantSub: recorded},
+		{name: "recorded words in stdout wrap the sentinel", stdout: recorded + "\n", stderr: forbidden + "\n", wantSentinel: true, wantSub: forbidden},
+		{name: "forbidden carries its first line, no sentinel", stderr: forbidden + "\n", wantSub: forbidden},
+		{name: "only the first stderr line is carried", stderr: forbidden + "\nsecond line\n", wantSub: forbidden, notSub: "second line"},
+		{name: "a 500 character line is cut to 200", stderr: long + "\n", wantSub: long[:200], notSub: long[:201]},
+		{name: "stdout object values are never echoed", stdout: objects, stderr: forbidden + "\n", wantSub: forbidden, notSub: "a1b2"},
+		{name: "empty stderr is still an error", stdout: objects},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseClusterDriftRun(2, []byte(tt.stdout), []byte(tt.stderr), nil)
+			if err == nil {
+				t.Fatalf("parseClusterDriftRun(2, %q, %q, nil) = %+v, nil; want an error", tt.stdout, tt.stderr, got)
+			}
+			if len(got.Differing) != 0 {
+				t.Errorf("result = %+v, want an empty result with the error", got)
+			}
+			if errors.Is(err, errNoRecordedRender) != tt.wantSentinel {
+				t.Errorf("errors.Is(err, errNoRecordedRender) = %t, want %t: %v", !tt.wantSentinel, tt.wantSentinel, err)
+			}
+			if tt.wantSub != "" && !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("error = %q, want it to carry %q", err, tt.wantSub)
+			}
+			if tt.notSub != "" && strings.Contains(err.Error(), tt.notSub) {
+				t.Errorf("error = %q, want it to omit %q", err, tt.notSub)
 			}
 		})
 	}
