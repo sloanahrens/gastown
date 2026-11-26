@@ -2132,6 +2132,11 @@ func TestStop_FinishedBranchAlreadyOnOriginIsHandedBackAsRework(t *testing.T) {
 // commit after its sling and beyond the target still goes back as rework.
 func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 	t.Parallel()
+	// keptText is what a stop with unfinished work writes, reworkText what a
+	// stop with finished work writes. The empty-branch row writes neither.
+	keptText := "work kept on branch " + stopSeat.Branch + ". Split the bead, then remove the needs-split label."
+	reworkText := "its finished work at abc1234 is already on origin as branch " + stopSeat.Branch + ". " +
+		"The next polecat must reuse branch " + stopSeat.Branch + " and run gt done; do not split the bead."
 	for _, tc := range []struct {
 		name       string
 		committed  time.Time
@@ -2139,11 +2144,13 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 		stub       func(*pushStubGit)
 		wantLabel  string
 		wantRework string
+		wantText   string
 	}{
 		{
 			name:      "idle on the resumed branch",
 			committed: overrunSlung.Add(-time.Hour),
 			wantLabel: polecat.NeedsSplitLabel,
+			wantText:  keptText,
 		},
 		{
 			// A branch cut from main at the spawn holds main's commit and
@@ -2161,6 +2168,7 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 				g.originRefs = g.originRefs[1:]
 			},
 			wantLabel: polecat.NeedsSplitLabel,
+			wantText:  keptText,
 		},
 		{
 			name: "unreadable ancestry keeps needs-split",
@@ -2168,12 +2176,14 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 				g.ancestorErr = errors.New("boom")
 			},
 			wantLabel: polecat.NeedsSplitLabel,
+			wantText:  keptText,
 		},
 		{
 			name:       "head produced after the sling",
 			committed:  overrunSlung.Add(5 * time.Minute),
 			wantLabel:  polecat.ReworkLabel,
 			wantRework: "abc1234",
+			wantText:   reworkText,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2246,12 +2256,10 @@ func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
 						t.Errorf("comment %q carries %q", comments, part)
 					}
 				}
-			case tc.wantRework == "":
-				if !strings.Contains(comments, "Split the bead") || strings.Contains(comments, "reuse branch") {
-					t.Errorf("comment %q, want the split instruction and no reuse", comments)
+			default:
+				if !strings.Contains(comments, tc.wantText) {
+					t.Errorf("comment %q lacks the hand-back text %q", comments, tc.wantText)
 				}
-			case !strings.Contains(comments, "on origin"):
-				t.Errorf("comment %q does not name the finished work on origin", comments)
 			}
 		})
 	}
