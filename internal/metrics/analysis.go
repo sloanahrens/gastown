@@ -271,9 +271,16 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := os.MkdirAll(docs, 0o755); err != nil {
 		return res, fmt.Errorf("analysis: %w", err)
 	}
-	dayDir, err := o.Extract(ctx, env.Town, docs)
-	if err != nil {
-		return res, fmt.Errorf("extract: %w", err)
+	// A day whose extract finished before an earlier run timed out is reused, so
+	// this run pays for the analysis steps alone (gt-zd3zsq).
+	dayDir, reused := reusableExtract(env, filepath.Join(env.Town, ".runtime", "metrics"), now)
+	if reused {
+		o.Reportf("analyse: reusing today's extract in %s", dayDir)
+	} else {
+		dayDir, err = o.Extract(ctx, env.Town, docs)
+		if err != nil {
+			return res, fmt.Errorf("extract: %w", err)
+		}
 	}
 	res.DayDir = dayDir
 	columns, rows, explainOnly, err := readExtract(env, dayDir)

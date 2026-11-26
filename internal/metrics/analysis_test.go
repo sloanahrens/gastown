@@ -1585,3 +1585,90 @@ func reusableWeeklyCSV(t *testing.T) string {
 	}
 	return buf.String()
 }
+
+// TestAnalysisReusesTheDaysExtract holds that RunAnalysis reuses the local day's
+// complete extract and calls the extract seam only when the day has none. An hour
+// that timed out after the extract finished costs the next hour the analysis
+// steps alone.
+func TestAnalysisReusesTheDaysExtract(t *testing.T) {
+	t.Parallel()
+	today := analyseNow.Local().Format(time.DateOnly)
+	cases := []struct {
+		name string
+		// dirExists writes the day's landings and sidecar into the day's directory,
+		// as an extract that timed out leaves them. footer adds the footer and
+		// weekly.csv that mark the extract complete.
+		dirExists bool
+		footer    bool
+		// reuse is whether the run reports reusing the day's directory, and so
+		// whether the extract seam is not called.
+		reuse bool
+	}{
+		{name: "a complete day's extract is reused", dirExists: true, footer: true, reuse: true},
+		{name: "no directory for the day"},
+		{name: "a day's directory with no footer", dirExists: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			town, dayDir := analysisTown(t)
+			todayDir := filepath.Join(town, ".runtime", "metrics", today)
+			if tc.dirExists {
+				for _, name := range []string{landingsName, sidecarName} {
+					body, err := os.ReadFile(filepath.Join(dayDir, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					writeTownFile(t, filepath.Join(todayDir, name), string(body))
+				}
+			}
+			if tc.footer {
+				writeTownFile(t, filepath.Join(todayDir, footerName), `{"rows_read":{"ledger":2}}`)
+				writeTownFile(t, filepath.Join(todayDir, weeklyName), reusableWeeklyCSV(t))
+			}
+			opts := analysisOptions(town)
+			var extracts []extractCall
+			opts.Extract = analysisExtract(dayDir, &extracts)
+			var reported []string
+			opts.Reportf = func(format string, args ...any) {
+				reported = append(reported, fmt.Sprintf(format, args...))
+			}
+			env, _ := analysisEnv(t, town, dayDir, nil)
+
+			res, err := RunAnalysis(context.Background(), env, opts)
+			if err != nil {
+				t.Fatalf("RunAnalysis: %v", err)
+			}
+			if !res.Ran {
+				t.Fatal("RunAnalysis was not due on a town with no stamp")
+			}
+			wantCalls, wantDir := 1, dayDir
+			if tc.reuse {
+				wantCalls, wantDir = 0, todayDir
+			}
+			if len(extracts) != wantCalls {
+				t.Errorf("extract seam called %d times, want %d", len(extracts), wantCalls)
+			}
+			if res.DayDir != wantDir {
+				t.Errorf("DayDir = %q, want %q", res.DayDir, wantDir)
+			}
+			wantLine := "analyse: reusing today's extract in " + todayDir
+			reusedLine := false
+			for _, line := range reported {
+				reusedLine = reusedLine || line == wantLine
+			}
+			if reusedLine != tc.reuse {
+				t.Errorf("report names the reused extract = %v, want %v (report: %q)", reusedLine, tc.reuse, reported)
+			}
+			if _, err := os.Stat(filepath.Join(res.Dir, panelName)); err != nil {
+				t.Errorf("panel.json was not published: %v", err)
+			}
+			stamp, err := os.ReadFile(filepath.Join(res.Dir, stampName))
+			if err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+			if got, want := string(stamp), analyseNow.UTC().Format(time.RFC3339)+"\n"; got != want {
+				t.Errorf("stamp = %q, want %q", got, want)
+			}
+		})
+	}
+}
