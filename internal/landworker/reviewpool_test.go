@@ -313,6 +313,58 @@ func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
 	})
 }
 
+// TestReviewPoolAwaitIgnoresOtherHead pins that Await waits for a review of the
+// caller's head only: with a review of another head of the bead running, the
+// wait returns at once, because that verdict cannot judge the head the caller
+// holds (gt-rudbr6). It runs in a synctest bubble, whose barrier settles both
+// waiters before either is checked.
+func TestReviewPoolAwaitIgnoresOtherHead(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead      = "gt-await"
+			heldHead  = "1111111"
+			otherHead = "2222222"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: heldHead}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		otherReturned := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, otherHead)
+			close(otherReturned)
+		}()
+		heldReturned := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, heldHead)
+			close(heldReturned)
+		}()
+		settle()
+
+		select {
+		case <-otherReturned:
+		default:
+			t.Errorf("Await for head %s did not return while only head %s is reviewed, want it to return at once", otherHead, heldHead)
+		}
+		select {
+		case <-heldReturned:
+			t.Fatalf("Await for the reviewed head %s returned while its review still runs, want it to wait", heldHead)
+		default:
+		}
+		if headAt, running := runningHeadAt(t, pool, bead); !running || headAt != heldHead {
+			t.Errorf("the pool holds the bead's review at %s (running %v) after the other-head Await returned, want head %s still reviewed", headAt, running, heldHead)
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, heldReturned, "Await returning after the review of its head ended")
+	})
+}
+
 // TestReviewPoolAwaitNothingRunning pins that Await returns at once for a bead
 // with no review running: the rows cover an idle pool and a pool busy with
 // another bead's review, so a wait on the pool rather than on the bead's own
