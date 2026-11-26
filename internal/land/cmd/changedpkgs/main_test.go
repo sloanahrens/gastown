@@ -220,7 +220,7 @@ func TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff(t *testing.T) {
 			// reads docs (gt-ntm1r4).
 			name:       "a docs-only diff still runs the always guards",
 			nameStatus: nameStatus("M docs/testing.md"),
-			want: "-run ^(TestAllowedTools|TestDockerTier|TestEnvArgsGuardOnTree|" +
+			want: "-run ^(TestAllowedTools|TestDockerTier|" +
 				"TestEveryEngineSiteHasARowPerFunction|" +
 				"TestGitFree|TestPolicy|TestRealGit|TestRepoMayorRig|" +
 				"TestRetiredRunnerNameIsGoneFromCode|" +

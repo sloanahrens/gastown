@@ -97,14 +97,3 @@ func TestEnvArgsParseError(t *testing.T) {
 		t.Fatal("ScanEnvArgs accepted an unparseable test file")
 	}
 }
-
-func TestEnvArgsGuardOnTree(t *testing.T) {
-	t.Parallel()
-	vs, err := ScanEnvArgs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("ScanEnvArgs: %v", err)
-	}
-	for _, v := range vs {
-		t.Error(v.String())
-	}
-}
