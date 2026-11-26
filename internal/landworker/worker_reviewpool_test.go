@@ -374,6 +374,96 @@ func TestReviewPoolWorkerProcessWithStoredOnly(t *testing.T) {
 	})
 }
 
+// TestReviewPoolWorkerNoStoredIsNotInfra pins that a stored-only pass which
+// finds no stored verdict to consume ends like the answer it is, not like an
+// infrastructure failure (gt-ixvxt5): the bead is not parked, the pass counts,
+// writes and backs off nothing, and the CI-silence run the ready pass owns
+// survives. Absence of a verdict also arrives wrapped, and an unrelated error
+// still parks the bead, so the new case consumes only its own sentinel.
+func TestReviewPoolWorkerNoStoredIsNotInfra(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"no stored verdict", land.ErrNoStoredVerdict},
+		{"wrapped no stored verdict", fmt.Errorf("stored-only pass: %w", land.ErrNoStoredVerdict)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReady(t, "gt-abc")
+			h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, tc.err }
+			issue, err := h.bd.Show("gt-abc")
+			if err != nil {
+				t.Fatalf("reading the seeded bead: %v", err)
+			}
+			// A run the ready pass has already counted on this bead: a pass
+			// that consumed nothing did not answer a silence, so it must not
+			// clear the run that did.
+			h.w.bead("gt-abc").ciSilences = 2
+
+			rep := Report{}
+			h.w.processWith(context.Background(), issue, &rep, true)
+
+			if want := (Report{}); rep != want {
+				t.Fatalf("report = %+v; want %+v: nothing to consume counts nothing", rep, want)
+			}
+			if h.w.parked("gt-abc") {
+				t.Fatalf("the bead is parked; want it left at its ordinary turn")
+			}
+			st := h.w.state["gt-abc"]
+			if st == nil {
+				t.Fatalf("the pass left no state for gt-abc; want its state untouched")
+			}
+			if !st.until.IsZero() {
+				t.Fatalf("the pass set a backoff until %v; want none", st.until)
+			}
+			if st.failures != 0 {
+				t.Fatalf("the pass counted %d failures; want none", st.failures)
+			}
+			if st.ciSilences != 2 {
+				t.Fatalf("ciSilences = %d; want the ready pass's 2 left alone", st.ciSilences)
+			}
+			if len(h.cleared) != 0 {
+				t.Fatalf("intent cleared for %v; want it kept for the bead's ordinary turn", h.cleared)
+			}
+			if len(h.w.pendingRepair) != 0 {
+				t.Fatalf("the pass queued %d repairs; want none", len(h.w.pendingRepair))
+			}
+			if got := h.comments(t, "gt-abc"); len(got) != 0 {
+				t.Fatalf("the pass wrote %d comments (%v); want none", len(got), got)
+			}
+			if len(h.lander.calls) != 1 || !h.lander.calls[0].StoredOnly {
+				t.Fatalf("landings = %+v; want one stored-only landing", h.lander.calls)
+			}
+		})
+	}
+
+	t.Run("another error is still infrastructure", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.seedReady(t, "gt-abc")
+		h.lander.fn = func(int, land.Work) (land.Result, error) {
+			return land.Result{}, &land.InfraError{Stage: "gate", Err: errors.New("boom")}
+		}
+		issue, err := h.bd.Show("gt-abc")
+		if err != nil {
+			t.Fatalf("reading the seeded bead: %v", err)
+		}
+
+		rep := Report{}
+		h.w.processWith(context.Background(), issue, &rep, true)
+
+		if want := (Report{Failed: 1}); rep != want {
+			t.Fatalf("report = %+v; want %+v", rep, want)
+		}
+		if !h.w.parked("gt-abc") {
+			t.Fatalf("the bead is not parked; want an unrelated error still parked")
+		}
+	})
+}
+
 // TestReviewPoolWorkerPoolDefaultsNil pins that the harness Worker leaves Pool
 // nil and that a pass over two ready beads still lands both with today's
 // report: the field is storage for later beads, and a nil pool changes nothing
