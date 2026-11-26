@@ -1296,20 +1296,30 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			rep.InstallRequested = true
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
-		w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+		if res.Deferred != nil {
+			// A deferred landing still owes the bead half of its record: the job
+			// finishes it and runs the four landing steps off this goroutine when
+			// a queue is set, and the bead stays held (booksHold) until the
+			// record is written, so no later pass lands it again (gt-c3vl2u).
+			w.finishDeferredQueued(work, res)
+		} else {
+			w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+		}
 		w.clearIntent(work)
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
-		// The label needs the landing's complete record, and a repair is the pass
-		// that completes a record an earlier pass left unfinished, so this runs
-		// on a repair too. The write is idempotent: a stale sp-actual is replaced.
-		w.writeSPActual(work.BeadID, res.LandedCommit)
-		// The record is complete now, which is the proof the seat's end reads.
-		// A repair that finishes a record left unfinished reaches it here, so
-		// the seat its earlier pass kept is ended once the record can prove it.
-		if w.AfterLanded != nil {
-			w.AfterLanded(work)
+		if res.Deferred == nil {
+			// The label needs the landing's complete record, and a repair is the pass
+			// that completes a record an earlier pass left unfinished, so this runs
+			// on a repair too. The write is idempotent: a stale sp-actual is replaced.
+			w.writeSPActual(work.BeadID, res.LandedCommit)
+			// The record is complete now, which is the proof the seat's end reads.
+			// A repair that finishes a record left unfinished reaches it here, so
+			// the seat its earlier pass kept is ended once the record can prove it.
+			if w.AfterLanded != nil {
+				w.AfterLanded(work)
+			}
 		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
@@ -1438,6 +1448,17 @@ func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 	if w.AfterLanded != nil {
 		w.AfterLanded(work)
 	}
+}
+
+// finishDeferredQueued runs a deferred landing's finishing steps on BookQueue's
+// goroutine when a queue is set, so the pass lands the next bead meanwhile; with
+// no queue it runs them here, so a deferred result is never dropped (gt-c3vl2u).
+func (w *Worker) finishDeferredQueued(work land.Work, res land.Result) {
+	if w.Books == nil {
+		w.finishDeferred(work, res)
+		return
+	}
+	w.Books.Add(work.BeadID, func() { w.finishDeferred(work, res) })
 }
 
 // repairLater puts work in pendingRepair: through Books.Later (the worker's own
