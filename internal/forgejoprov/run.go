@@ -40,9 +40,10 @@ type Env struct {
 // Run provisions what opts names: each role's bot and token (no token under
 // --skip-tokens), then for each repository its workflow-file hook list entry, the closed
 // main rule, its access, the viewer grant, the final main rule and the removal of the
-// candidate-branch rule. It returns ExitOK when the run finished (a dry run included,
-// which sends no write) and ExitFailure when a step failed. Progress and failures go to
-// env.Log; no admin or minted token reaches it.
+// candidate-branch rule. A run that names --revoke-token is a mode of its own: it deletes
+// that one bot token and reaches no other step. Run returns ExitOK when the run finished
+// (a dry run included, which sends no write) and ExitFailure when a step failed. Progress
+// and failures go to env.Log; no admin or minted token reaches it.
 func Run(ctx context.Context, opts *Options, env Env) int {
 	logOut := env.Log
 	if logOut == nil {
@@ -100,14 +101,23 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 }
 
 // provision runs the bot and token steps for every role, then the access and
-// protection steps for every repository. A failure stops the run where it is: each
-// step converges on its own, so a repeat picks up where this one stopped.
+// protection steps for every repository. A run with --revoke-token returns from its own
+// branch before either loop, leaving the provision untouched. A failure stops the run
+// where it is: each step converges on its own, so a repeat picks up where this one
+// stopped.
 func provision(p *Provisioner, opts *Options) error {
-	// --revoke-token is parsed but its action is not in this build yet. Refusing it
-	// here is what keeps it from falling through to the provision below, which
-	// ensures users and mints tokens: the caller named a revoke, not a provision.
+	// --revoke-token is a mode of its own: it names one bot's one token and returns
+	// after that revoke, so the run never reaches the steps below, which ensure users
+	// and mint tokens where no file exists. A broker run with no HOME must never mint
+	// a token, and the caller named a revoke, not a provision.
 	if opts.RevokeToken != "" {
-		return fmt.Errorf("--revoke-token is not implemented yet: this build parses and checks the option, then refuses; the revoke action lands in a later change")
+		// Parse accepts the option only beside exactly one --role, so the bot to name is
+		// that role's; a caller that built Options without Parse is refused rather than
+		// pointed at a bot it never named.
+		if len(opts.Roles) != 1 {
+			return fmt.Errorf("--revoke-token names one bot's token, so the run needs exactly one --role (got %d)", len(opts.Roles))
+		}
+		return p.revokeNamedToken(p.BotPrefix+opts.Roles[0], opts.RevokeToken)
 	}
 	// --rotate mints a token and --skip-tokens mints none, so the pair cannot both be
 	// honored; refuse it before any request rather than drop the rotation silently.

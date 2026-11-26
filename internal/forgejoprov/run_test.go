@@ -639,36 +639,179 @@ func TestRunRotateWithSkipTokensRefuses(t *testing.T) {
 	}
 }
 
-// TestProvisionRefusesRevokeToken: --revoke-token is parsed and checked, but its
-// action is not in this build, so a run that carries it fails before any request
-// and never falls through to the normal provision, which ensures users and mints
-// the tokens the caller asked to revoke.
-func TestProvisionRefusesRevokeToken(t *testing.T) {
+// TestRevokeTokenRun: --revoke-token is a mode of its own. A run whose one --role bot
+// holds the named token lists that bot's tokens, deletes exactly the named one and
+// returns ok: it sends no request but the list and that DELETE, so it creates no user,
+// mints no token, protects no repository and writes no token file.
+func TestRevokeTokenRun(t *testing.T) {
 	t.Parallel()
-	for name, args := range map[string][]string{
-		"live run": {"--revoke-token", "gt-old", "--role", "landing"},
-		"dry run":  {"--revoke-token", "gt-old", "--role", "landing", "--dry-run"},
+	f := forgejotest.New()
+	seedRevokeBot(t, f, revokeName, revokeOther)
+	files := newMemFiles()
+
+	res := runProvisioning(t, f, files, nil, "--role", "registry", "--revoke-token", revokeName)
+	if res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	want := []forgejotest.LoggedCall{
+		{Method: http.MethodGet, Path: forgejotest.APIPath + "/admin/users/" + revokeBot + "/tokens"},
+		{Method: http.MethodDelete, Path: forgejotest.APIPath + "/admin/users/" + revokeBot + "/tokens/" + revokeName},
+	}
+	calls := f.CallLog()
+	if len(calls) != len(want) {
+		t.Fatalf("run sent %d request(s) %v, want %v", len(calls), calls, want)
+	}
+	for i, w := range want {
+		if calls[i].Method != w.Method || calls[i].Path != w.Path {
+			t.Errorf("request %d = %s %s, want %s %s", i+1, calls[i].Method, calls[i].Path, w.Method, w.Path)
+		}
+	}
+	if _, ok := f.TokenScopes(revokeBot, revokeName); ok {
+		t.Errorf("the '%s' token survived the run", revokeName)
+	}
+	if _, ok := f.TokenScopes(revokeBot, revokeOther); !ok {
+		t.Errorf("the run removed '%s' as well as '%s'", revokeOther, revokeName)
+	}
+	if got := tokenFileCount(files); got != 0 {
+		t.Errorf("the run wrote %d token file(s), want none", got)
+	}
+	named := false
+	for _, line := range strings.Split(res.logs, "\n") {
+		if strings.Contains(line, "revoked") && strings.Contains(line, revokeName) && strings.Contains(line, revokeBot) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("logs %q do not name the bot and the revoked token", res.shown())
+	}
+}
+
+// TestRevokeTokenDryRun: with --dry-run the same revoke lists the bot's tokens, logs
+// that it would revoke the named one, and sends no DELETE, so the token survives and
+// no write of any kind is sent.
+func TestRevokeTokenDryRun(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	seedRevokeBot(t, f, revokeName, revokeOther)
+	files := newMemFiles()
+
+	res := runProvisioning(t, f, files, nil, "--role", "registry", "--revoke-token", revokeName, "--dry-run")
+	if res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	if deletes := deleteCalls(f); len(deletes) != 0 {
+		t.Fatalf("the dry run sent %d DELETE(s): %v", len(deletes), deletes)
+	}
+	if writes := f.Writes(); len(writes) != 0 {
+		t.Errorf("the dry run sent writes %v, want none", writes)
+	}
+	planned := false
+	for _, line := range strings.Split(res.logs, "\n") {
+		if strings.Contains(line, "would revoke") && strings.Contains(line, revokeName) {
+			planned = true
+		}
+	}
+	if !planned {
+		t.Fatalf("logs %q do not say it would revoke '%s'", res.shown(), revokeName)
+	}
+	if _, ok := f.TokenScopes(revokeBot, revokeName); !ok {
+		t.Errorf("the dry run removed the '%s' token", revokeName)
+	}
+	if got := tokenFileCount(files); got != 0 {
+		t.Errorf("the dry run wrote %d token file(s), want none", got)
+	}
+}
+
+// TestRevokeTokenRunRefuses drives a revoke the bot cannot satisfy through the run: each
+// fails with the bot or the token named in the logs and sends no DELETE, so a revoke
+// never falls through to the provision that would create a missing bot and mint it a
+// token.
+func TestRevokeTokenRunRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		seeded bool
+		tokens []string
+		revoke string
+		want   string
+	}{
+		{
+			name:   "the bot holds no such token",
+			seeded: true,
+			tokens: []string{revokeName, revokeOther},
+			revoke: "absent",
+			want:   "absent",
+		},
+		{
+			name:   "the bot's only token",
+			seeded: true,
+			tokens: []string{revokeName},
+			revoke: revokeName,
+			want:   "leave the bot with no token",
+		},
+		{
+			name:   "no such bot",
+			revoke: revokeName,
+			want:   revokeBot,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			if tc.seeded {
+				seedRevokeBot(t, f, tc.tokens...)
+			}
+			files := newMemFiles()
+
+			res := runProvisioning(t, f, files, nil, "--role", "registry", "--revoke-token", tc.revoke)
+			if res.code != ExitFailure {
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+			}
+			if !strings.Contains(res.logs, tc.want) {
+				t.Errorf("logs = %q, want the failure to name %q", res.shown(), tc.want)
+			}
+			if deletes := deleteCalls(f); len(deletes) != 0 {
+				t.Errorf("a refused revoke sent %d DELETE(s): %v", len(deletes), deletes)
+			}
+			if writes := f.Writes(); len(writes) != 0 {
+				t.Errorf("a refused revoke sent writes %v, want none", writes)
+			}
+			if _, ok := f.UserEmail(revokeBot); ok && !tc.seeded {
+				t.Errorf("the run created %s, want the refusal before any create", revokeBot)
+			}
+			if got := tokenFileCount(files); got != 0 {
+				t.Errorf("a refused revoke wrote %d token file(s), want none", got)
+			}
+		})
+	}
+}
+
+// TestProvisionNeedsOneRoleToRevoke: Run is exported and takes Options a caller can build
+// without Parse, so a revoke with no single role is refused before any request rather
+// than indexed into a bot the caller never named.
+func TestProvisionNeedsOneRoleToRevoke(t *testing.T) {
+	t.Parallel()
+	for name, roles := range map[string][]string{
+		"no role":   nil,
+		"two roles": {"polecat", "registry"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := forgejotest.New()
-			f.AddRepo(protectionRepo)
-			files := newMemFiles()
+			var logs []string
+			p := revokeProvisioner(f, &logs)
+			p.BotPrefix = DefaultBotPrefix
 
-			res := runProvisioning(t, f, files, nil, args...)
-			if res.code != ExitFailure {
-				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+			err := provision(p, &Options{BotPrefix: DefaultBotPrefix, RevokeToken: revokeName, Roles: roles})
+			if err == nil {
+				t.Fatal("provision accepted a revoke with no single role, want a refusal")
 			}
-			for _, want := range []string{"--revoke-token", "not implemented yet"} {
-				if !strings.Contains(res.logs, want) {
-					t.Errorf("logs = %q, want the refusal to hold %q", res.shown(), want)
-				}
+			if !strings.Contains(err.Error(), "--role") {
+				t.Errorf("error %q does not name --role", err)
 			}
 			if calls := f.CallLog(); len(calls) != 0 {
-				t.Errorf("run sent %d requests, want none: a revoke never provisions", len(calls))
-			}
-			if got := tokenFileCount(files); got != 0 {
-				t.Errorf("run wrote %d token files, want none", got)
+				t.Errorf("the refusal sent %d request(s): %v", len(calls), calls)
 			}
 		})
 	}

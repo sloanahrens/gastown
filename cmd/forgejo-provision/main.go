@@ -92,7 +92,7 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
                          word none skips the list
   --revoke-token NAME    revoke the one bot token named NAME; needs exactly one
                          --role and cannot be combined with --repo, --rotate or
-                         --skip-tokens (not implemented yet)
+                         --skip-tokens
   --rotate               mint a new token even where a token file exists, and
                          revoke the token the file records (its TOKEN_NAME
                          line, else the token named by --token-name)
