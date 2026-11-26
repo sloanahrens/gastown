@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -169,6 +170,57 @@ func (c *sqlChildrenClient) ShowMultiple(ids []string) (map[string]*beads.Issue,
 	return c.Client.ShowMultiple(ids)
 }
 
+// bdChildrenRead is one children read of the tick's default store, so a test
+// can drive the error bd's client produces for it.
+func bdChildrenRead(b *beads.Beads) error {
+	_, err := b.ChildrenOf("gt-a")
+	return err
+}
+
+// bdSQLChildrenRead is one SQL children read of the tick's default store, the
+// read a store that answers SQLCSV takes, so a test can drive its failure.
+func bdSQLChildrenRead(b *beads.Beads) error {
+	_, err := b.SQLCSV(beadsql.IssueCount())
+	return err
+}
+
+// bdReadFailure runs call against a real bd wrapper over run, and returns the
+// error the wrapper built: the chain a caller of the real store reads — the
+// deadline conversion and the "bd <args>:" prefix — rather than a hand-built
+// one. opts carry the call context a deadline needs (gt-p50pua).
+func bdReadFailure(t *testing.T, call func(*beads.Beads) error, run func(context.Context, []string) ([]byte, []byte, error), opts ...beads.Option) error {
+	t.Helper()
+	store := beads.NewPinned(t.TempDir(), append(opts, beads.WithRunner(run))...)
+	err := call(store)
+	if err == nil {
+		t.Fatal("the bd read returned no error; want the runner's failure")
+	}
+	return err
+}
+
+// bdDeadlineFailure is the error a bd read returns when the call's deadline
+// ended it before bd answered: the wrapper converts the killed subprocess into
+// its "timed out after ...: context deadline exceeded" chain. The call context
+// is already past its deadline, so no wait is spent (gt-p50pua).
+func bdDeadlineFailure(t *testing.T, call func(*beads.Beads) error) error {
+	t.Helper()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Time{})
+	t.Cleanup(cancel)
+	return bdReadFailure(t, call, func(context.Context, []string) ([]byte, []byte, error) {
+		return nil, nil, errors.New("signal: killed")
+	}, beads.WithCallContext(ctx))
+}
+
+// bdGatewayKillFailure is the error a bd read returns when the gateway ended
+// the call at its cap: exit status 124, as the gateway's shim exits, wrapped by
+// the bd client (gt-p50pua).
+func bdGatewayKillFailure(t *testing.T, call func(*beads.Beads) error) error {
+	t.Helper()
+	return bdReadFailure(t, call, func(context.Context, []string) ([]byte, []byte, error) {
+		return nil, nil, fakeExit(124)
+	})
+}
+
 // sqlChildrenCandidates creates n childless candidates in db and answers them
 // with cands, the way the tick's loop passes them.
 func sqlChildrenCandidates(t *testing.T, db *beadsfake.Fake, n int) (ids []string, cands []specCandidate) {
@@ -299,8 +351,8 @@ func TestTickEffSQLChildrenFallback(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"a deadline", fmt.Errorf("SQLCSV: %w", context.DeadlineExceeded)},
-		{"the gateway's kill", fakeExit(124)},
+		{"a deadline", bdDeadlineFailure(t, bdSQLChildrenRead)},
+		{"the gateway's kill", bdGatewayKillFailure(t, bdSQLChildrenRead)},
 	} {
 		client := &sqlChildrenClient{Client: db, sqlErr: tc.err}
 		children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil,
@@ -400,8 +452,8 @@ func TestTickEffTimeoutDoesNotFallBack(t *testing.T) {
 		fail     error
 		fallback bool
 	}{
-		{fmt.Errorf("bd show --children: %w", context.DeadlineExceeded), false},
-		{fakeExit(124), false}, // the gateway's kill
+		{bdDeadlineFailure(t, bdChildrenRead), false},
+		{bdGatewayKillFailure(t, bdChildrenRead), false},
 		{errors.New("bd show --children: refused"), true},
 	} {
 		reads := newSpecTickReads()
@@ -574,7 +626,7 @@ func lateTickRead(t *testing.T, root, path string, cands []specCandidate, timeou
 	children := specCandidateChildren(root, reads, cands, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		asked = append(asked, ids...)
 		if timeout {
-			return nil, fmt.Errorf("bd show --children: %w", context.DeadlineExceeded)
+			return nil, bdDeadlineFailure(t, bdChildrenRead)
 		}
 		got := map[string][]*beads.Issue{}
 		for _, id := range ids {
