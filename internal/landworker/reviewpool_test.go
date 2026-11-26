@@ -241,6 +241,51 @@ func TestReviewPoolWaitReturnsWhenIdle(t *testing.T) {
 	}
 }
 
+// TestReviewPoolErrorNotRetried pins that the head whose review failed is not
+// offered again, while a new head of the same bead still is: the pool keeps the
+// head each bead's last review ended at, so a broken om call is not repeated on
+// every pass, and a seat that pushed a new commit is reviewed (gt-xa01yc).
+func TestReviewPoolErrorNotRetried(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-error"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, map[string]error{bead: errors.New("om unreachable")})
+	pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the failing review start")
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the failure")
+	if got := reviewCounts(rev); got[bead] != 1 {
+		t.Fatalf("reviews of %s %d after the failing review, want 1", bead, got[bead])
+	}
+
+	// The same head is a head the pool tried: the offer starts no review.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the repeat offer")
+	if head, ok := runningHeadAt(t, pool, bead); ok {
+		t.Errorf("the repeat offer started a review of %s at %s, want none: the pool tried that head", bead, head)
+	}
+	if n := len(rev.reviewed()); n != 1 {
+		t.Fatalf("reviewer called %d times after the failed head was offered again, want 1", n)
+	}
+
+	// A head the pool has not tried is reviewed.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the new head")
+	if n := len(rev.reviewed()); n != 2 {
+		t.Fatalf("reviewer called %d times, want the failed head then the new head", n)
+	}
+}
+
 func TestReviewPoolLogsNothingForCancelledReview(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)

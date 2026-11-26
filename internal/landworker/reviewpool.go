@@ -38,6 +38,10 @@ type ReviewPool struct {
 
 	mu      sync.Mutex
 	running map[string]*aheadRun
+	// tried holds, per bead, the head its last review ended at: that head is not
+	// started again on every pass, while a new head of the same bead is
+	// (gt-xa01yc). One entry per bead, for the life of the pool.
+	tried map[string]string
 }
 
 // aheadRun is one review under way: the head it reviews, the cancel that stops
@@ -57,8 +61,11 @@ type aheadRun struct {
 // whose bead already has a review running at its head is a no-op: no second
 // reviewer and no second goroutine; at another head that review is canceled and
 // nothing is started in its place until the pool is offered the list again.
-// Nothing is started when no Reviewer is set, so every
-// submission is a miss and the landing runs om inline.
+// A work at the head the bead's last review ended at starts nothing: the pool
+// tried that head, so starting it again would repeat a failed review on every
+// pass, while a new head of the same bead is reviewed (gt-xa01yc). Nothing is
+// started when no Reviewer is set, so every submission is a miss and the
+// landing runs om inline.
 //
 // A refused Begin means a landing hold or drain is on (gt-vb9qod): the call
 // starts nothing more and asks no further Begin, while a work at a head its
@@ -83,6 +90,10 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 // it comes before a hold, so a hold never leaves a stale review running. With
 // starts false the call only reaches that cancel and begins nothing else.
 //
+// A head the bead's last review tried is refused before that running check:
+// the offer of a tried head must start nothing and cancel nothing, so it can
+// never stop the review of the head that replaced it (gt-bnc6ah).
+//
 // A review certain to start asks Begin, when set, with p.mu held: no other
 // Offer can take the slot in between, so a true Begin never outlives the review
 // that owes its End. Begin false means a landing hold or drain is on (gt-vb9qod):
@@ -92,6 +103,9 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if head, ok := p.tried[w.BeadID]; ok && head == w.Head {
+		return true
+	}
 	if run, ok := p.running[w.BeadID]; ok {
 		if run.head == w.Head || run.canceled {
 			return true
@@ -123,7 +137,9 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 // End runs once for every review that began, panic or not, before the entry
 // leaves the map and before done closes, so a Wait released by the empty map
 // already sees the review's End. The guard in start makes the entry under
-// w.BeadID this run's own.
+// w.BeadID this run's own. The run's own head is recorded as tried in the same
+// critical section that drops the entry, so a pass that finds the entry gone
+// also finds that head tried and starts no review of it again (gt-xa01yc).
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -131,6 +147,10 @@ func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 		}
 		p.end()
 		p.mu.Lock()
+		if p.tried == nil {
+			p.tried = map[string]string{}
+		}
+		p.tried[w.BeadID] = w.Head
 		delete(p.running, w.BeadID)
 		p.mu.Unlock()
 		run.cancel()
