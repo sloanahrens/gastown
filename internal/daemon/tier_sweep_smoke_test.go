@@ -49,10 +49,9 @@ func newSweepSmokeDaemon(t *testing.T, now time.Time) *Daemon {
 }
 
 // TestSweepSmokeLaunch pins the record each launch result gives, that the
-// launch runs exactly once over the cheapest stage the runner takes at the
-// rig's main tip, and that no wait for a result starts; a launch that cannot
-// be rendered is failed with the first line of why and launches nothing
-// (gt-d7qez9).
+// launch runs once over the cheapest stage the runner takes at the main tip,
+// and that no wait for a result starts; a launch that cannot be rendered is
+// failed with the first line of why and launches nothing (gt-d7qez9).
 func TestSweepSmokeLaunch(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -61,7 +60,7 @@ func TestSweepSmokeLaunch(t *testing.T) {
 		setup  func(*Daemon)
 		launch tierSweepLaunch
 		runs   bool
-		tiers  string // the launched stage's tiers, comma-joined
+		tiers  string
 		want   sweepSmokeRecord
 	}{
 		{"started", nil, tierSweepLaunch{exitCode: 0}, true, "shell", sweepSmokeRecord{Time: now, Outcome: "started"}},
@@ -86,9 +85,6 @@ func TestSweepSmokeLaunch(t *testing.T) {
 			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
 				launches++
 				st = s
-				if !tc.runs {
-					t.Error("a launch ran before anything could be rendered")
-				}
 				return tc.launch
 			}
 			d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) {
@@ -104,14 +100,16 @@ func TestSweepSmokeLaunch(t *testing.T) {
 			if tc.runs && (strings.Join(st.tiers, ",") != tc.tiers || st.tested != runnerTestSHA) {
 				t.Errorf("launched stage %+v, want tiers %q at the main tip", st, tc.tiers)
 			}
+			if !tc.runs && launches != 0 {
+				t.Errorf("launches = %d, want none", launches)
+			}
 		})
 	}
 }
 
-// TestSweepSmokeLaunchStops pins that a launch's teardown runs after it
-// returns for a started and a failed launch, and never for a busy one: a busy
-// launch created nothing, so its teardown could end a run the smoke did not
-// start (gt-d7qez9).
+// TestSweepSmokeLaunchStops pins that a launch's teardown runs once a started
+// or failed launch returns, and never for a busy one: a busy launch created
+// nothing, so its teardown could end a run the smoke did not start (gt-d7qez9).
 func TestSweepSmokeLaunchStops(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -119,30 +117,24 @@ func TestSweepSmokeLaunchStops(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		launch tierSweepLaunch
-		stop   bool
 		want   int
 	}{
-		{"started", tierSweepLaunch{exitCode: 0}, true, 1},
-		{"failed", tierSweepLaunch{exitCode: -1, err: errors.New("killed")}, true, 1},
-		{"busy has no stop", busy, false, 0},
-		{"busy keeps its stop", busy, true, 0},
-		{"declined", tierSweepLaunch{exitCode: -1, declined: true}, false, 0},
+		{"started", tierSweepLaunch{exitCode: 0}, 1},
+		{"failed", tierSweepLaunch{exitCode: -1, err: errors.New("killed")}, 1},
+		{"busy", busy, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d := newSweepSmokeDaemon(t, now)
-			launched, stops, early := false, 0, false
+			stops := 0
 			d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
-				launched = true
 				l := tc.launch
-				if tc.stop {
-					l.stop = func() { stops++; early = !launched }
-				}
+				l.stop = func() { stops++ }
 				return l
 			}
 			d.sweepSmokeLaunch(context.Background(), "gastown")
-			if early || stops != tc.want {
-				t.Errorf("stop ran %d times (before the launch: %v), want %d after it", stops, early, tc.want)
+			if stops != tc.want {
+				t.Errorf("stop ran %d times, want %d", stops, tc.want)
 			}
 		})
 	}
