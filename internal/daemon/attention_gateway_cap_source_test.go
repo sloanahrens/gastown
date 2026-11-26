@@ -29,8 +29,8 @@ func TestAttentionSourcesGatewayCapNilField(t *testing.T) {
 func TestAttentionSourcesGatewayCapRaises(t *testing.T) {
 	t.Parallel()
 	reads := []bdgateway.GatewayStats{
-		{TooManyCalls: 0, PeakInFlight: 2},
-		{TooManyCalls: 3, PeakInFlight: 5},
+		{TooManyCalls: 0, PeakInFlight: 2, CapsPresent: true},
+		{TooManyCalls: 3, PeakInFlight: 5, CapsPresent: true},
 	}
 	var tick int
 	c := &gatewayCapCollector{stats: func(context.Context) (bdgateway.GatewayStats, error) {
