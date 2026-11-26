@@ -1671,30 +1671,43 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		accepted, used := l.acceptedRisks(w.BeadID, op)
 		comments = l.beadComments(issue)
 		in := BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
-		// The usage window opens with the review it measures (gt-6qc3nw.13); it
-		// is read from the landing's clock, so a test can fix it.
-		usageStart := l.now()
-		verdict, reviewErr = l.review(omCtx, in)
-		// One flaky om run must not cost an escalation and a hand review
-		// (gt-q241r): an execution error on an ordinary tree is retried once,
-		// inside this same om stage. A timeout, an infra error and a verdict
-		// that arrived are final, and so is an execution error on a tree past
-		// the size bound, which is deterministic and would fail the same way
-		// again.
-		omRetried = errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
-		if omRetried {
-			l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
+		// A stored review may stand in for om (gt-er929x). On a hit the verdict is
+		// the record's, stamped with the om its key names, and no review runs. A
+		// miss, or an answer reuseAhead could not give, runs om as it does with no
+		// store; reuseAhead has logged why. An unknown answer is never a hit.
+		rec, key, reused, reuseErr := l.reuseAhead(omCtx, g, wt, w, in, base, merged)
+		reused = reused && reuseErr == nil
+		if reused {
+			verdict = rec.Verdict
+			verdict.Version = key.OMVersion
+			omDone()
+			l.recordAcceptedRisks(w, used)
+		} else {
+			// The usage window opens with the review it measures (gt-6qc3nw.13); it
+			// is read from the landing's clock, so a test can fix it.
+			usageStart := l.now()
 			verdict, reviewErr = l.review(omCtx, in)
-		}
-		if reviewErr == nil {
-			verdict = l.rescoreBorderline(omCtx, verdict, in)
-		}
-		omDone()
-		omTime = time.Since(reviewStart)
-		usageEnd := l.now()
-		l.recordAcceptedRisks(w, used)
-		if l.UsageSink != nil {
-			l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: usageStart, End: usageEnd})
+			// One flaky om run must not cost an escalation and a hand review
+			// (gt-q241r): an execution error on an ordinary tree is retried once,
+			// inside this same om stage. A timeout, an infra error and a verdict
+			// that arrived are final, and so is an execution error on a tree past
+			// the size bound, which is deterministic and would fail the same way
+			// again.
+			omRetried = errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
+			if omRetried {
+				l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
+				verdict, reviewErr = l.review(omCtx, in)
+			}
+			if reviewErr == nil {
+				verdict = l.rescoreBorderline(omCtx, verdict, in)
+			}
+			omDone()
+			omTime = time.Since(reviewStart)
+			usageEnd := l.now()
+			l.recordAcceptedRisks(w, used)
+			if l.UsageSink != nil {
+				l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: usageStart, End: usageEnd})
+			}
 		}
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base,
