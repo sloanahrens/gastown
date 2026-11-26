@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"syscall"
 )
 
 // limitedBuffer is an io.Writer that keeps the first limit bytes written and
@@ -45,10 +47,41 @@ func (b *limitedBuffer) Truncated() bool { return b.truncated }
 // and no error, however large. Nothing here reads the output.
 func startDriftChild(ctx context.Context, exe string, args []string, limit int) (stdout, stderr []byte, exit int, err error) {
 	out, errOut := &limitedBuffer{limit: limit}, &limitedBuffer{limit: limit}
-	cmd := exec.CommandContext(ctx, exe, args...) //nolint:gosec // G204: a fixed program and fixed arguments from the caller, never a shell
+	cmd := driftChildCmd(exec.CommandContext(ctx, exe, args...)) //nolint:gosec // G204: a fixed program and fixed arguments from the caller, never a shell
 	cmd.Stdout, cmd.Stderr = out, errOut
 	exit, err = driftChildOutcome(cmd.Run(), ctx.Err())
 	return out.Bytes(), errOut.Bytes(), exit, err
+}
+
+// driftChildCmd gives a command the drift child's process-group settings. The
+// child leads its own process group (Setpgid), so the cancel below reaches a
+// grandchild the child started; a deadline that killed only the child would
+// leave a grandchild holding the output pipes, and Run would wait on it past
+// the deadline.
+func driftChildCmd(cmd *exec.Cmd) *exec.Cmd {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// exec calls Cancel only after a successful Start, so cmd.Process is
+		// the child there. A command that never started has nothing to end:
+		// report it as already done, not as interrupted, and never hand a nil
+		// Process to the kill below.
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return driftChildCancel(cmd.Process.Pid, syscall.Kill, cmd.Process.Kill)
+	}
+	return cmd
+}
+
+// driftChildCancel ends the child and every process in its group: it sends
+// SIGKILL to the group led by pid (a negative pid names the group) so a
+// grandchild the child started dies with it, and falls back to killing the
+// child alone when the group signal fails.
+func driftChildCancel(pid int, signal func(int, syscall.Signal) error, kill func() error) error {
+	if err := signal(-pid, syscall.SIGKILL); err != nil {
+		return kill()
+	}
+	return nil
 }
 
 // driftChildOutcome maps a finished run to the child's exit code. No run error
