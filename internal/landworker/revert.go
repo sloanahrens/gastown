@@ -697,6 +697,14 @@ func (r *RedMain) revertOf(beadID string) (culprit, landed string, ok bool) {
 	return culprit, landed, ok
 }
 
+// IsRevert reports whether beadID is one of this owner's revert beads. It reads
+// the bead and writes nothing, so a deferred landing's bookkeeping job may call
+// it on the queue goroutine, where RevertLanded must not run (gt-dci9k8).
+func (r *RedMain) IsRevert(beadID string) bool {
+	_, _, ok := r.revertOf(beadID)
+	return ok
+}
+
 // RevertLanded finishes a revert once the landing worker has landed it: the
 // culprit is commented on and reopened with the rework label. Any other
 // landing is ignored.

@@ -317,8 +317,13 @@ type Worker struct {
 
 // RevertHooks is the red-main owner's side of an automatic revert.
 type RevertHooks interface {
-	// RevertLanded is called after every new landing.
+	// RevertLanded is called after every new landing that is not deferred; a
+	// deferred landing's bookkeeping job calls it at the next pass instead.
 	RevertLanded(ctx context.Context, work land.Work, res land.Result)
+	// IsRevert reports whether beadID is one of this owner's reverts. It reads
+	// only, so a deferred landing's bookkeeping job may call it on the queue
+	// goroutine, where RevertLanded must not run.
+	IsRevert(beadID string) bool
 	// RevertRejected is called on every rework rejection; true means the
 	// work was a revert and has been dealt with, so no rework comment.
 	RevertRejected(work land.Work, rej *land.Rejection) bool
@@ -1426,11 +1431,12 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	}
 }
 
-// finishDeferred finishes a deferred landing's record, then reaps its branches,
-// refreshes the authors' seats, writes sp-actual and runs the after-landed hook,
-// in that order. It runs on BookQueue's goroutine, so any Worker state it must
-// write goes through Later to w's own goroutine; a finish it cannot make leaves
-// the work in pendingRepair for the next pass (gt-k78e8j).
+// finishDeferred finishes a deferred landing's record, queues the revert call a
+// revert owes, then reaps its branches, refreshes the authors' seats, writes
+// sp-actual and runs the after-landed hook, in that order. It runs on
+// BookQueue's goroutine, so any Worker state it must write goes through Later
+// to w's own goroutine; a finish it cannot make leaves the work in pendingRepair
+// for the next pass (gt-k78e8j, gt-dci9k8).
 func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 	f, ok := w.Lander.(finisher)
 	if !ok {
@@ -1443,11 +1449,32 @@ func (w *Worker) finishDeferred(work land.Work, res land.Result) {
 		w.repairLater(work)
 		return
 	}
+	w.finishRevert(work, res)
 	w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
 	w.writeSPActual(work.BeadID, res.LandedCommit)
 	if w.AfterLanded != nil {
 		w.AfterLanded(work)
 	}
+}
+
+// finishRevert queues a deferred revert landing's RevertLanded for the worker's
+// own goroutine, after FinishLanding has made the record whole. IsRevert reads
+// the bead, so the queue goroutine may ask it; RevertLanded writes red-main
+// state the pass also writes, so with a queue it goes through Later and runs at
+// the next pass. With no queue the steps already run on the worker's goroutine,
+// and it runs there directly (gt-dci9k8).
+func (w *Worker) finishRevert(work land.Work, res land.Result) {
+	if w.Reverts == nil || !w.Reverts.IsRevert(work.BeadID) {
+		return
+	}
+	// RevertLanded takes a context it does not use, and a stored call outlives
+	// the pass that queued it, so there is no pass context to hand it.
+	run := func() { w.Reverts.RevertLanded(context.Background(), work, res) }
+	if w.Books != nil {
+		w.Books.Later(run)
+		return
+	}
+	run()
 }
 
 // finishDeferredQueued runs a deferred landing's finishing steps on BookQueue's
@@ -1861,7 +1888,9 @@ func (w *Worker) writeSPActual(beadID, landedCommit string) {
 
 // afterLanding starts the post-landing verdict for a new landing (a command run
 // or a pending status wait) and tells the red-main owner, which finishes the
-// landing if it was a revert.
+// landing if it was a revert. A deferred landing's revert is told by its
+// bookkeeping job instead: RevertLanded writes state the pass also writes, so
+// it must not run on the queue goroutine (gt-dci9k8).
 func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Result) {
 	if res.LandedCommit != "" && work.Target == w.WatchTarget {
 		w.lastSeen = res.LandedCommit
@@ -1869,7 +1898,7 @@ func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Resu
 	if w.PostLand != nil && res.LandedCommit != "" {
 		w.PostLand.Trigger(ctx, PostLand{BeadID: work.BeadID, Commit: res.LandedCommit, Target: work.Target})
 	}
-	if w.Reverts != nil {
+	if w.Reverts != nil && res.Deferred == nil {
 		w.Reverts.RevertLanded(ctx, work, res)
 	}
 }
