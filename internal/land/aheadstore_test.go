@@ -927,8 +927,12 @@ func aheadRunInWindow(t *testing.T, store *AheadStore, bead string, first, secon
 	}
 }
 
-// TestAheadStorePutKeepsNewerUnderRace: a Put that read the store before a later
-// review's Put wrote writes only after it, so the later record stays (gt-guahwz).
+// TestAheadStorePutKeepsNewerUnderRace proves the lock that keeps the newer
+// record: the older Put holds its bead's lock across its read and its write (the
+// window check fails at once without it), so the later review's Put, which runs
+// after the older one returns here, can only come after the older write and the
+// later record stays (gt-guahwz). A second Put started inside the window would
+// block on that same non-reentrant lock, so it is not started there.
 func TestAheadStorePutKeepsNewerUnderRace(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -946,9 +950,12 @@ func TestAheadStorePutKeepsNewerUnderRace(t *testing.T) {
 	}
 }
 
-// TestAheadStoreDeleteHoldsThePutLock: a Delete due in a Put's window is held off
-// by that lock, so no record is left stored. Removing only Delete's lock is
-// caught by TestAheadStoreDeleteRemovesUnderTheStoreLock, not by this row.
+// TestAheadStoreDeleteHoldsThePutLock proves a Put holds the lock a Delete needs
+// across its read-to-write window (the window check fails at once without it),
+// so a Delete that is due then can only run after the Put returns and no record
+// is left stored. This row runs the Delete after the Put, not inside its window;
+// that Delete itself takes the lock is proved by
+// TestAheadStoreDeleteRemovesUnderTheStoreLock, which removes without it.
 func TestAheadStoreDeleteHoldsThePutLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

@@ -88,7 +88,10 @@ func TownAheadStore(townRoot, rig string) *AheadStore {
 // aheadStoreLocks holds one lock per record path, under aheadStoreMu. Put's
 // read-compare-write and Delete hold their bead's lock, so an older Put cannot
 // overwrite a newer record and a Delete is not undone by a Put (gt-guahwz).
-// Package-level, since Put takes a store copy; it orders writers in this process.
+// Package-level, since Put takes a store copy; it orders writers in this process
+// only (a second process writing the same file is not ordered by it). The map
+// holds one small mutex per bead the process has stored and is never pruned: its
+// size is bounded by the number of beads, which the landing worker closes out.
 var aheadStoreMu sync.Mutex
 var aheadStoreLocks = map[string]*sync.Mutex{}
 
@@ -121,8 +124,9 @@ func (s AheadStore) Put(rec AheadRecord) error {
 		return err
 	}
 	// The comparison and the write share one lock hold (gt-guahwz).
-	aheadStoreLock(path).Lock()
-	defer aheadStoreLock(path).Unlock()
+	lock := aheadStoreLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 	stored, err := s.recordAt(path)
 	if err != nil {
 		return err
@@ -221,8 +225,9 @@ func (s AheadStore) Delete(bead string) error {
 	}
 	// Delete takes its bead's Put lock, so a remove that ran between a Put's read
 	// and its write cannot be undone by that Put writing the record back (gt-guahwz).
-	aheadStoreLock(path).Lock()
-	defer aheadStoreLock(path).Unlock()
+	lock := aheadStoreLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
