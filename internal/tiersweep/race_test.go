@@ -138,6 +138,31 @@ func TestRaceTierRunsEveryEntryAndSumsTheirCounts(t *testing.T) {
 	}
 }
 
+// TestRaceTierRunsEveryPackageOfOneEntry: an entry that names several packages
+// runs each with the entry's args and label, so a package after the first is
+// run, counted and named rather than silently dropped (gt-yznnu5).
+func TestRaceTierRunsEveryPackageOfOneEntry(t *testing.T) {
+	t.Parallel()
+	entry := raceRun{pkgs: []string{"./one", "./two"}, args: []string{"-race", "-run", "Shared"}, label: "shared"}
+	fake := &fakeTier{codes: map[string]int{". ./two": 1}}
+	s := raceSweep(t, fake)
+	line, red := s.raceTier([]raceRun{entry})
+	want := fmt.Sprintf("tier-sweep: race RED passed=1 failed=1 skipped=0 failed: ./two~shared (logs %s) in 0s", s.Opts.LogDir)
+	if line != want || !red {
+		t.Errorf("raceTier(%v) = %q, %v; want %q, true", []raceRun{entry}, line, red, want)
+	}
+	if got, want := fake.testRuns(), []string{". ./one", ". ./two"}; !slices.Equal(got, want) {
+		t.Errorf("raceTier(%v) ran %q, want %q", []raceRun{entry}, got, want)
+	}
+	head := []string{"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1", "go", "test", "-count=1", "-timeout", "7m"}
+	for _, pkg := range entry.pkgs {
+		want := append(append(append([]string{}, head...), entry.args...), pkg)
+		if got := goTestCall(t, fake, ".", pkg); !reflect.DeepEqual(got, want) {
+			t.Errorf("race ran %s as %q, want %q", pkg, got, want)
+		}
+	}
+}
+
 // TestRaceTierKeepsTwoEntriesOnOnePackageApart: a labeled entry keeps its own
 // log file and resume key from another entry on the same package, an empty
 // label keeps the name it has today, and a bad label is refused before any run.
