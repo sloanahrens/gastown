@@ -27,8 +27,8 @@ const (
 	// KindCacheTrimNoOp: a shared cache trim completed and its claim still
 	// holds more than twice the cap, so the Job may have run the wrong
 	// helper (gt-gg9hv.46), or a sweep cache claim that ended over its cap;
-	// a later finished sweep run that ends under the cap clears that item
-	// (gt-gi6o1j).
+	// a later finished sweep run whose cache-trim record is zero or missing
+	// clears that item (gt-gi6o1j).
 	KindCacheTrimNoOp Kind = "cache-trim-noop"
 	// KindRejectedTwice: a bead was rejected by landing twice.
 	KindRejectedTwice Kind = "rejected-twice"
