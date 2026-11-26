@@ -53,6 +53,27 @@ func TestNodeImagePruneLastReadTrims(t *testing.T) {
 	}
 }
 
+// A record the write could not have produced is an error, not an id: an empty
+// file or a malformed id read back as an error so the prune never compares, or
+// acts on, an id it does not understand. Only a missing file is "no run yet".
+func TestNodeImagePruneLastReadRefusesBadRecord(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ name, content string }{
+		{"empty", ""},
+		{"whitespace only", " \n\t\n"},
+		{"slash", "run/1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			town := t.TempDir()
+			writeLastRecord(t, town, tt.content)
+			if id, err := readNodeImagePruneLast(town); err == nil {
+				t.Fatalf("readNodeImagePruneLast() = %q, nil, want an error for the record %q", id, tt.content)
+			}
+		})
+	}
+}
+
 // A written id reads back, and the file holds it at mode 0600.
 func TestNodeImagePruneLastRoundTrip(t *testing.T) {
 	t.Parallel()
