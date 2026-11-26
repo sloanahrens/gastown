@@ -2,16 +2,20 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // TestDeferredBookkeepingWiring: a listed rig's Lander gets the deferred flag
@@ -233,5 +237,107 @@ func TestDeferredBookkeepingHold(t *testing.T) {
 
 		releaseJob()
 		waitForSignal(t, idle, "the hold waking after the queued job ended")
+	})
+}
+
+// escalatingNotifier forwards each escalation to the embedded notifier and
+// signals sent for each one it accepts, so a test waits instead of polling.
+type escalatingNotifier struct {
+	notify.Notifier
+	sent chan struct{}
+}
+
+func (n *escalatingNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	err := n.Notifier.Escalate(ctx, e)
+	if err == nil {
+		select {
+		case n.sent <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// overdueBookRig builds a daemon whose rig "gastown" is wired for deferred
+// bookkeeping, with its escalations recorded and signalled.
+func overdueBookRig(t *testing.T) (*landworker.Worker, *notifyfake.Recorder, chan struct{}) {
+	t.Helper()
+	rec := notifyfake.New()
+	sent := make(chan struct{}, 4)
+	d := &Daemon{
+		logger:   discardLogger,
+		config:   &Config{TownRoot: t.TempDir()},
+		notifier: &escalatingNotifier{Notifier: rec, sent: sent},
+	}
+	cfg := &config.LandingWorkerConfig{DeferredBookkeeping: &config.DeferredBookkeepingConfig{Rigs: []string{"gastown"}}}
+	worker := &landworker.Worker{}
+	d.wireBookQueue("gastown", cfg, &land.Lander{}, worker)
+	if worker.Books == nil || worker.Books.Overdue == nil {
+		t.Fatal("the listed rig's BookQueue has no Overdue hook; a hung job would reach only the daemon log")
+	}
+	return worker, rec, sent
+}
+
+// TestDeferredBookkeepingOverdue: a job past its bound raises one escalation
+// naming the rig, the bead and the bound, under a key per bead (gt-mxfezc).
+func TestDeferredBookkeepingOverdue(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the wired hook escalates with the rig, the bead and the bound", func(t *testing.T) {
+		t.Parallel()
+		worker, rec, sent := overdueBookRig(t)
+
+		worker.Books.Overdue("gt-hung", 37*time.Minute)
+		waitForSignal(t, sent, "the escalation for the overdue job")
+
+		got := rec.Escalations()
+		if len(got) != 1 {
+			t.Fatalf("escalations = %+v, want one", got)
+		}
+		e := got[0].Escalation
+		if want := bookOverdueAlertKey("gt-hung"); e.Fingerprint != want {
+			t.Errorf("fingerprint = %q, want %q", e.Fingerprint, want)
+		}
+		for _, want := range []string{"gt-hung", "gastown", "37m0s"} {
+			if !strings.Contains(e.Reason, want) {
+				t.Errorf("the escalation's reason %q does not name %q", e.Reason, want)
+			}
+		}
+	})
+
+	t.Run("a job held past the bound reaches the escalation through the queue", func(t *testing.T) {
+		t.Parallel()
+		worker, rec, sent := overdueBookRig(t)
+		clk := newFixedClock()
+		worker.Books.Clock = clk
+
+		ctx := t.Context()
+		started, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseJob := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseJob) // unblock the drain however the test ends
+		worker.Books.Add("gt-hung", func() {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		waitForSignal(t, started, "the queued job starting")
+
+		// Advance only once the drain waits on the clock, and bound that wait
+		// so a drain that stops waiting fails here instead of hanging.
+		waitCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if err := clk.BlockUntilContext(waitCtx, 1); err != nil {
+			t.Fatalf("the queue never waited on the clock for the job's bound: %v", err)
+		}
+		clk.Advance(24 * time.Hour)
+
+		waitForSignal(t, sent, "the escalation for the job held past the bound")
+		got := rec.Escalations()
+		if len(got) != 1 || got[0].Escalation.Fingerprint != bookOverdueAlertKey("gt-hung") {
+			t.Fatalf("escalations = %+v, want one keyed for gt-hung", got)
+		}
 	})
 }
