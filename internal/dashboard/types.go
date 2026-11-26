@@ -323,6 +323,7 @@ type OMWindow struct {
 	Skipped    int      `json:"skipped"` // landed without a review (an operator route)
 	Errors     int      `json:"errors"`  // review did not run or failed
 	Rejected   int      `json:"rejected"`
+	Reused     int      `json:"reused"` // landings that reused a stored review instead of running om
 	AvgScore   *float64 `json:"avg_score,omitempty"`
 	MedianSecs *float64 `json:"median_secs,omitempty"`
 	P95Secs    *float64 `json:"p95_secs,omitempty"`

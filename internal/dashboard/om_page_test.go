@@ -1,9 +1,29 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// A window's reused count rides beside its neighbouring counts under `reused`
+// (gt-lz4gu3): the landings that reused a stored review instead of running om
+// are counted apart from the ones it ran.
+func TestReviewPoolOMWindowReusedJSON(t *testing.T) {
+	t.Parallel()
+
+	b, err := json.Marshal(OMWindow{Reused: 2})
+	if err != nil {
+		t.Fatalf("marshal OMWindow: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal OMWindow: %v", err)
+	}
+	if got["reused"] != float64(2) {
+		t.Errorf("OMWindow{Reused: 2} marshals reused as %v, want 2 (json: %s)", got["reused"], b)
+	}
+}
 
 // The om panel opens with what is running now and the last five om ran, then
 // folds its Stats, Rework and Scores sections under details/summary lines built
