@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
@@ -508,4 +510,95 @@ func TestEventsPageReader(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestExportEventsFullPaged: the full export reads the table page by page into
+// dir's shards, and every page is charged to the one budget (gt-zchz8m).
+func TestExportEventsFullPaged(t *testing.T) {
+	t.Parallel()
+	// A page's keyset id must be an events row id, a UUID.
+	id := func(n int) string { return fmt.Sprintf("11111111-1111-1111-1111-11111111111%d", n) }
+	rows := []string{
+		eventsLine(id(1), "2026-10-31 10:00:00"),
+		eventsLine(id(2), "2026-10-31 10:00:01"),
+		eventsLine(id(3), "2026-10-31 10:00:01"),
+		eventsLine(id(4), "2026-10-31 10:00:02"),
+		eventsLine(id(5), "2026-10-31 10:00:03"),
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+
+	for _, tc := range []struct {
+		name        string
+		ctx         context.Context // the daemon's; nil as in a daemon that never ran
+		pageTime    time.Duration   // what each page's export takes
+		wantBudgets []time.Duration
+		wantWritten int
+		wantErr     string
+	}{
+		{
+			name:        "five rows in pages of two",
+			pageTime:    20 * time.Second,
+			wantBudgets: []time.Duration{time.Minute, 40 * time.Second, 20 * time.Second},
+			wantWritten: 5,
+		},
+		{
+			name:        "the pages spend the budget",
+			pageTime:    30 * time.Second,
+			wantBudgets: []time.Duration{time.Minute, 30 * time.Second},
+			wantWritten: 4,
+			wantErr:     "spent its 1m0s budget",
+		},
+		{name: "the daemon is stopping", ctx: stopped, wantErr: context.Canceled.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, dir := eventsPageReaderDaemon(t)
+			clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+			d.clock, d.ctx = clk, tc.ctx
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			var budgets []time.Duration
+			var queries, wantQueries []string
+			exportTable := func(table string, q beadsql.Query, stage, dataDir string, budget time.Duration) (int, error) {
+				// A call past the fixture gets an empty page, so the budgets compare fails it.
+				from := min(2*len(budgets), len(rows))
+				page := &eventsPageExport{rows: rows[from:min(from+2, len(rows))]}
+				budgets = append(budgets, budget)
+				n, err := page.export(table, q, stage, dataDir, budget)
+				queries = append(queries, page.queries...)
+				clk.Advance(tc.pageTime)
+				return n, err
+			}
+
+			written, err := d.exportEventsFullPaged(osEventsExportOps(), "gt", dir, "/data", time.Minute, 2, exportTable)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("export: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("export error = %v, want %q", err, tc.wantErr)
+			}
+			if written != tc.wantWritten {
+				t.Errorf("written = %d, want %d", written, tc.wantWritten)
+			}
+			if !slices.Equal(budgets, tc.wantBudgets) {
+				t.Errorf("page budgets = %v, want %v", budgets, tc.wantBudgets)
+			}
+			after := []eventsPageCall{{"", "", 2}, {"2026-10-31 10:00:01", id(2), 2}, {"2026-10-31 10:00:02", id(4), 2}}
+			for _, c := range after[:min(len(tc.wantBudgets), len(after))] {
+				want, err := beadsql.BackupEventsPage("gt", c.afterCreatedAt, c.afterID, c.limit).Inline()
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantQueries = append(wantQueries, want)
+			}
+			if !slices.Equal(queries, wantQueries) {
+				t.Errorf("queries = %q, want %q", queries, wantQueries)
+			}
+			if got := eventsExportLines(t, dir); !slices.Equal(got, rows[:tc.wantWritten]) {
+				t.Errorf("the export holds %q, want %q", got, rows[:tc.wantWritten])
+			}
+		})
+	}
 }
