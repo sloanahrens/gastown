@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/land"
@@ -15,6 +16,13 @@ const (
 	gateThrottleWindow = 3
 	gateThrottlePrefix = "gate-throttle-unread:" // keys every gate-throttle-unread item
 )
+
+// gateThrottleOwned picks the gate-throttle-unread items out of the previous
+// items a failed read keeps: the kind and the key prefix both have to match
+// (gt-hnd1kj).
+func gateThrottleOwned(it attention.Item) bool {
+	return it.Kind == attention.KindGateThrottleUnread && strings.HasPrefix(it.Key, gateThrottlePrefix)
+}
 
 // gateThrottleItems returns rig's gate-throttle-unread item, or none. It holds
 // when the rig's last gateThrottleWindow runs all carry RunnerPeriods below
