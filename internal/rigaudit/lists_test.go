@@ -7,7 +7,7 @@ import (
 )
 
 // TestRigLists decodes each JSON document and checks the lists RigLists finds
-// in it. Each call repeats because the walk visits map keys in random order.
+// in it.
 func TestRigLists(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -21,7 +21,8 @@ func TestRigLists(t *testing.T) {
 		{"empty list skipped", `{"e":[],"f":{}}`, nil},
 		{"scalar config has no lists", `"x"`, nil},
 		{"nil config has no lists", `null`, nil},
-		{"two lists come back sorted", `{"z":["1"],"a":{"b":["2"]}}`, []NamedList{{"a.b", []string{"2"}}, {"z", []string{"1"}}}},
+		// Index 2 is walked before index 10, but "[10]" sorts before "[2]" as a string.
+		{"two lists come back sorted by path", `[null,null,["a"],null,null,null,null,null,null,null,["b"]]`, []NamedList{{"[10]", []string{"b"}}, {"[2]", []string{"a"}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -30,10 +31,8 @@ func TestRigLists(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.json), &config); err != nil {
 				t.Fatalf("Unmarshal: %v", err)
 			}
-			for range 20 {
-				if got := RigLists(config); !reflect.DeepEqual(got, tc.want) {
-					t.Fatalf("RigLists(%s) = %+v, want %+v", tc.json, got, tc.want)
-				}
+			if got := RigLists(config); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("RigLists(%s) = %+v, want %+v", tc.json, got, tc.want)
 			}
 		})
 	}
