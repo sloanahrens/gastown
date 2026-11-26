@@ -1125,30 +1125,31 @@ func TestTownClusterDriftHoldsARunnerInStep(t *testing.T) {
 
 // TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota holds the recorded
 // cluster's dind request of 4 and limit of 8 to a render of 6 for both, which is one
-// line for the cpu request and one for the limit, and one for config.yml, whose
-// quota is that same limit.
+// line for the cpu request and one for the limit, and the changed line of
+// config.yml, whose quota is that same limit, as a '-' and a '+' line.
 func TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota(t *testing.T) {
 	t.Parallel()
 	recorded := driftRunnerRecorded(t)
 	six := driftControlRunner(t, "6")
-	sixManifests, err := forgejorunner.Build(six)
-	if err != nil {
+	if _, err := forgejorunner.Build(six); err != nil {
 		t.Fatalf("rendering the runner from a dind share of 6: %v", err)
 	}
-	recordedConfig := recorded["configmap/"+forgejorunner.Name+"-config"]["data"].(map[string]any)["config.yml"].(string)
 	deploymentLine := "deployment/" + forgejorunner.Name + ": "
+	configLine := "configmap/" + forgejorunner.Name + "-config: "
 	d, out, town := driftTestSeams(t, nil)
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
 	d.runner = driftRunnerRendering(t, six)
 	d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), recorded)
-	err = runClusterDrift(context.Background(), d)
+	err := runClusterDrift(context.Background(), d)
 	if got := driftExit(err); got != 1 {
 		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 	}
 	wantLines := []string{
 		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.limits.cpu", "6", "8"),
 		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "6", "4"),
-		"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", sixManifests.ConfigMap.Data["config.yml"], recordedConfig),
+		configLine + "data.config.yml:",
+		configLine + "-     CI_CPU_QUOTA: '8'",
+		configLine + "+     CI_CPU_QUOTA: '6'",
 	}
 	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
@@ -1257,13 +1258,12 @@ func mustBuildRunner(t *testing.T, v forgejorunner.Values) forgejorunner.Manifes
 }
 
 // TestTownClusterDriftReportsTheRunnersConfig holds a recorded ConfigMap whose
-// config.yml differs to one line naming data.config.yml and a fingerprint of
-// each side, with the document's text nowhere in the output.
+// config.yml differs on one line to the header naming data.config.yml and the
+// changed line as a '-' and a '+' line, and no other line of the document.
 func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 	t.Parallel()
 	d, out, town := driftTestSeams(t, nil)
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
-	renderedConfig := mustBuildRunner(t, driftControlRunner(t, "")).ConfigMap.Data["config.yml"]
 	live := driftRecordedObject(t, driftRunnerConfigFixture)
 	recordedConfig := live["data"].(map[string]any)["config.yml"].(string)
 	liveConfig := strings.Replace(recordedConfig, "capacity: 3", "capacity: 2", 1)
@@ -1278,22 +1278,14 @@ func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 	if got := driftExit(err); got != 1 {
 		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 	}
-	wantLines := []string{"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", renderedConfig, liveConfig)}
+	wantLines := []string{
+		"configmap/" + forgejorunner.Name + "-config: data.config.yml:",
+		"configmap/" + forgejorunner.Name + "-config: -   capacity: 2",
+		"configmap/" + forgejorunner.Name + "-config: +   capacity: 3",
+	}
 	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
 		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
-	}
-	if strings.Contains(out.String(), "capacity") {
-		t.Errorf("printed the config.yml text, want paths and fingerprints only:\n%s", out.String())
-	}
-	notCompared := driftSecretLines(t)
-	for _, line := range driftLines(out) {
-		if slices.Contains(notCompared, line) {
-			continue
-		}
-		if !driftLineShape.MatchString(line) {
-			t.Errorf("line %q is not a path and two fingerprints", line)
-		}
 	}
 }
 

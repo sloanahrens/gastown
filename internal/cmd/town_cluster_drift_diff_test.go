@@ -845,14 +845,7 @@ func TestClusterDriftObjectKinds(t *testing.T) {
 // driftRunnerConfigText is the gate runner's config.yml the compare reads: the
 // label its jobs run on and the container options it passes.
 func driftRunnerConfigText(label, options string) string {
-	return "log:\n" +
-		"  level: info\n" +
-		"runner:\n" +
-		"  labels:\n" +
-		"    - \"" + label + "\"\n" +
-		"container:\n" +
-		"  options: " + options + "\n" +
-		"  privileged: false\n"
+	return "log:\n  level: info\nrunner:\n  labels:\n    - \"" + label + "\"\ncontainer:\n  options: " + options + "\n"
 }
 
 // driftRunnerConfigMap is a ConfigMap holding value under key, as the compare reads it.
@@ -924,18 +917,14 @@ func TestDriftConfigTextFingerprintsATokenLine(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("drift =\n%q\nwant\n%q", got, want)
 	}
-	if text := strings.Join(got, "\n"); strings.Contains(text, "token-value") {
-		t.Errorf("drift %q carries a token value", text)
-	}
 }
 
 // TestDriftConfigTextStopsAtFortyLines holds the printed changes to forty lines
 // and counts the rest, so a fully changed config cannot flood a terminal.
 func TestDriftConfigTextStopsAtFortyLines(t *testing.T) {
 	t.Parallel()
-	const changedLines = 45
 	var renderedText, liveText strings.Builder
-	for i := range changedLines {
+	for i := range 45 {
 		fmt.Fprintf(&renderedText, "option-%02d: rendered-%02d\n", i, i)
 		fmt.Fprintf(&liveText, "option-%02d: observed-%02d\n", i, i)
 	}

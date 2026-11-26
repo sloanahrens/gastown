@@ -82,8 +82,7 @@ func objectDriftLines(rendered, live map[string]any, runnerConfig bool) ([]strin
 type driftWalk struct {
 	drift []string
 	err   error
-	// runnerConfig marks the gate runner's ConfigMap, whose config.yml prints
-	// changed lines; text holds those lines, after drift.
+	// runnerConfig marks the gate runner's ConfigMap; text holds its changed lines.
 	runnerConfig bool
 	text         []string
 }
@@ -206,8 +205,7 @@ func (w *driftWalk) keyedList(path, keyField string, rendered, live []any) bool 
 	return true
 }
 
-// difference records a field the two decodings carry differently, or the
-// changed lines of the runner config's text.
+// difference records a field the two decodings carry differently, or a config text.
 func (w *driftWalk) difference(path string, rendered, live any) {
 	if w.runnerConfig && path == runnerConfigPath && w.configText(path, rendered, live) {
 		return
@@ -252,8 +250,7 @@ func (w *driftWalk) record(path, renderedText, observed string) {
 	w.drift = append(w.drift, path+": rendered "+renderedText+", observed "+observed)
 }
 
-// runnerConfigPath is the gate runner's config.yml, the one text a drift line
-// prints (gt-svm7ds).
+// runnerConfigPath is the gate runner's config.yml, whose changed lines print.
 const runnerConfigPath = "data.config.yml"
 
 // runnerConfigMapName is the gate runner's ConfigMap, as the render names it.
@@ -262,12 +259,10 @@ const runnerConfigMapName = forgejorunner.Name + "-config"
 // configTextLineLimit is how many changed lines a runner config drift prints.
 const configTextLineLimit = 40
 
-// configTextCellLimit bounds the line-diff table (rows times columns); a larger
-// diff is fingerprinted instead.
+// configTextCellLimit bounds the line-diff table; a larger diff is fingerprinted.
 const configTextCellLimit = 1 << 20
 
-// configTextSecretWord matches a line naming a token, secret, password or key,
-// case-insensitively, so FORGEJO_TOKEN counts.
+// configTextSecretWord matches a token, secret, password or key, any case.
 var configTextSecretWord = regexp.MustCompile(`(?i)token|secret|password|key`)
 
 // runnerConfigObject reports whether rendered is the gate runner's ConfigMap,
