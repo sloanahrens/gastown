@@ -15,10 +15,12 @@ const gatewayCapKey = "bd-gateway-cap-hit"
 // gatewayCapReading is what one tick's /v1/stats read says about the gateway's
 // concurrency cap: Raise when it refused calls at the cap since the previous
 // tick, Refused the growth of those refusals, Peak the read's PeakInFlight.
+// AbsentFirst is true on the run's first read whose body carried no cap fields.
 type gatewayCapReading struct {
-	Raise   bool
-	Refused uint64
-	Peak    int
+	Raise       bool
+	Refused     uint64
+	Peak        int
+	AbsentFirst bool
 }
 
 // gatewayCapTracker decides, tick by tick, whether the gateway refused calls at
@@ -26,17 +28,21 @@ type gatewayCapReading struct {
 // State lives in memory for one daemon run. The tracker is not safe for
 // concurrent use: its collector owns the lock.
 type gatewayCapTracker struct {
-	seen bool
-	last uint64
+	seen       bool
+	last       uint64
+	absentSeen bool
 }
 
 // observe records one stats read and reports the growth of TooManyCalls since
 // the previous read. A counter that did not grow, or dropped, raises nothing.
 // A read whose body carried no cap fields (CapsPresent false) raises nothing
-// and leaves the base unchanged: its zero counters are not a sample.
+// and leaves the base unchanged: its zero counters are not a sample. The first
+// such read of the run sets AbsentFirst; later ones do not.
 func (t *gatewayCapTracker) observe(s bdgateway.GatewayStats) gatewayCapReading {
 	if !s.CapsPresent {
-		return gatewayCapReading{}
+		first := !t.absentSeen
+		t.absentSeen = true
+		return gatewayCapReading{AbsentFirst: first}
 	}
 	reading := gatewayCapReading{Peak: s.PeakInFlight}
 	if t.seen && s.TooManyCalls > t.last {

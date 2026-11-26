@@ -84,14 +84,14 @@ func TestGatewayCapTrackerAbsentRaisesNothing(t *testing.T) {
 			name: "an absent read raises nothing and the next present read raises from the old base",
 			reads: []read{
 				{tooManyCalls: 0, peak: 2, want: gatewayCapReading{Peak: 2}},
-				{absent: true, tooManyCalls: 9, want: gatewayCapReading{}},
+				{absent: true, tooManyCalls: 9, want: gatewayCapReading{AbsentFirst: true}},
 				{tooManyCalls: 3, peak: 5, want: gatewayCapReading{Raise: true, Refused: 3, Peak: 5}},
 			},
 		},
 		{
 			name: "an absent first read does not set the base",
 			reads: []read{
-				{absent: true, tooManyCalls: 0, want: gatewayCapReading{}},
+				{absent: true, tooManyCalls: 0, want: gatewayCapReading{AbsentFirst: true}},
 				{tooManyCalls: 3, peak: 1, want: gatewayCapReading{Peak: 1}},
 				{tooManyCalls: 4, peak: 1, want: gatewayCapReading{Raise: true, Refused: 1, Peak: 1}},
 			},
@@ -108,6 +108,69 @@ func TestGatewayCapTrackerAbsentRaisesNothing(t *testing.T) {
 				if got != r.want {
 					t.Fatalf("read %d: observe(absent=%v, TooManyCalls=%d, PeakInFlight=%d) = %+v, want %+v",
 						i, r.absent, r.tooManyCalls, r.peak, got, r.want)
+				}
+			}
+		})
+	}
+}
+
+// TestGatewayCapTrackerAbsentOnce: the first read with no cap fields sets
+// AbsentFirst; no later absent read sets it again, and a present read between
+// them does not reset it. The tracker lives for one daemon run, so the flag
+// stays set for that run.
+func TestGatewayCapTrackerAbsentOnce(t *testing.T) {
+	t.Parallel()
+	type read struct {
+		absent       bool
+		tooManyCalls uint64
+		wantFirst    bool
+	}
+	cases := []struct {
+		name  string
+		reads []read
+	}{
+		{
+			name: "the first absent read sets AbsentFirst and a second absent read does not",
+			reads: []read{
+				{absent: true, wantFirst: true},
+				{absent: true, wantFirst: false},
+			},
+		},
+		{
+			name: "a present read between absent reads does not reset AbsentFirst",
+			reads: []read{
+				{absent: true, wantFirst: true},
+				{tooManyCalls: 2, wantFirst: false},
+				{absent: true, wantFirst: false},
+			},
+		},
+		{
+			name: "an absent read after present reads sets AbsentFirst once",
+			reads: []read{
+				{tooManyCalls: 0, wantFirst: false},
+				{absent: true, wantFirst: true},
+				{absent: true, wantFirst: false},
+			},
+		},
+		{
+			name: "a run with no absent read never sets AbsentFirst",
+			reads: []read{
+				{tooManyCalls: 0, wantFirst: false},
+				{tooManyCalls: 2, wantFirst: false},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var tracker gatewayCapTracker
+			for i, r := range tc.reads {
+				got := tracker.observe(bdgateway.GatewayStats{
+					TooManyCalls: r.tooManyCalls, CapsPresent: !r.absent,
+				})
+				if got.AbsentFirst != r.wantFirst {
+					t.Fatalf("read %d: observe(absent=%v, TooManyCalls=%d).AbsentFirst = %v, want %v",
+						i, r.absent, r.tooManyCalls, got.AbsentFirst, r.wantFirst)
 				}
 			}
 		})
