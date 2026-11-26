@@ -348,3 +348,131 @@ func TestVerdictReuseAskLogsTheReason(t *testing.T) {
 		})
 	}
 }
+
+// reuseLandReviewer answers om's version probe and runs the fixture's fake
+// review, so a test counts the reviews a landing runs (gt-er929x).
+type reuseLandReviewer struct {
+	*fakeReviewer
+	version string
+}
+
+func (r reuseLandReviewer) OMVersion(context.Context, ReviewInput) string { return r.version }
+
+// reuseLandSetup is a landing whose om stage can reuse a stored review: the
+// keyFixture's base and work, a review-ahead store the landing reads, and a
+// reviewer that counts the reviews it runs. It also returns the review key the
+// landing computes for its work.
+func reuseLandSetup(t *testing.T) (*landFixture, *Lander, *AheadStore, ReviewKey) {
+	t.Helper()
+	f, l, wt := keyFixture(t)
+	l.Reviewer = reuseLandReviewer{fakeReviewer: f.review, version: stubOMVersion}
+	store := TownAheadStore(f.town, "gastown")
+	store.Now = l.Now
+	l.Ahead = store
+	l.ReuseExpiry = time.Hour
+	return f, l, store, reuseLandKey(t, f, l, wt)
+}
+
+// reuseLandKey is the review key the landing's om stage computes for f's work.
+// The input is built the way the stage builds it, from the bead as it stands
+// before the landing writes anything. The digest covers neither the merge
+// commit nor the landing's directory. The fixture's work already sits on base,
+// so the head's patch-id and changed paths are the merge's, and the head
+// stands in for the merge.
+func reuseLandKey(t *testing.T, f *landFixture, l *Lander, wt Repo) ReviewKey {
+	t.Helper()
+	issue := f.bead()
+	op := l.operatorConfig(f.work.BeadID)
+	accepted, _ := l.acceptedRisks(f.work.BeadID, op)
+	in := BuildReviewInput(issue, l.beadComments(issue), op, accepted, l.roundsText(f.work.BeadID), f.base, f.work.Head, f.work.Branch, "", wt)
+	key, _, err := l.reviewKey(context.Background(), wt, wt, f.work, in, f.base, f.work.Head)
+	if err != nil {
+		t.Fatalf("reviewKey error = %v; want nil", err)
+	}
+	return key
+}
+
+// TestVerdictReuseLandApproveSkipsOM: a landing whose work has a matching stored
+// approve runs no om review, does not call UsageSink, and lands on the stored
+// verdict stamped with the om its key names (gt-er929x). Ignoring the hit runs
+// one review, which turns the review count red.
+func TestVerdictReuseLandApproveSkipsOM(t *testing.T) {
+	t.Parallel()
+	f, l, store, key := reuseLandSetup(t)
+	if err := store.Put(reuseAskRecord(key, f.base, l.now().Add(-time.Minute))); err != nil {
+		t.Fatalf("Put error = %v; want nil", err)
+	}
+	usages := 0
+	l.UsageSink = func(context.Context, ReviewUsage) { usages++ }
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land error = %v; want nil", err)
+	}
+	if n := len(f.review.calls); n != 0 {
+		t.Errorf("om ran %d time(s) with a matching stored approve; want 0", n)
+	}
+	if usages != 0 {
+		t.Errorf("UsageSink was called %d time(s) on a reused verdict; want 0", usages)
+	}
+	if res.Verdict.Verdict != VerdictApprove || res.Verdict.Version != stubOMVersion {
+		t.Errorf("Land verdict = %+v; want the stored approve stamped with %s", res.Verdict, stubOMVersion)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Errorf("origin/main = %s; want the landed commit %s", got, res.LandedCommit)
+	}
+}
+
+// TestVerdictReuseLandMissRunsInline: a stored review that does not answer for
+// this landing (another head, an expired record) and an answer reuseAhead could
+// not give (an unreadable record) each leave the om stage to run om once, and
+// the landing still lands (gt-er929x).
+func TestVerdictReuseLandMissRunsInline(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// seed stores a record for the work, edited by edit; without it the
+		// store holds nothing and edit changes the landing's own store.
+		seed bool
+		edit func(l *Lander, rec *AheadRecord)
+	}{
+		{
+			name: "a different head",
+			seed: true,
+			edit: func(_ *Lander, rec *AheadRecord) { rec.Head = strings.Repeat("cd", 20) },
+		},
+		{
+			name: "an expired record",
+			seed: true,
+			edit: func(_ *Lander, rec *AheadRecord) { rec.ReviewedAt = rec.ReviewedAt.Add(-2 * time.Hour) },
+		},
+		{
+			name: "a reuseAhead error",
+			edit: func(l *Lander, _ *AheadRecord) {
+				l.Ahead.readFile = func(string) ([]byte, error) { return []byte("{not a record"), nil }
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, store, key := reuseLandSetup(t)
+			rec := reuseAskRecord(key, f.base, l.now().Add(-time.Minute))
+			tc.edit(l, &rec)
+			if tc.seed {
+				if err := store.Put(rec); err != nil {
+					t.Fatalf("Put error = %v; want nil", err)
+				}
+			}
+			res, err := l.Land(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("Land error = %v; want nil", err)
+			}
+			if n := len(f.review.calls); n != 1 {
+				t.Errorf("om ran %d time(s) for %s; want 1, run inline", n, tc.name)
+			}
+			if got := f.originMain(); got != res.LandedCommit {
+				t.Errorf("origin/main = %s; want the landed commit %s", got, res.LandedCommit)
+			}
+		})
+	}
+}
