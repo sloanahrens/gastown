@@ -317,9 +317,86 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 					t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", lander, want)
 				}
 			}
-			// The Worker is a later bead's wiring target; this one leaves it alone.
+			// A listed rig's Worker gets the pool and the store behind it
+			// (gt-sywmws); an unlisted rig leaves the Worker as it was built.
+			if !tc.wantOn {
+				if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+					t.Fatalf("rig not listed changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+				}
+			} else if worker.Pool == nil || worker.Stored == nil {
+				t.Fatalf("listed rig got Pool %v, Stored %v; want both set", worker.Pool, worker.Stored)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringOnSetsTheWorker pins the pool a listed rig's Worker
+// gets: it reviews through the Lander, reads its hints from the same store the
+// landing reads, runs the config's number of reviews at once, and logs where
+// the landing logs (gt-sywmws).
+func TestReviewPoolWiringOnSetsTheWorker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		pool    *config.ReviewPoolConfig
+		wantMax int
+	}{
+		{
+			name:    "default max",
+			pool:    &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			wantMax: 3,
+		},
+		{
+			name:    "configured max",
+			pool:    &config.ReviewPoolConfig{Rigs: []string{"gastown"}, MaxConcurrent: 5},
+			wantMax: 5,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+			var landingLog bytes.Buffer
+			worker.Logf = log.New(&landingLog, "", 0).Printf
+			env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
+
+			if want := land.TownAheadStore("/sentinel/town", "gastown"); !reflect.DeepEqual(worker.Stored, want) {
+				t.Fatalf("Stored = %+v; want the Lander's ahead store %+v", worker.Stored, want)
+			}
+			if worker.Pool == nil {
+				t.Fatal("the pool is on for the rig but the Worker got no pool")
+			}
+			if worker.Pool.Reviewer != lander {
+				t.Fatalf("Pool.Reviewer = %+v; want the rig's Lander %+v", worker.Pool.Reviewer, lander)
+			}
+			if !reflect.DeepEqual(worker.Pool.Hints, worker.Stored) {
+				t.Fatalf("Pool.Hints = %+v; want the store the Worker records into %+v", worker.Pool.Hints, worker.Stored)
+			}
+			if worker.Pool.Max != tc.wantMax {
+				t.Fatalf("Pool.Max = %d; want the config's %d", worker.Pool.Max, tc.wantMax)
+			}
+			if worker.Pool.Logf == nil {
+				t.Fatal("Pool.Logf is nil; want the landing log so a review's lines are seen")
+			}
+			worker.Pool.Logf("probe: %d", 1)
+			if got, want := landingLog.String(), "probe: 1\n"; got != want {
+				t.Fatalf("Pool.Logf wrote %q to the landing log; want %q", got, want)
+			}
+			// Only the two pool fields may move: with them and the injected
+			// log cleared, the Worker must be the one the daemon built.
+			worker.Stored, worker.Pool, worker.Logf = nil, nil, nil
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
-				t.Fatalf("wiring changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+				t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", worker, want)
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
 			}
 		})
 	}

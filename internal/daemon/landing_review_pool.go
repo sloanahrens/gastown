@@ -32,13 +32,14 @@ type reviewPoolEnv struct {
 // runs (gt-eduozs). When the pool is on for the rig, the Lander is given the
 // rig's review-ahead store, the configured reuse expiry, and the path of om's
 // own config file, so a landing can reuse a review its queue-time twin made
-// (gt-yqoha0, gt-aovgi3).
+// (gt-yqoha0, gt-aovgi3); the Worker is given that store and the pool that
+// fills it (gt-sywmws).
 //
 // The error is the on path's when om's config file cannot be named or does not
 // exist: the wiring is undone and the pool stays off, so a failure never reads
 // as a wired pool (gt-aovgi3, gt-lfykjq).
-func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // w and workRoot are the pool's wiring targets, used by the on path a later bead of gt-s47qp4 adds
-	on, _, expiry, err := cfg.ReviewPoolFor(rig)
+func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // workRoot is a later bead's wiring target
+	on, max, expiry, err := cfg.ReviewPoolFor(rig)
 	if err != nil {
 		// A bad review_pool block fails loud and leaves the pool off: the rig
 		// keeps landing without one until the config is fixed, because the next
@@ -74,8 +75,16 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 		return fmt.Errorf("landing_worker: %s: %w", rig, err)
 	}
 	l.OMConfigPath = omPath
-	// Wiring the Worker and workRoot into the pool is a later bead of the map,
-	// gt-s47qp4.
+	// The Worker gets the pool that fills the store and the store itself as its
+	// hints, so a review that finishes while the bead queues is the verdict its
+	// landing finds. Its lines go to the log the landing writes to (gt-sywmws).
+	w.Stored = l.Ahead
+	w.Pool = &landworker.ReviewPool{
+		Reviewer: l,
+		Hints:    l.Ahead,
+		Max:      max,
+		Logf:     w.Logf,
+	}
 	return nil
 }
 
