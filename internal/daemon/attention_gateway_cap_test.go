@@ -54,10 +54,60 @@ func TestGatewayCapTrackerGrowth(t *testing.T) {
 			t.Parallel()
 			var tracker gatewayCapTracker
 			for i, r := range tc.reads {
-				got := tracker.observe(bdgateway.GatewayStats{TooManyCalls: r.tooManyCalls, PeakInFlight: r.peak})
+				got := tracker.observe(bdgateway.GatewayStats{TooManyCalls: r.tooManyCalls, PeakInFlight: r.peak, CapsPresent: true})
 				if got != r.want {
 					t.Fatalf("read %d: observe(TooManyCalls=%d, PeakInFlight=%d) = %+v, want %+v",
 						i, r.tooManyCalls, r.peak, got, r.want)
+				}
+			}
+		})
+	}
+}
+
+// TestGatewayCapTrackerAbsentRaisesNothing: a read whose body carried no cap
+// fields (CapsPresent false) is not a counter of zero. It raises nothing and
+// leaves the base where it was, so a present read after it measures growth from
+// the last present base, and a first present read after it only sets the base.
+func TestGatewayCapTrackerAbsentRaisesNothing(t *testing.T) {
+	t.Parallel()
+	type read struct {
+		absent       bool
+		tooManyCalls uint64
+		peak         int
+		want         gatewayCapReading
+	}
+	cases := []struct {
+		name  string
+		reads []read
+	}{
+		{
+			name: "an absent read raises nothing and the next present read raises from the old base",
+			reads: []read{
+				{tooManyCalls: 0, peak: 2, want: gatewayCapReading{Peak: 2}},
+				{absent: true, tooManyCalls: 9, want: gatewayCapReading{}},
+				{tooManyCalls: 3, peak: 5, want: gatewayCapReading{Raise: true, Refused: 3, Peak: 5}},
+			},
+		},
+		{
+			name: "an absent first read does not set the base",
+			reads: []read{
+				{absent: true, tooManyCalls: 0, want: gatewayCapReading{}},
+				{tooManyCalls: 3, peak: 1, want: gatewayCapReading{Peak: 1}},
+				{tooManyCalls: 4, peak: 1, want: gatewayCapReading{Raise: true, Refused: 1, Peak: 1}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var tracker gatewayCapTracker
+			for i, r := range tc.reads {
+				got := tracker.observe(bdgateway.GatewayStats{
+					TooManyCalls: r.tooManyCalls, PeakInFlight: r.peak, CapsPresent: !r.absent,
+				})
+				if got != r.want {
+					t.Fatalf("read %d: observe(absent=%v, TooManyCalls=%d, PeakInFlight=%d) = %+v, want %+v",
+						i, r.absent, r.tooManyCalls, r.peak, got, r.want)
 				}
 			}
 		})
@@ -101,7 +151,7 @@ func TestGatewayCapTrackerRestart(t *testing.T) {
 			t.Parallel()
 			var tracker gatewayCapTracker
 			for i, r := range tc.reads {
-				got := tracker.observe(bdgateway.GatewayStats{TooManyCalls: r.tooManyCalls, PeakInFlight: r.peak})
+				got := tracker.observe(bdgateway.GatewayStats{TooManyCalls: r.tooManyCalls, PeakInFlight: r.peak, CapsPresent: true})
 				if got != r.want {
 					t.Fatalf("read %d: observe(TooManyCalls=%d, PeakInFlight=%d) = %+v, want %+v",
 						i, r.tooManyCalls, r.peak, got, r.want)

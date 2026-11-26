@@ -13,7 +13,10 @@ import (
 // or the error the read returned.
 type capTick struct {
 	stats bdgateway.GatewayStats
-	err   error
+	// absent marks a body that carried no cap fields: the fake reports it with
+	// CapsPresent false. A tick without it is a present read.
+	absent bool
+	err    error
 	// wantItems is how many items the tick raises; wantSummary is the summary of
 	// the one item, when it raises one.
 	wantItems   int
@@ -55,6 +58,14 @@ func TestCollectBDGatewayCapRaises(t *testing.T) {
 			},
 		},
 		{
+			name: "an absent read raises nothing and the next present read measures from the last present base",
+			ticks: []capTick{
+				{stats: bdgateway.GatewayStats{TooManyCalls: 0, PeakInFlight: 2}},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 9, PeakInFlight: 0}, absent: true},
+				{stats: bdgateway.GatewayStats{TooManyCalls: 3, PeakInFlight: 5}, wantItems: 1, wantSummary: raised},
+			},
+		},
+		{
 			name: "a failed read is returned and the next read measures from the last good base",
 			ticks: []capTick{
 				{stats: bdgateway.GatewayStats{TooManyCalls: 0, PeakInFlight: 2}},
@@ -68,7 +79,9 @@ func TestCollectBDGatewayCapRaises(t *testing.T) {
 			t.Parallel()
 			var cur capTick
 			c := &gatewayCapCollector{stats: func(context.Context) (bdgateway.GatewayStats, error) {
-				return cur.stats, cur.err
+				s := cur.stats
+				s.CapsPresent = !cur.absent
+				return s, cur.err
 			}}
 			for i, tk := range tc.ticks {
 				cur = tk

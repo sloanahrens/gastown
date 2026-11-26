@@ -32,7 +32,12 @@ type gatewayCapTracker struct {
 
 // observe records one stats read and reports the growth of TooManyCalls since
 // the previous read. A counter that did not grow, or dropped, raises nothing.
+// A read whose body carried no cap fields (CapsPresent false) raises nothing
+// and leaves the base unchanged: its zero counters are not a sample.
 func (t *gatewayCapTracker) observe(s bdgateway.GatewayStats) gatewayCapReading {
+	if !s.CapsPresent {
+		return gatewayCapReading{}
+	}
 	reading := gatewayCapReading{Peak: s.PeakInFlight}
 	if t.seen && s.TooManyCalls > t.last {
 		reading.Raise = true
