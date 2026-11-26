@@ -74,6 +74,30 @@ func TestNodeImagePruneLastReadRefusesBadRecord(t *testing.T) {
 	}
 }
 
+// A record whose content is empty or outside the run-id shape is an error, not
+// an id: a corrupted or hand-written record must not stand in for a pruned run.
+func TestNodeImagePruneLastReadRefusesBadContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct{ name, content string }{
+		{"empty", ""},
+		{"whitespace", " \n\t"},
+		{"slash", "run/1"},
+		{"space inside", "run 1"},
+		{"dot", "run.1"},
+		{"non-ascii", "runé"},
+		{"two ids", "run-1\nrun-2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			town := t.TempDir()
+			writeLastRecord(t, town, tt.content)
+			if id, err := readNodeImagePruneLast(town); err == nil {
+				t.Fatalf("readNodeImagePruneLast() = %q, nil, want an error", id)
+			}
+		})
+	}
+}
+
 // A written id reads back, and the file holds it at mode 0600.
 func TestNodeImagePruneLastRoundTrip(t *testing.T) {
 	t.Parallel()
