@@ -529,6 +529,97 @@ func TestBuildDashPolecatsTmuxTimeWins(t *testing.T) {
 	}
 }
 
+// The dashboard reads a running seat's heartbeat through the injected reader,
+// and the row takes it as the seat's last activity. The town is a temp dir and
+// the heartbeat is never read from disk (gt-09j5gz).
+func TestDashboardPolecatsReadsHeartbeats(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	beat := time.Date(2026, 11, 26, 8, 40, 0, 0, time.UTC)
+	var askedTown, askedSession string
+	readers := dashPolecatReaders{
+		kept: func(string) (map[string]time.Time, error) { return nil, nil },
+		seats: func(_ string, _ []string, _ bool, _ *dashSeatCache, _ *gtevents.DispatchReader, _ sessionLister, _ map[string]time.Time) ([]dashSeat, error) {
+			item := dashItem(polecat.StateStalled, polecat.WorkstateDisposition{CountsTowardCapacity: true})
+			item.SessionRunning = true
+			return []dashSeat{{Rig: "gastown", Name: "ember", Session: "gt-ember", Item: item,
+				Sandbox: dashSandboxSeat{Seat: true, Sampled: true}}}, nil
+		},
+		readHeartbeat: func(townRoot, session string) *polecat.SessionHeartbeat {
+			askedTown, askedSession = townRoot, session
+			return &polecat.SessionHeartbeat{Timestamp: beat}
+		},
+	}
+	var s dashboard.Summary
+	dashboardPolecatsWith(readers, &s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+	if askedTown != town || askedSession != "gt-ember" {
+		t.Errorf("heartbeat read for (%q, %q), want (%q, %q)", askedTown, askedSession, town, "gt-ember")
+	}
+	if len(s.Polecats) != 1 || s.Polecats[0].LastActive == nil || !s.Polecats[0].LastActive.Equal(beat) {
+		t.Fatalf("polecats = %+v, want the one seat clocked by its heartbeat %v", s.Polecats, beat)
+	}
+}
+
+// Only a running seat the host tmux does not clock is read. A seat that is not
+// running and a seat tmux clocks cost no read. A seat whose heartbeat does not
+// read keeps an unknown last activity, never a zero one (gt-09j5gz).
+func TestDashboardPolecatsReadsHeartbeatsOnlyForSandboxSeats(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	beat := now.Add(-20 * time.Minute)
+	tmuxAt := now.Add(-time.Minute)
+	seat := func(name string, live bool) dashSeat {
+		item := dashItem(polecat.StateStalled, polecat.WorkstateDisposition{CountsTowardCapacity: true})
+		item.SessionRunning = live
+		return dashSeat{Rig: "gastown", Name: name, Session: "gt-" + name, Item: item,
+			Sandbox: dashSandboxSeat{Seat: true, Sampled: true}}
+	}
+	asked := map[string]bool{}
+	readers := dashPolecatReaders{
+		kept: func(string) (map[string]time.Time, error) { return nil, nil },
+		seats: func(_ string, _ []string, _ bool, _ *dashSeatCache, _ *gtevents.DispatchReader, _ sessionLister, _ map[string]time.Time) ([]dashSeat, error) {
+			return []dashSeat{
+				seat("ember", true),  // running, tmux does not clock it: read, has a heartbeat
+				seat("cinder", true), // running, tmux does not clock it: read, no heartbeat
+				seat("quill", false), // not running: not read
+				seat("forge", true),  // running, tmux clocks it: not read
+			}, nil
+		},
+		readHeartbeat: func(_, session string) *polecat.SessionHeartbeat {
+			asked[session] = true
+			if session == "gt-ember" {
+				return &polecat.SessionHeartbeat{Timestamp: beat}
+			}
+			return nil
+		},
+	}
+	var s dashboard.Summary
+	dashboardPolecatsWith(readers, &s, town, nil, map[string]time.Time{"gt-forge": tmuxAt}, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+	if len(asked) != 2 || !asked["gt-ember"] || !asked["gt-cinder"] {
+		t.Fatalf("heartbeats read for %v, want exactly gt-ember and gt-cinder", asked)
+	}
+	rows := map[string]dashboard.Polecat{}
+	for _, p := range s.Polecats {
+		rows[p.Name] = p
+	}
+	if len(rows) != 4 {
+		t.Fatalf("rows = %+v, want all four seats", s.Polecats)
+	}
+	if got := rows["ember"].LastActive; got == nil || !got.Equal(beat) {
+		t.Errorf("ember LastActive = %v, want its heartbeat %v", got, beat)
+	}
+	if got := rows["cinder"].LastActive; got != nil {
+		t.Errorf("cinder LastActive = %v, want nil without a heartbeat", *got)
+	}
+	if got := rows["forge"].LastActive; got == nil || !got.Equal(tmuxAt) {
+		t.Errorf("forge LastActive = %v, want the tmux time %v", got, tmuxAt)
+	}
+	if got := rows["quill"].LastActive; got != nil {
+		t.Errorf("quill LastActive = %v, want nil for a seat not running", *got)
+	}
+}
+
 // The Age column's clock is the bead's first dispatch across seats, which the
 // overrun guard judges too, so the two readings cannot disagree (gt-tzbtf). An
 // unreadable event log is an error, not a town where no bead was ever
