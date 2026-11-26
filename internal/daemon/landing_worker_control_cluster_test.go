@@ -11,7 +11,7 @@ import (
 // as the gate run recorder reads the runner's cpu.stat through it.
 func controlClusterExecCall(t *testing.T, d *Daemon) (string, error) {
 	t.Helper()
-	return d.controlClusterExec()(context.Background(), runnerThrottleArgs...)
+	return d.controlClusterExec()(context.Background(), runnerThrottleArgs(runnerPod)...)
 }
 
 // TestControlClusterExecNamesTheFailingCause: a kubectl run that fails keeps
