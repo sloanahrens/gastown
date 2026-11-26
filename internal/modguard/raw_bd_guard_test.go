@@ -2,6 +2,7 @@ package modguard
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -279,13 +280,14 @@ var rawBdRealScan = func() (map[rawBdKey]int, int, error) {
 	return scanRawBdTree(r.FS())
 }
 
-// rawBdRealScanProblems compares the module root's counts against baseline; a failed scan is a problem, never a pass.
-func rawBdRealScanProblems(baseline map[rawBdKey]int, floor int) []string {
+// rawBdRealScanProblems compares the module root's counts against baseline. A
+// failed scan returns its error, so the caller fails rather than passes.
+func rawBdRealScanProblems(baseline map[rawBdKey]int, floor int) ([]string, error) {
 	counts, files, err := rawBdRealScan()
 	if err != nil {
-		return []string{fmt.Sprintf("walk stopped before the counts were complete: %v", err)}
+		return nil, err
 	}
-	return rawBdProblemsOf(counts, files, baseline, floor)
+	return rawBdProblemsOf(counts, files, baseline, floor), nil
 }
 
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
@@ -306,39 +308,39 @@ func TestNoNewRawBdSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, problem := range rawBdRealScanProblems(baseline, rawBdFileFloor) {
+	problems, err := rawBdRealScanProblems(baseline, rawBdFileFloor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, problem := range problems {
 		t.Error(problem)
 	}
 }
 
 // TestRawBdRealScanSeam drives TestNoNewRawBdSites's comparison through a
-// stubbed rawBdRealScan: an excess site is a problem, and so is a failed scan.
+// stubbed rawBdRealScan: an excess site is a problem, and a failed scan is an error.
 //
 //testpolicy:allow parallel — it swaps rawBdRealScan, a package variable, so no other test may run beside it
 func TestRawBdRealScanSeam(t *testing.T) {
 	real := rawBdRealScan
 	defer func() { rawBdRealScan = real }()
 
-	cases := []struct {
-		name string
-		scan func() (map[rawBdKey]int, int, error)
-		want string
-	}{
-		{"the seam's excess site is a problem", func() (map[rawBdKey]int, int, error) {
+	t.Run("an excess site is a problem", func(t *testing.T) {
+		rawBdRealScan = func() (map[rawBdKey]int, int, error) {
 			return map[rawBdKey]int{{"internal/cmd/run.go", "argv"}: 2}, 1, nil
-		}, "internal/cmd/run.go: 2 raw bd argv site(s), baseline 0; call a typed beads method instead"},
-		{"a seam that fails is a problem, not a pass", func() (map[rawBdKey]int, int, error) {
-			return nil, 0, fmt.Errorf("no root")
-		}, "walk stopped before the counts were complete: no root"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rawBdRealScan = tc.scan
-			if got := rawBdRealScanProblems(nil, 0); len(got) != 1 || got[0] != tc.want {
-				t.Fatalf("problems = %q, want %q", got, tc.want)
-			}
-		})
-	}
+		}
+		problems, err := rawBdRealScanProblems(nil, 0)
+		if err != nil || len(problems) != 1 || !strings.Contains(problems[0], "internal/cmd/run.go: 2 raw bd argv site(s)") {
+			t.Errorf("problems = %q, err = %v; want one excess-site problem for internal/cmd/run.go", problems, err)
+		}
+	})
+	t.Run("a failed scan is an error, not a pass", func(t *testing.T) {
+		scanErr := errors.New("no root")
+		rawBdRealScan = func() (map[rawBdKey]int, int, error) { return nil, 0, scanErr }
+		if problems, err := rawBdRealScanProblems(nil, 0); !errors.Is(err, scanErr) || problems != nil {
+			t.Errorf("problems = %q, err = %v; want the seam's error and no problems", problems, err)
+		}
+	})
 }
 
 // TestRawBdPolicy drives the rule behind TestNoNewRawBdSites over in-memory
