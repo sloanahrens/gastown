@@ -1157,21 +1157,34 @@ func TestReviewPoolWorkerSweepRejectionIsNotTriedTwice(t *testing.T) {
 	}
 }
 
-// TestReviewPoolWorkerSweepsOncePerPass pins that one bead and head gets one
-// stored-only attempt in a pass: a stored-only call that consumed nothing counts
-// nothing, so the bead is not marked handled and lands at its ordinary turn, and
-// — though it stays ready and rejecting through three rounds — is not swept a
-// second time (gt-ixvxt5, gt-9nco9r).
-func TestReviewPoolWorkerSweepsOncePerPass(t *testing.T) {
+// TestReviewPoolWorkerSweepThenLandsAtItsTurn pins that a swept bead whose
+// stored-only pass answers ErrNoStoredVerdict — the record no longer applies —
+// is not marked handled: it takes its ordinary turn later in the same pass,
+// with no backoff and no failure counted for it, and, though it stays ready and
+// rejecting through three rounds, it is not swept a second time
+// (gt-eyrufr, gt-ixvxt5, gt-9nco9r).
+func TestReviewPoolWorkerSweepThenLandsAtItsTurn(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReadyAt(t, "gt-early", 2, "2026-09-30T09:00:00Z")
 	h.seedReadyAt(t, "gt-mid", 2, "2026-09-30T10:00:00Z")
 	h.seedReadyAt(t, "gt-late", 2, "2026-09-30T11:00:00Z")
 	h.w.Stored = &sweepHints{rejecting: map[string]bool{"gt-late": true}}
+	// Read at the bead's ordinary turn: its landing succeeds, and a successful
+	// landing ends the bead's failure run and drops its state, so a read after
+	// the pass would prove nothing about what the sweep left behind.
+	var (
+		atTurnFailures int
+		atTurnUntil    time.Time
+	)
 	h.lander.fn = func(_ int, work land.Work) (land.Result, error) {
 		if work.StoredOnly {
 			return land.Result{}, land.ErrNoStoredVerdict
+		}
+		if work.BeadID == "gt-late" {
+			if st := h.w.state["gt-late"]; st != nil {
+				atTurnFailures, atTurnUntil = st.failures, st.until
+			}
 		}
 		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
 	}
@@ -1180,6 +1193,12 @@ func TestReviewPoolWorkerSweepsOncePerPass(t *testing.T) {
 
 	if got, want := landingCalls(h.lander.calls), "gt-late:true,gt-early:false,gt-mid:false,gt-late:false"; got != want {
 		t.Fatalf("landings = %s; want %s: a stored-only pass with nothing to consume sweeps one bead and head once and leaves it its ordinary turn", got, want)
+	}
+	if atTurnFailures != 0 {
+		t.Fatalf("the swept bead carried %d failures at its ordinary turn; want none: nothing was stored to consume", atTurnFailures)
+	}
+	if !atTurnUntil.IsZero() {
+		t.Fatalf("the swept bead carried a backoff until %v at its ordinary turn; want none: nothing was stored to consume", atTurnUntil)
 	}
 }
 
