@@ -276,6 +276,16 @@ func TestBookQueueWorkerDefers(t *testing.T) {
 // declared in revert_test.go with the rest of the revert hooks (gt-dci9k8).
 func (f *fakeRevertHooks) IsRevert(string) bool { return f.isRevert }
 
+// queueIdle waits until every job the queue held when it was called has
+// returned: the marker job added behind them runs last, so its channel closing
+// is the queue reaching that point.
+func queueIdle(ctx context.Context, t *testing.T, q *BookQueue) {
+	t.Helper()
+	done := make(chan struct{})
+	q.Add("queue-idle", func() { close(done) })
+	recvBounded(t, ctx, done, "the queued bookkeeping returning")
+}
+
 // TestBookQueueWorkerRevert: a deferred landing's revert call is stored by its
 // bookkeeping job and runs on the worker's own goroutine at the next pass, so
 // RevertLanded never runs on the queue goroutine; a deferred landing that is no
@@ -309,9 +319,7 @@ func TestBookQueueWorkerRevert(t *testing.T) {
 		if rep := h.w.Pass(ctx); rep.Landed != 1 {
 			t.Fatalf("report %v; want the landing counted", rep)
 		}
-		if err := q.Wait(ctx); err != nil {
-			t.Fatalf("waiting for the deferred bookkeeping: %v", err)
-		}
+		queueIdle(ctx, t, q)
 		if len(hooks.landed) != 0 {
 			t.Fatalf("RevertLanded ran %v while the queue job ran; want it stored for the worker's goroutine", hooks.landed)
 		}
@@ -331,9 +339,7 @@ func TestBookQueueWorkerRevert(t *testing.T) {
 		h.w.Reverts = hooks
 
 		h.w.Pass(ctx)
-		if err := q.Wait(ctx); err != nil {
-			t.Fatalf("waiting for the deferred bookkeeping: %v", err)
-		}
+		queueIdle(ctx, t, q)
 		nextPass(t, ctx, h)
 		if len(hooks.landed) != 0 {
 			t.Fatalf("RevertLanded ran %v for a landing that is no revert", hooks.landed)
