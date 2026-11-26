@@ -162,13 +162,14 @@ func TestCloudCheckRunsEachTickWithTheKeyAndRewritesTheStatus(t *testing.T) {
 	}
 }
 
-// TestCloudCheckWithoutTheKeyLogsOnceAndRunsNothing: a town without the key
-// runs nothing and gets one log line, not one per interval.
-func TestCloudCheckWithoutTheKeyLogsOnceAndRunsNothing(t *testing.T) {
+// TestCloudCheckNamedKeyAbsentLogsOnceAndRunsNothing: a key_file that names a
+// path the patrol cannot find runs nothing and gets one log line, not one per
+// interval: an operator who named a key meant it to be used.
+func TestCloudCheckNamedKeyAbsentLogsOnceAndRunsNothing(t *testing.T) {
 	t.Parallel()
-	key, _ := cloudCheckPresentKey()
+	const key = "/keys/absent-gcp-key"
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
-		func(*agentconfig.CloudCheckConfig) string { return "/keys/absent-gcp-key" },
+		func(c *agentconfig.CloudCheckConfig) string { return c.KeyFilePath() },
 		func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist })
 
 	d.runCloudCheckPatrol()
@@ -202,6 +203,107 @@ func TestCloudCheckRefusesAnUnreadableKeyFile(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "cannot read the key file") {
 		t.Errorf("log = %q, want the unreadable key file named", logs.String())
+	}
+}
+
+// TestCloudCheckKeyless: the check in the daemon pod does not call GCP, so an
+// empty key_file whose default file is absent runs the check with no
+// GOOGLE_APPLICATION_CREDENTIALS entry and says once that it runs without a
+// key. A file that exists is passed as that entry, and a key_file that names a
+// path which is missing still runs nothing: an operator who named a key meant it.
+func TestCloudCheckKeyless(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	present := filepath.Join(dir, "key.json")
+	if err := os.WriteFile(present, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	missing := filepath.Join(dir, "missing.json")
+	// The default path is absolute and outside the test's tree, so a row that
+	// leaves key_file empty is the production state of a pod without the
+	// Secret mounted.
+	defaultAbsent := func(name string) (fs.FileInfo, error) {
+		if name != agentconfig.CloudCheckDefaultKeyFile {
+			t.Errorf("stat called for %q, want the default key path %q", name, agentconfig.CloudCheckDefaultKeyFile)
+		}
+		return nil, fs.ErrNotExist
+	}
+
+	cases := []struct {
+		name string
+		// keyFile is the setting the config block carries; empty is the default.
+		keyFile string
+		stat    func(string) (fs.FileInfo, error)
+		// wantRuns is the number of ticks that ran the check.
+		wantRuns int
+		wantEnv  []string
+		// wantKeylessLogs is how many log lines say the run has no key.
+		wantKeylessLogs int
+		// wantRefused is whether the log names the absent key file as a refusal.
+		wantRefused bool
+	}{
+		{
+			name:            "default key file absent runs keyless",
+			keyFile:         "",
+			stat:            defaultAbsent,
+			wantRuns:        2,
+			wantEnv:         nil,
+			wantKeylessLogs: 1,
+		},
+		{
+			name:     "key file present is passed to the child",
+			keyFile:  present,
+			stat:     os.Stat,
+			wantRuns: 2,
+			wantEnv:  []string{cloudCheckKeyEnv + "=" + present},
+		},
+		{
+			name:        "named key file missing runs nothing",
+			keyFile:     missing,
+			stat:        os.Stat,
+			wantRuns:    0,
+			wantRefused: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", tt.keyFile),
+				func(c *agentconfig.CloudCheckConfig) string { return c.KeyFilePath() }, tt.stat)
+
+			for i := 0; i < 2; i++ {
+				if i > 0 {
+					// The ticker fires one interval after the previous run ended.
+					f.now = f.now.Add(10 * time.Minute)
+				}
+				d.runCloudCheckPatrol()
+			}
+
+			if len(f.calls) != tt.wantRuns {
+				t.Fatalf("ran %d ticks, want %d", len(f.calls), tt.wantRuns)
+			}
+			for i, call := range f.calls {
+				if !slices.Equal(call.env, tt.wantEnv) {
+					t.Errorf("tick %d env = %q, want %q", i+1, call.env, tt.wantEnv)
+				}
+			}
+
+			var keyless, refused int
+			for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+				if strings.Contains(line, "running without "+cloudCheckKeyEnv) {
+					keyless++
+				}
+				if strings.Contains(line, "no key file") && strings.Contains(line, "not running") {
+					refused++
+				}
+			}
+			if keyless != tt.wantKeylessLogs {
+				t.Errorf("logged %d keyless lines, want %d:\n%s", keyless, tt.wantKeylessLogs, logs.String())
+			}
+			if got := refused > 0; got != tt.wantRefused {
+				t.Errorf("logged a refusal = %v, want %v:\n%s", got, tt.wantRefused, logs.String())
+			}
+		})
 	}
 }
 

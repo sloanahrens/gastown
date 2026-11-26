@@ -10,8 +10,13 @@ package daemon
 // daemon.patrols.cloud_check.enabled turns it on. The GCP service-account key
 // is read from the file the daemon-gcp-key Secret mounts; the patrol stats the
 // file and passes its path to the child's environment, and never reads, logs or
-// reports the key itself. A run without the key does nothing and says so once,
-// because the check cannot reach the cloud without it.
+// reports the key itself.
+//
+// The key is optional. The binary in the daemon pod does not call GCP, so when
+// key_file is empty and the default file is absent the patrol runs the check
+// with no key entry and says so once. A key_file that names a path must exist:
+// an operator who named a key meant it, so a missing or unreadable one runs
+// nothing and says so.
 
 import (
 	"context"
@@ -297,16 +302,27 @@ func (d *Daemon) runCloudCheckPatrol() {
 // run: the status the dashboard shows is then an earlier run's, not this one's.
 func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	pc := d.patrol()
-	keyFile := s.keyFile(cloudCheckSettings(pc))
-	// The check cannot reach the cloud without the key, and a run without it
-	// would report every project as unreachable. Say so once and run nothing.
-	_, err := s.stat(keyFile)
+	settings := cloudCheckSettings(pc)
+	keyFile := s.keyFile(settings)
+	// Only an entry the operator set names a key: an empty setting is the
+	// default path the pod mounts, which the check in the pod can run without.
+	named := settings != nil && settings.KeyFile != ""
+
+	// The key entry is passed only when a key file is there. The binary never
+	// calls GCP, so an absent default key is no reason to skip the check; a
+	// key the operator named must exist, because naming one meant it.
+	var keyEnv []string
+	_, statErr := s.stat(keyFile)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case statErr == nil:
+		keyEnv = []string{cloudCheckKeyEnv + "=" + keyFile}
+	case errors.Is(statErr, fs.ErrNotExist) && named:
 		d.cloudCheckUnconfigured(fmt.Sprintf("no key file at %s; not running (mount the daemon-gcp-key Secret, or set patrols.cloud_check.key_file)", keyFile))
 		return
-	case err != nil:
-		d.cloudCheckUnconfigured(fmt.Sprintf("cannot read the key file %s: %v; not running", keyFile, err))
+	case errors.Is(statErr, fs.ErrNotExist):
+		d.cloudCheckUnconfigured(fmt.Sprintf("no key file at %s; running without %s (the check does not call GCP; set patrols.cloud_check.key_file to name another path)", keyFile, cloudCheckKeyEnv))
+	default:
+		d.cloudCheckUnconfigured(fmt.Sprintf("cannot read the key file %s: %v; not running", keyFile, statErr))
 		return
 	}
 
@@ -316,7 +332,7 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	statusPath := cloudCheckStatusPath(d.config.TownRoot)
 	command := cloudCheckCommand(pc)
 	before := cloudCheckStatusFileOf(statusPath)
-	err = s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, []string{cloudCheckKeyEnv + "=" + keyFile})
+	err := s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, keyEnv)
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.cloudCheckLastRun.Store(s.now().UnixNano())
 
@@ -395,8 +411,9 @@ func (d *Daemon) cloudCheckReleasebotStatus(s cloudCheckSeams, statusPath, body 
 	d.cloudCheckReleasebotAlertRaised.Store(true)
 }
 
-// cloudCheckUnconfigured logs the unconfigured line once per daemon run, so a
-// town that never mounts the key gets one line rather than one per interval.
+// cloudCheckUnconfigured logs a key-file line once per daemon run, so a town
+// whose default key is absent, or whose named key is missing, gets one line
+// rather than one per interval.
 func (d *Daemon) cloudCheckUnconfigured(reason string) {
 	d.cloudCheckNoKeyOnce.Do(func() {
 		d.logger.Printf("cloud_check: %s", reason)
