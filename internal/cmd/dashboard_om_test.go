@@ -740,6 +740,42 @@ func TestDashboardOmPrefilterSkipsLinesThatCannotBeEvents(t *testing.T) {
 	}
 }
 
+// TestOMConfigPathXDG pins the one rule om resolves its user config by: a set
+// and non-empty XDG_CONFIG_HOME wins over the home directory, an empty or
+// unset one leaves the home rule, and no home is no config.
+func TestOMConfigPathXDG(t *testing.T) {
+	t.Parallel()
+
+	home := func() (string, error) { return "/home/reviewer", nil }
+	noHome := func() (string, error) { return "", errors.New("no home") }
+	unset := func(string) (string, bool) { return "", false }
+	set := func(v string) func(string) (string, bool) {
+		return func(string) (string, bool) { return v, true }
+	}
+	homeRule := filepath.Join("/home/reviewer", ".config", "om", "config.json")
+
+	cases := []struct {
+		name   string
+		lookup func(string) (string, bool)
+		home   func() (string, error)
+		want   string
+	}{
+		{"XDG set", set("/xdg"), home, filepath.Join("/xdg", "om", "config.json")},
+		{"XDG set, no home", set("/xdg"), noHome, filepath.Join("/xdg", "om", "config.json")},
+		{"XDG empty", set(""), home, homeRule},
+		{"XDG unset", unset, home, homeRule},
+		{"XDG unset, no home", unset, noHome, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := omConfigPathIn(c.lookup, c.home); got != c.want {
+				t.Errorf("omConfigPathIn = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // A dashboard with no home directory has no reviewer config to read. That is
 // the cluster's absence, not a failed read: the panel gets the default config,
 // with no threshold set and no unreadable line in its source.
@@ -747,7 +783,8 @@ func TestOMConfigAbsentIsNoConfig(t *testing.T) {
 	t.Parallel()
 
 	noHome := func() (string, error) { return "", errors.New("no home") }
-	path := omConfigPathIn(noHome)
+	noXDG := func(string) (string, bool) { return "", false }
+	path := omConfigPathIn(noXDG, noHome)
 	if path != "" {
 		t.Fatalf("omConfigPathIn with no home = %q, want no path", path)
 	}
