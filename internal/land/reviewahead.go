@@ -16,7 +16,7 @@ type AheadOutcome string
 
 const (
 	// AheadStored means the review's verdict was kept in the review-ahead
-	// store. ReviewAhead does not return it yet.
+	// store, for a later landing to reuse.
 	AheadStored AheadOutcome = "stored"
 	// AheadConflict means the submission does not merge onto the target, so no
 	// verdict was made: a conflict record was stored instead.
@@ -83,8 +83,8 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	if OverseerReviewed(issue, w.Head) {
 		return AheadSkipped, aheadBuilt{}, nil
 	}
-	// started is when this review began: the land log dates it, and a conflict
-	// record stores it as started_at.
+	// started is when this review began: the land log dates it, and a stored
+	// record keeps it as started_at.
 	started := l.aheadNow()
 	l.logf("%s: ahead review of %s started at %s", w.BeadID, shortSHA(w.Head), started.UTC().Format(time.RFC3339))
 	g := l.open(l.Repo)
@@ -177,7 +177,7 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 	// returned input names none.
 	built := aheadBuilt{In: in, Key: key}
 	built.In.Dir = ""
-	_, ran, err := l.aheadReview(ctx, in)
+	v, ran, err := l.aheadReview(ctx, in)
 	if err != nil {
 		return "", aheadBuilt{}, err
 	}
@@ -187,10 +187,28 @@ func (l *Lander) reviewAhead(ctx context.Context, w Work) (AheadOutcome, aheadBu
 		l.logf("%s: ahead review of %s skipped: the reviewer cannot be isolated", w.BeadID, shortSHA(w.Head))
 		return AheadSkipped, aheadBuilt{}, nil
 	}
-	// NEXT BEAD: store the verdict aheadReview returns here. It is dropped
-	// until then, so a reviewed merge is AheadSkipped and the landing runs om
-	// inline.
-	return AheadSkipped, built, nil
+	// The verdict is kept for a later landing to reuse. It is not logged and no
+	// round is written: the landing writes a review when it consumes a verdict.
+	reviewed := l.aheadNow()
+	rec := AheadRecord{
+		Bead:         key.Bead,
+		Head:         key.Head,
+		PatchID:      key.PatchID,
+		OMVersion:    key.OMVersion,
+		OMConfigHash: key.OMConfigHash,
+		InputDigest:  key.InputDigest,
+		Base:         base,
+		StartedAt:    started,
+		ReviewedAt:   reviewed,
+		ReviewSecs:   reviewed.Sub(started).Seconds(),
+		Outcome:      aheadOutcomeVerdict,
+		Verdict:      v,
+		Source:       aheadSourcePool,
+	}
+	if err := l.Ahead.Put(rec); err != nil {
+		return "", aheadBuilt{}, &InfraError{Stage: "store record", Err: err}
+	}
+	return AheadStored, built, nil
 }
 
 // aheadReview runs om over in's checkout: the review, and the re-score of a
