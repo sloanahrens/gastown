@@ -1672,3 +1672,97 @@ func TestAnalysisReusesTheDaysExtract(t *testing.T) {
 		})
 	}
 }
+
+// analysisAdvancingClock is the analysis's injected clock for a phase-timing
+// test: each read returns the clock and moves it on by step, so a phase's two
+// reads differ by step and every phase reports step. A phase that reads the
+// clock once more than the design does reports a different duration, so the
+// test pins the boundaries and not only the presence of a line.
+func analysisAdvancingClock(start time.Time, step time.Duration) func() time.Time {
+	at := start
+	return func() time.Time {
+		read := at
+		at = at.Add(step)
+		return read
+	}
+}
+
+// Each phase of the daily analysis reports how long it took on the injected
+// clock, in the order the phases run, so a slow hour names the phase that spent
+// its time (gt-a8jgci).
+func TestAnalysisPhaseTimes(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	const step = 90 * time.Second
+	env.Now = analysisAdvancingClock(analyseNow, step)
+	opts := analysisOptions(town)
+	// An empty archive keeps the bead-change table a silent success, so the
+	// reports are the phases' own lines and nothing else.
+	opts.ArchiveDir = archiveResolver(archiveDirWith(t, nil))
+	var reports []string
+	opts.Reportf = func(format string, args ...any) {
+		reports = append(reports, fmt.Sprintf(format, args...))
+	}
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil || !res.Ran {
+		t.Fatalf("RunAnalysis = %+v, %v, want a due run", res, err)
+	}
+	want := []string{
+		"analyse: extract took 1m30s",
+		"analyse: join took 1m30s",
+		"analyse: targets took 1m30s",
+		"analyse: publish took 1m30s",
+	}
+	if !reflect.DeepEqual(reports, want) {
+		t.Fatalf("report lines = %q, want the four phases in order, each the clock's step: %q", reports, want)
+	}
+}
+
+// A phase that fails still reports its own duration, and the phases after it
+// report nothing because the run stops there (gt-a8jgci).
+func TestAnalysisPhaseTimesAFailedPhaseStillReports(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	const step = 90 * time.Second
+	env.Now = analysisAdvancingClock(analyseNow, step)
+	opts := analysisOptions(town)
+	opts.Extract = func(context.Context, string, string) (string, error) {
+		return "", errors.New("extract broke")
+	}
+	var reports []string
+	opts.Reportf = func(format string, args ...any) {
+		reports = append(reports, fmt.Sprintf(format, args...))
+	}
+
+	if _, err := RunAnalysis(context.Background(), env, opts); err == nil {
+		t.Fatal("RunAnalysis with a failing extract returned no error")
+	}
+	want := []string{"analyse: extract took 1m30s"}
+	if !reflect.DeepEqual(reports, want) {
+		t.Fatalf("report lines = %q, want the failed extract's own line and no later phase: %q", reports, want)
+	}
+}
+
+// A run that is not due runs no phase, so it reports no phase line (gt-a8jgci).
+func TestAnalysisPhaseTimesNotDueReportsNone(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	writeTownFile(t, filepath.Join(town, ".runtime", "metrics", analysisDirName, stampName), analyseNow.Add(-time.Minute).Format(time.RFC3339)+"\n")
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	opts := analysisOptions(town)
+	var reports []string
+	opts.Reportf = func(format string, args ...any) {
+		reports = append(reports, fmt.Sprintf(format, args...))
+	}
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil || res.Ran {
+		t.Fatalf("RunAnalysis = %+v, %v, want a run that is not due", res, err)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("report lines = %q, want none on a run that is not due", reports)
+	}
+}

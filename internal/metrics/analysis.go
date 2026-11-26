@@ -212,6 +212,30 @@ type AnalysisResult struct {
 // extract leaves BdGateway unset: a decision the caller makes, not a silent skip.
 var errNoAnalysisBdGatewayDecision = errors.New("analysis: AnalysisOptions.BdGateway is unset for the in-process extract; pass a check or BdGatewayNone")
 
+// analysisPhases times the daily analysis's phases on Env's clock and reports
+// each one when it ends, failed or not, so a slow hour names the phase that
+// spent its time (gt-a8jgci). The end of one phase is the start of the next, so
+// the lines partition the analysis rather than overlap.
+type analysisPhases struct {
+	now     func() time.Time
+	reportf func(format string, args ...any)
+	start   time.Time
+}
+
+// newAnalysisPhases starts the first phase's clock. RunAnalysis calls it after
+// it refuses a nil Env.Now and after ensureMango and the docs directory, so a
+// first run's mango build and setup stay out of the extract's line.
+func newAnalysisPhases(env Env, reportf func(format string, args ...any)) *analysisPhases {
+	return &analysisPhases{now: env.Now, reportf: reportf, start: env.Now()}
+}
+
+// end reports the phase that just finished and starts the next one's clock.
+func (p *analysisPhases) end(phase string) {
+	at := p.now()
+	p.reportf("analyse: %s took %s", phase, at.Sub(p.start).Round(time.Millisecond))
+	p.start = at
+}
+
 // RunAnalysis runs the daily analysis when its stamp is older than DueAfter, and
 // publishes panel.json, the joined landings and the stamp into
 // <town>/.runtime/metrics/latest. A run that is not due returns Ran false and
@@ -271,6 +295,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := os.MkdirAll(docs, 0o755); err != nil {
 		return res, fmt.Errorf("analysis: %w", err)
 	}
+	phases := newAnalysisPhases(env, o.Reportf)
 	// A day whose extract finished before an earlier run timed out is reused, so
 	// this run pays for the analysis steps alone (gt-zd3zsq).
 	dayDir, reused := reusableExtract(env, filepath.Join(env.Town, ".runtime", "metrics"), now)
@@ -279,20 +304,25 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	} else {
 		dayDir, err = o.Extract(ctx, env.Town, docs)
 		if err != nil {
+			phases.end("extract")
 			return res, fmt.Errorf("extract: %w", err)
 		}
 	}
+	phases.end("extract")
 	res.DayDir = dayDir
 	columns, rows, explainOnly, err := readExtract(env, dayDir)
 	if err != nil {
+		phases.end("join")
 		return res, err
 	}
 	snaps, err := readSnapshots(env)
 	if err != nil {
+		phases.end("join")
 		return res, err
 	}
 	peaks, peaksSkipped, err := readPeaks(env, o.Reportf)
 	if err != nil {
+		phases.end("join")
 		return res, err
 	}
 
@@ -300,10 +330,15 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
 	weekly := panelWeekly(joined, o.Reportf)
 	eras := SplitByEra(joined, readEraCuts(env))
+	phases.end("join")
 	targets, split, err := analyseTargets(ctx, env, o, joinHeader, eras, explainOnly)
+	phases.end("targets")
 	if err != nil {
 		return res, err
 	}
+	// The publish phase's line is deferred so every return in its block reports
+	// it, failed or not.
+	defer phases.end("publish")
 	panel := BuildPanel(targets, PanelMeta{
 		Items:          len(joined),
 		SnapshotHours:  snapshotHours(snaps),
