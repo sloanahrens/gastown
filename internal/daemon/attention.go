@@ -871,7 +871,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// (gt-nwea8n). It reads the daemon's own memory, so it cannot fail.
 		{kind: attention.KindGateRunLog, collect: s.collectGateRunLog},
 		// The bd gateway's refused calls grown past five in the hour (gt-xu8fkg).
-		// A failed read keeps the previous item, as every collector's does.
+		// A failed read raises the probe-failed item and keeps the previous one.
 		{kind: attention.KindBdGatewayRefusals, collect: s.collectGatewayRefusals},
 	}, s.questionCollectors()...)
 }
@@ -905,18 +905,23 @@ const gatewayRefusalsGrowthBar = 5
 // stays over the bar keeps this key, and with it the item's first_seen.
 const gatewayRefusalsKey = "bd-gateway-refusals"
 
+// gatewayRefusalsProbe names the gateway's stats read in the probe-failed item
+// a failed read raises (gt-dfklv5).
+const gatewayRefusalsProbe = "bd gateway stats"
+
 // collectGatewayRefusals adds this tick's refusal counts to the window and
 // raises one item while the refused calls grown over the hour pass the bar,
-// naming each reason and its growth. A failed read returns its error, so the
-// previous item is kept and the window takes no sample. An answer without the
-// refusals field raises nothing and adds nothing.
+// naming each reason and its growth. A failed read takes the probe-failed path:
+// the previous refusals item is kept and the window takes no sample, so an
+// unanswered hour cannot read as no refusals. An answer without the refusals
+// field raises nothing and adds nothing.
 func (s *attentionSources) collectGatewayRefusals(ctx context.Context) ([]attention.Item, error) {
 	if s.gatewayStats == nil || s.refusalWindow == nil {
 		return nil, nil
 	}
 	stats, err := s.gatewayStats(ctx)
 	if err != nil {
-		return nil, err
+		return s.hostProbeFailed(gatewayRefusalsProbe, err, attention.KindBdGatewayRefusals), nil
 	}
 	if !stats.RefusalsPresent {
 		return nil, nil
