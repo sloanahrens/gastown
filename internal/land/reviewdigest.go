@@ -85,7 +85,10 @@ func ReviewInputDigest(in ReviewInput, flags []string, omRepoConfig, contextFile
 // inputs always digest equal. It takes any value so a test can digest a struct
 // with a field ReviewInput does not have (gt-0cdbz6). A value that is not a
 // struct, an extra name that is also a field, and a field JSON cannot encode
-// are errors, never a partial digest.
+// are errors, never a partial digest. A field that is a func, interface or chan
+// is refused for the same reason: JSON cannot hash its identity, so a nil
+// interface would encode as null and a field added later would be silently
+// ignored (gt-wtt1b8).
 func reviewDigestOf(v any, extra map[string]any) (string, error) {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Struct {
@@ -100,6 +103,10 @@ func reviewDigestOf(v any, extra map[string]any) (string, error) {
 		f := rv.Type().Field(i)
 		if f.PkgPath != "" || excluded[f.Name] {
 			continue
+		}
+		switch f.Type.Kind() {
+		case reflect.Func, reflect.Interface, reflect.Chan:
+			return "", fmt.Errorf("review input digest: %s is a %s, which the digest cannot hash", f.Name, f.Type.Kind())
 		}
 		if _, dup := extra[f.Name]; dup {
 			return "", fmt.Errorf("review input digest: %s is a field and an extra input", f.Name)
