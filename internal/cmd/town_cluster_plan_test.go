@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -326,6 +327,9 @@ func TestClusterShapePlanDryRunIssuesNoWriteBeyondTheDryRun(t *testing.T) {
 			return answer(ctx, cwd, env, name, args...)
 		}
 		if _, _, ok := planGetOf(name, args); ok {
+			return answer(ctx, cwd, env, name, args...)
+		}
+		if _, _, _, ok := planSecretGetOf(name, args); ok {
 			return answer(ctx, cwd, env, name, args...)
 		}
 		others = append(others, name+" "+strings.Join(args, " "))
@@ -1190,6 +1194,9 @@ func planKubectlReading(t planFailer, static map[string]string, answer func(reso
 		if _, _, ok := planDryRunOf(name, args); ok {
 			return "configured (server dry run)", 0, nil
 		}
+		if _, _, secret, ok := planSecretGetOf(name, args); ok {
+			return planSecretTable(secret), 0, nil
+		}
 		resource, namespace, ok := planGetOf(name, args)
 		if !ok {
 			t.Fatalf("the plan ran %s %q, want only a get or a server-side dry run", name, args)
@@ -1200,6 +1207,21 @@ func planKubectlReading(t planFailer, static map[string]string, answer func(reso
 		}
 		return static[planStaticResourceKey(resource, namespace)], 0, nil
 	}
+}
+
+// planSecretTable is a held Secret's get answer: the metadata table naming it.
+func planSecretTable(name string) string {
+	return "NAME   TYPE     DATA   AGE\n" + name + "   Opaque   1      1d\n"
+}
+
+// planSecretGetOf reads a call as the plan's Secret get: kubeconfig, namespace
+// and name; ok is false for any other.
+func planSecretGetOf(name string, args []string) (kubeconfig, namespace, secret string, ok bool) {
+	if name != "kubectl" || len(args) != 7 || args[0] != "--kubeconfig" ||
+		args[2] != "-n" || args[4] != "get" || args[5] != "secret" {
+		return "", "", "", false
+	}
+	return args[1], args[3], args[6], true
 }
 
 // planKubectlRecording is kube with every server-side dry run's file and
@@ -1897,6 +1919,9 @@ func TestClusterShapePlanLiveGetOrDryRun(t *testing.T) {
 				if _, _, ok := planDryRunOf(name, args); ok {
 					return "configured (server dry run)", 0, nil
 				}
+				if _, _, secret, ok := planSecretGetOf(name, args); ok {
+					return planSecretTable(secret), 0, nil
+				}
 				if name != "kubectl" || len(args) < 2 || args[0] != "get" {
 					t.Errorf("the plan made cluster call %q, want only a get or a server-side dry run", calls[len(calls)-1])
 					return "", 1, errors.New("planted non-get call: " + name + " " + strings.Join(args, " "))
@@ -2149,5 +2174,128 @@ func TestClusterShapePlanRefuseSecretDocUnreadableSet(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+	}
+}
+
+// plantMountedSecret answers the render with the daemon Deployment mounting one
+// more of the render's own Secrets and returns a reader of its name.
+func plantMountedSecret(t *testing.T, d clusterRenderDeps) (clusterRenderDeps, func() string) {
+	t.Helper()
+	planted := ""
+	build := d.build
+	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+		m, err := build(v)
+		if err != nil {
+			return m, err
+		}
+		planted = m.Secrets[0].Metadata.Name
+		m.Deployment.Spec.Template.Spec.Volumes = append(m.Deployment.Spec.Template.Spec.Volumes,
+			k8sdaemon.Volume{Name: "planted-mount", Secret: &k8sdaemon.SecretVolumeSource{SecretName: planted}})
+		return m, nil
+	}
+	return d, func() string { return planted }
+}
+
+// TestClusterShapePlanRefuseSecretMissing: a Secret the rendered Deployments mount
+// that the cluster does not hold refuses the plan by name, printing nothing and
+// writing no plan.json; a get the check could not judge is an error naming it.
+func TestClusterShapePlanRefuseSecretMissing(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		output string
+		exit   int
+		runErr error
+		want   string
+	}{
+		{"the cluster lacks it", "Error from server (NotFound): secrets not found", 1, nil, "does not hold"},
+		{"a forbidden get", "Error from server (Forbidden): forbidden", 1, nil, "checking the Secrets"},
+		{"a get that could not run", "", 0, errors.New("exec: kubectl: not found"), "checking the Secrets"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, planted := plantMountedSecret(t, clusterRenderDepsAt(t, planTown(t), io.Discard))
+			base := planKubectl(t)
+			var gets [][]string
+			kube := func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+				if _, _, secret, ok := planSecretGetOf(name, args); ok {
+					gets = append(gets, append([]string(nil), args...))
+					if secret == planted() {
+						return tc.output, tc.exit, tc.runErr
+					}
+					return planSecretTable(secret), 0, nil
+				}
+				return base(ctx, dir, env, name, args...)
+			}
+			dir, out := planOut(t), &bytes.Buffer{}
+			err := runTownClusterPlan(context.Background(), d, kube, out, dir, planTestKubeconfigs, atomicfile.WriteJSON)
+			if err == nil || !strings.Contains(err.Error(), planted()) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterPlan = %v, want a refusal naming %s and %q", err, planted(), tc.want)
+			}
+			if strings.Contains(err.Error(), "missing") || (tc.want != "does not hold" && strings.Contains(err.Error(), "does not hold")) {
+				t.Fatalf("the refusal = %v, want a missing Secret and a Secret it could not judge told apart", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused plan printed %q, want nothing", out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, planFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("plan.json exists or cannot be checked (%v), want none written", statErr)
+			}
+			want := []string{"--kubeconfig", planTestKubeconfigs.applyKubeconfig, "-n", k8sdaemon.DefaultNamespace, "get", "secret"}
+			if !slices.ContainsFunc(gets, func(args []string) bool {
+				return len(args) == 7 && slices.Equal(args[:6], want) && args[6] == planted()
+			}) {
+				t.Fatalf("the Secret gets = %q, want the mounted Secret read as %q with no output flag", gets, want)
+			}
+			if tc.want == "does not hold" && (strings.Contains(err.Error(), "kubectl") || strings.Contains(err.Error(), "--from-file")) {
+				t.Fatalf("the refusal = %v, want no per-Secret command line for the person to run", err)
+			}
+		})
+	}
+}
+
+// TestClusterShapePlanRefuseSecretMissingRefusals: the mount scan refuses each
+// body, spec, volume or Secret name it cannot read, at the plan too; the preflight
+// refuses no --apply-kubeconfig or one that is not a path.
+func TestClusterShapePlanRefuseSecretMissingRefusals(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, doc, want string }{
+		{"an unreadable body", "kind: [", "cannot read a rendered file"},
+		{"a spec that is not an object", "kind: Deployment\nspec: unreadable", "its spec is not an object"},
+		{"volumes that are not a list", "kind: Deployment\nspec:\n  template:\n    spec:\n      volumes: unreadable", "volumes is not a list"},
+		{"a volume that is not an object", "kind: Deployment\nspec:\n  template:\n    spec:\n      volumes:\n        - unreadable", "entry is not an object"},
+		{"a secret that is not an object", "kind: Deployment\nspec:\n  template:\n    spec:\n      volumes:\n        - secret: unreadable", "secret is not an object"},
+		{"a secret naming no Secret", "kind: Deployment\nspec:\n  template:\n    spec:\n      volumes:\n        - secret:\n            optional: true", "names no Secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := planMountedSecrets([][]byte{[]byte(tc.doc)}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("planMountedSecrets = %v, want a refusal naming %q", err, tc.want)
+			}
+		})
+	}
+	t.Run("the walk refuses the plan", func(t *testing.T) {
+		t.Parallel()
+		d := clusterRenderDepsAt(t, planTown(t), io.Discard)
+		render := d.render
+		d.render = func(w io.Writer, m k8sdaemon.Manifests) error {
+			if err := render(w, m); err != nil {
+				return err
+			}
+			_, err := io.WriteString(w, "\n---\nkind: Deployment\nmetadata:\n  name: planted-unreadable\n  namespace: gt\nspec: unreadable\n")
+			return err
+		}
+		if err := runTownClusterPlan(context.Background(), d, planKubectl(t), &bytes.Buffer{}, planOut(t), planTestKubeconfigs, atomicfile.WriteJSON); err == nil || !strings.Contains(err.Error(), "planted-unreadable") {
+			t.Fatalf("runTownClusterPlan = %v, want the unreadable-Deployment refusal", err)
+		}
+	})
+	err := planSecretPreflight(context.Background(), planKubectl(t), "", []planMountedSecret{{namespace: "gt", name: "gt-secret"}})
+	if err == nil || !strings.Contains(err.Error(), "--apply-kubeconfig") {
+		t.Fatalf("planSecretPreflight with no kubeconfig = %v, want a refusal naming --apply-kubeconfig", err)
+	}
+	if err := planSecretPreflight(context.Background(), planKubectl(t), "-x", []planMountedSecret{{namespace: "gt", name: "gt-secret"}}); err == nil || !strings.Contains(err.Error(), "starts with '-'") {
+		t.Fatalf("planSecretPreflight with a kubeconfig that is not a path = %v, want the refusal", err)
 	}
 }

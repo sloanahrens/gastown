@@ -372,7 +372,10 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // the file in plan.json; a dry run that fails for any file ends the plan non-zero
 // and writes no plan.json (gt-f1p2fw). A plan whose rendered static set holds a
 // Secret document deploy/k8s does not review is refused before the static objects
-// are read, since Secrets stay operator-created (gt-8bck5o). The differences
+// are read, since Secrets stay operator-created (gt-8bck5o). Every Secret the
+// Deployments mount is then checked with internal/secretpreflight under the apply
+// kubeconfig: a missing one refuses the plan by name, a read it could not judge
+// is an error, never a missing Secret (gt-ettl5f). The differences
 // print after the phases, the static objects' then each Deployment's in apply
 // order, and the short id is the last line. plan.json is written only after every
 // read succeeds and every dry run passed, and the output only after it is
@@ -476,6 +479,15 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 		}
 	}
 	record.ID = full
+	// Every Secret the Deployments mount must exist before the apply, or the pod
+	// waits for it; the phase-kubeconfig loop above refused a missing flag (gt-ettl5f).
+	mounted, err := planMountedSecrets(bodies)
+	if err != nil {
+		return fmt.Errorf("gt town cluster plan: %w, so no plan was written", err)
+	}
+	if err := planSecretPreflight(ctx, kube, kubeconfigs.applyKubeconfig, mounted); err != nil {
+		return fmt.Errorf("gt town cluster plan: %w", err)
+	}
 	// Each file's server-side dry run runs before plan.json is written, and a run
 	// that fails for any file ends the plan here: plan.json is written last, so its
 	// presence means every file it names passed its dry run (gt-f1p2fw).
