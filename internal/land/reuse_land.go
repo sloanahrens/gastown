@@ -66,9 +66,11 @@ func (l *Lander) reuseAhead(ctx context.Context, g, wt Repo, w Work, in ReviewIn
 // than ReuseExpiry ago: the merge then decides whether the conflict is still
 // there. A conflict record for another head, or past that window, cannot answer
 // for this landing, so it is deleted and the pass ends with ErrNoStoredVerdict
-// before any fetch or merge. A record the store cannot read is kept and fails
-// the pass as infrastructure: a failed read is unknown, not an empty store, and
-// deleting it could throw away the record the bead's own landing needs.
+// before any fetch or merge. A record the store cannot read is kept and ends the
+// pass with the same sentinel: a failed read is unknown, and deleting it could
+// throw away the record the bead's own landing needs. The bead's own landing runs
+// without StoredOnly and finds a real conflict at the merge, so ending the pass
+// loses nothing.
 //
 // A missing record, a verdict record and a lander with no store all answer
 // (false, nil), so the landing runs as it did before (gt-6r4exl).
@@ -79,7 +81,7 @@ func (l *Lander) storedOnlyConflictBeforeMerge(w Work) (current bool, err error)
 	rec, ok, err := l.Ahead.Get(w.BeadID)
 	if err != nil {
 		l.logf("%s: stored-only pass: the record could not be read (%v); keeping it", w.BeadID, err)
-		return false, &InfraError{Stage: "stored review", Err: err}
+		return false, ErrNoStoredVerdict
 	}
 	if !ok || rec.Outcome != aheadOutcomeConflict {
 		return false, nil

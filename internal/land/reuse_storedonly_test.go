@@ -196,9 +196,7 @@ func TestVerdictReuseStoredOnlyMissDeletes(t *testing.T) {
 // TestVerdictReuseStoredOnlyErrorKeeps: an answer reuseAhead could not give ends
 // the pass with ErrNoStoredVerdict and KEEPS the record: the pass runs between
 // every landing, so a transient failure must not throw a verdict away (gt-6r4exl).
-// Deleting on an error turns this red. A record that will not read fails earlier,
-// in the conflict check before the merge, as infrastructure (gt-1yvte7); it is
-// still kept.
+// Deleting on an error turns this red.
 func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -207,15 +205,12 @@ func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 		// reviewer replaces the lander's reviewer when set, and counts the
 		// reviews it ran; nil keeps the setup's (f.review).
 		reviewer func() (Reviewer, func() int)
-		// wantInfra: the pass fails as infrastructure rather than with the sentinel.
-		wantInfra bool
 	}{
 		{
 			name: "a record that will not read",
 			edit: func(l *Lander) {
 				l.Ahead.readFile = func(string) ([]byte, error) { return nil, errors.New("record unreadable") }
 			},
-			wantInfra: true,
 		},
 		{
 			name: "a review key that cannot be computed",
@@ -242,12 +237,7 @@ func TestVerdictReuseStoredOnlyErrorKeeps(t *testing.T) {
 			f.work.StoredOnly = true
 			writes := aheadBeadWrites(t, f.bd)
 			_, err := l.Land(context.Background(), f.work)
-			if tc.wantInfra {
-				var infra *InfraError
-				if !errors.As(err, &infra) || errors.Is(err, ErrNoStoredVerdict) {
-					t.Fatalf("Land error = %T %v; want an *InfraError that is not ErrNoStoredVerdict", err, err)
-				}
-			} else if !errors.Is(err, ErrNoStoredVerdict) {
+			if !errors.Is(err, ErrNoStoredVerdict) {
 				t.Fatalf("Land error = %v; want ErrNoStoredVerdict", err)
 			}
 			if !storedOnlyHasRecord(t, f) {
@@ -336,10 +326,9 @@ func TestVerdictReuseStoredOnlyConflictGone(t *testing.T) {
 // TestVerdictReuseStoredOnlyConflictStale: a stored conflict that cannot answer
 // for this landing — another head, an expired record — is deleted and ends the
 // pass with ErrNoStoredVerdict before it cuts a worktree or merges. A record
-// that cannot be read is kept and fails the pass as infrastructure, not as
-// "nothing to consume", and a delete that fails is infrastructure too
-// (gt-1yvte7). Merging before the answer turns each row into a conflict
-// rejection instead.
+// that cannot be read is kept and ends the pass with the same sentinel, and a
+// delete that fails is infrastructure, not "nothing to consume" (gt-1yvte7).
+// Merging before the answer turns each row into a conflict rejection instead.
 func TestVerdictReuseStoredOnlyConflictStale(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -357,7 +346,7 @@ func TestVerdictReuseStoredOnlyConflictStale(t *testing.T) {
 		{name: "an expired record", editRecord: func(rec *AheadRecord) {
 			rec.ReviewedAt = rec.ReviewedAt.Add(-2 * time.Hour)
 		}},
-		{name: "a record that will not read", wantErr: true, kept: true, editLander: func(l *Lander) {
+		{name: "a record that will not read", kept: true, editLander: func(l *Lander) {
 			l.Ahead.readFile = func(string) ([]byte, error) { return nil, errors.New("record unreadable") }
 		}},
 		{name: "a record that will not delete", wantErr: true, kept: true,
@@ -400,6 +389,43 @@ func TestVerdictReuseStoredOnlyConflictStale(t *testing.T) {
 			storedOnlyUntouched(t, f, func() int { return len(f.review.calls) }, writes)
 		})
 	}
+}
+
+// TestVerdictReuseStoredOnlyConflictUnreadable: a conflict record the store cannot
+// read ends the stored-only pass with ErrNoStoredVerdict before the merge, keeps
+// the record, and logs one line naming the bead and the read error (gt-1yvte7).
+// Failing the pass as infrastructure turns this red.
+func TestVerdictReuseStoredOnlyConflictUnreadable(t *testing.T) {
+	t.Parallel()
+	f, l, store, key := reuseLandSetup(t)
+	storedOnlyPut(t, store, storedOnlyConflict(key, f.base, l.now().Add(-time.Minute)))
+	f.base = f.pushMain("b.txt", "main's b\n")
+	probe := reuseLandWorktreeProbeAt(t, f, l)
+	l.Ahead.readFile = func(string) ([]byte, error) { return nil, errors.New("record unreadable") }
+	var out bytes.Buffer
+	l.Out = &out
+	f.work.StoredOnly = true
+	writes := aheadBeadWrites(t, f.bd)
+	_, err := l.Land(context.Background(), f.work)
+	if !errors.Is(err, ErrNoStoredVerdict) {
+		t.Fatalf("Land error = %v; want ErrNoStoredVerdict", err)
+	}
+	if probe.ran {
+		t.Error("the pass cut a worktree and merged; an unreadable record must end the pass first")
+	}
+	if !storedOnlyHasRecord(t, f) {
+		t.Error("the record was deleted on a read error; only a definite mismatch may delete it")
+	}
+	var line string
+	for _, got := range strings.Split(out.String(), "\n") {
+		if strings.Contains(got, "could not be read") {
+			line = got
+		}
+	}
+	if !strings.Contains(line, f.work.BeadID) || !strings.Contains(line, "record unreadable") {
+		t.Errorf("log line = %q; want one line naming the bead and the read error", line)
+	}
+	storedOnlyUntouched(t, f, func() int { return len(f.review.calls) }, writes)
 }
 
 // TestVerdictReuseStoredOnlyConflictGoneDeleteFails: a clean merge whose
