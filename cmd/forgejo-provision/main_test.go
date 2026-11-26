@@ -72,7 +72,6 @@ func TestMainHelpExitsZero(t *testing.T) {
 				"--dry-run",
 				"--skip-tokens",
 				"--revoke-token",
-				"not implemented yet",
 				"with no HOME",
 				"else " + forgejoprov.DefaultAPIURL,
 				"(default: " + strings.Join(forgejoprov.DefaultRoles(), " ") + ";",
@@ -94,34 +93,6 @@ func TestMainHelpExitsZero(t *testing.T) {
 				t.Errorf("run(%s) stderr = %q, want nothing on a help request", flag, stderr.String())
 			}
 		})
-	}
-}
-
-// TestMainRefusesRevokeToken: the usage text's --revoke-token is in the parser's
-// flag table, so the command line parses, and the run refuses it with the
-// not-implemented failure rather than provisioning the account it was asked to
-// revoke. An unknown flag would instead be a usage refusal (2).
-func TestMainRefusesRevokeToken(t *testing.T) {
-	t.Parallel()
-	tokenEnv := func(key string) string {
-		if key == "FORGEJO_ADMIN_TOKEN" {
-			return "fixture-admin"
-		}
-		return ""
-	}
-	var stdout, stderr strings.Builder
-	got := run([]string{"--revoke-token", "gt-old", "--role", "landing"}, forgejoprov.Env{Getenv: tokenEnv}, &stdout, &stderr)
-	if got != forgejoprov.ExitFailure {
-		t.Fatalf("run(--revoke-token) = %d, want %d (stderr: %s)", got, forgejoprov.ExitFailure, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "--revoke-token") || !strings.Contains(stderr.String(), "not implemented yet") {
-		t.Errorf("stderr = %q, want the --revoke-token refusal", stderr.String())
-	}
-	if strings.Contains(stderr.String(), "usage: forgejo-provision --help") {
-		t.Errorf("stderr = %q, want no usage hint: the flag is known", stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing on a failed run", stdout.String())
 	}
 }
 
