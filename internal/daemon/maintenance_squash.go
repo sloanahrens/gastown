@@ -1357,6 +1357,31 @@ func (s *squashDeferrals) reset(db string) {
 	delete(s.counts, db)
 }
 
+// alertClockPath is the alert clock's directory for the daemon's squash
+// deferral stamps: <town>/daemon/alert_clock, beside the daemon's other state
+// files (gt-b8na21).
+func alertClockPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "alert_clock")
+}
+
+// squashDeferClockKey is the alert clock key holding when the gc flag first
+// deferred db's squash checks: one entry per database (gt-b8na21).
+func squashDeferClockKey(db string) string {
+	return "squash-defer:" + db
+}
+
+// squashDeferredSince returns when the gc flag first deferred db's squash
+// checks, read from the stamp the alert clock persists under
+// squashDeferClockKey. A database with no stamp, an entry that cannot be read
+// and an entry that is not a timestamp all read as the zero time, so the
+// caller treats the database as not yet deferred. The clock sits under the
+// town root, so the stamp survives the daemon's rolls. The write is the next
+// piece (gt-n6kgco).
+func (d *Daemon) squashDeferredSince(db string) time.Time {
+	at, _ := alertClock{dir: alertClockPath(d.config.TownRoot)}.last(squashDeferClockKey(db))
+	return at
+}
+
 // squashDeferAlertAfter is how long the gc flag may defer a database's squash
 // checks before the alert is raised: a day. The two holders of the flag release
 // it by deferring and run far shorter than a day, so a day of deferrals means
