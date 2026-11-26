@@ -984,3 +984,77 @@ func TestJobDueKeepsALedgerNextDue(t *testing.T) {
 		})
 	}
 }
+
+// TestJobsTierSweepAllowance is bead gt-aylg3l: the tier_sweep row has the
+// same run-duration allowance every other ledger row has. The sweep's cycles
+// start 31 to 35 minutes after the last completion and take 12 to 28 minutes,
+// so a cycle is still running when cadence plus grace runs out and the alert
+// flaps. A run that recorded a 20-minute duration is not overdue until 30 + 20
+// + 10 = 60 minutes after it ended, while a row whose run recorded no duration
+// keeps the 30 + 10 = 40 minute limit.
+func TestJobsTierSweepAllowance(t *testing.T) {
+	t.Parallel()
+	const (
+		cadence = 30 * time.Minute
+		run     = 20 * time.Minute
+		grace   = 10 * time.Minute // max(cadence/4, 10m)
+	)
+	end := testNow.Add(-time.Hour)
+	cases := []struct {
+		name    string
+		stats   map[string]int64 // the run's stats
+		after   time.Duration    // how long after the run's end the row is judged
+		wantDue time.Duration    // allowance past the run's end
+		want    State
+	}{
+		{
+			name:    "a 20-minute run is not overdue 55 minutes after it ends",
+			stats:   map[string]int64{"duration_ms": run.Milliseconds()},
+			after:   55 * time.Minute,
+			wantDue: cadence + run + grace,
+			want:    StateOK,
+		},
+		{
+			name:    "a 20-minute run is overdue 65 minutes after it ends",
+			stats:   map[string]int64{"duration_ms": run.Milliseconds()},
+			after:   65 * time.Minute,
+			wantDue: cadence + run + grace,
+			want:    StateOverdue,
+		},
+		{
+			name:    "a run with no duration is overdue 45 minutes after it ends",
+			after:   45 * time.Minute,
+			wantDue: cadence + grace,
+			want:    StateOverdue,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeMayorDaemon(t, root, `{"tier_sweep":{"interval":"30m"}}`)
+			appendLedgerRuns(t, root, jobledger.Run{
+				Job:       "tier_sweep",
+				StartedAt: end.Add(-run),
+				EndedAt:   end,
+				Outcome:   "ok",
+				Stats:     c.stats,
+			})
+
+			jobs, err := List(root, Options{}, end.Add(c.after))
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			row, ok := findJob(jobs, "tier_sweep")
+			if !ok {
+				t.Fatalf("no tier_sweep row in %d rows", len(jobs))
+			}
+			if want := end.Add(c.wantDue); row.Due == nil || !row.Due.Equal(want) {
+				t.Errorf("Due = %v, want %v", row.Due, want)
+			}
+			if row.State != c.want {
+				t.Errorf("State = %q, want %q", row.State, c.want)
+			}
+		})
+	}
+}
