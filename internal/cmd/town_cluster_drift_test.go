@@ -1034,7 +1034,7 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 
 // The gate runner's live objects a cluster in step holds: the control render with
 // the fields the API server fills in, the dind share at the cpu 8 of
-// values.control.yaml, and config.yml at the capacity 2 the control values name.
+// values.control.yaml, and config.yml at the capacity 3 the control values name.
 // They are not derived from the render at test time, so a change to a template
 // constant or the values makes the compare report the difference instead of the
 // fixture following the render; when the change is wanted on the cluster too,
@@ -1266,9 +1266,9 @@ func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 	renderedConfig := mustBuildRunner(t, driftControlRunner(t, "")).ConfigMap.Data["config.yml"]
 	live := driftRecordedObject(t, driftRunnerConfigFixture)
 	recordedConfig := live["data"].(map[string]any)["config.yml"].(string)
-	liveConfig := strings.Replace(recordedConfig, "capacity: 2", "capacity: 3", 1)
+	liveConfig := strings.Replace(recordedConfig, "capacity: 3", "capacity: 2", 1)
 	if liveConfig == recordedConfig {
-		t.Fatal("fixture: the recorded config.yml names no capacity of 2")
+		t.Fatal("fixture: the recorded config.yml names no capacity of 3")
 	}
 	live["data"].(map[string]any)["config.yml"] = liveConfig
 	d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), map[string]map[string]any{
