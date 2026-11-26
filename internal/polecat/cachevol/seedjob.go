@@ -44,6 +44,10 @@ const (
 	// are the ones a seat compiled with the same flag reuses: -gcflags is part of Go's build cache
 	// key, and DWARF is about a third of a package archive (gt-pk7noy).
 	GoCompileFlags = "-gcflags=all=-dwarf=false"
+	// GoTrimpathFlag is the build flag the seed container passes, as the seats' go_flags do: -trimpath
+	// removes the worktree path from the cache key, so every seat shares the entries the seed wrote
+	// (gt-gd5ith).
+	GoTrimpathFlag = "-trimpath"
 )
 
 // SeedJobInput is what the seed Job is built from: the polecat image tag its containers run, the
@@ -405,10 +409,11 @@ func cloneContainer(image, pins, tokenSecret string) Container {
 }
 
 // seedContainer runs the PlanSeed steps per rig, hands the claim to SeedUserID, and writes the
-// marker. Its image carries the Go toolchain. GOFLAGS is -p=4 and -modcacherw plus GoCompileFlags:
-// the compile flags are part of Go's cache key, so an entry the seed writes without them is one no
-// seat with the flag can reuse (gt-pk7noy). The polecat image's ENV GOFLAGS carries the same
-// compile flag; TestPolecatImageGOFLAGSMatchesSeedJob holds the two equal.
+// marker. Its image carries the Go toolchain. GOFLAGS is -p=4 and -modcacherw plus GoTrimpathFlag
+// and GoCompileFlags: the build flags are part of Go's cache key, so an entry the seed writes
+// without them is one no seat with the flags can reuse (gt-pk7noy, gt-gd5ith). The polecat
+// image's ENV GOFLAGS carries the compile flag; TestPolecatImageGOFLAGSMatchesSeedJob holds that
+// one equal.
 func seedContainer(image, pins string) Container {
 	return Container{
 		Name:            "seed",
@@ -419,7 +424,7 @@ func seedContainer(image, pins string) Container {
 		Env: []EnvVar{
 			{Name: "GOCACHE", Value: path.Join(SeedCacheRoot, SeedBuildCacheDir)},
 			{Name: "GOMODCACHE", Value: path.Join(SeedCacheRoot, SeedModuleCacheDir)},
-			{Name: "GOFLAGS", Value: "-p=4 -modcacherw " + GoCompileFlags},
+			{Name: "GOFLAGS", Value: "-p=4 -modcacherw " + GoTrimpathFlag + " " + GoCompileFlags},
 		},
 		VolumeMounts: []VolumeMount{
 			{Name: "cache", MountPath: SeedCacheRoot},
