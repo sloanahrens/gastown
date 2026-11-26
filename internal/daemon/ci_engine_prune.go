@@ -970,6 +970,35 @@ func ciEngineSplitOrphans(cands []ciEngineJobContainer, running map[int64]bool) 
 	return orphans, keptRunning
 }
 
+// ciEngineRunningTaskSet unions the running Actions task ids of every target,
+// all or an error. A repository it could not ask about would read as having
+// nothing running, so an empty token, an empty target list, a target whose
+// instance did not resolve and a failed read each return no set at all. The
+// token is a secret: the read's message is scrubbed of it rather than wrapped,
+// since a client that quotes the request would carry it into the error text.
+func ciEngineRunningTaskSet(ctx context.Context, targets []landingInfraTarget, token string, read func(ctx context.Context, apiBase, token, owner, repo string) ([]int64, error)) (map[int64]bool, error) {
+	if token == "" {
+		return nil, errors.New("the running task ids cannot be read with an empty token")
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("the running task ids cannot be read with no target")
+	}
+	running := make(map[int64]bool)
+	for _, t := range targets {
+		if t.BaseErr != nil {
+			return nil, fmt.Errorf("%s: its Forgejo instance is not resolved: %w", t.Rig, t.BaseErr)
+		}
+		ids, err := read(ctx, t.APIBase, token, t.Owner, t.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("%s: reading the running task ids: %s", t.Rig, strings.ReplaceAll(err.Error(), token, "<redacted>"))
+		}
+		for _, id := range ids {
+			running[id] = true
+		}
+	}
+	return running, nil
+}
+
 // parseCIEngineTime reads a time docker prints, RFC 3339 with its fraction. A
 // zero time is refused: it would read as created long ago, and every age check
 // would then remove the item.
