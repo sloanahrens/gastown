@@ -6021,3 +6021,94 @@ func TestRoleConfigRoundTripKeepsHealthFields(t *testing.T) {
 		t.Errorf("env_var lines = %q, want %q", envLines, wantLines)
 	}
 }
+
+// unreadDependencyListAnswer is a bd show answer for an issue whose dependency
+// list bd could not read: the issue carries dependencies_unread, and its list
+// holds only the edges bd could salvage. The one entry it does list is a closed
+// blocker, so the list alone would read as unblocked.
+const unreadDependencyListAnswer = `[{"id":"gt-a","title":"a","status":"open","dependencies_unread":true,"dependencies":[{"id":"gt-b","status":"closed","dependency_type":"blocks","issue_type":"task"}]}]`
+
+// TestShowSurfacesAnUnreadDependencyList: a show whose dependency list bd
+// could not read is refused as blocked, never admitted as unblocked
+// (gt-rxlpuq). The reader appends one blocking entry to Dependencies, so every
+// caller of HasUnresolvedBlockers — sling.Admit and its callers — refuses the
+// bead without a signature change. An answer without the flag adds nothing.
+func TestShowSurfacesAnUnreadDependencyList(t *testing.T) {
+	t.Parallel()
+
+	assertUnread := func(t *testing.T, issue *Issue, wantListed int) {
+		t.Helper()
+		if len(issue.Dependencies) != wantListed+1 {
+			t.Fatalf("dependencies = %d, want %d listed plus the unread entry: %+v", len(issue.Dependencies), wantListed, issue.Dependencies)
+		}
+		unread := issue.Dependencies[len(issue.Dependencies)-1]
+		if unread.ID != "(dependency list unread)" {
+			t.Errorf("unread entry id = %q, want %q", unread.ID, "(dependency list unread)")
+		}
+		if unread.Status != "unread" {
+			t.Errorf("unread entry status = %q, want unread", unread.Status)
+		}
+		if unread.DependencyType != "blocks" {
+			t.Errorf("unread entry dependency type = %q, want blocks", unread.DependencyType)
+		}
+		if !HasUnresolvedBlockers(issue) {
+			t.Error("HasUnresolvedBlockers = false, want an unread dependency list to block")
+		}
+	}
+
+	t.Run("show appends the unread entry after the listed edges", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(func([]string) reply { return reply{stdout: unreadDependencyListAnswer} })
+		issue, err := newRecordedBeads(t.TempDir(), r).Show("gt-a")
+		if err != nil {
+			t.Fatalf("Show = %v, want the bead read", err)
+		}
+		assertUnread(t, issue, 1)
+		if got := issue.Dependencies[0].ID; got != "gt-b" {
+			t.Errorf("first dependency = %q, want the listed gt-b", got)
+		}
+	})
+
+	t.Run("show with no listed edges still surfaces the unread entry", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(func([]string) reply {
+			return reply{stdout: `[{"id":"gt-a","status":"open","dependencies_unread":true}]`}
+		})
+		issue, err := newRecordedBeads(t.TempDir(), r).Show("gt-a")
+		if err != nil {
+			t.Fatalf("Show = %v, want the bead read", err)
+		}
+		assertUnread(t, issue, 0)
+	})
+
+	t.Run("show without the flag parses exactly the listed dependencies", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(func([]string) reply {
+			return reply{stdout: `[{"id":"gt-a","status":"open","dependencies":[{"id":"gt-b","status":"closed","dependency_type":"blocks"}]}]`}
+		})
+		issue, err := newRecordedBeads(t.TempDir(), r).Show("gt-a")
+		if err != nil {
+			t.Fatalf("Show = %v, want the bead read", err)
+		}
+		if len(issue.Dependencies) != 1 || issue.Dependencies[0].ID != "gt-b" {
+			t.Fatalf("dependencies = %+v, want exactly the listed gt-b", issue.Dependencies)
+		}
+		if HasUnresolvedBlockers(issue) {
+			t.Error("HasUnresolvedBlockers = true, want a closed listed blocker to stay unblocked")
+		}
+	})
+
+	t.Run("ShowMultiple carries the unread entry", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(func([]string) reply { return reply{stdout: unreadDependencyListAnswer} })
+		got, err := newRecordedBeads(t.TempDir(), r).ShowMultiple([]string{"gt-a"})
+		if err != nil {
+			t.Fatalf("ShowMultiple = %v, want the bead read", err)
+		}
+		issue := got["gt-a"]
+		if issue == nil {
+			t.Fatal("ShowMultiple returned no gt-a")
+		}
+		assertUnread(t, issue, 1)
+	})
+}
