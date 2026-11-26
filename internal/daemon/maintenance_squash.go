@@ -1398,18 +1398,24 @@ func (d *Daemon) markSquashDeferred(db string) error {
 	return nil
 }
 
-// clearSquashDeferred removes db's persisted deferral stamp, so its next
-// deferral starts a new run rather than continuing the one the stamp began. A
-// database with no stamp is already clear, so its removal reports no error; any
-// other failure is returned, because a stamp that outlives the run it started
-// would keep that run's window alive (gt-jykwan).
+// clearSquashDeferred removes db's persisted deferral stamp and its squash-alerted
+// mark, so its next deferral starts a new run rather than continuing the one the
+// stamp began, and that run is alerted afresh rather than suppressed by the mark
+// the old run left. The mark goes first: if it cannot be removed the stamp stays,
+// so the run is not reset while its mark outlives it, and the error is returned.
+// A database with no stamp or mark is already clear, so its removal reports no
+// error; any other failure is returned, because a stamp that outlives the run it
+// started would keep that run's window alive (gt-jykwan, gt-w9z5ob).
 func (d *Daemon) clearSquashDeferred(db string) error {
-	path := filepath.Join(alertClockPath(d.config.TownRoot), squashDeferClockKey(db))
-	err := os.Remove(path)
-	if err == nil || errors.Is(err, os.ErrNotExist) {
-		return nil
+	dir := alertClockPath(d.config.TownRoot)
+	for _, key := range []string{squashAlertedClockKey(db), squashDeferClockKey(db)} {
+		err := os.Remove(filepath.Join(dir, key))
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		return fmt.Errorf("clearing the squash deferral entry %q for %q: %w", key, db, err)
 	}
-	return fmt.Errorf("clearing the squash deferral stamp for %q: %w", db, err)
+	return nil
 }
 
 // squashDeferAlertAfter is how long the gc flag may defer a database's squash

@@ -383,6 +383,78 @@ func TestClearSquashDeferred(t *testing.T) {
 	}
 }
 
+// TestClearSquashDeferredClearsAlertedMark pins what a run's clear takes with
+// it: the database's squash-alerted mark goes with its deferral stamp, another
+// database's mark stays, and a mark that cannot be removed returns the error
+// and keeps the run's stamp, so the run is not reset while a mark it left is
+// still standing (gt-w9z5ob).
+func TestClearSquashDeferredClearsAlertedMark(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 24, 9, 30, 0, 0, time.UTC)
+	alertedAt := first.Add(24 * time.Hour)
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		// wantErr requires the clear of "gt" to fail.
+		wantErr bool
+		// wantStamp is squashDeferredSince("gt") after the clear.
+		wantStamp time.Time
+		// wantMark is whether squash-alerted:gt is still on the clock.
+		wantMark bool
+		// wantOtherMark is whether squash-alerted:hq is still on the clock.
+		wantOtherMark bool
+	}{
+		{
+			name: "a clear takes the alerted mark with the run's stamp",
+			setup: func(t *testing.T, dir string) {
+				stampSquashDefer(t, dir, squashDeferClockKey("gt"), first)
+				stampSquashDefer(t, dir, squashAlertedClockKey("gt"), alertedAt)
+				stampSquashDefer(t, dir, squashAlertedClockKey("hq"), alertedAt)
+			},
+			wantOtherMark: true,
+		},
+		{
+			name: "a mark that cannot be removed returns the error and keeps the run's stamp",
+			setup: func(t *testing.T, dir string) {
+				stampSquashDefer(t, dir, squashDeferClockKey("gt"), first)
+				entry := filepath.Join(dir, squashAlertedClockKey("gt"))
+				if err := os.MkdirAll(entry, 0o700); err != nil {
+					t.Fatalf("creating the mark's directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(entry, "held"), nil, 0o600); err != nil {
+					t.Fatalf("writing the mark's child: %v", err)
+				}
+			},
+			wantErr:   true,
+			wantStamp: first,
+			wantMark:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+			dir := alertClockPath(d.config.TownRoot)
+			tc.setup(t, dir)
+
+			if err := d.clearSquashDeferred("gt"); (err != nil) != tc.wantErr {
+				t.Fatalf("clearSquashDeferred(\"gt\") err = %v, wantErr %t", err, tc.wantErr)
+			}
+			if got := d.squashDeferredSince("gt"); !got.Equal(tc.wantStamp) {
+				t.Fatalf("squashDeferredSince(\"gt\") after clear = %v, want %v", got, tc.wantStamp)
+			}
+			// Lstat, not the clock's read: a mark that cannot be read is still
+			// a mark on the clock.
+			if _, err := os.Lstat(filepath.Join(dir, squashAlertedClockKey("gt"))); (err == nil) != tc.wantMark {
+				t.Fatalf("squash-alerted:gt on the clock = %t, want %t (err %v)", err == nil, tc.wantMark, err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, squashAlertedClockKey("hq"))); (err == nil) != tc.wantOtherMark {
+				t.Fatalf("squash-alerted:hq on the clock = %t, want %t (err %v)", err == nil, tc.wantOtherMark, err)
+			}
+		})
+	}
+}
+
 // TestMarkSquashDeferred pins the stamp of the first deferral: a first mark
 // makes squashDeferredSince return the daemon clock's time, a mark later keeps
 // that first time, one database's mark leaves another database unstamped, and
@@ -612,6 +684,9 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 		blockMark bool
 		// strangeMark puts a mark that is not a timestamp where the entry goes.
 		strangeMark bool
+		// loopMark puts a symlink that loops onto itself where the entry goes,
+		// so the mark cannot be read though it can be replaced.
+		loopMark bool
 		// wantCalls counts the escalation attempts; wantErr requires an error
 		// (the delivery's when deliveryErr is set); wantMarked is whether the
 		// clock holds squash-alerted:<db> at now.
@@ -650,6 +725,14 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 			strangeMark: true,
 			wantCalls:   1,
 			wantMarked:  true,
+		},
+		{
+			name:       "a mark that cannot be read reads as not alerted and is rewritten",
+			db:         "gt",
+			now:        first.Add(24 * time.Hour),
+			loopMark:   true,
+			wantCalls:  1,
+			wantMarked: true,
 		},
 		{
 			name: "a call before the day is up raises nothing and leaves no mark",
@@ -699,6 +782,15 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 				}
 			}
 
+			if tc.loopMark {
+				if err := os.MkdirAll(clock.dir, 0o700); err != nil {
+					t.Fatalf("creating the clock directory: %v", err)
+				}
+				if err := os.Symlink(key, filepath.Join(clock.dir, key)); err != nil {
+					t.Fatalf("writing the looping mark: %v", err)
+				}
+			}
+
 			var err error
 			for i := 0; i < max(tc.calls, 1); i++ {
 				if err = d.raiseSquashDeferAlert(tc.db, tc.now); err != nil {
@@ -728,5 +820,41 @@ func TestSquashDeferAlertRaisesOnce(t *testing.T) {
 				t.Errorf("%s = %v, want the call's instant %v", key, marked, tc.now)
 			}
 		})
+	}
+}
+
+// TestSquashDeferAlertRaisesAgainAfterClear pins that a run which ends is not
+// carried into the next: once the first run's alert is raised and its clear
+// runs, the next run's alert waits its own day from the next run's first
+// deferral and is raised, not suppressed by the mark the first run left
+// (gt-w9z5ob).
+func TestSquashDeferAlertRaisesAgainAfterClear(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	nextRun := first.Add(48 * time.Hour)
+	d, _, _ := squashDueDaemon(t)
+	dir := alertClockPath(d.config.TownRoot)
+	recorder := d.notifier.(*notifyfake.Recorder)
+	stampSquashDefer(t, dir, squashDeferClockKey("gt"), first)
+
+	if err := d.raiseSquashDeferAlert("gt", first.Add(24*time.Hour)); err != nil {
+		t.Fatalf("raising the first run's alert: %v", err)
+	}
+	if err := d.clearSquashDeferred("gt"); err != nil {
+		t.Fatalf("clearing the first run: %v", err)
+	}
+	stampSquashDefer(t, dir, squashDeferClockKey("gt"), nextRun)
+
+	if err := d.raiseSquashDeferAlert("gt", nextRun.Add(23*time.Hour+59*time.Minute)); err != nil {
+		t.Fatalf("raising before the next run's day: %v", err)
+	}
+	if n := len(recorder.Escalations()); n != 1 {
+		t.Fatalf("after the next run's first call before its day, %d alerts raised, want 1", n)
+	}
+	if err := d.raiseSquashDeferAlert("gt", nextRun.Add(24*time.Hour)); err != nil {
+		t.Fatalf("raising the next run's alert: %v", err)
+	}
+	if n := len(recorder.Escalations()); n != 2 {
+		t.Fatalf("after the next run's day, %d alerts raised, want 2: the first run's mark suppressed it", n)
 	}
 }
