@@ -444,6 +444,33 @@ func TestTickEffRigHeadsFailedQuery(t *testing.T) {
 	}
 }
 
+// TestTickEffRigHeadsFailure: a read that fails returns no map and the read's
+// error. A failed read must read as an error, never as an empty answer, or
+// every rig would look unchanged when the read simply did not happen.
+func TestTickEffRigHeadsFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, "gastown", ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"gt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New(`dial tcp 127.0.0.1:3307: connect: connection refused`)
+	read := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+		return nil, failure
+	})
+
+	got, err := rigHeads(town, []string{"gastown"}, read)
+	if !errors.Is(err, failure) {
+		t.Errorf("rigHeads error = %v, want the read's error %v", err, failure)
+	}
+	if got != nil {
+		t.Errorf("rigHeads = %v, want a nil map with a failed read", got)
+	}
+}
+
 // TestTickEffRigHeadsParse: the SQLCSV header and row pair by column name into
 // one rig per database — the row interleaves two databases, so positional
 // pairing misattributes it — and a result that is not a parseable header and
