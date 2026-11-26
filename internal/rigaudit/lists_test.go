@@ -37,3 +37,34 @@ func TestRigLists(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckLists checks the gaps CheckLists reports for a config document, the
+// unparked rigs and the known rigs.
+func TestCheckLists(t *testing.T) {
+	t.Parallel()
+	full := `"daemon":{"patrols":{"landing_worker":{"rigs":["a","b"]},"patrol_scan":{"rigs":["a","b"],"worktree_cleanup":{"rigs":["a","b"]}}}}`
+	tests := []struct {
+		name string
+		json string
+		want []Problem
+	}{
+		{"required list missing a rig", `{"daemon":{"patrols":{"landing_worker":{"rigs":["a"]},"patrol_scan":{"rigs":["a","b"],"worktree_cleanup":{"rigs":["a","b"]}}}}}`, []Problem{{"required", "daemon.patrols.landing_worker.rigs lacks b"}}},
+		{"info list missing a rig", `{` + full + `,"extra":{"rigs":["a"]}}`, []Problem{{"info", "extra.rigs lacks b"}}},
+		{"list naming no known rig is ignored", `{` + full + `,"other":{"rigs":["x"]}}`, nil},
+		{"required path absent", `{"daemon":{"patrols":{"landing_worker":{"rigs":["a","b"]},"patrol_scan":{"rigs":["a","b"]}}}}`, []Problem{{"required", "daemon.patrols.patrol_scan.worktree_cleanup.rigs is absent or names no known rig"}}},
+		{"clean config", `{` + full + `}`, nil},
+		{"nested index list", `{` + full + `,"x":[{"rigs":["a"]}]}`, []Problem{{"info", "x[0].rigs lacks b"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var config any
+			if err := json.Unmarshal([]byte(tc.json), &config); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if got := CheckLists(config, []string{"a", "b"}, []string{"a", "b"}); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("CheckLists(%s) = %+v, want %+v", tc.json, got, tc.want)
+			}
+		})
+	}
+}

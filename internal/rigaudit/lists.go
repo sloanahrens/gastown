@@ -60,3 +60,59 @@ func stringsOnly(list []any) ([]string, bool) {
 	}
 	return names, true
 }
+
+// RequiredLists are the config paths of the daemon's per-rig lists. A rig that
+// is unparked but missing from one of them half-works, so a gap there is required.
+var RequiredLists = []string{
+	"daemon.patrols.landing_worker.rigs",
+	"daemon.patrols.patrol_scan.rigs",
+	"daemon.patrols.patrol_scan.worktree_cleanup.rigs",
+}
+
+// Problem is one finding from a config check. Kind is "required" or "info".
+type Problem struct {
+	Kind string
+	Text string
+}
+
+// CheckLists reports each list in config that names a known rig but lacks an
+// unparked rig, and each RequiredLists path that no list naming a known rig
+// holds. A list that names no known rig is ignored. Problems are sorted by
+// Kind, then Text.
+func CheckLists(config any, unparked, known []string) []Problem {
+	var problems []Problem
+	seen := map[string]bool{}
+	for _, list := range RigLists(config) {
+		if !slices.ContainsFunc(list.Names, func(n string) bool { return slices.Contains(known, n) }) {
+			continue
+		}
+		seen[list.Path] = true
+		var missing []string
+		for _, rig := range unparked {
+			if !slices.Contains(list.Names, rig) {
+				missing = append(missing, rig)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		slices.Sort(missing)
+		kind := "info"
+		if slices.Contains(RequiredLists, list.Path) {
+			kind = "required"
+		}
+		problems = append(problems, Problem{kind, fmt.Sprintf("%s lacks %s", list.Path, strings.Join(slices.Compact(missing), ", "))})
+	}
+	for _, path := range RequiredLists {
+		if !seen[path] {
+			problems = append(problems, Problem{"required", path + " is absent or names no known rig"})
+		}
+	}
+	slices.SortFunc(problems, func(a, b Problem) int {
+		if c := strings.Compare(a.Kind, b.Kind); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Text, b.Text)
+	})
+	return problems
+}
