@@ -158,12 +158,12 @@ var townClusterPlanCmd = &cobra.Command{
 	Short: "Render the desired set into a directory and print its plan id",
 	Long: `Render the desired set into --out from the flags the last live render recorded,
 with --include-static, and print the short form of the plan's id. Nothing is
-applied. The plan reads the cluster's Deployments and the static objects with get
-only and writes nothing to any cluster, and sends each file as a server-side dry
-run. A Secret is compared on the fields its
-document declares and never on its data, which the cluster fills. After the phases,
-the plan prints, in the drift command's form, the compare's lines for the
-Deployments and static objects that differ from the live cluster.
+applied. The plan reads the cluster's Deployments and the static objects with
+get only and writes nothing to any cluster, and sends each file as a server-side
+dry run. A Secret is compared on the fields its document declares and never on
+its data, which the cluster fills. After the phases, the plan prints, in the
+drift command's form, the compare's lines for the Deployments and static objects
+that differ from the live cluster.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the

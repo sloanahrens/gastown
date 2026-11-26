@@ -247,13 +247,67 @@ func TestClusterShapePlanDryRunRefusesAKubeconfigThatIsNotAPath(t *testing.T) {
 	}
 }
 
-// planDryRuns refuses a file whose phase the plan does not hold, rather than
-// sending it under no kubeconfig.
+// TestClusterShapePlanDryRunRefusesAPhaseItCannotRead: planDryRuns refuses a file
+// whose phase the plan does not hold, rather than sending it under no kubeconfig.
 func TestClusterShapePlanDryRunRefusesAPhaseItCannotRead(t *testing.T) {
 	t.Parallel()
 	_, err := planDryRuns(context.Background(), planKubectl(t), t.TempDir(), []planRecordFile{{Name: "f", Phase: "X"}}, planTestKubeconfigs)
 	if err == nil || !strings.Contains(err.Error(), "is not a plan phase") {
 		t.Fatalf("planDryRuns = %v, want a refusal naming the phase", err)
+	}
+}
+
+// TestClusterShapePlanDryRunFailureIsTheFilesResult: a server-side dry run that
+// cannot run, or that exits non-zero, is that file's result, and every file is
+// still sent.
+func TestClusterShapePlanDryRunFailureIsTheFilesResult(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		output  string
+		exit    int
+		runErr  error
+		wantErr string
+	}{
+		{name: "passes", output: "configured (server dry run)"},
+		{name: "exits non-zero", output: "error: forbidden", exit: 1, wantErr: "kubectl exited 1"},
+		{name: "cannot run", runErr: errors.New("exec: kubectl: not found"), wantErr: "could not run"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := []planRecordFile{{Name: "a.yaml", Phase: planPhaseStatic}, {Name: "b.yaml", Phase: planPhaseWorkloads}}
+			var sent []string
+			kube := func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+				file, _, ok := planDryRunOf(name, args)
+				if !ok {
+					t.Fatalf("the plan ran %s %q, want only a server-side dry run", name, args)
+				}
+				sent = append(sent, file)
+				return tc.output, tc.exit, tc.runErr
+			}
+			results, err := planDryRuns(context.Background(), kube, t.TempDir(), files, planTestKubeconfigs)
+			if err != nil {
+				t.Fatalf("planDryRuns = %v, want each file's result and no refusal", err)
+			}
+			if len(sent) != len(files) || len(results) != len(files) {
+				t.Fatalf("planDryRuns sent %d files and returned %d results, want %d of each", len(sent), len(results), len(files))
+			}
+			for _, r := range results {
+				if tc.wantErr == "" {
+					if r.Err != nil {
+						t.Errorf("%s: Err = %v, want none for a passing dry run", r.Name, r.Err)
+					}
+					if r.Output != tc.output {
+						t.Errorf("%s: Output = %q, want kubectl's %q", r.Name, r.Output, tc.output)
+					}
+					continue
+				}
+				if r.Err == nil || !strings.Contains(r.Err.Error(), tc.wantErr) || !strings.Contains(r.Err.Error(), r.Name) {
+					t.Errorf("%s: Err = %v, want an error naming the file and %q", r.Name, r.Err, tc.wantErr)
+				}
+			}
+		})
 	}
 }
 
