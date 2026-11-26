@@ -1545,3 +1545,37 @@ func TestCallLogLoggedCountsAreBounded(t *testing.T) {
 		t.Errorf("beads logged = %d, want %d", got, maxLoggedItems)
 	}
 }
+
+// TestCallLogSentinelNamedKey: a caller-chosen actor that spells a sentinel
+// bucket gets a key of its own, so a caller can never be counted as that
+// sentinel (gt-1eqwnn).
+func TestCallLogSentinelNamedKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		actor string
+		key   string
+		ok    bool
+	}{
+		{name: "none sentinel", actor: "(none)", key: namedNoneActor, ok: true},
+		{name: "other sentinel", actor: "(other)", key: namedOtherActor, ok: true},
+		{name: "empty", actor: "", key: "", ok: false},
+		{name: "none without brackets", actor: "none", key: "", ok: false},
+		{name: "named actor", actor: "actor01", key: "", ok: false},
+		{name: "case differs", actor: "(Other)", key: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			key, ok := sentinelNamedKey(tt.actor)
+			if key != tt.key || ok != tt.ok {
+				t.Fatalf("sentinelNamedKey(%q) = (%q, %v), want (%q, %v)", tt.actor, key, ok, tt.key, tt.ok)
+			}
+		})
+	}
+	noneKey, _ := sentinelNamedKey(noneActor)
+	otherKey, _ := sentinelNamedKey(otherActor)
+	if noneKey == otherKey {
+		t.Fatalf("sentinel keys collide: %q", noneKey)
+	}
+}
