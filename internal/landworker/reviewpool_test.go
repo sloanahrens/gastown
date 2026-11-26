@@ -291,6 +291,38 @@ func TestReviewPoolCapsAtMax(t *testing.T) {
 	}
 }
 
+// TestReviewPoolZeroMaxIsOne checks that a pool built without a Max runs one
+// review at a time: Max 0 and Max -1 both count as 1, so of three offered works
+// exactly one starts.
+func TestReviewPoolZeroMaxIsOne(t *testing.T) {
+	t.Parallel()
+	for _, max := range []int{0, -1} {
+		t.Run(fmt.Sprintf("Max %d", max), func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			pool := &ReviewPool{Reviewer: rev, Max: max}
+
+			pool.Offer(context.Background(), []land.Work{
+				{BeadID: "gt-first", Head: "1111111"},
+				{BeadID: "gt-second", Head: "2222222"},
+				{BeadID: "gt-third", Head: "3333333"},
+			})
+			recvBounded(t, ctx, rev.entered, "the one review start")
+			close(rev.release)
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+			got := rev.reviewed()
+			if len(got) != 1 {
+				t.Fatalf("reviewer called %d times for three works with Max %d, want 1", len(got), max)
+			}
+			if got[0].BeadID != "gt-first" {
+				t.Errorf("reviewed %s with Max %d, want the first work gt-first", got[0].BeadID, max)
+			}
+		})
+	}
+}
+
 func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
