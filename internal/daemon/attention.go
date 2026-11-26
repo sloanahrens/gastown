@@ -873,6 +873,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The slow gate the last runs of a rig show (gt-l0t2tg). The owns
 		// predicate keeps only its own items when the run log cannot be read.
 		{kind: attention.KindGateSlow, collect: s.collectGateSlow, owns: gateSlowOwned},
+		// A rig whose last gate runs could not read the runner throttle
+		// (gt-hnd1kj). The owns predicate keeps only its own items when the run
+		// log cannot be read.
+		{kind: attention.KindGateThrottleUnread, collect: s.collectGateThrottle, owns: gateThrottleOwned},
 		// The gate-run log's last failed append, until the next one succeeds
 		// (gt-nwea8n). It reads the daemon's own memory, so it cannot fail.
 		{kind: attention.KindGateRunLog, collect: s.collectGateRunLog},
