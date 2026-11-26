@@ -151,6 +151,15 @@ func rawBdProblems(fsys fs.FS, baseline map[rawBdKey]int, floor int) []string {
 	if err != nil {
 		return []string{fmt.Sprintf("walk stopped before the counts were complete: %v", err)}
 	}
+	return rawBdProblemsOf(counts, files, baseline, floor)
+}
+
+// rawBdProblemsOf is the comparison half of rawBdProblems over counts already
+// taken, and the count of Go files those counts were read from: a count that
+// grew, a baseline entry that no longer matches its site, and a scan of fewer
+// than floor files. An empty result passes. A caller whose own scan produced
+// the same keys can feed it without a second walk.
+func rawBdProblemsOf(counts map[rawBdKey]int, files int, baseline map[rawBdKey]int, floor int) []string {
 	var problems []string
 	if files < floor {
 		problems = append(problems, fmt.Sprintf("scanned %d Go files (floor %d); the walk has stopped reading the repo", files, floor))
@@ -374,6 +383,64 @@ func TestRawBdPolicy(t *testing.T) {
 				if !strings.Contains(got[i], w) {
 					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], w)
 				}
+			}
+		})
+	}
+}
+
+// TestRawBdProblemsOf drives the comparison behind TestRawBdPolicy over counts
+// directly, so a caller that has already counted the same keys can feed it:
+// a count above its baseline, a count below, a baseline entry with no site
+// left, and a scan that read fewer files than the floor.
+func TestRawBdProblemsOf(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		counts   map[rawBdKey]int
+		files    int
+		baseline map[rawBdKey]int
+		floor    int
+		want     []string
+	}{
+		{
+			name:     "a count above its baseline fails",
+			counts:   map[rawBdKey]int{{"internal/cmd/two.go", "argv"}: 2},
+			files:    1,
+			baseline: map[rawBdKey]int{{"internal/cmd/two.go", "argv"}: 1},
+			floor:    1,
+			want:     []string{"internal/cmd/two.go: 2 raw bd argv site(s), baseline 1; call a typed beads method instead"},
+		},
+		{
+			name:     "a count below its baseline fails",
+			counts:   map[rawBdKey]int{{"internal/cmd/one.go", "argv"}: 1},
+			files:    1,
+			baseline: map[rawBdKey]int{{"internal/cmd/one.go", "argv"}: 2},
+			floor:    1,
+			want:     []string{"raw-bd-baseline.txt: internal/cmd/one.go argv: baseline 2, found 1; lower it to 1"},
+		},
+		{
+			name:     "a baseline entry with no site left fails",
+			counts:   map[rawBdKey]int{},
+			files:    1,
+			baseline: map[rawBdKey]int{{"internal/cmd/gone.go", "argv"}: 1},
+			floor:    1,
+			want:     []string{"raw-bd-baseline.txt: internal/cmd/gone.go argv: baseline 1, found none; remove the entry"},
+		},
+		{
+			name:   "a scan that read too few files fails",
+			counts: map[rawBdKey]int{},
+			files:  1,
+			floor:  2,
+			want:   []string{"scanned 1 Go files (floor 2); the walk has stopped reading the repo"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rawBdProblemsOf(tc.counts, tc.files, tc.baseline, tc.floor)
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("problems = %q, want %q", got, tc.want)
 			}
 		})
 	}
