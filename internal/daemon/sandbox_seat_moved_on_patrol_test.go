@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -293,5 +295,70 @@ func TestPatrolScanDropsMovedOnKeptSeat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// movedOnWaitedPolecat is the second seat whose moved-on keep one budgeted tick
+// does not reach. It sorts after the fixture seat, so that seat's record is
+// always the one read first.
+const movedOnWaitedPolecat = "beryl"
+
+// seedMovedOnSeatBead writes seat name's agent bead on the branch that names
+// another bead than the landed one, so the seat is a moved-on keep.
+func seedMovedOnSeatBead(t *testing.T, f *seatEndFake, name string) {
+	t.Helper()
+	id := beads.AgentBeadIDFor(constants.RolePolecat, endRig, name, f.town)
+	if _, err := f.agentDB.Create(beads.CreateOptions{
+		ID: id, Title: id, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(id, &f.seatFields),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// keptRecordPresent reports whether seat rig/name still has a kept record.
+func keptRecordPresent(t *testing.T, town, rig, name string) bool {
+	t.Helper()
+	path, err := keptSandboxSeatPath(town, rig, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// One tick of the moved-on pass reads at most its budget of kept records: with
+// a budget of 1 and two moved-on keeps it drops the first seat's record, leaves
+// the second's for the next tick, and logs the stop with the budget it spent
+// (gt-52noj3).
+func TestPatrolScanMovedOnIsBounded(t *testing.T) {
+	t.Parallel()
+	p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+	for _, name := range []string{endPolecat, movedOnWaitedPolecat} {
+		seedMovedOnSeatBead(t, p.seatEndFake, name)
+		if err := writeKeptSandboxSeat(p.town, endRig, name, movedOnRec()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.host.sandboxRecordBudget = 1
+	var logs strings.Builder
+	p.host.d.logger = log.New(&logs, "", 0)
+
+	p.host.dropMovedOnKeptSeats()
+
+	out := logs.String()
+	dropped := strings.Count(out, "patrol_scan: kept record of "+endRig+"/")
+	if dropped != 1 {
+		t.Errorf("the tick dropped %d records, want its budget of 1:\n%s", dropped, out)
+	}
+	if keptRecordPresent(t, p.town, endRig, endPolecat) {
+		t.Errorf("the fixture seat's record is still there; the tick read it and did not drop it:\n%s", out)
+	}
+	if !keptRecordPresent(t, p.town, endRig, movedOnWaitedPolecat) {
+		t.Errorf("the second seat's record was read in the same tick; want it left for the next tick:\n%s", out)
+	}
+	want := "patrol_scan: moved-on kept-record pass stopped at its budget of 1 reads; the rest wait for the next tick"
+	if got := strings.Count(out, want); got != 1 {
+		t.Errorf("log carries the bound line %d times, want once:\n%s", got, out)
 	}
 }
