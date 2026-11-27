@@ -63,6 +63,8 @@ func (f *driveFake) run(ctx context.Context, argv []string) ([]byte, error) {
 			return []byte(driveStart.Format("2006/01/02 15:04:05") + " daemon: heartbeat ok\n"), nil
 		case "sling":
 			return nil, nil
+		case "pool": // free seats, so every sling's seat check admits at once
+			return []byte("claude 0/8  open\ntotal 8 live\n"), nil
 		}
 	}
 	verb := argv[1]
