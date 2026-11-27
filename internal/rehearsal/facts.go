@@ -36,6 +36,20 @@ func GateFacts(notes string, comments []string) []Gate {
 	return gates
 }
 
+// LandingFacts reads a rehearsal bead's landing: Landed when the notes hold a
+// LANDING RECORD block naming a landed commit, and CIFailed when they hold a
+// MERGE REJECTION block of the gate kind, even when a later landing followed it.
+func LandingFacts(bead, notes string) Landing {
+	landing := Landing{Bead: bead}
+	if _, ok := land.ParseLandingRecord(notes); ok {
+		landing.Landed = true
+	}
+	if len(land.RejectionsOfKind(notes, string(land.RejectGate))) > 0 {
+		landing.CIFailed = true
+	}
+	return landing
+}
+
 // gateLinePresent reports whether the last READY TO LAND block carries a Gate
 // line, even a valueless one: ParseReadyNote returns the value, not its presence.
 func gateLinePresent(notes string) bool {
