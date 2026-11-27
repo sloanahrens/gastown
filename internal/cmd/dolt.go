@@ -1492,7 +1492,8 @@ func execDoltLogContainerTail(container string, lines int, follow bool, out, err
 
 // doltLogsTo writes the stale-log notice for the town's dolt.log to errw, then
 // its last lines (or follows it) to out. A container town's lines are read from
-// the container: its host dolt.log is the stale file the notice names (gt-rpoii1).
+// the container, followed when follow is set: its host dolt.log is the stale
+// file the notice names (gt-rpoii1, gt-chmmo4).
 func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines int, follow bool) error {
 	config := doltserver.DefaultConfig(townRoot)
 	container := doltLogContainer(config)
@@ -1505,13 +1506,12 @@ func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines 
 		return err
 	}
 
-	if follow {
-		// Use tail -f for following
-		return reads.tail([]string{"-f", config.LogFile}, out, errw)
+	if container != "" {
+		return reads.containerLog(container, lines, follow, out, errw)
 	}
 
-	if container != "" {
-		return reads.containerLog(container, lines, false, out, errw)
+	if follow {
+		return reads.tail([]string{"-f", config.LogFile}, out, errw)
 	}
 
 	// Use tail -n for last N lines

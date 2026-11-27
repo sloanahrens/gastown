@@ -287,6 +287,53 @@ func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
 	}
 }
 
+// TestDoltLogsFollowReadsTheContainer: with dolt.external_container set and
+// follow true, gt dolt logs follows the container's live log through the
+// container reader, called with the container name, the line count and follow
+// set, and never tails the stale host dolt.log (gt-chmmo4).
+func TestDoltLogsFollowReadsTheContainer(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	writeDoltLogStaleFixture(t, townRoot, now.Add(-15*24*time.Hour))
+
+	var gotContainer string
+	var gotLines int
+	var gotFollow bool
+	tailed := false
+	reads := doltLogReads{
+		now:  func() time.Time { return now },
+		tail: func([]string, io.Writer, io.Writer) error { tailed = true; return nil },
+		containerLog: func(container string, lines int, follow bool, out, _ io.Writer) error {
+			gotContainer, gotLines, gotFollow = container, lines, follow
+			_, err := io.WriteString(out, "container line one\ncontainer line two\n")
+			return err
+		},
+	}
+
+	var out bytes.Buffer
+	if err := doltLogsTo(townRoot, &out, &out, reads, 60, true); err != nil {
+		t.Fatalf("doltLogsTo: %v", err)
+	}
+
+	if gotContainer != "gt-dolt" || gotLines != 60 {
+		t.Errorf("container reader called with (%q, %d), want (\"gt-dolt\", 60)", gotContainer, gotLines)
+	}
+	if !gotFollow {
+		t.Error("container reader called with follow unset, want true")
+	}
+	if tailed {
+		t.Error("the stale host dolt.log was tailed")
+	}
+	got := out.String()
+	if !strings.Contains(got, "container line one") {
+		t.Errorf("output %q does not hold the container's lines", got)
+	}
+	if strings.Contains(got, "serving line one") {
+		t.Errorf("output %q holds the host dolt.log's lines", got)
+	}
+}
+
 // TestDoltLogsHostFollow: a host town with follow set tails the host dolt.log
 // with -f, and never reads a container log, since a town with no
 // dolt.external_container has no container whose log would hold its Dolt
