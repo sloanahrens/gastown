@@ -306,9 +306,23 @@ func (h *patrolScanHost) Reap(rig, polecat string) (string, error) {
 		return nukePreservedRef(stdout), nil
 	}
 	if exitCodeOf(err) == nukeRefusedExitCode {
-		return "", fmt.Errorf("%w: %s", errReapRefused, lastLine(string(stderr)))
+		return "", fmt.Errorf("%w: %s", errReapRefused, refusalReason(string(stderr)))
 	}
 	return "", fmt.Errorf("gt polecat nuke %s/%s: %w: %s", rig, polecat, err, lastLine(string(stderr)))
+}
+
+// refusalReason is the reason a refused nuke gives: the text of its
+// `Error: blocked:` line, which names each blocked polecat and its reasons.
+// Cobra prints its usage block after that line, so the last stderr line is a
+// flag's help text. A stderr with no such line falls back to lastLine.
+func refusalReason(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Error: ")
+		if ok && strings.HasPrefix(rest, "blocked:") {
+			return rest
+		}
+	}
+	return lastLine(stderr)
 }
 
 // nukePreservedPrefix opens the line `gt polecat nuke` prints when its
