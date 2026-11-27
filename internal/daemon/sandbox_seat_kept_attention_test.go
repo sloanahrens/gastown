@@ -395,6 +395,48 @@ func withoutAgentBeadShadow(log string) string {
 	return strings.Join(kept, "\n")
 }
 
+// beadIsLiveWork keeps livework.Check's two error texts: a read that fails is
+// "cannot read the hooked bead <id>: <cause>" and a read that returns no bead
+// is "the hooked bead <id> reads as no bead". Neither may read as (false, nil),
+// which the seat takes for a bead no longer under way and skips as idle
+// (gt-pihggb, gt-jw437c).
+func TestBeadIsLiveWorkReadFailureAndNoBeadAreErrors(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("bd show: store unavailable")
+	tests := []struct {
+		name    string
+		reader  keptSeatHookReader
+		wantErr string
+	}{
+		{
+			name:    "a failed read",
+			reader:  keptSeatHookReader{fail: map[string]error{"gt-new1": cause}},
+			wantErr: "cannot read the hooked bead gt-new1: bd show: store unavailable",
+		},
+		{
+			name:    "a read that returns no bead",
+			reader:  keptSeatHookReader{noBead: map[string]bool{"gt-new1": true}},
+			wantErr: "the hooked bead gt-new1 reads as no bead",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			f.d.openWorkBeads = tt.reader.open
+			h := &patrolScanHost{d: f.d}
+
+			live, err := beadIsLiveWork(h, attentionRig, "gt-new1")
+			if live {
+				t.Errorf("beadIsLiveWork = true beside %v, want false", err)
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Errorf("beadIsLiveWork err = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // The retired-record reason this collector skips on is the one the seat end
 // gives a record that does not say stop: the seat end returns this constant,
 // and the test pins that its keepReason still answers with it (gt-jw437c,
