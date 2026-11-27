@@ -1046,6 +1046,41 @@ func TestTierSweepBead_ReadsTheLabelledRaceLog(t *testing.T) {
 	}
 }
 
+// A race unit's name carries its entry's label, which no go test command
+// takes: the command names the package up to the first "~". The all-packages
+// entry runs -race alone, so its re-run keeps no -tags, while
+// integration-walk's keeps -tags integration (gt-od1bx9).
+func TestTierSweepLabeledCommand(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: race ./internal/x~all-packages ...\n"+
+		"    --- FAIL: TestX (0.01s)\n"+
+		"tier-sweep: race ./internal/cmd~integration-walk ...\n"+
+		"    --- FAIL: TestX (0.01s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	d.tierSweepRecordBeads("gastown", "abc1234", map[string]tierSweepTierResult{
+		"race": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/x~all-packages", "./internal/cmd~integration-walk"}, Log: logPath},
+	})
+	want := map[string]string{
+		"tier sweep (gastown): race: ./internal/x~all-packages":       "go test -race -run '^(TestX)$' -count=1 ./internal/x` passes",
+		"tier sweep (gastown): race: ./internal/cmd~integration-walk": "go test -race -tags integration -run '^(TestX)$' -count=1 ./internal/cmd` passes",
+	}
+	if len(bd.created) != len(want) {
+		t.Fatalf("created = %+v, want %d beads", bd.created, len(want))
+	}
+	for _, opts := range bd.created {
+		wantCmd, ok := want[opts.Title]
+		if !ok {
+			t.Errorf("unexpected bead title %q", opts.Title)
+			continue
+		}
+		if !strings.Contains(opts.Acceptance, wantCmd) {
+			t.Errorf("%q acceptance = %q, want it to carry %q", opts.Title, opts.Acceptance, wantCmd)
+		}
+	}
+}
+
 // The integration stage runs its docker list untagged after the tagged one,
 // so a bead for a package that failed there re-runs it without -tags: the tag
 // would compile a different file set than the run that failed.
