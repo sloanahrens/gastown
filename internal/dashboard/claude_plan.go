@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -197,6 +198,10 @@ type ClaudePlanReader struct {
 	// rows. A non-nil slice is folded instead of the file at path; the closeout
 	// history beside path is still read (gt-hutsr6).
 	given []ClaudePlanSample
+	// beforeTrimRewrite is the trim's beforeRewrite seam, which a test sets to
+	// inject the refusal a temporary directory cannot produce; nil in
+	// production.
+	beforeTrimRewrite func() error
 }
 
 // NewClaudePlanReader returns a reader of the series at path, pricing its
@@ -263,8 +268,9 @@ func (r *ClaudePlanReader) WithSamples(samples []ClaudePlanSample) *ClaudePlanRe
 // A series given by WithSamples is folded in place of the file.
 //
 // The poll also records windows whose reset has passed and trims the series. A
-// failure of either leaves the week and month as drawn and is reported in
-// StateError, so a town whose .runtime is not writable still draws its week.
+// failure of either leaves the week and month as drawn, and is reported in
+// StateError except a trim the filesystem refuses as read-only (gt-wndup3): a
+// town whose .runtime is not writable still draws its week.
 func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -289,8 +295,13 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 			if err := os.MkdirAll(filepath.Dir(r.historyPath), 0o755); err != nil {
 				stateErrs = append(stateErrs, fmt.Errorf("weekly history directory: %w", err))
 			}
-		} else if err := trimClaudePlanSamples(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour)); err != nil {
-			stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))
+		} else if err := trimClaudePlanSamplesHook(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour), r.beforeTrimRewrite); err != nil {
+			// On a read-only mount the series belongs to the status line
+			// writing it, so the trim's refusal is that mount's state and not
+			// a failure of the poll (gt-wndup3). Any other failure is reported.
+			if !errors.Is(err, syscall.EROFS) {
+				stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))
+			}
 		}
 		p = ComputeClaudePlan(samples, now, r.planUSDMonth)
 		if err := r.attachAPIEquivalent(&p, now); err != nil {

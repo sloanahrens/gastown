@@ -467,16 +467,17 @@ func TestTrimClaudePlanSamplesKeepsAnAppendMadeDuringTheRewrite(t *testing.T) {
 	)
 	racing := planLine(claudePlanNow, 5, 38, resets)
 
-	err := trimClaudePlanSamplesHook(path, cutoff, func() {
+	err := trimClaudePlanSamplesHook(path, cutoff, func() error {
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Error(err)
-			return
+			return nil
 		}
 		defer f.Close()
 		if _, err := f.WriteString(racing + "\n"); err != nil {
 			t.Error(err)
 		}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
