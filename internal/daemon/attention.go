@@ -780,6 +780,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostNodeDisk, collect: s.collectHostNodeDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
+		// The Go cache duty, from the field the Mac's probe file carries; a
+		// host read without the field raises nothing (gt-vlzm42).
+		{kind: attention.KindHostGoCacheTrim, collect: s.collectHostGoCacheTrim},
 		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
 		// The drift compare's answer, off until the overseer turns the patrol
 		// on after the read grant is applied (gt-b6j1k5).
