@@ -451,18 +451,18 @@ func (r *DeployReader) Read() *Deploys {
 	// all of ctx's timeout, and the health read would then start already expired.
 	hctx, cancelHealth := context.WithTimeout(context.Background(), healthReadBudget)
 	defer cancelHealth()
-	// Each repo's read writes only the checks it saw, in its own map held by its
-	// place in readable, so no repo can lose a check to another's (gt-5o4qwr) and
-	// the reads can be made at once without sharing a map (gt-kpg0x4). The fold
-	// below runs after every read, so all of them are finished before the block's
-	// rows are built.
+	// The repos are read at once, so a slow one spends only its own time; they
+	// still share hctx. Each read writes only its own result and the map of the
+	// checks it saw, both held by its place in readable, and only reads
+	// prevChecks, so no repo can lose a check to another's (gt-5o4qwr). The fold
+	// below runs after every read has ended (gt-kpg0x4).
 	results := make([]healthRead, len(readable))
 	seens := make([]map[string]cachedCheck, len(readable))
-	for i, name := range readable {
+	forEachRepo(readable, func(i int, name string) {
 		owner, repo, _ := strings.Cut(name, "/")
 		seens[i] = make(map[string]cachedCheck)
 		results[i] = r.healthRows(hctx, name, owner, repo, prevChecks, seens[i])
-	}
+	})
 	// Built fresh every refresh, so an entry goes the moment its run leaves the
 	// window and the map cannot grow with a town's history.
 	checks := make(map[string]cachedCheck, len(prevChecks))
@@ -499,7 +499,7 @@ func (r *DeployReader) Read() *Deploys {
 	r.checks = checks
 	r.mu.Unlock()
 
-	// The rows are read a repo at a time, in the viewer's order, and the page is
+	// The rows are folded a repo at a time, in the viewer's order, and the page is
 	// read app by app: sorting by repo keeps an app's environments together, in
 	// the order the fold drew them, and two repos with the same base name are
 	// two groups of rows rather than one app's.
