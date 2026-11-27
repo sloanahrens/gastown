@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	"github.com/steveyegge/gastown/deploy/k8s/sbx"
 )
 
@@ -30,19 +31,12 @@ func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
 	if err := checkSbxRenderInputs(in); err != nil {
 		return err
 	}
-	set, err := d.renderSbx(context.Background(), sbx.Inputs{
-		Read:             d.readFile,
-		Run:              sbxHelmRunner(d.runHelm, in.Helm),
-		AgentSandboxPath: in.Manifests,
-		ChartDir:         in.Chart,
-		ValuesPath:       in.Values,
-	})
+	set, err := renderSbxSet(d, in)
 	if err != nil {
-		return fmt.Errorf("cannot render the gt-sbx desired set: %w", err)
+		return err
 	}
 	for i, object := range set.Objects {
-		name := fmt.Sprintf("%02d-%s-%s.yaml", i+1, strings.ToLower(object.Kind), object.Name)
-		path := filepath.Join(in.OutDir, name)
+		path := filepath.Join(in.OutDir, sbxObjectFileName(i, object))
 		if err := d.writeFile(path, object.Doc); err != nil {
 			return fmt.Errorf("cannot write %s: %w", path, err)
 		}
@@ -51,6 +45,28 @@ func runSbxRender(d clusterRenderDeps, in sbxRenderInputs) error {
 		fmt.Fprintf(d.out, "expected Secret: %s\n", name)
 	}
 	return nil
+}
+
+// renderSbxSet composes the gt-sbx desired set from in with the render seam, which
+// reads the inputs and runs the helm binary in names. It writes nothing.
+func renderSbxSet(d clusterRenderDeps, in sbxRenderInputs) (sbx.Set, error) {
+	set, err := d.renderSbx(context.Background(), sbx.Inputs{
+		Read:             d.readFile,
+		Run:              sbxHelmRunner(d.runHelm, in.Helm),
+		AgentSandboxPath: in.Manifests,
+		ChartDir:         in.Chart,
+		ValuesPath:       in.Values,
+	})
+	if err != nil {
+		return sbx.Set{}, fmt.Errorf("cannot render the gt-sbx desired set: %w", err)
+	}
+	return set, nil
+}
+
+// sbxObjectFileName is the name object i of the set is written under: its apply
+// position and its kind and name, as the control render names its own files.
+func sbxObjectFileName(i int, object k8s.StaticObject) string {
+	return fmt.Sprintf("%02d-%s-%s.yaml", i+1, strings.ToLower(object.Kind), object.Name)
 }
 
 // checkSbxRenderInputs refuses an unnamed input and an out directory that is

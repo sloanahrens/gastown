@@ -24,7 +24,25 @@ const planIDShortHexLen = 12
 // keeps the boundary between two files unambiguous whatever their names and
 // bytes contain, so the same sequence recomputes the same id on any platform.
 func planID(files []planFile) (full, short string) {
+	return planIDWith(nil, files)
+}
+
+// planIDFor is planID for the plan of cluster. The control cluster's plan keeps
+// planID's id, so an approval already given names it still. Any other cluster's
+// id hashes a tag first: a NUL, the cluster name, a NUL. A file name holds no NUL
+// and a control stream starts with a name's byte, so no other cluster's plan
+// shares its id with a control plan, nor with a plan of another cluster.
+func planIDFor(cluster string, files []planFile) (full, short string) {
+	if cluster == "" || cluster == clusterControl {
+		return planID(files)
+	}
+	return planIDWith([]byte("\x00cluster\x00"+cluster+"\x00"), files)
+}
+
+// planIDWith hashes prefix, then each file as planID describes.
+func planIDWith(prefix []byte, files []planFile) (full, short string) {
 	h := sha256.New()
+	h.Write(prefix)
 	var length [8]byte
 	for _, f := range files {
 		h.Write([]byte(f.Name))
