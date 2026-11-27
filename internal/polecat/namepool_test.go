@@ -2127,3 +2127,50 @@ func TestNamePoolAvoid(t *testing.T) {
 		}
 	})
 }
+
+// TestDrawableNames pins the read a seat-name check makes (gt-f80c0w).
+func TestDrawableNames(t *testing.T) {
+	t.Parallel()
+	t.Run("first MaxSize themed names plus a seat name", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "units", []string{"alpha-one", "bravo-two", "charlie-three"}, 2)
+		pool.SetSeatNames(map[string][]string{"claude-haiku": {"delta-four"}})
+		names, err := pool.DrawableNames()
+		if err != nil {
+			t.Fatalf("DrawableNames: %v", err)
+		}
+		if got := strings.Join(names, ","); got != "alpha-one,bravo-two,delta-four" {
+			t.Fatalf("DrawableNames = %v, want the first two themed names and the seat name, sorted", names)
+		}
+	})
+	t.Run("a name in a seat list and the theme appears once, in use and bound", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "units", []string{"alpha-one", "bravo-two", "charlie-three"}, 2)
+		pool.SetSeatNames(map[string][]string{"claude-haiku": {"alpha-one", "delta-four"}})
+		if _, err := pool.AllocateFor("claude-haiku"); err != nil {
+			t.Fatalf("AllocateFor: %v", err)
+		}
+		if !pool.IsInUse("alpha-one") || pool.ModelOf("alpha-one") != "claude-haiku" {
+			t.Fatalf("alpha-one is not in use and bound to haiku after the draw")
+		}
+		names, err := pool.DrawableNames()
+		if err != nil {
+			t.Fatalf("DrawableNames: %v", err)
+		}
+		if got := strings.Join(names, ","); got != "alpha-one,bravo-two,delta-four" {
+			t.Fatalf("DrawableNames = %v, want alpha-one once and still listed", names)
+		}
+	})
+	t.Run("unresolved theme returns no names", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "no-such-theme", nil, 2)
+		pool.SetSeatNames(map[string][]string{"claude-haiku": {"delta-four"}})
+		names, err := pool.DrawableNames()
+		if !errors.Is(err, ErrThemeUnresolved) {
+			t.Fatalf("DrawableNames err = %v, want ErrThemeUnresolved", err)
+		}
+		if names != nil {
+			t.Fatalf("DrawableNames = %v with an unresolved theme, want no names", names)
+		}
+	})
+}
