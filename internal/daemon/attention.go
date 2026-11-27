@@ -774,6 +774,8 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// and the queue needs both. Each keeps only its own items on failure
 		// (gt-r6vjf).
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunParkedSeats, owns: overrunParkedSeatItem},
+		// The guard blind for three ticks in a row (gt-0vl1d4).
+		{kind: attention.KindOverrunBlind, collect: s.collectOverrunBlind},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostNodeDisk, collect: s.collectHostNodeDisk},
@@ -888,6 +890,20 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A failed read raises the probe-failed item and keeps the previous one.
 		{kind: attention.KindBdGatewayRefusals, collect: s.collectGatewayRefusals},
 	}, s.questionCollectors()...)
+}
+
+// collectOverrunBlind raises the blind overrun guard's one low item at three
+// ticks in a row that dropped a seat for an unreadable bead, naming the stored
+// seats and first error; with no daemon it raises nothing (gt-0vl1d4).
+func (s *attentionSources) collectOverrunBlind(context.Context) ([]attention.Item, error) {
+	if s.d == nil {
+		return nil, nil
+	}
+	item, ok := attention.OverrunBlindItem(s.d.overrunBlindStreak(), s.d.overrunBlindSeats(), s.d.overrunBlindError())
+	if !ok {
+		return nil, nil
+	}
+	return []attention.Item{item}, nil
 }
 
 // gateSlowOwned picks the gate-slow items out of the previous items a failed
