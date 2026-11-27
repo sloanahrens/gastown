@@ -90,3 +90,45 @@ func TestTickEffQuietRecordsTwoRigs(t *testing.T) {
 		t.Errorf("recorded hashes by rig = %v, want %v", got, want)
 	}
 }
+
+// TestTickEffQuietRecordsEachRigsCount drives the board closure over two rigs of
+// which one lists a ready bead: the quiet-rig memory holds a ready count of 1 for
+// that rig and 0 for the empty one (gt-g9xlnw).
+func TestTickEffQuietRecordsEachRigsCount(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    town,
+		maxPriority: 2,
+		reads:       newSpecTickReads(),
+		// The listed bead is below the priority cut: counted, never a candidate.
+		ready: func(rigPath string) ([]*beads.Issue, error) {
+			if filepath.Base(rigPath) == "gastown" {
+				return []*beads.Issue{{ID: "gt-low", Priority: 4}}, nil
+			}
+			return nil, nil
+		},
+		rigStatus: func(string, string) (bool, string) { return false, "" },
+		heads: func() map[string]beadsql.RigHash {
+			return map[string]beadsql.RigHash{"gastown": {Head: "g1", Working: "g2"}, "beads": {Head: "b1", Working: "b2"}}
+		},
+		memory:      memory,
+		now:         func() time.Time { return time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC) },
+		detailStore: func(string) beads.Client { return nil },
+	})
+
+	if got := board(nil, nil, nil); len(got.Errors) != 0 {
+		t.Fatalf("board read: Errors = %v, want none", got.Errors)
+	}
+
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	got := map[string]int{}
+	for rig, read := range memory.rigs {
+		got[rig] = read.Candidates
+	}
+	if want := map[string]int{"beads": 0, "gastown": 1}; !maps.Equal(got, want) {
+		t.Errorf("recorded ready counts by rig = %v, want %v", got, want)
+	}
+}
