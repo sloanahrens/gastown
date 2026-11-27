@@ -47,6 +47,30 @@ func TestLandedLinesRefuse(t *testing.T) {
 	}
 }
 
+// LineFloor is the band median the sp-minutes label reads; a missing, unreadable
+// or disagreeing label, or minutes past the table, gives no floor.
+func TestLineFloor(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		labels []string
+		want   int
+		found  bool
+	}{
+		{[]string{"sp-minutes:8"}, 67, true},
+		{[]string{"sp-minutes:9.5"}, 109, true},
+		{[]string{"sp-minutes:10.5"}, 246, true},
+		{[]string{"sp:5", "bird-filed"}, 0, false},
+		{[]string{"sp-minutes:abc"}, 0, false},
+		{[]string{"sp-minutes:8", "sp-minutes:9.5"}, 0, false},
+		{[]string{"sp-minutes:16"}, 0, false},
+	} {
+		got, found := LineFloor(tc.labels)
+		if found != tc.found || got != tc.want {
+			t.Errorf("LineFloor(%q) = %d, found %v; want %d, found %v", tc.labels, got, found, tc.want, tc.found)
+		}
+	}
+}
+
 // Advise is half of P90 rounded up: 27 gives 14, not 13.
 func TestLandedLinesAdvise(t *testing.T) {
 	t.Parallel()
