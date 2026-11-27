@@ -43,14 +43,17 @@ type Options struct {
 }
 
 // runWindow releases ids beside a side load, then waits for them to close. It
-// returns one Sling per id in ids order and one SideRun per worktree. Ids still
-// open at the deadline are not an error. The side load always ends before it
-// returns, and Wait and side load errors come back wrapped and joined with what
-// the window gathered.
+// returns one Sling per id in ids order and one SideRun per worktree. Each sling
+// waits for a free seat for o.Agent on its own deadline, so gt sling never refuses
+// one past the cap; a fired seat deadline fails the ids never slung and is not a
+// window error, while a failed seat read is joined as one. Ids still open at the
+// deadline are not an error. The side load always ends before it returns, and
+// Wait, seat and side load errors come back wrapped and joined.
 func runWindow(ctx context.Context, o Options, ids []string) ([]Sling, []SideRun, error) {
 	deadline := o.Deadline(windowBound)
+	seatDeadline := o.Deadline(windowBound) // its own channel, so a fired one is not also Wait's
 	var runs []SideRun
-	var sideErr error
+	var sideErr, seatErr error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -58,7 +61,15 @@ func runWindow(ctx context.Context, o Options, ids []string) ([]Sling, []SideRun
 	}()
 	slings := Release(ctx, ids, releaseInFlight, func(ctx context.Context, id string) error {
 		return o.Town.Sling(ctx, id, o.Agent)
-	}, nil, o.Now)
+	}, func(ctx context.Context, running func() int) error {
+		err := awaitSeat(ctx, func(ctx context.Context) (int, error) {
+			return o.Town.FreeSeats(ctx, o.Agent)
+		}, running, o.Tick, seatDeadline)
+		if err != nil && !errors.Is(err, errSeatDeadline) {
+			seatErr = err // Release runs admit on this goroutine and stops after its first error
+		}
+		return err
+	}, o.Now)
 	_, waitErr := Wait(ctx, ids, closedState(o.Town), o.Tick, deadline)
 	<-done
 	var errs []error
@@ -67,6 +78,9 @@ func runWindow(ctx context.Context, o Options, ids []string) ([]Sling, []SideRun
 	}
 	if sideErr != nil {
 		errs = append(errs, fmt.Errorf("run window: %w", sideErr))
+	}
+	if seatErr != nil {
+		errs = append(errs, fmt.Errorf("run window: seat: %w", seatErr))
 	}
 	return slings, runs, errors.Join(errs...)
 }

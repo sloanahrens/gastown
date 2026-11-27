@@ -20,11 +20,11 @@ var landedNote = land.LandingRecord{LandedCommit: "c0ffee", Target: "main", Bran
 var gateNotes = "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\nGate: pass presubmit 1m, slot wait 0s\n\n" + landedNote
 
 // withNotes answers bead reads with notes, so the run records the gate and
-// landing facts the notes carry.
+// landing facts the notes carry. gt pool show also holds "show", so it is left alone.
 func withNotes(run func(context.Context, []string) ([]byte, error), notes string) func(context.Context, []string) ([]byte, error) {
 	return func(ctx context.Context, argv []string) ([]byte, error) {
 		out, err := run(ctx, argv)
-		if err != nil || !slices.Contains(argv, "show") {
+		if err != nil || argv[0] == "gt" || !slices.Contains(argv, "show") {
 			return out, err
 		}
 		return json.Marshal(map[string][]map[string]string{"data": {{"status": "closed", "notes": notes}}})
