@@ -1660,12 +1660,12 @@ func seatEndsBead(fields *beads.AgentFields, beadID string) string {
 }
 
 // landingSeats maps each polecat seat a landed bead was built on to the branch
-// its own READY TO LAND block named, and to "" for a seat only the assignee
-// names: the caller resolves that one from its agent bead. Every block is read
-// (an earlier attempt of a rework is another seat), and the assignee counts
-// when it is <rig>/polecats/<name>. A name that is not one path segment is
-// skipped, and a bead left with no seat is an error: the caller ends nothing
-// rather than guess (gt-m1qf31).
+// its own READY TO LAND block named, and to "" for a seat only the assignee or
+// a holder note names: the caller resolves that one from its agent bead. Every
+// block is read (an earlier attempt of a rework is another seat), and the
+// assignee and each holder note count when they read <rig>/polecats/<name>. A
+// name that is not one path segment is skipped, and a bead left with no seat is
+// an error: the caller ends nothing rather than guess (gt-m1qf31).
 func landingSeats(reader beadReader, rig, beadID string) (map[string]string, error) {
 	if reader == nil {
 		return nil, errors.New("no bead reader is wired to resolve its seats")
@@ -1698,13 +1698,28 @@ func landingSeats(reader beadReader, rig, beadID string) (map[string]string, err
 		}
 		notes = notes[:idx]
 	}
-	if parts := strings.Split(issue.Assignee, "/"); len(parts) == 3 && parts[0] == rig && parts[1] == "polecats" {
+	// addAddress adds the seat an assignee-shaped address names
+	// ("<rig>/polecats/<name>") with no branch: the caller resolves its branch
+	// from its agent bead. A seat a READY TO LAND block already named keeps the
+	// block's branch, and any other address names no seat of this landing.
+	addAddress := func(address string) {
+		parts := strings.Split(address, "/")
+		if len(parts) != 3 || parts[0] != rig || parts[1] != "polecats" {
+			return
+		}
 		if _, dup := seats[parts[2]]; !dup && polecat.CheckSandboxSeatNames(rig, parts[2]) == nil {
 			seats[parts[2]] = ""
 		}
 	}
+	addAddress(issue.Assignee)
+	// A crew submission that claimed a polecat's bead leaves the seat it took
+	// the bead from in a holder note, since the assignee is then the crew actor.
+	// That seat is the bead's seat as the assignee would have been (gt-oiu5f7).
+	for _, seat := range land.HolderSeats(issue.Notes) {
+		addAddress(seat)
+	}
 	if len(seats) == 0 {
-		return nil, fmt.Errorf("its assignee %q and its READY TO LAND blocks name no polecat seat", issue.Assignee)
+		return nil, fmt.Errorf("its assignee %q, its READY TO LAND blocks and its holder notes name no polecat seat", issue.Assignee)
 	}
 	return seats, nil
 }
