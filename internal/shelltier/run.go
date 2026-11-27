@@ -47,9 +47,9 @@ type Config struct {
 	Timing TimingFiles
 	// TimingPath is the log Timing appends to. Empty records none.
 	TimingPath string
-	// Err receives the runner's diagnostics: a timing line that could not be
-	// appended, and each script a canceled run never started. Nil sends them
-	// to the process's error stream.
+	// Err receives the runner's diagnostics: each script's time line, a timing
+	// line that could not be appended, and each script a canceled run never
+	// started. Nil sends them to the process's error stream.
 	Err io.Writer
 }
 
@@ -87,7 +87,10 @@ type outcome struct {
 // Once ctx ends, no further script is started: the one it interrupts and every
 // script after it fail, none counted as timed out, and each one that never ran
 // is named on Config.Err. A script that ran at all gets a line in the timing
-// log (Config.Timing); one that never started does not.
+// log (Config.Timing) and one line on Config.Err, `shelltier: <path>: pass in
+// <seconds>s` or `shelltier: <path>: FAIL in <seconds>s`, in manifest order and
+// whether or not a timing log is configured; one that never started gets
+// neither.
 func Run(ctx context.Context, cfg Config) Result {
 	start := cfg.Now()
 	outs := make([]outcome, len(cfg.Entries))
@@ -115,6 +118,8 @@ func Run(ctx context.Context, cfg Config) Result {
 	for i, e := range cfg.Entries {
 		if ran[i] {
 			recordTiming(cfg, e, outs[i])
+			fmt.Fprintf(errorStream(cfg.Err), "shelltier: %s: %s in %.1fs\n",
+				e.Path, verdictWord(outs[i]), outs[i].ended.Sub(outs[i].began).Seconds())
 		} else {
 			fmt.Fprintf(errorStream(cfg.Err), "shelltier: %s: not run, the run's context ended\n", e.Path)
 		}
@@ -207,6 +212,15 @@ func runOne(ctx context.Context, cfg Config, e Entry) outcome {
 		began:    began,
 		ended:    ended,
 	}
+}
+
+// verdictWord is the word a script's time line carries: "pass" for a script
+// that passed, "FAIL" for one that failed.
+func verdictWord(out outcome) string {
+	if out.passed {
+		return "pass"
+	}
+	return "FAIL"
 }
 
 // logName is the stem of a script's log file and TMPDIR: its path with each
