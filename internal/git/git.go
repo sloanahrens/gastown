@@ -706,6 +706,7 @@ var hookedSubcommands = map[string]bool{
 	"read-tree":       true,
 	"rebase":          true,
 	"remote":          true,
+	"repack":          true,
 	"reset":           true,
 	"rev-list":        true,
 	"rev-parse":       true,
