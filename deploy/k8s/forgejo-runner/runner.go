@@ -246,6 +246,7 @@ func Build(v Values) (Manifests, error) {
 	if err != nil {
 		return Manifests{}, err
 	}
+	shareProcessNamespace := true
 
 	return Manifests{
 		DindClaim:   claim(Name+"-dind", namespace, v.DindStorage),
@@ -274,8 +275,9 @@ func Build(v Values) (Manifests, error) {
 							IP:        v.ForgejoHostIP,
 							Hostnames: []string{ForgejoHostname},
 						}},
-						InitContainers: []Container{dindContainer(v)},
-						Containers:     []Container{runnerContainer(v)},
+						ShareProcessNamespace: &shareProcessNamespace,
+						InitContainers:        []Container{dindContainer(v)},
+						Containers:            []Container{runnerContainer(v)},
 						Volumes: []Volume{
 							{Name: configVolume, ConfigMap: &ConfigMapVolumeSource{Name: Name + "-config"}},
 							// The engine writes its TLS material here and the runner
@@ -744,6 +746,10 @@ type PodSpec struct {
 	PriorityClassName             string      `yaml:"priorityClassName,omitempty"`
 	TerminationGracePeriodSeconds int         `yaml:"terminationGracePeriodSeconds,omitempty"`
 	HostAliases                   []HostAlias `yaml:"hostAliases,omitempty"`
+	// ShareProcessNamespace makes the pod's containers share one process table. The
+	// runner pod sets it so the pause container is PID 1 and reaps the children a
+	// job leaves behind (gt-p97r7p).
+	ShareProcessNamespace *bool `yaml:"shareProcessNamespace,omitempty"`
 	// InitContainers carries the native sidecars: a container with restartPolicy
 	// Always, which the kubelet stops only after every regular container has exited.
 	InitContainers []Container `yaml:"initContainers,omitempty"`
