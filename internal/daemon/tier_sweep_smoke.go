@@ -56,7 +56,7 @@ func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRec
 	// A mark outlives a cycle its daemon died under, and its Job's output claims
 	// wait for the resumed cycle (gt-vbdeh9); a launch here would remove them
 	// first. An unreadable mark is logged and the launch goes on (gt-rp65v0).
-	if mark, err := readTierSweepInFlight(d.config.TownRoot, rig); err == nil && now.Sub(mark.Started) < tierSweepRunBudget {
+	if mark, err := readTierSweepInFlight(d.config.TownRoot, rig); err == nil && tierSweepMarkYoung(mark, now) {
 		return sweepSmokeRecord{Time: now, Outcome: "busy", Detail: "a sweep of " + mark.SHA + " is still marked in flight"}
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.logger.Printf("Warning: tier-sweep mark not read, launching the smoke: %v", err)
