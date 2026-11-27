@@ -1432,6 +1432,63 @@ func TestTierSweepRunnerConfigDindCPUs(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunnerConfigCPURequest holds runner_cpu_request to the runner's
+// share: at or below it loads (zero without the key), while a negative value,
+// another backend and a value above the share are refused naming the key
+// (gt-13dre6.11).
+func TestTierSweepRunnerConfigCPURequest(t *testing.T) {
+	t.Parallel()
+	const k8s = `"image":"i","jobs":4,"output_root":"/out","context":"gt-control","backend":"kubernetes","memory":8`
+	for _, tc := range []struct {
+		name, block string
+		want        int
+		wantErr     []string
+	}{
+		{name: "below the share loads", block: `{` + k8s + `,"cpus":8,"runner_cpu_request":4}`, want: 4},
+		{name: "at the share loads", block: `{` + k8s + `,"cpus":8,"runner_cpu_request":8}`, want: 8},
+		{name: "omitted asks for the whole share", block: `{` + k8s + `,"cpus":8}`},
+		{name: "at the share with dind_cpus set", block: `{` + k8s + `,"cpus":8,"dind":true,"dind_cpus":3,"runner_cpu_request":5}`, want: 5},
+		{name: "negative", block: `{` + k8s + `,"cpus":8,"runner_cpu_request":-1}`, wantErr: []string{"runner.runner_cpu_request"}},
+		{name: "above the share", block: `{` + k8s + `,"cpus":8,"runner_cpu_request":9}`, wantErr: []string{"runner.runner_cpu_request", "want at most 8"}},
+		{name: "above the share with dind", block: `{` + k8s + `,"cpus":8,"dind":true,"runner_cpu_request":7}`, wantErr: []string{"runner.runner_cpu_request", "want at most 6"}},
+		{name: "on the docker backend", block: `{"image":"i","jobs":4,"output_root":"/out","context":"c","backend":"docker","memory":8,"cpus":8,"runner_cpu_request":4}`, wantErr: []string{"runner.runner_cpu_request"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+tc.block+`}}`), &p)
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("decoded a runner_cpu_request no run can use: %+v", p.TierSweep.Runner)
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to hold %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a runner block with runner_cpu_request does not decode: %v", err)
+			}
+			if r := p.TierSweep.Runner; r == nil || r.RunnerCPURequest != tc.want {
+				t.Fatalf("runner = %+v, want RunnerCPURequest %d", r, tc.want)
+			}
+		})
+	}
+
+	// The setting survives the kernel's strict walk, the path a town's
+	// settings.json takes.
+	doc := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"runner":{` + k8s + `,"cpus":8,"runner_cpu_request":4}}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("settings.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("settings.json with runner.runner_cpu_request = %v", err)
+	}
+	if cfg.Patrols.TierSweep.Runner == nil || cfg.Patrols.TierSweep.Runner.RunnerCPURequest != 4 {
+		t.Errorf("the kernel's decode lost runner_cpu_request: %+v", cfg.Patrols.TierSweep.Runner)
+	}
+}
+
 // TestTierSweepConfigRunnerShellDefaultsFalse: runner.shell is the opt-in that
 // sends the shell stage to the runner. A block that omits it keeps the shell
 // stage on the host, and one that sets it decodes true through both the plain

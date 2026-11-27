@@ -3901,6 +3901,14 @@ type TierSweepRunnerConfig struct {
 	// do nothing (gt-h7497c).
 	DindCPUs int `json:"dind_cpus,omitempty"`
 
+	// RunnerCPURequest is the runner container's CPU request in whole cores on
+	// the Kubernetes backend: at least 1, at most the runner's share (CPUs less
+	// the dind sidecar's share when Dind is on). Zero requests the whole share,
+	// as before. A request below the share lets the scheduler place the run on
+	// a node with less CPU to spare, so under contention a sweep yields CPU to
+	// landings and still runs. Another backend is refused (gt-13dre6.11).
+	RunnerCPURequest int `json:"runner_cpu_request,omitempty"`
+
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
 	// backend the whole Job pod's total, as CPUs is. With dind the minimum is 6
 	// (the sidecar's 4 GB and the runner's 2).
@@ -4089,6 +4097,25 @@ func (c *TierSweepRunnerConfig) validate() error {
 		}
 		if min := runnerMemoryMin + SweepDindMemoryGB; c.Memory < min {
 			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, SweepDindMemoryGB, runnerMemoryMin)
+		}
+	}
+	// runner_cpu_request asks the scheduler for less than the runner's whole
+	// share: only the Kubernetes Job's pod sets a request apart from its limit,
+	// and a value above the share asks for more than the runner may use. Zero
+	// asks for the whole share, as before (gt-13dre6.11).
+	if c.RunnerCPURequest < 0 {
+		return fmt.Errorf("runner_cpu_request = %d: want 0 for the runner's whole share, or at least 1", c.RunnerCPURequest)
+	}
+	if c.RunnerCPURequest > 0 && c.Backend != TierSweepRunnerKubernetes {
+		return fmt.Errorf("runner_cpu_request = %d: want it only with backend %s", c.RunnerCPURequest, TierSweepRunnerKubernetes)
+	}
+	if c.RunnerCPURequest > 0 {
+		share := c.CPUs
+		if c.Dind {
+			share -= c.DindCPUShare()
+		}
+		if c.RunnerCPURequest > share {
+			return fmt.Errorf("runner_cpu_request = %d: want at most %d, the runner's share of cpus = %d", c.RunnerCPURequest, share, c.CPUs)
 		}
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {

@@ -700,6 +700,12 @@ GB and the runner needs 2. A total that cannot hold the sidecar and leave the
 runner a share is refused when the run is rendered. The Docker backend has no
 pod, so its runner container asks for the whole share.
 
+`runner_cpu_request` sets the runner container's CPU request in whole cores: at
+most the runner's share (`cpus` less the sidecar's share when dind is on), and
+zero requests the whole share as before. It must be at least 1 and is refused
+unless the backend is `kubernetes`, since only the Job's pod sets what the
+scheduler reserves apart from what the runner may use.
+
 Before a Kubernetes Job is created, the daemon reads every node and pod once
 (`kubectl get nodes,pods -A -o json`). A node is eligible when it is Ready, is
 not cordoned, and carries no NoSchedule or NoExecute taint the Job pod does not
