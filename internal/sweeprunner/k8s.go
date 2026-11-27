@@ -292,8 +292,8 @@ type EnvVar struct {
 	Value string `json:"value"`
 }
 
-// Resources is a container's share, given identically as requests and limits so
-// the scheduler promises it rather than allowing it as a burst.
+// Resources is a container's share of a node: the requests the scheduler
+// promises it and the limits it may not pass.
 type Resources struct {
 	Requests ResourceList `json:"requests"`
 	Limits   ResourceList `json:"limits"`
@@ -734,11 +734,17 @@ func runnerContainer(spec Spec) (Container, error) {
 		// The integration tier's test-Dolt pool matches the towns queued on it.
 		EnvVar{Name: testDoltInitConcurrencyEnv, Value: testDoltInitConcurrency},
 	)
-	// Requests equal limits, so the scheduler promises the run its whole share
-	// instead of letting it burst into a neighbour's (design 2026-10-30).
+	// The runner is limited to its whole share but asks for the configured
+	// fraction of it, so a contended node places the run on fewer CPUs while a
+	// free one still lets it burst to the share. A zero request asks for the
+	// whole share, keeping requests equal to limits as before (gt-13dre6.13).
 	share, err := runnerShare(spec)
 	if err != nil {
 		return Container{}, err
+	}
+	resources := &Resources{Requests: share, Limits: share}
+	if spec.RunnerCPURequest > 0 {
+		resources.Requests.CPU = cpuQuantity(int64(spec.RunnerCPURequest) * 1000)
 	}
 	return Container{
 		Name:            runnerContainerName,
@@ -751,7 +757,7 @@ func runnerContainer(spec Spec) (Container, error) {
 		// next to the privileged dind sidecar it shares that namespace with.
 		SecurityContext: &SecurityContext{RunAsUser: int64Ptr(runnerUser)},
 		Env:             env,
-		Resources:       &Resources{Requests: share, Limits: share},
+		Resources:       resources,
 		VolumeMounts: []VolumeMount{
 			{Name: repoVolume, MountPath: RepoMount, ReadOnly: true},
 			{Name: outVolume, MountPath: OutputDir},
