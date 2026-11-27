@@ -217,40 +217,43 @@ func hmSkewBinaryPath(p string) bool {
 	return !strings.HasSuffix(p, ".md") && !strings.HasPrefix(p, "docs/") && !strings.HasSuffix(p, "_test.go") && !strings.Contains("/"+p, "/testdata/")
 }
 
-// hmSkewRefreshClone makes the job-owned clone current with origin's main. The
-// clone is cloned from the rig's origin url on first use, and origin's main is
-// fetched into it on every call, so a skew is judged against the tip the
-// reading names rather than against whatever the clone last saw. The fetch is
-// by url, so the clone follows the url the rig reports now. The rig worktree is
-// only read for that url, never written.
+// hmSkewRefreshClone refreshes the hm check's own clone (see skewRefreshClone).
 func (d *Daemon) hmSkewRefreshClone(townRoot, url string) (string, error) {
 	src := filepath.Join(townRoot, filepath.FromSlash(hmSkewCloneDir))
-	_, err := os.Stat(filepath.Join(src, ".git"))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		if err := d.hmSkewClone(src, url); err != nil {
-			return "", err
-		}
-	case err != nil:
-		return "", fmt.Errorf("the hm clone at %s: %w", src, err)
-	}
-	// The refspec moves the remote-tracking ref to main, so the commits of earlier
-	// fetches stay reachable and an installed commit on main's history is found.
-	if err := d.hmSkewGit(hmSkewFetchTimeout, "fetching origin's main into the hm clone",
-		"-C", src, "fetch", "--quiet", "--no-tags", "--", url,
-		"+"+omSkewRemoteRef+":refs/remotes/origin/main"); err != nil {
+	if err := d.skewRefreshClone("hm", src, url); err != nil {
 		return "", err
 	}
 	return src, nil
 }
 
-// hmSkewClone clones the hm origin into src without a worktree: the check reads
+// skewRefreshClone makes a job-owned clone current with origin's main: the clone
+// is cloned from url on first use, and origin's main is fetched into it by url
+// on every call, so a skew is judged against the tip the reading names. The
+// messages name the tool, so a failure names the check it belongs to.
+func (d *Daemon) skewRefreshClone(tool, src, url string) error {
+	_, err := os.Stat(filepath.Join(src, ".git"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := d.skewClone(tool, src, url); err != nil {
+			return err
+		}
+	case err != nil:
+		return fmt.Errorf("the %s clone at %s: %w", tool, src, err)
+	}
+	// The refspec moves the remote-tracking ref to main, so the commits of earlier
+	// fetches stay reachable and an installed commit on main's history is found.
+	return d.hmSkewGit(hmSkewFetchTimeout, "fetching origin's main into the "+tool+" clone",
+		"-C", src, "fetch", "--quiet", "--no-tags", "--", url,
+		"+"+omSkewRemoteRef+":refs/remotes/origin/main")
+}
+
+// skewClone clones tool's origin into src without a worktree: the check reads
 // commits and paths, never files. A clone that fails is removed, so a partial
 // directory does not read as a clone on the next reading and fail there for
 // good; the next reading clones again.
-func (d *Daemon) hmSkewClone(src, url string) error {
+func (d *Daemon) skewClone(tool, src, url string) error {
 	// git creates the leading directories of src itself.
-	err := d.hmSkewGit(hmSkewCloneTimeout, "cloning the hm origin into the hm clone",
+	err := d.hmSkewGit(hmSkewCloneTimeout, "cloning the "+tool+" origin into the "+tool+" clone",
 		"clone", "--quiet", "--no-checkout", "--", url, src)
 	if err == nil {
 		return nil

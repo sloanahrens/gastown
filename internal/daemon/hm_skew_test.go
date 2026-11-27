@@ -49,6 +49,7 @@ type hmSkewAnswers struct {
 	lagTimes     map[string]string // stdout of show --format=%ct, by revision
 	lagErr       string            // the git call named here fails: "rev-list" or "show"
 	grepErr      bool              // that grep fails
+	calls        *[]string         // when set, receives each call's argv
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -85,6 +86,9 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 	t.Helper()
 	return func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		joined := strings.Join(cmd.Args, " ")
+		if a.calls != nil {
+			*a.calls = append(*a.calls, joined)
+		}
 		var out string
 		var err error
 		switch {
@@ -696,6 +700,32 @@ func TestHMSkewPartialCloneThatCannotBeRemovedIsALogLine(t *testing.T) {
 	}
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, want none for a reading that could not be taken", esc)
+	}
+}
+
+// TestSkewRefreshCloneNamesItsTool: the refresh clones a tool's origin into the
+// directory it is given and fetches it there, naming the tool in a failure. No
+// error carries the url, which can hold a credential.
+func TestSkewRefreshCloneNamesItsTool(t *testing.T) {
+	t.Parallel()
+	const url = "https://user:secret@example.invalid/om.git"
+	var calls []string
+	src := filepath.Join(t.TempDir(), "om-src")
+	d := &Daemon{execCmd: hmSkewRunner(t, hmSkewAnswers{calls: &calls})}
+
+	if err := d.skewRefreshClone("om", src, url); err != nil {
+		t.Fatalf("skewRefreshClone: %v", err)
+	}
+	if len(calls) != 2 || !strings.Contains(calls[0], " clone ") || !strings.Contains(calls[0], " "+src) ||
+		!strings.Contains(calls[1], " fetch ") || !strings.Contains(calls[1], " -C "+src+" ") {
+		t.Errorf("calls = %q, want a clone into %s then a fetch there", calls, src)
+	}
+
+	d = &Daemon{execCmd: hmSkewRunner(t, hmSkewAnswers{cloneErr: true})}
+	err := d.skewRefreshClone("om", filepath.Join(t.TempDir(), "om-src"), url)
+	if err == nil || !strings.Contains(err.Error(), "om") ||
+		strings.Contains(err.Error(), url) || strings.Contains(err.Error(), "secret") {
+		t.Errorf("error = %v, want the failed clone's error naming om and no url", err)
 	}
 }
 
