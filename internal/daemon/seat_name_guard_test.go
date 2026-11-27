@@ -398,6 +398,9 @@ func TestSeatNameGuardRaisesAStuckSandbox(t *testing.T) {
 	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
 		return seatNameGuardListing("Provisioning", "gt-dag"), nil
 	}}
+	src.sandboxStatus = func(string, string) (sandbox.Status, error) {
+		return sandbox.Status{ReadyKnown: true, ReadyReason: "DependenciesNotReady"}, nil
+	}
 
 	first, err := src.collectStaleSeatSandboxes(context.Background())
 	if err != nil {
@@ -428,6 +431,125 @@ func TestSeatNameGuardRaisesAStuckSandbox(t *testing.T) {
 	}
 	if got := guard.Polecats("gt"); len(got) != 0 {
 		t.Errorf("Polecats(gt) = %v, want none", got)
+	}
+}
+
+// TestSeatNameGuardStuckItemNamesTheReadyReason drives the production
+// collector: once a Provisioning sandbox has been outside Ready for
+// sandboxstuck.After, its item carries the Ready reason the status seam
+// reports, asked of the default gateway the listing reads; a failed-phase
+// sandbox's item is left alone and its name is never asked (gt-m7s2wf).
+func TestSeatNameGuardStuckItemNamesTheReadyReason(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return []sandbox.Entry{
+			{Name: "gt-dag", Phase: "Provisioning"},
+			{Name: "gt-gone", Phase: "Error"},
+		}, nil
+	}}
+	asked := map[string]string{}
+	src.sandboxStatus = func(gateway, name string) (sandbox.Status, error) {
+		asked[name] = gateway
+		return sandbox.Status{ReadyKnown: true, ReadyReason: "DependenciesNotReady", ReadyMessage: "sandbox-runtime enforcement dependencies are not ready"}, nil
+	}
+
+	if first, err := src.collectStaleSeatSandboxes(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if len(first) != 1 {
+		t.Fatalf("first tick items = %+v, want only the Error sandbox: Provisioning is not stuck yet", first)
+	}
+
+	src.now = seatNameGuardNow.Add(sandboxstuck.After)
+	items, err := src.collectStaleSeatSandboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stuck, failed *attention.Item
+	for i := range items {
+		switch items[i].Key {
+		case seatSandboxStaleKeyPrefix + "gt-dag":
+			stuck = &items[i]
+		case seatSandboxStaleKeyPrefix + "gt-gone":
+			failed = &items[i]
+		}
+	}
+	if stuck == nil || failed == nil {
+		t.Fatalf("items = %+v, want one item for each sandbox", items)
+	}
+	if !strings.Contains(stuck.Summary, "Gateway Ready reason: DependenciesNotReady (sandbox-runtime enforcement dependencies are not ready).") {
+		t.Errorf("stuck item summary = %q, want the reason the status seam reported", stuck.Summary)
+	}
+	if strings.Contains(failed.Summary, "Gateway Ready reason:") {
+		t.Errorf("failed-phase item summary = %q, want no Ready reason appended", failed.Summary)
+	}
+	if gateway, ok := asked["gt-gone"]; ok {
+		t.Errorf("the failed-phase sandbox was asked for its status (gateway %q), want it left alone", gateway)
+	}
+	if gateway, ok := asked["gt-dag"]; !ok || gateway != "" {
+		t.Errorf("asked = %+v, want the stuck sandbox read through the default gateway \"\"", asked)
+	}
+}
+
+// TestSeatNameGuardStuckItemSurvivesAFailedRead drives the production
+// collector with a status seam that errors: the collector reports no error and
+// the stuck item stays, saying the reason was not read and carrying none of the
+// error's text (gt-m7s2wf).
+func TestSeatNameGuardStuckItemSurvivesAFailedRead(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	readErr := errors.New("openshell sandbox get gt-dag: exit status 1")
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return []sandbox.Entry{{Name: "gt-dag", Phase: "Provisioning"}}, nil
+	}}
+	src.sandboxStatus = func(string, string) (sandbox.Status, error) { return sandbox.Status{}, readErr }
+
+	if _, err := src.collectStaleSeatSandboxes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src.now = seatNameGuardNow.Add(sandboxstuck.After)
+	items, err := src.collectStaleSeatSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("a failed status read reported a collector error: %v", err)
+	}
+	if len(items) != 1 || items[0].Key != seatSandboxStaleKeyPrefix+"gt-dag" {
+		t.Fatalf("items = %+v, want the stuck sandbox's item", items)
+	}
+	if !strings.HasSuffix(items[0].Summary, " Gateway Ready reason: not read.") {
+		t.Errorf("summary = %q, want it to end saying the reason was not read", items[0].Summary)
+	}
+	if strings.Contains(items[0].Summary, readErr.Error()) {
+		t.Errorf("summary %q carries the read's error text %q", items[0].Summary, readErr.Error())
+	}
+}
+
+// TestSeatNameGuardStuckReasonStopsAtTheTickDeadline: a tick whose context is
+// already done asks the gateway nothing for the stuck item, and the item stays,
+// saying the reason was not read (gt-m7s2wf).
+func TestSeatNameGuardStuckReasonStopsAtTheTickDeadline(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	asked := false
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return []sandbox.Entry{{Name: "gt-dag", Phase: "Provisioning"}}, nil
+	}}
+	src.sandboxStatus = func(string, string) (sandbox.Status, error) { asked = true; return sandbox.Status{}, nil }
+
+	if _, err := src.collectStaleSeatSandboxes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src.now = seatNameGuardNow.Add(sandboxstuck.After)
+	items, err := src.collectStaleSeatSandboxes(ctx)
+	if err != nil {
+		t.Fatalf("a done tick was reported as a collector error: %v", err)
+	}
+	if asked {
+		t.Error("the gateway status was asked after the tick's context was done")
+	}
+	if len(items) != 1 || !strings.HasSuffix(items[0].Summary, " Gateway Ready reason: not read.") {
+		t.Fatalf("items = %+v, want the stuck item saying the reason was not read", items)
 	}
 }
 

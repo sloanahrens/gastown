@@ -448,6 +448,9 @@ type attentionSources struct {
 	// sandboxList is the gateway listing the stale-seat-sandbox collector
 	// reads (seat_name_guard.go); nil is the openshell CLI.
 	sandboxList seatSandboxList
+	// sandboxStatus is the stuck item's gateway Ready reason read; nil is
+	// session.GatewaySandboxPhase (seat_name_guard.go).
+	sandboxStatus seatSandboxStatus
 	// storyPointsDrift reads the story point estimator's drift measure over the
 	// newest extract at a tick's time (attention_story_points_drift.go).
 	storyPointsDrift func(now time.Time) (metrics.StoryPointsDriftRead, error)
