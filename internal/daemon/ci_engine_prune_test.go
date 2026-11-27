@@ -438,6 +438,8 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 	// A failed run raises its attention item through the notifier, so the fixture
 	// records the sends rather than running gt.
 	f.d.notifier = notifyfake.New()
+	// No Actions task runs in the fixture's repositories unless a test says so.
+	f.d.diskMaint.runningTasks = func(context.Context) (map[int64]bool, error) { return map[int64]bool{}, nil }
 	// held is the set of ids the fake engine still has after a removal that did not
 	// take them; the presence inspect echoes the requested ids it holds.
 	var heldMu sync.Mutex
@@ -3443,6 +3445,14 @@ func engTaskCtr(t *testing.T, id byte, name, status, startedAt string) ciEngineC
 	return c
 }
 
+// engJob is a running Actions job container's inspect for engListing.
+func engJob(id byte, task int64, running time.Duration) map[string]any {
+	c := engCtr(id, 'a', "running", running)
+	c["Name"] = fmt.Sprintf("/FORGEJO-ACTIONS-TASK-%d_WF_JOB", task)
+	c["State"].(map[string]any)["StartedAt"] = engAgo(running)
+	return c
+}
+
 // TestCIEngineOrphanCandidates: only a running container whose name is a Forgejo
 // Actions job's and whose process started more than the age ago is a candidate, and
 // it carries the task id from its name.
@@ -3555,6 +3565,86 @@ func TestCIEngineSplitOrphans(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCIEnginePlanOrphan: a running job container past the age is an orphan when
+// its task no longer runs, kept and named when it does, and neither when young. A
+// dry run lists the orphans and the containers left alone.
+func TestCIEnginePlanOrphan(t *testing.T) {
+	t.Parallel()
+	const cancelled, live, young = 22148, 22149, 22150
+	l := engDecode(t, engListing(t, []map[string]any{
+		engJob('1', cancelled, 72*time.Hour),
+		engJob('2', live, 72*time.Hour),
+		engJob('3', young, time.Hour),
+	}, nil, nil))
+	plan, err := planCIEnginePrune(l, ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"},
+		ciEngineOrphanRule{age: 12 * time.Hour, running: map[int64]bool{live: true}})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if len(plan.orphans) != 1 || plan.orphans[0].ID != engHex64('1') {
+		t.Errorf("orphans = %v, want the cancelled task's old container alone", plan.orphans)
+	}
+	if len(plan.keptRunning) != 1 || plan.keptRunning[0].ID != engHex64('2') {
+		t.Errorf("keptRunning = %v, want the running task's old container alone", plan.keptRunning)
+	}
+	t.Run("a dry run lists the orphans and the containers left alone", func(t *testing.T) {
+		t.Parallel()
+		l := engListing(t, []map[string]any{engJob('1', cancelled, 72*time.Hour), engJob('2', live, 72*time.Hour)}, nil, nil)
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeDryRun, l, engineRemoveAnswers{})
+		f.d.diskMaint.runningTasks = func(context.Context) (map[int64]bool, error) { return map[int64]bool{live: true}, nil }
+		f.tick()
+		f.drain()
+		logs := f.logs.String()
+		for _, want := range []string{
+			"dry_run: would remove orphan container " + engHex64('1')[:12],
+			"leaves container " + engHex64('2')[:12] + " alone, task still running in Forgejo",
+			"1 orphan container(s) planned, 1 left alone, task still running in Forgejo",
+		} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("the dry run's log lacks %q:\n%s", want, logs)
+			}
+		}
+	})
+}
+
+// TestCIEnginePlanOrphanRefuses: a failed running-task read plans no orphan and
+// the prune runs as it would without the rule, its refusal logged once; an orphan
+// age the patrol cannot act on fails the run before the engine is listed.
+func TestCIEnginePlanOrphanRefuses(t *testing.T) {
+	t.Parallel()
+	t.Run("a failed read plans no orphan and the prune continues", func(t *testing.T) {
+		t.Parallel()
+		l := engListing(t, []map[string]any{engCtr('4', 'e', "exited", 100*time.Hour), engJob('1', 22148, 72*time.Hour)}, nil, nil)
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeDryRun, l, engineRemoveAnswers{})
+		f.d.diskMaint.runningTasks = func(context.Context) (map[int64]bool, error) { return nil, errors.New("forgejo is unreachable") }
+		f.tick()
+		f.drain()
+		logs := f.logs.String()
+		if want := "dry_run: would remove container " + engHex64('4')[:12]; !strings.Contains(logs, want) {
+			t.Errorf("the prune did not continue past the failed read (%q):\n%s", want, logs)
+		}
+		if strings.Contains(logs, "orphan container") || strings.Contains(logs, "left alone") {
+			t.Errorf("a failed read still planned an orphan:\n%s", logs)
+		}
+		if n := strings.Count(logs, "the running task ids could not be read"); n != 1 {
+			t.Errorf("the refusal is logged %d time(s), want once:\n%s", n, logs)
+		}
+	})
+	t.Run("an orphan age the patrol cannot act on fails the run", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
+		f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineOrphanJobAge = "1h"
+		f.tick()
+		f.drain()
+		if n := len(engineExecs(f, "ci-engine-list")); n != 0 {
+			t.Fatalf("a refused orphan age ran %d engine exec(s), want none", n)
+		}
+		if logs := f.logs.String(); !strings.Contains(logs, "ci_engine_orphan_job_age") {
+			t.Errorf("the refusal does not name the setting:\n%s", logs)
+		}
+	})
 }
 
 // TestCIEngineRunningTaskSet: each target is asked once for its repository's
