@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -1044,19 +1045,95 @@ const (
 	driftRunnerConfigFixture     = "forgejo_runner_config.live.json"
 )
 
+// driftRecordedValue returns the object a recorded fixture compares: the object
+// a captured document holds under its _capture header, or a bare document
+// unchanged. A header that does not name the cluster, the instant and the uid,
+// or a captured document that holds no object, is an error naming the file, so
+// the failure shows which fixture is broken.
+func driftRecordedValue(name string, document map[string]any) (map[string]any, error) {
+	raw, captured := document["_capture"]
+	if !captured {
+		return document, nil
+	}
+	header, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: the _capture header is not an object", name)
+	}
+	for _, field := range []string{"cluster", "at", "uid"} {
+		value, ok := header[field].(string)
+		if !ok || value == "" {
+			return nil, fmt.Errorf("%s: the _capture header's %s is missing or empty", name, field)
+		}
+	}
+	object, ok := document["object"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: the captured document holds no object", name)
+	}
+	return object, nil
+}
+
 // driftRecordedObject reads a recorded live object, the JSON kubectl answered
-// with, from testdata.
+// with, from testdata; a captured fixture's _capture header is unwrapped to the
+// object it holds.
 func driftRecordedObject(t *testing.T, name string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatalf("reading the recorded %s: %v", name, err)
 	}
-	var object map[string]any
-	if err := json.Unmarshal(data, &object); err != nil {
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatalf("decoding the recorded %s: %v", name, err)
 	}
+	object, err := driftRecordedValue(name, document)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	return object
+}
+
+// TestDriftRecordedValue covers the unwrap a captured fixture needs: a document
+// with the _capture header returns the object it holds, a bare document comes
+// back unchanged, and a broken capture fails naming the file.
+func TestDriftRecordedValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, file, body, want, wantErr string
+	}{
+		{name: "a captured document returns its inner object", file: "wrapped.json", body: `{"_capture":{"cluster":"gt-sbx","at":"2026-11-25T18:00:00Z","uid":"u-1"},"object":{"kind":"ConfigMap","metadata":{"uid":"u-1"}}}`, want: `{"kind":"ConfigMap","metadata":{"uid":"u-1"}}`},
+		{name: "a bare document is returned unchanged", file: "bare.json", body: `{"kind":"ConfigMap","metadata":{"uid":"u-2"}}`, want: `{"kind":"ConfigMap","metadata":{"uid":"u-2"}}`},
+		{name: "an empty cluster is refused", file: "cluster.json", body: `{"_capture":{"cluster":"","at":"2026-11-25T18:00:00Z","uid":"u-1"},"object":{"metadata":{"uid":"u-1"}}}`, wantErr: "cluster"},
+		{name: "an empty at is refused", file: "at.json", body: `{"_capture":{"cluster":"gt-sbx","at":"","uid":"u-1"},"object":{"metadata":{"uid":"u-1"}}}`, wantErr: "at"},
+		{name: "an empty uid is refused", file: "uid.json", body: `{"_capture":{"cluster":"gt-sbx","at":"2026-11-25T18:00:00Z","uid":""},"object":{"metadata":{"uid":"u-1"}}}`, wantErr: "uid"},
+		{name: "a _capture header that is not an object is refused", file: "header.json", body: `{"_capture":"captured","object":{"metadata":{"uid":"u-1"}}}`, wantErr: "not an object"},
+		{name: "a captured document with no object is refused", file: "object.json", body: `{"_capture":{"cluster":"gt-sbx","at":"2026-11-25T18:00:00Z","uid":"u-1"}}`, wantErr: "holds no object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var document map[string]any
+			if err := json.Unmarshal([]byte(tc.body), &document); err != nil {
+				t.Fatalf("decoding %s: %v", tc.file, err)
+			}
+			object, err := driftRecordedValue(tc.file, document)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.file) || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("%s: object, err = %v, %v; want an error naming the file and %q", tc.file, object, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.file, err)
+			}
+			got, err := json.Marshal(object)
+			if err != nil {
+				t.Fatalf("encoding the object of %s: %v", tc.file, err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("%s: object = %s, want %s", tc.file, got, tc.want)
+			}
+		})
+	}
 }
 
 // driftRecordedAnswer answers the named resources with a recorded live object
