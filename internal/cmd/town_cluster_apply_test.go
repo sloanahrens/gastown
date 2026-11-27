@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -104,11 +105,30 @@ func TestClusterShapeApplyUnreadablePlan(t *testing.T) {
 	}
 }
 
+// shapeFlags gives both phases a kubeconfig, so a plan holding files in each can run.
+var shapeFlags = planFlags{policyKubeconfig: "/keys/policy.kubeconfig", applyKubeconfig: "/keys/apply.kubeconfig"}
+
+// shapePolicyDoc is a static ValidatingAdmissionPolicy, a document phase P applies.
+var shapePolicyDoc = []byte("apiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingAdmissionPolicy\nmetadata:\n  name: gt-policy\n")
+
+// shapePolicyFile is the plan record's phase P entry for shapePolicyDoc.
+var shapePolicyFile = planRecordFile{Name: "policy.yaml", Phase: planPhaseStatic, SHA256: clusterApplyFileSHA(shapePolicyDoc)}
+
+// shapeApplyArgs is the arguments of each call that carries an apply verb, in call order.
+func shapeApplyArgs(calls [][]string) [][]string {
+	var applies [][]string
+	for _, args := range calls {
+		if slices.Contains(args, "apply") {
+			applies = append(applies, args)
+		}
+	}
+	return applies
+}
+
 // TestClusterShapeApplyReadablePlan: a plan and approval that read, an approval
 // the verifier accepts, and a live Deployment at the plan's resourceVersion are
-// not applied: the run re-reads the Deployment under the plan's kubeconfig, then
-// returns an error saying apply is not built and nothing was applied, with no
-// apply call.
+// applied: the run re-reads the Deployment under the plan's kubeconfig, then
+// applies its file once under the apply kubeconfig and returns nil.
 func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -117,18 +137,157 @@ func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	writeReadFile(t, filepath.Join(dir, "approval.json"), readApprovalOK)
 	kube := &shapeLiveKube{out: shapeLiveAt("7")}
 	var verified int
-	err := runTownClusterApply(context.Background(), kube.run, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil))
-	if err == nil || !strings.Contains(err.Error(), "not built") || !strings.Contains(err.Error(), "nothing was applied") {
-		t.Fatalf("runTownClusterApply returned %v, want an error saying apply is not built and nothing was applied", err)
+	if err := runTownClusterApply(context.Background(), kube.run, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
 	}
 	if verified != 1 {
 		t.Errorf("runTownClusterApply called verify %d times, want once", verified)
 	}
-	if len(kube.calls) != 1 || shapeApplies(kube.calls) != 0 {
-		t.Fatalf("runTownClusterApply made the calls %v, want one read and no apply", kube.calls)
+	applies := shapeApplyArgs(kube.calls)
+	if len(kube.calls) != 2 || len(applies) != 1 {
+		t.Fatalf("runTownClusterApply made the calls %v, want one read and one apply", kube.calls)
 	}
-	if !strings.Contains(strings.Join(kube.calls[0], " "), "--kubeconfig "+readKubeconfs.applyKubeconfig) {
-		t.Errorf("the re-read's arguments %v do not carry the plan's phase kubeconfig", kube.calls[0])
+	want := []string{"--kubeconfig", readKubeconfs.applyKubeconfig, "apply", "-f", filepath.Join(dir, "deployment-web.yaml")}
+	if !slices.Equal(applies[0], want) {
+		t.Errorf("the apply's arguments %v, want %v", applies[0], want)
+	}
+}
+
+// TestClusterShapeApplyPhases: phase P's file is applied first, under the policy
+// kubeconfig, then phase W's, under the apply kubeconfig, and no file is applied
+// under the other phase's. Mutation: pass phase P's kubeconfig to phase W's
+// apply, and the W row's kubeconfig is wrong, so this test fails.
+func TestClusterShapeApplyPhases(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeReadFile(t, filepath.Join(dir, "policy.yaml"), shapePolicyDoc)
+	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
+	approvalPath := filepath.Join(dir, "approval.json")
+	writeReadFile(t, approvalPath, readApprovalOK)
+	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	var verified int
+	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
+	}
+	applies := shapeApplyArgs(kube.calls)
+	want := [][]string{
+		{"--kubeconfig", shapeFlags.policyKubeconfig, "apply", "-f", filepath.Join(dir, "policy.yaml")},
+		{"--kubeconfig", shapeFlags.applyKubeconfig, "apply", "-f", filepath.Join(dir, "deployment-web.yaml")},
+	}
+	if !slices.EqualFunc(applies, want, func(a, b []string) bool { return slices.Equal(a, b) }) {
+		t.Errorf("runTownClusterApply applied %v, want phase P's file under the policy kubeconfig, then phase W's under the apply kubeconfig: %v", applies, want)
+	}
+}
+
+// TestClusterShapeApplyDocumentKinds: a plan file holding a Secret in either
+// phase, or a static policy document or Role in phase W, is refused before any
+// cluster call, so verify never runs and nothing is applied. A Secret after a
+// Deployment document is refused too, so every document is read, and a document
+// that does not decode is refused. Mutation: drop the checkApplyDocuments call in
+// checkApplyPlanFiles, and every row reaches the cluster.
+func TestClusterShapeApplyDocumentKinds(t *testing.T) {
+	t.Parallel()
+	secretDoc := []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: api-key\n  namespace: gastown\n")
+	roleDoc := []byte("apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: r\n  namespace: gastown\n")
+	tests := []struct {
+		name    string
+		phase   string
+		doc     []byte
+		wantErr string
+	}{
+		{name: "a Secret in phase P", phase: planPhaseStatic, doc: secretDoc, wantErr: "holds a Secret"},
+		{name: "a Secret in phase W", phase: planPhaseWorkloads, doc: secretDoc, wantErr: "holds a Secret"},
+		{name: "a Secret after a Deployment document", phase: planPhaseWorkloads, doc: append(append([]byte{}, readWebDoc...), append([]byte("---\n"), secretDoc...)...), wantErr: "holds a Secret"},
+		{name: "a ValidatingAdmissionPolicy in phase W", phase: planPhaseWorkloads, doc: shapePolicyDoc, wantErr: "in phase W"},
+		{name: "a Role in phase W", phase: planPhaseWorkloads, doc: roleDoc, wantErr: "in phase W"},
+		{name: "a document that does not decode", phase: planPhaseWorkloads, doc: []byte("kind: [unclosed\n"), wantErr: "does not decode"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "doc.yaml"), tc.doc)
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(planRecordFile{Name: "doc.yaml", Phase: tc.phase, SHA256: clusterApplyFileSHA(tc.doc), Absent: true}))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			kube := &shapeLiveKube{out: shapeLiveAt("7")}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
+				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
+			}
+			if verified != 0 || len(kube.calls) != 0 {
+				t.Errorf("runTownClusterApply called verify %d times and made the calls %v, want none", verified, kube.calls)
+			}
+		})
+	}
+}
+
+// TestClusterShapeApplyMissingFlag: applyPlanFiles refuses a phase whose kubeconfig
+// flag is empty before any apply call, so no apply falls back to a default
+// cluster. Mutation: drop the phaseKubeconfig check in applyPlanFiles, and the
+// empty kubeconfig reaches kubectl, so this test fails.
+func TestClusterShapeApplyMissingFlag(t *testing.T) {
+	t.Parallel()
+	var calls int
+	kube := func(context.Context, string, []string, string, ...string) (string, int, error) {
+		calls++
+		return "", 0, nil
+	}
+	err := applyPlanFiles(context.Background(), kube, t.TempDir(), planRecord{Files: []planRecordFile{shapePolicyFile}}, planFlags{applyKubeconfig: "/keys/apply.kubeconfig"})
+	if err == nil || !strings.Contains(err.Error(), "--policy-kubeconfig") {
+		t.Fatalf("applyPlanFiles returned %v, want a refusal naming --policy-kubeconfig", err)
+	}
+	if calls != 0 {
+		t.Errorf("applyPlanFiles made %d calls, want none", calls)
+	}
+}
+
+// TestClusterShapeApplyPartial: an apply that fails stops the run, with no
+// further apply call, and the error names the files applied and not applied and
+// says nothing was rolled back. Mutation: ignore the exit code in applyPlanFiles,
+// and the rows run every apply and return nil.
+func TestClusterShapeApplyPartial(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		failing string
+		wantErr string
+	}{
+		{name: "the phase P apply fails", failing: "policy.yaml", wantErr: "applied nothing and not applied policy.yaml, deployment-web.yaml"},
+		{name: "the phase W apply fails", failing: "deployment-web.yaml", wantErr: "applied policy.yaml and not applied deployment-web.yaml"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "policy.yaml"), shapePolicyDoc)
+			writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			var applied []string
+			kube := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				if !slices.Contains(args, "apply") {
+					return shapeLiveAt("7"), 0, nil
+				}
+				file := filepath.Base(args[len(args)-1])
+				applied = append(applied, file)
+				if file == tc.failing {
+					return "", 1, nil
+				}
+				return "", 0, nil
+			}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was rolled back") {
+				t.Fatalf("runTownClusterApply returned %v, want a partial-apply error naming %q", err, tc.wantErr)
+			}
+			if applied[len(applied)-1] != tc.failing {
+				t.Errorf("runTownClusterApply applied %v after the failing %s, want none", applied, tc.failing)
+			}
+		})
 	}
 }
 

@@ -1,12 +1,18 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/clusterapproval"
 	"github.com/steveyegge/gastown/internal/update"
@@ -27,11 +33,9 @@ type approvalVerifier func(rec clusterapproval.Record, plan planRecord) error
 // before verify. Otherwise verify is called with the record and the plan, and
 // its error is returned naming nothing as applied. Each held Deployment is then
 // re-read with recheckApplyDeployments; one the cluster no longer holds at the
-// plan's resourceVersion refuses with nothing applied, before any apply call. A
-// plan and approval that pass are not applied yet, since the applies are the
-// next beads of the chain; it returns an error saying so, after the reads and
-// no apply. Nothing in the tree calls it yet: the command that runs it is
-// gt-7bxoh0.
+// plan's resourceVersion refuses with nothing applied, before any apply call.
+// Then applyPlanFiles applies the files. Nothing in the tree calls it yet: the
+// command that runs it is gt-7bxoh0.
 func runTownClusterApply(ctx context.Context, kube update.RunFunc, planDir, approvalPath string, kubeconfigs planFlags, verify approvalVerifier) error {
 	record, held, err := loadApplyPlan(planDir, kubeconfigs)
 	if err != nil {
@@ -55,15 +59,16 @@ func runTownClusterApply(ctx context.Context, kube update.RunFunc, planDir, appr
 	if err := recheckApplyDeployments(ctx, kube, held); err != nil {
 		return err
 	}
-	return fmt.Errorf("gt town cluster apply: the plan %s reads with %d held Deployments, but apply is not built yet, so nothing was applied", record.ID, len(held))
+	return applyPlanFiles(ctx, kube, planDir, record, kubeconfigs)
 }
 
 // checkApplyPlanFiles refuses a plan whose file bytes differ from the SHA-256
 // plan.json records for them. Every file the record names is checked, held or
 // not, so a Deployment the cluster does not hold is no exception. A name that is
 // not a file in planDir, and a file that cannot be read, are refused too: an
-// unread file never passes as matching. The error names the file and never a
-// hash, and nothing is applied.
+// unread file never passes as matching. Each matching file's documents are then
+// checked by checkApplyDocuments, from the same bytes. The error names the file
+// and never a hash, and nothing is applied.
 func checkApplyPlanFiles(planDir string, record planRecord) error {
 	for _, file := range record.Files {
 		if filepath.Base(file.Name) != file.Name {
@@ -77,8 +82,77 @@ func checkApplyPlanFiles(planDir string, record planRecord) error {
 		if hex.EncodeToString(sum[:]) != file.SHA256 {
 			return fmt.Errorf("gt town cluster apply: the plan file %s does not match the sha256 plan.json records for it, so nothing was applied", file.Name)
 		}
+		if err := checkApplyDocuments(file, data); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// checkApplyDocuments refuses a file holding a Secret document, in either phase,
+// and a static policy document (ValidatingAdmissionPolicy, its binding, or a
+// Role) in phase W, which takes none. Every document of the file is decoded, so a
+// Secret after the first document is refused too. A document that does not decode
+// is refused, since an unread document never passes as allowed.
+func checkApplyDocuments(file planRecordFile, data []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var doc struct {
+			Kind string `yaml:"kind"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("gt town cluster apply: the plan file %s does not decode as documents, so nothing was applied", file.Name)
+		}
+		switch {
+		case doc.Kind == secretKind:
+			return fmt.Errorf("gt town cluster apply: the plan file %s holds a Secret, which apply never applies, so nothing was applied", file.Name)
+		case file.Phase == planPhaseWorkloads && (doc.Kind == validatingPolicyKind || doc.Kind == validatingPolicyBindKind || doc.Kind == roleKind):
+			return fmt.Errorf("gt town cluster apply: the plan file %s holds a %s in phase W, and only phase P applies static documents, so nothing was applied", file.Name, doc.Kind)
+		}
+	}
+}
+
+// applyPlanFiles applies each file with one plain kubectl apply: phase P's first
+// under the policy kubeconfig, then phase W's under the apply kubeconfig, each in
+// plan.json order. A failed call stops the run with no rollback, and the error
+// names the files applied and not applied, never the output.
+func applyPlanFiles(ctx context.Context, kube update.RunFunc, planDir string, record planRecord, kubeconfigs planFlags) error {
+	var ordered []planRecordFile
+	for _, phase := range []string{planPhaseStatic, planPhaseWorkloads} {
+		for _, file := range record.Files {
+			if file.Phase == phase {
+				ordered = append(ordered, file)
+			}
+		}
+	}
+	for i, file := range ordered {
+		kubeconfig, err := phaseKubeconfig(file.Phase, kubeconfigs)
+		if err != nil {
+			return err
+		}
+		_, exit, err := kube(ctx, planDir, nil, "kubectl", "--kubeconfig", kubeconfig, "apply", "-f", filepath.Join(planDir, file.Name))
+		if err != nil || exit != 0 {
+			return fmt.Errorf("gt town cluster apply: the apply of %s failed, a partial apply: applied %s and not applied %s; nothing was rolled back", file.Name, applyFileNames(ordered[:i]), applyFileNames(ordered[i:]))
+		}
+	}
+	return nil
+}
+
+// applyFileNames lists the files' names for a partial-apply error, or "nothing"
+// when the list is empty.
+func applyFileNames(files []planRecordFile) string {
+	if len(files) == 0 {
+		return "nothing"
+	}
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // applyKubeconfigRunner binds kube to kubeconfig the way the plan's dry runs
