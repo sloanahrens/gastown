@@ -179,6 +179,10 @@ const (
 	// previous image after a check failed, so the daemon runs the pair from before
 	// the roll (gt-9odoqa). It clears when the next run starts.
 	KindUpdateRolledBack Kind = "update-rolled-back"
+	// KindUpdateMaintenance: the maintenance the roll runs first did not finish
+	// before the roll, so the roll went ahead with that work undone
+	// (gt-1mqpcb).
+	KindUpdateMaintenance Kind = "update-maintenance"
 	// KindHoldStale: a bead wears a hold label (overseer-only, needs-overseer or
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
@@ -289,7 +293,7 @@ func Kinds() []Kind {
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindStoryPoints, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
-		KindUpdateRolledBack, KindStoryPointsDrift,
+		KindUpdateRolledBack, KindUpdateMaintenance, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindGateThrottleUnread, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,

@@ -162,6 +162,9 @@ var ruleOwners = map[string]Owner{
 	// A rolled-back update is the overseer's to read: it names the failed check
 	// and decides whether the roll is tried again (gt-9odoqa).
 	RuleUpdateRolledBack: OwnerOverseer,
+	// Maintenance left undone before a roll is the overseer's to read: it finds
+	// what stopped it before the next roll (gt-1mqpcb).
+	RuleUpdateMaintenance: OwnerOverseer,
 	// A stale hold is the overseer's to release: it reads the hold's reason and
 	// releases the label or closes the bead (gt-j669b4.19).
 	RuleHoldStale: OwnerOverseer,
