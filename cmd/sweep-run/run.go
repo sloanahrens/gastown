@@ -513,12 +513,10 @@ func reportOf(stdout, stderrTail *tail) sweepReport {
 // the sweep's own complaint, because a tier that did not run is not a tier that
 // passed.
 func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweeprunner.Tier {
-	// The log group the runner adds, and the note it may add beside it, are part
-	// of the line's cap, so a line that arrived at the limit still ends in a
-	// whole group and the daemon still parses it.
+	// The log group is part of the line's cap. The notes live in Tier.Note: the
+	// daemon splits the line's failed: group on spaces (gt-xf0c6g).
 	group := " (logs " + logDir + ")"
-	budget := lineBudget(rep.dropped)
-	room := budget - len(group)
+	room := maxSummaryBytes - len(group)
 	if room < 1 {
 		room = 1
 	}
@@ -529,7 +527,7 @@ func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweep
 		if !ok {
 			continue
 		}
-		lines[tier] = withFailedNote(withLogDir(capRunes(line, room), logDir), rep.dropped)
+		lines[tier] = withLogDir(capRunes(line, room), logDir)
 	}
 	reason := fmt.Sprintf("no summary line (exit %d)", code)
 	if tail := tailOf(rep.stderr); tail != "" {
@@ -540,7 +538,7 @@ func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweep
 	// beside it stays GREEN: the sweep ran those and they passed. Only when the
 	// sweep exited non-zero and NO line says RED is there a contradiction no tier
 	// can be blamed for, and then every tier that reported GREEN is turned RED,
-	// each with the contradiction recorded.
+	// each with the contradiction recorded in its note.
 	anyRed := false
 	for tier, line := range lines {
 		if lineIsRed(line, tier) {
@@ -550,40 +548,27 @@ func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweep
 	out := make([]sweeprunner.Tier, 0, len(tiers))
 	for _, tier := range tiers {
 		line, ok := lines[tier]
+		// Every tier of a run that lost output carries the dropped-output note.
+		note := rep.dropped
 		switch {
 		case !ok:
-			line = withFailedNote(generated(tier, logDir, reason, budget), rep.dropped)
+			line = generated(tier, logDir, reason, maxSummaryBytes)
 		case code != 0 && !anyRed:
-			line = redOnFailure(line, tier, code)
+			var contradiction string
+			line, contradiction = redOnFailure(line, tier, code)
+			note = joinNotes(note, contradiction)
 		}
-		out = append(out, sweeprunner.Tier{Tier: tier, Summary: withinCap(line)})
+		out = append(out, sweeprunner.Tier{Tier: tier, Summary: withinCap(line), Note: note})
 	}
 	return out
 }
 
-// lineBudget is what a whole summary line may take once note is added to it.
-func lineBudget(note string) int {
-	if note == "" {
-		return maxSummaryBytes
+// joinNotes joins the notes one tier carries, leaving an absent note out.
+func joinNotes(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
 	}
-	return maxSummaryBytes - len(note) - len(", ")
-}
-
-// withFailedNote adds a note to a summary line's reasons, which is the only free
-// text the daemon reads out of a result; a line with no reason group gains one.
-// The note never reaches the log path, which stays the runner's own.
-func withFailedNote(line, note string) string {
-	if note == "" {
-		return line
-	}
-	i := strings.Index(line, " (logs ")
-	if i < 0 {
-		return line
-	}
-	if strings.Contains(line[:i], failedLabel) {
-		return line[:i] + ", " + note + line[i:]
-	}
-	return line[:i] + failedLabel + note + line[i:]
+	return a + "; " + b
 }
 
 // redTiers is every requested tier RED for reason: the run could not start, so
@@ -630,9 +615,7 @@ func withLogDir(line, logDir string) string {
 	return line + group
 }
 
-// withinCap keeps a summary line inside maxSummaryBytes once the notes the runner
-// adds (the dropped-output note, the exit contradiction) are on it: the part
-// before the log group gives way, and the group the daemon parses stays whole.
+// withinCap caps a summary line at maxSummaryBytes, keeping its log group whole.
 func withinCap(line string) string {
 	if len(line) <= maxSummaryBytes {
 		return line
@@ -655,26 +638,17 @@ func lineIsRed(line, tier string) bool {
 	return ok && strings.HasPrefix(rest, "RED")
 }
 
-// redOnFailure turns a tier's GREEN line RED when the sweep exited non-zero:
-// the exit status is the verdict, and a GREEN line beside it is a contradiction
-// the result records rather than hides. The counts and names stay as printed;
-// the contradiction joins the failed names so the daemon shows why.
-func redOnFailure(line, tier string, code int) string {
+// redOnFailure turns a tier's GREEN line RED when the sweep exited non-zero and
+// returns the contradiction for the tier's note, or an empty note otherwise. The
+// counts and failed names stay as printed: it is not a failed unit (gt-xf0c6g).
+func redOnFailure(line, tier string, code int) (string, string) {
 	prefix := tiersweep.Name + ": " + tier + " "
 	rest, ok := strings.CutPrefix(line, prefix)
 	if !ok || !strings.HasPrefix(rest, "GREEN") {
-		return line
+		return line, ""
 	}
-	line = prefix + "RED" + strings.TrimPrefix(rest, "GREEN")
-	note := fmt.Sprintf("sweep exited %d beside a GREEN summary line", code)
-	i := strings.Index(line, " (logs ")
-	if i < 0 {
-		return line
-	}
-	if strings.Contains(line[:i], failedLabel) {
-		return line[:i] + ", " + note + line[i:]
-	}
-	return line[:i] + failedLabel + note + line[i:]
+	return prefix + "RED" + strings.TrimPrefix(rest, "GREEN"),
+		fmt.Sprintf("sweep exited %d beside a GREEN summary line", code)
 }
 
 // tailOf is the end of the sweep's stderr as one short line: what a reader
