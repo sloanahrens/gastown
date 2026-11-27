@@ -134,6 +134,34 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 	}
 }
 
+// TestSweepSmokeLogsItsOutcome pins the one line each launch writes: the
+// start-up launch smoke, the rig, the run, the outcome with its detail, and
+// whether the smoke removed the run (gt-lveq0f).
+func TestSweepSmokeLogsItsOutcome(t *testing.T) {
+	t.Parallel()
+	d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+	d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+	next := tierSweepLaunch{}
+	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
+		next.stop = func() {}
+		return next
+	}
+	wantRun := tierSweepRunnerRunID("gastown", runnerTestSHA, []string{"shell"}) + "-smoke"
+	logOf := func(l tierSweepLaunch, want string) {
+		next = l
+		logs.Reset()
+		d.sweepSmokeLaunch(context.Background(), "gastown")
+		if got := logs.String(); got != "tier-sweep start-up launch smoke: gastown: run "+wantRun+" "+want+"\n" {
+			t.Errorf("log = %q, want one line ending %q", got, want)
+		}
+	}
+	logOf(tierSweepLaunch{exitCode: 0}, "started; run removed")
+	logOf(tierSweepLaunch{exitCode: -1, err: &sweeprunner.ActiveJob{Name: "sweep-x"}}, "busy; run not removed")
+	logOf(tierSweepLaunch{exitCode: -1, err: errors.New("killed\nmore")}, "failed (killed); run removed")
+}
+
 // TestSweepSmokeLeavesASweepsRunAlone: the smoke's run has a name of its own, so
 // a sweep Job of the same rig, commit and tiers that is running is a foreign Job
 // to it. The claim guard refuses it as busy and the smoke removes nothing, where
