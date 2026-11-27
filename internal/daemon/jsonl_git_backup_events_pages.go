@@ -11,6 +11,10 @@ import (
 	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
+// eventsFullPageRows is the rows one page of a paged full export of the events
+// table asks for.
+const eventsFullPageRows = 20000
+
 // eventsPageReader is the readPage seam of exportEventsPagesWith for database
 // db: each call exports one page of the events table, queried after the bound
 // it is given, into a fresh staging directory under the events export's own
@@ -113,4 +117,29 @@ func (d *Daemon) exportEventsPagesWith(ctx context.Context, ops eventsExportOps,
 			return written, nil
 		}
 	}
+}
+
+// exportEventsFullPaged replaces dir's events export with a read of the whole
+// events table in pages of pageRows. budget is the whole time that read may
+// run, as it is for a single read: each page is given what is left of it, and a
+// page with none left is refused. The read also stops before a page when the
+// daemon's context is done; a Daemon built without one (tests) has only its
+// budget to end it.
+//
+// A read that stops or fails returns the error and leaves the export partial,
+// as exportEventsPagesWith does. The backup cycle unstages a database whose
+// export failed, so its committed copy stays.
+func (d *Daemon) exportEventsFullPaged(ops eventsExportOps, db, dir, dataDir string, budget time.Duration, pageRows int, exportTable jsonlTableExporter) (int, error) {
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	start := d.clk().Now()
+	return d.exportEventsPagesWith(ctx, ops, db, dir, pageRows, func(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error) {
+		remaining := budget - d.clk().Now().Sub(start)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("the events full export spent its %s budget", budget)
+		}
+		return d.eventsPageReader(db, dataDir, remaining, exportTable)(afterCreatedAt, afterID, limit)
+	})
 }
