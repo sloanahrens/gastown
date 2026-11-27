@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -101,18 +102,41 @@ func TestRehearsalSideLoadRuns(t *testing.T) {
 	}
 }
 
+// warmCache fills the second run's GOCACHE, as an earlier rehearsal would have.
+func warmCache(t *testing.T, root string) {
+	t.Helper()
+	cache := filepath.Join(root, "gocache-1")
+	if err := os.Mkdir(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "warm.o"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fileAtCache makes the first run's GOCACHE a regular file.
+func fileAtCache(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "gocache-0"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRehearsalSideLoadErrors(t *testing.T) {
 	t.Parallel()
 	errStart := errors.New("cannot start presubmit")
 	tests := []struct {
 		name, cacheRoot string
+		setup           func(t *testing.T, root string)
 		errs            map[string]error
 		wantErr         error
 		wantRuns        int
 		wantCalls       int
 	}{
-		{"cache root missing", "absent", nil, os.ErrNotExist, 0, 0},
-		{"one run cannot start", "", map[string]error{"seat/beta": errStart}, errStart, 3, 3},
+		{"cache root missing", "absent", nil, nil, os.ErrNotExist, 0, 0},
+		{"one run cannot start", "", nil, map[string]error{"seat/beta": errStart}, errStart, 3, 3},
+		{"cache directory not empty", "", warmCache, nil, errCacheNotEmpty, 0, 0},
+		{"cache path is a file", "", fileAtCache, nil, syscall.ENOTDIR, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,6 +144,9 @@ func TestRehearsalSideLoadErrors(t *testing.T) {
 			root := t.TempDir()
 			if tt.cacheRoot != "" {
 				root = filepath.Join(root, tt.cacheRoot)
+			}
+			if tt.setup != nil {
+				tt.setup(t, root)
 			}
 			dirs := []string{"seat/alpha", "seat/beta", "seat/gamma"}
 			fake := &fakeRuns{want: int32(len(dirs)), errs: tt.errs}
