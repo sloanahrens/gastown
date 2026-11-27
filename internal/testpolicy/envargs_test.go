@@ -3,6 +3,7 @@ package testpolicy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,11 +87,43 @@ func TestEnvArgsBuildTaggedFile(t *testing.T) {
 	}
 }
 
+func TestEnvArgsPrefilter(t *testing.T) {
+	t.Parallel()
+	for name := range envArgNames {
+		if !strings.Contains(name, "env") && !strings.Contains(name, "Env") {
+			t.Errorf("envArgNames key %q holds neither env nor Env, so the scan skips every file that names it", name)
+		}
+	}
+	root := envArgsRoot(t)
+	broken := filepath.Join(root, "internal", "p", "broken_test.go")
+	if err := os.WriteFile(broken, []byte("package p\nfunc ("), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScanEnvArgs(root); err != nil {
+		t.Errorf("ScanEnvArgs = %v, want nil for a broken file that names env nowhere", err)
+	}
+}
+
+// TestEnvArgsUnreadableFile drives the read error: a dangling symlink named
+// *_test.go cannot be read, and the scan reads before it judges the words.
+func TestEnvArgsUnreadableFile(t *testing.T) {
+	t.Parallel()
+	root := envArgsRoot(t)
+	link := filepath.Join(root, "internal", "p", "dangling_test.go")
+	if err := os.Symlink(filepath.Join(root, "internal", "p", "missing.go"), link); err != nil {
+		t.Fatalf("os.Symlink: %v", err)
+	}
+	if _, err := ScanEnvArgs(root); err == nil {
+		t.Fatal("ScanEnvArgs accepted an unreadable test file")
+	}
+}
+
 func TestEnvArgsParseError(t *testing.T) {
 	t.Parallel()
 	root := envArgsRoot(t)
 	broken := filepath.Join(root, "internal", "p", "broken_test.go")
-	if err := os.WriteFile(broken, []byte("package p\nfunc ("), 0o644); err != nil {
+	// The file names env so the prefilter parses it, as ScanEnvArgs documents.
+	if err := os.WriteFile(broken, []byte("package p\n// env\nfunc ("), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ScanEnvArgs(root); err == nil {

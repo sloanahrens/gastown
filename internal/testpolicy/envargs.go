@@ -1,10 +1,12 @@
 package testpolicy
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -24,6 +26,8 @@ var envArgNames = map[string]bool{"env": true, "environ": true, "cmdEnv": true, 
 
 // ScanEnvArgs parses every *_test.go under root/internal and root/cmd, build tags
 // included, and reports failure args that print an environment; an unreadable file errors.
+// A file that holds neither "env" nor "Env" is skipped unparsed, since every name the
+// scan flags holds one; a syntax error in such a file is left to the compile.
 func ScanEnvArgs(root string) ([]Violation, error) {
 	fset, vs := token.NewFileSet(), []Violation{}
 	for _, sub := range []string{"cmd", "internal"} {
@@ -34,7 +38,14 @@ func ScanEnvArgs(root string) ([]Violation, error) {
 			if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+			src, err := os.ReadFile(path) //nolint:gosec // G122: read-only scan of the checkout; a swapped symlink changes what the guard reports, not what it does
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(src, []byte("env")) && !bytes.Contains(src, []byte("Env")) {
+				return nil
+			}
+			f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 			if err != nil {
 				return err
 			}
