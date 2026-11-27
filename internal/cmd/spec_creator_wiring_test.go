@@ -80,6 +80,26 @@ func TestSpecCreatorRefused(t *testing.T) {
 	}
 }
 
+// TestSpecCreatorWiringFailsClosed is the walk-failure half: a graph read that
+// fails is returned unchanged from specWithBlockerCreates, so both paths hold
+// the bead rather than judging cites from an unread graph.
+func TestSpecCreatorWiringFailsClosed(t *testing.T) {
+	t.Parallel()
+	bead := cleanSpec("gt-work", 2, "2026-09-29T10:00:00Z")
+	bead.Description = "## Goal\nAdd it, created by bead gt-creator.\n"
+	readErr := errors.New("bd show: connection refused")
+	read := func(string) (specdispatch.Spec, []string, error) {
+		return specdispatch.Spec{}, nil, readErr
+	}
+	got, err := specWithBlockerCreates(bead, read, "gt-work")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("specWithBlockerCreates error = %v, want the read's own error", err)
+	}
+	if len(got.CreatorCites) != 0 {
+		t.Errorf("CreatorCites = %+v beside the error, want none", got.CreatorCites)
+	}
+}
+
 // TestSpecCreatorRetiredThroughTheWiring is the close-reason half of the same
 // wiring: a closed cite is retired, with its reason, only if specFromIssue
 // carries the close reason into the spec the graph read answers.
