@@ -11,9 +11,9 @@ import (
 // runReconciler is one pass of the reconciler patrol. It does nothing when the
 // patrol is off, so a disabled town neither logs nor records a run. An active
 // pass logs whether it is shadow (judges only) or live, keeps the observations
-// it judged for dutyObservations to read, writes them to the duty state record
-// the jobs list reads, then records its completion time, which is what the
-// patrol's due-ness check reads.
+// it judged for dutyObservations to read, logs one line for each duty it finds
+// due or overdue, writes them to the duty state record the jobs list reads, then
+// records its completion time, which is what the patrol's due-ness check reads.
 func (d *Daemon) runReconciler() {
 	if !d.isPatrolActive("reconciler") {
 		return
@@ -34,19 +34,39 @@ func (d *Daemon) runReconciler() {
 	d.dutyObsMu.Lock()
 	d.dutyObs = obs
 	d.dutyObsMu.Unlock()
-	d.recordDutyState(rc, now, obs)
+	limits := dutyLimits(rc, obs)
+	d.logWouldRun(mode, obs, limits)
+	d.recordDutyState(now, obs, limits)
 	d.recordPatrolRun(&d.reconcilerRun, "reconciler", now)
 }
 
-// recordDutyState writes the pass's observations, with the limit each duty
-// reads from rc, to the duty state record under the town root. A failed write
-// is logged once for the pass and never stops it.
-func (d *Daemon) recordDutyState(rc *config.ReconcilerConfig, at time.Time, obs []reconcile.Observation) {
+// logWouldRun logs one line for each duty a pass finds due or overdue: the
+// duty's name and verdict, how old its last good result is, and the limit it
+// was judged by. A shadow pass names the mode and marks the line "(would run)",
+// so the log says no duty ran; a live pass logs plain. An ok duty logs nothing,
+// and an unknown duty logs nothing here.
+func (d *Daemon) logWouldRun(mode string, obs []reconcile.Observation, limits map[string]time.Duration) {
+	for _, o := range obs {
+		if o.Verdict != reconcile.VerdictDue && o.Verdict != reconcile.VerdictOverdue {
+			continue
+		}
+		if mode == "shadow" {
+			d.logger.Printf("reconciler: shadow: %s %s age %s limit %s (would run)", o.Duty, o.Verdict, o.Age, limits[o.Duty])
+			continue
+		}
+		d.logger.Printf("reconciler: %s %s age %s limit %s", o.Duty, o.Verdict, o.Age, limits[o.Duty])
+	}
+}
+
+// recordDutyState writes the pass's observations and their limits to the duty
+// state record under the town root. A failed write is logged once for the pass
+// and never stops it.
+func (d *Daemon) recordDutyState(at time.Time, obs []reconcile.Observation, limits map[string]time.Duration) {
 	townRoot := ""
 	if d.config != nil {
 		townRoot = d.config.TownRoot
 	}
-	if err := WriteDutyState(townRoot, at, obs, dutyLimits(rc, obs)); err != nil {
+	if err := WriteDutyState(townRoot, at, obs, limits); err != nil {
 		d.logger.Printf("reconciler: write duty state: %v", err)
 	}
 }

@@ -52,6 +52,103 @@ func TestReconcilerPassKeepsObservations(t *testing.T) {
 	}
 }
 
+// TestReconcilerPassLogsWouldRun: a pass logs one line for each duty it finds
+// due or overdue — its name, verdict, age and limit — marked "(would run)" in
+// shadow mode and plain in live mode. An ok or unknown duty logs nothing, so a
+// pass whose duties are all fresh logs only its pass line. Logging an ok duty
+// turns the no-duty-line rows red (gt-ucuzr9).
+func TestReconcilerPassLogsWouldRun(t *testing.T) {
+	t.Parallel()
+
+	// The fixture's backup night is ten hours old and the default grace is two
+	// hours, so a 1h limit is overdue and a 9h limit is due.
+	now := time.Now()
+	live := false
+	tests := []struct {
+		name        string
+		shadow      *bool
+		backupLimit string
+		breakGC     bool
+		wantLog     func(backup reconcile.Observation) string
+	}{
+		{
+			name:        "an overdue duty in shadow mode logs one would-run line",
+			backupLimit: "1h",
+			wantLog: func(o reconcile.Observation) string {
+				return "reconciler: pass (shadow)\n" +
+					"reconciler: shadow: backup overdue age " + o.Age.String() + " limit 1h0m0s (would run)"
+			},
+		},
+		{
+			name:        "a due duty in shadow mode logs one would-run line",
+			backupLimit: "9h",
+			wantLog: func(o reconcile.Observation) string {
+				return "reconciler: pass (shadow)\n" +
+					"reconciler: shadow: backup due age " + o.Age.String() + " limit 9h0m0s (would run)"
+			},
+		},
+		{
+			name:        "a live pass logs the line with no shadow mark",
+			shadow:      &live,
+			backupLimit: "1h",
+			wantLog: func(o reconcile.Observation) string {
+				return "reconciler: pass (live)\n" +
+					"reconciler: backup overdue age " + o.Age.String() + " limit 1h0m0s"
+			},
+		},
+		{
+			name:    "an ok duty logs nothing",
+			wantLog: func(reconcile.Observation) string { return "reconciler: pass (shadow)" },
+		},
+		{
+			name:    "an unknown duty logs nothing",
+			breakGC: true,
+			wantLog: func(reconcile.Observation) string { return "reconciler: pass (shadow)" },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := liveDaemon(t, now)
+			d.patrolConfig.Patrols.Reconciler.Enabled = true
+			d.patrolConfig.Patrols.Reconciler.Shadow = tt.shadow
+			d.patrolConfig.Patrols.Reconciler.BackupLimit = tt.backupLimit
+			if tt.breakGC {
+				path := maintenanceGCStatePath(d.config.TownRoot)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logs bytes.Buffer
+			d.logger = log.New(&logs, "", 0)
+
+			d.runReconciler()
+
+			backup := dutyObservation(t, d.dutyObservations(), "backup")
+			want := tt.wantLog(backup)
+			if got := strings.TrimSpace(logs.String()); got != want {
+				t.Errorf("log = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// dutyObservation returns the observation named duty, failing when the pass did
+// not judge it.
+func dutyObservation(t *testing.T, obs []reconcile.Observation, duty string) reconcile.Observation {
+	t.Helper()
+	for _, o := range obs {
+		if o.Duty == duty {
+			return o
+		}
+	}
+	t.Fatalf("no observation for %s in %+v", duty, obs)
+	return reconcile.Observation{}
+}
+
 // TestDutyStatePassWritesIt: one pass leaves the duty state record holding that
 // pass's observations in order, each with its family's limit in seconds (gc:<db>
 // reads the gc limit). Removing the call from runReconciler turns this red
