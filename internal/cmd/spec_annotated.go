@@ -69,6 +69,8 @@ type specAnnotated struct {
 	verdicts map[string]specCandidateVerdict
 	// rigs is each rig's last board read, never pruned: the board lists beads.
 	rigs map[string]specRigRead
+	// blocked is each rig's last blocked read, answered only while its hashes hold.
+	blocked map[string]specRigBlocked
 	// counts is this tick's board comment_count for each candidate; a bead
 	// absent from it is not remembered or skipped.
 	counts map[string]int
