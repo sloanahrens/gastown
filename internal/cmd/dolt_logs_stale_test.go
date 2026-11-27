@@ -287,6 +287,48 @@ func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
 	}
 }
 
+// TestDoltLogsHostFollow: a host town with follow set tails the host dolt.log
+// with -f, and never reads a container log, since a town with no
+// dolt.external_container has no container whose log would hold its Dolt
+// output (gt-grnust).
+func TestDoltLogsHostFollow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	townRoot := externalContainerTownRoot(t, "")
+	writeDoltLogStaleFixture(t, townRoot, now.Add(-5*time.Minute))
+
+	var tailArgs []string
+	containerRead := false
+	reads := doltLogReads{
+		now: func() time.Time { return now },
+		tail: func(args []string, out, _ io.Writer) error {
+			tailArgs = append([]string(nil), args...)
+			_, err := io.WriteString(out, "serving line one\nserving line two\n")
+			return err
+		},
+		containerLog: func(string, int, bool, io.Writer, io.Writer) error {
+			containerRead = true
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	if err := doltLogsTo(townRoot, &out, &out, reads, 50, true); err != nil {
+		t.Fatalf("doltLogsTo: %v", err)
+	}
+
+	want := []string{"-f", filepath.Join(townRoot, "daemon", "dolt.log")}
+	if !slices.Equal(tailArgs, want) {
+		t.Errorf("tail args = %q, want %q", tailArgs, want)
+	}
+	if containerRead {
+		t.Error("the container reader was called for a host town's follow")
+	}
+	if !strings.Contains(out.String(), "serving line one") {
+		t.Errorf("output %q does not hold the host dolt.log's lines", out.String())
+	}
+}
+
 // TestDoltLogStaleNoticeOnDumpCommand: gt dolt dump in a container town prints
 // the same stale notice on stderr, names the container instead of reading the
 // host's pid, metadata and log tail, and says a log it cannot read has an
