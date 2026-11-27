@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -57,8 +58,11 @@ const (
 // files must match their hashes, and every revision is checked before the first
 // kubectl call, so a bad plan refuses with nothing undone. A failed undo or wait
 // stops the run. A refusal of the flags or the kubeconfig path returns before any
-// record. Past those, the run appends one ledger line beside plan.json on every
-// outcome; a line that cannot be written is an error, so a cluster change is never unrecorded.
+// record. A stop at a failed undo or wait prints the Deployments undone and not
+// undone, in rollback order, so the overseer knows the cluster's state without
+// reading the ledger. Past those, the run appends one ledger line beside plan.json
+// on every outcome; a line that cannot be written is an error, so a cluster change
+// is never unrecorded.
 func runTownClusterRollback(ctx context.Context, kube update.RunFunc, out io.Writer, planDir, kubeconfig string) (err error) {
 	// An empty plan path would read the working directory, and an empty kubeconfig
 	// would fall back to the operator's default cluster; both refuse before any read.
@@ -116,12 +120,29 @@ func runTownClusterRollback(ctx context.Context, kube update.RunFunc, out io.Wri
 	for _, step := range steps {
 		resource := "deployment/" + step.deployment
 		if _, exit, err := runner(ctx, planDir, nil, "kubectl", "rollout", "undo", resource, "-n", step.namespace, "--to-revision="+step.file.file.Revision); err != nil || exit != 0 {
+			printRollbackOutcome(out, steps, len(undone))
 			return fmt.Errorf("gt town cluster rollback: the undo of %s failed, so the rollback stopped with %d of %d Deployments undone", resource, len(undone), len(steps))
 		}
 		undone = append(undone, "deployment/"+step.namespace+"/"+step.deployment)
 		if err := waitDeploymentRollout(ctx, runner, out, step.namespace, resource, applyRolloutWait); err != nil {
+			printRollbackOutcome(out, steps, len(undone))
 			return fmt.Errorf("gt town cluster rollback: %s was undone but did not come back ready, so the rollback stopped: %w", resource, err)
 		}
 	}
 	return nil
+}
+
+// printRollbackOutcome writes the Deployments undone and not undone, in rollback order.
+func printRollbackOutcome(out io.Writer, steps []applyStep, done int) {
+	names := func(list []applyStep) string {
+		var s []string
+		for _, step := range list {
+			s = append(s, step.namespace+"/"+step.deployment)
+		}
+		if len(s) == 0 {
+			return "none"
+		}
+		return strings.Join(s, ", ")
+	}
+	fmt.Fprintf(out, "undone: %s\nnot undone: %s\n", names(steps[:done]), names(steps[done:]))
 }
