@@ -456,3 +456,41 @@ func TestRaceRunsWithPackages(t *testing.T) {
 		}
 	})
 }
+
+// TestRaceEntryPooled: a pooled entry starts its serial.txt package beside the
+// others at 3 jobs, and the entry after it runs its serial package alone (gt-2ekofw).
+func TestRaceEntryPooled(t *testing.T) {
+	t.Parallel()
+	const pooledSerial, afterSerial = "./internal/tmux", "./internal/cmd"
+	if !serialPackage(pooledSerial) || !serialPackage(afterSerial) {
+		t.Fatalf("%s or %s is not on serial.txt", pooledSerial, afterSerial)
+	}
+	pkgs := []string{"./a", pooledSerial, "./b", afterSerial, "./c", "./d", "./e"}
+	gates := newGates(pkgs)
+	t.Cleanup(gates.releaseAll)
+	fake := &poolGo{jobs: 3, t: t, hold: gates.channel, started: make(chan string, len(pkgs))}
+	s := raceSweep(t, &fakeTier{})
+	s.Exec, s.Opts.Jobs = fake.exec, 3
+	done := make(chan struct{}, 1)
+	go func() {
+		s.raceTier([]raceRun{
+			{pkgs: pkgs[:3], args: []string{"-race"}, pooled: true},
+			{pkgs: pkgs[3:], args: []string{"-race"}},
+		})
+		done <- struct{}{}
+	}()
+	// Held with nothing released, the first entry starts all three only if it pools its serial package.
+	for i := 0; i < 3; i++ {
+		waitOrFail(t, fake.started, "a package of the pooled entry to start beside the held ones")
+	}
+	for _, pkg := range pkgs[:3] {
+		gates.release(pkg)
+	}
+	// The second entry lists its serial package first, so an inherited Pooled starts it among its first three.
+	second := []string{waitOrFail(t, fake.started, "a package of the second entry to start"), waitOrFail(t, fake.started, "a package of the second entry to start"), waitOrFail(t, fake.started, "a package of the second entry to start")}
+	gates.releaseAll()
+	waitOrFail(t, done, "the tier to count its packages")
+	if slices.Contains(second, afterSerial) {
+		t.Errorf("the entry after a pooled one started its serial package beside the pool: %q", second)
+	}
+}

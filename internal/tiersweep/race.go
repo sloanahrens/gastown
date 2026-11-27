@@ -27,11 +27,14 @@ type raceRun struct {
 	args []string
 	// label keeps two entries on one package's log and resume key apart.
 	label string
+	// pooled starts the entry's serial.txt packages on the pool too, set per
+	// entry so one that does not ask for it never inherits it (gt-2ekofw).
+	pooled bool
 }
 
 // raceRuns is the race tier's fixed entries; raceRunsWithPackages adds the one
 // that covers every listed package.
-var raceRuns = []raceRun{{[]string{racePkg}, raceArgs, "integration-walk"}}
+var raceRuns = []raceRun{{pkgs: []string{racePkg}, args: raceArgs, label: "integration-walk"}}
 
 // raceExcluded names the race tier's packages that are not run. It is empty:
 // a test race is a defect to fix, never a skip, and an entry needs a bead and
@@ -143,6 +146,7 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	var names []string
 	for _, run := range runs {
 		runner.Label = run.label
+		runner.Pooled = run.pooled
 		c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), run.args, run.pkgs)
 		passed += c.Passed
 		failed += c.Failed
