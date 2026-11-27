@@ -450,7 +450,7 @@ func howHookEnv(env map[string]string) func(string) string {
 
 // TestHowCardHookJSON drives the context decision: the overseer, named by either
 // identity value, reads the card and the re-read line, while a bird, a polecat
-// and a session with no identity read the re-read line alone.
+// and a session with no identity read the handoff line alone.
 func TestHowCardHookJSON(t *testing.T) {
 	t.Parallel()
 
@@ -458,8 +458,8 @@ func TestHowCardHookJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("howCardText: %v", err)
 	}
-	overseerText := card + howHookJSONRestoreText + "\n"
-	otherText := howHookJSONRestoreText + "\n"
+	overseerText := card + "Re-read /gastown, then /handoff gt-overseer.\n"
+	otherText := "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n"
 
 	tests := []struct {
 		name      string
@@ -523,8 +523,11 @@ func TestHowCardHookJSON(t *testing.T) {
 			if hasCard := strings.HasPrefix(got, overseerCardTitle+"\n"); hasCard != tc.wantCard {
 				t.Errorf("howHookJSONContext(%q, %q) carries the card = %v, want %v", tc.actor, tc.agentName, hasCard, tc.wantCard)
 			}
-			if tc.wantCard && !strings.HasSuffix(got, howHookJSONRestoreText+"\n") {
+			if tc.wantCard && !strings.HasSuffix(got, "Re-read /gastown, then /handoff gt-overseer.\n") {
 				t.Errorf("howHookJSONContext(%q, %q) does not end with the restore line: %q", tc.actor, tc.agentName, got)
+			}
+			if !tc.wantCard && strings.Contains(got, "gt-overseer") {
+				t.Errorf("howHookJSONContext(%q, %q) sends the session to the overseer's handoff: %q", tc.actor, tc.agentName, got)
 			}
 		})
 	}
@@ -650,16 +653,16 @@ func TestHowCardHookJSONWritesTheSessionStartOutput(t *testing.T) {
 		{
 			name: "the overseer",
 			env:  map[string]string{"BEADS_ACTOR": overseerActor},
-			want: card + howHookJSONRestoreText + "\n",
+			want: card + "Re-read /gastown, then /handoff gt-overseer.\n",
 		},
 		{
 			name: "a bird",
 			env:  map[string]string{"BEADS_ACTOR": "town/crew/eagle", "CLAUDE_AGENT_NAME": "eagle"},
-			want: howHookJSONRestoreText + "\n",
+			want: "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n",
 		},
 		{
 			name: "no identity",
-			want: howHookJSONRestoreText + "\n",
+			want: "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n",
 		},
 	}
 	for _, tc := range tests {
@@ -685,11 +688,11 @@ func TestHowCardHookJSONWritesTheSessionStartOutput(t *testing.T) {
 }
 
 // TestHowCardHookJSONRestoreLineIsTheRepositorysOwn pins the exact line a
-// session that is not the overseer reads at a session start: the re-read and
-// hand-off instruction, with no claim that the context was compacted, because
-// the same hook answers startup, resume and clear as well as compact. The line
-// lives in this repository, so a change to it fails here and is reviewed as a
-// diff (gt-y1juz1).
+// session that is not the overseer reads at a session start: the instruction to
+// find its own handoff bead, which names no card and no overseer, with no claim
+// that the context was compacted, because the same hook answers startup, resume
+// and clear as well as compact. The line lives in this repository, so a change
+// to it fails here and is reviewed as a diff (gt-y1juz1, gt-uk9vzj).
 func TestHowCardHookJSONRestoreLineIsTheRepositorysOwn(t *testing.T) {
 	t.Parallel()
 
@@ -701,7 +704,7 @@ func TestHowCardHookJSONRestoreLineIsTheRepositorysOwn(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("runHowHookJSON wrote %q, want one JSON document: %v", out.String(), err)
 	}
-	if want := "Re-read /gastown, then /handoff gt-overseer.\n"; got.HookSpecificOutput.AdditionalContext != want {
+	if want := "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n"; got.HookSpecificOutput.AdditionalContext != want {
 		t.Errorf("additionalContext = %q, want %q", got.HookSpecificOutput.AdditionalContext, want)
 	}
 }
@@ -729,22 +732,22 @@ func TestHowCardHookJSONCommandRunsTheHookJSON(t *testing.T) {
 		{
 			name: "the overseer's actor",
 			env:  map[string]string{"BEADS_ACTOR": overseerActor},
-			want: card + howHookJSONRestoreText + "\n",
+			want: card + "Re-read /gastown, then /handoff gt-overseer.\n",
 		},
 		{
 			name: "the overseer's agent name",
 			env:  map[string]string{"CLAUDE_AGENT_NAME": overseerAgentName},
-			want: card + howHookJSONRestoreText + "\n",
+			want: card + "Re-read /gastown, then /handoff gt-overseer.\n",
 		},
 		{
 			name: "a bird",
 			env:  map[string]string{"BEADS_ACTOR": "town/crew/eagle", "CLAUDE_AGENT_NAME": "eagle"},
-			want: howHookJSONRestoreText + "\n",
+			want: "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n",
 		},
 		{
 			name: "a polecat",
 			env:  map[string]string{"BEADS_ACTOR": "gastown/polecats/valkyrie"},
-			want: howHookJSONRestoreText + "\n",
+			want: "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you.\n",
 		},
 	}
 	for _, tc := range tests {
