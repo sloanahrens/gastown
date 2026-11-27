@@ -346,6 +346,90 @@ func TestMoleculeProgressOrWarnReportsUnreadableProgress(t *testing.T) {
 	}
 }
 
+// TestStepWispRetireStatusRootOnly: gt mol status on a hooked bead whose
+// molecule poured no steps exits 0 and prints the hooked bead, the molecule
+// root and the not-tracked line, with no progress bar and nothing on stderr
+// (gt-86xvdz).
+func TestStepWispRetireStatusRootOnly(t *testing.T) {
+	t.Parallel()
+
+	fake, root := rootOnlyMolecule(t)
+	hook := hookedTo(root.ID)
+
+	var out, warn bytes.Buffer
+	err := moleculeStatusRun{
+		out:      &out,
+		warn:     &warn,
+		client:   fake,
+		target:   "gastown/polecats/rictus",
+		role:     RolePolecat,
+		hookBead: hook,
+	}.run()
+	if err != nil {
+		t.Fatalf("gt mol status on a root-only molecule = %v, want exit 0", err)
+	}
+
+	printed := out.String()
+	for _, want := range []string{hook.ID, root.ID, noStepsPhrase} {
+		if !strings.Contains(printed, want) {
+			t.Errorf("output = %q, want it to print %q", printed, want)
+		}
+	}
+	if strings.Contains(printed, "Progress:") {
+		t.Errorf("output = %q, want no progress bar for a molecule with no steps", printed)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want no warning", warn.String())
+	}
+}
+
+// TestStepWispRetireStatusPouredSteps: gt mol status on a molecule that poured
+// steps still prints its progress, so retiring step wisps does not hide the
+// checklist of an every-step bond (gt-86xvdz).
+func TestStepWispRetireStatusPouredSteps(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	fake.Seed(beads.Issue{ID: "gt-wisp-stepped", Title: "mol-polecat-work", Type: moleculeIssueType})
+	done, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: "gt-wisp-stepped"})
+	if err != nil {
+		t.Fatalf("create closed step: %v", err)
+	}
+	if err := fake.Close(done.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	ready, err := fake.Create(beads.CreateOptions{Title: "implement", Parent: "gt-wisp-stepped"})
+	if err != nil {
+		t.Fatalf("create open step: %v", err)
+	}
+
+	var out, warn bytes.Buffer
+	err = moleculeStatusRun{
+		out:      &out,
+		warn:     &warn,
+		client:   fake,
+		target:   "gastown/polecats/rictus",
+		role:     RolePolecat,
+		hookBead: hookedTo("gt-wisp-stepped"),
+	}.run()
+	if err != nil {
+		t.Fatalf("gt mol status on a molecule with steps = %v, want exit 0", err)
+	}
+
+	printed := out.String()
+	for _, want := range []string{"Progress:", "1/2 steps", ready.ID} {
+		if !strings.Contains(printed, want) {
+			t.Errorf("output = %q, want it to print %q", printed, want)
+		}
+	}
+	if strings.Contains(printed, noStepsPhrase) {
+		t.Errorf("output = %q, want no not-tracked line for a molecule with steps", printed)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("stderr = %q, want no warning", warn.String())
+	}
+}
+
 // TestMoleculeProgressOrWarnSilentWhenReadable: a readable molecule warns about
 // nothing.
 func TestMoleculeProgressOrWarnSilentWhenReadable(t *testing.T) {
