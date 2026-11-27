@@ -88,6 +88,7 @@ The certgen Job is a `pre-install,pre-upgrade` hook (`deploy/k8s/sbx/testdata/op
 
 - The render runs only `helm template` and never `helm upgrade` (`OpenShell` in `openshell.go`).
 - `up.sh` is the one place that runs `helm upgrade --install`, and only on a first install (no deployed openshell release). On a deployed release it says it is not running helm; chart and values changes go through the deployer, and a set `GT_K8S_FORCE_HELM` stops the run rather than upgrading (`up.sh`, the helm block).
+- A `gt-bootstrap` marker with no deployed openshell release (failed, pending or removed) is not a first install either: the run stops before any apply or helm call and names the rebuild, `deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh` (`up.sh`, the statement after `first_install`).
 - The first install stays a helm install inside the rebuild sitting. Plain applies come after it and never call helm (`openshell.go`, the `OpenShell` comment).
 
 ### The cluster-per-plan rule

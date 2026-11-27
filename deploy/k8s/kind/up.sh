@@ -196,6 +196,13 @@ helm_release_deployed && first_install=0
 if [ "$first_install" = 0 ] && [ -n "${GT_K8S_FORCE_HELM:-}" ]; then
   die "GT_K8S_FORCE_HELM is set, but up.sh never upgrades an installed cluster; chart and values changes go through gt town cluster apply --cluster gt-sbx from an approved plan"
 fi
+# An installed cluster (a gt-bootstrap marker) whose openshell release is not
+# deployed (failed, pending or removed) is not a first install: helm here would
+# upgrade an installed cluster and replace every certificate. Only a rebuild
+# recovers it, so the run stops before any apply, patch or helm call.
+if [ "$bootstrap_present" = 1 ] && [ "$first_install" = 1 ]; then
+  die "cluster $CLUSTER has a gt-bootstrap marker and no deployed openshell release; rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
+fi
 # unfinished is the one test for the objects only an unfinished install
 # applies: the install is unfinished while no openshell release is deployed or
 # no gt-bootstrap marker says a run finished.

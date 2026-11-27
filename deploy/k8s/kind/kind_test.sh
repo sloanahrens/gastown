@@ -703,16 +703,29 @@ scenario helmforce_first
 run "$UP" GT_K8S_FORCE_HELM=1 --
 check "GT_K8S_FORCE_HELM on a first install still installs the chart once" test "$(helm_calls)" -eq 1
 check "GT_K8S_FORCE_HELM on a first install exits 0" test "$RC" -eq 0
+echo "an installed cluster with no deployed release is stopped, never upgraded"
 scenario helmgone
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
 run "$UP" --
-check "a marker without a deployed release runs helm" test "$(helm_calls)" -eq 1
+check "a marker with no release stops the run" test "$RC" -ne 0
+check "the stop names the marker and the missing deployed release" contains "has a gt-bootstrap marker and no deployed openshell release" "$OUT_TEXT"
+check "the stop names the rebuild" contains "deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh" "$OUT_TEXT"
+check "a marker with no release runs no helm upgrade" test "$(helm_calls)" -eq 0
+check "a marker with no release applies no manifest" lacks "kubectl apply" "$CALLS_LOG"
 scenario helmfailed
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
 run "$UP" STUB_HELM_FAILED=1 --
-check "a release that exists but is not deployed runs helm" test "$(helm_calls)" -eq 1
+check "a marker with an undeployed release stops the run" test "$RC" -ne 0
+check "the stop on an undeployed release names the rebuild" contains "deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh" "$OUT_TEXT"
+check "a marker with an undeployed release runs no helm upgrade" test "$(helm_calls)" -eq 0
+check "a marker with an undeployed release applies no manifest" lacks "kubectl apply" "$CALLS_LOG"
+scenario helmnomarker
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+run "$UP" STUB_HELM_FAILED=1 --
+check "an undeployed release with no marker is a first install" test "$RC" -eq 0
+check "an undeployed release with no marker runs helm upgrade --install once" test "$(calls_with 'helm upgrade --install')" -eq 1
 scenario helmtown
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
