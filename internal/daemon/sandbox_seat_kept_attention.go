@@ -148,6 +148,22 @@ func (s *attentionSources) keptSeatNuked(rig, name string) (bool, error) {
 	return rec.State == string(beads.AgentStateNuked), nil
 }
 
+// alarmOnlyKeptSeatItem builds the kept-seat item of a gateway tally with no
+// readable record to raise, unless the seat reads nuked: nuked is the trace of
+// a seat already gone. A failed read withholds nothing: the item is raised all
+// the same and the log names the seat and the error, because nuked is the one
+// answer that withholds an item (gt-kgawkr).
+func (s *attentionSources) alarmOnlyKeptSeatItem(rig, name, alarm string) (attention.Item, bool) {
+	nuked, err := s.keptSeatNuked(rig, name)
+	if err != nil {
+		s.d.logger.Printf("attention: kept sandbox seat %s/%s: %v", rig, name, err)
+	}
+	if nuked {
+		return attention.Item{}, false
+	}
+	return keptSeatItem(rig, name, "", "with no readable record", alarm), true
+}
+
 // beadIsLiveWork reports whether the rig's bead id is live work, by
 // livework.Check over the way the patrol scan reads a work bead. The bead a seat
 // was re-slung to is open or hooked, and the worker's first claim moves it on to

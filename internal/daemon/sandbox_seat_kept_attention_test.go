@@ -491,6 +491,55 @@ func TestKeptSeatNuked(t *testing.T) {
 	}
 }
 
+// alarmOnlyKeptSeatItem builds the alarm-only kept-seat item unless the seat's
+// agent bead reads nuked: nuked raises nothing, and a failed read raises the
+// item all the same and logs the seat and the error (gt-kgawkr).
+func TestAlarmOnlyKeptSeatItem(t *testing.T) {
+	t.Parallel()
+	const alarm = "cannot count gateway tries for gastown/capable"
+	cause := errors.New("bd show: store unavailable")
+	tests := []struct {
+		name, state  string
+		fail, wantOK bool
+	}{
+		{name: "an agent bead reading nuked", state: string(beads.AgentStateNuked)},
+		{name: "an agent bead reading working", state: string(beads.AgentStateWorking), wantOK: true},
+		{name: "a failed read", fail: true, wantOK: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			id := keptSeatAgentID(f, "capable")
+			r := keptSeatHookReader{issues: map[string]*beads.Issue{id: {ID: id, Description: "agent_state: " + tt.state}}}
+			if tt.fail {
+				r = keptSeatHookReader{fail: map[string]error{id: cause}}
+			}
+			f.d.openWorkBeads = r.open
+
+			item, ok := f.src.alarmOnlyKeptSeatItem(attentionRig, "capable", alarm)
+			if ok != tt.wantOK {
+				t.Fatalf("alarmOnlyKeptSeatItem ok = %t, want %t", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				if item != (attention.Item{}) {
+					t.Errorf("item = %+v beside ok=false, want the zero item", item)
+				}
+				return
+			}
+			want := "gastown/capable kept with no readable record on no recorded bead: " + alarm
+			if item.Key != "sandbox-seat-kept:gastown/capable" || item.Kind != attention.KindSandboxSeatKept ||
+				item.Rig != attentionRig || item.Bead != "" || item.Summary != want {
+				t.Errorf("item = %+v, want the alarm-only item of gastown/capable, summary %q", item, want)
+			}
+			logs := f.logs.String()
+			if tt.fail && (!strings.Contains(logs, "gastown/capable") || !strings.Contains(logs, cause.Error())) {
+				t.Errorf("logged %q, want the seat gastown/capable and the error %q", logs, cause.Error())
+			}
+		})
+	}
+}
+
 // The retired-record reason this collector skips on is the one the seat end
 // gives a record that does not say stop: the seat end returns this constant,
 // and the test pins that its keepReason still answers with it (gt-jw437c,
