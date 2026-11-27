@@ -92,6 +92,9 @@ type deepSeekSpend struct {
 		// and the page colors the balance from Available alone.
 		OK        *bool `json:"ok"`
 		Available *bool `json:"available"`
+		// Skipped says the writer made no live read by design: the ledger is
+		// the balance's source, so nothing was unreachable.
+		Skipped *bool `json:"skipped"`
 	} `json:"live"`
 	LastSample string `json:"last_sample"`
 	// BalanceAt is the instant the report's balance was read, when the writer
@@ -214,10 +217,15 @@ func deepSeekCostProvider(now time.Time, spend json.RawMessage, _ *ClaudePlan, _
 		p.Detail = append(p.Detail, creditRiseText(d.Credits[i]))
 	}
 	if d.LastSample != "" {
-		p.Detail = append(p.Detail, "ledger "+strings.Replace(d.LastSample, "T", " ", 1))
+		line := "ledger " + strings.Replace(d.LastSample, "T", " ", 1)
+		// A skipped read is on the ledger by design, so the line says so.
+		if d.Live.Skipped != nil && *d.Live.Skipped {
+			line += " · no live read by design"
+		}
+		p.Detail = append(p.Detail, line)
 	}
 
-	if liveUnreachable(d.Live.OK, d.Live.Available) {
+	if liveUnreachable(d.Live.OK, d.Live.Available, d.Live.Skipped) {
 		p.Warnings = append(p.Warnings, "live balance unreachable")
 	}
 	if w := deepSeekWatcherWarning(now, d.LastSample); w != "" {
@@ -251,11 +259,16 @@ func deepSeekWatcherWarning(now time.Time, sample string) string {
 }
 
 // liveUnreachable is whether the report leaves the balance on its ledger rather
-// than a live read. It fails closed: a writer that sent neither field, or that
-// reported the read failed through either one, has not said the balance is
-// live, and the page colors the figure bad for Available as well as OK. A
-// field that does confirm the read keeps the warning away.
-func liveUnreachable(ok, available *bool) bool {
+// than a live read. A writer that says the read was skipped by design has put
+// the balance on its ledger on purpose, so nothing is unreachable. It otherwise
+// fails closed: a writer that sent neither field, or that reported the read
+// failed through either one, has not said the balance is live, and the page
+// colors the figure bad for Available as well as OK. A field that does confirm
+// the read keeps the warning away.
+func liveUnreachable(ok, available, skipped *bool) bool {
+	if skipped != nil && *skipped {
+		return false
+	}
 	if ok == nil && available == nil {
 		return true
 	}
