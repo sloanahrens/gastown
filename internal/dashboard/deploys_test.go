@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -607,6 +608,75 @@ func TestDeployReaderReadsEveryReposChecksWhileOneIsSlow(t *testing.T) {
 			repos = append(repos, row.Repo)
 		}
 		assert.Equal(t, []string{app, app, other, other}, repos)
+	})
+}
+
+// answerInOrder answers the health lists in the order given: order[i] answers
+// only after order[i-1] has, and answered records the order they came back in.
+type answerInOrder struct {
+	*deployStub
+	order    []string
+	turn     []chan struct{} // turn[i] is closed when order[i] may answer
+	answered []string
+}
+
+func newAnswerInOrder(stub *deployStub, order []string) *answerInOrder {
+	s := &answerInOrder{deployStub: stub, order: order, turn: make([]chan struct{}, len(order)+1)}
+	for i := range s.turn {
+		s.turn[i] = make(chan struct{})
+	}
+	close(s.turn[0])
+	return s
+}
+
+func (s *answerInOrder) ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+	if f.WorkflowID != healthWorkflow {
+		return s.deployStub.ListRuns(ctx, owner, repo, f)
+	}
+	i := slices.Index(s.order, owner+"/"+repo)
+	select {
+	case <-s.turn[i]:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	list, err := s.deployStub.ListRuns(ctx, owner, repo, f)
+	s.answered = append(s.answered, s.order[i])
+	close(s.turn[i+1])
+	return list, err
+}
+
+// The health block reads the same whichever repo answers first (gt-67efdd).
+func TestDeployReaderHoldsTheHealthOrderWhenReposAnswerOutOfOrder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		const failing, unread, unknown = "operator/fractals-nextjs", "operator/gastown", "operator/forgejo"
+		repos := []string{failing, unread, unknown}
+		read := func(order []string) (*Deploys, *answerInOrder) {
+			stub := &deployStub{
+				runs: map[string][]forgejo.ActionRun{
+					failing: {testHealthRun(1, "failure", 5)},
+					unread:  {testHealthRun(2, "success", 5)},
+					unknown: {testHealthRun(3, "success", 5)},
+				},
+				jobsErr: map[int64]error{2: io.EOF},
+				jobs: map[int64][]forgejo.ActionRunJob{
+					1: healthJobs("success", "success", "failure"),
+					3: {testJob("off", "skipped"), testJob("something-else", "success")},
+				},
+			}
+			gate := newAnswerInOrder(stub, order)
+			r := NewDeployReader(gate, repos)
+			r.now = func() time.Time { return deployNow }
+			return r.Read(), gate
+		}
+		inOrder, _ := read(repos)
+		reversed, gate := read([]string{unknown, unread, failing})
+
+		assert.Equal(t, []string{unknown, unread, failing}, gate.answered, "the later repos answered first")
+		assert.Equal(t, [][]string{{failing}, {unread}, {unknown}}, [][]string{inOrder.HealthFailed, inOrder.HealthUnread, inOrder.HealthMissing}, "failed, unread, missing")
+		assert.Equal(t, []string{"fractals-nextjs/staging-integration", "fractals-nextjs/prod-smoke", "gastown/staging-integration", "gastown/prod-smoke"}, healthRowsOf(inOrder.Health))
+		assert.Equal(t, inOrder, reversed, "the answers' order is not in the read")
 	})
 }
 
