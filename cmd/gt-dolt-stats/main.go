@@ -4,6 +4,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -24,8 +25,10 @@ func dockerStats(container string) ([]byte, error) {
 }
 
 // run appends one row for gt-dolt under -dir and returns 0, or returns 1 when
-// a flag, the read or the append fails; that step names itself in gt-n3byrd.
-func run(args []string, stderr io.Writer, now func() time.Time, read func(container string) ([]byte, error)) int { //nolint:unparam // stderr carries the failing step's line from gt-n3byrd
+// a flag, the read, the parse or the append fails. A failing step prints one
+// stderr line, "gt-dolt-stats: <step>: <error>", and appends no row; a failing
+// flag prints nothing.
+func run(args []string, stderr io.Writer, now func() time.Time, read func(container string) ([]byte, error)) int {
 	fs := flag.NewFlagSet("gt-dolt-stats", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("dir", "", "directory of the metrics files")
@@ -33,6 +36,7 @@ func run(args []string, stderr io.Writer, now func() time.Time, read func(contai
 		return 1
 	}
 	if _, err := dockerstats.Record(*dir, gtDolt, now(), read); err != nil {
+		fmt.Fprintf(stderr, "gt-dolt-stats: %v\n", err)
 		return 1
 	}
 	return 0
