@@ -35,6 +35,10 @@ func TestClusterCaptureCommandRegistered(t *testing.T) {
 // case sets a flag on the registered one.
 func TestClusterCaptureCommandRefuses(t *testing.T) {
 	t.Parallel()
+	// A temp dir keeps the bad-reference case off the host's caller directory;
+	// the reference is refused before --out is resolved, so nothing is written.
+	workDir := t.TempDir()
+	getwd := func() (string, error) { return workDir, nil }
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -43,11 +47,11 @@ func TestClusterCaptureCommandRefuses(t *testing.T) {
 		{name: "a missing --out", args: []string{"deployment/daemon"}, want: `required flag(s) "out" not set`},
 		{name: "no argument", args: []string{"--out", "capture.json"}, want: "accepts 1 arg(s), received 0"},
 		{name: "two arguments", args: []string{"deployment/daemon", "deployment/dashboard", "--out", "capture.json"}, want: "accepts 1 arg(s), received 2"},
-		{name: "a complete call", args: []string{"deployment/daemon", "-n", "gt-sbx", "--out", "capture.json"}, want: "capture is not wired yet"},
+		{name: "a bad reference", args: []string{"deployment", "--out", "capture.json"}, want: "is not <kind>/<name>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cmd := newTownClusterCaptureCmd()
+			cmd := newTownClusterCaptureCmdWithGetwd(getwd)
 			cmd.SetArgs(tc.args)
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
@@ -56,6 +60,21 @@ func TestClusterCaptureCommandRefuses(t *testing.T) {
 				t.Errorf("capture %q = %v, want an error holding %q", tc.args, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestClusterCaptureCommandRefusesUnreadableDir drives a getwd that fails: the
+// command returns its error rather than running the capture.
+func TestClusterCaptureCommandRefusesUnreadableDir(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("the working directory is gone")
+	cmd := newTownClusterCaptureCmdWithGetwd(func() (string, error) { return "", readErr })
+	cmd.SetArgs([]string{"deployment/daemon", "--out", "capture.json"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	if !errors.Is(err, readErr) {
+		t.Fatalf("capture with an unreadable dir = %v, want the getwd error %v", err, readErr)
 	}
 }
 

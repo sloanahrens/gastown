@@ -1,11 +1,12 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // clusterCaptureCommandDeps is the capture command's deps: the kubectl runner
@@ -25,24 +26,38 @@ func clusterCaptureCommandDeps(getwd func() (string, error)) (clusterCaptureDeps
 	}, nil
 }
 
-// newTownClusterCaptureCmd builds `gt town cluster capture`: one <kind>/<name>
-// argument, the object's namespace and the required file to write. The command
-// does not read or write anything yet: it says capture is not wired
-// (gt-ba2krv wires it to runClusterCapture).
+// newTownClusterCaptureCmd builds `gt town cluster capture` with the caller's
+// working directory as the one --out resolves under. Require refuses a caller
+// path that is not present here, where the capture could not be written.
 func newTownClusterCaptureCmd() *cobra.Command {
+	return newTownClusterCaptureCmdWithGetwd(callercwd.Require)
+}
+
+// newTownClusterCaptureCmdWithGetwd builds `gt town cluster capture`: one
+// <kind>/<name> argument, the object's namespace and the required file to
+// write. runClusterCapture does the read and the write; the command passes it
+// the argument, the namespace, --out and the deps getwd names.
+func newTownClusterCaptureCmdWithGetwd(getwd func() (string, error)) *cobra.Command {
+	var namespace, out string
 	cmd := &cobra.Command{
 		Use:   "capture <kind>/<name>",
-		Short: "Capture one live object to a file (not wired yet)",
-		Long: `Capture one live cluster object to a file. This command is not wired yet: a
-call with the right argument and flags returns an error, reads no cluster and
-writes no file.`,
+		Short: "Capture one live object to a file",
+		Long: `Capture one live cluster object to a file: the object named by <kind>/<name>
+is read through kubectl in the namespace --namespace names (kubectl's default when
+empty) and written to --out as indented JSON with mode 0600. A reference that is
+not <kind>/<name> or an --out path outside the working directory is refused before
+anything is read.`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(*cobra.Command, []string) error {
-			return errors.New("capture is not wired yet")
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := clusterCaptureCommandDeps(getwd)
+			if err != nil {
+				return err
+			}
+			return runClusterCapture(cmd.Context(), d, args[0], namespace, out)
 		},
 	}
-	cmd.Flags().StringP("namespace", "n", "", "the object's namespace; empty means kubectl's default")
-	cmd.Flags().String("out", "", "the file to write the capture to, under the working directory (required)")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "the object's namespace; empty means kubectl's default")
+	cmd.Flags().StringVar(&out, "out", "", "the file to write the capture to, under the working directory (required)")
 	// The flag is defined on the line above, so marking it cannot fail.
 	_ = cmd.MarkFlagRequired("out")
 	return cmd
