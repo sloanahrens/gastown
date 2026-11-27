@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,22 +46,27 @@ type sbxDeployerDoc struct {
 	} `yaml:"subjects"`
 }
 
-// sbxDeployerParse parses the documents of the file named name, refusing any
-// field these types do not list and a file that holds no document object. Every
-// error names the file, so a refusal says which input carried the widening.
+// sbxDeployerParse reads the whole stream, one document at a time until io.EOF,
+// refusing a field these types do not list, a document with no kind and a stream
+// that holds no document; every error names the file.
 func sbxDeployerParse(name string, raw []byte) ([]sbxDeployerDoc, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
 	var docs []sbxDeployerDoc
-	for _, doc := range splitDocuments(raw) {
-		dec := yaml.NewDecoder(bytes.NewReader(doc))
-		dec.KnownFields(true)
+	// io.EOF ends the loop; the check after it accepts io.EOF and refuses any other decode error.
+	var err error
+	for err == nil {
 		var d sbxDeployerDoc
-		if err := dec.Decode(&d); err != nil {
-			return nil, fmt.Errorf("%s: %v", name, err)
+		if err = dec.Decode(&d); err != nil {
+			break
 		}
 		if d.Kind == "" {
 			return nil, fmt.Errorf("%s holds a document with no kind", name)
 		}
 		docs = append(docs, d)
+	}
+	if !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: %v", name, err)
 	}
 	if len(docs) == 0 {
 		return nil, fmt.Errorf("%s holds no object", name)
@@ -151,7 +158,7 @@ func TestSbxDeployerRBAC(t *testing.T) {
 }
 
 // TestSbxDeployerRBACRefusesUnreadInput holds the loader to refusing a field the
-// types do not list and a file that holds no object.
+// types do not list, a document with no kind and a stream with no document, naming the file.
 func TestSbxDeployerRBACRefusesUnreadInput(t *testing.T) {
 	t.Parallel()
 	const role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: gt-sbx-deployer-policy\n"
@@ -161,6 +168,8 @@ func TestSbxDeployerRBACRefusesUnreadInput(t *testing.T) {
 		{"empty.yaml", ""},
 		{"comments-only.yaml", "# no object here\n"},
 		{"no-kind.yaml", "apiVersion: v1\nmetadata:\n  name: gt-sbx-deployer-policy\n"},
+		{"empty-after-separator.yaml", role + "---\n"},
+		{"text-after-doc-end.yaml", role + "...\nstray text\n"},
 	}
 	for _, row := range rows {
 		t.Run(row.file, func(t *testing.T) {
@@ -172,10 +181,9 @@ func TestSbxDeployerRBACRefusesUnreadInput(t *testing.T) {
 	}
 }
 
-// TestSbxDeployerRBACReportsWidenings plants one edit in the manifest's own
-// bytes and holds the comparison to reporting it on the side the edit moved:
-// an added grant or subject is extra, a dropped one is missing.
-func TestSbxDeployerRBACReportsWidenings(t *testing.T) {
+// TestSbxDeployerRBACReportsEdits plants one edit in the manifest's own bytes and
+// holds the comparison to reporting it on the side the edit moved.
+func TestSbxDeployerRBACReportsEdits(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(sbxDeployerRBACFile)
 	if err != nil {
@@ -210,6 +218,34 @@ func TestSbxDeployerRBACReportsWidenings(t *testing.T) {
 			}
 			if !slices.Contains(got, row.want) {
 				t.Fatalf("%q went unreported; %s %q", row.want, side, got)
+			}
+		})
+	}
+}
+
+// TestSbxDeployerRBACReadsEveryDocument holds the loader to the whole stream: a
+// non-bare separator still begins a document kubectl applies, reported as extra.
+func TestSbxDeployerRBACReadsEveryDocument(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(sbxDeployerRBACFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", sbxDeployerRBACFile, err)
+	}
+	const second = "ClusterRoleBinding/gt-sbx-deployer-extra"
+	rows := []struct{ what, doc string }{
+		{"separator with comment", "--- # c\nkind: ClusterRoleBinding\nmetadata:\n  name: gt-sbx-deployer-extra\n"},
+		{"separator with tag", "--- !!map\nkind: ClusterRoleBinding\nmetadata:\n  name: gt-sbx-deployer-extra\n"},
+		{"flow mapping on separator line", "--- {kind: ClusterRoleBinding, metadata: {name: gt-sbx-deployer-extra}}\n"},
+	}
+	for _, row := range rows {
+		t.Run(row.what, func(t *testing.T) {
+			t.Parallel()
+			docs, err := sbxDeployerParse(sbxDeployerRBACFile, append(slices.Clone(raw), row.doc...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, extra := sbxDeployerMissingExtra(sbxDeployerLines(docs), sbxDeployerWant); !slices.Contains(extra, second) {
+				t.Fatalf("second document went unread; extra %q", extra)
 			}
 		})
 	}
