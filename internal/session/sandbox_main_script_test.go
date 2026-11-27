@@ -52,8 +52,8 @@ func TestSandboxMainScriptHoldDefaultMatchesConfig(t *testing.T) {
 	if sandboxEndedHoldDefault != strconv.Itoa(config.DefaultSandboxEndedHoldSeconds) {
 		t.Fatalf("sandboxEndedHoldDefault = %q, config default = %d: they must match", sandboxEndedHoldDefault, config.DefaultSandboxEndedHoldSeconds)
 	}
-	want := []string{"sh", "-c", sandboxMainScript, "sh", fakeMainSession, "", "", "", "", "600"}
-	if got := sandboxMainArgs(fakeMainSession, 600); !reflect.DeepEqual(got, want) {
+	want := []string{"sh", "-c", sandboxMainScript, "sh", fakeMainSession, "", "", "", "", "600", "", "", ""}
+	if got := sandboxMainArgs(SpawnSpec{Session: fakeMainSession}, 600); !reflect.DeepEqual(got, want) {
 		t.Fatalf("sandboxMainArgs = %q, want %q", got, want)
 	}
 }
@@ -76,6 +76,36 @@ func TestOpenShellEndedHoldFallsBackToTheDefault(t *testing.T) {
 			b := &openshellBackend{profile: Profile{EndedHoldSeconds: tt.profile}}
 			if got := b.endedHold(); got != tt.want {
 				t.Fatalf("endedHold() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// The seat's rig, polecat and bead are the main process's $7, $8 and $9, taken
+// from the spawn. A spawn with no bead keeps its position as an empty string.
+func TestSandboxMainArgsCarryTheSpawnsRigPolecatAndBead(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, bead string }{
+		{name: "a slung bead", bead: "gt-abc123"},
+		{name: "no bead", bead: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			b, _ := openshellTestBackend(town, openshellTestProfile, openshellPrepareFake(nil))
+			spawn := openshellSpawn(town, work)
+			spawn.WorkBeadID = tt.bead
+
+			cs, err := b.createSpec(spawn, sandboxTracker{})
+			if err != nil {
+				t.Fatalf("createSpec: %v", err)
+			}
+			want := []string{
+				"sh", "-c", sandboxMainScript, "sh", openshellTestSession, "", "", "", "",
+				strconv.Itoa(b.endedHold()), openshellTestRig, openshellTestPolecat, tt.bead,
+			}
+			if !reflect.DeepEqual(cs.Command, want) {
+				t.Fatalf("Command = %q, want %q", cs.Command, want)
 			}
 		})
 	}

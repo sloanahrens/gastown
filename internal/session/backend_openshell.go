@@ -122,8 +122,10 @@ const sandboxHolderSession = "boot"
 // (default sandboxSessionWaitSeconds); $3 the poll interval in seconds (2); $4
 // the sandbox home, where the tmux session starts and the marker is written
 // (default sandboxHome); $5 the unreachable-poll limit (default
-// sandboxTmuxLostPolls); $6 the hold in seconds (default sandboxEndedHoldDefault).
-// Only $1 and $6 are set in production.
+// sandboxTmuxLostPolls); $6 the hold in seconds (default sandboxEndedHoldDefault);
+// $7 the seat's rig, $8 its polecat and $9 the bead it was slung, empty without
+// one, none of which the script reads. Only $1 and $6 through $9 are set in
+// production.
 const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; D="${4:-` + sandboxHome + `}"; U="${5:-` + sandboxTmuxLostPolls + `}"; H="${6:-` + sandboxEndedHoldDefault + `}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
 	`$T new-session -d -s ` + sandboxHolderSession + ` -c "$D" || exit 1; ` +
 	`i=0; until $T has-session -t "=$S" 2>/dev/null; do i=$((i+1)); [ "$i" -gt "$W" ] && exit 1; sleep 1; done; ` +
@@ -153,10 +155,13 @@ const sandboxTmuxLostPolls = "150"
 const sandboxSessionWaitSeconds = "900"
 
 // sandboxMainArgs is the argv that runs sandboxMainScript as the sandbox's main
-// process for session. $2 through $5 are empty so the script's defaults apply,
-// and $6 is the hold in seconds.
-func sandboxMainArgs(session string, holdSeconds int) []string {
-	return []string{"sh", "-c", sandboxMainScript, "sh", session, "", "", "", "", strconv.Itoa(holdSeconds)}
+// process for spec's session, in the positions sandboxMainScript's comment
+// lists. An empty value keeps its place as an empty argument.
+func sandboxMainArgs(spec SpawnSpec, holdSeconds int) []string {
+	return []string{
+		"sh", "-c", sandboxMainScript, "sh", spec.Session, "", "", "", "",
+		strconv.Itoa(holdSeconds), spec.Rig, spec.Polecat, spec.WorkBeadID,
+	}
 }
 
 // openshellBackend hosts one polecat's session in an OpenShell sandbox named
@@ -1349,7 +1354,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec, tracker sandboxTracker) (s
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
 		Env:        b.contract(spec, tracker),
-		Command:    sandboxMainArgs(spec.Session, b.endedHold()),
+		Command:    sandboxMainArgs(spec, b.endedHold()),
 		NoKeep:     true,
 	}
 	if b.usesDockerVolumes() {
