@@ -434,6 +434,14 @@ type dashSeatCache struct {
 	ttl time.Duration
 	now func() time.Time
 
+	// refusals is the bd sql refusal memory every rig store this cache opens
+	// shares, so a merge-request read the gateway refused is sent once for the
+	// cache's life, not once per poll (gt-pcrz0u).
+	refusals *beads.SQLRefusalMemory
+	// storeOpts are added to every rig store the cache opens. Production sets
+	// none; a test answers the store's bd runner through it.
+	storeOpts []beads.Option
+
 	mu sync.Mutex
 	m  map[string]dashSeatCached
 }
@@ -445,7 +453,13 @@ type dashSeatCached struct {
 }
 
 func newDashSeatCache() *dashSeatCache {
-	return &dashSeatCache{ttl: 5 * time.Minute, now: time.Now, m: map[string]dashSeatCached{}}
+	return &dashSeatCache{ttl: 5 * time.Minute, now: time.Now, refusals: &beads.SQLRefusalMemory{}, m: map[string]dashSeatCached{}}
+}
+
+// openBeads opens a rig's bead store through the cache's refusal memory, so
+// every poll's store shares one memory (gt-pcrz0u).
+func (c *dashSeatCache) openBeads(rigPath string) *beads.Beads {
+	return c.refusals.Open(rigPath, c.storeOpts...)
 }
 
 func (c *dashSeatCache) get(id, key string) (polecatInventoryItem, bool) {
@@ -497,12 +511,12 @@ func dashHookTime(townRoot string, agentUpdated time.Time, bead *beads.Issue, di
 // the seats the daemon keeps for the jev_rules battery, by rig/name, read by
 // dashKeptSeats; a seat in it carries its submitted time (gt-ddg96x).
 func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time) ([]dashSeat, error) {
-	return dashSeatsWith(townRoot, sessionNames, sessionsKnown, cache, dispatches, lister, kept, func(rigPath string) *beads.Beads { return beads.New(rigPath) })
+	return dashSeatsWith(townRoot, sessionNames, sessionsKnown, cache, dispatches, lister, kept, cache.openBeads)
 }
 
 // dashSeatsWith is dashSeats with the rig's bead store injected, the seam a
 // test answers the store's reads through: the unit tier starts no bd
-// (docs/testing.md, "The rules"). dashSeats passes the real store. The
+// (docs/testing.md, "The rules"). dashSeats passes the cache's store. The
 // caller-injected lister is the same seam for sessions.
 func dashSeatsWith(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time, openBeads func(rigPath string) *beads.Beads) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
