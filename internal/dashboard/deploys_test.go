@@ -1514,6 +1514,68 @@ func TestDeployReaderKeepsAMarkerThroughAReadThatFails(t *testing.T) {
 	assert.Equal(t, healthFailure, d.Health[1].Status)
 }
 
+// A refresh that cannot read a repo's runs — its deploy list failed, or its
+// health list did — keeps the checks the refresh before it read, or the next
+// refresh asks for a window of jobs again (gt-wwlpkr).
+func TestDeployReaderKeepsChecksThroughAReadThatFails(t *testing.T) {
+	t.Parallel()
+
+	const beads, app = "operator/beads", "operator/fractals-nextjs"
+	for _, tc := range []struct {
+		name string
+		fail func(*deployStub)
+	}{
+		{"deploy list", func(s *deployStub) { s.runsErr = map[string]error{app: io.EOF} }},
+		{"health list", func(s *deployStub) { s.healthErr = map[string]error{app: io.EOF} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stub := &deployStub{
+				repos: []string{beads, app},
+				runs:  map[string][]forgejo.ActionRun{app: {testHealthRun(1, "success", 5)}},
+				jobs:  map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
+			}
+			reader := newDeployTestReader(stub, nil)
+			require.Len(t, reader.Read().Health, 2)
+			require.Equal(t, []int64{1}, stub.jobsAsked)
+
+			tc.fail(stub)
+			reader.Read()
+
+			stub.runsErr, stub.healthErr = nil, nil
+			d := reader.Read()
+			assert.Equal(t, []int64{1}, stub.jobsAsked, "a held check was asked for its jobs again")
+			require.Len(t, d.Health, 2, "the held check is still drawn")
+			assert.Equal(t, healthSuccess, d.Health[0].Status)
+		})
+	}
+}
+
+// A repo that leaves the reader's repo list keeps nothing: its held checks are
+// not copied forever, so a repo that returns is read afresh.
+func TestDeployReaderForgetsACheckOfARepoThatLeftTheList(t *testing.T) {
+	t.Parallel()
+
+	const beads, app = "operator/beads", "operator/fractals-nextjs"
+	stub := &deployStub{
+		repos: []string{beads, app},
+		runs:  map[string][]forgejo.ActionRun{app: {testHealthRun(1, "success", 5)}},
+		jobs:  map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
+	}
+	reader := newDeployTestReader(stub, nil)
+
+	reader.Read()
+	require.Equal(t, []int64{1}, stub.jobsAsked)
+
+	stub.repos = []string{beads}
+	reader.Read()
+
+	stub.repos = []string{beads, app}
+	reader.Read()
+	assert.Equal(t, []int64{1, 1}, stub.jobsAsked, "a repo that left the list kept a check it no longer may hold")
+}
+
 // A run the API sent no jobs for is a check the block could not read, not one
 // nothing went wrong in: the jobs are where a check says what it did, so an
 // ended run with none is the same answer as a jobs call that failed. Nothing is

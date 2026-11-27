@@ -430,6 +430,14 @@ func (r *DeployReader) Read() *Deploys {
 	// Built fresh every refresh, so an entry goes the moment its run leaves the
 	// window and the map cannot grow with a town's history.
 	checks := make(map[string]cachedCheck, len(prevChecks))
+	// keep is the repos this refresh still names but could not list, and which
+	// keep the checks the refresh before them read: rebuilt from this refresh
+	// alone, the cache would drop them and the next refresh would ask for a
+	// window of jobs again (gt-wwlpkr). A repo no longer named keeps nothing.
+	keep := make(map[string]bool, len(missing))
+	for _, name := range missing {
+		keep[name] = true
+	}
 	// Derived from a fresh context, not ctx: the deploy reads above may have spent
 	// all of ctx's timeout, and the health read would then start already expired.
 	hctx, cancelHealth := context.WithTimeout(context.Background(), healthReadBudget)
@@ -437,6 +445,9 @@ func (r *DeployReader) Read() *Deploys {
 	for _, name := range readable {
 		owner, repo, _ := strings.Cut(name, "/")
 		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
+		if res.listFailed {
+			keep[name] = true
+		}
 		health = append(health, res.rows...)
 		if len(res.rows) == 0 && !res.listFailed && !res.unknown && deployed[name] {
 			health = append(health, noChecksRows(name)...)
@@ -450,6 +461,12 @@ func (r *DeployReader) Read() *Deploys {
 			healthFailed = append(healthFailed, name)
 		case res.unknown:
 			healthMissing = append(healthMissing, name)
+		}
+	}
+	// runKey joins the repo and the run's id with '#', which a repo name cannot hold.
+	for key, held := range prevChecks {
+		if i := strings.LastIndexByte(key, '#'); i > 0 && keep[key[:i]] {
+			checks[key] = held
 		}
 	}
 	r.mu.Lock()
