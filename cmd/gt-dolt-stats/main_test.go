@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,6 +47,53 @@ func TestRunAppendsOneRowForGtDolt(t *testing.T) {
 	var row resourcesampler.Row
 	if err := json.Unmarshal(data, &row); err != nil || row.Name != gtDolt {
 		t.Errorf("day file = %q: want one row named %q, decode error %v", data, gtDolt, err)
+	}
+}
+
+// TestRunNamesFailingStep: a failing read, a parser-refused line and an append
+// the directory refuses each return 1, print one stderr line naming the step and
+// leave no row (gt-n3byrd).
+func TestRunNamesFailingStep(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, dir string)
+		read    func(string) ([]byte, error)
+		step    string
+	}{
+		{"read", nil, func(string) ([]byte, error) {
+			return nil, errors.New("docker stats: daemon not reachable")
+		}, "read"},
+		{"parse", nil, func(string) ([]byte, error) { return []byte("CPUPerc=349.74%"), nil }, "parse"},
+		{"append", func(t *testing.T, dir string) {
+			t.Helper()
+			if err := os.WriteFile(filepath.Join(dir, "resources"), nil, 0o644); err != nil {
+				t.Fatalf("block the resources directory: %v", err)
+			}
+		}, func(string) ([]byte, error) { return []byte(statsLine), nil }, "append"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if tt.prepare != nil {
+				tt.prepare(t, dir)
+			}
+			var stderr bytes.Buffer
+			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, tt.read); code != 1 {
+				t.Errorf("run = %d, want 1", code)
+			}
+			want := "gt-dolt-stats: " + tt.step + ": "
+			lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+			if len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
+				t.Errorf("stderr = %q, want one line starting %q", stderr.String(), want)
+			}
+			// The append row blocks resources with a file, so ENOTDIR means the
+			// day file cannot exist there.
+			if _, err := os.Stat(filepath.Join(dir, "resources", "2026-11-27.jsonl")); !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
+				t.Errorf("the %s failure wrote a row: stat error = %v", tt.step, err)
+			}
+		})
 	}
 }
 
