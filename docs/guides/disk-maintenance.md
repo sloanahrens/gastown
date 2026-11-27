@@ -17,7 +17,7 @@ All three run the same `registry` target and share the plugin's lock.
 |---|---|
 | the `polecat-image` plugin | plans after its own image, cache and volume trims, and applies in `apply` mode, in the run that holds the lock |
 | `gt maint` | plans by hand, or applies the plan it just printed because it was typed; a target name it does not know is listed back |
-| the `disk_maintenance` patrol | plans every target in a quiet daily window, and any target with an interval of its own on that interval; trims the shared cache claim on its own interval; applies the disk alerts on busy ticks through the alert-only pass; applies in `apply` mode |
+| the `disk_maintenance` patrol | plans every target in its daily window, and any target with an interval of its own on that interval, whether the town is quiet or busy; trims the shared cache claim on its own interval; applies the disk alerts on busy ticks through the alert-only pass; applies in `apply` mode |
 
 `registry` is the only target in slice 1. `plan` is the dry run, so it creates
 neither the ledger directory nor anything else; both `plan` and `apply` exit
@@ -146,10 +146,12 @@ what to wait for.
 
 ### The alert-only pass
 
-A busy tick whose trim is not due runs the alert-only pass, whether or not a
-target is due: it reads the disks and applies their alerts through the same
-application a trim or a full pass uses, and it does nothing else. A target the
-tick found still waits for a quiet tick. Its spacing is ten minutes
+A busy tick with nothing due runs the alert-only pass: it reads the disks and
+applies their alerts through the same application a trim or a full pass uses,
+and it does nothing else. A tick that finds a target pass already in flight runs
+it too, when no trim is due: the targets the tick found stay due for a later
+tick, and the alerts still get their reading rather than waiting for that pass
+to end. The pass never runs a target. Its spacing is ten minutes
 (`diskMaintBusyAlertEvery`), measured from the last application any pass made,
 so a trim or a full pass that applies the alerts restarts it, and the pass never
 repeats a reading another pass just took. Its own fallback read, the one it
@@ -165,19 +167,23 @@ a target.
 
 The patrol also trims the shared cache claim a kubernetes sandbox profile
 mounts, on its own interval (`cache_trim_interval`) in any window, and behind
-the same mode. The trim runs on a pass of its own and does not wait for the town
-to be quiet: it applies ConfigMaps and a Job on the sandbox cluster and reads
-neither the landing worker nor Dolt, so a landing pass in flight cannot starve
-it while the sandbox disk fills. That pass reads the disks and applies their
-alerts beside the trim, so a notifier that does not answer delays the end of
-the alerts and not the trim. Alert applications from different passes take
-turns, so a later reading is never applied over an earlier one's state, and
-every other target still waits for a quiet tick. A notifier that does not
-answer holds the alert turn for up to three attempts of the 60-second escalation
-timeout for each alert; another pass waits 30 seconds for the turn, then reads
-the disks for its own decisions and goes on, and the alerts of that time stay
-with the holder. A tick that finds no trim due runs no trim: a busy one applies
-the alerts through the alert-only pass (above).
+the same mode. The trim has a single-flight guard of its own and does not wait
+for the town to be quiet: it applies ConfigMaps and a Job on the sandbox
+cluster and reads neither the landing worker nor Dolt, so a landing pass in
+flight cannot starve it while the sandbox disk fills. A tick that finds a target
+pass in flight runs the trim on a pass of its own; that pass reads the disks and
+applies their alerts beside the trim, so a notifier that does not answer delays
+the end of the alerts and not the trim. Alert applications from different passes
+take turns, so a later reading is never applied over an earlier one's state. The
+targets are no exception: a tick that finds one due runs it whether the town is
+quiet or busy, and only a target pass already in flight holds it to a later
+tick. A notifier that does not answer holds the alert turn for up to three
+attempts of the 60-second escalation timeout for each alert; another pass waits
+30 seconds for the turn, then reads the disks for its own decisions and goes on,
+and the alerts of that time stay with the holder. A tick that finds no trim due
+runs no trim: its due targets run on the tick unless a target pass is in flight,
+and a busy tick with nothing due applies the alerts through the alert-only pass
+(above).
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
