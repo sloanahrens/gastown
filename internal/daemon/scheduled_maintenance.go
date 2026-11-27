@@ -266,19 +266,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	// the gap since the last cycle; the catch-up work is for a tick without
 	// one, and a requested cycle replaces it.
 	if !requested && !isInMaintenanceWindow(now, window) {
-		// Outside the window the work is a missed backup (gt-wne04) and, for a
-		// database whose windows kept deferring, the gc that never ran
-		// (gt-uux5b). A database with nothing else to do is a silent skip (this
-		// fires every 5 minutes).
-		// A malformed window also reads as "outside"; it must not enable
-		// catch-ups and hide that the window (and its gc) never runs.
-		if _, _, err := maintenanceWindowBounds(now, window); err == nil {
-			d.maybeCatchUpBackup(now, external)
-			// The gc's own freshness check still wants a backup, so a
-			// catch-up one dispatched just above defers the gc to a later
-			// tick rather than letting it run uncovered.
-			d.maybeCatchUpGC(now, external)
-		}
+		d.runUnrequestedTick(now, external, window)
 		return
 	}
 
@@ -387,6 +375,22 @@ func (d *Daemon) runScheduledMaintenance() {
 	d.startMaintenanceGC(databases, windowEnd, requestedCycle, localDataDir)
 	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 		d.lastMaintenanceRun = time.Unix(0, finished)
+	}
+}
+
+// runUnrequestedTick is the work of a tick that carries no request, outside the
+// window: a missed backup (gt-wne04) and, for a database whose windows kept
+// deferring, the gc that never ran (gt-uux5b). A database with nothing else to
+// do is a silent skip (this fires every 5 minutes).
+func (d *Daemon) runUnrequestedTick(now time.Time, external bool, window string) {
+	// A malformed window also reads as "outside"; it must not enable
+	// catch-ups and hide that the window (and its gc) never runs.
+	if _, _, err := maintenanceWindowBounds(now, window); err == nil {
+		d.maybeCatchUpBackup(now, external)
+		// The gc's own freshness check still wants a backup, so a catch-up one
+		// dispatched just above defers the gc to a later tick rather than
+		// letting it run uncovered.
+		d.maybeCatchUpGC(now, external)
 	}
 }
 
