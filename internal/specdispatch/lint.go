@@ -292,6 +292,10 @@ type Spec struct {
 	// Advice says the prose check did not run when the bead names another rig's
 	// read (gt-qotsst).
 	TownRigs []string
+	// CreatorCites are the creator beads the Goal and Constraints cite, each
+	// with the state the caller read for it (gt-pt1fb4). Nil is a spec whose
+	// states the caller did not record, judged as before.
+	CreatorCites []CreatorCite
 }
 
 // LintOptions are the dispatcher settings a lint reads besides the bead and the
@@ -918,6 +922,7 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 		}
 	}
 	failures = append(failures, otherRigRefusals(s, sections)...)
+	failures = append(failures, creatorCiteRefusals(s)...)
 	// A bead whose own estimate is at or over the operator's setting is
 	// refused here, when it is linted, rather than at the dispatcher's overrun
 	// stop (gt-mtzx6s). The check reads the label already on the bead and never
