@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
-	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/livework"
 )
 
 // keptSeatAttentionAfter is how long a kept sandbox seat may stand before the
@@ -130,22 +130,22 @@ func (s *attentionSources) keptSeatReSlung(seat KeptSandboxSeat) (bool, error) {
 	if hook == "" || hook == strings.TrimSpace(seat.Bead) {
 		return false, nil
 	}
-	issue, err := h.readBeads(seat.Rig).Show(hook)
-	if err != nil {
-		return false, fmt.Errorf("cannot read the hooked bead %s: %w", hook, err)
-	}
-	if issue == nil {
-		return false, fmt.Errorf("the hooked bead %s reads as no bead", hook)
-	}
-	// Open, hooked and in progress are live work: the bead a seat was re-slung
-	// to is open or hooked, and the worker's first claim moves it on to
-	// in_progress. A bead no longer under way (closed, deferred, blocked) is
-	// not, and its seat raises (gt-b87gmu).
-	switch beads.IssueStatus(issue.Status) {
-	case beads.StatusOpen, beads.IssueStatusHooked, beads.StatusInProgress:
-		return true, nil
-	}
-	return false, nil
+	return beadIsLiveWork(h, seat.Rig, hook)
+}
+
+// beadIsLiveWork reports whether the rig's bead id is live work, by
+// livework.Check over the way the patrol scan reads a work bead. The bead a seat
+// was re-slung to is open or hooked, and the worker's first claim moves it on to
+// in_progress. A bead no longer under way (closed, deferred, blocked) is not
+// live, and its seat raises (gt-b87gmu).
+func beadIsLiveWork(h *patrolScanHost, rig, id string) (bool, error) {
+	return livework.Check(id, func(id string) (string, bool, error) {
+		issue, err := h.readBeads(rig).Show(id)
+		if err != nil || issue == nil {
+			return "", false, err
+		}
+		return issue.Status, true, nil
+	})
 }
 
 // keptSeatItem is the kept-seat item of one seat, carrying reason verbatim.
