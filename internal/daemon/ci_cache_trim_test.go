@@ -1555,6 +1555,11 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 			f.exec = ciCacheReply(tt.afterKiB, tt.removed, tt.afterKiB)
 			f.tick()
 			f.drain()
+			if tt.raised {
+				// An over-cap reading is read again a floor later, with the same reply,
+				// before the item is looked for.
+				f.tickAFloorLater()
+			}
 
 			items := f.d.cacheTrimNoOp.observed()
 			if !tt.raised {
@@ -1584,11 +1589,12 @@ func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
 		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
+		f.tickAFloorLater()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 1 {
 			t.Fatalf("items over the cap = %+v, want one", items)
 		}
 
-		f.at(time.Hour)
+		f.at(3 * time.Hour)
 		f.exec = ciCacheReply(betweenWarnAndCap, 0, betweenWarnAndCap)
 		f.tick()
 		f.drain()
@@ -1613,12 +1619,14 @@ func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
 	)
 
 	// raiseOverCap runs one apply pass whose reply removed removed files and ended
-	// over the cap, and returns the item it raised.
+	// over the cap, reads the same reply again a floor later, and returns the item
+	// it raised.
 	raiseOverCap := func(t *testing.T, f *ciCacheFixture, removed int64) attention.Item {
 		t.Helper()
 		f.exec = ciCacheReply(overCap, removed, overCap)
 		f.tick()
 		f.drain()
+		f.tickAFloorLater()
 		items := f.d.cacheTrimNoOp.observed()
 		if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKey}) {
 			t.Fatalf("a run that removed %d files and ended over the cap raised %v, want one item keyed %q",
@@ -1655,7 +1663,7 @@ func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
 				f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 				raiseOverCap(t, f, 19000)
 
-				f.at(time.Hour)
+				f.at(3 * time.Hour)
 				f.exec = ciCacheReply(tt.afterKiB, 19000, tt.afterKiB)
 				f.tick()
 				f.drain()
@@ -1686,6 +1694,7 @@ func TestCICacheTrimGocacheNoopSummaryNamesTheFloor(t *testing.T) {
 		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
+		f.tickAFloorLater()
 
 		items := f.d.cacheTrimNoOp.observed()
 		if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKey}) {
