@@ -177,6 +177,66 @@ func TestTownClusterRollbackLedgerUnwritable(t *testing.T) {
 	}
 }
 
+// TestTownClusterRollbackRefusesPlan: a plan.json that is not a plan record, a plan
+// file changed after the plan was made (so it could name another Deployment), and a
+// plan file whose phase is not a plan phase are each refused before any kubectl
+// call, and each records one refused ledger line with no objects.
+func TestTownClusterRollbackRefusesPlan(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		plan func(t *testing.T) string
+		want string
+	}{
+		{
+			name: "the plan record is not a plan record",
+			plan: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeReadFile(t, filepath.Join(dir, planFileName), []byte("{"))
+				return dir
+			},
+			want: "is not a plan record",
+		},
+		{
+			name: "a plan file changed after the plan was made",
+			plan: func(t *testing.T) string {
+				docs, files := shapeDaemonPlan()
+				dir, _ := shapeWritePlan(t, docs, files)
+				changed := append(append([]byte{}, docs[files[0].Name]...), "# edited\n"...)
+				writeReadFile(t, filepath.Join(dir, files[0].Name), changed)
+				return dir
+			},
+			want: "does not match the sha256",
+		},
+		{
+			name: "a plan file's phase is not a plan phase",
+			plan: func(t *testing.T) string {
+				docs, files := shapeDaemonPlan()
+				files[0].Phase = "X"
+				dir, _ := shapeWritePlan(t, docs, files)
+				return dir
+			},
+			want: "is not a plan phase",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := tc.plan(t)
+			kube := &shapeLiveKube{}
+			err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownClusterRollback = %v, want a refusal naming %q", err, tc.want)
+			}
+			if len(kube.calls) != 0 {
+				t.Errorf("the rollback made %d calls, want none: %v", len(kube.calls), kube.calls)
+			}
+			if entry := rollbackLedgerLine(t, dir); entry.Result != rollbackResultRefused || len(entry.Objects) != 0 {
+				t.Errorf("the rollback ledger = %+v, want one refused line with no objects", entry)
+			}
+		})
+	}
+}
+
 // TestTownClusterRollbackNoPlanRecord: a plan directory with no plan.json refuses
 // before any kubectl call and records one refused line naming no plan.
 func TestTownClusterRollbackNoPlanRecord(t *testing.T) {
