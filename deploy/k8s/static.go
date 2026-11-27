@@ -66,6 +66,7 @@ var StaticExcluded = []struct{ File, Owner, Reason string }{
 	{"deploy/k8s/control-priorities.yaml", "overseer", "a record table of the priority class each live Forgejo Deployment runs at, not an applied object"},
 	{"deploy/k8s/policy/kind.yaml", "seagull", "the sandbox policy the gateway passes per sandbox create, not an object in the cluster"},
 	{"deploy/k8s/forgejo-tolerations.yaml", "overseer", "strategic-merge patch text for Deployments that live outside every repo"},
+	{"deploy/k8s/sbx-deployer-rbac.yaml", "overseer", "applied once per rebuild with the kind admin credential in the rebuild sitting, not an object in either apply set"},
 }
 
 // staticKinds maps every kind the static sets may hold to whether it is
