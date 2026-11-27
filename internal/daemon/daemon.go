@@ -851,9 +851,6 @@ type Daemon struct {
 	// maintenanceGCRunning is set while a scheduled_maintenance gc cycle runs
 	// on its own goroutine; it blocks a second cycle and an upgrade-restart.
 	maintenanceGCRunning atomic.Bool
-	// squashDeferrals counts, per database, the consecutive squash checks the
-	// maintenance gc flag deferred (gt-2n9wff).
-	squashDeferrals squashDeferrals
 	// maintenanceGCRequestRunID is the run id of the update job's maintenance
 	// request the in-flight cycle answers, empty for a scheduled cycle. A tick
 	// that finds a cycle running uses it to tell a request already being served
