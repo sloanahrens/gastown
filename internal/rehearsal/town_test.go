@@ -12,6 +12,7 @@ func TestRehearsalTownCreate(t *testing.T) {
 	t.Parallel()
 	bdFailed := errors.New("exit status 1")
 	const leaked = "bd: secret output"
+	const section = "## Acceptance\n- [ ] one\n"
 	cases := []struct {
 		name, rig, title, body, answer string
 		runErr                         error
@@ -19,14 +20,18 @@ func TestRehearsalTownCreate(t *testing.T) {
 		wantID                         string
 		wantErr                        bool
 	}{
-		{name: "a rig's bead runs bd -C the rig", rig: "rehearsal", title: "probe one", body: "body one\n", answer: "  rh-01\n",
-			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe one", "--description=body one\n"}, wantID: "rh-01"},
-		{name: "no rig leaves -C out", title: "probe two", body: "body two\n", answer: "rh-02\n",
-			wantArgv: []string{"bd", "create", "--silent", "--title=probe two", "--description=body two\n"}, wantID: "rh-02"},
-		{name: "a failed command is wrapped and carries no output", rig: "rehearsal", title: "probe three", body: "body three\n", answer: leaked, runErr: bdFailed,
-			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe three", "--description=body three\n"}, wantErr: true},
-		{name: "an answer empty after trimming is an error", rig: "rehearsal", title: "probe four", body: "body four\n", answer: " \n",
-			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe four", "--description=body four\n"}, wantErr: true},
+		{name: "a rig's bead runs bd -C the rig", rig: "rehearsal", title: "probe one", body: "body one\n" + section, answer: "  rh-01\n",
+			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe one", "--description=body one\n" + section, "--acceptance=- [ ] one"}, wantID: "rh-01"},
+		{name: "no rig leaves -C out", title: "probe two", body: "body two\n" + section, answer: "rh-02\n",
+			wantArgv: []string{"bd", "create", "--silent", "--title=probe two", "--description=body two\n" + section, "--acceptance=- [ ] one"}, wantID: "rh-02"},
+		{name: "a failed command is wrapped and carries no output", rig: "rehearsal", title: "probe three", body: "body three\n" + section, answer: leaked, runErr: bdFailed,
+			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe three", "--description=body three\n" + section, "--acceptance=- [ ] one"}, wantErr: true},
+		{name: "an answer empty after trimming is an error", rig: "rehearsal", title: "probe four", body: "body four\n" + section, answer: " \n",
+			wantArgv: []string{"bd", "-C", "rehearsal", "create", "--silent", "--title=probe four", "--description=body four\n" + section, "--acceptance=- [ ] one"}, wantErr: true},
+		{name: "rows run to the next level 2 heading", title: "probe five", body: "body five\n## Acceptance\n- [ ] one\n### sub\n- [ ] two\n\n## Notes\nnot a row\n", answer: "rh-05\n",
+			wantArgv: []string{"bd", "create", "--silent", "--title=probe five", "--description=body five\n## Acceptance\n- [ ] one\n### sub\n- [ ] two\n\n## Notes\nnot a row\n", "--acceptance=- [ ] one\n### sub\n- [ ] two"}, wantID: "rh-05"},
+		{name: "an empty section is refused and runs nothing", title: "probe six", body: "body six\n## Acceptance\n\n## Notes\nnot a row\n", answer: "rh-06\n", wantErr: true},
+		{name: "a body with no Acceptance heading is refused and runs nothing", title: "probe seven", body: "body seven\n", answer: "rh-07\n", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
