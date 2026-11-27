@@ -1320,7 +1320,7 @@ type Daemon struct {
 	landingInfra        landingInfraState
 	landingInfraRunning atomic.Bool
 	// landingInfraRigs lists the rigs the probe covers, and
-	// landingInfraProber makes its two HTTP calls; nil means the real ones.
+	// landingInfraProber makes its HTTP calls; nil means the real ones.
 	// Test seams (landing_infra.go).
 	landingInfraRigs   func() []landingInfraTarget
 	landingInfraProber infraProber

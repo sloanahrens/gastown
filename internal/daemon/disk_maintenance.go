@@ -170,6 +170,9 @@ type diskMaintSeams struct {
 	// nodeDiskFS replaces the directory creation and the write of the node disk
 	// record the node readings are recorded through; the zero value is the real ones.
 	nodeDiskFS nodeDiskFS
+	// runningTasks reads the Actions tasks running in the repositories the
+	// landing_infra patrol watches; nil is d.ciEngineRunningTasks (gt-unko5a).
+	runningTasks func(ctx context.Context) (map[int64]bool, error)
 }
 
 // jobRunAppender appends one maintenance job run to the ledger. It is an
@@ -237,6 +240,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.recordNodeDisk == nil {
 		s.recordNodeDisk = recordNodeDisk
+	}
+	if s.runningTasks == nil {
+		s.runningTasks = d.ciEngineRunningTasks
 	}
 	return s
 }
