@@ -29,11 +29,13 @@ const planFileName = "plan.json"
 // Deployment's revision number.
 const planRevisionAnnotation = "deployment.kubernetes.io/revision"
 
-// planRecord is what plan.json holds: the full plan id, and every file the id
-// names, in the order the plan applies them.
+// planRecord is what plan.json holds: the cluster the plan is for, the full plan
+// id, and every file the id names, in the order the plan applies them. Apply's
+// --cluster gate refuses a record whose cluster is not the flag's.
 type planRecord struct {
-	ID    string           `json:"id"`
-	Files []planRecordFile `json:"files"`
+	Cluster string           `json:"cluster"`
+	ID      string           `json:"id"`
+	Files   []planRecordFile `json:"files"`
 }
 
 // planPhaseStatic and planPhaseWorkloads name a plan's two phases, in the order
@@ -61,10 +63,20 @@ type planRecordFile struct {
 }
 
 // planFlags holds the plan's own flags: policyKubeconfig is phase P's (the
-// deployer-policy certificate), applyKubeconfig phase W's (the deployer-apply one).
+// deployer-policy certificate), applyKubeconfig phase W's (the deployer-apply one),
+// and cluster is the cluster the plan is for (empty or control for the control
+// cluster, gt-sbx for the sandbox), whose sbx inputs a control plan refuses.
 type planFlags struct {
 	policyKubeconfig string
 	applyKubeconfig  string
+	cluster          string
+	sbx              planSbxInputs
+}
+
+// planSbxInputs are the gt-sbx render's inputs, which stand in for the recorded
+// flags a control plan replays.
+type planSbxInputs struct {
+	manifests, chart, values, helm string
 }
 
 // phaseKubeconfig is the kubeconfig a phase reads: phase P's is
@@ -186,7 +198,14 @@ Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
 the deployer-policy certificate, and phase W --apply-kubeconfig, the
 deployer-apply certificate; the plan hard-codes no phase identity. A phase with
 files whose flag is missing is refused, naming the flag. The command does not
-run inside the daemon pod.`,
+run inside the daemon pod.
+
+--cluster gt-sbx plans the sandbox set from --sbx-manifests, --sbx-chart,
+--sbx-values and --helm instead of the recorded flags. Its cluster-scoped objects
+are phase P and its namespaced ones phase W, each read under its phase's
+kubeconfig; plan.json names the cluster, and the id names it too, so a gt-sbx
+plan and a control plan never share an id. Secrets stay operator-created and a
+gt-sbx set holding one is refused.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runTownClusterPlan(cmd.Context(), realClusterRenderDeps(io.Discard), realRunFunc(), cmd.OutOrStdout(), clusterPlanOut, clusterPlanKubeconfigs, atomicfile.WriteJSON)
@@ -205,6 +224,16 @@ func init() {
 		"phase P's kubeconfig, the deployer-policy certificate's: required when phase P has files")
 	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.applyKubeconfig, "apply-kubeconfig", "",
 		"phase W's kubeconfig, the deployer-apply certificate's: required when phase W has files")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.cluster, "cluster", clusterControl,
+		"the cluster the plan is for: "+clusterControl+", the default, or "+clusterSbx)
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.sbx.manifests, "sbx-manifests", "",
+		"the pinned agent-sandbox manifest; for --cluster "+clusterSbx+" only")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.sbx.chart, "sbx-chart", "",
+		"the pulled chart directory; for --cluster "+clusterSbx+" only")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.sbx.values, "sbx-values", "",
+		"the chart's values file; for --cluster "+clusterSbx+" only")
+	townClusterPlanCmd.Flags().StringVar(&clusterPlanKubeconfigs.sbx.helm, "helm", "",
+		"the helm binary, empty for helm on PATH; for --cluster "+clusterSbx+" only")
 	townClusterCmd.AddCommand(townClusterPlanCmd)
 }
 
@@ -410,6 +439,13 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 // written, so a refusal, a render error, a failed read, a failed dry run or a
 // failed write prints nothing.
 func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, out io.Writer, outDir string, kubeconfigs planFlags, writeJSON func(path string, v any) error) error {
+	cluster, err := planClusterFor(kubeconfigs)
+	if err != nil {
+		return err
+	}
+	if cluster == clusterSbx {
+		return runSbxPlan(ctx, d, kube, out, outDir, kubeconfigs, writeJSON)
+	}
 	f, root, err := planRecordedFlags(d.findTown, outDir)
 	if err != nil {
 		return err
@@ -474,7 +510,7 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	}
 	differs := len(differences) > 0
 	files := make([]planFile, 0, len(names))
-	record := planRecord{Files: make([]planRecordFile, 0, len(names))}
+	record := planRecord{Cluster: cluster, Files: make([]planRecordFile, 0, len(names))}
 	counts := map[string]int{}
 	// deployments counts the phase W Deployments and comparable the ones the
 	// compare found no difference in; rolls counts the comparable ones whose
@@ -521,7 +557,7 @@ func runTownClusterPlan(ctx context.Context, d clusterRenderDeps, kube update.Ru
 	if !differs && rolls > 0 && comparable == deployments {
 		return planImageRollRefusal()
 	}
-	full, short := planID(files)
+	full, short := planIDFor(cluster, files)
 	// A phase with files but no kubeconfig flag is refused: no identity is left to fall back on.
 	for _, phase := range []string{planPhaseStatic, planPhaseWorkloads} {
 		if counts[phase] == 0 {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ var townClusterApplyCmd = newTownClusterApplyCmd()
 // newTownClusterApplyCmd builds `gt town cluster apply`: the plan directory and
 // the approval record it will read, and each phase's kubeconfig.
 func newTownClusterApplyCmd() *cobra.Command {
-	var planDir, approvalPath string
+	var planDir, approvalPath, cluster string
 	var kubeconfigs planFlags
 	cmd := &cobra.Command{
 		Use:   "apply",
@@ -26,7 +27,9 @@ func newTownClusterApplyCmd() *cobra.Command {
 authorizes it, re-read the Deployments the plan holds, and apply the plan's files.
 Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
 the deployer-policy certificate, and phase W --apply-kubeconfig, the
-deployer-apply certificate.
+deployer-apply certificate. --cluster names the cluster the plan must be for, the
+control cluster by default; a plan for another cluster, or one that names none, is
+refused before its approval is verified.
 
 Phase P's files apply first, then phase W's, with the bd gateway Deployment moved
 ahead of the daemon, the dashboard and trackerd: each Deployment is waited for,
@@ -39,11 +42,13 @@ and never runs one. Whatever the outcome, it appends one line to the apply ledge
 beside the approval record.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTownClusterApply(cmd.Context(), realRunFunc(), cmd.OutOrStdout(), planDir, approvalPath, kubeconfigs, applyRecordVerifier(time.Now))
+			verify := applyClusterGate(cluster, applyRecordVerifier(time.Now))
+			return runTownClusterApply(cmd.Context(), realRunFunc(), cmd.OutOrStdout(), planDir, approvalPath, kubeconfigs, verify)
 		},
 	}
 	cmd.Flags().StringVar(&planDir, "plan", "", "the plan directory holding plan.json and its files (required)")
 	cmd.Flags().StringVar(&approvalPath, "approval", "", "the approval record file that authorizes this plan (required)")
+	cmd.Flags().StringVar(&cluster, "cluster", clusterControl, "the cluster the plan must be for: "+clusterControl+", the default, or "+clusterSbx+"; a plan for another cluster, or one that names none, is refused")
 	cmd.Flags().StringVar(&kubeconfigs.policyKubeconfig, "policy-kubeconfig", "", "phase P's kubeconfig, the deployer-policy certificate's: required when phase P has files")
 	cmd.Flags().StringVar(&kubeconfigs.applyKubeconfig, "apply-kubeconfig", "", "phase W's kubeconfig, the deployer-apply certificate's: required when phase W has files")
 	// Each flag is defined just above, and MarkFlagRequired's only error is an
@@ -54,12 +59,38 @@ beside the approval record.`,
 }
 
 // applyRecordVerifier is the approvalVerifier the command gives the apply: the
-// record must approve this plan for the control cluster inside its window at
-// now(). The live versions are not compared yet, so Verify gets no versions and
-// no live map; that comparison is a later bead of the chain.
+// record must approve this plan, for the cluster the plan names, inside its
+// window at now(). A plan record with no cluster is read as the control cluster,
+// the only one a plan named before plan.json recorded it; applyClusterGate refuses
+// such a plan before it reaches here, when the command runs. The live versions are
+// not compared yet, so Verify gets no versions and no live map; that comparison is
+// a later bead of the chain.
 func applyRecordVerifier(now func() time.Time) approvalVerifier {
 	return func(rec clusterapproval.Record, plan planRecord) error {
-		return clusterapproval.Verify(rec, clusterapproval.Plan{Cluster: clusterapproval.ClusterControl, SHA256: plan.ID}, nil, now())
+		cluster := plan.Cluster
+		if cluster == "" {
+			cluster = clusterapproval.ClusterControl
+		}
+		return clusterapproval.Verify(rec, clusterapproval.Plan{Cluster: cluster, SHA256: plan.ID}, nil, now())
+	}
+}
+
+// applyClusterGate wraps verify with the --cluster check: the plan must name the
+// cluster the flag names, so a plan for another cluster, or one that names none,
+// is refused before the approval is verified and before any cluster is called.
+// The flag itself must name a cluster clusterapproval knows.
+func applyClusterGate(cluster string, verify approvalVerifier) approvalVerifier {
+	return func(rec clusterapproval.Record, plan planRecord) error {
+		if !clusterapproval.ValidCluster(cluster) {
+			return fmt.Errorf("gt town cluster apply: --cluster %q is not a cluster the apply knows: want %s or %s; nothing was applied", cluster, clusterControl, clusterSbx)
+		}
+		if plan.Cluster == "" {
+			return fmt.Errorf("gt town cluster apply: the plan names no cluster, so it is not a plan for --cluster %s; nothing was applied", cluster)
+		}
+		if plan.Cluster != cluster {
+			return fmt.Errorf("gt town cluster apply: the plan is for cluster %s, not --cluster %s; nothing was applied", plan.Cluster, cluster)
+		}
+		return verify(rec, plan)
 	}
 }
 
