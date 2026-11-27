@@ -31,7 +31,8 @@ type sbxDeployerDoc struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name string `yaml:"name"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 	Rules   []sbxDeployerRule `yaml:"rules"`
 	RoleRef struct {
@@ -91,12 +92,16 @@ func loadSbxDeployerRBAC(t *testing.T, file string) []sbxDeployerDoc {
 // sbxDeployerLines flattens every object, every rule combination and every
 // binding subject into one line: the object, then its API group, resource,
 // verb and, when the rule has one, the resource name; a binding subject adds
-// the roleRef kind and name and the subject kind and name. A binding with no
+// the roleRef kind and name and the subject kind and name. A namespaced object
+// is kind/namespace/name, a cluster-scoped object kind/name. A binding with no
 // subject yields only its object line.
 func sbxDeployerLines(docs []sbxDeployerDoc) []string {
 	var lines []string
 	for _, d := range docs {
 		obj := d.Kind + "/" + d.Metadata.Name
+		if d.Metadata.Namespace != "" {
+			obj = d.Kind + "/" + d.Metadata.Namespace + "/" + d.Metadata.Name
+		}
 		lines = append(lines, obj)
 		roleRef := d.RoleRef.Kind + "/" + d.RoleRef.Name
 		for _, s := range d.Subjects {
@@ -221,6 +226,55 @@ func TestSbxDeployerRBACReportsEdits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSbxDeployerRBACDistinguishesNamespaces holds a namespaced object's line to
+// kind/namespace/name: one Role name in two namespaces is two objects, a grant in
+// the wrong namespace is reported on both sides, and a subject's namespace stays
+// an unlisted field, refused with the file named.
+func TestSbxDeployerRBACDistinguishesNamespaces(t *testing.T) {
+	t.Parallel()
+	role := func(ns string) string {
+		return "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: gt-sbx-deployer\n  namespace: " + ns + "\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"configmaps\"]\n    verbs: [\"get\"]\n"
+	}
+	load := func(t *testing.T, file, doc string) []string {
+		t.Helper()
+		docs, err := sbxDeployerParse(file, []byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sbxDeployerLines(docs)
+	}
+	t.Run("one name in two namespaces", func(t *testing.T) {
+		t.Parallel()
+		got := load(t, "two-namespaces.yaml", role("openshell")+"---\n"+role("agent-sandbox-system"))
+		want := []string{
+			"Role/openshell/gt-sbx-deployer", "Role/openshell/gt-sbx-deployer core/configmaps get",
+			"Role/agent-sandbox-system/gt-sbx-deployer", "Role/agent-sandbox-system/gt-sbx-deployer core/configmaps get",
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("changed namespace", func(t *testing.T) {
+		t.Parallel()
+		openshell := load(t, "openshell.yaml", role("openshell"))
+		missing, extra := sbxDeployerMissingExtra(load(t, "agent-sandbox-system.yaml", role("agent-sandbox-system")), openshell)
+		if want := []string{"Role/openshell/gt-sbx-deployer", "Role/openshell/gt-sbx-deployer core/configmaps get"}; !slices.Equal(missing, want) {
+			t.Fatalf("missing %q, want %q", missing, want)
+		}
+		if want := []string{"Role/agent-sandbox-system/gt-sbx-deployer", "Role/agent-sandbox-system/gt-sbx-deployer core/configmaps get"}; !slices.Equal(extra, want) {
+			t.Fatalf("extra %q, want %q", extra, want)
+		}
+	})
+	t.Run("subject namespace refused", func(t *testing.T) {
+		t.Parallel()
+		const file = "subject-namespace.yaml"
+		doc := "apiVersion: v1\nkind: ClusterRoleBinding\nmetadata:\n  name: gt-sbx-deployer\nsubjects:\n  - kind: ServiceAccount\n    name: gt-sbx-deployer\n    namespace: openshell\n"
+		if _, err := sbxDeployerParse(file, []byte(doc)); err == nil || !strings.Contains(err.Error(), file) {
+			t.Fatalf("got %v, want a refusal naming %s", err, file)
+		}
+	})
 }
 
 // TestSbxDeployerRBACReadsEveryDocument holds the loader to the whole stream: a
