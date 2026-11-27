@@ -9,7 +9,7 @@ import (
 
 // TestReconcilerWiringTickerUsesTheInterval: newReconcilerTicker asks its seam
 // for one ticker at the interval the patrol config names, and returns the
-// seam's channel and stop func (gt-n9gpxa).
+// seam's channel, that same interval, and its stop func (gt-n9gpxa, gt-1l4szw).
 func TestReconcilerWiringTickerUsesTheInterval(t *testing.T) {
 	t.Parallel()
 
@@ -41,13 +41,19 @@ func TestReconcilerWiringTickerUsesTheInterval(t *testing.T) {
 				return ticks, func() { stops++ }
 			}
 
-			channel, stop := d.newReconcilerTicker()
+			channel, interval, stop := d.newReconcilerTicker()
 
 			if channel != ticks {
 				t.Errorf("newReconcilerTicker returned %v, want the seam's channel", channel)
 			}
-			if len(asked) != 1 || asked[0] != tt.want {
-				t.Errorf("the seam was asked for %v, want one ticker at %v", asked, tt.want)
+			if len(asked) != 1 {
+				t.Fatalf("the seam was asked for a ticker %d times, want one", len(asked))
+			}
+			if asked[0] != tt.want {
+				t.Errorf("the seam was asked for %v, want %v", asked[0], tt.want)
+			}
+			if interval != asked[0] {
+				t.Errorf("newReconcilerTicker returned interval %v, want the %v the seam was asked for", interval, asked[0])
 			}
 			if stop == nil {
 				t.Fatal("newReconcilerTicker returned no stop func")
@@ -68,7 +74,7 @@ func TestReconcilerWiringTickerWithoutASeam(t *testing.T) {
 	d := &Daemon{patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		Reconciler: &config.ReconcilerConfig{Enabled: true},
 	}}}
-	channel, stop := d.newReconcilerTicker()
+	channel, _, stop := d.newReconcilerTicker()
 	if channel == nil || stop == nil {
 		t.Fatal("newReconcilerTicker with no seam returned no ticker")
 	}

@@ -2,11 +2,12 @@ package daemon
 
 import "time"
 
-// newReconcilerTicker returns the reconciler patrol's tick channel and the func
-// that stops it, ticking at the interval the patrol config in force names. The
-// ticker comes from reconcilerTickerFn, so a test records the cadence without a
-// real timer.
-func (d *Daemon) newReconcilerTicker() (<-chan time.Time, func()) {
+// newReconcilerTicker returns the reconciler patrol's tick channel, the interval
+// the ticker was made with, and the func that stops it, ticking at the interval
+// the patrol config in force names. The ticker comes from reconcilerTickerFn, so
+// a test records the cadence without a real timer. Returning the interval lets a
+// caller name the cadence it started without recomputing it (gt-1l4szw).
+func (d *Daemon) newReconcilerTicker() (<-chan time.Time, time.Duration, func()) {
 	interval := reconcilerInterval(d.patrol())
 	newTicker := d.reconcilerTickerFn
 	if newTicker == nil {
@@ -15,7 +16,8 @@ func (d *Daemon) newReconcilerTicker() (<-chan time.Time, func()) {
 			return ticker.C, ticker.Stop
 		}
 	}
-	return newTicker(interval)
+	ticks, stop := newTicker(interval)
+	return ticks, interval, stop
 }
 
 // startReconcilerTicker returns the reconciler patrol's tick channel and the
@@ -25,5 +27,6 @@ func (d *Daemon) startReconcilerTicker() (<-chan time.Time, func()) {
 	if !d.isPatrolActive("reconciler") {
 		return nil, nil
 	}
-	return d.newReconcilerTicker()
+	ticks, _, stop := d.newReconcilerTicker()
+	return ticks, stop
 }
