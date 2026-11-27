@@ -170,9 +170,18 @@ case "$*" in
       exit 0
     fi
     printf 'FAKE-%s-SECRETVALUE' "$name" | base64 ;;
-  *"get configmap gt-bootstrap"*) [ -f "$STATE/marker" ] && cat "$STATE/marker" ;;
+  *"get configmap gt-bootstrap"*)
+    # STUB_BOOTSTRAP_READ_FAILS: the read itself fails, which must stop the run
+    # rather than read as an absent marker. The script asks for the object's
+    # name and its helm key in one jsonpath, with --ignore-not-found for absence.
+    if [ -n "${STUB_BOOTSTRAP_READ_FAILS-}" ]; then exit 1; fi
+    [ -f "$STATE/marker" ] && printf 'gt-bootstrap|%s' "$(cat "$STATE/marker")" ;;
   *"create configmap gt-bootstrap"*)
     for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
+  *"apply -f"*"gateway-nodeport.yaml"*)
+    # STUB_NODEPORT_APPLY_FAILS: the NodePort apply fails, as a run that stops
+    # before the install is marked finished.
+    [ -n "${STUB_NODEPORT_APPLY_FAILS:-}" ] && exit 1 ;;
   *"apply -f -"*)
     while read -r line; do case "$line" in helm=*) printf '%s' "${line#helm=}" >"$STATE/marker" ;; esac; done ;;
   *"get deployment metrics-server"*)
@@ -577,6 +586,10 @@ check "the rerun still waits on the metrics-server rollout" contains "rollout st
 check "the rerun still writes the registry mirror to hosts.toml" contains 'server = "http://gt-registry:5000"' "$(cat "$S/state/hosts.toml")"
 check "the rerun still exports the client key as mode 600" test "$(mode "$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls/tls.key")" = 600
 check "the rerun makes no helm call for an unchanged chart" lacks "helm upgrade" "$CALLS_LOG"
+check "the rerun applies no gateway NodePort" test "$(calls_with "gateway-nodeport.yaml")" -eq 0
+check "the rerun applies no control-plane Services" test "$(calls_with "values/kind/control-plane-services.yaml")" -eq 0
+check "the rerun writes no gt-bootstrap marker" test "$(calls_with "create configmap gt-bootstrap")" -eq 0
+check "the deployer line names the NodePort and the control-plane Services" contains "the gateway NodePort and the control-plane Services are applied by gt town cluster apply" "$OUT_TEXT"
 echo "a cluster with no openshell release is a first install"
 scenario norelease
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
@@ -591,6 +604,21 @@ check "the controller's container has requests equal to limits (100m, 128Mi)" gu
 check "the controller rollout is awaited" contains "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
 check "the chart is installed once" test "$(calls_with 'helm upgrade --install')" -eq 1
 check "a first install prints no deployer line" lacks "gt town cluster apply" "$OUT_TEXT"
+
+echo "a first install that stopped before the two applies is completed by the next run"
+scenario partial
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" STUB_NODEPORT_APPLY_FAILS=1 --
+check "a first run whose NodePort apply fails exits non-zero" test "$RC" -ne 0
+check "the failed run leaves no gt-bootstrap marker" test ! -e "$S/state/marker"
+check "the failed run has installed the chart" test "$(calls_with 'helm upgrade --install')" -eq 1
+: >"$S/calls.log"
+run "$UP" --
+check "the next run exits 0" test "$RC" -eq 0
+check "the next run applies the gateway NodePort" test "$(calls_with "gateway-nodeport.yaml")" -eq 1
+check "the next run applies the control-plane Services" test "$(calls_with "values/kind/control-plane-services.yaml")" -eq 1
+check "the next run writes the gt-bootstrap marker" test "$(calls_with "create configmap gt-bootstrap")" -eq 1
+check "the next run records the chart marker" test "$(cat "$S/state/marker")" = "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")"
 
 echo "a failed helm list is not a first install: the run stops before anything is applied"
 scenario helmlistfail
@@ -610,6 +638,16 @@ check "the skip-check failure names the helm list query" contains "helm list --n
 check "no helm upgrade runs after a failed skip check" lacks "helm upgrade" "$CALLS_LOG"
 check "no manifest is applied after a failed skip check" lacks "gateway-nodeport.yaml" "$CALLS_LOG"
 
+echo "a failing gt-bootstrap read stops the run before any apply or helm call"
+scenario bootstrapreadfail
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" STUB_BOOTSTRAP_READ_FAILS=1 --
+check "a failing gt-bootstrap read stops the run" test "$RC" -ne 0
+check "the failure names the gt-bootstrap read" contains "cannot read the gt-bootstrap ConfigMap" "$OUT_TEXT"
+check "no helm call runs before the gt-bootstrap read" lacks "helm list" "$CALLS_LOG"
+check "no apply runs after a failed gt-bootstrap read" lacks "apply" "$CALLS_LOG"
+check "no helm upgrade runs after a failed gt-bootstrap read" lacks "helm upgrade" "$CALLS_LOG"
+
 echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
 VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"
 helm_calls() { grep -c '^helm upgrade' "$S/calls.log" || true; }
@@ -626,13 +664,17 @@ check "an unchanged chart and values make no helm call" test "$(helm_calls)" -eq
 check "the skip says why" contains "not running helm" "$OUT_TEXT"
 check "the skipped run still succeeds and reaches a healthy gateway" test "$RC" -eq 0
 check "the marker is left as it was" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
-check "the manifests are still applied on a skipped run" contains "gateway-nodeport.yaml" "$CALLS_LOG"
+check "a skipped run on a finished install applies no NodePort" lacks "gateway-nodeport.yaml" "$CALLS_LOG"
+check "a skipped run on a finished install writes no marker" lacks "create configmap gt-bootstrap" "$CALLS_LOG"
 scenario helmvalues
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:0000000000000000000000000000000000000000000000000000000000000000" >"$S/state/marker"
 run "$UP" --
 check "a changed values file runs helm" test "$(helm_calls)" -eq 1
 check "the marker is updated to the new digest" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+: >"$S/calls.log"
+run "$UP" --
+check "the run after a changed-values helm makes no helm call" test "$(helm_calls)" -eq 0
 scenario helmchart
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.3:$VALUES_SHA" >"$S/state/marker"
