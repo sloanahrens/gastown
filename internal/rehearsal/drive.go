@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // closeReason is the reason Drive gives the run's beads when it closes them.
@@ -29,9 +30,11 @@ var stepName = [...]string{"file set", "run window", "collect", "close beads", "
 // collect, close or save stops the run: Drive marks the record Stopped with the step's
 // name, sets End if it is unset, runs the steps after the failed one and returns the
 // error wrapped with that name, joined with any error from those steps. The record
-// returned with an error holds whatever the steps gathered up to that point.
+// returned with an error holds whatever the steps gathered up to that point. It
+// records o's CacheBytes and Interventions as given, copying the interventions.
 func Drive(ctx context.Context, o Options) (Record, error) {
-	rec := Record{RunID: o.RunID, Tag: o.Tag, ChangeSet: o.ChangeSet, Start: o.Now()}
+	rec := Record{RunID: o.RunID, Tag: o.Tag, ChangeSet: o.ChangeSet, Start: o.Now(),
+		CacheBytes: o.CacheBytes, Interventions: slices.Clone(o.Interventions)}
 	ids, err := FileSet(ctx, o.Town, o.Tasks)
 	if err != nil {
 		return finish(ctx, o, rec, ids, stepFileSet, err)
