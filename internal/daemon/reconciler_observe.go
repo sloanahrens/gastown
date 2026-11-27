@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,19 +17,54 @@ import (
 // dutyInputs are the reads one observation pass makes. The backup duty reads
 // databases, backupRoot and fsys; the archive duty reads archiveDir and fsys;
 // the gc duty reuses databases and reads readGCState; the other fields feed the
-// duties observed later.
+// duties observed later. backupErr and archiveErr are the seam's own failure:
+// they are judged as unknown rather than letting an empty path read as "off".
 type dutyInputs struct {
 	databases   func(ctx context.Context) ([]string, error)
 	backupRoot  string
+	backupErr   error
 	archiveDir  string // absolute; empty means archiving is off
+	archiveErr  error
 	readGCState func() ([]byte, error)
 	fsys        fs.FS // os.DirFS("/") in production
 }
 
+// observeDuties judges the maintenance duties against the live inputs one pass
+// reads: the server's database list, the backup root, the archive setting, the
+// gc state and the town-state root. A seam that fails is carried into the
+// judgement as its error, so it reads unknown (or overdue with no result when
+// nothing can exist yet), never fresh. gt-m4ubr4 calls it from the pass.
+func (d *Daemon) observeDuties(ctx context.Context, now time.Time) []reconcile.Observation {
+	pc := d.patrol()
+	var cfg *config.ReconcilerConfig
+	if pc != nil && pc.Patrols != nil {
+		cfg = pc.Patrols.Reconciler
+	}
+	m := d.maintenance()
+	// A daemon without a town root reads no state, rather than a path relative
+	// to its working directory.
+	readGCState := func() ([]byte, error) {
+		if d.config == nil || d.config.TownRoot == "" {
+			return nil, errors.New("no town root to read the maintenance state from")
+		}
+		return os.ReadFile(maintenanceGCStatePath(d.config.TownRoot))
+	}
+	in := dutyInputs{
+		databases:   func(ctx context.Context) ([]string, error) { return m.serverDatabases(d) },
+		readGCState: readGCState,
+		fsys:        os.DirFS("/"),
+	}
+	in.backupRoot, in.backupErr = m.backupRoot()
+	in.archiveDir, in.archiveErr = d.maintenanceArchiveDir()
+	root, rootErr := d.townStateNightlyRoot()
+	return append(observeDatabaseDuties(ctx, now, cfg, in), observeTownStateDuty(now, cfg, root, rootErr, in.fsys)...)
+}
+
 // observeDatabaseDuties judges the maintenance duties at now against the limits
 // and grace in cfg. The databases are listed once for the backup and gc duties;
-// the archive duty is judged too when archiving is on. A failed listing makes
-// the backup and gc observations unknown and does not stop the archive read.
+// the archive duty is judged too when archiving is on or its setting was
+// refused. A failed listing makes the backup and gc observations unknown and
+// does not stop the archive read.
 func observeDatabaseDuties(ctx context.Context, now time.Time, cfg *config.ReconcilerConfig, in dutyInputs) []reconcile.Observation {
 	var databases []string
 	var listErr error
@@ -38,7 +74,7 @@ func observeDatabaseDuties(ctx context.Context, now time.Time, cfg *config.Recon
 		databases, listErr = in.databases(ctx)
 	}
 	obs := []reconcile.Observation{observeBackupDuty(now, cfg, in, databases, listErr)}
-	if in.archiveDir != "" {
+	if in.archiveDir != "" || in.archiveErr != nil {
 		obs = append(obs, observeArchiveDuty(now, cfg, in))
 	}
 	return append(obs, observeGCDuties(now, cfg, in, databases, listErr)...)
@@ -123,8 +159,9 @@ func observeTownStateDuty(now time.Time, cfg *config.ReconcilerConfig, root stri
 }
 
 // observeBackupDuty judges the backup duty from the newest complete dated
-// backup night. A failed listing, a refused setting, a relative root and a
-// missing filesystem are kept as the read error, so none of them reads as fresh.
+// backup night. A failed listing, a failed backup-root read, a refused setting,
+// a relative root and a missing filesystem are kept as the read error, so none
+// of them reads as fresh.
 func observeBackupDuty(now time.Time, cfg *config.ReconcilerConfig, in dutyInputs, databases []string, listErr error) reconcile.Observation {
 	duty := reconcile.Duty{Name: config.ReconcilerDutyBackup}
 	fail := func(err error) reconcile.Observation {
@@ -132,6 +169,9 @@ func observeBackupDuty(now time.Time, cfg *config.ReconcilerConfig, in dutyInput
 	}
 	if listErr != nil {
 		return fail(listErr)
+	}
+	if in.backupErr != nil {
+		return fail(in.backupErr)
 	}
 	limit, err := cfg.ParseLimit(config.ReconcilerDutyBackup)
 	if err != nil {
@@ -157,13 +197,17 @@ func observeBackupDuty(now time.Time, cfg *config.ReconcilerConfig, in dutyInput
 	return reconcile.Evaluate(duty, now, lastGood, err)
 }
 
-// observeArchiveDuty judges the archive duty. A refused setting, a relative
-// directory and a missing filesystem reach reconcile.Evaluate as its read error,
-// so none of them reads as fresh; a read error is judged by Evaluate as it says.
+// observeArchiveDuty judges the archive duty. A failed archive-setting read, a
+// refused setting, a relative directory and a missing filesystem reach
+// reconcile.Evaluate as its read error, so none of them reads as fresh; a read
+// error is judged by Evaluate as it says.
 func observeArchiveDuty(now time.Time, cfg *config.ReconcilerConfig, in dutyInputs) reconcile.Observation {
 	duty := reconcile.Duty{Name: config.ReconcilerDutyArchive}
 	fail := func(err error) reconcile.Observation {
 		return reconcile.Evaluate(duty, now, time.Time{}, err)
+	}
+	if in.archiveErr != nil {
+		return fail(in.archiveErr)
 	}
 	limit, err := cfg.ParseLimit(config.ReconcilerDutyArchive)
 	if err != nil {
