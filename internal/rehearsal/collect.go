@@ -1,15 +1,15 @@
 package rehearsal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 )
 
-// Collect replaces rec.Gates and rec.Landings with what the rehearsal beads ids
-// record: each id's notes and comments give its gates, and its notes give its
-// landing, each naming the bead it came from. Neither field is assigned until
-// every bead has read, so a failed read stops Collect, returns its error
-// wrapped, and leaves both fields unchanged.
+// Collect fills rec from the town: Gates and Landings from the rehearsal beads,
+// FailedCalls from the daemon log over [rec.Start, rec.End), then Stranded from
+// the polecat listing of t.Rig. A step assigns its fields only after every read
+// in it succeeds, so a failure wraps its error and leaves later fields unchanged.
 func Collect(ctx context.Context, t Town, rec *Record, ids []string) error {
 	var gates []Gate
 	var landings []Landing
@@ -25,5 +25,23 @@ func Collect(ctx context.Context, t Town, rec *Record, ids []string) error {
 		landings = append(landings, LandingFacts(id, bead.Notes))
 	}
 	rec.Gates, rec.Landings = gates, landings
+	log, err := t.DaemonLog(ctx)
+	if err != nil {
+		return fmt.Errorf("collect failed calls: %w", err)
+	}
+	failed, err := FailedCalls(bytes.NewReader(log), rec.Start, rec.End)
+	if err != nil {
+		return fmt.Errorf("collect failed calls: %w", err)
+	}
+	rec.FailedCalls = failed
+	listing, err := t.Polecats(ctx)
+	if err != nil {
+		return fmt.Errorf("collect stranded seats: %w", err)
+	}
+	stranded, err := Stranded(listing, t.Rig)
+	if err != nil {
+		return fmt.Errorf("collect stranded seats: %w", err)
+	}
+	rec.Stranded = stranded
 	return nil
 }
