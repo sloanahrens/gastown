@@ -181,7 +181,9 @@ func (k Kubectl) noteReplacedPod(pod string, exit int) {
 // binary. The exit status, the standard input and the walk-up script are the same
 // either way. A bd call's stderr is also copied into tail, so a broken exec stream
 // is noted after the call; that copy is the one change to what the caller sees,
-// since kubectl's stderr is then a pipe, not the terminal.
+// since kubectl's stderr is then a pipe, not the terminal. A caller's stdout or
+// stderr that fails cannot stop the child: the call still ends with the child's
+// status and reports the failure (see keepFirst).
 func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (int, error) {
 	argv := k.execArgv(pod, call, dir)
 	stdout, stderr := k.outputs()
@@ -192,26 +194,40 @@ func (k Kubectl) attach(pod string, call Call, dir string, tail *tailBuffer) (in
 			}
 			return k.Shell.Attach(argv, nil)
 		}
-		// Only a bd call's stderr is copied, for the tail: its stdout is the
-		// caller's own writer, which an *os.File hands to the child as the
-		// descriptor itself. Its stderr becomes a pipe the tail and the caller's
-		// stderr share. bd runs in the pod, where its stderr is the exec stream
-		// whatever the Mac's is, so only kubectl's own stderr sees the pipe.
-		errs := &tailFirst{tail: tail, w: stderr}
-		exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, stdout, errs)
-		return exit, errors.Join(err, errs.err)
+		// Only a bd call's stderr is copied, for the tail. Its stderr becomes a
+		// pipe the tail and the caller's stderr share. bd runs in the pod, where
+		// its stderr is the exec stream whatever the Mac's is, so only kubectl's
+		// own stderr sees the pipe. The stdout is the caller's writer, or the
+		// descriptor itself when it is an *os.File (see callerStdout).
+		out, outKeep := callerStdout(stdout)
+		errs := &tailFirst{tail: tail, keepFirst: keepFirst{w: stderr}}
+		exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errs)
+		return exit, errors.Join(err, outKeep.failure(), errs.err)
 	}
 	// The same condition stdioFlags uses for a terminal: -t is passed only when the
 	// tool's stdin is the caller's terminal.
 	prompt := call.TTY && call.Stdin == nil
 	out := newOutputRewriter(stdout, k.podRoot(), k.Town, prompt)
 	errOut := newOutputRewriter(stderr, k.podRoot(), k.Town, prompt)
-	errs := &tailFirst{tail: tail, w: errOut}
-	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errs)
+	errs := &tailFirst{tail: tail, keepFirst: keepFirst{w: errOut}}
+	outW, outKeep := callerStdout(out)
+	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, outW, errs)
 	// The tool's last line need not end in a newline, so the two streams are
 	// flushed before the call returns. A failure to write the output is reported
 	// with the tool's own status, so the caller keeps it.
-	return exit, errors.Join(err, out.Flush(), errOut.Flush(), errs.err)
+	return exit, errors.Join(err, outKeep.failure(), out.Flush(), errOut.Flush(), errs.err)
+}
+
+// callerStdout is the writer the shell is given for a caller's stdout. An *os.File
+// is handed over unchanged, so the child writes to the file's own descriptor. Any
+// other writer is wrapped in a keepFirst, and the returned keepFirst is the one
+// whose failure the call reports; it is nil for an *os.File.
+func callerStdout(w io.Writer) (io.Writer, *keepFirst) {
+	if _, ok := w.(*os.File); ok {
+		return w, nil
+	}
+	k := &keepFirst{w: w}
+	return k, k
 }
 
 // outputs is the writers the call's output goes to: the wrapper's own streams,
@@ -227,27 +243,45 @@ func (k Kubectl) outputs() (stdout, stderr io.Writer) {
 	return stdout, stderr
 }
 
-// tailFirst is the writer a bd call's stderr is handed to. os/exec copies a
-// writer that is not an *os.File in a goroutine that stops at the first error,
-// leaving the pipe unread, and a child that then writes past the pipe buffer
-// blocks, so Wait never returns. So Write never fails: it writes the tail (which
-// cannot fail), then w; on w's first error it keeps that error in err, stops
-// writing to w, and keeps feeding the tail. The caller returns err after the
-// process has exited.
+// keepFirst is the writer a child's output is handed to when the caller's writer
+// is not an *os.File. os/exec copies such a writer in a goroutine that stops at the
+// first error, leaving the child's pipe unread, and a child that then writes past
+// the pipe buffer blocks, so Wait never returns. So Write never fails: on w's first
+// error it keeps that error and stops writing to w. The caller returns the error
+// after the process has exited.
+type keepFirst struct {
+	w   io.Writer
+	err error
+}
+
+func (k *keepFirst) Write(p []byte) (int, error) {
+	if k.err == nil {
+		if _, err := k.w.Write(p); err != nil {
+			k.err = err
+		}
+	}
+	return len(p), nil
+}
+
+// failure is the first error the writer returned, or nil when it never failed. A
+// nil keepFirst, for a writer passed through unchanged, has no failure.
+func (k *keepFirst) failure() error {
+	if k == nil {
+		return nil
+	}
+	return k.err
+}
+
+// tailFirst is the writer a bd call's stderr is handed to: every byte goes to the
+// tail, which cannot fail, and to the caller's stream through keepFirst.
 type tailFirst struct {
 	tail *tailBuffer
-	w    io.Writer
-	err  error
+	keepFirst
 }
 
 func (t *tailFirst) Write(p []byte) (int, error) {
 	_, _ = t.tail.Write(p)
-	if t.err == nil {
-		if _, err := t.w.Write(p); err != nil {
-			t.err = err
-		}
-	}
-	return len(p), nil
+	return t.keepFirst.Write(p)
 }
 
 // rewrites reports whether the pod's town root and the Mac's differ, and so

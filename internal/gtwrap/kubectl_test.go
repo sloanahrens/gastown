@@ -1255,23 +1255,30 @@ func TestExecLostReplyNoteText(t *testing.T) {
 
 // pipeKube runs its child the way os/exec does for a writer that is not a file:
 // the child writes into a pipe, and one goroutine copies the pipe to the writer
-// and stops at the first error, leaving the pipe unread. The child writes flood
-// bytes and then the break text, which is the last line of a real stream, and the call ends only when the child's
-// writes return, as Wait does.
+// and stops at the first error, leaving the pipe unread. The child writes about
+// flood bytes as newline-terminated lines, so an output rewriter hands each line
+// on as it arrives, and then the break text, which is the last line of a real
+// stream. The call ends only when the child's writes return, as Wait does. The
+// flood goes to stdout when onStdout is set, else to stderr.
 type pipeKube struct {
 	*fakeKube
-	ctx   context.Context
-	flood int
+	ctx      context.Context
+	flood    int
+	onStdout bool
 }
 
-func (p pipeKube) AttachStreams(argv []string, env []string, _ io.Reader, _, stderr io.Writer) (int, error) {
+func (p pipeKube) AttachStreams(argv []string, env []string, _ io.Reader, stdout, stderr io.Writer) (int, error) {
+	dst := stderr
+	if p.onStdout {
+		dst = stdout
+	}
 	pr, pw := io.Pipe()
 	copied := make(chan struct{})
 	go func() {
 		defer close(copied)
-		_, _ = io.Copy(stderr, pr)
+		_, _ = io.Copy(dst, pr)
 	}()
-	_, _ = pw.Write(bytes.Repeat([]byte("x"), p.flood))
+	_, _ = pw.Write(bytes.Repeat([]byte("x\n"), p.flood/2))
 	_, _ = io.WriteString(pw, execStreamBreak)
 	_ = pw.Close()
 	select {
@@ -1319,29 +1326,103 @@ func TestExecFailingStderrDoesNotStopTheChild(t *testing.T) {
 	}
 }
 
-// TestExecStdoutIsTheCallersWriter: at equal roots a bd call's stdout goes to the
-// caller's own writer, not a wrapper around it (an *os.File is then the child's
-// descriptor), and the two streams reach one shared writer in the order written.
-func TestExecStdoutIsTheCallersWriter(t *testing.T) {
+// TestExecFailingStdoutDoesNotStopTheChild: a caller's stdout that fails on its
+// first write must not leave the child's pipe unread. The child then writes a
+// mebibyte; the call returns inside the watchdog with the child's status and the
+// writer's error. The different-roots row runs the same flood through the output
+// rewriter, which is the stdout the call hands the shell on that path.
+func TestExecFailingStdoutDoesNotStopTheChild(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	mkdirTownDir(t, filepath.Join(town, ".beads"))
-	f := healthyKube()
-	f.attachExit = 1
-	var note, both bytes.Buffer
-	k := beadsTownKube(t, f, &note, town)
-	var got io.Writer
-	k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak, gotStdout: &got}
-	k.Stdout, k.Stderr = &both, &both
-	if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
-		t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+	for _, tc := range []struct{ name, podRoot string }{{"equal roots", ""}, {"different roots", "/pod/town"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			mkdirTownDir(t, filepath.Join(town, ".beads"))
+			f := healthyKube()
+			f.attachExit = 1
+			var note bytes.Buffer
+			k := beadsTownKube(t, f, &note, town)
+			if tc.podRoot != "" {
+				k.PodRoot = tc.podRoot
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			k.Shell = pipeKube{fakeKube: f, ctx: ctx, flood: 1 << 20, onStdout: true}
+			k.Stdout, k.Stderr = failWriter{}, io.Discard
+			type result struct {
+				exit int
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				exit, err := k.Launch(kubeBdCallArgs(t, town, "create"))
+				done <- result{exit, err}
+			}()
+			select {
+			case r := <-done:
+				if r.exit != 1 || !errors.Is(r.err, errWriterClosed) {
+					t.Fatalf("Launch = %d, %v; want the child's status 1 and the stream's error", r.exit, r.err)
+				}
+			case <-ctx.Done():
+				t.Fatal("Launch did not return: the failing stdout stopped the copy and the child blocked on the unread pipe")
+			}
+		})
 	}
-	if got != io.Writer(&both) {
-		t.Fatalf("stdout given to the shell is %T, want the caller's own writer", got)
-	}
-	if want := "out\n" + execStreamBreak; both.String() != want {
-		t.Fatalf("shared stream = %q, want %q", both.String(), want)
-	}
+}
+
+// TestExecStdoutIsPassedThroughUnlessAFile: a bd call's stdout reaches the shell
+// unchanged when it is an *os.File, so the child writes the file's own descriptor.
+// Any other writer is wrapped, so a failing write cannot stop the copy; the wrapped
+// writer still reaches the caller's writer, and the two streams keep their order.
+func TestExecStdoutIsPassedThroughUnlessAFile(t *testing.T) {
+	t.Parallel()
+	t.Run("an *os.File is the child's descriptor", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		mkdirTownDir(t, filepath.Join(town, ".beads"))
+		f := healthyKube()
+		f.attachExit = 1
+		var note, stderr bytes.Buffer
+		k := beadsTownKube(t, f, &note, town)
+		var got io.Writer
+		k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak, gotStdout: &got}
+		out, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+		if err != nil {
+			t.Fatalf("create stdout file: %v", err)
+		}
+		defer out.Close()
+		k.Stdout, k.Stderr = out, &stderr
+		if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+			t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+		}
+		if got != io.Writer(out) {
+			t.Fatalf("stdout given to the shell is %T, want the caller's *os.File", got)
+		}
+		if data, err := os.ReadFile(out.Name()); err != nil || string(data) != "out\n" {
+			t.Fatalf("stdout file = %q, %v; want %q", data, err, "out\n")
+		}
+	})
+	t.Run("another writer is wrapped and shares one stream in order", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		mkdirTownDir(t, filepath.Join(town, ".beads"))
+		f := healthyKube()
+		f.attachExit = 1
+		var note, both bytes.Buffer
+		k := beadsTownKube(t, f, &note, town)
+		var got io.Writer
+		k.Shell = streamKube{fakeKube: f, stdout: "out\n", stderr: execStreamBreak, gotStdout: &got}
+		k.Stdout, k.Stderr = &both, &both
+		if exit, err := k.Launch(kubeBdCallArgs(t, town, "create")); exit != 1 || err != nil {
+			t.Fatalf("Launch = %d, %v; want the call's status 1 and no error", exit, err)
+		}
+		if got == io.Writer(&both) {
+			t.Fatalf("stdout given to the shell is the caller's %T, want a wrapper around it", got)
+		}
+		if want := "out\n" + execStreamBreak; both.String() != want {
+			t.Fatalf("shared stream = %q, want %q", both.String(), want)
+		}
+	})
 }
 
 // TestExecLostReplyNoteSurvivesAFailingStream: a caller's stderr or stdout that
