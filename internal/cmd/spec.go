@@ -4804,6 +4804,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 		},
 		rigs: townRigs,
+		blocked: func(beadsDir string) ([]*beads.Issue, error) {
+			return beads.NewPinned(beadsDir).Blocked()
+		},
 	})
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
@@ -5552,6 +5555,9 @@ type specTickBoardDeps struct {
 	// rigs are the town's rigs, the set the inherited seam reads a blocked
 	// list from each tick.
 	rigs []string
+	// blocked reads one beads directory's blocked list; production is bd's
+	// Blocked, a test counts the reads.
+	blocked func(beadsDir string) ([]*beads.Issue, error)
 }
 
 // specTickBoard builds the board closure the tick and a held tick both take
@@ -5567,9 +5573,10 @@ type specTickBoardDeps struct {
 // another rig): it waits up to five minutes for its next read.
 //
 // The candidate order takes the inherited seam over every rig's blocked list
-// (gt-4cpx5s): the seam reads all of dp.rigs, one blocked call per rig per board
-// read, including a board with no candidate. Its opener is its own, as
-// detailStore's is; the ready board keeps no handle to share.
+// (gt-4cpx5s): the seam reads all of dp.rigs, including a board with no candidate.
+// A rig whose hashes still hold and whose stored list is under five minutes old
+// gets that list instead of a blocked call (gt-bbtsi4, through reusedBlockedReader).
+// Its opener is its own, as detailStore's is; the ready board keeps no handle to share.
 func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
 	return func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
 		heads := dp.heads()
@@ -5585,9 +5592,7 @@ func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *spe
 				recordRigRead(dp.memory, heads, filepath.Base(rigPath), len(issues), dp.now())
 			}
 			return issues, err
-		}, dp.rigStatus, retry, drop, skip, inheritedSeam(dp.rigs, inheritedBlockedReader(dp.townRoot, func(beadsDir string) ([]*beads.Issue, error) {
-			return beads.NewPinned(beadsDir).Blocked()
-		})))
+		}, dp.rigStatus, retry, drop, skip, inheritedSeam(dp.rigs, reusedBlockedReader(dp.memory, heads, dp.now, inheritedBlockedReader(dp.townRoot, dp.blocked))))
 		return specBoardDetails(dp.reads, dp.detailStore, read, memo)
 	}
 }
