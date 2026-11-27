@@ -13,11 +13,18 @@ import (
 // must not suppress the other pass's.
 const movedOnLogPrefix = "moved-on\x00"
 
-// movedOnKeep reports whether rec is a keep the branch guard wrote for work
-// that landed: the only kind this pass drops (gt-i72us8).
+// movedOnKeepReason reports whether a keep reason is one this pass judges: the
+// branch guard's keep of a seat working its own branch, or the gateway-silent
+// keep, since a seat slung to another bead leaves either one unsatisfiable.
+func movedOnKeepReason(reason string) bool {
+	return strings.HasPrefix(reason, seatWorksKeepPrefix) || isGatewayNoAnswerKeep(reason)
+}
+
+// movedOnKeep reports whether rec is a keep this pass may drop: work that
+// landed, for one of the reasons movedOnKeepReason judges (gt-i72us8,
+// gt-29kb5p).
 func movedOnKeep(rec keptSandboxSeatRecord) bool {
-	return rec.Landing != nil && rec.Landing.Landed &&
-		strings.HasPrefix(rec.Reason, seatWorksKeepPrefix)
+	return rec.Landing != nil && rec.Landing.Landed && movedOnKeepReason(rec.Reason)
 }
 
 // movedOnSeat reads the kept record at path and the seat's agent bead and
@@ -58,10 +65,11 @@ func movedOnAfter(seat KeptSandboxSeat, cursor string) bool {
 
 // dropMovedOnKeptSeats drops the kept record of every seat that has moved on
 // to another bead (gt-qrzhot, gt-i72us8). The branch guard keeps a landed seat
-// while it works its own polecat branch rather than the branch that landed; a
-// seat slung to another bead afterwards never lands the kept bead, so its
-// record can never be satisfied and would keep raising an attention item for a
-// seat that is gone. A record this pass does not drop keeps it: one for another
+// while it works its own polecat branch rather than the branch that landed, and
+// a gateway-silent keep holds a landed seat whose gateway did not answer; a seat
+// slung to another bead afterwards never lands the kept bead, so its record can
+// never be satisfied and would keep raising an attention item for a seat that is
+// gone (gt-29kb5p). A record this pass does not drop keeps it: one for another
 // reason, one whose landing is unlanded, a seat still on the landed bead (a
 // takeover), a record or agent bead that cannot be read, and a removal that
 // fails.
@@ -97,7 +105,7 @@ func (h *patrolScanHost) dropMovedOnKeptSeats() {
 	read := 0
 	for i := 0; i < n; i++ {
 		seat := seats[(start+i)%n]
-		if !strings.HasPrefix(seat.Reason, seatWorksKeepPrefix) {
+		if !movedOnKeepReason(seat.Reason) {
 			continue
 		}
 		if read == budget {
@@ -111,9 +119,10 @@ func (h *patrolScanHost) dropMovedOnKeptSeats() {
 }
 
 // dropMovedOnKeptSeat judges one seat's kept record and, when the seat works
-// another bead than the one that landed, drops it under the seat lock. A keep
-// it cannot settle logs once, so a seat whose agent bead stays unreadable is
-// not re-reported on every tick.
+// another bead than the one that landed, drops it under the seat lock and
+// clears the seat's silent-gateway tally, so a released seat raises no item on
+// its own. A keep it cannot settle logs once, so a seat whose agent bead stays
+// unreadable is not re-reported on every tick.
 func (h *patrolScanHost) dropMovedOnKeptSeat(rig, name string) {
 	key := movedOnLogPrefix + rig + "/" + name
 	path, err := keptSandboxSeatPath(h.town(), rig, name)
@@ -139,6 +148,9 @@ func (h *patrolScanHost) dropMovedOnKeptSeat(rig, name string) {
 		if err := h.removeKeptSeatRecord(rig, name); err != nil {
 			return fmt.Errorf("its record cannot be removed: %w", err)
 		}
+		// The seat is released, so its silent-gateway count ends with the
+		// record; a tally left behind would raise the seat on its own.
+		h.d.clearGatewayTally(rig, name)
 		delete(h.d.keptDropLogged, key)
 		h.d.logger.Printf("patrol_scan: kept record of %s/%s dropped: the seat works another bead than the landed %s", rig, name, landed)
 		return nil
