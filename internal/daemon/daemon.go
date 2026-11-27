@@ -392,8 +392,9 @@ type Daemon struct {
 	// gt-menvlj).
 	clusterDriftCache clusterDriftCache
 	// clusterDriftCompare is the drift collector's compare, injected so it
-	// reads no cluster. nil until the bead that wires the real read: the cache
-	// keeps its unreadable answer like any other (gt-menvlj).
+	// reads no cluster. New wires the real one (gt-v49mtr); a daemon a test
+	// builds without that step keeps the unreadable answer for a nil compare
+	// (gt-menvlj).
 	clusterDriftCompare func(ctx context.Context) (clusterDriftResult, error)
 
 	// seatUnreachable is the polecat-health pass's outage tracker, and the
@@ -2158,7 +2159,17 @@ func New(config *Config) (*Daemon, error) {
 		return beads.New(d.config.TownRoot, beads.WithBin(d.bdPathOrDefault()))
 	}
 
+	d.wireClusterDriftCompare()
 	return d, nil
+}
+
+// wireClusterDriftCompare gives the daemon the drift collector's real compare:
+// gt town cluster drift run as a bounded child of the daemon's own binary
+// (cluster_drift_compare.go). The patrols.cluster_drift setting decides whether
+// the collector calls it, so wiring it starts no process until the setting is
+// on (gt-v49mtr).
+func (d *Daemon) wireClusterDriftCompare() {
+	d.clusterDriftCompare = newClusterDriftCompare(os.Executable, startDriftChild)
 }
 
 // processEnv writes the daemon's own process environment. It is the one
