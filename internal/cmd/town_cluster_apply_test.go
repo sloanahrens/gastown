@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,23 @@ import (
 	"github.com/steveyegge/gastown/internal/clusterapproval"
 	"github.com/steveyegge/gastown/internal/update"
 )
+
+// clusterApplyFileSHA is the hex SHA-256 of data, as plan.json records a plan file's hash.
+func clusterApplyFileSHA(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// shapeWebFile is readWebFile with the hash of readWebDoc, the bytes the plan
+// directory holds for it. readWebFile's placeholder hash would now be refused.
+var shapeWebFile = planRecordFile{Name: readWebFile.Name, Phase: readWebFile.Phase, SHA256: clusterApplyFileSHA(readWebDoc), Revision: readWebFile.Revision, ResourceVersion: readWebFile.ResourceVersion}
+
+// shapeAbsentDoc is a Deployment the cluster does not hold: its plan file names
+// no resourceVersion, so only the hash check reads it.
+var shapeAbsentDoc = []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: gastown\n")
+
+// shapeAbsentFile is the plan record's entry for shapeAbsentDoc.
+var shapeAbsentFile = planRecordFile{Name: "deployment-api.yaml", Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(shapeAbsentDoc), Absent: true}
 
 // shapeKube is a RunFunc that counts every cluster call, so a run that applies
 // nothing can be shown to have made none.
@@ -94,7 +113,7 @@ func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
-	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 	writeReadFile(t, filepath.Join(dir, "approval.json"), readApprovalOK)
 	kube := &shapeLiveKube{out: shapeLiveAt("7")}
 	var verified int
@@ -139,7 +158,7 @@ func TestClusterShapeApplyClusterMoved(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
-			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 			approvalPath := filepath.Join(dir, "approval.json")
 			writeReadFile(t, approvalPath, readApprovalOK)
 			kube := &shapeLiveKube{out: tc.out, exit: tc.exit, err: tc.err}
@@ -166,7 +185,7 @@ func TestClusterShapeApplyOtherPlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
-	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, shapeApprovalFor(strings.Repeat("cd", 32)))
 	var calls, verified int
@@ -190,7 +209,7 @@ func TestClusterShapeApplyVerifierError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
-	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, readApprovalOK)
 	var calls, verified int
@@ -224,7 +243,7 @@ func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
-			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(readWebFile))
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 			approvalPath := filepath.Join(dir, "approval.json")
 			if !tc.missing {
 				writeReadFile(t, approvalPath, tc.data)
@@ -236,6 +255,74 @@ func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 			}
 			if calls != 0 {
 				t.Errorf("runTownClusterApply made %d cluster calls, want none", calls)
+			}
+		})
+	}
+}
+
+// TestClusterShapeApplyFileHash: a plan file whose bytes differ from the sha256
+// plan.json records for it, or that cannot be read, or whose name leaves the plan
+// directory, is refused before the approval is read and before any cluster call,
+// so no apply is made and the verifier never runs. Mutation: remove the
+// checkApplyPlanFiles call in runTownClusterApply, and the held Deployment row
+// reaches the cluster read, so this test fails. Mutation: drop the hash comparison
+// in checkApplyPlanFiles, and the two changed-bytes rows fail the same way.
+func TestClusterShapeApplyFileHash(t *testing.T) {
+	t.Parallel()
+	tamperedWeb := append(append([]byte{}, readWebDoc...), "# edited\n"...)
+	tamperedAPI := append(append([]byte{}, shapeAbsentDoc...), "# edited\n"...)
+	tests := []struct {
+		name    string
+		files   []planRecordFile
+		write   map[string][]byte // the plan directory's files; a file not named here is missing
+		wantErr string
+	}{
+		{
+			name:    "a held Deployment's bytes differ from its sha256",
+			files:   []planRecordFile{shapeWebFile},
+			write:   map[string][]byte{"deployment-web.yaml": tamperedWeb},
+			wantErr: "does not match the sha256",
+		},
+		{
+			name:    "an absent Deployment's bytes differ from its sha256",
+			files:   []planRecordFile{shapeWebFile, shapeAbsentFile},
+			write:   map[string][]byte{"deployment-web.yaml": readWebDoc, "deployment-api.yaml": tamperedAPI},
+			wantErr: "does not match the sha256",
+		},
+		{
+			name:    "an absent Deployment's file is missing",
+			files:   []planRecordFile{shapeWebFile, shapeAbsentFile},
+			write:   map[string][]byte{"deployment-web.yaml": readWebDoc},
+			wantErr: "cannot be read",
+		},
+		{
+			name:    "a file name leaves the plan directory",
+			files:   []planRecordFile{shapeWebFile, {Name: "../secret.yaml", Phase: planPhaseWorkloads, Absent: true}},
+			write:   map[string][]byte{"deployment-web.yaml": readWebDoc},
+			wantErr: "not a file in the plan directory",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			for name, data := range tc.write {
+				writeReadFile(t, filepath.Join(dir, name), data)
+			}
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(tc.files...))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			kube := &shapeLiveKube{out: shapeLiveAt("7")}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
+				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
+			}
+			if verified != 0 {
+				t.Errorf("runTownClusterApply called verify %d times, want none", verified)
+			}
+			if len(kube.calls) != 0 || shapeApplies(kube.calls) != 0 {
+				t.Errorf("runTownClusterApply made the calls %v, want none", kube.calls)
 			}
 		})
 	}
