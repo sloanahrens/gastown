@@ -24,6 +24,10 @@ func TestCreatorCites(t *testing.T) {
 		{"bare id mention is not a cite", creatorDescription("gt-aaa blocks this; see gt-bbb.", "Go only."), nil},
 		{"cite outside Goal and Constraints is ignored", "## Goal\nA thing exists.\n\n## Constraints\nGo only.\n\n## Out of scope\nThe file is created by bead gt-aaa.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR", nil},
 		{"dotted id, sentence period not part of it", creatorDescription("created by bead gt-13dre6.55.", "Go only."), []string{"gt-13dre6.55"}},
+		{"multi-hyphen id read whole", creatorDescription("created by bead gt-gastown-crew-goose.", "Go only."), []string{"gt-gastown-crew-goose"}},
+		{"hq id with a wisp segment read whole", creatorDescription("created by bead hq-wisp-i1jsk, then tests.", "Go only."), []string{"hq-wisp-i1jsk"}},
+		{"underscore id read whole", creatorDescription("created by bead gt-a_b.", "Go only."), []string{"gt-a_b"}},
+		{"trailing hyphen or underscore not part of id", creatorDescription("created by bead gt-abc- and created by bead gt-def_.", "Go only."), []string{"gt-abc", "gt-def"}},
 		{"no cite", creatorDescription("A thing exists.", "Go only."), nil},
 	}
 	for _, tc := range tests {
@@ -65,6 +69,10 @@ func TestLintCreatorCite(t *testing.T) {
 			[]string{"creator cite gt-cite is retired", `"superseded by gt-new"`}},
 		{"retired folded into refused, names reason", []CreatorCite{{ID: "gt-cite", State: CreatorRetired, Reason: "folded into gt-new"}}, RouteRefuse,
 			[]string{"creator cite gt-cite is retired", `"folded into gt-new"`}},
+		{"retired other reason refused, names reason", []CreatorCite{{ID: "gt-cite", State: CreatorRetired, Reason: "no longer needed"}}, RouteRefuse,
+			[]string{"creator cite gt-cite is retired", `"no longer needed"`}},
+		{"retired empty reason refused", []CreatorCite{{ID: "gt-cite", State: CreatorRetired}}, RouteRefuse,
+			[]string{"creator cite gt-cite is retired", `closed ""`}},
 		{"unreadable refused", []CreatorCite{{ID: "gt-cite", State: CreatorUnreadable}}, RouteRefuse,
 			[]string{"creator cite gt-cite could not be read"}},
 		{"unrecognized state refused", []CreatorCite{{ID: "gt-cite", State: "orphaned"}}, RouteRefuse,

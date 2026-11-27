@@ -34,9 +34,11 @@ type CreatorCite struct {
 	Reason string
 }
 
-// creatorCiteRe reads the bead id after "created by bead". The id is a prefix,
-// a dash and a dotted tail, so a sentence's final period is not part of it.
-var creatorCiteRe = regexp.MustCompile(`(?i)\bcreated\s+by\s+bead\s+([a-z][a-z0-9]*-[a-z0-9]+(?:\.[a-z0-9]+)*)`)
+// creatorCiteRe reads the bead id after "created by bead". The id is a
+// lowercase prefix, a dash, then letters and digits joined by single -, . or
+// _, read whole, so a sentence's final period, dash or underscore is not part
+// of it.
+var creatorCiteRe = regexp.MustCompile(`\b(?i:created\s+by\s+bead)\s+([a-z][a-z0-9]*-[A-Za-z0-9]+(?:[-._][A-Za-z0-9]+)*)`)
 
 // CreatorCites returns the bead ids that follow "created by bead" in the Goal
 // and Constraints sections, each once, in order of appearance. A bead id named
