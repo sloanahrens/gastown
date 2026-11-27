@@ -18,7 +18,7 @@ runnerResources:
   cpu: "1"
   memory: 1Gi
 dindResources:
-  cpu: "8"
+  cpu: "6"
   memory: 12Gi
 dindRequests:
   cpu: "4"

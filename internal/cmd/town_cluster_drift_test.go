@@ -1033,7 +1033,7 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 }
 
 // The gate runner's live objects a cluster in step holds: the control render with
-// the fields the API server fills in, the dind share at the cpu 8 of
+// the fields the API server fills in, the dind cpu limit 6 of
 // values.control.yaml, and config.yml at the capacity 3 the control values name.
 // They are not derived from the render at test time, so a change to a template
 // constant or the values makes the compare report the difference instead of the
@@ -1124,32 +1124,32 @@ func TestTownClusterDriftHoldsARunnerInStep(t *testing.T) {
 }
 
 // TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota holds the recorded
-// cluster's dind request of 4 and limit of 8 to a render of 6 for both, which is one
+// cluster's dind request of 4 and limit of 6 to a render of 8 for both, which is one
 // line for the cpu request and one for the limit, and the changed line of
 // config.yml, whose quota is that same limit, as a '-' and a '+' line.
 func TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota(t *testing.T) {
 	t.Parallel()
 	recorded := driftRunnerRecorded(t)
-	six := driftControlRunner(t, "6")
-	if _, err := forgejorunner.Build(six); err != nil {
-		t.Fatalf("rendering the runner from a dind share of 6: %v", err)
+	eight := driftControlRunner(t, "8")
+	if _, err := forgejorunner.Build(eight); err != nil {
+		t.Fatalf("rendering the runner from a dind share of 8: %v", err)
 	}
 	deploymentLine := "deployment/" + forgejorunner.Name + ": "
 	configLine := "configmap/" + forgejorunner.Name + "-config: "
 	d, out, town := driftTestSeams(t, nil)
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
-	d.runner = driftRunnerRendering(t, six)
+	d.runner = driftRunnerRendering(t, eight)
 	d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), recorded)
 	err := runClusterDrift(context.Background(), d)
 	if got := driftExit(err); got != 1 {
 		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 	}
 	wantLines := []string{
-		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.limits.cpu", "6", "8"),
-		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "6", "4"),
+		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.limits.cpu", "8", "6"),
+		deploymentLine + driftWantDifference(t, "spec.template.spec.initContainers[name=dind].resources.requests.cpu", "8", "4"),
 		configLine + "data.config.yml:",
-		configLine + "-     CI_CPU_QUOTA: '8'",
-		configLine + "+     CI_CPU_QUOTA: '6'",
+		configLine + "-     CI_CPU_QUOTA: '6'",
+		configLine + "+     CI_CPU_QUOTA: '8'",
 	}
 	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
