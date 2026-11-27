@@ -34,6 +34,21 @@ func LandedLines(minutes float64) (LinesBand, bool) {
 	return LinesBand{}, false
 }
 
+// LineFloor is the Median of the band the bead's sp-minutes estimate reads
+// (advice.go). found is false when no estimate reads or the minutes fall outside
+// the table, so the gate reads no floor rather than a guessed one.
+func LineFloor(labels []string) (int, bool) {
+	minutes, ok := spMinutes(labels)
+	if !ok {
+		return 0, false
+	}
+	band, ok := LandedLines(minutes)
+	if !ok {
+		return 0, false
+	}
+	return band.Median, true
+}
+
 // Refuse is the band's Median added lines.
 func (b LinesBand) Refuse() int { return b.Median }
 
