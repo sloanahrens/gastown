@@ -1,7 +1,7 @@
-# The gt-sbx deployer's policy ClusterRole and apply Role. The overseer applies
-# this file with the kind admin credential once per rebuild, in the sitting that
-# creates the gt-sbx cluster (gt-sc0avn, option A); neither the control cluster's
-# static set nor the gt-sbx set embeds it.
+# The gt-sbx deployer's policy ClusterRole, apply Role and read credential's
+# grants. The overseer applies this file with the kind admin credential once per
+# rebuild, in the sitting that creates the gt-sbx cluster (gt-sc0avn, option A);
+# neither the control cluster's static set nor the gt-sbx set embeds it.
 #
 # deploy/k8s/deployer-rbac.yaml states the same reach for the control cluster's
 # policy credential: escalate, bind and ClusterRoleBinding writes make this
@@ -127,6 +127,99 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: gt-sbx-deployer-apply
+subjects:
+  - kind: User
+    name: gt-deployer-apply
+    apiGroup: rbac.authorization.k8s.io
+---
+# The read credential (User gt-deployer-read, the name its certificate carries):
+# the built-in view role, plus get and list on the cluster-scoped kinds view
+# leaves out and the drift compare lists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sbx-deployer-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: User
+    name: gt-deployer-read
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-sbx-deployer-reader-extra
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sbx-deployer-reader-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sbx-deployer-reader-extra
+subjects:
+  - kind: User
+    name: gt-deployer-read
+    apiGroup: rbac.authorization.k8s.io
+---
+# get returns the Secret's data, not only its existence: RBAC cannot separate
+# them, so both the read and the apply credential can read these four values.
+# The existence check prints only the table (the secretpreflight package).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-sbx-deployer-secrets
+  namespace: openshell
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames:
+      - openshell-credential-storage-key-encryption-key
+      - openshell-server-tls
+      - openshell-client-tls
+      - openshell-jwt-keys
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-sbx-deployer-secrets-read
+  namespace: openshell
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-sbx-deployer-secrets
+subjects:
+  - kind: User
+    name: gt-deployer-read
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-sbx-deployer-secrets-apply
+  namespace: openshell
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-sbx-deployer-secrets
 subjects:
   - kind: User
     name: gt-deployer-apply
