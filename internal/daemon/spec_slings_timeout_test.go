@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -49,6 +50,50 @@ func TestASlingKilledAtItsBoundRecordsTheAttempt(t *testing.T) {
 	}
 	if n := countContaining(lines(), "gt-z: sling process failed"); n != 1 {
 		t.Errorf("failure lines = %d, want one: %v", n, lines())
+	}
+}
+
+// A sling writes each phase to stderr as it ends, so a sling killed at its
+// bound leaves the phases it finished, and the daemon logs them rather than a
+// failure with no sign of where the sling spent its bound (gt-d68ibg). The
+// failure reason still quotes the last line that is not one of those phases.
+func TestASlingKilledAtItsBoundLogsThePhasesItCompleted(t *testing.T) {
+	t.Parallel()
+	// A killed sling ends on the phase it was running, so its phase lines are
+	// last: the reason must look past them.
+	cases := []struct{ name, stderr, want string }{
+		{"the phases it completed, in order", "the sandbox refused to start\n" +
+			session.PhaseLinePrefix + "spawn 1.5s\n" + session.PhaseLinePrefix + "fill sandbox 2s\n",
+			"gt-z: phases completed before the failure: spawn 1.5s, fill sandbox 2s"},
+		{"no phase reported", "the sandbox refused to start\n", "gt-z: the sling reported no phase"},
+		{"a prefix with no phase name", session.PhaseLinePrefix + "\nthe sandbox refused to start\n", "gt-z: the sling reported no phase"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, d, lines := daemonWhoseSlingFailed(t, slingFailure{took: specSlingBound(), stderr: []byte(c.stderr)})
+			bd := newWorkBD(t)
+			bd.seed("gt-z", string(beads.StatusOpen), time.Now())
+			d.openWorkBeads = bd.open
+			d.runSpecDispatch()
+			waitSlings(t, d)
+
+			if got := countContaining(lines(), c.want); got != 1 {
+				t.Errorf("log lines containing %q = %d, want one: %v", c.want, got, lines())
+			}
+			var failure string
+			for _, line := range lines() {
+				if strings.Contains(line, "gt-z: sling process failed") {
+					failure = line
+				}
+			}
+			if failure == "" {
+				t.Fatalf("no failure line: %v", lines())
+			}
+			if !strings.Contains(failure, "the sandbox refused to start") || strings.Contains(failure, session.PhaseLinePrefix) {
+				t.Errorf("failure line = %q, want the last non-phase stderr line and no phase report", failure)
+			}
+		})
 	}
 }
 
@@ -345,10 +390,11 @@ func failedSling(t *testing.T) (*fakeCLI, *Daemon, func() []string) {
 }
 
 // slingFailure is how one sling ends in these tests: took is how far the fake
-// clock is carried while its process runs, and unslingErr refuses the hand-back
-// of a bead the sling hooked.
+// clock is carried while its process runs, stderr is what the process wrote as
+// it failed, and unslingErr refuses the hand-back of a bead the sling hooked.
 type slingFailure struct {
 	took       time.Duration
+	stderr     []byte
 	unslingErr error
 }
 
@@ -369,7 +415,7 @@ func daemonWhoseSlingFailed(t *testing.T, o slingFailure) (*fakeCLI, *Daemon, fu
 		switch {
 		case len(args) >= 2 && args[0] == "spec" && args[1] == "sling":
 			clock.Advance(o.took)
-			return nil, []byte("signal: terminated"), errors.New("signal: terminated")
+			return nil, o.stderr, errors.New("signal: terminated")
 		case len(args) >= 1 && args[0] == "unsling" && o.unslingErr != nil:
 			// The fake records the call it answers, so the test can see the
 			// hand-back was tried before it is refused.
