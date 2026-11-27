@@ -89,12 +89,10 @@ func TestRoleFromTheCommonWorkPath(t *testing.T) {
 }
 
 // TestCommonWorkPathIncompleteEnvFallback pins the fallback that fills a missing
-// rig or polecat from cwd detection when the cwd is the common work path
-// (gt-37qegv). The path is one segment, so cwd detection cannot name a polecat,
-// and a fill from it marks the env incomplete. The rig is not asserted: from the
-// common path cwd detection reports the rig as "work", which is wrong, and fixing
-// that is outside this change. The test pins the role the env names and the
-// incomplete flag only.
+// rig from cwd detection, and that the common work path fills nothing (gt-37qegv,
+// gt-fc82u2). The common path is one segment that names no rig, so a fill from it
+// would invent the rig "work"; a rig root is the cwd that does fill. The test
+// pins the role the env names, the polecat and the incomplete flag only.
 func TestCommonWorkPathIncompleteEnvFallback(t *testing.T) {
 	t.Parallel()
 	townRoot := filepath.Join(t.TempDir(), "gt")
@@ -102,18 +100,20 @@ func TestCommonWorkPathIncompleteEnvFallback(t *testing.T) {
 
 	tests := []struct {
 		name           string
+		cwd            string
 		vars           map[string]string
 		wantPolecat    string
 		wantIncomplete bool
 	}{
-		{"GT_ROLE alone fills from the common path", map[string]string{EnvGTRole: "polecat"}, "", true},
-		{"GT_ROLE with GT_RIG and GT_POLECAT is complete", map[string]string{EnvGTRole: "polecat", "GT_RIG": "gastown", "GT_POLECAT": "slit"}, "slit", false},
+		{"GT_ROLE alone fills nothing from the common path", commonPath, map[string]string{EnvGTRole: "polecat"}, "", false},
+		{"GT_ROLE alone fills the rig from a rig root", filepath.Join(townRoot, "gastown"), map[string]string{EnvGTRole: "polecat"}, "", true},
+		{"GT_ROLE with GT_RIG and GT_POLECAT is complete", commonPath, map[string]string{EnvGTRole: "polecat", "GT_RIG": "gastown", "GT_POLECAT": "slit"}, "slit", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			env := func(k string) string { return tt.vars[k] }
-			info, err := getRoleWithContextEnv(commonPath, townRoot, env)
+			info, err := getRoleWithContextEnv(tt.cwd, townRoot, env)
 			if err != nil {
 				t.Fatalf("getRoleWithContextEnv: %v", err)
 			}
