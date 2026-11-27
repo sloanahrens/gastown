@@ -28,6 +28,11 @@ const (
 	liftReleasedOnRetryDetail = "the run's cleanup released the hold on retry"
 )
 
+// ErrNoRenderRecord marks a hook error saying the cluster has no recorded
+// render to compare with, so a missing record is told apart from a compare
+// that could not be read. The hook wraps it; errors.Is finds it.
+var ErrNoRenderRecord = errors.New("no recorded render")
+
 // Deps is the effects one update run reaches.
 type Deps struct {
 	// Clock stamps every time the run records.
