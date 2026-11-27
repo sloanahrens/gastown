@@ -1318,6 +1318,10 @@ type poolSeatClaimStore struct {
 	fs  poolSeatFS
 	dir string
 	id  string
+	// bead is the bead this spawn is for. The spawn writes it before its pool
+	// decision, and the claim that decision writes names it, so the roster
+	// counts a running sling and the seat its claim holds once (gt-75fma5).
+	bead string
 }
 
 // newPoolSeatClaimStore is the store for one spawn: empty until that spawn's
@@ -2078,7 +2082,14 @@ func (r *poolRouter) routeWithNotice(requested string, live bool, occupied func(
 	}
 	agent, reason, refused, raise := choosePoolAgent(pool, requested, sessions, r.now())
 	if live && !refused {
-		seat.claimFor(agent, pool, "")
+		// The claim names the bead this spawn is for, so the roster counts the
+		// running sling and the seat its claim holds once (gt-75fma5). A store
+		// the caller never handed a bead writes a claim with none.
+		bead := ""
+		if r.seats.store != nil {
+			bead = r.seats.store.bead
+		}
+		seat.claimFor(agent, pool, bead)
 	}
 	if seat.note != "" {
 		reason = fmt.Sprintf("%s [%s]", reason, seat.note)
