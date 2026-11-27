@@ -32,20 +32,32 @@ var errClusterDriftNoAnswer = errors.New("no drift compare is wired into the dae
 // collectClusterDrift turns the drift compare's answer into its items: the
 // drift item for a difference and the unreadable item for a read that failed
 // or was never wired. It answers nothing while the patrol is off, and calls
-// the answer on every heartbeat; the 15 minute cadence is the cache bead's
-// (gt-0cdmgq). The error it returns is always nil and no timer retries: a
-// failed answer applies the unreadable item at once and keeps the drift item
-// from prev, the last run that read the cluster and found a difference, so a
-// failed read never clears an open difference (gt-b6j1k5, gt-9jbtl6).
+// the answer on every heartbeat once the start delay has passed; the 15 minute
+// cadence is the cache bead's (gt-0cdmgq). Inside the start delay it calls no
+// compare and returns the held items (gt-myyr6e). The error it returns is
+// always nil and no timer retries: a failed answer applies the unreadable item
+// at once and keeps the drift item from prev, the last run that read the
+// cluster and found a difference, so a failed read never clears an open
+// difference (gt-b6j1k5, gt-9jbtl6).
 func (s *attentionSources) collectClusterDrift(ctx context.Context) ([]attention.Item, error) {
 	if s.clusterDriftEnabled == nil || !s.clusterDriftEnabled() {
 		return nil, nil
+	}
+	if s.clusterDriftStarting != nil && s.clusterDriftStarting() {
+		return clusterDriftHeldFromPrev(s.prev), nil
 	}
 	if s.clusterDriftAnswer == nil {
 		return clusterDriftKeepingTheDifference(s.prev, clusterDriftItems(clusterDriftResult{}, errClusterDriftNoAnswer)), nil
 	}
 	res, err := s.clusterDriftAnswer(ctx)
 	return clusterDriftKeepingTheDifference(s.prev, clusterDriftItems(res, err)), nil
+}
+
+// clusterDriftHeldFromPrev is the drift and unreadable items the last heartbeat
+// held, returned unchanged while the start delay runs: a roll raises nothing
+// new and clears nothing (gt-myyr6e).
+func clusterDriftHeldFromPrev(prev attention.State) []attention.Item {
+	return append(prevOfKind(prev, attention.KindClusterDrift), prevOfKind(prev, attention.KindClusterDriftUnreadable)...)
 }
 
 // clusterDriftKeepingTheDifference returns an unreadable run's item beside the

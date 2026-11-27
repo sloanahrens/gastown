@@ -412,6 +412,10 @@ type attentionSources struct {
 	// cache. A sources value that carries none raises the unreadable item
 	// rather than a clear (gt-b6j1k5, gt-menvlj).
 	clusterDriftAnswer func(ctx context.Context) (clusterDriftResult, error)
+	// clusterDriftStarting reports whether the daemon is still inside its
+	// start delay, when the drift patrol calls no compare and holds its
+	// previous items. A nil func waits for nothing (gt-myyr6e).
+	clusterDriftStarting func() bool
 
 	// questions is the overseer-question collectors' read of the town
 	// database (attention_questions.go).
@@ -1064,6 +1068,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.clusterDriftAnswer = func(ctx context.Context) (clusterDriftResult, error) {
 		return d.clusterDriftCache.Answer(ctx, now, d.clusterDriftRun())
 	}
+	s.clusterDriftStarting = func() bool { return d.clusterDriftStarting(now) }
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
 	s.pairReady = d.pairReady.observed
