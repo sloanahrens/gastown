@@ -4,6 +4,7 @@ package modroot
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,11 +17,21 @@ func Root(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("modroot: %v", err)
 	}
-	root, err := rootFrom(wd)
+	root, err := rootFromWD(wd)
 	if err != nil {
 		t.Fatalf("modroot: %v", err)
 	}
 	return root
+}
+
+// rootFromWD resolves the symlinks in the working directory wd and returns the
+// module root above the physical path, or an error naming wd.
+func rootFromWD(wd string) (string, error) {
+	physical, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		return "", fmt.Errorf("modroot: resolving working directory %s: %w", wd, err)
+	}
+	return rootFrom(physical)
 }
 
 // rootFrom returns the first directory at or above the absolute start holding a go.mod file, or an error naming start.
