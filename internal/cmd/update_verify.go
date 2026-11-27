@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -272,6 +273,29 @@ func podSweepSmokeRecord(target podDaemonTarget, run update.RunFunc) func(contex
 		}
 		return rec, true, nil
 	}
+}
+
+// daemonStateStart is the running daemon's start from the town's daemon state.
+func daemonStateStart() (time.Time, error) {
+	return daemonStartFrom(workspace.FindFromCwdOrError, daemon.LoadState)
+}
+
+// daemonStartFrom reads the daemon's start through the town root and state
+// loader it is given. A state with no start cannot tell this daemon's record from
+// an earlier one, so it is an error: a zero start would judge every record current.
+func daemonStartFrom(findTownRoot func() (string, error), loadState func(string) (*daemon.State, error)) (time.Time, error) {
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return time.Time{}, err
+	}
+	state, err := loadState(townRoot)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if state.StartedAt.IsZero() {
+		return time.Time{}, errors.New("the daemon state names no start")
+	}
+	return state.StartedAt, nil
 }
 
 // podTargetImageLabel reads the commit label of the polecat image the values file
