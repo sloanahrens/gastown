@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hmhints"
-	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -102,8 +101,8 @@ type specEstimateStore interface {
 }
 
 // specEstimateRunner is what a run needs from outside the bead. Production
-// wires estimate.Estimate and specEstimateDeps; a test wires stubs, so no hm,
-// Jev or embedder is reached from a unit test.
+// wires estimate.Estimate and specEstimateDeps; a test wires stubs, so no hm
+// or embedder is reached from a unit test.
 type specEstimateRunner struct {
 	Estimate func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error)
 	Deps     func() (estimate.Deps, error)
@@ -560,9 +559,8 @@ func specEstimateNoneNote(hash string, cause error) string {
 
 // specEstimateDeps reads the estimate's inputs from the town's settings. A
 // settings block that does not parse refuses the run, as the dispatcher's tick
-// does. A Jev battery that cannot be opened, and an embedder that is not
-// configured, are not refusals: each becomes a skipped input, named in the
-// note. An embedder URL set without a model is a configuration error and
+// does. An embedder that is not configured is not a refusal: it becomes a
+// skipped input, named in the note. An embedder URL set without a model is a configuration error and
 // refuses the run (specEstimateEmbedder). The Prior reader reads the estimate
 // log where the run appends its line, and an unreadable log is one line on
 // errw.
@@ -584,7 +582,6 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 		TownRoot:        townRoot,
 		Prior:           specEstimatePrior(townRoot, errw),
 		Embedder:        embedder,
-		JevAsk:          specEstimateJev(townRoot, errw),
 		HMRunner:        hmhints.ExecRunner,
 		Rig:             rig,
 		NeighborMinutes: specEstimateNeighborMinutes(readSpecLedger, townRoot, errw),
@@ -681,28 +678,6 @@ func weightsName(w storypoints.Weights) string {
 		return v
 	}
 	return "loaded"
-}
-
-// specEstimateJev is the Jev input. When the battery cannot be opened, the
-// returned asker reports why on every call, so the note names the skip.
-func specEstimateJev(townRoot string, errw io.Writer) estimate.JevAsker {
-	pass, err := openSpecEstimateJev(townRoot, errw)
-	if err != nil {
-		return func(context.Context, *beads.Issue) (dispatch.Answers, error) {
-			return dispatch.Answers{}, err
-		}
-	}
-	return pass.Ask
-}
-
-// openSpecEstimateJev opens the battery from patrols.jev_dispatch, the settings
-// the dispatch pass reads.
-func openSpecEstimateJev(townRoot string, errw io.Writer) (*dispatch.Pass, error) {
-	settings, err := jevDispatchSettings(townRoot)
-	if err != nil {
-		return nil, err
-	}
-	return dispatch.Open(townRoot, settings, errw)
 }
 
 // writeSpecEstimate prints the outcome: one line for a person, the whole record

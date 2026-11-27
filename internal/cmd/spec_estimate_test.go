@@ -743,8 +743,7 @@ func writeSpecEstimateDaemon(t *testing.T, body string) string {
 
 // The estimate's inputs come from the town's settings. Settings that do not
 // parse refuse the run, and so does an embedder URL with no model. A town with
-// no settings gets no embedder, and its Jev asker reports that the battery is
-// not configured, so the note names the skip.
+// no settings gets no embedder.
 func TestSpecEstimateDepsReadTheTownSettings(t *testing.T) {
 	t.Parallel()
 	refused := []struct {
@@ -771,16 +770,8 @@ func TestSpecEstimateDepsReadTheTownSettings(t *testing.T) {
 	if deps.Weights == nil || deps.Weights.Version() != "embedded v1" {
 		t.Errorf("deps.Weights = %v, want the embedded weights a town with no runtime file gets", deps.Weights)
 	}
-	if deps.HMRunner == nil || deps.JevAsk == nil || deps.Rig != "gastown" {
-		t.Errorf("deps = %+v, want hm, a Jev asker and the rig", deps)
-	}
-	if _, err := deps.JevAsk(context.Background(), &beads.Issue{ID: "gt-est"}); err == nil {
-		t.Error("the Jev asker answered with no jev_dispatch settings, want its reason as an error")
-	}
-
-	town := writeSpecEstimateDaemon(t, `{not json`)
-	if _, err := specEstimateJev(town, io.Discard)(context.Background(), &beads.Issue{ID: "gt-est"}); err == nil {
-		t.Error("the Jev asker answered from settings it could not read")
+	if deps.HMRunner == nil || deps.Rig != "gastown" {
+		t.Errorf("deps = %+v, want hm and the rig", deps)
 	}
 }
 
