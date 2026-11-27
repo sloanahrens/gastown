@@ -196,7 +196,16 @@ case "$1" in
   upgrade) touch "$STATE/helm-release" ;;
   # STUB_HELM_FAILED: a release that exists but is not deployed (a failed or
   # pending upgrade); `helm list --deployed` omits it, as the CLI does.
-  list) [ -f "$STATE/helm-release" ] && [ -z "${STUB_HELM_FAILED:-}" ] && echo openshell ;;
+  # STUB_HELM_LIST_FAILS_FROM=N: the Nth and later `helm list` calls exit 1, as
+  # a query that cannot reach the cluster does. Call 1 is the first-install
+  # query and call 2 the skip-helm query, so N=2 reaches the second use.
+  list)
+    n=$(cat "$STATE/helm-list-n" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" >"$STATE/helm-list-n"
+    if [ -n "${STUB_HELM_LIST_FAILS_FROM:-}" ] && [ "$n" -ge "$STUB_HELM_LIST_FAILS_FROM" ]; then exit 1; fi
+    # No release is an empty answer with exit 0, as the CLI gives it.
+    if [ -f "$STATE/helm-release" ] && [ -z "${STUB_HELM_FAILED:-}" ]; then echo openshell; fi ;;
 esac
 STUB
 cat >"$TMP/bin/openssl" <<'STUB'
@@ -582,6 +591,24 @@ check "the controller's container has requests equal to limits (100m, 128Mi)" gu
 check "the controller rollout is awaited" contains "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
 check "the chart is installed once" test "$(calls_with 'helm upgrade --install')" -eq 1
 check "a first install prints no deployer line" lacks "gt town cluster apply" "$OUT_TEXT"
+
+echo "a failed helm list is not a first install: the run stops before anything is applied"
+scenario helmlistfail
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+run "$UP" STUB_HELM_LIST_FAILS_FROM=1 --
+check "a helm list that exits non-zero stops the run" test "$RC" -ne 0
+check "the failure names the helm list query" contains "helm list --namespace openshell --deployed failed" "$OUT_TEXT"
+check "no apply runs after a failed helm list" lacks "kubectl apply" "$CALLS_LOG"
+check "no patch runs after a failed helm list" lacks "patch" "$CALLS_LOG"
+check "no helm upgrade runs after a failed helm list" lacks "helm upgrade" "$CALLS_LOG"
+scenario helmlistskip
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")" >"$S/state/marker"
+run "$UP" STUB_HELM_LIST_FAILS_FROM=2 --
+check "a helm list that fails on the skip check stops the run" test "$RC" -ne 0
+check "the skip-check failure names the helm list query" contains "helm list --namespace openshell --deployed failed" "$OUT_TEXT"
+check "no helm upgrade runs after a failed skip check" lacks "helm upgrade" "$CALLS_LOG"
+check "no manifest is applied after a failed skip check" lacks "gateway-nodeport.yaml" "$CALLS_LOG"
 
 echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
 VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"

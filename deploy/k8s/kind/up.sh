@@ -161,9 +161,15 @@ pool_nodes="$(grep -c . <<<"$pool_list" || true)"
 
 # helm_release_deployed answers whether openshell is a deployed release. helm
 # status exits 0 for a failed release too, and skipping helm for one would leave
-# the gateway down while the marker says it is installed.
+# the gateway down while the marker says it is installed. A helm list that
+# exits non-zero is not "no release": it stops the run before any apply, patch
+# or helm upgrade that a first-install answer would lead to. Its output is not
+# captured into the error (it can hold anything), and its stderr stays visible.
 helm_release_deployed() {
-  [ "$(helm list --namespace openshell --deployed --filter '^openshell$' --short 2>/dev/null)" = openshell ]
+  local listed rc=0
+  listed="$(helm list --namespace openshell --deployed --filter '^openshell$' --short)" || rc=$?
+  [ "$rc" = 0 ] || die "helm list --namespace openshell --deployed failed (exit $rc); cannot tell whether openshell is deployed, so nothing is applied"
+  [ "$listed" = openshell ]
 }
 
 # first_install is the one first-install test: 1 while no openshell release is
