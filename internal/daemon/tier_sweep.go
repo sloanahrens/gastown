@@ -3382,7 +3382,7 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		exitCode = tierSweepRedExit
 	}
 	d.tierSweepCacheAttention(spec.Rig, spec.OutDir)
-	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true,
+	return tierSweepStageResult{output: tierSweepRunnerOutput(&b, res), exitCode: exitCode, ran: true,
 		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now()),
 		cacheNote:  tierSweepCacheNote(spec.OutDir)}
 }
@@ -4632,4 +4632,14 @@ func (d *Daemon) tierSweepCacheAttention(rig, dir string) {
 		Summary: fmt.Sprintf("the tier sweep's cache claim for %s ended %s over its %s cap after every removal the rules allow",
 			rig, polecatimage.Human(rec.OverBytes), polecatimage.Human(rec.CapBytes)),
 	})
+}
+
+// tierSweepRunnerOutput returns the stage output with each tier's note written as its own line (gt-nl4xwr).
+func tierSweepRunnerOutput(b *strings.Builder, res sweeprunner.Result) string {
+	for _, tier := range res.Tiers {
+		if tier.Note != "" {
+			fmt.Fprintf(b, "sweep-run: %s: %s\n", tier.Tier, tier.Note)
+		}
+	}
+	return b.String()
 }

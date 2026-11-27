@@ -326,6 +326,33 @@ func TestResultRoundTrip(t *testing.T) {
 	})
 }
 
+// TestTierSweepNote: a note reads back with its tier, and a newline in one is refused by Write and by Read (gt-nl4xwr).
+func TestTierSweepNote(t *testing.T) {
+	t.Parallel()
+	base := sampleResult()
+	base.Tiers[0].Note = "flaky in the sandbox"
+	dir := t.TempDir()
+	if err := Write(dir, base); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, err := Read(dir, base.Rig, base.SHA); err != nil {
+		t.Fatalf("Read: %v", err)
+	} else if !reflect.DeepEqual(got.Tiers, base.Tiers) {
+		t.Fatalf("tiers read back %+v, want %+v", got.Tiers, base.Tiers)
+	}
+	base.Tiers[0].Note = "first\nsecond"
+	if err := Write(t.TempDir(), base); err == nil || !strings.Contains(err.Error(), "note holds a control character") {
+		t.Fatalf("Write error = %v, want the note refused", err)
+	}
+	body := `{"version":1,"rig":"gastown","sha":"` + sampleSHA + `","started":"2026-10-30T18:45:11Z","finished":"2026-10-30T19:14:01Z","runner":{"backend":"docker","image":"gt-polecat:dev","cpus":8},"tiers":[{"tier":"shell","summary":"tier-sweep: shell GREEN passed=5 failed=0 skipped=0","note":"first\nsecond"}]}`
+	if err := os.WriteFile(filepath.Join(dir, ResultFileName), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(dir, base.Rig, base.SHA); err == nil || !strings.Contains(err.Error(), "note holds a control character") {
+		t.Fatalf("Read error = %v, want the note refused", err)
+	}
+}
+
 // assertOnlyResultFile fails when dir holds anything but the result file, which
 // is how a test sees a temp file the write should have removed.
 func assertOnlyResultFile(t *testing.T, dir string) {
