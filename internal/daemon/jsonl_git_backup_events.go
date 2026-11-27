@@ -271,18 +271,22 @@ func (d *Daemon) appendNewEventsWith(ops eventsExportOps, db, dir, dataDir strin
 	return state.Rows, nil
 }
 
-// exportAllEventsToJsonl reads the whole events table into dir, replacing the
-// export, and records the boundary the new file ends at. exportTable is the
-// cycle's table exporter, the seam a test drives.
+// exportAllEventsToJsonl reads the whole events table into dir in pages,
+// replacing the export, and records the boundary the new file ends at.
+// exportTable is the cycle's table exporter, the seam a test drives. A read
+// that succeeds is one timing sample of the events table, however many pages
+// it took.
 func (d *Daemon) exportAllEventsToJsonl(db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
 	return d.exportAllEventsToJsonlWith(osEventsExportOps(), db, dir, dataDir, budget, exportTable)
 }
 
 func (d *Daemon) exportAllEventsToJsonlWith(ops eventsExportOps, db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
-	n, err := exportTable("events", beadsql.BackupEvents(db, ""), dir, dataDir, budget)
+	start := d.clk().Now()
+	n, err := d.exportEventsFullPaged(ops, db, dir, dataDir, budget, eventsFullPageRows, exportTable)
 	if err != nil {
 		return 0, err
 	}
+	d.recordJsonlSample(db, "events", n, d.clk().Since(start))
 	state := eventsExportState{Version: eventsExportStateVersion, Rows: n, FullExportedAt: d.clk().Now()}
 	if n > 0 {
 		boundary, ids, err := eventsExportBoundary(dir)
