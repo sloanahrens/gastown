@@ -30,7 +30,8 @@ var (
 )
 
 var (
-	envLine = regexp.MustCompile(`(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+	// envLine: NAME=value at a line start, after an optional list marker (- ) and export (gt-slmjp2).
+	envLine = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
 	// jsonMember scans text that is not valid JSON, so a truncated document is never skipped.
 	jsonMember = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"[ \t\r\n]*:[ \t\r\n]*"((?:[^"\\]|\\.)*)"`)
 	// yamlLine matches a mapping entry in text that is not valid JSON: an
