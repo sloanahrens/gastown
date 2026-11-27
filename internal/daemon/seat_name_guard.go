@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/sandboxstuck"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -68,6 +69,12 @@ type SeatNameGuard struct {
 	// stale is keyed by sandbox name, so a listing that names a sandbox twice
 	// answers once.
 	stale map[string]StaleSeatSandbox
+	// stuck names the sandboxes sandboxstuck reports as outside Ready for
+	// sandboxstuck.After, including phases the failure set does not cover, such
+	// as Provisioning. It raises items only: it keeps no name out of the draw,
+	// since the phase is the gateway's report and the pod may still run
+	// (gt-u9qatj).
+	stuck sandboxstuck.Tracker
 }
 
 // NewSeatNameGuard returns a guard holding the failing sandboxes of one
@@ -97,6 +104,16 @@ func (g *SeatNameGuard) Observe(entries []sandbox.Entry, now time.Time) {
 		next[name] = StaleSeatSandbox{Sandbox: name, Phase: phase, Since: since}
 	}
 	g.stale = next
+	g.stuck.Observe(sandboxstuckListing(entries), now)
+}
+
+// sandboxstuckListing is one gateway listing as the stuck tracker reads it.
+func sandboxstuckListing(entries []sandbox.Entry) []sandboxstuck.Sandbox {
+	out := make([]sandboxstuck.Sandbox, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, sandboxstuck.Sandbox{Name: e.Name, Phase: e.Phase})
+	}
+	return out
 }
 
 // Findings returns the stale sandboxes, sorted by name.
@@ -138,8 +155,9 @@ func (g *SeatNameGuard) Polecats(rigPrefix string) []string {
 
 // Items is the queue's view: one high item per stale sandbox, keyed
 // seat-sandbox-stale:<sandbox>, naming the phase and how long it has been in
-// it. The item clears itself when the sandbox leaves the listing, so deleting
-// the sandbox needs no code path here.
+// it, and one per sandbox sandboxstuck reports stuck for sandboxstuck.After,
+// under the same key prefix. The item clears itself when the sandbox leaves the listing,
+// so deleting the sandbox needs no code path here.
 func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 	findings := g.Findings()
 	out := make([]attention.Item, 0, len(findings))
@@ -156,7 +174,7 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 				f.Sandbox, f.Phase, parkedAge(age), seatSandboxDeleteCommand(f.Sandbox)),
 		})
 	}
-	return out
+	return append(out, g.stuck.Items(now, seatSandboxStaleKeyPrefix)...)
 }
 
 // seatSandboxList reads the gateway's sandbox listing; nil is the openshell CLI
