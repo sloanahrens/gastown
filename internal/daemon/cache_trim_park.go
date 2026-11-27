@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"fmt"
+	"path/filepath"
+	"slices"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/attention"
 )
 
@@ -70,20 +73,38 @@ func cacheTrimCauseLine(cause error) string {
 	return "the failure named no cause"
 }
 
+// cacheTrimPendingPath is <town>/.runtime/cache-trim-pending.json, where the
+// pending mark survives a daemon restart (gt-8cchus reads it back).
+func cacheTrimPendingPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "cache-trim-pending.json")
+}
+
 // cacheTrimSetPending records, or clears, that claim's trim Job was still running
-// when its pass's wait ended. It writes nothing else: a park and a run are the
-// caller's.
+// when its pass's wait ended, and persists the resulting sorted set. A failed
+// write is logged and leaves the in-memory mark in place: the pass is not failed
+// for a town that cannot hold the file. Sort and write stay under the mark's lock
+// so two changes in a row leave the file holding the second one's set.
 func (d *Daemon) cacheTrimSetPending(namespace, claim string, pending bool) {
 	d.cacheTrimPendingMu.Lock()
 	defer d.cacheTrimPendingMu.Unlock()
+	key := cacheTrimParkKey(namespace, claim)
 	if !pending {
-		delete(d.cacheTrimPendingClaims, cacheTrimParkKey(namespace, claim))
-		return
+		delete(d.cacheTrimPendingClaims, key)
+	} else {
+		if d.cacheTrimPendingClaims == nil {
+			d.cacheTrimPendingClaims = map[string]bool{}
+		}
+		d.cacheTrimPendingClaims[key] = true
 	}
-	if d.cacheTrimPendingClaims == nil {
-		d.cacheTrimPendingClaims = map[string]bool{}
+	keys := make([]string, 0, len(d.cacheTrimPendingClaims))
+	for pendingKey := range d.cacheTrimPendingClaims {
+		keys = append(keys, pendingKey)
 	}
-	d.cacheTrimPendingClaims[cacheTrimParkKey(namespace, claim)] = true
+	slices.Sort(keys)
+	path := cacheTrimPendingPath(d.config.TownRoot)
+	if err := atomicfile.EnsureDirAndWriteJSON(path, keys); err != nil {
+		d.logger.Printf("disk_maintenance: cache trim: writing the pending mark to %s: %v", path, err)
+	}
 }
 
 // cacheTrimIsPending reports whether an earlier pass left the claim's trim Job
