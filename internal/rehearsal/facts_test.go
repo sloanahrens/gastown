@@ -24,6 +24,11 @@ func TestRehearsalFacts(t *testing.T) {
 		{"unparseable Gate wall is unavailable with zero seconds", readyNote + "pass presubmit soon, slot wait 0s", nil, []Gate{{Verdict: GateUnavailable}}},
 		{"unknown GATE RUN verdict is unavailable with zero seconds", "", []string{"GATE RUN: pass 2m3s, slot wait 0s, head a"}, []Gate{{Verdict: GateUnavailable}}},
 		{"fail comment with an unparseable wall keeps fail with zero seconds", "", []string{"GATE RUN: fail soon, slot wait 0s, head a"}, []Gate{{Verdict: GateFail}}},
+		{"empty Gate line is unavailable with zero seconds", readyNote, nil, []Gate{{Verdict: GateUnavailable}}},
+		{"negative Gate wall is unavailable with zero seconds", readyNote + "pass presubmit -3m, slot wait 0s", nil, []Gate{{Verdict: GateUnavailable}}},
+		{"blank GATE RUN rest is unavailable with zero seconds", "", []string{"GATE RUN: "}, []Gate{{Verdict: GateUnavailable}}},
+		{"bare fail verdict keeps fail with zero seconds", "", []string{"GATE RUN: fail"}, []Gate{{Verdict: GateFail}}},
+		{"negative comment wall keeps fail with zero seconds", "", []string{"GATE RUN: fail -2m, slot wait 0s, head a"}, []Gate{{Verdict: GateFail}}},
 		{"no Gate line gives no gate", "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\n", nil, nil},
 		{"comment without the prefix gives no gate", "", []string{"looks good", "the GATE RUN: fail 1m note is old", "GATE RUN:"}, nil},
 	}
