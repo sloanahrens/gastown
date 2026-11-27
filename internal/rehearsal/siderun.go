@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // sideCmd builds the command a side load runs in dir, with env as its whole environment.
@@ -24,6 +26,8 @@ func ExecSideRun(ctx context.Context, dir string, env []string, argv []string) (
 	if err != nil {
 		return -1, err
 	}
+	// Killing only the command's own pid leaves the compilers make started: the group ends the tree.
+	util.SetProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = ctxErr
