@@ -427,9 +427,6 @@ func (r *DeployReader) Read() *Deploys {
 	r.mu.Lock()
 	prevChecks := r.checks
 	r.mu.Unlock()
-	// Built fresh every refresh, so an entry goes the moment its run leaves the
-	// window and the map cannot grow with a town's history.
-	checks := make(map[string]cachedCheck, len(prevChecks))
 	// keep is the repos this refresh still names but could not list, and which
 	// keep the checks the refresh before them read: rebuilt from this refresh
 	// alone, the cache would drop them and the next refresh would ask for a
@@ -442,9 +439,26 @@ func (r *DeployReader) Read() *Deploys {
 	// all of ctx's timeout, and the health read would then start already expired.
 	hctx, cancelHealth := context.WithTimeout(context.Background(), healthReadBudget)
 	defer cancelHealth()
-	for _, name := range readable {
+	// Each repo's read writes only the checks it saw, in its own map held by its
+	// place in readable, so no repo can lose a check to another's (gt-5o4qwr) and
+	// the reads can be made at once without sharing a map (gt-kpg0x4). The fold
+	// below runs after every read, so all of them are finished before the block's
+	// rows are built.
+	results := make([]healthRead, len(readable))
+	seens := make([]map[string]cachedCheck, len(readable))
+	for i, name := range readable {
 		owner, repo, _ := strings.Cut(name, "/")
-		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
+		seens[i] = make(map[string]cachedCheck)
+		results[i] = r.healthRows(hctx, name, owner, repo, prevChecks, seens[i])
+	}
+	// Built fresh every refresh, so an entry goes the moment its run leaves the
+	// window and the map cannot grow with a town's history.
+	checks := make(map[string]cachedCheck, len(prevChecks))
+	for i, name := range readable {
+		res := results[i]
+		for key, held := range seens[i] {
+			checks[key] = held
+		}
 		if res.listFailed {
 			keep[name] = true
 		}
