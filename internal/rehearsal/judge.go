@@ -20,10 +20,11 @@ const (
 // Judge applies the ruled measures to r. A sling that did not finish ok, a
 // stranded seat, a landing whose CI failed, a failed call, an intervention and a
 // stopped run each fail with their own reason. The sling p90 counts every sling,
-// the presubmit p90 every gate whatever its verdict. A record with fewer than
-// setSize slings, no gate and no host load sample is unmeasured and fails with a
-// reason of its own for each: an unmeasured run never passes. Landing CI time and
-// the dispatcher tick are not judged.
+// the presubmit p90 every gate with a measured wall whatever its verdict: a
+// zero-second gate was never measured and is left out. A record with fewer than
+// setSize slings, no measured gate and no host load sample is unmeasured and
+// fails with a reason of its own for each: an unmeasured run never passes. Landing
+// CI time and the dispatcher tick are not judged.
 func Judge(r Record) Verdict {
 	var reasons []string
 	var slingSecs, gateSecs []float64
@@ -34,7 +35,9 @@ func Judge(r Record) Verdict {
 		slingSecs = append(slingSecs, s.Seconds)
 	}
 	for _, g := range r.Gates {
-		gateSecs = append(gateSecs, g.Seconds)
+		if g.Seconds != 0 {
+			gateSecs = append(gateSecs, g.Seconds)
+		}
 	}
 	for _, seat := range r.Stranded {
 		reasons = append(reasons, "stranded seat "+seat)
@@ -56,7 +59,7 @@ func Judge(r Record) Verdict {
 	if n := len(r.Slings); n < setSize {
 		reasons = append(reasons, fmt.Sprintf("only %d slings, want %d: the run is unmeasured", n, setSize))
 	}
-	if len(r.Gates) == 0 {
+	if len(gateSecs) == 0 {
 		reasons = append(reasons, "no gate figure: the run is unmeasured")
 	}
 	if r.Load.Samples <= 0 {
