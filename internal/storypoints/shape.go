@@ -62,7 +62,7 @@ func EstimateText(issue *beads.Issue) string {
 		b.WriteString(" labels: " + strings.Join(issue.Labels, ", "))
 	}
 	b.WriteString("\n\n## Description\n\n")
-	b.WriteString(strings.TrimRightFunc(issue.Description, unicode.IsSpace) + "\n")
+	b.WriteString(strings.TrimRightFunc(beads.StripAttachmentFields(issue.Description), unicode.IsSpace) + "\n")
 	if ac := strings.TrimRightFunc(issue.AcceptanceCriteria, unicode.IsSpace); ac != "" {
 		b.WriteString("\n## Acceptance\n\n" + ac + "\n")
 	}
