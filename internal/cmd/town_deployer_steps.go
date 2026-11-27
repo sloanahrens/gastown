@@ -16,10 +16,9 @@ import (
 	"github.com/steveyegge/gastown/internal/update"
 )
 
-// realSteps is deployerinbox.Steps over the real plan and apply code: each plan
-// is a directory under the runner's state, and the runs take the deployer's own
-// two kubeconfigs. render and apply are the seams their test replaces, so the
-// wiring is checked with no cluster and no town.
+// realSteps is deployerinbox.Steps over the real plan, apply and rollback code:
+// each plan is a directory under the runner's state, and the runs take the
+// deployer's own kubeconfigs. render, apply and rollback are the test's seams.
 type realSteps struct {
 	state       string // the runner's --state
 	proposals   string // where WriteProposal writes
@@ -28,6 +27,7 @@ type realSteps struct {
 	kube        update.RunFunc
 	render      func(context.Context, update.RunFunc, io.Writer, string, planFlags) error
 	apply       func(context.Context, update.RunFunc, io.Writer, string, string, planFlags) error
+	rollback    func(context.Context, update.RunFunc, io.Writer, string, string) error
 }
 
 // newRealSteps is the steps `gt town deployer serve` runs unless a test injects
@@ -51,6 +51,9 @@ func newRealSteps(state, inbox string) *realSteps {
 	}
 	s.apply = func(ctx context.Context, kube update.RunFunc, out io.Writer, planDir, approvalPath string, f planFlags) error {
 		return runTownClusterApply(ctx, kube, out, planDir, approvalPath, f, applyRecordVerifier(time.Now))
+	}
+	s.rollback = func(ctx context.Context, kube update.RunFunc, out io.Writer, planDir, kubeconfig string) error {
+		return runTownClusterRollback(ctx, kube, out, planDir, kubeconfig)
 	}
 	return s
 }
@@ -97,9 +100,8 @@ func (s *realSteps) Apply(ctx context.Context, name string, verified clusterappr
 	return s.apply(ctx, s.kube, io.Discard, dir, filepath.Join(s.approvals, id+".json"), s.kubeconfigs)
 }
 
-// LiveVersions, ReadRecord and Rollback are beads gt-fxl8ab's and gt-ws27qr's;
-// until they land each refuses, so a request that needs one is answered failed
-// rather than acted on unchecked.
+// LiveVersions and ReadRecord are bead gt-fxl8ab's; until they land each
+// refuses, so a request that needs one is answered failed, not acted on unchecked.
 func (s *realSteps) LiveVersions(context.Context, clusterapproval.Plan) (map[string]string, error) {
 	return nil, errors.New("gt town deployer steps: no live versions read is wired, so the plan cannot be verified")
 }
@@ -108,8 +110,21 @@ func (s *realSteps) ReadRecord(context.Context, string) (clusterapproval.Record,
 	return clusterapproval.Record{}, errors.New("gt town deployer steps: no approval record read is wired, so no plan is approved")
 }
 
-func (s *realSteps) Rollback(context.Context, string, clusterapproval.Plan) error {
-	return errors.New("gt town deployer steps: no rollback is wired, so nothing is undone")
+// Rollback undoes name only while the plan on disk is the one verified, and
+// returns the rollback code's error unchanged: what is approved is what is undone.
+func (s *realSteps) Rollback(ctx context.Context, name string, verified clusterapproval.Plan) error {
+	dir, err := s.planDir(name)
+	if err != nil {
+		return err
+	}
+	rendered, err := readPlanApproval(dir, s.kubeconfigs)
+	if err != nil {
+		return err
+	}
+	if rendered.SHA256 != verified.SHA256 {
+		return fmt.Errorf("gt town deployer steps: the plan %q on disk is %s, but %s is approved, so nothing is undone", name, rendered.SHA256, verified.SHA256)
+	}
+	return s.rollback(ctx, s.kube, io.Discard, dir, s.kubeconfigs.applyKubeconfig)
 }
 
 // planDir is the directory the plan named name is rendered into. The name comes

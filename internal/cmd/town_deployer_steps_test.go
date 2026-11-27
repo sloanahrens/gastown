@@ -94,11 +94,15 @@ func TestTownDeployerStepsCalls(t *testing.T) {
 				called = true
 				return nil
 			}
+			s.rollback = func(context.Context, update.RunFunc, io.Writer, string, string) error { called = true; return nil }
 			if _, err := s.Plan(context.Background(), bad); err == nil || !strings.Contains(err.Error(), "not a plan directory name") {
 				t.Errorf("Plan(%q) = %v, want a refusal naming the plan", bad, err)
 			}
 			if err := s.Apply(context.Background(), bad, clusterapproval.Plan{}, nil); err == nil || !strings.Contains(err.Error(), "not a plan directory name") {
 				t.Errorf("Apply(%q) = %v, want a refusal naming the plan", bad, err)
+			}
+			if err := s.Rollback(context.Background(), bad, clusterapproval.Plan{}); err == nil || !strings.Contains(err.Error(), "not a plan directory name") {
+				t.Errorf("Rollback(%q) = %v, want a refusal naming the plan", bad, err)
 			}
 			if called {
 				t.Errorf("the code ran for the name %q, want nothing", bad)
@@ -151,9 +155,6 @@ func TestTownDeployerStepsCalls(t *testing.T) {
 		if _, err := s.ReadRecord(context.Background(), "0123456789ab"); err == nil || !strings.Contains(err.Error(), "approval record") {
 			t.Errorf("ReadRecord = %v, want a refusal naming the approval record", err)
 		}
-		if err := s.Rollback(context.Background(), name, clusterapproval.Plan{}); err == nil || !strings.Contains(err.Error(), "rollback") {
-			t.Errorf("Rollback = %v, want a refusal naming the rollback", err)
-		}
 	})
 
 	t.Run("WriteProposal writes the proposal under the proposals directory", func(t *testing.T) {
@@ -183,7 +184,46 @@ func TestTownDeployerStepsCalls(t *testing.T) {
 		if s.proposals != filepath.Join(dir, "proposals") || s.approvals != filepath.Join(state, "approvals") {
 			t.Errorf("the proposals and approvals directories = %q and %q, want them beside the inbox and under --state", s.proposals, s.approvals)
 		}
+		if s.rollback == nil {
+			t.Error("newRealSteps does not wire the rollback code")
+		}
 	})
+}
+
+// TestTownDeployerStepsRollback: the verified plan calls the rollback code once
+// with the deployer-apply kubeconfig and its error is returned unchanged; a plan
+// directory holding another digest or no plan record undoes nothing (gt-ws27qr).
+func TestTownDeployerStepsRollback(t *testing.T) {
+	t.Parallel()
+	kubeconfigs := planFlags{policyKubeconfig: "/d/policy.kubeconfig", applyKubeconfig: "/d/apply.kubeconfig"}
+	approved, other := strings.Repeat("a1", 32), strings.Repeat("b2", 32)
+	sentinel := errors.New("the rollback failed")
+	dir := filepath.Join(t.TempDir(), "plan")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls, kubeconfig := 0, ""
+	s := &realSteps{state: filepath.Dir(dir), kubeconfigs: kubeconfigs}
+	s.rollback = func(_ context.Context, _ update.RunFunc, _ io.Writer, _, k string) error {
+		calls, kubeconfig = calls+1, k
+		return sentinel
+	}
+	if err := writeStepsPlan(t, dir, approved); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Rollback(context.Background(), "plan", clusterapproval.Plan{SHA256: approved}); err != sentinel || calls != 1 || kubeconfig != kubeconfigs.applyKubeconfig {
+		t.Errorf("Rollback = %v after %d calls with kubeconfig %q, want the error unchanged from one call with the apply kubeconfig", err, calls, kubeconfig)
+	}
+	if err := s.Rollback(context.Background(), "plan", clusterapproval.Plan{SHA256: other}); err == nil || !strings.Contains(err.Error(), approved) || !strings.Contains(err.Error(), other) || calls != 1 {
+		t.Errorf("Rollback = %v after %d calls, want a refusal naming both digests %s and %s and no call", err, calls, approved, other)
+	}
+	// A state with no plan record is refused before the code runs: the fake
+	// rollback returns sentinel, which names no plan record.
+	s.state = t.TempDir()
+	if err := s.Rollback(context.Background(), "plan", clusterapproval.Plan{SHA256: approved}); err == nil || !strings.Contains(err.Error(), "plan record") {
+		t.Errorf("Rollback with no plan record = %v, want a refusal naming the plan record", err)
+	}
 }
 
 // writeStepsPlan writes the plan.json a plan run leaves in dir, with a phase P
