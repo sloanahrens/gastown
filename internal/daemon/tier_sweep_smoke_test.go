@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -303,6 +304,88 @@ func TestSweepSmokeRecord(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRecordSweepSmokeAtStartIsAwaited: the start-time smoke launch runs on a
+// tracked goroutine, so waitForSweepSmoke does not return while the launch is
+// blocked and returns once it is released, with the record written; a launch
+// still blocked at the bound is named and left behind (gt-fgglou).
+func TestRecordSweepSmokeAtStartIsAwaited(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	daemonStart := now.Add(-time.Minute)
+	// aBlockedSmoke is a daemon whose smoke launch signals launchStarted, then
+	// blocks until release is closed.
+	aBlockedSmoke := func(t *testing.T) (*Daemon, *bytes.Buffer, chan struct{}, chan struct{}) {
+		t.Helper()
+		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+		d.ctx = context.Background()
+		d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+		d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+		d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+		release := make(chan struct{})
+		launchStarted := make(chan struct{})
+		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+			close(launchStarted)
+			blockUntil(t, "the smoke release", release)
+			return tierSweepLaunch{exitCode: 0}
+		}
+		return d, logs, release, launchStarted
+	}
+
+	t.Run("the wait joins the launch", func(t *testing.T) {
+		t.Parallel()
+		d, _, release, launchStarted := aBlockedSmoke(t)
+		// The bound is beyond the test, so only the launch finishing returns it.
+		d.sweepSmokeWait = signalWait
+		d.startSweepSmoke(daemonStart)
+		reached(t, "the smoke launch", launchStarted)
+
+		begun := make(chan struct{})
+		d.sweepSmokeWaitBegun = func() { close(begun) }
+		waited := make(chan struct{})
+		go func() {
+			d.waitForSweepSmoke()
+			close(waited)
+		}()
+		reached(t, "the wait", begun)
+		select {
+		case <-waited:
+			t.Fatal("waitForSweepSmoke returned while the launch was blocked")
+		default:
+		}
+		close(release)
+		within(t, signalWait, "the wait after the release", waited)
+
+		data, err := os.ReadFile(sweepSmokeRecordPath(d.config.TownRoot))
+		if err != nil {
+			t.Fatalf("read record after the wait returned: %v", err)
+		}
+		var got sweepSmokeRecord
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("decode record %s: %v", data, err)
+		}
+		if got.Outcome != "started" || !got.DaemonStart.Equal(daemonStart) {
+			t.Errorf("record after the wait = %+v, want started stamped with the daemon's start %v", got, daemonStart)
+		}
+	})
+
+	t.Run("a launch past the bound is logged and left behind", func(t *testing.T) {
+		t.Parallel()
+		d, logs, release, launchStarted := aBlockedSmoke(t)
+		d.sweepSmokeWait = 20 * time.Millisecond
+		d.startSweepSmoke(daemonStart)
+		reached(t, "the smoke launch", launchStarted)
+
+		d.waitForSweepSmoke()
+		if !strings.Contains(logs.String(), "still running 20ms after the wait") {
+			t.Errorf("waitForSweepSmoke returned without naming the launch it left behind:\n%s", logs.String())
+		}
+		// Release and join so the record write finishes inside the test's town.
+		close(release)
+		d.sweepSmokeWait = signalWait
+		d.waitForSweepSmoke()
+	})
 }
 
 // TestSweepSmokeRecordWriteError pins that a record the daemon cannot write is

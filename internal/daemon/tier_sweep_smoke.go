@@ -128,10 +128,52 @@ func sweepSmokeRecordPath(townRoot string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep", "launch-smoke.json")
 }
 
+// sweepSmokeWaitBound bounds how long waitForSweepSmoke waits for the start-time
+// smoke launch; one that does not stop is left behind rather than holding the
+// caller (gt-fgglou).
+const sweepSmokeWaitBound = 5 * time.Second
+
+// startSweepSmoke runs the smoke launch in its own goroutine, tracked by
+// d.sweepSmoke so waitForSweepSmoke can join it; the launch never holds up the
+// start (gt-r2497d, gt-fgglou).
+func (d *Daemon) startSweepSmoke(daemonStart time.Time) {
+	d.sweepSmoke.Add(1)
+	go func() {
+		defer d.sweepSmoke.Done()
+		d.recordSweepSmokeAtStart(d.ctx, daemonStart)
+	}()
+}
+
+// waitForSweepSmoke waits for the start-time smoke launch for at most the bound
+// and says so when it gives up, following waitForAttention
+// (attention_background.go). The launch starts once, at startup, so unlike the
+// attention tick there is no late start to refuse (gt-fgglou).
+func (d *Daemon) waitForSweepSmoke() {
+	done := make(chan struct{})
+	go func() {
+		d.sweepSmoke.Wait()
+		close(done)
+	}()
+	if d.sweepSmokeWaitBegun != nil {
+		d.sweepSmokeWaitBegun()
+	}
+	bound := d.sweepSmokeWait
+	if bound <= 0 {
+		bound = sweepSmokeWaitBound
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		d.logger.Printf("tier-sweep launch smoke: still running %s after the wait; going on without it", bound)
+	}
+}
+
 // recordSweepSmokeAtStart runs the smoke launch once for the first rig when
 // tier_sweep is active with a runner, and writes its record stamped with the
-// daemon's start. The daemon starts it in its own goroutine, so the launch never
-// holds up the start. A write error is logged and the start goes on
+// daemon's start. startSweepSmoke runs it in its own goroutine, so the launch
+// never holds up the start; a write error is logged and the start goes on
 // (gt-r2497d).
 func (d *Daemon) recordSweepSmokeAtStart(ctx context.Context, daemonStart time.Time) {
 	if d.patrolOffReason("tier_sweep") != "" || tierSweepRunnerConfig(d.patrol()) == nil {
