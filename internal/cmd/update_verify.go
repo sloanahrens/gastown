@@ -169,10 +169,12 @@ type podImageLabelProbes struct {
 	wantPolecat string
 	annotation  func(context.Context) (string, error)
 	devTag      func(context.Context) (string, error)
-	// sweep reads the daemon pod's launch-smoke record, and sweepStart is the
-	// running daemon's start the record is judged against.
+	// sweep reads the daemon pod's launch-smoke record, sweepStart is the running
+	// daemon's start the record is judged against, and sweepWait waits one poll
+	// between reads of a missing record, returning ctx's error once ctx ends.
 	sweep      func(context.Context) (daemon.SweepSmokeRecord, bool, error)
 	sweepStart func() (time.Time, error)
+	sweepWait  func(context.Context) error
 }
 
 var _ update.PairProbes = podImageLabelProbes{}
@@ -281,24 +283,57 @@ func podSweepSmokeRecord(target podDaemonTarget, run update.RunFunc) func(contex
 	}
 }
 
-// SweepLaunch answers whether the daemon's sweeper started a stage from one
-// read of the launch-smoke record; a record missing at that read is not waited for.
+// podSweepRecordWait bounds the wait for the daemon's launch-smoke record: it
+// writes it from its start goroutine, so one still missing after the bound is not written.
+const podSweepRecordWait = 5 * time.Minute
+
+// podSweepRecordPoll is the interval between reads of a missing record.
+const podSweepRecordPoll = 10 * time.Second
+
+// podSweepPoll waits one poll interval between reads of a missing record, and
+// returns ctx's error when ctx ends first.
+func podSweepPoll(ctx context.Context) error {
+	t := time.NewTimer(podSweepRecordPoll)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// SweepLaunch answers whether the daemon's sweeper started a stage, from the
+// launch-smoke record in the daemon pod. A record missing at a read is read again
+// after each poll until the wait ends: the context's end answers not started, and
+// a wait that fails for any other reason is an error.
 func (p podImageLabelProbes) SweepLaunch(ctx context.Context) (bool, string, error) {
-	if p.sweep == nil || p.sweepStart == nil {
+	if p.sweep == nil || p.sweepStart == nil || p.sweepWait == nil {
 		return false, "", errors.New("the run has no launch-smoke record reader")
 	}
+	ctx, cancel := context.WithTimeout(ctx, podSweepRecordWait)
+	defer cancel()
 	start, err := p.sweepStart()
 	if err != nil {
 		return false, "", fmt.Errorf("reading the daemon's start: %w", err)
 	}
-	rec, exists, err := p.sweep(ctx)
-	if err != nil {
-		return false, "", err
+	for {
+		rec, exists, err := p.sweep(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		if exists {
+			return sweepLaunchAnswer(rec, start)
+		}
+		err = p.sweepWait(ctx)
+		if err != nil && !errors.Is(err, ctx.Err()) {
+			return false, "", fmt.Errorf("waiting for the launch-smoke record: %w", err)
+		}
+		// The context check ends the loop even when the wait returns nil after the context ends.
+		if err != nil || ctx.Err() != nil {
+			return false, "no launch-smoke record in the daemon pod before the wait ended", nil
+		}
 	}
-	if !exists {
-		return false, "no launch-smoke record in the daemon pod", nil
-	}
-	return sweepLaunchAnswer(rec, start)
 }
 
 // daemonStateStart is the running daemon's start from the town's daemon state.
