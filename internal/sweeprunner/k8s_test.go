@@ -702,10 +702,9 @@ func TestSyncPodHasNoServiceAccountToken(t *testing.T) {
 }
 
 // TestHelperPodsEndWithoutTheDefaultGrace holds the reader and sync pods to a
-// one-second termination grace: both hold their mount by sleeping, and sleep
-// ignores SIGTERM, so without it every delete waits out the default 30 seconds
-// before the SIGKILL that ends the pod (gt-e43ylr). The Job's pod template
-// keeps the cluster default, because the runner may need to stop.
+// one-second termination grace: they sleep, and sleep ignores SIGTERM, so
+// without it every delete waits out the default 30 seconds before the SIGKILL
+// (gt-e43ylr). The Job's pod template keeps the cluster default.
 func TestHelperPodsEndWithoutTheDefaultGrace(t *testing.T) {
 	t.Parallel()
 	spec := goldenSpec()
