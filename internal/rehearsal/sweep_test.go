@@ -42,3 +42,35 @@ func TestRehearsalSweepLine(t *testing.T) {
 		})
 	}
 }
+
+func TestRehearsalSweepRan(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 27, 10, 30, 0, 0, time.UTC)
+	const line = "tier_sweep: gastown: swept 1a2b3c4d (shell GREEN) in "
+	tests := []struct {
+		name, log string
+		want      bool
+		bad       string
+	}{
+		{"a run inside the window overlaps it", "2026/11/27 10:10:00 " + line + "5m0s\n", true, ""},
+		{"a run that began before start still overlaps", "2026/11/27 10:05:00 " + line + "10m0s\n", true, ""},
+		{"a run ending at start does not overlap", "2026/11/27 10:00:00 " + line + "5m0s\n", false, ""},
+		{"a run beginning at end does not overlap", "2026/11/27 10:35:00 " + line + "5m0s\n", false, ""},
+		{"a refused line is false with its error", "2026/11/27 10:10:00 " + line + "soon\n", false, "soon"},
+		{"a refused line beside an overlapping run is still false with its error", "2026/11/27 10:10:00 " + line + "5m0s\n2026/11/27 10:12:00 " + line + "soon\n", false, "soon"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := sweepRan([]byte(tt.log), "gastown", start, end)
+			if tt.bad != "" {
+				if err == nil || got || !strings.Contains(err.Error(), tt.bad) {
+					t.Fatalf("sweepRan(%q) = %v, %v; want false and an error naming %q", tt.log, got, err, tt.bad)
+				}
+			} else if err != nil || got != tt.want {
+				t.Fatalf("sweepRan(%q) = %v, %v; want %v with no error", tt.log, got, err, tt.want)
+			}
+		})
+	}
+}

@@ -29,3 +29,26 @@ func sweptLine(line, rig string, start time.Time) (runStart, runEnd time.Time, o
 	}
 	return at.Add(-elapsed), at, true, nil
 }
+
+// sweepRan reports whether log shows a tier sweep run of rig overlapping
+// [start, end). sweptLine reads a line stamped after start as ok, so the run
+// ends after start and overlaps when it starts before end (not at end). A line
+// sweptLine refuses makes the result false with its error wrapped.
+func sweepRan(log []byte, rig string, start, end time.Time) (found bool, err error) {
+	for _, line := range strings.Split(string(log), "\n") {
+		runStart, _, ok, lineErr := sweptLine(line, rig, start)
+		if lineErr != nil {
+			if err == nil {
+				err = lineErr
+			}
+			continue
+		}
+		if ok && runStart.Before(end) {
+			found = true
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("read tier sweep runs: %w", err)
+	}
+	return found, nil
+}
