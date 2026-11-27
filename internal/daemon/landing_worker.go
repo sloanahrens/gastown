@@ -861,7 +861,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		TownRoot:   townRoot,
 		HumanActor: human.Name,
 		Beads:      bd,
-		Remote:     gitRemote{g: d.landingRemoteGitAt(repo).WithoutAllHooks(), remote: landingRemote},
+		Remote:     gitRemote{g: d.landingRemoteGitAt(repo).WithoutAllHooks(), remote: landingRemote, lock: lander.WithGitLock},
 		Lander:     lander,
 		Records:    records,
 		Landings:   landings,
@@ -2036,6 +2036,19 @@ var _ landingRemoteGit = (*git.Git)(nil)
 type gitRemote struct {
 	g      landingRemoteGit
 	remote string
+	// lock runs the git calls of one ref write under the lander's git lock,
+	// which the landing's own fetch holds: made beside it, one of the two parks
+	// on 'cannot lock ref' (gt-5n49q4). A nil lock runs fn directly.
+	lock func(fn func() error) error
+}
+
+// underLock runs fn, the git calls of one operation, under the lander's git
+// lock.
+func (r gitRemote) underLock(fn func() error) error {
+	if r.lock == nil {
+		return fn()
+	}
+	return r.lock(fn)
 }
 
 func (r gitRemote) BranchTip(branch string) (string, error) {
@@ -2043,7 +2056,9 @@ func (r gitRemote) BranchTip(branch string) (string, error) {
 }
 
 func (r gitRemote) Contains(target, commit string) (bool, error) {
-	if err := r.g.FetchRefspecWithTimeout(r.remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, r.remote, target), landingRemoteFetchTimeout); err != nil {
+	if err := r.underLock(func() error {
+		return r.g.FetchRefspecWithTimeout(r.remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, r.remote, target), landingRemoteFetchTimeout)
+	}); err != nil {
 		return false, err
 	}
 	// A commit the repository lacks after fetching the target is not on it;
@@ -2072,7 +2087,10 @@ func (r gitRemote) ListRemoteRefs(prefix string) ([]landworker.RemoteRef, error)
 // commit is on the target by reachability or by patch-id.
 func (r gitRemote) BranchLandedOn(target, branch, commit string) (bool, error) {
 	for _, b := range []string{branch, target} {
-		if err := r.g.FetchRefspecWithTimeout(r.remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", b, r.remote, b), landingRemoteFetchTimeout); err != nil {
+		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", b, r.remote, b)
+		if err := r.underLock(func() error {
+			return r.g.FetchRefspecWithTimeout(r.remote, refspec, landingRemoteFetchTimeout)
+		}); err != nil {
 			return false, fmt.Errorf("fetching %s: %w", b, err)
 		}
 	}
@@ -2091,7 +2109,9 @@ func (r gitRemote) CommitTime(commit string) (time.Time, error) {
 }
 
 func (r gitRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
-	return r.g.DeleteRemoteBranchIfAt(r.remote, branch, expectedHash)
+	return r.underLock(func() error {
+		return r.g.DeleteRemoteBranchIfAt(r.remote, branch, expectedHash)
+	})
 }
 
 // LocalBranchTip reads the rig repository's own branch of that name.
@@ -2111,6 +2131,18 @@ func (r gitRemote) LocalBranchTip(branch string) (string, error) {
 // onto, and any branch a worktree has checked out, which is a polecat still
 // working in it.
 func (r gitRemote) DeleteLocalBranch(branch, expectedHash string) (bool, error) {
+	var deleted bool
+	err := r.underLock(func() error {
+		var err error
+		deleted, err = r.deleteLocalBranch(branch, expectedHash)
+		return err
+	})
+	return deleted, err
+}
+
+// deleteLocalBranch is DeleteLocalBranch's body, whose reads and delete run
+// together under the lock so the guards it checked still hold when it deletes.
+func (r gitRemote) deleteLocalBranch(branch, expectedHash string) (bool, error) {
 	if branch == "" {
 		return false, errors.New("no branch name to delete")
 	}
