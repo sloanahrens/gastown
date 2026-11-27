@@ -31,8 +31,9 @@ type eventsTestRow struct {
 // page limit. Every row goes through the bound, so a row stamped before it is
 // not returned however it arrived in the table.
 type eventsTableFake struct {
-	rows    []eventsTestRow
-	queries []string
+	rows     []eventsTestRow
+	queries  []string
+	padBytes int // a payload of that many bytes on every row
 }
 
 // exporter is the fake's jsonlTableExportFn: an events read lands in dir as
@@ -72,7 +73,11 @@ func (f *eventsTableFake) exporter(t *testing.T, others map[string]int) jsonlTab
 		}
 		var lines []string
 		for _, row := range read {
-			line, err := json.Marshal(map[string]string{"id": row.id, "created_at": row.createdAt})
+			fields := map[string]string{"id": row.id, "created_at": row.createdAt}
+			if f.padBytes > 0 {
+				fields["payload"] = strings.Repeat("x", f.padBytes)
+			}
+			line, err := json.Marshal(fields)
 			if err != nil {
 				t.Fatalf("marshalling row %s: %v", row.id, err)
 			}
@@ -857,5 +862,105 @@ func TestExportAllEventsFailedPageWritesNoState(t *testing.T) {
 				t.Errorf("a failed export rewrote the state as %q, want the prior state %q", data, want)
 			}
 		})
+	}
+}
+
+// bigEventRows is n events rows one second apart.
+func bigEventRows(n int) []eventsTestRow {
+	base := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	rows := make([]eventsTestRow, n)
+	for i := range rows {
+		rows[i] = eventsTestRow{fmt.Sprintf("e%03d", i), base.Add(time.Duration(i) * time.Second).Format("2006-01-02 15:04:05")}
+	}
+	return rows
+}
+
+// TestExportEventsCutsShardsAtEightMiB: both events writers cut at 8 MiB and cut
+// the same rows into the same shards (gt-086stn).
+func TestExportEventsCutsShardsAtEightMiB(t *testing.T) {
+	t.Parallel()
+	all := bigEventRows(140)
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+	fake := &eventsTableFake{rows: all, padBytes: 64 * 1024}
+	d.jsonlTableExportFn = fake.exporter(t, nil)
+	export := func(gitRepo string) []string {
+		t.Helper()
+		if _, err := d.exportDatabaseToJsonl("hq", gitRepo, t.TempDir(), false); err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		paths, err := jsonlShardPaths(filepath.Join(gitRepo, "hq"), "events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bodies []string
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(body) > jsonlEventsShardMaxBytes {
+				t.Errorf("%s is over the 8 MiB events cap", filepath.Base(path))
+			}
+			bodies = append(bodies, string(body))
+		}
+		return bodies
+	}
+	full := export(t.TempDir())
+	incRepo := t.TempDir()
+	fake.rows = all[:70]
+	export(incRepo)
+	fake.rows = all
+	if appended := export(incRepo); len(full) < 2 || !slices.Equal(full, appended) {
+		t.Fatalf("the full export cut %d shards and the incremental %d, want at least two, cut the same", len(full), len(appended))
+	}
+}
+
+// TestExportEventsAppendsOntoAnOverCapShard: a last shard over the new cap takes
+// no more rows: the next append re-cuts it and writes a new shard (gt-086stn).
+func TestExportEventsAppendsOntoAnOverCapShard(t *testing.T) {
+	t.Parallel()
+	rows := bigEventRows(140)
+	payload := strings.Repeat("x", 64*1024)
+	var raw []json.RawMessage
+	for _, row := range rows {
+		raw = append(raw, json.RawMessage(`{"id":"`+row.id+`","created_at":"`+row.createdAt+`","payload":"`+payload+`"}`))
+	}
+	gitRepo := t.TempDir()
+	dbDir := filepath.Join(gitRepo, "hq")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeTableShards(dbDir, "events", raw, jsonlShardMaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	first, err := jsonlShardPaths(dbDir, "events")
+	if err != nil || len(first) != 1 {
+		t.Fatalf("the fixture wrote %d shard(s) (%v), want one", len(first), err)
+	}
+	if fi, err := os.Stat(first[0]); err != nil || fi.Size() <= jsonlEventsShardMaxBytes {
+		t.Fatalf("the fixture shard is not over the cap (%v)", err)
+	}
+	last, now := rows[len(rows)-1], time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC)
+	state := eventsExportState{Version: eventsExportStateVersion, LastCreatedAt: last.createdAt, BoundaryIDs: []string{last.id}, Rows: len(rows), FullExportedAt: now}
+	if err := writeEventsExportState(dbDir, state); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(now)
+	d.jsonlTableExportFn = (&eventsTableFake{rows: append(rows, eventsTestRow{"e140", "2026-10-31 10:04:59"}), padBytes: 64 * 1024}).exporter(t, nil)
+	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, t.TempDir(), false); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	paths, err := jsonlShardPaths(dbDir, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, row := range rows {
+		want = append(want, row.id)
+	}
+	if got := eventsExportIDs(t, dbDir); len(paths) < 2 || !slices.Equal(got, append(want, "e140")) {
+		t.Errorf("the export holds %d shard(s) and %v, want a new shard with every row once", len(paths), got)
 	}
 }

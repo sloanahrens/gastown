@@ -974,6 +974,13 @@ func (d *Daemon) exportTableToJsonl(target jsonlTarget, table string, q beadsql.
 // count.
 const jsonlShardMaxBytes = 50 * 1024 * 1024
 
+// jsonlEventsShardMaxBytes is where an events export moves on to its next
+// shard. A backup appends to the events table every cycle and rewrites that
+// table's last shard, so at the table-wide cut a backup wrote up to 50 MiB to
+// add a few rows. The events table is cut at 8 MiB; every other table keeps
+// jsonlShardMaxBytes (gt-086stn).
+const jsonlEventsShardMaxBytes = 8 * 1024 * 1024
+
 // jsonlShardHardLimit is the size no exported file may reach. It sits under
 // GitHub's 100 MB (read as 100 MiB or 100 000 000 bytes) with room for the
 // one row that crosses jsonlShardMaxBytes.

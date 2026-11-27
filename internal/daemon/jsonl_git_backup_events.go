@@ -258,7 +258,7 @@ func (d *Daemon) appendNewEventsWith(ops eventsExportOps, db, dir, dataDir strin
 		return 0, fmt.Errorf("a row stamped %s is older than the boundary %s", before, state.LastCreatedAt)
 	}
 
-	appended, err := appendEventRowsWith(ops, dir, rows, state, jsonlShardMaxBytes, jsonlShardHardLimit)
+	appended, err := appendEventRowsWith(ops, dir, rows, state, jsonlEventsShardMaxBytes, jsonlShardHardLimit)
 	if err != nil {
 		return 0, err
 	}
