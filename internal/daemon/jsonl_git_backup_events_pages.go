@@ -106,7 +106,7 @@ func (d *Daemon) exportEventsPagesWith(ctx context.Context, ops eventsExportOps,
 			if len(rows) == pageRows && afterID != "" && !eventsRowLess(eventsRow{createdAt: afterCreatedAt, id: afterID}, eventsRow{createdAt: createdAt, id: id}) {
 				return written, fmt.Errorf("%s: the page ending at (%s, %s) does not move the keyset (%s, %s) on", db, createdAt, id, afterCreatedAt, afterID)
 			}
-			n, err := appendEventRowsWith(ops, dir, rows, &state, jsonlShardMaxBytes, jsonlShardHardLimit)
+			n, err := appendEventRowsWith(ops, dir, rows, &state, jsonlEventsShardMaxBytes, jsonlShardHardLimit)
 			if err != nil {
 				return written, fmt.Errorf("%s: appending the events page ending at (%s, %s): %w", db, createdAt, id, err)
 			}
