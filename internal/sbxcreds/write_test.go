@@ -119,3 +119,68 @@ func runRefusals(t *testing.T, data string) {
 		})
 	}
 }
+
+// TestWriteKubeconfigFails makes each filesystem step of the writer fail in
+// turn: the error names the step and quotes no content, and neither a temporary
+// nor a partial file at path is left.
+func TestWriteKubeconfigFails(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("injected failure")
+	const marker = "key-bytes-that-must-not-be-echoed"
+	for _, tc := range []struct {
+		name, step, fail string
+		cause            error
+	}{
+		{"create the temporary", "create a temporary kubeconfig", "create", boom},
+		// A create refused by permissions holds for a root process, where a
+		// chmod of a real directory does not.
+		{"an unwritable directory", "create a temporary kubeconfig", "create", &fs.PathError{Op: "open", Path: "unwritable", Err: fs.ErrPermission}},
+		{"write the temporary", "write the temporary kubeconfig", "write", boom},
+		{"chmod the temporary", "chmod the temporary kubeconfig", "chmod", boom},
+		{"close the temporary", "close the temporary kubeconfig", "close", boom},
+		{"link into place", "linking the temporary into place", "link", boom},
+		{"remove the temporary", "remove the temporary kubeconfig", "remove", boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := testutil.PrivateTempDir(t)
+			path := filepath.Join(dir, "kubeconfig")
+			ops := osKubeconfigOps
+			switch tc.fail {
+			case "create":
+				ops.createTemp = func(string, string) (*os.File, error) { return nil, tc.cause }
+			case "write":
+				ops.write = func(*os.File, []byte) error { return tc.cause }
+			case "chmod":
+				ops.chmod = func(*os.File, fs.FileMode) error { return tc.cause }
+			case "close":
+				ops.close = func(f *os.File) error { _ = f.Close(); return tc.cause }
+			case "link":
+				ops.link = func(string, string) error { return tc.cause }
+			case "remove":
+				// The row's removal still unlinks, so the check below for no
+				// leftover temporary is real.
+				ops.remove = func(name string) error { _ = os.Remove(name); return tc.cause }
+			}
+			err := ops.publish(path, []byte(marker))
+			if err == nil {
+				t.Fatalf("write(%s) succeeded, want the %s failure", path, tc.fail)
+			}
+			if !errors.Is(err, tc.cause) || !strings.Contains(err.Error(), tc.step) || strings.Contains(err.Error(), marker) {
+				t.Errorf("write(%s) = %v, want a wrap of %v naming %q and no content", path, err, tc.cause, tc.step)
+			}
+			// Only the removal runs after the link, so its row alone leaves the
+			// complete kubeconfig at path.
+			if tc.fail == "remove" {
+				if got, rerr := os.ReadFile(path); rerr != nil || string(got) != marker {
+					t.Errorf("%s = %q (read %v), want the complete kubeconfig", path, got, rerr)
+				}
+			} else if _, serr := os.Lstat(path); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("%s exists after the %s failure (lstat %v), want no file", path, tc.fail, serr)
+			}
+			if tmps, gerr := filepath.Glob(filepath.Join(dir, ".kubeconfig.tmp-*")); gerr != nil || len(tmps) != 0 {
+				t.Errorf("temporaries %v left after the %s failure (glob %v)", tmps, tc.fail, gerr)
+			}
+		})
+	}
+}
