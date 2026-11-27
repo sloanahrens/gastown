@@ -2,11 +2,14 @@ package done
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/taskfile"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 const seatBeadID = "gt-seat1"
@@ -142,5 +145,56 @@ func TestNoBeadAccessCheckRenderedBoxCount(t *testing.T) {
 	}
 	if block, err := checkedBlock("- [ ] one", 1); err != nil || block != "- [ ] one" {
 		t.Errorf("checkedBlock with one box = %q, %v, want the block and nil", block, err)
+	}
+}
+
+func must(t *testing.T, err error) {
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seatDir writes files (relative paths; a trailing slash makes a directory) under a fresh private temp dir.
+func seatDir(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := testutil.PrivateTempDir(t)
+	for rel, text := range files {
+		path := filepath.Join(root, rel)
+		if strings.HasSuffix(rel, "/") {
+			must(t, os.MkdirAll(path, 0o700))
+			continue
+		}
+		must(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		must(t, os.WriteFile(path, []byte(text), 0o600))
+	}
+	return filepath.Join(root, ".gt", "task")
+}
+
+// TestNoBeadAccessSeatDirRefusal: over the seat's files on disk, an unticked box
+// refuses and is named, every box ticked passes, each unreadable input refuses,
+// and with no marker and no TASK.md there it passes, so dolt mode read no file.
+func TestNoBeadAccessSeatDirRefusal(t *testing.T) {
+	t.Parallel()
+	const mode, task, result = ".gt/task/" + taskfile.ModeFile, ".gt/task/TASK.md", outbox.Dir + "/" + outbox.ResultFile
+	text := seatTaskText(taskfile.Box{Text: "one"}, taskfile.Box{Text: "two"})
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"an unticked box refuses and is named":     {files: map[string]string{mode: taskfile.ModeFiles, task: text, result: string(outbox.Encode(seatBeadID, outbox.Result{Ticked: []int{0}}))}, want: "- [ ] two"},
+		"every box ticked returns nil":             {files: map[string]string{mode: taskfile.ModeFiles, task: text, result: string(outbox.Encode(seatBeadID, outbox.Result{Ticked: []int{0, 1}}))}},
+		"no result written yet refuses every box":  {files: map[string]string{mode: taskfile.ModeFiles, task: text}, want: "2 acceptance criteria unticked"},
+		"no marker and no TASK.md reads dolt mode": {files: map[string]string{}},
+		"an unreadable marker refuses":             {files: map[string]string{mode + "/": "", task: text}, want: "bead access is unknown"},
+		"a file-mode seat without TASK.md refuses": {files: map[string]string{mode: taskfile.ModeFiles}, want: "TASK.md cannot be read"},
+		"an unreadable result.json refuses":        {files: map[string]string{mode: taskfile.ModeFiles, task: text, result + "/": ""}, want: "result.json cannot be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := refuseUntickedSeatDir(seatDir(t, tc.files))
+			if (err != nil) != (tc.want != "") || err != nil && !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("refuseUntickedSeatDir = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
