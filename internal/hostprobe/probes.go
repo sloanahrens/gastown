@@ -104,6 +104,10 @@ type Probes struct {
 	// before the field decodes to nil, which a reader takes as unknown, not as
 	// zero lost commits.
 	DoltConflicts *Field[DoltConflicts] `json:"dolt_conflicts"`
+	// GoCacheTrim is a pointer for the same reason as Launchd: a file written
+	// before the field decodes to nil, which a reader takes as unknown, not as
+	// a trim at the zero time.
+	GoCacheTrim *Field[GoCacheTrim] `json:"go_cache_trim"`
 }
 
 // Path is the probe file under townRoot: the host agent writes it there and a
