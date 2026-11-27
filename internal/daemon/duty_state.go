@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -49,6 +51,32 @@ func WriteDutyState(townRoot string, at time.Time, obs []reconcile.Observation, 
 		return fmt.Errorf("write duty state to %s: %w", path, err)
 	}
 	return nil
+}
+
+// ReadDutyState reads the record WriteDutyState left under townRoot. An absent
+// file returns an error that wraps fs.ErrNotExist, and a file that does not
+// decode returns an error too, so neither reads as an empty state.
+func ReadDutyState(townRoot string) (DutyState, error) {
+	// An empty root would name a path relative to the process's working
+	// directory, which is not the town's record.
+	if townRoot == "" {
+		return DutyState{}, errors.New("read duty state: no town root")
+	}
+	path := dutyStatePath(townRoot)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return DutyState{}, fmt.Errorf("read duty state from %s: %w", path, err)
+	}
+	// Decoding into a pointer makes a file holding null a nil record rather
+	// than a zero DutyState that looks like a valid empty one.
+	var state *DutyState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return DutyState{}, fmt.Errorf("decode duty state in %s: %w", path, err)
+	}
+	if state == nil {
+		return DutyState{}, fmt.Errorf("decode duty state in %s: the file holds null, not a record", path)
+	}
+	return *state, nil
 }
 
 // newDutyState turns the observations into the record the state file holds.
