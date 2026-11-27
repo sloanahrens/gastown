@@ -1,10 +1,11 @@
 # Sandbox rescue runbook: save the work before the sandbox is deleted
 
 Read this when `gt polecat check-recovery` answers NEEDS_RECOVERY for a seat whose sandbox is
-failed or suspended, and before any `openshell sandbox delete` of it. `openshell sandbox start`
-refuses an Error sandbox and `openshell sandbox exec` needs a running pod, so the commits are
-reached through the workspace volume on its node. The steps below are the gt-cheedo rescue of
-2026-11-19 (bead gt-o9qmfe), in the order it ran; a later seat re-reads its own names.
+failed, suspended, or stays outside Ready (Provisioning included), and before any
+`openshell sandbox delete` of it. `openshell sandbox start` refuses an Error sandbox and
+`openshell sandbox exec` needs a running pod, so the commits are reached through the workspace
+volume on its node. The volume name, node and commit ids below belong to the 2026-11-19 rescue of
+gt-cheedo (bead gt-o9qmfe); step 1 reads the seat's own volume and node, and step 3 its commits.
 
 The operator's shell on the Mac runs steps 1 to 4, and has the `colima-gt-sbx` docker context; the PVC copy and bundle stay under `~/gt/.runtime/rescue`. The daemon pod runs what the Mac's `gt` wrapper sends it and holds the `openshell` gateway, so the pod commands in step 5 carry only pod paths. The overseer runs every step; a bird session may run steps 1 to 3, and step 4 only when the overseer says so. Step 5 is the overseer's, after step 4's read-back.
 
@@ -15,6 +16,24 @@ The operator's shell on the Mac runs steps 1 to 4, and has the `colima-gt-sbx` d
 Run `gt polecat check-recovery <rig>/<seat>` first: NEEDS_RECOVERY is why this page exists, and the
 Polecat section of [CLEANUP.md](CLEANUP.md) says what "landed" means to the verdict. For the example
 it is NEEDS_RECOVERY with `has_unpushed` and the branch, since no pod runs to show the commits.
+
+## Before step 1: a sandbox outside Ready that may still run
+
+The gateway composes the sandbox phase from the supervisor pod (`os-supervisor-<sandbox id>`) and
+its session as well as from the Sandbox CR, so a Ready CR with a running sandbox pod can still
+read Provisioning. Record the sandbox id and the Ready condition's `reason` and `message` from the
+JSON, then read the cluster, all before any delete: the delete and log rotation remove the evidence.
+
+```bash
+kubectl --context colima-gt-control -n gt exec deploy/daemon -c daemon -- \
+  openshell -g k8s sandbox get <sandbox> --output json
+kubectl --kubeconfig "$KC" -n openshell get sandbox,pod | grep -E '<sandbox>|os-supervisor-<id>'
+```
+
+The first command runs `openshell` in the daemon pod as step 5 does; set `KC` to the kubeconfig
+path step 1's block sets. The second read shows the Sandbox CR, the sandbox pod and the supervisor
+pod. When a pod runs, step 2 copies a live volume: confirm no process in the pod is writing before
+step 2, and say in the rescue record that the copy was live.
 
 ## Step 1: find the volume (read-only)
 
@@ -142,7 +161,7 @@ The store is sqlite in `$D` on node `gt-sbx-worker` (`openshell.db`, `-wal`, `-s
 
 ## Not verified
 
-- The copy is taken from the node's disk while the pod is gone; a running pod needs the sandbox stopped first, so nothing writes the volume mid-copy.
+- With no pod, the copy is taken from the node's disk while the pod is gone, and nothing writes the volume mid-copy; for a running pod the one case seen (gt-cheedo, 2026-11-26) was copied with the agent idle and read a clean worktree, and stopping the sandbox through a stale gateway was not tried.
 - The PV name, node, path, size and commits are gt-cheedo's readings; re-read each for the next seat.
 - Whether the daemon pod is allowed to push the branch its nuke preserves; a refused push stops the nuke with the branch and verified bundle intact.
 - Step 4 is one hand push because the nuke's preserve step reads only the seat's own worktree, which holds none of the commits copied out of the volume (`gt polecat nuke --help`: it "pushes the polecat's branch"). Whether the copied commits could instead be fetched into that worktree's branch, so the plain nuke pushes them and no second push path exists, has not been tried: the worktree sits in the daemon pod's town copy while the bundle sits on the Mac, and the nuke deletes it.
