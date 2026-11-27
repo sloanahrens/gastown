@@ -1160,6 +1160,48 @@ func TestTakeoverSeatEndEndsTheBeadsSeatNotTheCrewActor(t *testing.T) {
 	}
 }
 
+// A crew submission that claims a polecat's bead writes the seat it took the
+// bead from as a holder note, so the landed bead names that seat even though
+// its assignee is now the crew actor. The seat is offered the end with the
+// branch its agent bead records, just as the assignee would have been
+// (gt-oiu5f7).
+func TestTakeoverSeatEndOffersTheHolderNoteSeat(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/owl/" + endBead
+	const cheedoBranch = "polecat/cheedo/" + endBead + "+x1"
+	bead := &beads.Issue{
+		ID:       endBead,
+		Assignee: "town/crew/owl",
+		Notes: strings.Join([]string{
+			land.FormatReadyNote(land.Work{Branch: branch, Head: head, Target: "main", Worker: "town/crew/owl"}),
+			land.FormatHolderSeatNote(endRig + "/polecats/cheedo"),
+		}, "\n\n"),
+	}
+	d, got, agents := seatEndCalls(t, bead, io.Discard)
+	seedSeatAgent(t, d, agents, "cheedo", beads.AgentFields{HookBead: endBead, Branch: cheedoBranch})
+
+	d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+		land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/owl"})
+
+	if len(*got) != 1 {
+		t.Fatalf("seat ends offered = %+v, want only the holder note's seat", *got)
+	}
+	call := (*got)[0]
+	if call.name != "cheedo" || call.rig != endRig {
+		t.Errorf("ended %s/%s, want %s/cheedo", call.rig, call.name, endRig)
+	}
+	if call.landing.Branch != cheedoBranch {
+		t.Errorf("ended cheedo on branch %q, want the branch its agent bead records %q", call.landing.Branch, cheedoBranch)
+	}
+	if call.landing.BeadID != endBead || !call.landing.Landed {
+		t.Errorf("landing facts = %+v, want the bead's landed record", call.landing)
+	}
+	if call.landing.AgentNotDone {
+		t.Errorf("landing AgentNotDone = true, want false for a seat that still hooks the landed bead")
+	}
+}
+
 // A seat that ran gt done has its hook cleared and its last source issue left
 // behind, so an assignee-only name is also the seat that built the landed bead
 // when the hook is empty and the last source issue is the bead. Any other
