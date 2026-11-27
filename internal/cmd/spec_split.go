@@ -37,11 +37,15 @@ func init() {
 var specSplitCmd = &cobra.Command{
 	Use:   "split <bead-id>",
 	Short: "Print the two drafts a bead splits into, or create them with --apply",
-	Long: `Split a work bead into two pieces by package, printing or creating them.
+	Long: `Split a work bead into two pieces, printing or creating them.
 
 Each Constraints bullet and acceptance box is placed in the package directory it
 names. The packages are divided between piece A and piece B, which depends on
 A. Each draft is the full bead text that piece would carry.
+
+A bead whose bullets and boxes name one package has no package split. It is
+split by acceptance boxes instead: the bullets and the first box go to piece A,
+the other boxes to piece B. The dry run names the strategy it used.
 
 The packages are read from the rig's target branch. A bead that cannot be
 split is refused with the reason and exits non-zero.
@@ -138,8 +142,8 @@ func specSplitApplyForDaemon(townRoot, beadID string) (string, error) {
 	return report.String(), err
 }
 
-// runSpecSplitOn prints the two piece drafts of beadID to out, then each
-// piece's minutes and lint, then the verdict. A failed verdict returns a silent
+// runSpecSplitOn prints the strategy the split was planned by, the two piece
+// drafts of beadID to out, then each piece's minutes and lint, then the verdict. A failed verdict returns a silent
 // exit of 1 after the report. The read, the target inventory and the check are
 // given, so a test drives it through fakes. Every refusal returns before
 // anything is printed: the drafts, their estimates and their lints are all made
@@ -148,7 +152,7 @@ func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRea
 	if !dryRun {
 		return errors.New("gt spec split needs --dry-run to print the two drafts or --apply to create them")
 	}
-	issue, tree, plan, err := specSplitPlan(beadID, read, target)
+	issue, tree, plan, strategy, err := specSplitPlan(beadID, read, target)
 	if err != nil {
 		return err
 	}
@@ -160,6 +164,7 @@ func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRea
 	// The report is built whole and written once, so a failed write reaches
 	// the caller instead of leaving half a report on out.
 	var report strings.Builder
+	report.WriteString("strategy: " + strategy + "\n")
 	for i, piece := range pieces {
 		if i > 0 {
 			report.WriteString("\n")
@@ -193,19 +198,28 @@ func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRea
 	return nil
 }
 
+// The strategies a split is planned by, named in the dry-run output.
+const (
+	specStrategyByPackage = "by package"
+	specStrategyByBoxes   = "by acceptance boxes"
+)
+
 // specSplitPlan reads beadID, reads the target branch's files and plans the two
-// pieces. Both modes refuse here, before anything is written.
-func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*beads.Issue, *specdispatch.TargetTree, specsplit.SplitPlan, error) {
+// pieces. A spec the package split refuses is planned by acceptance boxes
+// instead, and strategy names the split planned. A spec both groupings refuse
+// is refused with both reasons. Both modes refuse here, before anything is
+// written.
+func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*beads.Issue, *specdispatch.TargetTree, specsplit.SplitPlan, string, error) {
 	issue, err := read(beadID)
 	if err != nil {
-		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read bead %s: %w", beadID, err)
+		return nil, nil, specsplit.SplitPlan{}, "", fmt.Errorf("cannot read bead %s: %w", beadID, err)
 	}
 	tree := target(beadID)
 	if tree == nil {
-		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read the target branch's files for %s", beadID)
+		return nil, nil, specsplit.SplitPlan{}, "", fmt.Errorf("cannot read the target branch's files for %s", beadID)
 	}
 	if tree.Err != "" {
-		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot read the target branch's files for %s: %s", beadID, tree.Err)
+		return nil, nil, specsplit.SplitPlan{}, "", fmt.Errorf("cannot read the target branch's files for %s: %s", beadID, tree.Err)
 	}
 	spec := specsplit.Spec{
 		Constraints: specdispatch.Sections(issue.Description)["constraints"],
@@ -216,15 +230,22 @@ func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*
 		// of no existing symbol and every symbol A declares keeps its note.
 		BaseSymbols: map[string]bool{},
 	}
-	groups, err := specsplit.Group(spec)
-	if err != nil {
-		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot split %s: %w", beadID, err)
+	strategy := specStrategyByPackage
+	groups, groupErr := specsplit.Group(spec)
+	// Group refuses every spec it cannot split into two groups, so its error is
+	// the signal to try the box-group split.
+	if groupErr != nil {
+		groups, err = specsplit.GroupByBoxes(spec)
+		if err != nil {
+			return nil, nil, specsplit.SplitPlan{}, "", fmt.Errorf("cannot split %s: by package: %w; by acceptance boxes: %w", beadID, groupErr, err)
+		}
+		strategy = specStrategyByBoxes
 	}
 	plan, err := specsplit.Plan(spec, groups)
 	if err != nil {
-		return nil, nil, specsplit.SplitPlan{}, fmt.Errorf("cannot split %s: %w", beadID, err)
+		return nil, nil, specsplit.SplitPlan{}, "", fmt.Errorf("cannot split %s: %w", beadID, err)
 	}
-	return issue, tree, plan, nil
+	return issue, tree, plan, strategy, nil
 }
 
 // runSpecSplitApplyOn creates the two pieces of beadID, moves the original's
@@ -238,7 +259,7 @@ func specSplitPlan(beadID string, read specSplitRead, target specSplitTarget) (*
 // the dependency table read that finds a dependent the store's own list leaves
 // out; nil uses only the store's list.
 func runSpecSplitApplyOn(out io.Writer, beadID, rig string, read specSplitRead, target specSplitTarget, check specSplitCheck, db beads.Client, raw specSplitRawDeps) error {
-	issue, tree, plan, err := specSplitPlan(beadID, read, target)
+	issue, tree, plan, _, err := specSplitPlan(beadID, read, target)
 	if err != nil {
 		return err
 	}

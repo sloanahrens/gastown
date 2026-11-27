@@ -46,6 +46,39 @@ One package.
 - [ ] The lexer works. Run: go test ./internal/alpha -run TestLex
 `
 
+// splitOneBoxDescription names one package and one box, so neither the package
+// split nor the box-group split has two groups to plan.
+const splitOneBoxDescription = `## Goal
+
+One package, one box.
+
+## Constraints
+
+- Add the parser to internal/alpha/alpha.go.
+
+## Acceptance
+
+- [ ] The parser works. Run: go test ./internal/alpha -run TestParse
+`
+
+// splitOnePackageThreeBoxesDescription names one package and three boxes that
+// all test it: the package split has one group, and the box-group split puts the
+// bullet and the first box in piece A, the other two boxes in piece B.
+const splitOnePackageThreeBoxesDescription = `## Goal
+
+One package, three boxes.
+
+## Constraints
+
+- Add the parser to internal/alpha/alpha.go.
+
+## Acceptance
+
+- [ ] The parser works. Run: go test ./internal/alpha -run TestParse
+- [ ] The lexer works. Run: go test ./internal/alpha -run TestLex
+- [ ] The printer works. Run: go test ./internal/alpha -run TestPrint
+`
+
 // splitUnboxedPackageDescription names beta in a bullet but tests only alpha,
 // so beta's file group has no acceptance box for its piece to carry.
 const splitUnboxedPackageDescription = `## Goal
@@ -117,6 +150,87 @@ func TestSpecSplitDryRunPrints(t *testing.T) {
 	}
 }
 
+// TestSpecSplitFallsBackToBoxes: a one-package bead with three boxes has no
+// package split, so the dry run plans it by acceptance boxes: piece A carries the
+// bullet and the first box, piece B depends on A and carries the other two, and
+// the output names the strategy.
+func TestSpecSplitFallsBackToBoxes(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: splitOnePackageThreeBoxesDescription})
+
+	var out bytes.Buffer
+	err := runSpecSplitOn(&out, "gt-split", true, db.Show, func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck())
+	if err != nil {
+		t.Fatalf("runSpecSplitOn() error = %v, want none", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"strategy: by acceptance boxes",
+		"== piece A: internal/alpha ==",
+		"== piece B: internal/alpha (depends on piece A) ==",
+		"- [ ] The lexer works. Run: go test ./internal/alpha -run TestLex",
+		"- [ ] The printer works. Run: go test ./internal/alpha -run TestPrint",
+		"verdict: both pieces lint ok",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestSpecSplitStrategyChoice: a bead the package split plans prints the
+// strategy "by package" and no box-group line; a bead both groupings refuse is
+// refused, naming both reasons, and prints nothing.
+func TestSpecSplitStrategyChoice(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		description string
+		wantOut     string
+		wantErr     string
+	}{
+		{
+			name:        "a multi-package bead splits by package",
+			description: splitBeadDescription,
+			wantOut:     "strategy: by package\n",
+		},
+		{
+			name:        "a one-package bead with one box is refused with both reasons",
+			description: splitOneBoxDescription,
+			wantErr:     "by package: spec has only the one file group internal/alpha, so it cannot be split; by acceptance boxes: a box-group split needs at least two acceptance boxes, and the spec has 1",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			mustBead(t, db, beads.CreateOptions{ID: "gt-split", Title: "split", Description: tc.description})
+
+			var out bytes.Buffer
+			err := runSpecSplitOn(&out, "gt-split", true, db.Show, func(string) *specdispatch.TargetTree { return splitTree() }, splitPassingCheck())
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("runSpecSplitOn() error = %v, want none", err)
+				}
+				if !strings.Contains(out.String(), tc.wantOut) {
+					t.Errorf("output lacks %q:\n%s", tc.wantOut, out.String())
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("runSpecSplitOn() error = nil, want a refusal naming %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tc.wantErr)
+			}
+			if out.Len() != 0 {
+				t.Errorf("output on refusal = %q, want none", out.String())
+			}
+		})
+	}
+}
+
 // TestSpecSplitRefusesBeforePrinting: every refusal returns an error and prints
 // nothing, so a caller never reads a half draft as a split.
 func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
@@ -132,7 +246,7 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 		{name: "bead not found", dryRun: true, beadID: "gt-missing", description: splitBeadDescription, tree: splitTree()},
 		{name: "no rig holds the bead", dryRun: true, beadID: "gt-split", description: splitBeadDescription, tree: nil},
 		{name: "target tree unreadable", dryRun: true, beadID: "gt-split", description: splitBeadDescription, tree: &specdispatch.TargetTree{Branch: "main", Files: splitTree().Files, Err: "cannot read main"}},
-		{name: "one package only", dryRun: true, beadID: "gt-split", description: splitOnePackageDescription, tree: splitTree()},
+		{name: "one package and one box", dryRun: true, beadID: "gt-split", description: splitOneBoxDescription, tree: splitTree()},
 		{name: "package with a bullet and no box", dryRun: true, beadID: "gt-split", description: splitUnboxedPackageDescription, tree: splitTree()},
 	}
 	for _, row := range rows {
@@ -167,7 +281,8 @@ func TestSpecSplitRefusesBeforePrinting(t *testing.T) {
 
 // TestSpecSplitDryRunRefusal: a planner refusal is reported by its reason and
 // exits 1. Nothing is printed, and the fake's journal shows no bead created or
-// updated. The two rows are the planner's stages, Plan and Group.
+// updated. The two rows are the planner's stages, Plan and the two groupings:
+// the package split and, when it refuses, the box-group split.
 func TestSpecSplitDryRunRefusal(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -181,9 +296,9 @@ func TestSpecSplitDryRunRefusal(t *testing.T) {
 			reason:      "file group internal/beta has no acceptance boxes, so its piece would have no tests",
 		},
 		{
-			name:        "group refuses a one-package bead",
-			description: splitOnePackageDescription,
-			reason:      "spec has only the one file group internal/alpha, so it cannot be split",
+			name:        "both groupings refuse a one-package bead with one box",
+			description: splitOneBoxDescription,
+			reason:      "by package: spec has only the one file group internal/alpha, so it cannot be split; by acceptance boxes: a box-group split needs at least two acceptance boxes, and the spec has 1",
 		},
 	}
 	for _, tc := range tests {
