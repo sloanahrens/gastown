@@ -2290,10 +2290,10 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
 	// The runner block's fields come from sweeprunner.ConfigSpec, the one builder
 	// the capacity preflight reads too, so the real sweep and its preflight
-	// cannot drift (gt-zo7z6e). Only the stage's own fields are set below.
+	// cannot drift (gt-zo7z6e), the CPU request included: the Job asks for the
+	// cores the config names, and for the whole share when it names none
+	// (gt-o9gx83). Only the stage's own fields are set below.
 	spec := sweeprunner.ConfigSpec(cfg)
-	// RunnerCPURequest stays 0: the real sweep does not carry the request yet (gt-o9gx83).
-	spec.RunnerCPURequest = 0
 	// The rig whose sweep runs, and the commit it tests.
 	spec.Rig = st.rig
 	spec.SHA = st.tested
