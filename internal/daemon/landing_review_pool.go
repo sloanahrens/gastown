@@ -37,7 +37,8 @@ type reviewPoolEnv struct {
 //
 // The error is the on path's when om's config file cannot be named or does not
 // exist: the wiring is undone and the pool stays off, so a failure never reads
-// as a wired pool (gt-aovgi3, gt-lfykjq).
+// as a wired pool (gt-aovgi3, gt-lfykjq). wireRigReviewPool, the production
+// entry point, logs that error; this function only returns it (gt-lmflya).
 func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // workRoot is a later bead's wiring target
 	on, max, expiry, err := cfg.ReviewPoolFor(rig)
 	if err != nil {
@@ -71,8 +72,7 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	}
 	if err != nil {
 		l.Ahead, l.ReuseExpiry, l.OMConfigPath = nil, 0, ""
-		d.logger.Printf("landing_worker: %s: review pool off: %v", rig, err)
-		return fmt.Errorf("landing_worker: %s: %w", rig, err)
+		return fmt.Errorf("landing_worker: %s: review pool off: %w", rig, err)
 	}
 	l.OMConfigPath = omPath
 	// The Worker gets the pool that fills the store and the store itself as its
@@ -93,6 +93,18 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 		Logf:     w.Logf,
 	}
 	return nil
+}
+
+// wireRigReviewPool is the production entry point for the review pool: it wires
+// a rig's landing worker with the environment held on the Daemon, whose zero
+// value reads this process's environment, so a unit test can point om's config
+// at its own file (gt-lmflya). wireReviewPool leaves the pool off when it
+// returns an error; the wiring does not fail the worker's construction, so the
+// error is logged here, once (gt-m0s4td).
+func (d *Daemon) wireRigReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string) {
+	if err := d.wireReviewPool(rig, cfg, l, w, workRoot, d.reviewPoolEnv); err != nil {
+		d.logger.Print(err)
+	}
 }
 
 // reviewPoolOMConfigPath resolves om's config file the way om does
