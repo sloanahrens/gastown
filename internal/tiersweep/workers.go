@@ -8,7 +8,8 @@ import (
 )
 
 // serialText is the shrink-only list of packages whose tests share fixed ports,
-// temporary paths or process state, so they run alone.
+// temporary paths or process state, so no other package runs beside them. The
+// shards of one such package do run beside each other (gt-0kestr).
 //
 //go:embed serial.txt
 var serialText string

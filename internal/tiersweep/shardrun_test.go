@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fixturePkg is the package the shard tests run, and fixtureTests the ten tests
@@ -37,6 +38,9 @@ type shardFake struct {
 	listFails  bool
 	patterns   []string
 	calls      []shardCall
+	// started and hold keep a -test.run command in flight until it is released.
+	started chan string
+	hold    <-chan struct{}
 }
 
 // shardCall is one command the fake was asked to run, and where it ran.
@@ -46,6 +50,13 @@ type shardCall struct {
 }
 
 func (f *shardFake) exec(dir string, _ []string, argv []string, out io.Writer) int {
+	if slices.Contains(argv, "-test.run") && f.hold != nil {
+		f.started <- dir
+		select {
+		case <-f.hold:
+		case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: a held command is released by its test, and a stuck one fails that test's own waits
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, shardCall{dir: dir, argv: argv})
@@ -168,6 +179,35 @@ func TestShardedPackageRunsOnThePool(t *testing.T) {
 	}
 	if log := readShardLog(t, r.LogDir); !strings.Contains(log, "--- PASS: TestJ") {
 		t.Errorf("log lacks the last shard's output:\n%s", log)
+	}
+}
+
+// TestSerialShardsRunTogether: with jobs 4 a serial package's three shards are
+// all handed out before any finishes, and nothing else runs meanwhile (gt-0kestr).
+func TestSerialShardsRunTogether(t *testing.T) {
+	t.Parallel()
+	const serial, beside = "./internal/cmd", "./internal/tmux"
+	release := make(chan struct{})
+	f := &shardFake{listed: fixtureTests, started: make(chan string, 6), hold: release}
+	r := &Runner{Exec: f.exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: io.Discard, Jobs: 4, Shards: map[string]int{serial: 3, beside: 3}}
+	done := make(chan Counts, 1)
+	go func() { done <- r.Tier(TierIntegration, ".", nil, taggedArgs, []string{serial, beside}) }()
+	for i := 0; i < 3; i++ {
+		if dir := waitOrFail(t, f.started, "a shard of the serial package"); dir != "internal/cmd" {
+			t.Fatalf("a shard started in %q, want internal/cmd", dir)
+		}
+	}
+	select {
+	case dir := <-f.started:
+		t.Fatalf("a shard started in %q while the first package's shards were in flight", dir)
+	default:
+	}
+	close(release)
+	for i := 0; i < 3; i++ {
+		waitOrFail(t, f.started, "a shard of the other serial package")
+	}
+	if got := waitOrFail(t, done, "the tier to count its packages"); got.Passed != 2 || got.Failed != 0 {
+		t.Fatalf("counts = %+v, want two packages passed", got)
 	}
 }
 
