@@ -1493,7 +1493,9 @@ func execDoltLogContainerTail(container string, lines int, follow bool, out, err
 // doltLogsTo writes the stale-log notice for the town's dolt.log to errw, then
 // its last lines (or follows it) to out. A container town's lines are read from
 // the container, followed when follow is set: its host dolt.log is the stale
-// file the notice names (gt-rpoii1, gt-chmmo4).
+// file the notice names, so a container read that fails is the command's error,
+// naming the container and the host command, and never the host tail
+// (gt-rpoii1, gt-chmmo4, gt-85v8dd).
 func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines int, follow bool) error {
 	config := doltserver.DefaultConfig(townRoot)
 	container := doltLogContainer(config)
@@ -1507,7 +1509,14 @@ func doltLogsTo(townRoot string, out, errw io.Writer, reads doltLogReads, lines 
 	}
 
 	if container != "" {
-		return reads.containerLog(container, lines, follow, out, errw)
+		if err := reads.containerLog(container, lines, follow, out, errw); err != nil {
+			// The stale host dolt.log is not the container's log, so the
+			// failure names the container and the host command that reads
+			// it; the reader's cause stays so "no container engine here"
+			// reaches the operator.
+			return fmt.Errorf("cannot read container %q's log from this host (read it on the host with: docker logs %s): %w", container, container, err)
+		}
+		return nil
 	}
 
 	if follow {
