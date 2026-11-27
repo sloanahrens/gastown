@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -475,7 +476,7 @@ func (r *Runner) report(tier string, t *task) {
 		fmt.Fprintf(r.Stderr, "    create log %s: %v\n", res.log, res.createErr)
 		return
 	}
-	r.addTiming(tier, t.name, res.start, res.code)
+	r.addTiming(tier, t.name, res.start, res.code, res.log)
 	r.addSlowTests(tier, t.name, res.tests)
 	r.reportLog(tier, t)
 }
@@ -544,7 +545,7 @@ func (r *Runner) now() time.Time {
 }
 
 // addTiming records one started package's line in the run's timings.
-func (r *Runner) addTiming(tier, name string, start time.Time, code int) {
+func (r *Runner) addTiming(tier, name string, start time.Time, code int, log string) {
 	if r.Timings == nil {
 		return
 	}
@@ -552,9 +553,33 @@ func (r *Runner) addTiming(tier, name string, start time.Time, code int) {
 		Tier:    tier,
 		Package: name,
 		WallMS:  r.now().Sub(start).Milliseconds(),
+		TestMS:  r.testElapsed(log),
 		Exit:    code,
 		Start:   start.Format(time.RFC3339Nano),
 	})
+}
+
+// testElapsed is the time go test's last `ok` or `FAIL` line in log says the
+// test binary ran, in milliseconds; 0 leaves test_ms out when the log cannot be
+// read (named on stderr once) or names no such line. The caller holds stderrMu.
+func (r *Runner) testElapsed(log string) int64 {
+	data, err := os.ReadFile(log)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "    read log %s: %v\n", log, err)
+		return 0
+	}
+	var ms int64
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Split(line, "\t")
+		verdict := strings.TrimSpace(fields[0])
+		if len(fields) < 3 || (verdict != "ok" && verdict != "FAIL") {
+			continue
+		}
+		if sec, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(fields[2]), "s"), 64); err == nil {
+			ms = int64(sec*1000 + 0.5)
+		}
+	}
+	return ms
 }
 
 // addSlowTests writes one test line per top-level test that took SlowTest or

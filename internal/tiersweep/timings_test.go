@@ -91,6 +91,58 @@ func TestTierWritesTimings(t *testing.T) {
 	}
 }
 
+// TestElapsed: a package's line carries the time go test's last `ok` or `FAIL`
+// line that names seconds says the test binary ran, coverage suffix and all; a
+// log with no such line, or one that cannot be read, still writes the line
+// without test_ms, and an unreadable log is named on stderr once.
+func TestElapsed(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/p"
+	ok := "ok  \t" + pkg + "\t"
+	cases := []struct {
+		name       string
+		code       int
+		output     string
+		unreadable bool
+		wantMS     int64
+	}{
+		{"the last ok line naming seconds, coverage suffix and all", 0, ok + "0.5s\n" + ok + "1.234s\tcoverage: 12.3% of statements\n" + ok + "(cached)\nnote\t" + pkg + "\t7s\n", false, 1234},
+		{"a FAIL line", 1, "--- FAIL: TestX (0.00s)\nFAIL\nFAIL\t" + pkg + "\t2.5s\n", false, 2500},
+		{"no line naming seconds", 1, "FAIL\t" + pkg + " [build failed]\n?   \t" + pkg + "\t[no test files]\n", false, 0},
+		{"an unreadable log", 0, "", true, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r, stderr, logDir := newRunner(t, &fakeGo{codes: map[string]int{pkg: tc.code}, output: map[string]string{pkg: tc.output}}, "")
+			timingsPath := filepath.Join(logDir, TimingsName)
+			r.Timings = OpenTimings(timingsPath, ProcessHost, stderr)
+			if tc.unreadable {
+				// The log goes elsewhere, so the path the report reads is absent.
+				r.CreateLog = func(string) (io.WriteCloser, error) { return os.Create(filepath.Join(t.TempDir(), "log")) }
+			}
+			r.Tier(TierIntegration, ".", nil, nil, []string{pkg})
+			r.Timings.Close()
+
+			data, err := os.ReadFile(timingsPath)
+			if err != nil {
+				t.Fatalf("read timings: %v", err)
+			}
+			got := readTimings(t, timingsPath)
+			if len(got) != 1 || got[0].TestMS != tc.wantMS {
+				t.Fatalf("timings = %+v, want one line with test_ms %d", got, tc.wantMS)
+			}
+			if has := strings.Contains(string(data), `"test_ms"`); has != (tc.wantMS != 0) {
+				t.Errorf("%q carries test_ms = %t, want %t", data, has, tc.wantMS != 0)
+			}
+			named := namingLines(stderr.String(), filepath.Join(logDir, LogName(TierIntegration, pkg)))
+			if want := map[bool]int{true: 1, false: 0}[tc.unreadable]; named != want {
+				t.Errorf("stderr names the log on %d lines, want %d:\n%s", named, want, stderr)
+			}
+		})
+	}
+}
+
 // TestTierTimingsComeFromTheSweepClock: each Go tier's lines are timed by the
 // sweep's clock, not the real one, and each names its own tier and package.
 func TestTierTimingsComeFromTheSweepClock(t *testing.T) {
@@ -643,7 +695,7 @@ func TestOpenTimingsNeedsItsSeams(t *testing.T) {
 // so a torn file starts the packages in list order.
 func TestParseWalls(t *testing.T) {
 	t.Parallel()
-	data := `{"tier":"integration","package":"./cmd","wall_ms":196000,"exit":0,"start":"2026-10-30T00:00:00Z"}
+	data := `{"tier":"integration","package":"./cmd","wall_ms":196000,"test_ms":171000,"exit":0,"start":"2026-10-30T00:00:00Z"}
 {"tier":"integration-docker","package":"./cmd","wall_ms":1000,"exit":0,"start":"2026-10-30T00:00:00Z"}
 not a timing line
 
