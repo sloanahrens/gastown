@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -45,7 +46,8 @@ func ReadDiff(run Runner, base string) ([]byte, error) {
 // JudgeTestWaits reports the lines base...HEAD adds to _test.go files that wait with no bound: a channel receive,
 // a call to a method named Wait on any receiver, a `for` loop with no condition, or a `for range x` loop that names
 // no key or value, each outside a select statement with a second clause; a line already on the base is not judged
-// (gt-4ndz7z, gt-whjd81).
+// (gt-4ndz7z, gt-whjd81). synctest.Wait in a file that imports testing/synctest is the bubble barrier and is not a
+// wait (gt-10cacr).
 func JudgeTestWaits(diff io.Reader, read FileReader) (TestWaitResult, error) {
 	var res TestWaitResult
 	added, err := addedLines(diff)
@@ -94,6 +96,7 @@ func judgeTestFile(src []byte, path string, added []addedLine) ([]TestWaitFindin
 	}
 	var out []TestWaitFinding
 	reported := map[int]bool{}
+	synctestBounded := importsSynctest(file)
 	// stack says, for each node being walked, whether it is a select that bounds the waits inside it.
 	var stack []bool
 	bounded := func() bool { return slices.Contains(stack, true) }
@@ -103,7 +106,7 @@ func judgeTestFile(src []byte, path string, added []addedLine) ([]TestWaitFindin
 			return false
 		}
 		if !bounded() {
-			if line, ok := waitNodeLine(fset, n); ok {
+			if line, ok := waitNodeLine(fset, n, synctestBounded); ok {
 				if lineText, wanted := text[line]; wanted && !reported[line] {
 					reported[line] = true
 					out = append(out, TestWaitFinding{Path: path, Line: line, Text: strings.TrimSpace(lineText)})
@@ -118,12 +121,27 @@ func judgeTestFile(src []byte, path string, added []addedLine) ([]TestWaitFindin
 	return out, nil
 }
 
+// importsSynctest reports whether file imports testing/synctest as synctest, which makes synctest.Wait the
+// bubble barrier. An import under another name is not the package this file calls, so it does not count.
+func importsSynctest(file *ast.File) bool {
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != "testing/synctest" {
+			continue
+		}
+		return imp.Name == nil || imp.Name.Name == "synctest"
+	}
+	return false
+}
+
 // waitNodeLine reports the line of n when n waits with no bound: a channel receive, a call to a method named Wait,
 // a `for` loop with no condition, or a `for range x` loop that names no key or value. The judge reads syntax alone,
 // so it judges any method named Wait whatever its receiver, since it cannot tell a sync.WaitGroup or exec.Cmd from a
 // type with a Wait that never returns. A range loop that binds the element is left alone: syntax cannot tell a
 // channel, which ends only on close, from a table, which ends on its own, and table loops are the common case.
-func waitNodeLine(fset *token.FileSet, n ast.Node) (int, bool) {
+// synctest.Wait in a file that imports the package is the exception: that barrier returns once every goroutine in
+// the bubble is blocked, or panics on deadlock, so it is always bounded (gt-10cacr).
+func waitNodeLine(fset *token.FileSet, n ast.Node, synctestBounded bool) (int, bool) {
 	switch n := n.(type) {
 	case *ast.UnaryExpr:
 		if n.Op == token.ARROW {
@@ -131,6 +149,9 @@ func waitNodeLine(fset *token.FileSet, n ast.Node) (int, bool) {
 		}
 	case *ast.CallExpr:
 		if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Wait" {
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "synctest" && synctestBounded {
+				return 0, false
+			}
 			return fset.Position(sel.Sel.Pos()).Line, true
 		}
 	case *ast.ForStmt:

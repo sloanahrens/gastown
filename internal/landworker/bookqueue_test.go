@@ -210,10 +210,9 @@ func TestBookQueueWait(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		ctx := waitCtx(t)
-		// settle is the bubble's barrier: it returns once every goroutine in the
-		// bubble is blocked, so the check that Wait has not returned reads a
-		// settled state instead of racing a goroutine that has not run yet.
-		settle := synctest.Wait
+		// synctest.Wait is the bubble's barrier: it returns once every goroutine
+		// in the bubble is blocked, so the check that Wait has not returned reads
+		// a settled state instead of racing a goroutine that has not run yet.
 		var q BookQueue
 		wait := q.Wait
 		first, firstRelease := make(chan struct{}), make(chan struct{})
@@ -232,10 +231,10 @@ func TestBookQueueWait(t *testing.T) {
 		go func() { waited <- wait(waitUntil) }()
 
 		// The waiter is blocked in Wait before the first job returns.
-		settle()
+		synctest.Wait()
 		close(firstRelease)
 		recvBounded(t, ctx, second, "the second job starting after the first returned")
-		settle()
+		synctest.Wait()
 		select {
 		case err := <-waited:
 			t.Fatalf("Wait returned %v with the second job still running, want it to keep waiting", err)
@@ -244,14 +243,14 @@ func TestBookQueueWait(t *testing.T) {
 
 		// The last job is still blocked, so Wait reports the context.
 		cancel()
-		settle()
+		synctest.Wait()
 		if err := recvBounded(t, ctx, waited, "Wait returning on cancel"); !errors.Is(err, context.Canceled) {
 			t.Errorf("Wait with a job still blocked = %v, want context.Canceled", err)
 		}
 
 		// With the last job released, an empty queue returns nil at once.
 		release.Do(func() { close(secondRelease) })
-		settle()
+		synctest.Wait()
 		if err := wait(ctx); err != nil {
 			t.Errorf("Wait after the last job = %v, want nil", err)
 		}
@@ -265,11 +264,10 @@ func TestBookQueueAddDuringEnd(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		ctx := waitCtx(t)
-		// settle is the bubble's barrier: it returns once every goroutine in the
-		// bubble is blocked, so the "has not run" and "has not returned" checks
-		// below read a settled state instead of racing a goroutine not yet run.
-		settle := synctest.Wait
-
+		// synctest.Wait is the bubble's barrier: it returns once every goroutine
+		// in the bubble is blocked, so the "has not run" and "has not returned"
+		// checks below read a settled state instead of racing a goroutine not yet
+		// run.
 		var q BookQueue
 		events := make(chan string, 8)
 		q.Begin = func() { events <- "begin" }
@@ -308,7 +306,7 @@ func TestBookQueueAddDuringEnd(t *testing.T) {
 			}
 		}()
 
-		settle()
+		synctest.Wait()
 		select {
 		case <-secondRan:
 			t.Fatal("the job added during End ran before End returned")
@@ -321,7 +319,7 @@ func TestBookQueueAddDuringEnd(t *testing.T) {
 		}
 
 		release.Do(func() { close(endRelease) })
-		settle()
+		synctest.Wait()
 
 		var got []string
 		for i := 0; i < 6; i++ {

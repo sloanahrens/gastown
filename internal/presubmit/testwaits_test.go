@@ -24,6 +24,15 @@ func src(lines ...string) string {
 	return "package x\n\nfunc F(t *testing.T) {\n" + strings.Join(lines, "\n") + "\n}\n"
 }
 
+// srcImport is src with the import added, so its body lines start at line 6.
+func srcImport(name, path string, lines ...string) string {
+	imp := fmt.Sprintf("import %q", path)
+	if name != "" {
+		imp = fmt.Sprintf("import %s %q", name, path)
+	}
+	return "package x\n\n" + imp + "\n\nfunc F(t *testing.T) {\n" + strings.Join(lines, "\n") + "\n}\n"
+}
+
 // waitFiles answers FileReader from canned file contents.
 func waitFiles(files map[string]string) FileReader {
 	return func(p string) ([]byte, error) {
@@ -62,6 +71,10 @@ func TestJudgeTestWaits(t *testing.T) {
 		{"a loop and a receive on one line are one finding", "", src("\tfor { <-ch }"), []int{4}, []int{4}},
 		{"an added line that is not a wait is judged but not a finding", "", src("\tx := 1"), []int{4}, nil},
 		{"a wait in a non-test file is not judged", "x.go", src("\t<-ch"), []int{4}, nil},
+		{"a synctest.Wait importing the package is the bubble barrier, not a finding", "", srcImport("", "testing/synctest", "\tsynctest.Wait()"), []int{6}, nil},
+		{"a synctest.Wait with no such import is a finding", "", src("\tsynctest.Wait()"), []int{4}, []int{4}},
+		{"a synctest.Wait under another import name is a finding", "", srcImport("st", "testing/synctest", "\tsynctest.Wait()"), []int{6}, []int{6}},
+		{"a wg.Wait in a file importing synctest is still a finding", "", srcImport("", "testing/synctest", "\twg.Wait()"), []int{6}, []int{6}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
