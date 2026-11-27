@@ -165,23 +165,19 @@ func TestIntegrationDriftChildGrandchildDeadline(t *testing.T) {
 func TestIntegrationDriftChildGroupKillEndsTheGrandchild(t *testing.T) {
 	t.Parallel()
 	// The FIFO is the pipe the child reports the grandchild's pid on. The test
-	// holds both ends: the read end so the read waits for the report rather
-	// than seeing end-of-file, and the write end so the pipe outlives the
-	// killed writers.
+	// holds it open for reading and writing: the open does not wait for the
+	// child, the read waits for the report rather than seeing end-of-file, and
+	// the pipe outlives the killed writers. The read is a blocking one, since
+	// darwin cannot poll a FIFO and a non-blocking read there returns EAGAIN.
 	fifo := filepath.Join(t.TempDir(), "grandchild-pid")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("make the FIFO the child reports the grandchild's pid on: %v", err)
 	}
-	rd, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	rd, err := os.OpenFile(fifo, os.O_RDWR, 0)
 	if err != nil {
-		t.Fatalf("open the FIFO for reading: %v", err)
+		t.Fatalf("open the FIFO: %v", err)
 	}
 	defer rd.Close()
-	wr, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatalf("open the FIFO for writing: %v", err)
-	}
-	defer wr.Close()
 
 	type report struct {
 		pid int
