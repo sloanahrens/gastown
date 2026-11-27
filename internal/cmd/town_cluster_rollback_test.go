@@ -153,3 +153,37 @@ func TestTownClusterRollbackMissingRevision(t *testing.T) {
 		t.Errorf("the rollback made %d calls, want none: %v", len(kube.calls), kube.calls)
 	}
 }
+
+// TestTownClusterRollbackLedgerUnwritable: a rollback whose ledger line cannot be
+// written returns that as an error, so a cluster change is never silently unrecorded.
+func TestTownClusterRollbackLedgerUnwritable(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	dir, _ := shapeWritePlan(t, docs, files)
+	if err := os.Mkdir(filepath.Join(dir, rollbackLedgerName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kube := &shapeLiveKube{answer: shapeAnswering(shapeDaemonHeld(), "True")}
+	err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+	if err == nil || !strings.Contains(err.Error(), "its ledger line could not be written") {
+		t.Fatalf("runTownClusterRollback = %v, want the unwritten ledger line", err)
+	}
+}
+
+// TestTownClusterRollbackNoPlanRecord: a plan directory with no plan.json refuses
+// before any kubectl call and records one refused line naming no plan.
+func TestTownClusterRollbackNoPlanRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	kube := &shapeLiveKube{}
+	err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+	if err == nil || !strings.Contains(err.Error(), "the plan record cannot be read") {
+		t.Fatalf("runTownClusterRollback = %v, want the unread plan record", err)
+	}
+	if len(kube.calls) != 0 {
+		t.Errorf("the rollback made %d calls, want none: %v", len(kube.calls), kube.calls)
+	}
+	if entry := rollbackLedgerLine(t, dir); entry.Result != rollbackResultRefused || entry.Plan != "" {
+		t.Errorf("the rollback ledger = %+v, want one refused line naming no plan", entry)
+	}
+}
