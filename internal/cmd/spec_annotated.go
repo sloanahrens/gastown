@@ -44,6 +44,7 @@ type specAnnotatedFile struct {
 	Beads    map[string]map[string]int       `json:"beads"`
 	Verdicts map[string]specCandidateVerdict `json:"verdicts,omitempty"`
 	Rigs     map[string]specRigRead          `json:"rigs,omitempty"`
+	Blocked  map[string]specRigBlocked       `json:"blocked,omitempty"`
 }
 
 // specRigRead is one rig's last board read.
@@ -88,6 +89,7 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 		seen:     map[string]map[string]int{},
 		verdicts: map[string]specCandidateVerdict{},
 		rigs:     map[string]specRigRead{},
+		blocked:  map[string]specRigBlocked{},
 		counts:   map[string]int{},
 	}
 	if owner == "" {
@@ -108,6 +110,9 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 	}
 	if f.Rigs != nil {
 		a.rigs = f.Rigs
+	}
+	if f.Blocked != nil {
+		a.blocked = f.Blocked
 	}
 	return a
 }
@@ -218,7 +223,7 @@ func (a *specAnnotated) save() {
 	}
 	err := os.MkdirAll(filepath.Dir(a.path), 0o700)
 	if err == nil {
-		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts, Rigs: a.rigs}, 0o600)
+		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts, Rigs: a.rigs, Blocked: a.blocked}, 0o600)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: spec annotated set not saved: %v\n", err)

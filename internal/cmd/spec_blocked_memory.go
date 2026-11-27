@@ -44,3 +44,16 @@ func (a *specAnnotated) rigBlocked(rig string, heads map[string]beadsql.RigHash,
 	}
 	return issues, true
 }
+
+// noteRigBlocked remembers rig's blocked list as read under hash at at, so the
+// next tick, a new process, can answer it while the hashes hold (gt-s984k8).
+func (a *specAnnotated) noteRigBlocked(rig string, hash beadsql.RigHash, at time.Time, issues []*beads.Issue) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	stored := make([]specBlockedIssue, len(issues))
+	for i, issue := range issues {
+		stored[i] = specBlockedIssue{ID: issue.ID, Priority: issue.Priority, BlockedBy: append([]string(nil), issue.BlockedBy...)}
+	}
+	a.blocked[rig] = specRigBlocked{Head: hash.Head, Working: hash.Working, At: at, Issues: stored}
+	a.dirty = true
+}
