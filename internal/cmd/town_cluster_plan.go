@@ -48,8 +48,9 @@ const (
 // planRecordFile is one file of a plan record: its name, its phase (P or W), the
 // hex SHA-256 of its bytes, and the output of its server-side dry run. A rendered
 // Deployment also records the revision the cluster holds for it, as the annotation
-// reads, and the object's resourceVersion, beside that hash. A Deployment the
-// cluster does not hold is marked absent with neither. The dry-run output is
+// reads, and the object's resourceVersion, beside that hash. A rendered StatefulSet
+// records the revision its ControllerRevision names, and no resourceVersion. One
+// the cluster does not hold is marked absent with neither. The dry-run output is
 // recorded only for a run that passed: a failed dry run ends the plan before
 // plan.json is written (gt-f1p2fw).
 type planRecordFile struct {
@@ -178,15 +179,17 @@ get only and writes nothing to any cluster, and sends each file as a server-side
 dry run. A Secret is compared on the fields its document declares and never on
 its data, which the cluster fills. After the phases, the plan prints, in the
 drift command's form, the compare's lines for the Deployments and static objects
-that differ from the live cluster.
+that differ from the live cluster. A StatefulSet and the ControllerRevision its
+status.updateRevision names are read with get only, the same way.
 
 Only --out is written: unlike a replay of the recorded flags, the plan does not
 settle the town's running values file, which a live render writes. Last, the
 plan writes plan.json into --out with the full id, each file's name, phase,
 SHA-256 and server-side dry-run output, and the revision the cluster holds for
-each Deployment; a Deployment the cluster does not hold is recorded absent, with
-no revision. A dry run that fails for any file ends the plan non-zero, and no
-plan.json is written. A plan holding a Secret document deploy/k8s does not review
+each Deployment and StatefulSet, a StatefulSet's being its ControllerRevision's
+number; one the cluster does not hold is recorded absent, with no revision. A
+dry run that fails for any file ends the plan non-zero, and no plan.json is
+written. A plan holding a Secret document deploy/k8s does not review
 is refused the same way, since Secrets stay operator-created. A plan whose only
 differences are container image digests and the gastown.dev/polecat-image
 annotation is refused, naming the gt-update Job (Role gt-update) that rolls an
@@ -248,9 +251,9 @@ func planRevisionIsNumber(revision string) bool {
 // planLiveDeployment is one rendered file read against the cluster: its kind,
 // the revision and resourceVersion a Deployment holds, whether the cluster lacks
 // it, the drift compare's lines for the rendered fields that differ, and the two
-// objects the compare read. A file of another kind carries its kind alone, since
-// the plan reads Deployments only; Rendered and Live are set only for a
-// Deployment the cluster holds.
+// objects the compare read. A StatefulSet carries its ControllerRevision's
+// revision and no resourceVersion; any other kind carries its kind alone;
+// Rendered and Live are set only for a Deployment the cluster holds.
 type planLiveDeployment struct {
 	Kind            string
 	Revision        string
@@ -269,7 +272,9 @@ type planLiveDeployment struct {
 // plan: absent, with no revision and no lines. A failed get, a held Deployment
 // with no revision annotation, a revision that is not a positive whole number, no
 // resourceVersion, or an answer that is no object at all, is an error: an empty
-// or unreadable value would let a later apply pass as unchanged.
+// or unreadable value would let a later apply pass as unchanged. A StatefulSet
+// is handed to planLiveStatefulSet, which records the revision its
+// ControllerRevision names.
 func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (planLiveDeployment, error) {
 	// The file's own fields are the rendered side of the compare, decoded as the
 	// drift compare decodes a rendered object, so the lines name the fields the
@@ -283,7 +288,12 @@ func planLiveVersions(ctx context.Context, kube update.RunFunc, body []byte) (pl
 		return planLiveDeployment{}, fmt.Errorf("gt town cluster plan: a rendered file has no kind to read, so no plan was written")
 	}
 	read := planLiveDeployment{Kind: kind}
-	if kind != "Deployment" {
+	switch kind {
+	case "Deployment":
+		// Compared with the cluster below.
+	case "StatefulSet":
+		return planLiveStatefulSet(ctx, kube, rendered)
+	default:
 		return read, nil
 	}
 	metadata, _ := rendered["metadata"].(map[string]any)
@@ -414,8 +424,8 @@ func planStaticDifferences(ctx context.Context, encode func(io.Writer, any) erro
 }
 
 // runTownClusterPlan renders the recorded flags' desired set with
-// runClusterRender, reads each rendered Deployment and each static object through
-// kube, writes plan.json into outDir with writeJSON, and prints the phases, the
+// runClusterRender, reads each rendered Deployment, StatefulSet and static
+// object through kube, writes plan.json into outDir with writeJSON, and prints the phases, the
 // drift compare's differences and the short plan id to out. The plan takes the file set, its apply order and its bytes
 // from the render's own writes, so the id names exactly what the render wrote; the
 // render's own output is dropped. Phase P is listed only when a static object
