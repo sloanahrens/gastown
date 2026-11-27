@@ -4104,6 +4104,11 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	// The background attention tick stops on that cancel; wait for it, bounded.
 	d.waitForAttention()
 
+	// The start-time smoke launch runs on its own goroutine and stops on that
+	// cancel too; join it, bounded, so the goroutine that writes its record is
+	// finished before shutdown goes on (gt-jtlw8o).
+	d.waitForSweepSmoke()
+
 	// A queued bookkeeping job runs on the queue's own goroutine and does not
 	// watch d.ctx, so the cancel does not stop it: wait for the queues too,
 	// bounded, and name the rigs still busy. This is before the Dolt stop,
