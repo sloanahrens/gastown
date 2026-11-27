@@ -211,6 +211,30 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("RemoteBranchTip reads the fetch side, PushRemoteBranchTip the push side", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone)
+		fork := filepath.Join(fx.root, "fork.git")
+		fx.env.InitBare(t, fork)
+		forkTip := fx.env.Commit(t, fork, fixtureBranch, "fork: another tip", map[string]string{"b.txt": "fork\n"})
+		if err := g.ConfigurePushURL("origin", fork); err != nil {
+			t.Fatalf("ConfigurePushURL: %v", err)
+		}
+		if tip, err := g.RemoteBranchTip("origin", fixtureBranch); err != nil || tip != fx.head {
+			t.Errorf("RemoteBranchTip = %q, %v; want the fetch side's %s", tip, err, fx.head)
+		}
+		if tip, err := g.PushRemoteBranchTip("origin", fixtureBranch); err != nil || tip != forkTip {
+			t.Errorf("PushRemoteBranchTip = %q, %v; want the push side's %s", tip, err, forkTip)
+		}
+		if tip, err := g.RemoteBranchTip("origin", "gone"); err != nil || tip != "" {
+			t.Errorf("RemoteBranchTip of a missing branch = %q, %v; want empty", tip, err)
+		}
+		if tip, err := g.PushRemoteBranchTip("origin", "gone"); err != nil || tip != "" {
+			t.Errorf("PushRemoteBranchTip of a missing branch = %q, %v; want empty", tip, err)
+		}
+	})
+
 	t.Run("TreesIdentical compares trees, not commits", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
