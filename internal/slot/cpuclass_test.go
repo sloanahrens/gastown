@@ -256,7 +256,7 @@ func TestCPUClassReapsDeadHolder(t *testing.T) {
 }
 
 // TestCPUClassRunsNicedWithPFlag: the command a CPU-class slot was taken for
-// runs at nice 10 and with -p=4 in GOFLAGS, added only when the caller has not
+// runs at nice 10 and with -p=2 in GOFLAGS, added only when the caller has not
 // already named a -p (gt-bq68w acceptance).
 func TestCPUClassRunsNicedWithPFlag(t *testing.T) {
 	t.Parallel()
@@ -270,8 +270,8 @@ func TestCPUClassRunsNicedWithPFlag(t *testing.T) {
 		environ   []string
 		wantFlags string
 	}{
-		{name: "unset GOFLAGS", wantFlags: "-p=4"},
-		{name: "GOFLAGS without -p", environ: []string{"GOFLAGS=-mod=mod"}, wantFlags: "-mod=mod -p=4"},
+		{name: "unset GOFLAGS", wantFlags: "-p=2"},
+		{name: "GOFLAGS without -p", environ: []string{"GOFLAGS=-mod=mod"}, wantFlags: "-mod=mod -p=2"},
 		{name: "GOFLAGS already sets -p", environ: []string{"GOFLAGS=-p=8 -mod=mod"}, wantFlags: "-p=8 -mod=mod"},
 	}
 	for _, tc := range cases {

@@ -17,11 +17,17 @@ import (
 // host's cores to the daemon and bd when they want them.
 const defaultCPUClassNice = 10
 
-// defaultCPUClassP is the go parallelism the CPU class adds to GOFLAGS. Go
-// sizes -p from the host's core count, so one crew build legitimately starts
-// 24 compile processes; four is what a shared host can afford beside its
-// neighbors.
-const defaultCPUClassP = "-p=4"
+// CPUClassParallel is how many packages a CPU-class build compiles or tests at
+// once, the go tool's -p. Go sizes -p from the host's core count, so one crew
+// build legitimately starts 24 compile processes; two is what a shared host can
+// afford beside its neighbors (gt-669dma).
+const CPUClassParallel = 2
+
+// cpuClassPFlag is the GOFLAGS entry the CPU class adds, built from
+// CPUClassParallel so the number is written once.
+func cpuClassPFlag() string {
+	return fmt.Sprintf("-p=%d", CPUClassParallel)
+}
 
 // CPURunOptions is one command to run with a CPU-class slot held.
 type CPURunOptions struct {
@@ -153,8 +159,8 @@ func RunCommandUnslotted(args []string, pathEnv string, stdin io.Reader, stdout,
 }
 
 // cpuClassEnv is the child's environment: the caller's, with the leading
-// assignments applied, and GOFLAGS carrying -p=4 unless the caller already set
-// -p. An unset GOFLAGS gets the value alone.
+// assignments applied, and GOFLAGS carrying CPUClassParallel's -p unless the
+// caller already set -p. An unset GOFLAGS gets the value alone.
 func cpuClassEnv(environ, envAssigns []string) []string {
 	env := runEnv(environ, envAssigns)
 	for _, entry := range env {
@@ -165,9 +171,9 @@ func cpuClassEnv(environ, envAssigns []string) []string {
 		if goflagsSetsP(v) {
 			return env
 		}
-		return append(filterEnvKey(env, "GOFLAGS"), "GOFLAGS="+strings.TrimSpace(v+" "+defaultCPUClassP))
+		return append(filterEnvKey(env, "GOFLAGS"), "GOFLAGS="+strings.TrimSpace(v+" "+cpuClassPFlag()))
 	}
-	return append(env, "GOFLAGS="+defaultCPUClassP)
+	return append(env, "GOFLAGS="+cpuClassPFlag())
 }
 
 // goflagsSetsP reports whether GOFLAGS already names a -p setting.
