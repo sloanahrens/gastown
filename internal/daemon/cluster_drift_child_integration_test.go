@@ -155,3 +155,104 @@ func TestIntegrationDriftChildGrandchildDeadline(t *testing.T) {
 		t.Errorf("startDriftChild returned after %v, want it back within %v of the 300ms deadline: a grandchild held the pipes", elapsed, promptly)
 	}
 }
+
+// TestIntegrationDriftChildGroupKillEndsTheGrandchild: after the deadline ends
+// a child whose grandchild holds the output pipes, the grandchild's pid is
+// gone, so the group kill reached it. A cancel that signalled only the child
+// would leave the grandchild alive in its sleep. The child reports the
+// grandchild's pid on a FIFO the test reads before the deadline (gt-tduwd3,
+// gt-orcopo).
+func TestIntegrationDriftChildGroupKillEndsTheGrandchild(t *testing.T) {
+	t.Parallel()
+	// The FIFO is the pipe the child reports the grandchild's pid on. The test
+	// holds both ends: the read end so the read waits for the report rather
+	// than seeing end-of-file, and the write end so the pipe outlives the
+	// killed writers.
+	fifo := filepath.Join(t.TempDir(), "grandchild-pid")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("make the FIFO the child reports the grandchild's pid on: %v", err)
+	}
+	rd, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("open the FIFO for reading: %v", err)
+	}
+	defer rd.Close()
+	wr, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open the FIFO for writing: %v", err)
+	}
+	defer wr.Close()
+
+	type report struct {
+		pid int
+		err error
+	}
+	reports := make(chan report, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, err := rd.Read(buf)
+		if err != nil {
+			reports <- report{err: err}
+			return
+		}
+		raw := strings.TrimSpace(string(buf[:n]))
+		pid, err := strconv.Atoi(raw)
+		if err != nil || pid <= 1 {
+			// Never probe pid 0 or 1: signal 0 to 0 names this process's own
+			// group, which always exists.
+			reports <- report{pid: 0, err: errors.New("the child reported " + strconv.Quote(raw) + ", not a pid")}
+			return
+		}
+		reports <- report{pid: pid}
+	}()
+
+	// The deadline outlasts the child's start, when it writes the pid. The
+	// background sleep is the grandchild: it inherits the child's stdout and
+	// stderr, so it holds the output pipes after the child is gone.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	type outcome struct {
+		exit int
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		_, _, exit, err := startDriftChild(ctx, "/bin/sh",
+			[]string{"-c", `sleep 30 & echo $! > "$1"; sleep 30`, "drift-child", fifo}, 64)
+		done <- outcome{exit: exit, err: err}
+	}()
+
+	var pid int
+	select {
+	case got := <-reports:
+		if got.err != nil {
+			t.Fatalf("read the grandchild's pid from the FIFO: %v", got.err)
+		}
+		pid = got.pid
+	case <-time.After(10 * time.Second):
+		t.Fatal("the child never reported its grandchild's pid on the FIFO")
+	}
+
+	// After the deadline the grandchild must be no such process. The poll is
+	// the package's bounded helper: a child-only kill leaves the grandchild
+	// sleeping out its 30 seconds, and the probe never sees ESRCH.
+	<-ctx.Done()
+	gone := waitFor(5*time.Second, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	})
+	if !gone {
+		t.Fatalf("grandchild %d still exists after the deadline: the group kill did not reach it", pid)
+	}
+
+	select {
+	case got := <-done:
+		if got.exit != -1 {
+			t.Errorf("startDriftChild = exit %d, want -1 for a child the deadline ended", got.exit)
+		}
+		if !errors.Is(got.err, context.DeadlineExceeded) {
+			t.Errorf("startDriftChild error = %v, want the context deadline error", got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("startDriftChild did not return after the deadline: a grandchild held the pipes")
+	}
+}
