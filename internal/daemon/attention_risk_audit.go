@@ -92,6 +92,8 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 			note(fmt.Errorf("%s: %w", rig, err))
 			if ctx.Err() != nil {
 				s.auditNext = (idx + 1) % len(rigs)
+				// What was read before the context ended still spares the collector.
+				s.keepForCollector(rig, issues)
 				return wrote, firstErr
 			}
 			// A batch that read nothing skips the rig; a per-bead fallback
@@ -172,9 +174,10 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 }
 
 // riskIssuesBatch reads rig's qualifying landing beads in batched calls of
-// at most riskReadChunkSize ids. A failed call returns the beads read before
-// it with its error, or a nil map when it was the first (gt-aarbqd). A source
-// without a batch read (riskIssues nil) reads each id with riskIssue (gt-5req0).
+// at most riskReadChunkSize ids. A failed call costs only its own ids and the
+// later calls are still made; the first error comes back with every bead read
+// (gt-jatltu). Once the context ends no further call is made. A source without
+// a batch read (riskIssues nil) reads each id with riskIssue (gt-5req0).
 func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs []land.LandingRecord) (map[string]*beads.Issue, error) {
 	var ids []string
 	seen := map[string]bool{}
@@ -190,10 +193,20 @@ func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs
 	}
 	if s.riskIssues != nil {
 		var out map[string]*beads.Issue
+		var firstErr error
 		for chunk := range slices.Chunk(ids, riskReadChunkSize) {
+			if err := ctx.Err(); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				break
+			}
 			got, err := s.riskIssues(ctx, rig, chunk)
 			if err != nil {
-				return out, err
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
 			if out == nil {
 				out = map[string]*beads.Issue{}
@@ -202,7 +215,7 @@ func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs
 				out[id] = issue
 			}
 		}
-		return out, nil
+		return out, firstErr
 	}
 	out := make(map[string]*beads.Issue, len(ids))
 	var errs []error
