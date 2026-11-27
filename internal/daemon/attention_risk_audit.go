@@ -171,10 +171,10 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 	return wrote, firstErr
 }
 
-// riskIssuesBatch reads the work beads of rig's qualifying landing records (a
-// bead id, a head and risk paths) in one batched call, keyed by bead id. A
-// source without a batch read (riskIssues nil) reads each id with riskIssue
-// (gt-5req0).
+// riskIssuesBatch reads rig's qualifying landing beads in batched calls of
+// at most riskReadChunkSize ids. A failed call returns the beads read before
+// it with its error, or a nil map when it was the first (gt-aarbqd). A source
+// without a batch read (riskIssues nil) reads each id with riskIssue (gt-5req0).
 func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs []land.LandingRecord) (map[string]*beads.Issue, error) {
 	var ids []string
 	seen := map[string]bool{}
@@ -189,7 +189,20 @@ func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs
 		return nil, nil
 	}
 	if s.riskIssues != nil {
-		return s.riskIssues(ctx, rig, ids)
+		var out map[string]*beads.Issue
+		for chunk := range slices.Chunk(ids, riskReadChunkSize) {
+			got, err := s.riskIssues(ctx, rig, chunk)
+			if err != nil {
+				return out, err
+			}
+			if out == nil {
+				out = map[string]*beads.Issue{}
+			}
+			for id, issue := range got {
+				out[id] = issue
+			}
+		}
+		return out, nil
 	}
 	out := make(map[string]*beads.Issue, len(ids))
 	var errs []error
