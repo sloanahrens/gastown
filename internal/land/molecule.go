@@ -60,10 +60,28 @@ func (l *Lander) closeAttachedMolecule(beadID string) {
 // last, because bd refuses a parent with open children; the work bead the
 // molecule is bonded to is closed before this runs, so the root's own bond is
 // no longer a fence.
+//
+// The root is read first. A missing root is 0 and nil, with no child listed.
+// A closed root whose direct children are all closed is 0 and nil after one
+// children read. The shortcut checks direct children only, because a
+// molecule's steps are direct children of its root. Any other root read error
+// is returned after the steps are closed.
 func closeMolecule(b moleculeBeads, rootID string) (int, error) {
-	steps, err := openDescendants(b, rootID)
+	root, rootErr := b.Show(rootID)
+	if errors.Is(rootErr, beads.ErrNotFound) {
+		return 0, nil
+	}
+	children, err := b.Children(rootID)
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(rootReadError(rootID, rootErr), fmt.Errorf("listing children of %s: %w", rootID, err))
+	}
+	rootClosed := rootErr == nil && beads.IssueStatus(strings.TrimSpace(root.Status)).IsTerminal()
+	if rootClosed && !anyOpen(children) {
+		return 0, nil
+	}
+	steps, err := openDescendants(b, children)
+	if err != nil {
+		return 0, errors.Join(rootReadError(rootID, rootErr), err)
 	}
 	_, unpinErr := beads.ReleasePinnedSteps(b, steps)
 	ids := make([]string, 0, len(steps))
@@ -72,35 +90,51 @@ func closeMolecule(b moleculeBeads, rootID string) (int, error) {
 	}
 	closed, err := closeUnforced(b, ids)
 	if err != nil {
-		return closed, errors.Join(unpinErr, err)
+		return closed, errors.Join(unpinErr, rootReadError(rootID, rootErr), err)
 	}
-	root, err := b.Show(rootID)
-	switch {
-	case errors.Is(err, beads.ErrNotFound):
-		return closed, unpinErr
-	case err != nil:
-		return closed, errors.Join(unpinErr, fmt.Errorf("reading molecule %s: %w", rootID, err))
-	case beads.IssueStatus(strings.TrimSpace(root.Status)).IsTerminal():
+	if rootErr != nil {
+		return closed, errors.Join(unpinErr, rootReadError(rootID, rootErr))
+	}
+	if rootClosed {
 		return closed, unpinErr
 	}
 	n, err := closeUnforced(b, []string{rootID})
 	return closed + n, errors.Join(unpinErr, err)
 }
 
-// openDescendants lists parentID's descendants that are not closed, deepest
-// first, which is the order bd lets them close in.
-func openDescendants(b moleculeBeads, parentID string) ([]*beads.Issue, error) {
-	children, err := b.Children(parentID)
-	if err != nil {
-		return nil, fmt.Errorf("listing children of %s: %w", parentID, err)
+// rootReadError wraps a failed read of the root, and is nil for a read that
+// did not fail, so a join of it with another error leaves that error alone.
+func rootReadError(rootID string, err error) error {
+	if err == nil {
+		return nil
 	}
+	return fmt.Errorf("reading molecule %s: %w", rootID, err)
+}
+
+// anyOpen reports whether any of the issues is not closed.
+func anyOpen(issues []*beads.Issue) bool {
+	for _, issue := range issues {
+		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+			return true
+		}
+	}
+	return false
+}
+
+// openDescendants lists the descendants of children that are not closed,
+// deepest first, which is the order bd lets them close in.
+func openDescendants(b moleculeBeads, children []*beads.Issue) ([]*beads.Issue, error) {
 	var out []*beads.Issue
 	for _, child := range children {
-		deeper, err := openDescendants(b, child.ID)
+		deeper, err := b.Children(child.ID)
+		if err != nil {
+			return nil, fmt.Errorf("listing children of %s: %w", child.ID, err)
+		}
+		ordered, err := openDescendants(b, deeper)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, deeper...)
+		out = append(out, ordered...)
 		if !beads.IssueStatus(strings.TrimSpace(child.Status)).IsTerminal() {
 			out = append(out, child)
 		}
