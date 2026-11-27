@@ -182,6 +182,42 @@ func TestRiskAuditStopsOnACanceledContext(t *testing.T) {
 	}
 }
 
+// riskIssuesBatch cuts the folded ids into calls of at most riskReadChunkSize, ending on the first failed call (gt-aarbqd).
+func TestRiskAuditCutsIdsIntoChunks(t *testing.T) {
+	t.Parallel()
+	recs := make([]land.LandingRecord, 121) // 121 records, 120 ids: the last repeats the first
+	for i := range recs {
+		recs[i] = land.LandingRecord{BeadID: fmt.Sprintf("gt-%03d", i%120), Head: strings.Repeat("a", 40), RiskPaths: []string{"x"}}
+	}
+	for _, tt := range []struct {
+		name            string
+		failAt, wantIDs int
+		calls           string // the call sizes, in order
+	}{
+		{"120 ids are read in calls of 50, 50 and 20", 0, 120, "50 50 20"},
+		{"a failed second call returns the first 50 and its error", 2, 50, "50 50"},
+		{"a failed first call returns a nil map and stops", 1, 0, "50"},
+	} {
+		f := newAttentionFixture(t, time.Time{})
+		var calls []int
+		f.src.riskIssues = func(_ context.Context, _ string, ids []string) (map[string]*beads.Issue, error) {
+			calls = append(calls, len(ids))
+			if tt.failAt == len(calls) {
+				return nil, errors.New("bd show: boom")
+			}
+			out := make(map[string]*beads.Issue, len(ids))
+			for _, id := range ids {
+				out[id] = &beads.Issue{ID: id}
+			}
+			return out, nil
+		}
+		got, err := f.src.riskIssuesBatch(context.Background(), "alpha", recs)
+		if fmt.Sprint(calls) != "["+tt.calls+"]" || len(got) != tt.wantIDs || (got == nil) != (tt.failAt == 1) || (err != nil) != (tt.failAt > 0) {
+			t.Errorf("%s: calls %v, %d ids, nil map %v, err %v; want [%s], %d", tt.name, calls, len(got), got == nil, err, tt.calls, tt.wantIDs)
+		}
+	}
+}
+
 // batchReader is a work-bead reader with the batched read.
 type batchReader struct {
 	workBeadReader
