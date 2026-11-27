@@ -875,24 +875,26 @@ func TestScrubSafe(t *testing.T) {
 		}
 	})
 
-	t.Run("ten megabytes", func(t *testing.T) {
+	t.Run("large input", func(t *testing.T) {
 		t.Parallel()
-		const size = 10 << 20
 		// The account name is assembled from parts so that no line of the tree holds
 		// it literally. The leak check below is a guard that must stay: it fails if
 		// the scrubber stops removing a home-directory account name.
 		account := strings.Join([]string{"lu", "cy"}, "")
-		line := "Authorization: Bearer " + fakeBearerToken + " mail alice@example.com at /Users/" + account + "/app\n"
-		in := strings.Repeat(line, size/len(line)+1)[:size]
+		// The auth-header rule redacts its whole line, so the address and home
+		// path go on a line of their own.
+		line := "Authorization: Bearer " + fakeBearerToken + "\nmail alice@example.com at /Users/" + account + "/app\n"
+		in := strings.Repeat(line, safeInputSize/len(line)+1)[:safeInputSize]
+		t.Logf("scrubbing %d bytes", len(in))
 		start := time.Now()
 		got, report := s.Scrub(in)
-		checkDeadlineBudget(t, start)
+		checkDeadlineBudget(t, start, safeBudgetDivisor)
 		if report.Total() == 0 {
-			t.Error("10 MB input reported no replacements")
+			t.Error("large input reported no replacements")
 		}
 		for _, leaked := range []string{fakeBearerToken, "alice@example.com", "/Users/" + account} {
 			if strings.Contains(got, leaked) {
-				t.Errorf("10 MB output still holds %q", leaked)
+				t.Errorf("large output still holds %q", leaked)
 			}
 		}
 	})
@@ -904,30 +906,29 @@ func TestScrubSafe(t *testing.T) {
 			strings.Repeat("Q2VjcmV0", 100000)
 		start := time.Now()
 		s.Scrub(in)
-		checkDeadlineBudget(t, start)
+		checkDeadlineBudget(t, start, 2)
 	})
 }
 
-// checkDeadlineBudget fails when the work that started at start has used half
-// the time left before the test's deadline. A run without a deadline cannot
-// enforce the bound, so it fails rather than passing the check silently.
-func checkDeadlineBudget(t *testing.T, start time.Time) {
+// checkDeadlineBudget fails when the work that started at start has used more
+// than one divisor-th of the time left; a run without a deadline fails rather
+// than passing the check silently.
+func checkDeadlineBudget(t *testing.T, start time.Time, divisor int) {
 	t.Helper()
 	deadline, ok := t.Deadline()
-	if err := deadlineBudgetError(start, time.Now(), deadline, ok); err != nil {
+	if err := deadlineBudgetError(start, time.Now(), deadline, ok, divisor); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // deadlineBudgetError is the decision checkDeadlineBudget makes, split out so
 // both of its failing branches have a test without needing a real deadline.
-func deadlineBudgetError(start, now, deadline time.Time, hasDeadline bool) error {
+func deadlineBudgetError(start, now, deadline time.Time, hasDeadline bool, divisor int) error {
 	if !hasDeadline {
 		return errors.New("the test has no deadline, so its time budget went unchecked; run go test with its default timeout")
 	}
-	elapsed := now.Sub(start)
-	if budget := deadline.Sub(start); elapsed > budget/2 {
-		return fmt.Errorf("scrubbing took %s, more than half the %s left on the test deadline", elapsed, budget)
+	if elapsed := now.Sub(start); elapsed > deadline.Sub(start)/time.Duration(divisor) {
+		return fmt.Errorf("scrubbing took %s, more than 1/%d of the %s left on the test deadline", elapsed, divisor, deadline.Sub(start))
 	}
 	return nil
 }
@@ -942,33 +943,37 @@ func TestDeadlineBudgetError(t *testing.T) {
 		now         time.Time
 		deadline    time.Time
 		hasDeadline bool
+		divisor     int
 		wantErr     string
 	}{
 		{
 			name:        "no deadline",
 			now:         start.Add(time.Second),
 			hasDeadline: false,
+			divisor:     2,
 			wantErr:     "no deadline",
 		},
 		{
-			name:        "over half the budget",
-			now:         start.Add(60 * time.Second),
+			name:        "over the budget",
+			now:         start.Add(6 * time.Second),
 			deadline:    start.Add(100 * time.Second),
 			hasDeadline: true,
-			wantErr:     "more than half",
+			divisor:     20,
+			wantErr:     "more than 1/20",
 		},
 		{
 			name:        "within the budget",
-			now:         start.Add(10 * time.Second),
+			now:         start.Add(4 * time.Second),
 			deadline:    start.Add(100 * time.Second),
 			hasDeadline: true,
+			divisor:     20,
 		},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			err := deadlineBudgetError(start, c.now, c.deadline, c.hasDeadline)
+			err := deadlineBudgetError(start, c.now, c.deadline, c.hasDeadline, c.divisor)
 			if c.wantErr == "" {
 				if err != nil {
 					t.Fatalf("deadlineBudgetError() = %v, want nil", err)
