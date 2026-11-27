@@ -11,8 +11,8 @@ import (
 
 // how_card.go holds the overseer card: the rule file and its loader
 // (gt-j669b4.8), the --card flag that prints it (gt-4n47gt), and the
-// --hook-json flag that gives a session its card and the re-read line, or the
-// re-read line alone, at session start (gt-ec569g).
+// --hook-json flag that gives the overseer its card and the re-read line, and
+// other sessions the handoff line, at session start (gt-ec569g, gt-uk9vzj).
 
 // overseerCardFile holds the overseer card's rule lines, one per line and no
 // headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
@@ -68,22 +68,29 @@ const (
 	// howHookJSONEventName is the hook this output answers: a session start.
 	howHookJSONEventName = "SessionStart"
 
-	// howHookJSONRestoreText is the line a session start reads after the
-	// overseer's card, or alone for every other session: re-read the town's
-	// directives, then hand off. This repository owns the line; it is not a copy
-	// of a file outside it, so a change to the instruction is reviewed as a diff
-	// here and no outside file can drift from it.
+	// howHookJSONRestoreText is the line the overseer reads after its card at a
+	// session start: re-read the town's directives, then hand off. This
+	// repository owns the line; it is not a copy of a file outside it, so a
+	// change to the instruction is reviewed as a diff here and no outside file
+	// can drift from it.
 	//
 	// It makes no claim that the context was compacted. This hook answers every
 	// SessionStart — startup, resume, clear and compact alike — so a line saying
 	// the context was just compacted would be false for most of them
 	// (gt-y1juz1). TestHowCardHookJSON pins what a session reads.
 	howHookJSONRestoreText = "Re-read /gastown, then /handoff gt-overseer."
+
+	// howHookJSONHandoffText is the line every session that is not the overseer
+	// reads at a session start: find the handoff bead its previous self left and
+	// resume there. Only the overseer takes the gt-overseer handoff, so it names
+	// neither the card nor the overseer (gt-uk9vzj), and claims no compaction
+	// (gt-y1juz1).
+	howHookJSONHandoffText = "Run /handoff to find your handoff-bead and resume your work. Your previous self left notes in the bead for you."
 )
 
 func init() {
 	howCmd.Flags().Bool("card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
-	howCmd.Flags().Bool("hook-json", false, "print the SessionStart hook JSON: the overseer's card and the re-read line, or the re-read line alone")
+	howCmd.Flags().Bool("hook-json", false, "print the SessionStart hook JSON: the overseer's card and the re-read line, or the handoff line for any other session")
 }
 
 // overseerCardRules returns the card's rule lines, in file order. howCardText,
@@ -212,11 +219,12 @@ func isOverseer(actor, agentName string) bool {
 
 // howHookJSONContext returns the text the hook adds to a session's context. The
 // overseer gets the card and then the re-read line; any other session gets the
-// re-read line alone, so it is told to re-read and hand off and nothing more. A
-// card that cannot be built is the card's error, never text without the card.
+// handoff line alone, so it resumes its own handoff bead and is told nothing of
+// the overseer's. A card that cannot be built is the card's error, never text
+// without the card.
 func howHookJSONContext(actor, agentName string, m howMap, loadRules func() ([]string, error)) (string, error) {
 	if !isOverseer(actor, agentName) {
-		return howHookJSONRestoreText + "\n", nil
+		return howHookJSONHandoffText + "\n", nil
 	}
 	card, err := howCardText(m, loadRules)
 	if err != nil {

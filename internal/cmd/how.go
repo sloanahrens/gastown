@@ -71,7 +71,7 @@ rule lines. It takes no group or word.
 With --hook-json, print Claude Code's SessionStart hook output instead: its
 additionalContext is the card and the re-read line when the session is the
 overseer (its actor is town/crew/overseer, or its agent name is overseer), and
-the re-read line alone for any other session. It takes no group or word.
+the handoff line for any other session. It takes no group or word.
 
 Examples:
   gt how
