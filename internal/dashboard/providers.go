@@ -217,7 +217,12 @@ func deepSeekCostProvider(now time.Time, spend json.RawMessage, _ *ClaudePlan, _
 		p.Detail = append(p.Detail, creditRiseText(d.Credits[i]))
 	}
 	if d.LastSample != "" {
-		p.Detail = append(p.Detail, "ledger "+strings.Replace(d.LastSample, "T", " ", 1))
+		line := "ledger " + strings.Replace(d.LastSample, "T", " ", 1)
+		// A skipped read is on the ledger by design, so the line says so.
+		if d.Live.Skipped != nil && *d.Live.Skipped {
+			line += " · no live read by design"
+		}
+		p.Detail = append(p.Detail, line)
 	}
 
 	if liveUnreachable(d.Live.OK, d.Live.Available, d.Live.Skipped) {

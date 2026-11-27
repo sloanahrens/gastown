@@ -131,7 +131,7 @@ func TestCostProvidersDeepSeekFigures(t *testing.T) {
 		"DeepSeek $30.00 cash + $10.00 credit · credit lasts ~4.0d, then cash",
 		"10-27 10:00 +$10.00 credit",
 		"10-24 09:00 +$20.00 top-up",
-		"ledger 2026-10-29 11:55:00",
+		"ledger 2026-10-29 11:55:00 · no live read by design",
 	} {
 		if !slices.Contains(p.Detail, want) {
 			t.Errorf("detail %q has no %q", p.Detail, want)
@@ -243,6 +243,53 @@ func TestDeepSeekLiveSkippedByDesign(t *testing.T) {
 			p := deepSeekCostProvider(costProvidersNow, tc.raw, nil, nil, nil)
 			if got := slices.Contains(p.Warnings, "live balance unreachable"); got != tc.want {
 				t.Errorf("warnings = %q, want the unreachable line: %v", p.Warnings, tc.want)
+			}
+		})
+	}
+}
+
+// The ledger line says the balance is on the ledger by design only when the
+// report skipped the live read. A report that did not skip keeps the plain line.
+func TestDeepSeekLiveSkippedByDesignLedgerDetail(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, time.November, 25, 8, 5, 0, 0, time.UTC)
+	pod, err := json.Marshal(deepseekspend.Build(deepseekspend.Input{
+		Constants: deepseekspend.CurrentConstants(time.UTC),
+		Rows:      []deepseekspend.Row{{At: at, Balance: 47.97}},
+		Now:       at,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withSample := func(t *testing.T, live map[string]any) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"balance":     10.0,
+			"last_sample": "2026-11-25T08:05:00",
+			"live":        live,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{"the pod's ledger report says the read is skipped by design", pod, "ledger 2026-11-25 08:05 · no live read by design"},
+		{"a report that did not skip keeps the plain line", withSample(t, map[string]any{"ok": true, "available": true, "skipped": false}), "ledger 2026-11-25 08:05:00"},
+		{"a report with no skipped field keeps the plain line", withSample(t, map[string]any{"ok": true, "available": true}), "ledger 2026-11-25 08:05:00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := deepSeekCostProvider(costProvidersNow, tc.raw, nil, nil, nil)
+			if !slices.Contains(p.Detail, tc.want) {
+				t.Errorf("detail %q has no %q", p.Detail, tc.want)
 			}
 		})
 	}
