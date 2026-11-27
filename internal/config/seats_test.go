@@ -632,6 +632,11 @@ func TestSandboxProfileValidate(t *testing.T) {
 		{"policy with an inner dotdot that stays inside", func(p *SandboxProfile) { p.Policy = "deploy/../p.yaml" }, ""},
 		{"empty provider", func(p *SandboxProfile) { p.Providers = []string{"deepseek", " "} }, "sandboxes.p.providers[1]: empty provider name"},
 		{"empty first provider", func(p *SandboxProfile) { p.Providers = []string{""} }, "sandboxes.p.providers[0]: empty provider name"},
+		{"forgejo per seat with the provider", func(p *SandboxProfile) {
+			p.Providers = []string{"deepseek", "forgejo-polecat"}
+			p.ForgejoPerSeat = true
+		}, ""},
+		{"forgejo per seat without the provider", func(p *SandboxProfile) { p.Providers = []string{"deepseek"}; p.ForgejoPerSeat = true }, "sandboxes.p.forgejo_per_seat: requires the forgejo-polecat provider in providers"},
 		{"bad cpu", func(p *SandboxProfile) { p.CPU = "four" }, `sandboxes.p.cpu "four": want a k8s CPU quantity such as "4" or "500m"`},
 		{"millicpu without a number", func(p *SandboxProfile) { p.CPU = "m" }, `sandboxes.p.cpu "m": want a k8s CPU quantity such as "4" or "500m"`},
 		{"bad memory", func(p *SandboxProfile) { p.Memory = "8 GB" }, `sandboxes.p.memory "8 GB": want a k8s memory quantity such as "8Gi"`},

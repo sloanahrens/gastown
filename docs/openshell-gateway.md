@@ -21,6 +21,18 @@ A sandbox profile's `driver` field names the compute driver its gateway runs. It
 - A `kubernetes` profile may set `kubernetes_namespace` to the namespace the gateway places its sandbox pods in. It defaults to `openshell`, the namespace the OpenShell chart creates them in. gt sends nothing to the gateway for it: the daemon reads that namespace's pods to raise the sandbox-pending item, so it must match where the gateway runs them. A `docker` profile that sets it is refused at validation.
 - A `kubernetes` profile may also set `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `requests` and `limits`. gt sends them to the gateway as the create call's driver config, so the gateway needs `allow_driver_config = true` in `[openshell.drivers.kubernetes]` as well; `deploy/k8s/values/kind.yaml` sets the chart's `server.drivers.kubernetes.allowDriverConfig` for the town cluster. A `docker` profile that sets any of the six is refused at validation, and a `kubernetes` profile that sets none sends no driver config.
 
+## Per-seat Forgejo providers
+
+A profile's `providers` lists the OpenShell providers every sandbox it creates attaches. `forgejo_per_seat` (default `false`) makes each sandbox attach its seat's own `forgejo-seat-<polecat>` provider in place of `forgejo-polecat`, so a push credits that seat's Forgejo account (gt-9x9wv8).
+
+Validation refuses `forgejo_per_seat: true` on a profile whose `providers` omits `forgejo-polecat`, naming the key in the error: the swap replaces that entry, so a profile without it has no Forgejo provider to replace.
+
+Turn the setting on only after the seat's account and provider exist, in this order:
+
+1. Provision the seat's Forgejo account and token with `forgejo-provision --seat <name>`. Before running it, read [the Forgejo runbook](forgejo-runbook.md).
+2. Create the seat's provider on every gateway that runs seats with `openshell-providers --seat <name>`.
+3. Set `forgejo_per_seat: true` on the profile. A sandbox already running keeps the provider it was created with; the setting applies to the next create.
+
 ## What a sandbox polecat cannot do
 
 A sandbox seat runs in a container the gateway creates, not on the Mac. Before you hand it work a host polecat could do, check the task against these differences; each names the file that decides it.

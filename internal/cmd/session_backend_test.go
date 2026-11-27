@@ -110,6 +110,50 @@ func TestSessionBackendForAgentCarriesTheCacheClaim(t *testing.T) {
 	}
 }
 
+// The profile's forgejo_per_seat reaches the session profile the resolver is
+// handed, and an unset value arrives false (gt-qxgxom call site).
+func TestSessionBackendForAgentCarriesForgejoPerSeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  bool
+		want bool
+	}{
+		{"unset arrives false", false, false},
+		{"set arrives true", true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			host := tmux.NewTmuxWithSocket("gt-test")
+			ts := config.NewTownSettings()
+			ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{
+				"deepseek-flash-sandbox": {Cap: 1, Backend: config.BackendOpenShell, Sandbox: "polecat-default"},
+			}}
+			ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {
+				Gateway:        "openshell",
+				Image:          "gastown-polecat:dev",
+				Policy:         "deploy/polecat/policy.yaml",
+				Providers:      []string{"deepseek", "forgejo-polecat"},
+				ForgejoPerSeat: tc.set,
+			}}
+			var got session.Profile
+			resolve := func(seat, backend string, p session.Profile, townRoot string, host *tmux.Tmux) (session.Backend, error) {
+				return session.ResolveWith(func(_ string, p session.Profile) (session.Backend, error) {
+					got = p
+					return session.NewTmuxBackend(host), nil
+				}, seat, backend, p, townRoot, host)
+			}
+			if _, err := sessionBackendForAgentWith(resolve, ts, t.TempDir(), "deepseek-flash-sandbox", host); err != nil {
+				t.Fatal(err)
+			}
+			if got.ForgejoPerSeat != tc.want {
+				t.Fatalf("ForgejoPerSeat = %v handed to the resolver, want %v", got.ForgejoPerSeat, tc.want)
+			}
+		})
+	}
+}
+
 // The profile's bead_access reaches the session profile the resolver is handed,
 // and an unset value arrives as the dolt default (gt-1m0kb call site).
 func TestSessionBackendForAgentCarriesBeadAccess(t *testing.T) {

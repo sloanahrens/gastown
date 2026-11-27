@@ -27,8 +27,12 @@ type Profile struct {
 	CPU, Memory      string   // k8s quantities, "" = driver default
 	ControlPlaneHost string   // how the sandbox reaches Dolt, and Forgejo unless ForgejoHost is set; "" = host.docker.internal
 	ForgejoHost      string   // how the sandbox reaches Forgejo when it differs from Dolt; "" = ControlPlaneHost
-	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
-	Driver           string   // the gateway's compute driver: DriverDocker or DriverKubernetes; "" means docker
+	// ForgejoPerSeat asks the create request to attach the seat's own
+	// forgejo-seat-<polecat> provider in place of forgejo-polecat (gt-qxgxom;
+	// the swap lands with gt-9x9wv8).
+	ForgejoPerSeat bool
+	CacheVolume    string // named volume for /sandbox/.cache; "{rig}" expands; "" = none
+	Driver         string // the gateway's compute driver: DriverDocker or DriverKubernetes; "" means docker
 	// KubernetesCacheClaim is the shared claim a kubernetes driver mounts at
 	// /tmp/gt-cache, outside /sandbox; "" means no cache mount (gt-zl804).
 	KubernetesCacheClaim string
