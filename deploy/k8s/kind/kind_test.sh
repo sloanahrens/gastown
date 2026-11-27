@@ -604,6 +604,18 @@ check "the controller's container has requests equal to limits (100m, 128Mi)" gu
 check "the controller rollout is awaited" contains "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
 check "the chart is installed once" test "$(calls_with 'helm upgrade --install')" -eq 1
 check "a first install prints no deployer line" lacks "gt town cluster apply" "$OUT_TEXT"
+# The unfinished-install objects: a cluster with no openshell release still
+# applies them once, and the marker that records the finished install is
+# written after them.
+check "the NodePort is applied once on a first install" test "$(calls_with "gateway-nodeport.yaml")" -eq 1
+check "the control-plane Services are applied once on a first install" test "$(calls_with "values/kind/control-plane-services.yaml")" -eq 1
+check "the gt-bootstrap marker is written once on a first install" test "$(calls_with "create configmap gt-bootstrap")" -eq 1
+check "the marker follows the two applies" before "values/kind/control-plane-services.yaml" "create configmap gt-bootstrap"
+check "the marker records the chart version and values digest" test "$(cat "$S/state/marker")" = "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")"
+# These run on every run, not only on a first install.
+check "the metrics-server flag is patched on a first install" test "$(calls_with 'patch deployment metrics-server')" -eq 1
+check "the registry mirror is written to hosts.toml on a first install" contains 'server = "http://gt-registry:5000"' "$(cat "$S/state/hosts.toml")"
+check "the client key is exported as mode 600 on a first install" test "$(mode "$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls/tls.key")" = 600
 
 echo "a first install that stopped before the two applies is completed by the next run"
 scenario partial
