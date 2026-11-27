@@ -25,7 +25,7 @@ func controlClusterValues() Values {
 		DindStorage:     "40Gi",
 		RunnerStorage:   "1Gi",
 		RunnerResources: Share{CPU: "1", Memory: "1Gi"},
-		DindResources:   Share{CPU: "6", Memory: "12Gi"},
+		DindResources:   Share{CPU: "8", Memory: "12Gi"},
 		DindRequests:    Share{CPU: "4", Memory: "8Gi"},
 	}
 }
@@ -60,11 +60,11 @@ func TestControlValuesRenderTheEngineBelowItsLimit(t *testing.T) {
 	if want := (ResourceList{CPU: "4", Memory: "8Gi"}); dind.Resources.Requests != want {
 		t.Errorf("the engine requests = %+v, want the control values' %+v", dind.Resources.Requests, want)
 	}
-	if want := (ResourceList{CPU: "6", Memory: "12Gi"}); dind.Resources.Limits != want {
+	if want := (ResourceList{CPU: "8", Memory: "12Gi"}); dind.Resources.Limits != want {
 		t.Errorf("the engine limits = %+v, want %+v", dind.Resources.Limits, want)
 	}
-	if got := decodeConfig(t, m).Runner.Envs["CI_CPU_QUOTA"]; got != "6" {
-		t.Errorf("the job environment's CI_CPU_QUOTA = %q, want the engine limit 6", got)
+	if got := decodeConfig(t, m).Runner.Envs["CI_CPU_QUOTA"]; got != "8" {
+		t.Errorf("the job environment's CI_CPU_QUOTA = %q, want the engine limit 8", got)
 	}
 }
 
