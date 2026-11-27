@@ -530,10 +530,17 @@ func cacheTrimNoOpKey(namespace, claim string) string {
 // a pass is dispatched to and the attention tick reads it on the heartbeat
 // goroutine, so a mutex guards it; it is memory only, and the next pass's
 // reading re-derives it after a restart. It also holds which image-pull alerts
-// this process has open (openAlerts), under the same mutex.
+// this process has open (openAlerts) and, per key, when the key's run of
+// over-cap readings began (overSince), under the same mutex.
 type cacheTrimNoOp struct {
 	mu    sync.Mutex
 	items map[string]attention.Item
+	// overSince is when each key's run of over-cap readings began, keyed by
+	// item key: overFor stores the first now it is given for a key and returns
+	// it on every later call, so a caller can tell how long the run has lasted.
+	// clear drops it with the item, so a key measured under the cap starts over.
+	// It is memory only, like items.
+	overSince map[string]time.Time
 	// openAlerts is the trim's alerts this process raised and has not yet
 	// cleared: a stuck image pull, a missing image_registry, a namespace the
 	// sandbox may not list pods in (gt-yduowj). A pass clears the ones it holds
@@ -579,11 +586,30 @@ func (s *cacheTrimNoOp) raise(it attention.Item) {
 	s.items[it.Key] = it
 }
 
-// clear drops key's item: the claim was measured at or under the threshold.
+// overFor records the first now it was given for key and returns it: a later
+// call with another now reads the first back, so a caller can tell how long the
+// key's run of over-cap readings has lasted. Nothing calls it yet: gt-mxl8ie
+// wires it into ciCacheTrimMeasure.
+func (s *cacheTrimNoOp) overFor(key string, now time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.overSince == nil {
+		s.overSince = map[string]time.Time{}
+	}
+	if since, ok := s.overSince[key]; ok {
+		return since
+	}
+	s.overSince[key] = now
+	return now
+}
+
+// clear drops key's item and the time its over-cap run began: the claim was
+// measured at or under the threshold.
 func (s *cacheTrimNoOp) clear(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.items, key)
+	delete(s.overSince, key)
 }
 
 // clearClaim drops every item of a claim, in every namespace: the claim listing

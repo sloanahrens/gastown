@@ -2902,6 +2902,51 @@ func TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim(t *testing.T) {
 	})
 }
 
+// TestCacheTrimNoOpOverFor is the bead's box: overFor remembers the first now it
+// was given for a key and returns it on every later call, so a caller can tell
+// how long a volume has been over the cap; two keys keep their own times, and
+// clearing one starts it over without touching the other.
+func TestCacheTrimNoOpOverFor(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 27, 1, 0, 0, 0, time.UTC)
+	later := first.Add(30 * time.Minute)
+	newest := later.Add(time.Hour)
+
+	t.Run("returns the first now on every later call", func(t *testing.T) {
+		t.Parallel()
+		var store cacheTrimNoOp
+		if got := store.overFor("a", first); !got.Equal(first) {
+			t.Fatalf("overFor(a) = %v, want the time it was given, %v", got, first)
+		}
+		if got := store.overFor("a", later); !got.Equal(first) {
+			t.Errorf("overFor(a) later = %v, want the first time it was given, %v", got, first)
+		}
+	})
+
+	t.Run("keeps keys apart", func(t *testing.T) {
+		t.Parallel()
+		var store cacheTrimNoOp
+		store.overFor("a", first)
+		if got := store.overFor("b", later); !got.Equal(later) {
+			t.Errorf("overFor(b) = %v, want its own first time, %v", got, later)
+		}
+	})
+
+	t.Run("returns a new time after clear", func(t *testing.T) {
+		t.Parallel()
+		var store cacheTrimNoOp
+		store.overFor("a", first)
+		store.overFor("b", first)
+		store.clear("a")
+		if got := store.overFor("a", newest); !got.Equal(newest) {
+			t.Errorf("overFor(a) after clear = %v, want the new time, %v", got, newest)
+		}
+		if got := store.overFor("b", newest); !got.Equal(first) {
+			t.Errorf("overFor(b) after clear(a) = %v, want its first time left alone, %v", got, first)
+		}
+	})
+}
+
 // cacheTrimFloorYoungSize is the build-cache unit in the floor fixture that is
 // younger than the age floor, so the plan reports it as Protected and the 10GB
 // cap cannot remove it: it renders as 13.6GB.
