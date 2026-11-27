@@ -264,7 +264,7 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("no live render has recorded its flags at %s, so there is no render to compare the live Deployments with; run a live render with --record-flags first", recordPath)
+		return noRenderRecordError{err: fmt.Errorf("no live render has recorded its flags at %s, so there is no render to compare the live Deployments with; run a live render with --record-flags first", recordPath)}
 	}
 	// The record is under the root the run already found, so the values assembly
 	// takes the same root rather than a second lookup that could disagree with it.
@@ -349,6 +349,17 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	}
 	return nil
 }
+
+// noRenderRecordError is the compare's refusal when no live render has recorded
+// its flags. It reads exactly as the refusal always has, and errors.Is finds
+// update.ErrNoRenderRecord through it, so the update Job's hook can tell a
+// missing record from any other compare error without the drift command's text
+// changing.
+type noRenderRecordError struct{ err error }
+
+func (e noRenderRecordError) Error() string { return e.err.Error() }
+
+func (e noRenderRecordError) Unwrap() error { return update.ErrNoRenderRecord }
 
 // deploymentTarget is the drift target of a rendered Deployment: the resource
 // kubectl reads it by, and the namespace it lives in.

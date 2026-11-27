@@ -942,8 +942,11 @@ func realUpdateDeps(townRoot string) (update.Deps, error) {
 			// town keeps under its gastown directory.
 			ValuesDir: func() string { return filepath.Join(townRoot, "gastown") },
 		}),
-		NewRunID: newUpdateRunID,
-		Log:      os.Stderr,
+		// The drift compare reads the record the run's own town holds, and its
+		// captured lines never reach the run's output.
+		RenderDrift: realRenderDrift(renderDriftDepsAt(townRoot)),
+		NewRunID:    newUpdateRunID,
+		Log:         os.Stderr,
 	}, nil
 }
 
