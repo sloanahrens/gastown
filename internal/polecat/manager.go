@@ -2325,11 +2325,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		return nil, fmt.Errorf("creating polecat dir: %w", err)
 	}
 
-	// Build branch name. When resuming an existing branch (gh#3602), use that
-	// branch's name directly so pushes update the existing PR.
-	branchName := m.buildBranchName(name, opts.HookBead)
-	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
+	// Build branch name. When resuming (gh#3602) the resume branch stands in
+	// until it is known whether it is this seat's own; a fresh name is built
+	// only if it is not.
+	branchName := opts.ResumeBranch
+	if branchName == "" {
+		branchName = m.buildBranchName(name, opts.HookBead)
 	}
 
 	tmpClonePath := newClonePath + ".repair-tmp"
@@ -2356,6 +2357,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 			return nil, fmt.Errorf("creating fresh worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
 		if err := m.advanceResumeBranch(tmpClonePath, opts.ResumeBranch); err != nil {
+			_ = repoGit.WorktreeRemove(tmpClonePath, true)
+			_ = os.RemoveAll(tmpClonePath)
+			return nil, err
+		}
+		branchName, err = m.ownBranchForResume(tmpClonePath, name, opts.ResumeBranch, opts.HookBead)
+		if err != nil {
 			_ = repoGit.WorktreeRemove(tmpClonePath, true)
 			_ = os.RemoveAll(tmpClonePath)
 			return nil, err

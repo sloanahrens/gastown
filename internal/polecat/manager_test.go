@@ -2866,6 +2866,90 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	}
 }
 
+// A repair follows the add paths' rule (gt-l0jhla): a seat resuming another
+// seat's branch gets a branch of its own at that tip, while its own branch is
+// kept. The resumed ref is left where it was, so the other seat's commits stay.
+func TestRepairWorktreeWithOptions_ResumeBranchOwnership(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		resume   string
+		wantKept bool
+	}{
+		{"another seat's branch", "polecat/jasper/gt-bagu+aaa", false},
+		{"own branch is kept", "polecat/toast/gt-bagu+aaa", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, _, _, w := canonicalWithPolecats(t, true, "toast")
+			// Origin has the branch at its base, the local one a commit
+			// origin lacks: a new branch must start at HEAD to keep it.
+			remote := filepath.Join(t.TempDir(), "origin")
+			w.InitRepo(t, remote)
+			w.SetRef(t, remote, "refs/heads/main", w.rev(t, mayorRig, "main"))
+			base := w.branchAtNewCommit(t, remote, tt.resume, w.rev(t, mayorRig, "main"), "published work")
+			w.SetRef(t, mayorRig, "refs/heads/"+tt.resume, base)
+			tip := w.Commit(t, mayorRig, tt.resume, "local work origin lacks", nil)
+			w.AddRemote(t, mayorRig, "origin", remote)
+			resume := tt.resume
+			p, err := mgr.RepairWorktreeWithOptions("toast", true, AddOptions{HookBead: "gt-next", ResumeBranch: resume})
+			if err != nil {
+				t.Fatalf("RepairWorktreeWithOptions: %v", err)
+			}
+			kept := p.Branch == resume
+			if kept != tt.wantKept || (!tt.wantKept && !strings.HasPrefix(p.Branch, "polecat/toast/")) {
+				t.Fatalf("polecat.Branch = %q, want own branch kept = %v under polecat/toast/", p.Branch, tt.wantKept)
+			}
+			if head := w.branch(t, p.ClonePath); head != p.Branch {
+				t.Errorf("worktree HEAD on %q, want %q", head, p.Branch)
+			}
+			if got := w.rev(t, mayorRig, "refs/heads/"+resume); got != tip {
+				t.Errorf("resume ref moved from %s to %s; it must be left where it was", tip, got)
+			}
+			if reachable, err := w.repo(p.ClonePath).IsAncestor(tip, "HEAD"); err != nil || !reachable {
+				t.Errorf("resume tip %s reachable from HEAD = %v (%v); the local commit origin lacks was lost", tip, reachable, err)
+			}
+		})
+	}
+}
+
+// An own branch a repair cannot create returns the error naming both branches,
+// removes the temporary worktree and leaves the old worktree as it was
+// (gt-l0jhla).
+func TestRepairWorktreeWithOptions_OwnBranchFailureKeepsOldWorktree(t *testing.T) {
+	t.Parallel()
+	mgr, mayorRig, _, _, w := canonicalWithPolecats(t, true, "toast")
+	oldClonePath := mgr.clonePath("toast")
+	oldBranch := w.branch(t, oldClonePath)
+	resume := "polecat/jasper/gt-bagu+aaa"
+	w.branchAtNewCommit(t, mayorRig, resume, w.rev(t, mayorRig, "origin/main"), "jasper work")
+	// Pin and occupy the own branch name the repair draws: the fixed clock
+	// makes a fresh stamp sequence repeat it.
+	mgr.now = func() time.Time { return time.UnixMilli(1_800_000_000_000) }
+	mgr.stamps = &branchStampClock{}
+	own := mgr.buildBranchName("toast", "gt-next")
+	mgr.stamps = &branchStampClock{}
+	w.SetRef(t, mayorRig, "refs/heads/"+own, w.rev(t, mayorRig, "origin/main"))
+
+	_, err := mgr.RepairWorktreeWithOptions("toast", true, AddOptions{HookBead: "gt-next", ResumeBranch: resume})
+	if err == nil {
+		t.Fatal("the repair succeeded with an own branch that cannot be created")
+	}
+	if msg := err.Error(); !strings.Contains(msg, own) || !strings.Contains(msg, resume) {
+		t.Errorf("error names neither or only one of %q and %q: %v", own, resume, err)
+	}
+	if !mgr.exists("toast") {
+		t.Fatal("a failed own-branch creation removed the old worktree")
+	}
+	if got := w.branch(t, oldClonePath); got != oldBranch {
+		t.Errorf("old worktree branch = %q, want it left on %q", got, oldBranch)
+	}
+	if _, err := os.Stat(oldClonePath + ".repair-tmp"); !os.IsNotExist(err) {
+		t.Errorf("the failed repair left its temporary worktree %s behind", oldClonePath+".repair-tmp")
+	}
+}
+
 // TestReuseIdlePolecat_KillsStaleSession verifies that ReuseIdlePolecat also
 // handles the stale-session case correctly (regression: the original code path
 // that worked before the fix should still work after).
