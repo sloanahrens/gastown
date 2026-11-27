@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,12 +20,19 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
-// at is the fixed reading time; UTC keeps the day file's name and the row's
-// stamp in step.
-var at = time.Date(2026, 11, 27, 16, 24, 0, 0, time.UTC)
+// at is the fixed reading time; its zone is behind UTC so its local date differs from the day file's.
+var at = time.Date(2026, 11, 26, 22, 24, 0, 0, time.FixedZone("behind UTC", -8*60*60))
 
 // statsLine is one docker stats reading the parser accepts.
 const statsLine = `{"CPUPerc":"349.74%","MemUsage":"7.989GiB / 8GiB"}`
+
+const podFile = "/Users/sloan/gt/.runtime/metrics/resources/2026-11-27.jsonl"
+
+func readOK(context.Context, string) ([]byte, error) { return []byte(statsLine), nil }
+func readFail(context.Context, string) ([]byte, error) {
+	return nil, errors.New("docker stats: daemon not reachable")
+}
+func noFeed([]string, []byte) error { return nil }
 
 // errHome is the injected home for a run with --dir: reading it would mean run
 // consulted the home when the flag says it must not.
@@ -39,7 +48,7 @@ func TestRunAppendsOneRowForGtDolt(t *testing.T) {
 		got = container
 		return []byte(statsLine), nil
 	}
-	if code := run([]string{"--dir", dir}, &bytes.Buffer{}, func() time.Time { return at }, errHome, read); code != 0 {
+	if code := run([]string{"--dir", dir}, &bytes.Buffer{}, func() time.Time { return at }, errHome, read, noFeed); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
 	}
 	if got != gtDolt {
@@ -85,7 +94,7 @@ func TestRunNamesFailingStep(t *testing.T) {
 				tt.prepare(t, dir)
 			}
 			var stderr bytes.Buffer
-			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, tt.read); code != 1 {
+			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, tt.read, noFeed); code != 1 {
 				t.Errorf("run = %d, want 1", code)
 			}
 			want := "gt-dolt-stats: " + tt.step + ": "
@@ -124,7 +133,7 @@ func TestRunRefusesWithoutRow(t *testing.T) {
 			if tt.flag != "" {
 				args = append(args, tt.flag)
 			}
-			if code := run(args, &bytes.Buffer{}, func() time.Time { return at }, errHome, tt.read); code != 1 {
+			if code := run(args, &bytes.Buffer{}, func() time.Time { return at }, errHome, tt.read, noFeed); code != 1 {
 				t.Errorf("run = %d, want 1", code)
 			}
 			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
@@ -152,7 +161,7 @@ func TestRunBoundsTheStatsRead(t *testing.T) {
 			return nil, errors.New("the read did not end at readTimeout")
 		}
 	}
-	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, read); code != 1 {
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, read, noFeed); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 	if got, want := strings.TrimSuffix(stderr.String(), "\n"), "gt-dolt-stats: read: docker stats: timed out after 5ms"; got != want {
@@ -184,7 +193,7 @@ func TestRunDefaults(t *testing.T) {
 				got = container
 				return []byte(statsLine), nil
 			}
-			if code := run(tt.args, &bytes.Buffer{}, func() time.Time { return at }, func() (string, error) { return home, nil }, read); code != 0 {
+			if code := run(tt.args, &bytes.Buffer{}, func() time.Time { return at }, func() (string, error) { return home, nil }, read, noFeed); code != 0 {
 				t.Fatalf("run = %d, want 0", code)
 			}
 			if got != tt.container {
@@ -204,10 +213,84 @@ func TestRunRefusesWithoutHome(t *testing.T) {
 	read := func(context.Context, string) ([]byte, error) { return nil, errors.New("must not be read") }
 	var stderr bytes.Buffer
 	homeErr := errors.New("$HOME is not defined")
-	if code := run(nil, &stderr, func() time.Time { return at }, func() (string, error) { return "", homeErr }, read); code != 1 {
+	if code := run(nil, &stderr, func() time.Time { return at }, func() (string, error) { return "", homeErr }, read, noFeed); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 	if got, want := strings.TrimSuffix(stderr.String(), "\n"), "gt-dolt-stats: home: $HOME is not defined"; got != want {
 		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// TestRunFeedsThePod: the row reaches the pod as one line on stdin; a feed error
+// exits 1 naming pod feed and keeps the local row; a failing read feeds nothing (gt-r31xgm).
+func TestRunFeedsThePod(t *testing.T) {
+	t.Parallel()
+	wantArgv := []string{"kubectl", "--context", "colima-gt-control", "-n", "gt", "exec", "-i", "deploy/daemon", "-c", "daemon", "--", "sh", "-c", "cat >> '" + podFile + "'"}
+	tests := []struct {
+		name    string
+		read    func(context.Context, string) ([]byte, error)
+		feedErr error
+		code    int
+		stderr  string
+		fed     bool
+	}{
+		{"the row is fed as one line", readOK, nil, 0, "", true},
+		{"a feed error exits 1 keeping the row", readOK, errors.New("kubectl exec: exit status 1"), 1, "gt-dolt-stats: pod feed: kubectl exec: exit status 1\n", true},
+		{"a failing read feeds nothing", readFail, nil, 1, "gt-dolt-stats: read: docker stats: daemon not reachable\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var argv []string
+			var stdin []byte
+			feed := func(a []string, s []byte) error { argv, stdin = a, s; return tt.feedErr }
+			var stderr bytes.Buffer
+			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, tt.read, feed); code != tt.code || stderr.String() != tt.stderr {
+				t.Fatalf("run = %d, stderr = %q: want %d, %q", code, stderr.String(), tt.code, tt.stderr)
+			}
+			if fed := argv != nil; fed != tt.fed {
+				t.Fatalf("feed called = %v, want %v", fed, tt.fed)
+			} else if !fed {
+				return
+			}
+			if !reflect.DeepEqual(argv, wantArgv) {
+				t.Errorf("feed argv = %q, want %q", argv, wantArgv)
+			}
+			local, err := os.ReadFile(filepath.Join(dir, "resources", "2026-11-27.jsonl"))
+			if err != nil || !bytes.Equal(stdin, local) || !bytes.HasSuffix(stdin, []byte("\n")) {
+				t.Errorf("feed stdin = %q, want the local row's one line %q (local read: %v)", stdin, local, err)
+			}
+		})
+	}
+}
+
+// TestPodFeedRefuses: an unencodable row and a path podAppendArgv refuses both return an error and leave feed unfed (gt-r31xgm).
+func TestPodFeedRefuses(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	feed := func([]string, []byte) error { t.Error("feed was called, want no feed"); return nil }
+	if err := podFeed(feed, resourcesampler.Row{CPUPct: &nan}, podFile); err == nil {
+		t.Error("podFeed with an unencodable row = nil, want a refusal")
+	} else if err := podFeed(feed, resourcesampler.Row{}, "/Users/sloan/gt/it's.jsonl"); err == nil {
+		t.Error("podFeed with an unquotable path = nil, want a refusal")
+	}
+}
+
+// TestFeedWithin: the runner sees a context bounded to feedTimeout; a run after the parent ended reports that error instead (gt-r31xgm).
+func TestFeedWithin(t *testing.T) {
+	t.Parallel()
+	runErr := errors.New("kubectl: exit status 1")
+	if err := feedWithin(context.Background(), func(ctx context.Context) error {
+		if d, ok := ctx.Deadline(); !ok || time.Until(d) <= 0 || time.Until(d) > feedTimeout {
+			t.Errorf("feed context deadline = %v (set %v), want one within %v", d, ok, feedTimeout)
+		}
+		return runErr
+	}); !errors.Is(err, runErr) {
+		t.Errorf("feedWithin = %v, want the runner's error", err)
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := feedWithin(ended, func(context.Context) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Errorf("feedWithin with an ended context = %v, want context.Canceled", err)
 	}
 }
