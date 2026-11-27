@@ -95,9 +95,10 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 			// instead of hanging; the hang guard stays as the backstop.
 			d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) { return runnerBudgetSpent(0) }
 			launches, stops, st, outDir := 0, 0, tierSweepStage{}, ""
+			var launched sweeprunner.Spec
 			d.tierSweepSeams.launch = func(_ context.Context, s tierSweepStage, sp sweeprunner.Spec) tierSweepLaunch {
 				launches++
-				st, outDir = s, sp.OutDir
+				st, outDir, launched = s, sp.OutDir, sp
 				l := tc.launch
 				l.stop = func() { stops++ }
 				return l
@@ -120,10 +121,38 @@ func testSweepSmokeLaunch(t *testing.T, checkStops bool) {
 			if entries, err := os.ReadDir(outDir); outDir != "" && err == nil && len(entries) > 0 {
 				t.Errorf("the output directory %s holds %d entries after the smoke, want none: a launch record means the smoke ran the waiting stage", outDir, len(entries))
 			}
+			if launches == 1 && (launched.RunID != tierSweepRunnerRunID(st.rig, st.tested, st.tiers)+"-smoke" ||
+				filepath.Base(launched.OutDir) != launched.RunID) {
+				t.Errorf("smoke launched run %q writing to %q, want a run of its own named beside the sweep's", launched.RunID, launched.OutDir)
+			}
 			if checkStops && stops != tc.stops {
 				t.Errorf("stop ran %d times, want %d", stops, tc.stops)
 			}
 		})
+	}
+}
+
+// TestSweepSmokeLeavesASweepsRunAlone: the smoke's run has a name of its own, so
+// a sweep Job of the same rig, commit and tiers that is running is a foreign Job
+// to it. The claim guard refuses it as busy and the smoke removes nothing, where
+// a shared run id let the launch adopt that Job and its stop take the running
+// sweep down (gt-9ieuas).
+func TestSweepSmokeLeavesASweepsRunAlone(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	g.d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+	running := sweeprunner.JobName(g.spec)
+	g.cluster.jobs = running + "\n"
+
+	rec := g.d.sweepSmokeLaunch(context.Background(), "gastown")
+
+	if rec.Outcome != "busy" {
+		t.Errorf("smoke outcome = %q, want busy: a running sweep of this rig must be a foreign Job", rec.Outcome)
+	}
+	for _, ran := range g.cmds.ran {
+		if strings.Contains(ran, " delete ") {
+			t.Errorf("the smoke ran %q, want no delete: it must leave the running sweep alone", ran)
+		}
 	}
 }
 
