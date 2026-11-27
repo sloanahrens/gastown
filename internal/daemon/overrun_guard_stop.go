@@ -1359,14 +1359,24 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox
-// runner as a clone directory: absolute, with no ".." element and no newline or
-// NUL, so a record cannot steer a git call out of the sandbox's own tree.
+// runner as a clone directory: absolute, with no control character (below 0x20
+// or 0x7f), no ".." element, and no element starting with "-", which an argument
+// parser reads as an option. So a record cannot steer a git call out of the
+// sandbox's own tree or pass it an option. Spaces, quotes and other printable
+// characters are valid: the rescue command quotes them.
 func validSandboxCloneDir(dir string) bool {
-	if dir == "" || !path.IsAbs(dir) || strings.ContainsAny(dir, "\n\x00") {
+	if dir == "" || !path.IsAbs(dir) {
 		return false
 	}
+	// Every byte of a multi-byte UTF-8 character is 0x80 or above, so a byte
+	// check finds every control character.
+	for i := 0; i < len(dir); i++ {
+		if c := dir[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
 	for _, elem := range strings.Split(dir, "/") {
-		if elem == ".." {
+		if elem == ".." || strings.HasPrefix(elem, "-") {
 			return false
 		}
 	}

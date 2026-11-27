@@ -3223,3 +3223,76 @@ func TestIsNonFastForwardPush(t *testing.T) {
 		})
 	}
 }
+
+// TestValidSandboxCloneDir: a clone path is refused when it holds a control
+// character or a segment that starts with a dash, and a printable path with a
+// space or a quote stays valid.
+func TestValidSandboxCloneDir(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		dir  string
+		want bool
+	}{
+		{"plain clone", "/sandbox/clone", true},
+		{"space", "/sandbox/a b", true},
+		{"single quote", "/sandbox/it's", true},
+		{"dash inside a segment", "/sandbox/a-b", true},
+		{"tab", "/sandbox/a\tb", false},
+		{"carriage return", "/sandbox/a\rb", false},
+		{"DEL", "/sandbox/a\x7fb", false},
+		{"newline", "/sandbox/a\nb", false},
+		{"NUL", "/sandbox/a\x00b", false},
+		{"dash-led segment", "/sandbox/-oProxy", false},
+		{"dash-led first segment", "/-x/y", false},
+		{"relative", "sandbox/clone", false},
+		{"dot-dot", "/sandbox/../escape", false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := validSandboxCloneDir(tc.dir); got != tc.want {
+				t.Errorf("validSandboxCloneDir(%q) = %t, want %t", tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidSandboxCloneDir_RescueLocationRefusesAnUnsafeClone: the rescue
+// location reads its clone through the guard, so a record naming a control
+// character or a dash-led segment yields no location, and a path with a space
+// is returned as it is.
+func TestValidSandboxCloneDir_RescueLocationRefusesAnUnsafeClone(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	for _, tc := range []struct {
+		name, workDir string
+		wantErr       bool
+	}{
+		{"a tab", "/sandbox/a\tb", true},
+		{"a carriage return", "/sandbox/a\rb", true},
+		{"a DEL", "/sandbox/a\x7fb", true},
+		{"a dash-led segment", "/sandbox/-oProxy", true},
+		{"a space", "/sandbox/a b", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+				return *overrunStopSandboxRecord(tc.workDir), true, nil
+			}
+			_, workDir, err := d.overrunUnsavedWorkLocation(stopSeat)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "no usable clone directory") {
+					t.Fatalf("overrunUnsavedWorkLocation() error = %v, want no usable clone directory", err)
+				}
+				return
+			}
+			if err != nil || workDir != tc.workDir {
+				t.Errorf("overrunUnsavedWorkLocation() = %q, %v; want %q, nil", workDir, err, tc.workDir)
+			}
+		})
+	}
+}
