@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
@@ -23,7 +24,20 @@ type reviewPoolEnv struct {
 	// stat reports om's config file; nil is os.Stat. An error means the review
 	// key's config file cannot be used (gt-lfykjq).
 	stat func(name string) (os.FileInfo, error)
+	// sweep removes the review-* directories a daemon that died mid-review left
+	// under the work root; nil is land.SweepReviewDirs, called with a git handle
+	// on the Lander's repo so a unit test injects a fake and runs no git (gt-vwrg30).
+	sweep func(workRoot string, g land.Repo) error
+	// sweepLedger, when non-nil, admits each work root once per process, so a
+	// rebuilt rig worker does not sweep again; nil admits every call (the
+	// wiring test's seam) (gt-vwrg30).
+	sweepLedger *sync.Map
 }
+
+// reviewPoolSweeps admits each rig work root once per daemon process: a
+// rebuild (the patrol re-enabled) must not sweep again (gt-vwrg30). Entries
+// never expire, but a work root is a rig's directory for the process's life.
+var reviewPoolSweeps sync.Map
 
 // wireReviewPool is where the daemon wires the review pool into a rig's
 // landing worker. The pool is per-rig and off by default: a rig the config
@@ -32,13 +46,16 @@ type reviewPoolEnv struct {
 // runs (gt-eduozs). When the pool is on for the rig, the Lander is given the
 // rig's review-ahead store, the configured reuse expiry, and the path of om's
 // own config file, so a landing can reuse a review its queue-time twin made
-// (gt-yqoha0, gt-aovgi3).
+// (gt-yqoha0, gt-aovgi3); the Worker is given that store and the pool that
+// fills it (gt-sywmws), and the leftover review directories of a daemon that
+// died mid-review are swept first (gt-vwrg30).
 //
 // The error is the on path's when om's config file cannot be named or does not
 // exist: the wiring is undone and the pool stays off, so a failure never reads
-// as a wired pool (gt-aovgi3, gt-lfykjq).
-func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // w and workRoot are the pool's wiring targets, used by the on path a later bead of gt-s47qp4 adds
-	on, _, expiry, err := cfg.ReviewPoolFor(rig)
+// as a wired pool (gt-aovgi3, gt-lfykjq). wireRigReviewPool, the production
+// entry point, logs that error; this function only returns it (gt-lmflya).
+func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error {
+	on, max, expiry, err := cfg.ReviewPoolFor(rig)
 	if err != nil {
 		// A bad review_pool block fails loud and leaves the pool off: the rig
 		// keeps landing without one until the config is fixed, because the next
@@ -70,13 +87,67 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	}
 	if err != nil {
 		l.Ahead, l.ReuseExpiry, l.OMConfigPath = nil, 0, ""
-		d.logger.Printf("landing_worker: %s: review pool off: %v", rig, err)
-		return fmt.Errorf("landing_worker: %s: %w", rig, err)
+		return fmt.Errorf("landing_worker: %s: review pool off: %w", rig, err)
 	}
 	l.OMConfigPath = omPath
-	// Wiring the Worker and workRoot into the pool is a later bead of the map,
-	// gt-s47qp4.
+	// A daemon that died mid-review left its review-* directories under the
+	// work root, and no live review owns them, so they are swept on this rig
+	// worker's construction (the daemon's boot for the rig) through a git
+	// handle on the Lander's repo with hooks off (gt-vwrg30, gt-sqy9ss). The
+	// ledger keeps that once per work root: a rebuilt worker must not remove a
+	// live review's directory. A failed sweep is clutter: log it, wire on.
+	sweepDue := true
+	if env.sweepLedger != nil {
+		_, already := env.sweepLedger.LoadOrStore(workRoot, struct{}{})
+		sweepDue = !already
+	}
+	if sweepDue {
+		sweep := env.sweep
+		if sweep == nil {
+			sweep = land.SweepReviewDirs
+		}
+		if err := sweep(workRoot, land.CommittingGit(l.Repo).WithoutAllHooks()); err != nil {
+			d.logger.Printf("landing_worker: %s: review pool: sweep leftover review directories: %v", rig, err)
+		}
+	}
+	// The Worker gets the pool that fills the store and the store itself as its
+	// hints, so a review that finishes while the bead queues is the verdict its
+	// landing finds. Its lines go to the log the landing writes to (gt-sywmws).
+	// Begin is the daemon's landing-pass gate, so an ahead review counts as a
+	// landing pass: while a hold or drain is on Begin answers false and the pool
+	// starts nothing. End gives back the slot that a true Begin took, once per
+	// review, so the in-flight count returns to zero when the pool is idle
+	// (gt-zajcg2).
+	w.Stored = l.Ahead
+	w.Pool = &landworker.ReviewPool{
+		Reviewer: l,
+		Hints:    l.Ahead,
+		Max:      max,
+		Begin:    d.beginLandingPass,
+		End:      d.landingPassEnded,
+		Logf:     w.Logf,
+	}
 	return nil
+}
+
+// wireRigReviewPool is the production entry point for the review pool: it wires
+// a rig's landing worker with the environment held on the Daemon, whose zero
+// value reads this process's environment, so a unit test can point om's config
+// at its own file (gt-lmflya). The one sweep ledger is supplied here, for the
+// real sweep only: a test's injected sweep is the test's to call, so its rows
+// stay independent of one another (gt-vwrg30). wireReviewPool leaves the pool
+// off when it returns an error; the wiring does not fail the worker's
+// construction, so the error is logged here, once (gt-m0s4td).
+func (d *Daemon) wireRigReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string) {
+	// The environment is copied before the ledger is added; the Daemon's field
+	// is never written, so concurrent rig constructions do not race on it.
+	env := d.reviewPoolEnv
+	if env.sweep == nil && env.sweepLedger == nil {
+		env.sweepLedger = &reviewPoolSweeps
+	}
+	if err := d.wireReviewPool(rig, cfg, l, w, workRoot, env); err != nil {
+		d.logger.Print(err)
+	}
 }
 
 // reviewPoolOMConfigPath resolves om's config file the way om does

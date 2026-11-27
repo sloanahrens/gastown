@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
@@ -189,6 +190,34 @@ func (h *holdFake) counts() (begins, ends int) {
 	return h.begins, h.ends
 }
 
+// fakeAheadHints answers Hint from a fixed table: a bead in heads answers that
+// head, a bead in fail answers its error, and every other bead has no stored
+// review. It records every bead it is asked about.
+type fakeAheadHints struct {
+	heads map[string]string
+	fail  map[string]error
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (f *fakeAheadHints) Hint(bead string) (string, bool, error) {
+	f.mu.Lock()
+	f.asked = append(f.asked, bead)
+	f.mu.Unlock()
+	if err := f.fail[bead]; err != nil {
+		return "", false, err
+	}
+	return f.heads[bead], false, nil
+}
+
+// askedBeads returns the beads Hint was asked about.
+func (f *fakeAheadHints) askedBeads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
+}
+
 func TestReviewPoolReviewsEachWorkOnce(t *testing.T) {
 	t.Parallel()
 	ctx := waitCtx(t)
@@ -238,6 +267,322 @@ func TestReviewPoolWaitReturnsWhenIdle(t *testing.T) {
 	}
 	if got := logs.get(); len(got) != 1 || !strings.Contains(got[0], "gt-bad") || !strings.Contains(got[0], "om unreachable") {
 		t.Errorf("logged %q, want one line naming the bead and the error", got)
+	}
+}
+
+// TestReviewPoolAwaitReturnsWhenDone pins that Await waits while the bead's
+// review runs and returns once that review has ended. It runs in a synctest
+// bubble: the bubble's barrier shows Await still waiting after the review
+// started, so a wait that returns at once is caught, not raced with.
+func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead = "gt-await"
+			head = "1111111"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		awaited := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, head)
+			close(awaited)
+		}()
+
+		// The review is held, so the waiter is blocked in Await when the
+		// bubble settles.
+		settle()
+		select {
+		case <-awaited:
+			t.Fatalf("Await returned with the bead's review still running, want it to wait")
+		default:
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, awaited, "Await returning after the review ended")
+		settle()
+		if headAt, running := runningHeadAt(t, pool, bead); running {
+			t.Errorf("Await returned with the bead's review still in the pool at %s, want the review gone", headAt)
+		}
+	})
+}
+
+// TestReviewPoolAwaitIgnoresOtherHead pins that Await waits for a review of the
+// caller's head only: with a review of another head of the bead running, the
+// wait returns at once, because that verdict cannot judge the head the caller
+// holds (gt-rudbr6). It runs in a synctest bubble, whose barrier settles both
+// waiters before either is checked.
+func TestReviewPoolAwaitIgnoresOtherHead(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead      = "gt-await"
+			heldHead  = "1111111"
+			otherHead = "2222222"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: heldHead}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		otherReturned := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, otherHead)
+			close(otherReturned)
+		}()
+		heldReturned := make(chan struct{})
+		go func() {
+			pool.Await(context.Background(), bead, heldHead)
+			close(heldReturned)
+		}()
+		settle()
+
+		select {
+		case <-otherReturned:
+		default:
+			t.Errorf("Await for head %s did not return while only head %s is reviewed, want it to return at once", otherHead, heldHead)
+		}
+		select {
+		case <-heldReturned:
+			t.Fatalf("Await for the reviewed head %s returned while its review still runs, want it to wait", heldHead)
+		default:
+		}
+		if headAt, running := runningHeadAt(t, pool, bead); !running || headAt != heldHead {
+			t.Errorf("the pool holds the bead's review at %s (running %v) after the other-head Await returned, want head %s still reviewed", headAt, running, heldHead)
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, heldReturned, "Await returning after the review of its head ended")
+	})
+}
+
+// TestReviewPoolAwaitNothingRunning pins that Await returns at once for a bead
+// with no review running: the rows cover an idle pool and a pool busy with
+// another bead's review, so a wait on the pool rather than on the bead's own
+// entry is caught.
+func TestReviewPoolAwaitNothingRunning(t *testing.T) {
+	t.Parallel()
+	const (
+		bead = "gt-await"
+		head = "1111111"
+	)
+	tests := []struct {
+		name string
+		// other is a bead whose review runs while Await is called; empty
+		// leaves the pool idle.
+		other string
+	}{
+		{name: "idle pool"},
+		{name: "another bead's review running", other: "gt-other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx := waitCtx(t)
+				settle := synctest.Wait
+				rev := newFakeAheadReviewer(t, ctx, nil)
+				pool := &ReviewPool{Reviewer: rev, Max: 2}
+				if tt.other != "" {
+					pool.Offer(context.Background(), []land.Work{{BeadID: tt.other, Head: head}})
+					recvBounded(t, ctx, rev.entered, "the other bead's review start")
+				}
+
+				awaited := make(chan struct{})
+				go func() {
+					pool.Await(context.Background(), bead, head)
+					close(awaited)
+				}()
+				settle()
+				select {
+				case <-awaited:
+				default:
+					t.Fatalf("Await did not return at once for a bead with no review running")
+				}
+
+				if tt.other != "" {
+					close(rev.release)
+					recvBounded(t, ctx, idleOf(pool), "the other bead's review ending")
+				}
+			})
+		})
+	}
+}
+
+// TestReviewPoolAwaitReturnsOnCancel pins that a cancelled ctx ends the wait
+// while the bead's review still runs: Await returns, the pool still holds that
+// review, and the review returns only at its own release.
+func TestReviewPoolAwaitReturnsOnCancel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			bead = "gt-await"
+			head = "1111111"
+		)
+		ctx := waitCtx(t)
+		settle := synctest.Wait
+		rev := newFakeAheadReviewer(t, ctx, nil)
+		pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+		pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+		recvBounded(t, ctx, rev.entered, "the review start")
+
+		waitUntil, cancel := context.WithCancel(ctx)
+		awaited := make(chan struct{})
+		go func() {
+			pool.Await(waitUntil, bead, head)
+			close(awaited)
+		}()
+
+		settle()
+		select {
+		case <-awaited:
+			t.Fatalf("Await returned before its context was cancelled, want it to wait")
+		default:
+		}
+
+		cancel()
+		settle()
+		select {
+		case <-awaited:
+		default:
+			t.Fatalf("Await did not return after its context was cancelled")
+		}
+		if headAt, running := runningHeadAt(t, pool, bead); !running {
+			t.Errorf("the bead's review left the pool with the cancelled wait, want it still running")
+		} else if headAt != head {
+			t.Errorf("the pool holds the bead's review at %s, want %s still running", headAt, head)
+		}
+		if rev.hasReturned() {
+			t.Errorf("the review returned with the cancelled wait, want it to keep running until its release")
+		}
+
+		close(rev.release)
+		recvBounded(t, ctx, idleOf(pool), "the review ending at the test's release")
+		if !rev.hasReturned() {
+			t.Errorf("the reviewer never returned after its release")
+		}
+	})
+}
+
+// TestReviewPoolErrorNotRetried pins that the head whose review failed is not
+// offered again, while a new head of the same bead still is: the pool keeps the
+// head each bead's last review ended at, so a broken om call is not repeated on
+// every pass, and a seat that pushed a new commit is reviewed (gt-xa01yc).
+func TestReviewPoolErrorNotRetried(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-error"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, map[string]error{bead: errors.New("om unreachable")})
+	pool := &ReviewPool{Reviewer: rev, Max: 1}
+
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the failing review start")
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the failure")
+	if got := reviewCounts(rev); got[bead] != 1 {
+		t.Fatalf("reviews of %s %d after the failing review, want 1", bead, got[bead])
+	}
+
+	// The same head is a head the pool tried: the offer starts no review.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the repeat offer")
+	if head, ok := runningHeadAt(t, pool, bead); ok {
+		t.Errorf("the repeat offer started a review of %s at %s, want none: the pool tried that head", bead, head)
+	}
+	if n := len(rev.reviewed()); n != 1 {
+		t.Fatalf("reviewer called %d times after the failed head was offered again, want 1", n)
+	}
+
+	// A head the pool has not tried is reviewed.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the new head")
+	if n := len(rev.reviewed()); n != 2 {
+		t.Fatalf("reviewer called %d times, want the failed head then the new head", n)
+	}
+}
+
+// TestReviewPoolCancelledDoesNotBlockNewHead pins that a review cancelled for a
+// new head leaves the new head reviewable. The cancelled review records only
+// its own head as tried, so the next offer starts the new head; an offer of the
+// old head while the new review runs is a head the pool tried, so it starts
+// nothing and cancels nothing (gt-bnc6ah). A pool that read the running entry
+// before the tried memo would cancel the new head's review here.
+func TestReviewPoolCancelledDoesNotBlockNewHead(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// The old review is held by the test, so only the cancel for the new head
+	// ends it.
+	rev.perWork = map[string]chan struct{}{bead: make(chan struct{})}
+	logs := &logRecorder{}
+	pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
+
+	// The old head's review starts, and the offer of the new head cancels it.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the old head's review start")
+	oldDone := reviewEnded(t, pool, bead)
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	recvBounded(t, ctx, oldDone, "the cancelled old review leaving the pool")
+	if got := logs.get(); len(got) != 1 {
+		t.Fatalf("logged %q for the replaced head, want one cancel line", got)
+	}
+
+	// The cancelled review does not block the head that replaced it: the next
+	// offer starts the new head's review.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	w := recvBounded(t, ctx, rev.entered, "the new head's review start")
+	if w.BeadID != bead || w.Head != newHead {
+		t.Fatalf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, newHead)
+	}
+
+	// The old head is a head the pool has tried: offering it again while the new
+	// head is under review starts nothing, cancels nothing and logs nothing.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	if head, ok := runningHeadAt(t, pool, bead); !ok || head != newHead {
+		t.Errorf("after the tried old head was offered again the pool holds the bead's review at head %q (running %v), want the new head %s still in place", head, ok, newHead)
+	}
+	if got := logs.get(); len(got) != 1 {
+		t.Errorf("offering the tried old head changed the log to %q, want the one cancel line: it must not cancel the new head's review", got)
+	}
+	if n := len(rev.reviewed()); n != 2 {
+		t.Fatalf("reviewer called %d times before the new review ended, want the old head then the new head", n)
+	}
+
+	// Let the new head's review end; it is the only one left.
+	close(rev.perWork[bead])
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the new head")
+	got := rev.reviewed()
+	if len(got) != 2 {
+		t.Fatalf("reviewer called %d times, want the old head then the new head: %v", len(got), got)
+	}
+	if got[0] != (land.Work{BeadID: bead, Head: oldHead}) {
+		t.Errorf("first review was %+v, want the old head %s", got[0], oldHead)
+	}
+	if got[1] != (land.Work{BeadID: bead, Head: newHead}) {
+		t.Errorf("second review was %+v, want the new head %s", got[1], newHead)
 	}
 }
 
@@ -947,5 +1292,96 @@ func TestReviewPoolWithoutReviewerStartsNothing(t *testing.T) {
 
 	if n := len(logs.get()); n != 1 {
 		t.Errorf("logged %d lines with no reviewer, want 1", n)
+	}
+}
+
+// TestReviewPoolHintSkips checks that Offer reuses a stored review: a hint at
+// the offered head starts nothing, a hint at another head leaves that work to be
+// reviewed, a hint error starts nothing and is logged once, and no hints at all
+// review the work. The error row offers the list twice: the head it recorded as
+// tried is what keeps the second offer from asking and logging again.
+func TestReviewPoolHintSkips(t *testing.T) {
+	t.Parallel()
+	const (
+		bead = "gt-stored"
+		head = "1111111"
+		old  = "2222222"
+	)
+	tests := []struct {
+		name       string
+		hints      *fakeAheadHints
+		offers     int
+		wantReview bool
+		wantAsked  int
+		wantLogs   int
+	}{
+		{
+			name:      "a hint at the same head is skipped",
+			hints:     &fakeAheadHints{heads: map[string]string{bead: head}},
+			offers:    1,
+			wantAsked: 1,
+		},
+		{
+			name:       "a hint at another head is reviewed",
+			hints:      &fakeAheadHints{heads: map[string]string{bead: old}},
+			offers:     1,
+			wantReview: true,
+			wantAsked:  1,
+		},
+		{
+			name:      "a hint error is skipped and logged once",
+			hints:     &fakeAheadHints{fail: map[string]error{bead: errors.New("unreadable record")}},
+			offers:    2,
+			wantAsked: 1,
+			wantLogs:  1,
+		},
+		{
+			name:       "no hints reviews",
+			offers:     1,
+			wantReview: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := waitCtx(t)
+			rev := newFakeAheadReviewer(t, ctx, nil)
+			logs := &logRecorder{}
+			pool := &ReviewPool{Reviewer: rev, Max: 1, Logf: logs.logf}
+			if tt.hints != nil {
+				pool.Hints = tt.hints
+			}
+
+			for n := 0; n < tt.offers; n++ {
+				pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: head}})
+			}
+			if tt.wantReview {
+				if w := recvBounded(t, ctx, rev.entered, "the review to start"); w.BeadID != bead || w.Head != head {
+					t.Errorf("started a review of %s at %s, want %s at %s", w.BeadID, w.Head, bead, head)
+				}
+				close(rev.release)
+			}
+			recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+			gotReviews := len(rev.reviewed())
+			if tt.wantReview && gotReviews != 1 {
+				t.Errorf("reviewer called %d times, want the work reviewed once", gotReviews)
+			}
+			if !tt.wantReview && gotReviews != 0 {
+				t.Errorf("reviewer called %d times, want the stored review reused", gotReviews)
+			}
+			asked := 0
+			if tt.hints != nil {
+				asked = len(tt.hints.askedBeads())
+			}
+			if asked != tt.wantAsked {
+				t.Errorf("hint asked %d times, want %d", asked, tt.wantAsked)
+			}
+			if lines := logs.get(); len(lines) != tt.wantLogs {
+				t.Errorf("logged %d lines, want %d: %v", len(lines), tt.wantLogs, lines)
+			} else if tt.wantLogs > 0 && !strings.Contains(lines[0], bead) {
+				t.Errorf("log line %q does not name %s", lines[0], bead)
+			}
+		})
 	}
 }

@@ -2,10 +2,41 @@ package daemon
 
 import (
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/reconcile"
 )
+
+// reconcilerCycleWanted answers which due duties a maintenance cycle may start
+// for now: reconcilerDueDuties' names, and nothing while the patrol is
+// shadow, while the town stands by (the ESTOP, a Waned Ring, the boot gate), or
+// while a maintenance gc already runs. The town_state duty is judged with
+// townStateNightlyRoot's error, so a duty whose root cannot be read is left
+// out. It starts nothing (gt-y9xml3).
+func (d *Daemon) reconcilerCycleWanted(now time.Time, obs []reconcile.Observation) []string {
+	if d.reconcilerShadow() {
+		return nil
+	}
+	if d.standbyReason(now) != "" {
+		return nil
+	}
+	if d.maintenanceGCRunning.Load() {
+		return nil
+	}
+	_, err := d.townStateNightlyRoot()
+	return reconcilerDueDuties(obs, err)
+}
+
+// reconcilerShadow reports whether the reconciler patrol only judges and logs:
+// the Reconciler block's shadow setting, read as runReconciler reads it. No
+// block at all reads shadow.
+func (d *Daemon) reconcilerShadow() bool {
+	if pc := d.patrol(); pc != nil && pc.Patrols != nil {
+		return pc.Patrols.Reconciler.ParseShadow()
+	}
+	return true
+}
 
 // reconcilerDueDuties returns, in input order, the duties a maintenance cycle
 // can fix and that are due or overdue: backup, archive, a gc of one database,

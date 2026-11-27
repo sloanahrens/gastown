@@ -76,6 +76,11 @@ type Lander interface {
 	Land(ctx context.Context, w land.Work) (land.Result, error)
 }
 
+// finisher finishes a deferred landing's record; *land.Lander implements it (gt-k78e8j).
+type finisher interface {
+	FinishLanding(w land.Work, res land.Result) error
+}
+
 // Landings is the rig's landings file, read to repair incomplete records.
 type Landings interface {
 	LatestForBead(beadID string) (land.LandingRecord, bool, error)
@@ -283,6 +288,11 @@ type Worker struct {
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
 	startupDone   bool
+	// revertChecked is whether this run's check for a revert completion a
+	// restart dropped has answered: either the call was made or none is owed.
+	// A check that could not read leaves it false, and the next pass asks
+	// again (gt-qxm7y3).
+	revertChecked bool
 	// lastSeen is the WatchTarget tip the worker last saw or landed.
 	lastSeen string
 	// sweptAt is when the leftover-branch sweep last ran; zero on the run's
@@ -312,8 +322,19 @@ type Worker struct {
 
 // RevertHooks is the red-main owner's side of an automatic revert.
 type RevertHooks interface {
-	// RevertLanded is called after every new landing.
+	// RevertLanded is called after every new landing that is not deferred; a
+	// deferred landing's bookkeeping job calls it at the next pass instead, and
+	// a run that starts before that pass asks RevertOwed and calls it there.
 	RevertLanded(ctx context.Context, work land.Work, res land.Result)
+	// IsRevert reports whether beadID is one of this owner's reverts. It reads
+	// only, so a deferred landing's bookkeeping job may call it on the queue
+	// goroutine, where RevertLanded must not run.
+	IsRevert(beadID string) bool
+	// RevertOwed returns the revert whose landing is recorded while it is
+	// still in flight, and false for none: the call a restart dropped between
+	// finishing the record and telling the owner (gt-qxm7y3). An unreadable
+	// state or landings file is an error, never a false.
+	RevertOwed() (land.Work, land.Result, bool, error)
 	// RevertRejected is called on every rework rejection; true means the
 	// work was a revert and has been dealt with, so no rework comment.
 	RevertRejected(work land.Work, rej *land.Rejection) bool
@@ -330,7 +351,8 @@ type beadState struct {
 	// health field (gt-fn9e6.44).
 	stage   string
 	lastErr string
-	// ciSilences counts consecutive candidate-gate silences; any other outcome
+	// ciSilences counts consecutive candidate-gate silences; every outcome but
+	// an infrastructure failure, and a pass that consumed no stored verdict,
 	// resets it.
 	ciSilences int
 	// escalated marks that this run of failures has raised an escalation
@@ -547,6 +569,9 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		w.startupDone = true
 		w.queueRecentRepairs()
 	}
+	// Before anything lands: a revert whose landing a restart left incomplete
+	// is told first, so its culprit is reopened before a new landing is counted.
+	w.recoverRevertLanded(ctx)
 	for id, work := range w.pendingRepair {
 		if ctx.Err() != nil {
 			return rep
@@ -589,16 +614,35 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// the whole list, not the beads this pass still has to land, because the
 	// column it answers counts what waits.
 	w.Queue.Publish(w.Rig, len(issues))
+	// The pool reviews this list while the pass lands it, so the landing has a
+	// verdict to reuse instead of running om inline. It is offered on ctx, the
+	// run context the pass was called with, which outlives one landing and one
+	// pass: a review must keep running past both (gt-mdv8eq).
+	w.offerReview(ctx, issues, "")
 	// The submissions this pass has looked at, whatever it left them on: a bead
 	// that stays ready after its attempt is not tried twice in one pass, and the
 	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
 	handled := make(map[string]bool, len(issues))
+	// The bead and head pairs this pass has already swept: one stored review is
+	// offered at most once per pass, even when the sweep counted nothing for it,
+	// so a kept record is not landed stored-only every round (gt-9nco9r). A new
+	// head for the bead is its own pair and is swept once (gt-k5s380).
+	swept := make(map[string]bool)
 	for {
 		if ctx.Err() != nil {
 			return rep
 		}
 		// Checked before each claim, never mid-landing.
 		if w.draining() {
+			return rep
+		}
+		// The stored rejections are consumed before the next bead is chosen, so
+		// a bead's author is told the review refused it without waiting behind
+		// the landings queued ahead of it (gt-9nco9r).
+		w.sweepStored(ctx, issues, handled, swept, &rep)
+		// The sweep may have learned that the run was canceled or a drain
+		// started; nothing more is started once either is true.
+		if ctx.Err() != nil || w.draining() {
 			return rep
 		}
 		issue := nextReady(issues, handled)
@@ -663,6 +707,12 @@ func (w *Worker) landReady(ctx context.Context) Report {
 			rep.Skipped++
 			continue
 		}
+		// The pool reviews this bead while the pass lands the beads ahead of it,
+		// so the landing reuses that verdict instead of starting a second om run:
+		// it waits for the review of the head it is about to land (gt-m9gfv9).
+		if !w.waitForReview(ctx, issue) {
+			return rep
+		}
 		w.process(ctx, issue, &rep)
 		w.rememberOutcome(issue)
 		// A landing takes minutes, and a bead made ready while it ran must land
@@ -675,6 +725,15 @@ func (w *Worker) landReady(ctx context.Context) Report {
 			rep.Failed++
 			return rep
 		}
+		// The fresh list is offered again: a bead made ready while the landing
+		// ran, and a work that did not fit the pool's cap until a review ended,
+		// are reviewed without a queue (gt-20kjw5). The bead about to be landed
+		// is left out, since its review would be spent on a landing now due.
+		landing := ""
+		if next := nextReady(issues, handled); next != nil {
+			landing = next.ID
+		}
+		w.offerReview(ctx, issues, landing)
 	}
 }
 
@@ -866,6 +925,106 @@ func (w *Worker) recordSubmission(work land.Work) {
 
 // process resolves what to land for issue and lands it.
 func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
+	w.processWith(ctx, issue, rep, false)
+}
+
+// sweepStored lands, as a stored-only pass, each ready bead's stored rejection
+// before the next landing is chosen, so a rejected bead's author is told before
+// the beads queued ahead of it run their gates; a rejection merges nothing, so
+// no landing order changes. It leaves a bead alone when the landing loop's own
+// turn for it is not due yet, and stops between beads once the run is canceled
+// or a drain is on. One bead and head is swept at most once per pass: swept
+// names the pairs already offered, and a bead the sweep counted an outcome for
+// is marked handled so the loop does not attempt it again while it stays ready;
+// a bead with nothing stored to consume counts nothing and keeps its ordinary
+// turn, so a stored review the pool replaced for a new head while that turn
+// waits is swept once for the new head too. Each landing it makes records the
+// first-sight record and the outcome memo the loop records around its own. With
+// Stored nil nothing is swept (gt-5q8ayw). A hint that cannot be read is
+// unknown, never "not rejecting": the error is logged in one line naming the
+// bead and the bead is left for its ordinary turn while the sweep goes on with
+// the rest (gt-end632).
+func (w *Worker) sweepStored(ctx context.Context, issues []*beads.Issue, handled, swept map[string]bool, rep *Report) {
+	if w.Stored == nil {
+		return
+	}
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		// A bead the pass has already looked at keeps its turn: sweeping it again
+		// would land it a second time (gt-wgvu6p).
+		submission := handledKey(issue)
+		if handled[submission] {
+			continue
+		}
+		if ctx.Err() != nil || w.draining() {
+			return
+		}
+		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
+			continue
+		}
+		if w.parked(issue.ID) {
+			continue
+		}
+		// The loop clears the operator's retry label and drops the old run
+		// before it lands the bead, so the sweep leaves that bead to it.
+		if beads.HasLabel(issue, LabelLandingRetry) {
+			continue
+		}
+		if _, pending := w.pendingRepair[issue.ID]; pending {
+			continue
+		}
+		// The loop skips a bead whose landing record is still being written, so
+		// the sweep must not land it stored-only in that window (gt-ppcl1g).
+		if w.booksHold(issue.ID) {
+			continue
+		}
+		if w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
+			continue
+		}
+		head, rejecting, err := w.Stored.Hint(issue.ID)
+		if err != nil {
+			// The hint is unknown, not "not rejecting": the bead keeps its
+			// ordinary turn and the sweep goes on with the rest (gt-end632).
+			w.logf("%s: reading the stored review: %v; the bead keeps its turn", issue.ID, err)
+			continue
+		}
+		if !rejecting {
+			continue
+		}
+		// The head joins the key after the hint, so a record replaced for a new
+		// head while the bead waits its turn is swept once for that head; the
+		// same pair is offered only once per pass (gt-k5s380).
+		key := sweptKey(issue.ID, head)
+		if swept[key] {
+			continue
+		}
+		swept[key] = true
+		before := *rep
+		// The loop records a submission before it lands and what it left the
+		// bead on after, so a swept landing leaves the same trail: the first-sight
+		// record the battery reads, and the outcome memo the next pass reads in
+		// place of the bead's row (gt-9nco9r).
+		w.recordFirstSight(issue)
+		w.processWith(ctx, issue, rep, true)
+		w.rememberOutcome(issue)
+		// An outcome the pass counted — a rejection, a skip or a failure — has
+		// spent the bead's turn, so the loop must not attempt it again while it
+		// stays ready (gt-9nco9r).
+		if *rep != before {
+			handled[submission] = true
+		}
+	}
+}
+
+// processWith resolves what to land for issue and lands it. storedOnly marks the
+// landing as a stored-only pass: it consumes the bead's stored review in place of
+// running om (land.Work.StoredOnly), and the recorded-landing repair is left to
+// the ready pass — a stored-only pass lands what the bead asks for now, never
+// finishes an earlier landing's record. It touches neither the ready pass's
+// handled set nor rememberOutcome, which belong to landReady (gt-t3fgce).
+func (w *Worker) processWith(ctx context.Context, issue *beads.Issue, rep *Report, storedOnly bool) {
 	if w.Active != nil {
 		w.Active(issue.ID)
 		defer w.Active("")
@@ -887,22 +1046,26 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	}
 
 	// A landing already on the target with an incomplete record is repaired,
-	// never landed twice, whatever the branch holds now.
-	if rec, found, err := w.Landings.LatestForBead(issue.ID); err != nil {
-		w.infraFailure(issue.ID, "reading the landings file", err, rep)
-		return
-	} else if found && !resubmittedAfter(issue.Notes, rec.LandedCommit) {
-		on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
-		if err != nil {
-			w.infraFailure(issue.ID, "checking a recorded landing", err, rep)
+	// never landed twice, whatever the branch holds now. A stored-only pass
+	// leaves the repair to the ready pass, and so reads no landing record: it
+	// lands the submission the bead carries now (gt-t3fgce).
+	if !storedOnly {
+		if rec, found, err := w.Landings.LatestForBead(issue.ID); err != nil {
+			w.infraFailure(issue.ID, "reading the landings file", err, rep)
 			return
-		}
-		if on {
-			w.logf("%s: already landed as %s; repairing its record only", issue.ID, short(rec.LandedCommit))
-			work := workFromRecord(rec, issue)
-			w.pendingRepair[issue.ID] = work
-			w.landOne(ctx, work, rep)
-			return
+		} else if found && !resubmittedAfter(issue.Notes, rec.LandedCommit) {
+			on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
+			if err != nil {
+				w.infraFailure(issue.ID, "checking a recorded landing", err, rep)
+				return
+			}
+			if on {
+				w.logf("%s: already landed as %s; repairing its record only", issue.ID, short(rec.LandedCommit))
+				work := workFromRecord(rec, issue)
+				w.pendingRepair[issue.ID] = work
+				w.landOne(ctx, work, rep)
+				return
+			}
 		}
 	}
 
@@ -944,6 +1107,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	work.Agent = w.seatAgent(work.Worker)
 	work.Priority = w.beadPriority(issue.ID)
 	work.SPEstimate, work.SPMinutes, work.SPSlung = w.beadSPLabels(issue.ID)
+	work.StoredOnly = storedOnly
 	w.landOne(ctx, work, rep)
 }
 
@@ -991,6 +1155,45 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool, error) {
 		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true, nil
 	}
 	return land.Work{}, false, nil
+}
+
+// waitForReview waits for the review pool's review of the head issue's own
+// submission names, the head this pass is about to land, so the landing reuses
+// that verdict instead of starting a second om run (gt-m9gfv9). It reports
+// false when ctx is done once the wait ends, and the caller then returns from
+// the pass without landing the bead: ctx is the context Pass was called with,
+// so a daemon stop ends the wait and the pass. It reports true without waiting
+// when no pool is set, or when the bead names no submission — its comments
+// cannot be read, or they name none — since process reports such a bead as it
+// did before the pool existed. A review of the bead at another head returns at
+// once (ReviewPool.Await), as does one that is not running.
+func (w *Worker) waitForReview(ctx context.Context, issue *beads.Issue) bool {
+	if w.Pool == nil {
+		return true
+	}
+	work, ok, err := w.resolveWork(issue)
+	if err != nil || !ok {
+		return true
+	}
+	w.Pool.Await(ctx, issue.ID, work.Head)
+	return ctx.Err() == nil
+}
+
+// offerReview offers the works reviewWorks builds for issues, leaving out the
+// bead named by landing (empty for none), to the review pool. A nil pool
+// offers nothing; an error building the works offers nothing that time and is
+// named on one line, since the pool can only save time and a broken offer must
+// never stop the pass landing the beads it can (gt-mdv8eq).
+func (w *Worker) offerReview(ctx context.Context, issues []*beads.Issue, landing string) {
+	if w.Pool == nil {
+		return
+	}
+	works, err := w.reviewWorks(issues, landing)
+	if err != nil {
+		w.logf("the review pool: building the works: %v; offering none this pass", err)
+		return
+	}
+	w.Pool.Offer(ctx, works)
 }
 
 // reviewWorks builds a work for each issue the pool may review ahead of a
@@ -1212,6 +1415,7 @@ const (
 	outNotReady
 	outReadBack
 	outCanceled
+	outNoStored
 	outInfra
 )
 
@@ -1240,6 +1444,12 @@ func classify(ctx context.Context, err error) outcome {
 		return outReadBack
 	case ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled):
 		return outCanceled
+	case errors.Is(err, land.ErrNoStoredVerdict):
+		// A stored-only pass found no stored verdict to consume: the pass asked
+		// and was answered, so nothing failed and nothing is owed. The bead
+		// keeps its ordinary turn rather than being parked on a verdict the
+		// pass was never going to find (gt-ixvxt5).
+		return outNoStored
 	case errors.Is(err, land.ErrCISilence):
 		// The candidate gate reported nothing: infrastructure, never a
 		// verdict on the work. CI red comes back as a *Rejection, so the two
@@ -1275,7 +1485,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	// landing an earlier pass already accounted for (gt-3qmv4.2).
 	installNow := st.installNow && !wasRepair
 	oc := classify(ctx, err)
-	if oc != outInfra {
+	// A stored-only pass that consumed nothing attempted no landing, so it
+	// neither answers nor resets the CI-silence run the ready pass counts.
+	if oc != outInfra && oc != outNoStored {
 		st.ciSilences = 0
 	}
 	switch oc {
@@ -1291,20 +1503,30 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			rep.InstallRequested = true
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
-		w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+		if res.Deferred != nil {
+			// A deferred landing still owes the bead half of its record: the job
+			// finishes it and runs the four landing steps off this goroutine when
+			// a queue is set, and the bead stays held (booksHold) until the
+			// record is written, so no later pass lands it again (gt-c3vl2u).
+			w.finishDeferredQueued(work, res, wasRepair)
+		} else {
+			w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+		}
 		w.clearIntent(work)
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
-		// The label needs the landing's complete record, and a repair is the pass
-		// that completes a record an earlier pass left unfinished, so this runs
-		// on a repair too. The write is idempotent: a stale sp-actual is replaced.
-		w.writeSPActual(work.BeadID, res.LandedCommit)
-		// The record is complete now, which is the proof the seat's end reads.
-		// A repair that finishes a record left unfinished reaches it here, so
-		// the seat its earlier pass kept is ended once the record can prove it.
-		if w.AfterLanded != nil {
-			w.AfterLanded(work)
+		if res.Deferred == nil {
+			// The label needs the landing's complete record, and a repair is the pass
+			// that completes a record an earlier pass left unfinished, so this runs
+			// on a repair too. The write is idempotent: a stale sp-actual is replaced.
+			w.writeSPActual(work.BeadID, res.LandedCommit)
+			// The record is complete now, which is the proof the seat's end reads.
+			// A repair that finishes a record left unfinished reaches it here, so
+			// the seat its earlier pass kept is ended once the record can prove it.
+			if w.AfterLanded != nil {
+				w.AfterLanded(work)
+			}
 		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
@@ -1404,11 +1626,120 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.announce(work.BeadID, "read-back", fmt.Sprintf("Landing worker: the push of %s reported success but %s's tip was not the landed commit on read-back (%v). Whether it landed is unknown; not retrying for %s. A human should compare origin/%s with the landings file.", work.Branch, work.Target, err, readBackBackoff, work.Target))
 	case outCanceled:
 		w.logf("%s: stopped: %v", work.BeadID, err)
+	case outNoStored:
+		// Nothing was stored to consume, so there is nothing to count, write,
+		// wait or hold: no report line either, since a stored-only sweep
+		// crosses every ready bead each interval and the ordinary pass owns
+		// the bead's turn (gt-ixvxt5).
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
 		w.countCISilence(work, err)
 		w.countFailingLanding(work, err)
 	}
+}
+
+// finishDeferred finishes a deferred landing's record, then reaps its branches,
+// refreshes the authors' seats, writes sp-actual and runs the after-landed hook,
+// in that order. It runs on BookQueue's goroutine, so any Worker state it must
+// write goes through Later to w's own goroutine; a finish it cannot make leaves
+// the work in pendingRepair for the next pass (gt-k78e8j, gt-dci9k8).
+func (w *Worker) finishDeferred(work land.Work, res land.Result) {
+	f, ok := w.Lander.(finisher)
+	if !ok {
+		w.logf("%s: the lander cannot finish a deferred landing; the next pass repairs its record", work.BeadID)
+		w.repairLater(work)
+		return
+	}
+	if err := f.FinishLanding(work, res); err != nil {
+		w.logf("%s: finishing the deferred landing record: %v; the next pass repairs it", work.BeadID, err)
+		w.repairLater(work)
+		return
+	}
+	w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
+	w.writeSPActual(work.BeadID, res.LandedCommit)
+	if w.AfterLanded != nil {
+		w.AfterLanded(work)
+	}
+}
+
+// finishRevert queues a deferred revert landing's RevertLanded for the worker's
+// own goroutine. It runs for the new landing whatever its finish returned, and a
+// repair pass skips it, so the call happens exactly once. IsRevert reads the
+// bead, so the queue goroutine may ask it; RevertLanded writes red-main state
+// the pass also writes, so with a queue it goes through Later and runs at the
+// next pass. With no queue the steps already run on the worker's goroutine, and
+// it runs there directly (gt-dci9k8).
+func (w *Worker) finishRevert(work land.Work, res land.Result) {
+	if w.Reverts == nil || !w.Reverts.IsRevert(work.BeadID) {
+		return
+	}
+	// RevertLanded takes a context it does not use, and a stored call outlives
+	// the pass that queued it, so there is no pass context to hand it.
+	run := func() { w.Reverts.RevertLanded(context.Background(), work, res) }
+	if w.Books != nil {
+		w.Books.Later(run)
+		return
+	}
+	run()
+}
+
+// recoverRevertLanded makes the RevertLanded a restart dropped. A deferred
+// revert's call waits in the queue for the worker's next pass, and a process
+// that stops first leaves it only in the red-main owner's in-flight record on
+// disk; the owner answers with the landing it recorded, and the call runs here,
+// on the worker's own goroutine, once per run (gt-qxm7y3). A check that could
+// not read makes nothing and is asked again on the next pass, since nothing
+// else holds the call.
+func (w *Worker) recoverRevertLanded(ctx context.Context) {
+	if w.revertChecked || w.Reverts == nil {
+		return
+	}
+	work, res, owed, err := w.Reverts.RevertOwed()
+	if err != nil {
+		w.logf("checking for a revert whose completion a restart dropped: %v; checking again next pass", err)
+		return
+	}
+	w.revertChecked = true
+	if owed {
+		w.logf("%s: landed before a restart dropped its revert's completion; telling the owner now", work.BeadID)
+		w.Reverts.RevertLanded(ctx, work, res)
+	}
+}
+
+// finishDeferredQueued runs a deferred landing's finishing steps on BookQueue's
+// goroutine when a queue is set, so the pass lands the next bead meanwhile; with
+// no queue it runs them here, so a deferred result is never dropped (gt-c3vl2u).
+// finishRevert follows the finish attempt whatever it returned, and only for a
+// new landing: a repair pass made after a failed finish must not call
+// RevertLanded a second time (gt-dci9k8).
+func (w *Worker) finishDeferredQueued(work land.Work, res land.Result, wasRepair bool) {
+	steps := func() {
+		w.finishDeferred(work, res)
+		if !wasRepair {
+			w.finishRevert(work, res)
+		}
+	}
+	if w.Books == nil {
+		steps()
+		return
+	}
+	w.Books.Add(work.BeadID, steps)
+}
+
+// repairLater puts work in pendingRepair: through Books.Later (the worker's own
+// goroutine) when a queue is set, directly when it is nil (gt-k78e8j).
+func (w *Worker) repairLater(work land.Work) {
+	repair := func() {
+		if w.pendingRepair == nil {
+			w.pendingRepair = map[string]land.Work{}
+		}
+		w.pendingRepair[work.BeadID] = work
+	}
+	if w.Books != nil {
+		w.Books.Later(repair)
+		return
+	}
+	repair()
 }
 
 // supersededRejection ends a landing whose bead was closed or changed hands
@@ -1795,7 +2126,9 @@ func (w *Worker) writeSPActual(beadID, landedCommit string) {
 
 // afterLanding starts the post-landing verdict for a new landing (a command run
 // or a pending status wait) and tells the red-main owner, which finishes the
-// landing if it was a revert.
+// landing if it was a revert. A deferred landing's revert is told by its
+// bookkeeping job instead: RevertLanded writes state the pass also writes, so
+// it must not run on the queue goroutine (gt-dci9k8).
 func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Result) {
 	if res.LandedCommit != "" && work.Target == w.WatchTarget {
 		w.lastSeen = res.LandedCommit
@@ -1803,7 +2136,7 @@ func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Resu
 	if w.PostLand != nil && res.LandedCommit != "" {
 		w.PostLand.Trigger(ctx, PostLand{BeadID: work.BeadID, Commit: res.LandedCommit, Target: work.Target})
 	}
-	if w.Reverts != nil {
+	if w.Reverts != nil && res.Deferred == nil {
 		w.Reverts.RevertLanded(ctx, work, res)
 	}
 }
@@ -1979,6 +2312,14 @@ func sortByLandingOrder(issues []*beads.Issue) {
 // which moves with every write to the bead.
 func handledKey(issue *beads.Issue) string {
 	return issue.ID + "@" + land.ReadyBlockTime(issue.Notes).Format(time.RFC3339Nano)
+}
+
+// sweptKey names one stored review the pass has already offered to the sweep:
+// the bead and the head the hint named. A bead whose stored-only attempt found
+// nothing stays unhandled, so a record the pool replaced for a new head while
+// its ordinary turn waits is swept once for that head too (gt-k5s380).
+func sweptKey(bead, head string) string {
+	return bead + "@" + head
 }
 
 // nextReady returns the first bead of a listed ready board whose submission

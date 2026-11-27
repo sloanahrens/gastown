@@ -161,6 +161,20 @@ type Daemon struct {
 	// attention is the background attention tick (attention_background.go,
 	// gt-zszj0).
 	attention attentionRun
+	// bookQueues are the rigs' deferred-bookkeeping queues (landing_bookqueue.go),
+	// keyed by queue so rebuilding a rig's worker keeps an older busy one: shutdown
+	// waits for each, so the exit does not kill a job mid-record (gt-yzgory).
+	// bookQueueBound and bookQueueWaitFn are test seams (the bound, and a hook that
+	// must not block, run once the wait has begun).
+	bookQueuesMu    sync.Mutex
+	bookQueues      map[*landworker.BookQueue]string
+	bookQueueBound  time.Duration
+	bookQueueWaitFn func()
+	// reviewPoolEnv is the environment the review-pool wiring reads om's config
+	// location through (landing_review_pool.go). The zero value is production:
+	// os.LookupEnv, os.UserHomeDir and os.Stat. A unit test sets it so om's
+	// config file is the test's own (gt-lmflya).
+	reviewPoolEnv reviewPoolEnv
 	// bootGate is the boot standby (boot_gate.go, gt-niooz0): the poller's last
 	// answer, which standbyReason reads. New builds it from the real probe set;
 	// a daemon built without one (a test that does not set it) reads healthy.
@@ -1189,9 +1203,11 @@ type Daemon struct {
 	reapAlertState reapAlertState
 	reapAlertSink  reapAlertSink
 
-	// landingPasses counts landing-worker passes in flight, one per rig at
-	// most: a restart mid-pass kills the merged-tree gate of the bead being
-	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
+	// landingPasses counts landing passes in flight: a landing worker's pass
+	// (one per rig at most, since a restart mid-pass kills the merged-tree
+	// gate of the bead being landed, gt-u641b) and a queued deferred-
+	// bookkeeping job (gt-k7glkk), so isIdleForUpgrade waits for both to
+	// reach zero. A queued job's duration is unbounded until gt-2hqjbi.
 	landingPasses atomic.Int32
 
 	// landingPassFn, when non-nil, is called on the landing loop's goroutine
@@ -2725,6 +2741,14 @@ func (d *Daemon) Run() (err error) {
 			patrolScanCheckTick(pc), interval)
 	}
 
+	// Start the escalation-close ticker (gt-bba7kq): a seat whose escalation
+	// was answered but has no session otherwise waits for the next patrol_scan
+	// pass, up to ten minutes away; this ticker cuts that to a minute. Its
+	// select case below consumes the channel and the next bead runs the close
+	// pass there (gt-7o6wyb).
+	escalationCloseChan, stopEscalationClose := d.openEscalationCloseTicker()
+	defer stopEscalationClose()
+
 	// Start the resource sampler ticker if enabled (default on, gt-qqwey). Its
 	// own ticker, not the heartbeat: the heartbeat is minutes apart and a row's
 	// cpu_pct is the delta over the interval since the previous row.
@@ -3055,6 +3079,12 @@ func (d *Daemon) Run() (err error) {
 					func() { d.triggerPatrolScan() },
 					func() { d.triggerPatrolScanIfDue() })
 			}
+
+		case <-escalationCloseChan:
+			// Escalation close tick — the next bead (gt-7o6wyb) calls the close
+			// pass here. The case consumes the channel from this ticker's first
+			// tick so the declaration is used and the loop keeps its behavior
+			// (gt-bba7kq).
 
 		case <-landingInfraChan:
 			// Landing-infrastructure probe — asks the Forgejo instance and the
@@ -4037,6 +4067,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 
 	// The background attention tick stops on that cancel; wait for it, bounded.
 	d.waitForAttention()
+
+	// A queued bookkeeping job runs on the queue's own goroutine and does not
+	// watch d.ctx, so the cancel does not stop it: wait for the queues too,
+	// bounded, and name the rigs still busy. This is before the Dolt stop,
+	// which a job that writes a bead record needs (gt-yzgory).
+	d.waitForBookQueues()
 
 	// Join the sandbox seat ends the cancel just stopped (their remaining
 	// reads go through Dolt, so this comes before the stop) and refuse any

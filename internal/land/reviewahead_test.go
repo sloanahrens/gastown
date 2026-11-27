@@ -935,6 +935,99 @@ func TestVerdictReuseAheadWritesNoBeadState(t *testing.T) {
 	}
 }
 
+// TestVerdictReuseAheadWritesNoLedger: the landing's reviews log and rounds
+// ledger record the landing that consumes a verdict, so a review made ahead of
+// it leaves both exactly as it found them — on the stored, failed and conflict
+// paths alike. Each path runs against a reviews log holding one line and a
+// rounds ledger holding one round, so a line appended or a round written is a
+// difference the test reads back.
+func TestVerdictReuseAheadWritesNoLedger(t *testing.T) {
+	t.Parallel()
+	seededReview := `{"bead":"gt-seeded","rig":"gastown","verdict":"approve"}` + "\n"
+	rows := []struct {
+		name      string
+		setup     func(t *testing.T, f *landFixture, l *Lander)
+		want      AheadOutcome
+		wantStage string // the InfraError stage a failing path returns; "" means no error
+	}{
+		{name: "stored approve", want: AheadStored},
+		{name: "failed review", setup: func(t *testing.T, _ *landFixture, l *Lander) {
+			l.Reviewer = &aheadPoolReviewer{t: t, err: errors.New("om: no verdict")}
+		}, wantStage: "review"},
+		{name: "conflict", setup: func(_ *testing.T, f *landFixture, _ *Lander) {
+			aheadConflictMain(f)
+		}, want: AheadConflict},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, l, _ := aheadKeyFixture(t)
+			l.Ahead = TownAheadStore(f.town, "gastown")
+			reviewsPath := filepath.Join(t.TempDir(), "reviews.jsonl")
+			if err := os.WriteFile(reviewsPath, []byte(seededReview), 0o600); err != nil {
+				t.Fatalf("seeding the reviews log: %v", err)
+			}
+			l.Reviews = &ReviewsFile{Path: reviewsPath}
+			rounds := t.TempDir()
+			ledger := &RoundsLedger{OutDir: rounds, Bead: f.work.BeadID}
+			if err := ledger.Append(1, f.work.Head, []Finding{{ID: "f1", Severity: "major", Path: "b.txt", Title: "the round already reviewed"}}); err != nil {
+				t.Fatalf("seeding the rounds ledger: %v", err)
+			}
+			l.RoundsDir = rounds
+			if tc.setup != nil {
+				tc.setup(t, f, l)
+			}
+			before := aheadLedgerSnapshot(t, reviewsPath, rounds)
+			got, err := l.ReviewAhead(context.Background(), f.work)
+			if tc.wantStage == "" {
+				if err != nil {
+					t.Fatalf("ReviewAhead: unexpected error: %v", err)
+				}
+				if got != tc.want {
+					t.Errorf("ReviewAhead = %q, want %q", got, tc.want)
+				}
+			} else {
+				var infra *InfraError
+				if !errors.As(err, &infra) || infra.Stage != tc.wantStage {
+					t.Fatalf("ReviewAhead error = %v, want a %q *InfraError", err, tc.wantStage)
+				}
+				if got != "" {
+					t.Errorf("ReviewAhead outcome = %q on error, want empty", got)
+				}
+			}
+			after := aheadLedgerSnapshot(t, reviewsPath, rounds)
+			if !reflect.DeepEqual(after, before) {
+				t.Errorf("ReviewAhead wrote to the review ledgers on the %s path:\nbefore: %v\nafter:  %v", tc.name, before, after)
+			}
+		})
+	}
+}
+
+// aheadLedgerSnapshot reads the reviews log and every file in the rounds
+// directory, keyed by name, so a line appended or a round written is a
+// difference the caller can name.
+func aheadLedgerSnapshot(t *testing.T, reviewsPath, roundsDir string) map[string]string {
+	t.Helper()
+	snap := make(map[string]string)
+	data, err := os.ReadFile(reviewsPath)
+	if err != nil {
+		t.Fatalf("reading the reviews log: %v", err)
+	}
+	snap["reviews.jsonl"] = string(data)
+	entries, err := os.ReadDir(roundsDir)
+	if err != nil {
+		t.Fatalf("reading the rounds directory: %v", err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(roundsDir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading the rounds ledger %s: %v", e.Name(), err)
+		}
+		snap[e.Name()] = string(data)
+	}
+	return snap
+}
+
 // TestVerdictReuseAheadChangedPathsReadFails: the .om.json check is a git read;
 // a read that fails is returned as an error, not skipped as the config edit is,
 // so a caller switching on the outcome cannot read the failed read as a

@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clusterCaptureNoFiles fails when root holds any regular file: a run that
@@ -62,8 +64,26 @@ func TestClusterCaptureRunRefuse(t *testing.T) {
 	}
 }
 
-// TestClusterCaptureRunNotWritten drives a run whose ref and path pass the
-// checks: it says the capture is not written yet and creates no file.
+// TestClusterCaptureRunReadFails drives a read that fails: the run returns the
+// read's error and creates no file.
+func TestClusterCaptureRunReadFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	failed := errors.New("kubectl is not installed")
+	err := runClusterCapture(context.Background(), clusterCaptureDeps{
+		kubectl: captureLiveAnswer("", 0, failed),
+		now:     time.Now,
+		workDir: root,
+	}, "deployment/daemon", "gt-sbx", "capture.json")
+	if !errors.Is(err, failed) {
+		t.Fatalf("runClusterCapture() = %v, want the read's error %v", err, failed)
+	}
+	clusterCaptureNoFiles(t, root)
+}
+
+// TestClusterCaptureRunNotWritten drives a run whose checks and read pass: it
+// reads the named object, says the capture is not written yet and creates no
+// file.
 func TestClusterCaptureRunNotWritten(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -71,7 +91,15 @@ func TestClusterCaptureRunNotWritten(t *testing.T) {
 	if err := os.Mkdir(workDir, 0o700); err != nil {
 		t.Fatalf("creating the work dir: %v", err)
 	}
-	err := runClusterCapture(context.Background(), clusterCaptureDeps{workDir: workDir}, "deployment/daemon", "gt-sbx", "capture.json")
+	var args []string
+	err := runClusterCapture(context.Background(), clusterCaptureDeps{
+		kubectl: func(_ context.Context, _ string, _ []string, _ string, got ...string) (string, int, error) {
+			args = got
+			return `{"kind":"Deployment","metadata":{"name":"daemon","uid":"d-1"}}`, 0, nil
+		},
+		now:     time.Now,
+		workDir: workDir,
+	}, "deployment/daemon", "gt-sbx", "capture.json")
 	if err == nil {
 		t.Fatalf("runClusterCapture() = nil, want the not-written refusal")
 	}
@@ -79,6 +107,9 @@ func TestClusterCaptureRunNotWritten(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
+	}
+	if got, want := strings.Join(args, " "), "get deployment/daemon -n gt-sbx --ignore-not-found -o json"; got != want {
+		t.Errorf("read with %q, want %q", got, want)
 	}
 	clusterCaptureNoFiles(t, root)
 }

@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // reviewPoolTestLander and reviewPoolTestWorker are fresh collaborators for
@@ -41,8 +43,8 @@ func reviewPoolTestWorker() *landworker.Worker {
 }
 
 // reviewPoolTestEnv is an environment the off paths must not read: a read
-// fails the test, so a wiring that resolved om's config with the pool off
-// would be caught here (gt-aovgi3).
+// fails the test, and a sweep fails it too, so the off path removes nothing
+// (gt-aovgi3, gt-vwrg30).
 func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
 	t.Helper()
 	return reviewPoolEnv{
@@ -54,12 +56,18 @@ func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
 			t.Fatal("the pool-off path read the home directory")
 			return "", nil
 		},
+		sweep: func(string, land.Repo) error {
+			t.Fatal("the pool-off path swept the work root")
+			return nil
+		},
 	}
 }
 
 // reviewPoolTestOMConfig puts om's config file under a fresh XDG directory and
 // returns the environment naming it plus the file's path, which the on path
-// requires to exist (gt-lfykjq).
+// requires to exist (gt-lfykjq). The sweep is a no-op: removing review
+// directories is SweepReviewDirs' own tested job, and a unit test runs no git,
+// so a test that must watch the sweep injects its own (gt-vwrg30).
 func reviewPoolTestOMConfig(t *testing.T, home func() (string, error)) (reviewPoolEnv, string) {
 	t.Helper()
 	configHome := t.TempDir()
@@ -77,7 +85,8 @@ func reviewPoolTestOMConfig(t *testing.T, home func() (string, error)) (reviewPo
 			}
 			return "", false
 		},
-		home: home,
+		home:  home,
+		sweep: func(string, land.Repo) error { return nil },
 	}, omConfig
 }
 
@@ -189,6 +198,49 @@ func TestReviewPoolWiringOff(t *testing.T) {
 			}
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
 				t.Fatalf("pool off for the rig changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringOffLeavesTheWorker pins that the off path gives the
+// Worker no review pool at all: Pool and Stored stay nil, so a landing for a
+// rig without the pool runs no queue-time review and sweeps no stored verdict.
+// Every way the pool reads as off is a row, and none of them reads om's config,
+// which reviewPoolTestEnv fails the test on (gt-1xc93t).
+func TestReviewPoolWiringOffLeavesTheWorker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  *config.LandingWorkerConfig
+	}{
+		{name: "no review_pool key", cfg: &config.LandingWorkerConfig{}},
+		{name: "rig not listed", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"other"}},
+		}},
+		{name: "unparseable reuse_expiry", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}, ReuseExpiryStr: "soon"},
+		}},
+		{name: "max_concurrent out of range", cfg: &config.LandingWorkerConfig{
+			ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}, MaxConcurrent: 9},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			worker := reviewPoolTestWorker()
+
+			if err := d.wireReviewPool("gastown", tc.cfg, reviewPoolTestLander(), worker, "/sentinel/reviews", reviewPoolTestEnv(t)); err != nil {
+				t.Fatalf("pool off for the rig returned %v; want nil, the pool off", err)
+			}
+
+			if worker.Pool != nil {
+				t.Fatalf("pool off for the rig gave the Worker Pool %+v; want nil so no review runs before the landing", worker.Pool)
+			}
+			if worker.Stored != nil {
+				t.Fatalf("pool off for the rig gave the Worker Stored %+v; want nil so no stored verdict is swept", worker.Stored)
 			}
 		})
 	}
@@ -317,9 +369,86 @@ func TestReviewPoolWiringOnSetsTheLander(t *testing.T) {
 					t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", lander, want)
 				}
 			}
-			// The Worker is a later bead's wiring target; this one leaves it alone.
+			// A listed rig's Worker gets the pool and the store behind it
+			// (gt-sywmws); an unlisted rig leaves the Worker as it was built.
+			if !tc.wantOn {
+				if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+					t.Fatalf("rig not listed changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+				}
+			} else if worker.Pool == nil || worker.Stored == nil {
+				t.Fatalf("listed rig got Pool %v, Stored %v; want both set", worker.Pool, worker.Stored)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringOnSetsTheWorker pins the pool a listed rig's Worker
+// gets: it reviews through the Lander, reads its hints from the same store the
+// landing reads, runs the config's number of reviews at once, and logs where
+// the landing logs (gt-sywmws).
+func TestReviewPoolWiringOnSetsTheWorker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		pool    *config.ReviewPoolConfig
+		wantMax int
+	}{
+		{
+			name:    "default max",
+			pool:    &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			wantMax: 3,
+		},
+		{
+			name:    "configured max",
+			pool:    &config.ReviewPoolConfig{Rigs: []string{"gastown"}, MaxConcurrent: 5},
+			wantMax: 5,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+			var landingLog bytes.Buffer
+			worker.Logf = log.New(&landingLog, "", 0).Printf
+			env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{ReviewPool: tc.pool}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
+
+			if want := land.TownAheadStore("/sentinel/town", "gastown"); !reflect.DeepEqual(worker.Stored, want) {
+				t.Fatalf("Stored = %+v; want the Lander's ahead store %+v", worker.Stored, want)
+			}
+			if worker.Pool == nil {
+				t.Fatal("the pool is on for the rig but the Worker got no pool")
+			}
+			if worker.Pool.Reviewer != lander {
+				t.Fatalf("Pool.Reviewer = %+v; want the rig's Lander %+v", worker.Pool.Reviewer, lander)
+			}
+			if !reflect.DeepEqual(worker.Pool.Hints, worker.Stored) {
+				t.Fatalf("Pool.Hints = %+v; want the store the Worker records into %+v", worker.Pool.Hints, worker.Stored)
+			}
+			if worker.Pool.Max != tc.wantMax {
+				t.Fatalf("Pool.Max = %d; want the config's %d", worker.Pool.Max, tc.wantMax)
+			}
+			if worker.Pool.Logf == nil {
+				t.Fatal("Pool.Logf is nil; want the landing log so a review's lines are seen")
+			}
+			worker.Pool.Logf("probe: %d", 1)
+			if got, want := landingLog.String(), "probe: 1\n"; got != want {
+				t.Fatalf("Pool.Logf wrote %q to the landing log; want %q", got, want)
+			}
+			// Only the two pool fields may move: with them and the injected
+			// log cleared, the Worker must be the one the daemon built.
+			worker.Stored, worker.Pool, worker.Logf = nil, nil, nil
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
-				t.Fatalf("wiring changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+				t.Fatalf("wiring changed more than the pool fields:\ngot  %+v\nwant %+v", worker, want)
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
 			}
 		})
 	}
@@ -369,7 +498,8 @@ func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
 					}
 					return "", false
 				},
-				home: tc.home,
+				home:  tc.home,
+				sweep: func(string, land.Repo) error { return nil },
 			}
 
 			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
@@ -393,9 +523,10 @@ func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
 
 // TestReviewPoolWiringNoOMConfigStaysOff pins that a pool the config lists
 // stays off when om's own config file cannot be used: a missing file and a
-// location this process cannot name each log one line, undo the wiring (Ahead
-// back to nil, so the rig lands with om inline) and return the error
-// (gt-lfykjq).
+// location this process cannot name each undo the wiring (Ahead back to nil,
+// so the rig lands with om inline), return the error, and leave exactly one
+// log line, from the production wrapper that logs the returned error
+// (gt-lfykjq, gt-lmflya).
 func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 	t.Parallel()
 	noXDG := func(string) (string, bool) { return "", false }
@@ -445,9 +576,10 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 			lander := reviewPoolTestLander()
 			worker := reviewPoolTestWorker()
 
-			err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+			cfg := &config.LandingWorkerConfig{
 				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
-			}, lander, worker, "/sentinel/reviews", tc.env)
+			}
+			err := d.wireReviewPool("gastown", cfg, lander, worker, "/sentinel/reviews", tc.env)
 
 			if err == nil {
 				t.Fatal("wireReviewPool returned nil without a usable om config file; want the error")
@@ -464,6 +596,11 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
 				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
 			}
+			// The production entry point logs the error wireReviewPool returns,
+			// once and only there (gt-lmflya): the direct call above logged
+			// nothing, so the one line below is the wrapper's.
+			d.reviewPoolEnv = tc.env
+			d.wireRigReviewPool("gastown", cfg, reviewPoolTestLander(), reviewPoolTestWorker(), "/sentinel/reviews")
 			got := logs.String()
 			if n := strings.Count(got, "\n"); n != 1 {
 				t.Fatalf("no om config file logged %d lines, want one naming the rig and the cause; log:\n%s", n, got)
@@ -472,5 +609,432 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 				t.Fatalf("log line %q does not name the rig and %q", got, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestReviewPoolWiringHoldStopsReviews pins that a listed rig's pool starts no
+// ahead review while the daemon holds new landing passes off: the pool's Begin
+// is the daemon's own landing-pass gate, so each hold a job takes answers false,
+// and the released daemon answers true (gt-zajcg2).
+func TestReviewPoolWiringHoldStopsReviews(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		hold string
+	}{
+		{name: "upgrade restart hold", hold: landingHoldUpgradeRestart},
+		{name: "shutdown drain hold", hold: landingHoldShutdownDrain},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+			env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+
+			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", env); err != nil {
+				t.Fatalf("wireReviewPool: %v", err)
+			}
+			if worker.Pool == nil {
+				t.Fatal("the pool is on for the rig but the Worker got no pool")
+			}
+			if worker.Pool.Begin == nil {
+				t.Fatal("Pool.Begin is nil; want the daemon's landing-pass gate so a hold stops new ahead reviews")
+			}
+			if worker.Pool.End == nil {
+				t.Fatal("Pool.End is nil; want the daemon's landing-pass end so the slot a true Begin takes is given back")
+			}
+
+			d.landingHolds.hold(tc.hold)
+			if worker.Pool.Begin() {
+				t.Fatalf("Begin returned true with the %s taken; want false so no ahead review starts", tc.hold)
+			}
+
+			d.landingHolds.release(tc.hold)
+			if !worker.Pool.Begin() {
+				t.Fatalf("Begin returned false after the %s was released; want true", tc.hold)
+			}
+			if got := d.landingPasses.Load(); got != 1 {
+				t.Fatalf("in-flight count = %d after a true Begin, want 1: the review holds a landing pass", got)
+			}
+			worker.Pool.End()
+			if got := d.landingPasses.Load(); got != 0 {
+				t.Fatalf("in-flight count = %d after Pool.End, want 0: the review gave its landing pass back", got)
+			}
+			if got := logs.String(); got != "" {
+				t.Fatalf("wiring logged %q; want nothing", got)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringNoOMConfigLeavesTheWorker pins that a listed rig whose
+// om config file is missing or cannot be named leaves the Worker exactly as it
+// was built: Pool and Stored stay nil, so a landing whose queue-time review
+// could never be reused spends no om run on one (gt-jbirx5).
+func TestReviewPoolWiringNoOMConfigLeavesTheWorker(t *testing.T) {
+	t.Parallel()
+	noXDG := func(string) (string, bool) { return "", false }
+	cases := []struct {
+		name string
+		env  func(t *testing.T) reviewPoolEnv
+	}{
+		{
+			// The production os.Stat runs here: a fresh XDG directory holds no
+			// om/config.json, as on a host that has never run om.
+			name: "config file missing",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: func(key string) (string, bool) {
+						if key == "XDG_CONFIG_HOME" {
+							return t.TempDir(), true
+						}
+						return "", false
+					},
+					home: func() (string, error) { return t.TempDir(), nil },
+				}
+			},
+		},
+		{
+			name: "no XDG and no home",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: noXDG,
+					home:   func() (string, error) { return "", nil },
+				}
+			},
+		},
+		{
+			name: "home directory read fails",
+			env: func(t *testing.T) reviewPoolEnv {
+				return reviewPoolEnv{
+					lookup: noXDG,
+					home:   func() (string, error) { return "", errors.New("no home for this process") },
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			lander := reviewPoolTestLander()
+			worker := reviewPoolTestWorker()
+
+			err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews", tc.env(t))
+
+			if err == nil {
+				t.Fatal("wireReviewPool returned nil with no usable om config file; want the error so the pool stays off")
+			}
+			if !strings.Contains(err.Error(), "gastown") {
+				t.Fatalf("error %q does not name the rig", err)
+			}
+			// The same error undoes the Lander's wiring, so the rig lands
+			// with om inline.
+			if want := reviewPoolTestLander(); !reflect.DeepEqual(lander, want) {
+				t.Fatalf("no om config file changed the Lander:\ngot  %+v\nwant %+v", lander, want)
+			}
+			if worker.Pool != nil {
+				t.Fatalf("no om config file gave the Worker Pool %+v; want nil so no review runs before the landing", worker.Pool)
+			}
+			if worker.Stored != nil {
+				t.Fatalf("no om config file gave the Worker Stored %+v; want nil so no stored verdict is swept", worker.Stored)
+			}
+			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
+				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringRig pins that wireRigReviewPool reads om's config
+// location through the Daemon's reviewPoolEnv field, so a test's own om config
+// wires the pool; an om config the environment cannot use is logged once and
+// leaves the pool off (gt-lmflya).
+func TestReviewPoolWiringRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		env      func(t *testing.T) (reviewPoolEnv, string)
+		wantPool bool
+	}{
+		{
+			name: "field's om config",
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				return reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+			},
+			wantPool: true,
+		},
+		{
+			name: "missing om config",
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				env, omConfig := reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+				env.stat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+				return env, omConfig
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			env, omConfig := tc.env(t)
+			d := &Daemon{logger: log.New(&logs, "", 0), reviewPoolEnv: env}
+			lander, worker := reviewPoolTestLander(), reviewPoolTestWorker()
+			d.wireRigReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews")
+
+			if got := worker.Pool != nil; got != tc.wantPool {
+				t.Fatalf("Worker.Pool set = %v; want %v", got, tc.wantPool)
+			}
+			if tc.wantPool && lander.OMConfigPath != omConfig {
+				t.Fatalf("OMConfigPath = %q; want the field's om config file %q", lander.OMConfigPath, omConfig)
+			}
+			wantLines := 0
+			if !tc.wantPool {
+				wantLines = 1
+				if lander.Ahead != nil {
+					t.Fatalf("Lander.Ahead = %+v with no om config file; want nil, the pool off", lander.Ahead)
+				}
+			}
+			if n := strings.Count(logs.String(), "\n"); n != wantLines {
+				t.Fatalf("wiring logged %d lines, want %d; log:\n%s", n, wantLines, logs.String())
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringCalledAtConstruction pins the one call site: a rig worker
+// built from a config naming the rig carries the pool, and one built from a
+// config without the key is left exactly as built. The switch is read at
+// construction, so removing the call turns the first row red while the second
+// stays green (gt-m0s4td).
+func TestReviewPoolWiringCalledAtConstruction(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	cases := []struct {
+		name string
+		// reviewRigs is the review_pool.rigs list; nil means no review_pool key.
+		reviewRigs []string
+		// env builds the wiring's environment; omConfig is the file the on
+		// path must use, empty when the pool is off.
+		env      func(t *testing.T) (reviewPoolEnv, string)
+		wantPool bool
+	}{
+		{
+			name:       "rig named",
+			reviewRigs: []string{rigName},
+			// The on path resolves om's config through the Daemon's field, so a
+			// test's own file stands in for the operator's.
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				return reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+			},
+			wantPool: true,
+		},
+		{
+			name: "rig not named",
+			// Off must not read the environment at all: any read fails the test.
+			env: func(t *testing.T) (reviewPoolEnv, string) { return reviewPoolTestEnv(t), "" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			forgejoRigConfig(t, townRoot, rigName)
+			writeOverseerIdentity(t, townRoot, overseerTestName)
+			tokenDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+				t.Fatalf("write token file: %v", err)
+			}
+			lw := &LandingWorkerConfig{
+				Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir},
+			}
+			if tc.reviewRigs != nil {
+				lw.ReviewPool = &config.ReviewPoolConfig{Rigs: tc.reviewRigs}
+			}
+			env, omConfig := tc.env(t)
+			d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+				patrolConfig:  &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: lw}},
+				reviewPoolEnv: env}
+			// The worker resolves the rig's landing remote through the daemon's
+			// git seam, so construction reads a fake world rather than git.
+			f := useGitfake(t, d)
+			forgejoLandingRemote(t, f, townRoot, rigName)
+
+			w, err := d.newRigLandingWorker(rigName)
+			if err != nil {
+				t.Fatalf("newRigLandingWorker: %v", err)
+			}
+			if got := w.Pool != nil; got != tc.wantPool {
+				t.Fatalf("Worker.Pool set = %v; want %v", got, tc.wantPool)
+			}
+			lander, ok := w.Lander.(*land.Lander)
+			if !ok {
+				t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+			}
+			if !tc.wantPool {
+				if lander.Ahead != nil || lander.OMConfigPath != "" {
+					t.Fatalf("pool off left Lander.Ahead = %+v and OMConfigPath = %q; want both unset",
+						lander.Ahead, lander.OMConfigPath)
+				}
+				return
+			}
+			// A pool on but wired without its store or om's config could never
+			// reuse a review, so the same call must set both (gt-yqoha0, gt-lfykjq).
+			if lander.Ahead == nil {
+				t.Fatal("pool on but Lander.Ahead is nil; the landing could not find an ahead review")
+			}
+			if lander.OMConfigPath != omConfig {
+				t.Fatalf("OMConfigPath = %q; want the environment's om config file %q", lander.OMConfigPath, omConfig)
+			}
+			if w.Pool.Logf == nil {
+				t.Fatal("Pool.Logf is nil; the wiring must copy the Worker's Logf into the pool")
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringSweepsLeftovers pins the boot sweep: a wired pool sweeps
+// the work root once, through the injected sweep, while the Worker still has no
+// pool; a pool that is off, or whose om config cannot be used, sweeps nothing.
+// Removing the call turns the on row red (gt-vwrg30).
+func TestReviewPoolWiringSweepsLeftovers(t *testing.T) {
+	t.Parallel()
+	const workRoot = "/sentinel/reviews"
+	onCfg := func() *config.LandingWorkerConfig {
+		return &config.LandingWorkerConfig{ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}}}
+	}
+	onEnv := func(t *testing.T) reviewPoolEnv {
+		env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+		return env
+	}
+	cases := []struct {
+		name      string
+		cfg       *config.LandingWorkerConfig
+		env       func(t *testing.T) reviewPoolEnv
+		wantSweep bool
+		wantErr   bool
+	}{
+		{"pool on", onCfg(), onEnv, true, false},
+		{"no review_pool key", &config.LandingWorkerConfig{}, reviewPoolTestEnv, false, false},
+		{"rig not listed", &config.LandingWorkerConfig{ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"other"}}}, reviewPoolTestEnv, false, false},
+		{"om config missing", onCfg(), func(t *testing.T) reviewPoolEnv {
+			env := onEnv(t)
+			env.stat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+			return env
+		}, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			d := &Daemon{logger: log.New(&logs, "", 0)}
+			worker := reviewPoolTestWorker()
+			var roots []string
+			var poolAtCall []*landworker.ReviewPool
+			env := tc.env(t)
+			env.sweep = func(root string, g land.Repo) error {
+				roots = append(roots, root)
+				poolAtCall = append(poolAtCall, worker.Pool)
+				return nil
+			}
+
+			err := d.wireReviewPool("gastown", tc.cfg, reviewPoolTestLander(), worker, workRoot, env)
+
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("wireReviewPool error = %v; want error = %v", err, tc.wantErr)
+			}
+			if !tc.wantSweep {
+				if len(roots) != 0 {
+					t.Fatalf("the sweep ran %d times with %q; want none with the pool off", len(roots), roots)
+				}
+				return
+			}
+			if len(roots) != 1 || roots[0] != workRoot {
+				t.Fatalf("the sweep ran with work roots %q; want once with %q", roots, workRoot)
+			}
+			if poolAtCall[0] != nil {
+				t.Fatalf("the sweep ran with Worker.Pool already %+v; want nil so no review starts beside a leftover", poolAtCall[0])
+			}
+			if worker.Pool == nil {
+				t.Fatal("the pool is on but the Worker got no pool")
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringSweepErrorKeepsThePool pins that a failed sweep is logged
+// in one line naming the rig and the pool is wired anyway: a leftover
+// directory is clutter, not a reason to lose the pool. Returning on the sweep
+// error leaves Worker.Pool nil and turns this red (gt-vwrg30).
+func TestReviewPoolWiringSweepErrorKeepsThePool(t *testing.T) {
+	t.Parallel()
+	sweepErr := errors.New("remove review directory /sentinel/reviews/review-1: permission denied")
+	var logs bytes.Buffer
+	d := &Daemon{logger: log.New(&logs, "", 0)}
+	lander := reviewPoolTestLander()
+	worker := reviewPoolTestWorker()
+	env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+	calls := 0
+	env.sweep = func(string, land.Repo) error {
+		calls++
+		return sweepErr
+	}
+
+	err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+		ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+	}, lander, worker, "/sentinel/reviews", env)
+
+	if err != nil {
+		t.Fatalf("wireReviewPool returned %v with a failed sweep; want nil, the pool still wired", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the sweep ran %d times; want once", calls)
+	}
+	if worker.Pool == nil || worker.Stored == nil || lander.Ahead == nil {
+		t.Fatalf("a failed sweep left Pool %v, Stored %v, Ahead %v; want the pool wired anyway",
+			worker.Pool, worker.Stored, lander.Ahead)
+	}
+	got := logs.String()
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Fatalf("a failed sweep logged %d lines, want one naming the rig and the error; log:\n%s", n, got)
+	}
+	if !strings.Contains(got, "gastown") || !strings.Contains(got, sweepErr.Error()) {
+		t.Fatalf("log line %q does not name the rig and the sweep error", got)
+	}
+}
+
+// TestReviewPoolWiringSweepOncePerWorkRoot pins the sweep ledger: a work root
+// is swept once per daemon, so a rebuilt rig worker does not sweep again and
+// remove the directory of a review the earlier worker still runs, while a
+// second work root is swept. Removing the ledger check sweeps the first root
+// twice and turns this red (gt-vwrg30).
+func TestReviewPoolWiringSweepOncePerWorkRoot(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: discardLogger}
+	env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+	env.sweepLedger = &sync.Map{}
+	var swept []string
+	env.sweep = func(root string, _ land.Repo) error {
+		swept = append(swept, root)
+		return nil
+	}
+	cfg := &config.LandingWorkerConfig{ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}}}
+	for _, root := range []string{"/sentinel/reviews", "/sentinel/reviews", "/sentinel/other-reviews"} {
+		if err := d.wireReviewPool("gastown", cfg, reviewPoolTestLander(), reviewPoolTestWorker(), root, env); err != nil {
+			t.Fatalf("wireReviewPool(%q): %v", root, err)
+		}
+	}
+	if want := []string{"/sentinel/reviews", "/sentinel/other-reviews"}; !reflect.DeepEqual(swept, want) {
+		t.Fatalf("the sweep ran with %q; want %q", swept, want)
 	}
 }

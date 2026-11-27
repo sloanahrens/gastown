@@ -237,6 +237,25 @@ deadline is that CI wait plus the rig's
 merge slack — 30 minutes at the defaults. A deadline hit is infrastructure, as
 CI silence is.
 
+**Review pool (`patrols.landing_worker.review_pool`).** The review pool reviews a
+queued submission ahead of its landing, so the serial landing reuses that verdict
+when nothing om depends on has changed (gt-m0s4td, gt-vwrg30).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `patrols.landing_worker.review_pool.rigs` | none | The rigs the pool is on for. A rig not listed lands exactly as before, so the default leaves the pool off everywhere. |
+| `patrols.landing_worker.review_pool.max_concurrent` | `3` | How many reviews run at once, `1` to `8`. |
+| `patrols.landing_worker.review_pool.reuse_expiry` | `45m` | How long a stored verdict stays reusable, at most `24h`. |
+
+The keys are read when the daemon starts, so a change needs a daemon restart; a
+value it cannot use leaves the pool off and logs why rather than reading as on,
+and that check runs for every rig, so a bad value is never silent. A landing that
+reused a stored review appends `om reused (<cost>, <age> old)` to its stage line,
+where cost is what om took when it ran and age is how long ago its verdict was
+stored. Ahead reviews count as landing passes: a landing hold, a runner roll's
+landing wait and the shutdown drain start no new review, and wait for the reviews
+already running, which end within om's timeout.
+
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
 **Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed

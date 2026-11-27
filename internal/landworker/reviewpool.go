@@ -26,8 +26,8 @@ type AheadHints interface {
 //
 // Begin, when set, reports whether a review may start: false means a landing
 // hold or drain is on; End, when set, is called once by every review that
-// began, before that review leaves the pool. Hints is stored here and not yet
-// read: the hint check lands with the bead that uses it.
+// began, before that review leaves the pool. Hints, when set, reports whether
+// the bead already has a stored review at the head offered: see Offer.
 type ReviewPool struct {
 	Reviewer AheadReviewer
 	Hints    AheadHints
@@ -38,6 +38,10 @@ type ReviewPool struct {
 
 	mu      sync.Mutex
 	running map[string]*aheadRun
+	// tried holds, per bead, the head its last review ended at: that head is not
+	// started again on every pass, while a new head of the same bead is
+	// (gt-xa01yc). One entry per bead, for the life of the pool.
+	tried map[string]string
 }
 
 // aheadRun is one review under way: the head it reviews, the cancel that stops
@@ -57,8 +61,14 @@ type aheadRun struct {
 // whose bead already has a review running at its head is a no-op: no second
 // reviewer and no second goroutine; at another head that review is canceled and
 // nothing is started in its place until the pool is offered the list again.
-// Nothing is started when no Reviewer is set, so every
-// submission is a miss and the landing runs om inline.
+// A work at the head the bead's last review ended at starts nothing: the pool
+// tried that head, so starting it again would repeat a failed review on every
+// pass, while a new head of the same bead is reviewed (gt-xa01yc). A work whose
+// bead already has a stored review at its head starts nothing either: the
+// landing reuses that verdict, while a stored review at another head judged a
+// submission the seat has replaced, so that work is reviewed (gt-548kiy).
+// Nothing is started when no Reviewer is set, so every submission is a miss and
+// the landing runs om inline.
 //
 // A refused Begin means a landing hold or drain is on (gt-vb9qod): the call
 // starts nothing more and asks no further Begin, while a work at a head its
@@ -83,6 +93,19 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 // it comes before a hold, so a hold never leaves a stale review running. With
 // starts false the call only reaches that cancel and begins nothing else.
 //
+// A head the bead's last review tried is refused before that running check:
+// the offer of a tried head must start nothing and cancel nothing, so it can
+// never stop the review of the head that replaced it (gt-bnc6ah).
+//
+// A stored review at the offered head (Hints) skips the work: the landing
+// already holds a verdict for it. The hint is asked after the running check, so
+// a work at a head its seat replaced still has its stale review canceled, and
+// before Begin, so a skip owes no End and leaves no hold waiting on one. A Hint
+// error counts as tried at that head and is logged once (gt-548kiy): starting
+// nothing leaves the bead to the landing's inline review, whereas reading an
+// unreadable record as no record would start a review the store may already
+// hold.
+//
 // A review certain to start asks Begin, when set, with p.mu held: no other
 // Offer can take the slot in between, so a true Begin never outlives the review
 // that owes its End. Begin false means a landing hold or drain is on (gt-vb9qod):
@@ -92,6 +115,9 @@ func (p *ReviewPool) Offer(ctx context.Context, works []land.Work) {
 func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if head, ok := p.tried[w.BeadID]; ok && head == w.Head {
+		return true
+	}
 	if run, ok := p.running[w.BeadID]; ok {
 		if run.head == w.Head || run.canceled {
 			return true
@@ -103,6 +129,20 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 	}
 	if !starts || p.free() == 0 {
 		return true
+	}
+	if p.Hints != nil {
+		head, _, err := p.Hints.Hint(w.BeadID)
+		if err != nil {
+			if p.tried == nil {
+				p.tried = map[string]string{}
+			}
+			p.tried[w.BeadID] = w.Head
+			p.logf("ahead review of %s at %s: hint: %v; the landing reviews it inline", w.BeadID, w.Head, err)
+			return true
+		}
+		if head == w.Head {
+			return true
+		}
 	}
 	if p.Begin != nil && !p.Begin() {
 		return false
@@ -123,7 +163,9 @@ func (p *ReviewPool) start(ctx context.Context, w land.Work, starts bool) bool {
 // End runs once for every review that began, panic or not, before the entry
 // leaves the map and before done closes, so a Wait released by the empty map
 // already sees the review's End. The guard in start makes the entry under
-// w.BeadID this run's own.
+// w.BeadID this run's own. The run's own head is recorded as tried in the same
+// critical section that drops the entry, so a pass that finds the entry gone
+// also finds that head tried and starts no review of it again (gt-xa01yc).
 func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -131,6 +173,10 @@ func (p *ReviewPool) review(ctx context.Context, w land.Work, run *aheadRun) {
 		}
 		p.end()
 		p.mu.Lock()
+		if p.tried == nil {
+			p.tried = map[string]string{}
+		}
+		p.tried[w.BeadID] = w.Head
 		delete(p.running, w.BeadID)
 		p.mu.Unlock()
 		run.cancel()
@@ -157,6 +203,31 @@ func (p *ReviewPool) Wait() {
 		}
 		for _, done := range pending {
 			<-done
+		}
+	}
+}
+
+// Await returns when bead has no review running at head, or when ctx is done. A
+// review of the bead at another head returns at once (gt-rudbr6): its verdict
+// judges a submission the caller is not landing, so waiting could not make a
+// usable verdict appear. head is the submission the caller means to land. A
+// wait ended by ctx leaves the review running: only the review's own end
+// removes it. It looks again after a review ends, so a review of the bead at
+// head started while it waits is waited for too, as Wait does for every review.
+func (p *ReviewPool) Await(ctx context.Context, bead, head string) {
+	for {
+		p.mu.Lock()
+		run, ok := p.running[bead]
+		if !ok || run.head != head {
+			p.mu.Unlock()
+			return
+		}
+		done := run.done
+		p.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
