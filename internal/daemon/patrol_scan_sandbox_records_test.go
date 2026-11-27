@@ -771,6 +771,108 @@ func TestPatrolScanSandboxRecordsEndsAStoppedSeatOnProbeError(t *testing.T) {
 	}
 }
 
+// A session probe that errors asks the gateway's phase, and only a Stopped
+// sandbox reaches the Stopped end. A Stopped row whose landing does not prove
+// the seat landed now is kept there with its reason: an unlanded record, no
+// record, or a record naming a branch the seat no longer holds. Any other phase,
+// or a phase read that errors, is no proof the session is gone, so the walk keeps
+// the record and says tmux could not be asked. No row may call the deleter or
+// remove the record: the delete destroys the workspace volume with any unpushed
+// commits (gt-onvurl).
+func TestPatrolScanProbeErrorKeeps(t *testing.T) {
+	t.Parallel()
+
+	staleBranch := "polecat/agate/gt-other+x2"
+	phase := func(want string) func(string, string) (sandbox.Status, error) {
+		return func(string, string) (sandbox.Status, error) { return sandbox.Status{Phase: want}, nil }
+	}
+	tests := []struct {
+		name string
+		// patrol builds the seat the row probes: its kept record, its agent bead
+		// and the gateway's phase answer.
+		patrol func(t *testing.T) *keptSeatPatrol
+		// wantLog is the line the row's keep logs: why the sandbox stays.
+		wantLog string
+	}{
+		{
+			name:    "stopped with an unlanded kept record",
+			patrol:  func(t *testing.T) *keptSeatPatrol { return newStoppedSeatPatrol(t, false) },
+			wantLog: stoppedUnlandedReason,
+		},
+		{
+			name: "stopped with no kept record",
+			patrol: func(t *testing.T) *keptSeatPatrol {
+				p := newStoppedSeatPatrol(t, true)
+				if err := removeKeptSandboxSeat(p.town, endRig, endPolecat); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			},
+			wantLog: "its seat's end is not recorded",
+		},
+		{
+			name: "stopped with a kept record naming a branch the seat no longer holds",
+			patrol: func(t *testing.T) *keptSeatPatrol {
+				p := newStoppedSeatPatrol(t, true)
+				p.seatFields.Branch = staleBranch
+				p.setAgent()
+				return p
+			},
+			wantLog: fmt.Sprintf(sandboxKeptRecordStaleReason, endBead, endBranch, "<missing>", staleBranch),
+		},
+		{
+			name: "provisioning is not proof the session is gone",
+			patrol: func(t *testing.T) *keptSeatPatrol {
+				p := newStoppedSeatPatrol(t, true)
+				p.host.sandboxStatus = phase("Provisioning")
+				return p
+			},
+			wantLog: "cannot ask tmux whether the session is live",
+		},
+		{
+			name: "an error phase is not proof the session is gone",
+			patrol: func(t *testing.T) *keptSeatPatrol {
+				p := newStoppedSeatPatrol(t, true)
+				p.host.sandboxStatus = phase("Error")
+				return p
+			},
+			wantLog: "cannot ask tmux whether the session is live",
+		},
+		{
+			name: "a phase read that errors is not proof the session is gone",
+			patrol: func(t *testing.T) *keptSeatPatrol {
+				p := newStoppedSeatPatrol(t, true)
+				p.host.sandboxStatus = func(string, string) (sandbox.Status, error) {
+					return sandbox.Status{}, errors.New("gateway did not answer")
+				}
+				return p
+			},
+			wantLog: "cannot ask tmux whether the session is live",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := tt.patrol(t)
+			p.host.d.tmux.(*fakeTmux).hasErr = errors.New("tmux: server timed out")
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+
+			p.host.patrolScanSandboxRecords()
+
+			if len(p.deleted) != 0 {
+				t.Errorf("sandboxes deleted = %v, want none: the delete destroys the workspace volume", p.deleted)
+			}
+			if !p.recorded() {
+				t.Error("the registry record was removed for a sandbox that stays")
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log %q does not name %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
 // The failure branches keep what they cannot judge and never stop the pass: a
 // gateway error keeps its record, and a removal that fails is logged while the
 // next record is still judged and removed.
