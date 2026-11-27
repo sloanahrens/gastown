@@ -20,19 +20,28 @@ var errDriveBoom = errors.New("town call failed")
 // falls inside the run's [Start, End) window.
 var driveStart = time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 
+// driveTasks is how many tasks driveOptions files, and so how many beads Drive creates.
+const driveTasks = 16
+
 // driveFake is the town for one run. It files beads gt-01 onward, reads every bead
 // as closed, and fails the call named by failAt with errDriveBoom: "create", "list"
-// (the polecat listing) or "close".
+// (the polecat listing) or "close". A call under a canceled ctx fails with its error,
+// as the town's commands do. When cancelOnShow is set, the first bead read cancels the
+// run's ctx and finds that bead open.
 type driveFake struct {
-	failAt  string
-	mu      sync.Mutex
-	created int
-	closed  []string
+	failAt       string
+	cancelOnShow context.CancelFunc
+	mu           sync.Mutex
+	created      int
+	closed       []string
 }
 
-func (f *driveFake) run(_ context.Context, argv []string) ([]byte, error) {
+func (f *driveFake) run(ctx context.Context, argv []string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if argv[0] == "gt" {
 		switch argv[1] {
 		case "polecat":
@@ -58,6 +67,11 @@ func (f *driveFake) run(_ context.Context, argv []string) ([]byte, error) {
 		f.created++
 		return []byte(fmt.Sprintf("gt-%02d", f.created)), nil
 	case "show":
+		if f.cancelOnShow != nil {
+			f.cancelOnShow()
+			f.cancelOnShow = nil
+			return []byte(`{"data":[{"status":"open","notes":""}]}`), nil
+		}
 		return []byte(`{"data":[{"status":"closed","notes":""}]}`), nil
 	case "comments":
 		return []byte(`{"data":[]}`), nil
@@ -85,7 +99,7 @@ func driveClock(start time.Time) func() time.Time {
 }
 
 func driveOptions(t *testing.T, f *driveFake, ticks int, path string) Options {
-	tasks := make([]Task, 16)
+	tasks := make([]Task, driveTasks)
 	for i := range tasks {
 		tasks[i] = Task{Title: fmt.Sprintf("task %d", i), Body: "Body.\n\n## Acceptance\n- [ ] done\n"}
 	}
@@ -118,8 +132,8 @@ func TestRehearsalDriveFullRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read saved record: %v", err)
 	}
-	if len(saved.Slings) != 16 {
-		t.Fatalf("saved %d slings, want 16", len(saved.Slings))
+	if len(saved.Slings) != driveTasks {
+		t.Fatalf("saved %d slings, want %d", len(saved.Slings), driveTasks)
 	}
 	for i, s := range saved.Slings {
 		if want := fmt.Sprintf("gt-%02d", i+1); s.Bead != want || s.Outcome != SlingOK {
@@ -132,8 +146,8 @@ func TestRehearsalDriveFullRun(t *testing.T) {
 	if !saved.Start.Equal(driveStart) || !saved.End.After(saved.Start) {
 		t.Errorf("window = [%s, %s), want it to start at %s and end after", saved.Start, saved.End, driveStart)
 	}
-	if len(saved.Landings) != 16 || saved.Load.Samples != 1 {
-		t.Errorf("collected %d landings and %d load samples, want 16 and 1", len(saved.Landings), saved.Load.Samples)
+	if len(saved.Landings) != driveTasks || saved.Load.Samples != 1 {
+		t.Errorf("collected %d landings and %d load samples, want %d and 1", len(saved.Landings), saved.Load.Samples, driveTasks)
 	}
 	if want := []string{"gt-01", "gt-02", "gt-03", "gt-04", "gt-05", "gt-06", "gt-07", "gt-08", "gt-09", "gt-10", "gt-11", "gt-12", "gt-13", "gt-14", "gt-15", "gt-16"}; !slices.Equal(f.closed, want) {
 		t.Errorf("closed %q, want %q", f.closed, want)
@@ -143,32 +157,64 @@ func TestRehearsalDriveFullRun(t *testing.T) {
 func TestRehearsalDriveFailedStep(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		failAt   string
-		ticks    int
-		badDir   bool
-		wantWrap error
+		name         string
+		failAt       string
+		ticks        int
+		badDir       bool
+		cancelWindow bool
+		wantWrap     error
+		wantAlso     error
+		wantStop     string
+		wantClosed   int
 	}{
-		{name: "a failed filing returns its error", failAt: "create", ticks: 1, wantWrap: errDriveBoom},
-		{name: "a closed tick ends the run window with its error", ticks: 0, wantWrap: errTickClosed},
+		{name: "a failed filing returns its error and saves nothing", failAt: "create", ticks: 1, wantWrap: errDriveBoom},
+		{name: "a closed tick stops the run and saves it", ticks: 0, wantWrap: errTickClosed, wantStop: "run window failed", wantClosed: driveTasks},
+		{name: "a canceled ctx stops the run and still saves it", ticks: 1, cancelWindow: true, wantWrap: context.Canceled, wantStop: "run window failed", wantClosed: driveTasks},
+		{name: "a failed close after a failed window joins both and still saves", failAt: "close", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed"},
+		{name: "a failed save after a failed window joins both", ticks: 0, badDir: true, wantWrap: errTickClosed, wantAlso: fs.ErrNotExist, wantClosed: driveTasks},
 		{name: "a failed polecat listing returns its error from Collect", failAt: "list", ticks: 1, wantWrap: errDriveBoom},
 		{name: "a failed close returns its error", failAt: "close", ticks: 1, wantWrap: errDriveBoom},
-		{name: "a save into a missing directory returns its error", ticks: 1, badDir: true, wantWrap: fs.ErrNotExist},
+		{name: "a save into a missing directory returns its error", ticks: 1, badDir: true, wantWrap: fs.ErrNotExist, wantClosed: driveTasks},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := &driveFake{failAt: tt.failAt}
+			if tt.cancelWindow {
+				f.cancelOnShow = cancel
+			}
 			dir := t.TempDir()
 			path := filepath.Join(dir, "record.json")
 			if tt.badDir {
 				path = filepath.Join(dir, "missing", "record.json")
 			}
-			_, err := Drive(context.Background(), driveOptions(t, &driveFake{failAt: tt.failAt}, tt.ticks, path))
+			_, err := Drive(ctx, driveOptions(t, f, tt.ticks, path))
 			if !errors.Is(err, tt.wantWrap) {
 				t.Fatalf("Drive error = %v; want it to wrap %v", err, tt.wantWrap)
 			}
-			if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
-				t.Errorf("a record was saved at %s after a failed step", path)
+			if tt.wantAlso != nil && !errors.Is(err, tt.wantAlso) {
+				t.Errorf("Drive error = %v; want it to also wrap %v", err, tt.wantAlso)
+			}
+			if len(f.closed) != tt.wantClosed {
+				t.Errorf("closed %d beads, want %d", len(f.closed), tt.wantClosed)
+			}
+			if tt.badDir || tt.wantStop == "" {
+				if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Errorf("a record was saved at %s after a failed step", path)
+				}
+				return
+			}
+			saved, readErr := Read(path)
+			if readErr != nil {
+				t.Fatalf("read saved record: %v", readErr)
+			}
+			if !saved.Stopped || saved.StopReason != tt.wantStop {
+				t.Errorf("record Stopped = %t, reason %q; want true, reason %q", saved.Stopped, saved.StopReason, tt.wantStop)
+			}
+			if !saved.End.After(saved.Start) {
+				t.Errorf("window = [%s, %s), want it to end after it starts", saved.Start, saved.End)
 			}
 		})
 	}
