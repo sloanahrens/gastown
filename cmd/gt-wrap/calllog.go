@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +19,9 @@ const callLogMaxBytes int64 = 5 << 20
 
 // callLogWords is how many leading arguments a line may name.
 const callLogWords = 2
+
+// callLogDirMode is the mode record gives the log's directory.
+const callLogDirMode fs.FileMode = 0o755
 
 // commandWord is the shape a recorded argument must have: a lowercase word.
 var commandWord = regexp.MustCompile(`^[a-z][a-z-]*$`)
@@ -33,6 +38,7 @@ type callLog struct {
 	path   string
 	now    func() time.Time
 	stat   func(string) (fs.FileInfo, error)
+	mkdir  func(string, fs.FileMode) error
 	rename func(string, string) error
 	open   func(string) (callLogAppender, error)
 	lock   func(string) (func(), error)
@@ -40,7 +46,21 @@ type callLog struct {
 
 // osCallLog is the callLog under path on the operating system.
 func osCallLog(path string) *callLog {
-	return &callLog{path: path, now: time.Now, stat: os.Stat, rename: os.Rename, open: openAppend, lock: lock.FlockAcquire}
+	return &callLog{path: path, now: time.Now, stat: os.Stat, mkdir: os.MkdirAll, rename: os.Rename, open: openAppend, lock: lock.FlockAcquire}
+}
+
+// record makes the log's directory, then appends the call's line: the lock does
+// not make the directory, so a new town would fail every append. A failed step
+// is one note on stderr, and nothing is appended under a directory not made.
+func (l *callLog) record(stderr io.Writer, tool string, args []string, status int, took time.Duration, dir string) {
+	logDir := filepath.Dir(l.path)
+	if err := l.mkdir(logDir, callLogDirMode); err != nil {
+		fmt.Fprintf(stderr, "gt-wrap: the call was not logged: make call log directory %s: %v\n", logDir, err)
+		return
+	}
+	if err := l.append(tool, args, status, took, dir); err != nil {
+		fmt.Fprintf(stderr, "gt-wrap: the call was not logged: %v\n", err)
+	}
 }
 
 // openAppend opens path for one appended line.

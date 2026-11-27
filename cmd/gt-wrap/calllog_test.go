@@ -42,6 +42,7 @@ type fakeCallLog struct {
 	file     *fakeLogFile
 	unlocked int
 	renamed  string
+	madeDir  string
 	lockErr  error
 }
 
@@ -51,6 +52,7 @@ func newFakeCallLog(size int64) *fakeCallLog {
 		path:   "/log/calls.log",
 		now:    func() time.Time { return time.Date(2026, 11, 26, 20, 27, 3, 0, time.UTC) },
 		stat:   func(string) (fs.FileInfo, error) { return fakeLogInfo{size: size}, nil },
+		mkdir:  func(dir string, _ fs.FileMode) error { f.madeDir = dir; return nil },
 		rename: func(old, new string) error { f.renamed = old + " -> " + new; return nil },
 		open:   func(string) (callLogAppender, error) { return f.file, nil },
 		lock: func(string) (func(), error) {
