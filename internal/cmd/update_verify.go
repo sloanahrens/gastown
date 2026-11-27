@@ -171,7 +171,7 @@ type podImageLabelProbes struct {
 	devTag      func(context.Context) (string, error)
 	// sweep reads the daemon pod's launch-smoke record, sweepStart is the running
 	// daemon's start the record is judged against, and sweepWait waits one poll
-	// between reads of a missing record, returning ctx's error once ctx ends.
+	// between reads of a missing or stale record, returning ctx's error once ctx ends.
 	sweep      func(context.Context) (daemon.SweepSmokeRecord, bool, error)
 	sweepStart func() (time.Time, error)
 	sweepWait  func(context.Context) error
@@ -283,15 +283,16 @@ func podSweepSmokeRecord(target podDaemonTarget, run update.RunFunc) func(contex
 	}
 }
 
-// podSweepRecordWait bounds the wait for the daemon's launch-smoke record: it
-// writes it from its start goroutine, so one still missing after the bound is not written.
+// podSweepRecordWait bounds the wait for this daemon's launch-smoke record: it
+// writes it from its start goroutine, so one still missing, or still from an
+// earlier daemon, after the bound is not coming.
 const podSweepRecordWait = 5 * time.Minute
 
-// podSweepRecordPoll is the interval between reads of a missing record.
+// podSweepRecordPoll is the interval between reads of a missing or stale record.
 const podSweepRecordPoll = 10 * time.Second
 
-// podSweepPoll waits one poll interval between reads of a missing record, and
-// returns ctx's error when ctx ends first.
+// podSweepPoll waits one poll interval between reads of a missing or stale
+// record, and returns ctx's error when ctx ends first.
 func podSweepPoll(ctx context.Context) error {
 	t := time.NewTimer(podSweepRecordPoll)
 	defer t.Stop()
@@ -304,9 +305,11 @@ func podSweepPoll(ctx context.Context) error {
 }
 
 // SweepLaunch answers whether the daemon's sweeper started a stage, from the
-// launch-smoke record in the daemon pod. A record missing at a read is read again
-// after each poll until the wait ends: the context's end answers not started, and
-// a wait that fails for any other reason is an error.
+// launch-smoke record in the daemon pod. A record missing at a read, or stamped
+// before this daemon's start, is read again after each poll until the wait ends:
+// the context's end answers not started, naming the last stale record's starts
+// when a read found one and the record missing otherwise. A wait that fails for
+// any other reason is an error.
 func (p podImageLabelProbes) SweepLaunch(ctx context.Context) (bool, string, error) {
 	if p.sweep == nil || p.sweepStart == nil || p.sweepWait == nil {
 		return false, "", errors.New("the run has no launch-smoke record reader")
@@ -317,12 +320,15 @@ func (p podImageLabelProbes) SweepLaunch(ctx context.Context) (bool, string, err
 	if err != nil {
 		return false, "", fmt.Errorf("reading the daemon's start: %w", err)
 	}
+	var last daemon.SweepSmokeRecord
+	haveLast := false
 	for {
 		rec, exists, err := p.sweep(ctx)
 		if err != nil {
 			return false, "", err
 		}
-		if exists {
+		last, haveLast = rec, exists
+		if exists && !rec.DaemonStart.Before(start) {
 			return sweepLaunchAnswer(rec, start)
 		}
 		err = p.sweepWait(ctx)
@@ -331,6 +337,9 @@ func (p podImageLabelProbes) SweepLaunch(ctx context.Context) (bool, string, err
 		}
 		// The context check ends the loop even when the wait returns nil after the context ends.
 		if err != nil || ctx.Err() != nil {
+			if haveLast {
+				return sweepLaunchAnswer(last, start)
+			}
 			return false, "no launch-smoke record in the daemon pod before the wait ended", nil
 		}
 	}
