@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,43 @@ func TestSweepSmokeLeavesASweepsRunAlone(t *testing.T) {
 		if strings.Contains(ran, " delete ") {
 			t.Errorf("the smoke ran %q, want no delete: it must leave the running sweep alone", ran)
 		}
+	}
+}
+
+// TestSweepSmokeHoldsTheSweepGuard: the smoke holds the cycle's single-flight
+// guard from before its launch to after its stop. A cycle holding it is not run
+// beside: nothing launches, the record says busy naming the cycle, guard held.
+func TestSweepSmokeHoldsTheSweepGuard(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	for _, cycle := range []bool{true, false} {
+		t.Run(fmt.Sprintf("a cycle holds the guard: %v", cycle), func(t *testing.T) {
+			t.Parallel()
+			g := newGuardFixture(t, now)
+			g.d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+			g.d.tierSweepRunning.Store(cycle)
+			launches, held := 0, [2]bool{}
+			g.d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+				launches++
+				held[0] = g.d.tierSweepRunning.Load() && g.d.tierSweepStartedAt.Load() != 0
+				return tierSweepLaunch{exitCode: 0, stop: func() { held[1] = g.d.tierSweepRunning.Load() }}
+			}
+			g.d.recordSweepSmokeAtStart(context.Background(), now.Add(-time.Minute))
+			data, err := os.ReadFile(sweepSmokeRecordPath(g.d.config.TownRoot))
+			if err != nil {
+				t.Fatalf("read record: %v", err)
+			}
+			var got sweepSmokeRecord
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("decode record %s: %v", data, err)
+			}
+			if (got.Outcome == "busy") != cycle || (launches == 0) != cycle ||
+				strings.Contains(got.Detail, "holds the guard") != cycle ||
+				g.d.tierSweepRunning.Load() != cycle || !cycle && !(held[0] && held[1]) {
+				t.Errorf("record %+v after %d launches, guard %v, held %v; want busy with the cycle named and its guard held, else started holding it through the stop",
+					got, launches, g.d.tierSweepRunning.Load(), held)
+			}
+		})
 	}
 }
 
