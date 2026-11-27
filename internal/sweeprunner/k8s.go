@@ -137,6 +137,12 @@ const (
 	// that never ran leaves no pod running past it.
 	readerLifetimeSeconds = 900
 
+	// helperTerminationGraceSeconds is the termination grace of the reader and
+	// sync pods: they only sleep, which ignores SIGTERM, and every exec and copy
+	// ends before the delete, so they need no time to stop. The default 30
+	// seconds is time spent waiting for the SIGKILL (gt-e43ylr).
+	helperTerminationGraceSeconds = int64(1)
+
 	// readerCPU and readerMemory are the reader's share, requested and limited
 	// alike. It only sleeps and serves a copy, so it takes a sliver of a node.
 	readerCPU    = "100m"
@@ -200,14 +206,18 @@ type PodTemplate struct {
 	Spec PodSpec `json:"spec"`
 }
 
-// PodSpec is the pod's priority, its restart policy and deadline, whether it
-// mounts the default service-account token, the init containers and sidecars
-// that start first, the containers that run the work and the volumes they mount.
+// PodSpec is the pod's priority, its restart policy and deadline, its
+// termination grace, whether it mounts the default service-account token, the
+// init containers and sidecars that start first, the containers that run the
+// work and the volumes they mount.
 type PodSpec struct {
 	PriorityClassName     string `json:"priorityClassName,omitempty"`
 	RestartPolicy         string `json:"restartPolicy"`
 	ShareProcessNamespace *bool  `json:"shareProcessNamespace,omitempty"`
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+	// TerminationGracePeriodSeconds is a pointer so an explicit short grace is
+	// rendered; an absent value keeps the cluster's default.
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 	// AutomountServiceAccountToken is a pointer so an explicit false is
 	// rendered; an absent value leaves the cluster's default, which mounts the
 	// namespace's service-account token into every container.
@@ -553,9 +563,10 @@ func renderReader(spec Spec) *Pod {
 		Kind:       "Pod",
 		Metadata:   ObjectMeta{Name: readerName(spec), Namespace: spec.Namespace},
 		Spec: PodSpec{
-			PriorityClassName:     PriorityClass,
-			RestartPolicy:         "Never",
-			ActiveDeadlineSeconds: int64Ptr(readerLifetimeSeconds),
+			PriorityClassName:             PriorityClass,
+			RestartPolicy:                 "Never",
+			ActiveDeadlineSeconds:         int64Ptr(readerLifetimeSeconds),
+			TerminationGracePeriodSeconds: int64Ptr(helperTerminationGraceSeconds),
 			Containers: []Container{{
 				Name:            readerContainerName,
 				Image:           spec.Image,
@@ -586,9 +597,10 @@ func renderSyncPod(spec Spec) *Pod {
 		Kind:       "Pod",
 		Metadata:   ObjectMeta{Name: syncPodName(spec), Namespace: spec.Namespace, Labels: map[string]string{runLabelKey: runLabelValue(spec.RunID)}},
 		Spec: PodSpec{
-			PriorityClassName:     PriorityClass,
-			RestartPolicy:         "Never",
-			ActiveDeadlineSeconds: int64Ptr(syncLifetimeSeconds),
+			PriorityClassName:             PriorityClass,
+			RestartPolicy:                 "Never",
+			ActiveDeadlineSeconds:         int64Ptr(syncLifetimeSeconds),
+			TerminationGracePeriodSeconds: int64Ptr(helperTerminationGraceSeconds),
 			// It runs as root to chown what the copy leaves and needs no API
 			// access, so it must not carry the namespace's service-account
 			// token, which would be a root token.
