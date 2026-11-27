@@ -419,3 +419,52 @@ func TestSweepSmokeRecordWriteError(t *testing.T) {
 		t.Errorf("log = %q, want the failed record write", logs.String())
 	}
 }
+
+// TestShutdownWaitsForSweepSmoke: shutdown cancels the daemon context, which
+// ends the start-time smoke launch, and joins the launch's tracked goroutine
+// before it goes on, so the record the goroutine writes is on disk when
+// shutdown returns (gt-jtlw8o).
+func TestShutdownWaitsForSweepSmoke(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	daemonStart := now.Add(-time.Minute)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx, d.cancel = ctx, cancel
+	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+	d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+	// The bound is beyond the test, so only the launch ending on the cancel
+	// returns the wait.
+	d.sweepSmokeWait = signalWait
+	d.tierSweepSeams.launch = func(ctx context.Context, _ tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
+		blockUntil(t, "the daemon context to be canceled", ctx.Done())
+		return tierSweepLaunch{exitCode: 0}
+	}
+	d.startSweepSmoke(daemonStart)
+
+	// begun closes only when shutdown calls the wait; without that call the
+	// launch's goroutine is left running and the record never reaches disk
+	// before shutdown returns (the mutation this bead guards).
+	begun := make(chan struct{})
+	d.sweepSmokeWaitBegun = func() { close(begun) }
+	done := make(chan error, 1)
+	go func() { done <- d.shutdown(&State{Running: true}) }()
+	reached(t, "the smoke wait during shutdown", begun)
+	if err := within(t, 5*time.Second, "shutdown", done); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	data, err := os.ReadFile(sweepSmokeRecordPath(d.config.TownRoot))
+	if err != nil {
+		t.Fatalf("read the smoke record after shutdown returned: %v", err)
+	}
+	var got sweepSmokeRecord
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode record %s: %v", data, err)
+	}
+	if got.Outcome != "started" || !got.DaemonStart.Equal(daemonStart) {
+		t.Errorf("record after shutdown = %+v, want started stamped with the daemon's start %v", got, daemonStart)
+	}
+}
