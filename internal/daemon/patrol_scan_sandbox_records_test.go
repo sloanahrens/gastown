@@ -722,6 +722,11 @@ func TestPatrolScanSandboxRecordsKeepsEverythingWhenTmuxErrors(t *testing.T) {
 			gatewayAsked++
 			return false, nil // the answer that would delete if it were asked
 		},
+		sandboxStatus: func(string, string) (sandbox.Status, error) {
+			// A running sandbox: the probe error's phase question never reaches a
+			// real gateway, and a non-Stopped answer keeps the record (gt-94q4eh).
+			return sandbox.Status{Phase: "Running"}, nil
+		},
 		removeSandboxRecord: func(_, _ string) error {
 			removeCalls++
 			return nil
@@ -739,6 +744,30 @@ func TestPatrolScanSandboxRecordsKeepsEverythingWhenTmuxErrors(t *testing.T) {
 		if want := "sandbox record " + name + " kept: cannot ask tmux whether the session is live"; !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// A Stopped sandbox whose session probe errors is ended on its gateway phase,
+// not kept for ever: the probe error is the same tmux error the record walk
+// meets on every Stopped sandbox, so the walk reaches the Stopped end, which
+// deletes the landed seat's sandbox and removes the record (gt-94q4eh).
+func TestPatrolScanSandboxRecordsEndsAStoppedSeatOnProbeError(t *testing.T) {
+	t.Parallel()
+	p := newStoppedSeatPatrol(t, true)
+	p.host.d.tmux.(*fakeTmux).hasErr = errors.New("tmux: server timed out")
+	var logs strings.Builder
+	p.host.d.logger = log.New(&logs, "", 0)
+
+	p.host.patrolScanSandboxRecords()
+
+	if want := []string{session.PolecatSessionName(session.DefaultPrefix, endPolecat)}; !reflect.DeepEqual(p.deleted, want) {
+		t.Fatalf("sandboxes deleted = %v, want %v", p.deleted, want)
+	}
+	if p.recorded() {
+		t.Error("the registry record survived the deleted sandbox")
+	}
+	if got := logs.String(); !strings.Contains(got, "warning") || !strings.Contains(got, "Stopped") {
+		t.Errorf("log %q does not warn about the Stopped sandbox", got)
 	}
 }
 

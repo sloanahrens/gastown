@@ -70,9 +70,11 @@ func (b *gatewayAskBudget) takeDrop() bool {
 // cannot be answered leaves it:
 //   - it is at least sandboxRecordGrace old;
 //   - no live session answers to its name (the routed tmux client asks the
-//     sandbox itself, so a running sandboxed seat is live). A tmux error counts
-//     as not live and is logged: it is fail-safe because the gateway's answer is
-//     still required next;
+//     sandbox itself, so a running sandboxed seat is live). A tmux error is no
+//     proof the session is gone, so the gateway's phase decides it: a Stopped
+//     sandbox is ended as one (see below), and every other answer, or a gateway
+//     that cannot give the phase, keeps the record and logs that the session
+//     could not be asked;
 //   - the gateway the record names reports no sandbox of that name (an
 //     unreachable gateway or any other error is not "gone").
 //
@@ -138,11 +140,17 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			continue
 		}
 		checked++
-		// A tmux error is no proof the session is gone, so the record is kept
-		// and judged again next tick: the same fail-closed rule the landing
-		// path follows (gt-0vb2fy).
+		// A tmux error is no proof the session is gone: the same fail-closed rule
+		// the landing path follows (gt-0vb2fy). A Stopped sandbox cannot answer the
+		// probe at all, so its gateway phase decides it here, as it does for a held
+		// sandbox below; every other answer keeps the record for the next tick
+		// (gt-94q4eh).
 		live, err := h.sandboxSeatSessionLive(name)
 		if err != nil {
+			if h.probeErrorStopped(rec) {
+				h.endListedSandbox(name, rec, h.endStoppedSandbox)
+				continue
+			}
 			h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask tmux whether the session is live: %v", name, err)
 			continue
 		}
@@ -195,8 +203,9 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 // under the seat lock. A keep is settled with settleGatewayKeep and logged, and a
 // record the landing removed first is a quiet return. When the record is dropped,
 // the seat's kept end is completed (completeKeptSeatEnd). The method itself asks
-// the gateway nothing: the walk has already answered the existence and phase
-// questions, and the end it runs asks its own.
+// the gateway nothing: the caller has already judged the sandbox, by the walk's
+// existence and phase questions or, when the session probe errored, by the phase
+// question alone, and the end it runs asks its own.
 func (h *patrolScanHost) endListedSandbox(name string, rec session.SandboxRecord, end func(caller, name string, rec session.SandboxRecord) string) {
 	dropped, why := h.deleteHeldSandbox(name, rec, end)
 	if why != "" {
