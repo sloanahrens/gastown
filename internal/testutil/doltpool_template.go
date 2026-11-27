@@ -26,11 +26,31 @@ import (
 // The template is made by the bd on PATH, the one the tests' own inits run,
 // so its schema is the one they expect; a newer bd migrates the rest itself.
 
-// doltPoolInits is how many template databases the pool holds for bd inits.
-// It bounds how many bd init leases get one at once, not how many a run
-// uses: a lease beyond it gets one of the pool's spare databases, migrated
-// by bd init itself, as every bd init did before the template.
+// doltPoolInits is the default for doltPoolInitCount: the number of template
+// databases the pool holds for bd inits. A lease beyond them gets one of the
+// pool's spare databases, migrated by bd init itself, as every bd init did
+// before the template; it bounds leases at once, not a run's use.
 const doltPoolInits = 24
+
+// doltPoolInitCount is how many template databases the next pool lays out.
+// It starts at doltPoolInits; SetDoltPoolInits sets it.
+var doltPoolInitCount = doltPoolInits
+
+// SetDoltPoolInits sets the template databases pools created after the call
+// lay out; n below 1 is an error naming n and leaves the count unchanged.
+func SetDoltPoolInits(n int) error {
+	return setDoltPoolInits(&doltPoolInitCount, n)
+}
+
+// setDoltPoolInits writes n to dst, or names n in an error and leaves dst
+// alone when n is below 1; the destination lets a unit test avoid the global.
+func setDoltPoolInits(dst *int, n int) error {
+	if n < 1 {
+		return fmt.Errorf("dolt test pool: %d template databases: a pool needs at least 1", n)
+	}
+	*dst = n
+	return nil
+}
 
 // doltInitTemplateDB is the database bd init migrates for the template. It
 // is dropped before any test can reach the container.
