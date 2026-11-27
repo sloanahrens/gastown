@@ -94,5 +94,5 @@ func (c CreatorCite) judge(self string) (Refusal, bool) {
 	case CreatorUnreadable:
 		return Refusal{Field: creatorField, Reason: fmt.Sprintf("creator cite %s could not be read, so its state is unknown", c.ID)}, true
 	}
-	return Refusal{Field: creatorField, Reason: fmt.Sprintf("creator cite %s has unrecognised state %q", c.ID, c.State)}, true
+	return Refusal{Field: creatorField, Reason: fmt.Sprintf("creator cite %s has unrecognized state %q", c.ID, c.State)}, true
 }

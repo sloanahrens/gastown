@@ -67,8 +67,8 @@ func TestLintCreatorCite(t *testing.T) {
 			[]string{"creator cite gt-cite is retired", `"folded into gt-new"`}},
 		{"unreadable refused", []CreatorCite{{ID: "gt-cite", State: CreatorUnreadable}}, RouteRefuse,
 			[]string{"creator cite gt-cite could not be read"}},
-		{"unrecognised state refused", []CreatorCite{{ID: "gt-cite", State: "orphaned"}}, RouteRefuse,
-			[]string{"creator cite gt-cite has unrecognised state"}},
+		{"unrecognized state refused", []CreatorCite{{ID: "gt-cite", State: "orphaned"}}, RouteRefuse,
+			[]string{"creator cite gt-cite has unrecognized state"}},
 		{"cite with no recorded state refused", []CreatorCite{{ID: "gt-other", State: CreatorLanded}}, RouteRefuse,
 			[]string{"creator cite gt-cite has no recorded state"}},
 	}
