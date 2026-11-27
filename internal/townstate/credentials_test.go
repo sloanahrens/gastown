@@ -184,6 +184,38 @@ func TestFindCredentialsUserinfoURL(t *testing.T) {
 	}
 }
 
+// A compose list item, `- NAME=value`, is an env finding like the bare line (gt-slmjp2).
+func TestFindCredentialsComposeListItem(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a list item with a credential name and a secret is an env finding", "environment:\n  - DB_PASSWORD=hunter2\n", []string{"env:DB_PASSWORD"}},
+		{"a quoted list item value is an env finding", "environment:\n  - DB_PASSWORD=\"hunter2\"\n", []string{"env:DB_PASSWORD"}},
+		{"a list item under a flag name is clean", "environment:\n  - DEBUG=1\n", nil},
+		{"a list item naming a file is clean", "environment:\n  - DB_PASSWORD_FILE=/run/s\n", nil},
+		{"a list item that is an environment reference is clean", "environment:\n  - DB_PASSWORD=${DB_PASSWORD}\n", nil},
+		{"a mapping entry is still a yaml finding", "environment:\n  DB_PASSWORD: hunter2\n", []string{"yaml:DB_PASSWORD"}},
+		{"an export line is still an env finding", "export DB_PASSWORD=hunter2\n", []string{"env:DB_PASSWORD"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+			// A rule names the key, never the value.
+			for _, rule := range got {
+				if strings.Contains(rule, "hunter2") {
+					t.Fatalf("rule %q holds the secret value", rule)
+				}
+			}
+		})
+	}
+}
+
 // A YAML mapping entry in text that is not valid JSON is a finding when the
 // last dotted segment of its key is a credential name and its value is a
 // secret (gt-b4uopc). The rule names the key, never the value.
