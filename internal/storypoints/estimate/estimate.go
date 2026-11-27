@@ -242,15 +242,18 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		blended.Inputs = append(append([]string(nil), blended.Inputs...), "size")
 	}
 
-	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue, deps.NeighborMinutes)
-
 	// A dependency that saw the context end returns an error, which the input
-	// builders above record as a skip. Reporting that as a lower-rung result
-	// would hand the caller an estimate from a run it abandoned, so a canceled
-	// context refuses the result.
+	// builders record as a skip. Reporting that as a lower-rung result would
+	// hand the caller an estimate from a run it abandoned, so a canceled
+	// context refuses the result once the inputs are blended. The neighbor step
+	// below only names past beads and changes no number, so a context that ends
+	// there keeps this finished estimate and records why it names no neighbors
+	// (gt-zzbd92).
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: %w", err)
 	}
+
+	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue, deps.NeighborMinutes)
 
 	return Result{
 		Points:           blended.Points,
