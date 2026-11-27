@@ -127,8 +127,8 @@ func tierSlotRuns(t *testing.T, env map[string]string) [][]string {
 			runs = append(runs, argv)
 		}
 	}
-	if len(runs) != 4 {
-		t.Fatalf("gt slot run calls = %d, want 4 (root, docker, module, race): %q", len(runs), runs)
+	if len(runs) != 6 {
+		t.Fatalf("gt slot run calls = %d, want 6 (root, docker, module, race walk, race ./d and ./r): %q", len(runs), runs)
 	}
 	return runs
 }
@@ -197,8 +197,8 @@ func TestIntegrationAndRaceUnsetNiceKeepsTheDefaultArgv(t *testing.T) {
 
 // packageCommands returns the commands a tier run started that run a package:
 // the ones carrying the container-test environment, whichever wrapper precedes
-// it. There are four when the fixture's repository is swept: root, docker,
-// module and race.
+// it. There are six when the fixture's repository is swept: root, docker,
+// module, and the race walk, ./d and ./r.
 func packageCommands(t *testing.T, commands [][]string) [][]string {
 	t.Helper()
 	var packages [][]string
@@ -207,14 +207,14 @@ func packageCommands(t *testing.T, commands [][]string) [][]string {
 			packages = append(packages, argv)
 		}
 	}
-	if len(packages) != 4 {
-		t.Fatalf("package commands = %d, want 4 (root, docker, module, race): %q", len(packages), packages)
+	if len(packages) != 6 {
+		t.Fatalf("package commands = %d, want 6 (root, docker, module, race walk, race ./d and ./r): %q", len(packages), packages)
 	}
 	return packages
 }
 
 // TestNoSlotDropsTheSlotWrapperFromEveryPackage: with TIER_SWEEP_NOSLOT=1 the
-// four package commands start with exactly the container-test environment and no
+// six package commands start with exactly the container-test environment and no
 // gt slot run: no argument is the gt binary, which is what the wrapper would
 // have contributed. The runner container has no town for gt slot run to find.
 func TestNoSlotDropsTheSlotWrapperFromEveryPackage(t *testing.T) {

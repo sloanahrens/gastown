@@ -14,13 +14,15 @@ import (
 )
 
 // raceSweep is a Sweep over fake for one race run, logging into a fresh
-// temporary directory. The clock stands still, so every elapsed time reads 0s.
+// temporary directory, over a repository with tests in ./a and ./b. The clock
+// stands still, so every elapsed time reads 0s.
 func raceSweep(t *testing.T, fake *fakeTier) *Sweep {
 	t.Helper()
 	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
 	return &Sweep{
 		Opts:   Options{Timeout: "7m", LogDir: t.TempDir()},
 		Exec:   fake.exec,
+		Src:    raceRepo([]string{"a/a_test.go", "b/b_test.go"}, nil),
 		Stderr: io.Discard,
 		Now:    func() time.Time { return at },
 	}
@@ -266,6 +268,53 @@ func TestRaceTierRefusesTwoEntriesWithOnePackageAndLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRaceTierRunsEveryListedPackageUnderRace: Race() runs raceRuns' entries
+// and then every listed test package under -race, so a racy test in any package
+// turns the tier RED. A listing that cannot be read is RED and runs nothing,
+// not even raceRuns' own entries.
+func TestRaceTierRunsEveryListedPackageUnderRace(t *testing.T) {
+	t.Parallel()
+	t.Run("every listed package runs under -race and a failure names it", func(t *testing.T) {
+		t.Parallel()
+		fake := &fakeTier{codes: map[string]int{". ./b": 1}}
+		s := raceSweep(t, fake)
+		line, red := s.Race()
+		want := fmt.Sprintf("tier-sweep: race RED passed=2 failed=1 skipped=0 failed: ./b~all-packages (logs %s) in 0s", s.Opts.LogDir)
+		if line != want || !red {
+			t.Errorf("Race() = %q, %v; want %q, true", line, red, want)
+		}
+		if got, want := fake.testRuns(), []string{". ./internal/cmd", ". ./a", ". ./b"}; !slices.Equal(got, want) {
+			t.Fatalf("Race() ran %q, want %q", got, want)
+		}
+		for _, pkg := range []string{"./a", "./b"} {
+			want := []string{"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1", "go", "test", "-count=1", "-timeout", "7m", "-race", pkg}
+			if got := goTestCall(t, fake, ".", pkg); !reflect.DeepEqual(got, want) {
+				t.Errorf("Race() ran %s as %q, want %q", pkg, got, want)
+			}
+		}
+	})
+	t.Run("an unreadable list is RED and runs nothing", func(t *testing.T) {
+		t.Parallel()
+		repo := baseRepo()
+		repo.listErr[". *_test.go"] = errors.New("git listing: boom")
+		fake := &fakeTier{}
+		s := raceSweep(t, fake)
+		var stderr strings.Builder
+		s.Src, s.Stderr = repo, &stderr
+		line, red := s.Race()
+		want := fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0 (logs %s) in 0s", s.Opts.LogDir)
+		if line != want || !red {
+			t.Errorf("Race() = %q, %v; want %q, true", line, red, want)
+		}
+		if got, want := stderr.String(), "tier-sweep: race: list test files: git listing: boom\n"; got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("Race() ran %v on an unreadable list, want no command", fake.calls)
+		}
+	})
 }
 
 // raceRepo is a fake repository with the race tier's test listing and nested

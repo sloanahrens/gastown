@@ -111,9 +111,13 @@ func TestTierTimingsComeFromTheSweepClock(t *testing.T) {
 		},
 		{
 			name: "race", tier: TierRace,
+			setup: func(r *rig) { oneTagged(r.repo) },
 			want: []Timing{{
 				Tier: TierRace, Package: "./internal/cmd~integration-walk", WallMS: 45000, Exit: 0,
 				Start: "2026-10-30T00:00:00Z",
+			}, {
+				Tier: TierRace, Package: "./r~all-packages", WallMS: 45000, Exit: 0,
+				Start: "2026-10-30T00:00:45Z",
 			}},
 		},
 	}
@@ -121,9 +125,7 @@ func TestTierTimingsComeFromTheSweepClock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := newRig(t)
-			if tc.setup != nil {
-				tc.setup(r)
-			}
+			tc.setup(r)
 			r.goTestTakes = 45 * time.Second
 			if code, _, stderr := r.run(tc.tier); code != 0 {
 				t.Fatalf("exit code = %d, stderr %q", code, stderr)

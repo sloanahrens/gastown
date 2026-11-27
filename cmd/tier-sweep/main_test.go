@@ -80,7 +80,7 @@ func TestMainOutputStreams(t *testing.T) {
 		t.Fatalf("exit code = %d, want 2 (stderr %q)", code, stderr.String())
 	}
 	wantOut := "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs " + logDir + ") in 0s\n" +
-		"tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs " + logDir + ") in 0s\n"
+		"tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs " + logDir + ") in 0s\n"
 	if stdout.String() != wantOut {
 		t.Errorf("stdout = %q, want %q", stdout.String(), wantOut)
 	}
