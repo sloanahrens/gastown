@@ -56,8 +56,7 @@ func TestDeferredBookkeepingShutdown(t *testing.T) {
 
 			// The job is still held, so the settled shutdown goroutine is in the
 			// queue's wait; one that skipped the wait has finished and sent.
-			settle := synctest.Wait // aliased: the added-wait check judges a bare Wait unbounded (gt-10cacr)
-			settle()
+			synctest.Wait()
 			select {
 			case err := <-done:
 				t.Fatalf("shutdown returned (%v) with the queued job still running, want it to wait", err)

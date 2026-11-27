@@ -282,7 +282,6 @@ func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
 			head = "1111111"
 		)
 		ctx := waitCtx(t)
-		settle := synctest.Wait
 		rev := newFakeAheadReviewer(t, ctx, nil)
 		pool := &ReviewPool{Reviewer: rev, Max: 1}
 
@@ -297,7 +296,7 @@ func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
 
 		// The review is held, so the waiter is blocked in Await when the
 		// bubble settles.
-		settle()
+		synctest.Wait()
 		select {
 		case <-awaited:
 			t.Fatalf("Await returned with the bead's review still running, want it to wait")
@@ -306,7 +305,7 @@ func TestReviewPoolAwaitReturnsWhenDone(t *testing.T) {
 
 		close(rev.release)
 		recvBounded(t, ctx, awaited, "Await returning after the review ended")
-		settle()
+		synctest.Wait()
 		if headAt, running := runningHeadAt(t, pool, bead); running {
 			t.Errorf("Await returned with the bead's review still in the pool at %s, want the review gone", headAt)
 		}
@@ -327,7 +326,6 @@ func TestReviewPoolAwaitIgnoresOtherHead(t *testing.T) {
 			otherHead = "2222222"
 		)
 		ctx := waitCtx(t)
-		settle := synctest.Wait
 		rev := newFakeAheadReviewer(t, ctx, nil)
 		pool := &ReviewPool{Reviewer: rev, Max: 1}
 
@@ -344,7 +342,7 @@ func TestReviewPoolAwaitIgnoresOtherHead(t *testing.T) {
 			pool.Await(context.Background(), bead, heldHead)
 			close(heldReturned)
 		}()
-		settle()
+		synctest.Wait()
 
 		select {
 		case <-otherReturned:
@@ -389,7 +387,6 @@ func TestReviewPoolAwaitNothingRunning(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				ctx := waitCtx(t)
-				settle := synctest.Wait
 				rev := newFakeAheadReviewer(t, ctx, nil)
 				pool := &ReviewPool{Reviewer: rev, Max: 2}
 				if tt.other != "" {
@@ -402,7 +399,7 @@ func TestReviewPoolAwaitNothingRunning(t *testing.T) {
 					pool.Await(context.Background(), bead, head)
 					close(awaited)
 				}()
-				settle()
+				synctest.Wait()
 				select {
 				case <-awaited:
 				default:
@@ -429,7 +426,6 @@ func TestReviewPoolAwaitReturnsOnCancel(t *testing.T) {
 			head = "1111111"
 		)
 		ctx := waitCtx(t)
-		settle := synctest.Wait
 		rev := newFakeAheadReviewer(t, ctx, nil)
 		pool := &ReviewPool{Reviewer: rev, Max: 1}
 
@@ -443,7 +439,7 @@ func TestReviewPoolAwaitReturnsOnCancel(t *testing.T) {
 			close(awaited)
 		}()
 
-		settle()
+		synctest.Wait()
 		select {
 		case <-awaited:
 			t.Fatalf("Await returned before its context was cancelled, want it to wait")
@@ -451,7 +447,7 @@ func TestReviewPoolAwaitReturnsOnCancel(t *testing.T) {
 		}
 
 		cancel()
-		settle()
+		synctest.Wait()
 		select {
 		case <-awaited:
 		default:
