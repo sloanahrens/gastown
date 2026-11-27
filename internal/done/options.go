@@ -127,6 +127,9 @@ type Options struct {
 	// refusal. Nil skips the write.
 	RecordFindings func(cwd, issueID string, findings []string)
 
+	// RaiseSizeRefusal escalates a size refusal; nil means no escalation route.
+	RaiseSizeRefusal func(bead, refusal string) error
+
 	// LocalGate builds the local pre-submit gate for a rig. Nil is the real
 	// land gate. The command layer supplies its own indirection so cmd-level
 	// integration tests can substitute a recording gate.

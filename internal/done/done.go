@@ -1000,6 +1000,8 @@ type doneRun struct {
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
 	recordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error)
+	// raiseSizeRefusal is Options.RaiseSizeRefusal; nil means no escalation route.
+	raiseSizeRefusal func(bead, refusal string) error
 	// logEvent writes the run's feed events; nil means events.LogFeed. It is a
 	// seam so a test can read what gt done records without a town log.
 	logEvent func(eventType, actor string, payload map[string]interface{}) error
@@ -1123,6 +1125,7 @@ func Run(opts Options) error {
 		recordAgentState: opts.RecordAgentState,
 		findings:         opts.Findings,
 		recordFindings:   opts.RecordFindings,
+		raiseSizeRefusal: opts.RaiseSizeRefusal,
 	}
 	r.g = git.NewGit(r.cwd)
 
@@ -1574,11 +1577,13 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 		if errors.As(err, &refusal) {
 			sha, pushErr := pushSandboxBranchBeforeDeferralTo(r.stdout(), r)
 			if pushErr != nil {
-				return unpushedRefusal(refusal, pushErr)
+				err = unpushedRefusal(refusal, pushErr)
+			} else if sha != "" {
+				err = pushedRefusal(refusal, sha, r.branch)
 			}
-			if sha != "" {
-				return pushedRefusal(refusal, sha, r.branch)
-			}
+			// The escalation carries the refusal this run returns, the sha or NOT
+			// pushed line included (gt-3odsvc).
+			raiseSizeEscalation(r, err)
 		}
 		return err
 	}
