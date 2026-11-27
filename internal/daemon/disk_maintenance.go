@@ -558,9 +558,12 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	return due, errs
 }
 
-// runDiskMaintenance is the tick: it finds the targets due, refuses quietly
-// while the town is busy, and then runs them off the loop goroutine. A busy
-// tick with nothing due still reads the disks for the alerts
+// runDiskMaintenance is the tick: it finds the targets due and runs them off
+// the loop goroutine, whether or not the town is busy: the registry target keeps itself safe with the
+// polecat-image lock, and a quiet-town wait starves it (gt-pc65u7). One target
+// pass runs at a time: a tick that finds one in flight starts no second, logs
+// the targets it found as skipped, and leaves the due decision to a later tick.
+// A tick with nothing due still reads the disks for the alerts
 // (runDiskMaintenanceAlertOnlyTick).
 //
 // It runs on the loop goroutine and only reads the schedule: the pass writes
@@ -573,7 +576,7 @@ func (d *Daemon) runDiskMaintenance() {
 	s := d.diskMaintenanceSeams()
 	now := s.now()
 	// The CI cache trim is due on its own interval whatever the town is doing, so
-	// it is ticked before the quiet guard that holds the targets back (gt-gg9hv.57).
+	// it is ticked before the targets' due decision (gt-gg9hv.57).
 	d.runCICacheTrimTick()
 	d.runCIEnginePruneTick()
 	d.runSweepRunsPruneTick()
@@ -601,17 +604,17 @@ func (d *Daemon) runDiskMaintenance() {
 		return
 	}
 
-	quiet, why := d.maintenance().quiet(d)
-	if !quiet {
-		d.runDiskMaintenanceTrim(mode, due, why, now)
-		return
-	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
-		// A due trim runs on its own pass. With no trim due, the alert-only
+		// The targets are what this tick found and are not running, so the line
+		// keeps their deferral from reading as a tick that found nothing to do.
+		if due.daily || len(due.interval) > 0 {
+			d.logger.Printf("disk_maintenance: targets skipped: a target pass is still running")
+		}
+		// A due trim runs on a pass of its own. With no trim due, the alert-only
 		// pass keeps a long target pass in flight from holding the alerts'
 		// next reading (gt-vek8mp, gt-q5s5wy).
 		if due.cacheTrim {
-			d.runDiskMaintenanceTrim(mode, due, "a target pass is still running", now)
+			d.runDiskMaintenanceTrim(mode)
 			return
 		}
 		if d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
@@ -679,29 +682,12 @@ func (d *Daemon) diskMaintenanceAlertOnlyPass() {
 	}
 }
 
-// runDiskMaintenanceTrim is the tick's case with a pass in flight: the cache trim may run, the
-// targets may not. The trim is off the Dolt window's quiet guard so continuous
-// landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
-// Everything else the tick found keeps the guard: it stays due, and the next
-// quiet tick runs it.
-func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string, now time.Time) {
-	if !due.cacheTrim {
-		d.logger.Printf("disk_maintenance: skipped: %s", why)
-		// No trim pass runs, so nothing this tick dispatches would read the
-		// disks, and the due targets wait for a quiet tick a busy town may not
-		// reach for hours: the alerts get their reading from the alert-only
-		// pass instead (gt-gg9hv.53).
-		if d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
-			d.dispatchDiskMaintenanceAlertOnly()
-		}
-		return
-	}
-	if due.daily || len(due.interval) > 0 {
-		// The targets the tick found are what this line is about, so their
-		// deferral is not read as the tick doing nothing; it is logged whether
-		// or not a trim pass is already in flight.
-		d.logger.Printf("disk_maintenance: targets skipped: %s", why)
-	}
+// runDiskMaintenanceTrim is the tick's case with a target pass in flight and
+// the cache trim due: the trim runs on a pass of its own, and the targets wait
+// for the pass in flight to end. The trim has a guard of its own, so a target
+// pass that takes minutes holds no due trim off (gt-gg9hv.48, gt-vek8mp;
+// docs/guides/disk-maintenance.md).
+func (d *Daemon) runDiskMaintenanceTrim(mode string) {
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
 		return // a trim pass is still running
 	}
