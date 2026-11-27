@@ -760,6 +760,9 @@ func TestFailureExcerptReadsShellPassAndProseAsNoFailure(t *testing.T) {
 		{"prose with the word FAIL", "   a row that did not FAIL: it waited", false},
 		{"indented FAILED summary", "   FAILED: some shell row (rc=3)", false},
 		{"gate FAILED summary line", "gate: FAILED at unit tier (unit): exit status 1", false},
+		{"indented test output", "    y_test.go:12: want 3, got 1", false},
+		{"tab-indented trace", "\t/src/pkg/cache.go:41 +0x2c", false},
+		{"file and line finding", "internal/x/y.go:12:3: undefined: zz", true},
 	}
 	for _, tt := range tests {
 		if got := isTestFailureMarker(tt.line); got != tt.want {
@@ -870,6 +873,53 @@ func TestFailureExcerptCarriesEveryShapeOfRed(t *testing.T) {
 			log:  gateJobLog("go build ./...", "make: *** [Makefile:106: build] Error 1"),
 			want: []string{"go build ./...", "make: *** [Makefile:106: build] Error 1"},
 		},
+		{
+			// The finding sits more than failureContextLines above make's
+			// Error, so the summary's own context cannot carry it (gt-b8mpxb).
+			name: "a golangci finding followed by the lint step's make error",
+			log: gateJobLog(
+				"lint: golangci-lint run --timeout=5m",
+				"internal/land/candidate.go:739:12: unused variable kept (unused)",
+				"lint: golangci-lint run in daemon",
+				"lint: golangci-lint run in pkg/bar",
+				"make: *** [Makefile:328: lint] Error 1"),
+			want: []string{"internal/land/candidate.go:739:12: unused variable kept (unused)", "make: *** [Makefile:328: lint] Error 1"},
+		},
+		{
+			name: "a testwaits finding",
+			log: gateJobLog(
+				"testwaits: judged 4 added test line(s), 1 with a wait with no bound",
+				"internal/land/candidate_test.go:912: added wait with no bound: <-ch",
+				"testwaits: bound each wait with a select case on a deadline, a timeout, or a loop condition",
+				"presubmit: docs/testing.md, the rules",
+				"make: *** [Makefile:650: presubmit] Error 1"),
+			want: []string{"internal/land/candidate_test.go:912: added wait with no bound: <-ch", "make: *** [Makefile:650: presubmit] Error 1"},
+		},
+		{
+			name: "an errbranch finding list",
+			log: gateJobLog(
+				"errbranch: judged 3 of 4 added error returns in Go sources",
+				"internal/land/candidate.go:120: added error branch no test drives: if err != nil {",
+				"internal/land/candidate.go:128: added error branch no test drives: if err != nil {",
+				"errbranch: drive each added error branch or name it in an exemption file",
+				"errbranch: docs/testing.md, an error branch",
+				"make: *** [Makefile:650: presubmit] Error 1"),
+			want: []string{
+				"internal/land/candidate.go:120: added error branch no test drives: if err != nil {",
+				"internal/land/candidate.go:128: added error branch no test drives: if err != nil {",
+				"make: *** [Makefile:650: presubmit] Error 1",
+			},
+		},
+		{
+			name: "a compile error",
+			log: gateJobLog(
+				"# github.com/x/cmd",
+				"./cmd/x/y.go:9:2: undefined: bazzinga",
+				"gate: build (the nested modules: daemon)",
+				"gate: FAILED at build",
+				"make: *** [Makefile:290: gate] Error 1"),
+			want: []string{"./cmd/x/y.go:9:2: undefined: bazzinga", "gate: FAILED at build", "make: *** [Makefile:290: gate] Error 1"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -887,6 +937,39 @@ func TestFailureExcerptCarriesEveryShapeOfRed(t *testing.T) {
 				t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
 			}
 		})
+	}
+}
+
+// TestFailureExcerptKeepsTheLinesAboveAGateVerdict: the gate's verdict closes
+// the log, and the failing stage's report ends just above it in lines like
+// tierwall's that name no file and line. The verdict keeps the 15 lines before
+// it, each once, with the earlier failure's block still in the note (gt-b8mpxb).
+func TestFailureExcerptKeepsTheLinesAboveAGateVerdict(t *testing.T) {
+	t.Parallel()
+	got := failureExcerpt(gateJobLog(
+		"--- FAIL: TestEarly (0.01s)",
+		"FAIL\tgithub.com/x/early\t0.2s",
+		"gate: unit tier (every package)",
+		"ok  \tgithub.com/x/aaa\t0.1s",
+		"tierwall: github.com/x/cmd 30s",
+		"tierwall: slow tests",
+		"tierwall:   github.com/x/cmd TestSlow 9s",
+		"gate: FAILED at unit tier (Go suite, exit 1) after 42s wall",
+	), gateTailLines)
+	for _, want := range []string{
+		"tierwall: github.com/x/cmd 30s",
+		"tierwall:   github.com/x/cmd TestSlow 9s",
+		"gate: FAILED at unit tier (Go suite, exit 1) after 42s wall",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("excerpt does not carry %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "--- FAIL: TestEarly (0.01s)"); n != 1 {
+		t.Errorf("excerpt carries the earlier failure %d times, want once:\n%s", n, got)
+	}
+	if n := strings.Count(got, "\n"); n > gateTailLines {
+		t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
 	}
 }
 

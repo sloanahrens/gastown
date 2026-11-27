@@ -736,12 +736,14 @@ func logHasTestFailure(log string) bool {
 }
 
 // isTestFailureMarker reports whether line is the first line of a failure that
-// names a test or a rule: the markers a capped tail must hold to be read as the
-// excerpt's source.
+// names a test, a rule or a finding: the markers a capped tail must hold to be
+// read as the excerpt's source. The gate's verdict is not one: it names no
+// failure by itself, and counting it would let a tail holding only the summary
+// lines stand as the source (gt-8bpwpx, gt-b8mpxb).
 func isTestFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || ruleReportRE.MatchString(line) ||
-		shellFailRowRE.MatchString(line)
+		shellFailRowRE.MatchString(line) || fileLineRE.MatchString(line)
 }
 
 // shellFailRowRE is the row a shell test prints when it fails: "FAIL: <name>"
@@ -749,6 +751,19 @@ func isTestFailureMarker(line string) bool {
 // A "PASS:" row, a "FAILED" summary and prose that only contains FAIL do not
 // match.
 var shellFailRowRE = regexp.MustCompile(`^ *FAIL: `)
+
+// fileLineRE matches a finding's own line: a path with a file extension, a
+// line number and an optional column, as golangci-lint, go vet and a compile
+// error print. Anchored at the line's first character, the indented output a
+// test prints inside its --- FAIL block is no marker (gt-b8mpxb).
+var fileLineRE = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+:[0-9]+(?::[0-9]+)?:`)
+
+// gateFailedRE matches the gate's verdict, its log's last line, whose stage
+// report ends above it in lines that may name no file and line (gt-b8mpxb).
+var gateFailedRE = regexp.MustCompile(`^gate: FAILED at `)
+
+// gateFailedLines is how many lines above the verdict the excerpt keeps.
+const gateFailedLines = 15
 
 // failureLines is the excerpt's line indices: every failure marker with the
 // range it carries, de-duplicated and in log order.
@@ -777,12 +792,15 @@ func failureLines(lines []string) []int {
 // failureSpan is the line range one failure marker carries. A "--- FAIL" block
 // runs to the next block boundary, so the test's own output comes with it; a
 // unit-tier rule report runs to its closing rule line, so the entries it names
-// come with it; any other marker takes failureContextLines either side of
-// itself.
+// come with it; the gate's verdict takes the report above it; any other marker
+// takes failureContextLines either side of itself.
 func failureSpan(lines []string, at int) (int, int) {
 	lo := max(at-failureContextLines, 0)
 	if ruleReportRE.MatchString(lines[at]) {
 		return lo, ruleReportEnd(lines, at)
+	}
+	if gateFailedRE.MatchString(lines[at]) {
+		return max(at-gateFailedLines, 0), at
 	}
 	if !failedTestRE.MatchString(lines[at]) {
 		return lo, min(at+failureContextLines, len(lines)-1)
@@ -876,11 +894,14 @@ const failureContextLines = 2
 // is cut inside a report, leaving the note with the report's guidance text and
 // none of its reason (gt-hqw8m). A shell test's "   FAIL: <name>" row is one by
 // itself: it names the failing row, so the excerpt keeps it even when no go
-// test or make line sits near it (gt-t2amjn).
+// test or make line sits near it (gt-t2amjn). A finding's "path:line:col:" line
+// is one too, and so is the gate's verdict, whose span carries the report above
+// it (gt-b8mpxb).
 func isFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
 		ruleReportRE.MatchString(line) || shellFailRowRE.MatchString(line) ||
+		fileLineRE.MatchString(line) || gateFailedRE.MatchString(line) ||
 		strings.Contains(line, buildFailedMarker)
 }
 
