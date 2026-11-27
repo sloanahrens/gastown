@@ -563,6 +563,16 @@ gate-test:
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
 	@umask 022; out=$$(mktemp -d); for m in $(NESTED_MODULES); do $(CPU_CLASS) go -C "$$m" build -o "$$out/" ./... || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@# The machine-readable stdout check (gt-fmaalx), as presubmit runs it:
+	@# the build's binary lands in a temp dir, so the check never leaves a gt
+	@# in the tree. Plain `make`, not $(MAKE): a line holding $(MAKE) runs
+	@# for real under `make -n`, and a dry run of the gate must start nothing
+	@# (gt-digv4n).
+	@umask 022; start=$$(date +%s); gtdir=$$(mktemp -d) || { echo "gate: FAILED at machinecheck" >&2; exit 1; }; \
+	$(CPU_CLASS) make --no-print-directory build BUILD_DIR="$$gtdir" >/dev/null || { rm -rf "$$gtdir"; echo "gate: FAILED at machinecheck" >&2; exit 1; }; \
+	go run ./cmd/machinecheck -gt "$$gtdir/$(BINARY)" || { rm -rf "$$gtdir"; echo "gate: FAILED at machinecheck" >&2; exit 1; }; \
+	rm -rf "$$gtdir"; \
+	echo "gate: check machinecheck $$(( $$(date +%s) - start ))s" >&2
 	@# The unit tier: every package, through go test's result cache, so a
 	@# landing reruns only the packages its change can affect (gt-s1vff).
 	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
