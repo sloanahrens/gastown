@@ -141,11 +141,11 @@ func TestAppendArchiveMemberReportsTargetFailures(t *testing.T) {
 // "nothing new".
 func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	zero := EventsArchiveWatermark{}
 
 	t.Run("a commit export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		if _, _, _, err := d.maintenanceArchiveCommits(context.Background(), dir, "../gt", ArchiveWatermark{}); err == nil {
 			t.Error("a path-escaping database name was exported")
@@ -154,6 +154,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		if _, _, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "../gt", zero); err == nil {
 			t.Error("a path-escaping database name was exported")
@@ -290,6 +291,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses an uncomparable watermark", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		bad := EventsArchiveWatermark{
 			CreatedAt: "yesterday",
@@ -302,6 +304,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a watermark whose date cannot be placed", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		// TimestampLiteral accepts this shape; the parser that computes the
 		// window does not, so the export cannot start.
@@ -316,6 +319,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a table without the watermark columns", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"payload"}, Rows: [][]string{{"x"}}}, nil
@@ -328,6 +332,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a row with no id value", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"id", "created_at"}, Rows: [][]string{{}}}, nil
@@ -340,6 +345,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a row narrower than its header", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
@@ -355,6 +361,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export refuses a row it cannot place in the window", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
@@ -370,6 +377,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 
 	t.Run("an events export reports a watermark it cannot record", func(t *testing.T) {
 		t.Parallel()
+		dir := t.TempDir()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
