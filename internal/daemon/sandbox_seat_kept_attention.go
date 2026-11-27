@@ -42,7 +42,9 @@ const retiredRecordKeepReason = "the seat's record does not say stop: something 
 // raised at once, naming the alarm, whatever the record says: a record that
 // cannot be read is then no collect failure, since the alarm already raised its
 // seat (gt-7h38pd). A seat whose tally is the only trace of it (its record cannot
-// be read or written) is raised the same way.
+// be read or written) is raised the same way, unless its agent bead reads nuked:
+// a nuked seat is already gone, so the tally alone raises nothing for it
+// (gt-5bch6b).
 //
 // The record is the only input. A record that cannot be read or decoded, or a
 // store that cannot be listed, fails the collection rather than passing as an
@@ -106,7 +108,9 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 	sort.Strings(alarmOnly)
 	for _, key := range alarmOnly {
 		rig, name, _ := strings.Cut(key, "/")
-		out = append(out, keptSeatItem(rig, name, "", "with no readable record", tallies[key].alarm))
+		if item, ok := s.alarmOnlyKeptSeatItem(rig, name, tallies[key].alarm); ok {
+			out = append(out, item)
+		}
 	}
 	return out, nil
 }
