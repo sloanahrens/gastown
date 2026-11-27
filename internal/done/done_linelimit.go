@@ -16,7 +16,7 @@ const noLimitLine = "no limit declared in the bead's Size or Constraints: the ad
 // do (gt-wxpd0y, gt-8f4y1k): push the commit first so it outlives the seat
 // (gt-574kps), report the measured added lines and the limit, and stop for the
 // overseer to decide whether to raise the limit or split the bead.
-const overLimitLine = "The measured added lines are over twice the limit the gate applies. Push the branch first with a plain git push origin HEAD:refs/heads/<your branch> (never --force), read git ls-remote origin <your branch> and check the tip is your HEAD, then comment both shas, the measured added lines and the limit on the bead and stop: the overseer decides whether to raise the limit or split the bead. Do not propose a split and do not run gt done again with the same change."
+const overLimitLine = "The measured added lines are over twice the limit the gate applies. Push the branch first with a plain git push origin HEAD:refs/heads/<your branch> (never --force), read git ls-remote origin <your branch> and check the tip is your HEAD, then comment both shas, the measured added lines and the limit on the bead and stop: the overseer decides whether to raise the limit or split the bead. Do not propose a split and do not run gt done again with the same change. gt done ends your turn as ESCALATED."
 
 // lineLimitVerdict decides whether added is too many for the limit the gate
 // applies — the larger of the limits the bead declares (the largest of several
