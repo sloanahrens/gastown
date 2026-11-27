@@ -333,11 +333,11 @@ func TestMaintenanceWindowTickDefersWhenUpdateEnabled(t *testing.T) {
 	})
 }
 
-// The window owns the pod's nightly cycle: an update-triggered roll plans no
-// maintenance step for a pod target, so a scheduled tick over an external
-// server with the trigger on takes the night's backup and the gc itself
-// (gt-ihvaja).
-func TestMaintenanceWindowPodTickRunsTheCycleWithUpdateEnabled(t *testing.T) {
+// A request serves the pod's nightly cycle even with the update trigger on: an
+// update-triggered roll plans no maintenance step for a pod target, so a
+// requested cycle over an external server takes the night's backup and the gc
+// itself (gt-ihvaja).
+func TestMaintenanceRequestPodRunsTheCycleWithUpdateEnabled(t *testing.T) {
 	t.Parallel()
 	d, f := requestDaemon(t, gcTestNow)
 	d.podMode = true
@@ -346,6 +346,7 @@ func TestMaintenanceWindowPodTickRunsTheCycleWithUpdateEnabled(t *testing.T) {
 	d.patrolConfig = updateOnWindow("03:00")
 	// Without a data dir on this host the week alone makes the gc due.
 	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+	writeRequestFile(t, d, "run-pod", gcTestNow)
 
 	requestTickAndCycle(t, d)
 
