@@ -266,6 +266,10 @@ const (
 	// KindBDGatewayCapHit: the bd gateway refused calls at its concurrency cap,
 	// so bd callers were turned away while the cap held (gt-7oy397).
 	KindBDGatewayCapHit Kind = "bd-gateway-cap-hit"
+	// KindBDGatewayUnreachable: bd calls through the gateway could not reach
+	// its database, and at least ten of them failed since the previous read
+	// (gt-g7rdh4).
+	KindBDGatewayUnreachable Kind = "bd-gateway-unreachable"
 	// KindBdGatewayRefusals: the bd gateway refused calls, whether at once or
 	// after the bounded wait for a slot, so those calls did not run (gt-q0eh0r).
 	KindBdGatewayRefusals Kind = "bd-gateway-refusals"
@@ -302,6 +306,7 @@ func Kinds() []Kind {
 		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindGateThrottleUnread, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
 		KindBDGatewayCapHit,
+		KindBDGatewayUnreachable,
 		KindBdGatewayRefusals,
 		KindMainUnknown,
 		KindRedHoldHeld,
