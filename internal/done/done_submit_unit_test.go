@@ -392,6 +392,9 @@ func newSubmitHarness(t *testing.T) *submitHarness {
 	h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusHooked)})
 	h.client = h.bd
 	h.gate = &fakeGate{repo: h.repo, result: land.GateResult{Passed: true, Steps: []land.StepResult{{Name: "test"}}}}
+	// The run's home is private and holds no seat task directory, so the seat
+	// check reads dolt mode and no test reads the process HOME (gt-kqa840).
+	home := t.TempDir()
 	h.r = &doneRun{
 		cwd:           t.TempDir(),
 		townRoot:      h.townRoot,
@@ -402,6 +405,7 @@ func newSubmitHarness(t *testing.T) *submitHarness {
 		issueID:       "bd-source",
 		defaultBranch: "main",
 		cleanupStatus: "unpushed",
+		env:           envHome(home),
 		opts:          doneOptions{polecatEnv: true},
 	}
 	h.r.deps = doneSubmitDeps{

@@ -170,6 +170,79 @@ func seatDir(t *testing.T, files map[string]string) string {
 	return filepath.Join(root, ".gt", "task")
 }
 
+// envHome is an environment seam whose HOME is home.
+func envHome(home string) func(string) string {
+	return func(key string) string {
+		if key == "HOME" {
+			return home
+		}
+		return ""
+	}
+}
+
+// seatHome stages TASK.md's boxes and the outbox result under a private home;
+// marker is MODE's contents, empty for no marker, "/" for a directory there.
+func seatHome(t *testing.T, marker string, boxes []taskfile.Box, result outbox.Result) string {
+	t.Helper()
+	files := map[string]string{
+		".gt/task/TASK.md":                seatTaskText(boxes...),
+		".gt/outbox/" + outbox.ResultFile: string(outbox.Encode(seatBeadID, result)),
+	}
+	switch marker {
+	case "":
+	case "/":
+		files[".gt/task/"+taskfile.ModeFile+"/"] = ""
+	default:
+		files[".gt/task/"+taskfile.ModeFile] = marker
+	}
+	return filepath.Dir(filepath.Dir(seatDir(t, files)))
+}
+
+// TestNoBeadAccessDoneRefusesUntickedBoxBeforeRebase drives submitForLanding
+// with a private home: a file-mode seat with one unticked box is refused, and
+// named, before the rebase and the gate; every box ticked submits; a seat with
+// no marker submits reading no TASK.md; an unreadable marker, an unreachable
+// task directory and an unnameable home refuse (gt-kqa840).
+func TestNoBeadAccessDoneRefusesUntickedBoxBeforeRebase(t *testing.T) {
+	t.Parallel()
+	boxes := []taskfile.Box{{Text: "one"}, {Text: "two"}}
+	seat := func(marker string, ticked ...int) string {
+		return seatHome(t, marker, boxes, outbox.Result{Ticked: ticked})
+	}
+	unreachable := func() string {
+		home := testutil.PrivateTempDir(t)
+		must(t, os.MkdirAll(filepath.Join(home, ".gt"), 0o700))
+		must(t, os.Symlink(filepath.Join(home, ".gt", "task"), filepath.Join(home, ".gt", "task")))
+		return home
+	}
+	for name, tc := range map[string]struct{ home, want string }{
+		"one unticked box refuses before the rebase": {home: seat(taskfile.ModeFiles, 0), want: "- [ ] two"},
+		"every box ticked submits":                   {home: seat(taskfile.ModeFiles, 0, 1)},
+		"no marker reads dolt mode and no TASK.md":   {home: seat("")},
+		"an unreadable marker refuses":               {home: seat("/"), want: "bead access is unknown"},
+		"an unreachable task directory refuses":      {home: unreachable(), want: "task directory"},
+		"a home the run cannot name refuses":         {home: "", want: "cannot name the seat's home"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newSubmitHarness(t)
+			// Behind the target, so a rebase would move the head if it ran.
+			h.repo.behind = 1
+			h.r.env = envHome(tc.home)
+			if err := h.submit(); tc.want == "" {
+				if err != nil {
+					t.Fatalf("submit: %v", err)
+				}
+				if h.repo.head != "feature1-rebased" || len(h.gate.heads) != 1 {
+					t.Errorf("head %s gate %v, want the rebased branch gated", h.repo.head, h.gate.heads)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) || h.repo.head != "feature1" || len(h.gate.heads) != 0 {
+				t.Errorf("submit = %v, head %s, gate %v; want a refusal naming %q before any rebase or gate", err, h.repo.head, h.gate.heads, tc.want)
+			}
+		})
+	}
+}
+
 // TestNoBeadAccessSeatDirRefusal: over the seat's files on disk, an unticked box
 // refuses and is named, every box ticked passes, each unreadable input refuses,
 // and with no marker and no TASK.md there it passes, so dolt mode read no file.
