@@ -195,14 +195,14 @@ func TestParseChangeBudgetReadsTheGateForms(t *testing.T) {
 }
 
 // The lint's declared-lines advice reads the same forms the gate does
-// (gt-hc43nx): a same-line budget at 9.8 minutes declaring the band's median
-// (109) gets the band's advice, a declaration at the band's Advise or above
-// gets none, and a Size section with no number is neither advised nor refused.
-// The 9.8 band's p90 is 454, so its Advise is (454+1)/2 = 227.
+// (gt-hc43nx, gt-82g9zr): a same-line budget or a lead-in declaring 30 added
+// lines at 9.8 minutes gets the advice naming the band's median (109) and the
+// gate's refusal (218); a declaration at the median (109) or above gets none,
+// and a Size section with no number gets none. The band's median at 9.8 is 109.
 func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 	t.Parallel()
 
-	const advice109 = "the Change line declares 109 added lines, but beads estimated at 9.8 minutes landed with a median of 109 (p75 216, p90 454) and the gate refuses past twice the declared number: declare at least 227, or split"
+	const advice30 = "the Change line declares 30 added lines; beads estimated at 9.8 minutes landed with a median of 109: this is advice, declare the lines you count; gt done refuses past 218 added lines"
 
 	for _, tc := range []struct {
 		name   string
@@ -210,10 +210,10 @@ func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{"a same-line budget", "One worker, one landing. Change: at most 109 added lines in 2 files.", []string{"sp-minutes:9.8"}, advice109},
-		{"a lead-in", "One worker, one landing. About 109 added lines.", []string{"sp-minutes:9.8"}, advice109},
-		{"at the band's Advise", "One worker, one landing. Change: at most 227 added lines.", []string{"sp-minutes:9.8"}, ""},
-		{"above the band's Advise", "One worker, one landing. Change: at most 228 added lines.", []string{"sp-minutes:9.8"}, ""},
+		{"a same-line budget", "One worker, one landing. Change: at most 30 added lines in 2 files.", []string{"sp-minutes:9.8"}, advice30},
+		{"a lead-in", "One worker, one landing. About 30 added lines.", []string{"sp-minutes:9.8"}, advice30},
+		{"at the band's median", "One worker, one landing. Change: at most 109 added lines.", []string{"sp-minutes:9.8"}, ""},
+		{"above the band's median", "One worker, one landing. Change: at most 227 added lines.", []string{"sp-minutes:9.8"}, ""},
 		{"no number", "One worker, one landing.", []string{"sp-minutes:9.8"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,40 +234,34 @@ func TestDeclaredLinesAdviceReadsTheGateForms(t *testing.T) {
 	}
 }
 
-// The lint's median refusal reads the same forms the gate does (gt-hc43nx): a
-// same-line budget and a lead-in that declare 30 added lines at 9.8 minutes are
-// both refused, naming the band's median (109), while a declaration at the
-// median in either form is not refused. The rows are driven through Lint so
-// deleting the Size-section fallback turns them red.
-func TestDeclaredLinesRefuseReadsTheGateForms(t *testing.T) {
+// The declared-lines floor is advice only (gt-82g9zr), and it reads the same
+// forms the gate does (gt-hc43nx): a same-line budget and a lead-in declaring
+// 30 added lines at 9.8 minutes get no size refusal from Lint, whatever the
+// declaration, so the author is never refused for a Change line below the
+// median. The rows are driven through Lint so a refusal put back in the lint
+// turns them red.
+func TestDeclaredLinesNeverRefuseReadsTheGateForms(t *testing.T) {
 	t.Parallel()
 
-	const wantReason = "the Change line declares 30 added lines, below what half of the beads estimated at 9.8 minutes landed with (median 109); declare at least 227, or split"
-
 	for _, tc := range []struct {
-		name       string
-		size       string
-		wantReason string
+		name string
+		size string
 	}{
-		{"a same-line 30", "One worker, one landing. Change: at most 30 added lines in 2 files.", wantReason},
-		{"a lead-in 30", "One worker, one landing. About 30 added lines.", wantReason},
-		{"a same-line 109", "One worker, one landing. Change: at most 109 added lines in 2 files.", ""},
-		{"a lead-in 109", "One worker, one landing. About 109 added lines.", ""},
+		{"a same-line 30", "One worker, one landing. Change: at most 30 added lines in 2 files."},
+		{"a lead-in 30", "One worker, one landing. About 30 added lines."},
+		{"a same-line 109", "One worker, one landing. Change: at most 109 added lines in 2 files."},
+		{"a lead-in 109", "One worker, one landing. About 109 added lines."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := sizedSpec(tc.size, "sp-minutes:9.8")
 			v := Lint(s, defaultTemplate())
-			got := ""
 			for _, r := range v.Refusals {
 				if r.Field == "size" {
-					got = r.Reason
+					t.Fatalf("size refusal = %q, want none (verdict %s)", r.Reason, v.Line(s.ID))
 				}
 			}
-			if got != tc.wantReason {
-				t.Fatalf("size refusal = %q, want %q (verdict %s)", got, tc.wantReason, v.Line(s.ID))
-			}
-			if tc.wantReason == "" && v.Route == RouteRefuse {
+			if v.Route == RouteRefuse {
 				t.Fatalf("Lint() refused %q, want no refusal", v.Line(s.ID))
 			}
 		})

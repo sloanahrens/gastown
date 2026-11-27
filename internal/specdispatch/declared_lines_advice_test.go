@@ -15,12 +15,11 @@ func declaredLinesSpec(size string, labels ...string) Spec {
 	}
 }
 
-// TestDeclaredLinesAdvice pins the advisory: a bead declaring fewer added lines
-// than its band advises gets one line naming the band's numbers and the
-// suggested minimum; a declaration at Advise, a missing label, a missing or
-// unparsable Change line, and minutes outside the table get none. A
-// declaration below Refuse is refused instead, so it gets no advice line
-// (gt-vb9pi9); 67 is the band's median at 8 minutes.
+// TestDeclaredLinesAdvice pins the advisory (gt-82g9zr): a bead declaring fewer
+// added lines than its band's median gets one line naming the median and the
+// refusal gt done applies, twice the median; a declaration at or above the
+// median, a missing label, a missing or unparsable Change line, and minutes
+// outside the table get none. The median is 109 at 9.8 minutes and 67 at 8.
 func TestDeclaredLinesAdvice(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -29,14 +28,17 @@ func TestDeclaredLinesAdvice(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{"67 declared at 8 minutes", "Change: at most 67 added lines.", []string{"sp-minutes:8"},
-			"the Change line declares 67 added lines, but beads estimated at 8.0 minutes landed with a median of 67 (p75 119, p90 236) and the gate refuses past twice the declared number: declare at least 118, or split"},
-		{"35 declared below the median at 8 minutes", "Change: at most 35 added lines.", []string{"sp-minutes:8"}, ""},
-		{"120 declared at 8 minutes", "Change: at most 120 added lines.", []string{"sp-minutes:8"}, ""},
-		{"no label", "Change: at most 35 added lines.", nil, ""},
-		{"no change line", "one worker, one landing.", []string{"sp-minutes:8"}, ""},
-		{"unparsable change line", "Change: lots of lines.", []string{"sp-minutes:8"}, ""},
-		{"minutes outside the table", "Change: at most 35 added lines.", []string{"sp-minutes:17"}, ""},
+		{"30 declared at 9.8 minutes", "Change: at most 30 added lines.", []string{"sp-minutes:9.8"},
+			"the Change line declares 30 added lines; beads estimated at 9.8 minutes landed with a median of 109: this is advice, declare the lines you count; gt done refuses past 218 added lines"},
+		{"35 declared at 8 minutes", "Change: at most 35 added lines.", []string{"sp-minutes:8"},
+			"the Change line declares 35 added lines; beads estimated at 8.0 minutes landed with a median of 67: this is advice, declare the lines you count; gt done refuses past 134 added lines"},
+		{"67 declared at the median at 8 minutes", "Change: at most 67 added lines.", []string{"sp-minutes:8"}, ""},
+		{"109 declared at the median at 9.8 minutes", "Change: at most 109 added lines.", []string{"sp-minutes:9.8"}, ""},
+		{"227 declared at 9.8 minutes", "Change: at most 227 added lines.", []string{"sp-minutes:9.8"}, ""},
+		{"no label", "Change: at most 30 added lines.", nil, ""},
+		{"no change line", "one worker, one landing.", []string{"sp-minutes:9.8"}, ""},
+		{"unparsable change line", "Change: lots of lines.", []string{"sp-minutes:9.8"}, ""},
+		{"minutes outside the table", "Change: at most 30 added lines.", []string{"sp-minutes:17"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
