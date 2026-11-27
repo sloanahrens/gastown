@@ -2043,6 +2043,27 @@ func (l *Lander) withGitMu(fn func() error) error {
 	return fn()
 }
 
+// WithGitLock runs fn with the lander's git lock held, releasing it on every
+// return path including a panic's unwind. A caller whose own fetch writes a
+// ref the landing's fetch writes — the author-seat refresh of a seat worktree
+// linked to the rig's shared repository — runs here rather than beside the
+// landing (gt-vwfzey). Not reentrant: a caller already holding the lock must
+// not call this, or it deadlocks.
+func (l *Lander) WithGitLock(fn func() error) error {
+	return l.withGitMu(fn)
+}
+
+// GitLockHeld reports whether a git call holds the lander's git lock, for a
+// caller's test. It takes the lock to answer, so production must not use it
+// to decide whether to take the lock.
+func (l *Lander) GitLockHeld() bool {
+	if l.gitMu.TryLock() {
+		l.gitMu.Unlock()
+		return false
+	}
+	return true
+}
+
 func (l *Lander) fetchTarget(g Repo, target string) error {
 	remote := l.remote()
 	return g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, remote, target), fetchTimeout)
