@@ -5992,6 +5992,74 @@ func TestTickEffQuietSecondTickEmptyRig(t *testing.T) {
 	}
 }
 
+// TestTickEffQuietSecondTickLiveRig: over the memory the first tick's own reads
+// fill, a second tick built as the dispatcher builds its board — a fresh closure
+// per tick — reads a rig whose ready board listed a bead again. The first tick
+// reads the rig once and records the bead it listed; a read that listed a bead is
+// not a quiet read, so the second, over the same held hashes and a minute later,
+// reads it once more (gt-5tm8k0). The rig whose board listed nothing is still
+// read once: its empty answer keeps it quiet.
+func TestTickEffQuietSecondTickLiveRig(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	store := &sqlChildrenClient{records: [][]string{{"be_head", "be_working", "gt_head", "gt_working"}, {"b1", "b2", "g1", "g2"}}}
+	var mu sync.Mutex
+	ready := map[string]int{}
+	runTick := func(at time.Time) {
+		board := specTickBoard(specTickBoardDeps{
+			townRoot:    town,
+			maxPriority: 2,
+			reads:       newSpecTickReads(),
+			ready: func(rigPath string) ([]*beads.Issue, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				rig := filepath.Base(rigPath)
+				ready[rig]++
+				if rig == "gastown" {
+					// A ready bead above the pick ceiling: listed on the board,
+					// no candidate of this tick.
+					return []*beads.Issue{{ID: "gt-live", Title: "a bead waiting for a seat", Type: "task", Status: "open", Priority: 9}}, nil
+				}
+				return nil, nil
+			},
+			rigStatus: func(string, string) (bool, string) { return false, "" },
+			heads: specTickHeadsHold(town, []string{"beads", "gastown"},
+				slingStores{pinned: func(string) slingStore { return store }}, func(string, ...any) {}),
+			memory:      memory,
+			now:         func() time.Time { return at },
+			detailStore: func(string) beads.Client { return nil },
+		})
+		if got := board(nil, nil, nil); len(got.Errors) != 0 {
+			t.Fatalf("board read at %v: Errors = %v, want none", at, got.Errors)
+		}
+	}
+	reads := func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(ready))
+		for rig, n := range ready {
+			out[rig] = n
+		}
+		return out
+	}
+
+	runTick(now)
+	if got := reads()["gastown"]; got != 1 {
+		t.Fatalf("the first tick read gastown %d time(s), want 1", got)
+	}
+
+	runTick(now.Add(time.Minute))
+	got := reads()
+	if got["gastown"] != 2 {
+		t.Errorf("gastown, whose ready board listed a bead, got %d ready read(s) over two ticks, want 2: a read that listed a bead keeps the rig from reading quiet (reads = %v)", got["gastown"], got)
+	}
+	if got["beads"] != 1 {
+		t.Errorf("the rig beads, whose ready board listed nothing, got %d ready read(s) over two ticks, want 1 (reads = %v)", got["beads"], got)
+	}
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
