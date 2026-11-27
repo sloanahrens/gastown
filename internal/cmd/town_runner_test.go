@@ -1485,7 +1485,7 @@ func TestTownRunnerRollRefusesAFlagItCannotRead(t *testing.T) {
 			return "", nil
 		}
 
-		err := runTownRunnerRollIn(rollFlagsCmd(name), findTown)
+		err := runTownRunnerRollIn(rollFlagsCmd(name), findTown, adminCheckGetenv(nil))
 
 		if err == nil || !strings.Contains(err.Error(), "reading --"+name) {
 			t.Errorf("--%s missing: error = %v, want it to name reading --%s", name, err, name)
@@ -1500,12 +1500,60 @@ func TestTownRunnerRollRefusesWhenTheTownIsNotFound(t *testing.T) {
 	cmd.SetOut(out)
 	findTown := func() (string, error) { return "", errors.New("no town above the working directory") }
 
-	err := runTownRunnerRollIn(cmd, findTown)
+	err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(nil))
 
 	if err == nil || !strings.Contains(err.Error(), "finding the town root") {
 		t.Fatalf("error = %v, want it to name finding the town root", err)
 	}
 	if out.Len() != 0 {
 		t.Errorf("the roll printed %q before refusing", out.String())
+	}
+}
+
+// TestTownRunnerRollRefusesInsideAPod: a real roll in the daemon pod refuses
+// before it reads the town or takes the hold.
+func TestTownRunnerRollRefusesInsideAPod(t *testing.T) {
+	t.Parallel()
+	out := &bytes.Buffer{}
+	cmd := rollFlagsCmd("")
+	cmd.SetOut(out)
+	findTown := func() (string, error) {
+		t.Error("the town was looked up although the roll refuses inside a pod")
+		return "", nil
+	}
+	err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(map[string]string{podEnv: "10.20.30.40"}))
+	if err == nil || out.Len() != 0 {
+		t.Fatalf("a real roll in a pod: error = %v, output = %q, want a refusal that prints nothing", err, out.String())
+	}
+	for _, want := range []string{podEnv, "landing hold", "write the runner", "on the Mac", "make build, then ./gt town runner roll"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to hold %q", err, want)
+		}
+	}
+}
+
+// TestTownRunnerRollLooksUpTheTownOutsideTheRefusal: the pod refusal covers
+// only a real roll, so --dry-run in a pod and a real roll outside a pod look
+// the town up; the error is the lookup's own.
+func TestTownRunnerRollLooksUpTheTownOutsideTheRefusal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, dryRun, pod string }{
+		{"dry run in a pod", "true", "10.20.30.40"},
+		{"real roll outside a pod", "false", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := rollFlagsCmd("")
+			if err := cmd.Flags().Set("dry-run", tc.dryRun); err != nil {
+				t.Fatalf("setting --dry-run: %v", err)
+			}
+			findTown := func() (string, error) { return "", errors.New("no town above the working directory") }
+
+			err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(map[string]string{podEnv: tc.pod}))
+
+			if err == nil || !strings.Contains(err.Error(), "finding the town root") {
+				t.Fatalf("error = %v, want the town lookup to have run and failed", err)
+			}
+		})
 	}
 }

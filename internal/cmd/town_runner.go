@@ -351,6 +351,10 @@ var townRunnerRollCmd = &cobra.Command{
 prints the steps, their bounds and their order, then the runner drift compare's
 lines against the live cluster, and takes no hold and writes nothing.
 
+A real roll refuses inside a pod, where KUBERNETES_SERVICE_HOST is set: the
+pod's account may not take the hold or write the runner, so build the commit to
+be applied and run it on the Mac. --dry-run runs anywhere.
+
 Once the hold store and the two waits are wired, a roll releases the hold on
 every exit path, including SIGINT and SIGTERM; until then a real roll refuses
 before it takes the hold. A second signal restores the default action and can end
@@ -383,12 +387,12 @@ func init() {
 // runTownRunnerRollCmd is what `gt town runner roll` runs, in the town the
 // working directory is in.
 func runTownRunnerRollCmd(cmd *cobra.Command, _ []string) error {
-	return runTownRunnerRollIn(cmd, workspace.FindFromCwdOrError)
+	return runTownRunnerRollIn(cmd, workspace.FindFromCwdOrError, os.Getenv)
 }
 
 // runTownRunnerRollIn reads the roll's flags from cmd and runs the roll in the
-// town findTown names.
-func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) error {
+// town findTown names. getenv is the environment the pod refusal reads.
+func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error), getenv func(string) string) error {
 	landingWait, err := cmd.Flags().GetDuration("landing-wait")
 	if err != nil {
 		return fmt.Errorf("reading --landing-wait: %w", err)
@@ -404,6 +408,9 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 	dryRun, err := cmd.Flags().GetBool("dry-run")
 	if err != nil {
 		return fmt.Errorf("reading --dry-run: %w", err)
+	}
+	if !dryRun && getenv(podEnv) != "" {
+		return fmt.Errorf("gt town runner roll refuses inside a pod, where %s is set: the daemon pod's account may not take the landing hold or write the runner, so build the commit to be applied and run it on the Mac instead: make build, then ./gt town runner roll", podEnv)
 	}
 	townRoot, err := findTown()
 	if err != nil {
