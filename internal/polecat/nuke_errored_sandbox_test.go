@@ -350,10 +350,11 @@ func TestNukeErroredSandboxNoRecordKeepsUnprovenWork(t *testing.T) {
 	}
 }
 
-// TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps: with no record and no
-// gateway the nuke can name, nothing is deleted and the reason is logged. The
-// agent bead that names the seat's agent is gone, or the seat config cannot be
-// read, so no gateway is named and no gateway is asked.
+// TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps: with no record, a seat
+// whose agent bead is gone names no seat to delete, so every gateway the seat
+// config names is asked what it holds and the answer is logged; a seat config
+// that cannot be read names no gateway at all and logs that. Either way nothing
+// is deleted (gt-xo4p78).
 func TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -362,7 +363,7 @@ func TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps(t *testing.T) {
 		settings     string
 		reason       string
 	}{
-		{name: "agent_bead_gone", agentMissing: true, settings: nukeSandboxSettings, reason: "no gateway is named, its agent bead is gone"},
+		{name: "agent_bead_gone", agentMissing: true, settings: nukeSandboxSettings, reason: `gateway "k8s" holds sandbox`},
 		{name: "settings_unreadable", settings: "{", reason: "no gateway is named, the town settings cannot be read"},
 	}
 	for _, tt := range tests {
