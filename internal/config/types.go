@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1867,8 +1868,13 @@ type SandboxProfile struct {
 	Memory           string   `json:"memory,omitempty"`       // e.g. "8Gi"
 	ControlPlaneHost string   `json:"control_plane_host"`     // default "host.docker.internal"
 	ForgejoHost      string   `json:"forgejo_host,omitempty"` // the sandbox's Forgejo host; "" = ControlPlaneHost
-	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
-	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
+	// ForgejoPerSeat asks the sandbox create request to attach the seat's own
+	// forgejo-seat-<polecat> provider in place of forgejo-polecat (gt-qxgxom;
+	// the swap lands with gt-9x9wv8). Validate requires providers to list
+	// forgejo-polecat.
+	ForgejoPerSeat bool   `json:"forgejo_per_seat,omitempty"`
+	CacheVolume    string `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
+	Driver         string `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
 	// EndedHoldSeconds is how long the sandbox stays up after the agent's
 	// session ends, so the daemon copies the seat's transcripts out before it
 	// deletes the sandbox. Nil is DefaultSandboxEndedHoldSeconds. Read it through
@@ -1939,6 +1945,10 @@ const (
 	SandboxBeadAccessFiles = "files"
 )
 
+// forgejoPolecatProvider is the gateway provider profile that binds Forgejo
+// for a polecat sandbox; a profile with ForgejoPerSeat must list it (gt-qxgxom).
+const forgejoPolecatProvider = "forgejo-polecat"
+
 // defaultSandboxKubernetesNamespace is the namespace the OpenShell chart creates
 // sandbox pods in, used when a kubernetes profile names no KubernetesNamespace.
 // Sandbox pods are named default--<seat> and live in namespace openshell: the
@@ -1977,8 +1987,9 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 // profile by its key name in TownSettings.Sandboxes. Image, Policy and Gateway
 // are required; Policy must stay inside the rig repo root (relative, no ".."
 // escape); each provider must be named; CPU and Memory, when set, must be k8s
-// quantities; ForgejoHost, when set, must be a bare host name; BeadAccess, when
-// set, is dolt or files; Driver, when set, is docker or kubernetes, and a
+// quantities; ForgejoHost, when set, must be a bare host name; ForgejoPerSeat,
+// when set, needs forgejo-polecat among providers; BeadAccess, when set, is
+// dolt or files; Driver, when set, is docker or kubernetes, and a
 // kubernetes profile sets no CacheVolume (a Docker volume does not exist there;
 // a k8s cache is a separate design), and a kubernetes profile may name a
 // KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
@@ -2010,6 +2021,9 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	if p.ForgejoHost != "" && !ValidSandboxForgejoHost(p.ForgejoHost) {
 		return fmt.Errorf("sandboxes.%s.forgejo_host %q: want a bare host name: letters, digits, dots and hyphens, with no port, IPv6 literal or URL", name, p.ForgejoHost)
+	}
+	if p.ForgejoPerSeat && !slices.Contains(p.Providers, forgejoPolecatProvider) {
+		return fmt.Errorf("sandboxes.%s.forgejo_per_seat: requires the %s provider in providers", name, forgejoPolecatProvider)
 	}
 	switch p.BeadAccess {
 	case "", SandboxBeadAccessDolt, SandboxBeadAccessFiles:
