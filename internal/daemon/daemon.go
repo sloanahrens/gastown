@@ -2106,6 +2106,9 @@ func New(config *Config) (*Daemon, error) {
 		podMode:       sweeprunner.InClusterHost(os.Getenv),
 		envShadowed:   envShadowed,
 	}
+	// The drift patrol waits clusterDriftStartDelay after this start before its
+	// first run (cluster_drift_patrol.go, gt-myyr6e).
+	d.clusterDriftCache.started = d.clk().Now()
 
 	// A rig whose docked/parked status cannot be read is treated as not
 	// operational, which suppresses auto-start for that rig. Escalate it, so

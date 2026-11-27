@@ -24,6 +24,9 @@ type clusterDriftCache struct {
 	at  time.Time
 	res clusterDriftResult
 	err error
+	// started is when the daemon started, set once in New before the daemon
+	// runs, so the patrol can wait clusterDriftStartDelay after it (gt-myyr6e).
+	started time.Time
 }
 
 // Answer returns the compare's answer for now, running run only when no answer
