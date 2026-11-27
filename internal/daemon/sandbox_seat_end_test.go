@@ -1202,6 +1202,62 @@ func TestTakeoverSeatEndOffersTheHolderNoteSeat(t *testing.T) {
 	}
 }
 
+// A holder note only names the address a seat assignment would name, so the
+// seat it points at is offered the end only when that address is this rig's
+// and its agent bead still names the landed bead: another rig's note names no
+// seat here, and a re-hooked or unreadable agent bead is refused with the
+// reason it gave (gt-bpwn45).
+func TestTakeoverSeatEndDoesNotOfferAnUnfitHolder(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/owl/" + endBead
+	const cheedoBranch = "polecat/cheedo/" + endBead + "+x1"
+	tests := []struct {
+		name    string
+		holder  string
+		seed    func(t *testing.T, d *Daemon, agents *beadsfake.Fake)
+		wantLog string
+	}{
+		// The note names another rig's seat whose name also resolves in this
+		// rig, so only the note's rig keeps that seat from being offered.
+		{"a holder of another rig", "otherrig/polecats/cheedo", func(t *testing.T, d *Daemon, agents *beadsfake.Fake) {
+			seedSeatAgent(t, d, agents, "cheedo", beads.AgentFields{HookBead: endBead, Branch: cheedoBranch})
+		}, "name no polecat seat"},
+		{"a holder whose agent bead hooks other work", endRig + "/polecats/cheedo", func(t *testing.T, d *Daemon, agents *beadsfake.Fake) {
+			seedSeatAgent(t, d, agents, "cheedo", beads.AgentFields{HookBead: "gt-other1", Branch: "polecat/cheedo/gt-other1+x1"})
+		}, `its agent bead hooks "gt-other1"`},
+		{"a holder whose agent bead cannot be read", endRig + "/polecats/cheedo", func(_ *testing.T, _ *Daemon, agents *beadsfake.Fake) {
+			agents.FailWith("show", errors.New("bd show: store unavailable"))
+		}, "cannot read its agent bead"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			bead := &beads.Issue{
+				ID:       endBead,
+				Assignee: "town/crew/owl",
+				Notes: strings.Join([]string{
+					land.FormatReadyNote(land.Work{Branch: branch, Head: head, Target: "main", Worker: "town/crew/owl"}),
+					land.FormatHolderSeatNote(tt.holder),
+				}, "\n\n"),
+			}
+			d, got, agents := seatEndCalls(t, bead, &logs)
+			tt.seed(t, d, agents)
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/owl"})
+
+			if len(*got) != 0 {
+				t.Errorf("a holder note naming %s was offered the end: %+v", tt.holder, *got)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want one line naming why the holder is not offered: %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
 // A seat that ran gt done has its hook cleared and its last source issue left
 // behind, so an assignee-only name is also the seat that built the landed bead
 // when the hook is empty and the last source issue is the bead. Any other
