@@ -1,6 +1,7 @@
 package testdb
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,14 +85,6 @@ func TestOneDefinition(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	self := filepath.Join(root, "internal", "testdb")
-	// A prefix counts where a name would start: at the start of the literal
-	// or after a non-identifier byte (space, |, (, ^, quote), so a word that
-	// merely contains one, like "beads_types", is not a copy.
-	prefixUse := make([]*regexp.Regexp, len(prefixes))
-	for i, p := range prefixes {
-		prefixUse[i] = regexp.MustCompile(`(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(p))
-	}
-	fset := token.NewFileSet()
 	scanned := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -112,28 +106,19 @@ func TestOneDefinition(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		scanned++
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			v, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				return true
-			}
-			for i, p := range prefixes {
-				if prefixUse[i].MatchString(v) {
-					rel, _ := filepath.Rel(root, path)
-					t.Errorf("%s:%d: string literal %q names test-database prefix %q; use internal/testdb", rel, fset.Position(lit.Pos()).Line, v, p)
-				}
-			}
-			return true
-		})
+		uses, err := literalPrefixUses(path, src)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, u := range uses {
+			t.Errorf("%s:%d: string literal %q names test-database prefix %q; use internal/testdb", rel, u.Line, u.Literal, u.Prefix)
+		}
 		return nil
 	})
 	if err != nil {
@@ -141,6 +126,75 @@ func TestOneDefinition(t *testing.T) {
 	}
 	if err := emptyScanErr(scanned, root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// prefixUse is a line and the string literal that names a test-database prefix there.
+type prefixUse struct {
+	Line            int
+	Literal, Prefix string
+}
+
+// prefixAt matches a prefix where a name would start, so a longer word is not a copy.
+var prefixAt = func() []*regexp.Regexp {
+	re := make([]*regexp.Regexp, len(prefixes))
+	for i, p := range prefixes {
+		re[i] = regexp.MustCompile(`(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(p))
+	}
+	return re
+}()
+
+// literalPrefixUses returns every string literal in src that names a
+// test-database prefix, and the parse error if src does not parse. A source
+// holding no prefix returns unparsed, its syntax error left to the compile.
+func literalPrefixUses(name string, src []byte) ([]prefixUse, error) {
+	if !slices.ContainsFunc(prefixes, func(p string) bool { return bytes.Contains(src, []byte(p)) }) {
+		return nil, nil
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	var uses []prefixUse
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if v, perr := strconv.Unquote(lit.Value); perr == nil {
+			for i, re := range prefixAt {
+				if re.MatchString(v) {
+					uses = append(uses, prefixUse{fset.Position(lit.Pos()).Line, v, prefixes[i]})
+				}
+			}
+		}
+		return true
+	})
+	return uses, nil
+}
+
+func TestLiteralPrefixUses(t *testing.T) {
+	t.Parallel()
+	for _, p := range Prefixes() {
+		lit, src := p+"sample", []byte("package p\n\nconst Name = \""+p+"sample\"\n")
+		if uses, err := literalPrefixUses("f.go", src); err != nil || len(uses) != 1 || uses[0] != (prefixUse{3, lit, p}) {
+			t.Errorf("%q: literalPrefixUses = %v, %v; want one use on line 3", lit, uses, err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		src     string
+		wantErr bool
+	}{
+		{"prefix inside a longer word", "package p\n\nconst Name = \"x" + MintPrefix + "\"\n", false},
+		{"prefix in a comment", "package p\n\n// const Name = \"testdb_a\"\nconst Name = \"plain\"\n", false},
+		{"unparseable, no prefix", "package p\n\nfunc {\n", false},
+		{"unparseable, prefix", "package p\n\nconst Name = \"testdb_a\"\n\nfunc {\n", true},
+	} {
+		if uses, err := literalPrefixUses("f.go", []byte(tc.src)); (err != nil) != tc.wantErr || len(uses) != 0 {
+			t.Errorf("%s: literalPrefixUses = %v, %v; want no uses, error %v", tc.name, uses, err, tc.wantErr)
+		}
 	}
 }
 
