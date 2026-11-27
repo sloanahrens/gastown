@@ -61,7 +61,9 @@ func CreatorCites(description string) []string {
 // creatorCiteRefusals is the refusal each recorded cite earns. A cite the
 // description names with no state recorded is refused too: once the caller
 // records states, a cite it left unjudged would pass as clean. A spec with no
-// recorded states is judged as before.
+// recorded states is judged as before. A cite of the spec's own id passes in
+// both loops: a bead waits on nothing for the file it creates itself
+// (gt-qbav5c).
 func creatorCiteRefusals(s Spec) []Refusal {
 	if len(s.CreatorCites) == 0 {
 		return nil
@@ -70,11 +72,17 @@ func creatorCiteRefusals(s Spec) []Refusal {
 	recorded := make(map[string]bool, len(s.CreatorCites))
 	for _, c := range s.CreatorCites {
 		recorded[c.ID] = true
+		if c.ID == s.ID {
+			continue
+		}
 		if r, refused := c.judge(s.ID); refused {
 			out = append(out, r)
 		}
 	}
 	for _, id := range CreatorCites(s.Description) {
+		if id == s.ID {
+			continue
+		}
 		if !recorded[id] {
 			out = append(out, Refusal{Field: creatorField, Reason: fmt.Sprintf("creator cite %s has no recorded state, so it cannot be judged", id)})
 		}
