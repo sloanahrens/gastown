@@ -89,6 +89,10 @@ type Runner struct {
 	// Jobs is how many packages run at once. Zero or one runs them one at a
 	// time in list order; more runs them on that many workers (gt-0rtgc).
 	Jobs int
+	// Pooled starts every package on the pool, serial.txt packages included, so
+	// a tier that can run them beside others runs nothing alone (gt-edl2yv); a
+	// run of one job already starts every package one at a time.
+	Pooled bool
 	// Walls is the previous run's wall time per tier and package, keyed by
 	// TimingsKey. A run of more than one job starts the longest packages first;
 	// nil, or a package with no entry, keeps list order. A run of one job
@@ -286,7 +290,12 @@ func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task
 	}
 	// A serial package runs after the pool has drained, so it is the only child
 	// in flight while it runs (gt-0rtgc).
-	parallel, serial := splitSerial(startOrder(run, r.Walls, tier))
+	// A Pooled run starts it on the pool too (gt-edl2yv).
+	ordered := startOrder(run, r.Walls, tier)
+	parallel, serial := splitSerial(ordered)
+	if r.Pooled {
+		parallel, serial = ordered, nil
+	}
 	r.pool(tier, dir, prefix, args, parallel)
 	for _, t := range serial {
 		r.runOne(tier, dir, prefix, args, t)
