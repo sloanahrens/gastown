@@ -383,3 +383,69 @@ func TestSandboxTraceNilCountsAreNoOps(t *testing.T) {
 		t.Fatalf("nil trace Summary() = %q, want empty", got)
 	}
 }
+
+// failingWriter fails every write and counts them, to drive report's error path.
+type failingWriter struct {
+	count int
+	err   error
+}
+
+func (w *failingWriter) Write([]byte) (int, error) { w.count++; return 0, w.err }
+
+// Each phase is reported as it ends, not when the sling returns, so a sling
+// killed at its bound still leaves the phase times (gt-p97r7p). Phases before
+// ReportTo are not replayed, no writer keeps today's Summary, nil reports nothing.
+func TestSandboxTraceReportToWritesEachPhaseAsItEnds(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("before", func() error { clock.Advance(time.Second); return nil })
+	if got, want := trace.Summary(), "before 1s, total 1s"; got != want {
+		t.Fatalf("Summary() with no writer = %q, want %q: unchanged", got, want)
+	}
+	var log strings.Builder
+	trace.ReportTo(&log)
+	if log.String() != "" {
+		t.Fatalf("ReportTo replayed %q, want nothing", log.String())
+	}
+	trace.Phase("ready", func() error { clock.Advance(4 * time.Second); return nil })
+	if got, want := log.String(), "sling-phase: ready 4s\n"; got != want {
+		t.Fatalf("as ready ended log = %q, want %q", got, want)
+	}
+	clock.Advance(2 * time.Second)
+	trace.Mark("start")
+	if got, want := log.String(), "sling-phase: ready 4s\nsling-phase: start 2s\n"; got != want {
+		t.Fatalf("as start ended log = %q, want %q", got, want)
+	}
+	var nilTrace *SandboxTrace
+	nilTrace.ReportTo(&log)
+	nilTrace.Mark("ignored")
+	if got, want := log.String(), "sling-phase: ready 4s\nsling-phase: start 2s\n"; got != want {
+		t.Fatalf("nil trace log = %q, want %q", got, want)
+	}
+}
+
+// A failed write is named in Summary and stops later reports. A fresh writer
+// clears the failure, so a caller can retry with a repaired sink.
+func TestSandboxTraceReportToKeepsTheFirstFailureAndAFreshWriterClearsIt(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	refused := errors.New("terminal gone")
+	w := &failingWriter{err: refused}
+	trace.ReportTo(w)
+	trace.Phase("ready", func() error { clock.Advance(4 * time.Second); return nil })
+	trace.Mark("start")
+	if w.count != 1 {
+		t.Fatalf("writes = %d, want 1: a failed write stops later reports", w.count)
+	}
+	if got := trace.Summary(); !strings.HasSuffix(got, "phase report failed: "+refused.Error()) {
+		t.Fatalf("Summary() = %q, want it to end with the write failure", got)
+	}
+	var log strings.Builder
+	trace.ReportTo(&log)
+	trace.Phase("again", func() error { clock.Advance(time.Second); return nil })
+	if got, want := log.String(), "sling-phase: again 1s\n"; got != want {
+		t.Fatalf("after a fresh ReportTo log = %q, want %q", got, want)
+	}
+}

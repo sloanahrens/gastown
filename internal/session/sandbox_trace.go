@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -27,6 +28,9 @@ type SandboxTrace struct {
 	// charged only the calls since the record before it.
 	bdAt  int64
 	gitAt int64
+	// w and reportErr are set by ReportTo; reportErr is the first failed write.
+	w         io.Writer
+	reportErr error
 }
 
 type tracePhase struct {
@@ -73,6 +77,20 @@ func (t *SandboxTrace) Steps() func(name string) {
 		return nil
 	}
 	return t.Mark
+}
+
+// PhaseLinePrefix begins each line ReportTo writes as a phase ends.
+const PhaseLinePrefix = "sling-phase: "
+
+// ReportTo writes a line as each later phase ends, replacing any earlier
+// writer and clearing its failure; phases recorded before the call are not
+// replayed. A nil trace or a nil w reports nothing.
+func (t *SandboxTrace) ReportTo(w io.Writer) {
+	if t == nil {
+		return
+	}
+	t.w = w
+	t.reportErr = nil
 }
 
 // traceNoteMax is the most of a note the summary keeps. A note is text from
@@ -150,6 +168,17 @@ func (t *SandboxTrace) record(name string, from time.Time) {
 	})
 	t.bdAt, t.gitAt = bd, git
 	t.last = end
+	t.report(t.phases[len(t.phases)-1])
+}
+
+// report writes p unbuffered as it ends so a sling killed at its bound keeps
+// the line (gt-p97r7p). The first failure is kept and stops later writes, so
+// a broken writer is tried once and Summary names its loss.
+func (t *SandboxTrace) report(p tracePhase) {
+	if t.w == nil || t.reportErr != nil {
+		return
+	}
+	_, t.reportErr = fmt.Fprintf(t.w, "%s%s %s\n", PhaseLinePrefix, p.name, p.took.Round(time.Millisecond))
 }
 
 // Breakdown is a trace as numbers: the phases that were named, the time no
@@ -206,7 +235,8 @@ func (t *SandboxTrace) Breakdown() Breakdown {
 // after its duration as "[bd N, git M]", and a phase with none shows no field.
 // The time no phase named is reported as "other", so the phases always add up
 // to the total and a gap is visible rather than folded into a neighbor
-// (gt-7nctk). It is "" when no phase ran, which is how a sling that never
+// (gt-7nctk). A failed ReportTo write is named last as "phase report failed:
+// <error>". It is "" when no phase ran, which is how a sling that never
 // touched a sandbox is left out of the log.
 func (t *SandboxTrace) Summary() string {
 	if t == nil || len(t.phases) == 0 {
@@ -230,5 +260,8 @@ func (t *SandboxTrace) Summary() string {
 		parts = append(parts, fmt.Sprintf("other %s", rest.Round(time.Millisecond)))
 	}
 	parts = append(parts, fmt.Sprintf("total %s", total.Round(time.Millisecond)))
+	if t.reportErr != nil {
+		parts = append(parts, "phase report failed: "+t.reportErr.Error())
+	}
 	return strings.Join(parts, ", ")
 }
