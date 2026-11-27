@@ -103,3 +103,39 @@ func TestLintCreatorCite(t *testing.T) {
 		})
 	}
 }
+
+// TestLintCreatorCiteSelf: a bead waits on nothing for the file it creates
+// itself, so a cite of its own id passes in any recorded state (gt-qbav5c).
+func TestLintCreatorCiteSelf(t *testing.T) {
+	t.Parallel()
+	const self = "A thing exists, created by bead gt-self."
+	own := CreatorCite{ID: "gt-self", State: CreatorUnlinked}
+	tests := []struct {
+		name, goal string
+		cites      []CreatorCite
+		want       string
+	}{
+		{"own cite recorded unlinked passes", self, []CreatorCite{own}, ""},
+		{"own cite recorded unreadable passes", self, []CreatorCite{{ID: "gt-self", State: CreatorUnreadable}}, ""},
+		{"own cite with no state recorded passes", self, []CreatorCite{{ID: "gt-other", State: CreatorLanded}}, ""},
+		{"own cite and another unlinked refused, names only the other", "A thing exists, created by bead gt-self and created by bead gt-other.",
+			[]CreatorCite{own, {ID: "gt-other", State: CreatorUnlinked}}, "creator cite gt-other is open and not a blocker"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := creatorSpec(tc.cites...)
+			s.Description = strings.Replace(goodDescription, "A thing exists.", tc.goal, 1)
+			v := Lint(s, defaultTemplate())
+			if tc.want == "" {
+				if v.Route != RouteDispatch {
+					t.Fatalf("Route = %s, want %s: %s", v.Route, RouteDispatch, v.Line("gt-self"))
+				}
+				return
+			}
+			if len(v.Refusals) != 1 || !strings.Contains(v.Refusals[0].Reason, tc.want) {
+				t.Fatalf("refusals = %+v, want only %q", v.Refusals, tc.want)
+			}
+		})
+	}
+}
