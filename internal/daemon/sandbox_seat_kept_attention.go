@@ -111,6 +111,14 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 	return out, nil
 }
 
+// keptSeatReSlingWithholds reports whether reason is one a re-slung seat's
+// kept-seat item is withheld for: the record-does-not-say-stop reason and the
+// sandbox-not-confirmed-gone reason, each naming no fact about the seat's own
+// run. Every other reason keeps the seat raising (gt-xqa3hs).
+func keptSeatReSlingWithholds(reason string) bool {
+	return reason == retiredRecordKeepReason || reason == sandboxNotGoneReason
+}
+
 // keptSeatReSlung reports whether the polecat's agent bead now hooks a bead
 // other than the one the seat's record names, and that bead is still live work —
 // open, hooked or in progress: the shape of a seat slung new work after its
