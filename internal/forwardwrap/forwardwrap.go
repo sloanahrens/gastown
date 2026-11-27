@@ -9,7 +9,10 @@ package forwardwrap
 // It forwards the port to the first Running pod labeled
 // app.kubernetes.io/name=<service> in the background, waits for the forward to
 // end, then exits 1, so launchd's KeepAlive restarts it to resolve a new pod.
+// When the get finds no pod, it names the selector on stderr and exits 1
+// before starting a forward.
 const Script = `pod=$("$1" --context="$2" --namespace="$3" get pods -l "app.kubernetes.io/name=$4" --field-selector=status.phase=Running -o name | head -n 1)
+[ -n "$pod" ] || { echo "no Running pod for app.kubernetes.io/name=$4" >&2; exit 1; }
 "$1" --context="$2" --namespace="$3" port-forward --address="$5" "$pod" "$6":"$6" &
 p=$!
 wait "$p"
