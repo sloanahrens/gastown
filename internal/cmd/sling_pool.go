@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -727,7 +728,17 @@ func poolDispositionFor(townRoot string) polecatDispositionFunc {
 // scheduler.max_polecats (polecat_capacity.go) already trust over a session's
 // mere presence, so a session that outlives its polecat's done+MR-open state
 // never counts twice against two different capacity models.
+//
+// A session dropped because its GT_ROLE cannot be read is named on stderr with
+// the error, so a count short of the seat inventory is explained (gt-mhanbc).
 func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, disposition polecatDispositionFunc, now time.Time) ([]poolSession, error) {
+	return listPolecatSessionsTo(t, seatAgent, disposition, now, os.Stderr)
+}
+
+// listPolecatSessionsTo is listPolecatSessionsWith writing one warning to warn
+// for every session it leaves out because its GT_ROLE read failed; a role that
+// reads and is not a polecat's is dropped silently.
+func listPolecatSessionsTo(t sessionLister, seatAgent poolSeatAgentFunc, disposition polecatDispositionFunc, now time.Time, warn io.Writer) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
@@ -735,7 +746,11 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 	var out []poolSession
 	for _, n := range names {
 		role, err := t.GetEnvironment(n, "GT_ROLE")
-		if err != nil || !strings.Contains(role, "/polecats/") {
+		if err != nil {
+			fmt.Fprintf(warn, "warning: session %s's GT_ROLE cannot be read, leaving it out of the live read: %v\n", n, err)
+			continue
+		}
+		if !strings.Contains(role, "/polecats/") {
 			continue
 		}
 		created, err := t.GetSessionCreatedTime(n)
