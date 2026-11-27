@@ -597,3 +597,30 @@ func TestKeptSeatAttentionIsInTheCollectorSet(t *testing.T) {
 		t.Errorf("kept(prev) = %+v, want only the kept-seat item", got)
 	}
 }
+
+// A re-slung seat withholds its kept-seat item only for the two reasons that
+// say nothing is waiting on the seat's own run; every other reason names a fact
+// about that run, so the seat still raises (gt-xqa3hs).
+func TestKeptSeatReSlingWithholds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		reason string
+		want   bool
+	}{
+		{name: "the retired record", reason: retiredRecordKeepReason, want: true},
+		{name: "a sandbox not confirmed gone", reason: sandboxNotGoneReason, want: true},
+		{name: "no reason", reason: "", want: false},
+		{name: "the seat works its own branch", reason: seatWorksKeepPrefix + "gt-new1", want: false},
+		{name: "a gateway with no answer", reason: gatewayNoAnswerKeepReason(keptSeatAttentionNow), want: false},
+		{name: "rules still to ask", reason: rulesPendingReason, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := keptSeatReSlingWithholds(tt.reason); got != tt.want {
+				t.Errorf("keptSeatReSlingWithholds(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
