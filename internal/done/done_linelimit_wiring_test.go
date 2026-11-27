@@ -226,3 +226,28 @@ func TestLineLimitWiringNoLimitContinues(t *testing.T) {
 		t.Errorf("output %q does not carry the no-limit line", out)
 	}
 }
+
+// TestLineLimitWiringReadsTheBandFloor pins the labels wiring: the source
+// bead's sp-minutes:9.5 label lifts the limit to its 109-line band median, so
+// 200 added lines against 70 declared pass; a check that never sees the labels
+// refuses past twice 70 (gt-3mcn7b).
+func TestLineLimitWiringReadsTheBandFloor(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.r.sessionBackend = backendOpenShell
+	h.r.opts = doneOptions{polecatEnv: true, allowReverts: true, allowThrowawayPaths: true}
+	h.r.out = new(bytes.Buffer)
+	h.r.g = git.NewGitWithExec(t.TempDir(), func(c git.ExecCall) (string, string, error) {
+		if args := c.Args(); len(args) >= 2 && args[0] == "diff" && args[1] == "--numstat" {
+			return "200\t0\tinternal/done/done.go\n", "", nil
+		}
+		return "", "", nil
+	})
+	sub := doneSubmission{sourceIssue: &beads.Issue{
+		Description: "Change: at most 70 added lines in 2 files.",
+		Labels:      []string{"sp-minutes:9.5"},
+	}}
+	if err := checkBranchForSubmit(h.r, sub, "origin/main"); err != nil {
+		t.Fatalf("checkBranchForSubmit refused 200 added lines against the 109-line band floor: %v", err)
+	}
+}
