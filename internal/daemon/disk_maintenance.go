@@ -607,7 +607,11 @@ func (d *Daemon) runDiskMaintenance() {
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
-		return // a pass is still running
+		// A due trim runs on its own pass; a tick with no trim due starts nothing (gt-vek8mp).
+		if due.cacheTrim {
+			d.runDiskMaintenanceTrim(mode, due, "a target pass is still running", now)
+		}
+		return
 	}
 	s.dispatch(func() {
 		defer d.diskMaintRunning.Store(false)
@@ -669,7 +673,7 @@ func (d *Daemon) diskMaintenanceAlertOnlyPass() {
 	}
 }
 
-// runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
+// runDiskMaintenanceTrim is the tick's case with a pass in flight: the cache trim may run, the
 // targets may not. The trim is off the Dolt window's quiet guard so continuous
 // landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
 // Everything else the tick found keeps the guard: it stays due, and the next

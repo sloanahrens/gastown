@@ -579,6 +579,50 @@ func TestDiskMaintTargetsStillWaitForAQuietTown(t *testing.T) {
 	}
 }
 
+// TestDiskMaintTargetPassInFlightRunsTheDueTrim: a target pass held in flight
+// does not hold off a trim that falls due again (gt-vek8mp).
+func TestDiskMaintTargetPassInFlightRunsTheDueTrim(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	d.diskMaintSchedule.record(diskMaintCacheTrimName, diskMaintNow) // the trim ran at 04:45
+	var pending []func()
+	d.diskMaint.dispatch = func(fn func()) { pending = append(pending, fn) }
+	now := diskMaintNow.Add(24 * time.Hour) // the next day's window
+	d.diskMaint.now = func() time.Time { return now }
+	d.runDiskMaintenance()         // the day's combined pass is dispatched and held
+	now = now.Add(5 * time.Minute) // the trim is due again while that pass runs
+	d.runDiskMaintenance()
+	if len(pending) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the trim's own pass too", len(pending))
+	}
+	pending[1]() // the trim pass runs
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times, want 1", *trims)
+	}
+	pending[0]() // the target pass finishes after the trim
+	if *trims != 1 {
+		t.Errorf("trimmed %d times, want 1: the target pass trims nothing twice", *trims)
+	}
+}
+
+// TestDiskMaintTargetPassInFlightWithNoTrimDueStartsNothing: with no trim due,
+// a pass in flight starts nothing (gt-vek8mp).
+func TestDiskMaintTargetPassInFlightWithNoTrimDueStartsNothing(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	d.patrolConfig.Patrols.DiskMaintenance.CacheTrimInterval = "1000h"
+	d.diskMaintSchedule.record(diskMaintCacheTrimName, diskMaintNow)
+	var pending []func()
+	d.diskMaint.dispatch = func(fn func()) { pending = append(pending, fn) }
+	d.runDiskMaintenance() // 04:45: the day's combined pass is dispatched and held
+	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(5 * time.Minute) }
+	d.runDiskMaintenance() // the pass is still in flight, and no trim is due
+	if len(pending) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: nothing is due", len(pending))
+	}
+}
+
 // diskMaintAlertOnly is a patrol on a busy town with nothing due: the clock is
 // outside the daily window and the cache trim's interval is spent, so the only
 // work a tick can find is the alert-only pass. now is the test's clock.
