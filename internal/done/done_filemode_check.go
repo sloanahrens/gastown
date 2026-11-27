@@ -4,12 +4,48 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/taskfile"
 )
+
+// refuseUntickedSeatDir is the seat-file check's production entry: taskDir holds
+// MODE and TASK.md, the ticks in the outbox beside it. Dolt mode reads neither
+// file and returns nil; an unreadable marker refuses (gt-fvjfsr).
+func refuseUntickedSeatDir(taskDir string) error {
+	files, err := taskfile.ReadFileMode(taskDir)
+	if err != nil {
+		return fmt.Errorf("cannot submit: this seat's bead access is unknown, so its acceptance boxes are unknown: %w", err)
+	}
+	if !files {
+		return nil
+	}
+	return refuseUntickedSeatBoxes(seatDirFiles{
+		task:   filepath.Join(taskDir, "TASK.md"),
+		result: filepath.Join(filepath.Dir(taskDir), filepath.Base(outbox.Dir), outbox.ResultFile),
+	})
+}
+
+// seatDirFiles is file mode's TASK.md and outbox result.json (internal/cmd's fileOutbox).
+type seatDirFiles struct{ task, result string }
+
+func (d seatDirFiles) TaskText() (string, error) {
+	data, err := os.ReadFile(d.task)
+	return string(data), err
+}
+
+func (d seatDirFiles) ResultJSON() ([]byte, error) {
+	data, err := os.ReadFile(d.result)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil // a seat that wrote no result yet has no ticks: every box refuses
+	}
+	return data, err
+}
 
 // seatFileReader is the seat's two input files as this check reads them. The
 // caller injects the reader, so the check opens no file and a test can fail a read.
