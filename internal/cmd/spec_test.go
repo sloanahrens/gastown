@@ -5880,6 +5880,64 @@ func TestTickEffQuietWiringHashFailure(t *testing.T) {
 	}
 }
 
+// TestTickEffQuietRecordsHeldHashes: the board closure records each rig's read
+// with the hashes the tick held before any rig was read, not a fresh read after
+// the rig's ready read. The hashes store answers differently on its second read,
+// so a closure that fetched the hashes again after a rig was read would store the
+// second answer; the memory must hold the first, and the change shows on the next
+// tick (gt-909myi).
+func TestTickEffQuietRecordsHeldHashes(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	first := [][]string{{"be_head", "be_working", "gt_head", "gt_working"}, {"b1", "b2", "g1", "g2"}}
+	second := [][]string{{"be_head", "be_working", "gt_head", "gt_working"}, {"b9", "b8", "g9", "g8"}}
+	reads := 0
+	store := sqlReaderFunc(func(beadsql.Query) ([][]string, error) {
+		reads++
+		if reads == 1 {
+			return first, nil
+		}
+		return second, nil
+	})
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    town,
+		maxPriority: 2,
+		reads:       newSpecTickReads(),
+		ready:       func(string) ([]*beads.Issue, error) { return nil, nil },
+		rigStatus:   func(string, string) (bool, string) { return false, "" },
+		heads: func() map[string]beadsql.RigHash {
+			return specTickHeads(town, []string{"beads", "gastown"}, store, func(string, ...any) {})
+		},
+		memory:      memory,
+		now:         func() time.Time { return now },
+		detailStore: func(string) beads.Client { return nil },
+	})
+
+	if got := board(nil, nil, nil); len(got.Errors) != 0 {
+		t.Fatalf("board read: Errors = %v, want none", got.Errors)
+	}
+
+	// Both rigs are recorded with the hashes the tick held: the first answer.
+	want := map[string]specRigRead{
+		"gastown": {Head: "g1", Working: "g2", At: now},
+		"beads":   {Head: "b1", Working: "b2", At: now},
+	}
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	for rig, w := range want {
+		got, ok := memory.rigs[rig]
+		if !ok {
+			t.Errorf("%s: no read recorded, want the held hashes", rig)
+			continue
+		}
+		if got != w {
+			t.Errorf("%s recorded %+v, want %+v: the hashes the tick held, not a fresh read", rig, got, w)
+		}
+	}
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
