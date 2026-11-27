@@ -58,6 +58,10 @@ const (
 	RuleHostMemLow       = "host.mem_low"
 	RuleHostForgejoDown  = "host.forgejo_down"
 	RuleHostProbe        = "host.probe_failed"
+	// RuleHostGoCacheTrim is the Go cache duty's rule: the last completed trim
+	// is stale or its newest run failed, so the freshness arithmetic is the
+	// alarm (gt-a0sewj).
+	RuleHostGoCacheTrim = "host.gocache_trim_stale"
 	// RuleTierSweepStuck is the tier sweep's own key: the guard's cycle, not a
 	// tier's verdict (gt-gg9hv.37).
 	RuleTierSweepStuck = "tier_sweep.stuck"
@@ -326,6 +330,9 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:     flagsWake,
 	RuleHostNodeDiskCrit: flagsWake,
 	RuleHostMemLow:       flagsWake,
+	// A stale or failed trim costs the next go command a full trim, not the
+	// town: the queue records it for the overseer's next look (gt-a0sewj).
+	RuleHostGoCacheTrim: flagsAsk,
 	// A Forgejo that does not answer its health endpoint is every landing
 	// stopped: the candidate gate waits on a CI verdict that cannot come.
 	RuleHostForgejoDown: flagsWake,
@@ -597,6 +604,7 @@ var kindRules = map[Kind]string{
 	KindOverrunStopped:                RuleOverrunStopped,
 	KindScheduledGate:                 RuleScheduledGate,
 	KindHostMem:                       RuleHostMemLow,
+	KindHostGoCacheTrim:               RuleHostGoCacheTrim,
 	KindHostForgejo:                   RuleHostForgejoDown,
 	KindConfigEnvShadowed:             RuleConfigEnvShadowed,
 	KindConfigParseFailed:             RuleConfigParseFailed,

@@ -80,6 +80,10 @@ const (
 	KindHostNodeDisk Kind = "host-node-disk"
 	// KindHostMem: the host's free memory is low.
 	KindHostMem Kind = "host-mem"
+	// KindHostGoCacheTrim: the host's Go cache trim has failed or has not
+	// completed for over 12 hours, so the next go command may pay a full trim
+	// (gt-a0sewj).
+	KindHostGoCacheTrim Kind = "host-gocache-trim"
 	// KindHostForgejo: the town's Forgejo has not answered its health endpoint
 	// for several heartbeats in a row (gt-gg9hv.36).
 	KindHostForgejo Kind = "host-forgejo"
@@ -284,7 +288,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck, KindTierSweepGuardUnreadable,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostForgejo, KindHostProbe,
+		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostGoCacheTrim, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,

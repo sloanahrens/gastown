@@ -50,6 +50,9 @@ var ruleOwners = map[string]Owner{
 	RuleHostMemLow:       OwnerOperator,
 	RuleHostForgejoDown:  OwnerOperator,
 	RuleHostProbe:        OwnerOperator,
+	// The Go cache trim is the town's own maintenance to restart or repair
+	// before a person is woken (gt-a0sewj).
+	RuleHostGoCacheTrim: OwnerOverseer,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
 	RuleOverseerSilent: OwnerOperator,
