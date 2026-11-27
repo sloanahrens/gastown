@@ -32,6 +32,15 @@ func (f fakeEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return f.vec, f.err
 }
 
+// cancelEmbedder cancels the estimate's context while the embed input is built,
+// then reports the cancellation as its error.
+type cancelEmbedder context.CancelFunc
+
+func (c cancelEmbedder) Embed(ctx context.Context, _ string) ([]float32, error) {
+	c()
+	return nil, ctx.Err()
+}
+
 // fakeJev is a Jev asker that answers with fits, or fails.
 func fakeJev(fits float64, err error) JevAsker {
 	return func(context.Context, *beads.Issue) (dispatch.Answers, error) {
@@ -661,6 +670,58 @@ func TestEstimateNeighborsSkipped(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEstimateNeighborDeadline: a context that ends during the neighbor step
+// keeps the finished estimate and records why it names no neighbors, because
+// that step only names past beads and never changes the number. A context that
+// ends while an input is built still refuses the whole run (gt-zzbd92).
+func TestEstimateNeighborDeadline(t *testing.T) {
+	t.Parallel()
+	t.Run("context ends while hm names neighbors", func(t *testing.T) {
+		t.Parallel()
+		baseline, err := Estimate(context.Background(), workingDeps(), sampleBead())
+		if err != nil {
+			t.Fatalf("Estimate(baseline): %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		deps := workingDeps()
+		deps.HMRunner = func(context.Context, []string) ([]byte, error) {
+			cancel()
+			return nil, context.Canceled
+		}
+		got, err := Estimate(ctx, deps, sampleBead())
+		if err != nil {
+			t.Fatalf("Estimate: %v, want the finished estimate", err)
+		}
+		if got.Minutes != baseline.Minutes || got.Points != baseline.Points {
+			t.Fatalf("minutes/points = %v/%d, want %v/%d from the uncancelled run",
+				got.Minutes, got.Points, baseline.Minutes, baseline.Points)
+		}
+		if len(got.Neighbors) != 0 {
+			t.Fatalf("neighbors = %+v, want none", got.Neighbors)
+		}
+		if !strings.Contains(got.NeighborsSkipped, context.Canceled.Error()) {
+			t.Fatalf("neighborsSkipped = %q, want it to name %v", got.NeighborsSkipped, context.Canceled)
+		}
+	})
+
+	t.Run("context ends while the embed input is built", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		deps := workingDeps()
+		deps.Embedder = cancelEmbedder(cancel)
+		got, err := Estimate(ctx, deps, sampleBead())
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Estimate error = %v, want %v", err, context.Canceled)
+		}
+		if got.Points != 0 || got.Rung != "" || got.Hash != "" || len(got.Inputs) != 0 {
+			t.Fatalf("Estimate = %+v, want no result", got)
+		}
+	})
 }
 
 func TestEstimateNearestLimit(t *testing.T) {
