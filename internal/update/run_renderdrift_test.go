@@ -3,8 +3,11 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRenderDriftAnswersAfterVerify runs the walk with a hook answer per row and
@@ -163,6 +166,84 @@ func TestRenderDriftFailedVerifyKeepsPartialOutcome(t *testing.T) {
 	}
 	if want := "render differs: 3 objects (run gt town cluster roll)"; !strings.HasSuffix(verify.Detail, "; "+want) {
 		t.Errorf("verify Detail = %q, want it to end with %q", verify.Detail, want)
+	}
+}
+
+// runRenderDrift runs the fixture with hook and requires the run to end ok,
+// returning the fixture and the verify step's detail.
+func runRenderDrift(t *testing.T, hook func(context.Context) (int, error)) (*runFixture, string) {
+	t.Helper()
+	f := newRunFixture(t)
+	f.deps.RenderDrift = hook
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q: the hook must not change the run", final.Outcome, OutcomeOK)
+	}
+	return f, step(t, final, StepVerify).Detail
+}
+
+// TestRenderDriftPanicIsUnreadable: a hook that panics is recovered into the
+// unreadable line, and its text stays out of the log.
+func TestRenderDriftPanicIsUnreadable(t *testing.T) {
+	t.Parallel()
+	f, detail := runRenderDrift(t, func(context.Context) (int, error) {
+		panic("kubeconfig read at /secret/cluster-token")
+	})
+	if want := "render drift: unreadable"; detail != want {
+		t.Errorf("verify Detail = %q, want %q", detail, want)
+	}
+	if out := f.log.String(); strings.Contains(out, "secret") {
+		t.Errorf("the panic's text was printed: log %q", out)
+	}
+}
+
+// TestRenderDriftSilentHookPassesBound: a hook still waiting when the bound
+// passes on the run's clock is canceled there, so the line is the unreadable one.
+func TestRenderDriftSilentHookPassesBound(t *testing.T) {
+	t.Parallel()
+	// release is a safety net for a run that stops canceling the hook: the test
+	// fails in seconds rather than hanging, and sawCancel names which ended it.
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	defer context.AfterFunc(ctx, func() { close(release) })()
+	var sawCancel bool
+	f, detail := runRenderDrift(t, func(ctx context.Context) (int, error) {
+		select {
+		case <-ctx.Done():
+			sawCancel = true
+			return 0, ctx.Err()
+		case <-release:
+			return 0, errors.New("the run never canceled the hook")
+		}
+	})
+	if want := "render drift: unreadable"; detail != want {
+		t.Errorf("verify Detail = %q, want %q", detail, want)
+	}
+	if !sawCancel {
+		t.Error("the run never canceled the hook: the test's own release ended it")
+	}
+	if !slices.Contains(f.clock.sleeps, 20*time.Second) {
+		t.Errorf("sleeps = %v, want the 20s bound on the run's clock", f.clock.sleeps)
+	}
+}
+
+// TestRenderDriftNoRecordNamesTheRecorder: a hook error wrapping
+// ErrNoRenderRecord prints the line naming the command that records a render.
+func TestRenderDriftNoRecordNamesTheRecorder(t *testing.T) {
+	t.Parallel()
+	const want = "render drift: unreadable (no recorded render: run gt town cluster render --record-flags)"
+	f, detail := runRenderDrift(t, func(context.Context) (int, error) {
+		return 0, fmt.Errorf("no flags recorded under /secret/path: %w", ErrNoRenderRecord)
+	})
+	if detail != want {
+		t.Errorf("verify Detail = %q, want %q", detail, want)
+	}
+	if out := f.log.String(); !strings.Contains(out, want+"\n") {
+		t.Errorf("log = %q, want the line %q", out, want)
 	}
 }
 

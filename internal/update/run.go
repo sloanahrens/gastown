@@ -689,6 +689,10 @@ func townHealthDetail(checks []Check) string {
 	return ""
 }
 
+// renderDriftBound is how long the run lets the hook answer on its clock, after
+// which the hook's context is canceled so a compare that honors it stops.
+const renderDriftBound = 20 * time.Second
+
 // renderDrift asks the render-drift hook after the verify step and adds its one
 // line to that step's note and to the log. A nil hook asks nothing. The hook
 // never fails the run: its answer only decides what the line says.
@@ -696,7 +700,7 @@ func (r *runner) renderDrift(i int) error {
 	if r.d.RenderDrift == nil {
 		return nil
 	}
-	line := renderDriftLine(r.d.RenderDrift(r.ctx))
+	line := renderDriftLine(r.renderDriftAnswer())
 	if line == "" {
 		return nil
 	}
@@ -711,12 +715,38 @@ func (r *runner) renderDrift(i int) error {
 	return err
 }
 
+// renderDriftAnswer asks the hook once: a panic is recovered into an error, and
+// a hook still silent when renderDriftBound passes on the run's clock has its
+// context canceled, which ends a hook that reads it as the unreadable line.
+func (r *runner) renderDriftAnswer() (differing int, err error) {
+	ctx, cancel := context.WithCancel(r.ctx)
+	watchdogDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-watchdogDone
+	}()
+	go func() {
+		defer close(watchdogDone)
+		if r.d.Sleep(ctx, renderDriftBound) == nil {
+			cancel()
+		}
+	}()
+	defer func() {
+		if p := recover(); p != nil {
+			differing, err = 0, errors.New("render drift hook panicked")
+		}
+	}()
+	return r.d.RenderDrift(ctx)
+}
+
 // renderDriftLine is the line for the hook's answer: "" for a count of zero, the
-// count when it is above zero, and the unreadable line for an error or a count
-// below zero, which is no count at all. The error's text is never printed, since
-// it can name what the hook read.
+// count when it is above zero, the unreadable line for an error or a count below
+// zero, and, for an error wrapping ErrNoRenderRecord, the command that records
+// the render. The error's text is never printed, since it can name what it read.
 func renderDriftLine(differing int, err error) string {
 	switch {
+	case errors.Is(err, ErrNoRenderRecord):
+		return "render drift: unreadable (no recorded render: run gt town cluster render --record-flags)"
 	case err != nil, differing < 0:
 		return "render drift: unreadable"
 	case differing > 0:
