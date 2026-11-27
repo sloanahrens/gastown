@@ -1,0 +1,29 @@
+# The gt-sbx deployer's policy ClusterRole. The overseer applies this file with
+# the kind admin credential once per rebuild, in the sitting that creates the
+# gt-sbx cluster (gt-sc0avn, option A); neither the control cluster's static set
+# nor the gt-sbx set embeds it.
+#
+# deploy/k8s/deployer-rbac.yaml states the same reach for the control cluster's
+# policy credential: escalate, bind and ClusterRoleBinding writes make this
+# credential cluster-admin in effect. Its bounds are the certificate's one-day
+# lifetime and the plan the operator approves.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-sbx-deployer-policy
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["escalate", "bind"]
