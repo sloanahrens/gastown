@@ -1704,6 +1704,13 @@ func (d *Daemon) ensureGitRepoInitialized(gitRepo string) error {
 	if err := g.ConfigSet("http.postBuffer", gitPostBufferBytes); err != nil {
 		return fmt.Errorf("git config http.postBuffer: %w", err)
 	}
+	// The daemon owns packing (gt-t21p6l): on 2026-11-27 git's auto gc packed
+	// 5.6 GiB in the 6 GiB container and the daemon was killed.
+	for _, kv := range [][2]string{{"gc.auto", "0"}, {"maintenance.auto", "false"}} {
+		if err := g.ConfigSet(kv[0], kv[1]); err != nil {
+			return fmt.Errorf("git config %s: %w", kv[0], err)
+		}
+	}
 	return nil
 }
 
