@@ -525,6 +525,45 @@ func TestSerialPackagesRunAlone(t *testing.T) {
 	}
 }
 
+// TestRunnerPooledStartsSerialPackagesBesideOthers: Pooled hands every package,
+// serial.txt ones included, to the pool, so a serial package starts beside the
+// others; without Pooled it runs alone after them (gt-edl2yv).
+func TestRunnerPooledStartsSerialPackagesBesideOthers(t *testing.T) {
+	t.Parallel()
+	const serial = "./internal/cmd"
+	if !serialPackage(serial) {
+		t.Fatalf("%s is not on serial.txt, so the run has no serial package", serial)
+	}
+	pkgs, beside := []string{"./a", serial, "./b"}, []string{"./a", "./b"}
+	for _, pooled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("Pooled=%t", pooled), func(t *testing.T) {
+			t.Parallel()
+			gates := newGates(pkgs)
+			t.Cleanup(gates.releaseAll)
+			fake := &poolGo{jobs: 3, t: t, hold: gates.channel,
+				alone:   func(pkg string) bool { return !pooled && serialPackage(pkg) },
+				started: make(chan string, len(pkgs))}
+			r := newWorkerRunner(t, fake.exec, 3)
+			r.Pooled = pooled
+			done := make(chan Counts, 1)
+			go func() { done <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
+			// Nothing is released, so every pooled command starts before any of
+			// them finishes; without Pooled only the beside packages are pooled.
+			want := beside
+			if pooled {
+				want = pkgs
+			}
+			for i := 0; i < len(want); i++ {
+				waitOrFail(t, fake.started, "every pooled package to start beside the held ones")
+			}
+			gates.releaseAll()
+			if got := waitOrFail(t, done, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
+				t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
+			}
+		})
+	}
+}
+
 // TestLabeledSerialPackageRunsAlone: a race-tier task's name carries "~label",
 // which no serial.txt line has, so a labeled package on the list still belongs
 // to the serial group and one off the list still shares the pool (gt-70xr8m).
