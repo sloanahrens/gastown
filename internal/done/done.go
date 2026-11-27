@@ -1801,7 +1801,8 @@ func localGateNote(res land.GateResult, slotWait time.Duration) string {
 
 // runDoneLocalGate runs the local pre-submit gate on the rebased tree at
 // head. A red gate exits 15 before anything is pushed. The run's cost is kept
-// on r for the READY TO LAND note (gt-7o5cql).
+// on r for the READY TO LAND note (gt-7o5cql); a failed or unrunnable gate
+// leaves a record on the bead before it exits (gt-13dre6.17).
 func runDoneLocalGate(r *doneRun, head string) error {
 	if r.opts.preVerified {
 		// No path reaches here today (a polecat's Run refuses the flag and the
@@ -1811,6 +1812,7 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	}
 	gate, err := r.deps.localGate(r.townRoot, r.rigName, r.cwd)
 	if err != nil {
+		r.recordGateRun("unavailable", nil, 0, head)
 		return doneExit(doneExitGateUnavailable, "no local gate could be built; this is not a verdict on your change, so escalate (gt escalate -s medium) rather than edit code", err)
 	}
 	fmt.Printf("→ Running the local gate on %s\n", ShortSHA(head))
@@ -1827,6 +1829,7 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	if err != nil {
 		cancel()
 		stopHeartbeat()
+		r.recordGateRun("unavailable", nil, slotWait, head)
 		return doneExit(doneExitGateUnavailable, "no presubmit slot could be taken ("+err.Error()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", err)
 	}
 	res := gate.Run(ctx, r.cwd)
@@ -1835,9 +1838,11 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	stopHeartbeat()
 	r.gateNote = localGateNote(res, slotWait)
 	if res.Err != nil {
+		r.recordGateRun("unavailable", &res, slotWait, head)
 		return doneExit(doneExitGateUnavailable, "the local gate could not run ("+res.Summary()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", res.Err)
 	}
 	if !res.Passed {
+		r.recordGateRun("fail", &res, slotWait, head)
 		return doneExit(doneExitGateFailed, fmt.Sprintf("the local gate failed on %s: %s\n%s", ShortSHA(head), res.Summary(), res.FailureTail()), nil)
 	}
 	fmt.Printf("%s Local gate passed: %s\n", style.Bold.Render("✓"), res.Summary())

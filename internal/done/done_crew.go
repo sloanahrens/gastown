@@ -397,6 +397,9 @@ func submitCrewForLanding(r *doneRun) error {
 	if bd == nil {
 		return fmt.Errorf("no beads client for %s", r.issueID)
 	}
+	// The gate record below writes through r.sourceBD, which the polecat path
+	// fills from the same source read; the crew path fills it here.
+	r.sourceBD = bd
 	target, err := resolveDoneTarget(r, issue)
 	if err != nil {
 		return err
