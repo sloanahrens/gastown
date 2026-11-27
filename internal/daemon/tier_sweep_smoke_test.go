@@ -327,7 +327,7 @@ func TestRecordSweepSmokeAtStartIsAwaited(t *testing.T) {
 		launchStarted := make(chan struct{})
 		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
 			close(launchStarted)
-			<-release
+			blockUntil(t, "the smoke release", release)
 			return tierSweepLaunch{exitCode: 0}
 		}
 		return d, logs, release, launchStarted
