@@ -41,6 +41,8 @@ type WorkTree interface {
 	// backup's oversize-push recovery (gt-q30zx).
 	ResetSoft(ref string) error
 	TreeFileSizes(rev string) (map[string]int64, error)
+	// CountObjects reads count-objects -v, for a caller to judge loose and packed sizes.
+	CountObjects() (string, error)
 	PackSize() (string, error)
 	LogAll(max int) ([]git.LogEntry, error)
 

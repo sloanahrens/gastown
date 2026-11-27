@@ -1,6 +1,7 @@
 package gitfake
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -50,6 +51,25 @@ func TestInitSparseCheckoutRecordsTheSetting(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent")
 	if err := h.InitSparseCheckout(missing, nil); err == nil {
 		t.Error("InitSparseCheckout outside any repository succeeded")
+	}
+}
+
+// TestCountObjectsReportsWhatTheTestSet drives the fake's object-count read:
+// the text SetObjectCounts set comes back, and the failure it set is returned.
+func TestCountObjectsReportsWhatTheTestSet(t *testing.T) {
+	t.Parallel()
+	f := New()
+	dir := filepath.Join(t.TempDir(), "clone")
+	f.InitRepo(t, dir)
+	g := f.Open(dir).(WorkTree)
+	f.SetObjectCounts(t, dir, "count: 7\nsize-pack: 9\n", nil)
+	if got, err := g.CountObjects(); err != nil || got != "count: 7\nsize-pack: 9\n" {
+		t.Fatalf("CountObjects = %q, %v; want the text the test set", got, err)
+	}
+	bad := errors.New("injected: count-objects")
+	f.SetObjectCounts(t, dir, "", bad)
+	if got, err := g.CountObjects(); got != "" || !errors.Is(err, bad) {
+		t.Fatalf("CountObjects with a set failure = %q, %v; want empty and %v", got, err, bad)
 	}
 }
 

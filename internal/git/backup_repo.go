@@ -21,6 +21,12 @@ func (g *Git) CommitWithAuthor(message, author string) error {
 	return err
 }
 
+// CountObjects returns git count-objects -v's output for a caller to judge the
+// loose and packed counts and sizes, or "" and the wrapped runner error.
+func (g *Git) CountObjects() (string, error) {
+	return g.run("count-objects", "-v")
+}
+
 // PackSize is the size-pack line of git count-objects -v: the KiB the
 // repository's packs take on disk, as git printed it, or "" when git
 // printed none.
