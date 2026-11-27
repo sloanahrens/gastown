@@ -48,6 +48,28 @@ func TestIntegrationRehearsalSideRunCancelEndsTheChild(t *testing.T) {
 	}
 }
 
+// TestIntegrationRehearsalSideRunExitStatus pins how ExecSideRun reports how its command ended: a non-zero status is the run's own code with a nil error, while a signal gives no code.
+func TestIntegrationRehearsalSideRunExitStatus(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		argv    []string
+		want    int
+		wantErr bool
+	}{
+		{name: "non-zero status is the run's code", argv: []string{"sh", "-c", "exit 3"}, want: 3},
+		{name: "a signaled command has no code", argv: []string{"sh", "-c", "kill -TERM $$"}, want: -1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, err := ExecSideRun(boundedCtx(t), t.TempDir(), nil, tc.argv)
+			if code != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("ExecSideRun(%q) = %d, %v; want %d, error %v", tc.argv, code, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestIntegrationRehearsalSideRunSucceeds pins that a command exiting 0 returns 0 and a nil error, with dir as its working directory and env as its whole environment.
 func TestIntegrationRehearsalSideRunSucceeds(t *testing.T) {
 	t.Parallel()
