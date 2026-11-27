@@ -4,11 +4,52 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+// driftFixture is a runFixture whose render-drift bound waits on the test. See
+// newDriftFixture.
+type driftFixture struct {
+	*runFixture
+	// running is closed by a hook that stays silent, once it has started.
+	running chan struct{}
+	// release is closed when the bound passes, so a silent hook answers late.
+	release chan struct{}
+	// bounds holds the bound the run waited on.
+	bounds chan time.Duration
+}
+
+// newDriftFixture is newRunFixture with the render-drift bound on the test's
+// hand. The bound passes only after a hook has started and is still silent: a
+// hook that answers at once cancels the wait, so its answer never races the
+// bound. When the bound passes, the silent hook is released, so any answer it
+// gives comes after the run has stopped waiting for it.
+func newDriftFixture(t *testing.T) *driftFixture {
+	t.Helper()
+	f := &driftFixture{
+		runFixture: newRunFixture(t),
+		running:    make(chan struct{}),
+		release:    make(chan struct{}),
+		bounds:     make(chan time.Duration, 1),
+	}
+	sleep := f.deps.Sleep
+	f.deps.Sleep = func(ctx context.Context, d time.Duration) error {
+		if d != renderDriftBound {
+			return sleep(ctx, d)
+		}
+		select {
+		case <-f.running:
+			f.bounds <- d
+			close(f.release)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return f
+}
 
 // TestRenderDriftAnswersAfterVerify runs the walk with a hook answer per row and
 // checks the one line the answer makes, in the log and in the verify note, with
@@ -48,7 +89,7 @@ func TestRenderDriftAnswersAfterVerify(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
-			f := newRunFixture(t)
+			f := newDriftFixture(t)
 			f.deps.RenderDrift = row.hook
 
 			final, err := f.run(context.Background())
@@ -149,7 +190,7 @@ func TestRenderDriftSkippedVerifyRunsNoHook(t *testing.T) {
 // the line beside its failed checks, and the run stays partial.
 func TestRenderDriftFailedVerifyKeepsPartialOutcome(t *testing.T) {
 	t.Parallel()
-	f := newRunFixture(t)
+	f := newDriftFixture(t)
 	f.verify.gt = verifyTestOld
 	f.deps.RenderDrift = func(context.Context) (int, error) { return 3, nil }
 
@@ -169,12 +210,10 @@ func TestRenderDriftFailedVerifyKeepsPartialOutcome(t *testing.T) {
 	}
 }
 
-// runRenderDrift runs the fixture with hook and requires the run to end ok,
-// returning the fixture and the verify step's detail.
-func runRenderDrift(t *testing.T, hook func(context.Context) (int, error)) (*runFixture, string) {
+// runRenderDrift runs the fixture and requires the run to end ok, returning the
+// verify step's detail.
+func runRenderDrift(t *testing.T, f *driftFixture) string {
 	t.Helper()
-	f := newRunFixture(t)
-	f.deps.RenderDrift = hook
 	final, err := f.run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -182,16 +221,19 @@ func runRenderDrift(t *testing.T, hook func(context.Context) (int, error)) (*run
 	if final.Outcome != OutcomeOK {
 		t.Errorf("Outcome = %q, want %q: the hook must not change the run", final.Outcome, OutcomeOK)
 	}
-	return f, step(t, final, StepVerify).Detail
+	return step(t, final, StepVerify).Detail
 }
 
 // TestRenderDriftPanicIsUnreadable: a hook that panics is recovered into the
 // unreadable line, and its text stays out of the log.
 func TestRenderDriftPanicIsUnreadable(t *testing.T) {
 	t.Parallel()
-	f, detail := runRenderDrift(t, func(context.Context) (int, error) {
+	f := newDriftFixture(t)
+	f.deps.RenderDrift = func(context.Context) (int, error) {
 		panic("kubeconfig read at /secret/cluster-token")
-	})
+	}
+
+	detail := runRenderDrift(t, f)
 	if want := "render drift: unreadable"; detail != want {
 		t.Errorf("verify Detail = %q, want %q", detail, want)
 	}
@@ -200,34 +242,43 @@ func TestRenderDriftPanicIsUnreadable(t *testing.T) {
 	}
 }
 
-// TestRenderDriftSilentHookPassesBound: a hook still waiting when the bound
-// passes on the run's clock is canceled there, so the line is the unreadable one.
+// TestRenderDriftSilentHookPassesBound: a hook still silent when the bound passes
+// on the run's clock is canceled there, and its answer, given after the bound,
+// does not count: the line is the unreadable one and the run still ends ok.
 func TestRenderDriftSilentHookPassesBound(t *testing.T) {
 	t.Parallel()
-	// release is a safety net for a run that stops canceling the hook: the test
-	// fails in seconds rather than hanging, and sawCancel names which ended it.
-	release := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	defer context.AfterFunc(ctx, func() { close(release) })()
-	var sawCancel bool
-	f, detail := runRenderDrift(t, func(ctx context.Context) (int, error) {
-		select {
-		case <-ctx.Done():
-			sawCancel = true
-			return 0, ctx.Err()
-		case <-release:
-			return 0, errors.New("the run never canceled the hook")
-		}
-	})
+	f := newDriftFixture(t)
+	type hookStart struct {
+		ctx      context.Context
+		startErr error
+	}
+	started := make(chan hookStart, 1)
+	f.deps.RenderDrift = func(ctx context.Context) (int, error) {
+		started <- hookStart{ctx: ctx, startErr: ctx.Err()}
+		close(f.running)
+		<-f.release
+		return 2, nil
+	}
+
+	detail := runRenderDrift(t, f)
 	if want := "render drift: unreadable"; detail != want {
-		t.Errorf("verify Detail = %q, want %q", detail, want)
+		t.Errorf("verify Detail = %q, want %q: a late answer must not count", detail, want)
 	}
-	if !sawCancel {
-		t.Error("the run never canceled the hook: the test's own release ended it")
+	select {
+	case s := <-started:
+		if s.startErr != nil {
+			t.Errorf("hook started with its context already canceled: %v", s.startErr)
+		}
+		if s.ctx.Err() == nil {
+			t.Error("the run did not cancel the hook's context at the bound")
+		}
+	default:
+		t.Fatal("the hook never started")
 	}
-	if !slices.Contains(f.clock.sleeps, 20*time.Second) {
-		t.Errorf("sleeps = %v, want the 20s bound on the run's clock", f.clock.sleeps)
+	select {
+	case <-f.bounds:
+	default:
+		t.Error("the run never waited the bound on its clock")
 	}
 }
 
@@ -236,10 +287,12 @@ func TestRenderDriftSilentHookPassesBound(t *testing.T) {
 func TestRenderDriftNoRecordNamesTheRecorder(t *testing.T) {
 	t.Parallel()
 	const want = "render drift: unreadable (no recorded render: run gt town cluster render --record-flags)"
-	f, detail := runRenderDrift(t, func(context.Context) (int, error) {
+	f := newDriftFixture(t)
+	f.deps.RenderDrift = func(context.Context) (int, error) {
 		return 0, fmt.Errorf("no flags recorded under /secret/path: %w", ErrNoRenderRecord)
-	})
-	if detail != want {
+	}
+
+	if detail := runRenderDrift(t, f); detail != want {
 		t.Errorf("verify Detail = %q, want %q", detail, want)
 	}
 	if out := f.log.String(); !strings.Contains(out, want+"\n") {
@@ -251,7 +304,7 @@ func TestRenderDriftNoRecordNamesTheRecorder(t *testing.T) {
 // hook read, so it stays out of the log and the note.
 func TestRenderDriftErrorTextIsNotPrinted(t *testing.T) {
 	t.Parallel()
-	f := newRunFixture(t)
+	f := newDriftFixture(t)
 	f.deps.RenderDrift = func(context.Context) (int, error) {
 		return 0, errors.New("secret-cluster-token leaked")
 	}
