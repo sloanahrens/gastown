@@ -34,11 +34,12 @@ const (
 )
 
 type fakeRemote struct {
-	tips      map[string]string
-	contains  map[string]bool // commit -> on target
-	tipErr    error
-	tipCalls  int
-	containsN int
+	tips        map[string]string
+	contains    map[string]bool // commit -> on target
+	tipErr      error
+	containsErr error
+	tipCalls    int
+	containsN   int
 
 	// The remote branch model the landing cleanup drives: full ref name to
 	// tip. beforeDelete, when set, runs before a delete's lease check so a
@@ -79,6 +80,9 @@ func (r *fakeRemote) BranchTip(branch string) (string, error) {
 
 func (r *fakeRemote) Contains(_, commit string) (bool, error) {
 	r.containsN++
+	if r.containsErr != nil {
+		return false, r.containsErr
+	}
 	return r.contains[commit], nil
 }
 
@@ -449,6 +453,79 @@ func TestPassMissingBranchAnnotatesOnceAndKeepsLabel(t *testing.T) {
 	h.w.Pass(context.Background())
 	if h.remote.tipCalls != 2 || len(h.comments(t, "gt-abc")) != 1 {
 		t.Fatalf("tip reads %d, comments %d; want a re-check with no second comment", h.remote.tipCalls, len(h.comments(t, "gt-abc")))
+	}
+}
+
+// TestPassMissingBranchOnTheTargetGoesToTheLander: a branch the town merged
+// and deleted is gone from origin, but its head is on the target, so the
+// lander finishes the landing instead of a human being asked. It is handed the
+// submitted head and the seat, priority and estimate fields any landing
+// carries (gt-mz3uxj).
+func TestPassMissingBranchOnTheTargetGoesToTheLander(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-abc", 1, "2026-09-30T11:00:00Z")
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{"sp:2"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.remote.tips = map[string]string{}
+	h.remote.contains[noteHead] = true
+	h.bd.Seed(beads.Issue{ID: "gt-gastown-polecat-opal", Title: "opal", Status: "done", Type: "agent",
+		Description: "role_type: polecat\nrig: gastown\nagent_state: done\nhook_bead: null\nagent: claude-haiku"})
+	h.w.AgentBeadID = func(polecat string) string { return beads.PolecatBeadID("gastown", polecat) }
+
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != 1 || len(h.lander.calls) != 1 {
+		t.Fatalf("report %v, calls %d; want the submitted head handed to the lander", rep, len(h.lander.calls))
+	}
+	got := h.lander.calls[0]
+	if got.Head != noteHead || got.Branch != branch || got.Target != "main" || got.BeadID != "gt-abc" {
+		t.Fatalf("landed %+v; want the submitted head %s of %s", got, noteHead, branch)
+	}
+	if got.Agent != "claude-haiku" || got.Priority == nil || *got.Priority != 1 || got.SPEstimate == nil || *got.SPEstimate != 2 {
+		t.Errorf("landed %+v; want the seat's agent and the bead's priority 1 and sp 2", got)
+	}
+	if cs := h.comments(t, "gt-abc"); len(cs) != 0 {
+		t.Errorf("comments %q; a handed-over landing is not parked for a human", cs)
+	}
+}
+
+// TestPassMissingBranchHeadOffTargetWaitsForHumanOrFailsInfra: with no branch
+// and a head the target does not carry, the bead waits for a human as before,
+// same key and message. A failed target read is an infrastructure failure
+// instead, never a human wait (gt-mz3uxj).
+func TestPassMissingBranchHeadOffTargetWaitsForHumanOrFailsInfra(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		setup   func(h *harness)
+		skipped int
+		failed  int
+		comment string
+	}{
+		{"head not on the target", func(h *harness) { h.remote.contains[noteHead] = false }, 1, 0, "not on origin"},
+		{"the target read fails", func(h *harness) { h.remote.containsErr = errors.New("git fetch origin main: timeout") }, 0, 1, "FAILED on infrastructure"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReady(t, "gt-abc")
+			h.remote.tips = map[string]string{}
+			tc.setup(h)
+			rep := h.w.Pass(context.Background())
+			if len(h.lander.calls) != 0 || rep.Skipped != tc.skipped || rep.Failed != tc.failed {
+				t.Fatalf("report %v, calls %d; want %d skipped and %d failed", rep, len(h.lander.calls), tc.skipped, tc.failed)
+			}
+			cs := h.comments(t, "gt-abc")
+			if len(cs) != 1 || !strings.Contains(cs[0], tc.comment) {
+				t.Fatalf("comments %q; want one saying %q", cs, tc.comment)
+			}
+			is, _ := h.bd.Show("gt-abc")
+			if !beads.HasLabel(is, land.LabelReadyToLand) {
+				t.Error("the ready label was removed; it must stay")
+			}
+		})
 	}
 }
 
