@@ -521,7 +521,8 @@ func stringStart(data []byte, end int) int {
 // finding. Anything else is scanned for
 // NAME=value, "key": "value" and a YAML name: value entry, whose last dotted segment
 // decides the name; an env value or a quoted JSON member that is a URL with a userinfo
-// password is a finding under env:name or json:key as well.
+// password is a finding under env:name or json:key as well. Every word of that text,
+// comment lines included, is also judged by shape, one value:shape finding per word.
 func FindCredentials(data []byte) []string {
 	var found []string
 	if hits, err := jsonHits(data); err == nil {
@@ -560,6 +561,14 @@ func FindCredentials(data []byte) []string {
 		value, _ := yamlValue(raw)
 		if credentialName(name) && isSecret(name, value) {
 			found = append(found, "yaml:"+key)
+		}
+	}
+	// Every word of every line is judged by shape, comment lines included, so a
+	// token is a finding wherever it sits in text that is not JSON (gt-xgijpb).
+	// The split is the one a JSON string uses; a newline splits words too.
+	for _, word := range strings.FieldsFunc(string(data), isValueShapeSplit) {
+		if config.LooksLikeSecret("", word) {
+			found = append(found, valueShapeRule)
 		}
 	}
 	return found
