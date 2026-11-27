@@ -2,6 +2,7 @@ package modguard
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -32,11 +33,31 @@ type rawBdKey struct {
 	Kind string // "argv", "BdCmd" or "BDRunner"
 }
 
+// rawBdPrefilter reports whether src holds a name scanRawBd can count: a
+// constructor key, BdCmd, BDRunner, or the bytes "bd" quoted either way. bd
+// spelled with string escapes ("\x62d") is not recognized.
+func rawBdPrefilter(src []byte) bool {
+	if bytes.Contains(src, []byte(`"bd"`)) || bytes.Contains(src, []byte("`bd`")) {
+		return true
+	}
+	for name := range rawBdConstructors {
+		if bytes.Contains(src, []byte(name)) {
+			return true
+		}
+	}
+	return bytes.Contains(src, []byte("BdCmd")) || bytes.Contains(src, []byte("BDRunner"))
+}
+
 // scanRawBd counts, in one Go file, the ways code outside internal/beads
 // reaches bd past Client: argv (a beads.Command* builder, ConfigureCommand,
 // or exec.Command naming "bd"), BdCmd (a bare BdCmd(...) call, the shape the
 // deleted NewBdCmd alias took) and BDRunner (the in-process bd test seam).
+// A file holding none of those names is not parsed, so a syntax error in it is
+// no longer reported here; the compile reports it.
 func scanRawBd(file string, src []byte, counts map[rawBdKey]int) error {
+	if !rawBdPrefilter(src) {
+		return nil
+	}
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
 	if err != nil {
@@ -566,6 +587,39 @@ func (f walkFailFS) Open(name string) (fs.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
 	}
 	return f.FS.Open(name)
+}
+
+// TestRawBdPrefilter checks the early return scanRawBd takes before parsing: a
+// file holding any one name it can count is still counted, and source holding
+// none of them — even source that will not parse — is skipped without an error.
+func TestRawBdPrefilter(t *testing.T) {
+	t.Parallel()
+	type prefilterCase struct {
+		name string
+		src  string
+		want map[rawBdKey]int
+	}
+	cases := []prefilterCase{
+		{"BdCmd", "package p\nfunc f() { BdCmd(\"show\") }\n", map[rawBdKey]int{{"p.go", "BdCmd"}: 1}},
+		{"BDRunner", "package p\nvar _ beads.BDRunner\n", map[rawBdKey]int{{"p.go", "BDRunner"}: 1}},
+		{"double-quoted bd", "package p\nfunc f() { exec.Command(\"bd\", \"list\") }\n", map[rawBdKey]int{{"p.go", "argv"}: 1}},
+		{"backquoted bd", "package p\nfunc f() { exec.Command(`bd`, \"list\") }\n", map[rawBdKey]int{{"p.go", "argv"}: 1}},
+		{"unparseable source holding none", "package p\nfunc f() {\n", nil},
+	}
+	for name := range rawBdConstructors {
+		cases = append(cases, prefilterCase{name, "package p\nfunc f() { beads." + name + "(\"show\") }\n", map[rawBdKey]int{{"p.go", "argv"}: 1}})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			counts := map[rawBdKey]int{}
+			if err := scanRawBd("p.go", []byte(tc.src), counts); err != nil {
+				t.Fatalf("scanRawBd(%s) = %v, want no error", tc.name, err)
+			}
+			if fmt.Sprint(counts) != fmt.Sprint(tc.want) {
+				t.Errorf("counts = %v, want %v", counts, tc.want)
+			}
+		})
+	}
 }
 
 func TestScanRawBd(t *testing.T) {
