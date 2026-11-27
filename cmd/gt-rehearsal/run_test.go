@@ -2,18 +2,67 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/rehearsal"
 )
 
 var runArgs = []string{"--set", "sets", "--worktree-1", "w1", "--worktree-2", "w2", "--worktree-3", "w3", "--agent", "deepseek", "--change-set", "cs-1", "--tag", "v1", "--cache-bytes", "4096", "--record", "run.json"}
+
+// fakeNotify stands in for signal.NotifyContext, recording the signals and
+// counting each release, so the test sends no real signal.
+type fakeNotify struct {
+	signals []os.Signal
+	calls   int
+}
+
+func (f *fakeNotify) notify(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	f.signals = signals
+	return parent, func() { f.calls++ }
+}
+
+// TestRehearsalCommandRunInterrupt: the run asks for an interrupt and SIGTERM,
+// and releases the handler once, the moment its context is done, so a second
+// signal kills the process (gt-13dre6.71).
+func TestRehearsalCommandRunInterrupt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		canceled bool
+	}{{"live run", false}, {"interrupted run", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				fake := &fakeNotify{}
+				runCtx, _ := interruptContext(ctx, fake.notify) // main.go defers the returned stop
+				if want := []os.Signal{os.Interrupt, syscall.SIGTERM}; !slices.Equal(fake.signals, want) {
+					t.Fatalf("asked for %v, want %v", fake.signals, want)
+				}
+				want, wantCalls := error(nil), 0
+				if tc.canceled {
+					cancel()
+					synctest.Wait()
+					want, wantCalls = context.Canceled, 1
+				}
+				if !errors.Is(runCtx.Err(), want) || fake.calls != wantCalls {
+					t.Errorf("context %v after %d releases, want %v after %d", runCtx.Err(), fake.calls, want, wantCalls)
+				}
+			})
+		})
+	}
+}
 
 // runRoot builds a town root with every input a good run line reads.
 func runRoot(t *testing.T) string {

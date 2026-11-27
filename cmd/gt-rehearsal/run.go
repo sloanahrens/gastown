@@ -3,11 +3,23 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/rehearsal"
 )
+
+// interruptContext gives the run a context that the first interrupt or SIGTERM
+// cancels. The handler is released as soon as it is done, restoring the default
+// handling so a second signal kills the process.
+func interruptContext(parent context.Context,
+	notify func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)) (context.Context, context.CancelFunc) {
+	ctx, stop := notify(parent, os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
+}
 
 // runCommand turns the run command line into the run's Options and returns
 // execute's code. A refused command line, an unreadable working directory or a
