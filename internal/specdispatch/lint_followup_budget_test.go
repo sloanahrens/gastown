@@ -10,8 +10,8 @@ import (
 // than a follow-up bead may spend is refused, told to cut the bead by finding
 // or by file and not to declare more. A declaration within the budget, a bead
 // without the label, and a rig's configured budget larger than the default are
-// not refused. The refusal is asked before the declared-lines floor, so a bead
-// over the budget is never told to declare more.
+// not refused. The declared-lines line is advice and never a refusal (gt-82g9zr),
+// so no refusal here tells a follow-up bead to declare more.
 func TestLintFollowupBudget(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

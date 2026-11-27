@@ -36,17 +36,6 @@ func TestLandedLinesOutsideTheTable(t *testing.T) {
 	}
 }
 
-// Refuse is the band's Median.
-func TestLandedLinesRefuse(t *testing.T) {
-	t.Parallel()
-	for minutes, want := range map[float64]int{7: 67, 9: 109, 10: 246} {
-		band, found := LandedLines(minutes)
-		if !found || band.Refuse() != want {
-			t.Errorf("LandedLines(%v).Refuse() = %d, found %v, want %d", minutes, band.Refuse(), found, want)
-		}
-	}
-}
-
 // LineFloor is the band median the sp-minutes label reads; a missing, unreadable
 // or disagreeing label, or minutes past the table, gives no floor.
 func TestLineFloor(t *testing.T) {
@@ -67,17 +56,6 @@ func TestLineFloor(t *testing.T) {
 		got, found := LineFloor(tc.labels)
 		if found != tc.found || got != tc.want {
 			t.Errorf("LineFloor(%q) = %d, found %v; want %d, found %v", tc.labels, got, found, tc.want, tc.found)
-		}
-	}
-}
-
-// Advise is half of P90 rounded up: 27 gives 14, not 13.
-func TestLandedLinesAdvise(t *testing.T) {
-	t.Parallel()
-	for minutes, want := range map[float64]int{4: 14, 7: 118, 9: 227} {
-		band, found := LandedLines(minutes)
-		if !found || band.Advise() != want {
-			t.Errorf("LandedLines(%v).Advise() = %d, found %v, want %d", minutes, band.Advise(), found, want)
 		}
 	}
 }

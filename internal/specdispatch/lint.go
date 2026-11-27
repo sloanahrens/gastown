@@ -939,16 +939,9 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 		failures = append(failures, r)
 	}
 	// A follow-up bead's Change line past the done gate's follow-up budget is
-	// refused before the declared-lines floor, since that floor would ask such
-	// a bead to declare more than gt done accepts (gt-hixqtv).
+	// refused here, where its author can still cut it (gt-hixqtv). A Change line
+	// below the band median is advice only (gt-82g9zr), never a refusal.
 	if r, refused := followupBudgetRefusal(s, sections["size"], opts); refused {
-		failures = append(failures, r)
-	} else if r, refused := declaredLinesRefusal(s, sections); refused {
-		// A Change line declaring fewer added lines than the median of what
-		// beads at the same estimate landed with trips the landing gate at
-		// twice the declared number, where a finished branch cannot act on it;
-		// it is refused here, naming the declaration that keeps under the gate
-		// (gt-vb9pi9).
 		failures = append(failures, r)
 	}
 	if len(failures) > 0 {
@@ -1091,10 +1084,8 @@ const (
 // followupBudgetRefusal is the lint's verdict on an om-followup bead's Change
 // line (gt-hixqtv): a follow-up fixes one finding from a passing review, and
 // gt done refuses a change past the follow-up budget, so a bead that declares
-// more is refused here where its author can still cut it. It is asked before
-// declaredLinesRefusal and suppresses it, because the floor's "declare at
-// least" would ask for more than the follow-up budget accepts. A bead without
-// the label, a Change line that does not parse (changeBudgetRefusal owns that
+// more is refused here where its author can still cut it. A bead without the
+// label, a Change line that does not parse (changeBudgetRefusal owns that
 // reading) or one that is absent (a feed body declares no Change line), and a
 // declaration within both limits are not refused.
 func followupBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) {
@@ -1123,24 +1114,6 @@ func followupBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool
 		"the Change line declares %s, over the follow-up budget of %d added lines and %d files: "+
 			"cut the bead by finding or by file, and do not declare more (gt done refuses a follow-up change past this budget)",
 		declared, maxAdded, maxFiles)}, true
-}
-
-// declaredLinesRefusal is the lint's verdict on a Change line that declares
-// fewer added lines than the median of what beads at the same estimate landed
-// with (gt-vb9pi9): such a bead trips the landing gate at twice its declared
-// number, which a finished branch cannot act on, so it is refused here naming
-// the declared number, the estimate, the band's median and the declaration
-// that keeps under the gate (LinesBand.Advise) or a split. It reads the same
-// inputs as the advice (declaredLinesBand), so a bead neither can place gets
-// neither a refusal nor a guessed number.
-func declaredLinesRefusal(s Spec, sections map[string]string) (Refusal, bool) {
-	budget, minutes, band, ok := declaredLinesBand(s, sections)
-	if !ok || budget.Lines >= band.Refuse() {
-		return Refusal{}, false
-	}
-	return Refusal{Field: "size", Reason: fmt.Sprintf(
-		"the Change line declares %d added lines, below what half of the beads estimated at %.1f minutes landed with (median %d); declare at least %d, or split",
-		budget.Lines, minutes, band.Median, band.Advise())}, true
 }
 
 // The change budget's warning (gt-ed0hjd): the lint warns when a declared

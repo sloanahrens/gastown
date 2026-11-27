@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-27 gt-82g9zr: rule 9 says await the overseer if refused, not past twice (same length): the spec lint's declared-lines line is advice only, never a refusal, and gt done is the gate (seventeen rules).
 - 2026-11-23 gt-r4cnk2: rule 7 sends a test that needs a private directory to PrivateTempDir(t) (internal/testutil), a t.TempDir() at 0700, because a CI job can run under an open umask while a seat's sandbox does not and internal/testpolicy refuses a per-test 0o700 chmod; the rule names no chmod; paid for by trimming rule 7's om flags to their three phrases, rendered size 14,412 to 14,411 and the ceiling lowered.
 - 2026-11-23 gt-hkllkj: rule 9 carries the contradiction rule -- an acceptance box and a Constraint that cannot both hold means STOP and escalate naming both, never an exemption, allowlist row or special case -- naming mol-polecat-work item 10 as authoritative; paid for by trimming rule 9's own om flags and line-limit wording, rendered size 14,418 to 14,412 and the ceiling lowered (seventeen rules).
 - 2026-11-23 gt-aejf3n: rule 9's line-limit bullet reports the measured and declared lines, not a split (seventeen rules).
@@ -106,7 +107,7 @@ The Tests section is the rule. om flags: "new parsing and state logic added to a
 
 Change only what the bead asks for.
 - If an acceptance box and a Constraint cannot both hold, STOP and `gt escalate` naming both; never add an exemption, allowlist row or special case to make both pass (mol-polecat-work item 10 is authoritative).
-- Constraints line limit is a cap, not an estimate: past 1.5 times, push your branch (never `--force`); comment sha and measured/declared lines; `gt done`; await the overseer past twice; no split.
+- Constraints line limit is a cap, not an estimate: past 1.5 times, push your branch (never `--force`); comment sha and measured/declared lines; `gt done`; await the overseer if refused; no split.
 - om flags: "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency"; "outside the bead's Constraints"; "outside the stated scope" — say why.
 
 ## 10. Test the call site, not the helper

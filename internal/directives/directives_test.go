@@ -219,7 +219,8 @@ func TestPolecatDirectiveRule17HasItsBody(t *testing.T) {
 }
 
 // TestPolecatDirectiveLineLimitIsACap holds rule 9 to its line-limit bullet in
-// rule 9's own section, so the same words in another rule fail it.
+// rule 9's own section, so the same words in another rule fail it. A refused
+// seat awaits the overseer (gt-82g9zr); the old "past twice" wait is gone.
 func TestPolecatDirectiveLineLimitIsACap(t *testing.T) {
 	t.Parallel()
 	text := readDirective(t, "polecat.md")
@@ -228,10 +229,14 @@ func TestPolecatDirectiveLineLimitIsACap(t *testing.T) {
 	if start < 0 || end < 0 {
 		t.Fatalf("polecat.md has no rule 9 section: heading at %d, rule 10 at %d", start, end)
 	}
-	for _, clause := range []string{"is a cap, not an estimate", "1.5 times"} {
-		if !strings.Contains(text[start:start+1+end], clause) {
+	rule := text[start : start+1+end]
+	for _, clause := range []string{"is a cap, not an estimate", "1.5 times", "await the overseer if refused"} {
+		if !strings.Contains(rule, clause) {
 			t.Errorf("rule 9 lacks the clause %q", clause)
 		}
+	}
+	if strings.Contains(rule, "await the overseer past twice") {
+		t.Errorf("rule 9 still says %q; a refused seat awaits the overseer if refused", "await the overseer past twice")
 	}
 }
 
