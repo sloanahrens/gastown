@@ -101,26 +101,55 @@ func TestTownClusterRollbackRefusesFlags(t *testing.T) {
 }
 
 // TestTownClusterRollbackUndoFails: an undo kubectl refuses stops the rollback before
-// the next Deployment, and the ledger records nothing undone.
+// the next Deployment, the printed lines name every Deployment not undone, and the
+// ledger records nothing undone.
 func TestTownClusterRollbackUndoFails(t *testing.T) {
 	t.Parallel()
 	docs, files := shapeDaemonPlan()
 	dir, _ := shapeWritePlan(t, docs, files)
 	kube := &shapeLiveKube{exit: 1}
-	err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+	var out strings.Builder
+	err := runTownClusterRollback(context.Background(), kube.run, &out, dir, "/keys/apply.kubeconfig")
 	if err == nil || !strings.Contains(err.Error(), "the undo of deployment/"+k8sdaemon.TrackerName+" failed") {
 		t.Fatalf("runTownClusterRollback = %v, want the trackerd undo's failure", err)
 	}
 	if got := rollbackSteps(kube.calls); len(got) != 1 {
 		t.Errorf("the rollback's steps = %v, want only the trackerd undo", got)
 	}
+	if want := "undone: none\nnot undone: gt/trackerd, gt/dashboard, gt/daemon, gt/bd-gateway\n"; !strings.HasSuffix(out.String(), want) {
+		t.Errorf("the rollback printed %q, want it to end with %q", out.String(), want)
+	}
 	if entry := rollbackLedgerLine(t, dir); entry.Result != rollbackResultRefused || len(entry.Objects) != 0 {
 		t.Errorf("the rollback ledger = %+v, want one refused line with no objects", entry)
 	}
 }
 
+// TestTownClusterRollbackUndoLaterFails: an undo after the first stops the rollback
+// with that Deployment not undone, and the printed lines name the trackerd undone
+// and the remaining three not.
+func TestTownClusterRollbackUndoLaterFails(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	dir, _ := shapeWritePlan(t, docs, files)
+	ready := shapeAnswering(shapeDaemonHeld(), "True")
+	kube := &shapeLiveKube{answer: func(args []string) (string, int, error) {
+		if v := shapeVerb(args); len(v) > 2 && v[0] == "rollout" && v[1] == "undo" && v[2] == "deployment/"+k8sdaemon.DashboardName {
+			return "", 1, nil
+		}
+		return ready(args)
+	}}
+	var out strings.Builder
+	err := runTownClusterRollback(context.Background(), kube.run, &out, dir, "/keys/apply.kubeconfig")
+	if err == nil || !strings.Contains(err.Error(), "the undo of deployment/"+k8sdaemon.DashboardName+" failed") {
+		t.Fatalf("runTownClusterRollback = %v, want the dashboard undo's failure", err)
+	}
+	if want := "undone: gt/trackerd\nnot undone: gt/dashboard, gt/daemon, gt/bd-gateway\n"; !strings.HasSuffix(out.String(), want) {
+		t.Errorf("the rollback printed %q, want it to end with %q", out.String(), want)
+	}
+}
+
 // TestTownClusterRollbackWaitFails: a Deployment undone but not ready again stops the
-// rollback, and the ledger records it as partial with that Deployment undone.
+// rollback, the printed lines count it undone, and the ledger records it as partial.
 func TestTownClusterRollbackWaitFails(t *testing.T) {
 	t.Parallel()
 	docs, files := shapeDaemonPlan()
@@ -131,9 +160,13 @@ func TestTownClusterRollbackWaitFails(t *testing.T) {
 		}
 		return "True"
 	})}
-	err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+	var out strings.Builder
+	err := runTownClusterRollback(context.Background(), kube.run, &out, dir, "/keys/apply.kubeconfig")
 	if err == nil || !strings.Contains(err.Error(), "deployment/"+k8sdaemon.TrackerName+" was undone but did not come back ready") {
 		t.Fatalf("runTownClusterRollback = %v, want the trackerd readiness failure", err)
+	}
+	if want := "undone: gt/trackerd\nnot undone: gt/dashboard, gt/daemon, gt/bd-gateway\n"; !strings.HasSuffix(out.String(), want) {
+		t.Errorf("the rollback printed %q, want it to end with %q", out.String(), want)
 	}
 	if entry := rollbackLedgerLine(t, dir); entry.Result != rollbackResultPartial || len(entry.Objects) != 1 {
 		t.Errorf("the rollback ledger = %+v, want one partial line naming the undone trackerd", entry)
@@ -141,7 +174,8 @@ func TestTownClusterRollbackWaitFails(t *testing.T) {
 }
 
 // TestTownClusterRollbackMissingRevision: a Deployment with no recorded revision
-// refuses before any kubectl call, since an undo to revision 0 means the previous one.
+// refuses before any kubectl call, since an undo to revision 0 means the previous
+// one, and prints neither progress line.
 func TestTownClusterRollbackMissingRevision(t *testing.T) {
 	t.Parallel()
 	docs, files := shapeDaemonPlan()
@@ -152,12 +186,16 @@ func TestTownClusterRollbackMissingRevision(t *testing.T) {
 	}
 	dir, _ := shapeWritePlan(t, docs, files)
 	kube := &shapeLiveKube{answer: shapeAnswering(shapeDaemonHeld(), "True")}
-	err := runTownClusterRollback(context.Background(), kube.run, io.Discard, dir, "/keys/apply.kubeconfig")
+	var out strings.Builder
+	err := runTownClusterRollback(context.Background(), kube.run, &out, dir, "/keys/apply.kubeconfig")
 	if err == nil || !strings.Contains(err.Error(), "records no revision") || !strings.Contains(err.Error(), "nothing was rolled back") {
 		t.Fatalf("runTownClusterRollback = %v, want a refusal naming the missing revision", err)
 	}
 	if len(kube.calls) != 0 {
 		t.Errorf("the rollback made %d calls, want none: %v", len(kube.calls), kube.calls)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the refused rollback printed %q, want no progress lines", out.String())
 	}
 }
 
