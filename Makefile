@@ -108,10 +108,14 @@ LDFLAGS := -s -w \
            -X github.com/steveyegge/gastown/internal/cmd.BuildTime=$(BUILD_TIME) \
            -X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1
 
-# Export the physical working directory, not a caller's PWD. A seat's shell
-# may name a symlink (/sandbox/gt/work); CURDIR is getcwd's resolved path, so
-# presubmit and gate children run where the files really are (gt-15ix74).
+# A seat's shell names the shared link /sandbox/gt/work, and Go's build cache
+# key holds the working path, so a PWD that resolves to $(CURDIR) is left alone
+# and every seat keeps one cache key (gt-z12wep, gt-1ir826). Only a PWD naming
+# some other directory is replaced by getcwd's physical path, so children never
+# run under a stale PWD (gt-15ix74).
+ifneq ($(realpath $(PWD)),$(CURDIR))
 export PWD := $(CURDIR)
+endif
 
 # ICU4C detection for macOS (required by go-icu-regex transitive dependency).
 # Homebrew installs icu4c as a keg-only package, so headers/libs aren't on the
