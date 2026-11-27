@@ -216,10 +216,11 @@ func TestPodSweepLaunchRefuses(t *testing.T) {
 	}
 }
 
-// TestPodSweepLaunchWaits pins the re-read: a record missing at the first read
-// is judged when a later read finds it, and one that never appears ends not
-// started when the context ends. A wait that fails while the context is live
-// ends SweepLaunch with an error, and no further read is made.
+// TestPodSweepLaunchWaits pins the re-read: a record missing at the first read,
+// or one from an earlier daemon start, is judged when a later read finds the
+// running daemon's record, and one that never does ends not started when the
+// context ends. A wait that fails while the context is live ends SweepLaunch
+// with an error, and no further read is made.
 func TestPodSweepLaunchWaits(t *testing.T) {
 	t.Parallel()
 	started := sweepRecordJSON(sweepDaemonStart(), "started", "")
@@ -238,6 +239,42 @@ func TestPodSweepLaunchWaits(t *testing.T) {
 		ok, detail, err := sweepProbes(run, wait).SweepLaunch(context.Background())
 		if err != nil || !ok || *reads != 2 || waits != 1 {
 			t.Errorf("SweepLaunch = (%v, %q, %v) after %d reads and %d waits, want started from 2 reads and 1 wait", ok, detail, err, *reads, waits)
+		}
+	})
+
+	t.Run("a stale record followed by a fresh one answers from the fresh record", func(t *testing.T) {
+		t.Parallel()
+		run, reads := sweepReads(
+			sweepReply{out: sweepRecordJSON(sweepDaemonStart().Add(-time.Hour), "declined", "")},
+			sweepReply{out: sweepRecordJSON(sweepDaemonStart(), "started", "")})
+		waits := 0
+		wait := func(context.Context) error { waits++; return nil }
+		ok, detail, err := sweepProbes(run, wait).SweepLaunch(context.Background())
+		if err != nil || !ok || !strings.Contains(detail, "launched") || *reads != 2 || waits != 1 {
+			t.Errorf("SweepLaunch = (%v, %q, %v) after %d reads and %d waits, want started from the fresh record, 2 reads and 1 wait", ok, detail, err, *reads, waits)
+		}
+	})
+
+	t.Run("a record that stays stale until the wait ends answers the last stale record", func(t *testing.T) {
+		t.Parallel()
+		older, later := sweepDaemonStart().Add(-2*time.Hour), sweepDaemonStart().Add(-time.Hour)
+		run, reads := sweepReads(
+			sweepReply{out: sweepRecordJSON(older, "started", "")},
+			sweepReply{out: sweepRecordJSON(later, "started", "")})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		waits := 0
+		wait := func(ctx context.Context) error {
+			if waits++; waits == 2 {
+				cancel()
+			}
+			return ctx.Err()
+		}
+		ok, detail, err := sweepProbes(run, wait).SweepLaunch(ctx)
+		wantStarts := strings.Contains(detail, later.Format(time.RFC3339)) && strings.Contains(detail, sweepDaemonStart().Format(time.RFC3339))
+		if err != nil || ok || *reads != 2 || waits != 2 || !wantStarts {
+			t.Errorf("SweepLaunch = (%v, %q, %v) after %d reads and %d waits, want not started naming the last stale start %s and this daemon's start %s, 2 each",
+				ok, detail, err, *reads, waits, later.Format(time.RFC3339), sweepDaemonStart().Format(time.RFC3339))
 		}
 	})
 
