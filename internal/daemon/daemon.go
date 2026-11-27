@@ -3081,10 +3081,12 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-escalationCloseChan:
-			// Escalation close tick — the next bead (gt-7o6wyb) calls the close
-			// pass here. The case consumes the channel from this ticker's first
-			// tick so the declaration is used and the loop keeps its behavior
-			// (gt-bba7kq).
+			// Escalation close tick — resumes seats whose escalation was
+			// answered but that have no live session, so they do not wait for
+			// the next patrol_scan pass (gt-7o6wyb). The helper drops a tick
+			// that arrives while shutdown is in progress, the rule the patrol
+			// scan arm above also applies to its ticks.
+			escalationCloseTick(d.isShutdownInProgress, d.triggerEscalationClosePass)
 
 		case <-landingInfraChan:
 			// Landing-infrastructure probe — asks the Forgejo instance and the
