@@ -168,6 +168,76 @@ func TestNukeSafetyClearsAFinishedSeatWithAMissingCleanupStatus(t *testing.T) {
 	}
 }
 
+// A paused seat whose hook_bead is open and unassigned was handed back: the
+// overrun guard stopped it and its bead carries no claim, so nuking the seat
+// destroys no assignment and the gate reads safe with HookStale set. The same
+// hook on a starting seat still blocks — it carries that reference from spawn
+// until the sling claim, and the bead alone cannot tell the two apart
+// (gt-8aksz7).
+func TestNukeSafetyHandedBackHook(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		agentState beads.AgentState
+		wantBlock  bool
+	}{
+		{name: "paused seat with a handed-back hook passes", agentState: beads.AgentStatePaused},
+		{name: "starting seat with the same hook keeps its blocker", agentState: beads.AgentStateSpawning, wantBlock: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			fake := mrlessBeads{beadsfake.New()}
+			agentID := polecatBeadIDForRig(r, "gastown", "ember")
+			if _, err := fake.Create(beads.CreateOptions{
+				ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+				Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+					RoleType: "polecat", Rig: "gastown", AgentState: string(tt.agentState),
+					CleanupStatus: string(polecat.CleanupClean), LastSourceIssue: "gt-work", HookBead: "gt-work",
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// No Assignee: an open bead with no claim is what a hand-back leaves.
+			if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+				t.Fatal(err)
+			}
+			env := sandboxSeatEnv{
+				probe: func(string, string) (polecat.LiveGitState, bool) { return polecat.LiveGitState{}, false },
+			}
+			get := func(string) (*polecat.Polecat, error) {
+				return &polecat.Polecat{Name: "ember", ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}, nil
+			}
+
+			result := checkPolecatSafetyWith("gastown", "ember", r, get, fake, env)
+
+			if tt.wantBlock {
+				if !result.Blocked {
+					t.Fatalf("nuke allowed a %s seat with an open unassigned hook", tt.agentState)
+				}
+				if len(result.Reasons) != 1 || result.Reasons[0] != "hook_bead=gt-work status=open" {
+					t.Errorf("refusal reasons = %q, want exactly [hook_bead=gt-work status=open]", strings.Join(result.Reasons, " | "))
+				}
+				if result.HookStale {
+					t.Error("HookStale = true for a blocked hook, want false")
+				}
+				return
+			}
+			if result.Blocked || len(result.Reasons) != 0 {
+				t.Fatalf("nuke refused a handed-back hook: blocked=%v reasons=%q", result.Blocked, strings.Join(result.Reasons, " | "))
+			}
+			if !result.HookStale {
+				t.Error("HookStale = false, want true for a handed-back hook")
+			}
+			if result.HookBead != "gt-work" {
+				t.Errorf("HookBead = %q, want gt-work", result.HookBead)
+			}
+		})
+	}
+}
+
 // The same missing cleanup_status on a seat whose git state is not safe is a
 // refusal, not a pass: with a terminal source and a closed hook the only thing
 // standing between this seat and a nuke is the live git answer, and a sandbox

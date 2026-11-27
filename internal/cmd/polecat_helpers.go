@@ -232,8 +232,11 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 			// the same thing in both: a reference whose bead is terminal,
 			// submitted for landing, or no longer an active assignment is not
 			// work this nuke would destroy. Anything else, including a
-			// reference that cannot be read, still blocks (gt-eqiid).
-			disposition := hookBeadSafeForCleanup(bd, hookBead)
+			// reference that cannot be read, still blocks (gt-eqiid). A stopped
+			// seat's handed-back hook is safe here as well: the overrun guard
+			// pauses the seat and leaves the bead open and unclaimed, so the
+			// nuke destroys no assignment (gt-8aksz7).
+			disposition := nukeHookDisposition(bd, hookBead, fields.AgentState)
 			if disposition.Safe {
 				result.HookStale = true
 			} else {
