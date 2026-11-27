@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,35 +26,57 @@ type sbxDeployerRule struct {
 }
 
 type sbxDeployerDoc struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Rules   []sbxDeployerRule `yaml:"rules"`
 	RoleRef struct {
-		Kind string `yaml:"kind"`
-		Name string `yaml:"name"`
+		APIGroup string `yaml:"apiGroup"`
+		Kind     string `yaml:"kind"`
+		Name     string `yaml:"name"`
 	} `yaml:"roleRef"`
 	Subjects []struct {
-		Kind string `yaml:"kind"`
-		Name string `yaml:"name"`
+		APIGroup string `yaml:"apiGroup"`
+		Kind     string `yaml:"kind"`
+		Name     string `yaml:"name"`
 	} `yaml:"subjects"`
 }
 
-// loadSbxDeployerRBAC parses every document of file, failing with its name.
+// sbxDeployerParse parses the documents of the file named name, refusing any
+// field these types do not list and a file that holds no document object. Every
+// error names the file, so a refusal says which input carried the widening.
+func sbxDeployerParse(name string, raw []byte) ([]sbxDeployerDoc, error) {
+	var docs []sbxDeployerDoc
+	for _, doc := range splitDocuments(raw) {
+		dec := yaml.NewDecoder(bytes.NewReader(doc))
+		dec.KnownFields(true)
+		var d sbxDeployerDoc
+		if err := dec.Decode(&d); err != nil {
+			return nil, fmt.Errorf("%s: %v", name, err)
+		}
+		if d.Kind == "" {
+			return nil, fmt.Errorf("%s holds a document with no kind", name)
+		}
+		docs = append(docs, d)
+	}
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("%s holds no object", name)
+	}
+	return docs, nil
+}
+
+// loadSbxDeployerRBAC reads file and parses it with sbxDeployerParse.
 func loadSbxDeployerRBAC(t *testing.T, file string) []sbxDeployerDoc {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.FromSlash(file))
 	if err != nil {
 		t.Fatalf("reading %s: %v", file, err)
 	}
-	var docs []sbxDeployerDoc
-	for _, doc := range splitDocuments(raw) {
-		var d sbxDeployerDoc
-		if err := yaml.Unmarshal(doc, &d); err != nil {
-			t.Fatalf("%s: %v", file, err)
-		}
-		docs = append(docs, d)
+	docs, err := sbxDeployerParse(file, raw)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return docs
 }
@@ -123,5 +147,70 @@ func TestSbxDeployerRBAC(t *testing.T) {
 	docs := loadSbxDeployerRBAC(t, sbxDeployerRBACFile)
 	if missing, extra := sbxDeployerMissingExtra(sbxDeployerLines(docs), sbxDeployerWant); len(missing)+len(extra) > 0 {
 		t.Fatalf("%s does not match the table: missing %q, extra %q", sbxDeployerRBACFile, missing, extra)
+	}
+}
+
+// TestSbxDeployerRBACRefusesUnreadInput holds the loader to refusing a field the
+// types do not list and a file that holds no object.
+func TestSbxDeployerRBACRefusesUnreadInput(t *testing.T) {
+	t.Parallel()
+	const role = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: gt-sbx-deployer-policy\n"
+	rows := []struct{ file, doc string }{
+		{"aggregation-rule.yaml", role + "aggregationRule:\n  clusterRoleSelectors: []\n"},
+		{"non-resource-urls.yaml", role + "rules:\n  - nonResourceURLs: [\"/healthz\"]\n    verbs: [\"get\"]\n"},
+		{"empty.yaml", ""},
+		{"comments-only.yaml", "# no object here\n"},
+		{"no-kind.yaml", "apiVersion: v1\nmetadata:\n  name: gt-sbx-deployer-policy\n"},
+	}
+	for _, row := range rows {
+		t.Run(row.file, func(t *testing.T) {
+			t.Parallel()
+			if _, err := sbxDeployerParse(row.file, []byte(row.doc)); err == nil || !strings.Contains(err.Error(), row.file) {
+				t.Fatalf("%s: got %v, want a refusal naming the file", row.file, err)
+			}
+		})
+	}
+}
+
+// TestSbxDeployerRBACReportsWidenings plants one edit in the manifest's own
+// bytes and holds the comparison to reporting it on the side the edit moved:
+// an added grant or subject is extra, a dropped one is missing.
+func TestSbxDeployerRBACReportsWidenings(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(sbxDeployerRBACFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", sbxDeployerRBACFile, err)
+	}
+	const role = "ClusterRole/gt-sbx-deployer-policy"
+	rows := []struct {
+		what, old, new, want string
+		dropped              bool
+	}{
+		{"added verb", `verbs: ["escalate", "bind"]`, `verbs: ["escalate", "bind", "delete"]`, role + " rbac.authorization.k8s.io/clusterroles delete", false},
+		{"dropped grant", "\n  - apiGroups: [\"rbac.authorization.k8s.io\"]\n    resources: [\"clusterroles\"]\n    verbs: [\"escalate\", \"bind\"]\n", "\n", role + " rbac.authorization.k8s.io/clusterroles escalate", true},
+		{"second binding subject", "  - kind: User\n    name: gt-deployer-policy", "  - kind: User\n    name: gt-deployers\n  - kind: User\n    name: gt-deployer-policy", "ClusterRoleBinding/gt-sbx-deployer-policy ClusterRole/gt-sbx-deployer-policy User/gt-deployers", false},
+		{"wildcard resource", `resources: ["namespaces"]`, `resources: ["namespaces", "*"]`, role + " core/* get", false},
+		{"wildcard verb", `verbs: ["escalate", "bind"]`, `verbs: ["escalate", "bind", "*"]`, role + " rbac.authorization.k8s.io/clusterroles *", false},
+	}
+	for _, row := range rows {
+		t.Run(row.what, func(t *testing.T) {
+			t.Parallel()
+			edited := strings.Replace(string(raw), row.old, row.new, 1)
+			if edited == string(raw) {
+				t.Fatalf("%q matched nothing in %s", row.old, sbxDeployerRBACFile)
+			}
+			docs, err := sbxDeployerParse(sbxDeployerRBACFile, []byte(edited))
+			if err != nil {
+				t.Fatal(err)
+			}
+			missing, extra := sbxDeployerMissingExtra(sbxDeployerLines(docs), sbxDeployerWant)
+			got, side := extra, "extra"
+			if row.dropped {
+				got, side = missing, "missing"
+			}
+			if !slices.Contains(got, row.want) {
+				t.Fatalf("%q went unreported; %s %q", row.want, side, got)
+			}
+		})
 	}
 }
