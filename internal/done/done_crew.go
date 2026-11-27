@@ -287,14 +287,22 @@ func polecatAssigneeSeat(assignee string, reg *session.PrefixRegistry) (string, 
 // a polecat seat does: an unassigned bead has no owner to keep it, and a
 // polecat seat is the holder a crew submission already stands down. Any other
 // holder keeps the bead, so a submission never takes live work from a crew
-// member or bird. A failed write is returned, never read as a successful
-// claim.
+// member or bird. When the claim replaces a polecat seat, the same Update
+// appends the seat as a holder note, so the landing can still name the seat
+// the submission took the bead from after the assignee changes (gt-bulryp).
+// A failed write is returned, never read as a successful claim.
 func claimForCrewSubmit(bd beads.Client, issue *beads.Issue, sender string) error {
 	if birdOwnedAssignee(issue.Assignee) {
 		return nil
 	}
 	status := string(beads.StatusInProgress)
-	if err := bd.Update(issue.ID, beads.UpdateOptions{Status: &status, Assignee: &sender}); err != nil {
+	opts := beads.UpdateOptions{Status: &status, Assignee: &sender}
+	// Only a non-empty holder can be a polecat seat here: birdOwnedAssignee
+	// keeps a bird or crew holder's bead, and an empty assignee names none.
+	if holder := strings.TrimSpace(issue.Assignee); holder != "" {
+		opts.AppendNotes = land.FormatHolderSeatNote(holder)
+	}
+	if err := bd.Update(issue.ID, opts); err != nil {
 		return fmt.Errorf("claiming %s for %s: %w", issue.ID, sender, err)
 	}
 	return nil

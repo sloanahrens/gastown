@@ -168,8 +168,37 @@ func TestCrewDoneClaimsUnassignedBead(t *testing.T) {
 	if issue.Assignee != h.r.sender || issue.Status != string(beads.StatusInProgress) {
 		t.Errorf("after the submission the bead is %q held by %q, want in_progress held by %q", issue.Status, issue.Assignee, h.r.sender)
 	}
+	if seats := land.HolderSeats(issue.Notes); len(seats) != 0 {
+		t.Errorf("an unassigned bead's claim recorded holder seats %v, want none", seats)
+	}
+	if strings.Contains(issue.Notes, land.HolderSeatNoteMarker) {
+		t.Errorf("an unassigned bead's claim wrote a holder line: notes %q", issue.Notes)
+	}
 	if !beads.HasLabel(issue, land.LabelReadyToLand) {
 		t.Errorf("labels %v lack %s: the claim must not cost the submission", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
+// TestCrewDoneClaimOverPolecatHolderRecordsHolderSeat: a crew submission that
+// claims a bead a polecat seat holds records that seat in the same write, so
+// the landing can still name the seat its assignee overwrote (gt-bulryp).
+func TestCrewDoneClaimOverPolecatHolderRecordsHolderSeat(t *testing.T) {
+	t.Parallel()
+	const holder = "gastown/polecats/agate"
+	h := newCrewSubmitHarness(t)
+	setCrewAssignee(t, h, holder)
+	if err := submitCrewForLanding(h.r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	issue := h.source(t)
+	if issue.Status != string(beads.StatusInProgress) || issue.Assignee != h.r.sender {
+		t.Errorf("after the submission the bead is %q held by %q, want in_progress held by %q", issue.Status, issue.Assignee, h.r.sender)
+	}
+	if got := land.HolderSeats(issue.Notes); len(got) != 1 || got[0] != holder {
+		t.Errorf("holder seats read back %v from notes %q, want [%s]", got, issue.Notes, holder)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("labels %v lack %s: the holder note must not cost the submission", issue.Labels, land.LabelReadyToLand)
 	}
 }
 
@@ -443,8 +472,10 @@ func setCrewAssignee(t *testing.T, h *submitHarness, assignee string) {
 // building for the submitter, so the landing worker's rejection path keeps it
 // with that owner instead of releasing it to dispatch and getting the branch
 // built a second time (gt-42cryp). An unassigned bead and a polecat-held bead
-// are claimed; a bead another crew member holds is left as it is. A failed
-// write is returned, never read as a successful claim.
+// are claimed; a bead another crew member holds is left as it is. A claim that
+// replaces a polecat seat records that seat as a holder note (gt-bulryp); an
+// unassigned or bird-held bead gets none. A failed write is returned, never
+// read as a successful claim.
 func TestClaimForCrewSubmit(t *testing.T) {
 	t.Parallel()
 	const sender = "gastown/crew/operator"
@@ -453,11 +484,12 @@ func TestClaimForCrewSubmit(t *testing.T) {
 		assignee    string
 		updateErr   error
 		wantClaimed bool
+		wantHolder  []string
 	}{
-		{"unassigned", "", nil, true},
-		{"polecat seat holder", "gastown/polecats/agate", nil, true},
-		{"another crew member", "gastown/crew/wren", nil, false},
-		{"failed write", "", errors.New("database is locked"), false},
+		{"unassigned", "", nil, true, nil},
+		{"polecat seat holder", "gastown/polecats/agate", nil, true, []string{"gastown/polecats/agate"}},
+		{"another crew member", "gastown/crew/wren", nil, false, nil},
+		{"failed write", "", errors.New("database is locked"), false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -476,12 +508,21 @@ func TestClaimForCrewSubmit(t *testing.T) {
 				if !errors.Is(err, tc.updateErr) {
 					t.Fatalf("claim error = %v, want the write error %v", err, tc.updateErr)
 				}
+				if got := land.HolderSeats(h.source(t).Notes); len(got) != 0 {
+					t.Errorf("a failed claim recorded holder seats %v, want none", got)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("claimForCrewSubmit: %v", err)
 			}
 			after := h.source(t)
+			if got := land.HolderSeats(after.Notes); strings.Join(got, "|") != strings.Join(tc.wantHolder, "|") {
+				t.Errorf("holder seats read back %v, want %v", got, tc.wantHolder)
+			}
+			if len(tc.wantHolder) == 0 && strings.Contains(after.Notes, land.HolderSeatNoteMarker) {
+				t.Errorf("notes %q carry a holder line, want none", after.Notes)
+			}
 			if tc.wantClaimed {
 				if after.Status != string(beads.StatusInProgress) || after.Assignee != sender {
 					t.Errorf("after claim status %q assignee %q, want in_progress/%q", after.Status, after.Assignee, sender)
