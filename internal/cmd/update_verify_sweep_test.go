@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,46 @@ import (
 // sweepDaemonStart is the start of the daemon the probes judge records against.
 func sweepDaemonStart() time.Time {
 	return time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+}
+
+// TestPodSweepLaunchAnswer pins the answer each outcome gives, and a record from
+// an earlier daemon start: the started flag and the detail a person reads.
+func TestPodSweepLaunchAnswer(t *testing.T) {
+	t.Parallel()
+	this := sweepDaemonStart()
+	tests := []struct {
+		name        string
+		record      daemon.SweepSmokeRecord
+		wantStarted bool
+		wantDetail  string
+	}{
+		{"started", daemon.SweepSmokeRecord{DaemonStart: this, Outcome: "started"}, true, "launched"},
+		{"busy", daemon.SweepSmokeRecord{DaemonStart: this, Outcome: "busy"}, true, "busy"},
+		{"declined", daemon.SweepSmokeRecord{DaemonStart: this, Outcome: "declined"}, false, "declined"},
+		{"failed", daemon.SweepSmokeRecord{DaemonStart: this, Outcome: "failed", Detail: "kubectl refused"}, false, "kubectl refused"},
+		{"failed with no detail", daemon.SweepSmokeRecord{DaemonStart: this, Outcome: "failed"}, false, "the sweep launch failed"},
+		{"stale record", daemon.SweepSmokeRecord{DaemonStart: this.Add(-time.Hour), Outcome: "started"}, false, "before this daemon's start"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			started, detail, err := sweepLaunchAnswer(tt.record, this)
+			if err != nil || started != tt.wantStarted || !strings.Contains(detail, tt.wantDetail) {
+				t.Errorf("sweepLaunchAnswer = (%v, %q, %v), want started %v with detail containing %q and no error",
+					started, detail, err, tt.wantStarted, tt.wantDetail)
+			}
+		})
+	}
+}
+
+// TestPodSweepLaunchAnswerRefuses pins the error: an outcome the record does not
+// name is not a verdict.
+func TestPodSweepLaunchAnswerRefuses(t *testing.T) {
+	t.Parallel()
+	started, detail, err := sweepLaunchAnswer(daemon.SweepSmokeRecord{DaemonStart: sweepDaemonStart(), Outcome: "unknown"}, sweepDaemonStart())
+	if err == nil {
+		t.Errorf("sweepLaunchAnswer = (%v, %q, nil), want an error naming no known outcome", started, detail)
+	}
 }
 
 // TestPodSweepLaunchStart pins the daemon start the record is judged against:

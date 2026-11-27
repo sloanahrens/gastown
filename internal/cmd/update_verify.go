@@ -298,6 +298,30 @@ func daemonStartFrom(findTownRoot func() (string, error), loadState func(string)
 	return state.StartedAt, nil
 }
 
+// sweepLaunchAnswer judges a record the daemon wrote. The daemon stamps its
+// record a moment after it saves its state's start, so this daemon's record is
+// never before that start; a record before it is from an earlier daemon. A
+// busy launch names no Job: the record carries none.
+func sweepLaunchAnswer(rec daemon.SweepSmokeRecord, start time.Time) (bool, string, error) {
+	if rec.DaemonStart.Before(start) {
+		return false, fmt.Sprintf("the launch-smoke record is from the daemon start %s, before this daemon's start %s", rec.DaemonStart.Format(time.RFC3339), start.Format(time.RFC3339)), nil
+	}
+	switch rec.Outcome {
+	case "started":
+		return true, "a sweep stage launched against main", nil
+	case "busy":
+		return true, "busy: a sweep Job of the rig has not ended (the record names no Job)", nil
+	case "declined":
+		return false, "declined by the capacity preflight", nil
+	case "failed":
+		if rec.Detail == "" {
+			return false, "the sweep launch failed", nil
+		}
+		return false, "the sweep launch failed: " + rec.Detail, nil
+	}
+	return false, "", errors.New("the launch-smoke record names no known outcome")
+}
+
 // podTargetImageLabel reads the commit label of the polecat image the values file
 // at imagesPath names, through the town's registry reader, in process: its only
 // inputs are the registry seams, the town root and the images file, and no
