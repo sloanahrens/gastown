@@ -73,15 +73,20 @@ printed before the first apply are how an operator undoes by hand.
 
 ### Runtime objects the compare ignores
 
-`gt town cluster drift` reports a live object the set does not name, unless `Set.IsRuntime` names it (`internal/cmd/town_cluster_drift_sbx.go`). The ignore lists are `sbxRuntime`, `sbxRuntimeNamespaces` and `sbxRuntimeClusterPrefixes` in `render.go`. Each entry is created by something other than the deployer:
+`gt town cluster drift` reports a live object the set does not name, unless `Set.IsRuntime` names it (`internal/cmd/town_cluster_drift_sbx.go`). The ignore lists are `sbxRuntime`, `sbxRuntimeNamespaces` and `sbxRuntimeClusterPrefixes` in `render.go`. Each cluster entry is created by something other than the deployer:
 
 - **The gateway and the daemon:** the NetworkPolicies `openshell-sandbox-supervisors` and `openshell-sandbox-workloads`, and the cache trim Job `gt-cache-trim-gt-cache`.
 - **The chart's certgen hook,** which leaves its ServiceAccount, Role and RoleBinding `openshell-certgen` behind. The hook document itself is never applied.
 - **kind and kubeadm:** the Namespaces `default`, `kube-system`, `kube-public`, `kube-node-lease` and `local-path-storage`; every object in `kube-system`, `kube-public` and `kube-node-lease`; the ClusterRoles and ClusterRoleBindings with the `system:` and `kubeadm:` prefixes; the bootstrap ClusterRoles `admin`, `edit`, `view` and `cluster-admin`; and kindnet.
 - **kind's local-path add-on,** including the StorageClass `standard`.
 - **The metrics-server manifest** that `up.sh` applies, including the APIService `v1beta1.metrics.k8s.io`.
+- **The deployer's own RBAC objects,** which the operator applies from `deploy/k8s/sbx-deployer-rbac.yaml` in the sitting; see [The deployer's rights](#the-deployers-rights).
 
-The lists were copied by hand from `deploy/k8s/kind/cluster.yaml`, `up.sh` and kind's defaults; the `sbxRuntime` comment says no live cluster was read for them. A missed object shows as an extra in the compare, and the fix is one more row.
+The cluster lists were copied by hand from `deploy/k8s/kind/cluster.yaml`, `up.sh` and kind's defaults; the `sbxRuntime` comment says no live cluster was read for them. A missed object shows as an extra in the compare, and the fix is one more row.
+
+### The deployer's rights
+
+`deploy/k8s/sbx-deployer-rbac.yaml` holds the policy ClusterRole and its binding, the apply Role and RoleBinding in each namespace of the rendered set, the read credential's view and reader-extra bindings, and the named-Secrets Role with its read and apply bindings. The operator applies it with the admin kubeconfig once per rebuild, in the sitting. Neither the plan nor the apply writes it, and neither the control cluster's static set nor the gt-sbx set embeds it, so `sbxRuntime` names its objects as runtime.
 
 ### The four Secrets
 

@@ -109,12 +109,14 @@ func (s Set) IsRuntime(ref ObjectRef) bool {
 	return false
 }
 
-// sbxRuntime is every fixed-name object the sandbox cluster creates itself,
-// grouped by the class of object that creates it. It is the source Render fills
-// Set.Runtime from. The list is read from the kind cluster config and up.sh in
-// deploy/k8s/kind, the pinned metrics-server manifest up.sh applies, and kind's
-// default add-ons; no live cluster was read for it. A miss shows as an "extra"
-// in the drift compare, and the fix is one more row.
+// sbxRuntime is every fixed-name object the drift compare must not report as
+// extra: those the sandbox cluster creates itself, grouped by the class that
+// creates it, and the deployer's own RBAC objects, applied in the sitting. It is
+// the source Render fills Set.Runtime from. The cluster's rows were read by hand
+// from deploy/k8s/kind's config and up.sh, the pinned metrics-server manifest
+// and kind's add-ons, and no live cluster was read for them. The deployer's rows
+// are read from deploy/k8s/sbx-deployer-rbac.yaml. A miss shows as an "extra";
+// the fix is one more row.
 var sbxRuntime = []ObjectRef{
 	// The OpenShell gateway and the daemon create these at runtime.
 	{Kind: "NetworkPolicy", Namespace: openshellName, Name: "openshell-sandbox-supervisors"},
@@ -161,6 +163,23 @@ var sbxRuntime = []ObjectRef{
 	{Kind: "ClusterRoleBinding", Name: "metrics-server:system:auth-delegator"},
 	{Kind: "ClusterRoleBinding", Name: "system:metrics-server"},
 	{Kind: "APIService", Name: "v1beta1.metrics.k8s.io"},
+
+	// The deployer's own RBAC objects: deploy/k8s/sbx-deployer-rbac.yaml, which
+	// the operator applies with the admin kubeconfig once per rebuild, in the
+	// sitting. The plan and the apply never write it, so no other list names
+	// them; without these rows the compare reports every one as extra.
+	{Kind: "ClusterRole", Name: "gt-sbx-deployer-policy"},
+	{Kind: "ClusterRoleBinding", Name: "gt-sbx-deployer-policy"},
+	{Kind: "Role", Namespace: openshellName, Name: "gt-sbx-deployer-apply"},
+	{Kind: "RoleBinding", Namespace: openshellName, Name: "gt-sbx-deployer-apply"},
+	{Kind: "Role", Namespace: "agent-sandbox-system", Name: "gt-sbx-deployer-apply"},
+	{Kind: "RoleBinding", Namespace: "agent-sandbox-system", Name: "gt-sbx-deployer-apply"},
+	{Kind: "ClusterRoleBinding", Name: "gt-sbx-deployer-view"},
+	{Kind: "ClusterRole", Name: "gt-sbx-deployer-reader-extra"},
+	{Kind: "ClusterRoleBinding", Name: "gt-sbx-deployer-reader-extra"},
+	{Kind: "Role", Namespace: openshellName, Name: "gt-sbx-deployer-secrets"},
+	{Kind: "RoleBinding", Namespace: openshellName, Name: "gt-sbx-deployer-secrets-read"},
+	{Kind: "RoleBinding", Namespace: openshellName, Name: "gt-sbx-deployer-secrets-apply"},
 }
 
 // sbxRuntimeNamespaces names the namespaces kubeadm and kind create themselves
