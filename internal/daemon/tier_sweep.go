@@ -1650,6 +1650,24 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	defer cleanup()
 
 	stages := tierSweepStages(rig)
+	// The mark names the commit this cycle sweeps before its first stage runs,
+	// so a daemon that dies mid-cycle resumes that commit rather than a newer
+	// tip whose result it would lose (gt-vbdeh9). One deferred step clears it on
+	// every return, whatever the cycle's outcome: a mark left after a failed
+	// record write would sweep that commit again on every cycle (gt-nz89cq). A
+	// cycle whose context ended keeps it, for the restart drain that reads it.
+	markErr := writeTierSweepInFlight(d.config.TownRoot, rig, tierSweepInFlightMark{SHA: sha, Started: now})
+	if markErr != nil {
+		d.logger.Printf("tier_sweep: %s: writing the mark of the commit under sweep: %v", rig, markErr)
+	}
+	defer func() {
+		if markErr != nil || ctx.Err() != nil {
+			return
+		}
+		if err := clearTierSweepInFlight(d.config.TownRoot, rig); err != nil {
+			d.logger.Printf("tier_sweep: %s: clearing the mark of the commit under sweep: %v", rig, err)
+		}
+	}()
 	// The cycle's start, logged before the first stage runs so the dashboard's
 	// tiersweep feed section reads a sweep as running from its true beginning,
 	// over the stages it will run, instead of inferring it from the shell stage
