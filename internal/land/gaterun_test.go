@@ -333,3 +333,51 @@ func TestParseGateRunLogBoundsTheText(t *testing.T) {
 		}
 	}
 }
+
+// TestParseGateRunLogChecks reads the branch checks' timings: "gate: check <name> <seconds>s"
+// adds one entry, a name is cut like the other copied text, the first line for a name wins, and
+// a malformed, overflowing or past-the-cap line adds nothing. A record with no checks omits the
+// field from its JSON (gt-3ui5of).
+func TestParseGateRunLogChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, log string
+		want      map[string]float64
+	}{
+		{"two checks", "2026-11-19T10:02:00Z gate: check gomod-rationale 7s\r\n" +
+			"2026-11-19T10:02:00Z gate: check err_branch 2s\n",
+			map[string]float64{"gomod-rationale": 7, "err_branch": 2}},
+		{"repeated name keeps the first", "2026-11-19T10:02:00Z gate: check unwired 4s\n" +
+			"2026-11-19T10:02:00Z gate: check unwired 9s\n", map[string]float64{"unwired": 4}},
+		{"name cut like other text", "2026-11-19T10:02:00Z gate: check " + strings.Repeat("a", 300) + " 1s\n",
+			map[string]float64{strings.Repeat("a", gateRunTextMax): 1}},
+		{"word after the seconds", "2026-11-19T10:02:00Z gate: check machinecheck 2s extra\n", nil},
+		{"seconds too large", "2026-11-19T10:02:00Z gate: check machinecheck " + strings.Repeat("9", 400) + "s\n", nil},
+		{"no check line", "2026-11-19T10:00:00Z lint: x\n", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			run := ParseGateRunLog(tc.log)
+			if !reflect.DeepEqual(run.Checks, tc.want) {
+				t.Errorf("Checks = %v, want %v", run.Checks, tc.want)
+			}
+			b, err := json.Marshal(run)
+			if err != nil {
+				t.Fatalf("marshal gate run: %v", err)
+			}
+			if has := strings.Contains(string(b), `"checks"`); has != (len(tc.want) > 0) {
+				t.Errorf("checks in JSON = %v, want %v: %s", has, len(tc.want) > 0, b)
+			}
+		})
+	}
+
+	var many strings.Builder
+	for i := 1; i <= gateRunChecksKept+1; i++ {
+		many.WriteString("2026-11-19T10:02:00Z gate: check check" + strconv.Itoa(i) + " 1s\n")
+	}
+	if all := ParseGateRunLog(many.String()).Checks; len(all) != gateRunChecksKept || all["check33"] != 0 {
+		t.Errorf("Checks from %d names = %d entries, check33 = %v, want the first %d",
+			gateRunChecksKept+1, len(all), all["check33"], gateRunChecksKept)
+	}
+}
