@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,10 +47,20 @@ func classifySweepSmoke(l tierSweepLaunch) sweepSmokeRecord {
 }
 
 // sweepSmokeLaunch launches the rig's first sweep stage the runner takes and
-// reports the outcome without waiting for the run (gt-ohgh0v). The stop runs
-// once the launch returns, except for a busy launch: it created nothing, and
-// its stop could end the run already going.
+// reports the outcome without waiting for the run (gt-ohgh0v). A sweep marked
+// in flight younger than the run budget is reported busy without launching. The
+// stop runs once the launch returns, except for a busy launch: it created
+// nothing, and its stop could end the run already going.
 func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRecord {
+	now := d.clk().Now()
+	// A mark outlives a cycle its daemon died under, and its Job's output claims
+	// wait for the resumed cycle (gt-vbdeh9); a launch here would remove them
+	// first. An unreadable mark is logged and the launch goes on (gt-rp65v0).
+	if mark, err := readTierSweepInFlight(d.config.TownRoot, rig); err == nil && now.Sub(mark.Started) < tierSweepRunBudget {
+		return sweepSmokeRecord{Time: now, Outcome: "busy", Detail: "a sweep of " + mark.SHA + " is still marked in flight"}
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.logger.Printf("Warning: tier-sweep mark not read, launching the smoke: %v", err)
+	}
 	l := d.sweepSmokeRun(ctx, rig)
 	rec := classifySweepSmoke(l)
 	if l.stop != nil && rec.Outcome != "busy" {
