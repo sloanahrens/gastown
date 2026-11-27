@@ -78,6 +78,9 @@ func TestRehearsalCollect(t *testing.T) {
 			if rec.Load != collectSummary || !rec.SweepRan {
 				t.Errorf("Load, SweepRan = %+v, %v; want %+v and true", rec.Load, rec.SweepRan, collectSummary)
 			}
+			if len(rec.Interventions) != 0 {
+				t.Errorf("Interventions = %q, want none after a full collect", rec.Interventions)
+			}
 			want := []string{}
 			for i := 0; i < tc.runs; i++ {
 				want = append(want, argv...)
@@ -92,7 +95,8 @@ func TestRehearsalCollect(t *testing.T) {
 // TestRehearsalCollectErrors stops Collect at one failed read, decode or refused
 // line. steps is how many steps had finished, in order: the beads, the daemon
 // log, the polecat listing and the host load. A finished step's fields are filled;
-// the rest keep the seed.
+// the rest keep the seed. step names the one intervention the failure leaves on
+// the record, which Judge reports as a failure.
 func TestRehearsalCollectErrors(t *testing.T) {
 	t.Parallel()
 	beads := []string{"bd show gt-a --json", "bd comments gt-a --json", "bd show gt-b --json", "bd comments gt-b --json"}
@@ -112,16 +116,17 @@ func TestRehearsalCollectErrors(t *testing.T) {
 		wraps                bool
 		ran                  []string
 		steps                int
+		step                 string
 	}{
-		{"a failed show read", "bd show gt-b --json", "gt-b", fakeAnswer{out: leaked, err: cause}, nil, true, beads[:3], 0},
-		{"a failed comments read", "bd comments gt-a --json", "gt-a", fakeAnswer{out: leaked, err: cause}, nil, true, beads[:2], 0},
-		{"a failed daemon log read", logs, "failed calls", fakeAnswer{out: leaked, err: cause}, nil, true, append(slices.Clone(beads), logs), 1},
-		{"an uncovered log window", logs, "failed calls", fakeAnswer{out: "2026/11/27 09:00:00 daemon: asleep\n"}, nil, false, append(slices.Clone(beads), logs), 1},
-		{"a failed listing read", listing, "stranded seats", fakeAnswer{out: leaked, err: cause}, nil, true, append(slices.Clone(beads), logs, listing), 2},
-		{"a listing that does not decode", listing, "stranded seats", fakeAnswer{out: "[{"}, nil, false, append(slices.Clone(beads), logs, listing), 2},
-		{"a bad load text", "", "host load", fakeAnswer{}, strings.NewReader("2026-11-27T10:10:00Z load1=oops load5=0.00 load15=0.00 ncpu=24\n"), false, full, 3},
-		{"a failing host load reader", "", "host load", fakeAnswer{}, iotest.ErrReader(cause), true, full, 3},
-		{"an unreadable sweep line", logs, "soon", fakeAnswer{out: badSweep}, nil, false, full, 4},
+		{"a failed show read", "bd show gt-b --json", "gt-b", fakeAnswer{out: leaked, err: cause}, nil, true, beads[:3], 0, "bead gt-b"},
+		{"a failed comments read", "bd comments gt-a --json", "gt-a", fakeAnswer{out: leaked, err: cause}, nil, true, beads[:2], 0, "bead gt-a"},
+		{"a failed daemon log read", logs, "failed calls", fakeAnswer{out: leaked, err: cause}, nil, true, append(slices.Clone(beads), logs), 1, "failed calls"},
+		{"an uncovered log window", logs, "failed calls", fakeAnswer{out: "2026/11/27 09:00:00 daemon: asleep\n"}, nil, false, append(slices.Clone(beads), logs), 1, "failed calls"},
+		{"a failed listing read", listing, "stranded seats", fakeAnswer{out: leaked, err: cause}, nil, true, append(slices.Clone(beads), logs, listing), 2, "stranded seats"},
+		{"a listing that does not decode", listing, "stranded seats", fakeAnswer{out: "[{"}, nil, false, append(slices.Clone(beads), logs, listing), 2, "stranded seats"},
+		{"a bad load text", "", "host load", fakeAnswer{}, strings.NewReader("2026-11-27T10:10:00Z load1=oops load5=0.00 load15=0.00 ncpu=24\n"), false, full, 3, "host load"},
+		{"a failing host load reader", "", "host load", fakeAnswer{}, iotest.ErrReader(cause), true, full, 3, "host load"},
+		{"an unreadable sweep line", logs, "soon", fakeAnswer{out: badSweep}, nil, false, full, 4, "sweep run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -158,6 +163,12 @@ func TestRehearsalCollectErrors(t *testing.T) {
 			}
 			if !slices.Equal(rec.Gates, wantGates) || !slices.Equal(rec.Landings, wantLandings) || !slices.Equal(rec.FailedCalls, wantFailed) || !slices.Equal(rec.Stranded, wantStranded) || rec.Load != wantLoad || rec.SweepRan {
 				t.Errorf("record = Gates %+v, Landings %+v, FailedCalls %q, Stranded %q, Load %+v, SweepRan %v; want %+v, %+v, %q, %q, %+v, false", rec.Gates, rec.Landings, rec.FailedCalls, rec.Stranded, rec.Load, rec.SweepRan, wantGates, wantLandings, wantFailed, wantStranded, wantLoad)
+			}
+			if want := []string{"collect failed: " + tc.step}; !slices.Equal(rec.Interventions, want) {
+				t.Errorf("Interventions = %q, want %q", rec.Interventions, want)
+			}
+			if reason := "intervention: collect failed: " + tc.step; !slices.Contains(Judge(rec).Reasons, reason) {
+				t.Errorf("Judge reasons = %q, want %q", Judge(rec).Reasons, reason)
 			}
 			if !slices.Equal(ran, tc.ran) {
 				t.Errorf("town ran %q, want %q", ran, tc.ran)
