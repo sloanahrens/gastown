@@ -1154,6 +1154,52 @@ func TestCacheTrimSetPendingKeepsTheDiskMarks(t *testing.T) {
 	}
 }
 
+// newCacheTrimRestartPair builds two daemons over one temp town: the fixture's
+// daemon, and a second built as a restart of it — the same town and the
+// fixture's log, with none of the first's in-memory state — so a row can show
+// what a mark written to the town's disk keeps across a restart (gt-hgwad7).
+func newCacheTrimRestartPair(t *testing.T) (before, after *Daemon) {
+	t.Helper()
+	f := newCacheTrimFixture(t, "", nil)
+	restarted := &Daemon{
+		config: &Config{TownRoot: f.d.config.TownRoot},
+		logger: log.New(f.log, "", 0),
+	}
+	return f.d, restarted
+}
+
+// TestCacheTrimRestartPairPending pins the row the restart pair exists for: a
+// claim the first daemon marked pending reads pending on a second daemon over
+// the same town, so the mark survives a restart in the town's file rather than
+// only in the first daemon's memory (gt-hgwad7).
+func TestCacheTrimRestartPairPending(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		mark      func(d *Daemon)
+		namespace string
+		claim     string
+		want      bool
+	}{
+		{
+			name:      "a claim the first daemon marked pending reads pending on the restart",
+			mark:      func(d *Daemon) { d.cacheTrimSetPending("alpha", "claim-a", true) },
+			namespace: "alpha",
+			claim:     "claim-a",
+			want:      true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			before, after := newCacheTrimRestartPair(t)
+			tc.mark(before)
+			if got := after.cacheTrimIsPending(tc.namespace, tc.claim); got != tc.want {
+				t.Errorf("the restarted daemon reports %s/%s pending = %v, want %v", tc.namespace, tc.claim, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCacheTrimIsPendingLoadErrorIsLoggedOnce pins that a fresh daemon whose
 // pending-mark file cannot be read answers not-pending and logs it once (gt-wcz9tm).
 func TestCacheTrimIsPendingLoadErrorIsLoggedOnce(t *testing.T) {
