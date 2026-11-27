@@ -1442,6 +1442,40 @@ func TestDeployReaderReadsAFinishedChecksJobsOnce(t *testing.T) {
 	assert.Equal(t, []int64{1, 2, 2}, stub.jobsAsked, "and only it is")
 }
 
+// Every repo's held checks are its own: a read fills only the map of checks it
+// saw, and the refresh merges them once every repo is read, so one repo's
+// checks cannot overwrite another's (gt-5o4qwr). The second refresh asks for no
+// ended run's jobs again, and each repo still draws its own result.
+func TestDeployReaderKeepsEachReposHeldChecksApart(t *testing.T) {
+	t.Parallel()
+
+	const north, south = "north/web", "south/web"
+	stub := &deployStub{
+		repos: []string{north, south},
+		runs: map[string][]forgejo.ActionRun{
+			north: {testHealthRun(1, "success", 5)},
+			south: {testHealthRun(2, "failure", 6)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", "success", "success"),
+			2: healthJobs("success", "success", "failure"),
+		},
+	}
+	reader := newDeployTestReader(stub, nil)
+	reader.Read()
+	require.Equal(t, []int64{1, 2}, stub.jobsAsked)
+
+	d := reader.Read()
+	assert.Equal(t, []int64{1, 2}, stub.jobsAsked, "the second refresh asks for no ended run's jobs again")
+	require.Len(t, d.Health, 4)
+	assert.Equal(t, []string{north, north, south, south},
+		[]string{d.Health[0].Repo, d.Health[1].Repo, d.Health[2].Repo, d.Health[3].Repo})
+	assert.Equal(t, []string{healthSuccess, healthSuccess, healthSuccess, healthFailure},
+		[]string{d.Health[0].Status, d.Health[1].Status, d.Health[2].Status, d.Health[3].Status},
+		"each repo draws its own held check, not a copy of the other's")
+	assert.Equal(t, []string{south}, d.HealthFailed)
+}
+
 // Only a final read is held: an ended run with a job still waiting or blocked is
 // read again, and so is a run that was re-run, which keeps its id but shows a
 // new status or a new stop time.
