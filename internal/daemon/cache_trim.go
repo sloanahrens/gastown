@@ -588,8 +588,7 @@ func (s *cacheTrimNoOp) raise(it attention.Item) {
 
 // overFor records the first now it was given for key and returns it: a later
 // call with another now reads the first back, so a caller can tell how long the
-// key's run of over-cap readings has lasted. Nothing calls it yet: gt-mxl8ie
-// wires it into ciCacheTrimMeasure.
+// key's run of over-cap readings has lasted.
 func (s *cacheTrimNoOp) overFor(key string, now time.Time) time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
