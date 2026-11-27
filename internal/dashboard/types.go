@@ -226,6 +226,16 @@ type ReadStatus struct {
 	Stale bool      `json:"stale,omitempty"`
 }
 
+// PollTiming is one poll's last run, the wait for a pollGate slot kept beside
+// the reader's own time so a page can tell a slow reader from a poll that
+// waited behind others (gt-uywol3).
+type PollTiming struct {
+	// At is when the run finished.
+	At     time.Time `json:"at"`
+	WaitMS int64     `json:"wait_ms"`
+	RunMS  int64     `json:"run_ms"`
+}
+
 // StaleNow reports whether the value is not current, which is true of a read
 // that failed, was never taken, or has aged past readStaleFactor of the poll's
 // intervals.
@@ -1096,6 +1106,11 @@ type State struct {
 	// standing items, each row tagged with its owner. It is nil until the
 	// readers behind it have reported (buildAttention).
 	Attention *Attention `json:"attention,omitempty"`
+	// Polls is the last run of each poll, keyed by its method name (pollHealth,
+	// pollFeed, ...): the time it waited for a pollGate slot and the time its
+	// reader ran, so a poll holding the gate can be told from a slow read
+	// (gt-uywol3). A poll missing from it has not run since the hub started.
+	Polls map[string]PollTiming `json:"polls,omitempty"`
 	// Reads is one entry per poller that keeps a last good value, keyed by
 	// source, so the page can tell a reading that failed or went old from one
 	// that is merely unchanged. A source missing from it has not reported.
