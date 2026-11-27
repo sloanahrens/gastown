@@ -326,6 +326,30 @@ func TestCPUSlotShare(t *testing.T) {
 	}
 }
 
+// TestCPUSlotShareReportsTheClassError: a queued command the class could not
+// run fails runFrom with that error, so the build does not read as run.
+// Mutation: return nil for the class's error, and the refusal reads as success.
+func TestCPUSlotShareReportsTheClassError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &recorder{
+		getwd: func() (string, error) { return town + "/gastown/crew/olive", nil },
+		find:  func(string) (string, error) { return town, nil },
+	}
+	refused := errors.New("no CPU-class slot")
+	h := r.host()
+	h.queued = queuedUnder(time.Minute, machine{
+		environ:   func() []string { return nil },
+		numCPU:    24,
+		classSize: func(string) int { return 3 },
+		runCPU:    func(string, slot.CPURunOptions) (int, error) { return 0, refused },
+	})
+
+	if _, err := runFrom([]string{"go", "build"}, h); !errors.Is(err, refused) {
+		t.Fatalf("runFrom error = %v, want the class's %v", err, refused)
+	}
+}
+
 // notRead is the working directory a case must not read.
 func notRead(t *testing.T) func() (string, error) {
 	t.Helper()
