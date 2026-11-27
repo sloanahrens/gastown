@@ -985,8 +985,10 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // priority answers the priority preflight's listing instead of the healthy one,
 // so a cycle can be driven from a protected pod the sweep outranks to a healthy
 // cluster and back. progress is what the Progress step prints, and failProgress
-// fails that step; an exec is the only command that step runs. goingReads answers
-// the first that many status reads with no status: the run is still going.
+// fails that step; progressStderr is the stderr that failure prints, defaulting
+// to a kubectl exec error when nil. An exec is the only command that step runs.
+// goingReads answers the first that many status reads with no status: the run is
+// still going.
 type runnerCluster struct {
 	t           *testing.T
 	status      string
@@ -1013,6 +1015,7 @@ type runnerCluster struct {
 	priority       []byte
 	progress       []byte
 	failProgress   bool
+	progressStderr []byte
 }
 
 // goldenListing reads a live-cluster fixture the sweep's guards were captured
@@ -1128,7 +1131,11 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 		// fails only the exec into the Job, which is the Progress step.
 		if c.failProgress && slices.ContainsFunc(argv, func(arg string) bool { return strings.HasPrefix(arg, "job/") }) {
 			// The step prints a whole record and still fails: it must not be stored.
-			return c.progress, []byte("error: unable to exec into the run's Job\n"), errors.New("exit status 1")
+			stderr := c.progressStderr
+			if stderr == nil {
+				stderr = []byte("error: unable to exec into the run's Job\n")
+			}
+			return c.progress, stderr, errors.New("exit status 1")
 		}
 		return c.progress, nil, nil
 	case slices.Contains(argv, "cp"):
@@ -2031,24 +2038,32 @@ func TestTierSweepRunnerCollect(t *testing.T) {
 // TestTierSweepRunnerProgress is the copy the wait makes while a run goes on: the
 // Progress step's stdout is stored as progress.json in the run's output
 // directory. A plan with no Progress step writes nothing, and a step that fails
-// or prints what is not a JSON object leaves the record the last poll stored.
+// or prints what is not a JSON object leaves the record the last poll stored. A
+// failed step's error carries the stderr it printed, cut to its last 200 bytes.
 func TestTierSweepRunnerProgress(t *testing.T) {
 	t.Parallel()
 	const earlier = `{"tiers":["integration"]}`
+	const longStderrPrefix = "the-part-of-the-stderr-the-error-drops-"
+	longStderr := longStderrPrefix + strings.Repeat("t", 200)
 	cases := []struct {
-		name     string
-		backend  string
-		progress string
-		failStep bool
-		noRunner bool
-		badSpec  bool
-		wantExec bool
-		wantErr  bool
-		wantFile string
+		name          string
+		backend       string
+		progress      string
+		failStep      bool
+		progressErr   []byte
+		noRunner      bool
+		badSpec       bool
+		wantExec      bool
+		wantErr       bool
+		wantErrText   string
+		wantErrAbsent string
+		wantFile      string
 	}{
 		{name: "a Progress step's stdout is stored as the run's progress record", progress: `{"tiers":["integration"],"running":"race"}`, wantExec: true, wantFile: `{"tiers":["integration"],"running":"race"}`},
 		{name: "a plan with no Progress step writes nothing", backend: config.TierSweepRunnerDocker, wantFile: earlier},
-		{name: "a failing Progress step is returned and keeps the stored record", progress: `{"tiers":["integration"],"running":"race"}`, failStep: true, wantExec: true, wantErr: true, wantFile: earlier},
+		{name: "a failing Progress step is returned and keeps the stored record", progress: `{"tiers":["integration"],"running":"race"}`, failStep: true, progressErr: []byte("error: unable to upgrade connection"), wantExec: true, wantErr: true, wantErrText: "error: unable to upgrade connection", wantFile: earlier},
+		{name: "a failing Progress step's long stderr is cut to its last 200 bytes", failStep: true, progressErr: []byte(longStderr), wantExec: true, wantErr: true, wantErrText: strings.Repeat("t", 200), wantErrAbsent: longStderrPrefix, wantFile: earlier},
+		{name: "a failing Progress step with no stderr still names the exit status", failStep: true, progressErr: []byte{}, wantExec: true, wantErr: true, wantErrText: "exit status 1", wantErrAbsent: "stderr:", wantFile: earlier},
 		{name: "a Progress step that prints no JSON object is refused and keeps the stored record", progress: "not json", wantExec: true, wantErr: true, wantFile: earlier},
 		{name: "a missing runner block is refused and keeps the stored record", noRunner: true, wantErr: true, wantFile: earlier},
 		{name: "a backend the daemon does not know is refused and keeps the stored record", backend: "podman", wantErr: true, wantFile: earlier},
@@ -2059,7 +2074,7 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 			t.Parallel()
 			now := atHour(time.Now(), 15)
 			d, spec, _ := runnerKubernetesDaemon(t, now)
-			cluster := &runnerCluster{t: t, progress: []byte(tc.progress), failProgress: tc.failStep}
+			cluster := &runnerCluster{t: t, progress: []byte(tc.progress), failProgress: tc.failStep, progressStderr: tc.progressErr}
 			cmds := &runnerFakeCmds{answer: cluster.answer}
 			d.execCmd = cmds.run
 			switch {
@@ -2082,6 +2097,12 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, want an error = %v", err, tc.wantErr)
+			}
+			if tc.wantErrText != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrText)) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.wantErrText)
+			}
+			if tc.wantErrAbsent != "" && err != nil && strings.Contains(err.Error(), tc.wantErrAbsent) {
+				t.Errorf("err = %v, want it not to contain %q", err, tc.wantErrAbsent)
 			}
 			if got := len(runnerCalls(cmds.ran, "exec")) > 0; got != tc.wantExec {
 				t.Errorf("a progress step ran = %v, want %v: %q", got, tc.wantExec, cmds.ran)

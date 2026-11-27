@@ -3792,13 +3792,19 @@ func (r *tierSweepGuardReads) get(rig string) *sweeprunner.GuardUnreadable {
 	return r.byRig[rig]
 }
 
+// tierSweepProgressStderrBytes is how much of a failed progress read's stderr
+// the error carries: its last bytes, so the daemon log names what failed
+// without dumping a long kubectl line.
+const tierSweepProgressStderrBytes = 200
+
 // tierSweepRunnerProgress stores the progress record a running run keeps. It
 // renders the Spec through the configured backend again, runs the plan's
 // Progress step, and writes that step's stdout as progress.json in spec.OutDir.
 // A plan with no Progress step, which is every plan the Docker backend renders,
 // has nothing to copy: it returns nil and writes nothing. A failed step, or
 // stdout that is not a JSON object, is returned wrapped and leaves the record
-// the last poll stored as it was.
+// the last poll stored as it was. A failed step's error carries the last lines
+// of the stderr it printed, so the caller's log names what failed.
 func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.Spec) error {
 	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
@@ -3818,8 +3824,19 @@ func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.S
 	step := plan.Poll.Progress
 	stepCtx, cancel := tierSweepRunnerStepContext(ctx, tierSweepRunnerProgressBudget)
 	defer cancel()
-	stdout, _, err := d.runCmd(exec.CommandContext(stepCtx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	stdout, stderr, err := d.runCmd(exec.CommandContext(stepCtx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
 	if err != nil {
+		// The error names the read's own failure, so the caller's log does not
+		// stop at the exit status. The stderr is cut to its last
+		// tierSweepProgressStderrBytes bytes at a character boundary, then
+		// quoted the way the status read and the teardown log it.
+		tail := string(stderr)
+		if len(tail) > tierSweepProgressStderrBytes {
+			tail = strings.ToValidUTF8(tail[len(tail)-tierSweepProgressStderrBytes:], "")
+		}
+		if tail = lastLines(tail); tail != "" {
+			err = fmt.Errorf("%w (stderr: %s)", err, tail)
+		}
 		return fmt.Errorf("reading run %s's progress: %w", spec.RunID, err)
 	}
 	if err := writeRunProgress(spec.OutDir, stdout); err != nil {
