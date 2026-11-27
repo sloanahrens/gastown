@@ -1127,3 +1127,46 @@ func TestCacheTrimIsPendingLoadsOnce(t *testing.T) {
 		t.Errorf("a key the file gained after the first read = true, want the daemon's one load kept")
 	}
 }
+
+// TestCacheTrimSetPendingKeepsTheDiskMarks pins that a fresh daemon's first
+// change to the pending mark loads the file's marks first, so a set and a clear
+// before the first read keep the other claims' marks (gt-wcz9tm).
+func TestCacheTrimSetPendingKeepsTheDiskMarks(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", nil)
+	f.d.cacheTrimSetPending("alpha", "claim-a", true)
+	fresh := func() *Daemon {
+		return &Daemon{config: &Config{TownRoot: f.d.config.TownRoot}, logger: log.New(f.log, "", 0)}
+	}
+
+	fresh().cacheTrimSetPending("beta", "claim-b", true) // the set precedes any read
+	if got, err := readCacheTrimPending(f.d.config.TownRoot); err != nil {
+		t.Fatalf("reading the pending marks back: %v", err)
+	} else if want := map[string]bool{"alpha/claim-a": true, "beta/claim-b": true}; !maps.Equal(got, want) {
+		t.Errorf("after a set the file holds %v, want %v", got, want)
+	}
+
+	fresh().cacheTrimSetPending("beta", "claim-b", false) // the clear precedes any read
+	if got, err := readCacheTrimPending(f.d.config.TownRoot); err != nil {
+		t.Fatalf("reading the pending marks back: %v", err)
+	} else if want := map[string]bool{"alpha/claim-a": true}; !maps.Equal(got, want) {
+		t.Errorf("after a clear the file holds %v, want %v", got, want)
+	}
+}
+
+// TestCacheTrimIsPendingLoadErrorIsLoggedOnce pins that a fresh daemon whose
+// pending-mark file cannot be read answers not-pending and logs it once (gt-wcz9tm).
+func TestCacheTrimIsPendingLoadErrorIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", nil)
+	mustMkdirAll(t, cacheTrimPendingPath(f.d.config.TownRoot)) // a directory fails every read
+	fresh := &Daemon{config: &Config{TownRoot: f.d.config.TownRoot}, logger: log.New(f.log, "", 0)}
+
+	if fresh.cacheTrimIsPending("alpha", "claim-a") {
+		t.Errorf("an unreadable file reported a claim pending")
+	}
+	fresh.cacheTrimIsPending("beta", "claim-b")
+	if got := strings.Count(f.log.String(), "reading the pending marks"); got != 1 {
+		t.Errorf("the load failure is logged %d times, want once; log: %s", got, f.log)
+	}
+}
