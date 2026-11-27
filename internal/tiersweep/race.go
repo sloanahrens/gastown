@@ -87,6 +87,17 @@ func (s *Sweep) Race() (line string, red bool) {
 	return s.raceTier(runs)
 }
 
+// raceRefusal reports why raceTier refuses its table: one line naming the
+// cause on stderr, and a RED summary with no counts. The reason rides the
+// stderr line because the summary's shape is the daemon's to parse
+// (tierSweepSummaryRE), which reads only a package list after the skipped
+// count, so a reason there would leave the line unparsed and its verdict lost
+// (gt-xp74il).
+func raceRefusal(s *Sweep, reason string, seconds int) (string, bool) {
+	fmt.Fprintf(s.Stderr, "%s: %s: %s\n", Name, TierRace, reason)
+	return Summary(TierRace, s.Opts.LogDir, 0, 0, 0, "", seconds)
+}
+
 // raceTier runs each entry in runs and sums their counts into one summary.
 func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	start := s.Now()
@@ -101,17 +112,17 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 		// Runner.Tier would run no command for it, so the tier would report
 		// GREEN having run nothing.
 		if len(run.pkgs) == 0 {
-			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: entry %q has no package (logs %s) in %s", run.label, s.Opts.LogDir, FormatDuration(elapsed())), true
+			return raceRefusal(s, fmt.Sprintf("entry %q has no package", run.label), elapsed())
 		}
 		if run.label != "" && !raceLabelRE.MatchString(run.label) {
-			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: label %q is not [A-Za-z0-9._-]+ (logs %s) in %s", run.label, s.Opts.LogDir, FormatDuration(elapsed())), true
+			return raceRefusal(s, fmt.Sprintf("label %q is not [A-Za-z0-9._-]+", run.label), elapsed())
 		}
 		name := run.pkgs[0]
 		if run.label != "" {
 			name += "~" + run.label
 		}
 		if seen[name] {
-			return fmt.Sprintf("tier-sweep: race RED passed=0 failed=0 skipped=0: %s is listed twice (logs %s) in %s", name, s.Opts.LogDir, FormatDuration(elapsed())), true
+			return raceRefusal(s, fmt.Sprintf("%s is listed twice", name), elapsed())
 		}
 		seen[name] = true
 	}
