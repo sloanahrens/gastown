@@ -1,7 +1,8 @@
 # Packages the sweep runs alone, one per line, after the parallel ones. The
 # seed below is the set whose tests share fixed ports, temporary paths or
 # process state, so a parallel run can make them fail where a serial one
-# passes. A name is the one the sweep prints (internal/tmux), module-relative
+# passes. A listed package that shard.txt splits runs its shards beside each
+# other (gt-0kestr), still apart from every other package. A name is the one the sweep prints (internal/tmux), module-relative
 # inside a nested module (tracker/server), and a guard test fails on a name
 # the sweep does not discover. The list only shrinks: a package leaves it when
 # the overseer's concurrency runs show it passing beside others, and one that
