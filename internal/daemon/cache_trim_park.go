@@ -134,9 +134,28 @@ func readCacheTrimPending(townRoot string) (map[string]bool, error) {
 }
 
 // cacheTrimIsPending reports whether an earlier pass left the claim's trim Job
-// pending and nothing has cleared the mark since.
+// pending and nothing has cleared the mark since. A fresh daemon reads the marks
+// the previous one wrote to disk before it answers (gt-wcz9tm).
 func (d *Daemon) cacheTrimIsPending(namespace, claim string) bool {
 	d.cacheTrimPendingMu.Lock()
 	defer d.cacheTrimPendingMu.Unlock()
+	d.loadCacheTrimPending()
 	return d.cacheTrimPendingClaims[cacheTrimParkKey(namespace, claim)]
+}
+
+// loadCacheTrimPending puts the marks the town's file holds into
+// d.cacheTrimPendingClaims once per daemon: the caller holds
+// cacheTrimPendingMu, and a set the daemon already holds is left as it is (a
+// write may have made it non-nil). A file that cannot be read leaves the empty
+// set the reader returns, so nothing reads as pending and the failure is logged
+// once instead of on every question.
+func (d *Daemon) loadCacheTrimPending() {
+	if d.cacheTrimPendingClaims != nil {
+		return
+	}
+	pending, err := readCacheTrimPending(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("disk_maintenance: cache trim: reading the pending marks: %v", err)
+	}
+	d.cacheTrimPendingClaims = pending
 }

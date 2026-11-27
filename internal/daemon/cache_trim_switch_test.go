@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1099,5 +1100,30 @@ func TestReadCacheTrimPending(t *testing.T) {
 				t.Errorf("the pending mark reads as %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCacheTrimIsPendingLoadsOnce pins that a fresh daemon answers from the
+// marks the town's file holds: the claim whose key it holds reads as pending and
+// another does not, and the file is read once per daemon, so a key the file gains
+// later is not seen (gt-wcz9tm).
+func TestCacheTrimIsPendingLoadsOnce(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", nil)
+	f.d.cacheTrimSetPending("alpha", "claim-a", true)
+	// The marks on the town's disk and a daemon that has read nothing yet: what a
+	// restart leaves behind.
+	fresh := &Daemon{config: &Config{TownRoot: f.d.config.TownRoot}, logger: log.New(f.log, "", 0)}
+
+	if !fresh.cacheTrimIsPending("alpha", "claim-a") {
+		t.Errorf("the claim whose key the file holds = false, want true")
+	}
+	if fresh.cacheTrimIsPending("beta", "claim-b") {
+		t.Errorf("a claim the file does not hold = true, want false")
+	}
+
+	writeFile(t, cacheTrimPendingPath(f.d.config.TownRoot), `["gamma/claim-g"]`)
+	if fresh.cacheTrimIsPending("gamma", "claim-g") {
+		t.Errorf("a key the file gained after the first read = true, want the daemon's one load kept")
 	}
 }
