@@ -18,13 +18,14 @@ const (
 )
 
 // Judge applies the ruled measures to r. A sling that did not finish ok, a
-// stranded seat, a landing whose CI failed, a failed call, an intervention and a
-// stopped run each fail with their own reason. The sling p90 counts every sling,
-// the presubmit p90 every gate with a measured wall whatever its verdict: a
-// zero-second gate was never measured and is left out. A record with fewer than
-// setSize slings, no measured gate and no host load sample is unmeasured and
-// fails with a reason of its own for each: an unmeasured run never passes. Landing
-// CI time and the dispatcher tick are not judged.
+// stranded seat, a landing whose CI failed, a bead that did not land within the
+// run, a failed call, an intervention and a stopped run each fail with their own
+// reason. The sling p90 counts every sling, the presubmit p90 every gate with a
+// measured wall whatever its verdict: a zero-second gate was never measured and
+// is left out. A record with fewer than setSize slings, no measured gate and no
+// host load sample is unmeasured and fails with a reason of its own for each: an
+// unmeasured run never passes. Landing CI time and the dispatcher tick are not
+// judged.
 func Judge(r Record) Verdict {
 	var reasons []string
 	var slingSecs, gateSecs []float64
@@ -45,6 +46,9 @@ func Judge(r Record) Verdict {
 	for _, l := range r.Landings {
 		if l.CIFailed {
 			reasons = append(reasons, fmt.Sprintf("landing %s failed CI", l.Bead))
+		}
+		if !l.Landed {
+			reasons = append(reasons, fmt.Sprintf("bead %s did not land within the run", l.Bead))
 		}
 	}
 	for _, c := range r.FailedCalls {

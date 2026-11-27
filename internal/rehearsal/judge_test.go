@@ -2,6 +2,7 @@ package rehearsal
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,37 @@ func TestRehearsalJudgeZeroTolerance(t *testing.T) {
 			r := withinBars()
 			tt.edit(&r)
 			assertVerdict(t, Judge(r), tt.want)
+		})
+	}
+}
+
+// TestRehearsalJudgeNotLanded checks that every landing the run never landed
+// fails with its own reason, and that a bead which also failed CI keeps both.
+func TestRehearsalJudgeNotLanded(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		landings []Landing
+		want     []string
+	}{
+		{name: "one bead not landed", landings: []Landing{{Bead: "l1", Landed: true}, {Bead: "l2"}},
+			want: []string{"bead l2 did not land within the run"}},
+		{name: "two beads not landed each add a reason", landings: []Landing{{Bead: "l1", Landed: true}, {Bead: "l2"}, {Bead: "l3"}},
+			want: []string{"bead l2 did not land within the run", "bead l3 did not land within the run"}},
+		{name: "a bead not landed that also failed CI adds both reasons", landings: []Landing{{Bead: "l1", Landed: true}, {Bead: "l2", CIFailed: true}},
+			want: []string{"landing l2 failed CI", "bead l2 did not land within the run"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := withinBars()
+			r.Landings = tt.landings
+			v := Judge(r)
+			if v.Pass {
+				t.Fatalf("Judge = %+v; want a fail", v)
+			}
+			if !slices.Equal(v.Reasons, tt.want) {
+				t.Errorf("reasons = %q; want %q", v.Reasons, tt.want)
+			}
 		})
 	}
 }
