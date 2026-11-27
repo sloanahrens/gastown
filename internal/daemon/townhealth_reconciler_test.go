@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"io"
 	"log"
 	"testing"
@@ -106,5 +107,63 @@ func TestHealthTicksReconcilerDisabled(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHealthTicksReconcilerStale: a reconciler whose recorded last run is three
+// of its intervals old reads DEGRADED, with the same wording a stalled
+// jsonl_git_backup or wisp_reaper tick gets, so a reconciler that stopped firing
+// is judged stale like every other tick (gt-r3tm7k).
+func TestHealthTicksReconcilerStale(t *testing.T) {
+	t.Parallel()
+
+	// Each interval is spelled once, here: the config, the recorded last run and
+	// the expected wording all follow from it. ago is the three-interval age.
+	const (
+		reconcilerEvery = "10m"
+		jsonlEvery      = "15m"
+		wispEvery       = "1h"
+	)
+	rows := []struct{ name, every, ago string }{
+		{"reconciler", reconcilerEvery, "30m"},
+		{"jsonl_git_backup", jsonlEvery, "45m"},
+		{"wisp_reaper", wispEvery, "3h"},
+	}
+
+	now := time.Date(2026, 11, 26, 6, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	for _, row := range rows {
+		every, err := time.ParseDuration(row.every)
+		if err != nil {
+			t.Fatalf("ParseDuration(%s): %v", row.every, err)
+		}
+		if err := savePatrolLastRun(root, row.name, now.Add(-3*every)); err != nil {
+			t.Fatalf("savePatrolLastRun(%s): %v", row.name, err)
+		}
+	}
+	d := &Daemon{
+		config: &Config{TownRoot: root},
+		logger: log.New(io.Discard, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			Reconciler:     &config.ReconcilerConfig{Enabled: true, Interval: reconcilerEvery},
+			JsonlGitBackup: &config.JsonlGitBackupConfig{Enabled: true, IntervalStr: jsonlEvery},
+			WispReaper:     &config.WispReaperConfig{Enabled: true, IntervalStr: wispEvery},
+		}},
+	}
+
+	r := townhealth.Compute(context.Background(), townhealth.Inputs{
+		Now: now, Thresholds: townhealth.DefaultThresholds(), Ticks: &healthSources{d: d},
+	})
+
+	for _, row := range rows {
+		got := healthField(t, r, "tick:"+row.name)
+		value := row.ago + "/" + row.every
+		detail := "last fired " + row.ago + " ago, interval " + row.every
+		if got.Tag != townhealth.Recorded || got.Verdict != townhealth.Degraded ||
+			got.Value != value || got.Detail != detail {
+			t.Errorf("tick:%s = %s %s %q %q, want %s %s %q %q",
+				row.name, got.Tag, got.Verdict, got.Value, got.Detail,
+				townhealth.Recorded, townhealth.Degraded, value, detail)
+		}
 	}
 }
