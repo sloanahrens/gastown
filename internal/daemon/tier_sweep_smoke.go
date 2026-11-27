@@ -95,6 +95,22 @@ func sweepSmokeSpec(spec sweeprunner.Spec) sweeprunner.Spec {
 	return spec
 }
 
+// sweepSmokeUnderGuard launches the smoke holding tierSweepRunning, the guard a
+// cycle single-flights with (tier_sweep.go), and releases it after the launch
+// and its stop. A cycle holding the guard is not run beside — both fill the
+// rig's one repo claim and sync pod — so the smoke launches nothing and records
+// busy, leaving the cycle to the heartbeat's retry (gt-mn57nd).
+func (d *Daemon) sweepSmokeUnderGuard(ctx context.Context, rig string) sweepSmokeRecord {
+	now := d.clk().Now()
+	if !d.tierSweepRunning.CompareAndSwap(false, true) {
+		return sweepSmokeRecord{Time: now, Outcome: "busy", Detail: "a sweep cycle holds the guard"}
+	}
+	// The start a cycle would stamp: the smoke holds the guard the same way.
+	d.tierSweepStartedAt.Store(now.UnixNano())
+	defer d.tierSweepRunning.Store(false)
+	return d.sweepSmokeLaunch(ctx, rig)
+}
+
 // sweepSmokeRecordPath is the file the startup smoke launch's record is written
 // to under the town root, read by the verify probe (gt-r2497d).
 func sweepSmokeRecordPath(townRoot string) string {
@@ -114,7 +130,7 @@ func (d *Daemon) recordSweepSmokeAtStart(ctx context.Context, daemonStart time.T
 	if len(rigs) == 0 {
 		return
 	}
-	rec := d.sweepSmokeLaunch(ctx, rigs[0])
+	rec := d.sweepSmokeUnderGuard(ctx, rigs[0])
 	rec.DaemonStart = daemonStart
 	if err := atomicfile.EnsureDirAndWriteJSON(sweepSmokeRecordPath(d.config.TownRoot), rec); err != nil {
 		d.logger.Printf("Warning: tier-sweep launch smoke record not written: %v", err)
