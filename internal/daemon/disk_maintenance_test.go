@@ -606,20 +606,48 @@ func TestDiskMaintTargetPassInFlightRunsTheDueTrim(t *testing.T) {
 	}
 }
 
-// TestDiskMaintTargetPassInFlightWithNoTrimDueStartsNothing: with no trim due,
-// a pass in flight starts nothing (gt-vek8mp).
-func TestDiskMaintTargetPassInFlightWithNoTrimDueStartsNothing(t *testing.T) {
+// TestDiskMaintTargetPassInFlightWithNoTrimDueReadsTheAlerts: a long target
+// pass in flight must not hold the alerts' next reading. A tick with no trim
+// due starts no target pass but, past the alert spacing, dispatches the
+// alert-only pass; inside it, nothing (gt-vek8mp, gt-q5s5wy).
+func TestDiskMaintTargetPassInFlightWithNoTrimDueReadsTheAlerts(t *testing.T) {
 	t.Parallel()
-	d, _, _ := diskMaintTestDaemon(t)
-	d.patrolConfig.Patrols.DiskMaintenance.CacheTrimInterval = "1000h"
+	d, _, f := diskMaintTestDaemon(t)
+	d.patrolConfig.Patrols.DiskMaintenance.CacheTrimInterval = "1000h" // no trim due
 	d.diskMaintSchedule.record(diskMaintCacheTrimName, diskMaintNow)
+	// The pass now in flight read and applied the alerts as it started.
+	d.diskMaintAlerts.recordApplied(diskMaintNow)
+	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	var reads atomic.Int32
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		reads.Add(1)
+		return f.readings
+	}
 	var pending []func()
 	d.diskMaint.dispatch = func(fn func()) { pending = append(pending, fn) }
-	d.runDiskMaintenance() // 04:45: the day's combined pass is dispatched and held
-	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(5 * time.Minute) }
-	d.runDiskMaintenance() // the pass is still in flight, and no trim is due
+	d.runDiskMaintenance() // 04:45: the day's target pass is dispatched and held
+
+	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(diskMaintBusyAlertEvery - time.Minute) }
+	d.runDiskMaintenance() // inside the spacing the pass in flight spends
 	if len(pending) != 1 {
-		t.Fatalf("dispatched %d passes, want 1: nothing is due", len(pending))
+		t.Fatalf("dispatched %d passes inside the spacing, want 1: only the target pass in flight", len(pending))
+	}
+
+	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(diskMaintBusyAlertEvery) }
+	d.runDiskMaintenance() // past the spacing the alerts get their own pass
+	if len(pending) != 2 {
+		t.Fatalf("dispatched %d passes past the spacing, want 2: the alert-only pass too", len(pending))
+	}
+	before := reads.Load()
+	pending[1]() // the alert-only pass runs
+	if got := reads.Load() - before; got != 1 {
+		t.Errorf("disk reads = %d on the alert-only pass, want 1", got)
+	}
+	if got := len(f.target.policies); got != 0 {
+		t.Errorf("planned the target %d times, want 0: the alert-only pass plans nothing", got)
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Errorf("escalations = %+v, want an open diskmaint:colima alert", f.notify.Escalations())
 	}
 }
 
