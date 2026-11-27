@@ -3632,6 +3632,16 @@ func TestCIEnginePlanOrphanRefuses(t *testing.T) {
 			t.Errorf("the refusal is logged %d time(s), want once:\n%s", n, logs)
 		}
 	})
+	t.Run("a candidate whose start time does not read fails the plan", func(t *testing.T) {
+		t.Parallel()
+		c := engJob('1', 22148, 72*time.Hour)
+		c["State"].(map[string]any)["StartedAt"] = "three days ago"
+		_, err := planCIEnginePrune(engDecode(t, engListing(t, []map[string]any{c}, nil, nil)), ciCacheTestStart,
+			48*time.Hour, 24*time.Hour, []string{"ci-base"}, ciEngineOrphanRule{12 * time.Hour, map[int64]bool{}})
+		if err == nil {
+			t.Errorf("a job container with an unreadable start time was planned")
+		}
+	})
 	t.Run("an orphan age the patrol cannot act on fails the run", func(t *testing.T) {
 		t.Parallel()
 		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})

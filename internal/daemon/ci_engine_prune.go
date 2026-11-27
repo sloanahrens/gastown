@@ -687,8 +687,8 @@ type ciEngineOrphanRule struct {
 // stopped, and how old an unused anonymous volume and an unused build cache record
 // must be. A listing it cannot read in full is refused: an id or name that is not
 // in docker's shape, a time it cannot parse, or a missing data root figure. A
-// refusal is a failed run, never an empty plan. An orphan rule plans orphans;
-// none of them is removed yet.
+// refusal is a failed run, never an empty plan. An orphan rule plans orphans, and
+// none is removed yet.
 func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string, orphan ...ciEngineOrphanRule) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
