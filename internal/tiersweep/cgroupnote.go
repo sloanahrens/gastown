@@ -12,7 +12,7 @@ type cgroupNote struct {
 }
 
 // report writes err's line once. A nil error or writer leaves the one line
-// unspent; every later error is silent. The caller serialises calls.
+// unspent; every later error is silent. The caller serializes calls.
 func (n *cgroupNote) report(w io.Writer, err error) {
 	if err == nil || w == nil || n.reported {
 		return
