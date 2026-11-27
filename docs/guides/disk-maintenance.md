@@ -19,6 +19,11 @@ All three run the same `registry` target and share the plugin's lock.
 | `gt maint` | plans by hand, or applies the plan it just printed because it was typed; a target name it does not know is listed back |
 | the `disk_maintenance` patrol | plans every target in its daily window, and any target with an interval of its own on that interval, whether the town is quiet or busy; trims the shared cache claim on its own interval; applies the disk alerts on busy ticks through the alert-only pass; applies in `apply` mode |
 
+The patrol needs no quiet town for it: `registry` is the one target the daemon
+builds (`diskMaintenanceTargets`), a delete runs under the `polecat-image` lock
+and the target asks whether an image push is in flight before it collects, and it
+reads neither the landing worker nor Dolt.
+
 `registry` is the only target in slice 1. `plan` is the dry run, so it creates
 neither the ledger directory nor anything else; both `plan` and `apply` exit
 non-zero on a target that refused or failed.

@@ -559,8 +559,8 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 }
 
 // runDiskMaintenance is the tick: it finds the targets due and runs them off
-// the loop goroutine, whether or not the town is busy. Waiting for a quiet town
-// let continuous landing passes starve the day's pass (gt-pc65u7). One target
+// the loop goroutine, whether or not the town is busy: the registry target keeps itself safe with the
+// polecat-image lock, and a quiet-town wait starves it (gt-pc65u7). One target
 // pass runs at a time: a tick that finds one in flight starts no second, logs
 // the targets it found as skipped, and leaves the due decision to a later tick.
 // A tick with nothing due still reads the disks for the alerts
