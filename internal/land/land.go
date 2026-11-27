@@ -1121,17 +1121,21 @@ const maxMinorFindings = 5
 // the findings': an approval carries no major or critical finding and no more
 // than maxMinorFindings minors (gt-oi4je). A verdict that is not an approval is
 // refused or waived elsewhere, and this leaves it alone.
+//
+// Each reason ends in the verdict's score, which the dashboard's om-score
+// reader takes from the rejected line, as it already did for a request for
+// changes.
 func findingsRejection(v Verdict) *Rejection {
 	if !v.Approved() {
 		return nil
 	}
 	if severity := blockingSeverity(v.Findings); severity != "" {
 		return &Rejection{Kind: RejectReview, Rework: true,
-			Reason: fmt.Sprintf("a %s finding blocks the landing at any score", severity)}
+			Reason: fmt.Sprintf("a %s finding blocks the landing at any score (score %.2f)", severity, v.Score)}
 	}
 	if minorFindings(v.Findings) > maxMinorFindings {
 		return &Rejection{Kind: RejectReview, Rework: true,
-			Reason: fmt.Sprintf("more than %d minor findings: fix the most important and resubmit", maxMinorFindings)}
+			Reason: fmt.Sprintf("more than %d minor findings: fix the most important and resubmit (score %.2f)", maxMinorFindings, v.Score)}
 	}
 	return nil
 }
