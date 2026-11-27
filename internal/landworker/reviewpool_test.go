@@ -1174,6 +1174,34 @@ func TestReviewPoolHoldStartsNothing(t *testing.T) {
 	}
 }
 
+// TestReviewPoolNilBeginStarts pins that a pool with no Begin starts its
+// reviews: an unset Begin is not a landing hold, so Offer starts the reviews the
+// cap allows. Two works and a slot for each also catch a pool that read the
+// missing hook as a refusal: the refusal stops the rest of the list as well, so
+// asserting one reviewer call would not be enough.
+func TestReviewPoolNilBeginStarts(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	works := []land.Work{
+		{BeadID: "gt-open", Head: "1111111"},
+		{BeadID: "gt-also", Head: "2222222"},
+	}
+	// Begin is left unset: the pool has no hold to ask.
+	pool := &ReviewPool{Reviewer: rev, Max: len(works)}
+
+	pool.Offer(context.Background(), works)
+	for n := 0; n < len(works); n++ {
+		recvBounded(t, ctx, rev.entered, "a review start")
+	}
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+
+	if got, want := reviewCounts(rev), map[string]int{"gt-open": 1, "gt-also": 1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reviews per bead %v with Begin unset, want every work started: %v", got, want)
+	}
+}
+
 // TestReviewPoolEndAlwaysCalled pins that every started review calls End
 // exactly once, after the reviewer returned, on each way a review can end: a
 // normal return, an error and a cancelled context. The reviewer records its own
