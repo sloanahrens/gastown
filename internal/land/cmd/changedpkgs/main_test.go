@@ -26,10 +26,14 @@ const testDoc = "## The inventory\n\n" +
 	"## Named, not a call site\n\n" +
 	"- `internal/c/c.go:12` names docker in prose.\n"
 
-// fakeSeams records what a run asked for; its runInventory returns inventory.
-// importers is the selection the direct-importer seam returns, importErr its
-// error; importedFrom records the changed directories it was asked about.
+// fakeSeams records what a run asked for; its status returns statusOut and
+// statusErr (an empty statusOut is a clean tree), and runInventory returns
+// inventory. importers is the selection the direct-importer seam returns,
+// importErr its error; importedFrom records the changed directories it was
+// asked about.
 type fakeSeams struct {
+	statusOut    string
+	statusErr    error
 	doc          string
 	docErr       error
 	inventory    error
@@ -41,6 +45,7 @@ type fakeSeams struct {
 
 func (f *fakeSeams) seams() seams {
 	return seams{
+		status: func() ([]byte, error) { return []byte(f.statusOut), f.statusErr },
 		readDoc: func() ([]byte, error) {
 			if f.docErr != nil {
 				return nil, f.docErr
@@ -414,6 +419,90 @@ func TestRunPrintsNoRecoveryWhenTheInventoryPassesOrNothingPinnedMoved(t *testin
 			}
 			if f.runs != tt.wantRuns {
 				t.Fatalf("the inventory ran %d times, want %d", f.runs, tt.wantRuns)
+			}
+		})
+	}
+}
+
+// TestRunRefusesAnUncommittedChangeInEveryMode: the selection reads committed
+// diffs only, so a changed or untracked file it needs refuses the run in every
+// mode, naming each such path and saying to commit first (gt-7ks0qo).
+func TestRunRefusesAnUncommittedChangeInEveryMode(t *testing.T) {
+	t.Parallel()
+	const goFile, podDoc = "internal/session/backend_openshell.go", "docs/design/pod-engine.md"
+	tests := []struct {
+		name   string
+		status string
+		paths  []string
+	}{
+		{"an unstaged Go edit", " M " + goFile + "\x00", []string{goFile}},
+		{"a staged Go add", "A  internal/x/added.go\x00", []string{"internal/x/added.go"}},
+		{"a deleted Go file", " D internal/x/gone.go\x00", []string{"internal/x/gone.go"}},
+		{"an untracked Go file", "?? internal/x/new.go\x00", []string{"internal/x/new.go"}},
+		{"a Go path holding a space", "?? internal/x/a b.go\x00", []string{"internal/x/a b.go"}},
+		{"a changed go.mod", " M go.mod\x00", []string{"go.mod"}},
+		{"an untracked go.sum", "?? go.sum\x00", []string{"go.sum"}},
+		{"a changed pod-engine doc", " M " + podDoc + "\x00", []string{podDoc}},
+		{"a staged rename from a Go file", "R  internal/x/renamed.txt\x00internal/x/old.go\x00", []string{"internal/x/old.go"}},
+		{"two listed paths", " M go.mod\x00?? internal/x/new.go\x00", []string{"go.mod", "internal/x/new.go"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, o := range []options{{}, {guards: true}} {
+				var stdout, stderr bytes.Buffer
+				code := run(o, nameStatus("M internal/a/a.go"), (&fakeSeams{doc: testDoc, statusOut: tt.status}).seams(), &stdout, &stderr)
+				if code != 1 || stdout.Len() != 0 {
+					t.Fatalf("run(%+v) = %d, stdout %q; want 1 and no output", o, code, stdout.String())
+				}
+				want := "changedpkgs: uncommitted change(s) to " + strings.Join(tt.paths, ", ") + ": commit them first"
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("run(%+v) stderr = %q, want %q", o, stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestRunSelectsAsBeforeWithACleanOrUnlistedStatus: a clean tree and any path
+// the selection does not need leave the changed-package list as it was.
+func TestRunSelectsAsBeforeWithACleanOrUnlistedStatus(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"", " M README.md\x00?? scratch/notes.txt\x00 M Makefile\x00"} {
+		var stdout, stderr bytes.Buffer
+		code := run(options{}, nameStatus("M internal/z/z.go"), (&fakeSeams{doc: testDoc, statusOut: status}).seams(), &stdout, &stderr)
+		if code != 0 || stdout.String() != "./internal/z\n" {
+			t.Fatalf("status %q: run = %d, stdout %q, stderr %q; want 0 and ./internal/z", status, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// TestRunRefusesAnUnreadableGitStatusInEveryMode: a failed status and a record
+// that cannot be parsed both fail the run, so neither reads as a clean tree.
+func TestRunRefusesAnUnreadableGitStatusInEveryMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status string
+		err    error
+	}{
+		{"git status fails", "", errors.New("exit status 128")},
+		{"a record with no status column", "MREADME.md\x00", nil},
+		{"a rename with no source path", "R  internal/x/a.go\x00", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, o := range []options{{}, {guards: true}} {
+				f := &fakeSeams{doc: testDoc, statusOut: tt.status, statusErr: tt.err}
+				var stdout, stderr bytes.Buffer
+				code := run(o, nameStatus("M internal/a/a.go"), f.seams(), &stdout, &stderr)
+				if code != 1 || stdout.Len() != 0 {
+					t.Fatalf("run(%+v) = %d, stdout %q; want 1 and no output", o, code, stdout.String())
+				}
+				if !strings.Contains(stderr.String(), "git status") {
+					t.Errorf("run(%+v) stderr = %q, want the git status cause named", o, stderr.String())
+				}
 			}
 		})
 	}
