@@ -86,10 +86,12 @@ func cacheTrimPendingPath(townRoot string) string {
 // when its pass's wait ended, and persists the resulting sorted set. A failed
 // write is logged and leaves the in-memory mark in place: the pass is not failed
 // for a town that cannot hold the file. Sort and write stay under the mark's lock
-// so two changes in a row leave the file holding the second one's set.
+// so two changes in a row leave the file holding the second one's set. It loads
+// the file's marks first, so a fresh daemon's first write keeps them (gt-wcz9tm).
 func (d *Daemon) cacheTrimSetPending(namespace, claim string, pending bool) {
 	d.cacheTrimPendingMu.Lock()
 	defer d.cacheTrimPendingMu.Unlock()
+	d.loadCacheTrimPending()
 	key := cacheTrimParkKey(namespace, claim)
 	if !pending {
 		delete(d.cacheTrimPendingClaims, key)
@@ -134,9 +136,26 @@ func readCacheTrimPending(townRoot string) (map[string]bool, error) {
 }
 
 // cacheTrimIsPending reports whether an earlier pass left the claim's trim Job
-// pending and nothing has cleared the mark since.
+// pending and nothing has cleared the mark since. A fresh daemon reads the marks
+// the previous one wrote to disk before it answers (gt-wcz9tm).
 func (d *Daemon) cacheTrimIsPending(namespace, claim string) bool {
 	d.cacheTrimPendingMu.Lock()
 	defer d.cacheTrimPendingMu.Unlock()
+	d.loadCacheTrimPending()
 	return d.cacheTrimPendingClaims[cacheTrimParkKey(namespace, claim)]
+}
+
+// loadCacheTrimPending puts the marks the file holds into
+// d.cacheTrimPendingClaims once per daemon; the caller holds cacheTrimPendingMu.
+// A set the daemon holds is left as it is, even an empty one (a write may have
+// made it non-nil); an unreadable file leaves that empty set and is logged once.
+func (d *Daemon) loadCacheTrimPending() {
+	if d.cacheTrimPendingClaims != nil {
+		return
+	}
+	pending, err := readCacheTrimPending(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("disk_maintenance: cache trim: reading the pending marks: %v", err)
+	}
+	d.cacheTrimPendingClaims = pending
 }
