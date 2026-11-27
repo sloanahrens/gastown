@@ -141,3 +141,71 @@ func TestRehearsalReleaseReportsInIdOrderWhenSlingsFinishOutOfOrder(t *testing.T
 		t.Errorf("Release = %+v, want b1 ok first and b4 failed last", got)
 	}
 }
+
+func TestRehearsalReleaseStopsStartingAfterCancel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		cancelFirst bool
+		wantStarted []string
+	}{
+		{"canceled before the call starts no sling", true, nil},
+		{"cancel while the first sling runs starts no later one", false, []string{"b1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			deadline := boundedCtx(t)
+			ctx, cancel := context.WithCancel(deadline)
+			t.Cleanup(cancel)
+			ids := []string{"b1", "b2", "b3", "b4"}
+			var mu sync.Mutex
+			var started []string
+			firstStarted := make(chan struct{})
+			var once sync.Once
+			sling := func(ctx context.Context, id string) error {
+				mu.Lock()
+				started = append(started, id)
+				mu.Unlock()
+				once.Do(func() { close(firstStarted) })
+				select {
+				case <-ctx.Done():
+				case <-deadline.Done():
+				}
+				return ctx.Err()
+			}
+			if tc.cancelFirst {
+				cancel()
+			}
+			done := make(chan []Sling, 1)
+			go func() { done <- Release(ctx, ids, 1, sling, clockwork.NewFakeClockAt(releaseEpoch).Now) }()
+			if !tc.cancelFirst {
+				select {
+				case <-firstStarted:
+				case <-deadline.Done():
+					t.Fatalf("no sling started before the deadline: %v", deadline.Err())
+				}
+				cancel()
+			}
+			var got []Sling
+			select {
+			case got = <-done:
+			case <-deadline.Done():
+				t.Fatalf("Release did not return before the deadline: %v", deadline.Err())
+			}
+			mu.Lock()
+			gotStarted := started
+			mu.Unlock()
+			if !slices.Equal(gotStarted, tc.wantStarted) {
+				t.Errorf("started %v, want %v", gotStarted, tc.wantStarted)
+			}
+			want := make([]Sling, len(ids))
+			for i, id := range ids {
+				want[i] = Sling{Bead: id, Outcome: SlingFailed}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("Release = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

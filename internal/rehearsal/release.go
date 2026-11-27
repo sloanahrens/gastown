@@ -9,14 +9,26 @@ import (
 
 // Release starts sling for each id in order, with at most inFlight running at once,
 // and returns one Sling per id in the same order. An inFlight below one runs one at
-// a time, so it cannot deadlock. Seconds is the time now reports across each sling.
+// a time, so it cannot deadlock. Once ctx is canceled no further sling starts, and
+// the ids it never reached read as failed in zero seconds. Seconds is the time now
+// reports across each sling.
 func Release(ctx context.Context, ids []string, inFlight int, sling func(ctx context.Context, id string) error, now func() time.Time) []Sling {
 	inFlight = max(inFlight, 1)
 	out := make([]Sling, len(ids))
 	slots := make(chan struct{}, inFlight)
 	var wg sync.WaitGroup
 	for i, id := range ids {
-		slots <- struct{}{} // taken before the goroutine starts, so starts follow id order
+		select {
+		case slots <- struct{}{}: // taken before the goroutine starts, so starts follow id order
+		case <-ctx.Done():
+			out[i] = Sling{Bead: id, Outcome: SlingFailed}
+			continue
+		}
+		if ctx.Err() != nil { // both cases were ready and the slot won: start nothing
+			<-slots
+			out[i] = Sling{Bead: id, Outcome: SlingFailed}
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
