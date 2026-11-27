@@ -410,21 +410,19 @@ func claudePlanWeeksPath(samplesPath string) string {
 	return filepath.Join(filepath.Dir(samplesPath), claudePlanWeeksFile)
 }
 
-// trimClaudePlanSamples rewrites the series without the lines older than cutoff
-// once its oldest line is claudePlanTrimSlackDays past it, and does nothing
-// before then.
+// trimClaudePlanSamplesHook rewrites the series without the lines older than
+// cutoff once its oldest line is claudePlanTrimSlackDays past it, and does
+// nothing before then.
 //
 // The status line appends to the same path, so the rewrite is a rename. An
 // append that opened the old file before the rename lands in the old inode,
 // which f still holds: the bytes f yields after the rename are re-appended to
 // the new file. Only a write delayed past that read is lost.
-func trimClaudePlanSamples(path string, cutoff time.Time) error {
-	return trimClaudePlanSamplesHook(path, cutoff, nil)
-}
-
-// trimClaudePlanSamplesHook is trimClaudePlanSamples with beforeRewrite run
-// between the read and the rewrite, so a test can append in that window.
-func trimClaudePlanSamplesHook(path string, cutoff time.Time, beforeRewrite func()) error {
+//
+// beforeRewrite runs between the read and the rewrite, so a test can append in
+// that window; an error it returns ends the trim and is the trim's, which is how
+// a test drives the refusal a read-only mount gives without one (gt-wndup3).
+func trimClaudePlanSamplesHook(path string, cutoff time.Time, beforeRewrite func() error) error {
 	oldest, ok, err := oldestClaudePlanSample(path)
 	if err != nil {
 		return err
@@ -456,7 +454,9 @@ func trimClaudePlanSamplesHook(path string, cutoff time.Time, beforeRewrite func
 		return err
 	}
 	if beforeRewrite != nil {
-		beforeRewrite()
+		if err := beforeRewrite(); err != nil {
+			return err
+		}
 	}
 	if err := atomicfile.WriteFile(path, kept, info.Mode().Perm()); err != nil {
 		return err
