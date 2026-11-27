@@ -107,6 +107,20 @@ func tierSweepBeadUnit(word string) (string, bool) {
 	return name, true
 }
 
+// tierSweepRaceAllPackagesLabel is the race tier's all-packages entry label
+// (internal/tiersweep/race.go): that entry runs `go test -race` with no build
+// tag, while integration-walk keeps its -tags (gt-od1bx9).
+const tierSweepRaceAllPackagesLabel = "all-packages"
+
+// tierSweepUnitPackage splits a unit name into the package a command runs and
+// the label the bead keeps: the race tier names a unit "./pkg~label" so two
+// entries on one package keep their own log and key, and no go test command
+// takes the label (gt-od1bx9).
+func tierSweepUnitPackage(unit string) (pkg, label string) {
+	pkg, label, _ = strings.Cut(unit, "~")
+	return pkg, label
+}
+
 // tierSweepBeadNames turns a tier's failed list into one name per unit and one
 // per reason, split on spaces as the summary writes it: a list opening with a
 // unit files each unit then the other words joined, anything else is one
@@ -422,7 +436,8 @@ type tierSweepUnitRed struct {
 	// Findings are slowcheck's finding lines, read from the unit's own log.
 	Findings []string
 	// BuildTag is the build tag the unit's runs used, empty for the untagged
-	// docker list.
+	// docker list and for the race tier's all-packages entry, which runs -race
+	// alone.
 	BuildTag string
 	// DockerPkg is the ./pkg path docker.txt lists for this unit, empty when
 	// the unit is not a container package. A container package's tests need a
@@ -451,6 +466,7 @@ func tierSweepReadUnitRed(ts tierSweepTierResult, tier, unit string) tierSweepUn
 		}
 	}
 	units := tierSweepLogUnits(stage)
+	_, label := tierSweepUnitPackage(unit)
 	var failures []tierSweepFailure
 	tagged := false
 	for _, mtier := range tierSweepLogMarkerTiers(tier) {
@@ -468,6 +484,11 @@ func tierSweepReadUnitRed(ts tierSweepTierResult, tier, unit string) tierSweepUn
 			continue
 		}
 		mtag := tierSweepMarkerBuildTag(mtier)
+		// The all-packages entry runs -race alone, so its re-run compiles the
+		// same file set: no -tags (gt-od1bx9).
+		if tier == tiersweep.TierRace && label == tierSweepRaceAllPackagesLabel {
+			mtag = ""
+		}
 		if tagged && mtag != red.BuildTag {
 			return tierSweepUnitRed{Mixed: true}
 		}
@@ -519,6 +540,9 @@ func tierSweepCheckCommand(tier, unit, ranCmd string, red tierSweepUnitRed) stri
 		}
 		return "GT_TEST_DOCKER=0 " + ranCmd
 	}
+	// The command names the package up to the first "~", not the labeled name
+	// the bead keeps (gt-od1bx9).
+	pkg, _ := tierSweepUnitPackage(unit)
 	// A finding names its test in its own line, so the filter it earns is the
 	// one a FAIL line earns. A test with both is named once.
 	names := append([]string(nil), red.Names...)
@@ -544,7 +568,7 @@ func tierSweepCheckCommand(tier, unit, ranCmd string, red tierSweepUnitRed) stri
 	b.WriteString("-run '^(")
 	b.WriteString(strings.Join(names, "|"))
 	b.WriteString(")$' -count=1 ")
-	b.WriteString(unit)
+	b.WriteString(pkg)
 	return b.String()
 }
 
