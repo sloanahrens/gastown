@@ -78,10 +78,21 @@ func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch 
 			if launch == nil {
 				launch = d.tierSweepLaunchRunner
 			}
-			return launch(ctx, st, spec)
+			return launch(ctx, st, sweepSmokeSpec(spec))
 		}
 	}
 	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}
+}
+
+// sweepSmokeSpec gives the smoke a run of its own: the rendered spec's RunID
+// gains a "-smoke" suffix and its OutDir moves to that name beside the sweep's.
+// A running sweep's Job is then never this run's Job, so the claim guard refuses
+// it as a foreign Job (busy) instead of the smoke adopting that run and taking
+// it down (gt-9ieuas).
+func sweepSmokeSpec(spec sweeprunner.Spec) sweeprunner.Spec {
+	spec.RunID += "-smoke"
+	spec.OutDir = filepath.Join(filepath.Dir(spec.OutDir), spec.RunID)
+	return spec
 }
 
 // sweepSmokeRecordPath is the file the startup smoke launch's record is written
