@@ -45,7 +45,8 @@ This section says what the deployer owns on the gt-sbx cluster and what stays in
 
 ### Apply order
 
-`deploy/k8s/sbx/render.go` (`renderSet`) composes the set in this order:
+`deploy/k8s/sbx/render.go` (`renderSet`) composes the set in this order, which is
+also the order the set and the plan list the files in:
 
 1. The Namespaces in the pinned agent-sandbox manifest, in manifest order (`deploy/k8s/sbx/agentsandbox.go`).
 2. The `openshell` Namespace (`openshellNamespace`).
@@ -56,6 +57,19 @@ This section says what the deployer owns on the gt-sbx cluster and what stays in
 7. The ConfigMap `gt-bootstrap` in `openshell`, last. Its `helm` key holds the chart version and the SHA-256 of the values file.
 
 The render refuses a Secret in the composed list (`checkNoSecrets`) and two objects with the same kind, namespace and name (`checkDuplicates`).
+
+The apply does not send the files in that order. `applySbxSteps`
+(`internal/cmd/town_cluster_apply.go`) gives the order the apply uses, and
+`TestClusterShapeSbxOrder` pins it:
+
+(a) Phase P's files, the plan's cluster-scoped static objects, in plan order and under the policy kubeconfig.
+(b) Then every other phase W file, the plan's namespaced objects, that is not the controller, a StatefulSet or `gt-bootstrap`, in plan order and whatever its namespace, so the agent-sandbox ServiceAccount, the openshell objects, the static Services and the `gt-cache` claim all go before the controller. A Deployment in this group is waited for as any Deployment is.
+(c) Then the agent-sandbox controller Deployment, waited for its rollout and its Available condition.
+(d) Then the openshell StatefulSet, waited for its rollout and its ready replica count.
+(e) Then the `gt-bootstrap` ConfigMap, last.
+
+A failed apply or wait stops the run where it is, with no rollback; the undo lines
+printed before the first apply are how an operator undoes by hand.
 
 ### Runtime objects the compare ignores
 
