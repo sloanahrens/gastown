@@ -61,10 +61,11 @@ func (c *createRunner) creates() int {
 
 // newCreateRun builds a run that creates providers through runner and reads key
 // files from files, with its two streams in the returned buffers.
-func newCreateRun(runner *createRunner, files *memFiles) (*Run, *bytes.Buffer, *bytes.Buffer) {
+func newCreateRun(runner Runner, files *memFiles) (*Run, *bytes.Buffer, *bytes.Buffer) {
 	out, errw := &bytes.Buffer{}, &bytes.Buffer{}
 	return &Run{
 		Client: Client{Run: runner},
+		Paths:  Paths{ConfigDir: testConfig},
 		Files:  files,
 		Env:    []string{"PATH=/usr/bin"},
 		Out:    out,
@@ -273,6 +274,115 @@ func TestCreateProviderWriteFailureStopsTheRun(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), deepseekSecret[:6]) || strings.Contains(err.Error(), tc.printed) {
 				t.Errorf("error %q carries output", err)
+			}
+		})
+	}
+}
+
+// seatRunner answers provider list with listing and echoes each create's
+// credential value from the child environment; it records argv, env and calls.
+type seatRunner struct {
+	listing string
+	invoked int
+	calls   [][]string
+	envs    [][]string
+}
+
+func (s *seatRunner) Run(_ string, args []string, env []string, _ io.Reader) ([]byte, []byte, error) {
+	s.invoked++
+	if !slices.Contains(args, "create") {
+		return []byte(s.listing), nil, nil
+	}
+	s.calls = append(s.calls, append([]string(nil), args...))
+	s.envs = append(s.envs, append([]string(nil), env...))
+	secret := envValue(env, flagValue(args, "--credential"))
+	return []byte("created " + flagValue(args, "--name") + " with value=" + secret + "\n"), nil, nil
+}
+
+// TestCreateSeatProvidersCreatesEachFromItsOwnFile creates two seats, the second
+// with the longest name the grammar allows: each provider has the polecat type
+// and its own token, which reaches only the child environment.
+func TestCreateSeatProvidersCreatesEachFromItsOwnFile(t *testing.T) {
+	t.Parallel()
+	const furiosaToken, longestToken = "seat-furiosa-token-zqxvjkcd", "seat-aaaa-token-zqxvjkcd"
+	longest := "seat-" + strings.Repeat("a", 26) // 31 characters: the longest accepted
+	runner := &seatRunner{listing: "NAME TYPE\n"}
+	files := newMemFiles()
+	files.contents[testConfig+"/forgejo-seat-furiosa.env"] = []byte("FORGEJO_TOKEN=" + furiosaToken + "\n")
+	files.contents[testConfig+"/forgejo-seat-"+longest+".env"] = []byte("FORGEJO_TOKEN=" + longestToken + "\n")
+	// The shared provider's file holds another token, which a seat must not read.
+	files.contents[testConfig+"/forgejo-polecat.env"] = []byte("FORGEJO_TOKEN=" + forgejoSecret + "\n")
+	run, out, errw := newCreateRun(runner, files)
+
+	if err := run.CreateSeatProviders([]string{"furiosa", longest}); err != nil {
+		t.Fatalf("CreateSeatProviders: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("creates = %d, want 2", len(runner.calls))
+	}
+	for i, want := range []struct{ name, token string }{{"furiosa", furiosaToken}, {longest, longestToken}} {
+		argv := runner.calls[i]
+		if flagValue(argv, "--name") != "forgejo-seat-"+want.name || flagValue(argv, "--type") != "forgejo-polecat" {
+			t.Errorf("create %d argv = %q, want forgejo-seat-%s of type forgejo-polecat", i, argv, want.name)
+		}
+		if !slices.Contains(runner.envs[i], "FORGEJO_TOKEN="+want.token) {
+			t.Errorf("create %d environment does not hold its own token: %q", i, runner.envs[i])
+		}
+	}
+	for _, secret := range []string{furiosaToken, longestToken, forgejoSecret} {
+		for _, argv := range runner.calls {
+			if strings.Contains(strings.Join(argv, " "), secret) {
+				t.Errorf("create argv %q carries a token", argv)
+			}
+		}
+		if strings.Contains(out.String()+errw.String(), secret) {
+			t.Errorf("output carries the secret %q", secret)
+		}
+	}
+	if !strings.Contains(out.String(), "created forgejo-seat-furiosa with value=***\n") {
+		t.Errorf("stdout = %q, want the masked create line", out.String())
+	}
+}
+
+// TestCreateSeatProvidersStopsAtTheFirstMissingFile creates furiosa, then finds
+// iosa's key file missing: it is named and mary is not created though her file is.
+func TestCreateSeatProvidersStopsAtTheFirstMissingFile(t *testing.T) {
+	t.Parallel()
+	runner := &seatRunner{listing: "NAME TYPE\n"}
+	files := newMemFiles()
+	files.contents[testConfig+"/forgejo-seat-furiosa.env"] = []byte("FORGEJO_TOKEN=" + forgejoSecret + "\n")
+	files.contents[testConfig+"/forgejo-seat-mary.env"] = []byte("FORGEJO_TOKEN=seat-mary-token-zqxvjkcd\n")
+	run, _, _ := newCreateRun(runner, files)
+
+	err := run.CreateSeatProviders([]string{"furiosa", "iosa", "mary"})
+	if err == nil || !strings.Contains(err.Error(), testConfig+"/forgejo-seat-iosa.env") {
+		t.Fatalf("CreateSeatProviders = %v, want the missing iosa file named", err)
+	}
+	if len(runner.calls) != 1 || flagValue(runner.calls[0], "--name") != "forgejo-seat-furiosa" {
+		t.Errorf("creates = %q, want only forgejo-seat-furiosa", runner.calls)
+	}
+}
+
+// TestCreateSeatProvidersRefusesABadNameBeforeAnyCall pairs each bad name with a
+// good one: the refusal comes before the provider list, so no openshell call is
+// made at all.
+func TestCreateSeatProvidersRefusesABadNameBeforeAnyCall(t *testing.T) {
+	t.Parallel()
+	long := "abcdefghijklmnopqrstuvwxyz012345" // 32 characters
+	for _, name := range []string{"Fur/iosa", "a--b", long, "-a", "a-"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			runner := &seatRunner{listing: "NAME TYPE\n"}
+			files := newMemFiles()
+			files.contents[testConfig+"/forgejo-seat-furiosa.env"] = []byte("FORGEJO_TOKEN=" + forgejoSecret + "\n")
+			run, _, _ := newCreateRun(runner, files)
+
+			err := run.CreateSeatProviders([]string{"furiosa", name})
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("CreateSeatProviders = %v, want the bad name %q refused", err, name)
+			}
+			if runner.invoked != 0 {
+				t.Errorf("made %d openshell calls, want none", runner.invoked)
 			}
 		})
 	}

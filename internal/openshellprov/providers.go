@@ -3,8 +3,42 @@ package openshellprov
 import (
 	"fmt"
 	"io"
+	"path/filepath"
+	"regexp"
 	"slices"
 )
+
+// seatProviderPrefix begins the provider name and the key file a seat's Forgejo
+// provider is built from.
+const seatProviderPrefix = "forgejo-seat-"
+
+// maxSeatNameLength is the longest seat name, in characters.
+const maxSeatNameLength = 31
+
+// seatName is the form a seat name must have: lower-case letters and digits in
+// groups joined by single hyphens (gt-t1yp6a).
+var seatName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// CreateSeatProviders creates provider forgejo-seat-NAME of type forgejo-polecat
+// for each name, from the key file forgejo-seat-NAME.env in the config directory.
+// Every name is checked before the first openshell call, so a refused name
+// creates nothing; the first seat whose file is missing or sets no token stops
+// the run, and an existing provider is left alone.
+func (r *Run) CreateSeatProviders(names []string) error {
+	for _, name := range names {
+		if len(name) > maxSeatNameLength || !seatName.MatchString(name) {
+			return fmt.Errorf("%s: seat name %q must be at most %d characters of lower-case letters and digits in groups joined by single hyphens", Name, name, maxSeatNameLength)
+		}
+	}
+	for _, name := range names {
+		provider := seatProviderPrefix + name
+		file := filepath.Join(r.Paths.ConfigDir, provider+".env")
+		if err := r.CreateProvider(provider, "forgejo-polecat", file, "FORGEJO_TOKEN", "FORGEJO_TOKEN"); err != nil {
+			return fmt.Errorf("provider %s: %w", provider, err)
+		}
+	}
+	return nil
+}
 
 // CreateProvider creates provider name of type typ, unless the gateway already
 // lists it. The secret is the value of key in file, and it reaches openshell only
