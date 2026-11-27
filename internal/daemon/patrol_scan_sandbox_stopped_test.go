@@ -172,6 +172,84 @@ func TestPatrolKeepsAStoppedSandboxWithUnsafeWork(t *testing.T) {
 	}
 }
 
+// A Stopped sandbox is kept when the seat's agent bead cannot prove its work
+// safe: a push gt done recorded as failed, a bead that cannot be read, or a bead
+// that is gone. Each row deletes nothing, leaves the registry record in place,
+// and names the reason it kept the sandbox. Only the push failure is written to
+// the kept record; an unreadable bead keeps the reason the seat's end recorded
+// (gt-nb2xnw, gt-6fqewe).
+func TestPatrolKeepsAStoppedSandboxItCannotProveSafe(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// setup changes the seat after its end recorded the keep.
+		setup func(t *testing.T, p *keptSeatPatrol)
+		// want is the reason the pass keeps the sandbox, as the log names it.
+		want string
+		// wantRecorded is the keep reason written to the record; "" keeps the
+		// reason the seat's end recorded.
+		wantRecorded string
+	}{
+		{
+			name: "a push that failed with a clean cleanup status",
+			setup: func(t *testing.T, p *keptSeatPatrol) {
+				p.seatFields.PushFailed = true
+				p.seatFields.CleanupStatus = string(polecat.CleanupClean)
+				p.setAgent()
+			},
+			want:         stoppedPushFailedReason,
+			wantRecorded: stoppedPushFailedReason,
+		},
+		{
+			name: "an agent bead that cannot be read",
+			setup: func(t *testing.T, p *keptSeatPatrol) {
+				p.agentDB.FailWith("show", errors.New("store unavailable"))
+			},
+			want: "cannot read its agent bead: store unavailable",
+		},
+		{
+			name: "an agent bead that is gone",
+			setup: func(t *testing.T, p *keptSeatPatrol) {
+				if err := p.agentDB.DeleteIssues(p.agentBead); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "its agent bead is gone",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newStoppedSeatPatrol(t, true)
+			wantRecorded := tt.wantRecorded
+			if wantRecorded == "" {
+				wantRecorded = p.keptSeatOf(t).Reason
+			}
+			tt.setup(t, p)
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+
+			p.host.patrolScanSandboxRecords()
+
+			if len(p.deleted) != 0 {
+				t.Fatalf("sandboxes deleted = %v, want the sandbox kept", p.deleted)
+			}
+			if !p.sandboxUp {
+				t.Error("the sandbox is gone, want it kept")
+			}
+			if !p.recorded() {
+				t.Error("the registry record was removed for a sandbox that stays")
+			}
+			if got := p.keptSeatOf(t).Reason; got != wantRecorded {
+				t.Errorf("kept reason = %q, want %q", got, wantRecorded)
+			}
+			if !strings.Contains(logs.String(), tt.want) {
+				t.Errorf("log %q does not carry the keep reason %q", logs.String(), tt.want)
+			}
+		})
+	}
+}
+
 // A Stopped sandbox whose work is not proven landed stays, and its kept record
 // carries the stopped, work not proven landed reason, which the kept-seat item
 // raises once the seat has been kept for the attention window (gt-7h38pd).
