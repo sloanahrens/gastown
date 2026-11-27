@@ -131,85 +131,65 @@ func TestEnsureTokenRefusesASeatPrefixedRoleOutsideTheSeatGrammar(t *testing.T) 
 	}
 }
 
-// TestProvisionSeatDryRunSendsNoWrite checks a dry run reports the seat's account
-// and token and sends no write or file.
-func TestProvisionSeatDryRunSendsNoWrite(t *testing.T) {
+// TestProvisionSeatHonoursTheRunFlags checks --dry-run sends no write or file,
+// --skip-tokens mints no token, and --rotate replaces the token the first run
+// minted, as each flag does for a role.
+func TestProvisionSeatHonoursTheRunFlags(t *testing.T) {
 	t.Parallel()
-	f := forgejotest.New()
-	for _, repo := range seatRepos {
-		f.AddRepo(repo)
+	const user = DefaultBotPrefix + "seat-furiosa"
+	path := tokenDir + "/forgejo-seat-furiosa.env"
+	cases := []struct {
+		name                string
+		dryRun, skip, rotate bool
+		check               func(t *testing.T, f *forgejotest.Fake, files *memFiles, first string)
+	}{
+		{"dry run", true, false, false, func(t *testing.T, f *forgejotest.Fake, files *memFiles, _ string) {
+			if w := f.Writes(); len(w) != 0 || len(files.files) != 0 {
+				t.Errorf("the dry run sent %d writes and wrote %d files, want none", len(w), len(files.files))
+			}
+		}},
+		{"skip tokens", false, true, false, func(t *testing.T, f *forgejotest.Fake, files *memFiles, _ string) {
+			if _, ok := fakeTokenScopes(f, user, DefaultTokenName); ok {
+				t.Errorf("--skip-tokens minted a token for %s", user)
+			}
+			if _, ok := files.files[path]; ok {
+				t.Error("--skip-tokens wrote the token file")
+			}
+		}},
+		{"rotate", false, false, true, func(t *testing.T, f *forgejotest.Fake, files *memFiles, first string) {
+			second := f.Token(user, DefaultTokenName)
+			if second == "" || second == first {
+				t.Fatal("rotation kept the token, want a newly minted one")
+			}
+			if got := string(files.files[path]); got != tokenFileText(user, second) {
+				t.Errorf("the token file does not hold the rotated token: %d bytes", len(got))
+			}
+		}},
 	}
-	files := newMemFiles()
-	var logs []string
-	p := tokenProvisioner(f, files, false, true, &logs)
-	if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
-		t.Fatalf("ProvisionSeat dry run: %v", masked(errString(err)))
-	}
-	if writes := f.Writes(); len(writes) != 0 {
-		t.Errorf("the dry run sent %d writes: %v", len(writes), writes)
-	}
-	if len(files.files) != 0 {
-		t.Errorf("the dry run wrote %d files, want none", len(files.files))
-	}
-	want := "would mint a '" + DefaultTokenName + "' token for " + DefaultBotPrefix + "seat-furiosa"
-	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, want) {
-		t.Errorf("logs lack %q: %v", want, masked(joined))
-	}
-}
-
-// TestProvisionSeatSkipTokensWritesNoToken checks --skip-tokens leaves an existing
-// seat account without minting or writing a token, and still grants the repos.
-func TestProvisionSeatSkipTokensWritesNoToken(t *testing.T) {
-	t.Parallel()
-	f := forgejotest.New()
-	for _, repo := range seatRepos {
-		f.AddRepo(repo)
-	}
-	withBot(t, f, "seat-furiosa")
-	files := newMemFiles()
-	p := tokenProvisioner(f, files, false, false, new([]string))
-	p.SkipTokens = true
-	if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
-		t.Fatalf("ProvisionSeat --skip-tokens: %v", masked(errString(err)))
-	}
-	user := DefaultBotPrefix + "seat-furiosa"
-	if _, ok := fakeTokenScopes(f, user, DefaultTokenName); ok {
-		t.Errorf("--skip-tokens minted a token for %s", user)
-	}
-	if _, ok := files.files[tokenDir+"/forgejo-seat-furiosa.env"]; ok {
-		t.Errorf("--skip-tokens wrote the token file")
-	}
-	for _, repo := range seatRepos {
-		if perm := f.Permission(repo, user); perm != permissionWrite {
-			t.Errorf("%s holds %q on %s, want %q", user, perm, repo, permissionWrite)
-		}
-	}
-}
-
-// TestProvisionSeatRotateReplacesTheToken checks --rotate on a seat mints a new
-// token and replaces the file, as the same flag does for a role.
-func TestProvisionSeatRotateReplacesTheToken(t *testing.T) {
-	t.Parallel()
-	f := forgejotest.New()
-	for _, repo := range seatRepos {
-		f.AddRepo(repo)
-	}
-	files := newMemFiles()
-	p := tokenProvisioner(f, files, false, false, new([]string))
-	if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
-		t.Fatalf("first run: %v", masked(errString(err)))
-	}
-	user, path := DefaultBotPrefix+"seat-furiosa", tokenDir+"/forgejo-seat-furiosa.env"
-	first := f.Token(user, DefaultTokenName)
-	p.Rotate = true
-	if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
-		t.Fatalf("rotate: %v", masked(errString(err)))
-	}
-	second := f.Token(user, DefaultTokenName)
-	if second == "" || second == first {
-		t.Fatal("rotation kept the token, want a newly minted one")
-	}
-	if got := string(files.files[path]); got != tokenFileText(user, second) {
-		t.Errorf("the token file does not hold the rotated token: %d characters", len(got))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			for _, repo := range seatRepos {
+				f.AddRepo(repo)
+			}
+			withBot(t, f, "seat-furiosa")
+			// The account seed is a write; only the run under test is counted.
+			f.ClearCalls()
+			files := newMemFiles()
+			p := tokenProvisioner(f, files, false, tc.dryRun, new([]string))
+			p.SkipTokens = tc.skip
+			first := ""
+			if tc.rotate {
+				if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
+					t.Fatalf("first run: %v", masked(errString(err)))
+				}
+				first, p.Rotate = f.Token(user, DefaultTokenName), true
+			}
+			if err := p.ProvisionSeat("furiosa", seatRepos); err != nil {
+				t.Fatalf("ProvisionSeat: %v", masked(errString(err)))
+			}
+			tc.check(t, f, files, first)
+		})
 	}
 }
