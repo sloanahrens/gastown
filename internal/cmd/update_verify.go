@@ -159,18 +159,24 @@ func (p *verifyProbes) ImageLabel(ctx context.Context) (string, error) {
 }
 
 // podImageLabelProbes is the run's verify probes for a pod target: the image
-// label of the target pair read from the registry, and the pair extension's two
-// checks. The update Job runs in a pod with no docker, so the docker inspect
-// ImageLabel makes cannot answer there.
+// label of the target pair read from the registry, the pair extension's two
+// checks, and the sweep-launch check read from the daemon pod's record. The
+// update Job runs in a pod with no docker, so the docker inspect ImageLabel
+// makes cannot answer there.
 type podImageLabelProbes struct {
 	update.VerifyProbes
 	label       func(context.Context) (string, error)
 	wantPolecat string
 	annotation  func(context.Context) (string, error)
 	devTag      func(context.Context) (string, error)
+	// sweep reads the daemon pod's launch-smoke record, and sweepStart is the
+	// running daemon's start the record is judged against.
+	sweep      func(context.Context) (daemon.SweepSmokeRecord, bool, error)
+	sweepStart func() (time.Time, error)
 }
 
 var _ update.PairProbes = podImageLabelProbes{}
+var _ update.SweepProbes = podImageLabelProbes{}
 
 // ImageLabel is the commit label of the target pair's polecat image, from the
 // registry. A run with no registry read wired is an error, never a pass.
@@ -273,6 +279,26 @@ func podSweepSmokeRecord(target podDaemonTarget, run update.RunFunc) func(contex
 		}
 		return rec, true, nil
 	}
+}
+
+// SweepLaunch answers whether the daemon's sweeper started a stage from one
+// read of the launch-smoke record; a record missing at that read is not waited for.
+func (p podImageLabelProbes) SweepLaunch(ctx context.Context) (bool, string, error) {
+	if p.sweep == nil || p.sweepStart == nil {
+		return false, "", errors.New("the run has no launch-smoke record reader")
+	}
+	start, err := p.sweepStart()
+	if err != nil {
+		return false, "", fmt.Errorf("reading the daemon's start: %w", err)
+	}
+	rec, exists, err := p.sweep(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	if !exists {
+		return false, "no launch-smoke record in the daemon pod", nil
+	}
+	return sweepLaunchAnswer(rec, start)
 }
 
 // daemonStateStart is the running daemon's start from the town's daemon state.
