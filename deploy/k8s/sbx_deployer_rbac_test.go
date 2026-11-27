@@ -136,10 +136,12 @@ func sbxDeployerMissingExtra(got, want []string) (missing, extra []string) {
 
 // sbxDeployerWant is the exact grant table: the policy ClusterRole's six writes
 // on the cluster kinds, escalate and bind on clusterroles only, and its binding
-// to the User the policy certificate carries; then the apply Role in each
-// namespace that holds the rendered set, with the six writes on the render's
-// namespaced kinds, escalate and bind on roles, reads on replicasets and
-// controllerrevisions, and its RoleBinding to the User gt-deployer-apply.
+// to the User the policy certificate carries; the apply Role in each namespace
+// that holds the rendered set, with the six writes on the render's namespaced
+// kinds, escalate and bind on roles, reads on replicasets and controllerrevisions,
+// and its RoleBinding to the User gt-deployer-apply; then the read credential's
+// view binding, its reader-extra ClusterRole and binding, and the named-Secrets
+// Role with its read and apply bindings.
 var sbxDeployerWant = func() []string {
 	const role = "ClusterRole/gt-sbx-deployer-policy"
 	write := []string{"get", "list", "watch", "create", "update", "patch"}
@@ -169,6 +171,29 @@ var sbxDeployerWant = func() []string {
 				lines = append(lines, applyRole+" "+res+" "+verb)
 			}
 		}
+	}
+	const readUser = "User/gt-deployer-read"
+	viewBinding := "ClusterRoleBinding/gt-sbx-deployer-view"
+	lines = append(lines, viewBinding, viewBinding+" ClusterRole/view "+readUser)
+	const reader = "ClusterRole/gt-sbx-deployer-reader-extra"
+	readerBinding := "ClusterRoleBinding/gt-sbx-deployer-reader-extra"
+	lines = append(lines, reader, readerBinding, readerBinding+" "+reader+" "+readUser)
+	for _, res := range []string{"core/namespaces", "scheduling.k8s.io/priorityclasses", "apiextensions.k8s.io/customresourcedefinitions", "rbac.authorization.k8s.io/clusterroles", "rbac.authorization.k8s.io/clusterrolebindings", "rbac.authorization.k8s.io/roles", "rbac.authorization.k8s.io/rolebindings"} {
+		for _, verb := range []string{"get", "list"} {
+			lines = append(lines, reader+" "+res+" "+verb)
+		}
+	}
+	const secrets = "Role/openshell/gt-sbx-deployer-secrets"
+	lines = append(lines, secrets)
+	for _, name := range []string{"openshell-credential-storage-key-encryption-key", "openshell-server-tls", "openshell-client-tls", "openshell-jwt-keys"} {
+		lines = append(lines, secrets+" core/secrets get "+name)
+	}
+	for _, b := range []struct{ name, user string }{
+		{"gt-sbx-deployer-secrets-read", "gt-deployer-read"},
+		{"gt-sbx-deployer-secrets-apply", "gt-deployer-apply"},
+	} {
+		obj := "RoleBinding/openshell/" + b.name
+		lines = append(lines, obj, obj+" Role/gt-sbx-deployer-secrets User/"+b.user)
 	}
 	return lines
 }()
@@ -297,6 +322,62 @@ func TestSbxDeployerRBACDistinguishesNamespaces(t *testing.T) {
 	})
 }
 
+// sbxDeployerSecretsProblems reports every secrets rule that reaches past get on
+// the named Secrets: a verb beside get and a rule with no resourceNames.
+func sbxDeployerSecretsProblems(docs []sbxDeployerDoc) []string {
+	var problems []string
+	for _, d := range docs {
+		obj := d.Kind + "/" + d.Metadata.Name
+		if d.Metadata.Namespace != "" {
+			obj = d.Kind + "/" + d.Metadata.Namespace + "/" + d.Metadata.Name
+		}
+		for _, r := range d.Rules {
+			if !slices.Contains(r.Resources, "secrets") {
+				continue
+			}
+			for _, verb := range r.Verbs {
+				if verb != "get" {
+					problems = append(problems, obj+" grants "+verb+" on secrets")
+				}
+			}
+			if len(r.ResourceNames) == 0 {
+				problems = append(problems, obj+" grants get on secrets with no resourceNames")
+			}
+		}
+	}
+	return problems
+}
+
+// TestSbxDeployerRBACSecretsAreNamedAndReadOnly holds every secrets rule in the
+// manifest to get alone with a non-empty resourceNames list; a planted rule
+// without names and a planted list verb are each reported.
+func TestSbxDeployerRBACSecretsAreNamedAndReadOnly(t *testing.T) {
+	t.Parallel()
+	if problems := sbxDeployerSecretsProblems(loadSbxDeployerRBAC(t, sbxDeployerRBACFile)); len(problems) > 0 {
+		t.Fatalf("%s as written is refused: %q", sbxDeployerRBACFile, problems)
+	}
+	const file = "planted-secrets.yaml"
+	role := func(rule string) string {
+		return "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: gt-sbx-deployer-secrets\n  namespace: openshell\nrules:\n" + rule
+	}
+	rows := []struct{ what, doc, want string }{
+		{"rule with no names", role("  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs: [\"get\"]\n"), "grants get on secrets with no resourceNames"},
+		{"list verb", role("  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs: [\"get\", \"list\"]\n    resourceNames: [\"openshell-server-tls\"]\n"), "grants list on secrets"},
+	}
+	for _, row := range rows {
+		t.Run(row.what, func(t *testing.T) {
+			t.Parallel()
+			docs, err := sbxDeployerParse(file, []byte(row.doc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if problems := sbxDeployerSecretsProblems(docs); !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, row.want) }) {
+				t.Fatalf("with %s the rule was not refused; want a problem containing %q, got %q", row.what, row.want, problems)
+			}
+		})
+	}
+}
+
 // TestSbxDeployerRBACReadsEveryDocument holds the loader to the whole stream: a
 // non-bare separator still begins a document kubectl applies, reported as extra.
 func TestSbxDeployerRBACReadsEveryDocument(t *testing.T) {
@@ -330,8 +411,8 @@ const sbxDeployerApplyUser = "gt-deployer-apply"
 
 // sbxDeployerApplyProblems reports every way the apply credential reaches past
 // its bound: a ClusterRoleBinding that names it, a binding whose roleRef the
-// manifest does not hold, and a reached rule that grants secrets or a removing
-// verb.
+// manifest does not hold, and a reached rule that grants secrets other than get
+// on a named one, or a removing verb.
 func sbxDeployerApplyProblems(docs []sbxDeployerDoc) []string {
 	lines := sbxDeployerLines(docs)
 	var problems []string
@@ -358,8 +439,8 @@ func sbxDeployerApplyProblems(docs []sbxDeployerDoc) []string {
 			if len(rf) < 3 || rf[0] != role {
 				continue
 			}
-			if strings.HasSuffix(rf[1], "/secrets") {
-				problems = append(problems, role+" grants "+rf[1])
+			if strings.HasSuffix(rf[1], "/secrets") && !(len(rf) == 4 && rf[2] == "get") {
+				problems = append(problems, role+" grants "+strings.Join(rf[1:], " "))
 			}
 			if slices.Contains(deployerRemoveVerbs, rf[2]) {
 				problems = append(problems, role+" grants "+rf[2]+" on "+rf[1])
@@ -371,8 +452,9 @@ func sbxDeployerApplyProblems(docs []sbxDeployerDoc) []string {
 
 // TestSbxDeployerRBACApplyReach holds the apply credential to its bound: no
 // binding that names it is a ClusterRoleBinding or refs an object the manifest
-// does not hold, and no rule it reaches grants secrets or a removing verb; the
-// unmutated manifest passes and each planted refusal is reported.
+// does not hold, and no rule it reaches grants secrets other than get on a named
+// one, or a removing verb; the unmutated manifest passes and each planted refusal
+// is reported.
 func TestSbxDeployerRBACApplyReach(t *testing.T) {
 	t.Parallel()
 	if problems := sbxDeployerApplyProblems(loadSbxDeployerRBAC(t, sbxDeployerRBACFile)); len(problems) > 0 {
