@@ -292,9 +292,11 @@ func TestFindCredentialsYAMLBlockScalar(t *testing.T) {
 // (gt-71o2v9). A blank body line is any line bytes.TrimSpace empties, so an
 // empty, form-feed-only or NBSP-only line does not end the body and the secret
 // after it is still found. A body line shaped like a mapping entry is judged as
-// its own entry too, so both findings are reported. Each row runs in LF and
-// CRLF and must give the same findings, because the CR must not leak into the
-// line text. These rows pin behaviour on main; they change no production code.
+// its own entry too, so both findings are reported, and the token word in it is a
+// value:shape finding as every token in non-JSON text is (gt-xgijpb). Each row runs
+// in LF and CRLF and must give the same findings, because the CR must not leak into
+// the line text. These rows pin behaviour on main; the one token row was widened by
+// gt-xgijpb, and no other row changed.
 // The named mutation (in blockScalarBody, strings.TrimSpace replaced by
 // strings.Trim(line, " \t")) is run by hand and is not run here: it turns the
 // form-feed and NBSP rows red in LF and the reference row red in CRLF.
@@ -311,7 +313,7 @@ func TestFindCredentialsYAMLBlockScalarBodyEdges(t *testing.T) {
 		{"a secret after a form-feed-only body line is found", "password: |\n\f\n  hunter2\n", []string{"yaml:password"}},
 		{"a secret after an NBSP-only body line is found", "password: |\n\u00a0\n  hunter2\n", []string{"yaml:password"}},
 		{"a body of only an environment reference is clean", "password: |\n  ${DOLT_PASSWORD}\n", nil},
-		{"a body line shaped like an entry is judged as its own entry", "password: |\n  token: " + token + "\n", []string{"yaml:password", "yaml:token"}},
+		{"a body line shaped like an entry is judged as its own entry, and its token word by shape", "password: |\n  token: " + token + "\n", []string{"yaml:password", "yaml:token", "value:shape"}},
 	}
 	for _, c := range cases {
 		for _, nl := range []struct{ name, sep string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
@@ -452,6 +454,43 @@ func TestValueShape(t *testing.T) {
 		{"<token>", `{"note":"<` + token + `>"}`, []string{"value:shape"}},
 		{"URL with the token in its query", `{"note":"curl https://x/?k=` + token + `"}`, []string{"value:shape"}},
 		{"no token-shaped word: URL, path and sentence", `{"note":"see https://example.com/guide?lang=en and ~/notes/[draft]: ok"}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// A token-shaped word is a value:shape finding in text that is not JSON, wherever
+// it sits: a log line, a markdown sentence, a YAML value or list item, a shell
+// header, a comment (gt-xgijpb). A commit SHA and ordinary prose are not. A NAME=value
+// line is reported as its env rule and once more for its token word. Built from parts
+// so this file holds no token-shaped literal.
+func TestFindCredentialsTokenShapeInText(t *testing.T) {
+	t.Parallel()
+	const token = "ghp_" + "abcdefghijklmnop1234"
+	const sha = "3f9a1c0d2b7e4a65f8c1d0e9b2a7c4f6d8e1b0a3"
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a log line holding a token", "2026-11-27 04:04:00 sync using " + token + " for the mirror\n", []string{"value:shape"}},
+		{"a markdown sentence", "Use " + token + " to log in to the mirror.\n", []string{"value:shape"}},
+		{"a YAML note value", "note: " + token + "\n", []string{"value:shape"}},
+		{"a YAML list item", "- " + token + "\n", []string{"value:shape"}},
+		{"a curl header in a shell script", "curl -H 'Authorization: Bearer " + token + "' https://api.example.com/v1\n", []string{"value:shape"}},
+		{"a token in a comment is still a token", "# rotate " + token + " before friday\n", []string{"value:shape"}},
+		{"two tokens on one line are two findings", "a " + token + " and " + token + "\n", []string{"value:shape", "value:shape"}},
+		{"a NAME=value line is its env rule and its token word", "OPENAI_API_KEY=" + token + "\n", []string{"env:OPENAI_API_KEY", "value:shape"}},
+		{"a commit SHA is not a token", "landed as " + sha + " on main\n", nil},
+		{"sk- inside risk-assessment is not a token", "see risk-assessment.md for the review\n", nil},
+		{"an ordinary sentence is not a token", "the build ran for twenty minutes without any error\n", nil},
+		{"a commented-out password with no token shape is not a finding", "# password: hunter2\n", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
