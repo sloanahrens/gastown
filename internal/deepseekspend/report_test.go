@@ -64,7 +64,7 @@ func TestBuildReportFromFixture(t *testing.T) {
 	t.Parallel()
 	got := Build(fixtureInput(t))
 	want := Report{
-		Live:        Live{OK: false, Error: "no live balance in the dashboard"},
+		Live:        Live{OK: false, Error: "no live balance in the dashboard", Skipped: true},
 		Balance:     ptr(51.5),
 		TopUp:       114.05,
 		SpentTotal:  8.5,
@@ -183,8 +183,8 @@ func TestReportHasNoLiveBalance(t *testing.T) {
 	if !ok {
 		t.Fatalf("live = %v, want an object", m["live"])
 	}
-	if live["ok"] != false || live["error"] != "no live balance in the dashboard" {
-		t.Errorf("live = %v, want ok false with the no-live-balance error", live)
+	if live["ok"] != false || live["error"] != "no live balance in the dashboard" || live["skipped"] != true {
+		t.Errorf("live = %v, want ok false, the no-live-balance error, and skipped true", live)
 	}
 	for _, key := range []string{"cash", "credit", "credit_runway_days_at_24h_pace", "watcher_pid"} {
 		if v, present := m[key]; !present || v != nil {

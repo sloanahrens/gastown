@@ -341,7 +341,7 @@ func TestCostProvidersTableKeepsDetailInTheHoverAndWarningsVisible(t *testing.T)
 	t.Parallel()
 
 	ds := deepSeekProvider()
-	ds["warnings"] = []string{"live balance unreachable", "spend watcher quiet for 40 min"}
+	ds["warnings"] = []string{"spend watcher quiet for 40 min"}
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", costPanelState([]map[string]any{ds}, map[string]any{"spend": spendReading()}))
 	rows := costTable(t, dom)
@@ -349,7 +349,7 @@ func TestCostProvidersTableKeepsDetailInTheHoverAndWarningsVisible(t *testing.T)
 		t.Errorf("the row's hover is %q, want %q", rows[1].Title, want)
 	}
 	warns := panelTexts(t, dom, "badc")
-	for _, w := range []string{"DeepSeek · live balance unreachable", "DeepSeek · spend watcher quiet for 40 min"} {
+	for _, w := range []string{"DeepSeek · spend watcher quiet for 40 min"} {
 		if !containsText(warns, w) {
 			t.Errorf("the warning %q is not drawn under the table; the panel drew %q", w, warns)
 		}

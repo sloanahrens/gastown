@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/deepseekspend"
 )
 
 // costProvidersNow is the clock every provider fixture is read at.
@@ -30,7 +32,7 @@ func deepSeekFixture(t *testing.T, runway float64) json.RawMessage {
 		"credit_runway_days_at_24h_pace": 4.0,
 		"last_sample":                    "2026-10-29T11:55:00",
 		"watcher_pid":                    nil,
-		"live":                           map[string]any{"ok": false, "available": false},
+		"live":                           map[string]any{"ok": false, "available": false, "skipped": true},
 		"credits": []map[string]any{
 			{"at": "2026-10-20T08:00:00", "amount": 5.0, "kind": "credit"},
 			{"at": "2026-10-24T09:00:00", "amount": 20.0, "kind": "top-up"},
@@ -118,8 +120,9 @@ func TestCostProvidersDeepSeekFigures(t *testing.T) {
 		t.Errorf("a readable report carries why %q", p.Why)
 	}
 
-	// The fixture's ledger is five minutes old, so the watcher is not quiet.
-	wantWarnings := []string{"live balance unreachable"}
+	// The fixture's ledger is five minutes old, so the watcher is not quiet,
+	// and the report skips the live read by design, so nothing is unreachable.
+	wantWarnings := []string{}
 	if !slices.Equal(p.Warnings, wantWarnings) {
 		t.Errorf("warnings = %q, want %q", p.Warnings, wantWarnings)
 	}
@@ -195,6 +198,51 @@ func TestCostProvidersDeepSeekLiveWarningFailsClosed(t *testing.T) {
 			p := deepSeekCostProvider(costProvidersNow, raw, nil, nil, nil)
 			if got := slices.Contains(p.Warnings, "live balance unreachable"); got != tc.want {
 				t.Errorf("live %v gives warnings %q, want the unreachable line: %v", tc.live, p.Warnings, tc.want)
+			}
+		})
+	}
+}
+
+// The pod builds its report from the ledger and says the live read was skipped
+// by design, so its balance is not warned unreachable. A writer that says
+// nothing about a skip still fails closed.
+func TestDeepSeekLiveSkippedByDesign(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, time.November, 25, 8, 5, 0, 0, time.UTC)
+	pod, err := json.Marshal(deepseekspend.Build(deepseekspend.Input{
+		Constants: deepseekspend.CurrentConstants(time.UTC),
+		Rows:      []deepseekspend.Row{{At: at, Balance: 47.97}},
+		Now:       at,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withLive := func(t *testing.T, live map[string]any) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"balance": 10.0, "watcher_pid": 4242, "live": live})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want bool
+	}{
+		{"the pod's ledger report skips the read by design", pod, false},
+		{"ok false with an error and no skip still warns", withLive(t, map[string]any{"ok": false, "error": "connection refused"}), true},
+		{"neither live field still warns", withLive(t, map[string]any{}), true},
+		{"available true does not warn", withLive(t, map[string]any{"available": true}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := deepSeekCostProvider(costProvidersNow, tc.raw, nil, nil, nil)
+			if got := slices.Contains(p.Warnings, "live balance unreachable"); got != tc.want {
+				t.Errorf("warnings = %q, want the unreachable line: %v", p.Warnings, tc.want)
 			}
 		})
 	}

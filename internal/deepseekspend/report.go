@@ -97,10 +97,12 @@ type Report struct {
 	Alerts           []string       `json:"alerts"`
 }
 
-// Live is the live balance read. The pod never makes it, so OK is always false.
+// Live is the live balance read. The pod never makes it: OK is always false,
+// and Skipped says so, since the ledger is the balance's source by design.
 type Live struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	Skipped bool   `json:"skipped"`
 }
 
 // Credit is one balance rise: a grant, a top-up, or both.
@@ -203,7 +205,7 @@ func parseSplit(fields []string) (granted, topped *float64) {
 // report, not an absent one: it has no balance, and its figures are zero or null.
 func Build(in Input) Report {
 	r := Report{
-		Live:    Live{OK: false, Error: noLiveBalance},
+		Live:    Live{OK: false, Error: noLiveBalance, Skipped: true},
 		TopUp:   in.TopUp,
 		Credits: []Credit{},
 		Alerts:  alertLines(in.Events),
