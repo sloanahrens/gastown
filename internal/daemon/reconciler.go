@@ -8,8 +8,9 @@ import (
 
 // runReconciler is one pass of the reconciler patrol. It does nothing when the
 // patrol is off, so a disabled town neither logs nor records a run. An active
-// pass logs whether it is shadow (judges only) or live, then records its
-// completion time, which is what the patrol's due-ness check reads.
+// pass logs whether it is shadow (judges only) or live, keeps the observations
+// it judged for dutyObservations to read, then records its completion time,
+// which is what the patrol's due-ness check reads.
 func (d *Daemon) runReconciler() {
 	if !d.isPatrolActive("reconciler") {
 		return
@@ -25,7 +26,12 @@ func (d *Daemon) runReconciler() {
 	}
 	d.logger.Printf("reconciler: pass (%s)", mode)
 
-	d.recordPatrolRun(&d.reconcilerRun, "reconciler", time.Now())
+	now := time.Now()
+	obs := d.observeDuties(d.ctx, now)
+	d.dutyObsMu.Lock()
+	d.dutyObs = obs
+	d.dutyObsMu.Unlock()
+	d.recordPatrolRun(&d.reconcilerRun, "reconciler", now)
 }
 
 // reconcilerInterval returns how often the reconciler patrol runs. It is the

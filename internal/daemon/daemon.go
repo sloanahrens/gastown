@@ -57,6 +57,7 @@ import (
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/reaper"
+	"github.com/steveyegge/gastown/internal/reconcile"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1559,6 +1560,11 @@ type Daemon struct {
 	// nil is time.NewTicker, and a test sets it to record the cadence
 	// (reconciler_wiring.go).
 	reconcilerTickerFn func(interval time.Duration) (ticks <-chan time.Time, stop func())
+	// dutyObs is the observations the last active reconciler pass kept, behind
+	// dutyObsMu because a pass replaces the slice while a reader takes a copy
+	// (gt-m4ubr4).
+	dutyObsMu sync.Mutex
+	dutyObs   []reconcile.Observation
 	// landingWorkerRun is the rig workers' last completed pass. They pass every
 	// minute but recorded no run, so gt jobs read the row as never_run
 	// (gt-zv3ndb).
@@ -1853,6 +1859,15 @@ func (d *Daemon) platform() string {
 		return d.goos
 	}
 	return runtime.GOOS
+}
+
+// dutyObservations returns a copy of the observations the reconciler pass last
+// kept, so a caller can read them without changing what the pass stored
+// (gt-m4ubr4).
+func (d *Daemon) dutyObservations() []reconcile.Observation {
+	d.dutyObsMu.Lock()
+	defer d.dutyObsMu.Unlock()
+	return append([]reconcile.Observation(nil), d.dutyObs...)
 }
 
 // sessionDeath records a detected session death for mass death analysis.
