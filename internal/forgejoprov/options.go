@@ -53,6 +53,7 @@ type Options struct {
 	MainBranch     string   // --main-branch: protected landing target
 	LandBranch     string   // --land-branch: candidate branch pattern kept unprotected
 	WorkflowList   string   // --workflow-list: hook list a provisioned repository is appended to
+	Seats          []string // --seat: seat bot names to provision on every --repo
 	RevokeToken    string   // --revoke-token: name of the one bot token to revoke
 	Rotate         bool     // --rotate: mint a new token where one exists, revoking the old
 	DryRun         bool     // --dry-run: read and report without writing
@@ -136,6 +137,7 @@ var valueFlags = map[string]func(*Options, string){
 	"--main-branch":      func(o *Options, v string) { o.MainBranch = v },
 	"--land-branch":      func(o *Options, v string) { o.LandBranch = v },
 	"--workflow-list":    func(o *Options, v string) { o.WorkflowList = v },
+	"--seat":             func(o *Options, v string) { o.Seats = append(o.Seats, v) },
 	"--revoke-token":     func(o *Options, v string) { o.RevokeToken = v },
 }
 
@@ -208,9 +210,10 @@ func (o *Options) parseFlags(args []string) error {
 }
 
 // applyDefaults fills the values no flag named: the script's ROLES,
-// GATE_CONTEXTS and LANDING_BOT assignments after its parse loop.
+// GATE_CONTEXTS and LANDING_BOT assignments after its parse loop. A run that
+// names seats provisions those and nothing else, so it gets no default role.
 func (o *Options) applyDefaults() {
-	if len(o.Roles) == 0 {
+	if len(o.Roles) == 0 && len(o.Seats) == 0 {
 		o.Roles = DefaultRoles()
 	}
 	if len(o.GateContexts) == 0 {
@@ -232,6 +235,28 @@ func (o *Options) validate() error {
 	o.APIURL = strings.TrimSuffix(o.APIURL, "/")
 	if o.WebURL == "" {
 		o.WebURL = strings.TrimSuffix(o.APIURL, "/api/v1")
+	}
+	// --seat is a mode of its own: it provisions the named seat bots on the named
+	// repositories and nothing else, so it needs those and conflicts with the flags
+	// that name roles or reach another run. The default roles were not applied here,
+	// so any role listed was named by the operator.
+	if len(o.Seats) > 0 {
+		// The revoke check comes first: a --revoke-token line carries a --role to
+		// name the bot, so the role conflict would otherwise speak for it.
+		if o.RevokeToken != "" {
+			return usagef("--seat cannot be combined with --revoke-token")
+		}
+		if len(o.Roles) > 0 {
+			return usagef("--seat cannot be combined with --role")
+		}
+		if len(o.Repos) == 0 {
+			return usagef("--seat needs at least one --repo")
+		}
+		for _, name := range o.Seats {
+			if !seatName.MatchString(name) {
+				return usagef("--seat '%s' must match [a-z0-9-]+", name)
+			}
+		}
 	}
 	for _, role := range o.Roles {
 		if err := requirePlain("--role", role); err != nil {

@@ -124,6 +124,9 @@ func provision(p *Provisioner, opts *Options) error {
 	if opts.Rotate && opts.SkipTokens {
 		return fmt.Errorf("--rotate and --skip-tokens cannot be combined: --skip-tokens mints no token, so the rotation would be ignored; drop one of them")
 	}
+	if len(opts.Seats) > 0 {
+		return provisionSeats(p, opts)
+	}
 	if opts.SkipTokens {
 		p.logf("tokens: skipped (--skip-tokens)")
 	}
@@ -140,6 +143,19 @@ func provision(p *Provisioner, opts *Options) error {
 	}
 	for _, repo := range opts.Repos {
 		if err := provisionRepo(p, repo, opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// provisionSeats provisions each named seat bot on every repository, and nothing
+// else: no role's bot, no branch protection and no viewer grant, since a seat run
+// names its own accounts. The first seat that fails stops the run, so a later seat
+// never hides the failure that came before it.
+func provisionSeats(p *Provisioner, opts *Options) error {
+	for _, name := range opts.Seats {
+		if err := p.ProvisionSeat(name, opts.Repos); err != nil {
 			return err
 		}
 	}

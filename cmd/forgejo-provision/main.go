@@ -80,6 +80,9 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --token-name NAME      name of the minted token (default: %s); the
                          token file records it on a TOKEN_NAME line
   --repo OWNER/NAME      repository to protect; repeatable
+  --seat NAME            provision the seat bot of NAME on every --repo and
+                         nothing else; repeatable; needs --repo and cannot be
+                         combined with --role or --revoke-token
   --landing-bot LOGIN    login on the merge whitelist (default: --bot-prefix
                          followed by landing)
   --gate-context CTX     required commit-status context; repeatable

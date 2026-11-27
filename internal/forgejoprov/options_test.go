@@ -217,6 +217,35 @@ func TestParseRevokeToken(t *testing.T) {
 	}
 }
 
+// TestParseSeat holds one row per command line the seat mode refuses, so
+// dropping a check leaves a row that no longer refuses.
+func TestParseSeat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"without --repo", []string{"--seat", "alpha"}, "--seat needs at least one --repo"},
+		{"with --role", []string{"--seat", "alpha", "--role", "polecat", "--repo", "acme/rig"}, "--seat cannot be combined with --role"},
+		{"with --revoke-token", []string{"--seat", "alpha", "--revoke-token", "gt-old", "--role", "landing", "--repo", "acme/rig"}, "--seat cannot be combined with --revoke-token"},
+		{"with a name outside the seat alphabet", []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, "--seat 'Fur/iosa' must match [a-z0-9-]+"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(tc.args, env(nil))
+			var refused *UsageError
+			if !errors.As(err, &refused) {
+				t.Fatalf("Parse(%v) = %v, want a usage error", tc.args, err)
+			}
+			if !strings.Contains(refused.Message, tc.want) {
+				t.Errorf("Parse(%v) error = %q, want it to hold %q", tc.args, refused.Message, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseRejectsBadValues holds one case per check the validation makes, so
 // dropping a check leaves a case that no longer refuses its value.
 func TestParseRejectsBadValues(t *testing.T) {
