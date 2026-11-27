@@ -170,6 +170,11 @@ type Daemon struct {
 	bookQueues      map[*landworker.BookQueue]string
 	bookQueueBound  time.Duration
 	bookQueueWaitFn func()
+	// reviewPoolEnv is the environment the review-pool wiring reads om's config
+	// location through (landing_review_pool.go). The zero value is production:
+	// os.LookupEnv, os.UserHomeDir and os.Stat. A unit test sets it so om's
+	// config file is the test's own (gt-lmflya).
+	reviewPoolEnv reviewPoolEnv
 	// bootGate is the boot standby (boot_gate.go, gt-niooz0): the poller's last
 	// answer, which standbyReason reads. New builds it from the real probe set;
 	// a daemon built without one (a test that does not set it) reads healthy.

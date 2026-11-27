@@ -513,9 +513,10 @@ func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
 
 // TestReviewPoolWiringNoOMConfigStaysOff pins that a pool the config lists
 // stays off when om's own config file cannot be used: a missing file and a
-// location this process cannot name each log one line, undo the wiring (Ahead
-// back to nil, so the rig lands with om inline) and return the error
-// (gt-lfykjq).
+// location this process cannot name each undo the wiring (Ahead back to nil,
+// so the rig lands with om inline), return the error, and leave exactly one
+// log line, from the production wrapper that logs the returned error
+// (gt-lfykjq, gt-lmflya).
 func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 	t.Parallel()
 	noXDG := func(string) (string, bool) { return "", false }
@@ -565,9 +566,10 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 			lander := reviewPoolTestLander()
 			worker := reviewPoolTestWorker()
 
-			err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+			cfg := &config.LandingWorkerConfig{
 				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
-			}, lander, worker, "/sentinel/reviews", tc.env)
+			}
+			err := d.wireReviewPool("gastown", cfg, lander, worker, "/sentinel/reviews", tc.env)
 
 			if err == nil {
 				t.Fatal("wireReviewPool returned nil without a usable om config file; want the error")
@@ -584,6 +586,11 @@ func TestReviewPoolWiringNoOMConfigStaysOff(t *testing.T) {
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
 				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
 			}
+			// The production entry point logs the error wireReviewPool returns,
+			// once and only there (gt-lmflya): the direct call above logged
+			// nothing, so the one line below is the wrapper's.
+			d.reviewPoolEnv = tc.env
+			d.wireRigReviewPool("gastown", cfg, reviewPoolTestLander(), reviewPoolTestWorker(), "/sentinel/reviews")
 			got := logs.String()
 			if n := strings.Count(got, "\n"); n != 1 {
 				t.Fatalf("no om config file logged %d lines, want one naming the rig and the cause; log:\n%s", n, got)
@@ -732,6 +739,64 @@ func TestReviewPoolWiringNoOMConfigLeavesTheWorker(t *testing.T) {
 			}
 			if want := reviewPoolTestWorker(); !reflect.DeepEqual(worker, want) {
 				t.Fatalf("no om config file changed the Worker:\ngot  %+v\nwant %+v", worker, want)
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringRig pins that wireRigReviewPool reads om's config
+// location through the Daemon's reviewPoolEnv field, so a test's own om config
+// wires the pool; an om config the environment cannot use is logged once and
+// leaves the pool off (gt-lmflya).
+func TestReviewPoolWiringRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		env      func(t *testing.T) (reviewPoolEnv, string)
+		wantPool bool
+	}{
+		{
+			name: "field's om config",
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				return reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+			},
+			wantPool: true,
+		},
+		{
+			name: "missing om config",
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				env, omConfig := reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+				env.stat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+				return env, omConfig
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			env, omConfig := tc.env(t)
+			d := &Daemon{logger: log.New(&logs, "", 0), reviewPoolEnv: env}
+			lander, worker := reviewPoolTestLander(), reviewPoolTestWorker()
+			d.wireRigReviewPool("gastown", &config.LandingWorkerConfig{
+				ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+			}, lander, worker, "/sentinel/reviews")
+
+			if got := worker.Pool != nil; got != tc.wantPool {
+				t.Fatalf("Worker.Pool set = %v; want %v", got, tc.wantPool)
+			}
+			if tc.wantPool && lander.OMConfigPath != omConfig {
+				t.Fatalf("OMConfigPath = %q; want the field's om config file %q", lander.OMConfigPath, omConfig)
+			}
+			wantLines := 0
+			if !tc.wantPool {
+				wantLines = 1
+				if lander.Ahead != nil {
+					t.Fatalf("Lander.Ahead = %+v with no om config file; want nil, the pool off", lander.Ahead)
+				}
+			}
+			if n := strings.Count(logs.String(), "\n"); n != wantLines {
+				t.Fatalf("wiring logged %d lines, want %d; log:\n%s", n, wantLines, logs.String())
 			}
 		})
 	}
