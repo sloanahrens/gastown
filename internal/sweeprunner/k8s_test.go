@@ -701,6 +701,44 @@ func TestSyncPodHasNoServiceAccountToken(t *testing.T) {
 	}
 }
 
+// TestHelperPodsEndWithoutTheDefaultGrace holds the reader and sync pods to a
+// one-second termination grace: they sleep, and sleep ignores SIGTERM, so
+// without it every delete waits out the default 30 seconds before the SIGKILL
+// (gt-e43ylr). The Job's pod template keeps the cluster default.
+func TestHelperPodsEndWithoutTheDefaultGrace(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Poll == nil || len(plan.Poll.Collect) == 0 {
+		t.Fatal("the Kubernetes plan renders no reader pod")
+	}
+	var reader Pod
+	if err := json.Unmarshal(plan.Poll.Collect[0].Stdin, &reader); err != nil {
+		t.Fatalf("the reader apply is not a document: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		pod  Pod
+	}{
+		{name: "reader", pod: reader},
+		{name: "sync", pod: syncPodFromPlan(t, plan, spec)},
+	} {
+		if tc.pod.Spec.TerminationGracePeriodSeconds == nil {
+			t.Errorf("the %s pod renders no terminationGracePeriodSeconds, so its delete waits out the default 30 seconds", tc.name)
+			continue
+		}
+		if got := *tc.pod.Spec.TerminationGracePeriodSeconds; got != 1 {
+			t.Errorf("the %s pod's terminationGracePeriodSeconds is %d, want 1: its sleep does not exit on SIGTERM", tc.name, got)
+		}
+	}
+	if got := plan.Job.Spec.Template.Spec.TerminationGracePeriodSeconds; got != nil {
+		t.Errorf("the Job's pod template renders terminationGracePeriodSeconds %d, want none: the runner pod keeps the cluster default", *got)
+	}
+}
+
 // TestSyncGuardRefusalNamesTheRunningJob: a Job of the rig that has not ended is
 // refused as an *ActiveJob that carries its name, so the daemon can tell this
 // run's own Job, which it adopts, from another run's, which it waits on. A
