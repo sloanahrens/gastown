@@ -118,7 +118,8 @@ func TestCostProvidersDeepSeekFigures(t *testing.T) {
 		t.Errorf("a readable report carries why %q", p.Why)
 	}
 
-	wantWarnings := []string{"live balance unreachable", "spend watcher is not running"}
+	// The fixture's ledger is five minutes old, so the watcher is not quiet.
+	wantWarnings := []string{"live balance unreachable"}
 	if !slices.Equal(p.Warnings, wantWarnings) {
 		t.Errorf("warnings = %q, want %q", p.Warnings, wantWarnings)
 	}
