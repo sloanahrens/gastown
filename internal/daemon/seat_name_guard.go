@@ -210,7 +210,9 @@ func gatewaySeatSandboxes(ctx context.Context) ([]sandbox.Entry, error) {
 // are kept rather than cleared by an unanswered read. Each stuck sandbox's item
 // then carries the gateway's Ready reason (gt-m7s2wf); a failed-phase sandbox is
 // not asked, and a status read that fails leaves the item saying the reason was
-// not read rather than failing the collector.
+// not read rather than failing the collector. The reads are asked one at a time
+// and stop once the tick's context is done, so no read is started past the
+// tick and the collector waits on at most the one read already in flight.
 func (s *attentionSources) collectStaleSeatSandboxes(ctx context.Context) ([]attention.Item, error) {
 	profiles, err := s.d.diskMaintenanceSeams().sandboxes()
 	if err != nil {
@@ -242,6 +244,12 @@ func (s *attentionSources) collectStaleSeatSandboxes(ctx context.Context) ([]att
 		_, failed := guard.Stale(name)
 		return failed
 	}, func(name string) (sandbox.Status, error) {
+		// The seam takes no context, so the tick's deadline is checked before
+		// each read: past it the items not yet read say the reason was not read
+		// rather than holding the collectors behind this one.
+		if err := ctx.Err(); err != nil {
+			return sandbox.Status{}, err
+		}
 		return status("", name)
 	}), nil
 }

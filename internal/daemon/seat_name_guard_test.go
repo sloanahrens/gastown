@@ -398,6 +398,9 @@ func TestSeatNameGuardRaisesAStuckSandbox(t *testing.T) {
 	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
 		return seatNameGuardListing("Provisioning", "gt-dag"), nil
 	}}
+	src.sandboxStatus = func(string, string) (sandbox.Status, error) {
+		return sandbox.Status{ReadyKnown: true, ReadyReason: "DependenciesNotReady"}, nil
+	}
 
 	first, err := src.collectStaleSeatSandboxes(context.Background())
 	if err != nil {
@@ -517,6 +520,36 @@ func TestSeatNameGuardStuckItemSurvivesAFailedRead(t *testing.T) {
 	}
 	if strings.Contains(items[0].Summary, readErr.Error()) {
 		t.Errorf("summary %q carries the read's error text %q", items[0].Summary, readErr.Error())
+	}
+}
+
+// TestSeatNameGuardStuckReasonStopsAtTheTickDeadline: a tick whose context is
+// already done asks the gateway nothing for the stuck item, and the item stays,
+// saying the reason was not read (gt-m7s2wf).
+func TestSeatNameGuardStuckReasonStopsAtTheTickDeadline(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	asked := false
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return []sandbox.Entry{{Name: "gt-dag", Phase: "Provisioning"}}, nil
+	}}
+	src.sandboxStatus = func(string, string) (sandbox.Status, error) { asked = true; return sandbox.Status{}, nil }
+
+	if _, err := src.collectStaleSeatSandboxes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src.now = seatNameGuardNow.Add(sandboxstuck.After)
+	items, err := src.collectStaleSeatSandboxes(ctx)
+	if err != nil {
+		t.Fatalf("a done tick was reported as a collector error: %v", err)
+	}
+	if asked {
+		t.Error("the gateway status was asked after the tick's context was done")
+	}
+	if len(items) != 1 || !strings.HasSuffix(items[0].Summary, " Gateway Ready reason: not read.") {
+		t.Fatalf("items = %+v, want the stuck item saying the reason was not read", items)
 	}
 }
 
