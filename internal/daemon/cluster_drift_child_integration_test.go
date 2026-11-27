@@ -54,6 +54,40 @@ func TestIntegrationStartDriftChildRealProcess(t *testing.T) {
 	}
 }
 
+// TestIntegrationDriftChildEnvIsFiltered: the child startDriftChild runs
+// inherits PATH but not a credential-named variable this process holds. The
+// filter runs inside startDriftChild, so passing os.Environ() whole makes this
+// row fail (gt-66luy0).
+func TestIntegrationDriftChildEnvIsFiltered(t *testing.T) {
+	// Not parallel: t.Setenv changes the process environment the child reads.
+	const token = "drift-child-test-token-0123456789"
+	t.Setenv("DEEPSEEK_API_KEY", token)
+	// A generous bound so a child that never exits fails the run instead of
+	// hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stdout, _, exit, err := startDriftChild(ctx, "/usr/bin/env", nil, 1<<20)
+	if err != nil || exit != 0 {
+		t.Fatalf("startDriftChild /usr/bin/env = exit %d, err %v; want exit 0 and no error", exit, err)
+	}
+	var sawPath bool
+	for _, entry := range strings.Split(string(stdout), "\n") {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "PATH":
+			sawPath = true
+		case "DEEPSEEK_API_KEY":
+			t.Errorf("the child environment carries DEEPSEEK_API_KEY, which the filter must drop")
+		}
+	}
+	if !sawPath {
+		t.Errorf("the child environment has no PATH, so the child could not find what it runs")
+	}
+}
+
 // TestIntegrationStartDriftChildDeadlineEndsAChildThatIgnoresSIGTERM: a child
 // that ignores SIGTERM and blocks is ended at a real deadline with exit -1 and
 // the context error, so the timeout mapping is pinned by a process rather than
