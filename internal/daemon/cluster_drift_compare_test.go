@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeDriftStart is an injected start that records its one call and answers
@@ -51,8 +52,56 @@ func TestClusterDriftCompareCallsStartWithTheResolvedBinary(t *testing.T) {
 	if fake.exe != "/opt/gt/bin/gt" || !reflect.DeepEqual(fake.args, []string{"town", "cluster", "drift"}) || fake.limit != 64<<10 {
 		t.Errorf("start(%q, %q, %d), want the resolved binary, town cluster drift and 64 KiB", fake.exe, fake.args, fake.limit)
 	}
-	if fake.ctx != ctx {
-		t.Error("start did not receive the caller's context")
+	cancel()
+	if fake.ctx.Err() != context.Canceled {
+		t.Error("start did not receive a context derived from the caller's")
+	}
+}
+
+// TestClusterDriftCompareBoundsStartWithDeadline: the context start receives
+// carries a deadline clusterDriftRunBound after the compare began, read from the
+// test's own clock on either side of the call, with no sleep (gt-ime6b8).
+func TestClusterDriftCompareBoundsStartWithDeadline(t *testing.T) {
+	t.Parallel()
+	fake := &fakeDriftStart{exit: 0}
+	exe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+
+	before := time.Now()
+	_, err := newClusterDriftCompare(exe, fake.start)(context.Background())
+	after := time.Now()
+
+	deadline, ok := fake.ctx.Deadline()
+	if err != nil || !fake.called || !ok {
+		t.Fatalf("compare err = %v, called = %t, deadline set = %t; want a run with a deadline", err, fake.called, ok)
+	}
+	if lo, hi := before.Add(60*time.Second), after.Add(60*time.Second); deadline.Before(lo) || deadline.After(hi) {
+		t.Errorf("deadline = %v, want between %v and %v (60 s after the compare began)", deadline, lo, hi)
+	}
+}
+
+// TestClusterDriftCompareOverrunEndsAsError: a start that returns the context's
+// deadline error makes the compare an error with no result, the overrun being
+// unreadable and never a clear. The caller's context is already past its
+// deadline, so the context that start receives reports DeadlineExceeded with no
+// sleep (gt-ime6b8).
+func TestClusterDriftCompareOverrunEndsAsError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
+	defer cancel()
+	called := false
+	start := func(runCtx context.Context, exe string, args []string, limit int) ([]byte, []byte, int, error) {
+		called = true
+		return nil, nil, -1, runCtx.Err()
+	}
+	exe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+
+	got, err := newClusterDriftCompare(exe, start)(ctx)
+
+	if !called {
+		t.Fatal("start was not called")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || len(got.Differing) != 0 {
+		t.Errorf("compare = %+v, %v; want no result and an error wrapping DeadlineExceeded", got, err)
 	}
 }
 
