@@ -29,6 +29,8 @@ func TestRehearsalFacts(t *testing.T) {
 		{"blank GATE RUN rest is unavailable with zero seconds", "", []string{"GATE RUN: "}, []Gate{{Verdict: GateUnavailable}}},
 		{"bare fail verdict keeps fail with zero seconds", "", []string{"GATE RUN: fail"}, []Gate{{Verdict: GateFail}}},
 		{"negative comment wall keeps fail with zero seconds", "", []string{"GATE RUN: fail -2m, slot wait 0s, head a"}, []Gate{{Verdict: GateFail}}},
+		{"Gate line in a block with no head is unavailable", "READY TO LAND\nBranch: b\nTarget: main\nGate: pass presubmit 1m, slot wait 0s", nil, []Gate{{Verdict: GateUnavailable}}},
+		{"rejected block with no Gate line gives no gate", "READY TO LAND\nBranch: b\n", nil, nil},
 		{"no Gate line gives no gate", "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\n", nil, nil},
 		{"comment without the prefix gives no gate", "", []string{"looks good", "the GATE RUN: fail 1m note is old", "GATE RUN:"}, nil},
 	}

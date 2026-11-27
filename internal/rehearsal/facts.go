@@ -14,19 +14,19 @@ const gateRunPrefix = "GATE RUN: "
 // GateFacts reads the gate figures recorded on one bead: the last READY TO LAND
 // block's Gate line, then one gate per "GATE RUN: " comment in comments order.
 // A Gate line that is not a pass with a wall in its third field, an empty one
-// included, gives an unavailable gate of zero seconds, as does a comment whose
-// verdict is neither fail nor unavailable. A fail or unavailable comment
-// without a readable wall keeps its verdict and zero seconds. A note with no
-// Gate line and a comment without the prefix record nothing.
+// included, gives an unavailable gate of zero seconds. So does a Gate line in a
+// block land.ParseReadyNote rejects, and a comment whose verdict is neither
+// fail nor unavailable. A fail or unavailable comment without a readable wall
+// keeps its verdict and zero seconds. A note with no Gate line and a comment
+// without the prefix record nothing.
 func GateFacts(notes string, comments []string) []Gate {
 	var gates []Gate
-	if w, ok := land.ParseReadyNote(notes); ok {
-		switch {
-		case w.Gate != "":
-			gates = append(gates, readyGate(w.Gate))
-		case gateLinePresent(notes):
-			gates = append(gates, Gate{Verdict: GateUnavailable})
-		}
+	w, ok := land.ParseReadyNote(notes)
+	switch {
+	case ok && w.Gate != "":
+		gates = append(gates, readyGate(w.Gate))
+	case gateLinePresent(notes):
+		gates = append(gates, Gate{Verdict: GateUnavailable})
 	}
 	for _, c := range comments {
 		if rest, ok := strings.CutPrefix(c, gateRunPrefix); ok {
