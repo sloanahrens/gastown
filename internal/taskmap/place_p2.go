@@ -103,6 +103,11 @@ func init() {
 			Use:   "Use this to register a project as a new rig by cloning its repository onto this machine.",
 		},
 		Entry{
+			Path:  "rig audit",
+			Group: "orient",
+			Use:   "Use this to find which of the town's rigs is missing from the daemon lists or its landing settings, before you change anything.",
+		},
+		Entry{
 			Path:  "rig config",
 			Group: "host",
 			Use:   "Use this to see or set a rig's configuration values, such as its polecat cap or whether it restarts itself.",
