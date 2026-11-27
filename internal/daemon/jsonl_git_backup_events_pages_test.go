@@ -602,3 +602,70 @@ func TestExportEventsFullPaged(t *testing.T) {
 		})
 	}
 }
+
+// TestExportEventsFullPagedPageFails: a page that fails mid-read makes the full
+// export return that error, and the partial export keeps the rows of the pages
+// read before it for the cycle to unstage (gt-5gf9r5).
+func TestExportEventsFullPagedPageFails(t *testing.T) {
+	t.Parallel()
+	// A page's keyset id must be an events row id, a UUID.
+	id := func(n int) string { return fmt.Sprintf("11111111-1111-1111-1111-11111111111%d", n) }
+	rows := []string{
+		eventsLine(id(1), "2026-10-31 10:00:00"),
+		eventsLine(id(2), "2026-10-31 10:00:01"),
+		eventsLine(id(3), "2026-10-31 10:00:01"),
+		eventsLine(id(4), "2026-10-31 10:00:02"),
+	}
+	const pageRows = 2
+	readErr := errors.New("the dolt read timed out")
+
+	for _, tc := range []struct {
+		name        string
+		failAt      int // the 1-based page export that fails
+		wantWritten int
+		wantLines   []string
+	}{
+		{"the first page fails", 1, 0, nil},
+		{"the second page fails", 2, 2, rows[:2]},
+		{"a later page fails", 3, 4, rows},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, dir := eventsPageReaderDaemon(t)
+			d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			exported := 0
+			exportTable := func(table string, q beadsql.Query, stage, dataDir string, budget time.Duration) (int, error) {
+				exported++
+				if exported == tc.failAt {
+					return 0, readErr
+				}
+				from := (exported - 1) * pageRows
+				page := &eventsPageExport{rows: rows[from:min(from+pageRows, len(rows))]}
+				return page.export(table, q, stage, dataDir, budget)
+			}
+
+			written, err := d.exportEventsFullPaged(osEventsExportOps(), "gt", dir, "/data", time.Minute, pageRows, exportTable)
+			if err == nil {
+				t.Fatalf("a page that failed at position %d reported success", tc.failAt)
+			}
+			if !errors.Is(err, readErr) {
+				t.Errorf("error %q does not wrap the page read error", err)
+			}
+			if !strings.Contains(err.Error(), "events") {
+				t.Errorf("error %q does not name events", err)
+			}
+			if written != tc.wantWritten {
+				t.Errorf("written = %d, want %d", written, tc.wantWritten)
+			}
+			if got := eventsExportLines(t, dir); !slices.Equal(got, tc.wantLines) {
+				t.Errorf("the export holds %q, want %q", got, tc.wantLines)
+			}
+			if _, err := os.Stat(eventsExportStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the state file was written after the failed page: %v", err)
+			}
+		})
+	}
+}
