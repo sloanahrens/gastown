@@ -588,7 +588,7 @@ func (a clusterRollApplier) apply(ctx context.Context, m k8sdaemon.Manifests, ch
 			continue
 		}
 		resource := "deployment/" + deployment.Metadata.Name
-		if err := waitDeploymentReady(ctx, a.kubectl, a.out, deployment.Metadata.Namespace, resource, a.rolloutWait); err != nil {
+		if err := waitDeploymentRollout(ctx, a.kubectl, a.out, deployment.Metadata.Namespace, resource, a.rolloutWait); err != nil {
 			fmt.Fprintf(a.out, "stopping: %s did not come back, so no further object is applied\n", resource)
 			return err
 		}
@@ -676,33 +676,5 @@ func (a clusterRollApplier) applyObject(ctx context.Context, object clusterApply
 	if exit != 0 {
 		return fmt.Errorf("applying the %s %s: kubectl exited %d", object.kind, object.name, exit)
 	}
-	return nil
-}
-
-// waitDeploymentReady waits for resource's rollout within bound, then reads its
-// Available condition. A rollout status that exits non-zero, or a condition that
-// is not True, is an error: a Deployment kubectl could not confirm ready is not
-// one, and the roll must not report success.
-func waitDeploymentReady(ctx context.Context, kubectl update.RunFunc, out io.Writer, namespace, resource string, bound time.Duration) error {
-	fmt.Fprintf(out, "waiting for %s to roll out (bound %s)\n", resource, bound)
-	_, exit, err := kubectl(ctx, "", nil, "kubectl", "rollout", "status", resource, "-n", namespace, "--timeout="+bound.String())
-	if err != nil {
-		return fmt.Errorf("waiting for the rollout of %s: %w", resource, err)
-	}
-	if exit != 0 {
-		return fmt.Errorf("%s did not complete its rollout within %s: kubectl rollout status exited %d", resource, bound, exit)
-	}
-	name := strings.TrimPrefix(resource, "deployment/")
-	status, exit, err := kubectl(ctx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", readyConditionJSONPath)
-	if err != nil {
-		return fmt.Errorf("reading the readiness of %s: %w", resource, err)
-	}
-	if exit != 0 {
-		return fmt.Errorf("reading the readiness of %s: kubectl exited %d", resource, exit)
-	}
-	if status = strings.TrimSpace(status); status != "True" {
-		return fmt.Errorf("%s is not ready: its Available condition is %q", resource, status)
-	}
-	fmt.Fprintf(out, "%s is ready\n", resource)
 	return nil
 }
