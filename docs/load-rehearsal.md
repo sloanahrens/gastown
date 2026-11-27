@@ -1,6 +1,6 @@
 # The load rehearsal runbook: before, run and stop
 
-Read this before the overseer runs one load rehearsal. It is the procedure for the scenario the operator ruled on 2026-11-26: a rehearsal rig seeded from gastown at one tagged commit, its own beads database and gate, a fixed set of sixteen beads released three in flight, and three Mac presubmits of the tag on empty Go caches beside them. One run writes one run record, and Restore at the end puts the town back.
+Read this before the overseer runs one load rehearsal. It is the procedure for the scenario the operator ruled on 2026-11-26: a rehearsal rig seeded from gastown at one tagged commit, its own beads database and gate, a fixed set of sixteen beads released three in flight, and three Mac presubmits of the tag on empty Go caches beside them. One run writes one run record, and Restore at the end puts the town back. After a run, After puts the rig back for the next one, and Compare reads two records side by side.
 
 `gt-rehearsal run` drives one run; the flags below are the ones it reads.
 
@@ -58,6 +58,21 @@ The overseer stops a run on any of these: Dolt unanswered for two minutes (`bd l
 2. Interrupt the driver once, with Ctrl-C in its terminal. It cancels the run, closes the run's beads and saves the record marked stopped; wait for it to exit. A second signal kills the process before that save (gt-13dre6.71).
 3. A stopped run is a failed run: its record is kept and its verdict is `fail`.
 
+## After
+
+Run After once the run's driver has exited, on a pass, a fail or a stop. Its three steps go in this order, and Restore then runs last.
+
+1. **Remove the run's seats.** `gt polecat remove rehearsal --all` removes every seat the run left in the rehearsal rig, and `gt polecat list rehearsal` then names none. A seat whose session still runs is reported and kept: stop it with `gt session stop rehearsal/<seat>` and run the command again.
+2. **Delete the run's empty Go caches.** `rm -rf .runtime/rehearsal/<record>.gocache` deletes the cache root the driver created beside its record (Before step 10); `test ! -e .runtime/rehearsal/<record>.gocache` then exits 0.
+3. **Reset the rig's main to the tag.** In `~/gt/.runtime/rehearsal/wt-1`, run `git fetch origin`, then `git diff --quiet <tag> origin/main`. Exit 0 means main already holds the tagged tree and the reset is done. Otherwise one commit whose tree is the tag's is landed, in this order:
+   1. File its bead: `gt bead create --rig rehearsal "reset main to <tag>" -q` prints the id (`<id>`).
+   2. Cut a branch from origin/main and make its tree the tag's: `git checkout -b crew/overseer/<id> origin/main`, `git read-tree --reset -u <tag>^{tree}`, `git commit -m "reset main to <tag>"`, `git push origin crew/overseer/<id>`.
+   3. Submit it: `gt land takeover <id> --branch crew/overseer/<id> --force "reset between rehearsal runs"`.
+   4. Wait for the landing: `gt land wait --agent overseer --timeout 10m` prints the landing or its refusal; exit 3 means none yet, so run it again.
+   5. Check out the tag again: `git checkout <tag>`.
+
+   A failed create, push, takeover or landing ends the reset there: start no further run until the rig's main holds the tagged tree, and still run Restore.
+
 ## Restore
 
 Run this last on every exit once this run wrote or took over its hold (Before step 2) or raised the caps (Before step 3): a later Before step failed, the driver refused or crashed, or the run passed, failed or was stopped. It returns the caps and the hold to the state Before recorded. After a stop for Dolt or the daemon, run it once both answer: `bd list --limit 1` succeeds and `gt daemon status` reports the daemon.
@@ -65,3 +80,15 @@ Run this last on every exit once this run wrote or took over its hold (Before st
 1. **Put the caps back.** If step 3 raised them: `gt pool set-total <recorded total>` and `gt pool set sbx-flash=<recorded cap>`. A total recorded as absent is `0`, which removes the total cap. `gt pool show` prints the recorded total and the seat's cap.
 2. **Remove only this run's hold.** Do this only when this run wrote the hold or took over an earlier run's (Before step 2). When step 3 raised the caps and `gt pool show` does not print both recorded values, report the mismatch with `gt escalate`, leave the hold on and skip the removal. Read the hold first: `kubectl --context colima-gt-control -n gt exec deploy/daemon -c daemon -- cat seat-refill.hold`. Only when it prints `overseer: load rehearsal; automatic dispatch held`, run `kubectl --context colima-gt-control -n gt exec deploy/daemon -c daemon -- rm seat-refill.hold`; `gt daemon status` then reads `Dispatch hold: clear`. Any other text belongs to its author: leave it in place.
 3. **A restore command that fails** leaves the hold in place and is reported with `gt escalate`; remove the hold only after the failed command succeeds.
+
+## Compare
+
+From the town root, `~/gt`, compare the two runs' records:
+
+```bash
+gt-rehearsal compare .runtime/rehearsal/<before record> .runtime/rehearsal/<after record>
+```
+
+It prints each record's run id, change set and verdict, then one line per count with both values: gates unavailable, slings not ok, gates not passing, stranded seats, CI failures, failed calls and interventions. Then one line per figure: sling p90, gate p90, side run walls, load max and load p90. A count over an empty sling or gate list, and a figure with no data, prints `none`; an empty list of seats, CI failures, calls or interventions prints 0. It exits 0 with the report, 1 for a record it cannot read and 2 for a wrong command line.
+
+The work is done when two standard runs in a row pass: run them under one change set (Before step 9), compare them, and read `pass` on both verdict lines.
