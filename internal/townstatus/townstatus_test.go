@@ -632,6 +632,10 @@ func agentBeadsTestDB(t *testing.T, mode string) *beads.Beads {
 			return nil, nil, errors.New("wisps read failed")
 		case mode == "notfound":
 			return nil, nil, beads.ErrNotFound
+		case mode == "hookfail" && slices.Contains(args, "show"):
+			return nil, nil, errors.New("hooked bead read failed")
+		case mode == "hookfail" && !wisp:
+			return []byte(`[{"id":"gt-town-a","status":"open","type":"agent","labels":["gt:agent"],"hook_bead":"gt-x"}]`), nil, nil
 		case wisp:
 			return []byte(`{"wisps": []}`), nil, nil
 		}
@@ -653,6 +657,7 @@ func TestGatherAgentBeadsUnread(t *testing.T) {
 		{"every read answers", map[string]string{"/town": "ok", "/rig": "ok"}, nil},
 		{"failed reads are named sorted", map[string]string{"/town": "fail", "/rig-b": "ok", "/rig-a": "fail"}, []string{"/rig-a", "/town"}},
 		{"not found is not unread", map[string]string{"/town": "notfound"}, nil},
+		{"failed hooked-bead read is unread", map[string]string{"/town": "hookfail"}, []string{"/town"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -662,8 +667,14 @@ func TestGatherAgentBeadsUnread(t *testing.T) {
 			}
 			var status TownStatus
 			agents, hooks := collectAgentBeads(&status, dbs)
-			if len(agents) != 0 || len(hooks) != 0 {
-				t.Errorf("got %d agents and %d hooks from empty databases, want none", len(agents), len(hooks))
+			wantAgents := 0
+			for _, mode := range tc.modes {
+				if mode == "hookfail" {
+					wantAgents++
+				}
+			}
+			if len(agents) != wantAgents || len(hooks) != 0 {
+				t.Errorf("got %d agents and %d hooks, want %d and none", len(agents), len(hooks), wantAgents)
 			}
 			if !slices.Equal(status.AgentBeadsUnread, tc.want) {
 				t.Errorf("AgentBeadsUnread = %v, want %v", status.AgentBeadsUnread, tc.want)

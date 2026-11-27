@@ -373,8 +373,9 @@ type agentBeadsDB struct {
 }
 
 // collectAgentBeads reads every database's agent beads and the beads on their
-// hooks, in parallel, and returns the merged maps. The paths of the databases
-// whose read failed are left sorted in status.AgentBeadsUnread (gt-s5twej).
+// hooks, in parallel, and returns the merged maps. The path of a database whose
+// agent read or hooked-bead read failed is left, sorted, in
+// status.AgentBeadsUnread (gt-s5twej).
 func collectAgentBeads(status *TownStatus, dbs []agentBeadsDB) (agents, hooks map[string]*beads.Issue) {
 	agents = make(map[string]*beads.Issue)
 	hooks = make(map[string]*beads.Issue)
@@ -404,9 +405,12 @@ func collectAgentBeads(status *TownStatus, dbs []agentBeadsDB) (agents, hooks ma
 			if len(hookIDs) == 0 {
 				return
 			}
-			hookBeads, _ := db.client.ShowMultiple(hookIDs)
+			hookBeads, err := db.client.ShowMultiple(hookIDs)
 			mu.Lock()
 			defer mu.Unlock()
+			if err != nil && !errors.Is(err, beads.ErrNotFound) {
+				status.AgentBeadsUnread = append(status.AgentBeadsUnread, db.path)
+			}
 			for id, issue := range hookBeads {
 				hooks[id] = issue
 			}
