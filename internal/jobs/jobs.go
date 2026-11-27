@@ -162,6 +162,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 	}
 	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
 	jobs = append(jobs, doltGCRows(townRoot, now)...)
+	jobs = append(jobs, dutyRows(townRoot, now)...)
 	jobs = append(jobs, doltArchiveRows(townRoot, now)...)
 	jobs = append(jobs, nodeDiskRows(townRoot, now)...)
 	jobs = append(jobs, diskmaintRows(opts.diskmaintLedgerFS(townRoot), now)...)
