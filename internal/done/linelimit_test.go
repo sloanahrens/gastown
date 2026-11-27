@@ -77,10 +77,10 @@ func TestLineLimitTwoNumbers(t *testing.T) {
 func TestLineLimitBudgetSentence(t *testing.T) {
 	t.Parallel()
 	const desc = "About 120 added lines. The budget is 300 added lines."
-	if err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 261, nil }, desc, true); err != nil {
+	if err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 261, nil }, desc, nil, true); err != nil {
 		t.Fatalf("261 added lines against a stated budget of 300 was refused: %v", err)
 	}
-	if err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 601, nil }, desc, true); err == nil {
+	if err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 601, nil }, desc, nil, true); err == nil {
 		t.Fatal("601 added lines against a stated budget of 300 was not refused")
 	}
 }

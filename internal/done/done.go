@@ -1557,13 +1557,15 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 		}
 	}
 	var sourceNotes, description string
+	var labels []string
 	if sub.sourceIssue != nil {
 		sourceNotes = sub.sourceIssue.Notes
 		description = sub.sourceIssue.Description
+		labels = sub.sourceIssue.Labels
 	}
 	if err := reportLineLimit(r.stdout(), os.Stderr, func() (int, error) {
 		return r.g.AddedLinesSince(baseRef)
-	}, description, r.opts.polecatEnv); err != nil {
+	}, description, labels, r.opts.polecatEnv); err != nil {
 		// A sandbox seat stops on the size refusal and its clone is the only copy
 		// of its commits, as at a deferral: push first (gt-oq8lc, gt-5h8lim). A
 		// failed push still refuses, saying the sandbox holds the only copy
