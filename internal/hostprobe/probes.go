@@ -33,10 +33,41 @@ const ProbeFileMaxAge = 3 * time.Minute
 
 // Field is one probe reading. A failed read sets Err and leaves Value at its
 // zero, so one command that failed does not cost the daemon the rest of the
-// file; Err, not Value, says whether the reading happened.
+// file; Err, not Value, says whether the reading happened. A value that does not
+// decode into T is that field's error too, not a refusal of the whole file.
 type Field[T any] struct {
 	Value T      `json:"value"`
 	Err   string `json:"err,omitempty"`
+}
+
+// UnmarshalJSON keeps one bad value inside its own field: Value stays at T's
+// zero and Err states the cause after the publisher's err. A field that is not
+// an object, or whose err is not a string, is no reading at all and refuses the
+// file.
+func (f *Field[T]) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Value json.RawMessage `json:"value"`
+		Err   string          `json:"err"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	// A scratch T, so a partial decode never reaches Value.
+	var value T
+	var decodeErr error
+	if len(wire.Value) > 0 {
+		decodeErr = json.Unmarshal(wire.Value, &value)
+	}
+	if decodeErr == nil {
+		*f = Field[T]{Value: value, Err: wire.Err}
+		return nil
+	}
+	cause := "value does not decode: " + decodeErr.Error()
+	if wire.Err != "" {
+		cause = wire.Err + "; " + cause
+	}
+	*f = Field[T]{Err: cause}
+	return nil
 }
 
 // Disk is a disk's use, in the shape the daemon's disk rule reads (hostDisk in
