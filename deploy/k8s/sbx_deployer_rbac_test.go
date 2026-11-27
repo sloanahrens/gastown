@@ -28,7 +28,15 @@ type sbxDeployerDoc struct {
 	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
-	Rules []sbxDeployerRule `yaml:"rules"`
+	Rules   []sbxDeployerRule `yaml:"rules"`
+	RoleRef struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"roleRef"`
+	Subjects []struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"subjects"`
 }
 
 // loadSbxDeployerRBAC parses every document of file, failing with its name.
@@ -49,14 +57,20 @@ func loadSbxDeployerRBAC(t *testing.T, file string) []sbxDeployerDoc {
 	return docs
 }
 
-// sbxDeployerLines flattens every object and every rule combination into one
-// line: the object, then its API group, resource, verb and, when the rule has
-// one, the resource name.
+// sbxDeployerLines flattens every object, every rule combination and every
+// binding subject into one line: the object, then its API group, resource,
+// verb and, when the rule has one, the resource name; a binding subject adds
+// the roleRef kind and name and the subject kind and name. A binding with no
+// subject yields only its object line.
 func sbxDeployerLines(docs []sbxDeployerDoc) []string {
 	var lines []string
 	for _, d := range docs {
 		obj := d.Kind + "/" + d.Metadata.Name
 		lines = append(lines, obj)
+		roleRef := d.RoleRef.Kind + "/" + d.RoleRef.Name
+		for _, s := range d.Subjects {
+			lines = append(lines, obj+" "+roleRef+" "+s.Kind+"/"+s.Name)
+		}
 		for _, r := range d.Rules {
 			names := r.ResourceNames
 			if len(names) == 0 {
@@ -85,11 +99,13 @@ func sbxDeployerMissingExtra(got, want []string) (missing, extra []string) {
 }
 
 // sbxDeployerWant is the exact grant table: the six writes on each resource,
-// and escalate and bind on clusterroles only.
+// escalate and bind on clusterroles only, and the binding of the role to the
+// User the certificate carries.
 var sbxDeployerWant = func() []string {
 	const role = "ClusterRole/gt-sbx-deployer-policy"
 	write := []string{"get", "list", "watch", "create", "update", "patch"}
-	lines := []string{role}
+	binding := "ClusterRoleBinding/gt-sbx-deployer-policy"
+	lines := []string{role, binding, binding + " ClusterRole/gt-sbx-deployer-policy User/gt-deployer-policy"}
 	for _, res := range []string{"core/namespaces", "scheduling.k8s.io/priorityclasses", "apiextensions.k8s.io/customresourcedefinitions", "rbac.authorization.k8s.io/clusterrolebindings"} {
 		for _, verb := range write {
 			lines = append(lines, role+" "+res+" "+verb)
