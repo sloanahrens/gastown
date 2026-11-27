@@ -91,8 +91,11 @@ func (b *gatewayAskBudget) takeDrop() bool {
 //
 // A held sandbox the gateway reports Stopped is ended on its phase, not its
 // marker, and only when its seat's end is recorded with landing facts that prove
-// the work landed. A Stopped sandbox whose work is not proven landed is kept with
-// the reason stoppedUnlandedReason (gt-7h38pd). A gateway that does not answer,
+// the work landed and its agent bead records that work as safe. A Stopped
+// sandbox whose work is not proven landed is kept with the reason
+// stoppedUnlandedReason (gt-7h38pd), and one whose agent bead records an unsafe
+// cleanup status or a failed push is kept with that reason (gt-nb2xnw). A
+// gateway that does not answer,
 // for the existence question or the phase question, is a retry on the next tick:
 // a seat whose end is recorded counts the tick in its kept record, whose reason
 // names the time of the last try, and nothing else is recorded for it.
@@ -486,14 +489,15 @@ func (h *patrolScanHost) endHeldSandboxWith(caller, name string, rec session.San
 // ended-marker read: a Stopped sandbox cannot answer that question, so the
 // marker never decides it. The sandbox is deleted through the record deleter
 // only when the seat's end is recorded with landing facts, the landing record
-// proves the work landed, and the seat still holds that landed bead and branch
-// (staleStoppedKeep). The transcripts may not be copied out of a stopped
+// proves the work landed, the seat still holds that landed bead and branch
+// (staleStoppedKeep), and the seat's agent bead records its work as safe
+// (stoppedCleanupKeep). The transcripts may not be copied out of a stopped
 // sandbox, so the delete is warned, naming the seat, and goes on. A seat whose
 // work is not proven landed stays, kept with stoppedUnlandedReason. The agent
 // bead's ended state is deliberately not an alternative: only a kept record with
 // landing facts, bound to the seat's current bead and branch, authorizes the
 // delete. It returns the reason the sandbox is kept, or "" when it was deleted
-// (gt-7h38pd).
+// (gt-7h38pd, gt-nb2xnw).
 // A Stopped sandbox cannot answer an exec, so its outbox cannot be copied out
 // either: the delete below goes on without it, warned like the transcripts.
 func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.SandboxRecord) string {
@@ -515,6 +519,9 @@ func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.Sand
 	}
 	if stale := h.staleStoppedKeep(rec.Rig, rec.Polecat, *kept.Landing); stale != "" {
 		return stale
+	}
+	if unsafe := h.stoppedCleanupKeep(rec.Rig, rec.Polecat, *kept.Landing); unsafe != "" {
+		return unsafe
 	}
 	deleter := h.recordDeleter()
 	if deleter == nil {
@@ -560,6 +567,50 @@ func (h *patrolScanHost) staleStoppedKeep(rig, name string, landing sandboxSeatL
 	h.recordKeptSeat(rig, name, landing, reason)
 	return reason
 }
+
+// stoppedCleanupKeep checks that the seat's agent bead records its work as safe
+// before a Stopped sandbox is deleted on its landing facts. The landing proves
+// the bead the seat's record names landed, but a seat whose branch landed from
+// another branch, with its own commits unpushed, leaves work only the sandbox
+// volume holds: a cleanup_status polecat.CleanupStatus.IsSafe does not accept,
+// or push_failed, keeps the sandbox and its record, with a reason naming the
+// value, so gt-nb2xnw cannot lose that work. An agent bead that cannot be read
+// or is gone keeps the sandbox with the read's reason and records nothing, as
+// staleStoppedKeep does. It returns "" when the bead records safe work
+// (gt-nb2xnw).
+func (h *patrolScanHost) stoppedCleanupKeep(rig, name string, landing sandboxSeatLanding) string {
+	fields, err := h.seatAgentFields(rig, name)
+	switch {
+	case err != nil:
+		return "cannot read its agent bead: " + err.Error()
+	case fields == nil:
+		return "its agent bead is gone"
+	}
+	if status := polecat.CleanupStatus(fields.CleanupStatus); !status.IsSafe() {
+		reason := stoppedUnsafeCleanupReason(status)
+		h.recordKeptSeat(rig, name, landing, reason)
+		return reason
+	}
+	if fields.PushFailed {
+		h.recordKeptSeat(rig, name, landing, stoppedPushFailedReason)
+		return stoppedPushFailedReason
+	}
+	return ""
+}
+
+// stoppedUnsafeCleanupReason is the keep reason of a Stopped sandbox whose seat's
+// agent bead records a cleanup status that IsSafe does not accept, the same text
+// the landing's end gives the keep. A status nothing recorded renders <missing>
+// (gt-nb2xnw).
+func stoppedUnsafeCleanupReason(status polecat.CleanupStatus) string {
+	return "cleanup_status=" + orMissing(status) + ": unpushed or unrecorded work keeps the seat"
+}
+
+// stoppedPushFailedReason is the keep reason of a Stopped sandbox whose seat's
+// agent bead records a push failure, the same text the landing's end gives the
+// keep: the branch never reached origin, so the sandbox holds its only copy
+// (gt-nb2xnw).
+const stoppedPushFailedReason = "push_failed=true: the seat's branch never reached origin"
 
 // recordDeleter is the record deleter a held sandbox is deleted through: the
 // seam when one is set, else session.SandboxDeleter. It is nil when the binary

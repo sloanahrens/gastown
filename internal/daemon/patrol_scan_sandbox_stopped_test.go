@@ -113,6 +113,65 @@ func TestPatrolDeletesAStoppedSandboxOfALandedEndedSeat(t *testing.T) {
 	}
 }
 
+// A Stopped sandbox of a landed, ended seat whose kept record still describes it
+// is kept when the seat's agent bead records work that is not safe: an unpushed
+// branch, uncommitted changes, or a cleanup status nothing recorded. The
+// landing facts prove the bead landed, but work the seat did after that landing
+// lives only in the sandbox volume, so the sandbox and its registry record stay
+// and the kept record names the cleanup value (gt-nb2xnw).
+func TestPatrolKeepsAStoppedSandboxWithUnsafeWork(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status polecat.CleanupStatus
+		want   string
+	}{
+		{
+			name:   "an unpushed branch",
+			status: polecat.CleanupUnpushed,
+			want:   "cleanup_status=has_unpushed: unpushed or unrecorded work keeps the seat",
+		},
+		{
+			name:   "uncommitted changes",
+			status: polecat.CleanupUncommitted,
+			want:   "cleanup_status=has_uncommitted: unpushed or unrecorded work keeps the seat",
+		},
+		{
+			name:   "no cleanup status recorded",
+			status: "",
+			want:   "cleanup_status=<missing>: unpushed or unrecorded work keeps the seat",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newStoppedSeatPatrol(t, true)
+			p.seatFields.CleanupStatus = string(tt.status)
+			p.setAgent()
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+
+			p.host.patrolScanSandboxRecords()
+
+			if len(p.deleted) != 0 {
+				t.Fatalf("sandboxes deleted = %v, want the unsafe seat's sandbox kept", p.deleted)
+			}
+			if !p.sandboxUp {
+				t.Error("the sandbox is gone, want it kept")
+			}
+			if !p.recorded() {
+				t.Error("the registry record was removed for a sandbox that stays")
+			}
+			if got := p.keptSeatOf(t).Reason; got != tt.want {
+				t.Errorf("kept reason = %q, want %q", got, tt.want)
+			}
+			if !strings.Contains(logs.String(), tt.want) {
+				t.Errorf("log %q does not carry the keep reason %q", logs.String(), tt.want)
+			}
+		})
+	}
+}
+
 // A Stopped sandbox whose work is not proven landed stays, and its kept record
 // carries the stopped, work not proven landed reason, which the kept-seat item
 // raises once the seat has been kept for the attention window (gt-7h38pd).
