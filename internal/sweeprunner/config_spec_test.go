@@ -63,8 +63,8 @@ func TestCapacityPreflightFromConfig(t *testing.T) {
 	})
 }
 
-// TestConfigSpecTakesTheRunnerBlock holds ConfigSpec to the block's eight
-// fields, the two defaults its methods supply included.
+// TestConfigSpecTakesTheRunnerBlock holds ConfigSpec to the block's settings,
+// the two defaults its methods supply included.
 func TestConfigSpecTakesTheRunnerBlock(t *testing.T) {
 	t.Parallel()
 	cfg := capacityConfig()
@@ -82,5 +82,55 @@ func TestConfigSpecTakesTheRunnerBlock(t *testing.T) {
 	}
 	if got := ConfigSpec(nil); !reflect.DeepEqual(got, Spec{}) {
 		t.Errorf("ConfigSpec(nil) = %+v, want the zero Spec", got)
+	}
+}
+
+// TestConfigSpecCarriesRunnerCPURequest holds the Spec to the block's request,
+// and to zero when the block names none: zero asks for the runner's whole share.
+func TestConfigSpecCarriesRunnerCPURequest(t *testing.T) {
+	t.Parallel()
+	cfg := capacityConfig()
+	cfg.RunnerCPURequest = 3
+	if got := ConfigSpec(cfg).RunnerCPURequest; got != 3 {
+		t.Errorf("ConfigSpec with runner_cpu_request 3 = %d, want 3", got)
+	}
+	cfg.RunnerCPURequest = 0
+	if got := ConfigSpec(cfg).RunnerCPURequest; got != 0 {
+		t.Errorf("ConfigSpec with no runner_cpu_request = %d, want 0", got)
+	}
+}
+
+// TestValidateRunnerCPURequest holds Validate to the request's bounds: zero asks
+// for the runner's whole share, above it more than the runner may use, below nothing.
+func TestValidateRunnerCPURequest(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		set     func(*Spec)
+		wantErr bool
+	}{
+		{name: "zero asks for the whole share", set: func(s *Spec) { s.RunnerCPURequest = 0 }},
+		{name: "the share with dind", set: func(s *Spec) { s.RunnerCPURequest = 6 }}, // goldenSpec: 8 CPUs less the default 2-CPU sidecar
+		{name: "above the share with dind", set: func(s *Spec) { s.RunnerCPURequest = 7 }, wantErr: true},
+		{name: "the share without dind", set: func(s *Spec) { s.Dind, s.RunnerCPURequest = false, 8 }},
+		{name: "above the share without dind", set: func(s *Spec) { s.Dind, s.RunnerCPURequest = false, 9 }, wantErr: true},
+		{name: "below zero", set: func(s *Spec) { s.RunnerCPURequest = -1 }, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			tc.set(&spec)
+			err := spec.Validate()
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Validate with runnerCPURequest %d = %v, want it accepted", spec.RunnerCPURequest, err)
+				}
+				return
+			}
+			var fieldErr *FieldError
+			if !errors.As(err, &fieldErr) || fieldErr.Field != "runnerCPURequest" {
+				t.Fatalf("Validate with runnerCPURequest %d = %v, want a *FieldError naming runnerCPURequest", spec.RunnerCPURequest, err)
+			}
+		})
 	}
 }

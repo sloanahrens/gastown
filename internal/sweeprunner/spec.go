@@ -39,6 +39,11 @@ type Spec struct {
 	// Zero means the default, config.SweepDindCPUs. A value set with Dind off is
 	// refused, because no sidecar would read it (gt-h7497c).
 	DindCPUs int
+	// RunnerCPURequest is the runner container's CPU request in whole cores on
+	// the Kubernetes backend: 1 to the runner's share (CPUs less the dind
+	// sidecar's share when Dind is on). Zero asks for the whole share, so a
+	// contended cluster may place the run on less CPU and it still runs (gt-13dre6.12).
+	RunnerCPURequest int
 	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
 	// tier-sweep command line naming none runs (TiersOrDefault).
 	Tiers []string
@@ -130,6 +135,18 @@ func (s Spec) Validate() error {
 		}
 		if s.DindCPUs >= s.CPUs {
 			return &FieldError{Field: "dindCPUs", Rule: fmt.Sprintf("%d leaves the runner no share of the pod's %d CPUs", s.DindCPUs, s.CPUs)}
+		}
+	}
+	if s.RunnerCPURequest < 0 {
+		return &FieldError{Field: "runnerCPURequest", Rule: fmt.Sprintf("%d is below 0, and 0 means the runner's whole share", s.RunnerCPURequest)}
+	}
+	if s.RunnerCPURequest > 0 {
+		share := s.CPUs
+		if s.Dind {
+			share -= s.dindCPUShare()
+		}
+		if s.RunnerCPURequest > share {
+			return &FieldError{Field: "runnerCPURequest", Rule: fmt.Sprintf("%d is above the runner's share of %d CPUs", s.RunnerCPURequest, share)}
 		}
 	}
 	if s.MemoryGB < 2 || s.MemoryGB > 48 {
