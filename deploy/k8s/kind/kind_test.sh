@@ -173,9 +173,9 @@ case "$*" in
   *"get configmap gt-bootstrap"*)
     # STUB_BOOTSTRAP_READ_FAILS: the read itself fails, which must stop the run
     # rather than read as an absent marker. The script asks for the object's
-    # name and its helm key in one jsonpath, with --ignore-not-found for absence.
+    # name with --ignore-not-found, so absence is an empty answer with exit 0.
     if [ -n "${STUB_BOOTSTRAP_READ_FAILS-}" ]; then exit 1; fi
-    [ -f "$STATE/marker" ] && printf 'gt-bootstrap|%s' "$(cat "$STATE/marker")" ;;
+    [ -f "$STATE/marker" ] && printf 'gt-bootstrap' ;;
   *"create configmap gt-bootstrap"*)
     for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
   *"apply -f"*"gateway-nodeport.yaml"*)
@@ -206,8 +206,8 @@ case "$1" in
   # STUB_HELM_FAILED: a release that exists but is not deployed (a failed or
   # pending upgrade); `helm list --deployed` omits it, as the CLI does.
   # STUB_HELM_LIST_FAILS_FROM=N: the Nth and later `helm list` calls exit 1, as
-  # a query that cannot reach the cluster does. Call 1 is the first-install
-  # query and call 2 the skip-helm query, so N=2 reaches the second use.
+  # a query that cannot reach the cluster does. The one list call is the
+  # first-install query, so N=1 fails it.
   list)
     n=$(cat "$STATE/helm-list-n" 2>/dev/null || echo 0)
     n=$((n + 1))
@@ -627,6 +627,8 @@ check "the failed run has installed the chart" test "$(calls_with 'helm upgrade 
 : >"$S/calls.log"
 run "$UP" --
 check "the next run exits 0" test "$RC" -eq 0
+check "the next run makes no helm upgrade" test "$(calls_with 'helm upgrade')" -eq 0
+check "the next run says it is not running helm" contains "not running helm" "$OUT_TEXT"
 check "the next run applies the gateway NodePort" test "$(calls_with "gateway-nodeport.yaml")" -eq 1
 check "the next run applies the control-plane Services" test "$(calls_with "values/kind/control-plane-services.yaml")" -eq 1
 check "the next run writes the gt-bootstrap marker" test "$(calls_with "create configmap gt-bootstrap")" -eq 1
@@ -641,14 +643,6 @@ check "the failure names the helm list query" contains "helm list --namespace op
 check "no apply runs after a failed helm list" lacks "kubectl apply" "$CALLS_LOG"
 check "no patch runs after a failed helm list" lacks "patch" "$CALLS_LOG"
 check "no helm upgrade runs after a failed helm list" lacks "helm upgrade" "$CALLS_LOG"
-scenario helmlistskip
-touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
-printf '%s' "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")" >"$S/state/marker"
-run "$UP" STUB_HELM_LIST_FAILS_FROM=2 --
-check "a helm list that fails on the skip check stops the run" test "$RC" -ne 0
-check "the skip-check failure names the helm list query" contains "helm list --namespace openshell --deployed failed" "$OUT_TEXT"
-check "no helm upgrade runs after a failed skip check" lacks "helm upgrade" "$CALLS_LOG"
-check "no manifest is applied after a failed skip check" lacks "gateway-nodeport.yaml" "$CALLS_LOG"
 
 echo "a failing gt-bootstrap read stops the run before any apply or helm call"
 scenario bootstrapreadfail
@@ -660,7 +654,7 @@ check "no helm call runs before the gt-bootstrap read" lacks "helm list" "$CALLS
 check "no apply runs after a failed gt-bootstrap read" lacks "apply" "$CALLS_LOG"
 check "no helm upgrade runs after a failed gt-bootstrap read" lacks "helm upgrade" "$CALLS_LOG"
 
-echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
+echo "helm runs only on a first install; a deployed release is never upgraded"
 VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"
 helm_calls() { grep -c '^helm upgrade' "$S/calls.log" || true; }
 scenario helmfresh
@@ -682,22 +676,33 @@ scenario helmvalues
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:0000000000000000000000000000000000000000000000000000000000000000" >"$S/state/marker"
 run "$UP" --
-check "a changed values file runs helm" test "$(helm_calls)" -eq 1
-check "the marker is updated to the new digest" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
-: >"$S/calls.log"
-run "$UP" --
-check "the run after a changed-values helm makes no helm call" test "$(helm_calls)" -eq 0
+check "a changed values digest runs no helm on a deployed release" test "$(helm_calls)" -eq 0
+check "a changed values digest says it is not running helm" contains "not running helm" "$OUT_TEXT"
+check "a changed values digest names the deployer" contains "gt town cluster apply --cluster gt-sbx" "$OUT_TEXT"
+check "a changed values digest exits 0" test "$RC" -eq 0
+check "a changed values digest leaves the marker unchanged" test "$(cat "$S/state/marker")" = "0.1.4:0000000000000000000000000000000000000000000000000000000000000000"
 scenario helmchart
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.3:$VALUES_SHA" >"$S/state/marker"
 run "$UP" --
-check "a changed chart version runs helm" test "$(helm_calls)" -eq 1
-check "the marker is updated to the new chart version" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+check "a changed chart version runs no helm on a deployed release" test "$(helm_calls)" -eq 0
+check "a changed chart version says it is not running helm" contains "not running helm" "$OUT_TEXT"
+check "a changed chart version names the deployer" contains "gt town cluster apply --cluster gt-sbx" "$OUT_TEXT"
+check "a changed chart version exits 0" test "$RC" -eq 0
+check "a changed chart version leaves the marker unchanged" test "$(cat "$S/state/marker")" = "0.1.3:$VALUES_SHA"
 scenario helmforce
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
 run "$UP" GT_K8S_FORCE_HELM=1 --
-check "GT_K8S_FORCE_HELM runs helm despite an unchanged marker" test "$(helm_calls)" -eq 1
+check "GT_K8S_FORCE_HELM on a deployed release fails the run" test "$RC" -ne 0
+check "the refusal names GT_K8S_FORCE_HELM" contains "GT_K8S_FORCE_HELM" "$OUT_TEXT"
+check "the refusal says up.sh never upgrades an installed cluster" contains "never upgrades an installed cluster" "$OUT_TEXT"
+check "GT_K8S_FORCE_HELM runs no helm upgrade" test "$(helm_calls)" -eq 0
+check "GT_K8S_FORCE_HELM applies no manifest" lacks "kubectl apply" "$CALLS_LOG"
+scenario helmforce_first
+run "$UP" GT_K8S_FORCE_HELM=1 --
+check "GT_K8S_FORCE_HELM on a first install still installs the chart once" test "$(helm_calls)" -eq 1
+check "GT_K8S_FORCE_HELM on a first install exits 0" test "$RC" -eq 0
 scenario helmgone
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
