@@ -1,8 +1,11 @@
 package townstatus
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -615,5 +618,67 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 	applyPauseMarker(&idle, townRoot)
 	if idle.PausedReason != "" {
 		t.Errorf("unpaused witness PausedReason = %q, want empty", idle.PausedReason)
+	}
+}
+
+// agentBeadsTestDB is a bd for the agent-bead read: "fail" fails the wisp
+// read, "notfound" answers not found, anything else answers with no beads.
+func agentBeadsTestDB(t *testing.T, mode string) *beads.Beads {
+	t.Helper()
+	return beads.New(t.TempDir(), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
+		wisp := slices.Contains(args, "wisp")
+		switch {
+		case mode == "fail" && wisp:
+			return nil, nil, errors.New("wisps read failed")
+		case mode == "notfound":
+			return nil, nil, beads.ErrNotFound
+		case mode == "hookfail" && slices.Contains(args, "show"):
+			return nil, nil, errors.New("hooked bead read failed")
+		case mode == "hookfail" && !wisp:
+			return []byte(`[{"id":"gt-town-a","status":"open","type":"agent","labels":["gt:agent"],"hook_bead":"gt-x"}]`), nil, nil
+		case wisp:
+			return []byte(`{"wisps": []}`), nil, nil
+		}
+		return []byte(`[]`), nil, nil
+	}))
+}
+
+// TestGatherAgentBeadsUnread drives the collection Gather runs over its
+// databases: a failed read marks that database unread on the status data, in
+// sorted order, and an answering or not-found one does not (gt-s5twej). Gather
+// itself starts tmux and ps, which the unit tier refuses.
+func TestGatherAgentBeadsUnread(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		modes map[string]string
+		want  []string
+	}{
+		{"every read answers", map[string]string{"/town": "ok", "/rig": "ok"}, nil},
+		{"failed reads are named sorted", map[string]string{"/town": "fail", "/rig-b": "ok", "/rig-a": "fail"}, []string{"/rig-a", "/town"}},
+		{"not found is not unread", map[string]string{"/town": "notfound"}, nil},
+		{"failed hooked-bead read is unread", map[string]string{"/town": "hookfail"}, []string{"/town"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var dbs []agentBeadsDB
+			for path, mode := range tc.modes {
+				dbs = append(dbs, agentBeadsDB{path: path, client: agentBeadsTestDB(t, mode)})
+			}
+			var status TownStatus
+			agents, hooks := collectAgentBeads(&status, dbs)
+			wantAgents := 0
+			for _, mode := range tc.modes {
+				if mode == "hookfail" {
+					wantAgents++
+				}
+			}
+			if len(agents) != wantAgents || len(hooks) != 0 {
+				t.Errorf("got %d agents and %d hooks, want %d and none", len(agents), len(hooks), wantAgents)
+			}
+			if !slices.Equal(status.AgentBeadsUnread, tc.want) {
+				t.Errorf("AgentBeadsUnread = %v, want %v", status.AgentBeadsUnread, tc.want)
+			}
+		})
 	}
 }
