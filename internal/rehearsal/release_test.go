@@ -41,14 +41,23 @@ func TestRehearsalReleaseOutcomesAndSeconds(t *testing.T) {
 	}
 }
 
+// boundedCtx gives a test a deadline so a wait that never ends fails the test instead of hanging the gate.
+func boundedCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestRehearsalReleaseNeverExceedsInFlight(t *testing.T) {
 	t.Parallel()
+	ctx := boundedCtx(t)
 	const inFlight = 3
 	ids := []string{"b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b09", "b10", "b11", "b12"}
 	var running, peak atomic.Int32
 	var once sync.Once
 	full, unblock := make(chan struct{}), make(chan struct{})
-	sling := func(context.Context, string) error {
+	sling := func(ctx context.Context, _ string) error {
 		n := running.Add(1)
 		defer running.Add(-1)
 		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
@@ -56,15 +65,27 @@ func TestRehearsalReleaseNeverExceedsInFlight(t *testing.T) {
 		if n == inFlight {
 			once.Do(func() { close(full) })
 		}
-		<-unblock
+		select {
+		case <-unblock:
+		case <-ctx.Done():
+		}
 		return nil
 	}
 	clk := clockwork.NewFakeClockAt(releaseEpoch)
-	done := make(chan []Sling)
-	go func() { done <- Release(t.Context(), ids, inFlight, sling, clk.Now) }()
-	<-full
+	done := make(chan []Sling, 1)
+	go func() { done <- Release(ctx, ids, inFlight, sling, clk.Now) }()
+	select {
+	case <-full:
+	case <-ctx.Done():
+		t.Fatalf("fewer than %d slings ran at once before the deadline: %v", inFlight, ctx.Err())
+	}
 	close(unblock)
-	got := <-done
+	var got []Sling
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatalf("Release did not return before the deadline: %v", ctx.Err())
+	}
 	if p := peak.Load(); p != inFlight {
 		t.Errorf("peak concurrent slings = %d, want %d", p, inFlight)
 	}
@@ -100,18 +121,22 @@ func TestRehearsalReleaseStartsInIdOrder(t *testing.T) {
 
 func TestRehearsalReleaseReportsInIdOrderWhenSlingsFinishOutOfOrder(t *testing.T) {
 	t.Parallel()
+	ctx := boundedCtx(t)
 	lastDone := make(chan struct{})
-	sling := func(_ context.Context, id string) error {
+	sling := func(ctx context.Context, id string) error {
 		switch id {
 		case "b1":
-			<-lastDone
+			select {
+			case <-lastDone:
+			case <-ctx.Done():
+			}
 		case "b4":
 			defer close(lastDone)
 			return errors.New("boom")
 		}
 		return nil
 	}
-	got := Release(t.Context(), []string{"b1", "b2", "b3", "b4"}, 4, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
+	got := Release(ctx, []string{"b1", "b2", "b3", "b4"}, 4, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
 	if got[0] != (Sling{Bead: "b1", Outcome: SlingOK}) || got[3] != (Sling{Bead: "b4", Outcome: SlingFailed}) {
 		t.Errorf("Release = %+v, want b1 ok first and b4 failed last", got)
 	}
