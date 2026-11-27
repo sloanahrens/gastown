@@ -38,8 +38,16 @@ gateway that does not come back stops the apply before the daemon behind it is
 replaced. Before the first apply it prints the kubectl rollout undo command for
 every Deployment it writes, with the revision plan.json records; a Deployment with
 no recorded revision refuses with nothing applied. The apply prints those commands
-and never runs one. Whatever the outcome, it appends one line to the apply ledger
-beside the approval record.`,
+and never runs one.
+
+A gt-sbx plan has its own order: phase P's files, the openshell objects, the
+agent-sandbox controller Deployment, each StatefulSet, and the gt-bootstrap
+ConfigMap last. A StatefulSet is waited for through its rollout and its ready
+replica count, which must equal its desired count; one that stays short stops the
+apply with nothing further applied, and its undo command is printed with the
+revision plan.json records for it; a StatefulSet with no recorded revision refuses
+with nothing applied, as a Deployment does. Whatever the outcome, the apply appends
+one line to the apply ledger beside the approval record.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			verify := applyClusterGate(cluster, applyRecordVerifier(time.Now))

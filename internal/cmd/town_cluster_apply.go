@@ -91,6 +91,9 @@ func runTownClusterApply(ctx context.Context, kube update.RunFunc, out io.Writer
 	if err := recheckApplyDeployments(ctx, kube, held); err != nil {
 		return err
 	}
+	// The plan names the cluster it is for, and that picks the apply's order, so
+	// the order comes from the plan the approval authorized, not from a flag.
+	kubeconfigs.cluster = record.Cluster
 	applied, err = applyPlanFiles(ctx, kube, out, planDir, files, kubeconfigs)
 	return err
 }
@@ -312,12 +315,27 @@ func checkApplyKind(file planRecordFile, kind string) error {
 const applyRolloutWait = 10 * time.Minute
 
 // applyStep is one file of the apply in the order it is sent. deployment and
-// namespace are the Deployment the file's document names, empty when the file
-// holds none, and were checked in applySteps before the file was applied.
+// statefulSet name the workload the file's document holds, empty when it holds
+// none of that kind; namespace is the namespace the workload is in. They were
+// checked before the file was applied: applySteps checks a Deployment, and
+// applyWorkloadStep a Deployment or a StatefulSet.
 type applyStep struct {
-	file       applyPlanFile
-	deployment string
-	namespace  string
+	file        applyPlanFile
+	deployment  string
+	statefulSet string
+	namespace   string
+}
+
+// rolloutResource is the kubectl resource the step's wait reads, such as
+// deployment/web, or empty when the file holds no workload to wait for.
+func (s applyStep) rolloutResource() string {
+	switch {
+	case s.deployment != "":
+		return "deployment/" + s.deployment
+	case s.statefulSet != "":
+		return "statefulset/" + s.statefulSet
+	}
+	return ""
 }
 
 // applyPlanFiles applies each file from the bytes checkApplyPlanFiles verified,
@@ -330,8 +348,10 @@ type applyStep struct {
 // Deployment it writes; a Deployment with no revision recorded in plan.json
 // refuses with nothing applied. After each Deployment is applied it waits for its
 // rollout and its Available condition before the next object, so a gateway that
-// does not come back stops the apply before the daemon behind it is replaced. A
-// failed call or a failed wait stops the run with no rollback, and the error names
+// does not come back stops the apply before the daemon behind it is replaced. On a
+// gt-sbx plan a StatefulSet is waited for the same way, through its ready replica
+// count (waitStatefulSetReady). A failed call or a failed wait stops the run with
+// no rollback, and the error names
 // the files applied and not applied, never kubectl's output. It returns the files
 // it applied, in order, so the ledger records them; on a failure that list is the
 // files applied before it.
@@ -339,7 +359,7 @@ func applyPlanFiles(ctx context.Context, kube update.RunFunc, out io.Writer, pla
 	if out == nil {
 		return nil, errors.New("gt town cluster apply: the apply has nowhere to print its rollback lines, so an operator could not undo by hand, and nothing was applied")
 	}
-	ordered, err := applySteps(files)
+	ordered, err := applyStepsFor(kubeconfigs.cluster, files)
 	if err != nil {
 		return nil, err
 	}
@@ -366,14 +386,13 @@ func applyPlanFiles(ctx context.Context, kube update.RunFunc, out io.Writer, pla
 			return applied, fmt.Errorf("gt town cluster apply: the apply of %s failed, a partial apply: applied %s and not applied %s; nothing was rolled back", f.file.Name, applyFileNames(ordered[:i]), applyFileNames(ordered[i:]))
 		}
 		applied = append(applied, f.file.Name)
-		if step.deployment == "" {
-			// A file that holds no Deployment has nothing to roll out, so the next
+		resource := step.rolloutResource()
+		if resource == "" {
+			// A file that holds no workload has nothing to roll out, so the next
 			// object follows at once.
 			continue
 		}
-		resource := "deployment/" + step.deployment
-		readiness := applyKubeconfigRunner(kube, byPhase[f.file.Phase])
-		if err := waitDeploymentRollout(ctx, readiness, out, step.namespace, resource, applyRolloutWait); err != nil {
+		if err := waitApplyRollout(ctx, kube, byPhase[f.file.Phase], out, step); err != nil {
 			return applied, fmt.Errorf("gt town cluster apply: %s was applied but did not come back ready, so nothing further was applied: applied %s and not applied %s; nothing was rolled back: %w", resource, applyFileNames(ordered[:i+1]), applyFileNames(ordered[i+1:]), err)
 		}
 	}
@@ -412,8 +431,153 @@ func applySteps(files []applyPlanFile) ([]applyStep, error) {
 	return append(p, hoistGatewayDeployment(w)...), nil
 }
 
+// applyStepsFor returns the files in the order the apply sends them for cluster:
+// the gt-sbx order for a gt-sbx plan, and applySteps for every other cluster.
+func applyStepsFor(cluster string, files []applyPlanFile) ([]applyStep, error) {
+	if cluster == clusterSbx {
+		return applySbxSteps(files)
+	}
+	return applySteps(files)
+}
+
+// applySbxSteps returns the files in the order a gt-sbx apply sends them: phase
+// P's in plan order, then the openshell objects in plan order, then the
+// agent-sandbox controller Deployment, then each StatefulSet, and the gt-bootstrap
+// ConfigMap last. The controller and each StatefulSet are waited for before the
+// next object, and the bootstrap marker is written only once every workload in the
+// set has come back. Phase P's files come first, whatever their kinds.
+func applySbxSteps(files []applyPlanFile) ([]applyStep, error) {
+	var p, objects, controller, statefulSets, bootstrap []applyStep
+	for _, f := range files {
+		step, err := applyWorkloadStep(f)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case f.file.Phase == planPhaseStatic:
+			p = append(p, step)
+		case f.file.Phase != planPhaseWorkloads:
+			return nil, fmt.Errorf("gt town cluster apply: %q is not a plan phase, so it has no place in the apply, and nothing was applied", f.file.Phase)
+		case step.statefulSet != "":
+			statefulSets = append(statefulSets, step)
+		case step.deployment == sbxControllerName && step.namespace == sbxControllerNamespace:
+			controller = append(controller, step)
+		case f.doc.Kind == configMapKind && f.doc.Metadata.Name == sbxBootstrapName:
+			bootstrap = append(bootstrap, step)
+		default:
+			objects = append(objects, step)
+		}
+	}
+	ordered := append(p, objects...)
+	ordered = append(ordered, controller...)
+	ordered = append(ordered, statefulSets...)
+	return append(ordered, bootstrap...), nil
+}
+
+// applyWorkloadStep is the step for one file, with the workload its document holds:
+// a Deployment or a StatefulSet, whose name and namespace the wait after its apply
+// puts in kubectl's arguments, so both are checked here, before the first apply.
+// Any other document names no workload.
+func applyWorkloadStep(f applyPlanFile) (applyStep, error) {
+	step := applyStep{file: f}
+	switch f.doc.Kind {
+	case deploymentKind:
+		step.deployment = f.doc.Metadata.Name
+	case statefulSetKind:
+		step.statefulSet = f.doc.Metadata.Name
+	default:
+		return step, nil
+	}
+	step.namespace = f.doc.Metadata.Namespace
+	if err := errors.Join(checkClusterName(f.doc.Metadata.Name), checkClusterNamespace(step.namespace)); err != nil {
+		return applyStep{}, fmt.Errorf("gt town cluster apply: the %s in the plan file %s is not one kubectl could wait for, so nothing was applied: %w", f.doc.Kind, f.file.Name, err)
+	}
+	return step, nil
+}
+
+// waitApplyRollout waits for a workload step's rollout through kubeconfig: a
+// Deployment's rollout and Available condition, or a StatefulSet's rollout and
+// ready replica count.
+func waitApplyRollout(ctx context.Context, kube update.RunFunc, kubeconfig string, out io.Writer, step applyStep) error {
+	readiness := applyKubeconfigRunner(kube, kubeconfig)
+	if step.statefulSet != "" {
+		return waitStatefulSetReady(ctx, readiness, out, step.namespace, step.statefulSet, applyRolloutWait)
+	}
+	return waitDeploymentRollout(ctx, readiness, out, step.namespace, step.rolloutResource(), applyRolloutWait)
+}
+
+// waitStatefulSetReady waits for a StatefulSet's rollout within bound, then reads
+// its live object and requires status.readyReplicas to equal spec.replicas. A
+// StatefulSet has no Available or Ready condition to read, so the replica count
+// is its readiness. A rollout that exits non-zero, a read that fails, a live object
+// that is gone, a replica count that is unread, or a ready count below the desired
+// one is an error, and the caller stops the apply. The controller omits
+// readyReplicas at zero, so an omitted count reads as zero.
+func waitStatefulSetReady(ctx context.Context, kubectl update.RunFunc, out io.Writer, namespace, name string, bound time.Duration) error {
+	resource := "statefulset/" + name
+	fmt.Fprintf(out, "waiting for %s to roll out (bound %s)\n", resource, bound)
+	_, exit, err := kubectl(ctx, "", nil, "kubectl", "rollout", "status", resource, "-n", namespace, "--timeout="+bound.String())
+	if err != nil {
+		return fmt.Errorf("waiting for the rollout of %s: %w", resource, err)
+	}
+	if exit != 0 {
+		return fmt.Errorf("%s did not complete its rollout within %s: kubectl rollout status exited %d", resource, bound, exit)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, readinessReadWait)
+	defer cancel()
+	live, absent, err := readLiveObject(readCtx, clusterDriftDeps{kubectl: kubectl}, resource, namespace, false)
+	if err != nil {
+		return fmt.Errorf("reading the readiness of %s within %s: %w", resource, readinessReadWait, err)
+	}
+	if absent {
+		return fmt.Errorf("%s is not in namespace %s, so its readiness was not read", resource, namespace)
+	}
+	desired, ready, err := statefulSetReplicas(live)
+	if err != nil {
+		return fmt.Errorf("%s: %w", resource, err)
+	}
+	if ready != desired {
+		return fmt.Errorf("%s has %v ready replicas of %v, so it is not ready", resource, ready, desired)
+	}
+	fmt.Fprintf(out, "%s is ready\n", resource)
+	return nil
+}
+
+// statefulSetReplicas reads a StatefulSet's desired and ready replica counts from
+// its live object. spec.replicas must be there, since the apiserver always sets it;
+// status.readyReplicas may be omitted at zero, and reads as zero then. A count that
+// is not a number is an error, never zero.
+func statefulSetReplicas(live map[string]any) (desired, ready float64, err error) {
+	spec, _ := live["spec"].(map[string]any)
+	status, _ := live["status"].(map[string]any)
+	desired, ok := spec["replicas"].(float64)
+	if !ok {
+		return 0, 0, errors.New("its spec.replicas is not a number, so its readiness was not read")
+	}
+	v, present := status["readyReplicas"]
+	if !present {
+		return desired, 0, nil
+	}
+	ready, ok = v.(float64)
+	if !ok {
+		return 0, 0, errors.New("its status.readyReplicas is not a number, so its readiness was not read")
+	}
+	return desired, ready, nil
+}
+
 // deploymentKind is the kind a plan file holds when the apply waits for it.
 const deploymentKind = "Deployment"
+
+// The names the gt-sbx apply orders by, which deploy/k8s/kind/up.sh gives the
+// controller and the bootstrap ConfigMap. A StatefulSet is matched by its kind
+// alone, and the gt-sbx render requires exactly one.
+const (
+	statefulSetKind        = "StatefulSet"
+	configMapKind          = "ConfigMap"
+	sbxControllerName      = "agent-sandbox-controller"
+	sbxControllerNamespace = "agent-sandbox-system"
+	sbxBootstrapName       = "gt-bootstrap"
+)
 
 // hoistGatewayDeployment moves the bd gateway Deployment ahead of the first
 // Deployment of the phase, leaving every other file where the plan put it. A
@@ -449,10 +613,11 @@ func hoistGatewayDeployment(steps []applyStep) []applyStep {
 }
 
 // printApplyRollbackLines prints, before the first apply, the command that undoes
-// each Deployment the apply writes: every Deployment file the plan does not mark
-// Absent, with the revision plan.json records for it. The plan records no
-// per-file difference, so a Deployment whose bytes changed nothing gets a line
-// too; undoing it to its recorded revision is harmless. A Deployment with no
+// each workload the apply writes: every Deployment file the plan does not mark
+// Absent, and on a gt-sbx apply each StatefulSet file, with the revision plan.json
+// records for it. The plan records no per-file difference, so a Deployment whose
+// bytes changed nothing gets a line too; undoing it to its recorded revision is
+// harmless. A Deployment with no
 // positive recorded revision refuses with nothing applied, since the command the
 // operator would copy would name no revision that exists. The apply prints the
 // commands and never runs one, so they need only kubectl and a kubeconfig, which
@@ -460,13 +625,14 @@ func hoistGatewayDeployment(steps []applyStep) []applyStep {
 func printApplyRollbackLines(out io.Writer, steps []applyStep) error {
 	var lines []string
 	for _, step := range steps {
-		if step.deployment == "" || step.file.file.Absent {
+		resource := step.rolloutResource()
+		if resource == "" || step.file.file.Absent {
 			continue
 		}
 		if !planRevisionIsNumber(step.file.file.Revision) {
-			return fmt.Errorf("gt town cluster apply: plan.json records no revision for the plan file %s, so the undo command for deployment/%s would name none, and nothing was applied", step.file.file.Name, step.deployment)
+			return fmt.Errorf("gt town cluster apply: plan.json records no revision for the plan file %s, so the undo command for %s would name none, and nothing was applied", step.file.file.Name, resource)
 		}
-		lines = append(lines, fmt.Sprintf("kubectl rollout undo deployment/%s -n %s --to-revision=%s", step.deployment, step.namespace, step.file.file.Revision))
+		lines = append(lines, fmt.Sprintf("kubectl rollout undo %s -n %s --to-revision=%s", resource, step.namespace, step.file.file.Revision))
 	}
 	if len(lines) == 0 {
 		return nil
