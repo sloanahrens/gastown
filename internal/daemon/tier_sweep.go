@@ -3812,7 +3812,9 @@ func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.S
 		return nil
 	}
 	step := plan.Poll.Progress
-	stdout, _, err := d.runCmd(exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	stepCtx, cancel := tierSweepRunnerStepContext(ctx, tierSweepRunnerProgressBudget)
+	defer cancel()
+	stdout, _, err := d.runCmd(exec.CommandContext(stepCtx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
 	if err != nil {
 		return fmt.Errorf("reading run %s's progress: %w", spec.RunID, err)
 	}
