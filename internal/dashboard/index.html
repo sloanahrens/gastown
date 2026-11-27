@@ -1196,6 +1196,12 @@ function polecatNames(polecats) {
     rigOf: name => { const s = rigs.get(name); return s && s.size === 1 ? [...s][0] : ""; },
   };
 }
+// trendSeats is what the Landings pane takes from the seats: whether they were
+// read, and the name and rig polecatNames draws from; a working seat's times
+// move every frame and draw nothing here (gt-urccnx).
+function trendSeats(polecats) {
+  return polecats ? polecats.filter(p => p.name).map(p => [p.name, p.rig || ""]) : null;
+}
 // One compact line per rig: whether it is parked, and where its work is. A
 // count the dashboard could not read says so rather than showing a zero.
 function renderRigs(s) {
@@ -6448,7 +6454,7 @@ const PANES = {
   // drew rather than one the panel's key says is current.
   polecats: {sec: "polecats", body: ["polecats"], read: s => [s.polecats, s.summary, s.summary_at, readInput(s, "seats")], draw: s => renderPolecats(s, true)},
   beads: {sec: "beads", body: ["beads"], read: s => [s.queue, s.dispatch, readInput(s, "queue")], draw: s => renderBeads(s, true)},
-  trend: {sec: "landings", body: ["trend"], read: s => [s.trend, s.queue, s.polecats, s.om], draw: s => renderTrend(s)},
+  trend: {sec: "landings", body: ["trend"], read: s => [s.trend, s.queue, s.om, s.followups, trendSeats(s.polecats)], draw: s => renderTrend(s)},
   news: {sec: "news", body: ["news"], read: s => s.news, draw: s => renderNews(s)},
   machine: {sec: "machine", body: ["machine"], read: s => [s.machine, s.loads, readInput(s, "machine")], draw: s => renderMachine(s)},
   cloud: {sec: "cloud", body: ["cloud"], read: s => s.cloud, draw: s => renderCloud(s)},
