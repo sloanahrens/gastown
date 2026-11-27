@@ -288,6 +288,44 @@ func TestFindCredentialsYAMLBlockScalar(t *testing.T) {
 	})
 }
 
+// Three edges of the block-scalar body reader, pinned without changing it
+// (gt-71o2v9). A blank body line is any line bytes.TrimSpace empties, so an
+// empty, form-feed-only or NBSP-only line does not end the body and the secret
+// after it is still found. A body line shaped like a mapping entry is judged as
+// its own entry too, so both findings are reported. Each row runs in LF and
+// CRLF and must give the same findings, because the CR must not leak into the
+// line text. These rows pin behaviour on main; they change no production code.
+// The named mutation (in blockScalarBody, strings.TrimSpace replaced by
+// strings.Trim(line, " \t")) is run by hand and is not run here: it turns the
+// form-feed and NBSP rows red in LF and the reference row red in CRLF.
+func TestFindCredentialsYAMLBlockScalarBodyEdges(t *testing.T) {
+	t.Parallel()
+	// Built from parts so this file holds no token-shaped literal.
+	const token = "sk-" + "abcdefghijklmnop1234"
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a secret after an empty body line is found", "password: |\n  ${DOLT_PASSWORD}\n\n  hunter2\n", []string{"yaml:password"}},
+		{"a secret after a form-feed-only body line is found", "password: |\n\f\n  hunter2\n", []string{"yaml:password"}},
+		{"a secret after an NBSP-only body line is found", "password: |\n\u00a0\n  hunter2\n", []string{"yaml:password"}},
+		{"a body of only an environment reference is clean", "password: |\n  ${DOLT_PASSWORD}\n", nil},
+		{"a body line shaped like an entry is judged as its own entry", "password: |\n  token: " + token + "\n", []string{"yaml:password", "yaml:token"}},
+	}
+	for _, c := range cases {
+		for _, nl := range []struct{ name, sep string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+			t.Run(c.name+", "+nl.name, func(t *testing.T) {
+				in := strings.ReplaceAll(c.in, "\n", nl.sep)
+				got := FindCredentials([]byte(in))
+				if !reflect.DeepEqual(got, c.want) {
+					t.Fatalf("FindCredentials(%s %q) = %q, want %q", nl.name, in, got, c.want)
+				}
+			})
+		}
+	}
+}
+
 // TestFlaggedContentRefusesYAMLCredential walks the new rule through a caller:
 // FlaggedContent is the check the export and the backup archive verifier share,
 // so a YAML config must be omitted there, not only found by FindCredentials. It
