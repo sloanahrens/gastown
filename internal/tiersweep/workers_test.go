@@ -525,6 +525,29 @@ func TestSerialPackagesRunAlone(t *testing.T) {
 	}
 }
 
+// TestLabeledSerialPackageRunsAlone: a race-tier task's name carries "~label",
+// which no serial.txt line has, so a labeled package on the list still belongs
+// to the serial group and one off the list still shares the pool (gt-70xr8m).
+func TestLabeledSerialPackageRunsAlone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		task   string
+		serial bool
+	}{
+		{"internal/cmd~all-packages", true},
+		{"./internal/cmd~all-packages", true},
+		{"./internal/tiersweep~all-packages", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.task, func(t *testing.T) {
+			parallel, serial := splitSerial([]*task{{name: tc.task}})
+			if got := len(serial) == 1 && len(parallel) == 0; got != tc.serial {
+				t.Errorf("splitSerial(%q) = %d parallel, %d serial, want serial=%v", tc.task, len(parallel), len(serial), tc.serial)
+			}
+		})
+	}
+}
+
 // TestWorkersKeepTheSerialResult: a mixed pass, fail and skip fixture reports
 // the same summary line on three workers as on one.
 func TestWorkersKeepTheSerialResult(t *testing.T) {

@@ -39,8 +39,13 @@ var serialSet = func() map[string]bool {
 	return set
 }()
 
-// serialPackage reports whether name must run alone.
-func serialPackage(name string) bool { return serialSet[strings.TrimPrefix(name, "./")] }
+// serialPackage reports whether name must run alone. A race-tier task's name
+// carries "~label", which no serial.txt line has, so the lookup judges the
+// package part alone (gt-70xr8m).
+func serialPackage(name string) bool {
+	name, _, _ = strings.Cut(strings.TrimPrefix(name, "./"), "~")
+	return serialSet[name]
+}
 
 // startOrder returns tasks ordered as a run starts them: longest first by the
 // wall time the previous run took for this tier, and a package with no wall
