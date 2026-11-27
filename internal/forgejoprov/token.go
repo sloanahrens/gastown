@@ -149,10 +149,12 @@ func (p *Provisioner) tokenFilePath(role string) string {
 // so a lost file means a rotation, never a recovery. An existing token keeps the
 // scopes it was minted with until Rotate replaces it.
 func (p *Provisioner) EnsureToken(role string) error {
-	// A seat's token gets the polecat role's scopes (claude-q3f.8); the role table
-	// itself names no seat, so --role still refuses one.
+	// A seat's token gets the polecat role's scopes (claude-q3f.8). The role table
+	// itself names no seat, and isSeatRole accepts only the role ProvisionSeat
+	// builds, so any other seat-prefixed string stays an unknown role and --role
+	// still refuses every seat.
 	scopes, ok := RoleScopes(role)
-	if strings.HasPrefix(role, seatRolePrefix) {
+	if !ok && isSeatRole(role) {
 		scopes, ok = RoleScopes("polecat")
 	}
 	if !ok {

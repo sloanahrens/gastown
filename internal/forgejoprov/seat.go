@@ -3,14 +3,24 @@ package forgejoprov
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
-// seatRolePrefix turns a seat name into the role the bot steps run on: seat NAME is
-// provisioned as role "seat-"+NAME, so it gets a role bot's account and token file.
+// seatRolePrefix is what a seat's role starts with: seat NAME runs as role
+// seat-NAME, so it gets a role bot's account and token file.
 const seatRolePrefix = "seat-"
 
 // seatName is what a seat may be called: lower-case letters, digits and hyphens.
 var seatName = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// isSeatRole reports whether role is exactly the role ProvisionSeat builds: the
+// prefix followed by a seat name. The role table names no seat, so EnsureToken
+// asks this before it gives a seat the polecat scopes; a string that merely
+// starts with the prefix is still an unknown role.
+func isSeatRole(role string) bool {
+	name, ok := strings.CutPrefix(role, seatRolePrefix)
+	return ok && seatName.MatchString(name)
+}
 
 // ProvisionSeat ensures the seat bot named name's account, token file
 // forgejo-seat-name.env and write access on each repository, and nothing else.
