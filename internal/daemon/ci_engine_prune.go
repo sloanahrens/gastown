@@ -486,11 +486,15 @@ type ciEngineVolume struct {
 
 // ciEnginePlan is what a run removes, in the order the remove program takes it:
 // containers first, so the images they used are free; images most layers first,
-// so a child goes before its parent; volumes by name.
+// so a child goes before its parent; volumes by name. orphans and keptRunning
+// are the old running job containers whose task does not, or still does, run;
+// the verdict names both, and nothing removes an orphan yet.
 type ciEnginePlan struct {
-	containers []ciEngineContainer
-	images     []ciEngineImage
-	volumes    []ciEngineVolume
+	containers  []ciEngineContainer
+	images      []ciEngineImage
+	volumes     []ciEngineVolume
+	orphans     []ciEngineContainer
+	keptRunning []ciEngineContainer
 }
 
 // count is the number of items the plan removes.
@@ -541,9 +545,11 @@ func capCIEnginePlan(plan ciEnginePlan, max int) (ciEnginePlan, ciEngineRemainin
 		max = 0
 	}
 	out := ciEnginePlan{
-		containers: slices.Clone(plan.containers),
-		images:     slices.Clone(plan.images),
-		volumes:    slices.Clone(plan.volumes),
+		containers:  slices.Clone(plan.containers),
+		images:      slices.Clone(plan.images),
+		volumes:     slices.Clone(plan.volumes),
+		orphans:     plan.orphans,
+		keptRunning: plan.keptRunning,
 	}
 	var remaining ciEngineRemaining
 	if max < len(out.containers) {
@@ -667,14 +673,23 @@ func ciEngineVolumeKeyOf(v ciEngineVolume) (time.Time, bool) {
 	return created, true
 }
 
+// ciEngineOrphanRule is the age past which a running Actions job container is an
+// orphan and the task ids still running. A nil running set means the read
+// failed, so no orphan is planned.
+type ciEngineOrphanRule struct {
+	age     time.Duration
+	running map[int64]bool
+}
+
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
 // now, under the keep rule in docs/guides/disk-maintenance.md. imageAge is how old
 // an unused image must be, and unusedAge how long a stopped container has been
 // stopped, and how old an unused anonymous volume and an unused build cache record
 // must be. A listing it cannot read in full is refused: an id or name that is not
 // in docker's shape, a time it cannot parse, or a missing data root figure. A
-// refusal is a failed run, never an empty plan.
-func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string) (ciEnginePlan, error) {
+// refusal is a failed run, never an empty plan. An orphan rule plans orphans, and
+// none is removed yet.
+func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string, orphan ...ciEngineOrphanRule) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
 		return plan, errors.New("the engine listing names no data root size")
@@ -706,6 +721,16 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge tim
 				usedVolume[m.Name] = true
 			}
 		}
+	}
+
+	// A running job is never a stopped-container candidate above: it has its own
+	// age rule, applied only when the running-task read succeeded.
+	if len(orphan) > 0 && orphan[0].running != nil {
+		cands, err := ciEngineOrphanCandidates(l.Containers, now, orphan[0].age)
+		if err != nil {
+			return plan, err
+		}
+		plan.orphans, plan.keptRunning = ciEngineSplitOrphans(cands, orphan[0].running)
 	}
 
 	images := make(map[string]ciEngineImage, len(l.Images))
@@ -1141,7 +1166,9 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // The run removes at most maxPerKind containers, the ones stopped longest ago
 // first, as many volumes, the oldest created first, and as many images, most layers
 // first; a container it keeps also keeps its image and volumes out of the plan. It
-// names the rest in its log, and a run that leaves some is still a verdict.
+// names the rest in its log, and a run that leaves some is still a verdict. A
+// failed running-task read plans no orphan, logs once, and leaves the rest of the
+// prune as it was; nothing removes a planned orphan yet.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -1168,6 +1195,16 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		}
 		d.recordCIEnginePruneRun(run)
 	}()
+	if err != nil {
+		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		return false, ciEngineReasonLine(err.Error())
+	}
+	// A bad orphan age fails the run, like any other setting it cannot act on.
+	engineSettings := agentconfig.DiskMaintenanceConfig{}
+	if c := diskMaintenanceSettings(pc); c != nil {
+		engineSettings = *c
+	}
+	orphanAge, err := engineSettings.CIEngineOrphanJobAgeDuration()
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
@@ -1200,8 +1237,14 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		d.ciEnginePruneLogf("listing", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false, ciEngineReasonLine(err.Error())
 	}
+	// A failed running-task read plans no orphan and fails nothing else.
+	running, readErr := s.runningTasks(ctx)
+	if readErr != nil {
+		d.ciEnginePruneLogf("running tasks", "disk_maintenance: ci engine prune: the running task ids could not be read: %v; no orphan is planned this run", readErr)
+		running = nil
+	}
 	now := s.now()
-	plan, err := planCIEnginePrune(listing, now, imageAge, unusedAge, keepRepos)
+	plan, err := planCIEnginePrune(listing, now, imageAge, unusedAge, keepRepos, ciEngineOrphanRule{age: orphanAge, running: running})
 	if err != nil {
 		d.ciEnginePruneLogf("plan refused", "disk_maintenance: ci engine prune: the listing could not be planned: %v; nothing pruned", err)
 		return false, ciEngineReasonLine(fmt.Sprintf("the listing could not be planned: %v", err))
@@ -1226,6 +1269,10 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 			remaining.containers, remaining.images, remaining.volumes, maxPerKind)
 	}
 	counts := ciEngineRemovalCounts(ciEngineRemovals(plan))
+	orphanVerdict := ""
+	if n := len(plan.orphans) + len(plan.keptRunning); n > 0 {
+		orphanVerdict = fmt.Sprintf("; %d orphan container(s) planned, %d left alone, task still running in Forgejo", len(plan.orphans), len(plan.keptRunning))
+	}
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		for _, c := range plan.containers {
 			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove container %s", c.ID[:12])
@@ -1236,8 +1283,14 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		for _, v := range plan.volumes {
 			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove volume %s", v.Name)
 		}
-		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed",
-			counts, before)
+		for _, c := range plan.orphans {
+			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove orphan container %s", c.ID[:12])
+		}
+		for _, c := range plan.keptRunning {
+			d.logger.Printf("disk_maintenance: ci engine prune dry_run: leaves container %s alone, task still running in Forgejo", c.ID[:12])
+		}
+		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed%s",
+			counts, before, orphanVerdict)
 		// The build cache step did not run, so no build_cache_bytes is recorded.
 		outcome = ciEngineOutcomeOK
 		return true, ""
@@ -1352,8 +1405,8 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		// it was allowed to remove from a cache docker called reclaimable.
 		outcome = ""
 	}
-	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s",
-		counts, before, polecatimage.Human(afterKiB*1024), cache)
+	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s%s",
+		counts, before, polecatimage.Human(afterKiB*1024), cache, orphanVerdict)
 	return true, ""
 }
 
