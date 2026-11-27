@@ -187,6 +187,12 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
+	// work/ is the common work path a seat may start in, a link rather than a
+	// rig: reading it as one would fill a missing GT_RIG with "work" (gt-fc82u2).
+	if len(parts) >= 1 && parts[0] == "work" {
+		return ctx
+	}
+
 	// At this point, first part should be a rig name
 	if len(parts) < 1 {
 		return ctx
