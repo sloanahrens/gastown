@@ -139,7 +139,8 @@ type clusterRenderFlags struct {
 	// share of the total, and zero means the gateway's own default of 8 in total.
 	bdGatewayMaxConcurrent int
 	// bdGatewayCPURequest is the bd gateway container's CPU request, written as its
-	// requests.cpu; empty renders no request, and the gateway carries no limit.
+	// requests.cpu. The flag defaults it to 1 core; an explicit empty value renders
+	// no request, and the gateway carries no limit either way.
 	bdGatewayCPURequest string
 	daemonClaudeDir     string
 	tracker             bool
@@ -343,8 +344,8 @@ func init() {
 		"the most bd processes all the gateway's pods run at once, a positive total, or zero for the gateway's own default of 8 in total; each pod runs the total divided by --bd-gateway-replicas, rounded up; a rehearsal renders no gateway, so the cap reaches only a live render; a negative cap is refused")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayReplicas, "bd-gateway-replicas", defaultBdGatewayReplicas,
 		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, one serving while the other rolls (gt-yz0s8v); a rehearsal renders no gateway, so the count reaches only a live render; a count below zero or above two is refused")
-	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayCPURequest, "bd-gateway-cpu-request", "",
-		"the bd gateway container's CPU request, whole cores or millicores such as 4 or 500m, with no CPU limit so the gateway is Burstable and not throttled under contention; empty renders no request; a value that is not whole cores or millicores is refused")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayCPURequest, "bd-gateway-cpu-request", "1",
+		"the bd gateway container's CPU request, whole cores or millicores such as 4 or 500m, with no CPU limit so the gateway is Burstable and not throttled under contention; defaults to 1, an explicit empty value renders no request; a value that is not whole cores or millicores is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.includeStatic, "include-static", false,
 		"also write the static control-cluster manifests deploy/k8s embeds, after the ServiceAccount, so one command writes one desired set; a static Secret is written as its reviewed document and gets no create line")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,

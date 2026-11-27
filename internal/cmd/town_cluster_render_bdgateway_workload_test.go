@@ -369,34 +369,53 @@ func TestClusterRenderBdGatewayRefusals(t *testing.T) {
 }
 
 // TestTickEffGatewayCPURequestFlag holds --bd-gateway-cpu-request to the gateway
-// container: the flag's value is the request a live render writes, with no limit; an
-// empty flag writes no resources; and a recorded request replays as the flag's value.
+// container: the flag defaults to 1 core, so a render with no flag asks 1 core with
+// no limit; a named value is the request a live render writes, with no limit; an
+// explicit empty value writes no resources; and a recorded request replays as the
+// flag's value.
 func TestTickEffGatewayCPURequestFlag(t *testing.T) {
 	t.Parallel()
-	t.Run("the flag writes the request it names, with no limit", func(t *testing.T) {
-		t.Parallel()
-		f := withBdImage(t, clusterRenderFixture(t))
-		f.bdGatewayCPURequest = "4"
-		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
-			t.Fatalf("render: %v", err)
-		}
-		res := renderedDeployment(t, f.out, "-deployment-bd-gateway.yaml").Spec.Template.Spec.Containers[0].Resources
-		if res == nil || res.Requests["cpu"] != "4" || len(res.Limits) != 0 {
-			t.Errorf("the gateway's resources are %+v, want requests.cpu 4 and no limit", res)
-		}
-	})
-	t.Run("no flag writes no resources", func(t *testing.T) {
-		t.Parallel()
-		f := withBdImage(t, clusterRenderFixture(t))
-		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
-			t.Fatalf("render: %v", err)
-		}
-		if res := renderedDeployment(t, f.out, "-deployment-bd-gateway.yaml").Spec.Template.Spec.Containers[0].Resources; res != nil {
-			t.Errorf("the gateway's resources are %+v, want none", res)
-		}
-	})
+	flag := townClusterRenderCmd.Flags().Lookup("bd-gateway-cpu-request")
+	if flag == nil {
+		t.Fatal("gt town cluster render has no --bd-gateway-cpu-request flag")
+	}
+	if flag.DefValue != "1" {
+		t.Errorf("--bd-gateway-cpu-request default = %q, want 1", flag.DefValue)
+	}
+	for _, tc := range []struct {
+		name, request, wantCPU string
+		// fromDefault renders the flag's registered default, which is what a
+		// render with no flag reaches.
+		fromDefault bool
+	}{
+		{"the default asks 1 core, with no limit", "", "1", true},
+		{"a named request is written, with no limit", "4", "4", false},
+		{"an explicit empty value writes no resources", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			request := tc.request
+			if tc.fromDefault {
+				request = flag.DefValue
+			}
+			f := withBdImage(t, clusterRenderFixture(t))
+			f.bdGatewayCPURequest = request
+			var out bytes.Buffer
+			if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			res := renderedDeployment(t, f.out, "-deployment-bd-gateway.yaml").Spec.Template.Spec.Containers[0].Resources
+			if tc.wantCPU == "" {
+				if res != nil {
+					t.Errorf("the gateway's resources are %+v, want none", res)
+				}
+				return
+			}
+			if res == nil || res.Requests["cpu"] != tc.wantCPU || len(res.Limits) != 0 {
+				t.Errorf("the gateway's resources are %+v, want requests.cpu %s and no limit", res, tc.wantCPU)
+			}
+		})
+	}
 	t.Run("a recorded request replays", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "render-flags.json")
