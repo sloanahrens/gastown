@@ -156,6 +156,54 @@ func TestIntegrationDriftChildGrandchildDeadline(t *testing.T) {
 	}
 }
 
+// TestIntegrationDriftChildExitZeroWithLingeringGrandchild: a child that exits
+// 0 while its grandchild keeps the output pipes open returns at WaitDelay with
+// exit 0, the bytes it wrote, and no error, rather than blocking until the
+// grandchild ends (gt-i9dyt0). The group is never killed here, so the test
+// kills the grandchild in its own cleanup.
+func TestIntegrationDriftChildExitZeroWithLingeringGrandchild(t *testing.T) {
+	t.Parallel()
+	pidFile := filepath.Join(t.TempDir(), "grandchild-pid")
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return
+		}
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	const (
+		wrote = "child done\n"
+		// The grandchild outlives the deadline below, so without WaitDelay the
+		// call blocks until the test's own context ends it.
+		grandchildSleepSeconds = 60
+	)
+	// The deadline is only a hang bound: the call must return at WaitDelay,
+	// well before it, because the child itself exits at once.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	stdout, stderr, exit, err := startDriftChild(ctx, "/bin/sh",
+		[]string{"-c", `printf 'child done\n'; sleep "$2" & echo $! > "$1"`, "drift-child", pidFile, strconv.Itoa(grandchildSleepSeconds)}, 256)
+	elapsed := time.Since(start)
+	if exit != 0 || err != nil {
+		t.Fatalf("startDriftChild = exit %d, err %v; want exit 0 and no error for a clean exit", exit, err)
+	}
+	if string(stdout) != wrote {
+		t.Errorf("stdout = %q, want %q kept from the child", stdout, wrote)
+	}
+	if len(stderr) != 0 {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	if margin := driftChildWaitDelay + 5*time.Second; elapsed > margin {
+		t.Errorf("startDriftChild returned after %v, want it within %v (WaitDelay plus a margin): a grandchild held the pipes", elapsed, margin)
+	}
+}
+
 // TestIntegrationDriftChildGroupKillEndsTheGrandchild: after the deadline ends
 // a child whose grandchild holds the output pipes, the grandchild's pid is
 // gone, so the group kill reached it. A cancel that signalled only the child

@@ -72,30 +72,36 @@ func (e fakeExitError) Error() string { return "exit status" }
 func (e fakeExitError) ExitCode() int { return e.code }
 
 // TestDriftChildOutcome: the exit mapping of a bounded child. No run error is
-// 0; a run error after the context ended is -1 with the context error; an
-// error that carries an exit code is that code with no error (a non-zero exit
-// is the child's answer); any other run error is -1 with that error.
+// 0; a run error after the context ended is -1 with the context error; a
+// successful exit whose pipes a grandchild held past WaitDelay (exec's
+// ErrWaitDelay) is 0 with no error; an error that carries an exit code is that
+// code with no error (a non-zero exit is the child's answer); any other run
+// error is -1 with that error.
 func TestDriftChildOutcome(t *testing.T) {
 	t.Parallel()
 	other := errors.New("fork/exec: no such file")
 	tests := []struct {
-		name    string
-		runErr  error
-		ctxErr  error
-		want    int
-		wantErr error
+		name       string
+		runErr     error
+		ctxErr     error
+		exitedZero bool
+		want       int
+		wantErr    error
 	}{
-		{"no run error", nil, nil, 0, nil},
-		{"the context ended it", other, context.Canceled, -1, context.Canceled},
-		{"a non-zero exit is the child's answer", fakeExitError{code: 3}, nil, 3, nil},
-		{"an error with no exit code", other, nil, -1, other},
+		{"no run error", nil, nil, true, 0, nil},
+		{"the context ended it", other, context.Canceled, false, -1, context.Canceled},
+		{"a non-zero exit is the child's answer", fakeExitError{code: 3}, nil, false, 3, nil},
+		{"an error with no exit code", other, nil, false, -1, other},
+		{"a clean exit whose pipes a grandchild held past WaitDelay", exec.ErrWaitDelay, nil, true, 0, nil},
+		{"WaitDelay with a non-zero exit stays an error", exec.ErrWaitDelay, nil, false, -1, exec.ErrWaitDelay},
+		{"the context wins over WaitDelay", exec.ErrWaitDelay, context.DeadlineExceeded, true, -1, context.DeadlineExceeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := driftChildOutcome(tt.runErr, tt.ctxErr)
+			got, err := driftChildOutcome(tt.runErr, tt.ctxErr, tt.exitedZero)
 			if got != tt.want || !errors.Is(err, tt.wantErr) {
-				t.Errorf("driftChildOutcome(%v, %v) = %d, %v; want %d, %v", tt.runErr, tt.ctxErr, got, err, tt.want, tt.wantErr)
+				t.Errorf("driftChildOutcome(%v, %v, %v) = %d, %v; want %d, %v", tt.runErr, tt.ctxErr, tt.exitedZero, got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
@@ -192,14 +198,19 @@ func TestDriftChildCancel(t *testing.T) {
 }
 
 // TestDriftChildCmd: the command startDriftChild runs leads its own process
-// group and installs a cancel for it. The cancel on a command that never
-// started has no process to end, so it reports the process already done rather
-// than dereferencing the nil Process exec's default cancel would.
+// group, installs a cancel for it, and bounds the wait for output pipes a
+// grandchild may hold past the child's exit by the named constant. The cancel
+// on a command that never started has no process to end, so it reports the
+// process already done rather than dereferencing the nil Process exec's
+// default cancel would.
 func TestDriftChildCmd(t *testing.T) {
 	t.Parallel()
 	cmd := driftChildCmd(&exec.Cmd{})
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
 		t.Errorf("driftChildCmd SysProcAttr = %#v, want Setpgid true", cmd.SysProcAttr)
+	}
+	if cmd.WaitDelay != driftChildWaitDelay {
+		t.Errorf("driftChildCmd WaitDelay = %v, want the driftChildWaitDelay constant %v", cmd.WaitDelay, driftChildWaitDelay)
 	}
 	if cmd.Cancel == nil {
 		t.Fatal("driftChildCmd Cancel = nil, want the group-kill cancel")
