@@ -241,6 +241,10 @@ var ruleOwners = map[string]Owner{
 	// A gateway at its cap is the town's own bd load to look at: the overseer
 	// finds the caller that held the slots before a person is woken (gt-7oy397).
 	RuleBDGatewayCapHit: OwnerOverseer,
+	// Calls that could not reach the database are the town's own bd path to
+	// look at: the overseer finds what the gateway or Dolt could not answer
+	// before a person is woken (gt-g7rdh4).
+	RuleBDGatewayUnreachable: OwnerOverseer,
 	// A gateway at its cap is the town's own bd load to look at: the overseer
 	// finds the caller that held the slots before a person is woken (gt-7oy397).
 	// A gateway at its cap is the town's own bd load to look at: the overseer

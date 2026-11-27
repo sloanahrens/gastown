@@ -292,6 +292,11 @@ const (
 	// cap (gt-7oy397).
 	RuleBDGatewayCapHit = "bd_gateway.cap_hit"
 
+	// RuleBDGatewayUnreachable is a burst of bd calls through the gateway that
+	// could not reach its database: work that did not run, loud enough to wake
+	// the operator (gt-g7rdh4).
+	RuleBDGatewayUnreachable = "bd_gateway.unreachable"
+
 	// RuleMainUnknown is a rig's red-main check that could not judge main for
 	// several runs in a row: the verdict is unknown, and no red-main bead can
 	// say so (gt-glc2yh).
@@ -537,6 +542,10 @@ var ruleFlags = map[string]RuleFlags{
 	// Callers turned away at the gateway's cap are work that did not run, so
 	// the operator is woken the way an idle dispatcher wakes it (gt-7oy397).
 	RuleBDGatewayCapHit: flagsWake,
+	// Calls that could not reach the database are work that did not run in
+	// bursts, so they wake the operator as a cap-hit does; the judge holds a
+	// single failure below its threshold (gt-g7rdh4).
+	RuleBDGatewayUnreachable: flagsWake,
 	// Calls the gateway refused are work that did not run, so the operator is
 	// woken the way the cap-hit rule wakes it (gt-q0eh0r).
 	RuleBdGatewayRefusals: flagsWake,
@@ -656,6 +665,7 @@ var kindRules = map[Kind]string{
 	KindClusterDrift:                  RuleClusterDrift,
 	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
 	KindBDGatewayCapHit:               RuleBDGatewayCapHit,
+	KindBDGatewayUnreachable:          RuleBDGatewayUnreachable,
 	KindMainUnknown:                   RuleMainUnknown,
 }
 
