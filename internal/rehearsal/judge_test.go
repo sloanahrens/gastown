@@ -104,6 +104,8 @@ func TestRehearsalJudgeP90(t *testing.T) {
 		{name: "presubmit p90 one second over fails", edit: func(r *Record) { r.Gates = gatesOf(GatePass, rep(setSize, 473)...) }, want: "presubmit p90 473 s is over 472 s"},
 		{name: "slow passing gates count", edit: func(r *Record) { r.Gates = gatesOf(GatePass, append(rep(setSize-2, 100), 500, 500)...) }, want: "presubmit p90 500 s is over 472 s"},
 		{name: "slow failing gates count", edit: func(r *Record) { r.Gates = gatesOf(GateFail, append(rep(setSize-2, 100), 500, 500)...) }, want: "presubmit p90 500 s is over 472 s"},
+		{name: "zero-second gates beside one slow gate still fail", edit: func(r *Record) { r.Gates = gatesOf(GatePass, append(rep(setSize-1, 0), 500)...) }, want: "presubmit p90 500 s is over 472 s"},
+		{name: "zero-second gates beside one measured gate within bars pass", edit: func(r *Record) { r.Gates = gatesOf(GatePass, append(rep(setSize-1, 0), 400)...) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -124,6 +126,7 @@ func TestRehearsalJudgeUnmeasured(t *testing.T) {
 		{name: "fifteen slings", edit: func(r *Record) { r.Slings = slingsOf(rep(setSize-1, 100)...) }, want: "only 15 slings, want 16: the run is unmeasured"},
 		{name: "no slings", edit: func(r *Record) { r.Slings = nil }, want: "only 0 slings, want 16: the run is unmeasured"},
 		{name: "no gate figure", edit: func(r *Record) { r.Gates = nil }, want: "no gate figure: the run is unmeasured"},
+		{name: "every gate zero seconds", edit: func(r *Record) { r.Gates = gatesOf(GatePass, rep(setSize, 0)...) }, want: "no gate figure: the run is unmeasured"},
 		{name: "no load samples", edit: func(r *Record) { r.Load = Load{} }, want: "no host load samples: the run is unmeasured"},
 		{name: "negative load samples", edit: func(r *Record) { r.Load = Load{Samples: -1} }, want: "no host load samples: the run is unmeasured"},
 	} {
