@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gt-0kk2: no polecat reuse may move a branch it does not own.
@@ -49,11 +50,15 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 			heldBranch, heldBefore, heldAfter)
 	}
 
-	if reused.Branch != resumeBranch {
-		t.Errorf("reused branch = %q, want %q", reused.Branch, resumeBranch)
+	// A branch of the seat's own at the resumed tip; the resumed ref stays put.
+	if reused.Branch == resumeBranch || !strings.HasPrefix(reused.Branch, "polecat/alpha/") {
+		t.Errorf("reused branch = %q, want a branch under polecat/alpha/", reused.Branch)
 	}
-	if head := w.branch(t, reused.ClonePath); head != resumeBranch {
-		t.Errorf("HEAD = %q, want %q", head, resumeBranch)
+	if head := w.branch(t, reused.ClonePath); head != reused.Branch {
+		t.Errorf("HEAD = %q, want %q", head, reused.Branch)
+	}
+	if got := w.rev(t, mayorRig, "refs/heads/"+resumeBranch); got != resumeSHA {
+		t.Errorf("refs/heads/%s = %s, want it left at %s", resumeBranch, got, resumeSHA)
 	}
 	if tip := w.rev(t, reused.ClonePath, "HEAD"); tip != resumeSHA {
 		t.Errorf("HEAD = %s, want the resume branch's origin tip %s", tip, resumeSHA)
@@ -353,6 +358,67 @@ func TestReleasePathFromRefusal_UndoesTheShellQuoting(t *testing.T) {
 				t.Errorf("releasePathFromRefusal(%q) = %q, want %q", tc.command, got, tc.want)
 			}
 		})
+	}
+}
+
+// resetFailingRepo is a gitRepo whose ResetHard fails, as a worktree the reset
+// cannot move does; every other call reaches the world it wraps.
+type resetFailingRepo struct {
+	gitRepo
+}
+
+func (r resetFailingRepo) ResetHard(string) error {
+	return errors.New("reset refused")
+}
+
+// TestReuseIdlePolecat_RefusesWhenTheResetFails: the resumed seat's own branch
+// is cut at HEAD, so a reset the reuse cannot confirm is a refusal — never an
+// own branch off a tip the resume did not name (gt-4ozhi8).
+func TestReuseIdlePolecat_RefusesWhenTheResetFails(t *testing.T) {
+	t.Parallel()
+	mgr, mayorRig, _, _, w := canonicalWithPolecats(t, false, "alpha")
+	resume := "polecat/jasper/gt-bagu+aaa"
+	resumeSHA := w.branchAtNewCommit(t, mayorRig, resume, w.rev(t, mayorRig, "origin/main"), "jasper work")
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+resume, resumeSHA)
+
+	base := w.opener()
+	mgr.gits = gitOpener{
+		open:     func(dir string) gitRepo { return resetFailingRepo{base.open(dir)} },
+		openDir:  base.openDir,
+		repoFile: base.repoFile,
+	}
+
+	_, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next", ResumeBranch: resume})
+	if err == nil || !strings.Contains(err.Error(), "resetting worktree to origin/"+resume) {
+		t.Fatalf("err = %v, want a refusal naming the reset it could not confirm", err)
+	}
+}
+
+// An own branch the reuse cannot create fails it, naming both branches; the
+// resume ref is untouched (gt-4ozhi8).
+func TestReuseIdlePolecat_OwnBranchFailureNamesBothBranches(t *testing.T) {
+	t.Parallel()
+	mgr, mayorRig, _, _, w := canonicalWithPolecats(t, false, "alpha")
+	resume := "polecat/jasper/gt-bagu+aaa"
+	resumeSHA := w.branchAtNewCommit(t, mayorRig, resume, w.rev(t, mayorRig, "origin/main"), "jasper work")
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+resume, resumeSHA)
+	// Pin and occupy the own branch name the reuse draws: the fixed clock makes
+	// a fresh stamp sequence repeat it.
+	mgr.now = func() time.Time { return time.UnixMilli(1_800_000_000_000) }
+	mgr.stamps = &branchStampClock{}
+	own := mgr.buildBranchName("alpha", "gt-next")
+	mgr.stamps = &branchStampClock{}
+	w.SetRef(t, mayorRig, "refs/heads/"+own, w.rev(t, mayorRig, "origin/main"))
+
+	_, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next", ResumeBranch: resume})
+	if err == nil {
+		t.Fatal("the reuse succeeded with an own branch that cannot be created")
+	}
+	if msg := err.Error(); !strings.Contains(msg, own) || !strings.Contains(msg, resume) {
+		t.Errorf("error names neither or only one of %q and %q: %v", own, resume, err)
+	}
+	if got := w.rev(t, mayorRig, "refs/heads/"+resume); got != resumeSHA {
+		t.Errorf("refs/heads/%s = %s, want it left at %s", resume, got, resumeSHA)
 	}
 }
 

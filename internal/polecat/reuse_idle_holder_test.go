@@ -47,8 +47,15 @@ func TestReuseIdlePolecat_ResumesBranchHeldByIdleUnreapedPolecat(t *testing.T) {
 	if reused.ClonePath != alpha.ClonePath {
 		t.Errorf("reused %s, want alpha's worktree %s", reused.ClonePath, alpha.ClonePath)
 	}
-	if head := w.branch(t, alpha.ClonePath); head != heldBranch {
-		t.Errorf("alpha HEAD = %q, want %q", head, heldBranch)
+	// alpha works on a branch of its own at the resumed tip (gt-4ozhi8).
+	if reused.Branch == heldBranch || !strings.HasPrefix(reused.Branch, "polecat/alpha/") {
+		t.Errorf("reused branch = %q, want a branch under polecat/alpha/", reused.Branch)
+	}
+	if head := w.branch(t, alpha.ClonePath); head != reused.Branch {
+		t.Errorf("alpha HEAD = %q, want %q", head, reused.Branch)
+	}
+	if got := w.rev(t, alpha.ClonePath, "HEAD"); got != tip {
+		t.Errorf("alpha HEAD tip = %s, want the resume branch's origin tip %s", got, tip)
 	}
 
 	// beta gave up the checkout, not the branch, and stays a reusable slot.
@@ -58,6 +65,7 @@ func TestReuseIdlePolecat_ResumesBranchHeldByIdleUnreapedPolecat(t *testing.T) {
 	if got := w.rev(t, beta.ClonePath, "HEAD"); got != tip {
 		t.Errorf("beta HEAD = %s, want %s", got, tip)
 	}
+	// The resumed ref is left where it was.
 	if got := w.rev(t, alpha.ClonePath, "refs/heads/"+heldBranch); got != tip {
 		t.Errorf("refs/heads/%s = %s, want %s", heldBranch, got, tip)
 	}

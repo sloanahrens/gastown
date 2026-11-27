@@ -55,8 +55,15 @@ func TestReuseIdlePolecat_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing
 	if reused.ClonePath != alpha.ClonePath {
 		t.Errorf("reused %s, want alpha's worktree %s", reused.ClonePath, alpha.ClonePath)
 	}
-	if head := w.branch(t, alpha.ClonePath); head != heldBranch {
-		t.Errorf("alpha HEAD = %q, want %q", head, heldBranch)
+	// alpha works on a branch of its own at the resumed tip (gt-4ozhi8).
+	if reused.Branch == heldBranch || !strings.HasPrefix(reused.Branch, "polecat/alpha/") {
+		t.Errorf("reused branch = %q, want a branch under polecat/alpha/", reused.Branch)
+	}
+	if head := w.branch(t, alpha.ClonePath); head != reused.Branch {
+		t.Errorf("alpha HEAD = %q, want %q", head, reused.Branch)
+	}
+	if got := w.rev(t, alpha.ClonePath, "HEAD"); got != tip {
+		t.Errorf("alpha HEAD tip = %s, want the resume branch's origin tip %s", got, tip)
 	}
 
 	// beta gave up the checkout, not the branch.

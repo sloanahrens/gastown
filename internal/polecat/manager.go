@@ -1722,12 +1722,13 @@ func (m *Manager) advanceResumeBranch(clonePath, branch string) error {
 
 // ownBranchForResume puts a seat that resumes another seat's branch on a branch
 // of its own (gt-8d2lv3), since the per-seat push rule refuses a push to a
-// branch under another seat's prefix — polecat/<name>/ with the slash, so
-// polecat/<name>2/ is another seat's. The own branch is created at HEAD (the
-// resume tip), keeping local commits origin lacks; a failure names both branches
-// with no fallback. It stays one helper for the repair and reuse paths (gt-l0jhla).
+// branch named for another seat — polecat/<name>/<issue> with the slash, so
+// polecat/<name>2/ is another seat's, and the issue-less polecat/<name>-<stamp>
+// (gt-4ozhi8). The own branch is created at HEAD (the resume tip), keeping local
+// commits origin lacks; a failure names both branches with no fallback. It stays
+// one helper for the repair and reuse paths (gt-l0jhla).
 func (m *Manager) ownBranchForResume(clonePath, name, resumeBranch, hookBead string) (string, error) {
-	if strings.HasPrefix(resumeBranch, polecatBranchPrefix+name+"/") {
+	if meta, ok := ParseBranchName(resumeBranch); ok && meta.Polecat == name {
 		return resumeBranch, nil
 	}
 	own := m.buildBranchName(name, hookBead)
@@ -2521,7 +2522,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 // Steps:
 //  1. Verify polecat exists and worktree is accessible
 //  2. Fetch latest from origin
-//  3. Create fresh branch: git checkout -b <branch> <startPoint>
+//  3. Create fresh branch: git checkout -b <branch> <startPoint>. A resume of
+//     another seat's branch is checked out as a branch of this seat's own at
+//     that branch's origin tip (gt-4ozhi8).
 //  4. Reset agent bead and set hook_bead atomically
 //  5. Return polecat in working state
 func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, error) {
@@ -2645,10 +2648,12 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}
 
 	// Resolve the branch name before touching the worktree: the guard below needs
-	// it, and a refusal is only honest while nothing has been mutated.
-	branchName := m.buildBranchName(name, opts.HookBead)
-	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
+	// it, and a refusal is only honest while nothing has been mutated. When
+	// resuming, the resume branch stands in until it is known whether it is this
+	// seat's own; a fresh name is built only if it is not (gt-4ozhi8).
+	branchName := opts.ResumeBranch
+	if branchName == "" {
+		branchName = m.buildBranchName(name, opts.HookBead)
 	}
 
 	// gt-0kk2: this worktree must not end up on a branch another worktree holds.
@@ -2669,7 +2674,11 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if err := polecatGit.CheckoutDetachForce("HEAD"); err != nil {
 		return nil, fmt.Errorf("detaching HEAD to clean worktree for reuse: %w", err)
 	}
-	_ = polecatGit.ResetHard(startPoint)
+	// A resumed seat's own branch is cut at HEAD below; a reset the reuse cannot
+	// confirm is a refusal, never a branch off a tip the resume did not name.
+	if err := polecatGit.ResetHard(startPoint); err != nil {
+		return nil, fmt.Errorf("resetting worktree to %s for reuse: %w", startPoint, err)
+	}
 	_ = polecatGit.CleanForce()
 
 	// Re-provision CLAUDE.md after reset — git reset --hard restores the tracked
@@ -2681,14 +2690,23 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		style.PrintWarning("could not re-provision polecat CLAUDE.md on reuse: %v", err)
 	}
 
+	// The claim above judged the resume branch; the seat itself takes a branch
+	// of its own at that branch's origin tip unless the resume branch is its
+	// own, cut at HEAD (the start point) and checked out by the helper (gt-4ozhi8).
 	if opts.ResumeBranch != "" {
+		branchName, err = m.ownBranchForResume(clonePath, name, opts.ResumeBranch, opts.HookBead)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if opts.ResumeBranch != "" && branchName == opts.ResumeBranch {
 		// CheckoutResetBranch (`git checkout -B`) creates or resets the branch to
 		// the start point. Use this instead of CheckoutNewBranch because the local
 		// branch may already exist from a prior run on this idle polecat.
 		if err := polecatGit.CheckoutResetBranch(branchName, startPoint); err != nil {
 			return nil, fmt.Errorf("checking out resume branch %s from %s: %w", branchName, startPoint, err)
 		}
-	} else {
+	} else if opts.ResumeBranch == "" {
 		if err := polecatGit.CheckoutNewBranch(branchName, startPoint); err != nil {
 			// checkout -b fails if branch already exists or other edge case.
 			// Fall back to: checkout start point, then create branch.
