@@ -740,8 +740,15 @@ func logHasTestFailure(log string) bool {
 // excerpt's source.
 func isTestFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
-		panicLineRE.MatchString(line) || ruleReportRE.MatchString(line)
+		panicLineRE.MatchString(line) || ruleReportRE.MatchString(line) ||
+		shellFailRowRE.MatchString(line)
 }
+
+// shellFailRowRE is the row a shell test prints when it fails: "FAIL: <name>"
+// after optional leading spaces, as the tier-sweep shell tests do (gt-t2amjn).
+// A "PASS:" row, a "FAILED" summary and prose that only contains FAIL do not
+// match.
+var shellFailRowRE = regexp.MustCompile(`^ *FAIL: `)
 
 // failureLines is the excerpt's line indices: every failure marker with the
 // range it carries, de-duplicated and in log order.
@@ -867,11 +874,13 @@ const failureContextLines = 2
 // header that does carries the rule line through failureSpan. Reading a bare
 // rule line as a failure would stop the note reading the whole log when a tail
 // is cut inside a report, leaving the note with the report's guidance text and
-// none of its reason (gt-hqw8m).
+// none of its reason (gt-hqw8m). A shell test's "   FAIL: <name>" row is one by
+// itself: it names the failing row, so the excerpt keeps it even when no go
+// test or make line sits near it (gt-t2amjn).
 func isFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
-		ruleReportRE.MatchString(line) ||
+		ruleReportRE.MatchString(line) || shellFailRowRE.MatchString(line) ||
 		strings.Contains(line, buildFailedMarker)
 }
 

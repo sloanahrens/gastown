@@ -690,6 +690,84 @@ func TestFailureExcerptReadsTheWholeLogForASummaryOnlyTail(t *testing.T) {
 	}
 }
 
+// TestFailureExcerptNamesAShellTestRow: a shell tier sweep prints its failing
+// row as "   FAIL: <name> (rc=N)", not as a go test line, so a tail holding only
+// that row above the summary lines is a tail that names a failure. Filler lines
+// put the summary's make Error out of failureContextLines reach of the row, so
+// the excerpt names it only if the row is a failure marker itself. An older
+// "--- FAIL" block above the tail must stay out of the note: the excerpt is
+// read from the shell row's tail, not the whole log (gt-t2amjn).
+func TestFailureExcerptNamesAShellTestRow(t *testing.T) {
+	t.Parallel()
+	log := gateJobLog(
+		"=== RUN   TestOld",
+		"--- FAIL: TestOld (0.01s)",
+		"    old_test.go:1: want 1, got 2",
+	) +
+		strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateTailBytes/40+1) +
+		gateJobLog(
+			"   FAIL: some shell row (rc=3)",
+			"sweep: unit tier checked 12 rows",
+			"sweep: 1 row failed",
+			"gate: FAILED at unit tier (unit): exit status 1",
+			"make: *** [Makefile:290: gate] Error 1",
+			"[runner]: exitcode 2",
+		)
+	if len(log) <= candidateTailBytes {
+		t.Fatalf("log is %d bytes; want it past the %d-byte tail cap", len(log), candidateTailBytes)
+	}
+	if tail := log[len(log)-candidateTailBytes:]; !strings.Contains(tail, "   FAIL: some shell row (rc=3)") || strings.Contains(tail, "--- FAIL: TestOld") {
+		t.Fatalf("the tail does not hold the shell row alone; the fixture does not exercise the shell-row tail")
+	}
+	lines := logLines(log)
+	rowAt, makeAt := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "   FAIL: some shell row (rc=3)") {
+			rowAt = i
+		}
+		if makeErrorRE.MatchString(line) {
+			makeAt = i
+		}
+	}
+	if rowAt < 0 || makeAt < 0 || makeAt-rowAt <= failureContextLines {
+		t.Fatalf("make's Error is %d lines from the shell row (row %d, make %d); want more than %d, so the fixture proves the row is a marker rather than passing by proximity", makeAt-rowAt, rowAt, makeAt, failureContextLines)
+	}
+	got := failureExcerpt(excerptSource(log), gateTailLines)
+	if !strings.Contains(got, "   FAIL: some shell row (rc=3)") {
+		t.Errorf("excerpt does not name the shell row:\n%s", got)
+	}
+	if strings.Contains(got, "TestOld") {
+		t.Errorf("excerpt names an older failure the tail's shell row already superseded:\n%s", got)
+	}
+}
+
+// TestFailureExcerptReadsShellPassAndProseAsNoFailure: only a shell row that
+// starts with FAIL after its indent is a failing row. A PASS row, a summary
+// line whose word is FAILED, and prose that merely contains FAIL name no
+// failure, so a red whose tail holds only them does not stand as the source
+// (gt-t2amjn).
+func TestFailureExcerptReadsShellPassAndProseAsNoFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"indented shell FAIL row", "   FAIL: some shell row (rc=3)", true},
+		{"shell FAIL row at column zero", "FAIL: some shell row (rc=3)", true},
+		{"shell PASS row", "   PASS: some shell row", false},
+		{"prose with FAIL: mid-line", "the sweep saw FAIL: some shell row and kept going", false},
+		{"prose with the word FAIL", "   a row that did not FAIL: it waited", false},
+		{"indented FAILED summary", "   FAILED: some shell row (rc=3)", false},
+		{"gate FAILED summary line", "gate: FAILED at unit tier (unit): exit status 1", false},
+	}
+	for _, tt := range tests {
+		if got := isTestFailureMarker(tt.line); got != tt.want {
+			t.Errorf("%s: isTestFailureMarker(%q) = %v, want %v", tt.name, tt.line, got, tt.want)
+		}
+	}
+}
+
 // TestFailureExcerptKeepsATailThatHoldsATestFailure: the excerpt is still read
 // from the capped tail while that tail names a failing test -- a "--- FAIL"
 // block, a bare panic, a FAIL package line, or a unit-tier rule report -- so an
