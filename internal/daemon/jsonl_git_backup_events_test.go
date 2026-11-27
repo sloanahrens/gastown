@@ -3,11 +3,13 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,15 +27,17 @@ type eventsTestRow struct {
 
 // eventsTableFake stands in for a database's events table: rows is what the
 // table holds, and each export writes in created_at, id order the rows its
-// query's bound admits, as Dolt would. Every row goes through the bound, so a
-// row stamped before it is not returned however it arrived in the table.
+// query admits, as Dolt would: its created_at bound or page keyset, up to its
+// page limit. Every row goes through the bound, so a row stamped before it is
+// not returned however it arrived in the table.
 type eventsTableFake struct {
 	rows    []eventsTestRow
 	queries []string
 }
 
 // exporter is the fake's jsonlTableExportFn: an events read lands in dir as
-// the rows the query bound admits, and every other table as empty lines.
+// the rows the query admits (its created_at bound, or its page keyset, and its
+// page limit), and every other table as empty lines.
 func (f *eventsTableFake) exporter(t *testing.T, others map[string]int) jsonlTableExporter {
 	t.Helper()
 	return func(table string, q beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
@@ -52,6 +56,9 @@ func (f *eventsTableFake) exporter(t *testing.T, others map[string]int) jsonlTab
 			if bounded && row.createdAt < bound {
 				continue
 			}
+			if !eventsRowPastKeyset(text, row) {
+				continue
+			}
 			read = append(read, row)
 		}
 		sort.SliceStable(read, func(i, j int) bool {
@@ -60,6 +67,9 @@ func (f *eventsTableFake) exporter(t *testing.T, others map[string]int) jsonlTab
 			}
 			return read[i].id < read[j].id
 		})
+		if limit, ok := eventsQueryLimit(text); ok && len(read) > limit {
+			read = read[:limit]
+		}
 		var lines []string
 		for _, row := range read {
 			line, err := json.Marshal(map[string]string{"id": row.id, "created_at": row.createdAt})
@@ -88,6 +98,31 @@ func eventsQueryBound(text string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+var (
+	eventsQueryKeysetPattern = regexp.MustCompile(`created_at > '([^']+)' OR \(created_at = '[^']+' AND id > '([^']+)'\)`)
+	eventsQueryLimitPattern  = regexp.MustCompile(`LIMIT (\d+)$`)
+)
+
+// eventsRowPastKeyset reports whether row comes after the keyset a page query
+// names. A query that names none admits every row.
+func eventsRowPastKeyset(text string, row eventsTestRow) bool {
+	m := eventsQueryKeysetPattern.FindStringSubmatch(text)
+	if m == nil {
+		return true
+	}
+	return row.createdAt > m[1] || (row.createdAt == m[1] && row.id > m[2])
+}
+
+// eventsQueryLimit is the row count a page query asks for, if it names one.
+func eventsQueryLimit(text string) (int, bool) {
+	m := eventsQueryLimitPattern.FindStringSubmatch(text)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	return n, err == nil
 }
 
 // eventsExportIDs is the ids the events export in dir holds, in file order.
@@ -650,5 +685,95 @@ func TestExportAllEventsIsPaged(t *testing.T) {
 				t.Errorf("export = %d rows, state %+v (%v), want 2 rows recorded", n, state, stateErr)
 			}
 		})
+	}
+}
+
+// TestExportAllEventsPagedState: a full export read in pages records the state
+// the next append resumes from. The last two rows share a created_at and the
+// page boundary falls between them, so the boundary run is split across two
+// pages: the state must still hold every row and both boundary ids, and the
+// incremental cycle after it must append only the rows newer than the boundary
+// (gt-hlyx5t).
+func TestExportAllEventsPagedState(t *testing.T) {
+	t.Parallel()
+	// One row more than a page, so the full export reads two pages.
+	n := eventsFullPageRows + 1
+	base := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	stamp := func(sec int) string { return base.Add(time.Duration(sec) * time.Second).Format("2006-01-02 15:04:05") }
+	uuid := func(i int) string { return fmt.Sprintf("00000000-0000-0000-0000-%012d", i) }
+	var rows []eventsTestRow
+	var wantIDs []string
+	for i := range n {
+		sec := i
+		if i == n-1 {
+			sec = n - 2 // the last two rows share a created_at
+		}
+		rows = append(rows, eventsTestRow{uuid(i), stamp(sec)})
+		wantIDs = append(wantIDs, uuid(i))
+	}
+
+	d, _ := backupTestDaemon(t)
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 16, 0, 0, 0, time.UTC))
+	d.clock = clk
+	fake := &eventsTableFake{rows: rows}
+	d.jsonlTableExportFn = fake.exporter(t, nil)
+	gitRepo := t.TempDir()
+	dbDir := filepath.Join(gitRepo, "hq")
+	dataDir := t.TempDir()
+
+	got, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false) // no state yet: the paged full export
+	if err != nil {
+		t.Fatalf("full export: %v", err)
+	}
+	if got != n {
+		t.Errorf("full export count = %d, want %d", got, n)
+	}
+	if len(fake.queries) != 2 {
+		t.Fatalf("the full export read %d page(s), want 2", len(fake.queries))
+	}
+	state, err := readEventsExportState(dbDir)
+	if err != nil {
+		t.Fatalf("reading the state: %v", err)
+	}
+	if state.Rows != n {
+		t.Errorf("state.Rows = %d, want the %d rows written", state.Rows, n)
+	}
+	if !state.FullExportedAt.Equal(clk.Now()) {
+		t.Errorf("state.FullExportedAt = %v, want the daemon clock %v", state.FullExportedAt, clk.Now())
+	}
+	if want := stamp(n - 2); state.LastCreatedAt != want {
+		t.Errorf("state.LastCreatedAt = %q, want the shared stamp %q", state.LastCreatedAt, want)
+	}
+	boundaryIDs := slices.Clone(state.BoundaryIDs)
+	slices.Sort(boundaryIDs)
+	if want := []string{uuid(n - 2), uuid(n - 1)}; !slices.Equal(boundaryIDs, want) {
+		t.Errorf("state.BoundaryIDs = %v, want both rows of the shared stamp %v", boundaryIDs, want)
+	}
+	if got := eventsExportIDs(t, dbDir); !slices.Equal(got, wantIDs) {
+		t.Fatalf("the full export holds %d rows in order, want the %d written once each", len(got), len(wantIDs))
+	}
+
+	// Two rows newer than the boundary: the next cycle appends only them.
+	fake.rows = append(fake.rows, eventsTestRow{uuid(n), stamp(n + 1)}, eventsTestRow{uuid(n + 1), stamp(n + 2)})
+	wantIDs = append(wantIDs, uuid(n), uuid(n+1))
+	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
+		t.Fatalf("incremental export: %v", err)
+	}
+	if len(fake.queries) != 3 {
+		t.Fatalf("the cycles read %d queries, want 2 pages then 1 incremental read", len(fake.queries))
+	}
+	if bound, ok := eventsQueryBound(fake.queries[2]); !ok || bound != stamp(n-2) {
+		t.Errorf("the incremental read came from bound %q (bounded %v), want the boundary %q", bound, ok, stamp(n-2))
+	}
+	if got := eventsExportIDs(t, dbDir); !slices.Equal(got, wantIDs) {
+		t.Errorf("after the incremental cycle the export holds %d rows, want every row once: %d", len(got), len(wantIDs))
+	}
+	state, err = readEventsExportState(dbDir)
+	if err != nil {
+		t.Fatalf("reading the state after the incremental cycle: %v", err)
+	}
+	if state.Rows != len(wantIDs) || state.LastCreatedAt != stamp(n+2) || !slices.Equal(state.BoundaryIDs, []string{uuid(n + 1)}) {
+		t.Errorf("state after the incremental cycle = rows %d, boundary %q %v; want rows %d, boundary %q [%s]",
+			state.Rows, state.LastCreatedAt, state.BoundaryIDs, len(wantIDs), stamp(n+2), uuid(n+1))
 	}
 }
