@@ -18,6 +18,9 @@ type daemonGit interface {
 	HasObject(sha string) (bool, error)
 	CommitTime(rev string) (time.Time, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
+	// RemoteBranchTip reads a branch's tip at a remote, which is how the
+	// attention tick reads a rig's landing target without fetching it.
+	RemoteBranchTip(remote, branch string) (string, error)
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
 
