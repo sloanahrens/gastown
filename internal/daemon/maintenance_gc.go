@@ -1028,6 +1028,15 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		d.logger.Printf("scheduled_maintenance: previous gc cycle still running — skipping this tick")
 		return
 	}
+	d.dispatchMaintenanceGC(databases, windowEnd, request, localDataDir)
+}
+
+// dispatchMaintenanceGC runs the cycle startMaintenanceGC dispatches: everything
+// that method does after its compare-and-swap. The caller MUST already hold
+// maintenanceGCRunning; this method does not take it, so a caller that does not
+// hold it would run its cycle beside another holder's. The dispatched func
+// clears the flag when the cycle ends.
+func (d *Daemon) dispatchMaintenanceGC(databases []string, windowEnd time.Time, request *update.RequestFile, localDataDir bool) {
 	d.maintenanceGCRequestRunID.Store("")
 	if request != nil {
 		d.maintenanceGCRequestRunID.Store(request.RunID)
