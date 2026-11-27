@@ -60,8 +60,8 @@ func TestRehearsalCompareReport(t *testing.T) {
 		{"load p90", "load p90: 4 | 7"},
 	}
 	assertCompareLines(t, report, rows)
-	// The report holds the verdicts, then the unavailable count directly under
-	// them, then the count lines in the Goal's order, and nothing else.
+	// The report holds the two verdicts, then the unavailable count directly under
+	// them, then the other count lines and one line per figure, and nothing else.
 	if lines := strings.Split(strings.TrimSuffix(report, "\n"), "\n"); len(lines) != len(rows) || lines[2] != rows[2].want {
 		t.Fatalf("report = %q; want %d lines with %q third", lines, len(rows), rows[2].want)
 	}
