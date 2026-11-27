@@ -110,6 +110,61 @@ func TestProvisionSeatRefusesABadName(t *testing.T) {
 	}
 }
 
+// TestSeatRunProvisionsEachSeatOnEveryRepo: two --seat flags and one --repo create
+// both seat bots, their token files and write access, and send no request about a
+// role bot, a branch protection or the viewer.
+func TestSeatRunProvisionsEachSeatOnEveryRepo(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+	res := runProvisioning(t, f, files, nil, "--seat", "alpha", "--seat", "beta", "--repo", protectionRepo)
+	if res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		user, path := DefaultBotPrefix+"seat-"+name, fixtureTokenFile("seat-"+name)
+		if perm := f.Permission(protectionRepo, user); perm != permissionWrite {
+			t.Errorf("%s holds %q on %s, want %q", user, perm, protectionRepo, permissionWrite)
+		}
+		if _, ok := fakeTokenScopes(f, user, DefaultTokenName); !ok {
+			t.Errorf("the fake holds no %s token for %s", DefaultTokenName, user)
+		}
+		if _, ok := files.files[path]; !ok {
+			t.Errorf("the run wrote no token file %s", path)
+		}
+	}
+	calls := strings.Join(sentCalls(f), "\n")
+	for _, forbidden := range []string{"branch_protections", "bot-polecat", "bot-landing", "bot-registry", "bot-viewer"} {
+		if strings.Contains(calls, forbidden) {
+			t.Errorf("the seat run sent a request about %s: %s", forbidden, calls)
+		}
+	}
+	if got := tokenFileCount(files); got != 2 {
+		t.Errorf("the seat run wrote %d token files, want the two seats'", got)
+	}
+}
+
+// TestSeatRunStopsAtTheFirstRefusedSeat: a refused grant for the first seat exits
+// non-zero and sends nothing for the second.
+func TestSeatRunStopsAtTheFirstRefusedSeat(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+	rt := failingRoute{next: f, match: "/collaborators/" + DefaultBotPrefix + "seat-alpha", method: http.MethodPut, status: http.StatusInternalServerError}
+	res := runProvisioning(t, rt, files, nil, "--seat", "alpha", "--seat", "beta", "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if calls := strings.Join(sentCalls(f), "\n"); strings.Contains(calls, DefaultBotPrefix+"seat-beta") {
+		t.Errorf("the run reached the second seat after the first failed: %s", calls)
+	}
+	if _, ok := files.files[fixtureTokenFile("seat-beta")]; ok {
+		t.Error("the run wrote the second seat's token file, want none")
+	}
+}
+
 // TestEnsureTokenRefusesASeatPrefixedRoleOutsideTheSeatGrammar checks the seat
 // scopes go only to the role ProvisionSeat builds: any other role is unknown, so
 // a string that merely starts with "seat-" cannot mint a polecat-scoped token.

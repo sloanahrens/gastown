@@ -32,6 +32,11 @@ func TestMainUsageExitsTwo(t *testing.T) {
 		"unknown role":              {args: []string{"--role", "admin"}, stderr: "unknown role 'admin'"},
 		"role with a slash":         {args: []string{"--role", "bad/role"}, stderr: "--role 'bad/role' must match"},
 		"--repo without OWNER/NAME": {args: []string{"--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
+		"--seat without --repo":     {args: []string{"--seat", "alpha"}, stderr: "--seat needs at least one --repo"},
+		"--seat with --role":        {args: []string{"--seat", "alpha", "--role", "polecat", "--repo", "acme/rig"}, stderr: "--seat cannot be combined with --role"},
+		"--seat with --revoke-token": {args: []string{"--seat", "alpha", "--revoke-token", "gt-old", "--role", "landing", "--repo", "acme/rig"},
+			stderr: "--seat cannot be combined with --revoke-token"},
+		"--seat with a bad name": {args: []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, stderr: "--seat 'Fur/iosa' must match"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -72,6 +77,7 @@ func TestMainHelpExitsZero(t *testing.T) {
 				"--dry-run",
 				"--skip-tokens",
 				"--revoke-token",
+				"--seat",
 				"with no HOME",
 				"else " + forgejoprov.DefaultAPIURL,
 				"(default: " + strings.Join(forgejoprov.DefaultRoles(), " ") + ";",
