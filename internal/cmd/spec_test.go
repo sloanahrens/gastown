@@ -5938,6 +5938,60 @@ func TestTickEffQuietRecordsHeldHashes(t *testing.T) {
 	}
 }
 
+// TestTickEffQuietSecondTickEmptyRig: over the memory the first tick's own reads
+// fill, a second tick built as the dispatcher builds its board — a fresh closure
+// per tick — reads no rig whose ready board listed nothing. The first tick reads
+// the rig once and records it; the second, over the same held hashes and a minute
+// later, skips it, so its ready read still stands at one (gt-cd7059).
+func TestTickEffQuietSecondTickEmptyRig(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	store := &sqlChildrenClient{records: [][]string{{"be_head", "be_working", "gt_head", "gt_working"}, {"b1", "b2", "g1", "g2"}}}
+	var mu sync.Mutex
+	ready := map[string]int{}
+	runTick := func(at time.Time) {
+		board := specTickBoard(specTickBoardDeps{
+			townRoot:    town,
+			maxPriority: 2,
+			reads:       newSpecTickReads(),
+			ready: func(rigPath string) ([]*beads.Issue, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				ready[filepath.Base(rigPath)]++
+				return nil, nil
+			},
+			rigStatus: func(string, string) (bool, string) { return false, "" },
+			heads: specTickHeadsHold(town, []string{"beads", "gastown"},
+				slingStores{pinned: func(string) slingStore { return store }}, func(string, ...any) {}),
+			memory:      memory,
+			now:         func() time.Time { return at },
+			detailStore: func(string) beads.Client { return nil },
+		})
+		if got := board(nil, nil, nil); len(got.Errors) != 0 {
+			t.Fatalf("board read at %v: Errors = %v, want none", at, got.Errors)
+		}
+	}
+	readsOf := func(rig string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return ready[rig]
+	}
+
+	runTick(now)
+	if got := readsOf("gastown"); got != 1 {
+		t.Fatalf("the first tick read the empty rig gastown %d time(s), want 1", got)
+	}
+
+	runTick(now.Add(time.Minute))
+	if got := readsOf("gastown"); got != 1 {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Errorf("the empty rig gastown got %d ready read(s) over two ticks, want 1: the second tick reads no rig its memory calls quiet under the held hashes (reads = %v)", got, ready)
+	}
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
