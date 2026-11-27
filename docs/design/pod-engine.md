@@ -191,6 +191,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/rehearsal/execrun.go` `ExecRun`
 - `internal/rehearsal/siderun.go` `sideCmd`
 - `internal/repoguard/gofmt.go` `CLIExec.Run`
+- `internal/sbxcreds/runner.go` `ExecRunner` — runs the argv that `Request.Argv` builds with the `docker exec` prefix, so the program is docker; `internal/daemon` does not reach `sbxcreds`, and its caller is the command bead gt-diasrp
 - `internal/testpolicy/cmd/budget/main.go` `execTest`
 - `internal/testpolicy/cmd/integrationvet/main.go` `command`
 - `internal/testutil/harness_host.go` `processHost`
