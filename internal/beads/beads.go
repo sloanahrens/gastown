@@ -1122,6 +1122,9 @@ type Beads struct {
 	// question asked and otherwise run their own bd subprocess unchanged. Same
 	// caveat as the other caches: it never refreshes.
 	issueSnapshot *issueSnapshot
+
+	// sqlRefusals is the bd sql refusal memory the reads share (WithSQLRefusalMemory).
+	sqlRefusals *SQLRefusalMemory
 }
 
 // beadsFields holds every constructor-settable field of Beads. It exists so
@@ -1152,6 +1155,7 @@ type beadsFields struct {
 	budget time.Duration
 	// bondRootOnly asks bd's mol bond for --root-only (WithBondRootOnly).
 	bondRootOnly bool
+	sqlRefusals  *SQLRefusalMemory
 }
 
 // Option configures a Beads at construction.
@@ -1163,6 +1167,17 @@ type Option func(*beadsFields)
 // later PATH change cannot swap the binary under it.
 func WithBin(path string) Option {
 	return func(f *beadsFields) { f.bin = path }
+}
+
+// WithSQLRefusalMemory makes the wrapper's bd sql reads share m, so a refused
+// read is sent once across them (gt-gen77o). A nil m sends every read.
+func WithSQLRefusalMemory(m *SQLRefusalMemory) Option {
+	return func(f *beadsFields) { f.sqlRefusals = m }
+}
+
+// Open returns New(workDir, opts...) sharing m, so one memory serves a store per rig.
+func (m *SQLRefusalMemory) Open(workDir string, opts ...Option) *Beads {
+	return New(workDir, append(append([]Option(nil), opts...), WithSQLRefusalMemory(m))...)
 }
 
 // WithEnv starts every call from env instead of the process environment;
@@ -1276,6 +1291,7 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		observe:      b.observe,
 		budget:       b.budget,
 		bondRootOnly: b.bondRootOnly,
+		sqlRefusals:  b.sqlRefusals,
 	})
 	c.plain, c.plainEnv, c.plainTimeout, c.plainGroup = b.plain, b.plainEnv, b.plainTimeout, b.plainGroup
 	c.accessMode = b.accessMode
@@ -1320,6 +1336,7 @@ func newBeads(f beadsFields) *Beads {
 		observe:      f.observe,
 		budget:       f.budget,
 		bondRootOnly: f.bondRootOnly,
+		sqlRefusals:  f.sqlRefusals,
 	}
 }
 
@@ -3270,7 +3287,7 @@ func (b *Beads) queryIssueRows(query beadsql.Query) ([]bdSQLIssueRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	sqlOut, sqlErr := b.run(args...)
+	sqlOut, sqlErr := b.sqlRefusals.Run(func() ([]byte, error) { return b.run(args...) })
 	if sqlErr != nil {
 		return nil, sqlErr
 	}
