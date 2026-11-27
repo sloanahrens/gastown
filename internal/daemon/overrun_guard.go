@@ -180,15 +180,32 @@ type overrunKeptReadStore struct {
 	// order, so the alarm can say why the guard was blind rather than only how
 	// often (gt-32qsly). It is empty exactly when blind is zero.
 	blindErr string
+	// blindStreak is the number of guard ticks in a row that dropped a seat for
+	// an unreadable bead, counting the last tick; a tick that drops none resets
+	// it to zero (gt-35d8ae).
+	blindStreak int
 }
 
-// setBlind stores the count and first error the guard tick just made; both are
-// zero and empty when it dropped none.
+// setBlind stores the count and first error the guard tick just made, and
+// extends or resets the blind streak; both are zero and empty when it dropped
+// none, and the streak is then zero.
 func (s *overrunKeptReadStore) setBlind(n int, firstErr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blind = n
 	s.blindErr = firstErr
+	if n > 0 {
+		s.blindStreak++
+	} else {
+		s.blindStreak = 0
+	}
+}
+
+// blindStreakCount is the streak the last guard tick left.
+func (s *overrunKeptReadStore) blindStreakCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blindStreak
 }
 
 // blindSeats is the count the last guard tick stored.
@@ -1312,12 +1329,14 @@ func (d *Daemon) overrunSeatRead(polecatsDir, rigName, name string) (seat overru
 
 // overrunBlindSeats is the number of seats the guard's last tick dropped
 // because their bead could not be read and no usable kept read stood in, and
-// overrunBlindError is the first such read error in that tick. Nothing reads
-// either yet: the alarm that will, after three such ticks in a row, is the next
-// bead of the split, gt-35d8ae.
+// overrunBlindError is the first such read error in that tick. overrunBlindStreak
+// is how many ticks in a row dropped one. Nothing reads them yet: the alarm that
+// will, after three such ticks in a row, is the next bead of the split, gt-0vl1d4.
 func (d *Daemon) overrunBlindSeats() int { return d.overrunKeptReads.blindSeats() }
 
 func (d *Daemon) overrunBlindError() string { return d.overrunKeptReads.blindError() }
+
+func (d *Daemon) overrunBlindStreak() int { return d.overrunKeptReads.blindStreakCount() }
 
 // gtDoneInFlight reports whether the session's heartbeat says gt done is
 // running. gt done writes state exiting first (internal/done/done.go) and renews

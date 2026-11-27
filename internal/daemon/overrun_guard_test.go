@@ -1702,7 +1702,7 @@ func checkBlind(t *testing.T, d *Daemon, wantSeats int, wantErr string) {
 // kept read; a tick that drops none resets the count and the text, and another
 // caller of overrunWorkingSeats (the overseer report) leaves both alone
 // (gt-tqv1dk, gt-32qsly). Nothing reads them yet: their alarm is the next bead
-// of the split, gt-35d8ae.
+// of the split, gt-0vl1d4.
 func TestOverrunGuardBlindCount(t *testing.T) {
 	t.Parallel()
 	d, buf, clk := newOverrunSeatDaemon(t)
@@ -1779,4 +1779,40 @@ func TestOverrunGuardBlindCount(t *testing.T) {
 		blindTick(t, d)
 		checkBlind(t, d, 2, "bead read failed with no error text")
 	})
+}
+
+// TestOverrunGuardBlindStreak: the streak counts guard ticks in a row that each
+// dropped a seat for an unreadable bead, so it reads 3 after three such ticks;
+// a tick that drops no seat reads 0, and another caller of overrunWorkingSeats
+// leaves it alone (gt-35d8ae).
+func TestOverrunGuardBlindStreak(t *testing.T) {
+	t.Parallel()
+	d, buf, _ := newOverrunSeatDaemon(t)
+	writeRigsJSON(t, d.config.TownRoot, []string{"gastown"})
+	if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.openWorkBeads = unreadableBeads{}.open
+
+	for want := 1; want <= 3; want++ {
+		blindTick(t, d)
+		if got := d.overrunBlindStreak(); got != want {
+			t.Fatalf("after blind tick %d: streak = %d, want %d:\n%s", want, got, want, buf.String())
+		}
+	}
+
+	// The walk sees the same unreadable bead and drops the seat, but it is not
+	// the guard's tick, so the streak stays where the last tick left it.
+	d.overrunWorkingSeats()
+	if got := d.overrunBlindStreak(); got != 3 {
+		t.Errorf("streak after overrunWorkingSeats = %d, want the guard's 3 left intact:\n%s", got, buf.String())
+	}
+
+	d.openWorkBeads = workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}}.open
+	if seats := blindTick(t, d); len(seats) != 1 {
+		t.Fatalf("judged %d seats where the bead reads, want 1:\n%s", len(seats), buf.String())
+	}
+	if got := d.overrunBlindStreak(); got != 0 {
+		t.Errorf("streak after a tick that drops no seat = %d, want 0:\n%s", got, buf.String())
+	}
 }
