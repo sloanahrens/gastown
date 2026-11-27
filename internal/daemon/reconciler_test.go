@@ -56,7 +56,10 @@ func TestReconcilerPatrolPass(t *testing.T) {
 
 	// Without a scheduled_maintenance block the town-state duty has no root, so
 	// it reads overdue with no result: the one duty line each active pass logs.
+	// The fixture lists no databases, so the backup duty reads unknown and its
+	// error is logged after the duty lines.
 	const townStateOverdue = "town_state overdue age 0s limit 24h0m0s"
+	const backupUnknown = "reconciler: backup unknown: backup: no databases listed"
 
 	tests := []struct {
 		name     string
@@ -66,8 +69,8 @@ func TestReconcilerPatrolPass(t *testing.T) {
 		wantRun  bool
 	}{
 		{"a disabled patrol logs nothing and records no run", true, nil, "", false},
-		{"an active shadow pass logs shadow and records its run", false, nil, "reconciler: pass (shadow)\nreconciler: shadow: " + townStateOverdue + " (would run)", true},
-		{"an active live pass logs live and records its run", false, &live, "reconciler: pass (live)\nreconciler: " + townStateOverdue, true},
+		{"an active shadow pass logs shadow and records its run", false, nil, "reconciler: pass (shadow)\nreconciler: shadow: " + townStateOverdue + " (would run)\n" + backupUnknown, true},
+		{"an active live pass logs live and records its run", false, &live, "reconciler: pass (live)\nreconciler: " + townStateOverdue + "\n" + backupUnknown, true},
 	}
 
 	for _, tt := range tests {

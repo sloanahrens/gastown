@@ -12,8 +12,9 @@ import (
 // patrol is off, so a disabled town neither logs nor records a run. An active
 // pass logs whether it is shadow (judges only) or live, keeps the observations
 // it judged for dutyObservations to read, logs one line for each duty it finds
-// due or overdue, writes them to the duty state record the jobs list reads, then
-// records its completion time, which is what the patrol's due-ness check reads.
+// due or overdue and one for each unknown duty, writes them to the duty state
+// record the jobs list reads, then records its completion time, which is what
+// the patrol's due-ness check reads.
 func (d *Daemon) runReconciler() {
 	if !d.isPatrolActive("reconciler") {
 		return
@@ -36,6 +37,7 @@ func (d *Daemon) runReconciler() {
 	d.dutyObsMu.Unlock()
 	limits := dutyLimits(rc, obs)
 	d.logWouldRun(mode, obs, limits)
+	d.logUnknown(obs)
 	d.recordDutyState(now, obs, limits)
 	d.recordPatrolRun(&d.reconcilerRun, "reconciler", now)
 }
@@ -44,7 +46,7 @@ func (d *Daemon) runReconciler() {
 // duty's name and verdict, how old its last good result is, and the limit it
 // was judged by. A shadow pass names the mode and marks the line "(would run)",
 // so the log says no duty ran; a live pass logs plain. An ok duty logs nothing,
-// and an unknown duty logs nothing here.
+// and an unknown duty is logged by logUnknown.
 func (d *Daemon) logWouldRun(mode string, obs []reconcile.Observation, limits map[string]time.Duration) {
 	for _, o := range obs {
 		if o.Verdict != reconcile.VerdictDue && o.Verdict != reconcile.VerdictOverdue {
@@ -55,6 +57,23 @@ func (d *Daemon) logWouldRun(mode string, obs []reconcile.Observation, limits ma
 			continue
 		}
 		d.logger.Printf("reconciler: %s %s age %s limit %s", o.Duty, o.Verdict, o.Age, limits[o.Duty])
+	}
+}
+
+// logUnknown logs one line for each duty the pass could not judge: its name and
+// the reader's error, in shadow and live mode alike, so an unreadable duty is
+// never silent. An unknown duty with no error is dated after now, so it logs
+// that reason instead of a nil error.
+func (d *Daemon) logUnknown(obs []reconcile.Observation) {
+	for _, o := range obs {
+		if o.Verdict != reconcile.VerdictUnknown {
+			continue
+		}
+		reason := "its last good result is dated after now"
+		if o.Err != nil {
+			reason = o.Err.Error()
+		}
+		d.logger.Printf("reconciler: %s unknown: %s", o.Duty, reason)
 	}
 }
 
@@ -74,7 +93,8 @@ func (d *Daemon) recordDutyState(at time.Time, obs []reconcile.Observation, limi
 // dutyLimits maps each observed duty to the limit its family reads from rc. A
 // gc observation is named gc:<db> and reads the gc limit. A limit ParseLimit
 // refuses leaves its duty out, so the record holds 0 for it; the observation
-// already carries the refused setting as its error, so nothing is logged here.
+// already carries the refused setting as its error, which the pass logs as an
+// unknown duty.
 func dutyLimits(rc *config.ReconcilerConfig, obs []reconcile.Observation) map[string]time.Duration {
 	limits := make(map[string]time.Duration, len(obs))
 	for _, o := range obs {

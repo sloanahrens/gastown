@@ -54,9 +54,9 @@ func TestReconcilerPassKeepsObservations(t *testing.T) {
 
 // TestReconcilerPassLogsWouldRun: a pass logs one line for each duty it finds
 // due or overdue — its name, verdict, age and limit — marked "(would run)" in
-// shadow mode and plain in live mode. An ok or unknown duty logs nothing, so a
-// pass whose duties are all fresh logs only its pass line. Logging an ok duty
-// turns the no-duty-line rows red (gt-ucuzr9).
+// shadow mode and plain in live mode. An ok duty logs nothing, so a pass whose
+// duties are all fresh logs only its pass line. Logging an ok duty turns the
+// no-duty-line row red (gt-ucuzr9).
 func TestReconcilerPassLogsWouldRun(t *testing.T) {
 	t.Parallel()
 
@@ -68,7 +68,6 @@ func TestReconcilerPassLogsWouldRun(t *testing.T) {
 		name        string
 		shadow      *bool
 		backupLimit string
-		breakGC     bool
 		wantLog     func(backup reconcile.Observation) string
 	}{
 		{
@@ -100,11 +99,6 @@ func TestReconcilerPassLogsWouldRun(t *testing.T) {
 			name:    "an ok duty logs nothing",
 			wantLog: func(reconcile.Observation) string { return "reconciler: pass (shadow)" },
 		},
-		{
-			name:    "an unknown duty logs nothing",
-			breakGC: true,
-			wantLog: func(reconcile.Observation) string { return "reconciler: pass (shadow)" },
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -113,12 +107,89 @@ func TestReconcilerPassLogsWouldRun(t *testing.T) {
 			d.patrolConfig.Patrols.Reconciler.Enabled = true
 			d.patrolConfig.Patrols.Reconciler.Shadow = tt.shadow
 			d.patrolConfig.Patrols.Reconciler.BackupLimit = tt.backupLimit
-			if tt.breakGC {
-				path := maintenanceGCStatePath(d.config.TownRoot)
-				if err := os.Remove(path); err != nil {
+			var logs bytes.Buffer
+			d.logger = log.New(&logs, "", 0)
+
+			d.runReconciler()
+
+			backup := dutyObservation(t, d.dutyObservations(), "backup")
+			want := tt.wantLog(backup)
+			if got := strings.TrimSpace(logs.String()); got != want {
+				t.Errorf("log = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestReconcilerPassLogsUnknown: a pass logs one line for each unknown duty,
+// "reconciler: <duty> unknown: <error>", in shadow and in live mode alike, so a
+// duty the reconciler cannot read is never silent. A read error logs its text;
+// a last good result dated after now has no error, so it logs that reason.
+// Dropping the logUnknown call from runReconciler turns every row red.
+func TestReconcilerPassLogsUnknown(t *testing.T) {
+	t.Parallel()
+	live := false
+	tests := []struct {
+		name    string
+		shadow  *bool
+		gcLimit string
+		breakGC bool
+		future  bool
+		want    func(t *testing.T, obs []reconcile.Observation) string
+	}{
+		{
+			name:    "an unreadable gc state logs its error in shadow mode",
+			breakGC: true,
+			want: func(t *testing.T, obs []reconcile.Observation) string {
+				return "reconciler: pass (shadow)\nreconciler: gc unknown: " + dutyObservation(t, obs, "gc").Err.Error()
+			},
+		},
+		{
+			name:    "an unreadable gc state logs its error in live mode",
+			shadow:  &live,
+			breakGC: true,
+			want: func(t *testing.T, obs []reconcile.Observation) string {
+				return "reconciler: pass (live)\nreconciler: gc unknown: " + dutyObservation(t, obs, "gc").Err.Error()
+			},
+		},
+		{
+			name:    "a refused gc limit logs its error in shadow mode",
+			gcLimit: "a while",
+			want: func(t *testing.T, obs []reconcile.Observation) string {
+				return "reconciler: pass (shadow)\nreconciler: gc unknown: " + dutyObservation(t, obs, "gc").Err.Error()
+			},
+		},
+		{
+			name:   "a gc state dated after now logs that reason in live mode",
+			shadow: &live,
+			future: true,
+			want: func(t *testing.T, obs []reconcile.Observation) string {
+				return "reconciler: pass (live)\n" +
+					"reconciler: gc:gastown unknown: its last good result is dated after now\n" +
+					"reconciler: gc:hq unknown: its last good result is dated after now"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := liveDaemon(t, time.Now())
+			d.patrolConfig.Patrols.Reconciler.Enabled = true
+			d.patrolConfig.Patrols.Reconciler.Shadow = tt.shadow
+			d.patrolConfig.Patrols.Reconciler.GCLimit = tt.gcLimit
+			statePath := maintenanceGCStatePath(d.config.TownRoot)
+			if tt.future {
+				later := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+				state := `{"last_gc":{"hq":"` + later + `","gastown":"` + later + `"}}`
+				if err := os.WriteFile(statePath, []byte(state), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Mkdir(path, 0o755); err != nil {
+			}
+			if tt.breakGC {
+				if err := os.Remove(statePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(statePath, 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -127,8 +198,7 @@ func TestReconcilerPassLogsWouldRun(t *testing.T) {
 
 			d.runReconciler()
 
-			backup := dutyObservation(t, d.dutyObservations(), "backup")
-			want := tt.wantLog(backup)
+			want := tt.want(t, d.dutyObservations())
 			if got := strings.TrimSpace(logs.String()); got != want {
 				t.Errorf("log = %q, want %q", got, want)
 			}
@@ -202,7 +272,7 @@ func TestDutyStatePassWriteFails(t *testing.T) {
 // TestDutyStatePassBadLimit: with a refused gc limit the record is still
 // written. The gc observation is unknown with the refused setting as its error,
 // its record holds limit 0, the other duties keep their family limits, and the
-// log holds only the pass line.
+// log holds the pass line and then the gc duty's unknown line with that error.
 func TestDutyStatePassBadLimit(t *testing.T) {
 	t.Parallel()
 	d := liveDaemon(t, time.Now())
@@ -221,8 +291,10 @@ func TestDutyStatePassBadLimit(t *testing.T) {
 	if sig := dutyRecordSignature(state.Duties); sig != want {
 		t.Errorf("duty state records = %q, want %q", sig, want)
 	}
-	if got := strings.TrimSpace(logs.String()); got != "reconciler: pass (shadow)" {
-		t.Errorf("log = %q, want only the pass line", got)
+	gc := dutyObservation(t, d.dutyObservations(), "gc")
+	wantLog := "reconciler: pass (shadow)\nreconciler: gc unknown: " + gc.Err.Error()
+	if got := strings.TrimSpace(logs.String()); got != wantLog {
+		t.Errorf("log = %q, want %q", got, wantLog)
 	}
 }
 
