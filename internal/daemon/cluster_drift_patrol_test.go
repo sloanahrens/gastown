@@ -240,6 +240,109 @@ func TestClusterDriftPatrolKeepsAFailedRun(t *testing.T) {
 	}
 }
 
+// clusterDriftAnswer is one scripted compare answer: the difference lines and
+// the read error.
+type clusterDriftAnswer struct {
+	differing []string
+	err       error
+}
+
+// clusterDriftSource is a collector whose answer walks answers in order. A call
+// past the script is a failed read, so a test that expects no call sees an
+// unreadable item instead of a pass.
+func clusterDriftSource(answers ...clusterDriftAnswer) *attentionSources {
+	s := &attentionSources{clusterDriftEnabled: func() bool { return true }}
+	i := 0
+	s.clusterDriftAnswer = func(context.Context) (clusterDriftResult, error) {
+		if i >= len(answers) {
+			return clusterDriftResult{}, errors.New("the test scripted no more answers")
+		}
+		a := answers[i]
+		i++
+		return clusterDriftResult{Differing: a.differing}, a.err
+	}
+	return s
+}
+
+// The three answers the drift tests script.
+var (
+	clusterDriftDiffers = clusterDriftAnswer{differing: []string{"Deployment/gastown-daemon: spec.replicas 2 -> 3"}}
+	clusterDriftFailed  = clusterDriftAnswer{err: errors.New("the cluster read was refused")}
+	clusterDriftInStep  = clusterDriftAnswer{}
+)
+
+// clusterDriftBeat runs one heartbeat and fails unless it returns exactly the
+// keys given, in any order. It then hands the items back as prev, the queue the
+// next heartbeat reads, as one tick of this collector leaves it.
+func clusterDriftBeat(t *testing.T, s *attentionSources, keys ...string) {
+	t.Helper()
+	items := collectClusterDriftOnce(t, s)
+	if len(items) != len(keys) {
+		t.Fatalf("items = %+v, want exactly the keys %v", items, keys)
+	}
+	for _, key := range keys {
+		found := false
+		for _, it := range items {
+			found = found || it.Key == key
+		}
+		if !found {
+			t.Errorf("items = %+v, want an item with key %q", items, key)
+		}
+	}
+	s.prev = attention.State{Items: items}
+}
+
+// TestClusterDriftPatrolKeepsTheDriftThroughFailures is the bead's first two
+// boxes: a failure with no earlier difference raises only the unreadable item,
+// a difference raised after it returns beside the unreadable item on the failed
+// runs that follow, and a clean run clears both.
+func TestClusterDriftPatrolKeepsTheDriftThroughFailures(t *testing.T) {
+	t.Parallel()
+	s := clusterDriftSource(clusterDriftFailed, clusterDriftDiffers, clusterDriftFailed, clusterDriftFailed, clusterDriftInStep)
+	clusterDriftBeat(t, s, attention.RuleClusterDriftUnreadable)
+	clusterDriftBeat(t, s, attention.RuleClusterDrift)
+	for i := 0; i < 2; i++ {
+		clusterDriftBeat(t, s, attention.RuleClusterDriftUnreadable, attention.RuleClusterDrift)
+	}
+	clusterDriftBeat(t, s)
+}
+
+// TestClusterDriftPatrolImageRollRaisesNothing is the bead's third box: the
+// compare skips digests, the polecat-image annotation and restartedAt, so an
+// image roll alone answers no difference and the collector raises nothing,
+// clearing the difference it raised before the roll. Mutation: make the roll's
+// answer carry a difference and this test goes red.
+func TestClusterDriftPatrolImageRollRaisesNothing(t *testing.T) {
+	t.Parallel()
+	s := clusterDriftSource(clusterDriftDiffers, clusterDriftInStep)
+	clusterDriftBeat(t, s, attention.RuleClusterDrift)
+	clusterDriftBeat(t, s)
+}
+
+// TestClusterDriftPatrolKeepsTheDriftAcrossTicks: an unreadable run in the
+// production tick, whose sources are built afresh each time, still returns the
+// difference the queue held from the run before it.
+func TestClusterDriftPatrolKeepsTheDriftAcrossTicks(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC))
+	for _, answer := range []clusterDriftAnswer{clusterDriftDiffers, clusterDriftFailed} {
+		f.d.writeAttentionWith(2*time.Second, func(time.Time) *attentionSources {
+			src := *f.src
+			src.clusterDriftEnabled = func() bool { return true }
+			src.clusterDriftAnswer = func(context.Context) (clusterDriftResult, error) {
+				return clusterDriftResult{Differing: answer.differing}, answer.err
+			}
+			return &src
+		})
+	}
+	st, err := attention.ReadState(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	itemByKey(t, st, attention.RuleClusterDriftUnreadable)
+	itemByKey(t, st, attention.RuleClusterDrift)
+}
+
 // TestClusterDriftPatrolNilCompareIsUnreadable: with the production wiring and
 // no compare set, a setting that is on raises the unreadable item rather than
 // a false clear, on the first heartbeat and on the next.

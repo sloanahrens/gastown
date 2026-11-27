@@ -16,18 +16,32 @@ var errClusterDriftNoAnswer = errors.New("no drift compare is wired into the dae
 // drift item for a difference and the unreadable item for a read that failed
 // or was never wired. It answers nothing while the patrol is off, and calls
 // the answer on every heartbeat; the 15 minute cadence is the cache bead's
-// (gt-0cdmgq). The error it returns is always nil, so a failed answer applies
-// the unreadable item at once instead of keeping the previous drift item, and
-// no timer retries (gt-b6j1k5).
+// (gt-0cdmgq). The error it returns is always nil and no timer retries: a
+// failed answer applies the unreadable item at once and keeps the drift item
+// from prev, the last run that read the cluster and found a difference, so a
+// failed read never clears an open difference (gt-b6j1k5, gt-9jbtl6).
 func (s *attentionSources) collectClusterDrift(ctx context.Context) ([]attention.Item, error) {
 	if s.clusterDriftEnabled == nil || !s.clusterDriftEnabled() {
 		return nil, nil
 	}
 	if s.clusterDriftAnswer == nil {
-		return clusterDriftItems(clusterDriftResult{}, errClusterDriftNoAnswer), nil
+		return clusterDriftKeepingTheDifference(s.prev, clusterDriftItems(clusterDriftResult{}, errClusterDriftNoAnswer)), nil
 	}
 	res, err := s.clusterDriftAnswer(ctx)
-	return clusterDriftItems(res, err), nil
+	return clusterDriftKeepingTheDifference(s.prev, clusterDriftItems(res, err)), nil
+}
+
+// clusterDriftKeepingTheDifference returns an unreadable run's item beside the
+// drift item the last readable run with a difference raised, held in prev until
+// a run reads the cluster again: a clean run returns neither and clears both, a
+// run with a difference replaces the kept one. The drift item is never built
+// from a failed read, so a failure cannot clear an open difference
+// (gt-9jbtl6).
+func clusterDriftKeepingTheDifference(prev attention.State, items []attention.Item) []attention.Item {
+	if len(items) != 1 || items[0].Kind != attention.KindClusterDriftUnreadable {
+		return items
+	}
+	return append(prevOfKind(prev, attention.KindClusterDrift), items...)
 }
 
 // clusterDriftRun is the compare the cache runs: the injected one, or the
