@@ -45,6 +45,41 @@ func TestEstimateTextLabels(t *testing.T) {
 	}
 }
 
+func TestEstimateTextDropsAttachmentLines(t *testing.T) {
+	t.Parallel()
+	const content = "## Goal\nDo it.\n\n## Constraints\n- one\n"
+	const attachment = "attached_molecule: gt-wisp-x\n" +
+		"attached_formula: mol-polecat-work\n" +
+		"attached_at: 2026-11-27T05:23:51Z\n" +
+		"attached_args: HOST SAFETY: use a temporary INSTALL_DIR\n" +
+		"attached_vars: [\"issue=gt-x\"]\n" +
+		"dispatched_by: daemon/spec-dispatch\n" +
+		"formula_vars: [\"issue=gt-x\"]\n"
+	tests := []struct {
+		name        string
+		description string
+	}{
+		{"without attachment block", content},
+		{"with attachment block", attachment + "\n" + content},
+	}
+	want := "# Add shape [open task P2]\n\n## Description\n\n" + content
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			issue := &beads.Issue{
+				Title:       "Add shape",
+				Status:      "open",
+				Type:        "task",
+				Priority:    2,
+				Description: tc.description,
+			}
+			if got := EstimateText(issue); got != want {
+				t.Errorf("EstimateText() =\n%q\nwant\n%q", got, want)
+			}
+		})
+	}
+}
+
 func TestEstimateTextEmptyDescription(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{
