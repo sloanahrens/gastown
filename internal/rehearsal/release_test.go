@@ -1,0 +1,118 @@
+package rehearsal
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/jonboulle/clockwork"
+)
+
+var releaseEpoch = time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+
+func TestRehearsalReleaseOutcomesAndSeconds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		err     error
+		outcome string
+	}{
+		{"nil is ok", nil, SlingOK},
+		{"a plain error is failed", errors.New("boom"), SlingFailed},
+		{"a wrapped deadline is killed", fmt.Errorf("sling: %w", context.DeadlineExceeded), SlingKilled},
+		{"deadline text without the wrap is failed", errors.New("context deadline exceeded"), SlingFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk := clockwork.NewFakeClockAt(releaseEpoch)
+			sling := func(context.Context, string) error { clk.Advance(2 * time.Second); return tc.err }
+			got := Release(t.Context(), []string{"bead-1"}, 1, sling, clk.Now)
+			want := []Sling{{Bead: "bead-1", Outcome: tc.outcome, Seconds: 2}}
+			if !slices.Equal(got, want) {
+				t.Errorf("Release = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestRehearsalReleaseNeverExceedsInFlight(t *testing.T) {
+	t.Parallel()
+	const inFlight = 3
+	ids := []string{"b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b09", "b10", "b11", "b12"}
+	var running, peak atomic.Int32
+	var once sync.Once
+	full, unblock := make(chan struct{}), make(chan struct{})
+	sling := func(context.Context, string) error {
+		n := running.Add(1)
+		defer running.Add(-1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		if n == inFlight {
+			once.Do(func() { close(full) })
+		}
+		<-unblock
+		return nil
+	}
+	clk := clockwork.NewFakeClockAt(releaseEpoch)
+	done := make(chan []Sling)
+	go func() { done <- Release(t.Context(), ids, inFlight, sling, clk.Now) }()
+	<-full
+	close(unblock)
+	got := <-done
+	if p := peak.Load(); p != inFlight {
+		t.Errorf("peak concurrent slings = %d, want %d", p, inFlight)
+	}
+	for i, s := range got {
+		if s.Bead != ids[i] || s.Outcome != SlingOK {
+			t.Errorf("result %d = %+v, want bead %q ok", i, s, ids[i])
+		}
+	}
+}
+
+func TestRehearsalReleaseStartsInIdOrder(t *testing.T) {
+	t.Parallel()
+	// An inFlight of 0 is below one and must run one at a time, not deadlock.
+	for _, inFlight := range []int{1, 0} {
+		t.Run(fmt.Sprintf("inFlight %d", inFlight), func(t *testing.T) {
+			t.Parallel()
+			ids := []string{"b1", "b2", "b3", "b4"}
+			var mu sync.Mutex
+			var started []string
+			sling := func(_ context.Context, id string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				started = append(started, id)
+				return nil
+			}
+			Release(t.Context(), ids, inFlight, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
+			if !slices.Equal(started, ids) {
+				t.Errorf("started %v, want %v", started, ids)
+			}
+		})
+	}
+}
+
+func TestRehearsalReleaseReportsInIdOrderWhenSlingsFinishOutOfOrder(t *testing.T) {
+	t.Parallel()
+	lastDone := make(chan struct{})
+	sling := func(_ context.Context, id string) error {
+		switch id {
+		case "b1":
+			<-lastDone
+		case "b4":
+			defer close(lastDone)
+			return errors.New("boom")
+		}
+		return nil
+	}
+	got := Release(t.Context(), []string{"b1", "b2", "b3", "b4"}, 4, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
+	if got[0] != (Sling{Bead: "b1", Outcome: SlingOK}) || got[3] != (Sling{Bead: "b4", Outcome: SlingFailed}) {
+		t.Errorf("Release = %+v, want b1 ok first and b4 failed last", got)
+	}
+}
