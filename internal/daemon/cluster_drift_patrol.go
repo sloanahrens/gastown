@@ -3,9 +3,26 @@ package daemon
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 )
+
+// clusterDriftStartDelay is how long after the daemon starts the drift patrol
+// waits before its first run: a roll starts the new daemon while the gateway
+// and dashboard rollouts may still be settling (gt-myyr6e). It is a constant,
+// not a setting.
+const clusterDriftStartDelay = 3 * time.Minute
+
+// clusterDriftStarting reports whether now is still inside clusterDriftStartDelay
+// after the daemon started. A daemon with no recorded start is not starting.
+func (d *Daemon) clusterDriftStarting(now time.Time) bool {
+	started := d.clusterDriftCache.started
+	if started.IsZero() {
+		return false
+	}
+	return now.Sub(started) < clusterDriftStartDelay
+}
 
 // errClusterDriftNoAnswer is the unreadable item's reason when the setting is
 // on and no compare is wired: a clear would claim the cluster was read and in
