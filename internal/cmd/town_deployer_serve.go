@@ -16,8 +16,9 @@ import (
 	"github.com/steveyegge/gastown/internal/deployerinbox"
 )
 
-// serveSteps is the deployer's plan, apply, rollback and record steps; nil
-// until bead gt-1afrbd wires them, and the run refuses a nil one.
+// serveSteps is the deployer's plan, apply, rollback and record steps. It is
+// nil in production, where the run builds the real steps from its flags; a
+// test sets it to drive the command's run with its own steps.
 var serveSteps deployerinbox.Steps
 
 var townDeployerServeCmd = &cobra.Command{
@@ -59,12 +60,18 @@ func runTownDeployerServe(cmd *cobra.Command, _ []string) error {
 		}
 		values[name] = v
 	}
+	// A test injects its own steps; the command runs the real plan and apply
+	// code, configured from the flags the run was given.
+	steps := serveSteps
+	if steps == nil {
+		steps = newRealSteps(values["state"], values["inbox"])
+	}
 	return runTownDeployerServeIn(cmd.Context(), townDeployerServeEnv{
 		once:    once,
 		inbox:   values["inbox"],
 		answers: values["answers"],
 		state:   values["state"],
-		steps:   serveSteps,
+		steps:   steps,
 		now:     time.Now,
 		out:     cmd.OutOrStdout(),
 	})
