@@ -63,6 +63,9 @@ type Run struct {
 	// Env is the environment a provider create runs with; the credential is added
 	// to a copy of it, so the secret reaches only that child.
 	Env []string
+	// Seats are the --seat names whose forgejo-seat-NAME providers Execute
+	// creates after the shared providers.
+	Seats []string
 	// Out receives the run's progress lines and what openshell prints to stdout.
 	Out io.Writer
 	// Err receives what openshell prints to stderr.
