@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/sbxcreds"
 )
 
 // newTownClusterCredentialsCmd builds `gt town cluster credentials` with the --cluster, --role and --out
@@ -24,4 +26,8 @@ func newTownClusterCredentialsCmd(run func(ctx context.Context, argv []string) (
 	cmd.Flags().StringVar(&role, "role", "", "the deployer role: read, policy or apply")
 	cmd.Flags().StringVar(&out, "out", "", "the kubeconfig path to write")
 	return cmd
+}
+
+func init() {
+	townClusterCmd.AddCommand(newTownClusterCredentialsCmd(sbxcreds.ExecRunner))
 }

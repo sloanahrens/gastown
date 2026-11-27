@@ -5,8 +5,11 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestClusterCredentialsCommandName holds the constructed command to the name credentials.
@@ -32,6 +35,23 @@ func TestClusterCredentialsCommandFlags(t *testing.T) {
 		}
 		if f.DefValue != "" {
 			t.Errorf("--%s default = %q, want empty", name, f.DefValue)
+		}
+	}
+}
+
+// TestClusterCredentialsCommandRegistered holds the command to its place under
+// townClusterCmd, with the --cluster, --role and --out flags it takes. It reads
+// the registered command and sets no flag on it.
+func TestClusterCredentialsCommandRegistered(t *testing.T) {
+	t.Parallel()
+	commands := townClusterCmd.Commands()
+	i := slices.IndexFunc(commands, func(c *cobra.Command) bool { return c.Name() == "credentials" })
+	if i < 0 {
+		t.Fatalf("townClusterCmd has no credentials command")
+	}
+	for _, name := range []string{"cluster", "role", "out"} {
+		if commands[i].Flags().Lookup(name) == nil {
+			t.Errorf("credentials has no --%s flag", name)
 		}
 	}
 }
