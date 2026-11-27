@@ -461,7 +461,15 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	took := d.clk().Now().Sub(start)
 	elapsed := took.Round(time.Second)
 	if err != nil {
-		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
+		// A sling writes each phase to stderr as it ends, so a sling killed at
+		// its bound leaves the phases it did finish (gt-p97r7p).
+		phases, last := splitSpecSlingStderr(string(stderr))
+		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, last)
+		if len(phases) > 0 {
+			d.logger.Printf("spec_dispatch: %s: phases completed before the failure: %s", f.Bead, strings.Join(phases, ", "))
+		} else {
+			d.logger.Printf("spec_dispatch: %s: the sling reported no phase before the failure", f.Bead)
+		}
 		// A process that ran out its whole bound was killed by the bound, not
 		// by the daemon: the daemon's ctx is untouched, so a canceled sling is
 		// the shutdown path, which failSpecSling leaves alone. The run is
@@ -488,6 +496,23 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	}
 	result, entry := specSlingResultOf(r, f.Bead)
 	d.feedSpecSlingOutcome(f, result, entry)
+}
+
+// splitSpecSlingStderr separates a failed sling's phase reports from the rest
+// of its stderr, so the log can name the phases a kill cut short while the
+// failure reason still quotes a line that is not one of them (gt-d68ibg).
+func splitSpecSlingStderr(stderr string) (phases []string, last string) {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if name, ok := strings.CutPrefix(line, session.PhaseLinePrefix); ok {
+			if name = strings.TrimSpace(name); name != "" {
+				phases = append(phases, name)
+			}
+		} else if line != "" {
+			last = line
+		}
+	}
+	return phases, last
 }
 
 // specSlingCensusPath names the file this sling writes its bd census to: the
