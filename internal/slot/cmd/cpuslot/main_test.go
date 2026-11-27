@@ -6,7 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -229,6 +231,122 @@ func TestWithCoreShareDoesNotModifyItsArgument(t *testing.T) {
 	}
 	if env[0] != "PATH=/bin" {
 		t.Fatalf("withCoreShare changed the argument's first entry: %q, want %q", env[0], "PATH=/bin")
+	}
+}
+
+// TestCPUSlotShare drives runFrom into the queued command on a host with 24
+// cores and a class of 3: a crew worktree's child runs with its third of the
+// cores unless the build already names a GOMAXPROCS, and a command from any
+// other tree takes the unchanged path, which reads no environment here.
+// Mutation: hand the class the caller's environment as it is, and the crew row
+// loses its GOMAXPROCS.
+func TestCPUSlotShare(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	cases := []struct {
+		name string
+		cwd  string
+		env  []string
+		want []string // nil: the command runs unchanged
+	}{
+		{
+			name: "crew worktree",
+			cwd:  town + "/gastown/crew/olive",
+			env:  []string{"PATH=/bin"},
+			want: []string{"PATH=/bin", "GOMAXPROCS=8"},
+		},
+		{
+			name: "crew worktree whose build names its own",
+			cwd:  town + "/gastown/crew/olive",
+			env:  []string{"GOMAXPROCS=4"},
+			want: []string{"GOMAXPROCS=4"},
+		},
+		{
+			name: "outside a crew worktree",
+			cwd:  town + "/gastown/polecats/dag/gastown",
+			env:  []string{"PATH=/bin"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var classes []slot.CPURunOptions
+			var sizedFor []string
+			r := &recorder{
+				getwd: func() (string, error) { return tc.cwd, nil },
+				find:  func(string) (string, error) { return town, nil },
+			}
+			h := r.host()
+			h.queued = queuedUnder(time.Minute, machine{
+				environ: func() []string { return tc.env },
+				numCPU:  24,
+				classSize: func(townRoot string) int {
+					sizedFor = append(sizedFor, townRoot)
+					return 3
+				},
+				runCPU: func(townRoot string, opts slot.CPURunOptions) (int, error) {
+					classes = append(classes, opts)
+					return 7, nil
+				},
+			})
+
+			code, err := runFrom([]string{"go", "test", "./..."}, h)
+			if err != nil {
+				t.Fatalf("runFrom: %v", err)
+			}
+			if tc.want == nil {
+				if code != 42 || len(r.ran) != 1 || len(classes) != 0 || len(sizedFor) != 0 {
+					t.Fatalf("code %d, unchanged runs %v, class runs %d, size reads %v; want only the unchanged command", code, r.ran, len(classes), sizedFor)
+				}
+				return
+			}
+			if code != 7 || len(classes) != 1 {
+				t.Fatalf("code %d, class runs %d; want the one class run's 7", code, len(classes))
+			}
+			got := classes[0]
+			if got.Environ == nil {
+				t.Fatal("the class run names no environment, so the child gets the caller's with no core share")
+			}
+			if child := got.Environ(); !slices.Equal(child, tc.want) {
+				var procs []string
+				for _, entry := range child {
+					if strings.HasPrefix(entry, "GOMAXPROCS=") {
+						procs = append(procs, entry)
+					}
+				}
+				t.Errorf("child has %d entries with %v, want %d entries ending %s", len(child), procs, len(tc.want), tc.want[len(tc.want)-1])
+			}
+			if got.Size != 3 || !slices.Equal(sizedFor, []string{town}) {
+				t.Errorf("class size = %d read for %v, want 3 read once for %s", got.Size, sizedFor, town)
+			}
+			if got.Role != "gastown/crew/olive" || got.Timeout != time.Minute || !slices.Equal(got.Args, []string{"go", "test", "./..."}) {
+				t.Errorf("class run = role %q, timeout %s, args %v; want the caller's", got.Role, got.Timeout, got.Args)
+			}
+		})
+	}
+}
+
+// TestCPUSlotShareReportsTheClassError: a queued command the class could not
+// run fails runFrom with that error, so the build does not read as run.
+// Mutation: return nil for the class's error, and the refusal reads as success.
+func TestCPUSlotShareReportsTheClassError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &recorder{
+		getwd: func() (string, error) { return town + "/gastown/crew/olive", nil },
+		find:  func(string) (string, error) { return town, nil },
+	}
+	refused := errors.New("no CPU-class slot")
+	h := r.host()
+	h.queued = queuedUnder(time.Minute, machine{
+		environ:   func() []string { return nil },
+		numCPU:    24,
+		classSize: func(string) int { return 3 },
+		runCPU:    func(string, slot.CPURunOptions) (int, error) { return 0, refused },
+	})
+
+	if _, err := runFrom([]string{"go", "build"}, h); !errors.Is(err, refused) {
+		t.Fatalf("runFrom error = %v, want the class's %v", err, refused)
 	}
 }
 

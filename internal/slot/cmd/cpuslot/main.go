@@ -2,7 +2,9 @@
 // it starts from a crew checkout, and runs it unchanged everywhere else. The
 // gate and presubmit recipes call it ahead of their go build, vet and test
 // steps, so a burst of crew worktrees building at once queues instead of
-// starving the daemon, bd and the dispatcher (gt-bq68w).
+// starving the daemon, bd and the dispatcher (gt-bq68w). A queued command also
+// gets GOMAXPROCS set to one slot's share of the cores, which each Go process
+// it starts reads as its own limit; a command that names a GOMAXPROCS keeps it.
 //
 // The wrapper's own flags come before the command, and leading VAR=value
 // assignments are env(1) assignments the command runs under:
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -58,20 +61,46 @@ func run(timeout time.Duration, args []string) (int, error) {
 		run: func(args []string) (int, error) {
 			return slot.RunCommandUnslotted(args, os.Getenv("PATH"), os.Stdin, os.Stdout, os.Stderr)
 		},
-		queued: func(townRoot, role string, args []string) (int, error) {
-			return slot.RunCPU(townRoot, slot.CPURunOptions{
-				Role:    role,
-				Timeout: timeout,
-				Size:    slot.CPUClassSize(townRoot),
-				Args:    args,
-				Path:    os.Getenv("PATH"),
-				Stdin:   os.Stdin,
-				Stdout:  os.Stdout,
-				Stderr:  os.Stderr,
-			})
-		},
+		queued: queuedUnder(timeout, machine{
+			environ:   os.Environ,
+			numCPU:    runtime.NumCPU(),
+			classSize: slot.CPUClassSize,
+			runCPU:    slot.RunCPU,
+		}),
 		warn: os.Stderr,
 	})
+}
+
+// machine is what a queued command takes from the host it runs on, injected so
+// a test reads the child a crew build gets without taking a slot.
+type machine struct {
+	environ   func() []string
+	numCPU    int
+	classSize func(townRoot string) int
+	runCPU    func(townRoot string, opts slot.CPURunOptions) (int, error)
+}
+
+// queuedUnder is run's queued command: args run under a CPU-class slot, waiting
+// up to timeout for one, in an environment that carries one slot's share of the
+// cores. The class size is read once, so the share and the number of slots
+// agree.
+func queuedUnder(timeout time.Duration, m machine) func(townRoot, role string, args []string) (int, error) {
+	return func(townRoot, role string, args []string) (int, error) {
+		size := m.classSize(townRoot)
+		return m.runCPU(townRoot, slot.CPURunOptions{
+			Role:    role,
+			Timeout: timeout,
+			Size:    size,
+			Args:    args,
+			Path:    os.Getenv("PATH"),
+			Environ: func() []string {
+				return withCoreShare(m.environ(), slot.CPUShare(m.numCPU, size))
+			},
+			Stdin:  os.Stdin,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		})
+	}
 }
 
 // runFrom runs args under a CPU-class slot only when cwd is inside a crew
