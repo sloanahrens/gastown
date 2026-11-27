@@ -2153,7 +2153,8 @@ func backupTestDaemon(t *testing.T) (*Daemon, *gitfake.Fake) {
 	t.Helper()
 	// The notifier records the alerts and clears a verify raises, so a test
 	// that does not look at them never reaches `gt escalate`.
-	d := &Daemon{logger: log.New(io.Discard, "", 0), notifier: notifyfake.New()}
+	// A paged read of the events table stages its pages under the town root.
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), notifier: notifyfake.New()}
 	return d, useGitfake(t, d)
 }
 
@@ -2225,6 +2226,70 @@ func writeNLines(t *testing.T, path string, n int) {
 
 func itoa(i int) string {
 	return strconv.Itoa(i)
+}
+
+// writeTableRows writes dir's export of table as a fake exporter reporting n
+// rows does. Events rows are ones a paged read accepts, in keyset order: each
+// has its own UUID id, which the next page's query takes, and a created_at.
+func writeTableRows(t *testing.T, dir, table string, n int) {
+	t.Helper()
+	path := filepath.Join(dir, table+".jsonl")
+	if table != "events" {
+		writeNLines(t, path, n)
+		return
+	}
+	var buf strings.Builder
+	for i := range n {
+		buf.WriteString(eventsLine(fmt.Sprintf("00000000-0000-0000-0000-%012d", i), "2026-10-21 12:00:00") + "\n")
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+func TestBackupFakesServeAPagedRead(t *testing.T) {
+	t.Parallel()
+	const rows = 3
+	clk := func() *clockwork.FakeClock {
+		return clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 5, 0, 0, time.UTC))
+	}
+	counts := map[string]int{"events": rows}
+	for _, tc := range []struct {
+		name string
+		fake func(t *testing.T) jsonlTableExporter
+	}{
+		{"tableRowsFake", func(t *testing.T) jsonlTableExporter { return tableRowsFake(t, counts, nil) }},
+		{"samplesExportFake", func(t *testing.T) jsonlTableExporter { return samplesExportFake(t, clk(), counts, time.Second, nil) }},
+		{"ratioExportFake", func(t *testing.T) jsonlTableExporter { return ratioExportFake(t, clk(), counts, nil, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := backupTestDaemon(t)
+			dir := t.TempDir()
+			read := d.eventsPageReader("gt", "/data", time.Minute, tc.fake(t))
+
+			// A page size of the row count makes the read ask for a second page,
+			// so the last row has to serve as a keyset.
+			served := false
+			n, err := d.exportEventsPagesWith(context.Background(), osEventsExportOps(), "gt", dir, rows,
+				func(afterCreatedAt, afterID string, limit int) ([]json.RawMessage, error) {
+					if served {
+						// The query is built from the keyset before the fake
+						// runs; the fake has no further rows to report.
+						_, err := beadsql.BackupEventsPage("gt", afterCreatedAt, afterID, limit).Inline()
+						return nil, err
+					}
+					served = true
+					return read(afterCreatedAt, afterID, limit)
+				})
+			if err != nil {
+				t.Fatalf("paged read over %s: %v", tc.name, err)
+			}
+			if got := eventsExportLines(t, dir); n != rows || len(got) != rows {
+				t.Errorf("paged read wrote %d rows, the export holds %q; want %d rows", n, got, rows)
+			}
+		})
+	}
 }
 
 // seedSubjectPrefix is the head of a backup commit subject written under the
@@ -3579,7 +3644,7 @@ func tableRowsFake(t *testing.T, rows map[string]int, failing map[string]bool) f
 		if failing[table] {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		writeTableRows(t, dir, table, rows[table])
 		return rows[table], nil
 	}
 }
@@ -3742,7 +3807,7 @@ func samplesExportFake(t *testing.T, clk *clockwork.FakeClock, rows map[string]i
 		if failing[table] {
 			return rows[table], errors.New("signal: killed: context deadline exceeded")
 		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		writeTableRows(t, dir, table, rows[table])
 		return rows[table], nil
 	}
 }
@@ -3843,20 +3908,7 @@ func ratioExportFake(t *testing.T, clk *clockwork.FakeClock, rows map[string]int
 		if failing[table] {
 			return rows[table], errors.New("signal: killed: context deadline exceeded")
 		}
-		if table == "events" {
-			var buf []byte
-			for i := 0; i < rows[table]; i++ {
-				line, _ := json.Marshal(map[string]string{"id": "ev-" + itoa(i), "created_at": "2026-10-21 12:00:00"})
-				buf = append(buf, line...)
-				buf = append(buf, '\n')
-			}
-			path := filepath.Join(dir, table+".jsonl")
-			if err := os.WriteFile(path, buf, 0644); err != nil {
-				t.Fatalf("writing %s: %v", path, err)
-			}
-			return rows[table], nil
-		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		writeTableRows(t, dir, table, rows[table])
 		return rows[table], nil
 	}
 }
