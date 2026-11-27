@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -1382,6 +1384,29 @@ func autoSaveUncommittedWork(g autoSaveGit, cwd, branch, exitType string) error 
 	return nil
 }
 
+// fileModeSeatTaskDir is the directory holding the file-mode seat's MODE and
+// TASK.md (<home>/.gt/task, where the runtime archive stages them), or "" when
+// there is none: a dolt run reads no marker and submits exactly as it did
+// before this check existed. A run that cannot name its home refuses, because
+// it cannot tell whether the seat holds unticked boxes (gt-kqa840).
+func fileModeSeatTaskDir(env func(string) string) (string, error) {
+	if env == nil {
+		env = os.Getenv
+	}
+	home := env("HOME")
+	if home == "" {
+		return "", errors.New("cannot submit: the run cannot name the seat's home, so it cannot tell whether the seat's acceptance boxes are ticked")
+	}
+	dir := filepath.Join(home, ".gt", "task")
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return "", nil
+		}
+		return "", fmt.Errorf("cannot submit: the seat's task directory %s cannot be read, so its acceptance boxes are unknown: %w", dir, err)
+	}
+	return dir, nil
+}
+
 // submitForLanding is the COMPLETED path: rebase, squash, gate, push and mark the
 // work bead ready to land. It never lands anything. Every failure returns
 // before any completion is recorded.
@@ -1476,6 +1501,18 @@ func submitForLanding(r *doneRun) error {
 	// are the landing worker's policy rejection, after the session retires.
 	if err := refuseUncheckedCriteria(r.issueID, sub.sourceIssue); err != nil {
 		return err
+	}
+	// A file-mode seat cannot read its bead, so its acceptance boxes are the
+	// ones in its own files: the same policy refusal, still before the rebase
+	// and the gate.
+	seatDir, err := fileModeSeatTaskDir(r.env)
+	if err != nil {
+		return err
+	}
+	if seatDir != "" {
+		if err := refuseUntickedSeatDir(seatDir); err != nil {
+			return err
+		}
 	}
 
 	// Jev's claims_verified flag shows the polecat its own risk before the
