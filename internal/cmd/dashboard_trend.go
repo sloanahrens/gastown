@@ -522,6 +522,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			return
 		}
 		r.LintSecs, r.GateSecs, r.OMSecs = secsPtr(st.Lint), secsPtr(st.Gate), secsPtr(st.OM)
+		r.Reused = st.Reused
 	}
 	// rejectTimes indexes every rejection record read by bead, oldest first, so
 	// a row's count reaches back past the day the table draws: a bead refused

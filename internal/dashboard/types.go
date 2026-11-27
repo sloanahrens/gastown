@@ -629,6 +629,11 @@ type LandingRow struct {
 	LintSecs    *float64 `json:"lint_secs,omitempty"`
 	GateSecs    *float64 `json:"gate_secs,omitempty"`
 	OMSecs      *float64 `json:"om_secs,omitempty"`
+	// Reused marks a landing that reused a stored review instead of running
+	// om. Its om cell reads "reused" rather than the dash of a landing with no
+	// review, because the review did happen, just earlier. OMSecs stays nil, so
+	// medians and totals do not change (gt-amwavi).
+	Reused bool `json:"om_reused,omitempty"`
 	// ShipSecs is the landing's total ship time, dispatched to shipped in
 	// seconds: the number the Ship time tile reports as a median. It is nil for
 	// a landing with no dispatch line (hand-slung), a rejection, and a landing
