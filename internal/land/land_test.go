@@ -1649,6 +1649,103 @@ func TestLandHeadMustBeOnOrigin(t *testing.T) {
 	f.assertRejected(t, err, RejectNotPushed, LabelRework)
 }
 
+// TestLandBranchGone: the town deletes a branch once it merges the landing, so
+// a pass that lost the record finds none to check; the target's own land merge
+// decides whether the head landed or was never pushed (gt-4av3vd).
+func TestLandBranchGone(t *testing.T) {
+	t.Parallel()
+	t.Run("a merged landing is finished", func(t *testing.T) {
+		t.Parallel()
+		f := newLandFixture(t)
+		merged := mergeThenDeleteBranch(t, f)
+		res, err := f.lander().Land(context.Background(), f.work)
+		if err != nil {
+			t.Fatalf("the retry did not finish the landing: %v", err)
+		}
+		b, lines := f.bead(), f.landingLines()
+		if res.LandedCommit != merged || len(f.merger.calls) != 1 ||
+			b.Status != "closed" || CountRejections(b.Notes) != 0 || len(lines) != 1 || !strings.Contains(lines[0], VerdictUnrecorded) {
+			t.Errorf("got %s after %d merges, bead status=%s notes=%q, landings file=%v; want the merge %s recorded and closed",
+				res.LandedCommit, len(f.merger.calls), b.Status, b.Notes, lines, merged)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		squash bool            // a merge whose commit does not contain the head
+		head   string          // a head the repository lacks
+		repo   func(Repo) Repo // nil keeps the fixture's repository
+		stage  string          // "" is the not-pushed rejection
+	}{
+		{"a head the target does not carry is still not pushed", true, "", nil, ""},
+		{"a head the repository lacks is still not pushed", false, strings.Repeat("1", 40), nil, ""},
+		{"a failed head read is an infrastructure error", false, "", func(g Repo) Repo { return headReadFailsRepo{g} }, "read head"},
+		{"a failed ancestry read is an infrastructure error", false, "", func(g Repo) Repo { return ancestryFailsRepo{g} }, "ancestry"},
+		{"a failed landing lookup is an infrastructure error", false, "", func(g Repo) Repo { return lookupFailsRepo{g} }, "find the landing on the target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			if tc.squash {
+				f.squashRange(t)
+			}
+			f.base = mergeThenDeleteBranch(t, f)
+			if tc.head != "" {
+				f.work.Head = tc.head
+			}
+			l := f.lander()
+			if tc.repo != nil {
+				l.openRepo = func(dir string) Repo { return tc.repo(f.git.Open(dir)) }
+			}
+			_, err := l.Land(context.Background(), f.work)
+			if tc.stage == "" {
+				f.assertRejected(t, err, RejectNotPushed, LabelRework)
+				return
+			}
+			var infra *InfraError
+			if !errors.As(err, &infra) || infra.Stage != tc.stage {
+				t.Fatalf("Land error = %T %v, want an *InfraError at %q", err, err, tc.stage)
+			}
+			if b := f.bead(); b.Status == "closed" || len(f.landingLines()) != 0 {
+				t.Errorf("the failed read recorded a landing: status=%s lines=%v", b.Status, f.landingLines())
+			}
+		})
+	}
+}
+
+// mergeThenDeleteBranch merges w in a pass that dies before the record, then
+// deletes the branch as the town does for a merged landing (gt-4av3vd). It
+// returns the merge commit the record must name.
+func mergeThenDeleteBranch(t *testing.T, f *landFixture) string {
+	t.Helper()
+	first := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := first.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	f.merger.fn = nil
+	f.git.DeleteRef(t, f.origin, "refs/heads/"+fixtureBranch)
+	return merged
+}
+
+// headReadFailsRepo and ancestryFailsRepo fail one read of the branch-gone
+// recovery: the head's presence, or its ancestry of the target.
+type headReadFailsRepo struct{ Repo }
+
+func (headReadFailsRepo) HasObject(string) (bool, error) {
+	return false, errors.New("git cat-file: transient failure")
+}
+
+type ancestryFailsRepo struct{ Repo }
+
+func (ancestryFailsRepo) IsAncestor(string, string) (bool, error) {
+	return false, errors.New("git merge-base: transient failure")
+}
+
 func TestLandNotReadyWritesNothing(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)

@@ -60,6 +60,9 @@ type Repo interface {
 	// local half of refs/landed/<bead> (gt-as9v8).
 	UpdateRef(ref, commit string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
+	// HasObject reports whether the repository holds commit, which tells a
+	// missing branch's head from a read that failed (gt-4av3vd).
+	HasObject(commit string) (bool, error)
 	// MergeBase is the best common ancestor of a and b, and it fails when the
 	// two share none (git merge-base exits 1 with no output): the point a
 	// squash of head onto base staged the head's change from, which is what
@@ -414,6 +417,9 @@ type Rejection struct {
 	// MaxReworkAttempts refusals of its kind, whatever that kind is: the loop,
 	// not the refusal, is what the ceiling stops (gt-phftg).
 	Rework bool
+	// BranchGone is set on a not-pushed refusal for a branch the remote does
+	// not have at all (gt-4av3vd).
+	BranchGone bool
 	// NoEscalate is set on a human refusal whose lane already escalated. The zero
 	// value escalates, so a refusal the lane check never reached still alarms (gt-dtx3ht).
 	NoEscalate bool
@@ -1557,8 +1563,19 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if err != nil {
 		return Result{}, &InfraError{Stage: "resolve target", Err: err}
 	}
+	// The town deletes a branch once it merges its landing, so a retry over a
+	// merge that lost its record finds no branch left to check (gt-4av3vd).
 	if rej, err := l.checkHeadPushed(g, w); err != nil || rej != nil {
 		if rej != nil {
+			if rej.BranchGone {
+				res, err := l.finishedGoneBranchLanding(g, issue, w, base)
+				if res != nil {
+					return *res, err
+				}
+				if err != nil {
+					return Result{}, err
+				}
+			}
 			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 		return Result{}, err
@@ -2136,6 +2153,35 @@ func (l *Lander) finishedUnrecordedLanding(g Repo, issue *beads.Issue, w Work) (
 	return Result{}, err != nil, asInfraError("recover the unrecorded landing", err)
 }
 
+// finishedGoneBranchLanding finishes a landing whose branch is no longer on
+// the remote while the target already carries its head: the shape a merged
+// landing and its branch delete leave behind when the record was lost
+// (gt-4av3vd). It returns nil, nil when the head belongs to no landing to
+// finish — the repository lacks it, or the target does not carry it, which
+// keeps the not-pushed rejection. A read that fails is an infrastructure
+// error, never a rejection.
+func (l *Lander) finishedGoneBranchLanding(g Repo, issue *beads.Issue, w Work, base string) (*Result, error) {
+	held, err := g.HasObject(w.Head)
+	if err != nil {
+		return nil, &InfraError{Stage: "read head", Err: err}
+	}
+	if !held {
+		return nil, nil
+	}
+	onTarget, err := g.IsAncestor(w.Head, base)
+	if err != nil {
+		return nil, &InfraError{Stage: "ancestry", Err: err}
+	}
+	if !onTarget {
+		return nil, nil
+	}
+	res, handled, err := l.finishedUnrecordedLanding(g, issue, w)
+	if !handled {
+		return nil, nil
+	}
+	return &res, err
+}
+
 // asInfraError returns err unchanged when it already is, or wraps, an
 // *InfraError, and wraps it at stage otherwise; nil stays nil. Land documents
 // that a pass with no verdict ends as an *InfraError, and the landing worker
@@ -2338,7 +2384,8 @@ func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 		return nil, &InfraError{Stage: "read branch tip", Err: err}
 	}
 	if tip == "" {
-		return &Rejection{Kind: RejectNotPushed, Rework: true, Reason: fmt.Sprintf("%s has no branch %s, so it cannot carry head %s", remote, w.Branch, shortSHA(w.Head))}, nil
+		return &Rejection{Kind: RejectNotPushed, Rework: true, BranchGone: true,
+			Reason: fmt.Sprintf("%s has no branch %s, so it cannot carry head %s", remote, w.Branch, shortSHA(w.Head))}, nil
 	}
 	if err := l.withGitMu(func() error {
 		return g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", w.Branch, remote, w.Branch), fetchTimeout)
