@@ -31,6 +31,14 @@
 // landing gate.
 // A heavy package among them (land.SelectImporters) is left out and named on
 // stderr with the reason. A graph that cannot be read fails the run.
+//
+// The diff above is committed, so a change still in the index or the working
+// tree is invisible to it: on 3edbadd09 an uncommitted line in
+// internal/session/backend_openshell.go selected no package and presubmit
+// passed while that package's tests failed. Every mode therefore refuses when
+// git status lists an uncommitted or untracked .go file, go.mod, go.sum or the
+// pod-engine document, naming the files and saying to commit first (gt-7ks0qo).
+// A status that cannot be read fails the run.
 package main
 
 import (
@@ -55,10 +63,12 @@ type options struct {
 	base     string // ref the branch is compared against, read for a changed file
 }
 
-// seams are what a run reaches outside the process: the inventory document, the
-// inventory package's tests, the check for Go in a directory, and the git and
-// go runner. main wires the real ones, and the tests inject fakes.
+// seams are what a run reaches outside the process: the working tree's status,
+// the inventory document, the inventory package's tests, the check for Go in a
+// directory, and the git and go runner. main wires the real ones, and the tests
+// inject fakes.
 type seams struct {
+	status       func() ([]byte, error) // `git status --porcelain -z --untracked-files=all`
 	readDoc      func() ([]byte, error)
 	runInventory func() error
 	hasGo        func(dir string) bool
@@ -87,6 +97,9 @@ func main() {
 		os.Exit(1)
 	}
 	s := seams{
+		status: func() ([]byte, error) {
+			return runCommand([]string{"git", "status", "--porcelain", "-z", "--untracked-files=all"})
+		},
 		// The inventory is read from the tree the branch is checked out on.
 		readDoc: func() ([]byte, error) { return os.ReadFile(filepath.Join(repoRoot, presubmit.PodEngineDoc)) },
 		runInventory: func() error {
@@ -133,6 +146,14 @@ func run(o options, nameStatus string, s seams, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "changedpkgs:", err)
 		return 1
+	}
+	uncommitted, err := uncommittedChanges(s.status)
+	if err != nil {
+		return fail(err)
+	}
+	if len(uncommitted) > 0 {
+		return fail(fmt.Errorf("uncommitted change(s) to %s: commit them first, since the selection reads only committed diffs",
+			strings.Join(uncommitted, ", ")))
 	}
 	if o.guards {
 		sel, err := land.GuardSelectsWithContent(nameStatus, s.hasGo, contentReader(s.run, o.base))
@@ -192,6 +213,59 @@ func run(o options, nameStatus string, s seams, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "./"+dir)
 	}
 	return 0
+}
+
+// uncommittedChanges returns the tree's uncommitted or untracked paths the
+// selection has to see before it can be trusted. A status that cannot be read,
+// or a record this cannot parse, is an error and never a clean tree.
+func uncommittedChanges(status func() ([]byte, error)) ([]string, error) {
+	out, err := status()
+	if err != nil {
+		return nil, fmt.Errorf("git status: %w", err)
+	}
+	return listedChanges(string(out))
+}
+
+// listedChanges parses `git status --porcelain -z` output. Each -z record is
+// "XY path" terminated by a NUL and unquoted, so splitting on the NUL keeps a
+// path with spaces whole; a rename or copy names the path it came from in the
+// next NUL-separated field, which carries no status prefix.
+func listedChanges(out string) ([]string, error) {
+	fields := strings.Split(out, "\x00")
+	var listed []string
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if f == "" {
+			continue // the trailing NUL of the last record
+		}
+		if len(f) < 4 || f[2] != ' ' {
+			return nil, errors.New("git status entry with no two-column status and path")
+		}
+		if isSelectedKind(f[3:]) {
+			listed = append(listed, f[3:])
+		}
+		if strings.ContainsAny(f[:2], "RC") {
+			i++
+			if i >= len(fields) || fields[i] == "" {
+				return nil, errors.New("git status rename entry with no source path")
+			}
+			if isSelectedKind(fields[i]) {
+				listed = append(listed, fields[i])
+			}
+		}
+	}
+	return listed, nil
+}
+
+// isSelectedKind reports whether an uncommitted path is one the selection must
+// see: a Go file, a module file, or the pod-engine document whose pins
+// presubmit recovers. Every other path is left to the branch's own state.
+func isSelectedKind(path string) bool {
+	switch filepath.Base(path) {
+	case "go.mod", "go.sum":
+		return true
+	}
+	return strings.HasSuffix(path, ".go") || path == presubmit.PodEngineDoc
 }
 
 // runCommand runs argv in the working directory and returns its standard
