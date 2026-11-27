@@ -57,8 +57,8 @@ func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	}
 	half := (len(groups) + 1) / 2
 	return SplitPlan{
-		A: buildPiece("A", groups[:half], groups, nil, "", spec.BaseFiles, spec.BaseSymbols),
-		B: buildPiece("B", groups[half:], groups, groups[:half], "A", spec.BaseFiles, spec.BaseSymbols),
+		A: buildPiece("A", groups[:half], groups[half:], groups, "", spec.BaseFiles, spec.BaseSymbols),
+		B: buildPiece("B", groups[half:], groups[:half], groups, "A", spec.BaseFiles, spec.BaseSymbols),
 	}, nil
 }
 
@@ -108,11 +108,10 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 	return nil
 }
 
-// buildPiece shapes one piece from its groups, reading allGroups for the guard
-// commands and createdFrom for the files and symbols the piece depends on. A
-// file in baseFiles or a symbol in baseSymbols exists on the base branch, so no
-// piece creates it.
-func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string, baseFiles, baseSymbols map[string]bool) Piece {
+// buildPiece shapes one piece from its groups, reading other for the other
+// piece's groups and allGroups for the guard commands. A file in baseFiles or a
+// symbol in baseSymbols exists on the base branch, so no piece creates it.
+func buildPiece(name string, groups, other, allGroups []FileGroup, dependsOn string, baseFiles, baseSymbols map[string]bool) Piece {
 	var packages []string
 	var ownBoxes []Box
 	var constraints []string
@@ -121,8 +120,17 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		ownBoxes = append(ownBoxes, group.Boxes...)
 		constraints = append(constraints, group.Constraints...)
 	}
+	var otherBoxes []Box
+	shares := false
+	for _, group := range other {
+		otherBoxes = append(otherBoxes, group.Boxes...)
+		shares = shares || contains(packages, group.Package)
+	}
 	if dependsOn != "" {
-		constraints = append(constraints, createdNotes(createdFrom, groups, baseFiles, baseSymbols)...)
+		constraints = append(constraints, createdNotes(other, groups, baseFiles, baseSymbols)...)
+		if shares {
+			constraints = append(constraints, sharedTestNote(other, baseFiles)...)
+		}
 	}
 	piece := Piece{
 		Name:      name,
@@ -130,8 +138,45 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		Boxes:     ownBoxes,
 		DependsOn: dependsOn,
 	}
-	piece.Text = pieceText(piece, constraints, pieceGate(ownBoxes, allGroups), otherPackages(packages, allGroups))
+	otherPiece := peer{packages: otherPackages(packages, allGroups), boxes: otherBoxes, shares: shares}
+	piece.Text = pieceText(piece, constraints, pieceGate(ownBoxes, allGroups), otherPiece)
 	return piece
+}
+
+// peer is the other piece as this piece's text names it.
+type peer struct {
+	packages []string
+	boxes    []Box
+	shares   bool
+}
+
+// sharedTestNote is the one Constraints bullet a piece sharing a package with the
+// other piece gets: the test files the other piece's bullets cite.
+func sharedTestNote(other []FileGroup, baseFiles map[string]bool) []string {
+	aPackages := map[string]bool{}
+	for _, group := range other {
+		aPackages[group.Package] = true
+	}
+	var clauses []string
+	for _, group := range other {
+		for _, bullet := range group.Constraints {
+			for _, name := range createdNames(bullet, aPackages, group.Package) {
+				if name.symbol || !strings.HasSuffix(name.text, "_test.go") {
+					continue
+				}
+				if baseFiles[name.text] {
+					clauses = append(clauses, "see "+name.text)
+				} else {
+					clauses = append(clauses, name.text+" is created by bead PIECE_A")
+				}
+			}
+		}
+	}
+	clauses = unique(clauses)
+	if len(clauses) == 0 {
+		return nil
+	}
+	return []string{strings.Join(clauses, "; ") + "."}
 }
 
 // otherPackages returns the packages the other piece carries, in group order.
@@ -170,9 +215,9 @@ func pieceGate(ownBoxes []Box, allGroups []FileGroup) string {
 
 // pieceText renders the piece as a bead description, the sections in the order
 // a filed bead carries them.
-func pieceText(piece Piece, constraints []string, gate string, other []string) string {
+func pieceText(piece Piece, constraints []string, gate string, other peer) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Goal\n\n%s\n\n", pieceGoal(piece))
+	fmt.Fprintf(&b, "## Goal\n\n%s\n\n", pieceGoal(piece, other))
 	b.WriteString("## Constraints\n\n")
 	for _, constraint := range constraints {
 		fmt.Fprintf(&b, "- %s\n", constraint)
@@ -187,20 +232,46 @@ func pieceText(piece Piece, constraints []string, gate string, other []string) s
 	return b.String()
 }
 
-// pieceGoal is the Goal sentence naming the piece's file groups.
-func pieceGoal(piece Piece) string {
+// pieceGoal names the piece's file groups, or its boxes when the packages are shared.
+func pieceGoal(piece Piece, other peer) string {
+	if other.shares {
+		return fmt.Sprintf("Deliver piece %s: the split bead's %s, with its Constraints bullets.",
+			piece.Name, boxPhrase(piece.Boxes))
+	}
 	return fmt.Sprintf("Deliver piece %s: the %s of the split bead, with its Constraints bullets and acceptance boxes.",
 		piece.Name, groupPhrase(piece.Packages))
 }
 
-// pieceOutOfScope names the other piece and everything outside this one.
-func pieceOutOfScope(piece Piece, other []string) string {
+// pieceOutOfScope names the other piece's packages, or its deliverable when shared.
+func pieceOutOfScope(piece Piece, other peer) string {
 	name := "B"
 	if piece.Name == "B" {
 		name = "A"
 	}
+	if other.shares {
+		return fmt.Sprintf("Piece %s's deliverable (the %s) and anything outside piece %s's %s.",
+			name, boxPhrase(other.boxes), piece.Name, boxNoun(len(piece.Boxes)))
+	}
 	return fmt.Sprintf("Piece %s (%s) and anything outside piece %s's %s.",
-		name, strings.Join(other, ", "), piece.Name, groupNoun(len(piece.Packages)))
+		name, strings.Join(other.packages, ", "), piece.Name, groupNoun(len(piece.Packages)))
+}
+
+// boxPhrase is the boxes' texts as prose, each quoted: `the acceptance box "x"`
+// for one box and `the acceptance boxes "x", "y"` for two or more.
+func boxPhrase(boxes []Box) string {
+	quoted := make([]string, len(boxes))
+	for i, box := range boxes {
+		quoted[i] = `"` + box.Text + `"`
+	}
+	return boxNoun(len(boxes)) + " " + strings.Join(quoted, ", ")
+}
+
+// boxNoun is "acceptance box" for one box and "acceptance boxes" otherwise.
+func boxNoun(n int) string {
+	if n == 1 {
+		return "acceptance box"
+	}
+	return "acceptance boxes"
 }
 
 // groupPhrase is the packages as prose: "a, b file groups".

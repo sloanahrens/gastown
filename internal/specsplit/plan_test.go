@@ -521,3 +521,63 @@ func TestSplitPlanRequiresBaseFiles(t *testing.T) {
 		t.Errorf("Plan() with an empty BaseFiles error = %v, want none", err)
 	}
 }
+
+// TestPlanSamePackage: pieces of one package name each other's test files,
+// deliverable and boxes, not a file group.
+func TestPlanSamePackage(t *testing.T) {
+	t.Parallel()
+	const boxA = "The shape holds. Run: go test ./internal/specsplit -run TestPlanSamePackage"
+	const boxB = "The plan is built. Run: go test ./internal/specsplit -run TestPlan"
+	tests := []struct {
+		name      string
+		baseFiles map[string]bool
+		wantNote  string
+	}{
+		{"a test file A creates is named as created by A", map[string]bool{}, "- internal/specsplit/plan_test.go is created by bead PIECE_A.\n"},
+		{"a test file on the base branch is named as seen", map[string]bool{"internal/specsplit/plan_test.go": true}, "- see internal/specsplit/plan_test.go.\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := Spec{
+				Constraints: "- Edit internal/specsplit/plan.go to shape the piece text.\n- Add the case to internal/specsplit/plan_test.go.",
+				Acceptance:  "- [ ] " + boxA + "\n- [ ] " + boxB,
+				Dirs:        testDirs,
+				BaseFiles:   tc.baseFiles,
+				BaseSymbols: map[string]bool{},
+			}
+			groups, err := GroupByBoxes(spec)
+			if err != nil {
+				t.Fatalf("GroupByBoxes() error = %v, want none", err)
+			}
+			plan, err := Plan(spec, groups)
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want none", err)
+			}
+			wantB := []string{
+				tc.wantNote,
+				`Deliver piece B: the split bead's acceptance box "` + boxB + `", with its Constraints bullets.`,
+				`Piece A's deliverable (the acceptance box "` + boxA + `") and anything outside piece B's acceptance box.`,
+				"- [ ] " + boxB + "\n",
+			}
+			wantA := []string{
+				`Deliver piece A: the split bead's acceptance box "` + boxA + `", with its Constraints bullets.`,
+				`Piece B's deliverable (the acceptance box "` + boxB + `") and anything outside piece A's acceptance box.`,
+				"- [ ] " + boxA + "\n",
+			}
+			for _, want := range wantB {
+				if !strings.Contains(plan.B.Text, want) {
+					t.Errorf("piece B text missing %q:\n%s", want, plan.B.Text)
+				}
+			}
+			for _, want := range wantA {
+				if !strings.Contains(plan.A.Text, want) {
+					t.Errorf("piece A text missing %q:\n%s", want, plan.A.Text)
+				}
+			}
+			if text := plan.A.Text + plan.B.Text; strings.Contains(text, "file group") || strings.Contains(plan.B.Text, "plan.go") {
+				t.Errorf("a piece sharing its package names a file group or a source file A's bullets cite:\n%s", text)
+			}
+		})
+	}
+}
