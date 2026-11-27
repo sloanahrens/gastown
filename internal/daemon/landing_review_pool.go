@@ -23,6 +23,10 @@ type reviewPoolEnv struct {
 	// stat reports om's config file; nil is os.Stat. An error means the review
 	// key's config file cannot be used (gt-lfykjq).
 	stat func(name string) (os.FileInfo, error)
+	// sweep removes the review-* directories a daemon that died mid-review left
+	// under the work root; nil is land.SweepReviewDirs, called with a git handle
+	// on the Lander's repo so a unit test injects a fake and runs no git (gt-vwrg30).
+	sweep func(workRoot string, g land.Repo) error
 }
 
 // wireReviewPool is where the daemon wires the review pool into a rig's
@@ -33,13 +37,14 @@ type reviewPoolEnv struct {
 // rig's review-ahead store, the configured reuse expiry, and the path of om's
 // own config file, so a landing can reuse a review its queue-time twin made
 // (gt-yqoha0, gt-aovgi3); the Worker is given that store and the pool that
-// fills it (gt-sywmws).
+// fills it (gt-sywmws), and the leftover review directories of a daemon that
+// died mid-review are swept first (gt-vwrg30).
 //
 // The error is the on path's when om's config file cannot be named or does not
 // exist: the wiring is undone and the pool stays off, so a failure never reads
 // as a wired pool (gt-aovgi3, gt-lfykjq). wireRigReviewPool, the production
 // entry point, logs that error; this function only returns it (gt-lmflya).
-func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error { //nolint:unparam // workRoot is a later bead's wiring target
+func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string, env reviewPoolEnv) error {
 	on, max, expiry, err := cfg.ReviewPoolFor(rig)
 	if err != nil {
 		// A bad review_pool block fails loud and leaves the pool off: the rig
@@ -75,6 +80,18 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 		return fmt.Errorf("landing_worker: %s: review pool off: %w", rig, err)
 	}
 	l.OMConfigPath = omPath
+	// A daemon that died mid-review left its review-* directories under the
+	// work root, and no live review owns them, so they are swept once here,
+	// before this pool starts a review, through a git handle on the Lander's
+	// repo with hooks off (gt-vwrg30, gt-sqy9ss). A failed sweep is clutter,
+	// not a reason to lose the pool: it is logged and the wiring goes on.
+	sweep := env.sweep
+	if sweep == nil {
+		sweep = land.SweepReviewDirs
+	}
+	if err := sweep(workRoot, land.CommittingGit(l.Repo).WithoutAllHooks()); err != nil {
+		d.logger.Printf("landing_worker: %s: review pool: sweep leftover review directories: %v", rig, err)
+	}
 	// The Worker gets the pool that fills the store and the store itself as its
 	// hints, so a review that finishes while the bead queues is the verdict its
 	// landing finds. Its lines go to the log the landing writes to (gt-sywmws).
