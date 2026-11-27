@@ -385,19 +385,26 @@ func TestSystemUpdatesLastGreenDrawsTheSweepAndAhead(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		green map[string]any
+		swept bool
 		ahead int
 		want  string
 	}{
-		{"a count", lastGreenAgo(), 3, `^last green 3333bbbb .+ \(2h00m ago\) · main is 3 commits ahead$`},
-		{"unknown", lastGreenAgo(), -1, `^last green 3333bbbb .+ \(2h00m ago\) · ahead unknown$`},
-		{"no green sweep", nil, -1, `^no green sweep yet$`},
+		{"a count", true, 3, `^last green 3333bbbb .+ \(2h00m ago\) · main is 3 commits ahead$`},
+		{"unknown", true, -1, `^last green 3333bbbb .+ \(2h00m ago\) · ahead unknown$`},
+		{"no green sweep", false, -1, `^no green sweep yet$`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			dom := newPageDOM(t)
-			dom.call(t, "renderSystemUpdates", lastGreenState(systemUpdatesSources{}, tc.green, tc.ahead))
+			// Stamped here, just before the render: a stamp made with the table
+			// is a minute old or more by the time a loaded run gives this
+			// subtest its turn (gt-6vvmxi).
+			var green map[string]any
+			if tc.swept {
+				green = lastGreenAgo()
+			}
+			dom.call(t, "renderSystemUpdates", lastGreenState(systemUpdatesSources{}, green, tc.ahead))
 			if got := lastGreenLine(t, dom); !regexp.MustCompile(tc.want).MatchString(got) {
 				t.Errorf("the line reads %q, want it to match %s", got, tc.want)
 			}
