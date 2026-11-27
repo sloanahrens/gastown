@@ -274,11 +274,37 @@ func TestKeptSeatAttentionSkipsAReSlungSeat(t *testing.T) {
 	}
 }
 
+// A seat kept with the sandbox-not-confirmed-gone reason whose polecat now
+// hooks a different live bead was re-slung too: the sandbox that existed was
+// the new run's, so the seat is not one waiting for the overseer (gt-xqa3hs).
+func TestKeptSeatAttentionSkipsAReSlungSeatWithItsSandboxNotGone(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{string(beads.StatusOpen), beads.StatusHooked} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
+			keptSeatHooked(t, f, "capable", "gt-new1", status)
+			c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("items = %+v, want none for a seat slung new work", items)
+			}
+		})
+	}
+}
+
 // A seat still raises its item when any one of the three does not hold: the
 // hook names the record's own bead, there is no hook, the hooked bead is no
-// longer live work, the reason is another one, or the hook cannot be read —
-// never a skip (gt-jw437c, gt-b87gmu). A gateway alarm raises whatever the hook
-// says.
+// longer live work, the reason is one a re-sling does not withhold, or the hook
+// cannot be read — never a skip (gt-jw437c, gt-b87gmu). The
+// sandbox-not-confirmed-gone reason's rows pin the same raises for a closed new
+// bead, a hook on the record's bead, a gateway alarm and an unreadable agent
+// bead (gt-xqa3hs); a gateway alarm raises whatever the hook says.
 func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -322,12 +348,41 @@ func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 			want: keptSeatReason,
 		},
 		{
-			name: "a sandbox the gateway has not confirmed gone",
+			name: "a sandbox not confirmed gone whose new bead is closed",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusClosed))
+			},
+			want: sandboxNotGoneReason,
+		},
+		{
+			name: "a sandbox not confirmed gone whose hook is the record's own bead",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-old1", string(beads.StatusOpen))
+			},
+			want: sandboxNotGoneReason,
+		},
+		{
+			name: "a sandbox not confirmed gone with a gateway alarm",
 			setup: func(t *testing.T, f *attentionFixture) {
 				keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
 				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusOpen))
+				f.d.gatewayTallies = map[string]gatewayTally{
+					gatewayTallyKey(attentionRig, "capable"): {alarm: "cannot count gateway tries for gastown/capable"},
+				}
 			},
-			want: sandboxNotGoneReason,
+			want: "cannot count gateway tries",
+		},
+		{
+			name: "a sandbox not confirmed gone whose agent bead cannot be read",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
+				id := keptSeatAgentID(f, "capable")
+				f.d.openWorkBeads = keptSeatHookReader{fail: map[string]error{id: errors.New("bd show: store unavailable")}}.open
+			},
+			want:    sandboxNotGoneReason,
+			wantLog: "cannot read its hook",
 		},
 		{
 			name: "the agent bead cannot be read",
