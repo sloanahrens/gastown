@@ -171,7 +171,9 @@ func (l applyLedger) append(entry applyLedgerEntry) error {
 		return err
 	}
 	if _, err := f.Write(line); err != nil {
-		f.Close() // the write error is the one to report; a close error cannot change it
+		// The write error is the failure; a close error joins it rather than
+		// replacing it, and a clean close leaves the write error alone.
+		err = errors.Join(err, f.Close())
 		return fmt.Errorf("the ledger %s cannot be written: %w", l.path, err)
 	}
 	if err := f.Close(); err != nil {
