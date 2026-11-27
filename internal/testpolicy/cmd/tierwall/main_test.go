@@ -1492,8 +1492,14 @@ func TestReport_CrashedPackageKeepsTheHeldOutput(t *testing.T) {
 			t.Parallel()
 			var in strings.Builder
 			for _, e := range tc.events {
-				e["Package"] = "p/crash"
-				line, err := json.Marshal(e)
+				// Copy the event before naming its package: sibling subtests
+				// share the table's maps, and a write to one would race.
+				m := make(ev, len(e)+1)
+				for k, v := range e {
+					m[k] = v
+				}
+				m["Package"] = "p/crash"
+				line, err := json.Marshal(m)
 				if err != nil {
 					t.Fatal(err)
 				}
