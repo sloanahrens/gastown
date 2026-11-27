@@ -68,6 +68,8 @@ type Tier struct {
 	// Command is the tier's command in the runner's tree, omitted when the
 	// runner recorded none.
 	Command string `json:"command,omitempty"`
+	// Note is optional text the daemon logs for the tier without changing its verdict (gt-nl4xwr).
+	Note string `json:"note,omitempty"`
 }
 
 // TierResult is one tier's verdict in the shape internal/daemon's state file
@@ -174,6 +176,9 @@ func tierResults(r Result) (map[string]TierResult, error) {
 		}
 		if hasControl(t.Command) {
 			return nil, fmt.Errorf("tier %q: command holds a control character", t.Tier)
+		}
+		if hasControl(t.Note) {
+			return nil, fmt.Errorf("tier %q: note holds a control character", t.Tier)
 		}
 		name, result, ok := parseTierSummary(t.Summary)
 		if !ok {

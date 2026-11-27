@@ -226,6 +226,23 @@ func TestTierSweepLogsRunnerTimingNote(t *testing.T) {
 	}
 }
 
+// TestTierSweepNoteWritesTheStageLogLine: a tier's note is its own line in the stage output, and the tier keeps its failed names (gt-nl4xwr).
+func TestTierSweepNoteWritesTheStageLogLine(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st, _ := runnerLauncher(t, &runnerFakeCmds{})
+	res := runnerTestResult(spec, now)
+	res.Tiers[1].Note = "the race detector needs more time"
+	if got := d.tierSweepRunnerStageResult(st, spec, res, tierSweepLaunch{exitCode: -1}, now); !strings.Contains(got.output, "sweep-run: race: "+res.Tiers[1].Note+"\n") {
+		t.Errorf("stage output does not hold the note:\n%s", got.output)
+	}
+	if converted, err := sweeprunner.ToTierResults(res); err != nil {
+		t.Fatalf("ToTierResults: %v", err)
+	} else if want := []string{"./internal/cmd"}; !slices.Equal(converted["race"].FailedNames, want) {
+		t.Errorf("race failed names = %q, want %q unchanged by the note", converted["race"].FailedNames, want)
+	}
+}
+
 // A stage whose own budget passes with no result judged nothing: it is RED with
 // the runner's own reason, never GREEN, and the run it waited on is taken down
 // so its containers, network and volume are not left behind (gt-z4ppb).
