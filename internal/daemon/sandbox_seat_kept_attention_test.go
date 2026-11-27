@@ -223,6 +223,32 @@ func TestKeptSeatAttentionNamesAnUnrecordedBead(t *testing.T) {
 	}
 }
 
+// An alarm-only gateway tally raises its kept-seat item unless the seat's agent
+// bead reads nuked: a nuked seat is already gone, so the tally alone raises
+// nothing for it (gt-5bch6b). The working and failed-read rows are
+// TestAlarmOnlyKeptSeatItem's; this pins the collector on the loop that swaps
+// the item builder in.
+func TestKeptSeatAttentionSkipsANukedAlarmOnlySeat(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	id := keptSeatAgentID(f, "capable")
+	f.d.openWorkBeads = keptSeatHookReader{issues: map[string]*beads.Issue{
+		id: {ID: id, Description: "agent_state: " + string(beads.AgentStateNuked)},
+	}}.open
+	f.d.gatewayTallies = map[string]gatewayTally{
+		gatewayTallyKey(attentionRig, "capable"): {alarm: "cannot count gateway tries for gastown/capable"},
+	}
+	c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
+
+	items, err := c.collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want none for a nuked seat", items)
+	}
+}
+
 // A seat kept with the retired-record reason whose polecat now hooks a
 // different bead that is still live work — open, hooked or in progress — raises
 // no item: the seat was slung new work, not left waiting for the overseer
