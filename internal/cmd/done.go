@@ -174,6 +174,9 @@ func runDone(cmd *cobra.Command, args []string) error {
 		RecordFindings: func(cwd, issueID string, findings []string) {
 			recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
 		},
+		RaiseSizeRefusal: func(bead, refusal string) error {
+			return raiseSizeRefusal(escalateRunFromFlags(), bead, refusal)
+		},
 		LocalGate:   doneLocalGate,
 		RetryDelays: pushLandingRetryDelays,
 		Sleep:       doneRetrySleep,
