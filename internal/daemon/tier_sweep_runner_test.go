@@ -2037,9 +2037,11 @@ func TestTierSweepRunnerCollect(t *testing.T) {
 
 // TestTierSweepRunnerProgress is the copy the wait makes while a run goes on: the
 // Progress step's stdout is stored as progress.json in the run's output
-// directory. A plan with no Progress step writes nothing, and a step that fails
-// or prints what is not a JSON object leaves the record the last poll stored. A
-// failed step's error carries the stderr it printed, cut to its last 200 bytes.
+// directory. A plan with no Progress step writes nothing, and so does a read
+// that fails because the run has not written the record yet. A step that fails
+// for any other reason, or prints what is not a JSON object, leaves the record
+// the last poll stored. A failed step's error carries the stderr it printed,
+// cut to its last 200 bytes.
 func TestTierSweepRunnerProgress(t *testing.T) {
 	t.Parallel()
 	const earlier = `{"tiers":["integration"]}`
@@ -2061,6 +2063,8 @@ func TestTierSweepRunnerProgress(t *testing.T) {
 	}{
 		{name: "a Progress step's stdout is stored as the run's progress record", progress: `{"tiers":["integration"],"running":"race"}`, wantExec: true, wantFile: `{"tiers":["integration"],"running":"race"}`},
 		{name: "a plan with no Progress step writes nothing", backend: config.TierSweepRunnerDocker, wantFile: earlier},
+		{name: "a read before the run writes progress.json is not a failure", failStep: true, progressErr: []byte("cat: /out/progress.json: No such file or directory\n"), wantExec: true, wantFile: earlier},
+		{name: "a failure naming another missing file is still returned", failStep: true, progressErr: []byte("error: stat /etc/kubernetes/admin.conf: no such file or directory\n"), wantExec: true, wantErr: true, wantErrText: "no such file or directory", wantFile: earlier},
 		{name: "a failing Progress step is returned and keeps the stored record", progress: `{"tiers":["integration"],"running":"race"}`, failStep: true, progressErr: []byte("error: unable to upgrade connection"), wantExec: true, wantErr: true, wantErrText: "error: unable to upgrade connection", wantFile: earlier},
 		{name: "a failing Progress step's long stderr is cut to its last 200 bytes", failStep: true, progressErr: []byte(longStderr), wantExec: true, wantErr: true, wantErrText: strings.Repeat("t", 200), wantErrAbsent: longStderrPrefix, wantFile: earlier},
 		{name: "a failing Progress step with no stderr still names the exit status", failStep: true, progressErr: []byte{}, wantExec: true, wantErr: true, wantErrText: "exit status 1", wantErrAbsent: "stderr:", wantFile: earlier},
