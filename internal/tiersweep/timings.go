@@ -29,8 +29,12 @@ type Timing struct {
 	Tier    string `json:"tier"`
 	Package string `json:"package"`
 	WallMS  int64  `json:"wall_ms"`
-	Exit    int    `json:"exit"`
-	Start   string `json:"start"`
+	// TestMS is the time go test's final `ok` or `FAIL` line says the test binary
+	// ran, in milliseconds: a package's wall minus build, link and start. Empty
+	// on a shard's line, which has no package summary to read (gt-eeeqfj).
+	TestMS int64  `json:"test_ms,omitempty"`
+	Exit   int    `json:"exit"`
+	Start  string `json:"start"`
 	// Shard is "i/K" on a shard's line, the shard's place in its package (gt-rw118).
 	Shard string `json:"shard,omitempty"`
 }
