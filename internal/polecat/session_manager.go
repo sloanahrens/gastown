@@ -1353,9 +1353,13 @@ func (m *SessionManager) removeErroredSandbox(polecat, sessionID string) {
 //
 // sandboxed is false for a host seat, which has no sandbox to remove. why names
 // the reason no gateway could be named, and is "" when the seat is a host seat
-// or a sandbox seat was named. The agent bead is read only when the town has an
-// openshell seat, so a host stop in a host-only town reads no bead and does not
-// wait on Dolt for a sandbox that cannot exist.
+// or a sandbox seat was named. A missing agent bead names no seat to delete, so
+// the gateway of every openshell seat is asked what it holds and each line
+// unnamedSandboxLines reports is warned here; nothing is deleted, since the
+// bead that would prove the seat's work landed is gone (gt-xo4p78). The agent
+// bead is read only when the town has an openshell seat, so a host stop in a
+// host-only town reads no bead and does not wait on Dolt for a sandbox that
+// cannot exist.
 func (m *SessionManager) seatSandboxRecord(polecat, sessionID string) (rec session.SandboxRecord, sandboxed bool, why string) {
 	// The name goes to the gateway as the sandbox's name, so it is checked as a
 	// registry record's name would be, before any gateway is named for it.
@@ -1382,7 +1386,20 @@ func (m *SessionManager) seatSandboxRecord(polecat, sessionID string) (rec sessi
 		return rec, false, "no gateway is named, its agent bead cannot be read: " + err.Error()
 	}
 	if fields == nil {
-		return rec, false, "no gateway is named, its agent bead is gone"
+		status := m.sandboxStatus
+		if status == nil {
+			status = session.GatewaySandboxPhase
+		}
+		var gateways []string
+		for _, seat := range seats {
+			if seat.Backend == config.BackendOpenShell {
+				gateways = append(gateways, ts.Sandboxes[seat.Sandbox].WithDefaults().Gateway)
+			}
+		}
+		for _, line := range unnamedSandboxLines(status, sessionID, gateways) {
+			m.warnSandbox("stopping %s: %s", sessionID, line)
+		}
+		return rec, false, ""
 	}
 	for _, seat := range seats {
 		if seat.Agent != fields.Agent || seat.Backend != config.BackendOpenShell {
