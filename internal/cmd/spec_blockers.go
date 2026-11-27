@@ -98,11 +98,24 @@ func specBlockerRead(reads *specTickReads, read func(id string) (*beads.Issue, e
 }
 
 // specWithBlockerCreates fills spec.BlockerCreates from the open transitive
-// blockers of its bead (gt-hgt9j.12). A bead with no Files section, or with one
-// that does not parse, asks nothing of the graph: the lint refuses a malformed
-// Files section on its own and never reads this set for it. An error is
-// returned unchanged so the caller can refuse the bead with it as the reason.
+// blockers of its bead (gt-hgt9j.12) and spec.CreatorCites from the state of
+// each creator bead the bead's Goal and Constraints cite (gt-rxlpuq). Both
+// gt spec lint and the tick's pre-sling check pass through here, so a creator
+// cite is judged on both paths.
+//
+// The creator states are filled with or without a Files section: the cite cue
+// needs none, and a bead whose file comes from a bead it does not wait on is
+// the case this guards. The blocker set is read only for a bead with a Files
+// section, the only check that reads it; a bead with none, or with one that
+// does not parse, asks the graph nothing there, and the lint refuses a
+// malformed Files section on its own. An error is returned unchanged so the
+// caller can refuse the bead with it as the reason.
 func specWithBlockerCreates(spec specdispatch.Spec, read func(id string) (specdispatch.Spec, []string, error), beadID string) (specdispatch.Spec, error) {
+	cites, err := specCreatorStates(spec, specCreatorIssueRead(read), beadID)
+	if err != nil {
+		return spec, err
+	}
+	spec.CreatorCites = cites
 	if _, present, err := specdispatch.ParseFiles(spec.Description); !present || err != nil {
 		return spec, nil
 	}
@@ -112,4 +125,29 @@ func specWithBlockerCreates(spec specdispatch.Spec, read func(id string) (specdi
 	}
 	spec.BlockerCreates = creates
 	return spec, nil
+}
+
+// specCreatorIssueRead is specCreatorStates' bd-show read over the graph read
+// specWithBlockerCreates is handed. The graph answers a bead's spec, whose
+// CloseReason specFromIssue copies, and the ids of its open blocking edges; the
+// show shape is rebuilt from those, the edges as open blocking ones, which is
+// the list UnresolvedBlockerIDs answered.
+func specCreatorIssueRead(read func(id string) (specdispatch.Spec, []string, error)) func(id string) (*beads.Issue, error) {
+	return func(id string) (*beads.Issue, error) {
+		spec, blockers, err := read(id)
+		if err != nil {
+			return nil, err
+		}
+		deps := make([]beads.IssueDep, 0, len(blockers))
+		for _, blocker := range blockers {
+			deps = append(deps, beads.IssueDep{ID: blocker, Status: "open", DependencyType: "blocks"})
+		}
+		return &beads.Issue{
+			ID:           spec.ID,
+			Status:       spec.Status,
+			CloseReason:  spec.CloseReason,
+			Description:  spec.Description,
+			Dependencies: deps,
+		}, nil
+	}
 }

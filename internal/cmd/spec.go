@@ -348,6 +348,7 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		Title:        issue.Title,
 		Type:         issue.Type,
 		Status:       issue.Status,
+		CloseReason:  issue.CloseReason,
 		Assignee:     issue.Assignee,
 		Priority:     issue.Priority,
 		CreatedAt:    issue.CreatedAt,

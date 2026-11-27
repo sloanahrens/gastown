@@ -233,6 +233,11 @@ type Spec struct {
 	Design      string
 	Notes       string
 	Acceptance  string
+	// CloseReason is the reason the bead was closed, as bd returned it. A
+	// caller filling creator cites reads it to tell a retired creator (one
+	// split, superseded or folded into another bead) from one whose work
+	// landed (gt-rxlpuq). Empty is a read that carried no reason.
+	CloseReason string
 	// Metadata is the bead's metadata JSON as bd returned it, filled by the
 	// caller from a full read (a show). The dispatcher reads the consecutive
 	// assignee-lock-timeout count from it (LockTimeoutAttempts, gt-a4cdcd); a
