@@ -242,6 +242,46 @@ func TestDoltPoolBdInitsTakeTemplateDatabasesFirst(t *testing.T) {
 	}
 }
 
+// The test builds its own setting so a parallel test never writes the package
+// value; the package value's setter is only driven along its refusal paths.
+func TestDoltPoolInitsSetting(t *testing.T) {
+	t.Parallel()
+	s := doltPoolSetting{inits: doltPoolInits}
+	p, err := s.layout(newDoltDBPool, 0, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.close)
+	if len(p.inits) != doltPoolInits || len(p.spares) != 3 || len(p.sql) != 2 {
+		t.Errorf("the default pool laid out %d inits, %d spares and %d SQL databases; want %d, 3 and 2", len(p.inits), len(p.spares), len(p.sql), doltPoolInits)
+	}
+	if err := s.set(5); err != nil {
+		t.Fatalf("set(5) = %v, want the setting at 5", err)
+	}
+	p5, err := s.layout(newDoltDBPool, 0, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p5.close)
+	if len(p5.inits) != 5 || len(p5.spares) != 3 || len(p5.sql) != 2 {
+		t.Errorf("after set(5) the pool laid out %d inits, %d spares and %d SQL databases; want 5, 3 and 2", len(p5.inits), len(p5.spares), len(p5.sql))
+	}
+	noPool := errors.New("no pool")
+	failPool := func(int, int, int) (*doltDBPool, error) { return nil, noPool }
+	if _, err := s.layout(failPool, 0, 0, 0); !errors.Is(err, noPool) {
+		t.Errorf("layout with a failing pool = %v, want %v", err, noPool)
+	}
+	for _, n := range []int{0, -1} {
+		want := fmt.Sprintf("%d template", n)
+		if err := s.set(n); err == nil || !strings.Contains(err.Error(), want) || s.inits != 5 {
+			t.Errorf("set(%d) = %v with inits at %d, want an error naming %d and 5 left alone", n, err, s.inits, n)
+		}
+		if err := SetDoltPoolInits(n); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("SetDoltPoolInits(%d) = %v, want an error naming %d", n, err, n)
+		}
+	}
+}
+
 func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)

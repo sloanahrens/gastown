@@ -26,11 +26,46 @@ import (
 // The template is made by the bd on PATH, the one the tests' own inits run,
 // so its schema is the one they expect; a newer bd migrates the rest itself.
 
-// doltPoolInits is how many template databases the pool holds for bd inits.
-// It bounds how many bd init leases get one at once, not how many a run
-// uses: a lease beyond it gets one of the pool's spare databases, migrated
-// by bd init itself, as every bd init did before the template.
+// doltPoolInits is the default for doltPoolInitSetting: the number of template
+// databases the pool holds for bd inits. A lease beyond them gets one of the
+// pool's spare databases, migrated by bd init itself, as every bd init did
+// before the template; it bounds leases at once, not a run's use.
 const doltPoolInits = 24
+
+// doltPoolSetting holds how many template databases a pool lays out. The
+// package value starts at doltPoolInits; SetDoltPoolInits sets it. A test
+// builds its own so it never writes the package value.
+type doltPoolSetting struct{ inits int }
+
+// doltPoolInitSetting is the package setting createDoltPool lays out.
+var doltPoolInitSetting = doltPoolSetting{inits: doltPoolInits}
+
+// set writes n to the setting, or names n in an error and leaves it alone
+// when n is below 1.
+func (s *doltPoolSetting) set(n int) error {
+	if n < 1 {
+		return fmt.Errorf("dolt test pool: %d template databases: a pool needs at least 1", n)
+	}
+	s.inits = n
+	return nil
+}
+
+// layout lays out the pool newPool returns plus the setting's template
+// databases.
+func (s *doltPoolSetting) layout(newPool func(int, int, int) (*doltDBPool, error), port, spares, sqlDBs int) (*doltDBPool, error) {
+	p, err := newPool(port, spares, sqlDBs)
+	if err != nil {
+		return nil, err
+	}
+	p.addInits(s.inits)
+	return p, nil
+}
+
+// SetDoltPoolInits sets the template databases pools created after the call
+// lay out; n below 1 is an error naming n and leaves the count unchanged.
+func SetDoltPoolInits(n int) error {
+	return doltPoolInitSetting.set(n)
+}
 
 // doltInitTemplateDB is the database bd init migrates for the template. It
 // is dropped before any test can reach the container.

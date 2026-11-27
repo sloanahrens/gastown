@@ -231,11 +231,10 @@ func (p *doltDBPool) create() error {
 // shared container's sync.Once, so no test can reach the container until it
 // returns. It installs the pool as the source of isolated beads Inits.
 func createDoltPool(port int) error {
-	p, err := newDoltDBPool(port, doltPoolSpares, doltPoolSQLDatabases)
+	p, err := doltPoolInitSetting.layout(newDoltDBPool, port, doltPoolSpares, doltPoolSQLDatabases)
 	if err != nil {
 		return err
 	}
-	p.addInits(doltPoolInits)
 	// The guard at teardown allows the image's own databases and the pool's,
 	// nothing else; a fresh container holding anything more means the image
 	// changed under doltImageDatabases, and the guard would misjudge it.
