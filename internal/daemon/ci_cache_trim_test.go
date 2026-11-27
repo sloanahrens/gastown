@@ -1765,6 +1765,112 @@ func TestCICacheTrimGocacheNoopNeedsTheFloor(t *testing.T) {
 	}
 }
 
+// TestCICacheTrimGocacheNoopRunEndsUnderCap: a reading at or under the cap clears
+// the ci-gocache item a run raised, and ends that run. The next over-cap reading
+// starts a new run, so it raises nothing, and the item comes back only once a
+// floor has passed from that new run's first reading. Each step checks the item
+// after its own reading, and that the volume was read, since a reading the
+// cadence skipped tests nothing.
+func TestCICacheTrimGocacheNoopRunEndsUnderCap(t *testing.T) {
+	t.Parallel()
+	const (
+		overCap  = 45 << 20 // KiB: over the default 40 GiB ci_gocache_cap_bytes
+		underCap = 35 << 20
+		cadence  = ciCacheTestEvery
+		floor    = ciCacheLRUFloorMinutes * time.Minute
+	)
+
+	// step is one trim's reading, gap after the one before it, and whether the
+	// item is raised once the reading is measured.
+	type step struct {
+		name   string
+		gap    time.Duration
+		over   bool
+		raised bool
+	}
+	steps := []step{
+		{"the first over-cap reading raises nothing", 0, true, false},
+		{"a second over-cap reading a floor later raises the item", floor, true, true},
+		{"an under-cap reading clears the item", cadence, false, false},
+		{"the next over-cap reading starts a new run and raises nothing", cadence, true, false},
+		{"an over-cap reading a cadence into the new run raises nothing", cadence, true, false},
+		{"an over-cap reading a floor past the new run's start raises the item again", cadence, true, true},
+	}
+	for _, removed := range []int64{0, 7} {
+		t.Run(fmt.Sprintf("removing %d files", removed), func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			for i, s := range steps {
+				f.now = f.now.Add(s.gap)
+				after, gone := int64(underCap), int64(0)
+				if s.over {
+					after, gone = overCap, removed
+				}
+				f.exec = ciCacheReply(after, gone, after)
+				f.tick()
+				f.drain()
+				if got := volumeExecs(f, ciCacheGocacheVolume); got != i+1 {
+					t.Fatalf("%s: the volume was read %d times, want %d", s.name, got, i+1)
+				}
+				want := []string(nil)
+				if s.raised {
+					want = []string{ciCacheNoOpKey}
+				}
+				if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, want) {
+					t.Errorf("%s: items = %v, want %v", s.name, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCICacheTrimGocacheNoopFailedTrimKeepsTheRun: a failed trim between two
+// over-cap ci-gocache readings leaves the run alone. A failure runs no
+// measurement, so the run still dates from the first over-cap reading. The
+// second successful reading comes a cadence after the failure, which is past the
+// floor from the first, so it raises the item. A failure that reset the run
+// would start it over at the second reading and raise nothing.
+func TestCICacheTrimGocacheNoopFailedTrimKeepsTheRun(t *testing.T) {
+	t.Parallel()
+	const (
+		overCap = 45 << 20 // KiB: over the default 40 GiB ci_gocache_cap_bytes
+		cadence = ciCacheTestEvery
+	)
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+
+	f.exec = ciCacheReply(overCap, 0, overCap)
+	f.tick()
+	f.drain()
+	if got := noopKeys(f.d.cacheTrimNoOp.observed()); len(got) != 0 {
+		t.Fatalf("the first over-cap reading raised %v, want none", got)
+	}
+
+	f.now = f.now.Add(cadence)
+	f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+	f.tick()
+	f.drain()
+	if got := volumeExecs(f, ciCacheGocacheVolume); got != 2 {
+		t.Fatalf("the volume was read %d times after the failed trim, want 2", got)
+	}
+	if got := noopKeys(f.d.cacheTrimNoOp.observed()); len(got) != 0 {
+		t.Fatalf("the failed trim raised %v, want none", got)
+	}
+
+	// The failure concluded at the cadence's end, so its next attempt is a
+	// cadence after that, which is past the floor from the first reading.
+	f.now = f.now.Add(cadence)
+	f.exec = ciCacheReply(overCap, 0, overCap)
+	f.tick()
+	f.drain()
+	if got := volumeExecs(f, ciCacheGocacheVolume); got != 3 {
+		t.Fatalf("the volume was read %d times after the retry, want 3", got)
+	}
+	want := []string{ciCacheNoOpKey}
+	if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, want) {
+		t.Errorf("items after the second successful reading = %v, want %v", got, want)
+	}
+}
+
 // TestCICacheTrimGocacheNoopSummaryNamesTheFloor: the ci-gocache volume is
 // trimmed by the LRU program, which never selects a file younger than
 // ciCacheLRUFloorMinutes. A volume still over its cap after a trim therefore
