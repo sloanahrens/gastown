@@ -400,12 +400,13 @@ func TestDeliveryWaitIdleSkipsConsumptionProbeAfterCtxEnds(t *testing.T) {
 }
 
 // clampProbeToDeadline: a probe starts with at most the time left on the
-// caller's deadline, not the full ProbeWindow, so a delivery with a second
-// left is not held for a 3s probe (gt-2a2a6). The deadline must outlast the
-// delivery: if it expires first, no probe starts and nothing is checked.
+// caller's deadline, not the full ProbeWindow, so the deadline still bounds
+// it (gt-2a2a6). The deadline is an hour so that it cannot end during the
+// delivery on a loaded host, and the window is above it so that a missing
+// clamp shows as too long rather than passing with no probe.
 func clampProbeToDeadline(t *testing.T, mode string, idle bool) {
 	t.Helper()
-	const left = time.Second
+	const left = time.Hour
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, idle)
 	ctx, cancel := context.WithTimeout(t.Context(), left)
@@ -413,7 +414,7 @@ func clampProbeToDeadline(t *testing.T, mode string, idle bool) {
 	probe := &probeRecordingTmux{deliveryTmux: ft}
 	d := testDelivery(ft, t.TempDir(), &pollerLog{}, &bytes.Buffer{})
 	d.Tmux, d.Mode, d.Force = probe, mode, true
-	d.ProbeWindow = 3 * time.Second
+	d.ProbeWindow = 2 * left
 
 	if err := d.Deliver(ctx, deliveryTarget, "m", "mayor"); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deliver: %v", err)
