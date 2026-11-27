@@ -75,6 +75,9 @@ var omSkewNonBinaryPaths = []string{".om.json", "docs/", "README.md", "CHANGELOG
 type omSkewMonitor struct {
 	start sync.Once
 
+	// refresh refreshes the clone a reading asks about; nil is omSkewRefreshClone.
+	refresh func(townRoot string) (string, error)
+
 	mu sync.Mutex
 	// raised is true while an om-skew alert is open. It is what keeps the
 	// hourly check from re-raising a condition the operator already holds.
@@ -99,6 +102,8 @@ type omSkewMonitor struct {
 	// fails to measure the lag. A reading that reads no lag leaves it as it is,
 	// so the same failure after such a reading is not logged again.
 	lastLagErr string
+	// lastRefreshErr is the refresh's suppression: a success clears it for the next failure.
+	lastRefreshErr string
 }
 
 // startOMSkewMonitor starts the check, once per daemon, from the landing
@@ -222,6 +227,17 @@ func (d *Daemon) omSkewNoFileCanChangeTheBinary(townRoot, installed, remote stri
 		}
 	}
 	return d.omSkewNoEmbedReaches(townRoot, remote, changed)
+}
+
+// omSkewRefresh refreshes the check's clone. A failure logs once per distinct
+// message; it is not returned, and the reading's own checks still alarm.
+func (d *Daemon) omSkewRefresh(townRoot string) {
+	refresh := d.omSkew.refresh
+	if refresh == nil {
+		refresh = d.omSkewRefreshClone
+	}
+	_, err := refresh(townRoot)
+	d.omSkewNoteCloneErr(&d.omSkew.lastRefreshErr, err)
 }
 
 // omSkewNoteCloneErr records the clone's answer to one question a reading asks

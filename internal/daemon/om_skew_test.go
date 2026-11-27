@@ -1243,3 +1243,39 @@ func TestOMSkewRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
 		t.Errorf("git calls = %q, want only the one diff of two commit ids", diffs)
 	}
 }
+
+// TestOMSkewRefreshLogsAFailureOnce: a refresh that fails logs once per distinct
+// message, and a refresh that succeeds lets the same failure log again.
+func TestOMSkewRefreshLogsAFailureOnce(t *testing.T) {
+	t.Parallel()
+	d, _ := omSkewDaemon(t)
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	failure := errors.New("the om origin did not answer")
+	d.omSkew.refresh = func(string) (string, error) { return "", failure }
+	d.omSkewRefresh(d.config.TownRoot)
+	d.omSkewRefresh(d.config.TownRoot)
+	if n := strings.Count(logs.String(), failure.Error()); n != 1 {
+		t.Fatalf("logged the failure %d times across two calls, want once", n)
+	}
+	d.omSkew.refresh = func(string) (string, error) { return "", nil }
+	d.omSkewRefresh(d.config.TownRoot)
+	d.omSkew.refresh = func(string) (string, error) { return "", failure }
+	d.omSkewRefresh(d.config.TownRoot)
+	if n := strings.Count(logs.String(), failure.Error()); n != 2 {
+		t.Errorf("logged the failure %d times, want it again after a recovery", n)
+	}
+}
+
+// TestOMSkewRefreshRunsTheCloneWhenNoFieldIsSet: an unset refresh field runs
+// omSkewRefreshClone on the check's own clone.
+func TestOMSkewRefreshRunsTheCloneWhenNoFieldIsSet(t *testing.T) {
+	t.Parallel()
+	d, _ := omSkewDaemon(t)
+	var calls []string
+	d.execCmd = hmSkewRunner(t, hmSkewAnswers{calls: &calls})
+	d.omSkewRefresh(d.config.TownRoot)
+	if len(calls) != 3 || !strings.Contains(calls[1], " clone ") || !strings.Contains(calls[2], " fetch ") {
+		t.Errorf("calls = %q, want a clone into the check's own clone and a fetch", calls)
+	}
+}
