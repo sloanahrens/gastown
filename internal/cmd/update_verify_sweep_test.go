@@ -173,6 +173,49 @@ func TestPodSweepLaunch(t *testing.T) {
 	}
 }
 
+// TestPodSweepLaunchRefuses pins the refusals: a probe with no reader, a read
+// that fails, a daemon start that cannot be read, a record whose outcome it does
+// not name and a record that is not JSON are each refused with their reason, and
+// no error carries the record's output.
+func TestPodSweepLaunchRefuses(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("kubectl refused")
+	const secret = "SECRET-MARKER"
+	startErr := func(p podImageLabelProbes) podImageLabelProbes {
+		p.sweepStart = func() (time.Time, error) { return time.Time{}, boom }
+		return p
+	}
+	failRun := func(context.Context, string, []string, string, ...string) (string, int, error) {
+		return "", 0, boom
+	}
+	startedRun, _ := sweepReads(sweepReply{out: sweepRecordJSON(sweepDaemonStart(), "started", "")})
+	unnamedRun, _ := sweepReads(sweepReply{out: sweepRecordJSON(sweepDaemonStart(), secret, "")})
+	notJSONRun, _ := sweepReads(sweepReply{out: "not json"})
+	tests := []struct {
+		name    string
+		probe   podImageLabelProbes
+		wantErr string
+	}{
+		{"no reader wired", podImageLabelProbes{}, "no launch-smoke record reader"},
+		{"the read fails", sweepProbes(failRun, noWait(t)), "kubectl refused"},
+		{"the daemon start cannot be read", startErr(sweepProbes(startedRun, noWait(t))), "reading the daemon's start"},
+		{"a record whose outcome is not named", sweepProbes(unnamedRun, noWait(t)), "names no known outcome"},
+		{"a record that is not JSON", sweepProbes(notJSONRun, noWait(t)), "is not JSON"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			started, _, err := tt.probe.SweepLaunch(context.Background())
+			if err == nil || started || !strings.Contains(fmt.Sprint(err), tt.wantErr) {
+				t.Errorf("SweepLaunch = (%v, _, %v), want not started with an error naming %q", started, err, tt.wantErr)
+			}
+			if err != nil && strings.Contains(err.Error(), secret) {
+				t.Errorf("error %q carries the record's output", err)
+			}
+		})
+	}
+}
+
 // TestPodSweepLaunchWaits pins the re-read: a record missing at the first read
 // is judged when a later read finds it, and one that never appears ends not
 // started when the context ends. A wait that fails while the context is live
