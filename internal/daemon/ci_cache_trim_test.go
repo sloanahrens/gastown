@@ -210,6 +210,15 @@ func (f *ciCacheFixture) drain() {
 	}
 }
 
+// tickAFloorLater moves the fixture's clock to a floor and a minute after now,
+// then ticks and drains: the trim's cadence is shorter than the floor, so each
+// volume is read again, more than a floor past the reading before.
+func (f *ciCacheFixture) tickAFloorLater() {
+	f.now = f.now.Add((ciCacheLRUFloorMinutes + 1) * time.Minute)
+	f.tick()
+	f.drain()
+}
+
 // execs returns the exec calls the fixture recorded.
 func (f *ciCacheFixture) execs() []cliCall {
 	return f.callsWith("exec ")
@@ -1125,7 +1134,9 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 			t.Errorf("item kind %q severity %q, want the cache trim kind at low severity", items[0].Kind, items[0].Severity)
 		}
 
-		f.at(time.Hour)
+		f.tickAFloorLater()
+
+		f.at(3 * time.Hour)
 		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
@@ -1133,7 +1144,7 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 			t.Fatalf("items after a repeat = %d, want still one", len(items))
 		}
 
-		f.at(2 * time.Hour)
+		f.at(4 * time.Hour)
 		f.exec = ciCacheReply(overCap, 5, underCap)
 		f.tick()
 		f.drain()
@@ -1148,6 +1159,7 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		f.exec = ciCacheReply(overCap, 7, overCap)
 		f.tick()
 		f.drain()
+		f.tickAFloorLater()
 		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey}) {
 			t.Errorf("a trim that removed files and ended over the cap raised %v, want one item keyed %q", got, ciCacheNoOpKey)
 		}
@@ -1460,7 +1472,9 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 			t.Fatalf("items = %v, want both volumes' items", got)
 		}
 
-		f.at(time.Hour)
+		f.tickAFloorLater()
+
+		f.at(3 * time.Hour)
 		f.npmExec = ciCacheReply(ciCacheNpmCapKiB, 0, ciCacheNpmCapKiB)
 		f.tick()
 		f.drain()
