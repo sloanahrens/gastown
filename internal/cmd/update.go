@@ -603,6 +603,12 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 			wantPolecat: podRefDigest(imagesValues.Polecat),
 			annotation:  podTargetAnnotation(*pod, seams.PodRun),
 			devTag:      podTargetDevTag(*pod, seams.PodRun),
+			// The sweep check reads the daemon pod's launch-smoke record, judges
+			// it against the running daemon's start, and waits one poll between
+			// reads of a record the daemon has not written yet.
+			sweep:      podSweepSmokeRecord(*pod, seams.PodRun),
+			sweepStart: daemonStateStart,
+			sweepWait:  podSweepPoll,
 		}, *pod, seams.PodRun, deps.Clock)
 	}
 	if req.Images != "" {
