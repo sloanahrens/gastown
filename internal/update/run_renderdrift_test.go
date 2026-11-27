@@ -256,8 +256,12 @@ func TestRenderDriftSilentHookPassesBound(t *testing.T) {
 	f.deps.RenderDrift = func(ctx context.Context) (int, error) {
 		started <- hookStart{ctx: ctx, startErr: ctx.Err()}
 		close(f.running)
-		<-f.release
-		return 2, nil
+		select {
+		case <-f.release:
+			return 2, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
 
 	detail := runRenderDrift(t, f)
