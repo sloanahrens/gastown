@@ -1252,8 +1252,9 @@ func Run(opts Options) error {
 		if err != nil {
 			// Nothing is reported done, but the worktree's git state is still
 			// recorded: a session that dies before re-running gt done must not
-			// strand its slot (hq-vx224).
-			return failRun(err)
+			// strand its slot (hq-vx224). A size refusal ends the turn as
+			// ESCALATED instead (gt-fkhjrv).
+			return endRunOnSubmitFailure(r, cleanupStatus, err, failRun)
 		}
 	} else {
 		if r.sessionBackend == backendOpenShell {
