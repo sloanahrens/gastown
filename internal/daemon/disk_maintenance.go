@@ -607,9 +607,15 @@ func (d *Daemon) runDiskMaintenance() {
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
-		// A due trim runs on its own pass; a tick with no trim due starts nothing (gt-vek8mp).
+		// A due trim runs on its own pass. With no trim due, the alert-only
+		// pass keeps a long target pass in flight from holding the alerts'
+		// next reading (gt-vek8mp, gt-q5s5wy).
 		if due.cacheTrim {
 			d.runDiskMaintenanceTrim(mode, due, "a target pass is still running", now)
+			return
+		}
+		if d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
+			d.dispatchDiskMaintenanceAlertOnly()
 		}
 		return
 	}
