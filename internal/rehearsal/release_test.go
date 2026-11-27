@@ -32,7 +32,7 @@ func TestRehearsalReleaseOutcomesAndSeconds(t *testing.T) {
 			t.Parallel()
 			clk := clockwork.NewFakeClockAt(releaseEpoch)
 			sling := func(context.Context, string) error { clk.Advance(2 * time.Second); return tc.err }
-			got := Release(t.Context(), []string{"bead-1"}, 1, sling, clk.Now)
+			got := Release(t.Context(), []string{"bead-1"}, 1, sling, nil, clk.Now)
 			want := []Sling{{Bead: "bead-1", Outcome: tc.outcome, Seconds: 2}}
 			if !slices.Equal(got, want) {
 				t.Errorf("Release = %+v, want %+v", got, want)
@@ -71,9 +71,14 @@ func TestRehearsalReleaseNeverExceedsInFlight(t *testing.T) {
 		}
 		return nil
 	}
+	var seen []int
+	admit := func(_ context.Context, running func() int) error {
+		seen = append(seen, running())
+		return nil
+	}
 	clk := clockwork.NewFakeClockAt(releaseEpoch)
 	done := make(chan []Sling, 1)
-	go func() { done <- Release(ctx, ids, inFlight, sling, clk.Now) }()
+	go func() { done <- Release(ctx, ids, inFlight, sling, admit, clk.Now) }()
 	select {
 	case <-full:
 	case <-ctx.Done():
@@ -88,6 +93,12 @@ func TestRehearsalReleaseNeverExceedsInFlight(t *testing.T) {
 	}
 	if p := peak.Load(); p != inFlight {
 		t.Errorf("peak concurrent slings = %d, want %d", p, inFlight)
+	}
+	if len(seen) != len(ids) {
+		t.Fatalf("admit calls = %d, want %d", len(seen), len(ids))
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(seen[:inFlight], want) {
+		t.Errorf("admit saw running = %v, want %v for the first %d slings", seen, want, inFlight)
 	}
 	for i, s := range got {
 		if s.Bead != ids[i] || s.Outcome != SlingOK {
@@ -111,7 +122,7 @@ func TestRehearsalReleaseStartsInIdOrder(t *testing.T) {
 				started = append(started, id)
 				return nil
 			}
-			Release(t.Context(), ids, inFlight, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
+			Release(t.Context(), ids, inFlight, sling, nil, clockwork.NewFakeClockAt(releaseEpoch).Now)
 			if !slices.Equal(started, ids) {
 				t.Errorf("started %v, want %v", started, ids)
 			}
@@ -136,7 +147,7 @@ func TestRehearsalReleaseReportsInIdOrderWhenSlingsFinishOutOfOrder(t *testing.T
 		}
 		return nil
 	}
-	got := Release(ctx, []string{"b1", "b2", "b3", "b4"}, 4, sling, clockwork.NewFakeClockAt(releaseEpoch).Now)
+	got := Release(ctx, []string{"b1", "b2", "b3", "b4"}, 4, sling, nil, clockwork.NewFakeClockAt(releaseEpoch).Now)
 	if got[0] != (Sling{Bead: "b1", Outcome: SlingOK}) || got[3] != (Sling{Bead: "b4", Outcome: SlingFailed}) {
 		t.Errorf("Release = %+v, want b1 ok first and b4 failed last", got)
 	}
@@ -178,7 +189,7 @@ func TestRehearsalReleaseStopsStartingAfterCancel(t *testing.T) {
 				cancel()
 			}
 			done := make(chan []Sling, 1)
-			go func() { done <- Release(ctx, ids, 1, sling, clockwork.NewFakeClockAt(releaseEpoch).Now) }()
+			go func() { done <- Release(ctx, ids, 1, sling, nil, clockwork.NewFakeClockAt(releaseEpoch).Now) }()
 			if !tc.cancelFirst {
 				select {
 				case <-firstStarted:
@@ -205,6 +216,73 @@ func TestRehearsalReleaseStopsStartingAfterCancel(t *testing.T) {
 			}
 			if !slices.Equal(got, want) {
 				t.Errorf("Release = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestRehearsalReleaseAdmits(t *testing.T) {
+	t.Parallel()
+	ids := []string{"b1", "b2", "b3"}
+	for _, tc := range []struct {
+		name     string
+		refuseAt int // -1 admits every id
+		cancel   bool
+	}{
+		{"admits every sling in order", -1, false},
+		{"an error at the first id starts no sling", 0, false},
+		{"an error later lets the started sling finish", 1, false},
+		{"a cancel during admit reads the same when admit returns nil", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			clk := clockwork.NewFakeClockAt(releaseEpoch)
+			admits, started := 0, []string(nil)
+			admit := func(context.Context, func() int) error {
+				clk.Advance(time.Minute) // must not land in Seconds
+				admits++
+				if admits-1 != tc.refuseAt {
+					return nil
+				}
+				if tc.cancel {
+					cancel()
+					return nil
+				}
+				return errors.New("no seat")
+			}
+			got := Release(ctx, ids, 1, func(_ context.Context, id string) error {
+				started = append(started, fmt.Sprintf("%s/%d", id, admits))
+				clk.Advance(2 * time.Second)
+				return nil
+			}, admit, clk.Now)
+			stop := tc.refuseAt
+			if stop < 0 {
+				stop = len(ids)
+			}
+			wantStarted := make([]string, stop)
+			for i := range wantStarted {
+				wantStarted[i] = fmt.Sprintf("%s/%d", ids[i], i+1)
+			}
+			if !slices.Equal(started, wantStarted) {
+				t.Errorf("started %v, want %v", started, wantStarted)
+			}
+			wantAdmits := stop
+			if tc.refuseAt >= 0 {
+				wantAdmits++
+			}
+			if admits != wantAdmits {
+				t.Errorf("admit calls = %d, want %d", admits, wantAdmits)
+			}
+			for i, s := range got {
+				want := Sling{Bead: ids[i], Outcome: SlingOK, Seconds: 2}
+				if i >= stop {
+					want = Sling{Bead: ids[i], Outcome: SlingFailed}
+				}
+				if s != want {
+					t.Errorf("Sling %d = %+v, want %+v", i, s, want)
+				}
 			}
 		})
 	}

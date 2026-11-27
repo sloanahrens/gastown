@@ -58,7 +58,7 @@ func runWindow(ctx context.Context, o Options, ids []string) ([]Sling, []SideRun
 	}()
 	slings := Release(ctx, ids, releaseInFlight, func(ctx context.Context, id string) error {
 		return o.Town.Sling(ctx, id, o.Agent)
-	}, o.Now)
+	}, nil, o.Now)
 	_, waitErr := Wait(ctx, ids, closedState(o.Town), o.Tick, deadline)
 	<-done
 	var errs []error
