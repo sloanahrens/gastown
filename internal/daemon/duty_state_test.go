@@ -3,8 +3,11 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +181,94 @@ func TestDutyStateWriteIsAtomic(t *testing.T) {
 		t.Parallel()
 		if err := WriteDutyState("", now, nil, nil); err == nil {
 			t.Error("WriteDutyState with no town root = nil, want an error")
+		}
+	})
+}
+
+// TestDutyStateRoundTrip covers what ReadDutyState gives back after
+// WriteDutyState: the same time and the same records, in the same order.
+func TestDutyStateRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	obs := []reconcile.Observation{
+		{Duty: "backup", LastGood: now.Add(-90 * time.Second), Age: 90 * time.Second, Verdict: reconcile.VerdictOK},
+		{Duty: "gc", LastGood: now.Add(-2 * time.Hour), Age: 2 * time.Hour, Verdict: reconcile.VerdictOverdue},
+		{Duty: "town-state", Verdict: reconcile.VerdictUnknown},
+	}
+	limits := map[string]time.Duration{"backup": 10 * time.Minute, "gc": 30 * time.Minute}
+
+	townRoot := t.TempDir()
+	if err := WriteDutyState(townRoot, now, obs, limits); err != nil {
+		t.Fatalf("WriteDutyState = %v, want no error", err)
+	}
+	got, err := ReadDutyState(townRoot)
+	if err != nil {
+		t.Fatalf("ReadDutyState = %v, want no error", err)
+	}
+	if want := newDutyState(now, obs, limits); !reflect.DeepEqual(got, want) {
+		t.Errorf("ReadDutyState = %+v, want %+v", got, want)
+	}
+}
+
+// TestDutyStateReadFailures covers the reads that must fail. A missing file
+// wraps fs.ErrNotExist; any other failure is an error that is not mistaken for
+// absence. None of them returns an empty state.
+func TestDutyStateReadFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a missing file satisfies errors.Is fs.ErrNotExist", func(t *testing.T) {
+		t.Parallel()
+		got, err := ReadDutyState(t.TempDir())
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("ReadDutyState error = %v, want one wrapping fs.ErrNotExist", err)
+		}
+		if !reflect.DeepEqual(got, DutyState{}) {
+			t.Errorf("ReadDutyState = %+v with the error, want the zero state", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"a file that is not JSON", "{not json"},
+		{"an empty file", ""},
+		{"a file holding null", "null"},
+	} {
+		t.Run(tc.name+" is an error", func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			path := dutyStatePath(townRoot)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := ReadDutyState(townRoot); err == nil || errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("ReadDutyState = %+v, %v; want an error that is not absence", got, err)
+			}
+		})
+	}
+
+	t.Run("a directory at the path is unreadable, not absent", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		if err := os.MkdirAll(dutyStatePath(townRoot), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadDutyState(townRoot); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadDutyState onto a directory = %v, want an error that is not absence", err)
+		}
+	})
+
+	t.Run("an empty town root is refused before any read", func(t *testing.T) {
+		t.Parallel()
+		// Without the refusal the read is of a path relative to the test's
+		// directory, which fails as absent; the refusal must not look like that.
+		if _, err := ReadDutyState(""); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadDutyState with no town root = %v, want the refusal", err)
 		}
 	})
 }
