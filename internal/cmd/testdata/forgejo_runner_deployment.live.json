@@ -120,7 +120,7 @@
             "name": "dind",
             "resources": {
               "limits": {
-                "cpu": "8",
+                "cpu": "6",
                 "memory": "12Gi"
               },
               "requests": {
