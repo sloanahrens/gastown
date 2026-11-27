@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/clusterapproval"
 	"github.com/steveyegge/gastown/internal/update"
@@ -265,7 +269,7 @@ func TestClusterShapeApplyMissingFlag(t *testing.T) {
 				calls++
 				return "", 0, nil
 			}
-			err := applyPlanFiles(context.Background(), kube, t.TempDir(), tc.files, tc.flags)
+			_, err := applyPlanFiles(context.Background(), kube, t.TempDir(), tc.files, tc.flags)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
 				t.Fatalf("applyPlanFiles returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
 			}
@@ -446,6 +450,248 @@ func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shapeLedgerLines reads the ledger the runs write beside the approval record at
+// approvalPath, one decoded entry per line.
+func shapeLedgerLines(t *testing.T, approvalPath string) []applyLedgerEntry {
+	t.Helper()
+	path := applyLedgerPath(approvalPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the ledger %s: %v", path, err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	entries := make([]applyLedgerEntry, 0, len(lines))
+	for _, line := range lines {
+		var entry applyLedgerEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("the ledger line %q: %v", line, err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// TestClusterShapeApplyLedger: every run appends one line to the ledger beside
+// the approval record, a refused run included. The applied run's line names its
+// plan, the file it applied and the result applied; the refused run's line says
+// refused and names no file. Each line carries a time, and the ledger is created
+// 0644, the mode the operator reads it in.
+func TestClusterShapeApplyLedger(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
+	approvalPath := filepath.Join(dir, "approval.json")
+	writeReadFile(t, approvalPath, readApprovalOK)
+	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	var verified int
+	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("the applied run returned %v, want the plan applied", err)
+	}
+	// A refused run: the plan file no longer hashes to what plan.json records.
+	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), append(append([]byte{}, readWebDoc...), "# edited\n"...))
+	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err == nil {
+		t.Fatal("the refused run was applied, want a refusal")
+	}
+	lines := shapeLedgerLines(t, approvalPath)
+	if len(lines) != 2 {
+		t.Fatalf("the ledger holds %d lines, want one per run", len(lines))
+	}
+	applied, refused := lines[0], lines[1]
+	if applied.Result != applyResultApplied || applied.Plan != readSHA || !slices.Equal(applied.Objects, []string{"deployment-web.yaml"}) {
+		t.Errorf("the applied run's line = %+v, want the plan %s, the file it applied and the result %q", applied, readSHA, applyResultApplied)
+	}
+	if refused.Result != applyResultRefused || len(refused.Objects) != 0 || refused.Plan != readSHA {
+		t.Errorf("the refused run's line = %+v, want the plan %s, no file and the result %q", refused, readSHA, applyResultRefused)
+	}
+	if applied.TS.IsZero() || refused.TS.IsZero() {
+		t.Errorf("the ledger lines hold the times %v and %v, want both recorded", applied.TS, refused.TS)
+	}
+	info, err := os.Stat(applyLedgerPath(approvalPath))
+	if err != nil {
+		t.Fatalf("stating the ledger: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("the ledger's mode is %04o, want 0644 so the operator can read it", perm)
+	}
+}
+
+// TestClusterShapeApplyLedgerPartial: a run that applies phase P's file and then
+// fails phase W's records the result partial and the one file it applied.
+func TestClusterShapeApplyLedgerPartial(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeReadFile(t, filepath.Join(dir, "policy.yaml"), shapePolicyDoc)
+	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
+	approvalPath := filepath.Join(dir, "approval.json")
+	writeReadFile(t, approvalPath, readApprovalOK)
+	kube := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+		switch {
+		case !slices.Contains(args, "apply"):
+			return shapeLiveAt("7"), 0, nil
+		case slices.Contains(args, shapeFlags.applyKubeconfig):
+			return "", 1, nil
+		}
+		return "", 0, nil
+	}
+	var verified int
+	if err := runTownClusterApply(context.Background(), kube, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err == nil {
+		t.Fatal("a failed phase W apply was reported as applied, want a partial apply")
+	}
+	lines := shapeLedgerLines(t, approvalPath)
+	if len(lines) != 1 {
+		t.Fatalf("the ledger holds %d lines, want one for the run", len(lines))
+	}
+	if lines[0].Result != applyResultPartial || !slices.Equal(lines[0].Objects, []string{"policy.yaml"}) || lines[0].Plan != readSHA {
+		t.Errorf("the partial run's line = %+v, want the plan %s, the file it applied and the result %q", lines[0], readSHA, applyResultPartial)
+	}
+}
+
+// TestClusterShapeApplyLedgerNotRecorded: a run whose ledger line cannot be
+// written is an error saying so — a good apply included, so an apply that
+// changed the cluster is never reported as recorded — and a refused run keeps
+// its own error beside it.
+func TestClusterShapeApplyLedgerNotRecorded(t *testing.T) {
+	t.Parallel()
+	t.Run("a good apply", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+		writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
+		approvalPath := filepath.Join(dir, "approval.json")
+		writeReadFile(t, approvalPath, readApprovalOK)
+		// A directory at the ledger path makes the append impossible.
+		if err := os.Mkdir(applyLedgerPath(approvalPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		kube := &shapeLiveKube{out: shapeLiveAt("7")}
+		var verified int
+		err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+		if err == nil || !strings.Contains(err.Error(), "ledger line could not be written") {
+			t.Fatalf("runTownClusterApply = %v, want an error saying the ledger line could not be written", err)
+		}
+		if shapeApplies(kube.calls) != 1 {
+			t.Errorf("the run made %d apply calls, want the one apply its error still reports", shapeApplies(kube.calls))
+		}
+	})
+	t.Run("a refused run", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+		writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
+		approvalPath := filepath.Join(dir, "approval.json") // no approval record: the run refuses
+		if err := os.Mkdir(applyLedgerPath(approvalPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var calls int
+		err := runTownClusterApply(context.Background(), shapeKube(&calls), dir, approvalPath, readKubeconfs, nil)
+		if err == nil || !strings.Contains(err.Error(), "there is no approval record") || !strings.Contains(err.Error(), "ledger line could not be written") {
+			t.Fatalf("runTownClusterApply = %v, want the refusal and the ledger error", err)
+		}
+	})
+}
+
+// shapeLedgerEntry is a good ledger line for the refusal rows to append.
+var shapeLedgerEntry = applyLedgerEntry{TS: time.Now().UTC(), Plan: readSHA, Objects: []string{"deployment-web.yaml"}, Result: applyResultApplied}
+
+// shapeLedgerFake is an applyLedgerWriter whose write or close fails, the two
+// failures a full disk would cause.
+type shapeLedgerFake struct {
+	writeErr error
+	closeErr error
+	written  []byte
+}
+
+func (f *shapeLedgerFake) Write(b []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	f.written = append(f.written, b...)
+	return len(b), nil
+}
+
+func (f *shapeLedgerFake) Close() error { return f.closeErr }
+
+// TestClusterShapeApplyLedgerRefuses: an append that cannot build its line, or
+// whose ledger path is a symlink, cannot be checked, cannot be opened, cannot be
+// written or cannot be closed, is an error and records nothing.
+func TestClusterShapeApplyLedgerRefuses(t *testing.T) {
+	t.Parallel()
+	t.Run("a line that cannot be encoded", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), applyLedgerName)
+		entry := shapeLedgerEntry
+		entry.TS = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		err := appendApplyLedger(path, entry)
+		if err == nil || !strings.Contains(err.Error(), "cannot be built") {
+			t.Fatalf("appendApplyLedger = %v, want the line cannot be built", err)
+		}
+		if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("appendApplyLedger wrote %s, want nothing", path)
+		}
+	})
+	t.Run("a symlink at the ledger path", func(t *testing.T) {
+		t.Parallel()
+		target := filepath.Join(t.TempDir(), "target.jsonl")
+		path := filepath.Join(t.TempDir(), applyLedgerName)
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		err := appendApplyLedger(path, shapeLedgerEntry)
+		if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Fatalf("appendApplyLedger = %v, want the symlink refused", err)
+		}
+		if _, statErr := os.Stat(target); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("appendApplyLedger wrote through the symlink to %s, want nothing", target)
+		}
+	})
+	t.Run("a ledger path that cannot be checked", func(t *testing.T) {
+		t.Parallel()
+		parent := filepath.Join(t.TempDir(), "file")
+		writeReadFile(t, parent, []byte("x"))
+		err := appendApplyLedger(filepath.Join(parent, applyLedgerName), shapeLedgerEntry)
+		if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+			t.Fatalf("appendApplyLedger = %v, want the path cannot be checked", err)
+		}
+	})
+	t.Run("a ledger that cannot be opened", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), applyLedgerName)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := appendApplyLedger(path, shapeLedgerEntry)
+		if err == nil || !strings.Contains(err.Error(), "cannot be opened") {
+			t.Fatalf("appendApplyLedger = %v, want the ledger cannot be opened", err)
+		}
+	})
+	t.Run("a ledger write that fails", func(t *testing.T) {
+		t.Parallel()
+		fake := &shapeLedgerFake{writeErr: errors.New("no space left")}
+		ledger := applyLedger{path: filepath.Join(t.TempDir(), applyLedgerName), open: func(string) (applyLedgerWriter, error) { return fake, nil }}
+		err := ledger.append(shapeLedgerEntry)
+		if err == nil || !strings.Contains(err.Error(), "cannot be written") {
+			t.Fatalf("append = %v, want the ledger cannot be written", err)
+		}
+		if len(fake.written) != 0 {
+			t.Errorf("append wrote %q past a failing write, want nothing", fake.written)
+		}
+	})
+	t.Run("a ledger close that fails", func(t *testing.T) {
+		t.Parallel()
+		fake := &shapeLedgerFake{closeErr: errors.New("close failed")}
+		ledger := applyLedger{path: filepath.Join(t.TempDir(), applyLedgerName), open: func(string) (applyLedgerWriter, error) { return fake, nil }}
+		err := ledger.append(shapeLedgerEntry)
+		if err == nil || !strings.Contains(err.Error(), "cannot be written") {
+			t.Fatalf("append = %v, want the ledger cannot be written", err)
+		}
+		if !strings.HasSuffix(string(fake.written), "\n") {
+			t.Errorf("append wrote %q, want one complete line", fake.written)
+		}
+	})
 }
 
 // TestClusterShapeApplyFileHash: a plan file whose bytes differ from the sha256
