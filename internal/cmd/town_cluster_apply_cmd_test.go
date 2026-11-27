@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/clusterapproval"
 )
 
 // TestClusterApplyCommandRegistered holds the command to its place under
@@ -42,7 +46,6 @@ func TestClusterApplyCommandRefuses(t *testing.T) {
 		{name: "a missing --plan", args: []string{"--approval", "approval.json"}, want: `required flag(s) "plan" not set`},
 		{name: "a missing --approval", args: []string{"--plan", "plan"}, want: `required flag(s) "approval" not set`},
 		{name: "both required flags missing", args: []string{}, want: `required flag(s) "approval", "plan" not set`},
-		{name: "a complete call", args: []string{"--plan", "plan", "--approval", "approval.json", "--policy-kubeconfig", "policy", "--apply-kubeconfig", "apply"}, want: "apply is not wired yet, so nothing was applied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -55,5 +58,51 @@ func TestClusterApplyCommandRefuses(t *testing.T) {
 				t.Errorf("apply %q = %v, want an error holding %q", tc.args, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestClusterApplyRecordVerifier holds the verifier the command gives the apply
+// to the clock it is built with: a record for this plan inside its window
+// authorizes it; an expired record and a record for the other cluster do not.
+func TestClusterApplyRecordVerifier(t *testing.T) {
+	t.Parallel()
+	sha := strings.Repeat("a", 64)
+	approvedAt := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+	record := func(cluster string) clusterapproval.Record {
+		return clusterapproval.Record{Act: clusterapproval.ActApplyPlan, Cluster: cluster, PlanSHA256: sha, ProposalID: "0123456789ab", ApprovedAt: approvedAt, ExpiresAt: approvedAt.Add(time.Hour)}
+	}
+	for _, tc := range []struct {
+		name    string
+		rec     clusterapproval.Record
+		now     time.Time
+		wantErr bool
+	}{
+		{name: "a record for this plan inside its window", rec: record(clusterapproval.ClusterControl), now: approvedAt.Add(30 * time.Minute)},
+		{name: "an expired record", rec: record(clusterapproval.ClusterControl), now: approvedAt.Add(time.Hour), wantErr: true},
+		{name: "a record for the other cluster", rec: record(clusterapproval.ClusterGTSbx), now: approvedAt.Add(30 * time.Minute), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			verify := applyRecordVerifier(func() time.Time { return tc.now })
+			if err := verify(tc.rec, planRecord{ID: sha}); (err != nil) != tc.wantErr {
+				t.Errorf("verify = %v, want an error: %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestClusterApplyCommandNoPlanRecord runs the command on a plan directory with
+// no plan.json. The plan is read before anything else, so the error names
+// nothing as applied.
+func TestClusterApplyCommandNoPlanRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cmd := newTownClusterApplyCmd()
+	cmd.SetArgs([]string{"--plan", dir, "--approval", filepath.Join(dir, "approval.json"), "--policy-kubeconfig", "policy", "--apply-kubeconfig", "apply"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "the plan record cannot be read, so nothing was applied") {
+		t.Errorf("apply of a directory with no plan.json = %v, want an error saying the plan record cannot be read and nothing was applied", err)
 	}
 }
