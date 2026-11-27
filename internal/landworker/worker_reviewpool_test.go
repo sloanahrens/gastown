@@ -168,6 +168,38 @@ func TestReviewPoolWorkerReviewWorksLeavesOutParked(t *testing.T) {
 	}
 }
 
+// TestReviewPoolWorkerReviewWorksSkipsAQueuedBookkeepingBead pins that
+// reviewWorks offers no work for a bead whose deferred bookkeeping is still
+// queued: the bead reads as ready until its job writes the record, so a review
+// now is spent on a landing the pass will not make. Once the job returns the
+// bead is offered again (gt-ppcl1g).
+func TestReviewPoolWorkerReviewWorksSkipsAQueuedBookkeepingBead(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	h := newHarness(t)
+	kept := readySubmission("gt-kept", "polecat/opal/gt-kept+x1", noteHead)
+	held := readySubmission("gt-held", "polecat/opal/gt-held+x1", tipHead)
+	q, release := holdQueue(ctx, t, held.ID)
+	h.w.Books = q
+
+	works, err := h.w.reviewWorks([]*beads.Issue{kept, held}, "")
+	if err != nil {
+		t.Fatalf("reviewWorks: %v", err)
+	}
+	if got, want := workOrder(works), "gt-kept"; got != want {
+		t.Fatalf("reviewWorks offered %s while gt-held's bookkeeping is queued; want only %s", got, want)
+	}
+
+	releaseBeadJob(ctx, t, q, held.ID, release)
+	works, err = h.w.reviewWorks([]*beads.Issue{kept, held}, "")
+	if err != nil {
+		t.Fatalf("reviewWorks after the job returned: %v", err)
+	}
+	if len(works) != 2 {
+		t.Fatalf("reviewWorks offered %d works after gt-held's job returned; want both beads", len(works))
+	}
+}
+
 // TestReviewPoolWorkerReviewWorksReturnsUnreadableSubmission pins that an
 // issue whose comments cannot be read fails the offer with that read error
 // instead of vanishing from the list: what such a bead asks for is unknown,
