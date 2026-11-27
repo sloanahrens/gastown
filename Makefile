@@ -510,6 +510,10 @@ gate: LINT_RUNNER_FLAGS := --allow-serial-runners
 # The gate's start, read when make parses the Makefile, so the wall it prints
 # includes lint.
 gate: GATE_START := $(shell date +%s)
+# The gate compiles without debug info, as the seats and the tier sweep do: its
+# GOFLAGS keeps the caller's value and adds -gcflags=all=-dwarf=false. Delete
+# this line to revert.
+gate gate-lint gate-test: export GOFLAGS := $(strip $(GOFLAGS) -gcflags=all=-dwarf=false)
 gate: gate-lint gate-test
 
 # The gate's two stages, which the landing worker runs one at a time, each
