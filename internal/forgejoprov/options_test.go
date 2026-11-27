@@ -234,6 +234,7 @@ func TestParseRejectsBadValues(t *testing.T) {
 		{"role with a slash", []string{"--role", "pola/cat"}, "--role 'pola/cat' must match [A-Za-z0-9._-]+"},
 		{"empty role", []string{"--role", ""}, "--role '' must match [A-Za-z0-9._-]+"},
 		{"unknown role", []string{"--role", "admin"}, "unknown role 'admin' (known roles: polecat landing registry viewer)"},
+		{"seat role", []string{"--role", "seat-furiosa"}, "unknown role 'seat-furiosa' (known roles: polecat landing registry viewer)"},
 		{"bot prefix with a space", []string{"--bot-prefix", "bot "}, "--bot-prefix 'bot ' must match [A-Za-z0-9._-]+"},
 		{"token name with a space", []string{"--token-name", "gt provision"}, "--token-name 'gt provision' must match [A-Za-z0-9._-]+"},
 		{"landing bot with a colon", []string{"--landing-bot", "bot:landing"}, "--landing-bot 'bot:landing' must match [A-Za-z0-9._-]+"},
