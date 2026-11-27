@@ -5758,8 +5758,9 @@ func TestTickEffHeadsRead(t *testing.T) {
 // TestTickEffQuietWiring drives the board closure the tick builds (specTickBoard,
 // the one runSpecDispatchAtWith calls) over a counting hashes store and a counting
 // ready board: two board reads in one tick read the hashes once, and a rig the
-// memory calls quiet under those hashes gets no ready read while the other rig is
-// read each time (gt-wdpcy8).
+// memory calls quiet under those hashes gets no ready read (gt-wdpcy8). The other
+// rig is read once: its empty answer is recorded, so the second read finds it quiet
+// too (gt-eu5n6o).
 func TestTickEffQuietWiring(t *testing.T) {
 	t.Parallel()
 	town := quietWiringTown(t)
@@ -5799,8 +5800,8 @@ func TestTickEffQuietWiring(t *testing.T) {
 	if ready["gastown"] != 0 {
 		t.Errorf("the quiet rig gastown got %d ready read(s), want 0 (reads = %v)", ready["gastown"], ready)
 	}
-	if ready["beads"] != 2 {
-		t.Errorf("the live rig beads got %d ready read(s) over two board reads, want 2 (reads = %v)", ready["beads"], ready)
+	if ready["beads"] != 1 {
+		t.Errorf("the rig beads got %d ready read(s) over two board reads, want 1: an empty answer makes it quiet (reads = %v)", ready["beads"], ready)
 	}
 }
 

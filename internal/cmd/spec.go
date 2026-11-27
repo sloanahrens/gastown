@@ -4842,7 +4842,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		// A held tick reads the same board with no retry to clear, no memo to
 		// fill, no stale label to drop and no annotation to observe, so the
-		// read writes nothing.
+		// read writes no bead; it records only the tick's quiet-rig memory.
 		HoldCandidates: func() specBoardRead { return board(nil, nil, nil) },
 		HoldFileOnly:   func() bool { return specOperatorHoldOnly(townRoot) },
 		Verdicts:       verdicts,
@@ -5456,12 +5456,12 @@ func quietSkip(memory *specAnnotated, heads map[string]beadsql.RigHash, now time
 }
 
 // recordRigRead writes one rig's board read into the quiet-rig memory: the hashes
-// the tick held for the rig, the time of the read and the number of candidates it
-// listed, so the next tick can ask memory.rigQuiet (gt-pa5zu3). It writes nothing
+// the tick held for the rig, the time of the read and the number of ready beads it
+// listed (an upper bound on its candidates, so a rig with one is never quiet), so the next tick can ask memory.rigQuiet (gt-pa5zu3). It writes nothing
 // for a nil memory, which has nowhere to write, and for nil hashes, where
 // noteRigRead would store an empty hash for a rig the tick holds none for
 // (gt-mr74gi), and for a rig absent from heads, which would store the same empty
-// hash (gt-314i6w). Nothing calls it yet.
+// hash (gt-314i6w). The tick's board closure calls it after each ready read.
 func recordRigRead(memory *specAnnotated, heads map[string]beadsql.RigHash, rig string, candidates int, at time.Time) {
 	if memory == nil || heads == nil {
 		return
@@ -5546,7 +5546,7 @@ type specTickBoardDeps struct {
 // specTickBoard builds the board closure the tick and a held tick both take
 // (gt-wdpcy8, gt-j9pew3): each read takes the held hashes and passes the quiet-rig
 // answer over them to the scan as its skip, so a rig the memory calls quiet gets
-// no ready read.
+// no ready read; each ready read that succeeds is recorded in that memory.
 //
 // What a skipped rig can miss: rigQuiet answers true only when the rig's head and
 // working hashes are both present and equal to the memory's, the memory's last read
@@ -5561,10 +5561,19 @@ type specTickBoardDeps struct {
 // detailStore's is; the ready board keeps no handle to share.
 func specTickBoard(dp specTickBoardDeps) func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
 	return func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
-		skip := quietSkip(dp.memory, dp.heads(), dp.now())
+		heads := dp.heads()
+		skip := quietSkip(dp.memory, heads, dp.now())
 		read := specCandidatesDropping(dp.townRoot, dp.maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 			dp.reads.call()
-			return dp.ready(rigPath)
+			issues, err := dp.ready(rigPath)
+			// The hashes are the ones held before the rig was read, so a change
+			// during the read shows on the next tick (gt-eu5n6o). A failed or
+			// partial read records nothing. Every rigPath is the town root joined
+			// with the rig's name, which is the key heads carries.
+			if err == nil {
+				recordRigRead(dp.memory, heads, filepath.Base(rigPath), len(issues), dp.now())
+			}
+			return issues, err
 		}, dp.rigStatus, retry, drop, skip, inheritedSeam(dp.rigs, inheritedBlockedReader(dp.townRoot, func(beadsDir string) ([]*beads.Issue, error) {
 			return beads.NewPinned(beadsDir).Blocked()
 		})))
