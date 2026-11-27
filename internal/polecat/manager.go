@@ -873,11 +873,11 @@ type AddOptions struct {
 	HookBead   string // Bead ID to set as hook_bead at spawn time (atomic assignment)
 	Agent      string // Agent the seat is spawned on; written to the agent bead with HookBead so the dashboard names it after the session ends
 	BaseBranch string // Override base branch for worktree (e.g., "origin/integration/gt-epic")
-	// ResumeBranch reuses an existing branch (typically a PR head) for the polecat
-	// worktree instead of creating a fresh polecat/<name>/<bead>+<ts> branch (gh#3602).
-	// When set, the polecat's branch IS this branch — pushes go back to the same ref,
-	// updating the existing PR. Mutually exclusive with BaseBranch (resume implies its
-	// own start point). When empty, normal fresh-branch behavior is used.
+	// ResumeBranch reuses an existing branch (typically a PR head) instead of a
+	// fresh polecat/<name>/<bead>+<ts> branch (gh#3602). A branch under this seat's
+	// own prefix (polecat/<name>/) IS the polecat's branch; another seat's branch only
+	// starts it, the seat getting a branch of its own because the per-seat push rule
+	// refuses a push to it (gt-8d2lv3). Excludes BaseBranch; empty: fresh branch.
 	ResumeBranch string
 	// AllowRecovery reuses a seat the workstate gate reads as NEEDS_RECOVERY,
 	// for a dispatch that resumes the very branch that work is on (gt-lid6d):
@@ -1215,9 +1215,9 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 
 	clonePath := filepath.Join(polecatDir, m.rig.Name)
-	branchName := m.buildBranchName(name, opts.HookBead)
-	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
+	branchName := opts.ResumeBranch
+	if branchName == "" {
+		branchName = m.buildBranchName(name, opts.HookBead)
 	}
 
 	// Track resources created for rollback on error.
@@ -1265,6 +1265,11 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		}
 		worktreeCreated = true
 		if err := m.advanceResumeBranch(clonePath, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, err
+		}
+		branchName, err = m.ownBranchForResume(clonePath, name, opts.ResumeBranch, opts.HookBead)
+		if err != nil {
 			cleanupOnError()
 			return nil, err
 		}
@@ -1403,11 +1408,11 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	clonePath := filepath.Join(polecatDir, m.rig.Name)
 
 	// Build branch name using configured template or default format.
-	// When resuming an existing branch (gh#3602), use that branch's name directly
-	// so pushes go back to the same ref and update the existing PR.
-	branchName := m.buildBranchName(name, opts.HookBead)
-	if opts.ResumeBranch != "" {
-		branchName = opts.ResumeBranch
+	// When resuming (gh#3602) the resume branch stands in until it is known
+	// whether it is this seat's own; a fresh name is built only if it is not.
+	branchName := opts.ResumeBranch
+	if branchName == "" {
+		branchName = m.buildBranchName(name, opts.HookBead)
 	}
 
 	// Create polecat directory (polecats/<name>/)
@@ -1478,6 +1483,11 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		}
 		worktreeCreated = true
 		if err := m.advanceResumeBranch(clonePath, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, err
+		}
+		branchName, err = m.ownBranchForResume(clonePath, name, opts.ResumeBranch, opts.HookBead)
+		if err != nil {
 			cleanupOnError()
 			return nil, err
 		}
@@ -1708,6 +1718,23 @@ func (m *Manager) advanceResumeBranch(clonePath, branch string) error {
 		return fmt.Errorf("moving resume branch %s to %s: %w", branch, remoteRef, err)
 	}
 	return nil
+}
+
+// ownBranchForResume puts a seat that resumes another seat's branch on a branch
+// of its own (gt-8d2lv3), since the per-seat push rule refuses a push to a
+// branch under another seat's prefix — polecat/<name>/ with the slash, so
+// polecat/<name>2/ is another seat's. The own branch is created at HEAD (the
+// resume tip), keeping local commits origin lacks; a failure names both branches
+// with no fallback. It stays one helper for the repair and reuse paths (gt-l0jhla).
+func (m *Manager) ownBranchForResume(clonePath, name, resumeBranch, hookBead string) (string, error) {
+	if strings.HasPrefix(resumeBranch, polecatBranchPrefix+name+"/") {
+		return resumeBranch, nil
+	}
+	own := m.buildBranchName(name, hookBead)
+	if err := m.gits.Open(clonePath).CheckoutNewBranch(own, "HEAD"); err != nil {
+		return "", fmt.Errorf("creating own branch %s at the tip of resume branch %s: %w", own, resumeBranch, err)
+	}
+	return own, nil
 }
 
 // pathWithin reports whether path is dir or lies under it. Both are absolute

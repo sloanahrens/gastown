@@ -72,8 +72,8 @@ func TestAddNamedWithOptions_ResumeFetchUsesTheBranchFetchBound(t *testing.T) {
 
 // TestAddNamedWithOptions_ResumeFetchFailureContinuesFromLocalRefs pins the
 // fallback gt-nh02an keeps: a resume fetch that fails (offline, or timed out at
-// the bound) is not fatal, and the polecat starts on the branch tip already in
-// the repository.
+// the bound) is not fatal, and the polecat's own branch starts at the branch tip
+// already in the repository.
 func TestAddNamedWithOptions_ResumeFetchFailureContinuesFromLocalRefs(t *testing.T) {
 	t.Parallel()
 	mgr, mayorRig, _, w := canonicalRig(t)
@@ -98,8 +98,8 @@ func TestAddNamedWithOptions_ResumeFetchFailureContinuesFromLocalRefs(t *testing
 	if err != nil {
 		t.Fatalf("CurrentBranch: %v", err)
 	}
-	if current != branch {
-		t.Fatalf("worktree HEAD on branch %q, want %q", current, branch)
+	if current != p.Branch || current == branch {
+		t.Fatalf("worktree HEAD on branch %q (returned %q), want a branch of gamma's own, not the resumed %q", current, p.Branch, branch)
 	}
 	reachable, err := worktreeGit.IsAncestor(tip, "HEAD")
 	if err != nil {

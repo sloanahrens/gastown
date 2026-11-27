@@ -76,8 +76,8 @@ func TestAddWithOptions_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing.T
 	if err != nil {
 		t.Fatalf("AddWithOptions refused a branch held by a stalled polecat on the same bead: %v", err)
 	}
-	if head := w.branch(t, gamma.ClonePath); head != heldBranch {
-		t.Errorf("gamma HEAD = %q, want %q", head, heldBranch)
+	if head := w.branch(t, gamma.ClonePath); head != gamma.Branch || !strings.HasPrefix(head, "polecat/gamma/") {
+		t.Errorf("gamma HEAD = %q (returned branch %q), want a branch under polecat/gamma/", head, gamma.Branch)
 	}
 	if w.branch(t, beta.ClonePath) != "HEAD" {
 		t.Error("beta is still on the branch gamma resumed")
