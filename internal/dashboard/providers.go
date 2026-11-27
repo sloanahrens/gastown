@@ -93,8 +93,6 @@ type deepSeekSpend struct {
 		OK        *bool `json:"ok"`
 		Available *bool `json:"available"`
 	} `json:"live"`
-	// WatcherPID is null or empty when the spend watcher is not running.
-	WatcherPID any    `json:"watcher_pid"`
 	LastSample string `json:"last_sample"`
 	// BalanceAt is the instant the report's balance was read, when the writer
 	// knows it. The dashboard's rows report carries the newest row's instant
@@ -122,11 +120,15 @@ type deepSeekCredit struct {
 // be read and the report does not say why.
 const deepSeekUnreadWhy = "the spend report could not be read"
 
+// deepSeekWatcherQuiet is how old the report's newest ledger sample may be before
+// the row warns that the spend watcher has gone quiet.
+const deepSeekWatcherQuiet = 15 * time.Minute
+
 // deepSeekCostProvider is the DeepSeek row: the cash balance, its spend rates,
 // the days the report's per-day spend reads, and the runway. A failed read
 // gives the first line of its error as the reason, and the fixed text when that
-// line is empty.
-func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *CostCharts, _ *JevSpend) CostProvider {
+// line is empty. now is the clock the ledger's age is read against.
+func deepSeekCostProvider(now time.Time, spend json.RawMessage, _ *ClaudePlan, _ *CostCharts, _ *JevSpend) CostProvider {
 	p := CostProvider{ID: costProviderDeepSeek, Label: "DeepSeek", Kind: "cash", Status: "none"}
 	var d *deepSeekSpend
 	if len(spend) == 0 || json.Unmarshal(spend, &d) != nil || d == nil {
@@ -218,10 +220,34 @@ func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *
 	if liveUnreachable(d.Live.OK, d.Live.Available) {
 		p.Warnings = append(p.Warnings, "live balance unreachable")
 	}
-	if d.WatcherPID == nil || d.WatcherPID == "" {
-		p.Warnings = append(p.Warnings, "spend watcher is not running")
+	if w := deepSeekWatcherWarning(now, d.LastSample); w != "" {
+		p.Warnings = append(p.Warnings, w)
 	}
 	return p
+}
+
+// deepSeekWatcherWarning is the watcher's line, read from the ledger's age: the
+// pod runs no watcher to ask, so the newest sample is all it can see. A sample
+// older than deepSeekWatcherQuiet warns with its age in whole minutes; a missing
+// or unparsable sample has no age to read. The sample is naive local time, read
+// in the zone of now.
+func deepSeekWatcherWarning(now time.Time, sample string) string {
+	var last time.Time
+	parsed := false
+	for _, layout := range spendSampleLayouts {
+		if at, err := time.ParseInLocation(layout, sample, now.Location()); err == nil {
+			last, parsed = at, true
+			break
+		}
+	}
+	if !parsed {
+		return "spend ledger has no sample"
+	}
+	age := now.Sub(last)
+	if age <= deepSeekWatcherQuiet {
+		return ""
+	}
+	return fmt.Sprintf("spend watcher quiet for %d min", int(age/time.Minute))
 }
 
 // liveUnreachable is whether the report leaves the balance on its ledger rather
