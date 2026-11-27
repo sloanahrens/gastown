@@ -1,13 +1,17 @@
 package shelltier
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/shelltier/shelltiertest"
 )
 
 // answer is what the fake Exec reports for one script.
@@ -362,5 +366,73 @@ func TestRunElapsedIsTheClockSpan(t *testing.T) {
 	})
 	if r.Elapsed != 5*time.Second {
 		t.Fatalf("Elapsed = %v, want 5s", r.Elapsed)
+	}
+}
+
+// TestRunWritesEachScriptsTimeToTheErrorStream: every script the run started
+// writes one line with its wall time on the error stream, in manifest order,
+// whether or not a timing log is configured; the summary and exit code do not
+// change.
+func TestRunWritesEachScriptsTimeToTheErrorStream(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		timing TimingFiles
+		path   string
+	}{
+		{"without a timing log", nil, ""},
+		{"with a timing log", &shelltiertest.Timing{}, TimingPath("/town")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeClock{now: time.Unix(0, 0)}
+			var errs bytes.Buffer
+			r := Run(t.Context(), Config{
+				Entries: entriesAt("scripts/a_test.sh", "scripts/b_test.sh"), Root: "/repo",
+				LogDir: "/logs", Budget: time.Minute,
+				Exec: func(_ context.Context, c Command) (int, error) {
+					clock.spend(67 * time.Second)
+					if c.Argv[1] == "scripts/b_test.sh" {
+						return 3, nil
+					}
+					return 0, nil
+				},
+				Now: clock.Now, WithTimeout: liveTimeout,
+				Timing: tc.timing, TimingPath: tc.path, Err: &errs,
+			})
+			want := "shelltier: scripts/a_test.sh: pass in 67.0s\n" +
+				"shelltier: scripts/b_test.sh: FAIL in 67.0s\n"
+			if got := errs.String(); got != want {
+				t.Errorf("error stream = %q, want %q", got, want)
+			}
+			wantSummary := "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s"
+			if got := Summary(r, "/logs"); got != wantSummary {
+				t.Errorf("summary = %q, want %q", got, wantSummary)
+			}
+			if r.Exit() != ExitRed {
+				t.Errorf("exit = %d, want ExitRed", r.Exit())
+			}
+		})
+	}
+}
+
+// TestRunWritesNoTimeForAScriptItNeverRan: a canceled run names the script it
+// never started and writes no time line for it.
+func TestRunWritesNoTimeForAScriptItNeverRan(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var errs bytes.Buffer
+	Run(ctx, Config{
+		Entries: entriesAt("scripts/a_test.sh"), Root: "/repo", LogDir: "/logs",
+		Budget: time.Minute, Now: clockAt(time.Unix(0, 0)), WithTimeout: liveTimeout, Err: &errs,
+		Exec: func(context.Context, Command) (int, error) {
+			t.Error("a canceled run started a script")
+			return 0, nil
+		},
+	})
+	if got := errs.String(); strings.Contains(got, ": pass in") || strings.Contains(got, ": FAIL in") || !strings.Contains(got, "scripts/a_test.sh: not run") {
+		t.Errorf("error stream = %q, want the not-run line and no time line", got)
 	}
 }

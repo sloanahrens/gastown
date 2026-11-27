@@ -148,6 +148,8 @@ func TestMainPrintsTheScriptLinesAndTheSummary(t *testing.T) {
 	Main([]string{"--all", "--logdir", "/logs"}, &f.out, f.env)
 	want := "tier-sweep: shell scripts/a_test.sh ...\n" +
 		"tier-sweep: shell scripts/b_test.sh ...\n" +
+		"shelltier: scripts/a_test.sh: pass in 67.0s\n" +
+		"shelltier: scripts/b_test.sh: pass in 67.0s\n" +
 		"tier-sweep: shell GREEN passed=2 failed=0 skipped=0 (logs /logs) in 2m14s\n"
 	if f.err.String() != want {
 		t.Fatalf("error stream = %q, want %q", f.err.String(), want)
@@ -168,14 +170,16 @@ func TestMainExitsRedWhenAScriptFails(t *testing.T) {
 	want := []string{
 		"tier-sweep: shell scripts/a_test.sh ...",
 		"tier-sweep: shell scripts/b_test.sh ...",
+		"shelltier: scripts/a_test.sh: pass in 67.0s",
+		"shelltier: scripts/b_test.sh: FAIL in 67.0s",
 		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s",
 		"tier-sweep: shell log tail scripts/b_test.sh",
 	}
 	if len(lines) != len(want)+1 {
-		t.Fatalf("error stream lines = %q, want the two announces, the summary, the header and one unreadable line", lines)
+		t.Fatalf("error stream lines = %q, want the two announces, two time lines, the summary, the header and one unreadable line", lines)
 	}
 	if !slices.Equal(lines[:len(want)], want) {
-		t.Fatalf("error stream lines = %q, want %q first, the summary as the first line after the announces and the tail header after it", lines, want)
+		t.Fatalf("error stream lines = %q, want %q first, the time lines after the announces and the tail header after the summary", lines, want)
 	}
 	if !strings.Contains(lines[len(want)], "cannot read") {
 		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[len(want)])
@@ -203,6 +207,8 @@ func TestMainPrintsTheFailedScriptsLogTailAfterTheSummary(t *testing.T) {
 	}
 	want := "tier-sweep: shell scripts/a_test.sh ...\n" +
 		"tier-sweep: shell scripts/b_test.sh ...\n" +
+		"shelltier: scripts/a_test.sh: pass in 67.0s\n" +
+		"shelltier: scripts/b_test.sh: FAIL in 67.0s\n" +
 		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs " + logDir + ") in 2m14s\n" +
 		"tier-sweep: shell log tail scripts/b_test.sh\n" +
 		"ok\nboom: the known failure\n"
@@ -222,17 +228,17 @@ func TestMainNamesAnUnreadableFailedScriptLog(t *testing.T) {
 	}
 	lines := errorLines(f.err.String())
 	want := "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs " + logDir + ") in 2m14s"
-	if len(lines) != 5 {
-		t.Fatalf("error stream lines = %q, want the two announces, the summary, the header and one unreadable line", lines)
+	if len(lines) != 7 {
+		t.Fatalf("error stream lines = %q, want the two announces, two time lines, the summary, the header and one unreadable line", lines)
 	}
-	if lines[2] != want {
-		t.Fatalf("summary = %q, want %q", lines[2], want)
+	if lines[4] != want {
+		t.Fatalf("summary = %q, want %q", lines[4], want)
 	}
-	if line := "tier-sweep: shell log tail scripts/b_test.sh"; lines[3] != line {
-		t.Fatalf("header = %q, want %q", lines[3], line)
+	if line := "tier-sweep: shell log tail scripts/b_test.sh"; lines[5] != line {
+		t.Fatalf("header = %q, want %q", lines[5], line)
 	}
-	if !strings.Contains(lines[4], "cannot read") {
-		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[4])
+	if !strings.Contains(lines[6], "cannot read") {
+		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[6])
 	}
 }
 

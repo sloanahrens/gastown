@@ -78,8 +78,10 @@ func TestTimingLineIsOneJSONObjectPerScript(t *testing.T) {
 	if !slices.Equal(files.Lines, want) {
 		t.Fatalf("lines = %q, want %q", files.Lines, want)
 	}
-	if errs.Len() != 0 {
-		t.Errorf("error stream = %q, want nothing when every line is written", errs.String())
+	wantErrs := "shelltier: scripts/a_test.sh: pass in 67.0s\n" +
+		"shelltier: scripts/b_test.sh: FAIL in 67.0s\n"
+	if got := errs.String(); got != wantErrs {
+		t.Errorf("error stream = %q, want each script's time and no timing error", got)
 	}
 }
 
@@ -228,8 +230,10 @@ func TestTimingRecordsNothingWithoutALog(t *testing.T) {
 			if ok && len(files.Lines) != 0 {
 				t.Errorf("appended %q, want nothing without a log", files.Lines)
 			}
-			if errs.Len() != 0 {
-				t.Errorf("error stream = %q, want nothing when no log is configured", errs.String())
+			want := "shelltier: scripts/a_test.sh: pass in 67.0s\n" +
+				"shelltier: scripts/b_test.sh: FAIL in 67.0s\n"
+			if got := errs.String(); got != want {
+				t.Errorf("error stream = %q, want each script's time and no timing error", got)
 			}
 		})
 	}
