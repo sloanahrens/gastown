@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -284,6 +285,58 @@ func TestDoltLogsContainerModeReadsTheContainer(t *testing.T) {
 	}
 	if strings.Contains(got, "serving line one") {
 		t.Errorf("output %q holds the host dolt.log's lines", got)
+	}
+}
+
+// TestDoltLogsContainerModeUnreadableIsAnError: a container town whose
+// container log the reader cannot read, as on a host with no container tool,
+// fails the command with an error naming the container and the host command
+// that reads it, keeps the reader's cause, and prints the stale notice naming
+// that command. No stale host dolt.log line is printed and tail is never run
+// (gt-85v8dd).
+func TestDoltLogsContainerModeUnreadableIsAnError(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	writeDoltLogStaleFixture(t, townRoot, now.Add(-15*24*time.Hour))
+
+	noEngine := errors.New("no container engine here")
+	tailed := false
+	reads := doltLogReads{
+		now: func() time.Time { return now },
+		tail: func(_ []string, out, _ io.Writer) error {
+			tailed = true
+			_, err := io.WriteString(out, "serving line one\nserving line two\n")
+			return err
+		},
+		containerLog: func(string, int, bool, io.Writer, io.Writer) error { return noEngine },
+	}
+
+	var out, errw bytes.Buffer
+	err := doltLogsTo(townRoot, &out, &errw, reads, 60, false)
+
+	if err == nil {
+		t.Fatal("doltLogsTo over a container log its reader cannot read returned no error")
+	}
+	if !errors.Is(err, noEngine) {
+		t.Errorf("error %q does not carry the reader's cause %q", err, noEngine)
+	}
+	for _, want := range []string{"gt-dolt", "docker logs gt-dolt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if tailed {
+		t.Error("the stale host dolt.log was tailed after the container read failed")
+	}
+	if strings.Contains(out.String(), "serving line one") {
+		t.Errorf("output %q holds the stale host dolt.log's lines", out.String())
+	}
+	// The notice is what names the host command on stderr, before the error.
+	for _, want := range []string{"dolt.log is stale", "docker logs gt-dolt"} {
+		if !strings.Contains(errw.String(), want) {
+			t.Errorf("stderr %q does not hold the stale notice naming %q", errw.String(), want)
+		}
 	}
 }
 
