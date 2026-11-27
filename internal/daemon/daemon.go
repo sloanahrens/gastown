@@ -171,6 +171,13 @@ type Daemon struct {
 	bookQueues      map[*landworker.BookQueue]string
 	bookQueueBound  time.Duration
 	bookQueueWaitFn func()
+	// sweepSmoke is the start-time smoke launch goroutine (tier_sweep_smoke.go),
+	// so a wait can join it (gt-fgglou). sweepSmokeWait and sweepSmokeWaitBegun
+	// are test seams (the bound, and a hook that must not block, run once the
+	// wait has begun).
+	sweepSmoke          sync.WaitGroup
+	sweepSmokeWait      time.Duration
+	sweepSmokeWaitBegun func()
 	// reviewPoolEnv is the environment the review-pool wiring reads om's config
 	// location through (landing_review_pool.go). The zero value is production:
 	// os.LookupEnv, os.UserHomeDir and os.Stat. A unit test sets it so om's
@@ -2452,9 +2459,10 @@ func (d *Daemon) Run() (err error) {
 	// slow or failed push never holds up the start.
 	d.startWorkspaceReconcile()
 
-	// The startup smoke launch of the sweeper, one goroutine: its record is
-	// the verify probe's proof that this daemon's sweeper can launch (gt-r2497d).
-	go d.recordSweepSmokeAtStart(d.ctx, d.clk().Now())
+	// The startup smoke launch of the sweeper, tracked so a wait can join it:
+	// its record is the verify probe's proof that this daemon's sweeper can
+	// launch (gt-r2497d, gt-fgglou).
+	d.startSweepSmoke(d.clk().Now())
 
 	// The boot gate's poller (gt-niooz0): its own goroutine asks the probes
 	// until they all answer, and ends with the daemon's context. The landing
