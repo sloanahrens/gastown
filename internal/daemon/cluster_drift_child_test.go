@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -192,6 +193,38 @@ func TestDriftChildCancel(t *testing.T) {
 			}
 			if errors.Is(err, groupErr) {
 				t.Errorf("driftChildCancel = %v, want the kill result rather than the group error", err)
+			}
+		})
+	}
+}
+
+// TestDriftChildEnv: the drift child's environment keeps the variables it needs
+// to run and drops every variable whose name the town's secret-name rule names
+// as a credential, without a second name list (gt-66luy0). An entry with no "="
+// is not an assignment and is dropped; an empty environment gives an empty
+// slice.
+func TestDriftChildEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		environ []string
+		want    []string
+	}{
+		{"DEEPSEEK_API_KEY is dropped", []string{"DEEPSEEK_API_KEY=x"}, nil},
+		{"GH_TOKEN is dropped", []string{"GH_TOKEN=x"}, nil},
+		{"DB_PASSWORD is dropped", []string{"DB_PASSWORD=x"}, nil},
+		{"SOME_SECRET is dropped", []string{"SOME_SECRET=x"}, nil},
+		{"PATH, HOME and the town root are kept", []string{"PATH=/usr/bin:/bin", "HOME=/home/agent", "GT_TOWN_ROOT=/town"}, []string{"PATH=/usr/bin:/bin", "HOME=/home/agent", "GT_TOWN_ROOT=/town"}},
+		{"a mixed environment keeps only the non-credential names", []string{"PATH=/usr/bin", "GH_TOKEN=x", "GT_TOWN_ROOT=/town", "SOME_SECRET=y"}, []string{"PATH=/usr/bin", "GT_TOWN_ROOT=/town"}},
+		{"an entry with no equals sign is dropped", []string{"NOEQUALSENTRY", "PATH=/usr/bin"}, []string{"PATH=/usr/bin"}},
+		{"an empty environment is empty", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := driftChildEnv(tt.environ)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("driftChildEnv(%v) = %v, want %v", tt.environ, got, tt.want)
 			}
 		})
 	}

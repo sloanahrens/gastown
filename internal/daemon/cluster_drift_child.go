@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // limitedBuffer is an io.Writer that keeps the first limit bytes written and
@@ -47,14 +50,34 @@ func (b *limitedBuffer) Truncated() bool { return b.truncated }
 // deadline is the caller's, set on ctx. A child that did not start or that ctx
 // ended returns -1 and an error; a child that ran and exited returns its code
 // and no error, however large, once driftChildWaitDelay has passed if a
-// grandchild still held its output pipes. Nothing here reads the output.
+// grandchild still held its output pipes. Nothing here reads the output. The
+// child inherits this process's environment with the variables the town's
+// secret-name rule matches removed (gt-66luy0).
 func startDriftChild(ctx context.Context, exe string, args []string, limit int) (stdout, stderr []byte, exit int, err error) {
 	out, errOut := &limitedBuffer{limit: limit}, &limitedBuffer{limit: limit}
 	cmd := driftChildCmd(exec.CommandContext(ctx, exe, args...)) //nolint:gosec // G204: a fixed program and fixed arguments from the caller, never a shell
+	cmd.Env = driftChildEnv(os.Environ())
 	cmd.Stdout, cmd.Stderr = out, errOut
 	runErr := cmd.Run()
 	exit, err = driftChildOutcome(runErr, ctx.Err(), cmd.ProcessState != nil && cmd.ProcessState.Success())
 	return out.Bytes(), errOut.Bytes(), exit, err
+}
+
+// driftChildEnv drops from environ every variable whose name the town's
+// secret-name rule, config.IsSecretKey, names as a credential, so the drift
+// child still inherits PATH, HOME and the GT_ roots but none of the daemon's
+// tokens (gt-66luy0). An entry with no "=" carries no name to judge and is not
+// an assignment, so it is dropped too.
+func driftChildEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || config.IsSecretKey(name) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // driftChildWaitDelay bounds how long Wait keeps reading the output pipes after
