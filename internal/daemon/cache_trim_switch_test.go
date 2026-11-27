@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1197,6 +1198,68 @@ func TestCacheTrimRestartPairPending(t *testing.T) {
 				t.Errorf("the restarted daemon reports %s/%s pending = %v, want %v", tc.namespace, tc.claim, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCacheTrimPendingMarkSurvivesARestart pins the late read the restart pair
+// exists for: a claim the first daemon marked pending, whose Job completed after
+// that daemon's wait, is read late by the second daemon over the same town —
+// one run in the ledger, the completed Job's — because the mark is loaded from
+// the town's file rather than held in the first daemon's memory (gt-agnw5h).
+func TestCacheTrimPendingMarkSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	before, after := newCacheTrimRestartPair(t)
+	// The mark a pass leaves when its Job is still running at the wait; the row
+	// gt-hgwad7 added proves it survives the town's file.
+	before.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
+	// The restarted daemon keeps the fixture's seams and settings, never its
+	// state: its pending marks, parks and attention items are its own, as a new
+	// process's are, and its logger is a buffer this test reads.
+	var logs bytes.Buffer
+	after.logger = log.New(&logs, "", 0)
+	after.patrolConfig = before.patrolConfig
+	after.notifier = before.notifier
+	after.diskMaint = before.diskMaint
+	// The cluster after the restart: the earlier Job has completed, and the Job
+	// this pass applies is still running at its wait, so the late read is the
+	// pass's only recorded run.
+	after.execCmd = newFakeCLIFor(func(c cliCall) cliReply {
+		switch verb := cacheTrimVerb(c.args); {
+		case verb == cacheTrimExistingVerb:
+			return cliReply{stdout: cacheTrimCompletedJSON}
+		case verb == cacheTrimClaimJobLogVerb:
+			return cliReply{stdout: "removed 3 absent 1 kept 2\n"}
+		case verb == cacheTrimJobStateVerb:
+			return cliReply{stdout: `{"status":{"active":1}}`}
+		case strings.HasPrefix(verb, "wait --for=condition="):
+			return cliReply{stderr: "error: timed out waiting for the condition\n", code: 1}
+		case strings.HasPrefix(verb, "get pods "):
+			return cliReply{stdout: cacheTrimPodsJSON}
+		}
+		return cliReply{}
+	}).run
+
+	if !after.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{}) {
+		t.Fatalf("the restarted daemon's pass = false, want true (a pending Job is a verdict); log: %s", logs.String())
+	}
+	want := "the earlier trim Job " + cacheTrimJob + " completed after its wait; recorded: removed 3 absent 1 kept 2"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("the restarted daemon did not read the earlier Job late; log: %s", logs.String())
+	}
+	ledger, err := jobledger.NewLedger(before.config.TownRoot)
+	if err != nil {
+		t.Fatalf("jobledger.NewLedger: %v", err)
+	}
+	runs, err := ledger.Tail(cacheTrimLedgerJob, 10)
+	if err != nil {
+		t.Fatalf("ledger.Tail(%q): %v", cacheTrimLedgerJob, err)
+	}
+	if len(runs) != 1 || runs[0].Outcome != cacheTrimRunOK {
+		t.Fatalf("the ledger holds %+v, want one run with outcome %q: the completed Job's", runs, cacheTrimRunOK)
+	}
+	if got := runs[0].Stats[cacheTrimStatTrimmedFiles]; got != 3 {
+		t.Errorf("the late run's %s = %d, want 3", cacheTrimStatTrimmedFiles, got)
 	}
 }
 
