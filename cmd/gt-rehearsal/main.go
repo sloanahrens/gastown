@@ -13,15 +13,17 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// run dispatches a subcommand. A command line it cannot use exits 2; a record
+// it cannot read exits 1.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return fail(stderr, "command", fmt.Errorf("name a subcommand: compare"))
+		return usage(stderr, "command", "name a subcommand: compare")
 	}
 	switch args[0] {
 	case "compare":
 		return compare(args[1:], stdout, stderr)
 	default:
-		return fail(stderr, "command", fmt.Errorf("unknown subcommand %q", args[0]))
+		return usage(stderr, "command", fmt.Sprintf("unknown subcommand %q", args[0]))
 	}
 }
 
@@ -29,7 +31,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 // the report lives once, in rehearsal.Compare.
 func compare(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 2 {
-		return fail(stderr, "compare", fmt.Errorf("want two record files, got %d", len(args)))
+		return usage(stderr, "compare", fmt.Sprintf("want two record files, got %d", len(args)))
 	}
 	before, err := rehearsal.Read(args[0])
 	if err != nil {
@@ -45,7 +47,15 @@ func compare(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// fail names the step in one stderr line, so a runbook can tell what stopped the run.
+// usage reports a wrong command line in one stderr line and returns 2: the
+// caller's arguments are at fault, not a record it could not read.
+func usage(stderr io.Writer, step, msg string) int {
+	fmt.Fprintf(stderr, "gt-rehearsal: %s: %s\n", step, msg)
+	return 2
+}
+
+// fail names the step in one stderr line and returns 1: the command line was
+// right but a record or the output failed.
 func fail(stderr io.Writer, step string, err error) int {
 	fmt.Fprintf(stderr, "gt-rehearsal: %s: %v\n", step, err)
 	return 1
