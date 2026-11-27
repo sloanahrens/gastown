@@ -1,7 +1,7 @@
-# The gt-sbx deployer's policy ClusterRole. The overseer applies this file with
-# the kind admin credential once per rebuild, in the sitting that creates the
-# gt-sbx cluster (gt-sc0avn, option A); neither the control cluster's static set
-# nor the gt-sbx set embeds it.
+# The gt-sbx deployer's policy ClusterRole and apply Role. The overseer applies
+# this file with the kind admin credential once per rebuild, in the sitting that
+# creates the gt-sbx cluster (gt-sc0avn, option A); neither the control cluster's
+# static set nor the gt-sbx set embeds it.
 #
 # deploy/k8s/deployer-rbac.yaml states the same reach for the control cluster's
 # policy credential: escalate, bind and ClusterRoleBinding writes make this
@@ -44,4 +44,90 @@ roleRef:
 subjects:
   - kind: User
     name: gt-deployer-policy
+    apiGroup: rbac.authorization.k8s.io
+---
+# The apply credential's Role in each namespace that holds the rendered set, the
+# render's namespaced kinds without Secret; get and list on replicasets and
+# controllerrevisions serve the Deployment undo and the StatefulSet plan.
+#
+# No rule grants bind on clusterroles, so a RoleBinding here that names a
+# ClusterRole fails its dry run. This credential writes RoleBindings and
+# workloads in these namespaces, so it can reach any Secret in them; its bound
+# is the approved plan.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-sbx-deployer-apply
+  namespace: openshell
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["escalate", "bind"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "controllerrevisions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-sbx-deployer-apply
+  namespace: openshell
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-sbx-deployer-apply
+subjects:
+  - kind: User
+    name: gt-deployer-apply
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-sbx-deployer-apply
+  namespace: agent-sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["escalate", "bind"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "controllerrevisions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-sbx-deployer-apply
+  namespace: agent-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-sbx-deployer-apply
+subjects:
+  - kind: User
+    name: gt-deployer-apply
     apiGroup: rbac.authorization.k8s.io

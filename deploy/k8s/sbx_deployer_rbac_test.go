@@ -134,9 +134,12 @@ func sbxDeployerMissingExtra(got, want []string) (missing, extra []string) {
 	return missing, extra
 }
 
-// sbxDeployerWant is the exact grant table: the six writes on each resource,
-// escalate and bind on clusterroles only, and the binding of the role to the
-// User the certificate carries.
+// sbxDeployerWant is the exact grant table: the policy ClusterRole's six writes
+// on the cluster kinds, escalate and bind on clusterroles only, and its binding
+// to the User the policy certificate carries; then the apply Role in each
+// namespace that holds the rendered set, with the six writes on the render's
+// namespaced kinds, escalate and bind on roles, reads on replicasets and
+// controllerrevisions, and its RoleBinding to the User gt-deployer-apply.
 var sbxDeployerWant = func() []string {
 	const role = "ClusterRole/gt-sbx-deployer-policy"
 	write := []string{"get", "list", "watch", "create", "update", "patch"}
@@ -149,6 +152,23 @@ var sbxDeployerWant = func() []string {
 	}
 	for _, verb := range append(slices.Clone(write), "escalate", "bind") {
 		lines = append(lines, role+" rbac.authorization.k8s.io/clusterroles "+verb)
+	}
+	for _, ns := range []string{"openshell", "agent-sandbox-system"} {
+		applyRole, applyBinding := "Role/"+ns+"/gt-sbx-deployer-apply", "RoleBinding/"+ns+"/gt-sbx-deployer-apply"
+		lines = append(lines, applyRole, applyBinding, applyBinding+" Role/gt-sbx-deployer-apply User/gt-deployer-apply")
+		for _, res := range []string{"core/serviceaccounts", "core/services", "core/persistentvolumeclaims", "core/configmaps", "apps/deployments", "apps/statefulsets", "batch/jobs", "rbac.authorization.k8s.io/roles", "rbac.authorization.k8s.io/rolebindings"} {
+			for _, verb := range write {
+				lines = append(lines, applyRole+" "+res+" "+verb)
+			}
+		}
+		for _, verb := range []string{"escalate", "bind"} {
+			lines = append(lines, applyRole+" rbac.authorization.k8s.io/roles "+verb)
+		}
+		for _, res := range []string{"apps/replicasets", "apps/controllerrevisions"} {
+			for _, verb := range []string{"get", "list"} {
+				lines = append(lines, applyRole+" "+res+" "+verb)
+			}
+		}
 	}
 	return lines
 }()
@@ -300,6 +320,87 @@ func TestSbxDeployerRBACReadsEveryDocument(t *testing.T) {
 			}
 			if _, extra := sbxDeployerMissingExtra(sbxDeployerLines(docs), sbxDeployerWant); !slices.Contains(extra, second) {
 				t.Fatalf("second document went unread; extra %q", extra)
+			}
+		})
+	}
+}
+
+// sbxDeployerApplyUser is the User the apply credential's certificate carries.
+const sbxDeployerApplyUser = "gt-deployer-apply"
+
+// sbxDeployerApplyProblems reports every way the apply credential reaches past
+// its bound: a ClusterRoleBinding that names it, a binding whose roleRef the
+// manifest does not hold, and a reached rule that grants secrets or a removing
+// verb.
+func sbxDeployerApplyProblems(docs []sbxDeployerDoc) []string {
+	lines := sbxDeployerLines(docs)
+	var problems []string
+	for _, line := range lines {
+		f := strings.Fields(line)
+		if len(f) != 3 || f[2] != "User/"+sbxDeployerApplyUser {
+			continue
+		}
+		parts := strings.Split(f[0], "/")
+		if parts[0] == "ClusterRoleBinding" {
+			problems = append(problems, f[0]+" binds User "+sbxDeployerApplyUser+"; the apply credential is bound by a RoleBinding in its namespace")
+			continue
+		}
+		role := f[1]
+		if len(parts) == 3 {
+			role = "Role/" + parts[1] + "/" + strings.TrimPrefix(f[1], "Role/")
+		}
+		if !slices.Contains(lines, role) {
+			problems = append(problems, f[0]+" refs "+f[1]+", which the manifest does not hold")
+			continue
+		}
+		for _, rule := range lines {
+			rf := strings.Fields(rule)
+			if len(rf) < 3 || rf[0] != role {
+				continue
+			}
+			if strings.HasSuffix(rf[1], "/secrets") {
+				problems = append(problems, role+" grants "+rf[1])
+			}
+			if slices.Contains(deployerRemoveVerbs, rf[2]) {
+				problems = append(problems, role+" grants "+rf[2]+" on "+rf[1])
+			}
+		}
+	}
+	return problems
+}
+
+// TestSbxDeployerRBACApplyReach holds the apply credential to its bound: no
+// binding that names it is a ClusterRoleBinding or refs an object the manifest
+// does not hold, and no rule it reaches grants secrets or a removing verb; the
+// unmutated manifest passes and each planted refusal is reported.
+func TestSbxDeployerRBACApplyReach(t *testing.T) {
+	t.Parallel()
+	if problems := sbxDeployerApplyProblems(loadSbxDeployerRBAC(t, sbxDeployerRBACFile)); len(problems) > 0 {
+		t.Fatalf("%s as written is refused: %q", sbxDeployerRBACFile, problems)
+	}
+	raw, err := os.ReadFile(sbxDeployerRBACFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", sbxDeployerRBACFile, err)
+	}
+	rows := []struct{ what, old, new, want string }{
+		{"a ClusterRoleBinding for the apply User", "kind: RoleBinding", "kind: ClusterRoleBinding", "ClusterRoleBinding/openshell/gt-sbx-deployer-apply binds User gt-deployer-apply"},
+		{"a secrets rule", `    verbs: ["get", "list"]`, "    verbs: [\"get\", \"list\"]\n  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs: [\"get\"]", "Role/openshell/gt-sbx-deployer-apply grants core/secrets"},
+		{"a delete verb", `    verbs: ["get", "list"]`, `    verbs: ["get", "list", "delete"]`, "Role/openshell/gt-sbx-deployer-apply grants delete on apps/replicasets"},
+		{"a roleRef the manifest does not hold", "kind: Role\nmetadata:\n  name: gt-sbx-deployer-apply", "kind: Role\nmetadata:\n  name: gt-sbx-deployer-apply-absent", "RoleBinding/openshell/gt-sbx-deployer-apply refs Role/gt-sbx-deployer-apply, which the manifest does not hold"},
+	}
+	for _, row := range rows {
+		t.Run(row.what, func(t *testing.T) {
+			t.Parallel()
+			edited := strings.Replace(string(raw), row.old, row.new, 1)
+			if edited == string(raw) {
+				t.Fatalf("%q matched nothing in %s", row.old, sbxDeployerRBACFile)
+			}
+			planted, err := sbxDeployerParse(sbxDeployerRBACFile, []byte(edited))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if problems := sbxDeployerApplyProblems(planted); !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, row.want) }) {
+				t.Fatalf("with %s the reach was not refused; want a problem containing %q, got %q", row.what, row.want, problems)
 			}
 		})
 	}
