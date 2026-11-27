@@ -1263,6 +1263,56 @@ func TestCacheTrimPendingMarkSurvivesARestart(t *testing.T) {
 	}
 }
 
+// TestCacheTrimShutdownDuringTheJobRun pins that a claim Job run failed while the
+// daemon shuts down records, parks and raises nothing, logs one line leaving the
+// trim to the restarted daemon and marks an apply pass pending; live, it parks.
+func TestCacheTrimShutdownDuringTheJobRun(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		apply    bool
+		capBytes int64
+		shutdown bool
+		wantOK   bool
+		wantRuns int
+		wantPark bool
+		wantMark bool
+	}{
+		{"an apply pass leaves the trim to the restarted daemon", true, 1 << 30, true, true, 0, false, true},
+		{"a dry run marks nothing", false, -1, true, true, 0, false, false},
+		{"the same failure with the daemon live still parks", true, 1 << 30, false, false, 1, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimApplyVerb: {stderr: "invalid manifest", code: 1}})
+			if tc.shutdown {
+				// The fake cluster still answers, so the failure lands as the daemon leaves.
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				f.d.ctx = ctx
+			}
+			// A negative cap is the failure a dry run can meet; the fake answers every call.
+			ok := f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+				"gastown-polecat:dev", cacheTrimNamespace, tc.capBytes, tc.apply, map[string]string{})
+			if ok != tc.wantOK {
+				t.Fatalf("the pass = %v, want %v; log: %s", ok, tc.wantOK, f.log.String())
+			}
+			runs, items, parked := f.jobRuns(t), f.noOpItems(t), f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName)
+			if len(runs) != tc.wantRuns || len(items) != tc.wantRuns || parked != tc.wantPark {
+				t.Errorf("runs %+v, items %+v, parked %v; want %d of each and parked %v; log: %s",
+					runs, items, parked, tc.wantRuns, tc.wantPark, f.log.String())
+			}
+			if mark := f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName); mark != tc.wantMark {
+				t.Errorf("the pending mark = %v, want %v", mark, tc.wantMark)
+			}
+			want := "the daemon is shutting down; the trim is left for the restarted daemon"
+			if n := strings.Count(f.log.String(), want); (n == 1) != tc.shutdown {
+				t.Errorf("the shutdown line is logged %d times, want it logged exactly when shutting down (%v); log: %s", n, tc.shutdown, f.log.String())
+			}
+		})
+	}
+}
+
 // TestCacheTrimIsPendingLoadErrorIsLoggedOnce pins that a fresh daemon whose
 // pending-mark file cannot be read answers not-pending and logs it once (gt-wcz9tm).
 func TestCacheTrimIsPendingLoadErrorIsLoggedOnce(t *testing.T) {
