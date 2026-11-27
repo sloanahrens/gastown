@@ -10,8 +10,9 @@ import (
 	"unicode/utf8"
 )
 
-// GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict and vet fields from
-// the run's job log; the other fields are set by whatever records the run, not by the parser.
+// GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict, vet and check
+// fields from the run's job log; the other fields are set by whatever records the run, not by
+// the parser.
 type GateRun struct {
 	TS                  time.Time        `json:"ts"`
 	Rig                 string           `json:"rig"`
@@ -42,12 +43,17 @@ type GateRun struct {
 	RunnerPeriods       int64            `json:"runner_periods"`
 	RunnerThrottled     int64            `json:"runner_throttled"`
 	RunnerThrottledUsec int64            `json:"runner_throttled_usec"`
+
+	Checks map[string]float64 `json:"checks,omitempty"`
 }
 
 // gateRunPackagesKept is how many packages a row stores: the slowest. The tier lists every
 // package (366 on 2026-11-22, 64 bytes each, 96% of a 24 KB row) and nothing reads the list back;
 // the pole is read from the full list before the cut, and PackageCount says how many there were.
 const gateRunPackagesKept = 20
+
+// gateRunChecksKept is how many branch checks a row stores: the names it saw first.
+const gateRunChecksKept = 32
 
 // gateRunTextMax bounds a gate-run row's text fields. The parser copies log text, so a long
 // package, test or cgroup line is cut: 256 is well past the longest real one (a 68-byte import
@@ -82,6 +88,10 @@ type GateRunTest struct {
 // gateWallRE reads the wall seconds off a verdict line: "after 139s wall" or "PASSED in 139s wall".
 var gateWallRE = regexp.MustCompile(`(?:after|PASSED in) (\d+)s wall`)
 
+// gateCheckRE reads a branch check's line, as the gate writes it: "gate: check testwaits 3s". The
+// line is matched whole, so a stray word after the seconds is not read.
+var gateCheckRE = regexp.MustCompile(`^gate: check ([A-Za-z0-9_-]+) ([0-9]+)s$`)
+
 // vetWallRE reads the integration vet's summary line, as internal/testpolicy/cmd/integrationvet
 // writes it: "integration vet: 79 packages in 2 modules type-check with -tags integration in
 // 1m5.8s". The package and module counts are not kept. The line is matched whole, so the vet's
@@ -91,12 +101,13 @@ var vetWallRE = regexp.MustCompile(`^integration vet: \d+ packages in \d+ module
 // ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the runner's task line
 // ("Runner <id> ... received task <n> ...") to the first lint line, lint to the build line and
 // build to the unit tier line; the verdict line gives the unit wall and passed. The integration
-// vet's summary line gives its wall in seconds as VetS. The tierwall report gives the tier,
+// vet's summary line gives its wall in seconds as VetS, and each "gate: check <name> <seconds>s"
+// line adds one branch check's seconds to Checks. The tierwall report gives the tier,
 // packages, slow tests, CPUs and pole; a "(cached)" ok line counts one cached package. A missing
-// marker, or a stage that does not run forward, leaves its field zero, a tierwall line or a vet
-// duration it cannot read is skipped rather than read as a value, and a line without a leading
-// RFC3339 timestamp is skipped. Each text field it copies is cut to gateRunTextMax bytes on a
-// rune boundary.
+// marker, or a stage that does not run forward, leaves its field zero, a tierwall line, a vet
+// duration or a check line it cannot read is skipped rather than read as a value, and a line
+// without a leading RFC3339 timestamp is skipped. Each text field it copies is cut to
+// gateRunTextMax bytes on a rune boundary.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
@@ -133,6 +144,22 @@ func ParseGateRunLog(log string) GateRun {
 					run.VetS = d.Seconds()
 				}
 			}
+		case strings.HasPrefix(msg, "gate: check "):
+			// A line that does not match whole, a seconds field too large for a float64 and a
+			// name past gateRunChecksKept add nothing; the first line for a name wins.
+			m := gateCheckRE.FindStringSubmatch(strings.TrimSuffix(msg, "\r"))
+			if m == nil {
+				continue
+			}
+			name := gateRunText(m[1])
+			s, err := strconv.ParseFloat(m[2], 64)
+			if _, seen := run.Checks[name]; seen || err != nil || len(run.Checks) >= gateRunChecksKept {
+				continue
+			}
+			if run.Checks == nil {
+				run.Checks = make(map[string]float64)
+			}
+			run.Checks[name] = s
 		case strings.HasPrefix(msg, "tierwall: "):
 			tw.parse(&run, strings.TrimSuffix(strings.TrimPrefix(msg, "tierwall: "), "\r"))
 		}
