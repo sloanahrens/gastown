@@ -946,6 +946,19 @@ func bondEngineOpts(townRoot string, warn io.Writer) []beads.Option {
 	return []beads.Option{beads.WithBondRootOnly()}
 }
 
+// dryRunBondLine is the bd mol bond command a dry run prints for the bond the
+// sling would run. It names --root-only exactly when bondEngineOpts gives the
+// real bond WithBondRootOnly, and places it where Beads.Bond appends it: after
+// the --var arguments.
+func dryRunBondLine(townRoot, formulaName, beadID, title string, warn io.Writer) string {
+	rootOnly := ""
+	if bondRootOnlySetting(townRoot, warn) {
+		rootOnly = " --root-only"
+	}
+	return fmt.Sprintf("bd mol bond %s %s --json --ephemeral --var feature=\"%s\" --var issue=\"%s\"%s",
+		formulaName, beadID, title, beadID, rootOnly)
+}
+
 // InstantiateFormulaOnBead bonds a formula directly to a bead.
 // This is the formula-on-bead pattern used by issue #288 for auto-applying mol-polecat-work.
 //

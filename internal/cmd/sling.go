@@ -1061,7 +1061,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		if formulaName != "" {
 			fmt.Fprintf(r.out, "Would instantiate formula %s:\n", formulaName)
 			fmt.Fprintf(r.out, "  1. bd cook %s\n", formulaName)
-			fmt.Fprintf(r.out, "  2. bd mol bond %s %s --json --ephemeral --var feature=\"%s\" --var issue=\"%s\"\n", formulaName, beadID, info.Title, beadID)
+			fmt.Fprintf(r.out, "  2. %s\n", dryRunBondLine(townRoot, formulaName, beadID, info.Title, nil))
 			fmt.Fprintf(r.out, "  3. bd update %s --status=hooked --assignee=%s\n", beadID, targetAgent)
 		} else {
 			fmt.Fprintf(r.out, "Would run: bd update %s --status=hooked --assignee=%s\n", beadID, targetAgent)
