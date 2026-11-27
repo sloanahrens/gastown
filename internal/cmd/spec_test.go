@@ -6131,6 +6131,108 @@ func TestTickEffQuietRecordsNothingWithoutHashes(t *testing.T) {
 	})
 }
 
+// TestTickEffQuietRecordsNothingAfterAFailedRead: specTickBoard records a rig's
+// read only after a ready read that answered no error (gt-eu5n6o), so a rig whose
+// ready read failed with an ordinary error leaves the quiet-rig memory as it was:
+// its stored read stands rather than being overwritten with a read the tick never
+// made. A partial board is not recorded either, and the rows it kept are still the
+// tick's candidates (gt-lojvig). The rig whose read succeeded is recorded, so a
+// failure skips one rig and no more.
+func TestTickEffQuietRecordsNothingAfterAFailedRead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	stored := specRigRead{Head: "old-head", Working: "old-working", At: now.Add(-2 * time.Minute)}
+	heads := func() map[string]beadsql.RigHash {
+		return map[string]beadsql.RigHash{
+			"gastown": {Head: "g1", Working: "g2"},
+			"beads":   {Head: "b1", Working: "b2"},
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		ready      func(rigPath string) ([]*beads.Issue, error)
+		failing    string
+		wantErr    string
+		wantCands  []string
+		wantMemory map[string]specRigRead
+	}{
+		{
+			name: "a ready read fails",
+			ready: func(rigPath string) ([]*beads.Issue, error) {
+				if filepath.Base(rigPath) == "gastown" {
+					return nil, errors.New("bd ready: database locked")
+				}
+				return nil, nil
+			},
+			failing: "gastown",
+			wantErr: "gastown: bd ready: database locked",
+			wantMemory: map[string]specRigRead{
+				"gastown": stored,
+				"beads":   {Head: "b1", Working: "b2", At: now},
+			},
+		},
+		{
+			name: "a partial board keeps its rows",
+			ready: func(rigPath string) ([]*beads.Issue, error) {
+				if filepath.Base(rigPath) == "beads" {
+					return []*beads.Issue{{ID: "be-task", Title: "a task", Type: "task", Status: "open", Priority: 1}},
+						&specPartialBoardError{err: errors.New("bd list: database locked")}
+				}
+				return nil, nil
+			},
+			failing:   "beads",
+			wantErr:   "beads: bd list: database locked",
+			wantCands: []string{"be-task"},
+			wantMemory: map[string]specRigRead{
+				"beads":   stored,
+				"gastown": {Head: "g1", Working: "g2", At: now},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := quietWiringTown(t)
+			memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+			memory.noteRigRead(tc.failing, beadsql.RigHash{Head: stored.Head, Working: stored.Working}, stored.At, 0)
+			detail := &skipRigStore{
+				rig:   "beads",
+				ready: []*beads.Issue{{ID: "be-task", Title: "a task", Type: "task", Status: "open", Priority: 1}},
+				reads: &skipRigReads{split: map[string]int{}, detail: map[string]int{}},
+			}
+			board := specTickBoard(specTickBoardDeps{
+				townRoot:    town,
+				maxPriority: 2,
+				reads:       newSpecTickReads(),
+				ready:       tc.ready,
+				rigStatus:   func(string, string) (bool, string) { return false, "" },
+				heads:       heads,
+				memory:      memory,
+				now:         func() time.Time { return now },
+				detailStore: func(string) beads.Client { return detail },
+			})
+
+			got := board(nil, nil, nil)
+
+			if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], tc.wantErr) {
+				t.Errorf("Errors = %q, want the failed read named once with %q", got.Errors, tc.wantErr)
+			}
+			var ids []string
+			for _, c := range got.Candidates {
+				ids = append(ids, c.Spec.ID)
+			}
+			if strings.Join(ids, " ") != strings.Join(tc.wantCands, " ") {
+				t.Errorf("candidates = %q, want %q: the rows a partial board kept are still the tick's", ids, tc.wantCands)
+			}
+			memory.mu.Lock()
+			defer memory.mu.Unlock()
+			if !reflect.DeepEqual(memory.rigs, tc.wantMemory) {
+				t.Errorf("the memory holds %v, want %v: a failed read leaves the stored read as it was", memory.rigs, tc.wantMemory)
+			}
+		})
+	}
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
