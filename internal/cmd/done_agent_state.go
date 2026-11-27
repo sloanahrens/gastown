@@ -105,9 +105,9 @@ type doneStateEnv struct {
 	// spanLog opens the polecat span log a submission's end is appended to;
 	// nil is the store under townRoot.
 	spanLog func(townRoot string) spanStore
-	// warn reports a write that failed without stopping gt done; nil is
-	// stderr. It is a seam so a test can read what the operator was told about
-	// an intent-record write that could not be made.
+	// warn reports an operator message gt done prints without stopping: a
+	// write that failed, the molecule close report; nil is stderr. It is a
+	// seam so a test can read what the operator was told.
 	warn func(format string, args ...any)
 }
 
@@ -509,10 +509,10 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 					return nil
 				})
 				if n > 0 {
-					fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachment.AttachedMolecule)
+					e.warnf("Closed %d molecule step(s) for %s", n, attachment.AttachedMolecule)
 				}
 				if molErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, molErr)
+					e.warnf("Warning: couldn't close attached molecule %s: %v", attachment.AttachedMolecule, molErr)
 					// Don't try to close hookedBeadID - it may still be blocked.
 					// But DO clear hooks and update agent state (goto doneStateUpdate)
 					// so the polecat isn't stuck in 'working' state (za-o9e).

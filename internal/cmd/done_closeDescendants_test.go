@@ -264,6 +264,14 @@ func runDoneStateUpdateForExitResult(t *testing.T, db beads.Client, childrenErr 
 // so there is no HEAD for review evidence.
 func runDoneStateUpdateWithRecorder(t *testing.T, rec *doneRecorder, exitType string) (bool, error) {
 	t.Helper()
+	return runDoneStateUpdateReporting(t, rec, exitType, nil)
+}
+
+// runDoneStateUpdateReporting is runDoneStateUpdateWithRecorder whose operator
+// message seam (a failed write, the molecule close report) is report; nil is
+// the process's stderr.
+func runDoneStateUpdateReporting(t *testing.T, rec *doneRecorder, exitType string, report func(format string, args ...any)) (bool, error) {
+	t.Helper()
 	townRoot := t.TempDir()
 	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
@@ -282,6 +290,7 @@ func runDoneStateUpdateWithRecorder(t *testing.T, rec *doneRecorder, exitType st
 		reviewHead: func(string) (string, error) {
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
+		warn: report,
 	}
 	return updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, exitType, "gt-base-123", beads.AgentFieldUpdates{})
 }
