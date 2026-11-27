@@ -64,6 +64,11 @@ const (
 	otherRefusal = "(other)"
 )
 
+// bdStoreUnavailableExit is bd's store_unavailable exit: the database behind bd
+// did not answer. internal/beads names it the same but imports this package, so
+// the status is repeated here (bd_failure.go).
+const bdStoreUnavailableExit = 25
+
 // unknownRefusal is the refusal a line carries when the value is not one of the
 // gateway's refusal codes. It is kept apart from otherRefusal, the stats key for
 // a reason past maxRefusalKeys.
@@ -197,6 +202,9 @@ type Stats struct {
 	Calls uint64 `json:"calls"`
 	// Errors is how many of them exited non-zero.
 	Errors uint64 `json:"errors"`
+	// Unreachable is how many of them bd failed at its store_unavailable exit
+	// (25), the burst an operator can be woken by, counted apart from Errors.
+	Unreachable uint64 `json:"unreachable"`
 	// Dropped is how many log lines were not written: the buffer was full, the
 	// log was closed, the line could not be marshaled, or the writer could not
 	// store it.
@@ -254,6 +262,10 @@ type CallLog struct {
 	dropped    uint64
 	cpuMSTotal uint64
 	verbs      map[string]uint64
+
+	// unreachable counts the counted calls bd failed at its store_unavailable
+	// exit.
+	unreachable uint64
 
 	conflicts     uint64
 	conflictVerbs map[string]uint64
@@ -414,6 +426,9 @@ func (l *CallLog) log(rec CallRecord, counted, write bool) {
 		if rec.ExitCode != 0 {
 			l.errors++
 		}
+		if rec.ExitCode == bdStoreUnavailableExit {
+			l.unreachable++
+		}
 		if parsed.verb != "" {
 			countVerb(l.verbs, parsed.verb)
 		}
@@ -542,6 +557,7 @@ func (l *CallLog) Stats() Stats {
 	return Stats{
 		Calls:         l.calls,
 		Errors:        l.errors,
+		Unreachable:   l.unreachable,
 		Dropped:       l.dropped,
 		CPUMSTotal:    l.cpuMSTotal,
 		Verbs:         verbs,
