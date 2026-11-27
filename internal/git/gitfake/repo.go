@@ -36,6 +36,7 @@ type Repo interface {
 	PatchIDZeroContext(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	FetchRefspecWithEnv(remote, refspec string, env []string) error
+	RemoteBranchTip(remote, branch string) (string, error)
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
 	ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error)
@@ -189,13 +190,34 @@ func (h *handle) remoteRepo(r *repo, remote string, args ...string) (*repo, erro
 	if !ok {
 		url = remote
 	}
+	return h.repoAtURL(r, url, remote, args...)
+}
+
+// pushRepo finds the repository remote names for a push: its push URL when
+// one is set, else its fetch URL or a path, resolved the way Push (push.go)
+// resolves where it writes.
+func (h *handle) pushRepo(r *repo, remote string, args ...string) (*repo, error) {
+	url, ok := r.pushURLs[remote]
+	if !ok {
+		url, ok = r.remotes[remote]
+	}
+	if !ok {
+		url = remote
+	}
+	return h.repoAtURL(r, url, url, args...)
+}
+
+// repoAtURL finds the repository at url, failing with the error git prints
+// when it resolves to none. name is what the message names: the remote for a
+// fetch read, the resolved URL for a push read, as Push does.
+func (h *handle) repoAtURL(r *repo, url, name string, args ...string) (*repo, error) {
 	if !filepath.IsAbs(url) {
 		url = filepath.Join(r.path, url)
 	}
 	if rr := h.f.repos[clean(url)]; rr != nil {
 		return rr, nil
 	}
-	return nil, gitErr(128, fmt.Sprintf("fatal: '%s' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.", remote), args...)
+	return nil, gitErr(128, fmt.Sprintf("fatal: '%s' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.", name), args...)
 }
 
 func (h *handle) Rev(ref string) (string, error) {
@@ -565,7 +587,20 @@ func (h *handle) FetchRefspecWithTimeout(remote, refspec string, _ time.Duration
 	return nil
 }
 
+// RemoteBranchTip is the tip of refs/heads/<branch> at remote's fetch URL:
+// empty for a missing branch, an error for a remote that does not resolve.
+func (h *handle) RemoteBranchTip(remote, branch string) (string, error) {
+	return h.remoteTip(remote, branch, h.remoteRepo)
+}
+
+// PushRemoteBranchTip is RemoteBranchTip at the push URL where Push writes
+// when one is set, else the fetch URL.
 func (h *handle) PushRemoteBranchTip(remote, branch string) (string, error) {
+	return h.remoteTip(remote, branch, h.pushRepo)
+}
+
+// remoteTip reads refs/heads/<branch> at the repository resolve finds.
+func (h *handle) remoteTip(remote, branch string, resolve func(*repo, string, ...string) (*repo, error)) (string, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
 	args := []string{"ls-remote", remote, "refs/heads/" + branch}
@@ -573,7 +608,7 @@ func (h *handle) PushRemoteBranchTip(remote, branch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rr, err := h.remoteRepo(r, remote, args...)
+	rr, err := resolve(r, remote, args...)
 	if err != nil {
 		return "", err
 	}
