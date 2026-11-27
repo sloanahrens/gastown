@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"regexp"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -326,8 +329,11 @@ func (h *Hub) workFrom(ctx context.Context, ticks <-chan time.Time, wake <-chan 
 
 // runPoll runs fn once a slot of pollGate is free, and gives the slot back when
 // fn returns. A poll whose ctx ends while it waits for a slot does not run, so
-// Run returning still means no poll is left waiting on the gate.
+// Run returning still means no poll is left waiting on the gate. Each run that
+// starts records how long it waited for the slot and how long fn ran, under the
+// poll's name in State.Polls (gt-uywol3).
 func (h *Hub) runPoll(ctx context.Context, fn func()) {
+	waitStart := h.cfg.Now()
 	select {
 	case <-ctx.Done():
 		return
@@ -337,7 +343,50 @@ func (h *Hub) runPoll(ctx context.Context, fn func()) {
 	if ctx.Err() != nil { // select picks at random when both are ready
 		return
 	}
+	start := h.cfg.Now()
 	fn()
+	h.recordPoll(pollName(fn), waitStart, start, h.cfg.Now())
+}
+
+// recordPoll keeps a poll's last run in State.Polls. It publishes a fresh map
+// rather than adding to the one in place: State hands out a copy of the hub's
+// state read without its lock held, so a reader holding an earlier copy must
+// never see the next poll's write.
+func (h *Hub) recordPoll(name string, waitStart, start, end time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	polls := make(map[string]PollTiming, len(h.state.Polls)+1)
+	for k, v := range h.state.Polls {
+		polls[k] = v
+	}
+	polls[name] = PollTiming{
+		At:     end,
+		WaitMS: start.Sub(waitStart).Milliseconds(),
+		RunMS:  end.Sub(start).Milliseconds(),
+	}
+	h.state.Polls = polls
+}
+
+// pollName is the name a poll is recorded under in State.Polls: the method name
+// of fn, with its package, receiver and the method value's "-fm" suffix
+// trimmed, so (*Hub).pollHealth records as "pollHealth" (gt-uywol3).
+func pollName(fn func()) string {
+	f := runtime.FuncForPC(reflect.ValueOf(fn).Pointer())
+	if f == nil {
+		return ""
+	}
+	name := f.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, "-fm")
+	if i := strings.LastIndex(name, ")."); i >= 0 {
+		return name[i+2:]
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // due reports whether a worker whose last run was at *last should run now,
