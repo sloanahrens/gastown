@@ -44,6 +44,8 @@ func TestRehearsalTownReadBead(t *testing.T) {
 		want    BeadState
 		wantErr bool
 		cause   error
+		// named is the command the error must name, so a caller can tell which read failed.
+		named string
 	}{
 		{name: "status, notes and comment texts are decoded", answers: map[string]fakeAnswer{
 			showArgv: {out: showOK}, commentsArgv: {out: commentsOK}},
@@ -53,17 +55,17 @@ func TestRehearsalTownReadBead(t *testing.T) {
 			wantRan: []string{showArgv, commentsArgv}, want: BeadState{Status: "open", Notes: "READY"}},
 		{name: "a failed show stops the read and carries no output", answers: map[string]fakeAnswer{
 			showArgv: {out: leaked, err: cause}},
-			wantRan: []string{showArgv}, wantErr: true, cause: cause},
+			wantRan: []string{showArgv}, wantErr: true, cause: cause, named: "bd show gt-1"},
 		{name: "a failed comments read is wrapped and carries no output", answers: map[string]fakeAnswer{
 			showArgv: {out: showOK}, commentsArgv: {out: leaked, err: cause}},
-			wantRan: []string{showArgv, commentsArgv}, wantErr: true, cause: cause},
+			wantRan: []string{showArgv, commentsArgv}, wantErr: true, cause: cause, named: "bd comments gt-1"},
 		{name: "a show answer that does not decode is an error", answers: map[string]fakeAnswer{
-			showArgv: {out: "not json"}}, wantRan: []string{showArgv}, wantErr: true},
+			showArgv: {out: "not json"}}, wantRan: []string{showArgv}, wantErr: true, named: "bd show gt-1"},
 		{name: "a show answer with no entry is an error", answers: map[string]fakeAnswer{
-			showArgv: {out: `{"data":[]}`}}, wantRan: []string{showArgv}, wantErr: true},
+			showArgv: {out: `{"data":[]}`}}, wantRan: []string{showArgv}, wantErr: true, named: "bd show gt-1"},
 		{name: "a comments answer that does not decode is an error", answers: map[string]fakeAnswer{
 			showArgv: {out: showOK}, commentsArgv: {out: "{"}},
-			wantRan: []string{showArgv, commentsArgv}, wantErr: true},
+			wantRan: []string{showArgv, commentsArgv}, wantErr: true, named: "bd comments gt-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,6 +84,9 @@ func TestRehearsalTownReadBead(t *testing.T) {
 				}
 				if strings.Contains(err.Error(), leaked) {
 					t.Errorf("Bead error %q carries command output", err)
+				}
+				if !strings.Contains(err.Error(), tc.named) {
+					t.Errorf("Bead error = %v, want it to name %q", err, tc.named)
 				}
 				return
 			}
@@ -121,6 +126,9 @@ func TestRehearsalTownReadPolecats(t *testing.T) {
 				if !errors.Is(err, cause) || strings.Contains(err.Error(), leaked) {
 					t.Errorf("Polecats error = %v, want it to wrap %v and carry no output", err, cause)
 				}
+				if !strings.Contains(err.Error(), "gt polecat list") {
+					t.Errorf("Polecats error = %v, want it to name %q", err, "gt polecat list")
+				}
 				return
 			}
 			if err != nil || string(got) != tc.want {
@@ -155,6 +163,9 @@ func TestRehearsalTownReadDaemonLog(t *testing.T) {
 			if tc.wantErr {
 				if !errors.Is(err, cause) || strings.Contains(err.Error(), leaked) {
 					t.Errorf("DaemonLog error = %v, want it to wrap %v and carry no output", err, cause)
+				}
+				if !strings.Contains(err.Error(), "gt daemon logs") {
+					t.Errorf("DaemonLog error = %v, want it to name %q", err, "gt daemon logs")
 				}
 				return
 			}
