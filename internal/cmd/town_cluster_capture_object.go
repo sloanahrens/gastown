@@ -8,12 +8,15 @@ import (
 )
 
 // captureRedacted stands in for every value a capture may not carry, but the
-// runner ConfigMap's config.yml, which the drift review reads and no secret backs.
+// runner ConfigMap's config.yml and the runner Deployment's four Docker values,
+// which the drift review reads and no secret backs.
 const (
-	captureRedacted        = "<redacted>"
-	captureRunnerConfigMap = "forgejo-runner-config"
-	captureRunnerConfigKey = "config.yml"
-	captureLastApplied     = "kubectl.kubernetes.io/last-applied-configuration"
+	captureRedacted         = "<redacted>"
+	captureRunnerConfigMap  = "forgejo-runner-config"
+	captureRunnerConfigKey  = "config.yml"
+	captureRunnerDeployment = "forgejo-runner"
+	captureRunnerNamespace  = "forgejo"
+	captureLastApplied      = "kubectl.kubernetes.io/last-applied-configuration"
 )
 
 // captureContainerPaths are the only places a capture looks for container env
@@ -59,6 +62,9 @@ func captureObject(obj map[string]any, kubeContext string, at time.Time) (map[st
 	}
 	delete(object, "status")
 	keepConfig := object["kind"] == "ConfigMap" && metadata["name"] == captureRunnerConfigMap
+	keepRunnerDockerEnv := object["kind"] == "Deployment" &&
+		metadata["name"] == captureRunnerDeployment &&
+		metadata["namespace"] == captureRunnerNamespace
 	for _, field := range []string{"data", "stringData", "binaryData"} {
 		raw, present := object[field]
 		if !present {
@@ -76,7 +82,7 @@ func captureObject(obj map[string]any, kubeContext string, at time.Time) (map[st
 		}
 	}
 	for _, path := range captureContainerPaths {
-		if err := captureRedactEnvAt(object, path); err != nil {
+		if err := captureRedactEnvAt(object, path, keepRunnerDockerEnv); err != nil {
 			return nil, err
 		}
 	}
@@ -111,10 +117,11 @@ func captureCopy(value any) any {
 }
 
 // captureRedactEnvAt replaces every container env value under path with
-// captureRedacted. An absent path is skipped; a node along it that is present but
-// the wrong shape is an error, so a value is never copied through because its
-// shape hid it from the redaction.
-func captureRedactEnvAt(object map[string]any, path []string) error {
+// captureRedacted, but the four Docker values when keepDockerEnv is set. An absent
+// path is skipped; a node along it that is present but the wrong shape is an
+// error, so a value is never copied through because its shape hid it from the
+// redaction.
+func captureRedactEnvAt(object map[string]any, path []string, keepDockerEnv bool) error {
 	node := object
 	for i, key := range path {
 		raw, present := node[key]
@@ -122,7 +129,7 @@ func captureRedactEnvAt(object map[string]any, path []string) error {
 			return nil
 		}
 		if i == len(path)-1 {
-			return captureRedactContainerList(raw, strings.Join(path, "."))
+			return captureRedactContainerList(raw, strings.Join(path, "."), keepDockerEnv)
 		}
 		child, ok := raw.(map[string]any)
 		if !ok {
@@ -134,10 +141,11 @@ func captureRedactEnvAt(object map[string]any, path []string) error {
 }
 
 // captureRedactContainerList replaces the env value of every container in raw, a
-// list at the known path at. A list, a container or an env of another shape is an
+// list at the known path at, with captureRedacted, but the four Docker values when
+// keepDockerEnv is set. A list, a container or an env of another shape is an
 // error rather than a skip: a container whose env cannot be read may hold a
 // value the capture must not keep.
-func captureRedactContainerList(raw any, at string) error {
+func captureRedactContainerList(raw any, at string, keepDockerEnv bool) error {
 	containers, ok := raw.([]any)
 	if !ok {
 		return fmt.Errorf("the object's %s is not a list, so its containers cannot be checked", at)
@@ -160,10 +168,31 @@ func captureRedactContainerList(raw any, at string) error {
 			if !ok {
 				return fmt.Errorf("an env entry under %s is not an object, so its value cannot be redacted", at)
 			}
-			if _, present := variable["value"]; present {
-				variable["value"] = captureRedacted
+			if _, present := variable["value"]; !present {
+				continue
 			}
+			if keepDockerEnv && captureKeepsDockerEnv(variable["name"]) {
+				continue
+			}
+			variable["value"] = captureRedacted
 		}
 	}
 	return nil
+}
+
+// captureKeepsDockerEnv reports whether the container env variable named name is
+// one of the four Docker values the drift compare reads on the control runner's
+// Deployment. They are constants in the render, so a capture that redacted them
+// would differ from it on every run (gt-kcpfli). A name that is not a string is
+// not one of them.
+func captureKeepsDockerEnv(name any) bool {
+	named, ok := name.(string)
+	if !ok {
+		return false
+	}
+	switch named {
+	case "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_TLS_CERTDIR":
+		return true
+	}
+	return false
 }
