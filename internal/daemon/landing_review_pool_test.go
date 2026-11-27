@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,8 +43,8 @@ func reviewPoolTestWorker() *landworker.Worker {
 }
 
 // reviewPoolTestEnv is an environment the off paths must not read: a read
-// fails the test, so a wiring that resolved om's config with the pool off
-// would be caught here (gt-aovgi3).
+// fails the test, and a sweep fails it too, so the off path removes nothing
+// (gt-aovgi3, gt-vwrg30).
 func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
 	t.Helper()
 	return reviewPoolEnv{
@@ -55,12 +56,18 @@ func reviewPoolTestEnv(t *testing.T) reviewPoolEnv {
 			t.Fatal("the pool-off path read the home directory")
 			return "", nil
 		},
+		sweep: func(string, land.Repo) error {
+			t.Fatal("the pool-off path swept the work root")
+			return nil
+		},
 	}
 }
 
 // reviewPoolTestOMConfig puts om's config file under a fresh XDG directory and
 // returns the environment naming it plus the file's path, which the on path
-// requires to exist (gt-lfykjq).
+// requires to exist (gt-lfykjq). The sweep is a no-op: removing review
+// directories is SweepReviewDirs' own tested job, and a unit test runs no git,
+// so a test that must watch the sweep injects its own (gt-vwrg30).
 func reviewPoolTestOMConfig(t *testing.T, home func() (string, error)) (reviewPoolEnv, string) {
 	t.Helper()
 	configHome := t.TempDir()
@@ -78,7 +85,8 @@ func reviewPoolTestOMConfig(t *testing.T, home func() (string, error)) (reviewPo
 			}
 			return "", false
 		},
-		home: home,
+		home:  home,
+		sweep: func(string, land.Repo) error { return nil },
 	}, omConfig
 }
 
@@ -490,7 +498,8 @@ func TestReviewPoolWiringSetsOMConfigPath(t *testing.T) {
 					}
 					return "", false
 				},
-				home: tc.home,
+				home:  tc.home,
+				sweep: func(string, land.Repo) error { return nil },
 			}
 
 			if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
@@ -1001,5 +1010,31 @@ func TestReviewPoolWiringSweepErrorKeepsThePool(t *testing.T) {
 	}
 	if !strings.Contains(got, "gastown") || !strings.Contains(got, sweepErr.Error()) {
 		t.Fatalf("log line %q does not name the rig and the sweep error", got)
+	}
+}
+
+// TestReviewPoolWiringSweepOncePerWorkRoot pins the sweep ledger: a work root
+// is swept once per daemon, so a rebuilt rig worker does not sweep again and
+// remove the directory of a review the earlier worker still runs, while a
+// second work root is swept. Removing the ledger check sweeps the first root
+// twice and turns this red (gt-vwrg30).
+func TestReviewPoolWiringSweepOncePerWorkRoot(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: discardLogger}
+	env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+	env.sweepLedger = &sync.Map{}
+	var swept []string
+	env.sweep = func(root string, _ land.Repo) error {
+		swept = append(swept, root)
+		return nil
+	}
+	cfg := &config.LandingWorkerConfig{ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}}}
+	for _, root := range []string{"/sentinel/reviews", "/sentinel/reviews", "/sentinel/other-reviews"} {
+		if err := d.wireReviewPool("gastown", cfg, reviewPoolTestLander(), reviewPoolTestWorker(), root, env); err != nil {
+			t.Fatalf("wireReviewPool(%q): %v", root, err)
+		}
+	}
+	if want := []string{"/sentinel/reviews", "/sentinel/other-reviews"}; !reflect.DeepEqual(swept, want) {
+		t.Fatalf("the sweep ran with %q; want %q", swept, want)
 	}
 }

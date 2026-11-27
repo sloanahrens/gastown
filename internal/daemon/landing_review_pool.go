@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
@@ -27,7 +28,16 @@ type reviewPoolEnv struct {
 	// under the work root; nil is land.SweepReviewDirs, called with a git handle
 	// on the Lander's repo so a unit test injects a fake and runs no git (gt-vwrg30).
 	sweep func(workRoot string, g land.Repo) error
+	// sweepLedger, when non-nil, admits each work root once per process, so a
+	// rebuilt rig worker does not sweep again; nil admits every call (the
+	// wiring test's seam) (gt-vwrg30).
+	sweepLedger *sync.Map
 }
+
+// reviewPoolSweeps admits each rig work root once per daemon process: a
+// rebuild (the patrol re-enabled) must not sweep again (gt-vwrg30). Entries
+// never expire, but a work root is a rig's directory for the process's life.
+var reviewPoolSweeps sync.Map
 
 // wireReviewPool is where the daemon wires the review pool into a rig's
 // landing worker. The pool is per-rig and off by default: a rig the config
@@ -81,16 +91,24 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 	}
 	l.OMConfigPath = omPath
 	// A daemon that died mid-review left its review-* directories under the
-	// work root, and no live review owns them, so they are swept once here,
-	// before this pool starts a review, through a git handle on the Lander's
-	// repo with hooks off (gt-vwrg30, gt-sqy9ss). A failed sweep is clutter,
-	// not a reason to lose the pool: it is logged and the wiring goes on.
-	sweep := env.sweep
-	if sweep == nil {
-		sweep = land.SweepReviewDirs
+	// work root, and no live review owns them, so they are swept on this rig
+	// worker's construction (the daemon's boot for the rig) through a git
+	// handle on the Lander's repo with hooks off (gt-vwrg30, gt-sqy9ss). The
+	// ledger keeps that once per work root: a rebuilt worker must not remove a
+	// live review's directory. A failed sweep is clutter: log it, wire on.
+	sweepDue := true
+	if env.sweepLedger != nil {
+		_, already := env.sweepLedger.LoadOrStore(workRoot, struct{}{})
+		sweepDue = !already
 	}
-	if err := sweep(workRoot, land.CommittingGit(l.Repo).WithoutAllHooks()); err != nil {
-		d.logger.Printf("landing_worker: %s: review pool: sweep leftover review directories: %v", rig, err)
+	if sweepDue {
+		sweep := env.sweep
+		if sweep == nil {
+			sweep = land.SweepReviewDirs
+		}
+		if err := sweep(workRoot, land.CommittingGit(l.Repo).WithoutAllHooks()); err != nil {
+			d.logger.Printf("landing_worker: %s: review pool: sweep leftover review directories: %v", rig, err)
+		}
 	}
 	// The Worker gets the pool that fills the store and the store itself as its
 	// hints, so a review that finishes while the bead queues is the verdict its
@@ -115,11 +133,19 @@ func (d *Daemon) wireReviewPool(rig string, cfg *config.LandingWorkerConfig, l *
 // wireRigReviewPool is the production entry point for the review pool: it wires
 // a rig's landing worker with the environment held on the Daemon, whose zero
 // value reads this process's environment, so a unit test can point om's config
-// at its own file (gt-lmflya). wireReviewPool leaves the pool off when it
-// returns an error; the wiring does not fail the worker's construction, so the
-// error is logged here, once (gt-m0s4td).
+// at its own file (gt-lmflya). The one sweep ledger is supplied here, for the
+// real sweep only: a test's injected sweep is the test's to call, so its rows
+// stay independent of one another (gt-vwrg30). wireReviewPool leaves the pool
+// off when it returns an error; the wiring does not fail the worker's
+// construction, so the error is logged here, once (gt-m0s4td).
 func (d *Daemon) wireRigReviewPool(rig string, cfg *config.LandingWorkerConfig, l *land.Lander, w *landworker.Worker, workRoot string) {
-	if err := d.wireReviewPool(rig, cfg, l, w, workRoot, d.reviewPoolEnv); err != nil {
+	// The environment is copied before the ledger is added; the Daemon's field
+	// is never written, so concurrent rig constructions do not race on it.
+	env := d.reviewPoolEnv
+	if env.sweep == nil && env.sweepLedger == nil {
+		env.sweepLedger = &reviewPoolSweeps
+	}
+	if err := d.wireReviewPool(rig, cfg, l, w, workRoot, env); err != nil {
 		d.logger.Print(err)
 	}
 }
