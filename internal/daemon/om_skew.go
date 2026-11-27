@@ -172,6 +172,7 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 	}
 	r := omSkewReading{installed: installed, remote: remote}
 	if installed != remote {
+		d.omSkewRefresh(townRoot) // only this check refreshes the clone it reads; the pod runs no rebuild_om (gt-wm7cwr)
 		unchanged, answered := d.omSkewBinaryUnchanged(townRoot, installed, remote)
 		r.binaryUnchanged = unchanged
 		// The lag matters only to a diff known to reach the binary.

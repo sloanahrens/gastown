@@ -42,6 +42,7 @@ func omSkewDaemon(t *testing.T) (*Daemon, *notifyfake.Recorder) {
 	}
 	d.omVersionFn = func(string) (string, error) { return omSkewInstalledSHA, nil }
 	d.omHeadFn = func(string) (string, error) { return omSkewRemoteSHA, nil }
+	d.omSkew.refresh = func(string) (string, error) { return "", nil } // no shared fake answers its git
 	return d, rec
 }
 
@@ -1272,10 +1273,53 @@ func TestOMSkewRefreshLogsAFailureOnce(t *testing.T) {
 func TestOMSkewRefreshRunsTheCloneWhenNoFieldIsSet(t *testing.T) {
 	t.Parallel()
 	d, _ := omSkewDaemon(t)
+	d.omSkew.refresh = nil // the shared builder no-ops it; this test wants the clone
 	var calls []string
 	d.execCmd = hmSkewRunner(t, hmSkewAnswers{calls: &calls})
 	d.omSkewRefresh(d.config.TownRoot)
 	if len(calls) != 3 || !strings.Contains(calls[1], " clone ") || !strings.Contains(calls[2], " fetch ") {
 		t.Errorf("calls = %q, want a clone into the check's own clone and a fetch", calls)
+	}
+}
+
+// TestOMSkewRefreshesBeforeItReads: differing shas refresh the clone before the diff so a short lag raises nothing; equal shas refresh nothing; a failed refresh still alarms (gt-wm7cwr).
+func TestOMSkewRefreshesBeforeItReads(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, remote string
+		fail         bool
+	}{
+		{name: "a short lag", remote: omSkewRemoteSHA},
+		{name: "equal shas", remote: omSkewInstalledSHA},
+		{name: "a failed refresh", remote: omSkewRemoteSHA, fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, rec := omSkewDaemon(t)
+			d.omSkew.refresh = nil // drive the check's own clone through the fake git
+			d.omHeadFn = func(string) (string, error) { return tc.remote, nil }
+			mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
+			tried := false
+			withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				switch {
+				case slices.Contains(c.args, "get-url"):
+					tried = true
+					if tc.fail {
+						return cliReply{code: 128}
+					}
+					return cliReply{stdout: "https://example.invalid/om.git\n"}
+				case gitSub(c, "diff"):
+					if tc.fail || !tried { // a diff before the refresh reads a clone nothing kept current
+						return cliReply{code: 128}
+					}
+					return cliReply{stdout: "internal/review/review.go\x00"}
+				}
+				r, _ := omSkewLagReply(c, 2, 3*time.Hour)
+				return r
+			})
+			d.omSkewOnce()
+			if got := len(rec.Escalations()) == 1; got != tc.fail || tried != (tc.remote != omSkewInstalledSHA) {
+				t.Errorf("alert %t, refresh attempted %t; want %t and %t", got, tried, tc.fail, tc.remote != omSkewInstalledSHA)
+			}
+		})
 	}
 }
