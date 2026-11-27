@@ -188,6 +188,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/polecat/imagectx/imagectx.go` `runArgv`
 - `internal/procutil/run.go` `Output`
 - `internal/procutil/run.go` `Start`
+- `internal/rehearsal/execrun.go` `ExecRun`
 - `internal/repoguard/gofmt.go` `CLIExec.Run`
 - `internal/testpolicy/cmd/budget/main.go` `execTest`
 - `internal/testpolicy/cmd/integrationvet/main.go` `command`
