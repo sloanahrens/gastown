@@ -506,6 +506,93 @@ func TestPatrolScanMovedOnRotates(t *testing.T) {
 	})
 }
 
+// seedGatewayKeep writes the gateway-silent keep the seat's end records for a
+// landed seat, with the landing's proof left to the row.
+func seedGatewayKeep(t *testing.T, p *keptSeatPatrol, landed bool) {
+	t.Helper()
+	landing := sandboxSeatLanding{BeadID: movedOnLandedBead, Branch: movedOnLanded, Landed: landed}
+	rec := keptSandboxSeatRecord{
+		Bead: movedOnLandedBead, Reason: gatewayNoAnswerKeepReason(p.clk.Now()),
+		Since: p.clk.Now().Add(-time.Hour), Tries: 3, Landing: &landing,
+	}
+	if err := writeKeptSandboxSeat(p.town, endRig, endPolecat, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The pass drops a landed gateway-silent keep whose seat has moved on to
+// another bead, and clears the seat's silent-gateway tally with it, so the
+// tally cannot raise an item for a released seat (gt-29kb5p).
+func TestMovedOnGatewaySilentKeepIsDropped(t *testing.T) {
+	t.Parallel()
+	p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+	p.seatFields.Branch = movedOnOther
+	p.seedAgent()
+	seedGatewayKeep(t, p, true)
+	tallyKey := gatewayTallyKey(endRig, endPolecat)
+	p.host.d.gatewayTallies = map[string]gatewayTally{tallyKey: {tries: 3}}
+
+	p.host.dropMovedOnKeptSeats()
+
+	if keptRecordPresent(t, p.town, endRig, endPolecat) {
+		t.Errorf("the gateway-silent keep of a seat that moved on survived the pass")
+	}
+	if _, ok := p.host.d.gatewayTallySnapshot()[tallyKey]; ok {
+		t.Errorf("the seat's silent-gateway tally survived the drop; a released seat must raise no item")
+	}
+}
+
+// The same gateway-silent keep is kept when the seat still works the landed
+// bead, when the landing is not Landed, and when the agent bead cannot be read;
+// a kept record's tally is left as it was (gt-29kb5p).
+func TestMovedOnGatewaySilentKeepStays(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// branch is the agent bead's branch.
+		branch string
+		// landed is whether the record's landing proves the work landed.
+		landed bool
+		// failShow makes the agent bead read fail.
+		failShow error
+		wantLog  string
+	}{
+		{name: "the seat still on the landed bead", branch: movedOnLanded, landed: true},
+		{name: "the landing is not Landed", branch: movedOnOther, landed: false},
+		{name: "the agent bead cannot be read", branch: movedOnOther, landed: true,
+			failShow: errors.New("store unavailable"),
+			wantLog:  "kept record of " + endRig + "/" + endPolecat + " kept: cannot read its agent bead: store unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newKeptSeatPatrol(t, time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC))
+			p.seatFields.Branch = tt.branch
+			p.seedAgent()
+			if tt.failShow != nil {
+				p.agentDB.FailWith("show", tt.failShow)
+			}
+			seedGatewayKeep(t, p, tt.landed)
+			tallyKey := gatewayTallyKey(endRig, endPolecat)
+			p.host.d.gatewayTallies = map[string]gatewayTally{tallyKey: {tries: 3}}
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+
+			p.host.dropMovedOnKeptSeats()
+
+			if !keptRecordPresent(t, p.town, endRig, endPolecat) {
+				t.Errorf("the gateway-silent keep was dropped; want it kept")
+			}
+			if _, ok := p.host.d.gatewayTallySnapshot()[tallyKey]; !ok {
+				t.Errorf("the seat's silent-gateway tally was cleared with a kept record")
+			}
+			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log lacks %q:\n%s", tt.wantLog, logs.String())
+			}
+		})
+	}
+}
+
 // One patrol_scan tick drops the kept record of a seat that has moved on to
 // another bead: runPatrolScanOn calls the moved-on pass after the sandbox
 // record walk, so the record is gone once the tick returns (gt-i72us8).
