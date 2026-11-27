@@ -185,16 +185,6 @@ func newDoltDBPool(port, spares, sqlDBs int) (*doltDBPool, error) {
 	return p, nil
 }
 
-// newDoltDBPoolWithInits lays out the pool newPool returns plus inits template databases (doltpool_template.go).
-func newDoltDBPoolWithInits(newPool func(int, int, int) (*doltDBPool, error), port, spares, sqlDBs, inits int) (*doltDBPool, error) {
-	p, err := newPool(port, spares, sqlDBs)
-	if err != nil {
-		return nil, err
-	}
-	p.addInits(inits)
-	return p, nil
-}
-
 func (p *doltDBPool) all() []*doltPoolEntry {
 	return append(p.beadsEntries(), p.sql...)
 }
@@ -241,7 +231,7 @@ func (p *doltDBPool) create() error {
 // shared container's sync.Once, so no test can reach the container until it
 // returns. It installs the pool as the source of isolated beads Inits.
 func createDoltPool(port int) error {
-	p, err := newDoltDBPoolWithInits(newDoltDBPool, port, doltPoolSpares, doltPoolSQLDatabases, doltPoolInitCount)
+	p, err := doltPoolInitSetting.layout(newDoltDBPool, port, doltPoolSpares, doltPoolSQLDatabases)
 	if err != nil {
 		return err
 	}
