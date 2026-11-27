@@ -288,8 +288,8 @@ func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task
 		groups = append(groups, t)
 		run = append(run, t.group.children...)
 	}
-	// A serial package runs after the pool has drained, so it is the only child
-	// in flight while it runs (gt-0rtgc).
+	// A serial package runs after the pool has drained, so nothing of another
+	// package runs beside it (gt-0rtgc).
 	// A Pooled run starts it on the pool too (gt-edl2yv).
 	ordered := startOrder(run, r.Walls, tier)
 	parallel, serial := splitSerial(ordered)
@@ -297,8 +297,14 @@ func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task
 		parallel, serial = ordered, nil
 	}
 	r.pool(tier, dir, prefix, args, parallel)
-	for _, t := range serial {
-		r.runOne(tier, dir, prefix, args, t)
+	// A run-alone package's shards run beside each other: a unit of shards takes
+	// the pool, and a unit of one still runs alone (gt-0kestr).
+	for _, unit := range serialUnits(serial) {
+		if len(unit) == 1 {
+			r.runOne(tier, dir, prefix, args, unit[0])
+			continue
+		}
+		r.pool(tier, dir, prefix, args, unit)
 	}
 	for _, g := range groups {
 		r.finishGroup(tier, g)
