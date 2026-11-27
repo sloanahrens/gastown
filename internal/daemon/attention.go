@@ -1175,7 +1175,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 			// so there is no tip to read (gt-v4r0x).
 			return "", fmt.Errorf("%s: %w", filepath.Join(rigPath, "config.json"), err)
 		}
-		return git.NewGit(constants.RigBareRepoPath(rigPath)).
+		return d.gitAt(constants.RigBareRepoPath(rigPath)).
 			RemoteBranchTip("origin", branch)
 	}
 	s.landedCommit = d.attentionLandedCommit
