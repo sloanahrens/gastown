@@ -13,6 +13,7 @@ import (
 // with fixed output, so the compare is tested with no process (gt-jokegc).
 type fakeDriftStart struct {
 	stdout []byte
+	stderr []byte
 	exit   int
 	runErr error
 
@@ -25,7 +26,7 @@ type fakeDriftStart struct {
 
 func (f *fakeDriftStart) start(ctx context.Context, exe string, args []string, limit int) ([]byte, []byte, int, error) {
 	f.called, f.ctx, f.exe, f.args, f.limit = true, ctx, exe, args, limit
-	return f.stdout, nil, f.exit, f.runErr
+	return f.stdout, f.stderr, f.exit, f.runErr
 }
 
 // TestClusterDriftCompareCallsStartWithTheResolvedBinary: the compare runs the
@@ -133,6 +134,77 @@ func TestClusterDriftCompareRefusals(t *testing.T) {
 			}
 			if (err != nil) != tt.wantErr || len(got.Differing) != 0 {
 				t.Errorf("compare = %+v, %v; want an error = %t with no result", got, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestClusterDriftCompareNamesTheMissingReadGrant: an exit 2 answer whose stderr
+// says the daemon was forbidden the cluster, or a binary the run needs was not
+// found, is an error with no result that names the missing drift read grant
+// and keeps the command's first stderr line (gt-udasjo).
+func TestClusterDriftCompareNamesTheMissingReadGrant(t *testing.T) {
+	t.Parallel()
+	const cannotSay = "gt town cluster drift exited 2, which cannot say whether the cluster is in step: "
+	const grant = "the daemon cannot read the control cluster yet (the drift read grant is not applied): "
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{name: "forbidden", stderr: "forbidden: User \"system:serviceaccount:gt:daemon\" cannot list pods", want: grant + cannotSay + "forbidden: User \"system:serviceaccount:gt:daemon\" cannot list pods"},
+		{name: "kubectl capitalised Forbidden", stderr: "Error from server (Forbidden): pods is forbidden", want: grant + cannotSay + "Error from server (Forbidden): pods is forbidden"},
+		{name: "executable file not found", stderr: "exec: \"kubectl\": executable file not found in $PATH", want: grant + cannotSay + "exec: \"kubectl\": executable file not found in $PATH"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeDriftStart{stderr: []byte(tt.stderr + "\n"), exit: 2}
+			exe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+
+			got, err := newClusterDriftCompare(exe, fake.start)(context.Background())
+
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("compare error = %v, want %q", err, tt.want)
+			}
+			if len(got.Differing) != 0 {
+				t.Errorf("compare result = %+v, want no result beside the error", got)
+			}
+		})
+	}
+}
+
+// TestClusterDriftCompareOtherErrorsPassThrough: an exit 2 answer with no grant
+// words keeps the parse's own text, and the recorded-flags answer is still
+// errNoRecordedRender, not named as a grant problem (gt-udasjo).
+func TestClusterDriftCompareOtherErrorsPassThrough(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		stderr     string
+		wantText   string
+		wantRecord bool
+	}{
+		{name: "unrelated exit 2 message", stderr: "disk full while writing the report", wantText: "gt town cluster drift exited 2, which cannot say whether the cluster is in step: disk full while writing the report"},
+		{name: "recorded-flags answer", stderr: "no live render has recorded its flags", wantText: "gt town cluster drift exited 2, which cannot say whether the cluster is in step: no live render has recorded its flags: " + errNoRecordedRender.Error(), wantRecord: true},
+		{name: "recorded-flags answer whose stderr also says forbidden", stderr: "forbidden: no live render has recorded its flags", wantText: "gt town cluster drift exited 2, which cannot say whether the cluster is in step: forbidden: no live render has recorded its flags: " + errNoRecordedRender.Error(), wantRecord: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeDriftStart{stderr: []byte(tt.stderr + "\n"), exit: 2}
+			exe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+
+			got, err := newClusterDriftCompare(exe, fake.start)(context.Background())
+
+			if err == nil || err.Error() != tt.wantText {
+				t.Fatalf("compare error = %v, want %q", err, tt.wantText)
+			}
+			if errors.Is(err, errNoRecordedRender) != tt.wantRecord {
+				t.Errorf("errNoRecordedRender = %t, want %t", errors.Is(err, errNoRecordedRender), tt.wantRecord)
+			}
+			if len(got.Differing) != 0 {
+				t.Errorf("compare result = %+v, want no result beside the error", got)
 			}
 		})
 	}

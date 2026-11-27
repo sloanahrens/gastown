@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -32,6 +34,25 @@ func newClusterDriftCompare(
 		runCtx, cancel := context.WithTimeout(ctx, clusterDriftRunBound)
 		defer cancel()
 		stdout, stderr, exit, runErr := start(runCtx, path, []string{"town", "cluster", "drift"}, clusterDriftOutputLimit)
-		return parseClusterDriftRun(exit, stdout, stderr, runErr)
+		res, err := parseClusterDriftRun(exit, stdout, stderr, runErr)
+		return res, clusterDriftNoGrantError(err)
 	}
+}
+
+// clusterDriftNoGrantError names the missing drift read grant in a run's error
+// when its text says the daemon was forbidden the cluster or a binary the run
+// needs was not found (gt-udasjo). The match is case-insensitive so kubectl's
+// "(Forbidden)" counts too. Only the first line of the error is kept. A nil
+// error, the no-recorded-render error and any other error pass through unchanged.
+func clusterDriftNoGrantError(err error) error {
+	if err == nil || errors.Is(err, errNoRecordedRender) {
+		return err
+	}
+	text := err.Error()
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "forbidden") && !strings.Contains(lower, "executable file not found") {
+		return err
+	}
+	first, _, _ := strings.Cut(text, "\n")
+	return fmt.Errorf("the daemon cannot read the control cluster yet (the drift read grant is not applied): %s", first)
 }
