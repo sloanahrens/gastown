@@ -528,19 +528,20 @@ func TestDeployReaderNamesTheRepoItCouldNotRead(t *testing.T) {
 	assert.Equal(t, "operator/beads", d.Runs[0].Repo)
 }
 
-// holdFirstRepo answers like deployStub, but holds the first repo's deploy query
-// until every other repo's deploy query has been asked for, or its context ends.
+// holdFirstRepo answers like deployStub, but holds the first repo's query for
+// one workflow until every other repo's has been asked for, or its context ends.
 // A read that asks one repo at a time asks for none of the rest while it holds.
 type holdFirstRepo struct {
 	*deployStub
-	first string
-	asked chan struct{} // one slot per other repo's deploy query
+	first    string
+	workflow string        // the workflow whose query is held
+	asked    chan struct{} // one slot per other repo's query for it
 }
 
 func (s *holdFirstRepo) ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
-	if f.WorkflowID == deployWorkflow && owner+"/"+repo != s.first {
+	if f.WorkflowID == s.workflow && owner+"/"+repo != s.first {
 		s.asked <- struct{}{}
-	} else if f.WorkflowID == deployWorkflow {
+	} else if f.WorkflowID == s.workflow {
 		for n := 0; n < cap(s.asked); n++ {
 			select {
 			case <-s.asked:
@@ -552,9 +553,10 @@ func (s *holdFirstRepo) ListRuns(ctx context.Context, owner, repo string, f forg
 	return s.deployStub.ListRuns(ctx, owner, repo, f)
 }
 
-// newHoldFirstReader reads repos through a stub that holds the first repo's deploy list.
-func newHoldFirstReader(stub *deployStub, repos []string) *DeployReader {
-	r := NewDeployReader(&holdFirstRepo{deployStub: stub, first: repos[0], asked: make(chan struct{}, len(repos)-1)}, repos)
+// newHoldFirstReader reads repos through a stub that holds the first repo's list
+// of the workflow's runs.
+func newHoldFirstReader(stub *deployStub, workflow string, repos []string) *DeployReader {
+	r := NewDeployReader(&holdFirstRepo{deployStub: stub, first: repos[0], workflow: workflow, asked: make(chan struct{}, len(repos)-1)}, repos)
 	r.now = func() time.Time { return deployNow }
 	return r
 }
@@ -570,10 +572,41 @@ func TestDeployReaderReadsEveryRepoWhileOneIsSlow(t *testing.T) {
 			"operator/fractals-nextjs": {testDeployRun(2, "v0.1.0", "success", 20)},
 			"operator/gastown":         {testDeployRun(3, "v0.3.0", "success", 30)},
 		}}
-		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
+		d := newHoldFirstReader(stub, deployWorkflow, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
 
 		assert.Empty(t, d.Missing, "the held repo timed out, or the others waited on it")
 		assert.Len(t, d.Runs, 3)
+	})
+}
+
+// A slow repo costs the health block only itself: the first repo's health list is
+// held and then fails, and every other repo's checks are still read. One repo at
+// a time spends the shared budget on the held one and leaves them all unread.
+func TestDeployReaderReadsEveryReposChecksWhileOneIsSlow(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		const held, app, other = "operator/beads", "operator/fractals-nextjs", "operator/gastown"
+		stub := &deployStub{
+			runs: map[string][]forgejo.ActionRun{
+				app:   {testHealthRun(1, "success", 5)},
+				other: {testHealthRun(2, "success", 5)},
+			},
+			healthErr: map[string]error{held: io.EOF},
+			jobs: map[int64][]forgejo.ActionRunJob{
+				1: healthJobs("success", "success", "success"),
+				2: healthJobs("success", "success", "success"),
+			},
+		}
+		d := newHoldFirstReader(stub, healthWorkflow, []string{held, app, other}).Read()
+
+		assert.Equal(t, []string{held}, d.HealthUnread, "a repo waited on the held one")
+		repos := make([]string, 0, len(d.Health))
+		for _, row := range d.Health {
+			assert.Equal(t, healthSuccess, row.Status, row.Repo)
+			repos = append(repos, row.Repo)
+		}
+		assert.Equal(t, []string{app, app, other, other}, repos)
 	})
 }
 
@@ -589,7 +622,7 @@ func TestDeployReaderDecidesRowsAndMissingByRepoOrderNotArrival(t *testing.T) {
 			},
 			runsErr: map[string]error{"operator/gastown": &forgejo.APIError{StatusCode: http.StatusNotFound}},
 		}
-		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
+		d := newHoldFirstReader(stub, deployWorkflow, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
 
 		assert.Empty(t, d.Error)
 		assert.Equal(t, []string{"operator/gastown"}, d.Missing)
@@ -607,7 +640,7 @@ func TestDeployReaderNamesTheLastFailureInRepoOrder(t *testing.T) {
 			"operator/beads":           &forgejo.APIError{StatusCode: http.StatusForbidden},
 			"operator/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
 		}}
-		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs"}).Read()
+		d := newHoldFirstReader(stub, deployWorkflow, []string{"operator/beads", "operator/fractals-nextjs"}).Read()
 
 		assert.Equal(t, "http 404", d.Error)
 		assert.Empty(t, d.Runs)
