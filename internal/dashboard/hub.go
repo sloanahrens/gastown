@@ -107,6 +107,10 @@ type Hub struct {
 	// after starts the bound on a /api/state wait and returns its channel and a
 	// stop. NewHub sets a time.Timer; a test replaces it with a timer it controls.
 	after func(time.Duration) (fire <-chan time.Time, stop func())
+
+	// logf writes the hub's own warning lines. NewHub sets warnf; a test sets it
+	// to capture the line rather than swap stderr.
+	logf func(format string, args ...any)
 }
 
 // apiStateBound is how long /api/state waits for a health read when no page is
@@ -134,6 +138,7 @@ func NewHub(cfg Config) *Hub {
 		wake:       make(chan struct{}),
 		pollGate:   make(chan struct{}, maxParallelPolls),
 		alerts:     NewAlerter(cfg.Now),
+		logf:       warnf,
 		after: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
 			return t.C, func() { t.Stop() }
@@ -531,6 +536,7 @@ func (h *Hub) answerState(ctx context.Context) State {
 		case <-ctx.Done():
 			return h.State()
 		case <-timeout:
+			h.logBoundWait()
 			return h.State()
 		case _, ok := <-frames:
 			if ok {
@@ -547,6 +553,19 @@ func (h *Hub) answerState(ctx context.Context) State {
 		}
 	}
 	return h.State()
+}
+
+// logBoundWait writes the one line a /api/state wait that ended by apiStateBound
+// earns: the viewers it waited with, and the last health poll's wait for a gate
+// slot and its run, which say whether the poll was starved. A health poll that
+// has not run yet leaves both times zero.
+func (h *Hub) logBoundWait() {
+	h.mu.Lock()
+	viewers := len(h.subs)
+	timing := h.state.Polls["pollHealth"]
+	h.mu.Unlock()
+	h.logf("/api/state answered without a health read after %s: %d viewers, health poll waited %d ms, ran %d ms",
+		apiStateBound, viewers, timing.WaitMS, timing.RunMS)
 }
 
 // healthReadSince reports whether the state carries a health read taken at or
