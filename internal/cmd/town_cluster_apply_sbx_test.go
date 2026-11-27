@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"slices"
@@ -62,13 +63,16 @@ type sbxCall struct {
 // sbxKube is the cluster a gt-sbx run calls. It records every call with its label
 // and answers the calls a run makes: an apply succeeds, a rollout completes, the
 // controller is held at resourceVersion 7 and Available, and the StatefulSet's live
-// object is statefulSet. The call labelled fail exits 1, so a test can stop the run
-// at one call.
+// object is statefulSet, or absent when absentStatefulSet is set. The call labelled
+// fail exits 1, and the call labelled runErr returns an error, so a test can stop
+// the run at one call, at the cluster or before kubectl runs.
 type sbxKube struct {
-	names       map[string]string // document bytes to the plan file name they are
-	calls       []sbxCall
-	statefulSet string
-	fail        string
+	names             map[string]string // document bytes to the plan file name they are
+	calls             []sbxCall
+	statefulSet       string
+	absentStatefulSet bool
+	fail              string
+	runErr            string
 }
 
 func newSbxKube() *sbxKube {
@@ -84,6 +88,9 @@ func (k *sbxKube) run(ctx context.Context, _ string, _ []string, _ string, args 
 	k.calls = append(k.calls, call)
 	if call.label == k.fail {
 		return "", 1, nil
+	}
+	if call.label == k.runErr {
+		return "", 0, errors.New("kubectl could not be run")
 	}
 	return k.answer(call.args), 0, nil
 }
@@ -128,6 +135,9 @@ func (k *sbxKube) answer(v []string) string {
 	kind, _ := sbxResource(v)
 	switch {
 	case kind == "statefulset":
+		if k.absentStatefulSet {
+			return ""
+		}
 		return k.statefulSet
 	case kind == "deployment" && strings.HasPrefix(v[len(v)-1], "jsonpath"):
 		return "True"
@@ -235,15 +245,18 @@ func TestClusterShapeSbxKubeconfigs(t *testing.T) {
 }
 
 // TestClusterShapeSbxStatefulSetStops: a StatefulSet that does not come back ready
-// stops the gt-sbx apply: its rollout or its replica read fails, the run ends on that
-// call, gt-bootstrap is never applied, and the run's rollback line for the StatefulSet
-// was printed before the first apply with the revision plan.json records.
+// stops the gt-sbx apply: its rollout cannot run, its rollout or its replica read
+// fails, or the live object is absent, the run ends on that call, gt-bootstrap is
+// never applied, and the run's rollback line for the StatefulSet was printed before
+// the first apply with the revision plan.json records.
 func TestClusterShapeSbxStatefulSetStops(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
 		statefulSet string
+		absent      bool
 		fail        string
+		runErr      string
 		wantErr     string
 		wantLast    string
 	}{
@@ -266,9 +279,21 @@ func TestClusterShapeSbxStatefulSetStops(t *testing.T) {
 			wantLast: "rollout statefulset/openshell",
 		},
 		{
+			name:     "rollout status cannot run",
+			runErr:   "rollout statefulset/openshell",
+			wantErr:  "waiting for the rollout of statefulset/openshell",
+			wantLast: "rollout statefulset/openshell",
+		},
+		{
 			name:     "replica read fails",
 			fail:     "read statefulset/openshell",
 			wantErr:  "reading the readiness of statefulset/openshell",
+			wantLast: "read statefulset/openshell",
+		},
+		{
+			name:     "StatefulSet absent at the replica read",
+			absent:   true,
+			wantErr:  "statefulset/openshell is not in namespace openshell, so its readiness was not read",
 			wantLast: "read statefulset/openshell",
 		},
 		{
@@ -291,7 +316,9 @@ func TestClusterShapeSbxStatefulSetStops(t *testing.T) {
 			if tc.statefulSet != "" {
 				k.statefulSet = tc.statefulSet
 			}
+			k.absentStatefulSet = tc.absent
 			k.fail = tc.fail
+			k.runErr = tc.runErr
 			out, err := sbxRun(t, k, sbxPlanFiles(sbxStatefulSetDoc, "3"), sbxDocs(sbxStatefulSetDoc))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("runTownClusterApply returned %v, want an error containing %q", err, tc.wantErr)
