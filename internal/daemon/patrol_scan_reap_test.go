@@ -292,6 +292,41 @@ func TestReapRefusalExitIsSentinel(t *testing.T) {
 	}
 }
 
+// A refused nuke's cobra error is followed by its usage block, so the last
+// stderr line is a flag's help text. The refusal must report the blocked
+// reasons from its `Error: blocked:` line instead.
+func TestReapRefusalReasonSkipsUsage(t *testing.T) {
+	t.Parallel()
+	stderr := `Error: Cannot nuke the following polecats:
+
+  onyx:
+    - Hook: has work (gt-8rk2ql)
+
+Safety checks failed. Resolve issues before nuking, or use --force.
+Error: blocked: 1 polecat(s) failed nuke safety checks: onyx: Hook: has work (gt-8rk2ql)
+Usage:
+  gt polecat nuke [rig/polecat...] [flags]
+
+Flags:
+  -f, --force   skip the safety checks
+  -h, --help    help for nuke
+`
+	refused := newFakeCLI(func([]string) cliReply {
+		return cliReply{stderr: stderr, code: nukeRefusedExitCode}
+	})
+	h := reapHost(t, enabledCleanup("gastown"), nil, refused)
+	_, err := h.Reap("gastown", "onyx")
+	if !errors.Is(err, errReapRefused) {
+		t.Fatalf("Reap on exit 3 = %v, want errReapRefused", err)
+	}
+	if !strings.Contains(err.Error(), "Hook: has work (gt-8rk2ql)") {
+		t.Fatalf("refusal error %q drops the polecat's blocked reason", err)
+	}
+	if strings.Contains(err.Error(), "help for nuke") {
+		t.Fatalf("refusal error %q reports the usage block's last line", err)
+	}
+}
+
 // IdleSince is the grace clock: the later of the agent bead's update and the
 // hooked work bead's close (its update when never closed), plus a parked
 // seat's park time.
