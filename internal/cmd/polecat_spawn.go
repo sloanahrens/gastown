@@ -977,6 +977,12 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	if labelErr != nil {
 		return nil, labelErr
 	}
+	// The claim this spawn's pool decision writes names the bead it is for, so
+	// the roster counts a running sling and the seat its claim holds once
+	// (gt-75fma5). A spawn with no hook bead names none.
+	if s.seatClaims != nil {
+		s.seatClaims.bead = opts.HookBead
+	}
 	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, requested)
 	if poolErr != nil {
 		return nil, poolErr
