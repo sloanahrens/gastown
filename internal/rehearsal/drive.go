@@ -14,9 +14,10 @@ const closeReason = "rehearsal run ended"
 // the run's beads and saves the record to o.Path. A failed file set, collect, close or
 // save returns its error wrapped with the step's name and saves nothing. A failed run
 // window, a canceled ctx included, stops the run: Drive marks the record Stopped with
-// the step's name, sets End, closes the run's beads, saves the record and returns the
-// window error joined with any error from the close or the save. The record returned
-// with an error holds whatever the steps gathered up to that point.
+// the step's name, sets End, collects the record from the town, closes the run's beads,
+// saves the record and returns the window error joined with any error from the collect,
+// the close or the save. The record returned with an error holds whatever the steps
+// gathered up to that point.
 func Drive(ctx context.Context, o Options) (Record, error) {
 	rec := Record{RunID: o.RunID, Tag: o.Tag, ChangeSet: o.ChangeSet, Start: o.Now()}
 	ids, err := FileSet(ctx, o.Town, o.Tasks)
@@ -42,10 +43,10 @@ func Drive(ctx context.Context, o Options) (Record, error) {
 }
 
 // finish ends a run whose window failed with err. It marks rec Stopped with the
-// failed step's name, sets End if it is unset, then closes the run's beads and saves
-// rec. The close and the save run under context.WithoutCancel(ctx), so a canceled run
-// still closes and saves. It returns rec with err joined with any error from the close
-// or the save.
+// failed step's name, sets End if it is unset, then collects rec from the town, closes
+// the run's beads and saves rec. The collect, the close and the save run under
+// context.WithoutCancel(ctx), so a canceled run still collects, closes and saves. It
+// returns rec with err joined with any error from the collect, the close or the save.
 func finish(ctx context.Context, o Options, rec Record, ids []string, err error) (Record, error) {
 	rec.Stopped, rec.StopReason = true, "run window failed"
 	if rec.End.IsZero() {
@@ -53,6 +54,9 @@ func finish(ctx context.Context, o Options, rec Record, ids []string, err error)
 	}
 	cleanup := context.WithoutCancel(ctx)
 	errs := []error{err}
+	if cerr := Collect(cleanup, o.Town, &rec, ids, o.HostLoad); cerr != nil {
+		errs = append(errs, fmt.Errorf("drive: collect: %w", cerr))
+	}
 	if cerr := CloseOpen(cleanup, o.Town, ids, closeReason); cerr != nil {
 		errs = append(errs, fmt.Errorf("drive: close beads: %w", cerr))
 	}
