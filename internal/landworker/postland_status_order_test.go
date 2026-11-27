@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -680,5 +681,58 @@ func TestPostLandStatusFailedSavesRaiseTheStoreFailure(t *testing.T) {
 	r.PollPending(ctx)
 	if f := r.StoreFailure(); f == nil || !strings.Contains(f.Error, "disk full") {
 		t.Fatalf("store failure = %+v after %d failed saves, want it raised naming the error", f, PostLandStatusStoreFailureAfter)
+	}
+}
+
+var canceledRun = &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{{Context: statusContext, Status: forgejo.StateFailure, Description: postLandCancelledDescription}}}
+
+// TestPostLandStatusCoveredEntryRaisesNothing: a canceled run's entry raised an unknown
+// item an hour later though a newer commit passed; a green on a descendant drops it (gt-82n9ew).
+func TestPostLandStatusCoveredEntryRaisesNothing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	drop := "dropping the pending verdict for " + short(redSHA) + " (landed by gt-cul): its run was canceled and the newer commit " + short(newerSHA) + " passed"
+	for _, tc := range []struct {
+		name       string
+		red, newer *forgejo.CombinedStatus
+		setup      func(o *orderedStatus)
+		later      bool // the canceled landing is triggered after the green decided
+		drops      bool
+		log        string
+	}{
+		{"same pass", canceledRun, green(), nil, false, true, drop},
+		{"later pass", canceledRun, green(), nil, true, true, drop},
+		{"no newer green", canceledRun, pending(), nil, false, false, ""},
+		{"no green yet", canceledRun, pending(), func(o *orderedStatus) { o.run.State = &MemoryMainState{} }, false, false, ""},
+		{"a green that is not a descendant", canceledRun, pending(), func(o *orderedStatus) { o.status(greenSHA, green()); o.run.Trigger(ctx, landOf("gt-ok", greenSHA)) }, false, false, ""},
+		{"an ancestry error", canceledRun, green(), func(o *orderedStatus) { o.ancErr = errors.New("git: bad object") }, false, false, "covering " + short(redSHA)},
+		{"no ancestry reader", canceledRun, green(), func(o *orderedStatus) { o.run.IsAncestor = nil }, false, false, ""},
+		{"an entry that is not canceled", pending(), green(), nil, false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			o := newOrderedStatus(t, "", redSHA, newerSHA)
+			if tc.setup != nil {
+				tc.setup(o)
+			}
+			o.status(redSHA, tc.red)
+			o.status(newerSHA, tc.newer)
+			o.run.Trigger(ctx, landOf("gt-new", newerSHA))
+			if !tc.later {
+				o.run.Trigger(ctx, landOf("gt-cul", redSHA))
+			}
+			o.poll(ctx)
+			if tc.later {
+				o.run.Trigger(ctx, landOf("gt-cul", redSHA))
+				o.later()
+				o.poll(ctx)
+			}
+			o.clk.Advance(time.Hour)
+			alarms, err := o.run.Alarms(o.clk.Now())
+			raised := slices.ContainsFunc(alarms.Unknown, func(u PostLandUnknown) bool { return u.SHA == redSHA })
+			if err != nil || raised == tc.drops || !strings.Contains(o.logText(), tc.log) || (tc.log == "" && strings.Contains(o.logText(), "covering")) {
+				t.Fatalf("raised %v (%v), want dropped %v and log %q:\n%s", raised, err, tc.drops, tc.log, o.logText())
+			}
+		})
 	}
 }

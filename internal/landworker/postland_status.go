@@ -537,8 +537,8 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	defer cancel()
 	removed := map[int]bool{}
 	var fires []func()
-	// The orphaned lines wait for the save: a mark lives in this slice until it, so
-	// a line logged at the mark would be logged again by the next pass when the save fails.
+	// The orphaned and covered lines wait for the save: a mark lives in this slice until it,
+	// so a line logged at the mark would be logged again by the next pass when the save fails.
 	var orphanLines []string
 	for _, i := range order {
 		if passCtx.Err() != nil {
@@ -633,7 +633,9 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 		p.storeFailure(fmt.Errorf("reading the main state back: %w", err))
 		return
 	}
-	fresh.PostLandPending = keep
+	var covered []string
+	fresh.PostLandPending, covered = p.coveredByGreen(fresh.LastGreen, keep)
+	orphanLines = append(orphanLines, covered...)
 	if dropped != nil {
 		fresh.PostLandDropped = dropped
 	}
@@ -700,6 +702,32 @@ func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, re
 		return fmt.Sprintf("orphaned at %s: run %s ended with the status still pending", short(e.Land.Commit), sanitizeStatusText(e.OrphanRun))
 	}
 	return ""
+}
+
+// coveredByGreen drops the canceled entries a green on a descendant covers (gt-82n9ew).
+// The log lines are returned for the caller to write once the save lands.
+func (p *PostLandRunner) coveredByGreen(green string, entries []PendingPostLand) ([]PendingPostLand, []string) {
+	if green == "" || p.IsAncestor == nil {
+		return entries, nil
+	}
+	var lines []string
+	kept := make([]PendingPostLand, 0, len(entries))
+	for _, e := range entries {
+		if e.LastState != "canceled" {
+			kept = append(kept, e)
+			continue
+		}
+		covered, err := p.IsAncestor(e.Land.Commit, green)
+		switch {
+		case err != nil:
+			lines = append(lines, fmt.Sprintf("covering %s (%s) by %s: %s; the entry keeps waiting", short(e.Land.Commit), e.Land.by(), short(green), sanitizeStatusText(err.Error())))
+		case covered:
+			lines = append(lines, fmt.Sprintf("dropping the pending verdict for %s (%s): its run was canceled and the newer commit %s passed", short(e.Land.Commit), e.Land.by(), short(green)))
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept, lines
 }
 
 // newPassContext makes one pass's context: a test's passContext, else a context
