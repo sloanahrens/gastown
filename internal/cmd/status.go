@@ -417,6 +417,12 @@ func outputStatusText(w io.Writer, status townstatus.TownStatus) error {
 			strings.Join(status.LivenessUnknown, ", "))
 	}
 
+	if len(status.AgentBeadsUnread) > 0 {
+		fmt.Fprintf(w, "%s %s\n\n",
+			style.Bold.Render("Agent beads unread (read failed, their agents are unknown):"),
+			strings.Join(status.AgentBeadsUnread, ", "))
+	}
+
 	// Role icons - uses centralized emojis from constants package
 	roleIcons := map[string]string{
 		constants.RoleCrew:    constants.EmojiCrew,

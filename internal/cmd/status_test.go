@@ -174,6 +174,23 @@ func TestBeadStatePausedStillShows(t *testing.T) {
 	}
 }
 
+// TestOutputStatusText_AgentBeadsUnread: a failed agent-bead read is named in
+// the text status, and no line appears when every read answered (gt-s5twej).
+func TestOutputStatusText_AgentBeadsUnread(t *testing.T) {
+	t.Parallel()
+	for _, unread := range [][]string{{"/town/rig-a"}, nil} {
+		var buf bytes.Buffer
+		st := townstatus.TownStatus{Name: "gt", Location: "gt", AgentBeadsUnread: unread}
+		if err := outputStatusText(&buf, st); err != nil {
+			t.Fatalf("outputStatusText: %v", err)
+		}
+		named := strings.Contains(buf.String(), "Agent beads unread") && strings.Contains(buf.String(), "/town/rig-a")
+		if named != (unread != nil) {
+			t.Errorf("unread %v: output names it = %v, want %v:\n%s", unread, named, unread != nil, buf.String())
+		}
+	}
+}
+
 // gt-fcxe9.1: a session whose liveness query failed is shown as running (it
 // is not known dead) and named on its own line, so the failure is visible.
 func TestOutputStatusText_LivenessUnknown(t *testing.T) {

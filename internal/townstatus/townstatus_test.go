@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -640,26 +639,32 @@ func agentBeadsTestDB(t *testing.T, mode string) *beads.Beads {
 	}))
 }
 
-// TestGatherAgentBeadsUnread drives the production read Gather calls per
-// database: a failed read marks that database unread on the status data, an
-// answering read leaves it unmarked (gt-s5twej). Gather itself starts tmux and
-// ps, which the unit tier refuses.
+// TestGatherAgentBeadsUnread drives the collection Gather runs over its
+// databases: a failed read marks that database unread on the status data, in
+// sorted order, and an answering or not-found one does not (gt-s5twej). Gather
+// itself starts tmux and ps, which the unit tier refuses.
 func TestGatherAgentBeadsUnread(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	townPath, rigPath := beads.GetTownBeadsPath(townRoot), filepath.Join(townRoot, "r", "mayor", "rig")
 	for _, tc := range []struct {
-		name, path, mode string
-		want             []string
+		name  string
+		modes map[string]string
+		want  []string
 	}{
-		{"failed town read", townPath, "fail", []string{townPath}},
-		{"failed rig read", rigPath, "fail", []string{rigPath}},
-		{"answered read", townPath, "ok", nil},
-		{"not found", townPath, "notfound", nil},
+		{"every read answers", map[string]string{"/town": "ok", "/rig": "ok"}, nil},
+		{"failed reads are named sorted", map[string]string{"/town": "fail", "/rig-b": "ok", "/rig-a": "fail"}, []string{"/rig-a", "/town"}},
+		{"not found is not unread", map[string]string{"/town": "notfound"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var dbs []agentBeadsDB
+			for path, mode := range tc.modes {
+				dbs = append(dbs, agentBeadsDB{path: path, client: agentBeadsTestDB(t, mode)})
+			}
 			var status TownStatus
-			readAgentBeads(&status, agentBeadsTestDB(t, tc.mode), tc.path, &sync.Mutex{})
+			agents, hooks := collectAgentBeads(&status, dbs)
+			if len(agents) != 0 || len(hooks) != 0 {
+				t.Errorf("got %d agents and %d hooks from empty databases, want none", len(agents), len(hooks))
+			}
 			if !slices.Equal(status.AgentBeadsUnread, tc.want) {
 				t.Errorf("AgentBeadsUnread = %v, want %v", status.AgentBeadsUnread, tc.want)
 			}

@@ -166,94 +166,16 @@ func Gather(opts Options) (TownStatus, error) {
 	// render runtime-only status instead of amplifying the query storm.
 	allAgentBeads := make(map[string]*beads.Issue)
 	allHookBeads := make(map[string]*beads.Issue)
-	var beadsMu sync.Mutex // Protects allAgentBeads, allHookBeads and status.AgentBeadsUnread
-
-	// Helper to safely merge beads into the shared maps
-	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allAgentBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-	mergeHookBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allHookBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
 
 	if !skipBeadsPrefetch {
-		var beadsWg sync.WaitGroup
-
-		// Fetch town-level agent beads from town beads
+		// Town-level agent beads first, then one database per rig, all read in parallel.
 		townBeadsPath := beads.GetTownBeadsPath(townRoot)
-		beadsWg.Add(1)
-		go func() {
-			defer beadsWg.Done()
-			townBeadsClient := beads.New(townBeadsPath)
-			townAgentBeads := readAgentBeads(&status, townBeadsClient, townBeadsPath, &beadsMu)
-			mergeAgentBeads(townAgentBeads)
-
-			// Fetch hook beads from town beads
-			var townHookIDs []string
-			for _, issue := range townAgentBeads {
-				hookID := issue.HookBead
-				if hookID == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						hookID = fields.HookBead
-					}
-				}
-				if hookID != "" {
-					townHookIDs = append(townHookIDs, hookID)
-				}
-			}
-			if len(townHookIDs) > 0 {
-				townHookBeads, _ := townBeadsClient.ShowMultiple(townHookIDs)
-				mergeHookBeads(townHookBeads)
-			}
-		}()
-
-		// Fetch rig-level agent beads in parallel
+		dbs := []agentBeadsDB{{path: townBeadsPath, client: beads.New(townBeadsPath)}}
 		for _, r := range rigs {
-			beadsWg.Add(1)
-			go func(r *rig.Rig) {
-				defer beadsWg.Done()
-				rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
-				rigBeads := beads.New(rigBeadsPath)
-				rigAgentBeads := readAgentBeads(&status, rigBeads, rigBeadsPath, &beadsMu)
-				if rigAgentBeads == nil {
-					return
-				}
-				mergeAgentBeads(rigAgentBeads)
-
-				var hookIDs []string
-				for _, issue := range rigAgentBeads {
-					// Use the HookBead field from the database column; fall back for legacy beads.
-					hookID := issue.HookBead
-					if hookID == "" {
-						fields := beads.ParseAgentFields(issue.Description)
-						if fields != nil {
-							hookID = fields.HookBead
-						}
-					}
-					if hookID != "" {
-						hookIDs = append(hookIDs, hookID)
-					}
-				}
-
-				if len(hookIDs) == 0 {
-					return
-				}
-				hookBeads, _ := rigBeads.ShowMultiple(hookIDs)
-				mergeHookBeads(hookBeads)
-			}(r)
+			rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
+			dbs = append(dbs, agentBeadsDB{path: rigBeadsPath, client: beads.New(rigBeadsPath)})
 		}
-
-		beadsWg.Wait()
-		sort.Strings(status.AgentBeadsUnread)
+		allAgentBeads, allHookBeads = collectAgentBeads(&status, dbs)
 	}
 
 	// Create mail router for inbox lookups
@@ -442,6 +364,57 @@ func Gather(opts Options) (TownStatus, error) {
 	status.Summary.RigCount = len(rigs)
 
 	return status, nil
+}
+
+// agentBeadsDB is one bead database Gather reads agent beads from.
+type agentBeadsDB struct {
+	path   string
+	client *beads.Beads
+}
+
+// collectAgentBeads reads every database's agent beads and the beads on their
+// hooks, in parallel, and returns the merged maps. The paths of the databases
+// whose read failed are left sorted in status.AgentBeadsUnread (gt-s5twej).
+func collectAgentBeads(status *TownStatus, dbs []agentBeadsDB) (agents, hooks map[string]*beads.Issue) {
+	agents = make(map[string]*beads.Issue)
+	hooks = make(map[string]*beads.Issue)
+	var mu sync.Mutex // Protects agents, hooks and status.AgentBeadsUnread
+	var wg sync.WaitGroup
+	for _, db := range dbs {
+		wg.Add(1)
+		go func(db agentBeadsDB) {
+			defer wg.Done()
+			found := readAgentBeads(status, db.client, db.path, &mu)
+			var hookIDs []string
+			mu.Lock()
+			for id, issue := range found {
+				agents[id] = issue
+				// Use the HookBead field from the database column; fall back for legacy beads.
+				hookID := issue.HookBead
+				if hookID == "" {
+					if fields := beads.ParseAgentFields(issue.Description); fields != nil {
+						hookID = fields.HookBead
+					}
+				}
+				if hookID != "" {
+					hookIDs = append(hookIDs, hookID)
+				}
+			}
+			mu.Unlock()
+			if len(hookIDs) == 0 {
+				return
+			}
+			hookBeads, _ := db.client.ShowMultiple(hookIDs)
+			mu.Lock()
+			defer mu.Unlock()
+			for id, issue := range hookBeads {
+				hooks[id] = issue
+			}
+		}(db)
+	}
+	wg.Wait()
+	sort.Strings(status.AgentBeadsUnread)
+	return agents, hooks
 }
 
 // readAgentBeads returns db's agent beads and, when the read failed, records
