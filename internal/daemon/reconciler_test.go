@@ -47,11 +47,16 @@ func TestReconcilerPatrolInterval(t *testing.T) {
 
 // TestReconcilerPatrolPass covers what one pass does: a disabled patrol logs
 // nothing and records no run, and an active one logs its mode (shadow unless
-// the block sets shadow false) and records the run it completed.
+// the block sets shadow false), logs each duty it would run, and records the
+// run it completed.
 func TestReconcilerPatrolPass(t *testing.T) {
 	t.Parallel()
 
 	live := false
+
+	// Without a scheduled_maintenance block the town-state duty has no root, so
+	// it reads overdue with no result: the one duty line each active pass logs.
+	const townStateOverdue = "town_state overdue age 0s limit 24h0m0s"
 
 	tests := []struct {
 		name     string
@@ -61,8 +66,8 @@ func TestReconcilerPatrolPass(t *testing.T) {
 		wantRun  bool
 	}{
 		{"a disabled patrol logs nothing and records no run", true, nil, "", false},
-		{"an active shadow pass logs shadow and records its run", false, nil, "reconciler: pass (shadow)", true},
-		{"an active live pass logs live and records its run", false, &live, "reconciler: pass (live)", true},
+		{"an active shadow pass logs shadow and records its run", false, nil, "reconciler: pass (shadow)\nreconciler: shadow: " + townStateOverdue + " (would run)", true},
+		{"an active live pass logs live and records its run", false, &live, "reconciler: pass (live)\nreconciler: " + townStateOverdue, true},
 	}
 
 	for _, tt := range tests {
