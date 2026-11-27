@@ -56,6 +56,8 @@ type repo struct {
 	worktrees map[string]*worktree
 	config    map[string]string // local config; worktrees share it
 	stashes   []stash           // newest first, like git stash list
+	counts    string            // count-objects -v text; see SetObjectCounts
+	countsErr error             // CountObjects' failure; see SetObjectCounts
 }
 
 // worktree is a checkout: its own HEAD (for a repository's main checkout,

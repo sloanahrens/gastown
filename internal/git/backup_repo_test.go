@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -35,6 +36,26 @@ func TestPackSizeReadsTheSizePackLine(t *testing.T) {
 	s = newScripted(map[string]reply{"count-objects -v": ok("count: 0\n")})
 	if got, err := newTestGit(t, s).PackSize(); err != nil || got != "" {
 		t.Fatalf("PackSize without a size-pack line = %q, %v; want empty", got, err)
+	}
+}
+
+func TestCountObjectsReturnsTheCountObjectsOutput(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{"count-objects -v": ok("count: 3\nsize: 12\nsize-pack: 5120\n")})
+	got, err := newTestGit(t, s).CountObjects()
+	if want := "count: 3\nsize: 12\nsize-pack: 5120"; err != nil || got != want {
+		t.Fatalf("CountObjects = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestCountObjectsWrapsAFailedRun(t *testing.T) {
+	t.Parallel()
+	const stderr = "fatal: not a git repository (or any of the parent directories): .git"
+	s := newScripted(map[string]reply{"count-objects -v": fail(128, stderr)})
+	got, err := newTestGit(t, s).CountObjects()
+	var gitErr *GitError
+	if got != "" || !errors.As(err, &gitErr) || gitErr.Stderr != stderr {
+		t.Fatalf("CountObjects of a failing run = %q, %v; want empty and a *GitError carrying %q", got, err, stderr)
 	}
 }
 
