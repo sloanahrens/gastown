@@ -95,6 +95,8 @@ type surface struct {
 	native gtwrap.Process
 	// git reads the caller's worktree for gt done; nil refuses gt done.
 	git gtwrap.Git
+	// newCallLog builds the call log at a path; nil records no call.
+	newCallLog func(path string) *callLog
 }
 
 func main() {
@@ -177,6 +179,7 @@ func osSurface() surface {
 			}
 		},
 		executable: os.Executable,
+		newCallLog: osCallLog,
 		newDoctor: func(town string) gtwrap.Doctor {
 			return cutoverDoctor{town: town, shell: gtwrap.OSShell{}, read: os.ReadFile, report: os.Stderr}
 		},
@@ -241,6 +244,8 @@ func run(argv []string, s surface) int {
 		return fail(s.stderr, err)
 	}
 	call.Stdin = stdin
+	// argv[1:] is the caller's own list; args may have been rewritten.
+	finish := startCallLog(s.newCallLog, s.stderr, town, name, argv[1:], dir)
 	exit, err := t.Launch(call)
 	if err != nil {
 		fmt.Fprintln(s.stderr, err)
@@ -248,6 +253,7 @@ func run(argv []string, s surface) int {
 			exit = exitFailure
 		}
 	}
+	finish(exit)
 	return exit
 }
 
