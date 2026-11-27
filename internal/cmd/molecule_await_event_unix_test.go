@@ -16,8 +16,8 @@ import (
 // by the guard rather than answered by the budget.
 const awaitEventReadBudget = 10 * time.Minute
 
-// TestReadPendingEventsBoundedCtxDone drives readPendingEventsBounded with an
-// already-cancelled context. The event file is a fifo nobody writes, so
+// TestReadPendingEventsBoundedCtxDone drives readPendingEventsBoundedDone with
+// an already-cancelled context. The event file is a fifo nobody writes, so
 // reading it blocks until a writer opens it: a read that ignored its context
 // would sit there until the far budget ran out instead of returning.
 //
@@ -34,12 +34,12 @@ func TestReadPendingEventsBoundedCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	done := make(chan []EventFile, 1)
+	done := make(chan (<-chan struct{}), 1)
 	go func() {
-		done <- readPendingEventsBounded(ctx, dir, awaitEventReadBudget)
+		_, readerDone := readPendingEventsBoundedDone(ctx, dir, awaitEventReadBudget)
+		done <- readerDone
 	}()
-
-	awaitEventWithin(t, done, "readPendingEventsBounded")
+	readerDone := awaitEventWithin(t, done, "readPendingEventsBoundedDone")
 
 	// Open the fifo for writing so the blocked read sees EOF and its
 	// goroutine exits.
@@ -48,4 +48,8 @@ func TestReadPendingEventsBoundedCtxDone(t *testing.T) {
 		t.Fatalf("open %s for write: %v", fifo, err)
 	}
 	w.Close()
+
+	// Wait for the reader goroutine to return too: leaving it running lets
+	// it outlive the test and trips the package's goroutine-leak check.
+	awaitEventWithin(t, readerDone, "reader goroutine")
 }

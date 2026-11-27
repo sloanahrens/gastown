@@ -569,24 +569,35 @@ func waitForEventFiles(ctx context.Context, clk clockwork.Clock, eventDir string
 // whatever it produces within the given budget, or nil if it doesn't finish.
 // ctx is also honored — whichever deadline fires first wins.
 func readPendingEventsBounded(ctx context.Context, dir string, budget time.Duration) []EventFile {
+	events, _ := readPendingEventsBoundedDone(ctx, dir, budget)
+	return events
+}
+
+// readPendingEventsBoundedDone is readPendingEventsBounded with a channel that
+// is closed once the reader goroutine has returned. A caller that lets the
+// budget or ctx win the race can wait on it rather than leave the reader to
+// outlive the caller (gt-j0m29x).
+func readPendingEventsBoundedDone(ctx context.Context, dir string, budget time.Duration) ([]EventFile, <-chan struct{}) {
 	ch := make(chan []EventFile, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		events, _ := readPendingEvents(dir)
 		ch <- events
 	}()
 	select {
 	case events := <-ch:
-		return events
+		return events, done
 	case <-time.After(budget):
-		return nil
+		return nil, done
 	case <-ctx.Done():
 		// ctx already done — give the read a tiny grace window so we
 		// don't drop events that were 1ms from arriving.
 		select {
 		case events := <-ch:
-			return events
+			return events, done
 		case <-time.After(50 * time.Millisecond):
-			return nil
+			return nil, done
 		}
 	}
 }
