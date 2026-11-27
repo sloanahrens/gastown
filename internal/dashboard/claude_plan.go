@@ -366,7 +366,23 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 			newest = s
 		}
 	}
-	p.WeeklyPct, p.FiveHourPct = newest.SevenDay, newest.FiveHour
+	// Several writers append to one series, and a writer that lags the others
+	// writes a lower percentage for the same window in the same second. A weekly
+	// percentage never falls inside one window, so the current reading is the
+	// window's max, whichever line came first (gt-x1rq13).
+	window := claudePlanWindow(samples, newest.SevenDayResetsAt)
+	p.WeeklyPct = newest.SevenDay
+	for _, s := range window {
+		if s.SevenDay > p.WeeklyPct {
+			p.WeeklyPct = s.SevenDay
+		}
+	}
+	p.FiveHourPct = newest.FiveHour
+	for _, s := range samples {
+		if claudePlanSameWindow(s.FiveHourResetsAt, newest.FiveHourResetsAt) && s.FiveHour > p.FiveHourPct {
+			p.FiveHourPct = s.FiveHour
+		}
+	}
 	p.WeeklyResetsAt, p.FiveHourResetsAt = newest.SevenDayResetsAt, newest.FiveHourResetsAt
 	p.SampledAt = newest.T
 	// A reading the meter cannot place in the current window is not the current
@@ -375,28 +391,27 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 	// absent instant and reads the same way.
 	windowEnded := newest.SevenDayResetsAt <= now.Unix()
 	p.Stale = windowEnded || now.Sub(time.Unix(newest.T, 0)) > claudePlanStale
-	p.UsedValueUSD = roundTo2(newest.SevenDay / claudePlanLimitPct * p.WeeklyValueUSD)
+	p.UsedValueUSD = roundTo2(p.WeeklyPct / claudePlanLimitPct * p.WeeklyValueUSD)
 
-	window := claudePlanWindow(samples, newest.SevenDayResetsAt)
-	pace1h := claudePlanPace(window, time.Hour)
-	pace24h := claudePlanPace(window, 24*time.Hour)
+	pace1h := claudePlanPace(window, p.WeeklyPct, time.Hour)
+	pace24h := claudePlanPace(window, p.WeeklyPct, 24*time.Hour)
 	p.PacePerDay1h, p.PacePerDay24h = roundTo2(pace1h), roundTo2(pace24h)
 
 	daysLeft := float64(newest.SevenDayResetsAt-now.Unix()) / claudePlanDaySecs
 	if daysLeft < 0 {
 		daysLeft = 0
 	}
-	p.ProjectedPctAtReset = roundTo2(newest.SevenDay + pace24h*daysLeft)
+	p.ProjectedPctAtReset = roundTo2(p.WeeklyPct + pace24h*daysLeft)
 	// A week already at the limit has nothing left to spend, so it is reached at
 	// no pace at all; below it, the day's pace says when, and a pace that is flat
 	// or falling never gets there. A limit that outlasts the window is the
 	// reset's, not the meter's, so the field stays null.
 	switch {
-	case newest.SevenDay >= claudePlanLimitPct:
+	case p.WeeklyPct >= claudePlanLimitPct:
 		hits := 0.0
 		p.HitsLimitInDays = &hits
 	case pace24h > 0:
-		if d := (claudePlanLimitPct - newest.SevenDay) / pace24h; d <= daysLeft {
+		if d := (claudePlanLimitPct - p.WeeklyPct) / pace24h; d <= daysLeft {
 			hits := roundTo2(d)
 			p.HitsLimitInDays = &hits
 		}
@@ -405,8 +420,12 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 }
 
 // claudePlanWindow is the samples of the newest reading's own window, in time
-// order: the limit's resets_at identifies a run of the limit, and a sample from
-// a run that has ended belongs to a week nobody is spending against now.
+// order, samples of one instant by ascending weekly percentage: the limit's
+// resets_at identifies a run of the limit, and a sample from a run that has
+// ended belongs to a week nobody is spending against now. The tie-break leaves
+// a window's highest reading of its newest second last, so a caller reading the
+// window's last sample sees the same reading whatever order the lines were
+// appended in (gt-x1rq13).
 func claudePlanWindow(samples []ClaudePlanSample, resetsAt int64) []ClaudePlanSample {
 	window := make([]ClaudePlanSample, 0, len(samples))
 	for _, s := range samples {
@@ -414,7 +433,12 @@ func claudePlanWindow(samples []ClaudePlanSample, resetsAt int64) []ClaudePlanSa
 			window = append(window, s)
 		}
 	}
-	sort.Slice(window, func(i, j int) bool { return window[i].T < window[j].T })
+	sort.Slice(window, func(i, j int) bool {
+		if window[i].T != window[j].T {
+			return window[i].T < window[j].T
+		}
+		return window[i].SevenDay < window[j].SevenDay
+	})
 	return window
 }
 
@@ -428,12 +452,13 @@ func claudePlanSameWindow(a, b int64) bool {
 	return -claudePlanWindowSlackSecs <= d && d <= claudePlanWindowSlackSecs
 }
 
-// claudePlanPace is the weekly percentage's rise per day over span, measured
-// from the window's newest sample back to the newest sample at least span old.
-// A window younger than span is measured from its oldest sample instead, the
-// longest span the window can offer, and a window of one sample is no span at
-// all: a flat pace of zero.
-func claudePlanPace(window []ClaudePlanSample, span time.Duration) float64 {
+// claudePlanPace is the weekly percentage's rise per day over span, from the
+// window's newest sample back to the newest sample at least span old, to end:
+// the window's max, which is the newest second's current reading. A window
+// younger than span is measured from its oldest sample instead, the longest
+// span the window can offer, and a window of one sample is no span at all: a
+// flat pace of zero.
+func claudePlanPace(window []ClaudePlanSample, end float64, span time.Duration) float64 {
 	if len(window) < 2 {
 		return 0
 	}
@@ -448,7 +473,7 @@ func claudePlanPace(window []ClaudePlanSample, span time.Duration) float64 {
 	if elapsed <= 0 {
 		return 0
 	}
-	return (newest.SevenDay - base.SevenDay) / (elapsed / claudePlanDaySecs)
+	return (end - base.SevenDay) / (elapsed / claudePlanDaySecs)
 }
 
 // readClaudePlanSamples decodes the series from the tail of the file. A line
