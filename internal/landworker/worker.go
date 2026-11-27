@@ -1091,6 +1091,20 @@ func (w *Worker) processWith(ctx context.Context, issue *beads.Issue, rep *Repor
 		return
 	}
 	if tip == "" {
+		// The branch may be gone because the town already merged and deleted
+		// it. A submitted head the target carries is handed to the lander,
+		// whose own recovery finishes the unrecorded landing (gt-4av3vd,
+		// gt-mz3uxj). A head it does not carry still needs a human, and a read
+		// that fails is an infrastructure failure, never a human wait.
+		on, err := w.Remote.Contains(work.Target, work.Head)
+		if err != nil {
+			w.infraFailure(issue.ID, "checking the submitted head on the target", err, rep)
+			return
+		}
+		if on {
+			w.landOne(ctx, w.landingWork(work, issue.ID, storedOnly), rep)
+			return
+		}
 		w.waitForHuman(issue.ID, "branch-missing:"+work.Branch, fmt.Sprintf("Landing worker: branch %s is not on origin, so %s cannot land. Leaving %s for a human.", work.Branch, issue.ID, land.LabelReadyToLand))
 		rep.Skipped++
 		return
@@ -1104,11 +1118,18 @@ func (w *Worker) processWith(ctx context.Context, issue *beads.Issue, rep *Repor
 		w.recordSubmission(moved)
 	}
 	work.Head = tip
+	w.landOne(ctx, w.landingWork(work, issue.ID, storedOnly), rep)
+}
+
+// landingWork fills the per-landing fields every handed work carries: the
+// seat's agent, the bead's priority and its story-point estimate, and whether
+// this pass is stored-only (gt-mz3uxj).
+func (w *Worker) landingWork(work land.Work, issueID string, storedOnly bool) land.Work {
 	work.Agent = w.seatAgent(work.Worker)
-	work.Priority = w.beadPriority(issue.ID)
-	work.SPEstimate, work.SPMinutes, work.SPSlung = w.beadSPLabels(issue.ID)
+	work.Priority = w.beadPriority(issueID)
+	work.SPEstimate, work.SPMinutes, work.SPSlung = w.beadSPLabels(issueID)
 	work.StoredOnly = storedOnly
-	w.landOne(ctx, work, rep)
+	return work
 }
 
 // hasLandingRecord reports whether notes carry the LANDING RECORD block for
