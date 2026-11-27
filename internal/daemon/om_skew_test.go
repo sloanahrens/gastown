@@ -638,14 +638,14 @@ func TestParseLSRemoteMain(t *testing.T) {
 	}
 }
 
-// omSkewClone gives the daemon the rebuild_om job's clone and answers its git
+// omSkewClone gives the daemon the om-skew check's own clone and answers its git
 // diff with changed (NUL-separated, as `git diff -z` prints it) or, when
 // diffErr is set, with that failure. Its lag reads put the installed om at the
 // planner's commit threshold. It returns the fake so a test can read the calls
 // the check made.
 func omSkewClone(t *testing.T, d *Daemon, changed []string, diffErr *cliReply) *fakeCLI {
 	t.Helper()
-	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 	return withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		if c.name == "git" && slices.Contains(c.args, "diff") {
 			if diffErr != nil {
@@ -705,7 +705,7 @@ func TestOMSkewThresholdsReading(t *testing.T) {
 			d, _ := omSkewDaemon(t)
 			var logs lockedBuffer
 			d.logger = log.New(&logs, "", 0)
-			mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+			mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
 				if tc.fails != "" && gitSub(c, tc.fails) {
 					return cliReply{stderr: "fatal: bad object", code: 128}
@@ -794,7 +794,7 @@ func TestOMSkewIgnoresCommitsThatCannotChangeTheBinary(t *testing.T) {
 			if len(diffs) != 1 {
 				t.Fatalf("git calls = %q, want exactly one diff in the clone", diffs)
 			}
-			wantSrc := filepath.Join(d.config.TownRoot, rebuildOMSrcDir)
+			wantSrc := filepath.Join(d.config.TownRoot, omSkewSrcDir)
 			if diffs[0][1] != wantSrc || !slices.Contains(diffs[0], omSkewInstalledSHA) ||
 				!slices.Contains(diffs[0], omSkewRemoteSHA) || diffs[0][len(diffs[0])-1] != "--" {
 				t.Errorf("git %q does not diff the two commit ids in %s behind a --", diffs[0], wantSrc)
@@ -809,7 +809,7 @@ func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
 	t.Parallel()
 	d, rec := omSkewDaemon(t)
 	changed := []string{"internal/review/review.go"}
-	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 	// omSkewOnce runs on this goroutine, so changed needs no lock.
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		if gitSub(c, "grep") {
@@ -839,7 +839,7 @@ func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
 func omSkewLaggingDaemon(t *testing.T, commits *int) (*Daemon, *notifyfake.Recorder) {
 	t.Helper()
 	d, rec := omSkewDaemon(t)
-	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		if gitSub(c, "diff") {
 			return cliReply{stdout: "internal/review/review.go\x00"}
@@ -954,7 +954,7 @@ func TestOMSkewCloneFailureLogsOnce(t *testing.T) {
 	d, rec := omSkewDaemon(t)
 	var logs lockedBuffer
 	d.logger = log.New(&logs, "", 0)
-	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 	failing := true
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		if !gitSub(c, "diff") {
@@ -996,7 +996,7 @@ func TestOMSkewUnreadableEmbedsLogOnce(t *testing.T) {
 	d, rec := omSkewDaemon(t)
 	var logs lockedBuffer
 	d.logger = log.New(&logs, "", 0)
-	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		switch {
 		case gitSub(c, "diff"):
@@ -1051,7 +1051,7 @@ func TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d, rec := omSkewDaemon(t)
-			mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+			mkdirs(t, filepath.Join(d.config.TownRoot, omSkewSrcDir, ".git"))
 			withRebuildGTCli(t, d, func(c cliCall) cliReply {
 				switch {
 				case gitSub(c, "diff"):

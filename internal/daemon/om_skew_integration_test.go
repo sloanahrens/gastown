@@ -16,7 +16,7 @@ import (
 func TestIntegrationOMSkewEmbedRulesReadsRealGitGrep(t *testing.T) {
 	t.Parallel()
 	d, _ := omSkewDaemon(t)
-	clone := filepath.Join(d.config.TownRoot, rebuildOMSrcDir)
+	clone := filepath.Join(d.config.TownRoot, omSkewSrcDir)
 	mkdirs(t, clone, filepath.Join(clone, "docs"))
 	lwGit(t, clone, "init", "-q", "-b", "main")
 	lwGit(t, clone, "commit", "-q", "--allow-empty", "-m", "an om with no directive")
