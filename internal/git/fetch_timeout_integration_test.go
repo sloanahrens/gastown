@@ -23,11 +23,6 @@ func stallingHTTPRemote(t *testing.T) (string, func() []net.Conn) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("git not available: %v", err)
 	}
-	// Keep a proxy from the environment out of the path to the listener.
-	for _, k := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"} {
-		t.Setenv(k, "")
-	}
-	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -69,6 +64,16 @@ func stallingHTTPRemote(t *testing.T) (string, func() []net.Conn) {
 // the helper had not started, the server saw no request, and the run failed
 // without exercising the http path (gt-ndqjn).
 const stallingRemoteBound = 5 * time.Second
+
+// stallingRemoteClient returns a client for the stalling remote with the
+// environment a stalled fetch must not inherit: the test's own process may
+// carry a proxy that would route around the listener, and there is no
+// terminal to prompt on.
+func stallingRemoteClient(dir string) *Git {
+	return NewGitWithDir(dir, "").
+		WithEnv([]string{"GIT_TERMINAL_PROMPT=0"}).
+		WithoutEnv("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
+}
 
 // assertBoundedAndHelperGone checks that a timed remote call returned a
 // timeout within its bound plus the process-group kill grace, and that the
@@ -116,31 +121,34 @@ func assertBoundedAndHelperGone(t *testing.T, err error, elapsed, bound time.Dur
 // whole process group (git and git-remote-http) is killed. It lives in the
 // integration tier because it needs a real socket and a real timeout.
 func TestIntegrationFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
+	t.Parallel()
 	url, conns := stallingHTTPRemote(t)
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	g := NewGitWithDir(dir, "")
+	g := stallingRemoteClient(dir)
 	start := time.Now()
 	err := g.FetchRefspecWithTimeout(url, "+refs/heads/main:refs/remotes/origin/main", stallingRemoteBound)
 	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())
 }
 
 // FetchBranch takes no timeout argument: the bound it runs under is the
-// package's remoteQueryTimeout, so this drives the crew submit path's fetch
-// against a real stalled socket at the bound it ships with. It is the slowest
-// of these three by design; the stall waits out the production bound.
+// handle's remoteBound, else the package's remoteQueryTimeout. This sets the
+// handle's bound so the crew submit path's fetch is driven against a real
+// stalled socket without waiting out the production 30 s.
 func TestIntegrationFetchBranchBoundsAStallingHTTPRemote(t *testing.T) {
+	t.Parallel()
 	url, conns := stallingHTTPRemote(t)
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	g := NewGitWithDir(dir, "")
+	g := stallingRemoteClient(dir)
+	g.remoteBound = stallingRemoteBound
 	start := time.Now()
 	err := g.FetchBranch(url, "main")
-	assertBoundedAndHelperGone(t, err, time.Since(start), remoteQueryTimeout, conns())
+	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())
 	// FetchBranch wraps the timeout with the remote and the branch, so the
 	// caller's message says which fetch stalled.
 	for _, want := range []string{url, "main"} {
@@ -152,12 +160,13 @@ func TestIntegrationFetchBranchBoundsAStallingHTTPRemote(t *testing.T) {
 
 // ls-remote against the same stalling http remote is bounded the same way.
 func TestIntegrationListRemoteRefsWithHashesTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
+	t.Parallel()
 	url, conns := stallingHTTPRemote(t)
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	g := NewGitWithDir(dir, "")
+	g := stallingRemoteClient(dir)
 	start := time.Now()
 	_, err := g.ListRemoteRefsWithHashesTimeout(url, "refs/heads/polecat/", stallingRemoteBound)
 	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())

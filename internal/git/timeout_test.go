@@ -143,6 +143,23 @@ func TestFetchBranchIsBoundedAndSkipsTags(t *testing.T) {
 	}
 }
 
+// A handle with its own remote bound fetches under it, so the integration
+// tier can drive the stalled-remote path without waiting out the production
+// bound.
+func TestFetchBranchRunsUnderItsOwnBound(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{"fetch --no-tags origin main": ok("")})
+	g := newTestGit(t, s)
+	g.remoteBound = 3 * time.Second
+	if err := g.FetchBranch("origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	c, found := s.sentCall("fetch --no-tags origin main")
+	if !found || c.timeout != 3*time.Second {
+		t.Errorf("fetch ran with timeout %v (found %v), want the handle's 3s", c.timeout, found)
+	}
+}
+
 // A FetchBranch killed at its bound names the remote and the branch, so the
 // caller's message says which fetch stalled, and still matches ErrTimedOut.
 func TestFetchBranchTimeoutNamesTheRemote(t *testing.T) {

@@ -118,6 +118,7 @@ type Git struct {
 	remoteTownRoots []string      // town roots, in the remote's own paths, a mutation must not resolve to (NewGitWithRemoteExec)
 	observe         func()        // called before each git process starts (WithRunObserver); nil counts nothing
 	timeout         time.Duration // deadline for every call when set (WithTimeout)
+	remoteBound     time.Duration // FetchBranch's own bound; zero means remoteQueryTimeout
 	env             []string      // added to every call's environment (WithEnv)
 	unset           []string      // removed from every call's environment (WithoutEnv)
 	noHooks         bool          // run with the repo's local hooks off (WithoutLocalHooks)
@@ -1366,10 +1367,15 @@ func (g *Git) FetchRefspecWithEnv(remote, refspec string, env []string) error {
 }
 
 // FetchBranch fetches a specific branch from the remote, without tags and
-// bounded by the remote-query timeout. A timeout names the remote and the
-// branch, so a caller's message says which fetch stalled.
+// bounded by remoteBound when set, else the remote-query timeout. A timeout
+// names the remote and the branch, so a caller's message says which fetch
+// stalled.
 func (g *Git) FetchBranch(remote, branch string) error {
-	_, err := g.runWithTimeout(remoteQueryTimeout, "fetch", "--no-tags", remote, branch)
+	bound := g.remoteBound
+	if bound == 0 {
+		bound = remoteQueryTimeout
+	}
+	_, err := g.runWithTimeout(bound, "fetch", "--no-tags", remote, branch)
 	if errors.Is(err, ErrTimedOut) {
 		return fmt.Errorf("fetch %s %s: %w", remote, branch, err)
 	}
