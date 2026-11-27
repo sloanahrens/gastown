@@ -936,6 +936,7 @@ func newKeptSeatPatrol(t *testing.T, now time.Time) *keptSeatPatrol {
 	clk := clockwork.NewFakeClockAt(now)
 	f.host.d.clock = clk
 	f.host.d.tmux = newFakeTmux(clk)
+	f.host.d.openWorkBeads = keptSeatHookReader{}.open
 	p := &keptSeatPatrol{seatEndFake: f, clk: clk}
 	f.host.sandboxExists = func(string, string) (bool, error) { return p.sandboxUp, nil }
 	f.host.sandboxEndedMarker = func(string, string) (bool, error) { return true, nil }

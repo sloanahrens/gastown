@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/livework"
 )
 
@@ -131,6 +132,20 @@ func (s *attentionSources) keptSeatReSlung(seat KeptSandboxSeat) (bool, error) {
 		return false, nil
 	}
 	return beadIsLiveWork(h, seat.Rig, hook)
+}
+
+// keptSeatNuked reports whether the seat's agent bead reads agent_state nuked,
+// the state `gt polecat nuke` writes, read the way keptSeatReSlung reads it
+// (patrolScanHost.AgentRecord). A failed read is the error, never "not nuked":
+// the caller decides, because nuked is the answer that withholds an item
+// (gt-btnzan).
+func (s *attentionSources) keptSeatNuked(rig, name string) (bool, error) {
+	h := &patrolScanHost{d: s.d}
+	rec, err := h.AgentRecord(rig, name)
+	if err != nil {
+		return false, fmt.Errorf("cannot read its agent bead: %w", err)
+	}
+	return rec.State == string(beads.AgentStateNuked), nil
 }
 
 // beadIsLiveWork reports whether the rig's bead id is live work, by
