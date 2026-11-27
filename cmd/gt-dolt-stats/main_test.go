@@ -25,6 +25,10 @@ var at = time.Date(2026, 11, 27, 16, 24, 0, 0, time.UTC)
 // statsLine is one docker stats reading the parser accepts.
 const statsLine = `{"CPUPerc":"349.74%","MemUsage":"7.989GiB / 8GiB"}`
 
+// errHome is the injected home for a run with --dir: reading it would mean run
+// consulted the home when the flag says it must not.
+func errHome() (string, error) { return "", errors.New("home must not be read") }
+
 // TestRunAppendsOneRowForGtDolt: the read's line becomes one row under --dir,
 // and a clean run returns 0 (gt-362cts).
 func TestRunAppendsOneRowForGtDolt(t *testing.T) {
@@ -35,7 +39,7 @@ func TestRunAppendsOneRowForGtDolt(t *testing.T) {
 		got = container
 		return []byte(statsLine), nil
 	}
-	if code := run([]string{"--dir", dir}, &bytes.Buffer{}, func() time.Time { return at }, read); code != 0 {
+	if code := run([]string{"--dir", dir}, &bytes.Buffer{}, func() time.Time { return at }, errHome, read); code != 0 {
 		t.Fatalf("run = %d, want 0", code)
 	}
 	if got != gtDolt {
@@ -81,7 +85,7 @@ func TestRunNamesFailingStep(t *testing.T) {
 				tt.prepare(t, dir)
 			}
 			var stderr bytes.Buffer
-			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, tt.read); code != 1 {
+			if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, tt.read); code != 1 {
 				t.Errorf("run = %d, want 1", code)
 			}
 			want := "gt-dolt-stats: " + tt.step + ": "
@@ -120,7 +124,7 @@ func TestRunRefusesWithoutRow(t *testing.T) {
 			if tt.flag != "" {
 				args = append(args, tt.flag)
 			}
-			if code := run(args, &bytes.Buffer{}, func() time.Time { return at }, tt.read); code != 1 {
+			if code := run(args, &bytes.Buffer{}, func() time.Time { return at }, errHome, tt.read); code != 1 {
 				t.Errorf("run = %d, want 1", code)
 			}
 			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
@@ -148,7 +152,7 @@ func TestRunBoundsTheStatsRead(t *testing.T) {
 			return nil, errors.New("the read did not end at readTimeout")
 		}
 	}
-	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, read); code != 1 {
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, errHome, read); code != 1 {
 		t.Fatalf("run = %d, want 1", code)
 	}
 	if got, want := strings.TrimSuffix(stderr.String(), "\n"), "gt-dolt-stats: read: docker stats: timed out after 5ms"; got != want {
@@ -156,5 +160,54 @@ func TestRunBoundsTheStatsRead(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Errorf("dir = %v, %v: want empty, so no row appended", entries, err)
+	}
+}
+
+// TestRunDefaults: with no -dir the row goes under the home's
+// gt/.runtime/metrics, and -container changes which container is read
+// (gt-mmyalw).
+func TestRunDefaults(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		args      []string
+		container string
+	}{
+		{"no flags", nil, gtDolt},
+		{"container flag", []string{"--container", "other-dolt"}, "other-dolt"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			var got string
+			read := func(_ context.Context, container string) ([]byte, error) {
+				got = container
+				return []byte(statsLine), nil
+			}
+			if code := run(tt.args, &bytes.Buffer{}, func() time.Time { return at }, func() (string, error) { return home, nil }, read); code != 0 {
+				t.Fatalf("run = %d, want 0", code)
+			}
+			if got != tt.container {
+				t.Errorf("read container = %q, want %q", got, tt.container)
+			}
+			if _, err := os.Stat(filepath.Join(home, "gt", ".runtime", "metrics", "resources", "2026-11-27.jsonl")); err != nil {
+				t.Errorf("day file under the home metrics dir: %v", err)
+			}
+		})
+	}
+}
+
+// TestRunRefusesWithoutHome: an unreadable home with no -dir returns 1, names
+// the home step and appends nothing (gt-mmyalw).
+func TestRunRefusesWithoutHome(t *testing.T) {
+	t.Parallel()
+	read := func(context.Context, string) ([]byte, error) { return nil, errors.New("must not be read") }
+	var stderr bytes.Buffer
+	homeErr := errors.New("$HOME is not defined")
+	if code := run(nil, &stderr, func() time.Time { return at }, func() (string, error) { return "", homeErr }, read); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+	if got, want := strings.TrimSuffix(stderr.String(), "\n"), "gt-dolt-stats: home: $HOME is not defined"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }
