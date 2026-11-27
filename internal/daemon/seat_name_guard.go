@@ -181,6 +181,10 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 // on its active gateway.
 type seatSandboxList func(ctx context.Context) ([]sandbox.Entry, error)
 
+// seatSandboxStatus reads one sandbox's status from the gateway the listing
+// reads (""), for the stuck item's Ready reason; nil is session.GatewaySandboxPhase.
+type seatSandboxStatus func(gateway, name string) (sandbox.Status, error)
+
 // GatewaySandboxListing is the one read of the gateway's sandbox listing the
 // dispatcher's sling and the attention collector share, bounded by timeout so
 // a gateway that hangs costs the caller the one read and no more. cli is the
@@ -198,11 +202,15 @@ func gatewaySeatSandboxes(ctx context.Context) ([]sandbox.Entry, error) {
 }
 
 // collectStaleSeatSandboxes raises the item of every gateway sandbox in a
-// terminal failure phase, in a town that names a sandbox profile: a town with
-// none runs no gateway and is asked nothing. The guard is the daemon's, so a
-// sandbox that stays stale keeps the time it was first read so; a profile or
-// listing read that fails returns the error and no items, so the previous
-// tick's items are kept rather than cleared by an unanswered read.
+// terminal failure phase, and of every sandbox outside Ready for
+// sandboxstuck.After, in a town that names a sandbox profile: a town with none
+// runs no gateway and is asked nothing. The guard is the daemon's, so a sandbox
+// that stays stuck keeps the time it was first read so; a profile or listing
+// read that fails returns the error and no items, so the previous tick's items
+// are kept rather than cleared by an unanswered read. Each stuck sandbox's item
+// then carries the gateway's Ready reason (gt-m7s2wf); a failed-phase sandbox is
+// not asked, and a status read that fails leaves the item saying the reason was
+// not read rather than failing the collector.
 func (s *attentionSources) collectStaleSeatSandboxes(ctx context.Context) ([]attention.Item, error) {
 	profiles, err := s.d.diskMaintenanceSeams().sandboxes()
 	if err != nil {
@@ -224,8 +232,18 @@ func (s *attentionSources) collectStaleSeatSandboxes(ctx context.Context) ([]att
 	if s.d.seatSandboxGuard == nil {
 		s.d.seatSandboxGuard = &SeatNameGuard{}
 	}
-	s.d.seatSandboxGuard.Observe(entries, s.now)
-	return s.d.seatSandboxGuard.Items(s.now), nil
+	guard := s.d.seatSandboxGuard
+	guard.Observe(entries, s.now)
+	status := s.sandboxStatus
+	if status == nil {
+		status = session.GatewaySandboxPhase
+	}
+	return appendStuckSandboxReasons(guard.Items(s.now), func(name string) bool {
+		_, failed := guard.Stale(name)
+		return failed
+	}, func(name string) (sandbox.Status, error) {
+		return status("", name)
+	}), nil
 }
 
 // seatSandboxStaleItem picks the stale-seat items out of the kind's previous
