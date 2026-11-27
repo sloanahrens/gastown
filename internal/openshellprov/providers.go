@@ -19,6 +19,11 @@ const maxSeatNameLength = 31
 // groups joined by single hyphens (gt-t1yp6a).
 var seatName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// seatNameValid reports whether name has the form a seat name must have.
+func seatNameValid(name string) bool {
+	return len(name) <= maxSeatNameLength && seatName.MatchString(name)
+}
+
 // CreateSeatProviders creates provider forgejo-seat-NAME of type forgejo-polecat
 // for each name, from the key file forgejo-seat-NAME.env in the config directory.
 // Every name is checked before the first openshell call, so a refused name
@@ -26,7 +31,7 @@ var seatName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 // the run, and an existing provider is left alone.
 func (r *Run) CreateSeatProviders(names []string) error {
 	for _, name := range names {
-		if len(name) > maxSeatNameLength || !seatName.MatchString(name) {
+		if !seatNameValid(name) {
 			return fmt.Errorf("%s: seat name %q must be at most %d characters of lower-case letters and digits in groups joined by single hyphens", Name, name, maxSeatNameLength)
 		}
 	}
