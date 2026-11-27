@@ -940,6 +940,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			},
 		}},
 	}
+	// The review pool switch is read once, here, after the Worker exists: a rig
+	// the config names gets the queue-time review wired into the Lander and the
+	// Worker above, and every other rig keeps both exactly as built. The wiring
+	// logs its own failure and leaves the pool off, so it never fails
+	// construction. A change to the switch needs a daemon restart (gt-m0s4td).
+	d.wireRigReviewPool(rigName, cfg, lander, w, workRoot)
 	// A rig the switch lists hands its bookkeeping to the queue; one it does not
 	// keeps the inline path with the Lander and Worker built above (gt-libhdq).
 	d.wireBookQueue(rigName, cfg, lander, w)

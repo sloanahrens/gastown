@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // reviewPoolTestLander and reviewPoolTestWorker are fresh collaborators for
@@ -797,6 +798,97 @@ func TestReviewPoolWiringRig(t *testing.T) {
 			}
 			if n := strings.Count(logs.String(), "\n"); n != wantLines {
 				t.Fatalf("wiring logged %d lines, want %d; log:\n%s", n, wantLines, logs.String())
+			}
+		})
+	}
+}
+
+// TestReviewPoolWiringCalledAtConstruction pins the one call site: a rig worker
+// built from a config naming the rig carries the pool, and one built from a
+// config without the key is left exactly as built. The switch is read at
+// construction, so removing the call turns the first row red while the second
+// stays green (gt-m0s4td).
+func TestReviewPoolWiringCalledAtConstruction(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	cases := []struct {
+		name string
+		// reviewRigs is the review_pool.rigs list; nil means no review_pool key.
+		reviewRigs []string
+		// env builds the wiring's environment; omConfig is the file the on
+		// path must use, empty when the pool is off.
+		env      func(t *testing.T) (reviewPoolEnv, string)
+		wantPool bool
+	}{
+		{
+			name:       "rig named",
+			reviewRigs: []string{rigName},
+			// The on path resolves om's config through the Daemon's field, so a
+			// test's own file stands in for the operator's.
+			env: func(t *testing.T) (reviewPoolEnv, string) {
+				return reviewPoolTestOMConfig(t, func() (string, error) { return t.TempDir(), nil })
+			},
+			wantPool: true,
+		},
+		{
+			name: "rig not named",
+			// Off must not read the environment at all: any read fails the test.
+			env: func(t *testing.T) (reviewPoolEnv, string) { return reviewPoolTestEnv(t), "" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			forgejoRigConfig(t, townRoot, rigName)
+			writeOverseerIdentity(t, townRoot, overseerTestName)
+			tokenDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+				t.Fatalf("write token file: %v", err)
+			}
+			lw := &LandingWorkerConfig{
+				Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir},
+			}
+			if tc.reviewRigs != nil {
+				lw.ReviewPool = &config.ReviewPoolConfig{Rigs: tc.reviewRigs}
+			}
+			env, omConfig := tc.env(t)
+			d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+				patrolConfig:  &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: lw}},
+				reviewPoolEnv: env}
+			// The worker resolves the rig's landing remote through the daemon's
+			// git seam, so construction reads a fake world rather than git.
+			f := useGitfake(t, d)
+			forgejoLandingRemote(t, f, townRoot, rigName)
+
+			w, err := d.newRigLandingWorker(rigName)
+			if err != nil {
+				t.Fatalf("newRigLandingWorker: %v", err)
+			}
+			if got := w.Pool != nil; got != tc.wantPool {
+				t.Fatalf("Worker.Pool set = %v; want %v", got, tc.wantPool)
+			}
+			lander, ok := w.Lander.(*land.Lander)
+			if !ok {
+				t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+			}
+			if !tc.wantPool {
+				if lander.Ahead != nil || lander.OMConfigPath != "" {
+					t.Fatalf("pool off left Lander.Ahead = %+v and OMConfigPath = %q; want both unset",
+						lander.Ahead, lander.OMConfigPath)
+				}
+				return
+			}
+			// A pool on but wired without its store or om's config could never
+			// reuse a review, so the same call must set both (gt-yqoha0, gt-lfykjq).
+			if lander.Ahead == nil {
+				t.Fatal("pool on but Lander.Ahead is nil; the landing could not find an ahead review")
+			}
+			if lander.OMConfigPath != omConfig {
+				t.Fatalf("OMConfigPath = %q; want the environment's om config file %q", lander.OMConfigPath, omConfig)
+			}
+			if w.Pool.Logf == nil {
+				t.Fatal("Pool.Logf is nil; the wiring must copy the Worker's Logf into the pool")
 			}
 		})
 	}
