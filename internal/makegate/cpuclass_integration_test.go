@@ -139,7 +139,7 @@ func TestIntegrationCPUClassFrontsTheGatesStepsInACrewCheckout(t *testing.T) {
 	if r.Code != 0 {
 		t.Fatalf("the crew gate exited %d on green stubs, want 0\nstdout:\n%s\nstderr:\n%s\ncalls:\n%s", r.Code, r.Stdout, r.Stderr, r.callLog())
 	}
-	for _, step := range []string{"go build GOFLAGS=-p=4", "go test GOFLAGS=-p=4"} {
+	for _, step := range []string{"go build GOFLAGS=-p=2", "go test GOFLAGS=-p=2"} {
 		if !r.hasCall(step) {
 			t.Errorf("a gate step ran outside the CPU class: no %q call\ncalls:\n%s", step, r.callLog())
 		}
@@ -169,7 +169,7 @@ func TestIntegrationCPUClassFrontsPresubmitsIntegrationVet(t *testing.T) {
 	if !r.hasCall("integrationvet") {
 		t.Fatalf("presubmit never ran the integration vet, so this case asserts nothing\ncalls:\n%s", r.callLog())
 	}
-	if !r.hasCall("go run GOFLAGS=-p=4") {
-		t.Errorf("the integration vet ran outside the CPU class: no %q call\ncalls:\n%s", "go run GOFLAGS=-p=4", r.callLog())
+	if !r.hasCall("go run GOFLAGS=-p=2") {
+		t.Errorf("the integration vet ran outside the CPU class: no %q call\ncalls:\n%s", "go run GOFLAGS=-p=2", r.callLog())
 	}
 }
