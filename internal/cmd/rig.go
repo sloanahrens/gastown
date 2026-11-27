@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/rigaudit"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
@@ -210,6 +211,20 @@ Examples:
 	RunE: runRigStop,
 }
 
+var rigAuditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Audit the town's rigs against the town and rig settings",
+	Long: `Audit the town's registered rigs against the town and rig settings.
+
+Prints each problem and a final verdict line, and exits non-zero when the
+audit finds one, so a broken town never reads as clean.
+
+Examples:
+  gt rig audit`,
+	Args: cobra.NoArgs,
+	RunE: runRigAudit,
+}
+
 // Flags
 var (
 	rigAddPrefix         string
@@ -273,6 +288,7 @@ func init() {
 	rigCmd.AddCommand(rigMenuCmd)
 	rigCmd.AddCommand(rigStatusCmd)
 	rigCmd.AddCommand(rigStopCmd)
+	rigCmd.AddCommand(rigAuditCmd)
 
 	rigListCmd.Flags().BoolVar(&rigListJSON, "json", false, "Output as JSON")
 
@@ -1758,6 +1774,28 @@ func runRigStopIn(townRoot string, rigNames []string, force, nuclear bool, open 
 func getRigOperationalState(townRoot, rigName string) (state string, source string) {
 	opState, source := rig.GetOpState(townRoot, rigName)
 	return string(opState), source
+}
+
+func runRigAudit(cmd *cobra.Command, args []string) error {
+	return rigAuditCommand(cmd.OutOrStdout(), workspace.FindFromCwdOrError)
+}
+
+// rigAuditCommand audits the town find locates, printing the report to out.
+// The audit's code becomes this command's: a non-zero code returns a silent
+// exit, so the report is the only output and a script sees the failure.
+func rigAuditCommand(out io.Writer, find func() (string, error)) error {
+	townRoot, err := find()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	code := rigaudit.Town(townRoot, func(rigName string) string {
+		state, _ := getRigOperationalState(townRoot, rigName)
+		return state
+	}, out)
+	if code != 0 {
+		return NewSilentExit(code)
+	}
+	return nil
 }
 
 // ensureHooksBase creates ~/.gt/hooks-base.json from current defaults if it
