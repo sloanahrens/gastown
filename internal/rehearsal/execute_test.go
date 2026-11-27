@@ -8,19 +8,26 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
-// gateNotes is a READY TO LAND block whose gate passed in one minute.
-const gateNotes = "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\nGate: pass presubmit 1m, slot wait 0s"
+// landedNote is a LANDING RECORD block, so a fake bead reads as landed.
+var landedNote = land.LandingRecord{LandedCommit: "c0ffee", Target: "main", Branch: "b", Head: "h"}.NoteBlock()
 
-// withGateFigure answers bead reads with gateNotes, so the run records a passing gate.
-func withGateFigure(run func(context.Context, []string) ([]byte, error)) func(context.Context, []string) ([]byte, error) {
+// gateNotes is a READY TO LAND block whose gate passed in one minute, then a
+// LANDING RECORD block: the bead landed with a measured gate.
+var gateNotes = "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\nGate: pass presubmit 1m, slot wait 0s\n\n" + landedNote
+
+// withNotes answers bead reads with notes, so the run records the gate and
+// landing facts the notes carry.
+func withNotes(run func(context.Context, []string) ([]byte, error), notes string) func(context.Context, []string) ([]byte, error) {
 	return func(ctx context.Context, argv []string) ([]byte, error) {
 		out, err := run(ctx, argv)
 		if err != nil || !slices.Contains(argv, "show") {
 			return out, err
 		}
-		return json.Marshal(map[string][]map[string]string{"data": {{"status": "closed", "notes": gateNotes}}})
+		return json.Marshal(map[string][]map[string]string{"data": {{"status": "closed", "notes": notes}}})
 	}
 }
 
@@ -41,9 +48,11 @@ func TestRehearsalExecuteRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			o := driveOptions(t, &driveFake{}, 1, filepath.Join(t.TempDir(), "record.json"))
-			if !tt.noGate {
-				o.Town.Run = withGateFigure(o.Town.Run)
+			notes := gateNotes
+			if tt.noGate {
+				notes = landedNote // landed, with no Gate line
 			}
+			o.Town.Run = withNotes(o.Town.Run, notes)
 			o.Interventions = tt.interventions
 			var stdout, stderr bytes.Buffer
 			if code := Execute(context.Background(), o, &stdout, &stderr); code != tt.wantCode {
