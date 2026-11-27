@@ -26,8 +26,8 @@ func TestDepsAreWired(t *testing.T) {
 		t.Errorf("a filesystem or clock seam is nil: mkdirTemp %v, mkdirAll %v, removeAll %v, lstat %v, now %v",
 			d.MkdirTemp != nil, d.MkdirAll != nil, d.RemoveAll != nil, d.Lstat != nil, d.Now != nil)
 	}
-	if d.Trim == nil || d.Trim.Claim == nil || d.Trim.Remove == nil || d.Trim.Root != sweepCacheRoot || d.Trim.CapBytes != sweepCacheCapBytes {
-		t.Errorf("the cache trim is not the shared claim's: %+v, want root %s and cap %d", d.Trim, sweepCacheRoot, sweepCacheCapBytes)
+	if d.Trim == nil || d.Trim.Claim == nil || d.Trim.Remove == nil || d.Trim.Root != sweepCacheRoot || d.Trim.CapBytes != 8<<30 {
+		t.Errorf("the cache trim is not the shared claim's: %+v, want root %s and cap %d", d.Trim, sweepCacheRoot, 8<<30)
 	}
 	if !slices.Equal(d.Environ, env) {
 		t.Errorf("environment = %d entries, want the %d it was given", len(d.Environ), len(env))
