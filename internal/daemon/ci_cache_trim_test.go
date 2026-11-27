@@ -1125,16 +1125,19 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
+		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
+			t.Fatalf("items after the first over-cap trim = %+v, want none until the run lasts the floor", items)
+		}
+
+		f.tickAFloorLater()
 
 		items := f.d.cacheTrimNoOp.observed()
 		if len(items) != 1 || items[0].Key != ciCacheNoOpKey {
-			t.Fatalf("items after the first no-op = %+v, want one item keyed %q", items, ciCacheNoOpKey)
+			t.Fatalf("items after a floor's run over the cap = %+v, want one item keyed %q", items, ciCacheNoOpKey)
 		}
 		if items[0].Kind != attention.KindCacheTrimNoOp || items[0].Severity != attention.SeverityLow {
 			t.Errorf("item kind %q severity %q, want the cache trim kind at low severity", items[0].Kind, items[0].Severity)
 		}
-
-		f.tickAFloorLater()
 
 		f.at(3 * time.Hour)
 		f.exec = ciCacheReply(overCap, 0, overCap)
@@ -1468,11 +1471,14 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 		f.npmExec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
-		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey, npmKey}) {
-			t.Fatalf("items = %v, want both volumes' items", got)
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{npmKey}) {
+			t.Fatalf("items after the first trim = %v, want only the capped volume's item until the gocache run lasts the floor", got)
 		}
 
 		f.tickAFloorLater()
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey, npmKey}) {
+			t.Fatalf("items after a floor's run = %v, want both volumes' items", got)
+		}
 
 		f.at(3 * time.Hour)
 		f.npmExec = ciCacheReply(ciCacheNpmCapKiB, 0, ciCacheNpmCapKiB)
@@ -1673,6 +1679,90 @@ func TestCICacheTrimGocacheOverCapAfterRemovals(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestCICacheTrimGocacheNoopNeedsTheFloor: the ci-gocache volume raises its item
+// only when its run of over-cap readings has lasted ciCacheLRUFloorMinutes. The
+// run starts at its first over-cap reading, so one reading, or two readings less
+// than the floor apart, raise nothing; a reading under the cap ends the run. Each
+// row is read once with removed nothing and once with files removed, since the
+// floor applies to both.
+func TestCICacheTrimGocacheNoopNeedsTheFloor(t *testing.T) {
+	t.Parallel()
+	const (
+		overCap  = 45 << 20 // KiB: over the default 40 GiB ci_gocache_cap_bytes
+		underCap = 35 << 20
+		cadence  = ciCacheTestEvery
+		floor    = ciCacheLRUFloorMinutes * time.Minute
+	)
+
+	// reading is one trim's reading, gap after the one before it.
+	type reading struct {
+		gap  time.Duration
+		over bool
+	}
+	cases := []struct {
+		name     string
+		readings []reading
+		raised   bool
+	}{
+		{
+			name:     "one over-cap trim raises nothing",
+			readings: []reading{{0, true}},
+		},
+		{
+			name:     "two over-cap trims an hour apart raise nothing",
+			readings: []reading{{0, true}, {cadence, true}},
+		},
+		{
+			name:     "two over-cap trims a minute under the floor apart raise nothing",
+			readings: []reading{{0, true}, {floor - time.Minute, true}},
+		},
+		{
+			name:     "two over-cap trims the floor apart raise the item",
+			readings: []reading{{0, true}, {floor, true}},
+			raised:   true,
+		},
+		{
+			name:     "the floor counts from the run's first over-cap reading",
+			readings: []reading{{0, true}, {cadence, true}, {cadence, true}},
+			raised:   true,
+		},
+		{
+			name:     "a reading under the cap restarts the run",
+			readings: []reading{{0, true}, {cadence, false}, {cadence, true}, {cadence, true}},
+		},
+	}
+	for _, removed := range []int64{0, 7} {
+		for _, tt := range cases {
+			t.Run(fmt.Sprintf("%s, removing %d files", tt.name, removed), func(t *testing.T) {
+				t.Parallel()
+				f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+				for _, r := range tt.readings {
+					f.now = f.now.Add(r.gap)
+					after, gone := int64(underCap), int64(0)
+					if r.over {
+						after, gone = overCap, removed
+					}
+					f.exec = ciCacheReply(after, gone, after)
+					f.tick()
+					f.drain()
+				}
+				// A reading the cadence skipped tests nothing, so every row must read
+				// the volume once per reading it lists.
+				if got := volumeExecs(f, ciCacheGocacheVolume); got != len(tt.readings) {
+					t.Fatalf("the volume was read %d times, want %d", got, len(tt.readings))
+				}
+				want := []string(nil)
+				if tt.raised {
+					want = []string{ciCacheNoOpKey}
+				}
+				if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, want) {
+					t.Errorf("items after the last reading = %v, want %v", got, want)
+				}
+			})
+		}
+	}
 }
 
 // TestCICacheTrimGocacheNoopSummaryNamesTheFloor: the ci-gocache volume is

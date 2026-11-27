@@ -867,12 +867,14 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 // volume, and the setting the pass copies into the row for ci-gocache. A volume
 // with neither a cap nor an lru program has no threshold, so it raises nothing.
 // A reading at or under the threshold clears the item. Over it, the lru volume
-// raises the item whatever the trim removed: its program never selects a file
-// younger than the floor, so a volume written faster than its cap ends every
-// trim over the cap with files removed, and that reading is the one that says
-// so. Every other volume raises the item only when the trim removed no file; a
-// reading over the threshold after removals leaves the item as it is. A dry run
-// measures nothing, since it removes nothing by design.
+// raises the item whatever the trim removed, once its run of over-cap readings
+// has lasted the floor: its program never selects a file younger than the floor,
+// so a volume written faster than its cap ends every trim over the cap with files
+// removed, and that reading is the one that says so. A volume merely busy for one
+// trim's span does not raise it (gt-mxl8ie). Every other volume raises the item
+// only when the trim removed no file; a reading over the threshold after removals
+// leaves the item as it is. A dry run measures nothing, since it removes nothing
+// by design.
 func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
@@ -889,6 +891,14 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	}
 	if !v.lru && reply.removed != 0 {
 		return
+	}
+	if v.lru {
+		// A run younger than the floor is a volume busy for a moment; it raises
+		// nothing until the run has lasted the floor.
+		now := d.diskMaintenanceSeams().now()
+		if now.Sub(d.cacheTrimNoOp.overFor(key, now)) < ciCacheLRUFloorMinutes*time.Minute {
+			return
+		}
 	}
 	// The lru volume's floor is what stops its trim: over the cap, every file
 	// older than the floor was already selected, so what is left was written
