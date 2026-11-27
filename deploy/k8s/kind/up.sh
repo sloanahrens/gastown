@@ -172,12 +172,36 @@ helm_release_deployed() {
   [ "$listed" = openshell ]
 }
 
+# gt-bootstrap is the record that an install finished: up.sh writes it last,
+# after the gateway NodePort and the control-plane Services. A run that stops
+# part way leaves it absent, and the next run completes the install. A
+# successful read that finds no ConfigMap means absent (--ignore-not-found); a
+# read that fails is not absence, so it stops the run here, before any apply or
+# helm call.
+bootstrap_read="$(kubectl -n openshell get configmap gt-bootstrap --ignore-not-found -o 'jsonpath={.metadata.name}|{.data.helm}')" ||
+  die "cannot read the gt-bootstrap ConfigMap in namespace openshell; nothing is applied"
+bootstrap_present=0
+helm_recorded=""
+case "$bootstrap_read" in
+  gt-bootstrap\|*)
+    bootstrap_present=1
+    helm_recorded="${bootstrap_read#*|}"
+    ;;
+esac
+
 # first_install is the one first-install test: 1 while no openshell release is
 # deployed. Only a first install applies the in-cluster objects here (the
 # priority classes and the agent-sandbox manifest with its patches); on a
 # deployed cluster the deployer applies them from an approved plan.
 first_install=1
 helm_release_deployed && first_install=0
+# unfinished is decided here, before the helm block changes anything: the
+# install is unfinished while no openshell release is deployed or no
+# gt-bootstrap marker says a run finished.
+unfinished=1
+if [ "$first_install" = 0 ] && [ "$bootstrap_present" = 1 ]; then
+  unfinished=0
+fi
 if [ "$first_install" = 1 ]; then
   kubectl apply -f "$HERE/../priority-classes.yaml"
 else
@@ -285,11 +309,12 @@ fi
 # The chart's certificate job is a helm pre-install AND pre-upgrade hook, so
 # every `helm upgrade` regenerates the CA and every certificate and rolls the
 # gateway: each exported copy of the client certificates (the town
-# registration included) goes stale at once. A marker records the chart version
-# and the values file the release was installed with; an unchanged marker on a
-# deployed release means no helm call. GT_K8S_FORCE_HELM=1 forces one.
+# registration included) goes stale at once. The gt-bootstrap marker read above
+# holds the chart version and values digest the release was installed with; an
+# unchanged marker on a deployed release means no helm call.
+# GT_K8S_FORCE_HELM=1 forces one.
 helm_marker="$CHART_VERSION:$(sha256_of "$VALUES")"
-helm_recorded="$(kubectl -n openshell get configmap gt-bootstrap -o 'jsonpath={.data.helm}' 2>/dev/null || true)"
+helm_ran=0
 if [ -z "${GT_K8S_FORCE_HELM:-}" ] && [ "$helm_recorded" = "$helm_marker" ] &&
   helm_release_deployed; then
   say "OpenShell chart $CHART_VERSION and its values are unchanged; not running helm (every helm upgrade regenerates the gateway's certificates)"
@@ -297,11 +322,26 @@ else
   say "installing OpenShell chart $CHART_VERSION"
   helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart --version "$CHART_VERSION" \
     --namespace openshell --create-namespace -f "$VALUES" --wait --timeout 7m
+  helm_ran=1
+fi
+
+# The gateway NodePort and the control-plane Services are in-cluster objects
+# like the priority classes, so only an unfinished install applies them; on a
+# finished install the deployer owns them.
+if [ "$unfinished" = 1 ]; then
+  kubectl apply -f "$HERE/gateway-nodeport.yaml"
+  kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
+else
+  say "the gateway NodePort and the control-plane Services are applied by gt town cluster apply --cluster gt-sbx from an approved plan; not applying them on this rerun"
+fi
+# The marker is written last, after the two applies: a run that stops before
+# them leaves it absent and the next run completes the install. It also records
+# what helm installed, so a run that ran helm writes it even on a finished
+# install; a run that ran no helm and had nothing to apply writes nothing.
+if [ "$helm_ran" = 1 ] || [ "$unfinished" = 1 ]; then
   kubectl -n openshell create configmap gt-bootstrap --from-literal="helm=$helm_marker" --dry-run=client -o yaml |
     kubectl apply -f -
 fi
-kubectl apply -f "$HERE/gateway-nodeport.yaml"
-kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
 # The gateway is a control-plane pod, so it runs Guaranteed (gt-cjm8fu). The
 # chart's container names are not fixed here, so every container gets the pair.
 guaranteed_pod openshell statefulset/openshell 500m 1Gi

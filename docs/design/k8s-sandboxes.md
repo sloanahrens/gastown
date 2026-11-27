@@ -110,7 +110,7 @@ The deployer does not apply these. Each is run by `deploy/k8s/kind/up.sh` or `do
 - **The sandbox policy,** `deploy/k8s/policy/kind.yaml`. The gateway takes it per sandbox create. It is not a cluster object (`StaticExcluded` in `deploy/k8s/static.go`).
 - **Sandbox profiles and providers:** created on the gateway through the CLI, not as cluster objects and not in the render. The provider state is in `docs/openshell-gateway.md`. Beads `gt-g08vr` and `gt-ujzas` track the profile and provider work.
 
-`up.sh` also applies the PriorityClasses (`up.sh`, before the metrics-server step), `gateway-nodeport.yaml` and `control-plane-services.yaml` on every run, and the render places the same objects. Bead `gt-qob3po` owns that overlap; this section does not resolve it.
+`up.sh` also applies the PriorityClasses (`up.sh`, before the metrics-server step), `gateway-nodeport.yaml` and `control-plane-services.yaml`, and the render places the same objects. The PriorityClasses apply only on a first install (no deployed openshell release). The gateway NodePort and the control-plane Services apply only while the install is unfinished: a first install, or a run that finds no `gt-bootstrap` marker because an earlier run stopped before writing it. On a deployed cluster that has the marker, `up.sh` leaves all three to the deployer from an approved plan.
 
 ### What was not verified
 
