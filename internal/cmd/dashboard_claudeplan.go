@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -43,6 +44,14 @@ type costSamplesRead func(kind string, since time.Time, limit int) ([]beads.Samp
 // meter reads while the town has no claude_plan row.
 func dashboardClaudePlanPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "claude-plan", "samples.jsonl")
+}
+
+// dashboardClaudePlanWeeksPath is the town's weekly closeout history: one JSON
+// line per closed week, beside dashboardClaudePlanPath. The series may be read
+// from the home directory, which the pod mounts read-only, so the closeouts are
+// appended here whichever series file answers (gt-rk08p0).
+func dashboardClaudePlanWeeksPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "claude-plan", "weeks.jsonl")
 }
 
 // newDashboardClaudePlanReader builds the Cost panel's plan meter over the
@@ -136,7 +145,16 @@ func newDashboardClaudePlanRead(townRoot string, rows costSamplesRead, home func
 	return func() *dashboard.ClaudePlan {
 		at := now()
 		file := resolveClaudePlanFile(townRoot, home, stat, whyLog)
-		read := newDashboardClaudePlanReader(file, usage, planUSDMonth).WithRenewalDay(renewalDay)
+		weeks := dashboardClaudePlanWeeksPath(townRoot)
+		// The reader makes the history's directory only when the rows answer, so a
+		// town whose runtime directory does not exist yet would fail its closeout
+		// here. A failed mkdir is logged and surfaces as the reader's state_error
+		// when the append then fails.
+		if err := os.MkdirAll(filepath.Dir(weeks), 0o755); err != nil {
+			whyLog.claudePlanSeries(file, fmt.Sprintf("weekly history directory: %v", err))
+		}
+		read := newDashboardClaudePlanReader(file, usage, planUSDMonth).WithRenewalDay(renewalDay).
+			WithHistoryPath(weeks)
 		samples, unusable, err := claudePlanRowSamples(rows, at)
 		why := ""
 		if unusable > 0 {
