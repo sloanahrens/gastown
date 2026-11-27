@@ -2434,6 +2434,50 @@ func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec: the Spec the daemon
+// builds starts from sweeprunner.ConfigSpec, so each runner-block field equals
+// the literal the config names; comparing against literals, not against
+// ConfigSpec itself, fails when the builder drops a field (gt-zo7z6e). The real
+// sweep Job asks for its whole share today, so the built Spec keeps the CPU
+// request at 0 until that changes (gt-o9gx83).
+func TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	cfg := runnerTestConfig(t)
+	cfg.Backend = config.TierSweepRunnerKubernetes
+	cfg.DindCPUs = 3
+	cfg.RunnerCPURequest = 4
+	cfg.Namespace = "gt-ci"
+	cfg.ProtectedNamespaces = []string{"gt-sweeps", "kube-system"}
+	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+
+	spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+	if err != nil || !ok {
+		t.Fatalf("spec = %+v, ok = %v, err = %v", spec, ok, err)
+	}
+
+	// The runner block's amounts and engine settings, as literals.
+	if spec.CPUs != 8 || spec.MemoryGB != 24 || spec.Jobs != 4 || !spec.Dind || spec.DindCPUs != 3 {
+		t.Errorf("the runner block's amounts = %+v, want CPUs 8, memoryGB 24, jobs 4, dind, dindCPUs 3", spec)
+	}
+	// Its namespaces, as literals: the setting above names them, so the config
+	// defaults do not stand in.
+	if spec.Context != "colima-gt-sbx" || spec.Namespace != "gt-ci" ||
+		!slices.Equal(spec.ProtectedNamespaces, []string{"gt-sweeps", "kube-system"}) {
+		t.Errorf("the runner block's namespaces = %+v, want context colima-gt-sbx, namespace gt-ci, protected [gt-sweeps kube-system]", spec)
+	}
+	// The one runner-block field the Spec does not take: the real sweep does not
+	// carry the request yet, so it stays 0 (gt-o9gx83).
+	if spec.RunnerCPURequest != 0 {
+		t.Errorf("RunnerCPURequest = %d, want 0 until the real sweep carries the request", spec.RunnerCPURequest)
+	}
+
+	// Only the stage's own fields come from the stage.
+	if spec.Rig != "gastown" || spec.SHA != runnerTestSHA || !slices.Equal(spec.Tiers, []string{"integration"}) {
+		t.Errorf("the stage's own fields are not set on the Spec: %+v", spec)
+	}
+}
+
 // TestTierSweepRunnerSpecInCluster: a daemon that decides it runs in a pod sets
 // Spec.InCluster on every Spec it builds, asks the decision for the runner's
 // context, and logs it once, not per Spec; a daemon that decides otherwise leaves

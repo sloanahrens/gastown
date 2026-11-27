@@ -2288,32 +2288,32 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		return sweeprunner.Spec{}, false, err
 	}
 	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
-	spec := sweeprunner.Spec{
-		Rig:      st.rig,
-		SHA:      st.tested,
-		Image:    image,
-		CPUs:     cfg.CPUs,
-		MemoryGB: cfg.Memory,
-		Tiers:    append([]string(nil), st.tiers...),
-		Jobs:     cfg.Jobs,
-		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
-		RepoDir:  constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig)),
-		Snapshot: filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", st.rig+".git"),
-		Dind:     cfg.Dind,
-		// The sidecar's share; zero renders the default (gt-esfo9p).
-		DindCPUs: cfg.DindCPUs,
-		RunID:    runID,
-		Context:  cfg.Context,
-		// In a pod with no kubeconfig naming the context, the kubectl steps use the
-		// service account (gt-2by0ke).
-		InCluster: d.sweepInCluster(cfg.Context),
-		// The preflight checks these namespaces for a pod the run would outrank;
-		// the config's default applies when the setting names none.
-		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
-		// Every namespaced kubectl call and every manifest names this namespace,
-		// so a pod's calls land where the sweep role is bound (gt-42xdun).
-		Namespace: cfg.NamespaceName(),
-	}
+	// The runner block's fields come from sweeprunner.ConfigSpec, the one builder
+	// the capacity preflight reads too, so the real sweep and its preflight
+	// cannot drift (gt-zo7z6e). Only the stage's own fields are set below.
+	spec := sweeprunner.ConfigSpec(cfg)
+	// RunnerCPURequest stays 0: the real sweep does not carry the request yet (gt-o9gx83).
+	spec.RunnerCPURequest = 0
+	// The rig whose sweep runs, and the commit it tests.
+	spec.Rig = st.rig
+	spec.SHA = st.tested
+	// Image is the runner container, resolved from the installed build when the
+	// config names none.
+	spec.Image = image
+	// Tiers are the stage's own; OutDir is where its result.json and logs land,
+	// a directory per rig and run under the configured output root.
+	spec.Tiers = append([]string(nil), st.tiers...)
+	spec.OutDir = filepath.Join(cfg.OutputRoot, st.rig, runID)
+	// RepoDir is the bare repository, mounted read-only, and Snapshot is the
+	// mirror the Kubernetes backend copies into its sync pod.
+	spec.RepoDir = constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig))
+	spec.Snapshot = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", st.rig+".git")
+	// RunID names the run from the rig, commit and tiers, so a restarted cycle
+	// adopts the same output directory instead of starting a second run.
+	spec.RunID = runID
+	// In a pod with no kubeconfig naming the context, the kubectl steps use the
+	// service account (gt-2by0ke).
+	spec.InCluster = d.sweepInCluster(cfg.Context)
 	if err := spec.Validate(); err != nil {
 		return sweeprunner.Spec{}, false, err
 	}
