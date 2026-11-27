@@ -73,6 +73,16 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	}
 	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
 	if err != nil {
+		// A failure while the daemon shuts down is not a trim failure: its context cut
+		// the run short and its Job may still complete. Nothing is recorded or parked;
+		// an apply marks the claim pending for the restarted daemon, a dry run nothing.
+		if d.shuttingDown() {
+			if apply {
+				d.cacheTrimSetPending(namespace, claim.ClaimName, true)
+			}
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the daemon is shutting down; the trim is left for the restarted daemon", claim.ClaimName, namespace)
+			return true
+		}
 		// A Job still running at the wait's end is a verdict, not a failure: its
 		// result is read at a later pass, so nothing is recorded or parked.
 		if errors.Is(err, errCacheTrimJobPending) {
