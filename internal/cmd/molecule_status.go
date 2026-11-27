@@ -309,19 +309,14 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 
 	b := beads.New(workDir)
 
-	// Build status info
-	status := MoleculeStatusInfo{
-		Target: target,
-		Role:   string(roleCtx.Role),
-	}
-
-	// lookupHookedWork performs the full multi-step hook lookup for target.
-	// Called in a retry loop for polecats to handle Dolt propagation lag.
-	lookupHookedWork := func() *beads.Issue {
+	// lookupHookedWork performs the full multi-step hook lookup for target,
+	// returning the agent bead to display and the hooked bead it found. Called
+	// in a retry loop for polecats to handle Dolt propagation lag.
+	lookupHookedWork := func() (agentBeadID string, hookBead *beads.Issue) {
 		// Resolve agent bead ID for display purposes only.
 		// Agent bead's hook_bead field is no longer maintained (updateAgentHookBead is
 		// a no-op since hq-l6mm5), so reading it returns stale data. See GH#2371.
-		agentBeadID := buildAgentBeadID(target, roleCtx.Role, townRoot)
+		agentBeadID = buildAgentBeadID(target, roleCtx.Role, townRoot)
 		if agentBeadID != "" {
 			agentBeadPath := beads.ResolveHookDir(townRoot, agentBeadID, workDir)
 			agentB := b
@@ -329,15 +324,15 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 				agentB = beads.New(agentBeadPath)
 			}
 			agentBead, err := agentB.Show(agentBeadID)
-			if err == nil && beads.IsAgentBead(agentBead) {
-				status.AgentBeadID = agentBeadID
+			if err != nil || !beads.IsAgentBead(agentBead) {
+				agentBeadID = ""
 			}
 		}
 
 		// Query for active work using the authoritative source: bead status + assignee.
 		hookedBeads, err := listAssignedActiveWork(b, target)
 		if err != nil {
-			return nil
+			return agentBeadID, nil
 		}
 
 		// For rig-level agents (polecats, crew), also search town-level beads.
@@ -352,22 +347,21 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		if len(hookedBeads) > 0 {
-			return hookedBeads[0]
+			return agentBeadID, hookedBeads[0]
 		}
-		return nil
+		return agentBeadID, nil
 	}
 
 	// Run the lookup. In polecat context, retry with backoff to handle Dolt
 	// propagation lag between the sling write and the nudge arriving here.
 	// See: https://github.com/steveyegge/gastown/issues/2389
-	var hookBead *beads.Issue
 	isPolecat := roleCtx.Role == RolePolecat ||
 		(os.Getenv("GT_ROLE") != "" && func() bool {
 			r, _, _ := parseRoleString(os.Getenv("GT_ROLE"))
 			return r == RolePolecat
 		}())
 
-	hookBead = lookupHookedWork()
+	agentBeadID, hookBead := lookupHookedWork()
 	if hookBead == nil && isPolecat {
 		const maxRetries = 5
 		const baseBackoff = 500 * time.Millisecond
@@ -375,42 +369,89 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
 			clockwork.NewRealClock().Sleep(backoff)
-			hookBead = lookupHookedWork()
+			id, found := lookupHookedWork()
+			if id != "" {
+				agentBeadID = id
+			}
+			hookBead = found
 			if hookBead != nil {
 				break
 			}
 		}
 	}
 
-	if hookBead != nil {
+	return moleculeStatusRun{
+		out:         os.Stdout,
+		warn:        os.Stderr,
+		client:      b,
+		target:      target,
+		role:        roleCtx.Role,
+		agentBeadID: agentBeadID,
+		hookBead:    hookBead,
+		asJSON:      moleculeJSON,
+		hints: func() {
+			showGitDivergenceWarning()
+			showRecentTrailSummary()
+		},
+	}.run()
+}
+
+// moleculeStatusRun is one gt mol status call with its environment resolved:
+// the store the hook and its molecule are read from, the agent it names, what
+// the lookup found and where its output goes, so a test drives the command body
+// without a beads workspace.
+type moleculeStatusRun struct {
+	out         io.Writer
+	warn        io.Writer
+	client      beads.Client
+	target      string
+	role        Role
+	agentBeadID string
+	hookBead    *beads.Issue
+	asJSON      bool
+	// hints prints the git divergence warning and recent trail for the current
+	// directory; nil prints nothing, so a test never touches a real checkout.
+	hints func()
+}
+
+func (r moleculeStatusRun) run() error {
+	status := MoleculeStatusInfo{
+		Target:      r.target,
+		Role:        string(r.role),
+		AgentBeadID: r.agentBeadID,
+	}
+
+	if r.hookBead != nil {
 		status.HasWork = true
-		status.PinnedBead = hookBead
+		status.PinnedBead = r.hookBead
 
 		// Check for attached molecule
-		applyHookAttachment(os.Stderr, b, &status, hookBead)
+		applyHookAttachment(r.warn, r.client, &status, r.hookBead)
 	}
 
 	// Determine next action if no work is slung
-	if !status.HasWork {
+	switch {
+	case !status.HasWork:
 		status.NextAction = "Check inbox for work assignments: gt mail inbox"
-	} else if status.AttachedMolecule == "" && status.AttachedFormula == "" {
+	case status.AttachedMolecule == "" && status.AttachedFormula == "":
 		status.NextAction = "Attach a molecule to start work: gt mol attach <bead-id> <molecule-id>"
-	} else if status.AttachedFormula != "" && status.NextAction == "" && status.PinnedBead != nil {
+	case status.AttachedFormula != "" && status.NextAction == "" && status.PinnedBead != nil:
 		status.NextAction = "Show the workflow steps: gt prime or gt mol current"
 	}
 
 	// JSON output
-	if moleculeJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if r.asJSON {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(status)
 	}
 
 	// Human-readable output
-	outputMoleculeStatus(os.Stdout, status, func() {
-		showGitDivergenceWarning()
-		showRecentTrailSummary()
-	})
+	hints := r.hints
+	if hints == nil {
+		hints = func() {}
+	}
+	outputMoleculeStatus(r.out, status, hints)
 	return nil
 }
 
