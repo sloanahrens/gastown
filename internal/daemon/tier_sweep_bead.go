@@ -75,6 +75,9 @@ const (
 	// tierSweepAssertionLineLen caps each quoted assertion line, the way
 	// tierSweepFindingLineLen caps a finding.
 	tierSweepAssertionLineLen = 160
+
+	// tierSweepBeadNameLen caps a joined reason's name: its title and its open-bead key are that cut.
+	tierSweepBeadNameLen = 120
 )
 
 // tierSweepUnitRE is what a failing unit from a summary line must look like
@@ -91,6 +94,42 @@ var tierSweepUnitRE = regexp.MustCompile(`^[A-Za-z0-9._/][A-Za-z0-9._/~-]*$`)
 // "no verdict line (exit 1)") do not.
 func tierSweepUnitIsName(unit string) bool {
 	return tierSweepUnitRE.MatchString(unit) && strings.Contains(unit, "/")
+}
+
+// tierSweepBeadUnit reads one word of a failed list as a unit: one trailing
+// comma and a container package's "untagged:" label are set aside for the
+// check, and the name filed keeps the label but drops the comma.
+func tierSweepBeadUnit(word string) (string, bool) {
+	name := strings.TrimSuffix(word, ",")
+	if !tierSweepUnitIsName(strings.TrimPrefix(name, "untagged:")) {
+		return "", false
+	}
+	return name, true
+}
+
+// tierSweepBeadNames turns a tier's failed list into one name per unit and one
+// per reason, split on spaces as the summary writes it: a list opening with a
+// unit files each unit then the other words joined, anything else is one
+// reason whole (gt-d6zc1s), and an empty list keeps tierSweepNoName.
+func tierSweepBeadNames(words []string) []string {
+	if len(words) == 0 {
+		return []string{tierSweepNoName}
+	}
+	if _, ok := tierSweepBeadUnit(words[0]); !ok {
+		return []string{tierSweepClip(strings.Join(words, " "), tierSweepBeadNameLen)}
+	}
+	var names, rest []string
+	for _, word := range words {
+		if unit, ok := tierSweepBeadUnit(word); ok {
+			names = append(names, unit)
+			continue
+		}
+		rest = append(rest, word)
+	}
+	if len(rest) > 0 {
+		names = append(names, tierSweepClip(strings.Join(rest, " "), tierSweepBeadNameLen))
+	}
+	return names
 }
 
 // tierSweepTestNameRE is a top-level Go test name. A subtest's own --- FAIL

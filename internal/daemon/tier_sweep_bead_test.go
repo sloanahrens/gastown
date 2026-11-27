@@ -1460,6 +1460,36 @@ func TestTierSweepBead_LegacyRecordKeepsItsCheckCommand(t *testing.T) {
 	}
 }
 
+// The summary's failed group is split on spaces, so a reason arrives as its
+// words: a sentence files one bead, not one per word, while the packages beside
+// it keep their own and the following words are one more reason (gt-d6zc1s).
+func TestTierSweepFailedWords(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, failed string
+		want         []string
+	}{
+		{"a reason and no unit", "no summary line (exit 1): boom", []string{"no summary line (exit 1): boom"}},
+		{"two packages then a reason", "./internal/alpha, ./internal/beta, output truncated: 5 bytes", []string{"./internal/alpha", "./internal/beta", "output truncated: 5 bytes"}},
+		{"a labelled package keeps its label", "untagged:./internal/beads, no result", []string{"untagged:./internal/beads", "no result"}},
+		{"a long reason is cut once", strings.Repeat("word ", 40), []string{strings.TrimRight(strings.Repeat("word ", 24), " ") + "..."}},
+		{"an empty list keeps the stand-in", "", []string{tierSweepNoName}},
+	} {
+		d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+		d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+		d.tierSweepRecordBeads("gastown", "abc1234", map[string]tierSweepTierResult{
+			"integration": {Verdict: tierSweepRed, Failed: len(tc.want), FailedNames: strings.Fields(tc.failed), Log: tierSweepWriteTestLog(t, "")},
+		})
+		var got []string
+		for _, c := range bd.created {
+			got = append(got, strings.TrimPrefix(c.Title, tierSweepBeadPrefix("gastown", "integration")))
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: beads filed = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The shell check command names the command that ran in the rig's tree: the Go
 // runner where the tree ships it, the rig's own script where it does not, and
 // nothing where neither ran (gt-j0wki). A check that always names the Go runner
