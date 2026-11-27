@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"io"
 	"slices"
 	"strings"
@@ -55,5 +56,42 @@ func TestClusterCaptureCommandRefuses(t *testing.T) {
 				t.Errorf("capture %q = %v, want an error holding %q", tc.args, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestClusterCaptureCommandDeps holds the deps to getwd's directory and the
+// control cluster, with the runner and the clock wired.
+func TestClusterCaptureCommandDeps(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	d, err := clusterCaptureCommandDeps(func() (string, error) { return dir, nil })
+	if err != nil {
+		t.Fatalf("clusterCaptureCommandDeps = %v, want no error", err)
+	}
+	if d.workDir != dir {
+		t.Errorf("workDir = %q, want getwd's %q", d.workDir, dir)
+	}
+	if d.cluster != clusterControl {
+		t.Errorf("cluster = %q, want %q", d.cluster, clusterControl)
+	}
+	if d.kubectl == nil {
+		t.Errorf("kubectl is nil, want the real runner")
+	}
+	if d.now == nil {
+		t.Errorf("now is nil, want time.Now")
+	}
+}
+
+// TestClusterCaptureCommandDepsRefusesUnreadableDir drives the failing getwd: its
+// error is returned and no deps are built.
+func TestClusterCaptureCommandDepsRefusesUnreadableDir(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("the working directory is gone")
+	d, err := clusterCaptureCommandDeps(func() (string, error) { return "", readErr })
+	if !errors.Is(err, readErr) {
+		t.Fatalf("clusterCaptureCommandDeps = %v, want an error holding %v", err, readErr)
+	}
+	if d.kubectl != nil || d.now != nil || d.cluster != "" || d.workDir != "" {
+		t.Errorf("deps = %+v, want none with the error", d)
 	}
 }

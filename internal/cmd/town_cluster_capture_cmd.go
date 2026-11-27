@@ -2,9 +2,28 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// clusterCaptureCommandDeps is the capture command's deps: the kubectl runner
+// the object is read through, time.Now, the control cluster, and the directory
+// getwd names as the one --out resolves under. A getwd that fails is the error,
+// never deps for the wrong directory.
+func clusterCaptureCommandDeps(getwd func() (string, error)) (clusterCaptureDeps, error) {
+	dir, err := getwd()
+	if err != nil {
+		return clusterCaptureDeps{}, fmt.Errorf("capture: the working directory: %w", err)
+	}
+	return clusterCaptureDeps{
+		kubectl: realRunFunc(),
+		now:     time.Now,
+		cluster: clusterControl,
+		workDir: dir,
+	}, nil
+}
 
 // newTownClusterCaptureCmd builds `gt town cluster capture`: one <kind>/<name>
 // argument, the object's namespace and the required file to write. The command
