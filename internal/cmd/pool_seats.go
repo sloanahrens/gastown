@@ -95,7 +95,9 @@ func poolSeatSessionsProbedWith(t sessionLister, townRoot string, disposition po
 		// as one is what makes the picture lie (gt-t8q5).
 		return nil, probed, err
 	}
-	return append(sessions, claims...), probed, nil
+	// A sling's claim and the seat its spawn already hooks are one seat
+	// (gt-il6mm7): withSeatClaims leaves out the claim a seat covers.
+	return withSeatClaims(sessions, claims), probed, nil
 }
 
 // poolOccupiedSessions lists the seats the pool already holds: the live polecat
