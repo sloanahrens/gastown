@@ -44,6 +44,37 @@ func readTierSweepInFlight(townRoot, rig string) (tierSweepInFlightMark, error) 
 	return mark, nil
 }
 
+// tierSweepMarkYoung reports whether a sweep mark is still inside its run
+// budget: younger than tierSweepRunBudget. An older mark is an interrupted
+// cycle too stale to resume (gt-rp65v0, gt-vbdeh9).
+func tierSweepMarkYoung(mark tierSweepInFlightMark, now time.Time) bool {
+	return now.Sub(mark.Started) < tierSweepRunBudget
+}
+
+// tierSweepResumeSHA names the commit a cycle should sweep (gt-vbdeh9). A mark
+// younger than tierSweepRunBudget is a sweep the daemon was interrupted under,
+// so its commit is resumed instead of the newer tip whose result the
+// interrupted run would lose; one log line names both commits when they differ.
+// No mark, or one at or past the budget, gives tip. An unreadable mark is
+// logged and gives tip too (gt-ejsew3).
+func (d *Daemon) tierSweepResumeSHA(rig, tip string, now time.Time) string {
+	mark, err := readTierSweepInFlight(d.config.TownRoot, rig)
+	if errors.Is(err, fs.ErrNotExist) {
+		return tip
+	}
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: reading the in-flight mark: %v; sweeping the tip %s", rig, err, shortSHA(tip))
+		return tip
+	}
+	if !tierSweepMarkYoung(mark, now) {
+		return tip
+	}
+	if mark.SHA != tip {
+		d.logger.Printf("tier_sweep: %s: resuming the interrupted sweep of %s, not the tip %s", rig, shortSHA(mark.SHA), shortSHA(tip))
+	}
+	return mark.SHA
+}
+
 // writeTierSweepInFlight writes one rig's mark whole, by rename, so a reader
 // never sees half of it.
 func writeTierSweepInFlight(townRoot, rig string, mark tierSweepInFlightMark) error {

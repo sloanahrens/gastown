@@ -99,6 +99,58 @@ func TestTierSweepInFlightMarkReportsFailures(t *testing.T) {
 	}
 }
 
+// TestTierSweepResumeSHA: a mark younger than the run budget names the commit
+// to sweep and one line names the tip it replaces; a mark at or past the
+// budget, and no mark, give the tip silently; an unreadable mark gives the tip
+// and is logged (gt-ejsew3).
+func TestTierSweepResumeSHA(t *testing.T) {
+	t.Parallel()
+	const (
+		markSHA = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
+		tipSHA  = "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
+	)
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		started time.Time
+		markSHA string
+		unread  bool
+		want    string
+		logged  []string
+	}{
+		{"young mark resumes", now.Add(-time.Minute), markSHA, false, markSHA, []string{"resuming", "aaaa1111", "bbbb2222"}},
+		{"mark at the budget", now.Add(-tierSweepRunBudget), markSHA, false, tipSHA, nil},
+		{"mark past the budget", now.Add(-tierSweepRunBudget - time.Second), markSHA, false, tipSHA, nil},
+		{"no mark", time.Time{}, "", false, tipSHA, nil},
+		{"young mark already the tip", now.Add(-time.Minute), tipSHA, false, tipSHA, nil},
+		{"unreadable mark", time.Time{}, "", true, tipSHA, []string{"reading the in-flight mark"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+			switch {
+			case tc.unread:
+				plantMark(t, tierSweepInFlightPath(d.config.TownRoot, "gastown"), "{not json", false)
+			case !tc.started.IsZero():
+				if err := writeTierSweepInFlight(d.config.TownRoot, "gastown", tierSweepInFlightMark{SHA: tc.markSHA, Started: tc.started}); err != nil {
+					t.Fatalf("write mark: %v", err)
+				}
+			}
+			if got := d.tierSweepResumeSHA("gastown", tipSHA, now); got != tc.want {
+				t.Errorf("resume sha = %q, want %q", got, tc.want)
+			}
+			for _, want := range tc.logged {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("log missing %q; got:\n%s", want, logs.String())
+				}
+			}
+			if len(tc.logged) == 0 && logs.Len() != 0 {
+				t.Errorf("logged %q, want silence", logs.String())
+			}
+		})
+	}
+}
+
 // TestTierSweepMarksTheCommitUnderSweep: while a stage runs the mark names the
 // commit under sweep and its start; a recorded cycle, one whose record write
 // failed and one no stage ran in leave none; a cycle whose context ended keeps
