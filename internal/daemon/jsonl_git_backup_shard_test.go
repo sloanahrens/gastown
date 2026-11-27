@@ -664,15 +664,17 @@ func TestPollutionFilterAndVerifyCoverEveryIssuesShard(t *testing.T) {
 	}
 }
 
-// TestSyncJsonlGitBackupCountsAndCommitsEveryShard drives a cycle whose events
+// TestSyncJsonlGitBackupCountsAndCommitsEveryShard drives a cycle whose comments
 // table exports as several shards: the commit subject records the rows summed
 // across them, so the spike guard compares like with like, and every shard
 // reaches the commit.
 func TestSyncJsonlGitBackupCountsAndCommitsEveryShard(t *testing.T) {
 	t.Parallel()
-	const issues, comments, events = 30, 10, 60
-	// 60 rows of about 230 bytes cut at 3000 bytes: several shards.
-	eventRows := syntheticRows(events, 200)
+	const issues, comments, events = 30, 60, 10
+	// 60 rows of about 230 bytes cut at 3000 bytes: several shards. They are
+	// comments rows: a paged read rewrites the events shards at the production
+	// shard size.
+	commentRows := syntheticRows(comments, 200)
 
 	d, f := backupTestDaemon(t)
 	root := t.TempDir()
@@ -692,12 +694,12 @@ func TestSyncJsonlGitBackupCountsAndCommitsEveryShard(t *testing.T) {
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
 	}}
-	rows := map[string]int{"issues": issues, "comments": comments}
+	rows := map[string]int{"issues": issues, "events": events}
 	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
-		if table == "events" {
-			return writeTableShards(dir, table, eventRows, 3000)
+		if table == "comments" {
+			return writeTableShards(dir, table, commentRows, 3000)
 		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		writeTableRows(t, dir, table, rows[table])
 		return rows[table], nil
 	}
 
@@ -709,19 +711,19 @@ func TestSyncJsonlGitBackupCountsAndCommitsEveryShard(t *testing.T) {
 		t.Fatal("no commit was made")
 	}
 	if open := rec.OpenEscalations(alertKeyJSONLSpike); len(open) != 0 {
-		t.Errorf("sharded events escalated as a spike: %+v", open)
+		t.Errorf("sharded comments escalated as a spike: %+v", open)
 	}
 	if subjects := backupSubjects(t, d, gitRepo); len(subjects) == 0 || !strings.Contains(subjects[0], fmt.Sprintf(": hq=%d", issues+comments+events)) {
 		t.Errorf("commit subject %v, want hq=%d summed across every shard", subjects, issues+comments+events)
 	}
 	var shards int
 	for path := range f.Tree(after) {
-		if strings.HasPrefix(path, "hq/events") {
+		if strings.HasPrefix(path, "hq/comments") {
 			shards++
 		}
 	}
 	if shards < 2 {
-		t.Errorf("commit holds %d events file(s), want the shards", shards)
+		t.Errorf("commit holds %d comments file(s), want the shards", shards)
 	}
 }
 
@@ -750,7 +752,7 @@ func TestSyncJsonlGitBackupHaltsWhenAShardCannotBeRead(t *testing.T) {
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
 	}}
 	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), 1)
+		writeTableRows(t, dir, table, 1)
 		return 1, nil
 	}
 	// An issues shard that is a directory: the check opens it and the read

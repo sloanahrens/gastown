@@ -3746,7 +3746,7 @@ func TestExportDatabaseToJsonlSlowTableLeavesTheRestTheirFloor(t *testing.T) {
 	d.clock = clk
 	d.jsonlSupplementalTimeout = budget
 	var attempted []string
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir string, _ string, got time.Duration) (int, error) {
 		if table == "issues" {
 			return 1, nil
 		}
@@ -3758,6 +3758,7 @@ func TestExportDatabaseToJsonlSlowTableLeavesTheRestTheirFloor(t *testing.T) {
 			// Succeeds, but only after using everything it was given.
 			clk.Advance(got)
 		}
+		writeTableRows(t, dir, table, 1)
 		return 1, nil
 	}
 
@@ -4257,14 +4258,21 @@ func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testin
 	// hq's issues export is a 3-row mass drop and its events export fails; gt
 	// exports fully, so the cycle is a partial failure that reaches the commit.
 	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
-		if filepath.Base(dir) == "hq" && table == "events" {
+		// A paged read hands the exporter a stage below the database's
+		// directory, so the database is the first part under the repo.
+		rel, err := filepath.Rel(gitRepo, dir)
+		if err != nil {
+			t.Errorf("export directory %s: %v", dir, err)
+		}
+		db, _, _ := strings.Cut(rel, string(filepath.Separator))
+		if db == "hq" && table == "events" {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
 		n := 30
-		if filepath.Base(dir) == "hq" && table == "issues" {
+		if db == "hq" && table == "issues" {
 			n = 3
 		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), n)
+		writeTableRows(t, dir, table, n)
 		return n, nil
 	}
 
@@ -4330,7 +4338,7 @@ func TestSyncJsonlGitBackupIssuesFailureIsReported(t *testing.T) {
 		if filepath.Base(dir) == "hq" && table == "issues" {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
-		writeNLines(t, filepath.Join(dir, table+".jsonl"), 30)
+		writeTableRows(t, dir, table, 30)
 		return 30, nil
 	}
 
