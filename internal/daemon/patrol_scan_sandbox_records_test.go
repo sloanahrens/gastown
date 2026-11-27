@@ -244,6 +244,32 @@ func TestPatrolScanSandboxRecordsStillDeletesAHeldSandboxWhoseHookIsClear(t *tes
 	}
 }
 
+// endListedSandbox holds the walk's keep steps for a listed sandbox: an end
+// function that returns a reason leaves the record in place, and the reason is
+// logged in the existing kept line (gt-7g2iir).
+func TestPatrolScanEndListedSandboxKeepsWithItsReason(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	rec, ok, err := session.ReadSandboxRecord(r.town, recordReapSession)
+	if err != nil || !ok {
+		t.Fatalf("the record before the pass = %v, %v; want it present", ok, err)
+	}
+	calls := 0
+	r.host.endListedSandbox(recordReapSession, rec, func(caller, name string, rec session.SandboxRecord) string {
+		calls++
+		return "its ended marker is not set"
+	})
+	if calls != 1 {
+		t.Errorf("the end function was called %d times, want 1", calls)
+	}
+	if !r.recorded() {
+		t.Error("the record was removed although the end kept the sandbox")
+	}
+	if want := "patrol_scan: sandbox record gt-capable kept: its ended marker is not set (gastown/capable)"; !strings.Contains(r.logs.String(), want) {
+		t.Errorf("log = %q, want it to contain %q", r.logs.String(), want)
+	}
+}
+
 func (r *recordReap) recorded() bool {
 	r.t.Helper()
 	ok, err := session.IsSandboxed(r.town, recordReapSession)

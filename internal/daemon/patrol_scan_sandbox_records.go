@@ -173,16 +173,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			if isStoppedPhase(phase) {
 				end = h.endStoppedSandbox
 			}
-			dropped, why := h.deleteHeldSandbox(name, rec, end)
-			if why != "" {
-				h.settleGatewayKeep(rec, why)
-				h.d.logger.Printf("patrol_scan: sandbox record %s kept: %s (%s/%s)", name, why, rec.Rig, rec.Polecat)
-				continue
-			}
-			if !dropped {
-				continue // the landing removed the record first: nothing left here
-			}
-			h.completeKeptSeatEnd(rec)
+			h.endListedSandbox(name, rec, end)
 			continue
 		}
 		// A nil deleter drops the record and the routed client and leaves the
@@ -197,6 +188,26 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		h.completeKeptSeatEnd(rec)
 	}
 	h.dropKeptSandboxSeatsWithoutRecord()
+}
+
+// endListedSandbox runs the record walk's steps for a sandbox the gateway still
+// lists: end decides whether the sandbox goes, and deleteHeldSandbox deletes it
+// under the seat lock. A keep is settled with settleGatewayKeep and logged, and a
+// record the landing removed first is a quiet return. When the record is dropped,
+// the seat's kept end is completed (completeKeptSeatEnd). The method itself asks
+// the gateway nothing: the walk has already answered the existence and phase
+// questions, and the end it runs asks its own.
+func (h *patrolScanHost) endListedSandbox(name string, rec session.SandboxRecord, end func(caller, name string, rec session.SandboxRecord) string) {
+	dropped, why := h.deleteHeldSandbox(name, rec, end)
+	if why != "" {
+		h.settleGatewayKeep(rec, why)
+		h.d.logger.Printf("patrol_scan: sandbox record %s kept: %s (%s/%s)", name, why, rec.Rig, rec.Polecat)
+		return
+	}
+	if !dropped {
+		return // the landing removed the record first: nothing left here
+	}
+	h.completeKeptSeatEnd(rec)
 }
 
 // dropKeptSandboxSeatsWithoutRecord drops the gateway-silent kept record of a
