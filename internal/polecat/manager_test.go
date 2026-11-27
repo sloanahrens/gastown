@@ -1071,8 +1071,7 @@ func TestCheckShellOutsideWorktree_SiblingNamePrefix(t *testing.T) {
 	}
 }
 
-// A resumed branch whose local copy sits behind origin must start at the
-// origin tip, or the polecat's push is rejected non-fast-forward.
+// A resume behind origin starts at the origin tip, not the stale one; another seat's branch gives toast its own there (gt-8d2lv3).
 func TestAddWithOptions_ResumeBranchStaleLocalTip(t *testing.T) {
 	t.Parallel()
 	mgr, mayorRig, _, w := canonicalRig(t)
@@ -1102,8 +1101,8 @@ func TestAddWithOptions_ResumeBranchStaleLocalTip(t *testing.T) {
 	if head := w.rev(t, polecat.ClonePath, "HEAD"); head != c2 {
 		t.Errorf("worktree HEAD = %s, want the fetched tip %s (stale local tip was %s)", head, c2, c1)
 	}
-	if current, err := wt.CurrentBranch(); err != nil || current != branch {
-		t.Errorf("worktree on branch %q (%v), want %q", current, err, branch)
+	if current, err := wt.CurrentBranch(); err != nil || current != polecat.Branch || polecat.Branch == branch {
+		t.Errorf("worktree on branch %q (%v), want a branch of toast's own, not the resumed %q", current, err, branch)
 	}
 }
 
@@ -1813,10 +1812,9 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	}
 }
 
-// TestAddWithOptions_ResumeBranch verifies gh#3602: when ResumeBranch is set,
-// AddWithOptions checks out the named existing branch instead of creating a
-// fresh polecat/<name>/<bead>+<ts> branch. This lets `gt sling --branch/--pr`
-// resume work on an existing PR branch without creating duplicates.
+// TestAddWithOptions_ResumeBranch verifies gh#3602: a resume continues the
+// resumed branch's work rather than starting fresh; the branch is another
+// seat's, so the worktree gets toast a branch of its own there (gt-8d2lv3).
 func TestAddWithOptions_ResumeBranch(t *testing.T) {
 	t.Parallel()
 	mgr, mayorRig, _, w := canonicalRig(t)
@@ -1834,8 +1832,8 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 		t.Fatalf("AddWithOptions with ResumeBranch: %v", err)
 	}
 
-	if polecat.Branch != prBranch {
-		t.Fatalf("polecat.Branch = %q, want %q (ResumeBranch should override fresh-branch naming)", polecat.Branch, prBranch)
+	if !strings.HasPrefix(polecat.Branch, "polecat/toast") || polecat.Branch == prBranch {
+		t.Fatalf("polecat.Branch = %q, want a branch named for toast, not the resumed %q", polecat.Branch, prBranch)
 	}
 
 	worktreeGit := w.repo(polecat.ClonePath)
@@ -1843,18 +1841,97 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentBranch: %v", err)
 	}
-	if current != prBranch {
-		t.Fatalf("worktree HEAD on branch %q, want %q", current, prBranch)
+	if current != polecat.Branch {
+		t.Fatalf("worktree HEAD on branch %q, want %q", current, polecat.Branch)
 	}
 
-	// The PR commit must be reachable from HEAD — proves we attached to the
-	// existing branch rather than starting fresh from main.
+	// The PR commit must be reachable from HEAD — proves we resumed the existing
+	// branch rather than starting fresh from main.
 	reachable, err := worktreeGit.IsAncestor(prCommit, "HEAD")
 	if err != nil {
 		t.Fatalf("IsAncestor: %v", err)
 	}
 	if !reachable {
-		t.Fatalf("PR commit %s should be reachable from HEAD on resumed branch", prCommit)
+		t.Fatalf("PR commit %s should be reachable from HEAD on the resumed worktree", prCommit)
+	}
+}
+
+// A seat that resumes another seat's branch works on a branch of its own at
+// that tip (gt-8d2lv3): the per-seat push rule refuses a push to a branch
+// under another seat's prefix, while the resumed ref keeps its own commits.
+func TestAddWithOptions_ResumeBranchOfAnotherSeatGetsOwnBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		resumeBranch string
+		wantKept     bool // the worktree stays on the resume branch
+	}{
+		{"another seat's branch", "polecat/jasper/gt-bagu+aaa", false},
+		{"own branch is kept", "polecat/toast/gt-bagu+aaa", true},
+		{"a name only starting with this one's is another seat's", "polecat/toast2/gt-bagu+aaa", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, _, w := canonicalRig(t)
+			// The remote has the branch at its base, the local one a commit origin
+			// lacks: the own branch must start at HEAD, not origin/<resume>.
+			remote := filepath.Join(t.TempDir(), "origin")
+			w.InitRepo(t, remote)
+			w.SetRef(t, remote, "refs/heads/main", w.rev(t, mayorRig, "main"))
+			base := w.branchAtNewCommit(t, remote, tt.resumeBranch, w.rev(t, mayorRig, "main"), "published work")
+			w.SetRef(t, mayorRig, "refs/heads/"+tt.resumeBranch, base)
+			tip := w.Commit(t, mayorRig, tt.resumeBranch, "local work origin lacks", nil)
+			w.AddRemote(t, mayorRig, "origin", remote)
+			p, err := mgr.AddWithOptions("toast", AddOptions{HookBead: "gt-next", ResumeBranch: tt.resumeBranch})
+			if err != nil {
+				t.Fatalf("AddWithOptions: %v", err)
+			}
+			kept := p.Branch == tt.resumeBranch
+			if kept != tt.wantKept || (!tt.wantKept && !strings.HasPrefix(p.Branch, "polecat/toast/")) {
+				t.Fatalf("polecat.Branch = %q, want own branch kept = %v under polecat/toast/", p.Branch, tt.wantKept)
+			}
+			if head := w.branch(t, p.ClonePath); head != p.Branch {
+				t.Errorf("worktree HEAD on %q, want %q", head, p.Branch)
+			}
+			if got := w.rev(t, mayorRig, "refs/heads/"+tt.resumeBranch); got != tip {
+				t.Errorf("resume ref moved from %s to %s; it must be left where it was", tip, got)
+			}
+			if reachable, err := w.repo(p.ClonePath).IsAncestor(tip, "HEAD"); err != nil || !reachable {
+				t.Errorf("resume tip %s reachable from HEAD = %v (%v); the local commit origin lacks was lost", tip, reachable, err)
+			}
+		})
+	}
+}
+
+// An own branch that cannot be created fails the allocation, naming both
+// branches and leaving no half-built polecat behind (gt-8d2lv3).
+func TestAddWithOptions_OwnBranchFailureNamesBothBranches(t *testing.T) {
+	t.Parallel()
+	mgr, mayorRig, _, w := canonicalRig(t)
+	resume := "polecat/jasper/gt-bagu+aaa"
+	w.branchAtNewCommit(t, mayorRig, resume, w.rev(t, mayorRig, "origin/main"), "jasper work")
+	// Pin and occupy the own branch name the add draws: the fixed clock makes a fresh stamp sequence repeat it.
+	mgr.now = func() time.Time { return time.UnixMilli(1_800_000_000_000) }
+	mgr.stamps = &branchStampClock{}
+	own := mgr.buildBranchName("toast", "gt-next")
+	mgr.stamps = &branchStampClock{}
+	w.SetRef(t, mayorRig, "refs/heads/"+own, w.rev(t, mayorRig, "origin/main"))
+	_, err := mgr.AddWithOptions("toast", AddOptions{HookBead: "gt-next", ResumeBranch: resume})
+	if err == nil {
+		t.Fatal("AddWithOptions succeeded with an own branch that cannot be created")
+	}
+	if msg := err.Error(); !strings.Contains(msg, own) || !strings.Contains(msg, resume) {
+		t.Errorf("error names neither or only one of %q and %q: %v", own, resume, err)
+	}
+	if mgr.exists("toast") {
+		t.Error("a failed own-branch creation left the polecat behind")
+	}
+
+	// The pooled path shares the step and must fail the same way.
+	mgr.stamps = &branchStampClock{}
+	if _, err := mgr.AddNamedWithOptions("toast", AddOptions{HookBead: "gt-next", ResumeBranch: resume}); err == nil || !strings.Contains(err.Error(), resume) {
+		t.Errorf("AddNamedWithOptions error = %v, want the own-branch failure naming %q", err, resume)
 	}
 }
 
