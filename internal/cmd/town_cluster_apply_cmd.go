@@ -62,7 +62,8 @@ beside the approval record.`,
 // record must approve this plan, for the cluster the plan names, inside its
 // window at now(). A plan record with no cluster is read as the control cluster,
 // the only one a plan named before plan.json recorded it; applyClusterGate refuses
-// such a plan before it reaches here, when the command runs. The live versions are
+// such a plan before it reaches here when the command runs, so a plan recorded
+// without a cluster is planned again (a control plan keeps its id). The live versions are
 // not compared yet, so Verify gets no versions and no live map; that comparison is
 // a later bead of the chain.
 func applyRecordVerifier(now func() time.Time) approvalVerifier {

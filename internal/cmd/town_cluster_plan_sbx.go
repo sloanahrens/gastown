@@ -132,7 +132,8 @@ func runSbxPlan(ctx context.Context, d clusterRenderDeps, kube update.RunFunc, o
 
 // planSbxSet renders the gt-sbx set into outDir, which must exist and be empty,
 // and returns each file with its phase and each object's drift target. A Secret
-// document refuses the plan before any file is written.
+// document refuses the plan, so no plan.json is written; objects before it may
+// already be in outDir, and a rerun needs an empty directory again.
 func planSbxSet(d clusterRenderDeps, in planSbxInputs, outDir string) ([]string, [][]byte, []string, []driftTarget, error) {
 	rin := sbxRenderInputs{OutDir: outDir, Manifests: in.manifests, Chart: in.chart, Values: in.values, Helm: in.helm}
 	if err := checkSbxRenderInputs(rin); err != nil {
