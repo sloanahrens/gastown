@@ -20,7 +20,8 @@ const (
 // Wait polls on, and Deadline, which returns a channel that fires once the given
 // duration has passed. Drive also takes the record's identity (RunID, Tag,
 // ChangeSet), the Tasks it files, the Path it saves the record to, and the
-// HostLoad reader Collect fills Load from.
+// HostLoad reader Collect fills Load from. CacheBytes and Interventions are the
+// values the operator's run command was given.
 type Options struct {
 	Town      Town
 	Agent     string
@@ -36,6 +37,9 @@ type Options struct {
 	Tasks     []Task
 	Path      string
 	HostLoad  io.Reader
+
+	CacheBytes    int64
+	Interventions []string
 }
 
 // runWindow releases ids beside a side load, then waits for them to close. It

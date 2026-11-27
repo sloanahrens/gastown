@@ -23,6 +23,12 @@ var driveStart = time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 // driveTasks is how many tasks driveOptions files, and so how many beads Drive creates.
 const driveTasks = 16
 
+// driveCacheBytes and driveInterventions are what driveOptions gives the run, so a
+// saved record carries them and the intervention fails Judge.
+const driveCacheBytes = 4096
+
+var driveInterventions = []string{"held dispatch"}
+
 // driveFake is the town for one run. It files beads gt-01 onward, reads every bead
 // as closed, and fails the call named by failAt with errDriveBoom: "create", "list"
 // (the polecat listing) or "close". A failed create fails every create after the first
@@ -122,6 +128,10 @@ func driveOptions(t *testing.T, f *driveFake, ticks int, path string) Options {
 		Tasks:     tasks,
 		Path:      path,
 		HostLoad:  strings.NewReader(driveStart.Format(time.RFC3339) + " load1=1.50 load5=1.00 load15=1.00 ncpu=24\n"),
+
+		CacheBytes: driveCacheBytes,
+		// Spare capacity, so the loop catches a record that shares this slice.
+		Interventions: slices.Grow(driveInterventions, 4),
 	}
 }
 
@@ -146,6 +156,12 @@ func TestRehearsalDriveFullRun(t *testing.T) {
 	}
 	if saved.RunID != "run-1" || saved.Tag != "v1.2.3" || saved.ChangeSet != "cs-9" {
 		t.Errorf("identity = %q %q %q, want run-1 v1.2.3 cs-9", saved.RunID, saved.Tag, saved.ChangeSet)
+	}
+	if saved.CacheBytes != driveCacheBytes || !slices.Equal(saved.Interventions, driveInterventions) {
+		t.Errorf("cache size and interventions = %d %q, want %d %q", saved.CacheBytes, saved.Interventions, driveCacheBytes, driveInterventions)
+	}
+	if v := Judge(saved); v.Pass || !slices.Contains(v.Reasons, "intervention: held dispatch") {
+		t.Errorf("Judge = %+v; want a fail naming the intervention", v)
 	}
 	if !saved.Start.Equal(driveStart) || !saved.End.After(saved.Start) {
 		t.Errorf("window = [%s, %s), want it to start at %s and end after", saved.Start, saved.End, driveStart)
@@ -172,14 +188,15 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 		wantStop     string
 		wantClosed   int
 		wantLists    int
+		wantTail     []string
 	}{
 		{name: "a failed filing saves a stopped record and closes what it filed", failAt: "create", ticks: 1, createBefore: 2, wantWrap: errDriveBoom, wantStop: "file set failed", wantClosed: 2, wantLists: 1},
 		{name: "a closed tick stops the run and saves what Collect read", ticks: 0, wantWrap: errTickClosed, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
 		{name: "a canceled ctx stops the run and still saves what Collect read", ticks: 1, cancelWindow: true, wantWrap: context.Canceled, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
 		{name: "a failed close after a failed window joins both and still saves", failAt: "close", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed", wantLists: 1},
 		{name: "a failed save after a failed window joins both", ticks: 0, badDir: true, wantWrap: errTickClosed, wantAlso: fs.ErrNotExist, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
-		{name: "a failed collect after a failed window joins both and still closes and saves", failAt: "list", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
-		{name: "a failed collect after a good window saves a stopped record", failAt: "list", ticks: 1, wantWrap: errDriveBoom, wantStop: "collect failed", wantClosed: driveTasks, wantLists: 1},
+		{name: "a failed collect after a failed window joins both and still closes and saves", failAt: "list", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1, wantTail: []string{"collect failed: stranded seats"}},
+		{name: "a failed collect after a good window saves a stopped record", failAt: "list", ticks: 1, wantWrap: errDriveBoom, wantStop: "collect failed", wantClosed: driveTasks, wantLists: 1, wantTail: []string{"collect failed: stranded seats"}},
 		{name: "a failed close after a good window saves a stopped record", failAt: "close", ticks: 1, wantWrap: errDriveBoom, wantStop: "close beads failed", wantLists: 1},
 		{name: "a failed save returns the stopped record and runs no step again", ticks: 1, badDir: true, wantWrap: fs.ErrNotExist, wantStop: "save record failed", wantClosed: driveTasks, wantLists: 1},
 	}
@@ -197,7 +214,8 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 			if tt.badDir {
 				path = filepath.Join(dir, "missing", "record.json")
 			}
-			rec, err := Drive(ctx, driveOptions(t, f, tt.ticks, path))
+			o := driveOptions(t, f, tt.ticks, path)
+			rec, err := Drive(ctx, o)
 			if !errors.Is(err, tt.wantWrap) {
 				t.Fatalf("Drive error = %v; want it to wrap %v", err, tt.wantWrap)
 			}
@@ -212,6 +230,15 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 			}
 			if f.lists != tt.wantLists {
 				t.Errorf("ran %d polecat listings, want %d; a run collects once", f.lists, tt.wantLists)
+			}
+			want := append(slices.Clone(driveInterventions), tt.wantTail...)
+			if !slices.Equal(o.Interventions, driveInterventions) {
+				t.Errorf("options interventions = %q after the run, want %q", o.Interventions, driveInterventions)
+			}
+			// A later append by the caller must not reach the returned record.
+			o.Interventions = append(o.Interventions, "caller entry")
+			if rec.CacheBytes != driveCacheBytes || !slices.Equal(rec.Interventions, want) {
+				t.Errorf("returned cache size and interventions = %d %q, want %d %q", rec.CacheBytes, rec.Interventions, driveCacheBytes, want)
 			}
 			if tt.badDir {
 				if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
@@ -228,6 +255,9 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 			}
 			if !saved.End.After(saved.Start) {
 				t.Errorf("window = [%s, %s), want it to end after it starts", saved.Start, saved.End)
+			}
+			if saved.CacheBytes != driveCacheBytes || !slices.Equal(saved.Interventions, want) {
+				t.Errorf("saved cache size and interventions = %d %q, want %d %q", saved.CacheBytes, saved.Interventions, driveCacheBytes, want)
 			}
 		})
 	}
