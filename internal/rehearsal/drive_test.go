@@ -25,11 +25,13 @@ const driveTasks = 16
 
 // driveFake is the town for one run. It files beads gt-01 onward, reads every bead
 // as closed, and fails the call named by failAt with errDriveBoom: "create", "list"
-// (the polecat listing) or "close". A call under a canceled ctx fails with its error,
-// as the town's commands do. When cancelOnShow is set, the first bead read cancels the
-// run's ctx and finds that bead open.
+// (the polecat listing) or "close". A failed create fails every create after the first
+// createBefore. A call under a canceled ctx fails with its error, as the town's
+// commands do. When cancelOnShow is set, the first bead read cancels the run's ctx and
+// finds that bead open.
 type driveFake struct {
 	failAt       string
+	createBefore int
 	cancelOnShow context.CancelFunc
 	mu           sync.Mutex
 	created      int
@@ -63,10 +65,10 @@ func (f *driveFake) run(ctx context.Context, argv []string) ([]byte, error) {
 	}
 	switch verb {
 	case "create":
-		if f.failAt == "create" {
+		f.created++
+		if f.failAt == "create" && f.created > f.createBefore {
 			return nil, errDriveBoom
 		}
-		f.created++
 		return []byte(fmt.Sprintf("gt-%02d", f.created)), nil
 	case "show":
 		if f.cancelOnShow != nil {
@@ -162,6 +164,7 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 		name         string
 		failAt       string
 		ticks        int
+		createBefore int
 		badDir       bool
 		cancelWindow bool
 		wantWrap     error
@@ -170,22 +173,22 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 		wantClosed   int
 		wantLists    int
 	}{
-		{name: "a failed filing returns its error and saves nothing", failAt: "create", ticks: 1, wantWrap: errDriveBoom},
+		{name: "a failed filing saves a stopped record and closes what it filed", failAt: "create", ticks: 1, createBefore: 2, wantWrap: errDriveBoom, wantStop: "file set failed", wantClosed: 2, wantLists: 1},
 		{name: "a closed tick stops the run and saves what Collect read", ticks: 0, wantWrap: errTickClosed, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
 		{name: "a canceled ctx stops the run and still saves what Collect read", ticks: 1, cancelWindow: true, wantWrap: context.Canceled, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
 		{name: "a failed close after a failed window joins both and still saves", failAt: "close", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed", wantLists: 1},
-		{name: "a failed save after a failed window joins both", ticks: 0, badDir: true, wantWrap: errTickClosed, wantAlso: fs.ErrNotExist, wantClosed: driveTasks, wantLists: 1},
+		{name: "a failed save after a failed window joins both", ticks: 0, badDir: true, wantWrap: errTickClosed, wantAlso: fs.ErrNotExist, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
 		{name: "a failed collect after a failed window joins both and still closes and saves", failAt: "list", ticks: 0, wantWrap: errTickClosed, wantAlso: errDriveBoom, wantStop: "run window failed", wantClosed: driveTasks, wantLists: 1},
-		{name: "a failed polecat listing returns its error from Collect", failAt: "list", ticks: 1, wantWrap: errDriveBoom, wantLists: 1},
-		{name: "a failed close returns its error", failAt: "close", ticks: 1, wantWrap: errDriveBoom, wantLists: 1},
-		{name: "a save into a missing directory returns its error", ticks: 1, badDir: true, wantWrap: fs.ErrNotExist, wantClosed: driveTasks, wantLists: 1},
+		{name: "a failed collect after a good window saves a stopped record", failAt: "list", ticks: 1, wantWrap: errDriveBoom, wantStop: "collect failed", wantClosed: driveTasks, wantLists: 1},
+		{name: "a failed close after a good window saves a stopped record", failAt: "close", ticks: 1, wantWrap: errDriveBoom, wantStop: "close beads failed", wantLists: 1},
+		{name: "a failed save returns the stopped record and runs no step again", ticks: 1, badDir: true, wantWrap: fs.ErrNotExist, wantStop: "save record failed", wantClosed: driveTasks, wantLists: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			f := &driveFake{failAt: tt.failAt}
+			f := &driveFake{failAt: tt.failAt, createBefore: tt.createBefore}
 			if tt.cancelWindow {
 				f.cancelOnShow = cancel
 			}
@@ -194,12 +197,15 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 			if tt.badDir {
 				path = filepath.Join(dir, "missing", "record.json")
 			}
-			_, err := Drive(ctx, driveOptions(t, f, tt.ticks, path))
+			rec, err := Drive(ctx, driveOptions(t, f, tt.ticks, path))
 			if !errors.Is(err, tt.wantWrap) {
 				t.Fatalf("Drive error = %v; want it to wrap %v", err, tt.wantWrap)
 			}
 			if tt.wantAlso != nil && !errors.Is(err, tt.wantAlso) {
 				t.Errorf("Drive error = %v; want it to also wrap %v", err, tt.wantAlso)
+			}
+			if !rec.Stopped || rec.StopReason != tt.wantStop {
+				t.Errorf("returned record Stopped = %t, reason %q; want true, reason %q", rec.Stopped, rec.StopReason, tt.wantStop)
 			}
 			if len(f.closed) != tt.wantClosed {
 				t.Errorf("closed %d beads, want %d", len(f.closed), tt.wantClosed)
@@ -207,9 +213,9 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 			if f.lists != tt.wantLists {
 				t.Errorf("ran %d polecat listings, want %d; a run collects once", f.lists, tt.wantLists)
 			}
-			if tt.badDir || tt.wantStop == "" {
+			if tt.badDir {
 				if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
-					t.Errorf("a record was saved at %s after a failed step", path)
+					t.Errorf("a record was saved at %s after a failed save", path)
 				}
 				return
 			}
@@ -218,13 +224,10 @@ func TestRehearsalDriveFailedStep(t *testing.T) {
 				t.Fatalf("read saved record: %v", readErr)
 			}
 			if !saved.Stopped || saved.StopReason != tt.wantStop {
-				t.Errorf("record Stopped = %t, reason %q; want true, reason %q", saved.Stopped, saved.StopReason, tt.wantStop)
+				t.Errorf("saved Stopped = %t, reason %q; want true, reason %q", saved.Stopped, saved.StopReason, tt.wantStop)
 			}
 			if !saved.End.After(saved.Start) {
 				t.Errorf("window = [%s, %s), want it to end after it starts", saved.Start, saved.End)
-			}
-			if len(saved.Landings) != driveTasks {
-				t.Errorf("saved %d landings, want %d collected before the run stopped", len(saved.Landings), driveTasks)
 			}
 		})
 	}
