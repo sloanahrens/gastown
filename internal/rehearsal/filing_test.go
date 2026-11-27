@@ -9,6 +9,15 @@ import (
 	"testing"
 )
 
+// probeTasks returns n tasks titled "probe 01" through "probe 0n", each with an acceptance row.
+func probeTasks(n int) []Task {
+	tasks := make([]Task, 0, n)
+	for i := 1; i <= n; i++ {
+		tasks = append(tasks, Task{Title: fmt.Sprintf("probe %02d", i), Body: "body\n## Acceptance\n- [ ] one\n"})
+	}
+	return tasks
+}
+
 func TestRehearsalFilingFileSet(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -21,12 +30,9 @@ func TestRehearsalFilingFileSet(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var tasks []Task
 			var want []string
 			for i := 1; i <= tc.count; i++ {
-				n := fmt.Sprintf("%02d", i)
-				tasks = append(tasks, Task{Title: "probe " + n, Body: "body\n## Acceptance\n- [ ] one\n"})
-				want = append(want, "rh-"+n)
+				want = append(want, fmt.Sprintf("rh-%02d", i))
 			}
 			// With no rig, Create's argv is bd create --silent --title=..., so argv[3]
 			// is the title; the fake answers with its probe number.
@@ -34,7 +40,7 @@ func TestRehearsalFilingFileSet(t *testing.T) {
 				n, _ := strings.CutPrefix(argv[3], "--title=probe ")
 				return []byte("rh-" + n + "\n"), nil
 			}}
-			ids, err := FileSet(context.Background(), town, tasks)
+			ids, err := FileSet(context.Background(), town, probeTasks(tc.count))
 			if err != nil || !slices.Equal(ids, want) {
 				t.Fatalf("FileSet = %q, %v; want %q, nil", ids, err, want)
 			}
@@ -63,35 +69,75 @@ func TestRehearsalFilingCloseOpen(t *testing.T) {
 	}
 }
 
-func TestRehearsalFilingFileSetFailure(t *testing.T) {
+func TestRehearsalFilingCloseOpenTriesEvery(t *testing.T) {
 	t.Parallel()
-	bdFailed := errors.New("exit status 1")
-	tasks := []Task{{Title: "probe 01", Body: "body\n## Acceptance\n- [ ] one\n"}, {Title: "probe 02", Body: "body\n## Acceptance\n- [ ] one\n"}, {Title: "probe 03", Body: "body\n## Acceptance\n- [ ] one\n"}}
-	town := Town{Run: func(_ context.Context, argv []string) ([]byte, error) {
-		if argv[3] == "--title=probe 03" {
-			return nil, bdFailed
-		}
-		n, _ := strings.CutPrefix(argv[3], "--title=probe ")
-		return []byte("rh-" + n + "\n"), nil
-	}}
+	closeErr, laterErr := errors.New("close refused"), errors.New("later close refused")
+	cases := []struct {
+		name    string
+		fails   map[string]error
+		want    error
+		dropped error
+	}{
+		{name: "a failed close reports the failure and closes the rest", fails: map[string]error{"rh-02": closeErr}, want: closeErr},
+		{name: "two failed closes report the first", fails: map[string]error{"rh-01": closeErr, "rh-03": laterErr}, want: closeErr, dropped: laterErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			town := Town{Run: func(_ context.Context, argv []string) ([]byte, error) {
+				got = append(got, argv[2])
+				return nil, tc.fails[argv[2]]
+			}}
 
-	ids, err := FileSet(context.Background(), town, tasks)
-	if !errors.Is(err, bdFailed) || !slices.Equal(ids, []string{"rh-01", "rh-02"}) {
-		t.Fatalf("FileSet = %q, %v; want the two ids filed before the failure and an error wrapping it", ids, err)
+			err := CloseOpen(context.Background(), town, []string{"rh-01", "rh-02", "rh-03"}, "run done")
+			if !errors.Is(err, tc.want) || (tc.dropped != nil && errors.Is(err, tc.dropped)) {
+				t.Fatalf("CloseOpen = %v; want the first failure %v and not %v", err, tc.want, tc.dropped)
+			}
+			if want := []string{"rh-01", "rh-02", "rh-03"}; !slices.Equal(got, want) {
+				t.Errorf("CloseOpen closed %q, want %q", got, want)
+			}
+		})
 	}
 }
 
-func TestRehearsalFilingCloseOpenFailure(t *testing.T) {
+func TestRehearsalFilingFileSetClosesOnFailure(t *testing.T) {
 	t.Parallel()
-	bdFailed := errors.New("exit status 1")
-	closes := 0
-	town := Town{Run: func(_ context.Context, _ []string) ([]byte, error) {
-		closes++
-		return nil, bdFailed
-	}}
+	createErr, closeErr := errors.New("create refused"), errors.New("close refused")
+	cases := []struct {
+		name      string
+		failClose string
+	}{
+		{name: "a failed create closes the beads filed before it"},
+		{name: "a failed cleanup close is reported with the create failure", failClose: "rh-02"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var closes []string
+			town := Town{Run: func(_ context.Context, argv []string) ([]byte, error) {
+				if argv[1] == "close" {
+					closes = append(closes, strings.Join(argv, " "))
+					if argv[2] == tc.failClose {
+						return nil, closeErr
+					}
+					return nil, nil
+				}
+				n, _ := strings.CutPrefix(argv[3], "--title=probe ")
+				if n == "03" {
+					return nil, createErr
+				}
+				return []byte("rh-" + n + "\n"), nil
+			}}
 
-	err := CloseOpen(context.Background(), town, []string{"rh-01", "rh-02"}, "run done")
-	if !errors.Is(err, bdFailed) || closes != 1 {
-		t.Fatalf("CloseOpen = %v after %d closes; want an error wrapping %v after one close", err, closes, bdFailed)
+			ids, err := FileSet(context.Background(), town, probeTasks(3))
+			if ids != nil || !errors.Is(err, createErr) || errors.Is(err, closeErr) != (tc.failClose != "") {
+				t.Errorf("FileSet = %q, %v; want no ids, an error wrapping %v, and one wrapping %v iff close %q failed", ids, err, createErr, closeErr, tc.failClose)
+			}
+			wantCloses := []string{"bd close rh-01 --reason=filing failed", "bd close rh-02 --reason=filing failed"}
+			if !slices.Equal(closes, wantCloses) {
+				t.Errorf("FileSet closed %q, want %q", closes, wantCloses)
+			}
+		})
 	}
 }
