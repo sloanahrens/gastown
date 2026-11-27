@@ -3797,14 +3797,33 @@ func (r *tierSweepGuardReads) get(rig string) *sweeprunner.GuardUnreadable {
 // without dumping a long kubectl line.
 const tierSweepProgressStderrBytes = 200
 
+// tierSweepProgressMissing reports whether a failed progress read is the record
+// not written yet. The read runs while the Job is up, so the first poll of a
+// run reaches it before sweep-run writes progress.json and cat reports the
+// absence. A line must name the record as well as the phrase, so a missing
+// kubeconfig, or any other absent file, is still the read's failure
+// (gt-u1gd0r).
+func tierSweepProgressMissing(stderr []byte) bool {
+	const phrase = "no such file or directory"
+	for _, line := range strings.Split(strings.ToLower(string(stderr)), "\n") {
+		if strings.Contains(line, phrase) && strings.Contains(line, runProgressName) {
+			return true
+		}
+	}
+	return false
+}
+
 // tierSweepRunnerProgress stores the progress record a running run keeps. It
 // renders the Spec through the configured backend again, runs the plan's
 // Progress step, and writes that step's stdout as progress.json in spec.OutDir.
 // A plan with no Progress step, which is every plan the Docker backend renders,
-// has nothing to copy: it returns nil and writes nothing. A failed step, or
-// stdout that is not a JSON object, is returned wrapped and leaves the record
-// the last poll stored as it was. A failed step's error carries the last lines
-// of the stderr it printed, so the caller's log names what failed.
+// has nothing to copy: it returns nil and writes nothing. So does a step that
+// failed because the run has not written progress.json yet, which the first
+// poll of a run meets: the next poll reads it (gt-u1gd0r). A failed step for
+// any other reason, or stdout that is not a JSON object, is returned wrapped
+// and leaves the record the last poll stored as it was. A failed step's error
+// carries the last lines of the stderr it printed, so the caller's log names
+// what failed.
 func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.Spec) error {
 	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
@@ -3826,6 +3845,11 @@ func (d *Daemon) tierSweepRunnerProgress(ctx context.Context, spec sweeprunner.S
 	defer cancel()
 	stdout, stderr, err := d.runCmd(exec.CommandContext(stepCtx, step.Argv[0], step.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
 	if err != nil {
+		// A run that has not written its first progress record yet is early,
+		// not failed: nothing is stored and the next poll reads it (gt-u1gd0r).
+		if tierSweepProgressMissing(stderr) {
+			return nil
+		}
 		// The error names the read's own failure, so the caller's log does not
 		// stop at the exit status. The stderr is cut to its last
 		// tierSweepProgressStderrBytes bytes at a character boundary, then
