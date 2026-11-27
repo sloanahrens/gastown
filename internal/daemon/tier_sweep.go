@@ -4372,11 +4372,7 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep%s", rig, tier, tierSweepRed, tierSweepCauseNote(ts.Cause))
 			continue
 		}
-		names := ts.FailedNames
-		if len(names) == 0 {
-			names = []string{tierSweepNoName}
-		}
-		for _, name := range names {
+		for _, name := range tierSweepBeadNames(ts.FailedNames) {
 			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name])
 		}
 	}
