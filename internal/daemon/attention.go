@@ -295,6 +295,9 @@ type attentionSources struct {
 	// gatewayCap is the cap collector the bd_gateway.cap_hit read runs; nil
 	// leaves that read a no-op, as a daemon with no gateway configured has it.
 	gatewayCap *gatewayCapCollector
+	// gatewayUnreachable is the bd_gateway.unreachable collector; nil leaves
+	// that read a no-op, as a daemon with no gateway configured has it.
+	gatewayUnreachable *gatewayUnreachableCollector
 	// landingState reads the rig's in-flight landing, the landing-stuck
 	// collector's subject.
 	landingState func(rig string) landingState
@@ -791,6 +794,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// Raises nothing when no gateway is configured: gatewayCap is nil then
 		// (gt-01bka3).
 		{kind: attention.KindBDGatewayCapHit, collect: s.collectBDGatewayCap},
+		{kind: attention.KindBDGatewayUnreachable, collect: s.collectGatewayUnreachable},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
 		{kind: attention.KindPostLandUnknown, collect: s.collectPostLandUnknown},
@@ -1246,6 +1250,13 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		}
 		d.gatewayCap.mu.Unlock()
 		s.gatewayCap = &d.gatewayCap
+		// The unreachable base outlives the tick too; bound once under its lock.
+		d.gatewayUnreachable.mu.Lock()
+		if d.gatewayUnreachable.stats == nil {
+			d.gatewayUnreachable.stats = d.gatewayStatsRead
+		}
+		d.gatewayUnreachable.mu.Unlock()
+		s.gatewayUnreachable = &d.gatewayUnreachable
 	}
 	// The extract read walks the town's .runtime/metrics, where the daily run
 	// writes one directory per day (internal/metrics/extract.go).
