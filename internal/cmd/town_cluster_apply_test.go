@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,17 +56,19 @@ func shapeApprovalFor(sha string) []byte {
 }
 
 // shapeLiveKube is a RunFunc that records every kubectl call's arguments and
-// answers each read with out at exit, failing with err, so a test can choose the
-// cluster's answer and show which calls the run made.
+// stdin and answers each read with out at exit, failing with err, so a test can
+// choose the cluster's answer and show which calls the run made.
 type shapeLiveKube struct {
-	calls [][]string
-	out   string
-	exit  int
-	err   error
+	calls  [][]string
+	stdins []string
+	out    string
+	exit   int
+	err    error
 }
 
-func (k *shapeLiveKube) run(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+func (k *shapeLiveKube) run(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
 	k.calls = append(k.calls, args)
+	k.stdins = append(k.stdins, string(runStdinOf(ctx)))
 	return k.out, k.exit, k.err
 }
 
@@ -104,11 +107,32 @@ func TestClusterShapeApplyUnreadablePlan(t *testing.T) {
 	}
 }
 
+// shapeFlags gives both phases a kubeconfig, so a plan holding files in each can run.
+var shapeFlags = planFlags{policyKubeconfig: "/keys/policy.kubeconfig", applyKubeconfig: "/keys/apply.kubeconfig"}
+
+// shapePolicyDoc is a static ValidatingAdmissionPolicy, a document phase P applies.
+var shapePolicyDoc = []byte("apiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingAdmissionPolicy\nmetadata:\n  name: gt-policy\n")
+
+// shapePolicyFile is the plan record's phase P entry for shapePolicyDoc.
+var shapePolicyFile = planRecordFile{Name: "policy.yaml", Phase: planPhaseStatic, SHA256: clusterApplyFileSHA(shapePolicyDoc)}
+
+// shapeApplyCalls returns each call that carries an apply verb, in call order,
+// as its arguments and the stdin it was sent.
+func shapeApplyCalls(k *shapeLiveKube) (calls [][]string, stdins []string) {
+	for i, call := range k.calls {
+		if slices.Contains(call, "apply") {
+			calls = append(calls, call)
+			stdins = append(stdins, k.stdins[i])
+		}
+	}
+	return calls, stdins
+}
+
 // TestClusterShapeApplyReadablePlan: a plan and approval that read, an approval
 // the verifier accepts, and a live Deployment at the plan's resourceVersion are
-// not applied: the run re-reads the Deployment under the plan's kubeconfig, then
-// returns an error saying apply is not built and nothing was applied, with no
-// apply call.
+// applied: the run re-reads the Deployment under the plan's kubeconfig, then
+// applies its file once under the apply kubeconfig, sending the checked bytes on
+// stdin, and returns nil.
 func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -117,27 +141,195 @@ func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	writeReadFile(t, filepath.Join(dir, "approval.json"), readApprovalOK)
 	kube := &shapeLiveKube{out: shapeLiveAt("7")}
 	var verified int
-	err := runTownClusterApply(context.Background(), kube.run, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil))
-	if err == nil || !strings.Contains(err.Error(), "not built") || !strings.Contains(err.Error(), "nothing was applied") {
-		t.Fatalf("runTownClusterApply returned %v, want an error saying apply is not built and nothing was applied", err)
+	if err := runTownClusterApply(context.Background(), kube.run, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
 	}
 	if verified != 1 {
 		t.Errorf("runTownClusterApply called verify %d times, want once", verified)
 	}
-	if len(kube.calls) != 1 || shapeApplies(kube.calls) != 0 {
-		t.Fatalf("runTownClusterApply made the calls %v, want one read and no apply", kube.calls)
+	applies, stdins := shapeApplyCalls(kube)
+	if len(kube.calls) != 2 || len(applies) != 1 {
+		t.Fatalf("runTownClusterApply made the calls %v, want one read and one apply", kube.calls)
 	}
-	if !strings.Contains(strings.Join(kube.calls[0], " "), "--kubeconfig "+readKubeconfs.applyKubeconfig) {
-		t.Errorf("the re-read's arguments %v do not carry the plan's phase kubeconfig", kube.calls[0])
+	want := []string{"--kubeconfig", readKubeconfs.applyKubeconfig, "apply", "-f", "-"}
+	if !slices.Equal(applies[0], want) {
+		t.Errorf("the apply's arguments %v, want %v", applies[0], want)
+	}
+	if stdins[0] != string(readWebDoc) {
+		t.Errorf("the apply's stdin %q, want the checked bytes %q", stdins[0], string(readWebDoc))
+	}
+}
+
+// TestClusterShapeApplyPhases: phase P's file is applied first, under the policy
+// kubeconfig, then phase W's, under the apply kubeconfig, each from its own
+// checked bytes, and no file is applied under the other phase's.
+func TestClusterShapeApplyPhases(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeReadFile(t, filepath.Join(dir, "policy.yaml"), shapePolicyDoc)
+	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
+	approvalPath := filepath.Join(dir, "approval.json")
+	writeReadFile(t, approvalPath, readApprovalOK)
+	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	var verified int
+	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
+	}
+	applies, stdins := shapeApplyCalls(kube)
+	want := [][]string{
+		{"--kubeconfig", shapeFlags.policyKubeconfig, "apply", "-f", "-"},
+		{"--kubeconfig", shapeFlags.applyKubeconfig, "apply", "-f", "-"},
+	}
+	if !slices.EqualFunc(applies, want, func(a, b []string) bool { return slices.Equal(a, b) }) {
+		t.Errorf("runTownClusterApply applied %v, want phase P's file under the policy kubeconfig, then phase W's under the apply kubeconfig: %v", applies, want)
+	}
+	wantStdin := []string{string(shapePolicyDoc), string(readWebDoc)}
+	if !slices.Equal(stdins, wantStdin) {
+		t.Errorf("runTownClusterApply applied the stdin %q, want each file's checked bytes %q", stdins, wantStdin)
+	}
+}
+
+// TestClusterShapeApplyDocumentKinds: a plan file holding a Secret in either
+// phase, or a static policy document or Role in phase W, is refused before any
+// cluster call, so verify never runs and nothing is applied. A Secret after a
+// Deployment document, or inside a List or a typed SecretList, is refused too, so
+// every document and every list item is read, and a document that does not decode
+// is refused.
+func TestClusterShapeApplyDocumentKinds(t *testing.T) {
+	t.Parallel()
+	secretDoc := []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: api-key\n  namespace: gastown\n")
+	roleDoc := []byte("apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: r\n  namespace: gastown\n")
+	listSecretDoc := []byte("apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Secret\n  metadata:\n    name: api-key\n    namespace: gastown\n")
+	typedListSecretDoc := []byte("apiVersion: v1\nkind: SecretList\nitems:\n- apiVersion: v1\n  metadata:\n    name: api-key\n    namespace: gastown\n")
+	tests := []struct {
+		name    string
+		phase   string
+		doc     []byte
+		wantErr string
+	}{
+		{name: "a Secret in phase P", phase: planPhaseStatic, doc: secretDoc, wantErr: "holds a Secret"},
+		{name: "a Secret in phase W", phase: planPhaseWorkloads, doc: secretDoc, wantErr: "holds a Secret"},
+		{name: "a Secret after a Deployment document", phase: planPhaseWorkloads, doc: append(append([]byte{}, readWebDoc...), append([]byte("---\n"), secretDoc...)...), wantErr: "holds a Secret"},
+		{name: "a Secret inside a List", phase: planPhaseWorkloads, doc: listSecretDoc, wantErr: "holds a Secret"},
+		{name: "a Secret inside a SecretList", phase: planPhaseStatic, doc: typedListSecretDoc, wantErr: "holds a Secret"},
+		{name: "a ValidatingAdmissionPolicy in phase W", phase: planPhaseWorkloads, doc: shapePolicyDoc, wantErr: "in phase W"},
+		{name: "a Role in phase W", phase: planPhaseWorkloads, doc: roleDoc, wantErr: "in phase W"},
+		{name: "a document that does not decode", phase: planPhaseWorkloads, doc: []byte("kind: [unclosed\n"), wantErr: "does not decode"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "doc.yaml"), tc.doc)
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(planRecordFile{Name: "doc.yaml", Phase: tc.phase, SHA256: clusterApplyFileSHA(tc.doc), Absent: true}))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			kube := &shapeLiveKube{out: shapeLiveAt("7")}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
+				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
+			}
+			if verified != 0 || len(kube.calls) != 0 {
+				t.Errorf("runTownClusterApply called verify %d times and made the calls %v, want none", verified, kube.calls)
+			}
+		})
+	}
+}
+
+// TestClusterShapeApplyMissingFlag: applyPlanFiles reads every phase's kubeconfig
+// before its first apply, so a phase without its flag refuses with nothing
+// applied — phase P's file is not applied before phase W's missing flag is found
+// — a file whose phase is not one of the plan's two is refused rather than
+// dropped, and the refusal names the apply command, not the plan.
+func TestClusterShapeApplyMissingFlag(t *testing.T) {
+	t.Parallel()
+	policy := applyPlanFile{file: shapePolicyFile, data: shapePolicyDoc}
+	web := applyPlanFile{file: shapeWebFile, data: readWebDoc}
+	tests := []struct {
+		name    string
+		files   []applyPlanFile
+		flags   planFlags
+		wantErr string
+	}{
+		{name: "phase P's kubeconfig is missing", files: []applyPlanFile{policy}, flags: planFlags{applyKubeconfig: "/keys/apply.kubeconfig"}, wantErr: "--policy-kubeconfig"},
+		{name: "phase W's kubeconfig is missing after phase P's file", files: []applyPlanFile{policy, web}, flags: planFlags{policyKubeconfig: "/keys/policy.kubeconfig"}, wantErr: "--apply-kubeconfig"},
+		{name: "a file's phase is not one of the plan's two", files: []applyPlanFile{{file: planRecordFile{Name: "x.yaml", Phase: "X"}, data: shapePolicyDoc}}, flags: shapeFlags, wantErr: "is not a plan phase"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			kube := func(context.Context, string, []string, string, ...string) (string, int, error) {
+				calls++
+				return "", 0, nil
+			}
+			err := applyPlanFiles(context.Background(), kube, t.TempDir(), tc.files, tc.flags)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
+				t.Fatalf("applyPlanFiles returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "gt town cluster plan") {
+				t.Errorf("applyPlanFiles returned the plan command's error %v, want the apply's", err)
+			}
+			if calls != 0 {
+				t.Errorf("applyPlanFiles made %d calls, want none", calls)
+			}
+		})
+	}
+}
+
+// TestClusterShapeApplyPartial: an apply that fails stops the run, with no
+// further apply call, and the error names the files applied and not applied and
+// says nothing was rolled back.
+func TestClusterShapeApplyPartial(t *testing.T) {
+	t.Parallel()
+	orderedNames := []string{"policy.yaml", "deployment-web.yaml"}
+	tests := []struct {
+		name    string
+		failing string
+		wantErr string
+	}{
+		{name: "the phase P apply fails", failing: "policy.yaml", wantErr: "applied nothing and not applied policy.yaml, deployment-web.yaml"},
+		{name: "the phase W apply fails", failing: "deployment-web.yaml", wantErr: "applied policy.yaml and not applied deployment-web.yaml"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "policy.yaml"), shapePolicyDoc)
+			writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			var applied []string
+			kube := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				if !slices.Contains(args, "apply") {
+					return shapeLiveAt("7"), 0, nil
+				}
+				file := orderedNames[len(applied)]
+				applied = append(applied, file)
+				if file == tc.failing {
+					return "", 1, nil
+				}
+				return "", 0, nil
+			}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was rolled back") {
+				t.Fatalf("runTownClusterApply returned %v, want a partial-apply error naming %q", err, tc.wantErr)
+			}
+			if applied[len(applied)-1] != tc.failing {
+				t.Errorf("runTownClusterApply applied %v after the failing %s, want none", applied, tc.failing)
+			}
+		})
 	}
 }
 
 // TestClusterShapeApplyClusterMoved: a held Deployment the cluster no longer
 // holds at the plan's resourceVersion ends the run before any apply, saying
 // nothing was applied: another version, no version, an object that is gone, and
-// a read that failed are each refused. Mutation: remove the version comparison
-// in recheckApplyDeployments, and each row reaches the not-built error, so this
-// test fails.
+// a read that failed are each refused.
 func TestClusterShapeApplyClusterMoved(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -179,8 +371,7 @@ func TestClusterShapeApplyClusterMoved(t *testing.T) {
 
 // TestClusterShapeApplyOtherPlan: an approval that authorizes another plan's
 // sha256 is refused before verify, so the verifier is never called and no
-// cluster call is made. Mutation: remove the sha comparison in
-// runTownClusterApply, and verify is called, so this test fails.
+// cluster call is made.
 func TestClusterShapeApplyOtherPlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -203,8 +394,6 @@ func TestClusterShapeApplyOtherPlan(t *testing.T) {
 
 // TestClusterShapeApplyVerifierError: a verifier that refuses the approval ends
 // the run with its error, saying nothing was applied, and no cluster call.
-// Mutation: swallow the verifier's error, and the not-built error is returned
-// instead, so this test fails.
 func TestClusterShapeApplyVerifierError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -226,8 +415,7 @@ func TestClusterShapeApplyVerifierError(t *testing.T) {
 }
 
 // TestClusterShapeApplyUnreadableApproval: a plan that reads and an approval
-// that does not returns the approval reader's error and makes no cluster call,
-// so the run never falls through to the not-built error on an unread approval.
+// that does not returns the approval reader's error and makes no cluster call.
 func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -263,10 +451,7 @@ func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 // TestClusterShapeApplyFileHash: a plan file whose bytes differ from the sha256
 // plan.json records for it, or that cannot be read, or whose name leaves the plan
 // directory, is refused before the approval is read and before any cluster call,
-// so no apply is made and the verifier never runs. Mutation: remove the
-// checkApplyPlanFiles call in runTownClusterApply, and the held Deployment row
-// reaches the cluster read, so this test fails. Mutation: drop the hash comparison
-// in checkApplyPlanFiles, and the two changed-bytes rows fail the same way.
+// so no apply is made and the verifier never runs.
 func TestClusterShapeApplyFileHash(t *testing.T) {
 	t.Parallel()
 	tamperedWeb := append(append([]byte{}, readWebDoc...), "# edited\n"...)
