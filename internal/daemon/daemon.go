@@ -535,6 +535,9 @@ type Daemon struct {
 	// attentionSources rebuilt each tick (gt-01bka3).
 	gatewayCap gatewayCapCollector
 
+	// gatewayUnreachable's base outlives the attentionSources rebuilt each tick (gt-w33hlr).
+	gatewayUnreachable gatewayUnreachableCollector
+
 	// workspaceDrift checks each gateway answer for drift and signals the reconcile
 	// loop. startWorkspaceReconcile creates it; the installed pusher and the loop's
 	// probe feed it, and a test calls observe on it to stand in for a gateway answer.
