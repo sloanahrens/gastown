@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-// withinBars is a record inside every ruled bar.
+// withinBars is a measured record inside every ruled bar.
 func withinBars() Record {
 	return Record{
-		Slings:   []Sling{{Bead: "s1", Outcome: SlingOK, Seconds: 100}},
-		Gates:    []Gate{{Bead: "g1", Verdict: GatePass, Seconds: 400}},
+		Slings:   slingsOf(rep(setSize, 100)...),
+		Gates:    gatesOf(GatePass, 400),
 		Landings: []Landing{{Bead: "l1", Landed: true}},
+		Load:     Load{Samples: 10},
 	}
 }
 
@@ -90,23 +91,71 @@ func TestRehearsalJudgeP90(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name string
-		rec  Record
+		edit func(*Record)
 		want string // reason substring; empty means the run passes
 	}{
-		{name: "sling p90 at the limit passes", rec: Record{Slings: slingsOf(rep(10, 120)...)}},
-		{name: "sling p90 over the limit fails", rec: Record{Slings: slingsOf(rep(10, 121)...)}, want: "sling p90 121 s is over 120 s"},
-		{name: "one slow sling in ten is outside nearest rank", rec: Record{Slings: slingsOf(append(rep(9, 100), 500)...)}},
-		{name: "two slow slings in ten fail the sling p90", rec: Record{Slings: slingsOf(append(rep(8, 100), 500, 500)...)}, want: "sling p90 500 s is over 120 s"},
-		{name: "two slow slings in eleven fail the sling p90", rec: Record{Slings: slingsOf(append(rep(9, 100), 500, 500)...)}, want: "sling p90 500 s is over 120 s"},
-		{name: "slow slings listed first still count", rec: Record{Slings: slingsOf(append([]float64{500, 500}, rep(8, 100)...)...)}, want: "sling p90 500 s is over 120 s"},
-		{name: "presubmit p90 at the limit passes", rec: Record{Gates: gatesOf(GatePass, rep(10, 472)...)}},
-		{name: "presubmit p90 over the limit fails", rec: Record{Gates: gatesOf(GatePass, rep(10, 473)...)}, want: "presubmit p90 473 s is over 472 s"},
-		{name: "slow passing gates count", rec: Record{Gates: gatesOf(GatePass, append(rep(8, 100), 500, 500)...)}, want: "presubmit p90 500 s is over 472 s"},
-		{name: "slow failing gates count", rec: Record{Gates: gatesOf(GateFail, append(rep(8, 100), 500, 500)...)}, want: "presubmit p90 500 s is over 472 s"},
+		{name: "sling p90 at the limit passes", edit: func(r *Record) { r.Slings = slingsOf(rep(setSize, 120)...) }},
+		{name: "sling p90 one second over fails", edit: func(r *Record) { r.Slings = slingsOf(rep(setSize, 121)...) }, want: "sling p90 121 s is over 120 s"},
+		{name: "one slow sling in sixteen is outside nearest rank", edit: func(r *Record) { r.Slings = slingsOf(append(rep(setSize-1, 100), 500)...) }},
+		{name: "two slow slings in sixteen fail the sling p90", edit: func(r *Record) { r.Slings = slingsOf(append(rep(setSize-2, 100), 500, 500)...) }, want: "sling p90 500 s is over 120 s"},
+		{name: "two slow slings in seventeen fail the sling p90", edit: func(r *Record) { r.Slings = slingsOf(append(rep(setSize-1, 100), 500, 500)...) }, want: "sling p90 500 s is over 120 s"},
+		{name: "slow slings listed first still count", edit: func(r *Record) { r.Slings = slingsOf(append([]float64{500, 500}, rep(setSize-2, 100)...)...) }, want: "sling p90 500 s is over 120 s"},
+		{name: "presubmit p90 at the limit passes", edit: func(r *Record) { r.Gates = gatesOf(GatePass, rep(setSize, 472)...) }},
+		{name: "presubmit p90 one second over fails", edit: func(r *Record) { r.Gates = gatesOf(GatePass, rep(setSize, 473)...) }, want: "presubmit p90 473 s is over 472 s"},
+		{name: "slow passing gates count", edit: func(r *Record) { r.Gates = gatesOf(GatePass, append(rep(setSize-2, 100), 500, 500)...) }, want: "presubmit p90 500 s is over 472 s"},
+		{name: "slow failing gates count", edit: func(r *Record) { r.Gates = gatesOf(GateFail, append(rep(setSize-2, 100), 500, 500)...) }, want: "presubmit p90 500 s is over 472 s"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assertVerdict(t, Judge(tt.rec), tt.want)
+			r := withinBars()
+			tt.edit(&r)
+			assertVerdict(t, Judge(r), tt.want)
 		})
+	}
+}
+
+func TestRehearsalJudgeUnmeasured(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		edit func(*Record)
+		want string
+	}{
+		{name: "fifteen slings", edit: func(r *Record) { r.Slings = slingsOf(rep(setSize-1, 100)...) }, want: "only 15 slings, want 16: the run is unmeasured"},
+		{name: "no slings", edit: func(r *Record) { r.Slings = nil }, want: "only 0 slings, want 16: the run is unmeasured"},
+		{name: "no gate figure", edit: func(r *Record) { r.Gates = nil }, want: "no gate figure: the run is unmeasured"},
+		{name: "no load samples", edit: func(r *Record) { r.Load = Load{} }, want: "no host load samples: the run is unmeasured"},
+		{name: "negative load samples", edit: func(r *Record) { r.Load = Load{Samples: -1} }, want: "no host load samples: the run is unmeasured"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := withinBars()
+			tt.edit(&r)
+			assertVerdict(t, Judge(r), tt.want)
+		})
+	}
+}
+
+// TestRehearsalJudgeEveryBrokenRuleAddsAReason checks that three unmet measures
+// give three reasons, not one: an unmeasured run keeps every refusal it earned.
+func TestRehearsalJudgeEveryBrokenRuleAddsAReason(t *testing.T) {
+	t.Parallel()
+	r := withinBars()
+	r.Slings, r.Gates, r.Load = slingsOf(rep(setSize-1, 100)...), nil, Load{}
+	v := Judge(r)
+	if v.Pass {
+		t.Fatalf("Judge = %+v; want a fail", v)
+	}
+	for _, want := range []string{"only 15 slings", "no gate figure", "no host load samples"} {
+		found := false
+		for _, reason := range v.Reasons {
+			found = found || strings.Contains(reason, want)
+		}
+		if !found {
+			t.Errorf("reasons %q; want one containing %q", v.Reasons, want)
+		}
+	}
+	if len(v.Reasons) != 3 {
+		t.Errorf("reasons = %q; want exactly the 3 unmeasured reasons", v.Reasons)
 	}
 }
