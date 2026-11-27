@@ -264,3 +264,49 @@ func TestTierSweepMarksTheCommitUnderSweep(t *testing.T) {
 		})
 	}
 }
+
+// TestTierSweepResumesAnInterruptedSweep: a cycle started with a young mark and
+// a newer origin/main checks out, tests and records the marked commit instead
+// of the tip; with no mark it sweeps the tip (gt-vbdeh9).
+func TestTierSweepResumesAnInterruptedSweep(t *testing.T) {
+	t.Parallel()
+	const marked, tip = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		mark bool
+		want string
+	}{
+		{"young mark resumes the interrupted commit", true, marked},
+		{"no mark sweeps the tip", false, tip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return tip, nil }
+			var checkedOut []string
+			d.tierSweepSeams.worktree = func(_ context.Context, _, _, sha string) (func(), error) {
+				checkedOut = append(checkedOut, sha)
+				return func() {}, nil
+			}
+			if tc.mark {
+				mark := tierSweepInFlightMark{SHA: marked, Started: now.Add(-time.Minute)}
+				if err := writeTierSweepInFlight(d.config.TownRoot, "gastown", mark); err != nil {
+					t.Fatalf("write mark: %v", err)
+				}
+			}
+			rec.green()
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+			if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+				t.Fatal("the cycle deferred; both stages report a verdict")
+			}
+			if len(checkedOut) != 1 || checkedOut[0] != tc.want {
+				t.Errorf("checked out %q, want one checkout of %s", checkedOut, tc.want)
+			}
+			if st := tierSweepTestState(t, d, "gastown"); st.LastSHA != tc.want || st.LastGreenSHA != tc.want {
+				t.Errorf("record = last %s green %s, want both %s", st.LastSHA, st.LastGreenSHA, tc.want)
+			}
+		})
+	}
+}
