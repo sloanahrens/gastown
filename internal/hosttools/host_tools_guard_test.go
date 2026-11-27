@@ -354,6 +354,8 @@ func TestHostToolHitsNotCounted(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			writeFixture(t, root, tc.path, tc.source)
+			// A clean non-test file keeps the scan from reading nothing, which is a refusal.
+			writeFixture(t, root, "pkg/clean.go", "package pkg\n")
 			allowPath := writeFixture(t, root, "allow.txt", "# no entries\n")
 
 			if err := checkHostToolsAt(root, allowPath); err != nil {
@@ -442,6 +444,136 @@ func TestHostToolsUnparsableSourceIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pkg/broken.go") {
 		t.Fatalf("checkHostToolsAt error = %q, want it to name pkg/broken.go", err)
+	}
+}
+
+// TestHostToolsScanReadsSomething keeps the host-tool scan from passing when it
+// read no non-test Go file. A root reached through a symlink is followed, and a
+// root that holds no such file is a refusal naming the root, never a clean scan.
+func TestHostToolsScanReadsSomething(t *testing.T) {
+	t.Parallel()
+
+	const source = "package pkg\n\nimport \"os/exec\"\n\nfunc run() error {\n\treturn exec.Command(\"launchctl\", \"list\").Run()\n}\n"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) string
+		wants func(root string) []string
+	}{
+		{
+			name: "a non-test Go file naming a tool, reached through a symlink, is scanned",
+			setup: func(t *testing.T) string {
+				real := t.TempDir()
+				writeFixture(t, real, "pkg/run.go", source)
+				link := filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(real, link); err != nil {
+					t.Fatalf("symlink %s: %v", link, err)
+				}
+				return link
+			},
+			wants: func(string) []string { return []string{"pkg/run.go:6 names launchctl"} },
+		},
+		{
+			name:  "an empty root fails naming the root",
+			setup: func(t *testing.T) string { return t.TempDir() },
+			wants: func(root string) []string { return []string{"no Go files", root} },
+		},
+		{
+			name: "a root with only a test file fails naming the root",
+			setup: func(t *testing.T) string {
+				root := t.TempDir()
+				writeFixture(t, root, "pkg/run_test.go", source)
+				return root
+			},
+			wants: func(root string) []string { return []string{"no Go files", root} },
+		},
+		{
+			name:  "a missing root fails naming the root",
+			setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") },
+			wants: func(root string) []string { return []string{"resolving scan root", root} },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := tc.setup(t)
+			allowPath := writeFixture(t, t.TempDir(), "allow.txt", "# no entries\n")
+
+			err := checkHostToolsAt(root, allowPath)
+			if err == nil {
+				t.Fatalf("checkHostToolsAt(%s) = nil, want a refusal", root)
+			}
+			for _, want := range tc.wants(root) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("checkHostToolsAt error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDarwinScanReadsSomething is the darwin counterpart: a macOS-only file
+// reached through a symlink is found, and a root with no non-test Go file is a
+// refusal naming the root.
+func TestDarwinScanReadsSomething(t *testing.T) {
+	t.Parallel()
+
+	const source = "package pkg\n"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) string
+		wants func(root string) []string
+	}{
+		{
+			name: "a macOS-only file reached through a symlink is scanned",
+			setup: func(t *testing.T) string {
+				real := t.TempDir()
+				writeFixture(t, real, "pkg/run_darwin.go", source)
+				link := filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(real, link); err != nil {
+					t.Fatalf("symlink %s: %v", link, err)
+				}
+				return link
+			},
+			wants: func(string) []string { return []string{"pkg/run_darwin.go:1 is macOS-only"} },
+		},
+		{
+			name:  "an empty root fails naming the root",
+			setup: func(t *testing.T) string { return t.TempDir() },
+			wants: func(root string) []string { return []string{"no Go files", root} },
+		},
+		{
+			name: "a root with only a test file fails naming the root",
+			setup: func(t *testing.T) string {
+				root := t.TempDir()
+				writeFixture(t, root, "pkg/run_test.go", source)
+				return root
+			},
+			wants: func(root string) []string { return []string{"no Go files", root} },
+		},
+		{
+			name:  "a missing root fails naming the root",
+			setup: func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") },
+			wants: func(root string) []string { return []string{"resolving scan root", root} },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := tc.setup(t)
+			allowPath := writeFixture(t, t.TempDir(), "allow.txt", "# no entries\n")
+
+			err := checkDarwinFilesAt(root, allowPath)
+			if err == nil {
+				t.Fatalf("checkDarwinFilesAt(%s) = nil, want a refusal", root)
+			}
+			for _, want := range tc.wants(root) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("checkDarwinFilesAt error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -610,6 +742,8 @@ func TestDarwinFilesNotCounted(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			writeFixture(t, root, tc.path, tc.source)
+			// A clean non-test file keeps the scan from reading nothing, which is a refusal.
+			writeFixture(t, root, "pkg/clean.go", "package pkg\n")
 			allowPath := writeFixture(t, root, "allow.txt", "# no entries\n")
 
 			if err := checkDarwinFilesAt(root, allowPath); err != nil {
@@ -746,15 +880,22 @@ func checkHostToolsAt(root, allowPath string) error {
 
 // hostToolHits scans every non-test Go file under root and returns one hit per
 // file and tool, counting the literals that name it. It fails on a directory or
-// parse error rather than reporting a clean scan.
+// parse error rather than reporting a clean scan, and on a root that holds no
+// non-test Go file: a scan that reads nothing is a refusal, not a pass. A root
+// that is a symlink is resolved first, since WalkDir does not follow one.
 func hostToolHits(root string) ([]hostToolHit, error) {
+	scanRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolving scan root %s: %w", root, err)
+	}
 	var hits []hostToolHit
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	goFiles := 0
+	err = filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if path != root && skippedScanDirs[d.Name()] {
+			if path != scanRoot && skippedScanDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -762,10 +903,11 @@ func hostToolHits(root string) ([]hostToolHit, error) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(scanRoot, path)
 		if err != nil {
 			return err
 		}
+		goFiles++
 		found, err := hostToolHitsInFile(path, filepath.ToSlash(rel))
 		if err != nil {
 			return err
@@ -775,6 +917,9 @@ func hostToolHits(root string) ([]hostToolHit, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scanning %s: %w", root, err)
+	}
+	if goFiles == 0 {
+		return nil, fmt.Errorf("scanning %s: no Go files outside tests, so the scan read nothing", root)
 	}
 	return hits, nil
 }
@@ -984,15 +1129,21 @@ func checkDarwinFilesAt(root, allowPath string) error {
 
 // darwinFileHits scans every non-test Go file under root and returns the ones
 // that are macOS-only. It fails on a directory, read or constraint error rather
-// than reporting a clean scan.
+// than reporting a clean scan, and on a root that holds no non-test Go file. A
+// root that is a symlink is resolved first, as in hostToolHits.
 func darwinFileHits(root string) ([]darwinFileHit, error) {
+	scanRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolving scan root %s: %w", root, err)
+	}
 	var hits []darwinFileHit
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	goFiles := 0
+	err = filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if path != root && skippedScanDirs[d.Name()] {
+			if path != scanRoot && skippedScanDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -1001,11 +1152,12 @@ func darwinFileHits(root string) ([]darwinFileHit, error) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(scanRoot, path)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		goFiles++
 		hit, err := darwinFileHitAt(path, name, rel)
 		if err != nil {
 			return err
@@ -1017,6 +1169,9 @@ func darwinFileHits(root string) ([]darwinFileHit, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scanning %s: %w", root, err)
+	}
+	if goFiles == 0 {
+		return nil, fmt.Errorf("scanning %s: no Go files outside tests, so the scan read nothing", root)
 	}
 	return hits, nil
 }
