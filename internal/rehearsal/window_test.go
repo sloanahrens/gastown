@@ -63,7 +63,7 @@ func TestRehearsalWait(t *testing.T) {
 		doneB++
 		return doneB > 1, nil
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
 		name     string
@@ -77,7 +77,7 @@ func TestRehearsalWait(t *testing.T) {
 	}{
 		{"all done returns no open id", context.Background(), []string{"a", "b"}, waitDone, waitTicks(1), waitDeadline(false), nil, nil},
 		{"deadline returns the open ids", context.Background(), []string{"a", "b"}, waitOpen, waitTicks(0), waitDeadline(true), []string{"a", "b"}, nil},
-		{"cancel returns ctx's error with a tick ready", cancelled, []string{"a"}, waitOpen, waitTicks(1), waitDeadline(false), []string{"a"}, context.Canceled},
+		{"cancel returns ctx's error with a tick ready", canceled, []string{"a"}, waitOpen, waitTicks(1), waitDeadline(false), []string{"a"}, context.Canceled},
 		{"three failed ticks return the last error", context.Background(), []string{"a"}, lastRead, waitTicks(3), waitDeadline(false), []string{"a"}, last},
 		{"a readable tick resets the failed count", context.Background(), []string{"a"}, resetRead, waitTicks(6), waitDeadline(false), nil, nil},
 		{"a failed read keeps its id open", context.Background(), []string{"a", "b"}, partialRead, waitTicks(2), waitDeadline(false), []string{"a"}, errTickClosed},
