@@ -27,3 +27,21 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
     verbs: ["escalate", "bind"]
+---
+# The gt-sbx certificates carry their role in the client name and the
+# organization (credentialRequest in internal/cmd/town_cluster_credentials.go),
+# so this binds the User name. The control cluster's gt-deployers group is not
+# bound here: a gt-sbx deployer certificate carries gt-deployer-policy as its
+# organization, not gt-deployers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sbx-deployer-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sbx-deployer-policy
+subjects:
+  - kind: User
+    name: gt-deployer-policy
+    apiGroup: rbac.authorization.k8s.io
