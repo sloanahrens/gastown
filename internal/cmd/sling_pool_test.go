@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -286,6 +287,59 @@ func TestListPolecatSessions(t *testing.T) {
 	}
 	if n := poolSeatCount("deepseek-flash", got); n != 1 {
 		t.Errorf("only slate sits on the deepseek-flash seat: seat count = %d, want 1", n)
+	}
+}
+
+// TestPoolListedSessionDropped pins gt-mhanbc: a listed session the live read
+// leaves out because its GT_ROLE cannot be read is named, with the error; a
+// role that reads and is not a polecat's leaves no line.
+func TestPoolListedSessionDropped(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		env      map[string]map[string]string
+		want     []string
+		wantWarn string
+	}{
+		{
+			name: "a failed read is named, a non-polecat seat is not",
+			env: map[string]map[string]string{
+				"gt-marble":  {"GT_ROLE": "gastown/polecats/marble"},
+				"gt-broken":  {},
+				"gt-witness": {"GT_ROLE": "gastown/witness"},
+			},
+			want:     []string{"gt-marble"},
+			wantWarn: "warning: session gt-broken's GT_ROLE cannot be read, leaving it out of the live read: unknown variable\n",
+		},
+		{
+			name: "every role that reads leaves no warning",
+			env: map[string]map[string]string{
+				"gt-marble":  {"GT_ROLE": "gastown/polecats/marble"},
+				"gt-witness": {"GT_ROLE": "gastown/witness"},
+			},
+			want: []string{"gt-marble"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var warn bytes.Buffer
+			got, err := listPolecatSessionsTo(&fakeLister{sessions: c.env}, nil, nil, poolTestNow, &warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, s := range got {
+				names = append(names, s.name)
+			}
+			sort.Strings(names)
+			if !slices.Equal(names, c.want) {
+				t.Fatalf("sessions = %v, want %v", names, c.want)
+			}
+			if warn.String() != c.wantWarn {
+				t.Fatalf("warning = %q, want %q", warn.String(), c.wantWarn)
+			}
+		})
 	}
 }
 
