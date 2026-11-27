@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -71,7 +73,7 @@ func TestTownClusterRollbackOrder(t *testing.T) {
 }
 
 // TestTownClusterRollbackRefusesFlags: an empty plan, an empty kubeconfig and a
-// flag-shaped kubeconfig each refuse before any read or kubectl call.
+// flag-shaped kubeconfig each refuse before any read, kubectl call or ledger line.
 func TestTownClusterRollbackRefusesFlags(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, plan, kubeconfig, want string }{
@@ -88,6 +90,11 @@ func TestTownClusterRollbackRefusesFlags(t *testing.T) {
 			}
 			if len(kube.calls) != 0 {
 				t.Errorf("the rollback made %d calls, want none: %v", len(kube.calls), kube.calls)
+			}
+			if tc.plan != "" {
+				if _, err := os.Stat(filepath.Join(tc.plan, rollbackLedgerName)); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a refused flag left a ledger (stat: %v), want none", err)
+				}
 			}
 		})
 	}

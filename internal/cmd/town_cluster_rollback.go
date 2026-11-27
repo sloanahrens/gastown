@@ -22,8 +22,9 @@ var townClusterRollbackCmd = &cobra.Command{
 	Long: `Undo each Deployment the plan holds to the revision plan.json records for it:
 one kubectl rollout undo per Deployment, in the reverse of the apply's order, each
 waited for before the next. The deployer's runner checks the approval first; this
-command does not. Whatever the outcome, one line is appended to rollback-ledger.jsonl
-in the plan directory.`,
+command does not. A refused flag or kubeconfig path records nothing; once both are
+accepted, whatever the outcome, one line is appended to rollback-ledger.jsonl in
+the plan directory.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		planDir, _ := cmd.Flags().GetString("plan")
@@ -55,8 +56,9 @@ const (
 // revision, through kubeconfig, in the reverse of the apply's order. The plan's
 // files must match their hashes, and every revision is checked before the first
 // kubectl call, so a bad plan refuses with nothing undone. A failed undo or wait
-// stops the run. The run appends one ledger line beside plan.json on every outcome;
-// a line that cannot be written is an error, so a cluster change is never unrecorded.
+// stops the run. A refusal of the flags or the kubeconfig path returns before any
+// record. Past those, the run appends one ledger line beside plan.json on every
+// outcome; a line that cannot be written is an error, so a cluster change is never unrecorded.
 func runTownClusterRollback(ctx context.Context, kube update.RunFunc, out io.Writer, planDir, kubeconfig string) (err error) {
 	// An empty plan path would read the working directory, and an empty kubeconfig
 	// would fall back to the operator's default cluster; both refuse before any read.
