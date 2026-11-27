@@ -6060,6 +6060,77 @@ func TestTickEffQuietSecondTickLiveRig(t *testing.T) {
 	}
 }
 
+// TestTickEffQuietRecordsNothingWithoutHashes: specTickBoard's recording leaves
+// the quiet-rig memory as it was for a rig whose hashes are absent from the tick's
+// held hashes — nil hashes, or a rig the hashes statement did not answer — because
+// noteRigRead would store an empty hash for it, and an empty hash reads the board
+// (gt-slthzl). The rigs are still read; only the recording is skipped, and a rig
+// the tick does hold is recorded.
+func TestTickEffQuietRecordsNothingWithoutHashes(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+	runBoard := func(t *testing.T, heads map[string]beadsql.RigHash) (*specAnnotated, map[string]int) {
+		t.Helper()
+		town := quietWiringTown(t)
+		memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+		var mu sync.Mutex
+		reads := map[string]int{}
+		board := specTickBoard(specTickBoardDeps{
+			townRoot:    town,
+			maxPriority: 2,
+			reads:       newSpecTickReads(),
+			ready: func(rigPath string) ([]*beads.Issue, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				reads[filepath.Base(rigPath)]++
+				return nil, nil
+			},
+			rigStatus:   func(string, string) (bool, string) { return false, "" },
+			heads:       func() map[string]beadsql.RigHash { return heads },
+			memory:      memory,
+			now:         func() time.Time { return now },
+			detailStore: func(string) beads.Client { return nil },
+		})
+		if got := board(nil, nil, nil); len(got.Errors) != 0 {
+			t.Fatalf("board read: Errors = %v, want none", got.Errors)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return memory, reads
+	}
+
+	t.Run("nil hashes", func(t *testing.T) {
+		t.Parallel()
+		memory, reads := runBoard(t, nil)
+		if reads["gastown"] != 1 || reads["beads"] != 1 {
+			t.Errorf("ready reads = %v, want one for each rig: nil hashes skip no rig", reads)
+		}
+		memory.mu.Lock()
+		defer memory.mu.Unlock()
+		if len(memory.rigs) != 0 {
+			t.Errorf("the tick held no hashes and recorded %v, want the memory unchanged", memory.rigs)
+		}
+	})
+
+	t.Run("a rig absent from the held hashes", func(t *testing.T) {
+		t.Parallel()
+		memory, reads := runBoard(t, map[string]beadsql.RigHash{"beads": {Head: "b1", Working: "b2"}})
+		if reads["gastown"] != 1 {
+			t.Fatalf("gastown got %d ready read(s), want 1: a rig absent from the hashes is not quiet", reads["gastown"])
+		}
+		memory.mu.Lock()
+		defer memory.mu.Unlock()
+		if got, ok := memory.rigs["gastown"]; ok {
+			t.Errorf("gastown, absent from the held hashes, was recorded %+v, want nothing", got)
+		}
+		want := specRigRead{Head: "b1", Working: "b2", At: now}
+		if got := memory.rigs["beads"]; got != want {
+			t.Errorf("beads, the rig the tick holds, recorded %+v, want %+v", got, want)
+		}
+	})
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
