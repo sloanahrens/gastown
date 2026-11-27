@@ -1225,16 +1225,16 @@ func TestRunTakesTheVerdictFromTheSweepExit(t *testing.T) {
 				overrides[tiersweep.EnvLogDir])
 			return 1
 		})
-		verdict, summary := runAndRead(t, h, "integration")
-		if verdict.Verdict != "RED" {
-			t.Errorf("integration = %+v, want RED from the sweep's exit status", verdict)
+		got := runAndReadOne(t, h, "integration")
+		if got.Result.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED from the sweep's exit status", got.Result)
 		}
-		if !strings.Contains(summary, "sweep exited 1") {
-			t.Errorf("summary %q does not record the exit status beside a GREEN line", summary)
+		if !strings.Contains(got.Note, "sweep exited 1") {
+			t.Errorf("note %q does not record the exit status beside a GREEN line", got.Note)
 		}
 		// The counts the sweep printed are still the counts the result holds.
-		if verdict.Passed != 7 {
-			t.Errorf("passed = %d, want the printed 7", verdict.Passed)
+		if got.Result.Passed != 7 {
+			t.Errorf("passed = %d, want the printed 7", got.Result.Passed)
 		}
 	})
 
@@ -1266,8 +1266,8 @@ func TestRunTakesTheVerdictFromTheSweepExit(t *testing.T) {
 		})
 		got := runAndReadAll(t, h, "shell", "integration")
 		for _, tier := range []string{"shell", "integration"} {
-			if !strings.Contains(got[tier].Summary, " RED ") || !strings.Contains(got[tier].Summary, "sweep exited 3") {
-				t.Errorf("%s summary %q, want RED with the exit named: no tier can be blamed", tier, got[tier].Summary)
+			if !strings.Contains(got[tier].Summary, " RED ") || !strings.Contains(got[tier].Note, "sweep exited 3") {
+				t.Errorf("%s summary %q / note %q, want RED with the exit named in the note: no tier can be blamed", tier, got[tier].Summary, got[tier].Note)
 			}
 			if got[tier].Result.Verdict != "RED" {
 				t.Errorf("%s = %+v, want RED", tier, got[tier].Result)
@@ -1327,11 +1327,12 @@ func runAndRead(t *testing.T, h *harness, tier string) (sweeprunner.TierResult, 
 	return verdicts[tier], r.Tiers[0].Summary
 }
 
-// tierRead is one tier of a read result: its verdict and the summary line the
-// result holds for it.
+// tierRead is one tier of a read result: its verdict, the summary line the
+// result holds for it, and the note the runner recorded beside it.
 type tierRead struct {
 	Result  sweeprunner.TierResult
 	Summary string
+	Note    string
 }
 
 // runAndReadAll runs the runner for several tiers and returns each tier's
@@ -1351,9 +1352,15 @@ func runAndReadAll(t *testing.T, h *harness, tiers ...string) map[string]tierRea
 	}
 	out := map[string]tierRead{}
 	for _, tier := range r.Tiers {
-		out[tier.Tier] = tierRead{Result: verdicts[tier.Tier], Summary: tier.Summary}
+		out[tier.Tier] = tierRead{Result: verdicts[tier.Tier], Summary: tier.Summary, Note: tier.Note}
 	}
 	return out
+}
+
+// runAndReadOne runs one tier's sweep and returns its verdict, summary and note.
+func runAndReadOne(t *testing.T, h *harness, tier string) tierRead {
+	t.Helper()
+	return runAndReadAll(t, h, tier)[tier]
 }
 
 // TestRunSanitisesTheSweepOutput: whatever the sweep prints is data a reader is
@@ -1366,13 +1373,13 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 		name        string
 		line        string
 		wantVerdict string
-		check       func(t *testing.T, logDir, summary string)
+		check       func(t *testing.T, logDir, summary, note string)
 	}{
 		{
 			name:        "a terminal escape",
 			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) \x1b[31min 1s\x1b[0m\n",
 			wantVerdict: "GREEN",
-			check: func(t *testing.T, _, summary string) {
+			check: func(t *testing.T, _, summary, _ string) {
 				if strings.Contains(summary, "\x1b") {
 					t.Errorf("summary %q holds a terminal escape", summary)
 				}
@@ -1382,7 +1389,7 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			name:        "a NUL byte",
 			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\x00\n",
 			wantVerdict: "GREEN",
-			check: func(t *testing.T, _, summary string) {
+			check: func(t *testing.T, _, summary, _ string) {
 				if strings.ContainsRune(summary, 0) {
 					t.Errorf("summary %q holds a NUL byte", summary)
 				}
@@ -1392,15 +1399,13 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			name:        "a line larger than the cap",
 			line:        "tier-sweep: integration RED passed=0 failed=1 skipped=0 failed: " + strings.Repeat("x", 1<<20) + " (logs %s) in 1s\n",
 			wantVerdict: "RED",
-			check: func(t *testing.T, _, summary string) {
+			check: func(t *testing.T, _, summary, note string) {
 				if len(summary) > maxSummaryBytes {
 					t.Errorf("summary is %d bytes, want at most %d", len(summary), maxSummaryBytes)
 				}
-				// A line longer than the capture cannot be kept whole, so the run
-				// records what it lost rather than passing the fragment off as a
-				// verdict.
-				if !strings.Contains(summary, "output truncated:") {
-					t.Errorf("summary %q does not record the output the run dropped", summary)
+				// A line past the capture cap cannot be kept whole; the note says what was lost.
+				if !strings.Contains(note, "output truncated:") {
+					t.Errorf("note %q does not record the output the run dropped", note)
 				}
 			},
 		},
@@ -1408,7 +1413,7 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			name:        "invalid UTF-8",
 			line:        "tier-sweep: integration RED passed=0 failed=1 skipped=0 failed: \xff\xfe (logs %s) in 1s\n",
 			wantVerdict: "RED",
-			check: func(t *testing.T, _, summary string) {
+			check: func(t *testing.T, _, summary, _ string) {
 				if !utf8.ValidString(summary) {
 					t.Errorf("summary %q is not valid UTF-8", summary)
 				}
@@ -1418,7 +1423,7 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			name:        "a log path the sweep chose",
 			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs ../../etc) in 1s\n",
 			wantVerdict: "GREEN",
-			check: func(t *testing.T, logDir, summary string) {
+			check: func(t *testing.T, logDir, summary, _ string) {
 				if !strings.Contains(summary, "(logs "+logDir+")") {
 					t.Errorf("summary %q does not name the run's own log directory %q", summary, logDir)
 				}
@@ -1431,7 +1436,7 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			name:        "a line that looks like JSON",
 			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 failed: {\"verdict\":\"RED\"} (logs %s) in 1s\n",
 			wantVerdict: "GREEN",
-			check: func(t *testing.T, logDir, summary string) {
+			check: func(t *testing.T, logDir, summary, _ string) {
 				// The payload stays the text it was, and the path is still the
 				// runner's own: nothing in the line is read as a document or a path.
 				if !strings.Contains(summary, "(logs "+logDir+")") {
@@ -1447,13 +1452,13 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 				fmt.Fprintf(stdout, tc.line, overrides[tiersweep.EnvLogDir])
 				return 0
 			})
-			verdict, summary := runAndRead(t, h, "integration")
+			got := runAndReadOne(t, h, "integration")
 			// A line the runner leaves unsafe fails Read, which is the whole
-			// point: runAndRead would have failed the case already.
-			if verdict.Verdict != tc.wantVerdict {
-				t.Errorf("verdict = %q, want the line's own %q beside a clean exit", verdict.Verdict, tc.wantVerdict)
+			// point: runAndReadOne would have failed the case already.
+			if got.Result.Verdict != tc.wantVerdict {
+				t.Errorf("verdict = %q, want the line's own %q beside a clean exit", got.Result.Verdict, tc.wantVerdict)
 			}
-			tc.check(t, filepath.Join(h.out, "logs"), summary)
+			tc.check(t, filepath.Join(h.out, "logs"), got.Summary, got.Note)
 		})
 	}
 }
@@ -1478,13 +1483,13 @@ func TestRunKeepsTheEndOfTheSweepOutput(t *testing.T) {
 			printed = len(noise) + len(line)
 			return 0
 		})
-		verdict, summary := runAndRead(t, h, "integration")
-		if verdict.Verdict != "GREEN" {
-			t.Errorf("integration = %+v, want the GREEN line printed after %d bytes of progress", verdict, len(noise))
+		got := runAndReadOne(t, h, "integration")
+		if got.Result.Verdict != "GREEN" {
+			t.Errorf("integration = %+v, want the GREEN line printed after %d bytes of progress", got.Result, len(noise))
 		}
 		want := fmt.Sprintf("output truncated: %d bytes dropped from the head", printed-maxCaptureBytes)
-		if !strings.Contains(summary, want) {
-			t.Errorf("summary %q does not hold %q", summary, want)
+		if !strings.Contains(got.Note, want) {
+			t.Errorf("note %q does not hold %q", got.Note, want)
 		}
 	})
 
@@ -1517,16 +1522,80 @@ func TestRunKeepsTheEndOfTheSweepOutput(t *testing.T) {
 			printed = len(noise) + len(complaint)
 			return 1
 		})
-		verdict, summary := runAndRead(t, h, "integration")
-		if verdict.Verdict != "RED" {
-			t.Errorf("integration = %+v, want RED", verdict)
+		got := runAndReadOne(t, h, "integration")
+		if got.Result.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED", got.Result)
 		}
-		if !strings.Contains(summary, "could not count the integration packages") {
-			t.Errorf("summary %q does not quote the sweep's last line", summary)
+		if !strings.Contains(got.Summary, "could not count the integration packages") {
+			t.Errorf("summary %q does not quote the sweep's last line", got.Summary)
 		}
 		want := fmt.Sprintf("output truncated: %d bytes dropped from the head", printed-maxStderrCapture)
-		if !strings.Contains(summary, want) {
-			t.Errorf("summary %q does not hold %q", summary, want)
+		if !strings.Contains(got.Note, want) {
+			t.Errorf("note %q does not hold %q", got.Note, want)
+		}
+	})
+}
+
+// noteRun runs a sweep printing beyond the capture cap, then lines with %s filled in.
+func noteRun(t *testing.T, lines []string, code int, tiers ...string) (map[string]tierRead, int) {
+	t.Helper()
+	var printed int
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+		progress := "go: downloading example.com/x v1.2.3 (100%)\n"
+		noise := strings.Repeat(progress, 3*maxCaptureBytes/len(progress)+1)
+		io.WriteString(stdout, noise)
+		printed = len(noise)
+		for _, line := range lines {
+			line = fmt.Sprintf(line, overrides[tiersweep.EnvLogDir])
+			io.WriteString(stdout, line)
+			printed += len(line)
+		}
+		return code
+	})
+	return runAndReadAll(t, h, tiers...), printed
+}
+
+// TestSweepRunNote: a run's notes — the bytes it dropped and the exit status that
+// contradicts a GREEN line — are not failed units. They live in Tier.Note, never
+// in the summary line whose failed: group the daemon splits on spaces (gt-xf0c6g).
+func TestSweepRunNote(t *testing.T) {
+	t.Parallel()
+	const dropped = "output truncated: %d bytes dropped from the head"
+
+	t.Run("a truncated run keeps the note off every summary and the byte count in every note", func(t *testing.T) {
+		t.Parallel()
+		const pkg = "./internal/race"
+		got, printed := noteRun(t, []string{"tier-sweep: integration RED passed=12 failed=1 skipped=0 failed: " + pkg + " (logs %s) in 3m2s\n"}, 0, "shell", "integration")
+		want := fmt.Sprintf(dropped, printed-maxCaptureBytes)
+		for _, tier := range []string{"shell", "integration"} {
+			if got[tier].Note != want {
+				t.Errorf("%s note = %q, want %q", tier, got[tier].Note, want)
+			}
+		}
+		g := got["integration"]
+		if strings.Contains(g.Summary, "output truncated") || !strings.Contains(g.Summary, "failed: "+pkg+" (logs ") {
+			t.Errorf("summary %q, want the failing package with no note", g.Summary)
+		}
+		if len(g.Result.FailedNames) != 1 || g.Result.FailedNames[0] != pkg {
+			t.Errorf("failed names = %q, want exactly %q", g.Result.FailedNames, pkg)
+		}
+	})
+
+	t.Run("a non-zero exit beside only GREEN lines puts the contradiction in the note", func(t *testing.T) {
+		t.Parallel()
+		const pkg = "./pkg/a"
+		got, printed := noteRun(t, []string{"tier-sweep: integration GREEN passed=7 failed=0 skipped=0 failed: " + pkg + " (logs %s) in 1s\n"}, 1, "integration")
+		g := got["integration"]
+		// Both notes arrive on this tier, so they must be joined with "; ".
+		want := fmt.Sprintf(dropped, printed-maxCaptureBytes) + "; sweep exited 1 beside a GREEN summary line"
+		if g.Result.Verdict != "RED" || g.Note != want {
+			t.Errorf("integration = %+v, note %q, want RED with note %q", g.Result, g.Note, want)
+		}
+		if strings.Contains(g.Summary, "output truncated") || strings.Contains(g.Summary, "sweep exited") {
+			t.Errorf("summary %q carries a note, want both only in the note", g.Summary)
+		}
+		if len(g.Result.FailedNames) != 1 || g.Result.FailedNames[0] != pkg {
+			t.Errorf("failed names = %q, want the printed %q and none added", g.Result.FailedNames, pkg)
 		}
 	})
 }
