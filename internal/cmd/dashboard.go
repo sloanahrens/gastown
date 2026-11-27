@@ -530,7 +530,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot))).
 		WithApps(dashboard.NewAppPowerReaderFromSource(cloudSettings.OffDir, cloudSource))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
-	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot))
+	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot)).WithActivity(newBirdActivity(func(id string) (*beads.Issue, error) {
+		return beadReads.show(tailTownRig, id)
+	}, time.Now, whyLog.logf).Last)
 	// The reasons behind a failed seats, ready or questions read are logged
 	// once per change, so a read that stays down is one line (gt-6qc3nw.2).
 	questions := newDashQuestionsReader(townRoot).withWhy(whyLog)

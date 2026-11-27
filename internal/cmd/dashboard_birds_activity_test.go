@@ -1,13 +1,20 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
 // birdActivityRig wires a birdActivity to a fake store, a fake clock and a
@@ -143,5 +150,62 @@ func TestDashboardBirdActivityUnparsedTimeAnswersFalse(t *testing.T) {
 		if len(r.logs) != 1 {
 			t.Errorf("updated_at %q: logs = %q, want exactly one line", updated, r.logs)
 		}
+	}
+}
+
+// The hub the command builds puts each bird's last activity on its row. dunlin's
+// handoff bead was updated two hours ago, so its row carries that time; rictus
+// has no handoff bead, so its row carries none (gt-o5bifr). The fake store
+// reaches the hub through the seam's tailOptions, the same beads reader the
+// birds' activity closure reads at each call.
+func TestDashboardBirdsCarryLastActive(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	written := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	for _, bird := range []string{"dunlin", "rictus"} {
+		reports := filepath.Join(root, ".runtime", bird, "reports")
+		if err := os.MkdirAll(reports, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sidecar := fmt.Sprintf(`{"bird":%q,"written_at":%q,"title":"t","summary":"s"}`, bird, written)
+		if err := os.WriteFile(filepath.Join(reports, "daily.json"), []byte(sidecar), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updated := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
+	observe := func(opts tailOptions) {
+		opts.beads.show = func(_, id string) (*beads.Issue, error) {
+			if id == "gt-dunlin" {
+				return &beads.Issue{ID: id, UpdatedAt: updated.Format(time.RFC3339)}, nil
+			}
+			return nil, beads.ErrNotFound
+		}
+	}
+
+	hub, closeSources, err := newDashboardHub(root, time.Now(), time.UTC, "", nil, 0, 0, "", io.Discard, dashboardHubSeam{observe: observe})
+	if err != nil {
+		t.Fatalf("building the dashboard's hub: %v", err)
+	}
+	defer closeSources()
+
+	rec := httptest.NewRecorder()
+	hub.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/birds", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/birds: status %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	var rows []dashboard.BirdReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decoding /api/birds: %v (body %q)", err, rec.Body.String())
+	}
+	byBird := map[string]dashboard.BirdReport{}
+	for _, r := range rows {
+		byBird[r.Bird] = r
+	}
+	if got := byBird["dunlin"].LastActive; !got.Equal(updated) {
+		t.Errorf("dunlin LastActive = %v, want its handoff bead's update time %v", got, updated)
+	}
+	if got := byBird["rictus"].LastActive; !got.IsZero() {
+		t.Errorf("rictus LastActive = %v, want zero for a bird with no handoff bead", got)
 	}
 }
