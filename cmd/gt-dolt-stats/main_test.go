@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -30,7 +31,7 @@ func TestRunAppendsOneRowForGtDolt(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var got string
-	read := func(container string) ([]byte, error) {
+	read := func(_ context.Context, container string) ([]byte, error) {
 		got = container
 		return []byte(statsLine), nil
 	}
@@ -58,19 +59,19 @@ func TestRunNamesFailingStep(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, dir string)
-		read    func(string) ([]byte, error)
+		read    func(context.Context, string) ([]byte, error)
 		step    string
 	}{
-		{"read", nil, func(string) ([]byte, error) {
+		{"read", nil, func(context.Context, string) ([]byte, error) {
 			return nil, errors.New("docker stats: daemon not reachable")
 		}, "read"},
-		{"parse", nil, func(string) ([]byte, error) { return []byte("CPUPerc=349.74%"), nil }, "parse"},
+		{"parse", nil, func(context.Context, string) ([]byte, error) { return []byte("CPUPerc=349.74%"), nil }, "parse"},
 		{"append", func(t *testing.T, dir string) {
 			t.Helper()
 			if err := os.WriteFile(filepath.Join(dir, "resources"), nil, 0o644); err != nil {
 				t.Fatalf("block the resources directory: %v", err)
 			}
-		}, func(string) ([]byte, error) { return []byte(statsLine), nil }, "append"},
+		}, func(context.Context, string) ([]byte, error) { return []byte(statsLine), nil }, "append"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,10 +105,12 @@ func TestRunRefusesWithoutRow(t *testing.T) {
 	tests := []struct {
 		name string
 		flag string
-		read func(string) ([]byte, error)
+		read func(context.Context, string) ([]byte, error)
 	}{
-		{"flags", "--nope", func(string) ([]byte, error) { return []byte(statsLine), nil }},
-		{"read fails", "", func(string) ([]byte, error) { return nil, errors.New("docker stats: daemon not reachable") }},
+		{"flags", "--nope", func(context.Context, string) ([]byte, error) { return []byte(statsLine), nil }},
+		{"read fails", "", func(context.Context, string) ([]byte, error) {
+			return nil, errors.New("docker stats: daemon not reachable")
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -124,5 +127,34 @@ func TestRunRefusesWithoutRow(t *testing.T) {
 				t.Errorf("dir = %v, %v: want empty, so no row appended", entries, err)
 			}
 		})
+	}
+}
+
+// TestRunBoundsTheStatsRead: a read that waits for its context ends at readTimeout, and run returns 1 naming the stats read (gt-r8sgrc).
+
+//testpolicy:allow parallel — it assigns the package's readTimeout, which no parallel test may see
+func TestRunBoundsTheStatsRead(t *testing.T) {
+	was := readTimeout
+	readTimeout = 5 * time.Millisecond //testpolicy:allow no-global-swap — the bead specifies the package variable readTimeout so a test shortens the deadline, and the recorded run has no other seam for it
+	t.Cleanup(func() { readTimeout = was })
+
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+	read := func(ctx context.Context, _ string) ([]byte, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second): //testpolicy:allow no-sleep — a hang guard only: the deadline under test ends the read in milliseconds, so only a missing bound reaches this
+			return nil, errors.New("the read did not end at readTimeout")
+		}
+	}
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, read); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+	if got, want := strings.TrimSuffix(stderr.String(), "\n"), "gt-dolt-stats: read: docker stats: timed out after 5ms"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("dir = %v, %v: want empty, so no row appended", entries, err)
 	}
 }
