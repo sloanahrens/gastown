@@ -196,7 +196,16 @@ case "$1" in
   upgrade) touch "$STATE/helm-release" ;;
   # STUB_HELM_FAILED: a release that exists but is not deployed (a failed or
   # pending upgrade); `helm list --deployed` omits it, as the CLI does.
-  list) [ -f "$STATE/helm-release" ] && [ -z "${STUB_HELM_FAILED:-}" ] && echo openshell ;;
+  # STUB_HELM_LIST_FAILS_FROM=N: the Nth and later `helm list` calls exit 1, as
+  # a query that cannot reach the cluster does. Call 1 is the first-install
+  # query and call 2 the skip-helm query, so N=2 reaches the second use.
+  list)
+    n=$(cat "$STATE/helm-list-n" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" >"$STATE/helm-list-n"
+    if [ -n "${STUB_HELM_LIST_FAILS_FROM:-}" ] && [ "$n" -ge "$STUB_HELM_LIST_FAILS_FROM" ]; then exit 1; fi
+    # No release is an empty answer with exit 0, as the CLI gives it.
+    if [ -f "$STATE/helm-release" ] && [ -z "${STUB_HELM_FAILED:-}" ]; then echo openshell; fi ;;
 esac
 STUB
 cat >"$TMP/bin/openssl" <<'STUB'
@@ -547,6 +556,59 @@ check "the failure names the kubectl error, not a missing layout" contains "cann
 check "the kubectl error text is shown" contains "connection to the server" "$OUT_TEXT"
 check "a failing node query does not claim the layout is missing" lacks "lacks the core and sandbox nodes" "$OUT_TEXT"
 check "nothing is installed after a failing node query" lacks "helm upgrade --install" "$CALLS_LOG"
+
+echo "the in-cluster objects are applied only by a first install"
+calls_with() { grep -cF -- "$1" "$S/calls.log" || true; }
+scenario deployedrerun
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")" >"$S/state/marker"
+run "$UP" --
+check "a rerun on a deployed release exits 0" test "$RC" -eq 0
+check "the rerun names the deployer for the in-cluster objects" contains "gt town cluster apply --cluster gt-sbx" "$OUT_TEXT"
+check "the rerun applies no priority classes" test "$(calls_with "priority-classes.yaml")" -eq 0
+check "the rerun downloads no agent-sandbox manifest" lacks "agent-sandbox/releases/download" "$CALLS_LOG"
+check "the rerun applies no agent-sandbox manifest" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml")" -eq 0
+check "the rerun patches no agent-sandbox controller" lacks "agent-sandbox-controller" "$CALLS_LOG"
+check "the rerun sets no controller nodeSelector" lacks "nodeSelector" "$CALLS_LOG"
+check "the rerun waits on no agent-sandbox rollout" lacks "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
+check "the rerun still applies metrics-server" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml")" -eq 1
+check "the rerun still patches the metrics-server flag" test "$(calls_with 'patch deployment metrics-server')" -eq 1
+check "the rerun still waits on the metrics-server rollout" contains "rollout status deployment/metrics-server" "$CALLS_LOG"
+check "the rerun still writes the registry mirror to hosts.toml" contains 'server = "http://gt-registry:5000"' "$(cat "$S/state/hosts.toml")"
+check "the rerun still exports the client key as mode 600" test "$(mode "$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls/tls.key")" = 600
+check "the rerun makes no helm call for an unchanged chart" lacks "helm upgrade" "$CALLS_LOG"
+echo "a cluster with no openshell release is a first install"
+scenario norelease
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" --
+check "a cluster with no release exits 0" test "$RC" -eq 0
+check "the priority classes are applied once" test "$(calls_with "priority-classes.yaml")" -eq 1
+check "the priority classes are applied before the chart" before "priority-classes.yaml" "helm upgrade --install"
+check "the agent-sandbox manifest is applied once" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml")" -eq 1
+check "the controller gets the core nodeSelector once" test "$(calls_with "$patch_args")" -eq 1
+check "the controller is patched once with the guaranteed pair" test "$(calls_with 'patch deployment/agent-sandbox-controller')" -eq 1
+check "the controller's container has requests equal to limits (100m, 128Mi)" guaranteed "$S/state/patch-controller" containers 0 100m 128Mi
+check "the controller rollout is awaited" contains "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
+check "the chart is installed once" test "$(calls_with 'helm upgrade --install')" -eq 1
+check "a first install prints no deployer line" lacks "gt town cluster apply" "$OUT_TEXT"
+
+echo "a failed helm list is not a first install: the run stops before anything is applied"
+scenario helmlistfail
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+run "$UP" STUB_HELM_LIST_FAILS_FROM=1 --
+check "a helm list that exits non-zero stops the run" test "$RC" -ne 0
+check "the failure names the helm list query" contains "helm list --namespace openshell --deployed failed" "$OUT_TEXT"
+check "no apply runs after a failed helm list" lacks "kubectl apply" "$CALLS_LOG"
+check "no patch runs after a failed helm list" lacks "patch" "$CALLS_LOG"
+check "no helm upgrade runs after a failed helm list" lacks "helm upgrade" "$CALLS_LOG"
+scenario helmlistskip
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")" >"$S/state/marker"
+run "$UP" STUB_HELM_LIST_FAILS_FROM=2 --
+check "a helm list that fails on the skip check stops the run" test "$RC" -ne 0
+check "the skip-check failure names the helm list query" contains "helm list --namespace openshell --deployed failed" "$OUT_TEXT"
+check "no helm upgrade runs after a failed skip check" lacks "helm upgrade" "$CALLS_LOG"
+check "no manifest is applied after a failed skip check" lacks "gateway-nodeport.yaml" "$CALLS_LOG"
 
 echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
 VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"
