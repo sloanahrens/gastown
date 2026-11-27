@@ -1,4 +1,4 @@
-.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-makefile test-e2e-container check-up-to-date lint lint-tools golangci-lint-version ci-base-image docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
+.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-makefile test-e2e-container check-up-to-date lint lint-tools golangci-lint-version ci-base-image docs-lint bd-command-tree gate gate-lint gate-branch-checks gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -519,7 +519,16 @@ gate: gate-lint gate-test
 # (gt-5suext); make lint keeps the full scan.
 gate-lint: LINT_RUNNER_FLAGS := --allow-serial-runners
 gate-lint: HYGIENE_SCAN_FLAGS := -changed-since origin/main
-gate-lint: exec-tax-preflight lint
+gate-lint: exec-tax-preflight gate-branch-checks lint
+
+# gate-lint's branch checks are the three presubmit checks that need no build
+# (gt-y1z02o): a branch they reject fails in seconds, before lint. testwaits and
+# gomodrationale fail the gate, unwired stays advisory as in presubmit, and each
+# prints its wall whatever its outcome.
+gate-branch-checks:
+	@start=$$(date +%s); go run ./internal/presubmit/cmd/testwaits -base $(PRESUBMIT_BASE); rc=$$?; echo "gate: check testwaits $$(( $$(date +%s) - $$start ))s" >&2; [ $$rc -eq 0 ] || { echo "gate: FAILED at testwaits" >&2; exit 1; }
+	@start=$$(date +%s); go run ./internal/presubmit/cmd/gomodrationale -base $(PRESUBMIT_BASE); rc=$$?; echo "gate: check gomodrationale $$(( $$(date +%s) - $$start ))s" >&2; [ $$rc -eq 0 ] || { echo "gate: FAILED at gomodrationale" >&2; exit 1; }
+	@start=$$(date +%s); go run ./internal/presubmit/cmd/unwired -base $(PRESUBMIT_BASE); rc=$$?; echo "gate: check unwired $$(( $$(date +%s) - $$start ))s" >&2; [ $$rc -eq 0 ] || echo "presubmit: WARNING: the unwired export check could not judge the branch; it is advisory and presubmit continues" >&2
 
 # The unit tier's wall series (gt-u0up0): each run appends one line per package
 # to the town's .runtime/metrics/gate-walls.jsonl, so the gate's time can be
