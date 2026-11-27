@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -36,13 +39,38 @@ type approvalVerifier func(rec clusterapproval.Record, plan planRecord) error
 // returned naming nothing as applied. Each held Deployment is then re-read with
 // recheckApplyDeployments; one the cluster no longer holds at the plan's
 // resourceVersion refuses with nothing applied, before any apply call. Then
-// applyPlanFiles applies the files. Nothing in the tree calls it yet: the
-// command that runs it is gt-7bxoh0.
-func runTownClusterApply(ctx context.Context, kube update.RunFunc, planDir, approvalPath string, kubeconfigs planFlags, verify approvalVerifier) error {
+// applyPlanFiles applies the files. Whatever the outcome, the run appends one
+// line to the ledger beside the approval record (time, plan id, the files this
+// run applied, and the result), so a refused run is recorded too. A line that
+// cannot be written is an error: a change on the cluster is never left
+// unrecorded.
+func runTownClusterApply(ctx context.Context, kube update.RunFunc, planDir, approvalPath string, kubeconfigs planFlags, verify approvalVerifier) (err error) {
+	var planID string
+	var applied []string
+	defer func() {
+		result := applyResultRefused
+		switch {
+		case err == nil:
+			result = applyResultApplied
+		case len(applied) > 0:
+			result = applyResultPartial
+		}
+		objects := applied
+		if objects == nil {
+			objects = []string{}
+		}
+		entry := applyLedgerEntry{TS: time.Now().UTC(), Plan: planID, Objects: objects, Result: result}
+		if ledgerErr := appendApplyLedger(applyLedgerPath(approvalPath), entry); ledgerErr != nil {
+			// The run's own error stays beside the ledger error; a good apply
+			// whose line was not written is an error, never a silent success.
+			err = errors.Join(err, fmt.Errorf("gt town cluster apply: the run's outcome is not recorded, and its ledger line could not be written: %w", ledgerErr))
+		}
+	}()
 	record, held, err := loadApplyPlan(planDir, kubeconfigs)
 	if err != nil {
 		return err
 	}
+	planID = record.ID
 	files, err := checkApplyPlanFiles(planDir, record)
 	if err != nil {
 		return err
@@ -62,7 +90,99 @@ func runTownClusterApply(ctx context.Context, kube update.RunFunc, planDir, appr
 	if err := recheckApplyDeployments(ctx, kube, held); err != nil {
 		return err
 	}
-	return applyPlanFiles(ctx, kube, planDir, files, kubeconfigs)
+	applied, err = applyPlanFiles(ctx, kube, planDir, files, kubeconfigs)
+	return err
+}
+
+// applyLedgerName is the ledger `gt town cluster apply` appends one line to per
+// run. It sits beside the approval record, in the approvals directory the
+// deployer owns, and its 0644 create mode lets the operator read it.
+const applyLedgerName = "apply-ledger.jsonl"
+
+// The result a ledger line records: applied is a run that applied every file,
+// refused one that applied nothing, and partial one that applied some and then
+// stopped.
+const (
+	applyResultApplied = "applied"
+	applyResultRefused = "refused"
+	applyResultPartial = "partial"
+)
+
+// applyLedgerEntry is one line of the apply's ledger: when the run happened, the
+// plan it applied, the files it applied in order, and the result. A refused run
+// names no files, and its plan id is empty until plan.json has read.
+type applyLedgerEntry struct {
+	TS      time.Time `json:"ts"`
+	Plan    string    `json:"plan"`
+	Objects []string  `json:"objects"`
+	Result  string    `json:"result"`
+}
+
+// applyLedgerPath is the ledger a run appends to: beside the approval record,
+// the file whose directory the deployer owns.
+func applyLedgerPath(approvalPath string) string {
+	return filepath.Join(filepath.Dir(approvalPath), applyLedgerName)
+}
+
+// applyLedgerWriter is what an append writes through: the ledger file in
+// production, and a fake in a test, so a write or close failure that a full disk
+// would cause is driven without one.
+type applyLedgerWriter interface {
+	io.Writer
+	io.Closer
+}
+
+// applyLedger appends lines to one ledger file. open is a field so a test can
+// hand an append a file whose write or close fails.
+type applyLedger struct {
+	path string
+	open func(string) (applyLedgerWriter, error)
+}
+
+// openApplyLedger opens the ledger at path for an append, creating it 0644 so
+// the operator can read it. A symlink at path is refused, and so is a path that
+// cannot be checked: the apply never appends through a link or a path it could
+// not examine.
+func openApplyLedger(path string) (applyLedgerWriter, error) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("the ledger %s is a symlink, and the apply appends only to a real file", path)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("the ledger %s cannot be checked: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("the ledger %s cannot be opened: %w", path, err)
+	}
+	return f, nil
+}
+
+// append writes one entry as a JSON line. The line goes in one Write under
+// O_APPEND, so two runs' lines cannot interleave.
+func (l applyLedger) append(entry applyLedgerEntry) error {
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("the apply's ledger line cannot be built: %w", err)
+	}
+	line = append(line, '\n')
+	f, err := l.open(l.path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close() // the write error is the one to report; a close error cannot change it
+		return fmt.Errorf("the ledger %s cannot be written: %w", l.path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("the ledger %s cannot be written: %w", l.path, err)
+	}
+	return nil
+}
+
+// appendApplyLedger appends one line for a run to the ledger at path.
+func appendApplyLedger(path string, entry applyLedgerEntry) error {
+	return applyLedger{path: path, open: openApplyLedger}.append(entry)
 }
 
 // applyPlanFile is one plan file with the bytes checkApplyPlanFiles read and
@@ -174,8 +294,10 @@ func checkApplyKind(file planRecordFile, kind string) error {
 // flag refuses with nothing applied rather than after phase P has been applied,
 // and a file whose phase is not one of the plan's two is refused rather than
 // dropped. A failed call stops the run with no rollback, and the error names the
-// files applied and not applied, never kubectl's output.
-func applyPlanFiles(ctx context.Context, kube update.RunFunc, planDir string, files []applyPlanFile, kubeconfigs planFlags) error {
+// files applied and not applied, never kubectl's output. It returns the files it
+// applied, in order, so the ledger records them; on a failure that list is the
+// files applied before it.
+func applyPlanFiles(ctx context.Context, kube update.RunFunc, planDir string, files []applyPlanFile, kubeconfigs planFlags) ([]string, error) {
 	byPhase := map[string]string{}
 	for _, f := range files {
 		if _, ok := byPhase[f.file.Phase]; ok {
@@ -183,7 +305,7 @@ func applyPlanFiles(ctx context.Context, kube update.RunFunc, planDir string, fi
 		}
 		kubeconfig, err := applyPhaseKubeconfig(f.file.Phase, kubeconfigs)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		byPhase[f.file.Phase] = kubeconfig
 	}
@@ -195,13 +317,15 @@ func applyPlanFiles(ctx context.Context, kube update.RunFunc, planDir string, fi
 			}
 		}
 	}
+	applied := make([]string, 0, len(ordered))
 	for i, f := range ordered {
 		_, exit, err := kube(withRunStdin(ctx, f.data), planDir, nil, "kubectl", "--kubeconfig", byPhase[f.file.Phase], "apply", "-f", "-")
 		if err != nil || exit != 0 {
-			return fmt.Errorf("gt town cluster apply: the apply of %s failed, a partial apply: applied %s and not applied %s; nothing was rolled back", f.file.Name, applyFileNames(ordered[:i]), applyFileNames(ordered[i:]))
+			return applied, fmt.Errorf("gt town cluster apply: the apply of %s failed, a partial apply: applied %s and not applied %s; nothing was rolled back", f.file.Name, applyFileNames(ordered[:i]), applyFileNames(ordered[i:]))
 		}
+		applied = append(applied, f.file.Name)
 	}
-	return nil
+	return applied, nil
 }
 
 // applyPhaseKubeconfig is phaseKubeconfig for the apply: it names the apply
