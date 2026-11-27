@@ -1000,6 +1000,10 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 
 	// Wait for Claude to start (non-fatal)
 	_ = m.tmux.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout)
+	// The startup waits below are their own phases, so the sling's
+	// "session start" mark, recorded when this launch returns, covers only the
+	// checks after them, and the slow wait can be named (gt-9l3xhn).
+	opts.Trace.Mark("agent command wait")
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear
 	_ = m.tmux.AcceptStartupDialogs(sessionID)
@@ -1007,11 +1011,13 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
 	}
+	opts.Trace.Mark("startup dialogs")
 
 	// Wait for runtime to be fully ready at the prompt (not just started).
 	// Uses prompt-based polling for agents with ReadyPromptPrefix (e.g., Claude "❯ "),
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
 	_ = m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout)
+	opts.Trace.Mark("runtime ready wait")
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
 		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
