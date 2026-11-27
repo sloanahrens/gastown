@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/clusterapproval"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -60,20 +66,67 @@ func shapeApprovalFor(sha string) []byte {
 }
 
 // shapeLiveKube is a RunFunc that records every kubectl call's arguments and
-// stdin and answers each read with out at exit, failing with err, so a test can
-// choose the cluster's answer and show which calls the run made.
+// stdin. When answer is set it answers each call through it; otherwise it
+// answers every call with out at exit, failing with err, so a test can choose the
+// cluster's answer and show which calls the run made.
 type shapeLiveKube struct {
 	calls  [][]string
 	stdins []string
 	out    string
 	exit   int
 	err    error
+	answer func(args []string) (string, int, error)
 }
 
 func (k *shapeLiveKube) run(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
 	k.calls = append(k.calls, args)
 	k.stdins = append(k.stdins, string(runStdinOf(ctx)))
+	if k.answer != nil {
+		return k.answer(args)
+	}
 	return k.out, k.exit, k.err
+}
+
+// shapeVerb is a recorded call's arguments with a leading --kubeconfig pair
+// dropped, so a test reads the verb whatever runner the apply went through.
+func shapeVerb(args []string) []string {
+	if len(args) >= 2 && args[0] == "--kubeconfig" {
+		return args[2:]
+	}
+	return args
+}
+
+// shapeAnswering answers the cluster calls an apply makes: the recheck read of a
+// Deployment answers the live object at versions[name], an apply succeeds, a
+// rollout status succeeds, and the Available read answers available. A Deployment
+// missing from versions reads as one the cluster does not hold.
+func shapeAnswering(versions map[string]string, available string) func(args []string) (string, int, error) {
+	return shapeAnsweringNames(versions, func(string) string { return available })
+}
+
+// shapeAnsweringNames is shapeAnswering with the Deployment's Available condition
+// read from availableFor(name), so a test can hold one Deployment back.
+func shapeAnsweringNames(versions map[string]string, availableFor func(name string) string) func(args []string) (string, int, error) {
+	return func(args []string) (string, int, error) {
+		v := shapeVerb(args)
+		switch {
+		case len(v) > 0 && v[0] == "apply":
+			return "", 0, nil
+		case len(v) > 1 && v[0] == "rollout" && v[1] == "status":
+			return "", 0, nil
+		case len(v) > 2 && v[0] == "get" && (v[1] == "deployment" || strings.HasPrefix(v[1], "deployment/")):
+			if strings.HasPrefix(v[len(v)-1], "jsonpath") {
+				return availableFor(v[2]), 0, nil
+			}
+			name := strings.TrimPrefix(v[1], "deployment/")
+			version, ok := versions[name]
+			if !ok {
+				return "", 0, nil
+			}
+			return `{"metadata":{"name":"` + name + `","namespace":"gastown","resourceVersion":"` + version + `"}}`, 0, nil
+		}
+		return "", 0, nil
+	}
 }
 
 // shapeApplies counts recorded calls that carry an apply verb, so a run that
@@ -101,7 +154,7 @@ func shapeLiveAt(version string) string {
 func TestClusterShapeApplyUnreadablePlan(t *testing.T) {
 	t.Parallel()
 	var calls int
-	err := runTownClusterApply(context.Background(), shapeKube(&calls),
+	err := runTownClusterApply(context.Background(), shapeKube(&calls), io.Discard,
 		filepath.Join(t.TempDir(), "plan"), filepath.Join(t.TempDir(), "approval.json"), readKubeconfs, nil)
 	if err == nil || !strings.Contains(err.Error(), "the plan record cannot be read") {
 		t.Fatalf("runTownClusterApply returned %v, want the plan read error", err)
@@ -136,24 +189,24 @@ func shapeApplyCalls(k *shapeLiveKube) (calls [][]string, stdins []string) {
 // the verifier accepts, and a live Deployment at the plan's resourceVersion are
 // applied: the run re-reads the Deployment under the plan's kubeconfig, then
 // applies its file once under the apply kubeconfig, sending the checked bytes on
-// stdin, and returns nil.
+// stdin, waits for its rollout and Available condition, and returns nil.
 func TestClusterShapeApplyReadablePlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), readWebDoc)
 	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 	writeReadFile(t, filepath.Join(dir, "approval.json"), readApprovalOK)
-	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	kube := &shapeLiveKube{answer: shapeAnswering(map[string]string{"web": "7"}, "True")}
 	var verified int
-	if err := runTownClusterApply(context.Background(), kube.run, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+	if err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, filepath.Join(dir, "approval.json"), readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
 		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
 	}
 	if verified != 1 {
 		t.Errorf("runTownClusterApply called verify %d times, want once", verified)
 	}
 	applies, stdins := shapeApplyCalls(kube)
-	if len(kube.calls) != 2 || len(applies) != 1 {
-		t.Fatalf("runTownClusterApply made the calls %v, want one read and one apply", kube.calls)
+	if len(kube.calls) != 4 || len(applies) != 1 {
+		t.Fatalf("runTownClusterApply made the calls %v, want one read, one apply and the wait's two reads", kube.calls)
 	}
 	want := []string{"--kubeconfig", readKubeconfs.applyKubeconfig, "apply", "-f", "-"}
 	if !slices.Equal(applies[0], want) {
@@ -175,9 +228,9 @@ func TestClusterShapeApplyPhases(t *testing.T) {
 	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapePolicyFile, shapeWebFile))
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, readApprovalOK)
-	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	kube := &shapeLiveKube{answer: shapeAnswering(map[string]string{"web": "7"}, "True")}
 	var verified int
-	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err != nil {
+	if err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err != nil {
 		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
 	}
 	applies, stdins := shapeApplyCalls(kube)
@@ -231,7 +284,7 @@ func TestClusterShapeApplyDocumentKinds(t *testing.T) {
 			writeReadFile(t, approvalPath, readApprovalOK)
 			kube := &shapeLiveKube{out: shapeLiveAt("7")}
 			var verified int
-			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
 				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
 			}
@@ -269,7 +322,7 @@ func TestClusterShapeApplyMissingFlag(t *testing.T) {
 				calls++
 				return "", 0, nil
 			}
-			_, err := applyPlanFiles(context.Background(), kube, t.TempDir(), tc.files, tc.flags)
+			_, err := applyPlanFiles(context.Background(), kube, io.Discard, t.TempDir(), tc.files, tc.flags)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
 				t.Fatalf("applyPlanFiles returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
 			}
@@ -319,7 +372,7 @@ func TestClusterShapeApplyPartial(t *testing.T) {
 				return "", 0, nil
 			}
 			var verified int
-			err := runTownClusterApply(context.Background(), kube, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
+			err := runTownClusterApply(context.Background(), kube, io.Discard, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was rolled back") {
 				t.Fatalf("runTownClusterApply returned %v, want a partial-apply error naming %q", err, tc.wantErr)
 			}
@@ -359,7 +412,7 @@ func TestClusterShapeApplyClusterMoved(t *testing.T) {
 			writeReadFile(t, approvalPath, readApprovalOK)
 			kube := &shapeLiveKube{out: tc.out, exit: tc.exit, err: tc.err}
 			var verified int
-			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+			err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
 				t.Fatalf("runTownClusterApply returned %v, want the moved-cluster refusal naming %q and nothing applied", err, tc.wantErr)
 			}
@@ -384,7 +437,7 @@ func TestClusterShapeApplyOtherPlan(t *testing.T) {
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, shapeApprovalFor(strings.Repeat("cd", 32)))
 	var calls, verified int
-	err := runTownClusterApply(context.Background(), shapeKube(&calls), dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+	err := runTownClusterApply(context.Background(), shapeKube(&calls), io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
 	if err == nil || !strings.Contains(err.Error(), "another plan") || !strings.Contains(err.Error(), "nothing was applied") {
 		t.Fatalf("runTownClusterApply returned %v, want an error saying the approval is for another plan and nothing was applied", err)
 	}
@@ -406,7 +459,7 @@ func TestClusterShapeApplyVerifierError(t *testing.T) {
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, readApprovalOK)
 	var calls, verified int
-	err := runTownClusterApply(context.Background(), shapeKube(&calls), dir, approvalPath, readKubeconfs, shapeVerifier(&verified, errors.New("the approval expired")))
+	err := runTownClusterApply(context.Background(), shapeKube(&calls), io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, errors.New("the approval expired")))
 	if err == nil || !strings.Contains(err.Error(), "the approval expired") || !strings.Contains(err.Error(), "nothing was applied") {
 		t.Fatalf("runTownClusterApply returned %v, want the verifier's error saying nothing was applied", err)
 	}
@@ -441,7 +494,7 @@ func TestClusterShapeApplyUnreadableApproval(t *testing.T) {
 				writeReadFile(t, approvalPath, tc.data)
 			}
 			var calls int
-			err := runTownClusterApply(context.Background(), shapeKube(&calls), dir, approvalPath, readKubeconfs, nil)
+			err := runTownClusterApply(context.Background(), shapeKube(&calls), io.Discard, dir, approvalPath, readKubeconfs, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("runTownClusterApply returned %v, want an error naming %q", err, tc.wantErr)
 			}
@@ -485,14 +538,14 @@ func TestClusterShapeApplyLedger(t *testing.T) {
 	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(shapeWebFile))
 	approvalPath := filepath.Join(dir, "approval.json")
 	writeReadFile(t, approvalPath, readApprovalOK)
-	kube := &shapeLiveKube{out: shapeLiveAt("7")}
+	kube := &shapeLiveKube{answer: shapeAnswering(map[string]string{"web": "7"}, "True")}
 	var verified int
-	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+	if err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
 		t.Fatalf("the applied run returned %v, want the plan applied", err)
 	}
 	// A refused run: the plan file no longer hashes to what plan.json records.
 	writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), append(append([]byte{}, readWebDoc...), "# edited\n"...))
-	if err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err == nil {
+	if err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err == nil {
 		t.Fatal("the refused run was applied, want a refusal")
 	}
 	lines := shapeLedgerLines(t, approvalPath)
@@ -538,7 +591,7 @@ func TestClusterShapeApplyLedgerPartial(t *testing.T) {
 		return "", 0, nil
 	}
 	var verified int
-	if err := runTownClusterApply(context.Background(), kube, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err == nil {
+	if err := runTownClusterApply(context.Background(), kube, io.Discard, dir, approvalPath, shapeFlags, shapeVerifier(&verified, nil)); err == nil {
 		t.Fatal("a failed phase W apply was reported as applied, want a partial apply")
 	}
 	lines := shapeLedgerLines(t, approvalPath)
@@ -567,9 +620,9 @@ func TestClusterShapeApplyLedgerNotRecorded(t *testing.T) {
 		if err := os.Mkdir(applyLedgerPath(approvalPath), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		kube := &shapeLiveKube{out: shapeLiveAt("7")}
+		kube := &shapeLiveKube{answer: shapeAnswering(map[string]string{"web": "7"}, "True")}
 		var verified int
-		err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+		err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
 		if err == nil || !strings.Contains(err.Error(), "ledger line could not be written") {
 			t.Fatalf("runTownClusterApply = %v, want an error saying the ledger line could not be written", err)
 		}
@@ -587,7 +640,7 @@ func TestClusterShapeApplyLedgerNotRecorded(t *testing.T) {
 			t.Fatal(err)
 		}
 		var calls int
-		err := runTownClusterApply(context.Background(), shapeKube(&calls), dir, approvalPath, readKubeconfs, nil)
+		err := runTownClusterApply(context.Background(), shapeKube(&calls), io.Discard, dir, approvalPath, readKubeconfs, nil)
 		if err == nil || !strings.Contains(err.Error(), "there is no approval record") || !strings.Contains(err.Error(), "ledger line could not be written") {
 			t.Fatalf("runTownClusterApply = %v, want the refusal and the ledger error", err)
 		}
@@ -745,7 +798,7 @@ func TestClusterShapeApplyFileHash(t *testing.T) {
 			writeReadFile(t, approvalPath, readApprovalOK)
 			kube := &shapeLiveKube{out: shapeLiveAt("7")}
 			var verified int
-			err := runTownClusterApply(context.Background(), kube.run, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+			err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
 				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
 			}
@@ -756,5 +809,261 @@ func TestClusterShapeApplyFileHash(t *testing.T) {
 				t.Errorf("runTownClusterApply made the calls %v, want none", kube.calls)
 			}
 		})
+	}
+}
+
+// shapeDoc is one plan document of a kind, named in a namespace.
+func shapeDoc(api, kind, name, namespace string) []byte {
+	return []byte("apiVersion: " + api + "\nkind: " + kind + "\nmetadata:\n  name: " + name + "\n  namespace: " + namespace + "\n")
+}
+
+// TestClusterShapeApplyDeploymentTarget: a Deployment file the plan marks Absent
+// is never re-read, so the apply checks its name and namespace itself. One that is
+// not a resource name or not a namespace kubectl could take refuses before any
+// cluster call, since the wait after its apply puts them in kubectl's arguments.
+func TestClusterShapeApplyDeploymentTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		doc     []byte
+		wantErr string
+	}{
+		{name: "the name is not a resource name", doc: shapeDoc("apps/v1", deploymentKind, "web/x", "gt"), wantErr: "is not a resource name"},
+		{name: "the namespace is not a namespace", doc: shapeDoc("apps/v1", deploymentKind, "web", "Gastown"), wantErr: "is not a Kubernetes namespace name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "deployment-web.yaml"), tc.doc)
+			writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(planRecordFile{Name: "deployment-web.yaml", Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(tc.doc), Absent: true}))
+			approvalPath := filepath.Join(dir, "approval.json")
+			writeReadFile(t, approvalPath, readApprovalOK)
+			kube := &shapeLiveKube{}
+			var verified int
+			err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing was applied") {
+				t.Fatalf("runTownClusterApply returned %v, want a refusal naming %q and nothing applied", err, tc.wantErr)
+			}
+			if len(kube.calls) != 0 {
+				t.Errorf("runTownClusterApply made the calls %v, want none", kube.calls)
+			}
+		})
+	}
+}
+
+// TestClusterShapeApplyNoOutput: an apply with nowhere to print its rollback lines
+// refuses before any cluster call, so an operator is never left with a change they
+// cannot undo by hand.
+func TestClusterShapeApplyNoOutput(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	dir, approvalPath := shapeWritePlan(t, docs, files)
+	kube := &shapeLiveKube{answer: shapeAnswering(shapeDaemonHeld(), "True")}
+	err := runTownClusterApply(context.Background(), kube.run, nil, dir, approvalPath, readKubeconfs, shapeVerifier(new(int), nil))
+	if err == nil || !strings.Contains(err.Error(), "nowhere to print its rollback lines") || !strings.Contains(err.Error(), "nothing was applied") {
+		t.Fatalf("runTownClusterApply returned %v, want a refusal naming the missing output and nothing applied", err)
+	}
+	if got := shapeApplies(kube.calls); got != 0 {
+		t.Errorf("the run made %d apply calls, want none: %v", got, kube.calls)
+	}
+}
+
+// shapeDaemonPlan is the daemon namespace's phase W set as the render writes it:
+// one file per object, the claims first, then the ServiceAccount, the Services,
+// and the daemon, the dashboard, trackerd and the bd gateway Deployment. Each
+// Deployment's record holds the resourceVersion the apply re-reads it at and the
+// revision its undo line names. It returns the files' documents and their plan
+// records, so a test writes both.
+func shapeDaemonPlan() (map[string][]byte, []planRecordFile) {
+	objects := []struct{ kind, name, revision string }{
+		{kind: "PersistentVolumeClaim", name: "town-state"},
+		{kind: "ServiceAccount", name: "daemon"},
+		{kind: "Service", name: "forgejo"},
+		{kind: "Service", name: k8sdaemon.BdGatewayName},
+		{kind: "Service", name: k8sdaemon.BdGatewayPushName},
+		{kind: deploymentKind, name: k8sdaemon.Name, revision: "3"},
+		{kind: deploymentKind, name: k8sdaemon.DashboardName, revision: "4"},
+		{kind: deploymentKind, name: k8sdaemon.TrackerName, revision: "5"},
+		{kind: deploymentKind, name: k8sdaemon.BdGatewayName, revision: "6"},
+	}
+	docs := make(map[string][]byte, len(objects))
+	files := make([]planRecordFile, 0, len(objects))
+	for i, object := range objects {
+		api := "v1"
+		if object.kind == deploymentKind {
+			api = "apps/v1"
+		}
+		doc := shapeDoc(api, object.kind, object.name, "gt")
+		name := fmt.Sprintf("%02d-%s-%s.yaml", i+1, strings.ToLower(object.kind), object.name)
+		docs[name] = doc
+		file := planRecordFile{Name: name, Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(doc), Revision: object.revision}
+		if object.kind == deploymentKind {
+			file.ResourceVersion = "7"
+		}
+		files = append(files, file)
+	}
+	return docs, files
+}
+
+// shapeDaemonHeld is the resourceVersion each Deployment of shapeDaemonPlan is
+// held at, as shapeAnswering reads it.
+func shapeDaemonHeld() map[string]string {
+	return map[string]string{
+		k8sdaemon.Name:          "7",
+		k8sdaemon.DashboardName: "7",
+		k8sdaemon.TrackerName:   "7",
+		k8sdaemon.BdGatewayName: "7",
+	}
+}
+
+// shapeWritePlan writes the plan directory and the approval record that approves
+// it, returning both paths.
+func shapeWritePlan(t *testing.T, docs map[string][]byte, files []planRecordFile) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, doc := range docs {
+		writeReadFile(t, filepath.Join(dir, name), doc)
+	}
+	writeReadFile(t, filepath.Join(dir, planFileName), readPlanJSON(files...))
+	approvalPath := filepath.Join(dir, "approval.json")
+	writeReadFile(t, approvalPath, readApprovalOK)
+	return dir, approvalPath
+}
+
+// shapeApplySequence is the apply's ordering as a list of its steps: each file it
+// applied, by kind and name, the rollout status it waited on and the Available
+// read after it. The recheck reads and the printed undo lines are not steps.
+func shapeApplySequence(t *testing.T, k *shapeLiveKube) []string {
+	t.Helper()
+	var steps []string
+	for i, call := range k.calls {
+		v := shapeVerb(call)
+		switch {
+		case len(v) > 0 && v[0] == "apply":
+			var doc struct {
+				Kind     string `yaml:"kind"`
+				Metadata struct {
+					Name string `yaml:"name"`
+				} `yaml:"metadata"`
+			}
+			if err := yaml.Unmarshal([]byte(k.stdins[i]), &doc); err != nil {
+				t.Fatalf("decoding the applied document: %v", err)
+			}
+			steps = append(steps, "apply "+strings.ToLower(doc.Kind)+"/"+doc.Metadata.Name)
+		case len(v) > 1 && v[0] == "rollout" && v[1] == "status":
+			steps = append(steps, "rollout "+v[2])
+		case len(v) > 2 && v[0] == "get" && v[1] == "deployment" && strings.HasPrefix(v[len(v)-1], "jsonpath"):
+			steps = append(steps, "available deployment/"+v[2])
+		}
+	}
+	return steps
+}
+
+// TestClusterShapeApplyGatewayOrder: the apply sends the claims, the
+// ServiceAccount and the Services, then the bd gateway Deployment, and waits for
+// its rollout and its Available condition before it applies the daemon, the
+// dashboard and trackerd — each applied only after the wait before it finished —
+// so the gateway is ready before the daemon behind it is replaced.
+func TestClusterShapeApplyGatewayOrder(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	dir, approvalPath := shapeWritePlan(t, docs, files)
+	kube := &shapeLiveKube{answer: shapeAnswering(shapeDaemonHeld(), "True")}
+	var verified int
+	if err := runTownClusterApply(context.Background(), kube.run, io.Discard, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil)); err != nil {
+		t.Fatalf("runTownClusterApply returned %v, want the plan applied", err)
+	}
+	want := []string{
+		"apply persistentvolumeclaim/town-state",
+		"apply serviceaccount/daemon",
+		"apply service/forgejo",
+		"apply service/bd-gateway",
+		"apply service/bd-gateway-push",
+		"apply deployment/bd-gateway",
+		"rollout deployment/bd-gateway",
+		"available deployment/bd-gateway",
+		"apply deployment/daemon",
+		"rollout deployment/daemon",
+		"available deployment/daemon",
+		"apply deployment/dashboard",
+		"rollout deployment/dashboard",
+		"available deployment/dashboard",
+		"apply deployment/trackerd",
+		"rollout deployment/trackerd",
+		"available deployment/trackerd",
+	}
+	if got := shapeApplySequence(t, kube); !slices.Equal(got, want) {
+		t.Errorf("the apply's steps = %v, want %v", got, want)
+	}
+}
+
+// TestClusterShapeApplyGatewayNotReady: a gateway Deployment whose rollout
+// completes but whose Available condition is not True stops the apply. No further
+// object is applied, the run returns an error, and the undo line for every
+// Deployment it writes is printed with its recorded revision.
+func TestClusterShapeApplyGatewayNotReady(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	dir, approvalPath := shapeWritePlan(t, docs, files)
+	out := &bytes.Buffer{}
+	kube := &shapeLiveKube{answer: shapeAnsweringNames(shapeDaemonHeld(), func(name string) string {
+		if name == k8sdaemon.BdGatewayName {
+			return "False"
+		}
+		return "True"
+	})}
+	var verified int
+	err := runTownClusterApply(context.Background(), kube.run, out, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+	if err == nil || !strings.Contains(err.Error(), "deployment/bd-gateway is not ready") {
+		t.Fatalf("runTownClusterApply = %v, want the gateway's not-ready error", err)
+	}
+	for _, name := range []string{k8sdaemon.Name, k8sdaemon.DashboardName, k8sdaemon.TrackerName} {
+		if strings.Contains(out.String(), "deployment/"+name+" is ready") {
+			t.Errorf("the apply waited on deployment/%s after the gateway refused; printed:\n%s", name, out.String())
+		}
+	}
+	sequence := shapeApplySequence(t, kube)
+	if want := "apply deployment/" + k8sdaemon.BdGatewayName; !slices.Contains(sequence, want) {
+		t.Errorf("the apply's steps = %v, want %q", sequence, want)
+	}
+	for _, name := range []string{k8sdaemon.Name, k8sdaemon.DashboardName, k8sdaemon.TrackerName} {
+		if want := "apply deployment/" + name; slices.Contains(sequence, want) {
+			t.Errorf("the apply applied %q after the gateway was not ready, want it stopped", want)
+		}
+	}
+	for _, line := range []string{
+		"kubectl rollout undo deployment/" + k8sdaemon.BdGatewayName + " -n gt --to-revision=6",
+		"kubectl rollout undo deployment/" + k8sdaemon.Name + " -n gt --to-revision=3",
+		"kubectl rollout undo deployment/" + k8sdaemon.DashboardName + " -n gt --to-revision=4",
+		"kubectl rollout undo deployment/" + k8sdaemon.TrackerName + " -n gt --to-revision=5",
+	} {
+		if !strings.Contains(out.String(), line+"\n") {
+			t.Errorf("the apply never printed the undo line %q; printed:\n%s", line, out.String())
+		}
+	}
+}
+
+// TestClusterShapeApplyMissingRevision: a plan whose Deployment file records no
+// revision refuses with nothing applied, since the undo command the operator
+// would copy would name no revision that exists.
+func TestClusterShapeApplyMissingRevision(t *testing.T) {
+	t.Parallel()
+	docs, files := shapeDaemonPlan()
+	for i := range files {
+		if strings.HasSuffix(files[i].Name, "-deployment-"+k8sdaemon.BdGatewayName+".yaml") {
+			files[i].Revision = ""
+		}
+	}
+	dir, approvalPath := shapeWritePlan(t, docs, files)
+	out := &bytes.Buffer{}
+	kube := &shapeLiveKube{answer: shapeAnswering(shapeDaemonHeld(), "True")}
+	var verified int
+	err := runTownClusterApply(context.Background(), kube.run, out, dir, approvalPath, readKubeconfs, shapeVerifier(&verified, nil))
+	if err == nil || !strings.Contains(err.Error(), "records no revision") || !strings.Contains(err.Error(), "nothing was applied") {
+		t.Fatalf("runTownClusterApply = %v, want a refusal naming the missing revision and nothing applied", err)
+	}
+	if got := shapeApplies(kube.calls); got != 0 {
+		t.Errorf("the run made %d apply calls, want none: %v", got, kube.calls)
 	}
 }

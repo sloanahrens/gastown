@@ -10,8 +10,8 @@ import (
 
 // townClusterApplyCmd is `gt town cluster apply`, registered under
 // townClusterCmd by this file's init. It reads the plan and its approval, checks
-// the approval against the plan and re-reads the held Deployments; it applies
-// nothing yet, since the applies are a later bead of the chain.
+// the approval against the plan and re-reads the held Deployments; then it
+// applies the plan's files.
 var townClusterApplyCmd = newTownClusterApplyCmd()
 
 // newTownClusterApplyCmd builds `gt town cluster apply`: the plan directory and
@@ -21,16 +21,25 @@ func newTownClusterApplyCmd() *cobra.Command {
 	var kubeconfigs planFlags
 	cmd := &cobra.Command{
 		Use:   "apply",
-		Short: "Check a plan's approval record before apply (applies nothing yet)",
+		Short: "Apply a plan whose approval record authorizes it",
 		Long: `Check the plan a plan directory holds against the approval record that
-authorizes it, and re-read the Deployments the plan holds. Each phase takes its
-kubeconfig from its own flag: phase P --policy-kubeconfig, the deployer-policy
-certificate, and phase W --apply-kubeconfig, the deployer-apply certificate.
-Nothing is applied yet: every run ends with an error saying nothing was applied,
-including a plan and approval that pass.`,
+authorizes it, re-read the Deployments the plan holds, and apply the plan's files.
+Each phase takes its kubeconfig from its own flag: phase P --policy-kubeconfig,
+the deployer-policy certificate, and phase W --apply-kubeconfig, the
+deployer-apply certificate.
+
+Phase P's files apply first, then phase W's, with the bd gateway Deployment moved
+ahead of the daemon, the dashboard and trackerd: each Deployment is waited for,
+its rollout and its Available condition, before the next object is applied, so a
+gateway that does not come back stops the apply before the daemon behind it is
+replaced. Before the first apply it prints the kubectl rollout undo command for
+every Deployment it writes, with the revision plan.json records; a Deployment with
+no recorded revision refuses with nothing applied. The apply prints those commands
+and never runs one. Whatever the outcome, it appends one line to the apply ledger
+beside the approval record.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTownClusterApply(cmd.Context(), realRunFunc(), planDir, approvalPath, kubeconfigs, applyRecordVerifier(time.Now))
+			return runTownClusterApply(cmd.Context(), realRunFunc(), cmd.OutOrStdout(), planDir, approvalPath, kubeconfigs, applyRecordVerifier(time.Now))
 		},
 	}
 	cmd.Flags().StringVar(&planDir, "plan", "", "the plan directory holding plan.json and its files (required)")

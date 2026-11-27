@@ -223,32 +223,41 @@ func (a runnerApplier) apply(ctx context.Context, kind, name string, object any)
 }
 
 // waitReady waits for the Deployment's rollout within rolloutWait, then reads
-// its Available condition within readinessReadWait. A rollout status that exits
-// non-zero, or a condition that is not True, is an error: a Deployment kubectl
-// could not confirm ready is not one, and the roll must not report success.
+// its Available condition, through the one wait every applier shares
+// (waitDeploymentRollout).
 func (a runnerApplier) waitReady(ctx context.Context, namespace, name string) error {
-	resource := "deployment/" + name
-	fmt.Fprintf(a.out, "waiting for %s to roll out (bound %s)\n", resource, a.rolloutWait)
-	_, exit, err := a.kubectl(ctx, "", nil, "kubectl", "rollout", "status", resource, "-n", namespace, "--timeout="+a.rolloutWait.String())
+	return waitDeploymentRollout(ctx, a.kubectl, a.out, namespace, "deployment/"+name, a.rolloutWait)
+}
+
+// waitDeploymentRollout waits for resource's rollout within bound, then reads its
+// Available condition within readinessReadWait. A rollout status that exits
+// non-zero, or a condition that is not True, is an error: a Deployment kubectl
+// could not confirm ready is not one, and the caller must not report success.
+// The runner roll, the cluster roll and the cluster apply all wait through this
+// function, so no applier keeps a copy of the wait.
+func waitDeploymentRollout(ctx context.Context, kubectl update.RunFunc, out io.Writer, namespace, resource string, bound time.Duration) error {
+	fmt.Fprintf(out, "waiting for %s to roll out (bound %s)\n", resource, bound)
+	_, exit, err := kubectl(ctx, "", nil, "kubectl", "rollout", "status", resource, "-n", namespace, "--timeout="+bound.String())
 	if err != nil {
 		return fmt.Errorf("waiting for the rollout of %s: %w", resource, err)
 	}
 	if exit != 0 {
-		return fmt.Errorf("%s did not complete its rollout within %s: kubectl rollout status exited %d", resource, a.rolloutWait, exit)
+		return fmt.Errorf("%s did not complete its rollout within %s: kubectl rollout status exited %d", resource, bound, exit)
 	}
+	name := strings.TrimPrefix(resource, "deployment/")
 	readCtx, cancel := context.WithTimeout(ctx, readinessReadWait)
 	defer cancel()
-	out, exit, err := a.kubectl(readCtx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", readyConditionJSONPath)
+	outStatus, exit, err := kubectl(readCtx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", readyConditionJSONPath)
 	if err != nil {
 		return fmt.Errorf("reading the readiness of %s within %s: %w", resource, readinessReadWait, err)
 	}
 	if exit != 0 {
 		return fmt.Errorf("reading the readiness of %s: kubectl exited %d", resource, exit)
 	}
-	if status := strings.TrimSpace(out); status != "True" {
+	if status := strings.TrimSpace(outStatus); status != "True" {
 		return fmt.Errorf("%s is not ready: its Available condition is %q", resource, status)
 	}
-	fmt.Fprintf(a.out, "%s is ready\n", resource)
+	fmt.Fprintf(out, "%s is ready\n", resource)
 	return nil
 }
 
