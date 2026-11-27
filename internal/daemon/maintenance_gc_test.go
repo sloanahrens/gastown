@@ -1168,7 +1168,7 @@ func TestScheduledMaintenanceRunsGCAndMarksRun(t *testing.T) {
 	f.shrinkTo = map[string]gcMeasure{"hq": {97 * mib, 90 * mib}}
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %s, want hq", got)
@@ -1218,13 +1218,13 @@ func TestScheduledMaintenanceDeferralRetriesNextTick(t *testing.T) {
 	f.quietUntil = 0 // busy
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if len(f.gcCalls) != 0 {
 		t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
 	}
 
 	f.quietUntil = -1 // town goes quiet
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("after a deferral the next tick ran gc on %q, want hq", got)
 	}
@@ -1255,7 +1255,7 @@ func TestScheduledMaintenanceSkipsWhileCycleRunning(t *testing.T) {
 	d.patrolConfig = gcModeConfig()
 	d.maintenanceGCRunning.Store(true)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if len(f.gcCalls) != 0 {
 		t.Errorf("a second cycle started while one was running: %v", f.gcCalls)
 	}
@@ -1383,7 +1383,7 @@ func TestMaintenanceGCRunsBesideSoftWorkAndWorkingPolecats(t *testing.T) {
 	d.compactorDogRunning = true
 	d.compactorDogMu.Unlock()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Fatalf("gc calls = %q, want hq: soft work and working polecats must not defer it", got)
@@ -1409,7 +1409,7 @@ func TestMaintenanceGCDemandCountIsNotAGate(t *testing.T) {
 		return nil, errors.New("rig gastown: permission denied")
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Fatalf("gc calls = %q, want hq: an unreadable polecat listing must not defer", got)

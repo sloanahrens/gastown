@@ -316,7 +316,7 @@ func TestScheduledMaintenanceTickCarriesTheStaleGCAlert(t *testing.T) {
 	recordRun(t, d, "gt", 12, 300*mib)
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	esc := rec.Escalations()
 	if len(esc) != 1 || esc[0].Escalation.Fingerprint != doltGCStaleAlertKey("gt") {

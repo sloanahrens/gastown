@@ -209,9 +209,9 @@ func TestStandbyTierSweepLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
 }
 
 // The scheduled maintenance site logs its standby once when it appears and
-// once when it lifts, over a Ring that wanes and is then renewed. The ticks
-// keep reaching the site because a town with no databases to back up leaves
-// the window unconsumed.
+// once when it lifts, over a Ring that wanes and is then renewed. Each tick
+// carries a request, so each reaches the site; a town with no databases to back
+// up leaves the window unconsumed.
 func TestStandbyMaintenanceLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -222,7 +222,7 @@ func TestStandbyMaintenanceLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
 
 	ringtest.Waned(t, d.config.TownRoot, standbyKey, gcTestNow)
 	for i := 0; i < 3; i++ {
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 	}
 	if n := strings.Count(logs.String(), "scheduled_maintenance: standing by"); n != 1 {
 		t.Errorf("waned Ring logged %d times over 3 ticks, want once; log: %s", n, logs.String())
@@ -230,7 +230,7 @@ func TestStandbyMaintenanceLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
 
 	ringtest.Valid(t, d.config.TownRoot, standbyKey, gcTestNow)
 	for i := 0; i < 3; i++ {
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 	}
 	if n := strings.Count(logs.String(), "scheduled_maintenance: standby lifted"); n != 1 {
 		t.Errorf("standby lift logged %d times over 3 ticks, want once; log: %s", n, logs.String())
@@ -250,7 +250,7 @@ func TestStandbyBackupLogsDiscoveryFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if len(f.backupCalls) != 0 {
 		t.Errorf("a backup ran with no databases discovered: %v", f.backupCalls)
@@ -316,12 +316,13 @@ func TestStandbyTierSweep(t *testing.T) {
 	})
 }
 
-// Under each standby neither the window gc nor the catch-up gc starts, the
-// catch-up backup still runs, and a gc already running is not interrupted.
+// Under each standby neither a requested cycle's gc nor the catch-up gc
+// starts, the catch-up backup still runs, and a gc already running is not
+// interrupted.
 func TestStandbyMaintenanceGC(t *testing.T) {
 	t.Parallel()
 	for _, c := range standbyConditions {
-		t.Run("window gc under "+c.name, func(t *testing.T) {
+		t.Run("requested gc under "+c.name, func(t *testing.T) {
 			t.Parallel()
 			d, _ := gcTestDaemon(t)
 			f := withGCFakes(t, d)
@@ -330,13 +331,13 @@ func TestStandbyMaintenanceGC(t *testing.T) {
 			d.maint.now = func() time.Time { return gcTestNow }
 			c.set(t, d, gcTestNow)
 
-			d.runScheduledMaintenance()
+			requestedTick(t, d)
 
 			if len(f.gcCalls) != 0 {
-				t.Errorf("window gc ran under %s: %v", c.name, f.gcCalls)
+				t.Errorf("requested gc ran under %s: %v", c.name, f.gcCalls)
 			}
 			if len(f.backupCalls) != 2 {
-				t.Errorf("window backup under %s = %v, want gt and hq", c.name, f.backupCalls)
+				t.Errorf("standby backup under %s = %v, want gt and hq", c.name, f.backupCalls)
 			}
 			// The window is consumed by its backup: the next tick takes no second one.
 			d.runScheduledMaintenance()
@@ -383,7 +384,7 @@ func TestStandbyMaintenanceGC(t *testing.T) {
 			c.set(t, d, gcTestNow)
 			d.maintenanceGCRunning.Store(true)
 
-			d.runScheduledMaintenance()
+			requestedTick(t, d)
 
 			if !d.maintenanceGCRunning.Load() {
 				t.Errorf("the running gc was cleared under %s", c.name)
@@ -490,15 +491,15 @@ func TestTierSweepIgnoresTheDispatchHoldFile(t *testing.T) {
 	tierSweepRunsUnderTheDispatchHoldFile(t)
 }
 
-// The operator's dispatch hold file parks dispatch only: the 03:00 window runs
-// its archive, backup and gc as due under it, and so does the catch-up
-// (gt-5cl4i). A waned Ring and the town ESTOP still stand them by
+// The operator's dispatch hold file parks dispatch only: a requested
+// maintenance cycle runs its archive, backup and gc under it, and so does the
+// catch-up (gt-5cl4i). A waned Ring and the town ESTOP still stand them by
 // (TestStandbyMaintenanceGC).
 func TestScheduledMaintenanceIgnoresTheDispatchHoldFile(t *testing.T) {
 	t.Parallel()
-	t.Run("the window runs its cycle", func(t *testing.T) {
+	t.Run("the requested cycle runs", func(t *testing.T) {
 		t.Parallel()
-		maintenanceWindowRunsUnderTheDispatchHoldFile(t)
+		maintenanceCycleRunsUnderTheDispatchHoldFile(t)
 	})
 	t.Run("the catch-up runs its gc", func(t *testing.T) {
 		t.Parallel()
@@ -508,7 +509,7 @@ func TestScheduledMaintenanceIgnoresTheDispatchHoldFile(t *testing.T) {
 
 // The operator's dispatch hold file parks dispatch only: no daemon background
 // job reads it (gt-5cl4i). Under it alone the heartbeat, the tier sweep, the
-// maintenance window and the maintenance catch-up all run.
+// requested maintenance cycle and the maintenance catch-up all run.
 func TestStandbyDaemonJobsIgnoreTheDispatchHoldFile(t *testing.T) {
 	t.Parallel()
 	t.Run("the heartbeat runs every step", func(t *testing.T) {
@@ -527,9 +528,9 @@ func TestStandbyDaemonJobsIgnoreTheDispatchHoldFile(t *testing.T) {
 		t.Parallel()
 		tierSweepRunsUnderTheDispatchHoldFile(t)
 	})
-	t.Run("the maintenance window runs", func(t *testing.T) {
+	t.Run("the requested cycle runs", func(t *testing.T) {
 		t.Parallel()
-		maintenanceWindowRunsUnderTheDispatchHoldFile(t)
+		maintenanceCycleRunsUnderTheDispatchHoldFile(t)
 	})
 	t.Run("the maintenance catch-up runs", func(t *testing.T) {
 		t.Parallel()
@@ -557,9 +558,9 @@ func tierSweepRunsUnderTheDispatchHoldFile(t *testing.T) {
 	}
 }
 
-// maintenanceWindowRunsUnderTheDispatchHoldFile proves the 03:00 window runs
-// its archive, backup and gc with the hold file present.
-func maintenanceWindowRunsUnderTheDispatchHoldFile(t *testing.T) {
+// maintenanceCycleRunsUnderTheDispatchHoldFile proves a requested maintenance
+// cycle runs its archive, backup and gc with the hold file present.
+func maintenanceCycleRunsUnderTheDispatchHoldFile(t *testing.T) {
 	t.Helper()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
@@ -577,19 +578,19 @@ func maintenanceWindowRunsUnderTheDispatchHoldFile(t *testing.T) {
 	}
 	writeOperatorHold(t, d.config.TownRoot)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if len(archived) != 2 {
 		t.Errorf("archive read %v, want gt and hq", archived)
 	}
 	if len(f.backupCalls) != 2 {
-		t.Errorf("window backup calls = %v, want gt and hq", f.backupCalls)
+		t.Errorf("cycle backup calls = %v, want gt and hq", f.backupCalls)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "gt,hq" {
-		t.Errorf("window gc calls = %s, want gt,hq", got)
+		t.Errorf("cycle gc calls = %s, want gt,hq", got)
 	}
 	if strings.Contains(logs.String(), "standing by") {
-		t.Errorf("the window logged a standby under the dispatch hold file: %s", logs.String())
+		t.Errorf("the cycle logged a standby under the dispatch hold file: %s", logs.String())
 	}
 }
 
@@ -627,7 +628,7 @@ func TestStandbyBackupArchivesOnALocalServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	want := [][]string{
 		archiveCSVHeader,
@@ -666,7 +667,7 @@ func TestStandbyBackupArchiveFailureEscalatesAndStillBacksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "maintenance.archive_dir") {
 		t.Errorf("escalations = %v, want one naming maintenance.archive_dir", f.escalations)

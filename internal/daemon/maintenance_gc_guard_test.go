@@ -349,7 +349,7 @@ func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
 	// The compactor list names only hq; discovery finds both.
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if strings.Join(f.gcCalls, ",") != "gt,hq" {
 		t.Errorf("gc calls = %v, want gt,hq from discovery, largest first", f.gcCalls)
 	}
@@ -367,7 +367,7 @@ func TestScheduledMaintenanceGCRunsAgainstExternalServer(t *testing.T) {
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %q, want hq from the server's list, not gt from the data dir", got)
 	}

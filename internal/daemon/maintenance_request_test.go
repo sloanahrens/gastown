@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,6 +64,20 @@ func requestTickAndCycle(t *testing.T, d *Daemon) {
 	if cycle != nil {
 		cycle()
 	}
+}
+
+// requestTickSeq keeps every request a test files on its own run id: the daemon
+// answers a reused, already-completed id from its record without running the
+// cycle again.
+var requestTickSeq atomic.Int64
+
+// requestedTick starts the maintenance cycle the way the update job does: it
+// files a request and runs one scheduled_maintenance tick, so a test asserting
+// the cycle's work starts it here rather than from the window (gt-pahd2z).
+func requestedTick(t *testing.T, d *Daemon) {
+	t.Helper()
+	writeRequestFile(t, d, fmt.Sprintf("run-test-%d", requestTickSeq.Add(1)), d.maintenance().now())
+	d.runScheduledMaintenance()
 }
 
 // blockResultPath puts a directory where the result belongs, so the answer's

@@ -27,7 +27,7 @@ func TestScheduledMaintenanceBacksUpBeforeGCUnderPause(t *testing.T) {
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}, "hq": {631 * mib, 0}}
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	// Each copy and each gc sits between its own marker write and remove,
 	// and every copy is done before the first gc.
@@ -73,13 +73,13 @@ func TestScheduledMaintenanceGCRetryDoesNotRepeatBackup(t *testing.T) {
 	f.quietUntil = 0 // busy
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if strings.Join(f.backupCalls, ",") != "hq" || len(f.gcCalls) != 0 {
 		t.Fatalf("busy tick: backups %v, gc %v; want the backup and no gc", f.backupCalls, f.gcCalls)
 	}
 
 	f.quietUntil = -1
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if len(f.backupCalls) != 1 {
 		t.Errorf("retry tick backed up again: %v", f.backupCalls)
 	}
@@ -99,7 +99,7 @@ func TestScheduledMaintenanceBackupFailureSkipsGCAndUnpauses(t *testing.T) {
 	f.backupErr["hq"] = errors.New("dolt_backup sync-url: disk full")
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	d.runScheduledMaintenance()
 
 	if len(f.gcCalls) != 0 {
@@ -470,7 +470,7 @@ func TestScheduledMaintenanceExternalServerTakesBackupThenGC(t *testing.T) {
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if strings.Join(f.backupCalls, ",") != "gt,hq" {
 		t.Errorf("backup calls = %v, want gt,hq from the server", f.backupCalls)
@@ -591,7 +591,7 @@ func TestScheduledMaintenanceProbesExternalServerOncePerTick(t *testing.T) {
 	}
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if probes != 1 {
 		t.Errorf("in-window tick probed gcExternal %d times, want 1", probes)
 	}
@@ -688,7 +688,7 @@ func TestScheduledMaintenanceExternalServerKeepsNewestFourteen(t *testing.T) {
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = gcModeConfig()
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	all, err := doltbackup.List(f.backupRoot)
 	if err != nil {

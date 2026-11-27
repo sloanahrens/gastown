@@ -194,7 +194,7 @@ func TestMaintenanceArchivesNewCommitsBeforeGc(t *testing.T) {
 	}
 	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	want := [][]string{
 		archiveCSVHeader,
@@ -271,7 +271,7 @@ func TestMaintenanceCommitCursorSurvivesAFlatten(t *testing.T) {
 	}
 	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": log}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	want := [][]string{
 		archiveCSVHeader,
@@ -299,7 +299,7 @@ func TestMaintenanceCommitCursorSurvivesAFlatten(t *testing.T) {
 	}
 	firstReads := fake.reads
 	d.lastMaintenanceRun = time.Time{}
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if fake.reads == firstReads {
 		t.Fatal("the second run never read dolt_log; the size check below would prove nothing")
 	}
@@ -347,7 +347,7 @@ func TestMaintenanceCommitExportSelectsByArchivedHashSet(t *testing.T) {
 	}
 	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": log}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	want := [][]string{
 		archiveCSVHeader,
@@ -380,7 +380,7 @@ func TestMaintenanceCommitExportSelectsByArchivedHashSet(t *testing.T) {
 	}
 	firstReads := fake.reads
 	d.lastMaintenanceRun = time.Time{}
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	if fake.reads == firstReads {
 		t.Fatal("the second run never read dolt_log; the size check below would prove nothing")
 	}
@@ -535,7 +535,7 @@ func TestMaintenanceArchiveFilesAreOwnerOnly(t *testing.T) {
 		"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}},
 	}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	file, err := os.Stat(archiveFile(dir, "gt"))
 	if err != nil {
@@ -573,7 +573,7 @@ func TestMaintenanceArchiveLeavesWatermarkPutWhenTheFileCannotBeWritten(t *testi
 		"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first"}},
 	}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
@@ -610,7 +610,7 @@ func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.
 		map[string][]archiveCommit{"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first"}}},
 		map[string]error{"gt": errors.New("connection refused")})
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
@@ -662,7 +662,7 @@ func TestMaintenanceArchiveOffWithoutArchiveDir(t *testing.T) {
 		return archiveEvents{}, nil
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Count(logs.String(), "history archiving is off"); got != 1 {
 		t.Errorf("log holds %d 'history archiving is off' lines, want one per run:\n%s", got, logs.String())
@@ -691,7 +691,7 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 			return nil, nil
 		}
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "maintenance.archive_dir") {
 			t.Errorf("escalations = %v, want one naming maintenance.archive_dir", f.escalations)
@@ -719,7 +719,7 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 			return nil, nil
 		}
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "cannot create") {
 			t.Errorf("escalations = %v, want one saying the directory cannot be created", f.escalations)
@@ -746,6 +746,9 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 			t.Error("the dolt_log read ran with an unreadable watermark file")
 			return nil, nil
 		}
+		// A maintenance request is answered failed before the archive when the
+		// state file cannot be read, so an archive request drives this pass.
+		writeArchiveRequestFile(t, d, "run-corrupt-state", d.maintenance().now())
 
 		d.runScheduledMaintenance()
 
@@ -796,7 +799,7 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 		return nil, errors.New("not reached")
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if !strings.Contains(logs.String(), "watermark for") || !strings.Contains(logs.String(), "cannot be recorded") {
 		t.Errorf("log does not report the unrecorded watermark:\n%s", logs.String())
@@ -1087,7 +1090,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		withArchiveFakes(d, f, nil, nil)
 		withEventsFake(d, columns, map[string][][]string{"gt": rows}, nil)
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		want := append([][]string{columns}, rows...)
 		if got := readArchiveCSV(t, eventsArchiveFile(dir, "gt")); !csvRowsEqual(got, want) {
@@ -1119,7 +1122,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		st, err := loadMaintenanceGCState(d.config.TownRoot)
 		if err != nil {
@@ -1152,7 +1155,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 			nil)
 		withEventsFake(d, columns, nil, map[string]error{"gt": errors.New("connection refused")})
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		st, err := loadMaintenanceGCState(d.config.TownRoot)
 		if err != nil {
@@ -1192,7 +1195,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		}
 		fake := withEventsFake(d, columns, map[string][][]string{"gt": many}, nil)
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		if fake.reads != 1 {
 			t.Errorf("events read ran %d time(s), want one window read", fake.reads)
@@ -1243,7 +1246,7 @@ func TestMaintenanceEventsCursorReadsBackThroughTheLookbackWindow(t *testing.T) 
 		t.Fatalf("seeding the events watermark: %v", err)
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	want := [][]string{columns, rows[1], rows[3]}
 	if got := readArchiveCSV(t, eventsArchiveFile(dir, "gt")); !csvRowsEqual(got, want) {
@@ -1273,7 +1276,7 @@ func TestMaintenanceEventsCursorReadsBackThroughTheLookbackWindow(t *testing.T) 
 		t.Fatal(err)
 	}
 	d.lastMaintenanceRun = time.Time{}
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 	after, err := os.Stat(eventsArchiveFile(dir, "gt"))
 	if err != nil {
 		t.Fatal(err)
@@ -1493,7 +1496,7 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 		return archiveEvents{Columns: columns, Rows: rows}, nil
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if _, err := os.Stat(eventsArchiveFile(dir, "gt")); !os.IsNotExist(err) {
 		t.Errorf("the failed export left %s behind (stat err %v)", eventsArchiveFile(dir, "gt"), err)
@@ -1530,7 +1533,7 @@ func TestMaintenanceArchiveRunsWhileALandingPassIsInFlight(t *testing.T) {
 	}
 	withEventsFake(d, nil, nil, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if !ran {
 		t.Fatalf("the commit read did not run while a landing pass was in flight:\n%s", logs.String())
@@ -1565,7 +1568,7 @@ func TestMaintenanceArchiveBoundsTheWholeStep(t *testing.T) {
 	// start, so comparing it to a clock read after the run would widen the
 	// window by however long the run took.
 	base := time.Now()
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if deadline.IsZero() {
 		t.Fatal("the archive read ran with no deadline")
@@ -1622,7 +1625,7 @@ func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
 		return nil
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if !strings.Contains(logs.String(), "could not be rolled back") {
 		t.Errorf("log does not report the failed rollback:\n%s", logs.String())
@@ -1904,7 +1907,7 @@ func TestEventsArchiveRefusesAnIncompatibleHeader(t *testing.T) {
 		"gt": {{"2", "2026-10-01 01:00:00"}},
 	}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := readArchiveCSV(t, path); !csvRowsEqual(got, [][]string{old, oldRow}) {
 		t.Errorf("archive file = %v, want the older member untouched", got)
@@ -1941,7 +1944,7 @@ func TestEventsArchiveRefusesAnUnreadableHeader(t *testing.T) {
 		"gt": {{"2", "2026-10-01 01:00:00"}},
 	}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
@@ -2079,7 +2082,7 @@ func TestArchiveTightensAnExistingLooseDirectory(t *testing.T) {
 		d.patrolConfig = archiveConfig(dir)
 		withArchiveFakes(d, f, nil, nil)
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		info, err := os.Stat(dir)
 		if err != nil {
@@ -2357,7 +2360,7 @@ func TestMaintenanceArchiveRefusesABadLimitSetting(t *testing.T) {
 				return nil, nil
 			}
 
-			d.runScheduledMaintenance()
+			requestedTick(t, d)
 
 			if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], tt.wantKey) {
 				t.Errorf("escalations = %v, want one naming %s", f.escalations, tt.wantKey)
@@ -3010,7 +3013,7 @@ func TestMaintenanceArchiveBudgetStopSkipsGcOfThatDatabase(t *testing.T) {
 	}
 	d.maint.archiveOpenDB = open
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if reads["gt"] != 1 {
 		t.Errorf("gt dolt_log read %d time(s), want 1: the budget ends its loop after the first batch", reads["gt"])
@@ -3056,7 +3059,7 @@ func TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase(t *testing.T) {
 		}}, nil
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if reads["gt"] != archiveTestMaxBatches {
 		t.Errorf("gt dolt_log read %d time(s), want the %d-batch per-cycle bound", reads["gt"], archiveTestMaxBatches)
@@ -3114,7 +3117,7 @@ func TestMaintenanceArchiveEventsStopSkipsGcOfThatDatabase(t *testing.T) {
 		return archiveEvents{Columns: columns, Rows: rows}, nil
 	}
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if reads != 1 {
 		t.Errorf("gt events read %d time(s), want 1: the budget ends its loop after the first page", reads)
@@ -3148,7 +3151,7 @@ func TestMaintenanceArchiveCaughtUpDatabasesStillGc(t *testing.T) {
 	}
 	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "gt" {
 		t.Errorf("gc calls = %v, want gt: its short batch means it is not marked unarchived", f.gcCalls)
@@ -3207,7 +3210,7 @@ func TestMaintenanceArchiveNoProgressStopLeavesDatabaseUnmarked(t *testing.T) {
 		t.Parallel()
 		d, f, logs := setup(t)
 
-		d.runScheduledMaintenance()
+		requestedTick(t, d)
 
 		if got := strings.Join(f.gcCalls, ","); got != "gt" {
 			t.Errorf("gc calls = %v, want gt: a no-progress stop does not skip its database's gc", f.gcCalls)
@@ -3351,7 +3354,7 @@ func TestArchiveBudgetSetting(t *testing.T) {
 				return nil, nil
 			}
 
-			d.runScheduledMaintenance()
+			requestedTick(t, d)
 
 			if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], config.MaintenanceArchiveBudgetKey) {
 				t.Errorf("escalations = %v, want one naming %s", f.escalations, config.MaintenanceArchiveBudgetKey)
@@ -3442,7 +3445,7 @@ func TestMaintenanceArchiveRunsOnAnExternalServerBeforeBackupAndGC(t *testing.T)
 	}
 	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
 
-	d.runScheduledMaintenance()
+	requestedTick(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "gt,hq" {
 		t.Errorf("gc calls = %q, want gt,hq after the backup, over SQL", got)
@@ -3482,7 +3485,7 @@ func TestMaintenanceArchiveRemoteRunAfterSkippedNightsCatchesUp(t *testing.T) {
 	}
 	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": {commit("h1", -72*time.Hour), commit("h2", -48*time.Hour)}}, nil)
 
-	d.runScheduledMaintenance() // the first night: archives h1 and h2
+	requestedTick(t, d) // the first night: archives h1 and h2
 
 	// Two days pass with the watermark stale; commits land meanwhile.
 	fake.commits["gt"] = append(fake.commits["gt"],
@@ -3490,7 +3493,7 @@ func TestMaintenanceArchiveRemoteRunAfterSkippedNightsCatchesUp(t *testing.T) {
 	later := gcTestNow.Add(48 * time.Hour)
 	d.maint.now = func() time.Time { return later }
 
-	d.runScheduledMaintenance() // the catch-up night
+	requestedTick(t, d) // the catch-up night
 
 	first := readArchiveCSV(t, filepath.Join(dir, archiveFileName("dolt-log", "gt", gcTestNow)))
 	second := readArchiveCSV(t, filepath.Join(dir, archiveFileName("dolt-log", "gt", later)))
