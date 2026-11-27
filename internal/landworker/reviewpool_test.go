@@ -190,6 +190,14 @@ func (h *holdFake) counts() (begins, ends int) {
 	return h.begins, h.ends
 }
 
+// set changes the hold's answer, so a test can lift a hold between offers while
+// the pool keeps the same Begin hook it was built with.
+func (h *holdFake) set(reply bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reply = reply
+}
+
 // fakeAheadHints answers Hint from a fixed table: a bead in heads answers that
 // head, a bead in fail answers its error, and every other bead has no stored
 // review. It records every bead it is asked about.
@@ -1195,6 +1203,110 @@ func TestReviewPoolNilBeginStarts(t *testing.T) {
 
 	if got, want := reviewCounts(rev), map[string]int{"gt-open": 1, "gt-also": 1}; !reflect.DeepEqual(got, want) {
 		t.Errorf("reviews per bead %v with Begin unset, want every work started: %v", got, want)
+	}
+}
+
+// TestReviewPoolHoldLiftedStartsAgain pins that a lifted hold lets the next
+// offer start reviews again: while Begin answers false the offer starts nothing,
+// and the offer of the same works after Begin turns true starts one review per
+// work. Offer asks Begin afresh on each call, so a pool that latched the first
+// false and never asked again would start nothing here (gt-vb9qod).
+func TestReviewPoolHoldLiftedStartsAgain(t *testing.T) {
+	t.Parallel()
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	hold := &holdFake{reply: false}
+	pool := &ReviewPool{Reviewer: rev, Max: 2, Begin: hold.begin, End: hold.end}
+	works := []land.Work{
+		{BeadID: "gt-held", Head: "1111111"},
+		{BeadID: "gt-also", Head: "2222222"},
+	}
+
+	// The hold is on: the offer starts nothing and asks Begin once, for the first
+	// review it would have started.
+	pool.Offer(context.Background(), works)
+	for _, w := range works {
+		if head, ok := runningHeadAt(t, pool, w.BeadID); ok {
+			t.Errorf("under a hold the pool started a review of %s at %s, want none", w.BeadID, head)
+		}
+	}
+	if got := rev.reviewed(); len(got) != 0 {
+		t.Errorf("reviewer called %d times under a hold, want 0: %v", len(got), got)
+	}
+	if begins, ends := hold.counts(); begins != 1 || ends != 0 {
+		t.Errorf("Begin called %d times and End %d under a hold, want Begin 1 and End 0", begins, ends)
+	}
+
+	// The hold lifts: the next offer of the same works starts both reviews.
+	hold.set(true)
+	pool.Offer(context.Background(), works)
+	started := map[string]string{}
+	for n := 0; n < len(works); n++ {
+		w := recvBounded(t, ctx, rev.entered, "a review start after the hold lifted")
+		started[w.BeadID] = w.Head
+	}
+	close(rev.release)
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle after the reviews ended")
+
+	if want := map[string]string{"gt-held": "1111111", "gt-also": "2222222"}; !reflect.DeepEqual(started, want) {
+		t.Errorf("reviews started %v after the hold lifted, want one per work %v", started, want)
+	}
+	if begins, ends := hold.counts(); begins < 2 || ends != len(works) {
+		t.Errorf("Begin called %d times and End %d after the hold lifted, want Begin asked again and End %d", begins, ends, len(works))
+	}
+}
+
+// TestReviewPoolHoldStillCancelsReplaced pins that a landing hold does not stop
+// the cancel of a stale review: with Begin answering false, an offer of a bead
+// whose seat has moved to a new head cancels the running review of the old head,
+// starts nothing and asks no Begin. A pool that returned on the hold before the
+// running check would leave the stale review running for the whole hold
+// (gt-sor91y).
+func TestReviewPoolHoldStillCancelsReplaced(t *testing.T) {
+	t.Parallel()
+	const (
+		bead    = "gt-held-seat"
+		oldHead = "1111111"
+		newHead = "2222222"
+	)
+	ctx := waitCtx(t)
+	rev := newFakeAheadReviewer(t, ctx, nil)
+	// The old review is held by the test, so only a cancel ends it.
+	rev.perWork = map[string]chan struct{}{bead: make(chan struct{})}
+	rev.stopped = make(chan land.Work, 1)
+	logs := &logRecorder{}
+	hold := &holdFake{reply: true}
+	pool := &ReviewPool{Reviewer: rev, Max: 2, Begin: hold.begin, End: hold.end, Logf: logs.logf}
+
+	// The old head's review starts under a lifted hold.
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: oldHead}})
+	recvBounded(t, ctx, rev.entered, "the old head's review start")
+	oldDone := reviewEnded(t, pool, bead)
+
+	// The hold is on. The offer of the new head still cancels the old review; the
+	// cancel is decided under p.mu before Offer returns, so its line is there at
+	// once and no review of the new head was started in its place.
+	hold.set(false)
+	pool.Offer(context.Background(), []land.Work{{BeadID: bead, Head: newHead}})
+	got := logs.get()
+	if len(got) != 1 {
+		t.Fatalf("logged %q offering the new head under a hold, want one cancel line", got)
+	}
+	for _, want := range []string{bead, oldHead, newHead} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("logged %q, want it to name %q", got[0], want)
+		}
+	}
+	if n := len(rev.reviewed()); n != 1 {
+		t.Errorf("reviewer called %d times, want only the old head: the new head starts at a later offer", n)
+	}
+
+	// The cancelled review sees its context end, leaves the pool and ends once.
+	recvBounded(t, ctx, rev.stopped, "the cancelled review seeing its context end")
+	recvBounded(t, ctx, oldDone, "the cancelled old review leaving the pool")
+	recvBounded(t, ctx, idleOf(pool), "the pool going idle")
+	if begins, ends := hold.counts(); begins != 1 || ends != 1 {
+		t.Errorf("Begin called %d times and End %d, want 1 and 1: only the old review began, and it ended", begins, ends)
 	}
 }
 
