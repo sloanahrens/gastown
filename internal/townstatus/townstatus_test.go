@@ -1,8 +1,12 @@
 package townstatus
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -615,5 +619,50 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 	applyPauseMarker(&idle, townRoot)
 	if idle.PausedReason != "" {
 		t.Errorf("unpaused witness PausedReason = %q, want empty", idle.PausedReason)
+	}
+}
+
+// agentBeadsTestDB is a bd for the agent-bead read: "fail" fails the wisp
+// read, "notfound" answers not found, anything else answers with no beads.
+func agentBeadsTestDB(t *testing.T, mode string) *beads.Beads {
+	t.Helper()
+	return beads.New(t.TempDir(), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
+		wisp := slices.Contains(args, "wisp")
+		switch {
+		case mode == "fail" && wisp:
+			return nil, nil, errors.New("wisps read failed")
+		case mode == "notfound":
+			return nil, nil, beads.ErrNotFound
+		case wisp:
+			return []byte(`{"wisps": []}`), nil, nil
+		}
+		return []byte(`[]`), nil, nil
+	}))
+}
+
+// TestGatherAgentBeadsUnread drives the production read Gather calls per
+// database: a failed read marks that database unread on the status data, an
+// answering read leaves it unmarked (gt-s5twej). Gather itself starts tmux and
+// ps, which the unit tier refuses.
+func TestGatherAgentBeadsUnread(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	townPath, rigPath := beads.GetTownBeadsPath(townRoot), filepath.Join(townRoot, "r", "mayor", "rig")
+	for _, tc := range []struct {
+		name, path, mode string
+		want             []string
+	}{
+		{"failed town read", townPath, "fail", []string{townPath}},
+		{"failed rig read", rigPath, "fail", []string{rigPath}},
+		{"answered read", townPath, "ok", nil},
+		{"not found", townPath, "notfound", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var status TownStatus
+			readAgentBeads(&status, agentBeadsTestDB(t, tc.mode), tc.path, &sync.Mutex{})
+			if !slices.Equal(status.AgentBeadsUnread, tc.want) {
+				t.Errorf("AgentBeadsUnread = %v, want %v", status.AgentBeadsUnread, tc.want)
+			}
+		})
 	}
 }

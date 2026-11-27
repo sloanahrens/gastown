@@ -24,6 +24,9 @@ type TownStatus struct {
 	// are shown as running (unknown is not dead) and named here so the
 	// failure is visible (gt-fcxe9.1).
 	LivenessUnknown []string `json:"liveness_unknown,omitempty"`
+	// AgentBeadsUnread names the agent-bead databases whose read failed: their
+	// agents are unknown, not absent (gt-s5twej).
+	AgentBeadsUnread []string `json:"agent_beads_unread,omitempty"`
 	// Health is the daemon's last health report (gt-s3rec.2); nil when
 	// there is none. HealthLines is it rendered, every field — what
 	// `gt status --line` prints as its one line.
