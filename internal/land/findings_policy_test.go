@@ -38,25 +38,25 @@ func TestFindingsRejection(t *testing.T) {
 		},
 		{
 			name:    "an approve with one major",
-			verdict: Verdict{Verdict: VerdictApprove, Score: 0.90, Findings: findingsOf("major", 1)},
-			want:    "a major finding blocks the landing at any score",
+			verdict: Verdict{Verdict: VerdictApprove, Score: 0.82, Findings: findingsOf("major", 1)},
+			want:    "a major finding blocks the landing at any score (score 0.82)",
 		},
 		{
 			name:    "an approve with one critical",
-			verdict: Verdict{Verdict: VerdictApprove, Score: 0.90, Findings: findingsOf("critical", 1)},
-			want:    "a critical finding blocks the landing at any score",
+			verdict: Verdict{Verdict: VerdictApprove, Score: 0.80, Findings: findingsOf("critical", 1)},
+			want:    "a critical finding blocks the landing at any score (score 0.80)",
 		},
 		{
 			// Severity is compared the way the feed compares it.
 			name:    "a padded, capitalised major",
 			verdict: Verdict{Verdict: VerdictApprove, Score: 0.90, Findings: []Finding{{Severity: " Major ", Title: "leaks the token"}}},
-			want:    "a major finding blocks the landing at any score",
+			want:    "a major finding blocks the landing at any score (score 0.90)",
 		},
 		{
 			name: "a critical beside a major",
 			verdict: Verdict{Verdict: VerdictApprove, Score: 0.90,
 				Findings: append(findingsOf("major", 1), findingsOf("critical", 1)...)},
-			want: "a critical finding blocks the landing at any score",
+			want: "a critical finding blocks the landing at any score (score 0.90)",
 		},
 		{
 			name:    "an approve with five minors",
@@ -64,8 +64,8 @@ func TestFindingsRejection(t *testing.T) {
 		},
 		{
 			name:    "an approve with six minors",
-			verdict: Verdict{Verdict: VerdictApprove, Score: 0.90, Findings: findingsOf("minor", maxMinorFindings+1)},
-			want:    fmt.Sprintf("more than %d minor findings: fix the most important and resubmit", maxMinorFindings),
+			verdict: Verdict{Verdict: VerdictApprove, Score: 0.77, Findings: findingsOf("minor", maxMinorFindings+1)},
+			want:    fmt.Sprintf("more than %d minor findings: fix the most important and resubmit (score 0.77)", maxMinorFindings),
 		},
 		{
 			// Info is what om already decided is not worth fixing, and it
@@ -133,8 +133,8 @@ func TestLandRefusesAnApproveWithABlockingFinding(t *testing.T) {
 
 	_, err := f.lander().Land(context.Background(), f.work)
 	rej := f.assertRejected(t, err, RejectReview, LabelRework)
-	if !strings.Contains(rej.Reason, "a major finding blocks the landing at any score") {
-		t.Errorf("rejection reason = %q, want the major named", rej.Reason)
+	if !strings.Contains(rej.Reason, "a major finding blocks the landing at any score (score 0.90)") {
+		t.Errorf("rejection reason = %q, want the major named and the verdict's score", rej.Reason)
 	}
 	if rej.ReviewScore != 0.90 || len(rej.Findings) != 1 || rej.Findings[0].ID != "f-1" {
 		t.Errorf("rejection does not carry om's verdict: %+v", rej)
@@ -168,8 +168,8 @@ func TestLandRefusesAnApproveWithTooManyMinors(t *testing.T) {
 
 	_, err := f.lander().Land(context.Background(), f.work)
 	rej := f.assertRejected(t, err, RejectReview, LabelRework)
-	if !strings.Contains(rej.Reason, "more than 5 minor findings") {
-		t.Errorf("rejection reason = %q, want the minor count named", rej.Reason)
+	if !strings.Contains(rej.Reason, "more than 5 minor findings") || !strings.HasSuffix(rej.Reason, "(score 0.90)") {
+		t.Errorf("rejection reason = %q, want the minor count named and the verdict's score at the end", rej.Reason)
 	}
 	if len(rej.Findings) != maxMinorFindings+1 {
 		t.Errorf("rejection carries %d findings, want all %d so the author picks which to fix", len(rej.Findings), maxMinorFindings+1)
