@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io/fs"
 	"log"
@@ -669,6 +670,93 @@ func TestReviewPoolWiringHoldStopsReviews(t *testing.T) {
 				t.Fatalf("wiring logged %q; want nothing", got)
 			}
 		})
+	}
+}
+
+// aheadReviewerFunc is a review the pool runs without om: f says when the
+// review is under way and when it ends, so a test can hold a review open and
+// watch what waits on it.
+type aheadReviewerFunc func(context.Context, land.Work) (land.AheadOutcome, error)
+
+func (f aheadReviewerFunc) ReviewAhead(ctx context.Context, w land.Work) (land.AheadOutcome, error) {
+	return f(ctx, w)
+}
+
+// TestReviewPoolWiringHoldIdleAfterEnd pins a hold's view of a running ahead
+// review: the wired Begin is the daemon's landing-pass gate, so the review
+// holds a landing pass while it runs, and a hold taken meanwhile wakes only
+// from the wired End the pool calls when that review ends (gt-zajcg2,
+// gt-dtnlf4).
+func TestReviewPoolWiringHoldIdleAfterEnd(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	var logs bytes.Buffer
+	d := &Daemon{logger: log.New(&logs, "", 0)}
+	// The store the pool reads its hints from hangs off the Lander's town, so a
+	// temp town keeps that read off the worktree.
+	lander := reviewPoolTestLander()
+	lander.TownRoot = t.TempDir()
+	worker := reviewPoolTestWorker()
+	env, _ := reviewPoolTestOMConfig(t, func() (string, error) { return "/sentinel/home", nil })
+
+	if err := d.wireReviewPool("gastown", &config.LandingWorkerConfig{
+		ReviewPool: &config.ReviewPoolConfig{Rigs: []string{"gastown"}},
+	}, lander, worker, "/sentinel/reviews", env); err != nil {
+		t.Fatalf("wireReviewPool: %v", err)
+	}
+	if worker.Pool == nil {
+		t.Fatal("the pool is on for the rig but the Worker got no pool")
+	}
+	if worker.Pool.Begin == nil || worker.Pool.End == nil {
+		t.Fatalf("Pool.Begin set = %v, Pool.End set = %v; want the daemon's landing-pass gate and its end",
+			worker.Pool.Begin != nil, worker.Pool.End != nil)
+	}
+
+	// The review stays in ReviewAhead until released, so the hold below is
+	// taken while the review's landing pass is in flight. The empty store is a
+	// miss, so the offered work starts this review (gt-548kiy).
+	const bead, head = "gt-probe", "0000000000000000000000000000000000000001"
+	running := make(chan struct{})
+	release := make(chan struct{})
+	worker.Pool.Reviewer = aheadReviewerFunc(func(ctx context.Context, _ land.Work) (land.AheadOutcome, error) {
+		close(running)
+		select {
+		case <-release:
+			return land.AheadSkipped, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	})
+	worker.Pool.Offer(ctx, []land.Work{{BeadID: bead, Head: head}})
+	within(t, 5*time.Second, "the ahead review starting", running)
+
+	idle := d.landingHolds.hold(landingHoldUpgradeRestart)
+	select {
+	case <-idle:
+		t.Fatal("the hold was idle with the ahead review still running; want it to wait for the review's End")
+	default:
+	}
+	if got := d.landingPassCount(); got != 1 {
+		t.Fatalf("landing passes in flight = %d with the ahead review running, want 1: the review holds the pass a hold waits out", got)
+	}
+
+	// Await returns once the review has left the pool, and the review's End
+	// runs before that, so what the hold sees after it is the state after End.
+	endedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	close(release)
+	worker.Pool.Await(endedCtx, bead, head)
+
+	select {
+	case <-idle:
+	default:
+		t.Fatal("the ahead review ended and the hold was not woken; want it idle only after the review's End")
+	}
+	if got := d.landingPassCount(); got != 0 {
+		t.Fatalf("landing passes in flight = %d after the ahead review ended, want 0: the review gave its pass back", got)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("wiring logged %q; want nothing", got)
 	}
 }
 
