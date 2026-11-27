@@ -1407,7 +1407,10 @@ type poolSeatDecision struct {
 }
 
 // begin merges the claims other slings hold into the pool's occupied seats and
-// opens the window to claim one. The caller must call done(), error or not.
+// opens the window to claim one. A claim and the seat its sling's spawn already
+// hooks name one (agent, bead), so the merge leaves that claim out — through
+// withSeatClaims, as the roster does (gt-uwq612), else another sling is refused
+// a seat the town still has free. The caller must call done(), error or not.
 //
 // occupied reads the seats the pool already holds (poolOccupiedSessions, the
 // live sessions and the seats mid-landing), and it is called under the decision
@@ -1440,7 +1443,7 @@ func (l *poolSeatLedger) begin(live bool, occupied func() ([]poolSession, error)
 			return nil, d, err
 		}
 		claims, err := l.claimSessions(ownID)
-		return append(sessions, claims...), d, err
+		return withSeatClaims(sessions, claims), d, err
 	}
 	unlock, err := l.lock()
 	if err != nil {
@@ -1469,7 +1472,7 @@ func (l *poolSeatLedger) begin(live bool, occupied func() ([]poolSession, error)
 		return nil, d, err
 	}
 	claims, claimErr := l.claimSessions(ownID)
-	return append(sessions, claims...), d, claimErr
+	return withSeatClaims(sessions, claims), d, claimErr
 }
 
 // claimFor takes a seat for the route the caller chose when that seat is
