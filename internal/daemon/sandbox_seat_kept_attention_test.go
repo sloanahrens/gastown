@@ -437,6 +437,60 @@ func TestBeadIsLiveWorkReadFailureAndNoBeadAreErrors(t *testing.T) {
 	}
 }
 
+// keptSeatNuked answers whether the seat's agent bead reads agent_state nuked:
+// true for nuked, false for another state, and false with the cause on a read
+// that fails (gt-btnzan).
+func TestKeptSeatNuked(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("bd show: store unavailable")
+	tests := []struct {
+		name    string
+		state   string
+		fail    bool
+		want    bool
+		wantErr string
+	}{
+		{name: "an agent bead reading nuked", state: string(beads.AgentStateNuked), want: true},
+		{name: "an agent bead reading working", state: string(beads.AgentStateWorking)},
+		{
+			name:    "a failed read",
+			fail:    true,
+			wantErr: "cannot read its agent bead: bd show: store unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			id := keptSeatAgentID(f, "capable")
+			r := keptSeatHookReader{issues: map[string]*beads.Issue{
+				id: {ID: id, Description: "agent_state: " + tt.state},
+			}}
+			if tt.fail {
+				r = keptSeatHookReader{fail: map[string]error{id: cause}}
+			}
+			f.d.openWorkBeads = r.open
+
+			nuked, err := f.src.keptSeatNuked(attentionRig, "capable")
+			if nuked != tt.want {
+				t.Errorf("keptSeatNuked = %t beside %v, want %t", nuked, err, tt.want)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("keptSeatNuked err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("keptSeatNuked err = %v, want it to carry %q", err, tt.wantErr)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("keptSeatNuked err = %v, want it to wrap the cause", err)
+			}
+		})
+	}
+}
+
 // The retired-record reason this collector skips on is the one the seat end
 // gives a record that does not say stop: the seat end returns this constant,
 // and the test pins that its keepReason still answers with it (gt-jw437c,
