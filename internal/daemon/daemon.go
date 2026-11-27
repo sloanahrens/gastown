@@ -557,8 +557,8 @@ type Daemon struct {
 	// diskMaintRunning is that patrol's single-flight guard.
 	diskMaintRunning atomic.Bool
 	// diskMaintTrimRunning is the single-flight guard of the cache trim's own
-	// pass, which runs on a tick whose targets are deferred to a quiet one
-	// (gt-gg9hv.48).
+	// pass, which runs on a tick that finds a target pass already in flight
+	// (gt-gg9hv.48, gt-pc65u7).
 	diskMaintTrimRunning atomic.Bool
 	// diskMaintEarlyRunning is the single-flight guard of the early cache trim's
 	// disk read, which runs off the loop goroutine on a tick the gap allows
@@ -619,15 +619,15 @@ type Daemon struct {
 	// sql.Open in a test so the read's failure paths need no server (gt-w9wdav).
 	doltImageDB doltImageOpenDB
 	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
-	// pass, which runs on its own interval and off the quiet guard
+	// pass, which runs on its own interval whatever the town is doing
 	// (gt-gg9hv.57).
 	ciCacheTrimRunning atomic.Bool
 	// ciEnginePruneRunning is the single-flight guard of the CI runner's engine
-	// prune pass, which runs on its own interval and off the quiet guard
+	// prune pass, which runs on its own interval whatever the town is doing
 	// (gt-i02983).
 	ciEnginePruneRunning atomic.Bool
 	// sweepRunsPruneRunning is the single-flight guard of the sweep-runs prune
-	// pass, which runs on its own interval and off the quiet guard.
+	// pass, which runs on its own interval whatever the town is doing.
 	sweepRunsPruneRunning atomic.Bool
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
