@@ -158,7 +158,25 @@ pool_list="$(kubectl get nodes -l gt.dev/pool -o name 2>&1)" ||
 pool_nodes="$(grep -c . <<<"$pool_list" || true)"
 [ "$pool_nodes" = 2 ] ||
   die "cluster $CLUSTER lacks the core and sandbox nodes ($pool_nodes labelled, want 2); rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
-kubectl apply -f "$HERE/../priority-classes.yaml"
+
+# helm_release_deployed answers whether openshell is a deployed release. helm
+# status exits 0 for a failed release too, and skipping helm for one would leave
+# the gateway down while the marker says it is installed.
+helm_release_deployed() {
+  [ "$(helm list --namespace openshell --deployed --filter '^openshell$' --short 2>/dev/null)" = openshell ]
+}
+
+# first_install is the one first-install test: 1 while no openshell release is
+# deployed. Only a first install applies the in-cluster objects here (the
+# priority classes and the agent-sandbox manifest with its patches); on a
+# deployed cluster the deployer applies them from an approved plan.
+first_install=1
+helm_release_deployed && first_install=0
+if [ "$first_install" = 1 ]; then
+  kubectl apply -f "$HERE/../priority-classes.yaml"
+else
+  say "in-cluster objects (the priority classes and the agent-sandbox manifest) are applied by gt town cluster apply --cluster gt-sbx from an approved plan; not applying them on this rerun"
+fi
 
 # fetch_pinned NAME VERSION URL DEST PIN downloads URL and moves it to DEST only
 # once its sha256 matches PIN or the digest the first fetch recorded beside DEST,
@@ -205,17 +223,6 @@ case " $metrics_args " in
 esac
 kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
 
-say "installing agent-sandbox $AGENT_SANDBOX_VERSION"
-sandbox_manifest="$OUT/agent-sandbox-$AGENT_SANDBOX_VERSION.yaml"
-fetch_pinned agent-sandbox "$AGENT_SANDBOX_VERSION" \
-  "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$AGENT_SANDBOX_VERSION/sandbox.yaml" \
-  "$sandbox_manifest" "$AGENT_SANDBOX_SHA256"
-kubectl apply -f "$sandbox_manifest"
-# Until this patch the controller may start on the control-plane node; it can
-# never start on the sandbox node (the taint), and the patch rolls it onto core
-# before the rollout below is awaited.
-kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
-  -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 # guaranteed_pod NAMESPACE KIND/NAME CPU MEMORY [CONTAINER] gives every container
 # and init container of the pod template requests equal to limits, so the pod
 # runs Guaranteed (gt-cjm8fu). Every container gets the same pair: the sizes are
@@ -250,15 +257,24 @@ guaranteed_pod() {
   done
   kubectl -n "$ns" patch "$target" --type json -p "[${ops#,}]"
 }
-guaranteed_pod agent-sandbox-system deployment/agent-sandbox-controller 100m 128Mi agent-sandbox-controller
-kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
-# helm_release_deployed answers whether openshell is a deployed release. helm
-# status exits 0 for a failed release too, and skipping helm for one would leave
-# the gateway down while the marker says it is installed.
-helm_release_deployed() {
-  [ "$(helm list --namespace openshell --deployed --filter '^openshell$' --short 2>/dev/null)" = openshell ]
-}
+# The agent-sandbox manifest and its controller patches are in-cluster objects
+# like the priority classes, so only a first install applies them (first_install).
+if [ "$first_install" = 1 ]; then
+  say "installing agent-sandbox $AGENT_SANDBOX_VERSION"
+  sandbox_manifest="$OUT/agent-sandbox-$AGENT_SANDBOX_VERSION.yaml"
+  fetch_pinned agent-sandbox "$AGENT_SANDBOX_VERSION" \
+    "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$AGENT_SANDBOX_VERSION/sandbox.yaml" \
+    "$sandbox_manifest" "$AGENT_SANDBOX_SHA256"
+  kubectl apply -f "$sandbox_manifest"
+  # Until this patch the controller may start on the control-plane node; it can
+  # never start on the sandbox node (the taint), and the patch rolls it onto core
+  # before the rollout below is awaited.
+  kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
+  guaranteed_pod agent-sandbox-system deployment/agent-sandbox-controller 100m 128Mi agent-sandbox-controller
+  kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
+fi
 
 # The chart's certificate job is a helm pre-install AND pre-upgrade hook, so
 # every `helm upgrade` regenerates the CA and every certificate and rolls the

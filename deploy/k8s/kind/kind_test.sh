@@ -548,6 +548,41 @@ check "the kubectl error text is shown" contains "connection to the server" "$OU
 check "a failing node query does not claim the layout is missing" lacks "lacks the core and sandbox nodes" "$OUT_TEXT"
 check "nothing is installed after a failing node query" lacks "helm upgrade --install" "$CALLS_LOG"
 
+echo "the in-cluster objects are applied only by a first install"
+calls_with() { grep -cF -- "$1" "$S/calls.log" || true; }
+scenario deployedrerun
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$(digest "$TMP/root/deploy/k8s/values/kind.yaml")" >"$S/state/marker"
+run "$UP" --
+check "a rerun on a deployed release exits 0" test "$RC" -eq 0
+check "the rerun names the deployer for the in-cluster objects" contains "gt town cluster apply --cluster gt-sbx" "$OUT_TEXT"
+check "the rerun applies no priority classes" test "$(calls_with "priority-classes.yaml")" -eq 0
+check "the rerun downloads no agent-sandbox manifest" lacks "agent-sandbox/releases/download" "$CALLS_LOG"
+check "the rerun applies no agent-sandbox manifest" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml")" -eq 0
+check "the rerun patches no agent-sandbox controller" lacks "agent-sandbox-controller" "$CALLS_LOG"
+check "the rerun sets no controller nodeSelector" lacks "nodeSelector" "$CALLS_LOG"
+check "the rerun waits on no agent-sandbox rollout" lacks "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
+check "the rerun still applies metrics-server" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml")" -eq 1
+check "the rerun still patches the metrics-server flag" test "$(calls_with 'patch deployment metrics-server')" -eq 1
+check "the rerun still waits on the metrics-server rollout" contains "rollout status deployment/metrics-server" "$CALLS_LOG"
+check "the rerun still writes the registry mirror to hosts.toml" contains 'server = "http://gt-registry:5000"' "$(cat "$S/state/hosts.toml")"
+check "the rerun still exports the client key as mode 600" test "$(mode "$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls/tls.key")" = 600
+check "the rerun makes no helm call for an unchanged chart" lacks "helm upgrade" "$CALLS_LOG"
+echo "a cluster with no openshell release is a first install"
+scenario norelease
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" --
+check "a cluster with no release exits 0" test "$RC" -eq 0
+check "the priority classes are applied once" test "$(calls_with "priority-classes.yaml")" -eq 1
+check "the priority classes are applied before the chart" before "priority-classes.yaml" "helm upgrade --install"
+check "the agent-sandbox manifest is applied once" test "$(calls_with "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml")" -eq 1
+check "the controller gets the core nodeSelector once" test "$(calls_with "$patch_args")" -eq 1
+check "the controller is patched once with the guaranteed pair" test "$(calls_with 'patch deployment/agent-sandbox-controller')" -eq 1
+check "the controller's container has requests equal to limits (100m, 128Mi)" guaranteed "$S/state/patch-controller" containers 0 100m 128Mi
+check "the controller rollout is awaited" contains "rollout status deployment/agent-sandbox-controller" "$CALLS_LOG"
+check "the chart is installed once" test "$(calls_with 'helm upgrade --install')" -eq 1
+check "a first install prints no deployer line" lacks "gt town cluster apply" "$OUT_TEXT"
+
 echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
 VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"
 helm_calls() { grep -c '^helm upgrade' "$S/calls.log" || true; }
