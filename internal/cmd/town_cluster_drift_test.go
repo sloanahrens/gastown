@@ -1034,7 +1034,7 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 
 // The gate runner's live objects a cluster in step holds: the control render with
 // the fields the API server fills in, the dind cpu limit 6 of
-// values.control.yaml, and config.yml at the capacity 3 the control values name.
+// values.control.yaml, and config.yml at the capacity 2 the control values name.
 // They are not derived from the render at test time, so a change to a template
 // constant or the values makes the compare report the difference instead of the
 // fixture following the render; when the change is wanted on the cluster too,
@@ -1266,9 +1266,9 @@ func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
 	live := driftRecordedObject(t, driftRunnerConfigFixture)
 	recordedConfig := live["data"].(map[string]any)["config.yml"].(string)
-	liveConfig := strings.Replace(recordedConfig, "capacity: 3", "capacity: 2", 1)
+	liveConfig := strings.Replace(recordedConfig, "capacity: 2", "capacity: 1", 1)
 	if liveConfig == recordedConfig {
-		t.Fatal("fixture: the recorded config.yml names no capacity of 3")
+		t.Fatal("fixture: the recorded config.yml names no capacity of 2")
 	}
 	live["data"].(map[string]any)["config.yml"] = liveConfig
 	d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), map[string]map[string]any{
@@ -1280,8 +1280,8 @@ func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
 	}
 	wantLines := []string{
 		"configmap/" + forgejorunner.Name + "-config: data.config.yml:",
-		"configmap/" + forgejorunner.Name + "-config: -   capacity: 2",
-		"configmap/" + forgejorunner.Name + "-config: +   capacity: 3",
+		"configmap/" + forgejorunner.Name + "-config: -   capacity: 1",
+		"configmap/" + forgejorunner.Name + "-config: +   capacity: 2",
 	}
 	wantLines = append(wantLines, driftSecretLines(t)...)
 	if got := driftLines(out); !slices.Equal(got, wantLines) {

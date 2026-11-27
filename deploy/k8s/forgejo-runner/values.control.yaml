@@ -6,7 +6,10 @@
 # a knob added here must first exist in Values (gt-q2nigb). It holds labels, an
 # address and sizes, and no credential.
 namespace: forgejo
-capacity: 3
+# Two concurrent jobs until the load scenario has run, so one change to the
+# runner is measured at a time; three jobs (gt-jp8axa, gt-s47qp4.10) return
+# after that test.
+capacity: 2
 labels:
   - "docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli"
   - "node:docker://data.forgejo.org/oci/node:20.19"
