@@ -4907,7 +4907,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			// does — the seat picture it reads, the engine's stages, the spawn's
 			// seat claim and the sandbox's phases — is timed on one timeline
 			// (gt-7nctk). A nil trace here would leave the pre-sling work out.
-			trace := session.NewSandboxTrace(time.Now)
+			// Each phase is also written to stderr as it ends, so a sling killed
+			// at its bound leaves its phase times (gt-ojc5t3).
+			trace := newSpecSlingTrace(time.Now, os.Stderr)
 			var occupied func() ([]poolSession, error)
 			if seats := snapshot.Load(); seats != nil {
 				occupied = snapshotOccupied(*seats, poolSeatAgentFor(townRoot), newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
@@ -5032,6 +5034,15 @@ func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest 
 		line += "; candidate steps " + strings.Join(named, ", ")
 	}
 	return line
+}
+
+// newSpecSlingTrace starts a sling's trace and reports each phase to w as it
+// ends, so a sling killed at its bound keeps the phases it completed
+// (gt-p97r7p, gt-ojc5t3). The sling's report is still read from stdout.
+func newSpecSlingTrace(now func() time.Time, w io.Writer) *session.SandboxTrace {
+	trace := session.NewSandboxTrace(now)
+	trace.ReportTo(w)
+	return trace
 }
 
 // specSlingTraceLine is the line a sling that started a sandbox session adds to
