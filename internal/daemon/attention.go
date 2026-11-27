@@ -1036,6 +1036,11 @@ func (s *attentionSources) collectRedHold(context.Context) ([]attention.Item, er
 		Severity: attention.SeverityHigh, Summary: summary}}, nil
 }
 
+// dutyJobPrefix names a reconciler duty row's job. internal/jobs imports this
+// package, so the prefix is repeated rather than shared: the two must stay the
+// same literal "duty:" (gt-ubzyds).
+const dutyJobPrefix = "duty:"
+
 // attentionSources builds the production reads. The bead lists go through the
 // daemon's own read-only work-bead client, so the queue never writes to
 // beads; the slot picture and the bd timing are the daemon's own probes.
@@ -1073,7 +1078,14 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		root := d.config.TownRoot
 		s.jobList = func(now time.Time) ([]JobReading, error) { return list(root, now) }
 	}
-	s.patrolOff = func(name string) bool { return d.patrolOffReason(name) != "" }
+	// A duty row is not a patrol of its own: the reconciler writes it, so it
+	// is off exactly when the reconciler patrol is off (gt-ubzyds).
+	s.patrolOff = func(name string) bool {
+		if strings.HasPrefix(name, dutyJobPrefix) {
+			return d.patrolOffReason("reconciler") != ""
+		}
+		return d.patrolOffReason(name) != ""
+	}
 	// The drift compare runs through the 15 minute cache, so a heartbeat between
 	// runs reads the last answer, failure included, and the compare is called
 	// no sooner than the next run (gt-menvlj).
