@@ -20,6 +20,7 @@ func ConfigSpec(cfg *config.TierSweepRunnerConfig) Spec {
 		Jobs:                cfg.Jobs,
 		Dind:                cfg.Dind,
 		DindCPUs:            cfg.DindCPUs,
+		RunnerCPURequest:    cfg.RunnerCPURequest,
 		Context:             cfg.Context,
 		Namespace:           cfg.NamespaceName(),
 		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
