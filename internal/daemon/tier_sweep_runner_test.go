@@ -2437,9 +2437,9 @@ func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 // TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec: the Spec the daemon
 // builds starts from sweeprunner.ConfigSpec, so each runner-block field equals
 // the literal the config names; comparing against literals, not against
-// ConfigSpec itself, fails when the builder drops a field (gt-zo7z6e). The real
-// sweep Job asks for its whole share today, so the built Spec keeps the CPU
-// request at 0 until that changes (gt-o9gx83).
+// ConfigSpec itself, fails when the builder drops a field (gt-zo7z6e). The CPU
+// request is one of those fields: the real sweep Job asks for the cores the
+// config names, and for its whole share when it names none (gt-o9gx83).
 func TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec(t *testing.T) {
 	t.Parallel()
 	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
@@ -2466,15 +2466,42 @@ func TestTierSweepRunnerSpecTakesTheRunnerBlockFromConfigSpec(t *testing.T) {
 		!slices.Equal(spec.ProtectedNamespaces, []string{"gt-sweeps", "kube-system"}) {
 		t.Errorf("the runner block's namespaces = %+v, want context colima-gt-sbx, namespace gt-ci, protected [gt-sweeps kube-system]", spec)
 	}
-	// The one runner-block field the Spec does not take: the real sweep does not
-	// carry the request yet, so it stays 0 (gt-o9gx83).
-	if spec.RunnerCPURequest != 0 {
-		t.Errorf("RunnerCPURequest = %d, want 0 until the real sweep carries the request", spec.RunnerCPURequest)
-	}
-
 	// Only the stage's own fields come from the stage.
 	if spec.Rig != "gastown" || spec.SHA != runnerTestSHA || !slices.Equal(spec.Tiers, []string{"integration"}) {
 		t.Errorf("the stage's own fields are not set on the Spec: %+v", spec)
+	}
+
+	// The rendered runner container asks for the configured cores and keeps its
+	// limit at the runner's whole share; with no request named, the Spec carries
+	// 0 and the runner asks for the whole share (gt-o9gx83).
+	for _, tc := range []struct {
+		setting      int
+		wantRequests string
+	}{{4, "4"}, {0, "5"}} {
+		cfg.RunnerCPURequest = tc.setting
+		spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+		if err != nil || !ok || spec.RunnerCPURequest != tc.setting {
+			t.Fatalf("runnerCPURequest %d: spec = %+v, ok = %v, err = %v", tc.setting, spec, ok, err)
+		}
+		plan, err := sweeprunner.Kubernetes{}.Render(spec)
+		if err != nil {
+			t.Fatalf("runnerCPURequest %d: rendering the spec: %v", tc.setting, err)
+		}
+		var runner *sweeprunner.Container
+		for i := range plan.Job.Spec.Template.Spec.Containers {
+			if plan.Job.Spec.Template.Spec.Containers[i].Name == "runner" {
+				runner = &plan.Job.Spec.Template.Spec.Containers[i]
+			}
+		}
+		if runner == nil || runner.Resources == nil {
+			t.Fatalf("runnerCPURequest %d: the rendered Job holds no runner container with resources", tc.setting)
+		}
+		if got := runner.Resources.Requests.CPU; got != tc.wantRequests {
+			t.Errorf("runnerCPURequest %d: the runner requests %s CPUs, want %s", tc.setting, got, tc.wantRequests)
+		}
+		if got := runner.Resources.Limits.CPU; got != "5" {
+			t.Errorf("runnerCPURequest %d: the runner's CPU limit is %s, want its whole share 5", tc.setting, got)
+		}
 	}
 }
 
