@@ -3,8 +3,10 @@
 // gate and presubmit recipes call it ahead of their go build, vet and test
 // steps, so a burst of crew worktrees building at once queues instead of
 // starving the daemon, bd and the dispatcher (gt-bq68w). A queued command also
-// gets GOMAXPROCS set to one slot's share of the cores, which each Go process
-// it starts reads as its own limit; a command that names a GOMAXPROCS keeps it.
+// gets GOMAXPROCS set to one slot's share of the cores divided by the packages
+// the build runs at once, so packages at once times cores per process stays
+// within one slot's share; each Go process it starts reads that as its own
+// limit, and a command that names a GOMAXPROCS keeps it.
 //
 // The wrapper's own flags come before the command, and leading VAR=value
 // assignments are env(1) assignments the command runs under:
@@ -82,8 +84,9 @@ type machine struct {
 
 // queuedUnder is run's queued command: args run under a CPU-class slot, waiting
 // up to timeout for one, in an environment that carries one slot's share of the
-// cores. The class size is read once, so the share and the number of slots
-// agree.
+// cores divided by the packages the build compiles or tests at once
+// (slot.CPUClassParallel). The class size is read once, so the share and the
+// number of slots agree.
 func queuedUnder(timeout time.Duration, m machine) func(townRoot, role string, args []string) (int, error) {
 	return func(townRoot, role string, args []string) (int, error) {
 		size := m.classSize(townRoot)
@@ -94,7 +97,7 @@ func queuedUnder(timeout time.Duration, m machine) func(townRoot, role string, a
 			Args:    args,
 			Path:    os.Getenv("PATH"),
 			Environ: func() []string {
-				return withCoreShare(m.environ(), slot.CPUShare(m.numCPU, size))
+				return withCoreShare(m.environ(), slot.CPUShare(m.numCPU, size*slot.CPUClassParallel))
 			},
 			Stdin:  os.Stdin,
 			Stdout: os.Stdout,

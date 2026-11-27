@@ -236,10 +236,12 @@ func TestWithCoreShareDoesNotModifyItsArgument(t *testing.T) {
 
 // TestCPUSlotShare drives runFrom into the queued command on a host with 24
 // cores and a class of 3: a crew worktree's child runs with its third of the
-// cores unless the build already names a GOMAXPROCS, and a command from any
-// other tree takes the unchanged path, which reads no environment here.
+// cores divided by the packages the build runs at once (4) unless the build
+// already names a GOMAXPROCS, and a command from any other tree takes the
+// unchanged path, which reads no environment here.
 // Mutation: hand the class the caller's environment as it is, and the crew row
-// loses its GOMAXPROCS.
+// loses its GOMAXPROCS; pass the class size to CPUShare without
+// slot.CPUClassParallel, and the crew row gets 8 instead of 4.
 func TestCPUSlotShare(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -253,7 +255,7 @@ func TestCPUSlotShare(t *testing.T) {
 			name: "crew worktree",
 			cwd:  town + "/gastown/crew/olive",
 			env:  []string{"PATH=/bin"},
-			want: []string{"PATH=/bin", "GOMAXPROCS=8"},
+			want: []string{"PATH=/bin", "GOMAXPROCS=4"},
 		},
 		{
 			name: "crew worktree whose build names its own",
