@@ -12,8 +12,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
+
+// birdsNoHandoffBeads gives a hub built in a test a store that holds no handoff
+// bead, so the birds' activity reader answers from the fake and never starts
+// bd (the subprocess tripwire refuses that start). No row's assertion reads
+// last_active, so the fake changes none of them.
+func birdsNoHandoffBeads() dashboardHubSeam {
+	return dashboardHubSeam{observe: func(opts tailOptions) {
+		opts.beads.show = func(_, _ string) (*beads.Issue, error) {
+			return nil, beads.ErrNotFound
+		}
+	}}
+}
 
 // The birds' reader is built over the town's runtime directory.
 func TestDashboardBirdsRuntimeDir(t *testing.T) {
@@ -73,7 +86,7 @@ func TestDashboardHubServesTheBirdsRuntimeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard)
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard, birdsNoHandoffBeads())
 	if err != nil {
 		t.Fatalf("building the dashboard's hub: %v", err)
 	}
@@ -121,7 +134,7 @@ func TestDashboardHubMarksTheOverseerHeadline(t *testing.T) {
 		}
 	}
 
-	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard)
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard, birdsNoHandoffBeads())
 	if err != nil {
 		t.Fatalf("building the dashboard's hub: %v", err)
 	}
