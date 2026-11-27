@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -639,8 +640,9 @@ func TestParseLSRemoteMain(t *testing.T) {
 
 // omSkewClone gives the daemon the rebuild_om job's clone and answers its git
 // diff with changed (NUL-separated, as `git diff -z` prints it) or, when
-// diffErr is set, with that failure. It returns the fake so a test can read the
-// calls the check made.
+// diffErr is set, with that failure. Its lag reads put the installed om at the
+// planner's commit threshold. It returns the fake so a test can read the calls
+// the check made.
 func omSkewClone(t *testing.T, d *Daemon, changed []string, diffErr *cliReply) *fakeCLI {
 	t.Helper()
 	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
@@ -651,8 +653,86 @@ func omSkewClone(t *testing.T, d *Daemon, changed []string, diffErr *cliReply) *
 			}
 			return cliReply{stdout: strings.Join(changed, "\x00") + "\x00"}
 		}
+		if reply, ok := omSkewLagReply(c, imagePinsFileBehind, 0); ok {
+			return reply
+		}
 		return cliReply{}
 	})
+}
+
+// omSkewLagReply answers skewLag's git calls for an installed om that is
+// commits commits and age behind the remote; ok is false for any other call.
+func omSkewLagReply(c cliCall, commits int, age time.Duration) (cliReply, bool) {
+	switch {
+	case gitSub(c, "rev-list"):
+		return cliReply{stdout: fmt.Sprintf("%d\n", commits)}, true
+	case gitSub(c, "show") && slices.Contains(c.args, omSkewRemoteSHA):
+		return cliReply{stdout: fmt.Sprintf("%d\n", 100+int64(age.Seconds()))}, true
+	case gitSub(c, "show"):
+		return cliReply{stdout: "100\n"}, true
+	}
+	return cliReply{}, false
+}
+
+// TestOMSkewThresholdsReading: a reading of an om whose changed files can change
+// the binary says it is below the thresholds only when both of the image-pins
+// planner's measures are under; a lag that cannot be read, or one the check has
+// no reason to read, leaves it false (gt-pd6jae).
+func TestOMSkewThresholdsReading(t *testing.T) {
+	t.Parallel()
+	code := []string{"internal/review/review.go"}
+	for _, tc := range []struct {
+		name    string
+		commits int
+		age     time.Duration
+		changed []string
+		fails   string // the git subcommand that exits 128
+		below   bool
+		lagRead bool
+		logs    string // a line two readings log exactly once
+	}{
+		{name: "three commits and a few hours", commits: 3, age: 5 * time.Hour, changed: code, below: true, lagRead: true},
+		{name: "one under both thresholds", commits: imagePinsFileBehind - 1, age: imagePinsFileAge - time.Second, changed: code, below: true, lagRead: true},
+		{name: "the commit threshold", commits: imagePinsFileBehind, age: 5 * time.Hour, changed: code, lagRead: true},
+		{name: "the age threshold", commits: 3, age: imagePinsFileAge, changed: code, lagRead: true},
+		{name: "the commit count cannot be read", changed: code, fails: "rev-list", lagRead: true, logs: "how far behind"},
+		{name: "a commit time cannot be read", commits: 3, changed: code, fails: "show", lagRead: true, logs: "how far behind"},
+		{name: "the changed files cannot be listed", commits: 3, changed: code, fails: "diff"},
+		{name: "no changed file reaches the binary", commits: 3, changed: []string{"README.md"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := omSkewDaemon(t)
+			var logs lockedBuffer
+			d.logger = log.New(&logs, "", 0)
+			mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				if tc.fails != "" && gitSub(c, tc.fails) {
+					return cliReply{stderr: "fatal: bad object", code: 128}
+				}
+				if gitSub(c, "diff") {
+					return cliReply{stdout: strings.Join(tc.changed, "\x00") + "\x00"}
+				}
+				reply, _ := omSkewLagReply(c, tc.commits, tc.age)
+				return reply
+			})
+
+			// Twice, as two hourly checks: the log rows count lines across both.
+			d.omSkewRead(d.config.TownRoot)
+			r := d.omSkewRead(d.config.TownRoot)
+
+			if r.err != nil || r.belowThresholds != tc.below {
+				t.Errorf("reading = %+v, want belowThresholds=%t and no error", r, tc.below)
+			}
+			read := slices.ContainsFunc(cli.argvs("-C"), func(a []string) bool { return slices.Contains(a, "rev-list") })
+			if read != tc.lagRead {
+				t.Errorf("lag read = %t, want %t", read, tc.lagRead)
+			}
+			if tc.logs != "" && strings.Count(logs.String(), tc.logs) != 1 {
+				t.Errorf("log = %q, want one line naming %q across two readings", logs.String(), tc.logs)
+			}
+		})
+	}
 }
 
 // omSkewDiffCalls returns the `git -C <clone> diff ...` calls the check made,
@@ -734,6 +814,9 @@ func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		if gitSub(c, "grep") {
 			return cliReply{} // a source carrying no directive
+		}
+		if reply, ok := omSkewLagReply(c, imagePinsFileBehind, 0); ok {
+			return reply
 		}
 		return cliReply{stdout: strings.Join(changed, "\x00") + "\x00"}
 	})
