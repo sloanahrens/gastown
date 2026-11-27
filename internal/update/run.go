@@ -689,6 +689,17 @@ func townHealthDetail(checks []Check) string {
 	return ""
 }
 
+// renderDriftBound is how long the run waits for the render-drift hook's answer,
+// on the run's clock.
+const renderDriftBound = 20 * time.Second
+
+// errRenderDriftPanicked and errRenderDriftSilent are the two ways the hook gives
+// no answer. Both make the line unreadable, and neither text is printed.
+var (
+	errRenderDriftPanicked = errors.New("render drift hook panicked")
+	errRenderDriftSilent   = errors.New("render drift hook gave no answer within the bound")
+)
+
 // renderDrift asks the render-drift hook after the verify step and adds its one
 // line to that step's note and to the log. A nil hook asks nothing. The hook
 // never fails the run: its answer only decides what the line says.
@@ -696,7 +707,7 @@ func (r *runner) renderDrift(i int) error {
 	if r.d.RenderDrift == nil {
 		return nil
 	}
-	line := renderDriftLine(r.d.RenderDrift(r.ctx))
+	line := renderDriftLine(r.renderDriftAnswer())
 	if line == "" {
 		return nil
 	}
@@ -711,12 +722,50 @@ func (r *runner) renderDrift(i int) error {
 	return err
 }
 
+// renderDriftAnswer returns the hook's answer, or errRenderDriftSilent when the
+// bound passes on the run's clock before one comes. The hook runs in its own
+// goroutine, so the run returns at the bound even if the hook ignores its
+// context; the context is canceled on return so a hook that honors it can stop.
+// A panic in the hook is recovered into errRenderDriftPanicked.
+func (r *runner) renderDriftAnswer() (int, error) {
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	type answer struct {
+		differing int
+		err       error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		var a answer
+		defer func() {
+			if recover() != nil {
+				a = answer{err: errRenderDriftPanicked}
+			}
+			done <- a
+			cancel()
+		}()
+		a.differing, a.err = r.d.RenderDrift(ctx)
+	}()
+	if r.d.Sleep(ctx, renderDriftBound) != nil {
+		// The wait ended early: either the hook answered and canceled ctx, which
+		// it does only after its answer is in done, or the run was canceled.
+		select {
+		case a := <-done:
+			return a.differing, a.err
+		default:
+		}
+	}
+	return 0, errRenderDriftSilent
+}
+
 // renderDriftLine is the line for the hook's answer: "" for a count of zero, the
-// count when it is above zero, and the unreadable line for an error or a count
-// below zero, which is no count at all. The error's text is never printed, since
-// it can name what the hook read.
+// count when it is above zero, the unreadable line for an error or a count below
+// zero, and, for an error wrapping ErrNoRenderRecord, the command that records
+// the render. The error's text is never printed, since it can name what it read.
 func renderDriftLine(differing int, err error) string {
 	switch {
+	case errors.Is(err, ErrNoRenderRecord):
+		return "render drift: unreadable (no recorded render: run gt town cluster render --record-flags)"
 	case err != nil, differing < 0:
 		return "render drift: unreadable"
 	case differing > 0:
