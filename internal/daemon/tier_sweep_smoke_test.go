@@ -157,6 +157,58 @@ func TestSweepSmokeLeavesASweepsRunAlone(t *testing.T) {
 	}
 }
 
+// TestSweepSmokeSparesAnInterruptedSweep: a sweep mark younger than the run
+// budget is an interrupted cycle whose finished Job's output claims wait for the
+// resumed cycle. The smoke records busy naming the commit and launches nothing;
+// no mark, an old one, or an unreadable one (logged) launches as before (gt-rp65v0).
+func TestSweepSmokeSparesAnInterruptedSweep(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	for _, tc := range []struct {
+		name     string
+		started  time.Time
+		unread   bool
+		launches int
+		outcome  string
+	}{
+		{"young mark", now.Add(-time.Minute), false, 0, "busy"},
+		{"no mark", time.Time{}, false, 1, "started"},
+		{"mark at the budget", now.Add(-tierSweepRunBudget), false, 1, "started"},
+		{"unreadable mark", time.Time{}, true, 1, "started"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+			d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+			d.patrolConfig.Patrols.TierSweep.Runner.Shell = true
+			d.tierSweepSeams.localMainSHA = func(string) (string, error) { return runnerTestSHA, nil }
+			switch {
+			case tc.unread:
+				plantMark(t, tierSweepInFlightPath(d.config.TownRoot, "gastown"), "{not json", false)
+			case !tc.started.IsZero():
+				writeErr := writeTierSweepInFlight(d.config.TownRoot, "gastown", tierSweepInFlightMark{SHA: "abc123", Started: tc.started})
+				if writeErr != nil {
+					t.Fatalf("write mark: %v", writeErr)
+				}
+			}
+			launches := 0
+			d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+				launches++
+				return tierSweepLaunch{exitCode: 0}
+			}
+			rec := d.sweepSmokeLaunch(context.Background(), "gastown")
+			named := tc.outcome == "busy" && strings.Contains(rec.Detail, "abc123")
+			if launches != tc.launches || !rec.Time.Equal(now) || rec.Outcome != tc.outcome || tc.outcome == "busy" && !named {
+				t.Errorf("sweepSmokeLaunch = %+v after %d launches, want %s with the marked commit named when it spared the sweep (%q)",
+					rec, launches, tc.outcome, rec.Detail)
+			}
+			if logged := strings.Contains(logs.String(), "mark not read"); logged != tc.unread {
+				t.Errorf("log = %q, want the unreadable mark named: %v", logs.String(), tc.unread)
+			}
+		})
+	}
+}
+
 // TestSweepSmokeHoldsTheSweepGuard: the smoke holds the cycle's single-flight
 // guard from before its launch to after its stop. A cycle holding it is not run
 // beside: nothing launches, the record says busy naming the cycle, guard held.
