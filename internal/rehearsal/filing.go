@@ -16,7 +16,8 @@ func FileSet(ctx context.Context, t Town, tasks []Task) ([]string, error) {
 		id, err := t.Create(ctx, task)
 		if err != nil {
 			cause := fmt.Errorf("file %s: %w", task.Title, err)
-			return nil, errors.Join(cause, CloseOpen(ctx, t, ids, "filing failed"))
+			// The cleanup ignores ctx's cancellation: a canceled filing still closes the beads it filed.
+			return nil, errors.Join(cause, CloseOpen(context.WithoutCancel(ctx), t, ids, "filing failed"))
 		}
 		ids = append(ids, id)
 	}

@@ -101,6 +101,54 @@ func TestRehearsalFilingCloseOpenTriesEvery(t *testing.T) {
 	}
 }
 
+func TestRehearsalFilingFileSetClosesWhenCanceled(t *testing.T) {
+	t.Parallel()
+	createErr, closeErr := errors.New("create refused"), errors.New("close refused")
+	cases := []struct {
+		name      string
+		failClose string
+	}{
+		{name: "a cancel during a later create closes the beads filed before it and returns the create error"},
+		{name: "a failed cleanup close after the cancel is reported with the create error", failClose: "rh-02"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var closes []string
+			town := Town{Run: func(runCtx context.Context, argv []string) ([]byte, error) {
+				// The fake town fails any command under a canceled ctx, as a real exec does.
+				if err := runCtx.Err(); err != nil {
+					return nil, err
+				}
+				if argv[1] == "close" {
+					closes = append(closes, strings.Join(argv, " "))
+					if argv[2] == tc.failClose {
+						return nil, closeErr
+					}
+					return nil, nil
+				}
+				n, _ := strings.CutPrefix(argv[3], "--title=probe ")
+				if n == "03" {
+					cancel()
+					return nil, createErr
+				}
+				return []byte("rh-" + n + "\n"), nil
+			}}
+
+			ids, err := FileSet(ctx, town, probeTasks(3))
+			if ids != nil || !errors.Is(err, createErr) || errors.Is(err, closeErr) != (tc.failClose != "") {
+				t.Errorf("FileSet = %q, %v; want no ids, an error wrapping %v, and one wrapping %v iff close %q failed", ids, err, createErr, closeErr, tc.failClose)
+			}
+			wantCloses := []string{"bd close rh-01 --reason=filing failed", "bd close rh-02 --reason=filing failed"}
+			if !slices.Equal(closes, wantCloses) {
+				t.Errorf("FileSet closed %q, want %q", closes, wantCloses)
+			}
+		})
+	}
+}
+
 func TestRehearsalFilingFileSetClosesOnFailure(t *testing.T) {
 	t.Parallel()
 	createErr, closeErr := errors.New("create refused"), errors.New("close refused")
