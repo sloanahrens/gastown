@@ -12,6 +12,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/sandboxstuck"
 )
 
 // seatNameGuardNow is the tick these tests judge a sandbox's age against, so no
@@ -383,6 +384,50 @@ func TestSeatNameGuardCollectorLeavesAHostOnlyTownAlone(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("items = %+v, want none", items)
+	}
+}
+
+// TestSeatNameGuardRaisesAStuckSandbox drives the production collector: a
+// sandbox the gateway lists as Provisioning raises no item on the first tick,
+// and one seat-sandbox-stale item once it has been outside Ready for
+// sandboxstuck.After. Provisioning is not a failure phase, so no name is kept
+// out of the draw (gt-u9qatj).
+func TestSeatNameGuardRaisesAStuckSandbox(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return seatNameGuardListing("Provisioning", "gt-dag"), nil
+	}}
+
+	first, err := src.collectStaleSeatSandboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 0 {
+		t.Fatalf("first tick items = %+v, want none: the sandbox has been outside Ready for no time", first)
+	}
+
+	src.now = seatNameGuardNow.Add(sandboxstuck.After)
+	later, err := src.collectStaleSeatSandboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(later) != 1 || later[0].Key != "seat-sandbox-stale:gt-dag" || later[0].Kind != attention.KindSeatSandboxStale {
+		t.Fatalf("later items = %+v, want one seat-sandbox-stale:gt-dag item", later)
+	}
+	if !strings.Contains(later[0].Summary, "Provisioning") {
+		t.Errorf("summary %q should name the phase Provisioning", later[0].Summary)
+	}
+
+	guard := d.seatSandboxGuard
+	if findings := guard.Findings(); len(findings) != 0 {
+		t.Errorf("Findings() = %+v, want none: Provisioning is not a failure phase", findings)
+	}
+	if f, ok := guard.Stale("gt-dag"); ok {
+		t.Errorf("Stale(gt-dag) = %+v, want no finding", f)
+	}
+	if got := guard.Polecats("gt"); len(got) != 0 {
+		t.Errorf("Polecats(gt) = %v, want none", got)
 	}
 }
 

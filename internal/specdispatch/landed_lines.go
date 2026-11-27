@@ -48,11 +48,3 @@ func LineFloor(labels []string) (int, bool) {
 	}
 	return band.Median, true
 }
-
-// Refuse is the band's Median added lines.
-func (b LinesBand) Refuse() int { return b.Median }
-
-// Advise is half the band's P90 rounded up: the gate refuses past twice the
-// declared number, so a declaration at Advise is refused only above about P90,
-// which one bead in ten lands over.
-func (b LinesBand) Advise() int { return (b.P90 + 1) / 2 }
