@@ -27,6 +27,8 @@ package daemon
 // whatever an earlier one did, so one refused image never keeps the cache from
 // being pruned. A dry run runs the list program alone. The keep rule is written once, in
 // docs/guides/disk-maintenance.md: read it before changing what is removed.
+// An orphaned job container is still running, so it goes with docker rm -f, and the
+// verdict counts it beside the other kinds.
 //
 // Build cache is not sized in a dry run, since docker has no dry run for it.
 
@@ -135,17 +137,29 @@ if [ -n "$containers" ]; then docker container inspect --format '{{.Image}}' $co
 
 // ciEngineRemoval is one docker command of the remove step: the kind it removes,
 // the argv docker runs (the verb and the plan's ids, nothing else) and the ids
-// docker must report removed for the step to count.
+// docker must report removed for the step to count. An orphan job container is
+// kind "orphan", so the verdict counts it beside the other kinds; docker calls the
+// object a container, and dockerKind is what an inspect of it asks for.
 type ciEngineRemoval struct {
 	kind string
 	argv []string
 	ids  []string
 }
 
+// dockerKind is the docker object kind of the removal: an orphan is still a
+// container to docker.
+func (r ciEngineRemoval) dockerKind() string {
+	if r.kind == "orphan" {
+		return "container"
+	}
+	return r.kind
+}
+
 // ciEngineRemovals is the remove step as docker commands: one per kind the plan
 // names, each over that kind's ids as argv. No shell runs and nothing counts: a
 // kind with no ids is not sent, and what was removed is read from docker's output
-// (ciEngineMissing), never from the number of ids passed.
+// (ciEngineMissing), never from the number of ids passed. An orphan job container
+// is running, so docker needs -f to remove it; stopped containers keep docker rm.
 func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
 	var out []ciEngineRemoval
 	if len(plan.containers) > 0 {
@@ -154,6 +168,13 @@ func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
 			ids = append(ids, c.ID)
 		}
 		out = append(out, ciEngineRemoval{kind: "container", argv: append([]string{"docker", "rm"}, ids...), ids: ids})
+	}
+	if len(plan.orphans) > 0 {
+		ids := make([]string, 0, len(plan.orphans))
+		for _, c := range plan.orphans {
+			ids = append(ids, c.ID)
+		}
+		out = append(out, ciEngineRemoval{kind: "orphan", argv: append([]string{"docker", "rm", "-f"}, ids...), ids: ids})
 	}
 	if len(plan.images) > 0 {
 		ids := make([]string, 0, len(plan.images))
@@ -173,13 +194,18 @@ func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
 }
 
 // ciEngineRemovalCounts names the ids a set of removals takes, per kind, for the
-// run's log.
+// run's log. Orphans are counted after the other kinds, and only when the plan
+// names some, so a run without one keeps the line it always had.
 func ciEngineRemovalCounts(removals []ciEngineRemoval) string {
 	counts := map[string]int{}
 	for _, r := range removals {
 		counts[r.kind] = len(r.ids)
 	}
-	return fmt.Sprintf("%d containers, %d images, %d volumes", counts["container"], counts["image"], counts["volume"])
+	text := fmt.Sprintf("%d containers, %d images, %d volumes", counts["container"], counts["image"], counts["volume"])
+	if counts["orphan"] > 0 {
+		text += fmt.Sprintf(", %d orphaned job containers", counts["orphan"])
+	}
+	return text
 }
 
 // ciEngineShortImages names image ids for a log line, each as the digest's first 12
@@ -205,7 +231,7 @@ func (r ciEngineRemoval) presenceArgv(ids []string) []string {
 	if r.kind == "volume" {
 		format = "{{.Name}}"
 	}
-	return append([]string{"docker", r.kind, "inspect", "--format", format}, ids...)
+	return append([]string{"docker", r.dockerKind(), "inspect", "--format", format}, ids...)
 }
 
 // ciEngineBuildCachePruneArgv is the build cache prune: everything unused for
@@ -485,10 +511,10 @@ type ciEngineVolume struct {
 }
 
 // ciEnginePlan is what a run removes, in the order the remove program takes it:
-// containers first, so the images they used are free; images most layers first,
-// so a child goes before its parent; volumes by name. orphans and keptRunning
-// are the old running job containers whose task does not, or still does, run;
-// the verdict names both, and nothing removes an orphan yet.
+// containers first, so the images they used are free; then orphans, the old
+// running job containers whose task no longer runs; images most layers first, so
+// a child goes before its parent; volumes by name. keptRunning are the old running
+// job containers whose task still runs: they stay, and the verdict names them.
 type ciEnginePlan struct {
 	containers  []ciEngineContainer
 	images      []ciEngineImage
@@ -687,8 +713,9 @@ type ciEngineOrphanRule struct {
 // stopped, and how old an unused anonymous volume and an unused build cache record
 // must be. A listing it cannot read in full is refused: an id or name that is not
 // in docker's shape, a time it cannot parse, or a missing data root figure. A
-// refusal is a failed run, never an empty plan. An orphan rule plans orphans, and
-// none is removed yet.
+// refusal is a failed run, never an empty plan. An orphan rule plans the old
+// running job containers whose task no longer runs; the remove step takes them with
+// the forced verb.
 func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string, orphan ...ciEngineOrphanRule) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
@@ -1168,7 +1195,8 @@ func ciEngineReasonLine(s string) string { return strings.SplitN(s, "\n", 2)[0] 
 // first; a container it keeps also keeps its image and volumes out of the plan. It
 // names the rest in its log, and a run that leaves some is still a verdict. A
 // failed running-task read plans no orphan, logs once, and leaves the rest of the
-// prune as it was; nothing removes a planned orphan yet.
+// prune as it was; a planned orphan is removed with docker rm -f, and an orphan
+// docker leaves in place fails the run like any other kind.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, reason string) {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
@@ -1462,7 +1490,7 @@ func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext
 		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineFailure(inspectErr, seenErr))
 		return false, fmt.Sprintf("the %s presence check could not run (%s)", r.kind, ciEngineFailure(inspectErr, seenErr))
 	}
-	present := ciEnginePresent(r.kind, seen)
+	present := ciEnginePresent(r.dockerKind(), seen)
 	left := 0
 	for _, id := range missing {
 		if present[id] {

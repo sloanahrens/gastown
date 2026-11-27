@@ -2711,13 +2711,15 @@ func TestCIEnginePresentReadsInspectOutput(t *testing.T) {
 }
 
 // TestCIEnginePresenceArgv: the presence check is the kind's inspect over the
-// missing ids, formatted to the id (the name for a volume), with no shell.
+// missing ids, formatted to the id (the name for a volume), with no shell; an
+// orphan is a container to docker.
 func TestCIEnginePresenceArgv(t *testing.T) {
 	t.Parallel()
 	for kind, want := range map[string][]string{
 		"container": {"docker", "container", "inspect", "--format", "{{.Id}}", "a", "b"},
 		"image":     {"docker", "image", "inspect", "--format", "{{.Id}}", "a", "b"},
 		"volume":    {"docker", "volume", "inspect", "--format", "{{.Name}}", "a", "b"},
+		"orphan":    {"docker", "container", "inspect", "--format", "{{.Id}}", "a", "b"},
 	} {
 		got := ciEngineRemoval{kind: kind}.presenceArgv([]string{"a", "b"})
 		if !slices.Equal(got, want) {
@@ -3653,6 +3655,74 @@ func TestCIEnginePlanOrphanRefuses(t *testing.T) {
 		}
 		if logs := f.logs.String(); !strings.Contains(logs, "ci_engine_orphan_job_age") {
 			t.Errorf("the refusal does not name the setting:\n%s", logs)
+		}
+	})
+}
+
+// TestCIEnginePruneOrphanRemoved: an orphan, a running job container whose task
+// no longer runs, goes with the forced verb docker rm -f, and the verdict counts
+// it beside the other kinds.
+func TestCIEnginePruneOrphanRemoved(t *testing.T) {
+	t.Parallel()
+	const cancelled = 22148
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply,
+		engListing(t, []map[string]any{engJob('1', cancelled, 72*time.Hour)}, nil, nil),
+		engineRemoveAnswers{})
+	f.tick()
+	f.drain()
+
+	execs := engineDockerExecs(f, "rm")
+	if len(execs) != 1 {
+		t.Fatalf("docker rm ran %d time(s), want once:\n%s", len(execs), f.logs.String())
+	}
+	i := slices.Index(execs[0].args, "docker")
+	if i < 0 {
+		t.Fatalf("the orphan removal is no docker command: %q", execs[0].args)
+	}
+	if got, want := execs[0].args[i:], []string{"docker", "rm", "-f", engHex64('1')}; !slices.Equal(got, want) {
+		t.Errorf("orphan removal argv = %q, want the forced verb %q", got, want)
+	}
+	if want := "removed 0 containers, 0 images, 0 volumes, 1 orphaned job containers"; !strings.Contains(f.logs.String(), want) {
+		t.Errorf("the verdict does not count the orphan beside the other kinds (%q):\n%s", want, f.logs.String())
+	}
+	if items := enginePruneItems(f); len(items) != 0 {
+		t.Errorf("a removed orphan raised %d item(s): %+v", len(items), items)
+	}
+}
+
+// TestCIEnginePruneOrphanDryRun: a dry run removes nothing, naming the orphan it
+// would remove, and a run with no orphan keeps the verdict line it always had.
+func TestCIEnginePruneOrphanDryRun(t *testing.T) {
+	t.Parallel()
+	t.Run("a dry run sends no removal", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeDryRun,
+			engListing(t, []map[string]any{engJob('1', 22148, 72*time.Hour)}, nil, nil),
+			engineRemoveAnswers{})
+		f.tick()
+		f.drain()
+		for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
+			if n := len(engineDockerExecs(f, verb)); n != 0 {
+				t.Errorf("a dry run ran %d docker %q command(s)", n, verb)
+			}
+		}
+		if want := "dry_run: would remove orphan container " + engHex64('1')[:12]; !strings.Contains(f.logs.String(), want) {
+			t.Errorf("the dry run's log lacks %q:\n%s", want, f.logs.String())
+		}
+	})
+	t.Run("no orphan keeps today's verdict line", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply,
+			engListing(t, []map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)}, nil, nil),
+			engineRemoveAnswers{})
+		f.tick()
+		f.drain()
+		logs := f.logs.String()
+		if want := "removed 1 containers, 0 images, 0 volumes"; !strings.Contains(logs, want) {
+			t.Errorf("the verdict lost its old line (%q):\n%s", want, logs)
+		}
+		if strings.Contains(logs, "orphaned job containers") {
+			t.Errorf("a run without an orphan still names one:\n%s", logs)
 		}
 	})
 }
