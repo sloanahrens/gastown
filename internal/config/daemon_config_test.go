@@ -3058,3 +3058,51 @@ func TestClusterDriftSetting(t *testing.T) {
 		}
 	})
 }
+
+// TestClusterDriftSettingRefusesBadBlocks: the cluster_drift block decodes
+// strictly, so an operator who writes a non-boolean enabled or misspells a key
+// gets a decode error rather than a patrol silently read as off (gt-g6q05l).
+func TestClusterDriftSettingRefusesBadBlocks(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{"non-boolean enabled", `{"patrols":{"cluster_drift":{"enabled":"yes"}}}`},
+		{"unknown key", `{"patrols":{"cluster_drift":{"enaabled":true}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.doc), &cfg); err == nil {
+				t.Errorf("%s decoded, want a refusal", tc.doc)
+			}
+		})
+	}
+}
+
+// TestClusterDriftSettingRoundTripsWithoutTheKey: a daemon config that names no
+// cluster_drift block rewrites without gaining one, so a daemon rewrite leaves
+// an operator's file alone (gt-g6q05l).
+func TestClusterDriftSettingRoundTripsWithoutTheKey(t *testing.T) {
+	t.Parallel()
+
+	body := `{"patrols":{"spec_dispatch":{"enabled":true}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "cluster_drift") {
+		t.Errorf("a rewrite gained a cluster_drift key: %s", out)
+	}
+	if !strings.Contains(string(out), `"spec_dispatch":{"enabled":true}`) {
+		t.Errorf("a rewrite dropped the neighbouring block: %s", out)
+	}
+}
