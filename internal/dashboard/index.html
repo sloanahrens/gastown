@@ -1723,7 +1723,10 @@ function queueHolder(b) {
 
 // Each poll redraws this pane, and the landings rows open in a new scroll box at
 // the top: landingsScroll reads where the old one was, and keepLandingsScroll sets
-// it on the new one once the rows are drawn (gt-tjlu6).
+// it on the new one once the rows are drawn (gt-tjlu6). A saved position of 0 is
+// left unwritten — the new box already stands there — because a scrollTop write
+// makes WebKit lay the whole table out inside the stream's event handler, even in
+// a hidden tab (gt-h3ze01).
 function landingsScroll(box) {
   const rows = box.querySelector(".lrows");
   return rows ? rows.scrollTop : 0;
@@ -1731,7 +1734,7 @@ function landingsScroll(box) {
 
 function keepLandingsScroll(box, top) {
   const rows = box.querySelector(".lrows");
-  if (rows) rows.scrollTop = top;
+  if (rows && top > 0) rows.scrollTop = top;
 }
 
 // The landings head — the day's figures and the per-hour bars — folds away for

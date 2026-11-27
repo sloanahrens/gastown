@@ -127,6 +127,65 @@ func TestLandingsPaneKeepsItsScrollAcrossARedraw(t *testing.T) {
 	}
 }
 
+// A redraw whose saved position is the top writes nothing: the new scroll box
+// already stands there, and the write made WebKit lay the whole landings table
+// out inside the stream's event handler, even in a hidden tab. A reader who has
+// scrolled still gets exactly one write of their place (gt-h3ze01).
+func TestLandingsPaneDoesNotWriteScrollTopAtTheTop(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	v, err := p.vm.RunString(`(function () {
+  function recordingBox() {
+    var box = document.createElement("div");
+    var rows = document.createElement("div");
+    rows.className = "lrows";
+    for (var i = 0; i < 20; i++) {
+      var row = document.createElement("div");
+      row.className = "ltrow";
+      rows.append(row);
+    }
+    box.append(rows);
+    var writes = [];
+    var d = Object.getOwnPropertyDescriptor(rows, "scrollTop");
+    Object.defineProperty(rows, "scrollTop", {
+      get: function () { return d.get.call(rows); },
+      set: function (top) { writes.push(top); d.set.call(rows, top); }
+    });
+    return {box: box, rows: rows, writes: writes};
+  }
+  var atTop = recordingBox();
+  keepLandingsScroll(atTop.box, 0);
+  var scrolled = recordingBox();
+  keepLandingsScroll(scrolled.box, 120);
+  return JSON.stringify({
+    topWrites: atTop.writes,
+    scrolledWrites: scrolled.writes,
+    scrolledTop: scrolled.rows.scrollTop
+  });
+})()`)
+	if err != nil {
+		t.Fatalf("calling keepLandingsScroll on recording boxes: %v", err)
+	}
+	var got struct {
+		TopWrites      []int `json:"topWrites"`
+		ScrolledWrites []int `json:"scrolledWrites"`
+		ScrolledTop    int   `json:"scrolledTop"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("decoding the scrollTop writes: %v", err)
+	}
+	if len(got.TopWrites) != 0 {
+		t.Errorf("a redraw with the rows at the top wrote scrollTop %v, want no write", got.TopWrites)
+	}
+	if len(got.ScrolledWrites) != 1 || got.ScrolledWrites[0] != 120 {
+		t.Errorf("a redraw at 120 wrote scrollTop %v, want exactly one write of 120", got.ScrolledWrites)
+	}
+	if got.ScrolledTop != 120 {
+		t.Errorf("the scrolled rows read back at %d after the redraw, want 120", got.ScrolledTop)
+	}
+}
+
 // landingsReading is a Landings pane reading with something landed in the
 // window, so the figures, the per-hour bars and the table are all drawn: two
 // hours of landings, each with a load reading, two stage lines, and one
