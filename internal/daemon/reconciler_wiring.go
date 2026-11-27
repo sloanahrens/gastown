@@ -17,3 +17,13 @@ func (d *Daemon) newReconcilerTicker() (<-chan time.Time, func()) {
 	}
 	return newTicker(interval)
 }
+
+// startReconcilerTicker returns the reconciler patrol's tick channel and the
+// func that stops it, or two nils when the patrol is off, so a town that does
+// not run the patrol starts no ticker at all (gt-ykyuuc).
+func (d *Daemon) startReconcilerTicker() (<-chan time.Time, func()) {
+	if !d.isPatrolActive("reconciler") {
+		return nil, nil
+	}
+	return d.newReconcilerTicker()
+}
