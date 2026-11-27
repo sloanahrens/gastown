@@ -90,3 +90,40 @@ func TestDeclaredLines(t *testing.T) {
 		})
 	}
 }
+
+func TestDeclaredLinesInline(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		description string
+		want        int
+		wantOK      bool
+	}{
+		{
+			name:        "budget stated inside a sentence",
+			description: sizeBead("One worker, one landing. Change: at most 227 added lines in 3 files."),
+			want:        227,
+			wantOK:      true,
+		},
+		{
+			name:        "two inline wordings take the smaller",
+			description: sizeBead("One worker, one landing. Change: at most 227 added lines in 3 files. Change: at most 70 added lines in 2 files."),
+			want:        70,
+			wantOK:      true,
+		},
+		{
+			name:        "no declaration",
+			description: sizeBead("One worker, one landing."),
+			wantOK:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := DeclaredLines(tt.description)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("DeclaredLines = %d, %t; want %d, %t", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
