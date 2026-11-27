@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint/growth"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // diskNow is the instant the fixtures count from. It sits well before the wall
@@ -82,6 +83,26 @@ func TestDiskPanelReadsControlThenSandboxWithTheRoundedShare(t *testing.T) {
 				t.Errorf("sandbox row used_pct is %d, want 50", sandbox.UsedPct)
 			}
 		})
+	}
+}
+
+// The reader is handed the town's runtime directory, <town>/.runtime, and finds
+// each disk's ring under its disk-growth subdirectory. The test builds the town
+// and runtime segments literally, so a renamed production directory fails here
+// rather than moving the test with it.
+func TestDiskPanelReadsTheTownRuntimeShape(t *testing.T) {
+	t.Parallel()
+
+	town := testutil.PrivateTempDir(t)
+	runtimeDir := filepath.Join(town, ".runtime")
+	diskAppend(t, runtimeDir, "control", growth.Sample{At: diskNow, UsedBytes: 200, TotalBytes: 1000})
+
+	row := ReadDisk(runtimeDir, diskNow).Rows[0]
+	if row.NoSamples || row.Err != "" {
+		t.Fatalf("control row reads no_samples=%t err=%q, want the sample written under .runtime/disk-growth", row.NoSamples, row.Err)
+	}
+	if row.UsedBytes != 200 || row.TotalBytes != 1000 || !row.SampledAt.Equal(diskNow) {
+		t.Errorf("control row reads %d/%d at %v, want the sample's 200/1000 at %v", row.UsedBytes, row.TotalBytes, row.SampledAt, diskNow)
 	}
 }
 

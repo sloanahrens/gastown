@@ -49,13 +49,17 @@ type Disk struct {
 // floats are always sent so the page never has to guess whether a zero is a
 // reading (gt-u3ccue).
 type DiskRow struct {
-	Name       string    `json:"name"`
-	UsedBytes  int64     `json:"used_bytes,omitempty"`
-	TotalBytes int64     `json:"total_bytes,omitempty"`
-	UsedPct    int       `json:"used_pct"`
-	SampledAt  time.Time `json:"sampled_at,omitempty"`
-	NoSamples  bool      `json:"no_samples,omitempty"`
-	Err        string    `json:"err,omitempty"`
+	Name       string `json:"name"`
+	UsedBytes  int64  `json:"used_bytes,omitempty"`
+	TotalBytes int64  `json:"total_bytes,omitempty"`
+	UsedPct    int    `json:"used_pct"`
+	// SampledAt is the instant of the sample this row reports. A NoSamples row
+	// has none, and encoding/json does not omit a zero time.Time under
+	// omitempty: that row serializes sampled_at as the zero instant
+	// (0001-01-01T00:00:00Z) rather than leaving the key out.
+	SampledAt time.Time `json:"sampled_at,omitempty"`
+	NoSamples bool      `json:"no_samples,omitempty"`
+	Err       string    `json:"err,omitempty"`
 
 	GibPerDay24h float64 `json:"gib_per_day_24h"`
 	GibPerDay7d  float64 `json:"gib_per_day_7d"`
