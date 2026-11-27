@@ -3,6 +3,8 @@ package rehearsal
 import (
 	"reflect"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 const readyNote = "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: toast\nGate: "
@@ -39,6 +41,38 @@ func TestRehearsalFacts(t *testing.T) {
 			t.Parallel()
 			if got := GateFacts(tt.notes, tt.comments); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("GateFacts(%q, %q) = %+v, want %+v", tt.notes, tt.comments, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRehearsalFactsLanding covers LandingFacts: a LANDING RECORD sets Landed,
+// a gate-kind MERGE REJECTION sets CIFailed even before a later landing, and a
+// rejection of another kind sets neither.
+func TestRehearsalFactsLanding(t *testing.T) {
+	t.Parallel()
+	landed := land.LandingRecord{LandedCommit: "c0ffee", Target: "main", Branch: "b", Head: "h"}.NoteBlock()
+	gate := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "gate failed", Branch: "b", Target: "main"})
+	review := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectReview), Reason: "om requested changes", Branch: "b", Target: "main"})
+	unclassified := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Reason: "unclassified", Branch: "b", Target: "main"})
+	tests := []struct {
+		name  string
+		notes string
+		want  Landing
+	}{
+		{"a LANDING RECORD block sets landed", landed, Landing{Bead: "gt-a", Landed: true}},
+		{"notes without one leave landed unset", "", Landing{Bead: "gt-a"}},
+		{"prose naming the markers sets nothing", "LANDING RECORD was mentioned, not written", Landing{Bead: "gt-a"}},
+		{"a gate rejection sets CI failed", gate, Landing{Bead: "gt-a", CIFailed: true}},
+		{"a gate rejection before a later landing sets both", gate + "\n\n" + landed, Landing{Bead: "gt-a", Landed: true, CIFailed: true}},
+		{"a review rejection does not set CI failed", review, Landing{Bead: "gt-a"}},
+		{"an unclassified rejection does not set CI failed", unclassified, Landing{Bead: "gt-a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := LandingFacts("gt-a", tt.notes); got != tt.want {
+				t.Errorf("LandingFacts(%q) = %+v, want %+v", tt.notes, got, tt.want)
 			}
 		})
 	}
