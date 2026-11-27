@@ -19,10 +19,13 @@ const (
 	// (gt-hlo07.1). A runner started outside that Job has no such directory and
 	// its trim finds nothing.
 	sweepCacheRoot = "/var/cache/gt-sweep"
-	// sweepCacheCapBytes is the size a run brings the claim under: the 5 GiB
-	// the claim is requested at, so a sweep's cache cannot fill it without
-	// bound (gt-hlo07).
-	sweepCacheCapBytes int64 = 5 << 30
+	// sweepCacheCapBytes is the size a run brings the claim under: 8 GiB, so a
+	// sweep's cache cannot fill the host without bound (gt-hlo07). The claim it
+	// trims stays smaller on purpose: its local-path storage class does not
+	// enforce a claim's size (gt-fp66p0), so the cap needs no claim change. Do
+	// not raise the claim to match: the class cannot resize a bound claim, and
+	// every launch applies the claim.
+	sweepCacheCapBytes int64 = 8 << 30
 	// cacheTrimLogName is the file under the run's log directory that records
 	// the trim's failures, beside the tier logs the daemon reads.
 	cacheTrimLogName = "cache-trim.log"
