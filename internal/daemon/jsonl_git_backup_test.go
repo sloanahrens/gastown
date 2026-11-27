@@ -116,7 +116,7 @@ func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
 	}
 }
 
-func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
+func TestEnsureJsonlGitRepoInitialized_SetsBackupConfigOnFreshRepo(t *testing.T) {
 	t.Parallel()
 	d, f := backupTestDaemon(t)
 	gitRepo := t.TempDir()
@@ -127,9 +127,14 @@ func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
 	if got := gitConfigGet(t, f, gitRepo, "http.postBuffer"); got != gitPostBufferBytes {
 		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
 	}
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+		if got := gitConfigGet(t, f, gitRepo, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
 }
 
-func TestEnsureGitRepoInitialized_SetsPostBufferOnExistingRepo(t *testing.T) {
+func TestEnsureJsonlGitRepoInitialized_SetsBackupConfigOnExistingRepo(t *testing.T) {
 	t.Parallel()
 	// Regression for gt-kxa1: a repo initialized before this fix (or with the
 	// config lost some other way) must also get covered, not just fresh inits.
@@ -142,6 +147,37 @@ func TestEnsureGitRepoInitialized_SetsPostBufferOnExistingRepo(t *testing.T) {
 	}
 	if got := gitConfigGet(t, f, gitRepo, "http.postBuffer"); got != gitPostBufferBytes {
 		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
+	}
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+		if got := gitConfigGet(t, f, gitRepo, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// failingConfigSetGit fails writes of one config key.
+type failingConfigSetGit struct {
+	daemonGit
+	key string
+}
+
+func (g failingConfigSetGit) ConfigSet(key, value string) error {
+	if key == g.key {
+		return errors.New("config write failed")
+	}
+	return g.daemonGit.ConfigSet(key, value)
+}
+
+func TestJsonlBackupGitConfig_SetFailureNamesKey(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"gc.auto", "maintenance.auto"} {
+		d, f := backupTestDaemon(t)
+		d.openGitFn = func(dir string) daemonGit {
+			return failingConfigSetGit{f.Open(dir).(daemonGit), key}
+		}
+		if err := d.ensureGitRepoInitialized(t.TempDir()); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s: ensureGitRepoInitialized = %v, want the key named", key, err)
+		}
 	}
 }
 
