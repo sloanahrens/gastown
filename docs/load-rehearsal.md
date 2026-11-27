@@ -4,6 +4,16 @@ Read this before the overseer runs one load rehearsal. It is the procedure for t
 
 `gt-rehearsal run` drives one run; the flags below are the ones it reads.
 
+## Setup
+
+Once on the Mac, before the first run: a step that fails stops setup, and no run starts until each is in place.
+
+1. **The driver is built from origin/main.** In a gastown checkout of origin/main, run `CGO_ENABLED=0 go build -o ~/go/bin/gt-rehearsal ./cmd/gt-rehearsal`; rebuild it whenever `cmd/gt-rehearsal` changes. `CGO_ENABLED=0` because AGENTS.md says a bare `go build` fails on the macOS ICU headers and this driver needs no cgo. No build touches the installed `gt`.
+2. **The rehearsal repository is cloned.** `mkdir -p ~/gt/.runtime/rehearsal`, then `git clone <rehearsal repository URL> ~/gt/.runtime/rehearsal/src`; its main is the baseline commit (gt-13dre6.38).
+3. **The baseline tag is on the clone.** In `src`, create the tag at the baseline commit and push it: `git tag <tag> <baseline commit>`, then `git push origin <tag>`.
+4. **The three worktrees are detached at the tag.** In `src`, add each at the tag: `git worktree add --detach ~/gt/.runtime/rehearsal/wt-1 <tag>`, then the same for `wt-2` and `wt-3`.
+5. **The sixteen bead definitions are in the set.** `~/gt/.runtime/rehearsal/set` holds the sixteen files gt-13dre6.40 writes; `LoadSet` (internal/rehearsal/set.go) refuses a set that is not exactly sixteen `.md` files.
+
 ## Before
 
 Run every step from the town root, `~/gt`: the driver reads today's host load file and the rehearsal set from paths below it. A step that fails starts no run; Restore still runs for the hold or cap this run already wrote.
