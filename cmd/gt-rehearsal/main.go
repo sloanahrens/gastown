@@ -2,10 +2,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/rehearsal"
 )
 
@@ -17,11 +19,13 @@ func main() {
 // it cannot read exits 1.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return usage(stderr, "command", "name a subcommand: compare")
+		return usage(stderr, "command", "name a subcommand: run, compare")
 	}
 	switch args[0] {
 	case "compare":
 		return compare(args[1:], stdout, stderr)
+	case "run":
+		return runCommand(context.Background(), args[1:], callercwd.Require, rehearsal.Execute, stdout, stderr)
 	default:
 		return usage(stderr, "command", fmt.Sprintf("unknown subcommand %q", args[0]))
 	}

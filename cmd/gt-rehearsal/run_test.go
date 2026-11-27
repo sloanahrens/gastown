@@ -42,6 +42,36 @@ func callRun(args []string, getwd func() (string, error), execute func(context.C
 	return code, stdout.String(), stderr.String()
 }
 
+// TestRehearsalCommandRunReachesRunCommand: run([]string{"run"}) dispatches to
+// runCommand, whose refused command line exits 2 naming the missing flag. The
+// unknown-subcommand branch would name no flag.
+func TestRehearsalCommandRunReachesRunCommand(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr strings.Builder
+	if code := run([]string{"run"}, &stdout, &stderr); code != 2 {
+		t.Errorf("run = %d, want 2 (stderr %q)", code, stderr.String())
+	}
+	if stdout.Len() != 0 || strings.Count(stderr.String(), "\n") != 1 || !strings.Contains(stderr.String(), "--set") {
+		t.Errorf("stdout %q, stderr %q; want no stdout and one line naming --set", stdout.String(), stderr.String())
+	}
+}
+
+// TestRehearsalCommandMissingSubcommandNamesRunAndCompare: a command line with
+// no subcommand names both subcommands the binary has.
+func TestRehearsalCommandMissingSubcommandNamesRunAndCompare(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr strings.Builder
+	code := run(nil, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 {
+		t.Errorf("run = %d, stdout %q; want 2 and no stdout", code, stdout.String())
+	}
+	for _, want := range []string{"run", "compare"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q does not name %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestRehearsalCommandRun(t *testing.T) {
 	t.Parallel()
 	root := runRoot(t)
