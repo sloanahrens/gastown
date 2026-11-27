@@ -175,6 +175,11 @@ const (
 	// hold, and the town runs the older one until the next roll (gt-9odoqa).
 	RuleUpdateRolledBack = "update.rolled_back"
 
+	// RuleUpdateMaintenance is maintenance the roll runs first that did not
+	// finish before the roll: a record the overseer reads on its next look
+	// (gt-1mqpcb).
+	RuleUpdateMaintenance = "update.maintenance_not_done"
+
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
@@ -409,6 +414,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A rolled-back update leaves the town on the older pair: the overseer is
 	// woken to read the failed check before the next roll is due (gt-9odoqa).
 	RuleUpdateRolledBack: flagsWake,
+	// The roll proceeds on every outcome, so this is what happened rather than a
+	// page: the item records the outcome for the overseer's next look
+	// (gt-1mqpcb).
+	RuleUpdateMaintenance: flagsInfo,
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
@@ -616,6 +625,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
 	KindSeatEndNoRecord:               RuleSeatEndNoRecord,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
+	KindUpdateMaintenance:             RuleUpdateMaintenance,
 	KindHoldStale:                     RuleHoldStale,
 	KindBdGatewayRefusals:             RuleBdGatewayRefusals,
 	KindStoryPoints:                   RuleStoryPoints,
