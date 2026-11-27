@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // sweepDaemonStart is the start of the daemon the probes judge records against.
@@ -79,6 +82,83 @@ func TestPodSweepLaunchStart(t *testing.T) {
 			start, err := daemonStartFrom(tt.find, load)
 			if (err != nil) != tt.wantErr || (!tt.wantErr && !start.Equal(sweepDaemonStart())) {
 				t.Errorf("daemonStartFrom = (%v, %v), want the start %v and error %v", start, err, sweepDaemonStart(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// sweepReply is one kubectl exec's answer: the output, the exit code and the error.
+type sweepReply struct {
+	out  string
+	exit int
+	err  error
+}
+
+// sweepAbsent is the answer for a launch-smoke record the daemon has not written.
+var sweepAbsent = sweepReply{exit: podSweepSmokeAbsent}
+
+// sweepReads answers each exec with the next reply, repeating the last, and counts.
+func sweepReads(replies ...sweepReply) (update.RunFunc, *int) {
+	reads := new(int)
+	return func(context.Context, string, []string, string, ...string) (string, int, error) {
+		r := replies[min(*reads, len(replies)-1)]
+		*reads++
+		return r.out, r.exit, r.err
+	}, reads
+}
+
+// sweepRecordJSON is the record the daemon writes for an outcome, stamped with its start.
+func sweepRecordJSON(daemonStart time.Time, outcome, detail string) string {
+	return fmt.Sprintf(`{"daemon_start":%q,"outcome":%q,"detail":%q}`,
+		daemonStart.Format(time.RFC3339), outcome, detail)
+}
+
+// sweepProbes is a pod target's probes read through run, started at sweepDaemonStart.
+func sweepProbes(run update.RunFunc) podImageLabelProbes {
+	return podImageLabelProbes{
+		sweep:      podSweepSmokeRecord(podPairTarget(), run),
+		sweepStart: func() (time.Time, error) { return sweepDaemonStart(), nil },
+	}
+}
+
+// TestPodSweepLaunch pins the answer one read gives, and the read and start errors.
+func TestPodSweepLaunch(t *testing.T) {
+	t.Parallel()
+	this := sweepDaemonStart()
+	boom := errors.New("kubectl refused")
+	tests := []struct {
+		name        string
+		probes      func() (podImageLabelProbes, *int)
+		wantStarted bool
+		wantDetail  string
+		wantErr     string
+		wantReads   int
+	}{
+		{"a started record answers started from one read", func() (podImageLabelProbes, *int) {
+			run, reads := sweepReads(sweepReply{out: sweepRecordJSON(this, "started", "")})
+			return sweepProbes(run), reads
+		}, true, "launched", "", 1},
+		{"a missing record answers not started without waiting", func() (podImageLabelProbes, *int) {
+			run, reads := sweepReads(sweepAbsent)
+			return sweepProbes(run), reads
+		}, false, "no launch-smoke record", "", 1},
+		{"a read error is returned", func() (podImageLabelProbes, *int) {
+			run, reads := sweepReads(sweepReply{err: boom})
+			return sweepProbes(run), reads
+		}, false, "", "kubectl refused", 1},
+		{"a start that cannot be read is an error", func() (podImageLabelProbes, *int) {
+			return podImageLabelProbes{sweep: podSweepSmokeRecord(podPairTarget(), nil), sweepStart: func() (time.Time, error) { return time.Time{}, boom }}, new(int)
+		}, false, "", "reading the daemon's start", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes, reads := tt.probes()
+			started, detail, err := probes.SweepLaunch(context.Background())
+			if (err != nil) != (tt.wantErr != "") || !strings.Contains(fmt.Sprint(err), tt.wantErr) ||
+				started != tt.wantStarted || !strings.Contains(detail, tt.wantDetail) || *reads != tt.wantReads {
+				t.Errorf("SweepLaunch = (%v, %q, %v) after %d reads, want started %v, detail containing %q, error %q, %d reads",
+					started, detail, err, *reads, tt.wantStarted, tt.wantDetail, tt.wantErr, tt.wantReads)
 			}
 		})
 	}
