@@ -3281,7 +3281,9 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 		return false, nil
 	}
 	status := plan.Poll.Status
-	stdout, stderr, err := d.runCmd(exec.CommandContext(ctx, status.Argv[0], status.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	statusCtx, cancelStatus := tierSweepRunnerStepContext(ctx, tierSweepRunnerStatusBudget)
+	stdout, stderr, err := d.runCmd(exec.CommandContext(statusCtx, status.Argv[0], status.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	cancelStatus()
 	if err != nil {
 		d.logger.Printf("tier_sweep: %s: reading run %s's status; last lines:\n%s",
 			spec.Rig, spec.RunID, lastLines(string(stderr)))
@@ -3290,7 +3292,9 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 	if !plan.Poll.Ended(stdout) {
 		return false, nil
 	}
-	out, code := tierSweepRunSteps(ctx, d, plan.Poll.Collect)
+	collectCtx, cancelCollect := tierSweepRunnerStepContext(ctx, tierSweepRunnerCollectBudget)
+	defer cancelCollect()
+	out, code := tierSweepRunSteps(collectCtx, d, plan.Poll.Collect)
 	if code != 0 {
 		d.logger.Printf("tier_sweep: %s: copying run %s's result and logs out (exit %d); last lines:\n%s",
 			spec.Rig, spec.RunID, code, lastLines(out))
