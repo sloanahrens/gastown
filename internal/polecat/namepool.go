@@ -527,6 +527,38 @@ func (p *NamePool) SessionProbeNames() []string {
 	return names
 }
 
+// DrawableNames returns every name the pool may hand to a seat: the names each
+// seat lists and the theme's names up to MaxSize, each once, sorted. Overflow
+// numbers are not included, and a name in use or bound is still listed, because
+// this is a read. An unresolved theme is an error and no names either way.
+func (p *NamePool) DrawableNames() ([]string, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for _, seatNames := range p.SeatNames {
+		for _, name := range seatNames {
+			add(name)
+		}
+	}
+	theme, err := p.themeNames()
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(theme) && i < p.MaxSize; i++ {
+		add(theme[i])
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // isThemedName checks if a name is in the theme pool or listed by a seat.
 func (p *NamePool) isThemedName(name string) bool {
 	// An unresolved theme has no names to match. Allocate refuses it, so a
