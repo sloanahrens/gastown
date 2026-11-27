@@ -809,6 +809,35 @@ func (t *Tmux) KillSession(name string) (retErr error) {
 // and caused Claude processes to become orphans when they couldn't shut down in time.
 const processKillGracePeriod = 2 * time.Second
 
+// processGonePollInterval is how often waitGone checks whether a pid has exited.
+const processGonePollInterval = 100 * time.Millisecond
+
+// waitGone returns once kill -0 through the runner fails for every pid, or
+// processKillGracePeriod has passed on the clock. A process still running at
+// the deadline gets no more time: the caller sends SIGKILL regardless.
+func (t *Tmux) waitGone(pids []string) {
+	for waited := time.Duration(0); waited < processKillGracePeriod; waited += processGonePollInterval {
+		if allPidsGone(t.runner(), pids) {
+			return
+		}
+		t.clk().Sleep(processGonePollInterval)
+	}
+}
+
+// allPidsGone reports whether kill -0 exited 1 for every pid, which is how the
+// kill paths learn that a process they signaled has exited. A nil error means
+// the process is alive; so does any error that is not a no-match exit (the
+// probe could not run, exited with another status, or was cut short), because
+// an unusable probe must not be read as a dead process and skip the grace period.
+func allPidsGone(ex execFunc, pids []string) bool {
+	for _, pid := range pids {
+		if _, _, err := ex(context.Background(), "kill", "-0", pid); !isNoMatchExit(err) {
+			return false
+		}
+	}
+	return true
+}
+
 // KillSessionWithProcesses explicitly kills all processes in a session before terminating it.
 // This prevents orphan processes that survive tmux kill-session due to SIGHUP being ignored.
 //
@@ -1181,8 +1210,8 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 	}
 
-	// Wait for graceful shutdown (2s gives processes time to clean up)
-	t.clk().Sleep(processKillGracePeriod)
+	// Wait for the descendants to exit, giving up after the grace period
+	t.waitGone(descendants)
 
 	// Send SIGKILL to any remaining descendants
 	for _, dpid := range descendants {
@@ -1192,7 +1221,7 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 	// Kill the pane process itself (may have called setsid() and detached,
 	// or may have no children like Claude Code)
 	_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-	t.clk().Sleep(processKillGracePeriod)
+	t.waitGone([]string{pid})
 	_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 
 	return nil

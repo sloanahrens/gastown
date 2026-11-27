@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // processTree is a fakeServer whose session gt-x runs a shell (the pane
@@ -267,6 +269,73 @@ func signaled(f *fakeServer, sig string) []string {
 	return out
 }
 
+// killZeroFromProcs answers kill -0 from f's process table: the fake's own
+// kill answer replies success to every signal, so a signaled pid would read as alive.
+func killZeroFromProcs(f *fakeServer) execFunc {
+	base := newScripted(f.answer).exec
+	return func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+		if name == "kill" && len(args) == 2 && args[0] == "-0" {
+			f.mu.Lock()
+			_, alive := f.procs[args[1]]
+			f.mu.Unlock()
+			if alive {
+				return nil, nil, nil
+			}
+			return nil, nil, exitError(1)
+		}
+		return base(ctx, name, args...)
+	}
+}
+
+// TestWaitGone: waitGone stops as soon as every pid is gone, and otherwise
+// waits out the grace period. Only a kill -0 exit status of 1 proves a pid
+// gone; a probe that cannot run or exits with another status is still alive.
+func TestWaitGone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		pids  []string
+		probe func(check int) error
+		want  time.Duration
+	}{
+		{"every pid already gone", []string{"41", "42"}, func(int) error { return exitError(1) }, 0},
+		{"a pid that never exits", []string{"41"}, func(int) error { return nil }, processKillGracePeriod},
+		{"a pid that exits on a later check", []string{"41"}, func(check int) error {
+			if check < 3 {
+				return nil
+			}
+			return exitError(1)
+		}, 2 * processGonePollInterval},
+		{"a probe that cannot run", []string{"41"}, func(int) error { return errors.New("exec: \"kill\": executable file not found in $PATH") }, processKillGracePeriod},
+		{"a probe that exits with another status", []string{"41"}, func(int) error { return exitError(2) }, processKillGracePeriod},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newFixedClock()
+			checks := 0
+			ex := func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+				if name != "kill" || len(args) != 2 || args[0] != "-0" {
+					t.Errorf("waitGone ran %s %v, want kill -0", name, args)
+					return nil, nil, nil
+				}
+				checks++
+				return nil, nil, tt.probe(checks)
+			}
+			tm := newTmuxForTest("gt-test-unit", ex, clk)
+			if err := driven(t, clk, processGonePollInterval, func() error {
+				tm.waitGone(tt.pids)
+				return nil
+			}); err != nil {
+				t.Fatalf("waitGone: %v", err)
+			}
+			if got := clk.Now().Sub(testEpoch); got != tt.want {
+				t.Errorf("waitGone woke after %v of fake time, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestKillSessionWithProcesses checks the whole sequence: respawn disarmed
 // first, the tree TERMed deepest-first plus the reparented group member, then
 // KILLed, then the pane process, then the session.
@@ -453,17 +522,29 @@ func TestExactTargetForms(t *testing.T) {
 	}
 }
 
+// TestKillPaneProcesses: TERM and KILL both reach every process, and a kill
+// whose processes exit on TERM does not wait out the grace period.
 func TestKillPaneProcesses(t *testing.T) {
 	t.Parallel()
 	f, pane, node, claude, reparented, _, _ := processTree()
-	if _, err := killWith(t, f, func(tm *Tmux) error { return tm.KillPaneProcesses("gt-x") }); err != nil {
+	clk := newFixedClock()
+	tm := newTmuxForTest("gt-test-unit", killZeroFromProcs(f), clk)
+	err := driven(t, clk, processGonePollInterval, func() error { return tm.KillPaneProcesses("gt-x") })
+	if err != nil {
 		t.Fatalf("KillPaneProcesses: %v", err)
 	}
-	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signaled(f, "TERM"), want) {
-		t.Errorf("TERM order = %v, want %v", signaled(f, "TERM"), want)
+	want := []string{claude, node, reparented, pane}
+	if got := signaled(f, "TERM"); !reflect.DeepEqual(got, want) {
+		t.Errorf("TERM order = %v, want %v", got, want)
+	}
+	if got := signaled(f, "KILL"); !reflect.DeepEqual(got, want) {
+		t.Errorf("KILL order = %v, want %v", got, want)
 	}
 	if !f.has("gt-x") {
 		t.Error("KillPaneProcesses must leave the session for the respawn")
+	}
+	if got := clk.Now().Sub(testEpoch); got != 0 {
+		t.Errorf("KillPaneProcesses waited %v after every process exited on TERM", got)
 	}
 }
 
