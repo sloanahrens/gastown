@@ -182,7 +182,7 @@ func TestRiskAuditStopsOnACanceledContext(t *testing.T) {
 	}
 }
 
-// riskIssuesBatch cuts the folded ids into calls of at most riskReadChunkSize, ending on the first failed call (gt-aarbqd).
+// riskIssuesBatch cuts the folded ids into calls of at most riskReadChunkSize; a failed call costs only its own ids, and once the context ends no further call is made (gt-jatltu).
 func TestRiskAuditCutsIdsIntoChunks(t *testing.T) {
 	t.Parallel()
 	recs := make([]land.LandingRecord, 121) // 121 records, 120 ids: the last repeats the first
@@ -195,8 +195,8 @@ func TestRiskAuditCutsIdsIntoChunks(t *testing.T) {
 		calls           string // the call sizes, in order
 	}{
 		{"120 ids are read in calls of 50, 50 and 20", 0, 120, "50 50 20"},
-		{"a failed second call returns the first 50 and its error", 2, 50, "50 50"},
-		{"a failed first call returns a nil map and stops", 1, 0, "50"},
+		{"a failed middle call skips its own ids and goes on", 2, 70, "50 50 20"},
+		{"a failed first call skips its own ids and goes on", 1, 70, "50 50 20"},
 	} {
 		f := newAttentionFixture(t, time.Time{})
 		var calls []int
@@ -212,9 +212,57 @@ func TestRiskAuditCutsIdsIntoChunks(t *testing.T) {
 			return out, nil
 		}
 		got, err := f.src.riskIssuesBatch(context.Background(), "alpha", recs)
-		if fmt.Sprint(calls) != "["+tt.calls+"]" || len(got) != tt.wantIDs || (got == nil) != (tt.failAt == 1) || (err != nil) != (tt.failAt > 0) {
+		if fmt.Sprint(calls) != "["+tt.calls+"]" || len(got) != tt.wantIDs || got == nil || (err != nil) != (tt.failAt > 0) {
 			t.Errorf("%s: calls %v, %d ids, nil map %v, err %v; want [%s], %d", tt.name, calls, len(got), got == nil, err, tt.calls, tt.wantIDs)
 		}
+	}
+}
+
+// A failed middle call costs only its own ids, so the FAIL in the last chunk is audited (gt-jatltu).
+func TestRiskAuditAFailedMiddleCallCostsOnlyItsIDs(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC))
+	w := newBatchAuditWorld(f, "alpha")
+	for i := 0; i < 120; i++ {
+		w.landIn("alpha", fmt.Sprintf("gt-a%03d", i), strings.Repeat("a", 40), "ok")
+	}
+	w.notes["gt-a110"], w.status["gt-fa"] = failNote(strings.Repeat("a", 40), "gt-fa"), "closed" // the last chunk
+	inner, calls := f.src.riskIssues, 0
+	f.src.riskIssues = func(c context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+		if calls++; calls == 2 {
+			return nil, errors.New("bd show: boom")
+		}
+		return inner(c, rig, ids)
+	}
+	wrote, err := f.src.auditResolvedRiskFails(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "boom") || len(wrote) != 1 || !strings.HasPrefix(wrote[0], "gt-a110: ") || calls != 3 {
+		t.Errorf("%s: calls %d, err %v, wrote %v; want 3 calls, the failure kept, and gt-a110 audited", t.Name(), calls, err, wrote)
+	}
+}
+
+// A context that ends in the second call keeps the first call's beads for the collector and makes no third call (gt-jatltu).
+func TestRiskAuditEndedContextKeepsWhatItRead(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC))
+	w := newBatchAuditWorld(f, "alpha")
+	for i := 0; i < 120; i++ {
+		w.landIn("alpha", fmt.Sprintf("gt-a%03d", i), strings.Repeat("b", 40), "ok")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inner, calls := f.src.riskIssues, 0
+	f.src.riskIssues = func(c context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+		if calls++; calls == 2 {
+			cancel()
+			return nil, c.Err()
+		}
+		return inner(c, rig, ids)
+	}
+	if _, err := f.src.auditResolvedRiskFails(ctx); err == nil || calls != 2 {
+		t.Errorf("%s: err %v after %d calls, want the context's error and no call after it", t.Name(), err, calls)
+	}
+	if len(f.src.tickIssues) != 50 || f.src.tickIssues["alpha\x00gt-a050"] != nil {
+		t.Errorf("%s: %d beads kept, want the first call's 50 and none of the second's", t.Name(), len(f.src.tickIssues))
 	}
 }
 
