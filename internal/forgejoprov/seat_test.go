@@ -139,9 +139,9 @@ func TestProvisionSeatHonoursTheRunFlags(t *testing.T) {
 	const user = DefaultBotPrefix + "seat-furiosa"
 	path := tokenDir + "/forgejo-seat-furiosa.env"
 	cases := []struct {
-		name                string
+		name                 string
 		dryRun, skip, rotate bool
-		check               func(t *testing.T, f *forgejotest.Fake, files *memFiles, first string)
+		check                func(t *testing.T, f *forgejotest.Fake, files *memFiles, first string)
 	}{
 		{"dry run", true, false, false, func(t *testing.T, f *forgejotest.Fake, files *memFiles, _ string) {
 			if w := f.Writes(); len(w) != 0 || len(files.files) != 0 {
