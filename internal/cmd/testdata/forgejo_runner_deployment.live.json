@@ -158,6 +158,7 @@
         ],
         "priorityClassName": "gt-ci-gate",
         "restartPolicy": "Always",
+        "shareProcessNamespace": true,
         "terminationGracePeriodSeconds": 660,
         "volumes": [
           {

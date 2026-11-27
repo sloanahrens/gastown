@@ -25,6 +25,7 @@ spec:
         - ip: 192.168.5.2
           hostnames:
             - forgejo
+      shareProcessNamespace: true
       initContainers:
         - name: dind
           image: data.forgejo.org/oci/docker:dind
