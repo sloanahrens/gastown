@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- This is the uninstalled template. Its install steps are in
+     "Recording gt-dolt's memory and CPU", docs/guides/dolt-container.md. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.gastown.dolt-stats</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/__USER__/.local/bin/gt-dolt-stats</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/__USER__/gt/.runtime/metrics/dolt-stats.err</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/__USER__/gt/.runtime/metrics/dolt-stats.err</string>
+</dict>
+</plist>

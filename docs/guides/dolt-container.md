@@ -464,6 +464,53 @@ gt dolt status
 rm -f ~/gt/seat-refill.hold
 ```
 
+## Recording gt-dolt's memory and CPU
+
+Nothing recorded the container's memory or CPU before the 2026-11-24 21:37
+outage: the daemon pod's resource sampler reads `ps` inside the pod, and its
+`dolt` rows are the SQL client processes, not the container. The launchd job
+`com.gastown.dolt-stats` runs `gt-dolt-stats` every 60 seconds, and the command
+appends one row for the container to
+`~/gt/.runtime/metrics/resources/<UTC date>.jsonl`. Installing it is an
+overseer step (gt-ab5hpm), not a seat's: the Mac has `plutil` and `launchctl`,
+and a seat has neither.
+
+The template is `deploy/launchd/com.gastown.dolt-stats.plist` in the gastown
+checkout; `/Users/__USER__` in it is the installing user's home, replaced when
+the `sed` line copies it to `~/Library/LaunchAgents/`. Run the steps below
+from that checkout, in one shell, where `&&` stops the chain at the first
+failure: a failed build, `mkdir`, copy or `plutil -lint` never reaches the
+bootstrap.
+
+```bash
+go build -o ~/.local/bin/gt-dolt-stats ./cmd/gt-dolt-stats &&
+mkdir -p ~/gt/.runtime/metrics &&
+sed "s|/Users/__USER__|$HOME|g" deploy/launchd/com.gastown.dolt-stats.plist \
+  > ~/Library/LaunchAgents/com.gastown.dolt-stats.plist &&
+plutil -lint ~/Library/LaunchAgents/com.gastown.dolt-stats.plist &&
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.dolt-stats.plist
+```
+
+`gt-dolt-stats` imports no Dolt, so the bare build needs none of the ICU flags
+the Makefile sets for Dolt's `go-icu-regex`. `mkdir -p ~/gt/.runtime/metrics`
+comes before the bootstrap because launchd opens the job's stdout and stderr
+paths before the command runs and does not create their parent directory.
+`plutil -lint` checks the installed copy, the file launchd reads. The bootstrap
+loads the job into the user's own GUI domain, `gui/$(id -u)`, so it needs no
+sudo and no password, as for the other `com.gastown.*` agents.
+
+A failing run of the loaded job writes one line,
+`gt-dolt-stats: <step>: <error>` with the step `home`, `read`, `parse` or
+`append`, to `~/gt/.runtime/metrics/dolt-stats.err`.
+
+To read a row, take the newest one from the day file, or the container's newest
+row by its `dolt-server` component:
+
+```bash
+tail -1 ~/gt/.runtime/metrics/resources/$(date -u +%F).jsonl | jq
+jq -c 'select(.component == "dolt-server")' ~/gt/.runtime/metrics/resources/$(date -u +%F).jsonl | tail -1
+```
+
 ## Measured and unproven
 
 The rehearsal measures these on a restored copy in a quiet window; none is
