@@ -398,8 +398,9 @@ func TestExportDatabaseToJsonlDoltRigKeepsTheSQLExport(t *testing.T) {
 		return nil
 	}
 	var tables []string
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _, _ string, _ time.Duration) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		tables = append(tables, table)
+		writeTableRows(t, dir, table, 1)
 		return 1, nil
 	}
 
@@ -496,8 +497,9 @@ func TestExportDatabaseToJsonlTrackerRouteTablePartlyUnreadable(t *testing.T) {
 		return nil
 	}
 	var tables []string
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _, _ string, _ time.Duration) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		tables = append(tables, table)
+		writeTableRows(t, dir, table, 1)
 		return 1, nil
 	}
 
@@ -579,7 +581,8 @@ func TestExportDatabaseToJsonlRefusesADatabaseTwoTrackerRoutesName(t *testing.T)
 		t.Error("the tracker export ran for a database the table refuses")
 		return nil
 	}
-	d.jsonlTableExportFn = func(_ string, _ beadsql.Query, _, _ string, _ time.Duration) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
+		writeTableRows(t, dir, table, 1)
 		return 1, nil
 	}
 
