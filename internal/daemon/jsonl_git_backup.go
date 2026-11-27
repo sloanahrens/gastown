@@ -730,17 +730,17 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 // daemon's clock, and the ratio of this call's duration to the remembered one
 // is collected in d.jsonlRatios. The ratio is taken before the new sample
 // replaces the old, so it compares against the previous read that completed,
-// not a partial one. A failed export records nothing and adds no ratio.
+// not a partial one. A read that fails records nothing and adds no ratio.
 //
-// An events read from a boundary (only the rows after it) is neither sampled
-// nor compared: the events table is read whole by a full export and from a
-// boundary by an incremental one, and the two durations are not the same
-// quantity, so their ratio is not a slowdown. Only the whole-table read counts
-// (gt-mzkucw).
+// An events read passes through unsampled. The events table is read in pages by
+// a full export, which exportAllEventsToJsonlWith samples once as a whole, and
+// from a boundary by an incremental one, whose duration is not the same
+// quantity, so neither a page nor an incremental read is a sample (gt-mzkucw).
+// The full export is sampled once its read succeeds, even if recording its
+// state then fails.
 func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExporter) jsonlTableExporter {
-	fullEvents := beadsql.BackupEvents(db, "").String()
 	return func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
-		if table == "events" && q.String() != fullEvents {
+		if table == "events" {
 			return exportTable(table, q, dir, dataDir, budget)
 		}
 		start := d.clk().Now()
@@ -748,13 +748,19 @@ func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExpor
 		if err != nil {
 			return n, err
 		}
-		took := d.clk().Since(start)
-		if ratio, ok := d.jsonlRates.Ratio(db, table, took); ok {
-			d.jsonlRatios = append(d.jsonlRatios, ratio)
-		}
-		d.jsonlRates.Record(db, table, n, took)
+		d.recordJsonlSample(db, table, n, d.clk().Since(start))
 		return n, nil
 	}
+}
+
+// recordJsonlSample keeps one successful read of db's table, rows long and took
+// long, as the table's sample, and first collects its ratio against the
+// previous sample in d.jsonlRatios.
+func (d *Daemon) recordJsonlSample(db, table string, rows int, took time.Duration) {
+	if ratio, ok := d.jsonlRates.Ratio(db, table, took); ok {
+		d.jsonlRatios = append(d.jsonlRatios, ratio)
+	}
+	d.jsonlRates.Record(db, table, rows, took)
 }
 
 // jsonlDoltTarget decides which Dolt one JSONL export reads: the daemon's

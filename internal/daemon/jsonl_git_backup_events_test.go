@@ -582,3 +582,73 @@ func TestEventsExportBoundaryCoversTheRunAcrossShards(t *testing.T) {
 		t.Errorf("boundary ids = %v, want every row of that second %v", ids, want)
 	}
 }
+
+// TestExportAllEventsIsPaged: a full export reads the events table through the
+// page query and never the whole-table one, and a read or a state write that
+// fails is an error. Only a read that succeeds is sampled.
+func TestExportAllEventsIsPaged(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name        string
+		readErr     error
+		ops         eventsExportOps
+		wantErr     bool
+		wantSampled bool
+	}{
+		{name: "a finished read", ops: osEventsExportOps(), wantSampled: true},
+		{name: "a state that cannot be written", ops: eventsOpsWithRename(errors.New("the state cannot be replaced")), wantErr: true, wantSampled: true},
+		{name: "a page that fails", ops: osEventsExportOps(), readErr: errors.New("the read was cut off"), wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := backupTestDaemon(t)
+			clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+			d.clock = clk
+			fake := &eventsTableFake{rows: []eventsTestRow{{"e1", "2026-10-31 10:00:00"}, {"e2", "2026-10-31 10:01:00"}}}
+			table := fake.exporter(t, nil)
+			// Every read takes time on the daemon clock: a sample needs it.
+			read := jsonlTableExporter(func(name string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+				clk.Advance(time.Second)
+				return table(name, q, dir, dataDir, budget)
+			})
+			if tt.readErr != nil {
+				read = func(_ string, q beadsql.Query, _, _ string, _ time.Duration) (int, error) {
+					clk.Advance(time.Second)
+					text, err := q.Inline()
+					if err != nil {
+						t.Fatalf("events query: %v", err)
+					}
+					fake.queries = append(fake.queries, text)
+					return 0, tt.readErr
+				}
+			}
+			dir := t.TempDir()
+
+			n, err := d.exportAllEventsToJsonlWith(tt.ops, "hq", dir, t.TempDir(), time.Minute, read)
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("export = (%d, %v), want an error: %v", n, err, tt.wantErr)
+			}
+			page, err := beadsql.BackupEventsPage("hq", "", "", eventsFullPageRows).Inline()
+			if err != nil {
+				t.Fatalf("the page query: %v", err)
+			}
+			if want := []string{page}; !slices.Equal(fake.queries, want) {
+				t.Errorf("the export asked %q, want the first page only %q", fake.queries, want)
+			}
+			if _, _, sampled := d.jsonlRates.PerRow("hq", "events"); sampled != tt.wantSampled {
+				t.Errorf("events sampled = %v, want %v", sampled, tt.wantSampled)
+			}
+			state, stateErr := readEventsExportState(dir)
+			if tt.wantErr {
+				if stateErr == nil {
+					t.Errorf("a failed export recorded the state %+v", *state)
+				}
+				return
+			}
+			if stateErr != nil || n != 2 || state.Rows != 2 {
+				t.Errorf("export = %d rows, state %+v (%v), want 2 rows recorded", n, state, stateErr)
+			}
+		})
+	}
+}
