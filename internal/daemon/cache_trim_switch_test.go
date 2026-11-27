@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -1000,4 +1003,52 @@ func TestCacheTrimSwitchParksAWedgedJob(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCacheTrimPendingMarkIsWritten pins that each change to the pending mark is
+// persisted to <town>/.runtime/cache-trim-pending.json as the sorted keys still
+// pending (gt-d4cxyx), and that a failed write is logged and the mark still
+// changes.
+func TestCacheTrimPendingMarkIsWritten(t *testing.T) {
+	t.Parallel()
+	t.Run("the file holds the sorted keys still pending", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", nil)
+		// Marked out of order, and one cleared again, so order pins the sorted set.
+		f.d.cacheTrimSetPending("zeta", "claim-z", true)
+		f.d.cacheTrimSetPending("alpha", "claim-a", true)
+		f.d.cacheTrimSetPending("mid", "claim-m", true)
+		f.d.cacheTrimSetPending("mid", "claim-m", false)
+		path := filepath.Join(f.d.config.TownRoot, ".runtime", "cache-trim-pending.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("the pending mark file was not written: %v; log: %s", err, f.log.String())
+		}
+		var got []string
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("the pending mark file %q is not a list of keys: %v", data, err)
+		}
+		want := []string{"alpha/claim-a", "zeta/claim-z"}
+		if !slices.Equal(got, want) {
+			t.Errorf("the pending mark file holds %q, want the sorted keys still pending %q", got, want)
+		}
+	})
+	t.Run("a write to an unwritable path is logged and the mark changes", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", nil)
+		// A regular file where the .runtime directory must be: every write beneath
+		// it fails with ENOTDIR for whoever runs the test, owner or root.
+		if err := os.WriteFile(filepath.Join(f.d.config.TownRoot, ".runtime"), []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("planting the unwritable path: %v", err)
+		}
+
+		f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
+
+		if !f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("the mark was not set because its file could not be written")
+		}
+		if got := f.log.String(); !strings.Contains(got, "cache-trim-pending.json") {
+			t.Errorf("the failed write is not logged; log: %q", got)
+		}
+	})
 }
