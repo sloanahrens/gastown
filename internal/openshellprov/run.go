@@ -14,6 +14,7 @@ func NewRun(h Host, opts Options, paths Paths, out, errw io.Writer) *Run {
 		Paths:  paths,
 		Files:  h.Files,
 		Env:    h.Env(),
+		Seats:  opts.Seats,
 		Out:    out,
 		Err:    errw,
 	}
@@ -21,7 +22,8 @@ func NewRun(h Host, opts Options, paths Paths, out, errw io.Writer) *Run {
 
 // Execute runs the whole import in the script's order. The gateway endpoint is
 // checked first, so a gateway gt refuses is left untouched; then the profiles are
-// imported; then the deepseek and forgejo-polecat providers are created.
+// imported; then the deepseek and forgejo-polecat providers are created; then a
+// provider for each --seat.
 func (r *Run) Execute() error {
 	if err := r.Gt.CheckEndpoint(); err != nil {
 		return err
@@ -32,5 +34,8 @@ func (r *Run) Execute() error {
 	if err := r.CreateProvider("deepseek", "deepseek-claude", filepath.Join(r.Paths.ConfigDir, "deepseek.env"), "DEEPSEEK_API_KEY", "ANTHROPIC_AUTH_TOKEN"); err != nil {
 		return err
 	}
-	return r.CreateProvider("forgejo-polecat", "forgejo-polecat", filepath.Join(r.Paths.ConfigDir, "forgejo-polecat.env"), "FORGEJO_TOKEN", "FORGEJO_TOKEN")
+	if err := r.CreateProvider("forgejo-polecat", "forgejo-polecat", filepath.Join(r.Paths.ConfigDir, "forgejo-polecat.env"), "FORGEJO_TOKEN", "FORGEJO_TOKEN"); err != nil {
+		return err
+	}
+	return r.CreateSeatProviders(r.Seats)
 }

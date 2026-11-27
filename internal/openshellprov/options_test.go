@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,6 +32,13 @@ func TestParseGatewayForms(t *testing.T) {
 		{name: "-g with an empty name", args: []string{"-g", ""}, wantErr: "openshell-providers: -g needs a gateway name, e.g. -g k8s"},
 		{name: "--gateway with no name", args: []string{"--gateway"}, wantErr: "openshell-providers: --gateway needs a gateway name, e.g. -g k8s"},
 		{name: "--gateway= with an empty name", args: []string{"--gateway="}, wantErr: "openshell-providers: --gateway needs a gateway name, e.g. -g k8s"},
+		{name: "--seat NAME", args: []string{"--seat", "furiosa"}, want: Options{Seats: []string{"furiosa"}}},
+		{name: "--seat repeats in order", args: []string{"--seat", "furiosa", "--seat=iosa"}, want: Options{Seats: []string{"furiosa", "iosa"}}},
+		{name: "--seat with no name", args: []string{"--seat"}, wantErr: "openshell-providers: --seat needs a seat name, e.g. --seat furiosa"},
+		{name: "--seat with an empty name", args: []string{"--seat", ""}, wantErr: "openshell-providers: --seat needs a seat name, e.g. --seat furiosa"},
+		{name: "--seat= with an empty name", args: []string{"--seat="}, wantErr: "openshell-providers: --seat needs a seat name, e.g. --seat furiosa"},
+		{name: "--seat with a bad name", args: []string{"--seat", "Fur/iosa"}, wantErr: `openshell-providers: seat name "Fur/iosa" must be at most 31 characters of lower-case letters and digits in groups joined by single hyphens`},
+		{name: "--seat= with a bad name", args: []string{"--seat=a--b"}, wantErr: `openshell-providers: seat name "a--b" must be at most 31 characters of lower-case letters and digits in groups joined by single hyphens`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,7 +53,7 @@ func TestParseGatewayForms(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q): %v", tc.args, err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Parse(%q) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
@@ -144,6 +152,18 @@ func TestDerivedPaths(t *testing.T) {
 				t.Errorf("ResolvePaths() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestExecuteStopsAtAFailedForgejoPolecatCreate drives the branch Execute added
+// for the shared polecat provider: its create fails, so the run returns it.
+func TestExecuteStopsAtAFailedForgejoPolecatCreate(t *testing.T) {
+	t.Parallel()
+	gw := newGateway(newFreshFiles())
+	gw.failCreate = "forgejo-polecat"
+	run, _, _ := newGatewayRun(gw, gw.files, "")
+	if err := run.Execute(); err == nil || err.Error() != "openshell-providers: openshell provider create --name forgejo-polecat failed" {
+		t.Fatalf("Execute = %v, want the failed forgejo-polecat create", err)
 	}
 }
 

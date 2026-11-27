@@ -216,6 +216,92 @@ func keyDir(t *testing.T) string {
 	return home
 }
 
+// seatKeyDir is keyDir plus furiosa's seat key, so the seat is created for real.
+func seatKeyDir(t *testing.T) string {
+	t.Helper()
+	home := keyDir(t)
+	seat := filepath.Join(home, "gt", "forgejo-seat-furiosa.env")
+	if err := os.WriteFile(seat, []byte("FORGEJO_TOKEN=seat-furiosa-token\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", seat, err)
+	}
+	return home
+}
+
+// TestRunSeatCreatesProviderAfterSharedOnes: -g k8s --seat furiosa creates
+// forgejo-seat-furiosa on the gateway k8s, after the forgejo-polecat provider.
+func TestRunSeatCreatesProviderAfterSharedOnes(t *testing.T) {
+	t.Parallel()
+	h := fakeHost(t, map[string]string{"XDG_CONFIG_HOME": seatKeyDir(t)})
+	var calls []string
+	h.Exec = recordingExec{calls: &calls}
+	var out, errw bytes.Buffer
+	if code := run([]string{"-g", "k8s", "--seat", "furiosa"}, &out, &errw, h); code != 0 {
+		t.Fatalf("run() = %d, want 0 (stderr %q)", code, errw.String())
+	}
+	const want = "openshell -g k8s provider create --name forgejo-seat-furiosa --type forgejo-polecat --credential FORGEJO_TOKEN"
+	seat := slices.Index(calls, want)
+	if seat < 0 {
+		t.Fatalf("calls = %q, want %q", calls, want)
+	}
+	shared := slices.Index(calls, "openshell -g k8s provider create --name forgejo-polecat --type forgejo-polecat --credential FORGEJO_TOKEN")
+	if shared < 0 || seat < shared {
+		t.Errorf("seat create at %d, forgejo-polecat create at %d: want the seat after the shared provider", seat, shared)
+	}
+}
+
+// TestRunRefusesASeatBeforeAnyCall: a bad or valueless --seat exits 2 with no
+// openshell call.
+func TestRunRefusesASeatBeforeAnyCall(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"no value", []string{"--seat"}, "openshell-providers: --seat needs a seat name, e.g. --seat furiosa"},
+		{"32 characters", []string{"--seat", "abcdefghijklmnopqrstuvwxyz012345"}, `openshell-providers: seat name "abcdefghijklmnopqrstuvwxyz012345" must be at most 31 characters of lower-case letters and digits in groups joined by single hyphens`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := fakeHost(t, nil)
+			var calls []string
+			h.Exec = recordingExec{calls: &calls}
+			var out, errw bytes.Buffer
+			if code := run(tc.args, &out, &errw, h); code != 2 {
+				t.Fatalf("run(%q) = %d, want 2", tc.args, code)
+			}
+			if len(calls) != 0 {
+				t.Errorf("calls = %q, want none", calls)
+			}
+			if got := errw.String(); !strings.Contains(got, tc.wantErr) {
+				t.Errorf("stderr = %q, want it to contain %q", got, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRunWithoutSeatCreatesNoSeatProvider: no --seat means no forgejo-seat-
+// provider, even when the seat's key file is there to be read.
+func TestRunWithoutSeatCreatesNoSeatProvider(t *testing.T) {
+	t.Parallel()
+	h := fakeHost(t, map[string]string{"XDG_CONFIG_HOME": seatKeyDir(t)})
+	var calls []string
+	h.Exec = recordingExec{calls: &calls}
+	var out, errw bytes.Buffer
+	if code := run([]string{"-g", "k8s"}, &out, &errw, h); code != 0 {
+		t.Fatalf("run() = %d, want 0 (stderr %q)", code, errw.String())
+	}
+	if len(calls) == 0 {
+		t.Fatal("no calls recorded, so the run did nothing")
+	}
+	for _, c := range calls {
+		if strings.Contains(c, "forgejo-seat-") {
+			t.Errorf("call %q creates a seat provider, want none", c)
+		}
+	}
+}
+
 // A working directory that cannot be resolved stops the run before anything is
 // read, with the resolution's own message.
 func TestDerivedPathsStopsTheRun(t *testing.T) {

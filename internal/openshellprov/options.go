@@ -18,13 +18,16 @@ import (
 const Name = "openshell-providers"
 
 // Usage is the one-line help -h, --help and a refused argument print.
-const Usage = "usage: " + Name + " [-g NAME]"
+const Usage = "usage: " + Name + " [-g NAME] [--seat NAME]..."
 
 // Options is a command line the command accepts.
 type Options struct {
 	// Gateway is the -g name every openshell call targets; empty is the gateway
 	// the CLI has as its default.
 	Gateway string
+	// Seats are the --seat names whose forgejo-seat-NAME providers the run
+	// creates after the shared providers; none leaves them untouched.
+	Seats []string
 	// Help says -h or --help asked for the usage line, which ends the parse
 	// where it stands.
 	Help bool
@@ -55,11 +58,40 @@ func Parse(args []string) (Options, error) {
 				return opts, fmt.Errorf("%s: --gateway needs a gateway name, e.g. -g k8s", Name)
 			}
 			opts.Gateway = name
+		case arg == "--seat" || strings.HasPrefix(arg, "--seat="):
+			// Whatever follows --seat is the name, another flag included; only a
+			// missing or empty one is refused. A bad name is checked here, before
+			// the run reaches openshell, so it is a usage error (exit 2).
+			name := strings.TrimPrefix(strings.TrimPrefix(arg, "--seat"), "=")
+			if name == "" {
+				if arg == "--seat" && i+1 < len(args) {
+					i++
+					name = args[i]
+				}
+				if name == "" {
+					return opts, fmt.Errorf("%s: --seat needs a seat name, e.g. --seat furiosa", Name)
+				}
+			}
+			if err := validateSeatName(name); err != nil {
+				return opts, err
+			}
+			opts.Seats = append(opts.Seats, name)
 		default:
 			return opts, fmt.Errorf("%s: unknown argument: %s (%s)", Name, arg, Usage)
 		}
 	}
 	return opts, nil
+}
+
+// validateSeatName refuses a name CreateSeatProviders could not create, with
+// the same message it would give. The grammar and the length cap are the
+// package's seatName and maxSeatNameLength in providers.go, so the command line
+// and the run refuse the same names.
+func validateSeatName(name string) error {
+	if len(name) > maxSeatNameLength || !seatName.MatchString(name) {
+		return fmt.Errorf("%s: seat name %q must be at most %d characters of lower-case letters and digits in groups joined by single hyphens", Name, name, maxSeatNameLength)
+	}
+	return nil
 }
 
 // Host is what a run reads from the process: its working directory, its
