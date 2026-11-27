@@ -6302,6 +6302,71 @@ func TestTickEffQuietSkippedRigKeepsItsRead(t *testing.T) {
 	}
 }
 
+// TestTickEffQuietSkippedRigReadAfterFive: the skip answers for a rig only while
+// its stored read is under five minutes old, so once the clock passes five minutes
+// from that read the rig the skip left unread is read again and recorded with the
+// new time (part 14). The rig whose stored read is four minutes old stays unread
+// and keeps its stored time, so the re-read is the bound passing, not the skip
+// failing. Both stored reads listed no candidate, so a rig skipped now would be
+// quiet on its stored read alone.
+func TestTickEffQuietSkippedRigReadAfterFive(t *testing.T) {
+	t.Parallel()
+	town := quietWiringTown(t)
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	memory := loadSpecAnnotated(filepath.Join(t.TempDir(), "spec_annotated.json"), "daemon-1")
+	stale := specRigRead{Head: "g1", Working: "g2", At: now.Add(-6 * time.Minute)}
+	fresh := specRigRead{Head: "b1", Working: "b2", At: now.Add(-4 * time.Minute)}
+	memory.noteRigRead("gastown", beadsql.RigHash{Head: stale.Head, Working: stale.Working}, stale.At, stale.Candidates)
+	memory.noteRigRead("beads", beadsql.RigHash{Head: fresh.Head, Working: fresh.Working}, fresh.At, fresh.Candidates)
+
+	var mu sync.Mutex
+	reads := map[string]int{}
+	board := specTickBoard(specTickBoardDeps{
+		townRoot:    town,
+		maxPriority: 2,
+		reads:       newSpecTickReads(),
+		ready: func(rigPath string) ([]*beads.Issue, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			reads[filepath.Base(rigPath)]++
+			return nil, nil
+		},
+		rigStatus: func(string, string) (bool, string) { return false, "" },
+		heads: func() map[string]beadsql.RigHash {
+			return map[string]beadsql.RigHash{
+				"gastown": {Head: stale.Head, Working: stale.Working},
+				"beads":   {Head: fresh.Head, Working: fresh.Working},
+			}
+		},
+		memory:      memory,
+		now:         func() time.Time { return now },
+		detailStore: func(string) beads.Client { return nil },
+	})
+
+	if got := board(nil, nil, nil); len(got.Errors) != 0 {
+		t.Fatalf("board read: Errors = %v, want none", got.Errors)
+	}
+
+	mu.Lock()
+	if reads["gastown"] != 1 {
+		t.Errorf("the rig gastown got %d ready read(s), want 1: its stored read is six minutes old", reads["gastown"])
+	}
+	if reads["beads"] != 0 {
+		t.Errorf("the rig beads got %d ready read(s), want 0: its stored read is four minutes old", reads["beads"])
+	}
+	mu.Unlock()
+
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	want := specRigRead{Head: stale.Head, Working: stale.Working, At: now}
+	if got := memory.rigs["gastown"]; got != want {
+		t.Errorf("the re-read rig gastown stored %+v, want %+v: read again and recorded with the new time", got, want)
+	}
+	if got := memory.rigs["beads"]; got != fresh {
+		t.Errorf("the quiet rig beads stored %+v, want %+v: a rig under five minutes keeps its stored read", got, fresh)
+	}
+}
+
 // TestTickEffRecordRigRead: recordRigRead writes a rig's read into the quiet-rig
 // memory with the hashes the tick held for it, the time of the read and the number
 // of candidates it listed (gt-pa5zu3).
