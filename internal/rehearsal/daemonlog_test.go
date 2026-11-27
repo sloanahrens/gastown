@@ -39,6 +39,7 @@ func (r *failingReader) Read(p []byte) (int, error) {
 }
 
 func TestRehearsalFailedCallsEachMarker(t *testing.T) {
+	t.Parallel()
 	markers := []string{
 		"i/o timeout",
 		"invalid connection",
@@ -49,6 +50,7 @@ func TestRehearsalFailedCallsEachMarker(t *testing.T) {
 	}
 	for _, marker := range markers {
 		t.Run(marker, func(t *testing.T) {
+			t.Parallel()
 			failed := "2026/11/27 10:15:05 bd: call failed: " + marker + "\n"
 			got, err := FailedCalls(strings.NewReader(covering+failed), windowStart, windowEnd)
 			if err != nil {
@@ -63,6 +65,7 @@ func TestRehearsalFailedCallsEachMarker(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsWindowBounds(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		stamp string
@@ -76,6 +79,7 @@ func TestRehearsalFailedCallsWindowBounds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			line := tc.stamp + " bd: call failed: i/o timeout"
 			got, err := FailedCalls(strings.NewReader(covering+line+"\n"), windowStart, windowEnd)
 			if err != nil {
@@ -92,6 +96,7 @@ func TestRehearsalFailedCallsWindowBounds(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsSkipsOtherLines(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string
@@ -107,6 +112,7 @@ func TestRehearsalFailedCallsSkipsOtherLines(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := FailedCalls(strings.NewReader(covering+tc.input), windowStart, windowEnd)
 			if err != nil {
 				t.Fatalf("FailedCalls: unexpected error %v", err)
@@ -119,6 +125,7 @@ func TestRehearsalFailedCallsSkipsOtherLines(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsDedupesMessages(t *testing.T) {
+	t.Parallel()
 	input := "2026/11/27 10:10:00 dolt: invalid connection\n" +
 		"2026/11/27 10:11:00 dolt: invalid connection\n" +
 		"2026/11/27 10:12:00 bd: did not answer\n" +
@@ -137,7 +144,9 @@ func TestRehearsalFailedCallsDedupesMessages(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsCutsLines(t *testing.T) {
+	t.Parallel()
 	t.Run("long ascii line is cut to 300 bytes", func(t *testing.T) {
+		t.Parallel()
 		line := "2026/11/27 10:05:00 gateway: i/o timeout " + strings.Repeat("x", 400)
 		got, err := FailedCalls(strings.NewReader(covering+line+"\n"), windowStart, windowEnd)
 		if err != nil {
@@ -149,6 +158,7 @@ func TestRehearsalFailedCallsCutsLines(t *testing.T) {
 	})
 
 	t.Run("cut never splits a multibyte rune", func(t *testing.T) {
+		t.Parallel()
 		// Byte 300 falls inside a two-byte rune, so the cut backs off to 299.
 		line := "2026/11/27 10:05:00 gateway: i/o timeout " + strings.Repeat("é", 200)
 		got, err := FailedCalls(strings.NewReader(covering+line+"\n"), windowStart, windowEnd)
@@ -164,6 +174,7 @@ func TestRehearsalFailedCallsCutsLines(t *testing.T) {
 	})
 
 	t.Run("marker past byte 300 still returns the cut line", func(t *testing.T) {
+		t.Parallel()
 		line := "2026/11/27 10:05:00 gateway: " + strings.Repeat("x", 350) + " i/o timeout"
 		got, err := FailedCalls(strings.NewReader(covering+line+"\n"), windowStart, windowEnd)
 		if err != nil {
@@ -176,6 +187,7 @@ func TestRehearsalFailedCallsCutsLines(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsParsesInStartLocation(t *testing.T) {
+	t.Parallel()
 	// The stamp is the daemon's local wall clock: +03:00 here, so 12:30 local
 	// is 09:30 UTC and lies outside a UTC window of 10:00 to 11:00.
 	zone := time.FixedZone("daemon", 3*60*60)
@@ -194,6 +206,7 @@ func TestRehearsalFailedCallsParsesInStartLocation(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsRefusesUncoveredWindow(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string
@@ -213,6 +226,7 @@ func TestRehearsalFailedCallsRefusesUncoveredWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := FailedCalls(strings.NewReader(tc.input), windowStart, windowEnd)
 			if err == nil {
 				t.Fatalf("FailedCalls returned %q with no error, want an error: the log does not cover the window", got)
@@ -225,6 +239,7 @@ func TestRehearsalFailedCallsRefusesUncoveredWindow(t *testing.T) {
 }
 
 func TestRehearsalFailedCallsReturnsReaderError(t *testing.T) {
+	t.Parallel()
 	// The reader serves one in-window failure, then fails. The error must come
 	// back with no lines, never the partial list read before it.
 	r := &failingReader{
