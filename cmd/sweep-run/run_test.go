@@ -449,6 +449,37 @@ func TestRunFailsWhenItCannotPrepareTheRun(t *testing.T) {
 	})
 }
 
+// TestSweepRunTimings: the Go sweep gets a timings file beside GOCACHE named for
+// the rig and tiers, so its next run starts longest first; a refused path leaves
+// the variable unset with one line and the run still returns its tiers (gt-wv3gee).
+func TestSweepRunTimings(t *testing.T) {
+	t.Parallel()
+	claim := t.TempDir()
+	for _, tc := range []struct{ tiers, file string }{
+		{"integration,race", "timings-gastown-integration+race.jsonl"},
+		{"shell", "timings-gastown-shell.jsonl"},
+	} {
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", tc.tiers); code != 0 {
+			t.Fatalf("%s: exit code = %d, want 0 (stderr %q)", tc.tiers, code, h.stderr.String())
+		}
+		if got, want := h.overrides[tiersweep.EnvTimings], filepath.Join(claim, tc.file); got != want {
+			t.Errorf("%s timings = %q, want %q", tc.tiers, got, want)
+		}
+	}
+	h := newHarness(t, nil, nil)
+	if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", "integration"); code != 0 {
+		t.Fatalf("empty GOCACHE: exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+	}
+	if v, ok := h.overrides[tiersweep.EnvTimings]; ok {
+		t.Errorf("empty GOCACHE timings = %q, want the variable unset", v)
+	}
+	if !strings.Contains(h.stderr.String(), "timings file unset: GOCACHE is empty") {
+		t.Errorf("stderr = %q, want the line naming why the timings file is unset", h.stderr.String())
+	}
+}
+
 // TestWorkDirUsesTheCacheClaim: the clone lands in <parent of
 // GOCACHE>/work/<rig>-<tiers>, so later sweeps of the same rig and tiers hit
 // the Go build cache, and a leftover clone is removed before the clone starts

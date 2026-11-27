@@ -301,6 +301,13 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 			tiersweep.EnvNoSlot:  "1",
 			tiersweep.EnvTrigger: "0",
 		}
+		// The last run's walls let the sweep order its pool and balance shards.
+		// A path the claim checks refuse leaves the variable unset; the run goes on.
+		if path, reason := timingsFile(d.Environ, opts.Rig, opts.Tiers); reason == "" {
+			overrides[tiersweep.EnvTimings] = path
+		} else {
+			fmt.Fprintf(stderr, "%s: timings file unset: %s; the sweep starts in list order\n", name, reason)
+		}
 		code = d.Sweep(sweepArgs(work, opts.Tiers), overrides,
 			io.MultiWriter(stdout, captured, lines),
 			io.MultiWriter(stderr, sweepErrs))
@@ -723,12 +730,10 @@ func workDirectory(d Deps, opts options, stderr io.Writer) (string, error) {
 	return d.MkdirTemp("", name+".")
 }
 
-// stableWorkDir derives the work directory under the cache claim from GOCACHE
-// and states why it cannot be used, or "" when it can. The name holds the rig
-// and the tier set, so two runs of the same rig with different tiers never
-// share a directory; two runs of the same pair at once are not handled, since
-// the daemon's busy alert already keeps one sweep per rig running (gt-1cmla6).
-func stableWorkDir(env []string, rig string, tiers []string) (string, string) {
+// claimPath derives path under the cache claim from GOCACHE and states why it
+// cannot be used, or "" when it can. The leaf holds the rig and tiers, and the
+// checks refuse a path that would escape the claim (gt-1cmla6).
+func claimPath(env []string, rig string, tiers []string, leaf string) (string, string) {
 	cache := envValue(env, "GOCACHE")
 	if cache == "" {
 		return "", "GOCACHE is empty"
@@ -744,7 +749,19 @@ func stableWorkDir(env []string, rig string, tiers []string) (string, string) {
 			return "", reason
 		}
 	}
-	return filepath.Join(filepath.Dir(cache), "work", rig+"-"+strings.Join(tiers, "+")), ""
+	return filepath.Join(filepath.Dir(cache), leaf), ""
+}
+
+// stableWorkDir is the work directory under the cache claim, named for the rig
+// and tiers; the daemon's busy alert keeps one sweep per rig running (gt-1cmla6).
+func stableWorkDir(env []string, rig string, tiers []string) (string, string) {
+	return claimPath(env, rig, tiers, filepath.Join("work", rig+"-"+strings.Join(tiers, "+")))
+}
+
+// timingsFile is the file a run replaces with its timings lines, named for the
+// rig and tiers so the shell and integration-race runs keep separate files.
+func timingsFile(env []string, rig string, tiers []string) (string, string) {
+	return claimPath(env, rig, tiers, "timings-"+rig+"-"+strings.Join(tiers, "+")+".jsonl")
 }
 
 // elementRefusal states why value cannot be one path element under the claim,
