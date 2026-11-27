@@ -528,6 +528,103 @@ func TestDeployReaderNamesTheRepoItCouldNotRead(t *testing.T) {
 	assert.Equal(t, "operator/beads", d.Runs[0].Repo)
 }
 
+// holdFirstRepo answers like deployStub, but holds the first repo's deploy query
+// until every other repo's deploy query has been asked for, or its context ends.
+// A read that asks one repo at a time asks for none of the rest while it holds.
+type holdFirstRepo struct {
+	*deployStub
+	first string
+	asked chan struct{} // one slot per other repo's deploy query
+}
+
+func (s *holdFirstRepo) ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+	if f.WorkflowID == deployWorkflow && owner+"/"+repo != s.first {
+		s.asked <- struct{}{}
+	} else if f.WorkflowID == deployWorkflow {
+		for n := 0; n < cap(s.asked); n++ {
+			select {
+			case <-s.asked:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return s.deployStub.ListRuns(ctx, owner, repo, f)
+}
+
+// newHoldFirstReader reads repos through a stub that holds the first repo's deploy list.
+func newHoldFirstReader(stub *deployStub, repos []string) *DeployReader {
+	r := NewDeployReader(&holdFirstRepo{deployStub: stub, first: repos[0], asked: make(chan struct{}, len(repos)-1)}, repos)
+	r.now = func() time.Time { return deployNow }
+	return r
+}
+
+// A slow repo costs the block only itself: every repo answers while the first
+// is held, so Missing is empty. One repo at a time names the held repo missing.
+func TestDeployReaderReadsEveryRepoWhileOneIsSlow(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		stub := &deployStub{runs: map[string][]forgejo.ActionRun{
+			"operator/beads":           {testDeployRun(1, "v0.2.0", "success", 10)},
+			"operator/fractals-nextjs": {testDeployRun(2, "v0.1.0", "success", 20)},
+			"operator/gastown":         {testDeployRun(3, "v0.3.0", "success", 30)},
+		}}
+		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
+
+		assert.Empty(t, d.Missing, "the held repo timed out, or the others waited on it")
+		assert.Len(t, d.Runs, 3)
+	})
+}
+
+// The answers come back in reverse list order; rows and Missing still follow the list.
+func TestDeployReaderDecidesRowsAndMissingByRepoOrderNotArrival(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		stub := &deployStub{
+			runs: map[string][]forgejo.ActionRun{
+				"operator/beads":           {testDeployRun(1, "v0.2.0", "success", 10)},
+				"operator/fractals-nextjs": {testDeployRun(2, "v0.1.0", "success", 10)},
+			},
+			runsErr: map[string]error{"operator/gastown": &forgejo.APIError{StatusCode: http.StatusNotFound}},
+		}
+		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs", "operator/gastown"}).Read()
+
+		assert.Empty(t, d.Error)
+		assert.Equal(t, []string{"operator/gastown"}, d.Missing)
+		require.Len(t, d.Runs, 2)
+		assert.Equal(t, []string{"operator/beads", "operator/fractals-nextjs"}, []string{d.Runs[0].Repo, d.Runs[1].Repo}, "tied runs follow the list")
+	})
+}
+
+// When every repo fails, the note is the last repo's failure in list order.
+func TestDeployReaderNamesTheLastFailureInRepoOrder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		stub := &deployStub{runsErr: map[string]error{
+			"operator/beads":           &forgejo.APIError{StatusCode: http.StatusForbidden},
+			"operator/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
+		}}
+		d := newHoldFirstReader(stub, []string{"operator/beads", "operator/fractals-nextjs"}).Read()
+
+		assert.Equal(t, "http 404", d.Error)
+		assert.Empty(t, d.Runs)
+	})
+}
+
+// A name that is not owner/name is refused before any repo is read.
+func TestDeployReaderRefusesABadRepoNameBeforeReadingAny(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{}
+	d := newDeployTestReader(stub, []string{"operator/beads", "operator/", "operator/gastown"}).Read()
+
+	assert.Equal(t, "bad repo name", d.Error)
+	assert.Empty(t, stub.runsAsked, "a repo before the bad name was read")
+}
+
 // A stage name and a ref are a repository's own text: the characters that carry
 // no visible glyph are gone and a long one is capped, so neither can reorder
 // what the operator reads or spend the cell.

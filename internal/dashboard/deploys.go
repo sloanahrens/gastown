@@ -347,26 +347,38 @@ func (r *DeployReader) Read() *Deploys {
 		}
 	}
 
+	// Every name is checked before any read is made, so a bad name costs the
+	// block no read at all.
+	for _, name := range names {
+		if owner, repo, ok := strings.Cut(name, "/"); !ok || owner == "" || repo == "" {
+			return &Deploys{Runs: []DeployRun{}, Error: forgejoErrorClass(fmt.Errorf("%w: %s", errRepoName, strconv.Quote(name)))}
+		}
+	}
+	// The repos are read at once, so a slow one spends only its own time. Each
+	// answer is kept at its repo's index and merged below in the list's order,
+	// once every read has ended.
+	found := make([][]deployRun, len(names))
+	errs := make([]error, len(names))
+	forEachRepo(names, func(i int, name string) {
+		owner, repo, _ := strings.Cut(name, "/")
+		found[i], errs[i] = r.runList(ctx, name, owner, repo)
+	})
+
 	var (
 		runs     []deployRun
 		readable []string // the repos whose runs answered, whose checks are read below
 		missing  []string
 		firstErr error
 	)
-	for _, name := range names {
-		owner, repo, ok := strings.Cut(name, "/")
-		if !ok || owner == "" || repo == "" {
-			return &Deploys{Runs: []DeployRun{}, Error: forgejoErrorClass(fmt.Errorf("%w: %s", errRepoName, strconv.Quote(name)))}
-		}
+	for i, name := range names {
 		// One repo the viewer cannot read must not cost the block the repos
 		// that answered: its runs are simply absent and it is named.
-		found, err := r.runList(ctx, name, owner, repo)
-		if err != nil {
-			firstErr = err
+		if errs[i] != nil {
+			firstErr = errs[i]
 			missing = append(missing, name)
 			continue
 		}
-		runs = append(runs, found...)
+		runs = append(runs, found[i]...)
 		readable = append(readable, name)
 	}
 	if len(missing) == len(names) && len(missing) > 0 {
