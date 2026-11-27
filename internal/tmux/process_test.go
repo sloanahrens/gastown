@@ -288,18 +288,26 @@ func killZeroFromProcs(f *fakeServer) execFunc {
 }
 
 // TestWaitGone: waitGone stops as soon as every pid is gone, and otherwise
-// waits out the grace period.
+// waits out the grace period. Only a kill -0 exit status of 1 proves a pid
+// gone; a probe that cannot run or exits with another status is still alive.
 func TestWaitGone(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
 		pids  []string
-		alive func(check int) bool
+		probe func(check int) error
 		want  time.Duration
 	}{
-		{"every pid already gone", []string{"41", "42"}, func(int) bool { return false }, 0},
-		{"a pid that never exits", []string{"41"}, func(int) bool { return true }, processKillGracePeriod},
-		{"a pid that exits on a later check", []string{"41"}, func(check int) bool { return check < 3 }, 2 * processGonePollInterval},
+		{"every pid already gone", []string{"41", "42"}, func(int) error { return exitError(1) }, 0},
+		{"a pid that never exits", []string{"41"}, func(int) error { return nil }, processKillGracePeriod},
+		{"a pid that exits on a later check", []string{"41"}, func(check int) error {
+			if check < 3 {
+				return nil
+			}
+			return exitError(1)
+		}, 2 * processGonePollInterval},
+		{"a probe that cannot run", []string{"41"}, func(int) error { return errors.New("exec: \"kill\": executable file not found in $PATH") }, processKillGracePeriod},
+		{"a probe that exits with another status", []string{"41"}, func(int) error { return exitError(2) }, processKillGracePeriod},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -312,10 +320,7 @@ func TestWaitGone(t *testing.T) {
 					return nil, nil, nil
 				}
 				checks++
-				if tt.alive(checks) {
-					return nil, nil, nil
-				}
-				return nil, nil, exitError(1)
+				return nil, nil, tt.probe(checks)
 			}
 			tm := newTmuxForTest("gt-test-unit", ex, clk)
 			if err := driven(t, clk, processGonePollInterval, func() error {

@@ -824,11 +824,14 @@ func (t *Tmux) waitGone(pids []string) {
 	}
 }
 
-// allPidsGone reports whether kill -0 fails for every pid, which is how the
-// kill paths learn that a process they signaled has exited.
+// allPidsGone reports whether kill -0 exited 1 for every pid, which is how the
+// kill paths learn that a process they signaled has exited. A nil error means
+// the process is alive; so does any error that is not a no-match exit (the
+// probe could not run, exited with another status, or was cut short), because
+// an unusable probe must not be read as a dead process and skip the grace period.
 func allPidsGone(ex execFunc, pids []string) bool {
 	for _, pid := range pids {
-		if _, _, err := ex(context.Background(), "kill", "-0", pid); err == nil {
+		if _, _, err := ex(context.Background(), "kill", "-0", pid); !isNoMatchExit(err) {
 			return false
 		}
 	}
