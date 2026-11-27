@@ -178,7 +178,7 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 }
 
 // omSkewBinaryUnchanged reports whether no file between the installed om and
-// origin/main can change the binary. The diff runs in the rebuild_om job's own
+// origin/main can change the binary. The diff runs in the om-skew check's own
 // clone, read-only: never in om's canonical worktree, which an om build runs
 // in. When the clone cannot answer (missing, unreadable, or without either
 // sha) answered and unchanged are both false, so the alert still fires.
@@ -190,8 +190,8 @@ func (d *Daemon) omSkewBinaryUnchanged(townRoot, installed, remote string) (unch
 
 // omSkewBelowThresholds reports whether the installed om is under both measures
 // the image-pins planner files a refresh at, imagePinsFileBehind commits and
-// imagePinsFileAge, read in the rebuild_om clone. A lag that cannot be read is
-// false, so the alert still fires.
+// imagePinsFileAge, read in the om-skew check's own clone. A lag that cannot
+// be read is false, so the alert still fires.
 func (d *Daemon) omSkewBelowThresholds(townRoot, installed, remote string) bool {
 	var commits int
 	var age time.Duration
@@ -421,13 +421,13 @@ func omSkewEmbedRuleCovers(r omSkewEmbedRule, p string) bool {
 	return false
 }
 
-// omSkewCloneDir is the rebuild_om job's own clone, the only checkout this
+// omSkewCloneDir is the om-skew check's own clone, the only checkout this
 // check reads: an om build runs in the rig's worktree, which a probe must not
 // touch.
 func omSkewCloneDir(townRoot string) (string, error) {
-	src := filepath.Join(townRoot, filepath.FromSlash(rebuildOMSrcDir))
+	src := filepath.Join(townRoot, filepath.FromSlash(omSkewSrcDir))
 	if _, err := os.Stat(src); err != nil {
-		return "", fmt.Errorf("the rebuild_om clone: %w", err)
+		return "", fmt.Errorf("the om-skew check's clone: %w", err)
 	}
 	return src, nil
 }
@@ -446,7 +446,7 @@ func omSkewCommitRevs(revs ...string) error {
 }
 
 // omSkewChangedPaths lists the files that differ between the installed om's
-// commit and origin/main's, from the rebuild_om clone. Renames are not
+// commit and origin/main's, from the om-skew check's own clone. Renames are not
 // detected, so a file moved out of Go source is listed under both names.
 func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]string, error) {
 	src, err := omSkewCloneDir(townRoot)
