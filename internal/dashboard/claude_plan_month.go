@@ -245,7 +245,7 @@ func claudePlanWindowInstants(samples []ClaudePlanSample) []int64 {
 // be written; the weeks are still the best the poll can answer. An unreadable
 // history is never appended to, since every window in the samples would look new.
 func (r *ClaudePlanReader) claudePlanWeeks(samples []ClaudePlanSample, now time.Time) ([]ClaudePlanWeek, error) {
-	history, readErr := readClaudePlanWeeks(r.historyPath)
+	history, readErr := r.readHistory()
 	weeks := claudePlanWeeksFromSamples(samples)
 	weeks = append(claudePlanCarriedWeeks(samples, weeks, history, now), weeks...)
 	sort.SliceStable(weeks, func(i, j int) bool { return weeks[i].ResetsAt < weeks[j].ResetsAt })
@@ -266,6 +266,23 @@ func (r *ClaudePlanReader) claudePlanWeeks(samples []ClaudePlanSample, now time.
 		return history, readErr
 	}
 	return history, errors.Join(readErr, appendClaudePlanWeeks(r.historyPath, fresh))
+}
+
+// readHistory is the closeouts on record: the series-side file's and, when the
+// reader appends elsewhere, the file at historyPath's, each window once. An
+// error from either read is returned, and the caller then appends nothing.
+func (r *ClaudePlanReader) readHistory() ([]ClaudePlanWeek, error) {
+	history, err := readClaudePlanWeeks(r.seriesHistoryPath)
+	if r.historyPath == r.seriesHistoryPath {
+		return history, err
+	}
+	own, ownErr := readClaudePlanWeeks(r.historyPath)
+	for _, w := range own {
+		if !claudePlanHasWeek(history, w) {
+			history = append(history, w)
+		}
+	}
+	return history, errors.Join(err, ownErr)
 }
 
 // claudePlanCarriedWeeks are the windows the tail no longer names: each week

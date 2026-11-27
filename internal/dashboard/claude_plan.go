@@ -168,13 +168,18 @@ type ClaudePlan struct {
 }
 
 // ClaudePlanReader reads a status line series from the path it was given, and
-// keeps the weekly history and the series' trim that live beside it. Reads are
-// serialized, so concurrent callers in one process record a closeout once.
+// keeps the series' trim and the weekly history. The history is the file beside
+// the series unless WithHistoryPath names another. Reads are serialized, so
+// concurrent callers in one process record a closeout once.
 type ClaudePlanReader struct {
-	mu           sync.Mutex
-	path         string
-	historyPath  string
-	planUSDMonth float64
+	mu   sync.Mutex
+	path string
+	// historyPath is where closed weeks are appended. seriesHistoryPath is the
+	// history beside the series, which is always read, so the weeks recorded
+	// there count even when historyPath names another file.
+	historyPath       string
+	seriesHistoryPath string
+	planUSDMonth      float64
 	// usage is where the API-equivalent figures' tokens come from: the usage
 	// scan's records, read at the same instant the week is measured at. A reader
 	// without one draws the plan line alone.
@@ -190,7 +195,7 @@ type ClaudePlanReader struct {
 	renewalDay int
 	// given is a series a caller read from another source, the town's cost
 	// rows. A non-nil slice is folded instead of the file at path; the closeout
-	// history still lives beside path (gt-hutsr6).
+	// history beside path is still read (gt-hutsr6).
 	given []ClaudePlanSample
 }
 
@@ -200,11 +205,12 @@ type ClaudePlanReader struct {
 // WithRenewalDay says otherwise.
 func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
 	return &ClaudePlanReader{
-		path:         path,
-		historyPath:  claudePlanWeeksPath(path),
-		planUSDMonth: planUSDMonth,
-		prices:       EmbeddedClaudePrices,
-		renewalDay:   ClaudePlanDefaultRenewalDay,
+		path:              path,
+		historyPath:       claudePlanWeeksPath(path),
+		seriesHistoryPath: claudePlanWeeksPath(path),
+		planUSDMonth:      planUSDMonth,
+		prices:            EmbeddedClaudePrices,
+		renewalDay:        ClaudePlanDefaultRenewalDay,
 	}
 }
 
@@ -212,6 +218,15 @@ func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
 // falls back to the default.
 func (r *ClaudePlanReader) WithRenewalDay(day int) *ClaudePlanReader {
 	r.renewalDay = planRenewalDay(day)
+	return r
+}
+
+// WithHistoryPath appends closed weeks to the file at path instead of the one
+// beside the series. The series-side history is still read, so the weeks
+// recorded there stay in the month rollup, and a window both files hold counts
+// once.
+func (r *ClaudePlanReader) WithHistoryPath(path string) *ClaudePlanReader {
+	r.historyPath = path
 	return r
 }
 
@@ -236,8 +251,8 @@ func (r *ClaudePlanReader) WithUsageAbsent(absent func() bool) *ClaudePlanReader
 
 // WithSamples makes Read fold the given series instead of reading the file at
 // the reader's path, so a caller whose source answered draws the same payload
-// the file would (gt-hutsr6). The closeout history is still kept beside the
-// path. A nil slice reads the file.
+// the file would (gt-hutsr6). The closeout history beside the path is still
+// read. A nil slice reads the file.
 func (r *ClaudePlanReader) WithSamples(samples []ClaudePlanSample) *ClaudePlanReader {
 	r.given = samples
 	return r
