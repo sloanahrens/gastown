@@ -61,38 +61,54 @@ func (d *Daemon) sweepSmokeLaunch(ctx context.Context, rig string) sweepSmokeRec
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.logger.Printf("Warning: tier-sweep mark not read, launching the smoke: %v", err)
 	}
-	l := d.sweepSmokeRun(ctx, rig)
+	l, runID := d.sweepSmokeRun(ctx, rig)
 	rec := classifySweepSmoke(l)
+	removed := false
 	if l.stop != nil && rec.Outcome != "busy" {
 		l.stop()
+		removed = true
 	}
 	rec.Time = d.clk().Now()
+	// Only a launch that reached the runner has a run to name (gt-lveq0f).
+	if runID != "" {
+		line := "tier-sweep start-up launch smoke: " + rig + ": run " + runID + " " + rec.Outcome
+		if rec.Detail != "" {
+			line += " (" + rec.Detail + ")"
+		}
+		how := "; run not removed"
+		if removed {
+			how = "; run removed"
+		}
+		d.logger.Print(line + how)
+	}
 	return rec
 }
 
 // sweepSmokeRun renders each sweep stage at origin/main and launches the first
-// the runner takes off the host. A stage the config keeps on the host has no
-// Spec. A failure before the launch is a failed launch that created nothing.
-func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) tierSweepLaunch {
+// the runner takes off the host, returning the run id it launched ("" when no
+// launch was reached). A stage the config keeps on the host has no Spec. A
+// failure before the launch is a failed launch that created nothing.
+func (d *Daemon) sweepSmokeRun(ctx context.Context, rig string) (tierSweepLaunch, string) {
 	sha, err := d.tierSweepLocalMain(rig)
 	if err != nil {
-		return tierSweepLaunch{exitCode: -1, err: err}
+		return tierSweepLaunch{exitCode: -1, err: err}, ""
 	}
 	for _, st := range tierSweepStages(rig) {
 		st.tested = sha
 		spec, offHost, err := d.tierSweepRunnerSpec(st)
 		if err != nil {
-			return tierSweepLaunch{exitCode: -1, err: err}
+			return tierSweepLaunch{exitCode: -1, err: err}, ""
 		}
 		if offHost {
 			launch := d.tierSweepSeams.launch
 			if launch == nil {
 				launch = d.tierSweepLaunchRunner
 			}
-			return launch(ctx, st, sweepSmokeSpec(spec))
+			spec = sweepSmokeSpec(spec)
+			return launch(ctx, st, spec), spec.RunID
 		}
 	}
-	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}
+	return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured for the rig's sweep")}, ""
 }
 
 // sweepSmokeSpec gives the smoke a run of its own: the rendered spec's RunID
