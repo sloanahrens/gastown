@@ -731,6 +731,13 @@ func isSandboxNotFound(err error) bool {
 	return err != nil && sandboxNotFound.MatchString(strings.ToLower(err.Error()))
 }
 
+// SandboxNotFound reports whether err is openshell's missing-sandbox failure,
+// for callers outside the package that must tell a gone sandbox from a gateway
+// that could not answer (gt-xo4p78).
+func SandboxNotFound(err error) bool {
+	return isSandboxNotFound(err)
+}
+
 // A no-bead-access seat reports its work in an outbox instead of writing beads
 // (gt-1m0kb): result.json and notes.md, the two files internal/outbox decodes.
 // They live inside the seat's sandbox, so the host copies them out before the
