@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 
@@ -105,6 +108,29 @@ func (d *Daemon) cacheTrimSetPending(namespace, claim string, pending bool) {
 	if err := atomicfile.EnsureDirAndWriteJSON(path, keys); err != nil {
 		d.logger.Printf("disk_maintenance: cache trim: writing the pending mark to %s: %v", path, err)
 	}
+}
+
+// readCacheTrimPending reads the pending marks the town's disk holds — the
+// sorted keys cacheTrimSetPending wrote — as a set. No file is the empty set
+// and no error; an unreadable or corrupt file is the empty set and the error.
+func readCacheTrimPending(townRoot string) (map[string]bool, error) {
+	path := cacheTrimPendingPath(townRoot)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return map[string]bool{}, err
+	}
+	var keys []string
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return map[string]bool{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	pending := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		pending[key] = true
+	}
+	return pending, nil
 }
 
 // cacheTrimIsPending reports whether an earlier pass left the claim's trim Job

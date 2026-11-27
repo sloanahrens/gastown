@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1051,4 +1052,52 @@ func TestCacheTrimPendingMarkIsWritten(t *testing.T) {
 			t.Errorf("the failed write is not logged; log: %q", got)
 		}
 	})
+}
+
+// TestReadCacheTrimPending pins that the file the write produces reads back as
+// the same set, that a missing file is the empty set with no error, and that an
+// unreadable or corrupt file is the empty set and the error (gt-8cchus).
+func TestReadCacheTrimPending(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		write   func(f *cacheTrimFixture)
+		content string
+		dir     bool
+		want    map[string]bool
+		wantErr bool
+	}{
+		{name: "a file the write produced reads back as the same set",
+			write: func(f *cacheTrimFixture) {
+				f.d.cacheTrimSetPending("zeta", "claim-z", true)
+				f.d.cacheTrimSetPending("alpha", "claim-a", true)
+			},
+			want: map[string]bool{"alpha/claim-a": true, "zeta/claim-z": true}},
+		{name: "a missing file is an empty set with no error", want: map[string]bool{}},
+		{name: "a corrupt file returns an empty set and an error", content: "{not a list", want: map[string]bool{}, wantErr: true},
+		{name: "an unreadable file returns an empty set and an error", dir: true, want: map[string]bool{}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", nil)
+			if tc.write != nil {
+				tc.write(f)
+			}
+			path := cacheTrimPendingPath(f.d.config.TownRoot)
+			if tc.content != "" {
+				mustMkdirAll(t, filepath.Dir(path))
+				writeFile(t, path, tc.content)
+			} else if tc.dir {
+				// A directory at the file's path fails every read, owner or root.
+				mustMkdirAll(t, path)
+			}
+			got, err := readCacheTrimPending(f.d.config.TownRoot)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("read = %v, %v; wantErr %v", got, err, tc.wantErr)
+			}
+			if got == nil || !maps.Equal(got, tc.want) {
+				t.Errorf("the pending mark reads as %#v, want %#v", got, tc.want)
+			}
+		})
+	}
 }
