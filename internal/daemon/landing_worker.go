@@ -777,8 +777,16 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, postLandTimeout)
 	// Every rig that lands here does so through Forgejo, so the merge happens
 	// on the remote and the author seat's remote-tracking default branch is
-	// stale until something fetches it (gt-fn9e6.55).
-	refreshAuthorSeat := func(polecat string) error { return d.refreshAuthorSeat(rigName, polecat) }
+	// stale until something fetches it (gt-fn9e6.55). The seat's worktree is
+	// linked to the rig's shared repository, and a deferred landing refreshes
+	// it on BookQueue's goroutine once the landing's own fetch has finished,
+	// so this fetch would write refs/remotes/origin/<default> beside the
+	// landing's target fetch and one of them would park on 'cannot lock ref'
+	// (gt-vwfzey). It runs under the lander's git lock, like every other git
+	// call the landing and the review pool make.
+	refreshAuthorSeat := func(polecat string) error {
+		return lander.WithGitLock(func() error { return d.refreshAuthorSeat(rigName, polecat) })
+	}
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:      rigName,
