@@ -5,7 +5,6 @@
 package estimate
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,11 +15,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/hmhints"
-	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/nearest"
@@ -36,11 +33,6 @@ var ErrNoBead = errors.New("storypoints/estimate: estimate needs a bead")
 // Such a bead has no text to build the shape input from, so it has no
 // estimate; the caller records the rung as none.
 var ErrNoBeadText = errors.New("storypoints/estimate: bead has no text to estimate")
-
-// JevAsker asks the dispatch battery about a bead before it has a seat.
-// *dispatch.Pass's Ask method fits it: Deps.JevAsk = pass.Ask. Estimate never
-// calls it (gt-xzzbgv).
-type JevAsker func(ctx context.Context, issue *beads.Issue) (dispatch.Answers, error)
 
 // Deps are the estimate's inputs. Every dependency is optional: a nil one is
 // skipped, the reason goes in the result, and the blend falls to the rung its
@@ -58,10 +50,6 @@ type Deps struct {
 	TownRoot string
 	// Embedder turns the section text into the vector the embedding ridge reads.
 	Embedder storypoints.Embedder
-	// JevAsk is the battery's asker. Estimate does not call it, so the estimate
-	// is built from shape and embed alone (gt-xzzbgv). The field stays so the
-	// callers that wire it still compile.
-	JevAsk JevAsker
 	// HMRunner runs hm for the nearest past beads. It only names them; it never
 	// changes the number.
 	HMRunner hmhints.Runner
@@ -419,65 +407,6 @@ func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *be
 		return 0, nil, &Skip{Input: "embed", Reason: err.Error()}
 	}
 	return minutes, vec, nil
-}
-
-// jevCalls is how many times jevInput asks the battery for a new text.
-const jevCalls = 3
-
-// jevMedian drops answers outside 0 to 1 and returns the median of the rest, or
-// false when none are left. An even count takes the mean of the middle two.
-func jevMedian(answers []float64) (float64, bool) {
-	valid := slices.DeleteFunc(slices.Clone(answers), func(a float64) bool { return !(a >= 0 && a <= 1) })
-	if len(valid) == 0 {
-		return 0, false
-	}
-	slices.Sort(valid)
-	n := len(valid)
-	return (valid[(n-1)/2] + valid[n/2]) / 2, true
-}
-
-// jevInput asks the battery jevCalls times, all at once, and returns the median
-// of the answers with the count it used, or the skip that says why not. A failed
-// call or an out-of-range answer is dropped; a cap-reached ask fails only
-// itself, since the others are already asked, and with no answer left the first
-// error, in call order, or the out-of-range answers, names it. The daily spend
-// cap is a check-then-spend line across the town's callers, so asking together
-// can cross it by at most jevCalls-1 asks per estimate.
-func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, int, *Skip) {
-	if deps.JevAsk == nil {
-		return 0, 0, &Skip{Input: "jev", Reason: "no Jev asker"}
-	}
-	type reply struct {
-		ans dispatch.Answers
-		err error
-	}
-	replies := make([]reply, jevCalls)
-	var wg sync.WaitGroup
-	for i := range jevCalls {
-		wg.Go(func() { replies[i].ans, replies[i].err = deps.JevAsk(ctx, issue) })
-	}
-	wg.Wait()
-	answers := make([]float64, 0, jevCalls)
-	used := 0
-	var firstErr error
-	for _, r := range replies {
-		if r.err != nil {
-			firstErr = cmp.Or(firstErr, r.err)
-			continue
-		}
-		answers = append(answers, r.ans.FitsTwentyMinutes)
-		if r.ans.FitsTwentyMinutes >= 0 && r.ans.FitsTwentyMinutes <= 1 {
-			used++
-		}
-	}
-	m, ok := jevMedian(answers)
-	if ok {
-		return m, used, nil
-	}
-	if firstErr != nil {
-		return 0, 0, &Skip{Input: "jev", Reason: firstErr.Error()}
-	}
-	return 0, 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", answers)}
 }
 
 // neighborsOf asks hm for the past beads nearest the issue, then records each
