@@ -1200,7 +1200,8 @@ func (w *Worker) offerReview(ctx context.Context, issues []*beads.Issue, landing
 // landing: one whose status is still actionable, that carries the ready label,
 // that is not the bead named by landing, the one being landed, and that this
 // pass is not holding back — one parked on an infrastructure failure, one held
-// by its last outcome, or one whose landing record is being repaired. It sorts
+// by its last outcome, one whose landing record is being repaired, or one whose
+// deferred bookkeeping is still queued (booksHold). It sorts
 // the issues in place into the order the landing will take them
 // (sortByLandingOrder), from the same resolveWork process reads, so the pool
 // starts its reviews in landing order and reviews the head the submission
@@ -1220,8 +1221,10 @@ func (w *Worker) reviewWorks(issues []*beads.Issue, landing string) ([]land.Work
 		}
 		// The holds landReady keeps a bead under, read from the same in-memory
 		// state: the pass skips such a bead, so a review of it now is spent on
-		// a landing this pass will not make (gt-u8s6m7).
-		if w.parked(issue.ID) || w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
+		// a landing this pass will not make (gt-u8s6m7). A bead whose queued
+		// bookkeeping has not written its record yet still reads as ready, so
+		// the pass skips it too (gt-ppcl1g).
+		if w.parked(issue.ID) || w.outcomeMemo().held(issue.ID, issue.UpdatedAt) || w.booksHold(issue.ID) {
 			continue
 		}
 		if _, pending := w.pendingRepair[issue.ID]; pending {
