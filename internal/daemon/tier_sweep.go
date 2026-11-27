@@ -1621,9 +1621,16 @@ const (
 
 // tierSweepRigCycle runs the stages, writes the record, and files or closes the
 // beads the verdicts imply. The record says which run wrote it: kind is
-// tierSweepEarlyRun for an early re-run.
+// tierSweepEarlyRun for an early re-run. sha is the tip to sweep unless a mark
+// from an interrupted cycle names the commit to resume (gt-vbdeh9).
 func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time, kind tierSweepRunKind) bool {
 	seams := d.tierSweepSeams
+
+	// A cycle the daemon was interrupted under leaves a mark naming its commit.
+	// Taking it before the checkout makes the tree, run ids, record and
+	// promotion all name that commit, instead of a newer tip whose result the
+	// interrupted run would lose (gt-vbdeh9).
+	sha = d.tierSweepResumeSHA(rig, sha, now)
 
 	stepStart := d.clk().Now()
 	d.setTierSweepStep("work dir")
