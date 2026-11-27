@@ -33,10 +33,10 @@ const retiredRecordKeepReason = "the seat's record does not say stop: something 
 // it. The key is the seat, so a seat raises one item however many ticks it stays
 // kept, and the item clears when the record is gone.
 //
-// A seat that carries the retired-record reason while its polecat hooks a
-// different bead that is still live work (open, hooked or in progress) is not
+// A seat that carries a reason a re-sling withholds on while its polecat hooks
+// a different bead that is still live work (open, hooked or in progress) is not
 // raised: that is a seat slung new work, not one waiting for the overseer
-// (gt-jw437c, gt-b87gmu).
+// (gt-jw437c, gt-b87gmu, gt-xqa3hs).
 //
 // A seat whose gateway count cannot be kept in its record (the tally's alarm) is
 // raised at once, naming the alarm, whatever the record says: a record that
@@ -83,11 +83,11 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 		if tally.alarm != "" {
 			reason = tally.alarm
 		}
-		// A seat slung new work since its record was written carries the
-		// retired-record reason, which is exactly what a re-slung polecat's
-		// record says: nothing has asked its new run to stop. It is not a kept
-		// seat to wake anyone for (gt-jw437c).
-		if reason == retiredRecordKeepReason {
+		// A seat slung new work since its record was written carries a reason
+		// that says nothing about its own run — the retired-record one or the
+		// sandbox-not-gone one. It is not a kept seat to wake anyone for
+		// (gt-jw437c, gt-xqa3hs).
+		if keptSeatReSlingWithholds(reason) {
 			reSlung, err := s.keptSeatReSlung(seat)
 			if err != nil {
 				// A hook that cannot be read is never a re-sling: the seat
