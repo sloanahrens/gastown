@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -14,10 +15,12 @@ const (
 	releaseInFlight = 3
 )
 
-// Options is what a run's load window needs: the town and agent its slings and
-// reads go through, the side load's worktrees, GOCACHE root and run function, the
-// clock, the tick Wait polls on, and Deadline, which returns a channel that fires
-// once the given duration has passed.
+// Options is what a run needs: the town and agent its slings and reads go through,
+// the side load's worktrees, GOCACHE root and run function, the clock, the tick
+// Wait polls on, and Deadline, which returns a channel that fires once the given
+// duration has passed. Drive also takes the record's identity (RunID, Tag,
+// ChangeSet), the Tasks it files, the Path it saves the record to, and the
+// HostLoad reader Collect fills Load from.
 type Options struct {
 	Town      Town
 	Agent     string
@@ -27,6 +30,12 @@ type Options struct {
 	Now       func() time.Time
 	Tick      <-chan time.Time
 	Deadline  func(after time.Duration) <-chan time.Time
+	RunID     string
+	Tag       string
+	ChangeSet string
+	Tasks     []Task
+	Path      string
+	HostLoad  io.Reader
 }
 
 // runWindow releases ids beside a side load, then waits for them to close. It
