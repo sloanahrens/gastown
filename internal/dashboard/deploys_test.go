@@ -8,7 +8,9 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode"
 
@@ -33,6 +35,9 @@ type deployStub struct {
 	healthErr map[string]error // only the health read fails: the repo's deploy runs answered
 	jobs      map[int64][]forgejo.ActionRunJob
 	jobsErr   map[int64]error
+
+	// mu guards the records and deadlines below against concurrent reads.
+	mu sync.Mutex
 
 	// runsAsked is the repo and workflow each deploy query named, healthAsked
 	// the repos asked for the health workflow's runs, and jobsAsked the runs
@@ -65,6 +70,8 @@ func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error
 }
 
 func (s *deployStub) ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	name := owner + "/" + repo
 	if f.WorkflowID == healthWorkflow {
 		s.healthAsked = append(s.healthAsked, name)
@@ -107,6 +114,8 @@ func (s *deployStub) workflowRuns(name, workflow string) []forgejo.ActionRun {
 }
 
 func (s *deployStub) ListRunJobs(ctx context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.jobsAsked = append(s.jobsAsked, runID)
 	if s.jobsDeadline.IsZero() {
 		// The deploys' own jobs are the first the refresh asks for.
@@ -123,6 +132,41 @@ func newDeployTestReader(stub *deployStub, repos []string) *DeployReader {
 	r := NewDeployReader(stub, repos)
 	r.now = func() time.Time { return deployNow }
 	return r
+}
+
+// The deploy reader is to read the repos at once, so the stub it reads through
+// must answer several goroutines: eight call all three methods at the same
+// time, each call is recorded once, and the race detector finds no race
+// (gt-te2z63). The bubble's barrier joins them, so the counts read a settled
+// stub.
+func TestDeployStubAnswersSeveralReadsAtOnce(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		stub := &deployStub{
+			repos: []string{"operator/beads"},
+			runs:  map[string][]forgejo.ActionRun{"operator/beads": {testDeployRun(1, "v0.1.0", "success", 30)}},
+			jobs:  map[int64][]forgejo.ActionRunJob{1: {testJob("build", "success")}},
+		}
+		const readers = 8
+		ctx := context.Background()
+		for i := 0; i < readers; i++ {
+			go func() {
+				_, errRepos := stub.ListUserRepos(ctx)
+				_, errDeploy := stub.ListRuns(ctx, "operator", "beads", forgejo.RunFilter{WorkflowID: deployWorkflow})
+				_, errHealth := stub.ListRuns(ctx, "operator", "beads", forgejo.RunFilter{WorkflowID: healthWorkflow})
+				_, errJobs := stub.ListRunJobs(ctx, "operator", "beads", 1)
+				if errRepos != nil || errDeploy != nil || errHealth != nil || errJobs != nil {
+					t.Errorf("a stub read failed: %v %v %v %v", errRepos, errDeploy, errHealth, errJobs)
+				}
+			}()
+		}
+		synctest.Wait()
+
+		assert.Len(t, stub.runsAsked, readers, "every deploy query was recorded once")
+		assert.Len(t, stub.healthAsked, readers, "every health query was recorded once")
+		assert.Len(t, stub.jobsAsked, readers, "every jobs query was recorded once")
+	})
 }
 
 // testDeployRun builds a run of the deploy workflow: the fields the block
@@ -410,10 +454,27 @@ func TestDeployReaderWithNoDeployRuns(t *testing.T) {
 	assert.Empty(t, d.Missing)
 	assert.Empty(t, d.Runs)
 	assert.NotNil(t, d.Runs, "an empty list, never nil: the page draws its own line for it")
-	assert.Equal(t, []string{
-		"operator/fractals-nextjs deploy.yml", "operator/fractals-nextjs staging.yml",
-		"operator/beads deploy.yml", "operator/beads staging.yml",
-	}, stub.runsAsked, "both repos were asked, each by workflow")
+	// Either repo order passes; each repo's own workflow order is kept exactly.
+	assert.Equal(t, map[string][]string{
+		"operator/fractals-nextjs": {deployWorkflow, stagingWorkflow},
+		"operator/beads":           {deployWorkflow, stagingWorkflow},
+	}, runsByRepo(t, stub.runsAsked), "both repos were asked, each by workflow")
+}
+
+// runsByRepo groups the stub's recorded deploy queries by repo, keeping each
+// repo's own order: a test says which workflows each repo was asked for, and
+// not which repo was asked first.
+func runsByRepo(t *testing.T, asked []string) map[string][]string {
+	t.Helper()
+	out := make(map[string][]string, len(asked))
+	for _, a := range asked {
+		repo, workflow, ok := strings.Cut(a, " ")
+		if !ok {
+			t.Fatalf("the stub recorded %q with no workflow", a)
+		}
+		out[repo] = append(out[repo], workflow)
+	}
+	return out
 }
 
 // A viewer that cannot answer leaves the block saying so, and the Cloud
@@ -1463,10 +1524,11 @@ func TestDeployReaderKeepsEachReposHeldChecksApart(t *testing.T) {
 	}
 	reader := newDeployTestReader(stub, nil)
 	reader.Read()
-	require.Equal(t, []int64{1, 2}, stub.jobsAsked)
+	// One jobs call per repo: the set is exact, and either repo order passes.
+	require.ElementsMatch(t, []int64{1, 2}, stub.jobsAsked)
 
 	d := reader.Read()
-	assert.Equal(t, []int64{1, 2}, stub.jobsAsked, "the second refresh asks for no ended run's jobs again")
+	assert.ElementsMatch(t, []int64{1, 2}, stub.jobsAsked, "the second refresh asks for no ended run's jobs again")
 	require.Len(t, d.Health, 4)
 	assert.Equal(t, []string{north, north, south, south},
 		[]string{d.Health[0].Repo, d.Health[1].Repo, d.Health[2].Repo, d.Health[3].Repo})
