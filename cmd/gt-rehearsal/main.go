@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/rehearsal"
 )
 
@@ -24,7 +25,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "compare":
 		return compare(args[1:], stdout, stderr)
 	case "run":
-		return runCommand(context.Background(), args[1:], os.Getwd, rehearsal.Execute, stdout, stderr)
+		return runCommand(context.Background(), args[1:], callercwd.Require, rehearsal.Execute, stdout, stderr)
 	default:
 		return usage(stderr, "command", fmt.Sprintf("unknown subcommand %q", args[0]))
 	}
