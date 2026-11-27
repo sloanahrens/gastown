@@ -777,3 +777,85 @@ func TestExportAllEventsPagedState(t *testing.T) {
 			state.Rows, state.LastCreatedAt, state.BoundaryIDs, len(wantIDs), stamp(n+2), uuid(n+1))
 	}
 }
+
+// TestExportAllEventsFailedPageWritesNoState: a full paged export whose second
+// page fails returns the error and records no boundary. A partial file with a
+// boundary recorded would be appended to as if it were whole, and a state the
+// failed export never wrote must be left as it was (gt-m4rb7x).
+func TestExportAllEventsFailedPageWritesNoState(t *testing.T) {
+	t.Parallel()
+	// One row more than a page: the first page fills, so a second is read.
+	n := eventsFullPageRows + 1
+	base := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	rows := make([]eventsTestRow, n)
+	for i := range rows {
+		rows[i] = eventsTestRow{
+			id:        fmt.Sprintf("00000000-0000-0000-0000-%012d", i),
+			createdAt: base.Add(time.Duration(i) * time.Second).Format("2006-01-02 15:04:05"),
+		}
+	}
+	prior := eventsExportState{
+		Version:        eventsExportStateVersion,
+		LastCreatedAt:  "2026-10-30 09:00:00",
+		BoundaryIDs:    []string{"00000000-0000-0000-0000-000000000999"},
+		Rows:           7,
+		FullExportedAt: time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC),
+	}
+	for _, tt := range []struct {
+		name  string
+		prior *eventsExportState
+	}{
+		{name: "a fresh export"},
+		{name: "a recorded state", prior: &prior},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := backupTestDaemon(t)
+			d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 16, 0, 0, 0, time.UTC))
+			fake := &eventsTableFake{rows: rows}
+			table := fake.exporter(t, nil)
+			dir := t.TempDir()
+			want := ""
+			if tt.prior != nil {
+				if err := writeEventsExportState(dir, *tt.prior); err != nil {
+					t.Fatalf("recording the prior state: %v", err)
+				}
+				data, err := os.ReadFile(eventsExportStatePath(dir))
+				if err != nil {
+					t.Fatalf("reading the prior state: %v", err)
+				}
+				want = string(data)
+			}
+			pages := 0
+			read := func(name string, q beadsql.Query, readDir, dataDir string, budget time.Duration) (int, error) {
+				pages++
+				if pages == 2 {
+					return 0, errors.New("the second page was cut off")
+				}
+				return table(name, q, readDir, dataDir, budget)
+			}
+
+			got, err := d.exportAllEventsToJsonlWith(osEventsExportOps(), "hq", dir, t.TempDir(), time.Minute, read)
+
+			if err == nil {
+				t.Fatalf("a failed second page exported %d rows with no error", got)
+			}
+			if pages != 2 {
+				t.Fatalf("the export read %d pages, want the second one to fail", pages)
+			}
+			data, readErr := os.ReadFile(eventsExportStatePath(dir))
+			if tt.prior == nil {
+				if !errors.Is(readErr, os.ErrNotExist) {
+					t.Errorf("a failed export left the state %q (%v), want no state file", data, readErr)
+				}
+				return
+			}
+			if readErr != nil {
+				t.Fatalf("reading the state after the failed export: %v", readErr)
+			}
+			if string(data) != want {
+				t.Errorf("a failed export rewrote the state as %q, want the prior state %q", data, want)
+			}
+		})
+	}
+}
