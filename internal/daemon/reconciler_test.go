@@ -75,6 +75,12 @@ func TestReconcilerPatrolPass(t *testing.T) {
 				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 					Reconciler: &config.ReconcilerConfig{Enabled: true, Shadow: tt.shadow},
 				}},
+				// The active rows observe, so the live listing and backup root
+				// must not reach a real Dolt server or the host's home dir.
+				maint: maintenanceSeams{
+					serverDatabases: func(*Daemon) ([]string, error) { return nil, nil },
+					backupRoot:      func() (string, error) { return t.TempDir(), nil },
+				},
 			}
 			if tt.disabled {
 				d.disabledPatrols = map[string]bool{"reconciler": true}
