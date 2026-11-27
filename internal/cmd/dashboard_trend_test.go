@@ -367,6 +367,68 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	}
 }
 
+// A landing that reused a stored review carries that on its row, with no om
+// time; one whose om ran carries the time and not the flag. The stage lines go
+// through the reader's own parse, so the suffix that sets the flag is the one
+// the log writes (gt-amwavi).
+func TestLandingRowOMReused(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 26, 18, 0, 0, 0, time.Local)
+	r := &omReader{}
+	r.parseLogLine("2026/11/26 17:50:00 landing_worker: [land] gt-reused: stages: ci 1m32s, om reused (38s, 3s old)")
+	r.parseLogLine("2026/11/26 17:51:00 landing_worker: [land] gt-ran: stages: lint 4s, gate 1m, om 40s")
+	if len(r.stages) != 2 {
+		t.Fatalf("parsed %d stage lines, want 2: %+v", len(r.stages), r.stages)
+	}
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-reused", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-10 * time.Minute)}},
+		{Record: landings.Record{Bead: "gt-ran", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-9 * time.Minute)}},
+	}
+	rows := buildRecentLandings(now, recs, r.stages, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, row := range rows {
+		byBead[row.Bead] = row
+	}
+	reused, ok := byBead["gt-reused"]
+	if !ok {
+		t.Fatalf("no row for gt-reused: %+v", rows)
+	}
+	if !reused.Reused || reused.OMSecs != nil {
+		t.Errorf("reused landing row = reused %v, om %v; want the flag set and no om time", reused.Reused, reused.OMSecs)
+	}
+	ran, ok := byBead["gt-ran"]
+	if !ok {
+		t.Fatalf("no row for gt-ran: %+v", rows)
+	}
+	if ran.Reused || ran.OMSecs == nil || *ran.OMSecs != 40 {
+		t.Errorf("ran landing row = reused %v, om %v; want the om time and not the flag", ran.Reused, ran.OMSecs)
+	}
+	// The page reads the wire form, so the row names the flag om_reused and
+	// leaves om_secs absent on a reused landing.
+	wire := func(row dashboard.LandingRow) map[string]any {
+		t.Helper()
+		b, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal row %s: %v", row.Bead, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("unmarshal row %s: %v", row.Bead, err)
+		}
+		return m
+	}
+	if m := wire(reused); m["om_reused"] != true {
+		t.Errorf("reused row's om_reused = %v, want true", m["om_reused"])
+	} else if _, ok := m["om_secs"]; ok {
+		t.Errorf("reused row carries om_secs %v, want none", m["om_secs"])
+	}
+	if m := wire(ran); m["om_secs"] != float64(40) {
+		t.Errorf("ran row's om_secs = %v, want 40", m["om_secs"])
+	} else if _, ok := m["om_reused"]; ok {
+		t.Errorf("ran row carries om_reused %v, want the key absent", m["om_reused"])
+	}
+}
+
 // Every landing in the window, up to the table's row bound, is a row, newest
 // first, so the pane can scroll all of them; a title is looked up only for the
 // first recentTitleRows of them, since each lookup can be a bd read (gt-1kttu).

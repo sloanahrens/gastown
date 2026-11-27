@@ -2309,7 +2309,9 @@ function landingTable(s, names, rows, waiting) {
     tr.append(landingPointsCell(r.sp_estimate, r.sp_actual));
     tr.append(el("span", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("span", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
-    tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
+    // A reused landing ran no om, so its om cell says the review was reused
+    // rather than drawing the dash of a landing with no review (gt-amwavi).
+    tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : (r.om_reused ? "reused" : "–")));
     const ship = el("span", "n" + (r.ship_pending ? " warnc" : ""));
     const appRig = r.ship_via === "staging";
     if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = appRig ? "dispatched to staging deployed" : "dispatched to deployed"; }
