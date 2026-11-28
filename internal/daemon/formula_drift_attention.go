@@ -3,8 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -16,16 +14,11 @@ const formulasStaleKey = "formulas-stale"
 
 // collectFormulasStale raises one item while the town's formula copies differ
 // from the binary's, naming every formula a sync writes; orphaned and unowned
-// files alone raise nothing, and a failed read is returned (gt-u661sv).
+// files alone raise nothing, and a failed read is returned (gt-u661sv). A town
+// with no formulas directory is drift too: every formula is an install.
 func (s *attentionSources) collectFormulasStale(_ context.Context) ([]attention.Item, error) {
 	read := s.formulasStalePlan
 	if read == nil {
-		// A town with no formulas directory has no copies to differ: the
-		// container start wrote none (gt-qgh0t4). Any other stat failure falls
-		// through to the plan read, whose error is returned below.
-		if _, err := os.Stat(filepath.Join(s.d.config.TownRoot, ".beads", "formulas")); os.IsNotExist(err) {
-			return nil, nil
-		}
 		read = formula.PlanFormulaSync
 	}
 	plan, err := read(s.d.config.TownRoot)

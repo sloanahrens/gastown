@@ -28,17 +28,16 @@ func TestFormulaDriftRaisesOnlyChangedFormulas(t *testing.T) {
 		name    string
 		entries []formula.SyncEntry
 		raise   bool
-		absent  string
 	}{
 		{"outdated", []formula.SyncEntry{
 			{Name: "mol-polecat-work.formula.toml", Action: formula.SyncUpdate},
 			{Name: "tdd-cycle.formula.toml", Action: formula.SyncUpToDate},
-		}, true, "tdd-cycle.formula.toml"},
+		}, true},
 		{"up-to-date, orphaned and unowned", []formula.SyncEntry{
 			{Name: "mol-polecat-work.formula.toml", Action: formula.SyncUpToDate},
 			{Name: "gone.formula.toml", Action: formula.SyncOrphaned},
 			{Name: "hand.formula.toml", Action: formula.SyncUnowned},
-		}, false, ""},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -62,9 +61,6 @@ func TestFormulaDriftRaisesOnlyChangedFormulas(t *testing.T) {
 				if !strings.Contains(items[0].Summary, want) {
 					t.Errorf("Summary = %q, want %q", items[0].Summary, want)
 				}
-			}
-			if strings.Contains(items[0].Summary, tc.absent) && tc.absent != "" {
-				t.Errorf("Summary = %q, want %q left out", items[0].Summary, tc.absent)
 			}
 		})
 	}
@@ -98,11 +94,14 @@ func TestFormulaDriftNilSeamReadsTheTownRoot(t *testing.T) {
 		strings.Contains(items[0].Summary, "tdd-cycle.formula.toml") {
 		t.Fatalf("items = %+v err = %v, want one naming only the town root's drift", items, err)
 	}
+	// A daemon's town with no formulas directory is drift: every embedded
+	// formula is an install the sync would write (gt-u661sv).
 	empty := &attentionSources{d: &Daemon{config: &Config{TownRoot: t.TempDir()}}}
-	if items, err := empty.collectFormulasStale(context.Background()); err != nil || len(items) != 0 {
-		t.Fatalf("items = %+v err = %v, want none from a town with no formulas", items, err)
+	items, err = empty.collectFormulasStale(context.Background())
+	if err != nil || len(items) != 1 || !strings.Contains(items[0].Summary, "mol-polecat-work.formula.toml") {
+		t.Fatalf("items = %+v err = %v, want one naming an embedded formula for a town with no formulas", items, err)
 	}
-	// A stat failure that is not absence falls through to the read's error.
+	// A town whose .beads is a file cannot be planned: the read's error is returned.
 	notDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(notDir, ".beads"), []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)

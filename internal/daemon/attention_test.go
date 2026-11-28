@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -84,6 +85,8 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		host:           healthyHost(),
 		reworkNotes:    map[string]reworkNote{},
 		escalationBead: func(context.Context, string) (*beads.Issue, error) { return nil, nil },
+		// A temp town has no formulas directory, which the real plan reads as every formula to install; answer an empty plan so ticks raise nothing (gt-u661sv).
+		formulasStalePlan: func(string) (*formula.SyncPlan, error) { return &formula.SyncPlan{}, nil },
 	}
 	return &attentionFixture{d: d, logs: logs, now: now, src: src}
 }
