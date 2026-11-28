@@ -111,6 +111,11 @@ type poolSession struct {
 	// slings still running, so a running sling and the seat it already fills
 	// count once (gt-75fma5).
 	hookedBead string
+	// runsNothing marks a counted dead-hooked seat whose measured read found
+	// nothing held and nobody working (seatRunsNothing): a seat the pool counts
+	// that runs no worker in its sandbox (gt-p1og4z). A seat whose state read
+	// errored is not proven to run nothing, so it never carries the mark.
+	runsNothing bool
 }
 
 // poolHeldCount counts the sessions that hold a pool seat: every session but a

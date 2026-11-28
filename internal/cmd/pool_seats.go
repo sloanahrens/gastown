@@ -1220,14 +1220,14 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				if readErr == nil {
 					readErr = fmt.Errorf("reading the state of %s/%s: %w", rigName, name, err)
 				}
-				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", deadClassUnread, now))
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", deadClassUnread, false, now))
 				continue
 			}
 			probed++
 			if !poolDeadSeatCounted(state) {
 				continue
 			}
-			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, deadSeatClass(state), now))
+			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, deadSeatClass(state), seatRunsNothing(state, nil), now))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -1278,8 +1278,9 @@ func deadSeatClass(state poolSeatState) string {
 // for its hook, so a running sling for that bead and this seat count once
 // (gt-75fma5); a seat whose disposition could not be read passes "". class is
 // the seat's disposition class as deadSeatClass names it, and a seat whose
-// state read failed passes deadClassUnread.
-func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead, class string, now time.Time) poolSession {
+// state read failed passes deadClassUnread. runsNothing is the seat's measured
+// answer from seatRunsNothing, false for a seat whose read failed.
+func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead, class string, runsNothing bool, now time.Time) poolSession {
 	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 	stale := parkedStale(townRoot, rigName, name, now)
 	return poolSession{
@@ -1292,6 +1293,7 @@ func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead, class st
 		deadClass:   class,
 		parkedStale: stale,
 		hookedBead:  hookedBead,
+		runsNothing: runsNothing,
 	}
 }
 
