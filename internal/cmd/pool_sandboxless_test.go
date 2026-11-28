@@ -39,6 +39,10 @@ func TestPoolSandboxlessFilter(t *testing.T) {
 	landing := poolSession{name: "landing/r/p", agent: "sandbox", rig: "r", polecat: "p", landing: true}
 	// keeper is a host landing seat, so a drop must leave it untouched.
 	keeper := poolSession{name: "landing/r/host", agent: "host", rig: "r", polecat: "host", landing: true}
+	dead := poolSession{name: "dead/r/p", agent: "sandbox", rig: "r", polecat: "p", deadHooked: true, runsNothing: true}
+	deadWorking := poolSession{name: "dead/r/p", agent: "sandbox", rig: "r", polecat: "p", deadHooked: true}
+	live := poolSession{name: "r/p", agent: "sandbox", rig: "r", polecat: "p"}
+	claim := poolSession{name: "pool-claim/c", agent: "sandbox", rig: "r", polecat: "p", claim: true}
 	sandbox := func(a string) bool { return a == "sandbox" }
 	noRecord := func(string, string) (bool, error) { return false, nil }
 	hasRecord := func(string, string) (bool, error) { return true, nil }
@@ -58,6 +62,12 @@ func TestPoolSandboxlessFilter(t *testing.T) {
 		{"seat naming no rig or polecat is kept", poolSession{name: "landing//", agent: "sandbox", landing: true}, sandbox, noRecord, true},
 		{"nil isSandboxAgent returns every seat", landing, nil, noRecord, true},
 		{"nil hasRecord returns every seat", landing, sandbox, nil, true},
+		{"dead sandbox seat that runs nothing with no record is dropped", dead, sandbox, noRecord, false},
+		{"dead sandbox seat that runs nothing with a record is kept", dead, sandbox, hasRecord, true},
+		{"dead sandbox seat that runs nothing with a record read error is kept", dead, sandbox, errRecord, true},
+		{"dead sandbox seat that does not run nothing is kept", deadWorking, sandbox, noRecord, true},
+		{"live session is kept", live, sandbox, noRecord, true},
+		{"claim is kept", claim, sandbox, noRecord, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
