@@ -327,6 +327,47 @@ func TestJSONLCachedPackageShipsNoWall(t *testing.T) {
 	}
 }
 
+// TestCachedMarkerIsTheThirdField pins which package lines mark a package cached:
+// the "(cached)" third field, with or without a coverage figure after it. A
+// measured line or a test's output holding the word marks nothing.
+func TestCachedMarkerIsTheThirdField(t *testing.T) {
+	t.Parallel()
+	const pkg = `{"Action":"output","Package":"example.com/p","Output":"`
+	const pass = `{"Action":"pass","Package":"example.com/p","Elapsed":0}`
+	for _, tc := range []struct {
+		name, stream string
+		cached       bool
+	}{
+		{"marker alone", pkg + `ok  \texample.com/p\t(cached)\n"}` + "\n" + pass, true},
+		{"marker with coverage", pkg + `ok  \texample.com/p\t(cached) coverage: 42.0% of statements\n"}` + "\n" + pass, true},
+		{"measured with coverage", pkg + `ok  \texample.com/p\t1.5s coverage: 42.0% of statements\n"}` + "\n" + pass, false},
+		{"marker in second field", pkg + `ok  \t(cached)\n"}` + "\n" + pass, false},
+		{"test output holds the marker", `{"Action":"output","Package":"example.com/p","Test":"TestX","Output":"ok  \texample.com/p\t(cached)\n"}` + "\n" + pkg + `ok  \texample.com/p\t1.5s\n"}` + "\n" + pass, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+			var out, errOut bytes.Buffer
+			if code := run([]string{"-jsonl", path, "-run", "gate-1"}, strings.NewReader(tc.stream), &out, &errOut, fixedHost()); code != 0 {
+				t.Fatalf("exit code = %d, want 0: stderr = %q", code, errOut.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("the run wrote no series: %v", err)
+			}
+			var line map[string]json.RawMessage
+			if err := json.Unmarshal(data, &line); err != nil {
+				t.Fatalf("series = %q, want one JSON line: %v", data, err)
+			}
+			if _, ok := line["cached"]; ok != tc.cached {
+				t.Errorf("cached key present = %v, want %v: %s", ok, tc.cached, data)
+			}
+			if _, ok := line["wall_s"]; ok == tc.cached {
+				t.Errorf("wall_s present = %v, want %v: %s", ok, !tc.cached, data)
+			}
+		})
+	}
+}
+
 // TestJSONLEmptyStreamAppendsNothing checks that a stream with no package
 // verdicts writes no file and says so on stderr: an empty run must not read as
 // a run with nothing slow to report.
