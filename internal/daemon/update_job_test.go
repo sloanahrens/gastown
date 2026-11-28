@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -159,6 +160,7 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 		return nil, errors.New("no resolver in this rig: " + host)
 	}
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
+	// In a synctest bubble this cleanup runs inside it, before synctest.Test returns, so a hung create waiting on release ends there.
 	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
 	// The rig's main tip is commits[2] and its verdict is green unless a test says
@@ -932,6 +934,10 @@ func TestUpdateJobRefusedLaunchWaitsOutTheBackoff(t *testing.T) {
 // the timeout is logged as a timeout.
 func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testUpdateJobBlockingCreateTimesOut)
+}
+
+func testUpdateJobBlockingCreateTimesOut(t *testing.T) {
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	r.cluster.hang = true
 	r.d.updateTrigger.jobBound = testUpdateJobBound
@@ -963,6 +969,10 @@ func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 // launch, so no backoff is noted for it.
 func TestUpdateJobHungCreateIsNotStacked(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testUpdateJobHungCreateIsNotStacked)
+}
+
+func testUpdateJobHungCreateIsNotStacked(t *testing.T) {
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	r.cluster.hang = true
 	r.cluster.ignoreCtx = true
