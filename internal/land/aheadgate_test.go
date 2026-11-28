@@ -142,7 +142,7 @@ func TestAheadSlotTakeWaitsForTheRunAndReturnsItOnce(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		release := make(chan struct{})
-		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		want := AheadGate{Bead: "gt-a", Head: "h1", Base: "main", Result: CandidateResult{State: CandidatePassed}}
 		var s AheadSlot
 		if !s.Start(ctx, "gt-a", "h1", "main", func(ctx context.Context, _ func(string)) (AheadGate, error) {
 			select {
@@ -257,7 +257,7 @@ func TestAheadSlotTakeCanceledLeavesTheCarHeld(t *testing.T) {
 		parent, cancelParent := context.WithCancel(context.Background())
 		defer cancelParent()
 		release := make(chan struct{})
-		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		want := AheadGate{Bead: "gt-a", Head: "h1", Base: "main", Result: CandidateResult{State: CandidatePassed}}
 		var s AheadSlot
 		if !s.Start(parent, "gt-a", "h1", "main", func(ctx context.Context, _ func(string)) (AheadGate, error) {
 			select {
@@ -303,7 +303,7 @@ func TestAheadSlotTakeCanceledLeavesTheCarHeld(t *testing.T) {
 func TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		want := AheadGate{Bead: "gt-a", Head: "h1", Base: "main", Result: CandidateResult{State: CandidatePassed}}
 		var s AheadSlot
 		if !s.Start(context.Background(), "gt-a", "h1", "main", finished(want, nil), nil) {
 			t.Fatal("Start on an empty slot = false, want true")
@@ -313,6 +313,49 @@ func TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun(t *testing.T) {
 		cancel()
 		if gate, ok := s.Take(ctx, "gt-a", "h1", "main"); !ok || gate != want {
 			t.Fatalf("Take with an ended ctx = (%+v, %v), want (%+v, true)", gate, ok, want)
+		}
+	})
+}
+
+// TestAheadSlotTakeNamesTheCarItWasBuiltFor shows a taken result carrying the
+// key Start was given though run set others, and the reported merged commit.
+func TestAheadSlotTakeNamesTheCarItWasBuiltFor(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var s AheadSlot
+		if !s.Start(ctx, "gt-a", "h1", "main", func(_ context.Context, report func(string)) (AheadGate, error) {
+			report("m-reported")
+			return AheadGate{Bead: "gt-x", Head: "hx", Base: "bx"}, nil
+		}, nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		synctest.Wait()
+		gate, ok := s.Take(ctx, "gt-a", "h1", "main")
+		if want := (AheadGate{Bead: "gt-a", Head: "h1", Base: "main", Merged: "m-reported"}); !ok || gate != want {
+			t.Fatalf("Take = (%+v, %v), want (%+v, true)", gate, ok, want)
+		}
+	})
+}
+
+// TestAheadSlotTakeKeepsTheMergedCommitRunNamed shows run's merged commit kept
+// over the one report recorded.
+func TestAheadSlotTakeKeepsTheMergedCommitRunNamed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var s AheadSlot
+		if !s.Start(ctx, "gt-a", "h1", "main", func(_ context.Context, report func(string)) (AheadGate, error) {
+			report("m-reported")
+			return AheadGate{Merged: "m-run"}, nil
+		}, nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		synctest.Wait()
+		if gate, ok := s.Take(ctx, "gt-a", "h1", "main"); !ok || gate.Merged != "m-run" {
+			t.Fatalf("Take Merged = (%q, %v), want (%q, true)", gate.Merged, ok, "m-run")
 		}
 	})
 }
