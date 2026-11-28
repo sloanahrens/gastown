@@ -74,6 +74,31 @@ func joinSeatNames(rigNames []string, namesOf func(rigName string) ([]string, er
 	return names, nil
 }
 
+// townSeatNames lists every seat name any rig of the town may hand out: the
+// registered rigs' names joined once and sorted, the town's seats feeding every
+// pool. It writes nothing; an unreadable registry or settings file is an error.
+func townSeatNames(townRoot string) ([]string, error) {
+	rigNames, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	seats, err := config.Seats(ts, nil)
+	if err != nil {
+		return nil, err
+	}
+	seatNames := make(map[string][]string, len(seats))
+	for _, seat := range seats {
+		seatNames[seat.Agent] = seat.Names
+	}
+	return joinSeatNames(rigNames, func(rigName string) ([]string, error) {
+		return rigSeatNames(townRoot, rigName, seatNames)
+	})
+}
+
 // rigNamePool builds the rig's name pool from its settings, mirroring the
 // branches of newManager (internal/polecat/manager.go), except that an
 // unreadable file is an error here rather than a fallback.
