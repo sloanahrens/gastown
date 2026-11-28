@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/sweeprunner"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // errInjected is the failure a faulty copy injects into a write or a close.
@@ -403,4 +407,113 @@ func TestCacheProgStatsAtLimit(t *testing.T) {
 	if _, err := os.Lstat(src); !os.IsNotExist(err) {
 		t.Errorf("source left behind, Lstat err = %v", err)
 	}
+}
+
+// statsRun is a run whose trim reads a real temp claim, with GOCACHE beside it, so the move sees the tree
+// the trim does. The stub sweep makes its log directory as the real sweep does.
+func statsRun(t *testing.T) (*harness, string) {
+	t.Helper()
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+		must(t, os.MkdirAll(overrides[tiersweep.EnvLogDir], 0o755))
+		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+		return 0
+	})
+	claim := emptyClaimRoot(t)
+	h.deps.Trim, h.deps.Environ = diskCacheTrim(claim), []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+	return h, claim
+}
+
+// runStats runs one tier and requires exit 0 and an integration GREEN result.
+func runStats(t *testing.T, h *harness) {
+	t.Helper()
+	if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", tiersweep.TierIntegration, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+	}
+	r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+	if err != nil {
+		t.Fatalf("read the result: %v", err)
+	}
+	verdicts, err := sweeprunner.ToTierResults(r)
+	if err != nil {
+		t.Fatalf("convert the result: %v", err)
+	}
+	if v := verdicts[tiersweep.TierIntegration]; v.Verdict != "GREEN" {
+		t.Errorf("integration = %+v, want GREEN", v)
+	}
+}
+
+// linkedStats plants the cache program's stats as a symbolic link under claim, which the move refuses.
+func linkedStats(t *testing.T, claim string) string {
+	t.Helper()
+	must(t, os.MkdirAll(filepath.Join(claim, cacheProgDirName), 0o755))
+	src := filepath.Join(claim, cacheProgDirName, cacheProgStatsName)
+	must(t, os.Symlink(planted(t, "target.jsonl", nil), src))
+	return src
+}
+
+// TestCacheProgStatsRunMovesTheStatsAfterTheTrim: a run whose claim holds the stats ends with them in its
+// log directory and none under the claim.
+func TestCacheProgStatsRunMovesTheStatsAfterTheTrim(t *testing.T) {
+	t.Parallel()
+	h, claim := statsRun(t)
+	content := []byte("{\"gets\":3}\n")
+	src := statsAt(t, claim, content)
+	runStats(t, h)
+	if got, err := os.ReadFile(filepath.Join(h.out, "logs", cacheProgStatsCopyName)); err != nil || !bytes.Equal(got, content) {
+		t.Errorf("copy = %q, %v; want %q", got, err, content)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Errorf("source left under the claim, Lstat err = %v", err)
+	}
+}
+
+// TestCacheProgStatsRunRecordsARefusedMove: a refused move is one line in cache-trim.log, or one line on
+// stderr when that log cannot be written. The exit status and the result stay the same, and a claim with
+// no stats records nothing.
+func TestCacheProgStatsRunRecordsARefusedMove(t *testing.T) {
+	t.Parallel()
+	t.Run("one line in cache-trim.log", func(t *testing.T) {
+		t.Parallel()
+		h, claim := statsRun(t)
+		src := linkedStats(t, claim)
+		runStats(t, h)
+		log, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+		if err != nil || strings.Count(string(log), "\n") != 1 || !strings.Contains(string(log), "cache trim: ") || !strings.Contains(string(log), src) {
+			t.Errorf("cache-trim.log = %q, %v; want one line naming %s", log, err, src)
+		}
+		if _, err := os.Lstat(src); err != nil {
+			t.Errorf("refused link %s was removed: %v", src, err)
+		}
+	})
+	t.Run("one line on stderr when the log is unwritable", func(t *testing.T) {
+		t.Parallel()
+		h, claim := statsRun(t)
+		src := linkedStats(t, claim)
+		// A directory where the log goes cannot be opened, so the line falls back to stderr.
+		must(t, os.MkdirAll(filepath.Join(h.out, "logs", cacheTrimLogName), 0o755))
+		runStats(t, h)
+		if n := strings.Count(h.stderr.String(), "\n"); n != 1 || !strings.Contains(h.stderr.String(), src) {
+			t.Errorf("stderr = %q; want one line naming %s", h.stderr.String(), src)
+		}
+	})
+	t.Run("a trim with no absolute root is one line naming the root", func(t *testing.T) {
+		t.Parallel()
+		for _, root := range []*CacheTrim{nil, {}, {Root: "relative/claim"}} {
+			h, _ := statsRun(t)
+			h.deps.Trim = root
+			runStats(t, h)
+			log, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+			if err != nil || strings.Count(string(log), "no absolute claim root") != 1 {
+				t.Errorf("trim %+v: cache-trim.log = %q, %v; want one line naming the root", root, log, err)
+			}
+		}
+	})
+	t.Run("no stats file writes no line", func(t *testing.T) {
+		t.Parallel()
+		h, _ := statsRun(t)
+		runStats(t, h)
+		if _, err := os.Lstat(filepath.Join(h.out, "logs", cacheTrimLogName)); !os.IsNotExist(err) || h.stderr.Len() != 0 {
+			t.Errorf("no stats wrote a line: Lstat err = %v, stderr = %q", err, h.stderr.String())
+		}
+	})
 }
