@@ -63,6 +63,13 @@ const (
 	// this directory alone, never recursively.
 	cacheMount = "/var/cache/gt-sweep"
 
+	// gocacheprogPath is the cache program the polecat image installs beside the
+	// town binaries (gt-ylv89q). gocacheprogStore is its store on the sweep cache
+	// claim, outside the gocache and gomodcache trees the run's own trim lists,
+	// so the trim never removes it (gt-7gezj1).
+	gocacheprogPath  = "/usr/local/bin/gt-gocacheprog"
+	gocacheprogStore = cacheMount + "/gtprog"
+
 	// cacheClaimStorage is the cache claim's requested size: room for one rig's
 	// build cache and module cache, with headroom for the next sweep to add to them.
 	cacheClaimStorage = "5Gi"
@@ -746,6 +753,11 @@ func runnerContainer(spec Spec) (Container, error) {
 		// The integration tier's test-Dolt pool matches the towns queued on it.
 		EnvVar{Name: testDoltInitConcurrencyEnv, Value: testDoltInitConcurrency},
 	)
+	// A cap above zero runs the Go builds through the cache program; zero leaves
+	// the variable out, so the Job renders as before (gt-7gezj1).
+	if spec.GoCacheProgMaxBytes > 0 {
+		env = append(env, EnvVar{Name: "GOCACHEPROG", Value: fmt.Sprintf("%s -dir %s -max-bytes %d", gocacheprogPath, gocacheprogStore, spec.GoCacheProgMaxBytes)})
+	}
 	// The runner is limited to its whole share but asks for the configured
 	// fraction of it, so a contended node places the run on fewer CPUs while a
 	// free one still lets it burst to the share. A zero request asks for the

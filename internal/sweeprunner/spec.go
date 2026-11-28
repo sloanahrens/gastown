@@ -55,6 +55,11 @@ type Spec struct {
 	// in millicores. A value set with Dind off is refused, because no sidecar
 	// would read it (gt-9ji7v9).
 	DindCPURequestMillis int
+	// GoCacheProgMaxBytes runs the run's Go builds through the cache program,
+	// its store capped at this many bytes. Zero is off and renders the runner
+	// as before; a positive value is the cap, and the store sits on the sweep
+	// cache claim outside the gocache and gomodcache trees (gt-7gezj1).
+	GoCacheProgMaxBytes int
 	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
 	// tier-sweep command line naming none runs (TiersOrDefault).
 	Tiers []string
@@ -185,6 +190,9 @@ func (s Spec) Validate() error {
 		if share *= 1000; s.RunnerCPURequestMillis > share {
 			return &FieldError{Field: "runnerCPURequestMillis", Rule: fmt.Sprintf("%d is above the runner's share of %d millicores", s.RunnerCPURequestMillis, share)}
 		}
+	}
+	if s.GoCacheProgMaxBytes < 0 {
+		return &FieldError{Field: "goCacheProgMaxBytes", Rule: fmt.Sprintf("%d is below 0, and 0 turns the cache program off", s.GoCacheProgMaxBytes)}
 	}
 	if s.MemoryGB < 2 || s.MemoryGB > 48 {
 		return &FieldError{Field: "memoryGB", Rule: fmt.Sprintf("%d is outside 2-48", s.MemoryGB)}

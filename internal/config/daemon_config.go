@@ -3918,6 +3918,14 @@ type TierSweepRunnerConfig struct {
 	// DindCPUs is; 100 to the share, and only with dind on (gt-svprjl).
 	DindCPURequestMillis int `json:"dind_cpu_request_m,omitempty"`
 
+	// GoCacheProgMaxBytes runs the sweep's Go builds through the cache program
+	// (gt-gocacheprog) with its store bounded at this many bytes: 0 is off, the
+	// default, and a positive value is the store's cap. The store sits on the
+	// sweep cache claim, outside the gocache and gomodcache trees. Only the
+	// Kubernetes backend renders the program, so another backend is refused
+	// (gt-7gezj1).
+	GoCacheProgMaxBytes int `json:"go_cache_prog_max_bytes,omitempty"`
+
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
 	// backend the whole Job pod's total, as CPUs is. With dind the minimum is 6
 	// (the sidecar's 4 GB and the runner's 2).
@@ -4157,6 +4165,15 @@ func (c *TierSweepRunnerConfig) validate() error {
 	}
 	if share *= 1000; c.RunnerCPURequestMillis > share {
 		return fmt.Errorf("runner_cpu_request_m = %d: want at most %d, the runner's share of cpus = %d", c.RunnerCPURequestMillis, share, c.CPUs)
+	}
+	// The cache program is a Kubernetes runner setting: a negative cap is no
+	// store, and a cap on another backend would read as effective and do
+	// nothing (gt-7gezj1).
+	if c.GoCacheProgMaxBytes < 0 {
+		return fmt.Errorf("go_cache_prog_max_bytes = %d: want 0 for off, or above 0", c.GoCacheProgMaxBytes)
+	}
+	if c.GoCacheProgMaxBytes > 0 && c.Backend != TierSweepRunnerKubernetes {
+		return fmt.Errorf("go_cache_prog_max_bytes = %d: want it only with backend %s", c.GoCacheProgMaxBytes, TierSweepRunnerKubernetes)
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
 		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
