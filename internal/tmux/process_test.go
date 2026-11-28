@@ -366,6 +366,34 @@ func TestKillSessionWithProcesses(t *testing.T) {
 	}
 }
 
+// TestKillSessionWithProcessesReturnsWhenGone: a tree whose processes exit on
+// TERM is not slept for — the fake clock it was handed stays at testEpoch — and
+// TERM then KILL still reach every process in the same order.
+func TestKillSessionWithProcessesReturnsWhenGone(t *testing.T) {
+	t.Parallel()
+	f, pane, node, claude, reparented, _, _ := processTree()
+	clk := newFixedClock()
+	tm := newTmuxForTest("gt-test-unit", killZeroFromProcs(f), clk)
+	if err := driven(t, clk, processGonePollInterval, func() error {
+		return tm.KillSessionWithProcesses("gt-x")
+	}); err != nil {
+		t.Fatalf("KillSessionWithProcesses: %v", err)
+	}
+	want := []string{claude, node, reparented, pane}
+	if got := signaled(f, "TERM"); !reflect.DeepEqual(got, want) {
+		t.Errorf("TERM order = %v, want %v", got, want)
+	}
+	if got := signaled(f, "KILL"); !reflect.DeepEqual(got, want) {
+		t.Errorf("KILL order = %v, want %v", got, want)
+	}
+	if f.has("gt-x") {
+		t.Error("session survived KillSessionWithProcesses")
+	}
+	if got := clk.Now().Sub(testEpoch); got != 0 {
+		t.Errorf("KillSessionWithProcesses waited %v after every process exited on TERM", got)
+	}
+}
+
 func TestKillSessionWithProcesses_NonexistentSession(t *testing.T) {
 	t.Parallel()
 	f := newFakeServer()
