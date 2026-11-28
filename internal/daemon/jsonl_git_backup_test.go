@@ -4952,12 +4952,13 @@ func TestJSONLExportStopsWithTheDaemon(t *testing.T) {
 	}
 }
 
-// packPushRig holds one cycle daemon's push and pack results and records the
-// calls the cycle made through packPushGit.
+// packPushRig holds one cycle daemon's push, pack and object-count results.
 type packPushRig struct {
 	pushErr, packErr error
 	pushes           int
 	packs            []packCall
+	objectCounts     string
+	countErr         error
 }
 
 type packCall struct {
@@ -4965,8 +4966,8 @@ type packCall struct {
 	timeout time.Duration
 }
 
-// packPushGit wraps the gitfake handle a cycle opens: pushes and packs are
-// recorded and answered from rig, everything else is the fake's.
+// packPushGit wraps the gitfake handle a cycle opens: pushes, packs and counts
+// come from rig, and RemoteURL names an origin the fake's repo lacks.
 type packPushGit struct {
 	daemonGit
 	rig *packPushRig
@@ -4975,6 +4976,8 @@ type packPushGit struct {
 func (g packPushGit) RemoteURL(string) (string, error) {
 	return "https://offsite.invalid/backup.git", nil
 }
+
+func (g packPushGit) CountObjects() (string, error) { return g.rig.objectCounts, g.rig.countErr }
 
 func (g packPushGit) PushWithTimeout(string, string, bool, time.Duration) error {
 	g.rig.pushes++
@@ -5043,5 +5046,40 @@ func TestJSONLGitBackupPacksAfterEveryCycleAndAlertsUntilItSucceeds(t *testing.T
 				t.Errorf("packs over two cycles = %d, want one per cycle", len(rig.packs))
 			}
 		})
+	}
+}
+
+// TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound: the reading left
+// by the pack judges the repo whether the pack failed or not — raising the
+// plan's reason while due, clearing under the bound, logging an unreadable one.
+func TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound(t *testing.T) {
+	t.Parallel()
+	d, rec, logs := newRemoteBackupDaemon(t, t.TempDir(), remoteDoltHost, &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"}]}`)})
+	rig := &packPushRig{}
+	open := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return packPushGit{daemonGit: open(dir), rig: rig} }
+	for i, step := range []struct {
+		out     string
+		err     error
+		packErr error
+		open    bool
+	}{
+		{out: countObjects("2000", "0"), open: true},
+		{out: countObjects("many", "0"), open: true},
+		{out: countObjects("1999", "0"), packErr: errors.New("repack exited with status 128"), open: false},
+		{err: errors.New("git count-objects: exit status 128"), open: false},
+	} {
+		rig.objectCounts, rig.countErr, rig.packErr = step.out, step.err, step.packErr
+		d.syncJsonlGitBackup()
+		alerts := rec.OpenEscalations(alertKeyJSONLLoose)
+		if got := len(alerts) > 0; got != step.open {
+			t.Fatalf("cycle %d: loose alert open = %v, want %v (alerts %+v)", i+1, got, step.open, alerts)
+		}
+		if i == 0 && !strings.Contains(alerts[0].Reason, "2000 loose objects (threshold 2000)") {
+			t.Errorf("loose alert reason %q does not carry the plan's reason", alerts[0].Reason)
+		}
+	}
+	if !strings.Contains(logs.String(), "leaving the loose alert as it was") {
+		t.Errorf("an unreadable count was not logged as leaving the alert unchanged; log:\n%s", logs.String())
 	}
 }

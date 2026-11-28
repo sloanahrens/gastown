@@ -558,6 +558,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	// Pack whichever way the push went; in-cycle, so no pack overlaps a commit.
 	d.packJsonlBackup(gitRepo)
+	d.checkJsonlBackupLoose(gitRepo)
 
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
 	cycle.closeStep("report")
@@ -1509,6 +1510,26 @@ func (d *Daemon) packJsonlBackup(gitRepo string) {
 	d.clearAlerts("the backup repo packed", alertKeyJSONLPack)
 }
 
+// checkJsonlBackupLoose raises alertKeyJSONLLoose with the plan's reason while
+// the reading the last pack left is still due, clears it under the bound, and
+// logs a failed or unparsable read, leaving the alert as it was.
+func (d *Daemon) checkJsonlBackupLoose(gitRepo string) {
+	out, readErr := d.backupGitAt(gitRepo, gitCmdTimeout).CountObjects()
+	plan, err := RepackPlanFor(out)
+	if readErr != nil {
+		err = readErr
+	}
+	if err != nil {
+		d.logger.Printf("jsonl_git_backup: cannot read the loose object counts of %s — leaving the loose alert as it was: %v", gitRepo, err)
+		return
+	}
+	if plan.Due {
+		d.escalateAlert(alertKeyJSONLLoose, "jsonl_git_backup", fmt.Sprintf("the offsite backup repo %s is still loose after its pack: %s", gitRepo, plan.Reason))
+		return
+	}
+	d.clearAlerts("the backup repo is under its loose bound", alertKeyJSONLLoose)
+}
+
 // pushJsonlBackup pushes the backup repository's current branch to origin,
 // returning nil once origin carries HEAD.
 //
@@ -2088,6 +2109,8 @@ const (
 	alertKeyJSONLPush      = "jsonl_git_backup:push"
 	// alertKeyJSONLPack is a failed or timed-out bounded pack of the backup repo.
 	alertKeyJSONLPack = "jsonl_git_backup:pack"
+	// alertKeyJSONLLoose is a backup repo the last pack left at or over its bound.
+	alertKeyJSONLLoose = "jsonl_git_backup:loose"
 )
 
 // escalate raises an alert whose key is derived from its own title, for
