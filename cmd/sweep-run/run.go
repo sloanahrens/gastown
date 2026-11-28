@@ -236,7 +236,24 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	// The trim runs after the result is on disk, so a trim that fails cannot
 	// keep the daemon from reading the verdicts it just measured (gt-hlo07.2).
 	recordTrim(d.Trim, opts.logDir(), stderr)
+	// The stats move runs after the trim, for the same reason: a stats file the
+	// move refuses changes neither the verdicts nor the exit status (gt-fqwlm3).
+	moveStats(d.Trim, opts.logDir(), stderr)
 	return 0
+}
+
+// moveStats moves the cache program's stats from the claim the trim names into
+// the run's log directory. A trim with no absolute claim root has no claim to
+// move from, and recordTrim has already recorded why, so it returns without a
+// second line. A move that fails is one line in cache-trim.log, or on stderr when
+// that log cannot be written, and changes neither the result nor the exit status.
+func moveStats(trim *CacheTrim, logDir string, stderr io.Writer) {
+	if trim == nil || !filepath.IsAbs(trim.Root) {
+		return
+	}
+	if err := moveCacheProgStats(trim.Root, logDir, os.Remove); err != nil {
+		recordTrimError(logDir, err, stderr)
+	}
 }
 
 // sweepTiers runs the sweep the work tree ships and returns the result's tiers:
