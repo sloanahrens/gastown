@@ -470,6 +470,44 @@ func TestClaimListingRefusesAnActionFileItCannotRead(t *testing.T) {
 	}
 }
 
+// TestTrimListingHeadersListsEachActionFilesOutput: every action file is paired with its -d file.
+func TestTrimListingHeadersListsEachActionFilesOutput(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	other := cachevol.SeedBuildCacheDir + "/44/" + strings.Repeat("4", 64) + "-a"
+	otherOut := cachevol.SeedBuildCacheDir + "/55/" + strings.Repeat("5", 64) + "-d"
+	plantBuildAction(t, filepath.Join(root, filepath.FromSlash(trimListAction)), trimListActionID, trimListOutputID, testTime)
+	plantBuildAction(t, filepath.Join(root, filepath.FromSlash(other)), strings.Repeat("4", 64), strings.Repeat("5", 64), testTime)
+	if listing, err := claimListing(root, filepath.Walk); err != nil || len(listing) != 2 || listing[0].Path != trimListAction || listing[0].Output != trimListOutput || listing[1].Path != other || listing[1].Output != otherOut {
+		t.Fatalf("the listing is %+v (error %v), want the two action files paired in walk order", listing, err)
+	}
+}
+
+// TestTrimListingHeadersNamesAnUnreadableActionFile: a failed header read fails the listing by name.
+func TestTrimListingHeadersNamesAnUnreadableActionFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := filepath.Join(root, filepath.FromSlash(trimListAction))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	walk := func(_ string, fn filepath.WalkFunc) error {
+		return fn(dir, &fakeFileInfo{name: filepath.Base(dir)}, nil)
+	}
+	_, err := claimListing(root, walk)
+	if want := "reading the build-cache header of " + trimListAction + ": "; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("claimListing error = %v, want it to start %q", err, want)
+	}
+}
+
+// TestTrimListingHeadersReadSixteenAtATime pins the worker count claimListing hands the pool.
+func TestTrimListingHeadersReadSixteenAtATime(t *testing.T) {
+	t.Parallel()
+	if claimListingHeaderWorkers != 16 {
+		t.Errorf("claimListingHeaderWorkers = %d, want 16", claimListingHeaderWorkers)
+	}
+}
+
 // TestTrimListPathsRemovesAnActionFileWithItsOutput drives the plan the init container writes: a cap
 // the -a file alone would reach still names the -d file it points at, because the pair goes whole
 // (gt-udrvfw).
