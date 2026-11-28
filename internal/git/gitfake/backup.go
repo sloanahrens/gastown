@@ -67,6 +67,15 @@ func (f *Fake) SetObjectCounts(t testing.TB, dir, output string, err error) {
 	r.counts, r.countsErr = output, err
 }
 
+// RepackWithTimeout is GC in the model: it fails only outside a repository, and
+// the bounds in args change nothing the fake keeps.
+func (h *handle) RepackWithTimeout(args []string, _ time.Duration) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	_, _, err := h.locate(args...)
+	return err
+}
+
 // PackSize is "0": the fake keeps no packs, and a repository git has not
 // packed reports 0 too.
 func (h *handle) PackSize() (string, error) {
