@@ -18,6 +18,9 @@ func TestRedBaseReportLines(t *testing.T) {
 		want     string
 		wantOK   bool
 	}{
+		{"not-judged files print one line each in the plan's order before the count, and are not a finding", RedBasePlanResult{Packages: []RedBasePackage{pkg("a", rt("TestA", 3))}, NotJudged: []string{"plugins/z_test.go", "plugins/a_test.go"}},
+			nil,
+			"redbase: not judged: plugins/z_test.go\nredbase: not judged: plugins/a_test.go\nredbase: 1 new or changed test(s) in 1 package(s), 0 passing without the change\n", true},
 		{"findings print one line each in order, then the count, and are not ok", plan(pkg("b", rt("TestB", 3)), pkg("a", rt("TestA", 7), rt("TestC", 8))),
 			[]RedBaseFinding{{Test: rt("TestB", 3)}, {Test: rt("TestA", 7)}},
 			"x_test.go:3: TestB passes without the change\nx_test.go:7: TestA passes without the change\nredbase: 3 new or changed test(s) in 2 package(s), 2 passing without the change\n", false},
@@ -39,13 +42,18 @@ func TestRedBaseReportLines(t *testing.T) {
 func TestRedBaseReportWriteError(t *testing.T) {
 	t.Parallel()
 	broken := errors.New("device full")
-	for name, findings := range map[string][]RedBaseFinding{
-		"a failed finding line is returned": {{Test: RedBaseTest{Name: "TestA", File: "x_test.go", Line: 1}}},
-		"a failed count line is returned":   nil,
+	for _, tt := range []struct {
+		name     string
+		plan     RedBasePlanResult
+		findings []RedBaseFinding
+	}{
+		{"a failed not-judged line is returned", RedBasePlanResult{NotJudged: []string{"x_test.go"}}, nil},
+		{"a failed finding line is returned", RedBasePlanResult{}, []RedBaseFinding{{Test: RedBaseTest{Name: "TestA", File: "x_test.go", Line: 1}}}},
+		{"a failed count line is returned", RedBasePlanResult{}, nil},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if ok, err := RedBaseReport(&failOnce{err: broken}, RedBasePlanResult{}, findings); ok || !errors.Is(err, broken) {
+			if ok, err := RedBaseReport(&failOnce{err: broken}, tt.plan, tt.findings); ok || !errors.Is(err, broken) {
 				t.Errorf("RedBaseReport = %v, %v; want false and an error wrapping %v", ok, err, broken)
 			}
 		})
