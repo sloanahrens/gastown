@@ -21,21 +21,24 @@ type AheadSlot struct {
 	car *aheadCar
 }
 
-// aheadCar is the car a slot holds. The run goroutine writes gate and err under
-// the slot's mu before it closes done.
+// aheadCar is the car a slot holds. The run goroutine writes merged, gate and
+// err under the slot's mu before it closes done.
 type aheadCar struct {
 	bead, head, base string
 	discard          func(AheadGate)
 	cancel           context.CancelFunc
 	done             chan struct{}
+	merged           string
 	gate             AheadGate
 	err              error
 }
 
 // Start runs run on its own goroutine, with a context that ends when ctx does,
-// and keeps what run returns with the car (gt-o1w1rv). It starts nothing and
-// returns false on a nil slot, with a nil run, or while a car is held. The
-// report given to run does nothing yet, and discard is only stored.
+// and keeps what run returns with the car (gt-o1w1rv). The gate it keeps names
+// the bead, head and base Start was given, and the merged commit report
+// recorded when run's own result names none (gt-6ivh2m). It starts nothing and
+// returns false on a nil slot, with a nil run, or while a car is held. discard
+// is only stored.
 func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func(ctx context.Context, report func(merged string)) (AheadGate, error), discard func(AheadGate)) bool {
 	if s == nil || run == nil {
 		return false
@@ -51,9 +54,18 @@ func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func
 	go func() {
 		defer close(car.done)
 		defer cancel()
-		gate, err := run(runCtx, func(string) {})
+		gate, err := run(runCtx, func(merged string) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			car.merged = merged
+		})
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		// The key comes from the car, so Take matches what Start was given.
+		gate.Bead, gate.Head, gate.Base = car.bead, car.head, car.base
+		if gate.Merged == "" {
+			gate.Merged = car.merged
+		}
 		car.gate, car.err = gate, err
 	}()
 	return true
