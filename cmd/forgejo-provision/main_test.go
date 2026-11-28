@@ -36,7 +36,7 @@ func TestMainUsageExitsTwo(t *testing.T) {
 		"--seat with --role":        {args: []string{"--seat", "alpha", "--role", "polecat", "--repo", "acme/rig"}, stderr: "--seat cannot be combined with --role"},
 		"--seat with --revoke-token": {args: []string{"--seat", "alpha", "--revoke-token", "gt-old", "--role", "landing", "--repo", "acme/rig"},
 			stderr: "--seat cannot be combined with --revoke-token"},
-		"--seat with a bad name": {args: []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, stderr: "--seat 'Fur/iosa' must match"},
+		"--seat with a bad name": {args: []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, stderr: "--seat 'Fur/iosa' must be at most 31 characters"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -7,11 +7,21 @@ import (
 )
 
 // seatRolePrefix is what a seat's role starts with: seat NAME runs as role
-// seat-NAME, so it gets a role bot's account and token file.
+// seat-NAME.
 const seatRolePrefix = "seat-"
 
-// seatName is what a seat may be called: lower-case letters, digits and hyphens.
-var seatName = regexp.MustCompile(`^[a-z0-9-]+$`)
+// maxSeatNameLength is the longest seat name, in characters.
+const maxSeatNameLength = 31
+
+// seatName is the form a seat name must have: lower-case letters and digits in
+// groups joined by single hyphens.
+var seatName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// seatNameValid reports whether name is a seat name openshellprov also accepts,
+// so every seat bot this package creates can have its provider.
+func seatNameValid(name string) bool {
+	return len(name) <= maxSeatNameLength && seatName.MatchString(name)
+}
 
 // isSeatRole reports whether role is exactly the role ProvisionSeat builds: the
 // prefix followed by a seat name. The role table names no seat, so EnsureToken
@@ -19,14 +29,14 @@ var seatName = regexp.MustCompile(`^[a-z0-9-]+$`)
 // starts with the prefix is still an unknown role.
 func isSeatRole(role string) bool {
 	name, ok := strings.CutPrefix(role, seatRolePrefix)
-	return ok && seatName.MatchString(name)
+	return ok && seatNameValid(name)
 }
 
 // ProvisionSeat ensures the seat bot named name's account, token file
 // forgejo-seat-name.env and write access on each repository, and nothing else.
 func (p *Provisioner) ProvisionSeat(name string, repos []string) error {
-	if !seatName.MatchString(name) {
-		return fmt.Errorf("seat name %q must match [a-z0-9-]+: nothing was sent", name)
+	if !seatNameValid(name) {
+		return fmt.Errorf("seat name %q must be at most %d characters of lower-case letters and digits in groups joined by single hyphens: nothing was sent", name, maxSeatNameLength)
 	}
 	role, user := seatRolePrefix+name, p.BotPrefix+seatRolePrefix+name
 	// The account and its token are one step: SkipTokens skips the mint, as provision

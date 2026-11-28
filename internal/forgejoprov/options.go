@@ -253,8 +253,8 @@ func (o *Options) validate() error {
 			return usagef("--seat needs at least one --repo")
 		}
 		for _, name := range o.Seats {
-			if !seatName.MatchString(name) {
-				return usagef("--seat '%s' must match [a-z0-9-]+", name)
+			if !seatNameValid(name) {
+				return usagef("--seat '%s' must be at most %d characters of lower-case letters and digits in groups joined by single hyphens", name, maxSeatNameLength)
 			}
 		}
 	}
