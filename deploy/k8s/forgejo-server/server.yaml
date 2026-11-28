@@ -1,0 +1,53 @@
+# The control cluster's Forgejo server: the forgejo Namespace, the data claim and the
+# forgejo Service, as the live read of 2026-11-27 recorded them after the cluster-set
+# fields are stripped (testdata/live-2026-11-27). The forgejo Deployment is not in
+# this file yet.
+#
+# Applied only by the overseer's adoption step. gt town cluster render never reads
+# this file, so no applied set owns it.
+# Never delete or replace the data claim: its volume holds every repository.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: forgejo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: forgejo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 6Gi
+  storageClassName: local-path
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forgejo
+  namespace: forgejo
+spec:
+  allocateLoadBalancerNodePorts: true
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: http
+      port: 3000
+      protocol: TCP
+      targetPort: 3000
+    - name: ssh
+      port: 2222
+      protocol: TCP
+      targetPort: 22
+  selector:
+    app: forgejo
+  sessionAffinity: None
+  type: LoadBalancer
