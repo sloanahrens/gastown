@@ -32,18 +32,27 @@ func (m *missStore) Close() error {
 	return nil
 }
 
-// failWriter accepts n writes and fails every write after them.
+// failWriter accepts n writes and fails every write after them, signalling the
+// first failure on failed and keeping what it accepted.
 type failWriter struct {
-	n   int
-	err error
+	n      int
+	err    error
+	failed chan struct{} // when set, gets a value for a refused write if it has room
+	buf    strings.Builder
 }
 
 func (w *failWriter) Write(p []byte) (int, error) {
 	if w.n <= 0 {
+		if w.failed != nil {
+			select {
+			case w.failed <- struct{}{}:
+			default:
+			}
+		}
 		return 0, w.err
 	}
 	w.n--
-	return len(p), nil
+	return w.buf.Write(p)
 }
 
 // decodeResponses returns every response value written to written.
@@ -365,5 +374,51 @@ func TestServeParallelHeldGetThenBadLine(t *testing.T) {
 	}
 	if resp := got[1]; resp.ID != 1 || resp.Miss || string(resp.OutputID) != "x" || resp.Size != 3 {
 		t.Errorf("response = %+v, want the whole hit x for ID 1", resp)
+	}
+}
+
+// gateReader blocks until gate closes, then reads from inner. A gate that never
+// opens is a read error, so Serve reports it instead of the test hanging.
+type gateReader struct {
+	gate  <-chan struct{}
+	inner io.Reader
+}
+
+func (g *gateReader) Read(p []byte) (int, error) {
+	select {
+	case <-g.gate:
+		return g.inner.Read(p)
+	case <-time.After(parallelWait): //testpolicy:allow no-sleep — a hang guard: the test opens the gate, so this fires only when Serve never asks for the rest
+		return 0, errors.New("gateReader: the gate never opened")
+	}
+}
+
+func TestServeParallelWriteErrorStartsNoRequest(t *testing.T) {
+	t.Parallel()
+	store := &heldStore{hold: "a", started: make(chan struct{}, 1), release: make(chan struct{})}
+	// The first request is held in the store. The second waits behind gate, and
+	// the test does not open gate before Serve returns: a Serve that reads on
+	// reaches the gate and returns a read error instead of the write error.
+	gate := make(chan struct{})
+	in := io.MultiReader(
+		strings.NewReader(`{"ID":1,"Command":"get","ActionID":"YQ=="}`+"\n"),
+		&gateReader{gate: gate, inner: strings.NewReader(`{"ID":2,"Command":"get","ActionID":"Yg=="}` + "\n")},
+	)
+	out := &failWriter{n: 1, err: errors.New("pipe closed"), failed: make(chan struct{}, 1)}
+	openGate := sync.OnceFunc(func() { close(gate) })
+	release := sync.OnceFunc(func() { close(store.release) })
+	done := serve(t, in, out, store, func() { openGate(); release() })
+	settle(t, store.started, "the held get must start")
+	release()
+	settle(t, out.failed, "the held get's response write must fail")
+	run := settle(t, done, "Serve must return")
+	if run.err == nil || !strings.Contains(run.err.Error(), "pipe closed") {
+		t.Fatalf("Serve = %v, want the write error", run.err)
+	}
+	if gets, _ := store.counts(); gets != 1 || run.finished != 1 {
+		t.Errorf("store saw %d gets and finished %d when Serve returned, want the one held get started and finished", gets, run.finished)
+	}
+	if got := decodeResponses(t, out.buf.String()); !reflect.DeepEqual(got, []gocacheprog.Response{handshake}) {
+		t.Errorf("responses = %+v, want the handshake only", got)
 	}
 }
