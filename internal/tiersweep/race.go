@@ -73,7 +73,9 @@ func raceRunsWithPackages(s *Sweep) ([]raceRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(slices.Clone(raceRuns), raceRun{pkgs: pkgs, args: []string{"-race"}, label: "all-packages"}), nil
+	// This entry runs the untagged tier, whose serial.txt packages listen on
+	// no fixed port, so it starts every one of them on the pool (gt-ut8721).
+	return append(slices.Clone(raceRuns), raceRun{pkgs: pkgs, args: []string{"-race"}, label: "all-packages", pooled: true}), nil
 }
 
 // Race runs the race tier, raceRunsWithPackages' table, and returns its summary
