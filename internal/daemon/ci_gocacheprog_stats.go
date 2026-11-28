@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // ciGocacheprogStatsCounts are the eight counts each stats line carries; the
@@ -142,4 +146,48 @@ func gocacheprogStatsOverflows(counts, vals map[string]int64) bool {
 		}
 	}
 	return false
+}
+
+// ciGocacheprogVolume is the cache program's stats volume (gt-0lo0iw), not in ciCacheVolumes.
+const ciGocacheprogVolume = "ci-gocacheprog"
+
+// ciGocacheprogStatsMaxBytes bounds the stats file a read takes: 8 MiB is far past a run's.
+const ciGocacheprogStatsMaxBytes = 8 << 20
+
+// ciGocacheprogReadScript moves $1 aside to $2, prints the first $3 bytes of it and removes $2; exit 3 is absent.
+const ciGocacheprogReadScript = `set -eu
+src=$1; aside=$2; limit=$3
+trap 'rm -f "$aside"' EXIT
+[ -f "$src" ] || { echo "stats file not found" >&2; exit 3; }
+mv "$src" "$aside"
+head -c "$limit" "$aside"
+`
+
+// ciGocacheprogRead takes the stats file out of the ci-gocacheprog volume (gt-0lo0iw): absent
+// is present false with no error; an oversize file or a failed exec is present true with an error.
+func (d *Daemon) ciGocacheprogRead(ctx context.Context, at ciCacheExecTarget) (data []byte, present bool, err error) {
+	root := ciCacheVolumeRoot(ciGocacheprogVolume)
+	out, stderr, err := d.ciEngineExec(ctx, at, "sh", "-c", ciGocacheprogReadScript, "ci-gocacheprog-read",
+		root+"/stats.jsonl", root+"/stats.jsonl.read", strconv.Itoa(ciGocacheprogStatsMaxBytes+1))
+	var status interface{ ExitCode() int }
+	switch {
+	case errors.As(err, &status) && status.ExitCode() == 3:
+		return nil, false, nil
+	case err != nil:
+		return nil, true, fmt.Errorf("read gocacheprog stats: %s, last stderr line %q", ciEngineExitStatus(err), ciGocacheprogStderrLine(err, stderr))
+	case len(out) > ciGocacheprogStatsMaxBytes:
+		return nil, true, fmt.Errorf("read gocacheprog stats: over the %d byte limit", ciGocacheprogStatsMaxBytes)
+	}
+	return out, true, nil
+}
+
+// ciGocacheprogStderrLine is the last line of stderr that is not kubectl's exit report, bounded.
+func ciGocacheprogStderrLine(err error, stderr []byte) string {
+	lines := strings.Split(string(stderr), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := ciEngineBounded(lines[i]); line != "" && !ciEngineKubectlLine(err, lines[i]) {
+			return line
+		}
+	}
+	return ""
 }
