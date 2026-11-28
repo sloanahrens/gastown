@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -71,4 +73,22 @@ func reconcilerCycleFixes(duty string, townStateRootErr error) bool {
 	}
 	db, found := strings.CutPrefix(duty, config.ReconcilerDutyGC+":")
 	return found && db != ""
+}
+
+// reconcilerCycleList lists the databases a due-duty cycle runs over, through
+// backupDatabases for the one gcExternal answer it reads. localDataDir is the
+// negation of that answer. A list error is returned wrapped; an empty list is
+// an error too. It starts nothing and does not touch maintenanceGCRunning
+// (gt-q51bzr).
+func (d *Daemon) reconcilerCycleList() (databases []string, localDataDir bool, err error) {
+	external, _ := d.maintenance().gcExternal(d)
+	localDataDir = !external
+	databases, err = d.backupDatabases(external)
+	if err != nil {
+		return nil, localDataDir, fmt.Errorf("listing the databases the due-duty cycle runs over: %w", err)
+	}
+	if len(databases) == 0 {
+		return nil, localDataDir, errors.New("the due-duty cycle found no databases to run over")
+	}
+	return databases, localDataDir, nil
 }
