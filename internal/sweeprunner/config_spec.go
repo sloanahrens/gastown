@@ -15,15 +15,17 @@ func ConfigSpec(cfg *config.TierSweepRunnerConfig) Spec {
 		return Spec{}
 	}
 	return Spec{
-		CPUs:                cfg.CPUs,
-		MemoryGB:            cfg.Memory,
-		Jobs:                cfg.Jobs,
-		Dind:                cfg.Dind,
-		DindCPUs:            cfg.DindCPUs,
-		RunnerCPURequest:    cfg.RunnerCPURequest,
-		Context:             cfg.Context,
-		Namespace:           cfg.NamespaceName(),
-		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
+		CPUs:                   cfg.CPUs,
+		MemoryGB:               cfg.Memory,
+		Jobs:                   cfg.Jobs,
+		Dind:                   cfg.Dind,
+		DindCPUs:               cfg.DindCPUs,
+		RunnerCPURequest:       cfg.RunnerCPURequest,
+		RunnerCPURequestMillis: cfg.RunnerCPURequestMillis,
+		DindCPURequestMillis:   cfg.DindCPURequestMillis,
+		Context:                cfg.Context,
+		Namespace:              cfg.NamespaceName(),
+		ProtectedNamespaces:    cfg.ProtectedNamespaceList(),
 	}
 }
 
