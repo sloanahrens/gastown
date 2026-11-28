@@ -29,6 +29,13 @@ done
 for tool in colima kind kubectl helm docker openssl openshell curl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH (helm may live in $OUT/bin)"
 done
+# --register-town also creates the gateway's providers, which needs the Go
+# toolchain and gt; checked here, before anything is changed.
+if [ "$register_town" = 1 ]; then
+  for tool in go gt; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH (--register-town creates the gateway's providers with it)"
+  done
+fi
 # The API port is written into the kind config and probed as a port, so a value
 # that is not a port number is refused before anything is started. A leading
 # zero is refused too, so each port has one spelling in the config.
@@ -451,6 +458,10 @@ town_rollback() {
   fi
 }
 
+# The providers command as the failure and the no-flag run print it: from the
+# repository root, where the profiles live, with the town's config home.
+repo_root="$(cd "$HERE/../../.." && pwd)"
+providers_cmd="(cd $repo_root && XDG_CONFIG_HOME=$TOWN_XDG_CONFIG_HOME go run ./cmd/openshell-providers -g $GATEWAY_NAME)"
 if [ "$register_town" = 1 ]; then
   town_active_before="$(town_active_gateway)"
   town_entry_before=0
@@ -494,6 +505,14 @@ if [ "$register_town" = 1 ]; then
   town_unverified=0
   town_rollback_pending=0
   say "registered $GATEWAY_NAME in $TOWN_CONFIG (active gateway: $(town_active_gateway))"
+  # From the repository root, where it finds the profiles, against the key files
+  # under the town's config home; after the entry is healthy and its rollback
+  # disarmed, so a failed run here leaves the k8s entry registered. It leaves an
+  # existing provider alone, so every --register-town run calls it.
+  (cd "$repo_root" && XDG_CONFIG_HOME="$TOWN_XDG_CONFIG_HOME" go run ./cmd/openshell-providers -g "$GATEWAY_NAME") ||
+    die "the $GATEWAY_NAME providers were not created; run again: $providers_cmd"
+else
+  say "the gateway's providers are created by: $providers_cmd"
 fi
 
 say "ready: openshell -g $GATEWAY_NAME ..."
