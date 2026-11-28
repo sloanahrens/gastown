@@ -96,7 +96,10 @@ type SafetyCheckResult struct {
 	HookStale bool
 	ActiveMR  string
 	OpenMR    string
-	GitState  *GitState
+	// Reusable: a missing cleanup_status is the only blocker and the bead is not
+	// terminal (gt-19ihi4). Blocked and Reasons keep their refusal values.
+	Reusable bool
+	GitState *GitState
 }
 
 // checkPolecatSafety performs safety checks before destructive operations.
@@ -113,6 +116,8 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 	result := &SafetyCheckResult{
 		Polecat: fmt.Sprintf("%s/%s", rigName, polecatName),
 	}
+	// Facts for reusableSeatBlockedOnlyByCleanup; false when there is no agent bead.
+	var hookSafe, activeMRSafe, gitSafe, beadTerminal bool
 
 	// Get polecat info for branch name
 	polecatInfo, infoErr := getPolecat(polecatName)
@@ -173,10 +178,11 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 			}
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		}
-		beadTerminal := isAssignedBeadTerminal(bd, sourceHint)
+		beadTerminal = isAssignedBeadTerminal(bd, sourceHint)
 		if activeMRAssessment.SourceTerminal {
 			beadTerminal = true
 		}
+		activeMRSafe = !activeMRAssessment.Pending
 
 		// A sandbox the gateway says is gone reads clean, which is not the same as
 		// finished: unfinished work with no branch on origin and no resume_branch
@@ -200,7 +206,7 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 			if result.CleanupStatus == polecat.CleanupUnpushed {
 				loadGitState()
 			}
-			gitSafe := false
+			gitSafe = false
 			if sandboxed {
 				gitSafe = sandboxSeatGitSafe(sandboxLive)
 			} else if polecatInfo != nil {
@@ -226,6 +232,7 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 		}
 
 		// Check 3: Work on hook
+		hookSafe = true
 		if hookBead != "" {
 			result.HookBead = hookBead
 			// The same classifier the recovery report uses, so "stale" means
@@ -237,6 +244,7 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 			// pauses the seat and leaves the bead open and unclaimed, so the
 			// nuke destroys no assignment (gt-8aksz7).
 			disposition := nukeHookDisposition(bd, hookBead, fields.AgentState)
+			hookSafe = disposition.Safe
 			if disposition.Safe {
 				result.HookStale = true
 			} else {
@@ -263,8 +271,19 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 		}
 	}
 
+	result.Reusable = reusableSeatBlockedOnlyByCleanup(result.CleanupStatus, result.Reasons, hookSafe, activeMRSafe, gitSafe, beadTerminal)
 	result.Blocked = len(result.Reasons) > 0
 	return result
+}
+
+// reusableSeatBlockedOnlyByCleanup reports whether a missing cleanup_status is
+// the seat's only blocker and every other fact is safe on a non-terminal bead:
+// the next sling continues the branch, so the seat is reusable (gt-19ihi4).
+func reusableSeatBlockedOnlyByCleanup(status polecat.CleanupStatus, reasons []string, hookSafe, activeMRSafe, gitSafe, beadTerminal bool) bool {
+	if status != "" || beadTerminal || !hookSafe || !activeMRSafe || !gitSafe {
+		return false
+	}
+	return len(reasons) == 1 && reasons[0] == cleanupStatusBlocker(status)
 }
 
 func rigPrefix(r *rig.Rig) string {
