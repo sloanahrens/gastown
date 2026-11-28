@@ -7,16 +7,17 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// mergeCar cuts the landing worktree at the target tip and makes the merge
-// commit there, ending the pass when the merge conflicts, writes nothing, or
-// leaves a state the landing cannot record. A nil car means the pass is over
-// and the caller returns res and err; a non-nil cleanup means the worktree was
-// added, and the caller defers it so every path removes the worktree.
+// mergeCar cuts the landing worktree for slot at the target tip and makes the
+// merge commit there, ending the pass when the merge conflicts, writes
+// nothing, or leaves a state the landing cannot record. A nil car means the
+// pass is over and the caller returns res and err; a non-nil cleanup means the
+// worktree was added, and the caller defers it so every path removes the
+// worktree.
 //
 // From the add on, a panic in the merge work removes the worktree here, since
 // no cleanup reaches the caller; once the work has returned, cleanup belongs to
 // the caller and is not run here.
-func (l *Lander) mergeCar(ctx context.Context, g Repo, issue *beads.Issue, w Work, base string, storedConflict bool) (c *car, cleanup func(), res Result, err error) {
+func (l *Lander) mergeCar(ctx context.Context, g Repo, issue *beads.Issue, w Work, base string, storedConflict bool, slot int) (c *car, cleanup func(), res Result, err error) {
 	// The merge commit's identity is read before the worktree is cut, so an
 	// unreadable head author fails the landing with no commit made (gt-vuv2n).
 	env, err := l.landingCommitEnv(g, w)
@@ -31,7 +32,7 @@ func (l *Lander) mergeCar(ctx context.Context, g Repo, issue *beads.Issue, w Wor
 	var dir, id string
 	if err := l.withGitMu(func() error {
 		var addErr error
-		dir, id, cleanup, addErr = l.addWorktree(g, base)
+		dir, id, cleanup, addErr = l.addWorktree(g, base, slot)
 		return addErr
 	}); err != nil {
 		return nil, nil, Result{}, &InfraError{Stage: "worktree", Err: err}

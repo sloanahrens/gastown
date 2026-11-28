@@ -1530,7 +1530,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return res, err
 	}
 	remote := l.remote()
-	c, cleanup, res, err := l.mergeCar(ctx, p.g, p.issue, w, p.base, p.storedConflict)
+	c, cleanup, res, err := l.mergeCar(ctx, p.g, p.issue, w, p.base, p.storedConflict, 0)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -1942,19 +1942,33 @@ func WithLandingID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, landingIDKey{}, id)
 }
 
-// landWorktreeName is the one worktree directory every landing of a rig uses,
-// under WorkRoot. A fixed path is what lets Go's build cache hit across
-// landings: its keys include each package's directory, so a new random path
-// per landing recompiled every package and wrote a whole new cache
-// generation each time (gt-2ycne.2, ~470 GB). The worker lands one bead at a
-// time per rig, so one path per WorkRoot is never shared.
+// landWorktreeName is the base name of the worktree directory each landing
+// slot of a rig uses under WorkRoot: slot 0 takes it as is, slot n takes it
+// with -n appended. A fixed path per slot is what lets Go's build cache hit
+// across landings: its keys include each package's directory, so a new random
+// path per landing recompiled every package and wrote a whole new cache
+// generation each time (gt-2ycne.2, ~470 GB). One path per slot, and no path
+// shared by two cars landing at once.
 const landWorktreeName = "wt"
 
-// addWorktree adds a detached worktree at base at WorkRoot/wt, clearing one a
+// landWorktreePath is slot's worktree directory: WorkRoot/wt for slot 0, as
+// every landing used before slots, and WorkRoot/wt-n for slot n above 0.
+func (l *Lander) landWorktreePath(slot int) string {
+	if slot == 0 {
+		return filepath.Join(l.WorkRoot, landWorktreeName)
+	}
+	return filepath.Join(l.WorkRoot, fmt.Sprintf("%s-%d", landWorktreeName, slot))
+}
+
+// addWorktree adds a detached worktree at base at slot's path, clearing one a
 // dead landing left there, and returns it with this landing's ID. The caller
 // holds gitMu for the calls this makes; the cleanup it returns takes the lock
-// itself (gt-havcnw).
-func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(), err error) {
+// itself (gt-havcnw). A slot below 0 is not a valid slot, so it is refused
+// before any path is named.
+func (l *Lander) addWorktree(g Repo, base string, slot int) (dir, id string, cleanup func(), err error) {
+	if slot < 0 {
+		return "", "", nil, fmt.Errorf("landing worktree slot %d: slots start at 0", slot)
+	}
 	if err := os.MkdirAll(l.WorkRoot, 0o700); err != nil {
 		return "", "", nil, err
 	}
@@ -1967,7 +1981,7 @@ func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(
 	if err != nil {
 		return "", "", nil, err
 	}
-	dir = filepath.Join(l.WorkRoot, landWorktreeName)
+	dir = l.landWorktreePath(slot)
 	removeWorktree := func() {
 		_ = g.WorktreeRemove(dir, true)
 		_ = os.RemoveAll(dir)
