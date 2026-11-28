@@ -37,10 +37,14 @@ func newGateway(files *memFiles) *gateway {
 	return &gateway{files: files, profiles: map[string]string{}}
 }
 
-func (g *gateway) Run(name string, args []string, env []string, _ io.Reader) ([]byte, []byte, error) {
+func (g *gateway) Run(name string, args []string, env []string, stdin io.Reader) ([]byte, []byte, error) {
 	g.calls = append(g.calls, strings.Join(append([]string{name}, args...), " "))
+	var in []byte
+	if stdin != nil {
+		in, _ = io.ReadAll(stdin)
+	}
 	if name == "gt" {
-		return g.gt(args)
+		return g.gt(args, in)
 	}
 	if len(args) >= 2 && args[0] == "-g" {
 		args = args[2:]
@@ -76,8 +80,8 @@ func (g *gateway) Run(name string, args []string, env []string, _ io.Reader) ([]
 
 // gt answers the endpoint check with nothing, renders every forgejo profile as
 // renderedForgejo (stamped with version 7 when it is rendered from an export), and
-// judges an exported profile bound when it is renderedForgejo less its versions.
-func (g *gateway) gt(args []string) ([]byte, []byte, error) {
+// judges its stdin profile bound when it is renderedForgejo less its versions.
+func (g *gateway) gt(args []string, stdin []byte) ([]byte, []byte, error) {
 	if g.refuseGt {
 		reason := "Error: sandbox endpoint: no sandbox profile names gateway \"" + flagValue(args, "--gateway") + "\"\n"
 		return nil, []byte(reason), errors.New("exit status 1")
@@ -93,8 +97,7 @@ func (g *gateway) gt(args []string) ([]byte, []byte, error) {
 		if g.verdict != "" {
 			return []byte(g.verdict), nil, nil
 		}
-		exported := g.body(flagValue(args, "--check"))
-		if withoutVersions(exported) == renderedForgejo {
+		if withoutVersions(string(stdin)) == renderedForgejo {
 			return []byte("bound\n"), nil, nil
 		}
 		return []byte("stale: the profile binds another endpoint\n"), nil, nil
@@ -498,7 +501,7 @@ func TestRunUpdatesAStaleForgejoProfile(t *testing.T) {
 	}
 	var checked, rendered, updated bool
 	for _, c := range gw.calls {
-		checked = checked || (strings.Contains(c, " --check ") && strings.HasSuffix(c, "forgejo-polecat.export.yaml"))
+		checked = checked || strings.HasSuffix(c, " --check /dev/stdin")
 		rendered = rendered || (strings.Contains(c, " --render ") && strings.Contains(c, " --from-export "))
 		if strings.Contains(c, " profile update --global -f ") && strings.HasSuffix(c, " forgejo-polecat") {
 			updated = true

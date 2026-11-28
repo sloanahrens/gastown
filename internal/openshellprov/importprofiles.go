@@ -168,9 +168,13 @@ func (r *Run) importProfile(file, work string) error {
 // gt renders for it. When the copy does not bind the endpoint it is updated from
 // the rendered file and updateIfStale reports true; a copy that binds it is kept.
 func (r *Run) updateIfStale(id string, data []byte, work string) (bool, error) {
-	exported := filepath.Join(work, id+".export.yaml")
-	if err := r.export(id, exported); err != nil {
+	exportFile := filepath.Join(work, id+".export.yaml")
+	if err := r.export(id, exportFile); err != nil {
 		return false, err
+	}
+	exported, err := r.Files.ReadFile(exportFile)
+	if err != nil {
+		return false, fmt.Errorf("%s: reading %s: %w", Name, r.rel(exportFile), err)
 	}
 	reason, err := r.Gt.StaleReason(id, exported)
 	if err != nil {
@@ -181,7 +185,7 @@ func (r *Run) updateIfStale(id string, data []byte, work string) (bool, error) {
 	}
 	fmt.Fprintf(r.Out, "%s: profile %s is stale (%s), updating it\n", Name, id, reason)
 	rendered := filepath.Join(work, id+".yaml")
-	if err := r.render(data, rendered, exported); err != nil {
+	if err := r.render(data, rendered, exportFile); err != nil {
 		return false, err
 	}
 	if err := r.openshell("profile", "lint", "-f", rendered); err != nil {
