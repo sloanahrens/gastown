@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runnerroll"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // rollEvents is the ordered record of the roll's calls to its fakes.
@@ -1796,5 +1797,54 @@ func TestTownRunnerRenderOnlyRefusesWithDryRun(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("the refusal printed %q", out.String())
+	}
+}
+
+// TestClusterReadinessReadBound: the readiness read of each wait runs under
+// readinessReadWait, and the rollout status before it under no deadline. Without
+// the bound a hung read holds the roll until the signal context ends.
+func TestClusterReadinessReadBound(t *testing.T) {
+	t.Parallel()
+	const rolloutBound = 10 * time.Minute
+	rows := []struct {
+		name string
+		read string
+		wait func(ctx context.Context, kubectl update.RunFunc) error
+	}{
+		{"deployment", "True", func(ctx context.Context, k update.RunFunc) error {
+			return waitDeploymentRollout(ctx, k, io.Discard, "gastown", "deployment/gateway", rolloutBound)
+		}},
+		{"statefulset", `{"spec":{"replicas":1},"status":{"readyReplicas":1}}`, func(ctx context.Context, k update.RunFunc) error {
+			return waitStatefulSetReady(ctx, k, io.Discard, "gastown", "forgejo", rolloutBound)
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			var deadlines []time.Time
+			kubectl := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				d, _ := ctx.Deadline()
+				deadlines = append(deadlines, d)
+				if args[0] == "rollout" {
+					return "", 0, nil
+				}
+				return row.read, 0, nil
+			}
+			if err := row.wait(context.Background(), kubectl); err != nil {
+				t.Fatalf("wait returned %v, want nil", err)
+			}
+			if len(deadlines) != 2 {
+				t.Fatalf("made %d kubectl calls, want 2 (the rollout status, then the read)", len(deadlines))
+			}
+			if !deadlines[0].IsZero() {
+				t.Errorf("the rollout status carries a deadline %v, want none", deadlines[0])
+			}
+			if deadlines[1].IsZero() {
+				t.Fatalf("the readiness read carries no deadline, want one within %s", readinessReadWait)
+			}
+			if limit := time.Now().Add(readinessReadWait); deadlines[1].After(limit) {
+				t.Errorf("the readiness read's deadline is %v, want no later than %v", deadlines[1], limit)
+			}
+		})
 	}
 }
