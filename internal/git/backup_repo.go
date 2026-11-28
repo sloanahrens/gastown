@@ -27,6 +27,14 @@ func (g *Git) CountObjects() (string, error) {
 	return g.run("count-objects", "-v")
 }
 
+// RepackWithTimeout runs git with args, a bounded repack's argv (its -c
+// options and then gc), killing git after timeout. The args run as given:
+// the bounds only hold if the caller passes them.
+func (g *Git) RepackWithTimeout(args []string, timeout time.Duration) error {
+	_, err := g.runWithTimeout(timeout, args...)
+	return err
+}
+
 // PackSize is the size-pack line of git count-objects -v: the KiB the
 // repository's packs take on disk, as git printed it, or "" when git
 // printed none.

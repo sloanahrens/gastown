@@ -4951,3 +4951,97 @@ func TestJSONLExportStopsWithTheDaemon(t *testing.T) {
 		t.Errorf("error %q does not name the table in flight", err)
 	}
 }
+
+// packPushRig holds one cycle daemon's push and pack results and records the
+// calls the cycle made through packPushGit.
+type packPushRig struct {
+	pushErr, packErr error
+	pushes           int
+	packs            []packCall
+}
+
+type packCall struct {
+	args    []string
+	timeout time.Duration
+}
+
+// packPushGit wraps the gitfake handle a cycle opens: pushes and packs are
+// recorded and answered from rig, everything else is the fake's.
+type packPushGit struct {
+	daemonGit
+	rig *packPushRig
+}
+
+func (g packPushGit) RemoteURL(string) (string, error) {
+	return "https://offsite.invalid/backup.git", nil
+}
+
+func (g packPushGit) PushWithTimeout(string, string, bool, time.Duration) error {
+	g.rig.pushes++
+	return g.rig.pushErr
+}
+
+func (g packPushGit) RepackWithTimeout(args []string, timeout time.Duration) error {
+	g.rig.packs = append(g.rig.packs, packCall{args: slices.Clone(args), timeout: timeout})
+	return g.rig.packErr
+}
+
+// TestJSONLGitBackupPacksAfterEveryCycleAndAlertsUntilItSucceeds: each cycle that
+// reaches the commit packs the backup repository once with the bounded repack
+// and a positive timeout, whatever its push did; the pack leaves the push result
+// as it was; a failed or timed-out pack raises jsonl_git_backup:pack with its
+// error, and the next cycle's successful pack clears it.
+func TestJSONLGitBackupPacksAfterEveryCycleAndAlertsUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+	pushFails := errors.New("remote rejected the push")
+	for _, tt := range []struct {
+		name             string
+		pushErr, packErr error
+	}{
+		{name: "push and pack succeed"},
+		{name: "push fails, pack succeeds", pushErr: pushFails},
+		{name: "push succeeds, pack fails", packErr: errors.New("repack exited with status 128")},
+		{name: "push fails, pack times out", pushErr: pushFails, packErr: errors.New("git gc: timed out after 10m0s")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"}]}`)}
+			d, rec, _ := newRemoteBackupDaemon(t, t.TempDir(), remoteDoltHost, server)
+			rig := &packPushRig{pushErr: tt.pushErr, packErr: tt.packErr}
+			open := d.openGitFn
+			d.openGitFn = func(dir string) daemonGit { return packPushGit{daemonGit: open(dir), rig: rig} }
+
+			d.syncJsonlGitBackup()
+
+			if len(rig.packs) != 1 || !slices.Equal(rig.packs[0].args, jsonlRepackArgs) || rig.packs[0].timeout != jsonlRepackTimeout {
+				t.Fatalf("packs = %+v, want one pack of %q with timeout %v", rig.packs, jsonlRepackArgs, jsonlRepackTimeout)
+			}
+			wantFailures := 0
+			if tt.pushErr != nil {
+				wantFailures = 1
+			}
+			if d.jsonlPushFailures != wantFailures {
+				t.Errorf("push failures = %d, want %d: the pack changed the push result", d.jsonlPushFailures, wantFailures)
+			}
+			alerts := rec.OpenEscalations(alertKeyJSONLPack)
+			if tt.packErr == nil && len(alerts) != 0 {
+				t.Errorf("pack alert raised by a successful pack: %+v", alerts)
+			}
+			if tt.packErr != nil {
+				if len(alerts) != 1 || !strings.Contains(alerts[0].Reason, tt.packErr.Error()) {
+					t.Fatalf("pack alerts = %+v, want one carrying %q", alerts, tt.packErr)
+				}
+			}
+
+			rig.packErr = nil
+			d.syncJsonlGitBackup()
+
+			if alerts := rec.OpenEscalations(alertKeyJSONLPack); len(alerts) != 0 {
+				t.Errorf("pack alert still open after a successful pack: %+v", alerts)
+			}
+			if len(rig.packs) != 2 {
+				t.Errorf("packs over two cycles = %d, want one per cycle", len(rig.packs))
+			}
+		})
+	}
+}

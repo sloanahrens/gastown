@@ -67,6 +67,9 @@ type daemonGit interface {
 	// CountObjects reads count-objects -v, for a caller to judge loose and packed sizes.
 	CountObjects() (string, error)
 	PackSize() (string, error)
+	// RepackWithTimeout runs git with args, the bounded repack argv of
+	// jsonlRepackArgs, killing git after timeout. A timeout is an error.
+	RepackWithTimeout(args []string, timeout time.Duration) error
 	LogAll(max int) ([]git.LogEntry, error)
 
 	// Remotes lists the repository's remotes (with RemoteURL above, enough to

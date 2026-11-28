@@ -556,6 +556,9 @@ func (d *Daemon) syncJsonlGitBackup() {
 		d.clearAlerts("backup push succeeded", alertKeyJSONLPush)
 	}
 
+	// Pack whichever way the push went; in-cycle, so no pack overlaps a commit.
+	d.packJsonlBackup(gitRepo)
+
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
 	cycle.closeStep("report")
 }
@@ -1490,6 +1493,22 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	return d.pushJsonlBackup(gitRepo, hasStaged, msg)
 }
 
+// jsonlRepackTimeout bounds one pack of the backup repository.
+const jsonlRepackTimeout = 10 * time.Minute
+
+// packJsonlBackup runs the bounded repack on the backup repository. It returns
+// nothing, so a failed pack cannot change the push result or the cycle outcome:
+// it logs and raises alertKeyJSONLPack, and a success clears that alert.
+func (d *Daemon) packJsonlBackup(gitRepo string) {
+	err := d.backupGitAt(gitRepo, jsonlRepackTimeout).RepackWithTimeout(jsonlRepackArgs, jsonlRepackTimeout)
+	if err != nil {
+		d.logger.Printf("jsonl_git_backup: pack of %s failed: %v", gitRepo, err)
+		d.escalateAlert(alertKeyJSONLPack, "jsonl_git_backup", fmt.Sprintf("packing the offsite backup repo %s failed: %v", gitRepo, err))
+		return
+	}
+	d.clearAlerts("the backup repo packed", alertKeyJSONLPack)
+}
+
 // pushJsonlBackup pushes the backup repository's current branch to origin,
 // returning nil once origin carries HEAD.
 //
@@ -2067,6 +2086,8 @@ const (
 	// cannot become the baseline unseen.
 	alertKeyJSONLStoreFlip = "jsonl_git_backup:store-flip:"
 	alertKeyJSONLPush      = "jsonl_git_backup:push"
+	// alertKeyJSONLPack is a failed or timed-out bounded pack of the backup repo.
+	alertKeyJSONLPack = "jsonl_git_backup:pack"
 )
 
 // escalate raises an alert whose key is derived from its own title, for
