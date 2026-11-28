@@ -21,16 +21,19 @@ const (
 )
 
 // heldLeg is a kubectl call the fixture holds, as a wait on a condition the Job
-// never reaches does. started closes when the call begins; stuck is set when
-// the hold ran to the hang guard, which is how a wait that wrongly waits on
-// this leg shows: as a failure, not as a hang.
+// never reaches does. started closes when the call begins and ended when it
+// returns; stuck is set when the hold ran to the hang guard, which is how a
+// wait that wrongly waits on this leg shows: as a failure, not as a hang.
 type heldLeg struct {
 	started <-chan struct{}
+	ended   <-chan struct{}
 	stuck   *atomic.Bool
 }
 
 // await fails the test if the held call never began within the hang guard or
-// if the wait under test sat on it until the guard ended it.
+// if the wait under test sat on it until the guard ended it. A caller that
+// abandons the wait leaves the leg running, so a returned wait checks ended
+// in its own test.
 func (h heldLeg) await(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
@@ -45,34 +48,61 @@ func (h heldLeg) await(t *testing.T) {
 	}
 }
 
-// cacheTrimFailWaitHold makes the kubectl call for verb hang until the test
-// ends or the hang guard does, as a wait on a condition the Job never reaches
-// does. The call's start is reported on the returned leg: the fixture records
-// a call only when it answers, so a held call is read from the leg, not from
-// the recorded calls.
+// cacheTrimFailWaitHold makes the kubectl call for verb hang until the command's
+// context is canceled, the test ends or the hang guard does. The call runs under
+// the context the cacheTrimCtxSeen seam hands over, so a canceled wait leg ends
+// the hold as a killed kubectl would, and a wait that runs both legs to their
+// return does not hang on this one. stuck is set only when the guard's timer
+// fired.
 func cacheTrimFailWaitHold(t *testing.T, f *cacheTrimFixture, verb string) heldLeg {
 	t.Helper()
 	started := make(chan struct{})
+	ended := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var once, endOnce sync.Once
 	stuck := &atomic.Bool{}
 	t.Cleanup(func() { close(release) })
+	seen := f.d.cacheTrimCtxSeen
+	var mu sync.Mutex
+	var callCtx context.Context
+	f.d.cacheTrimCtxSeen = func(ctx context.Context, v string) {
+		if seen != nil {
+			seen(ctx, v)
+		}
+		if v == verb {
+			mu.Lock()
+			callCtx = ctx
+			mu.Unlock()
+		}
+	}
 	answer := f.d.execCmd
 	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		if len(cmd.Args) > 1 && cacheTrimVerb(cmd.Args[1:]) == verb {
 			once.Do(func() { close(started) })
-			ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+			defer endOnce.Do(func() { close(ended) })
+			mu.Lock()
+			ctx := callCtx
+			mu.Unlock()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			guard, cancel := context.WithTimeout(ctx, workspaceHangGuard)
 			defer cancel()
 			select {
 			case <-release:
 			case <-ctx.Done():
-				stuck.Store(true)
+			case <-guard.Done():
+				// The guard also ends when the command's context ends; only its
+				// own timer says the wait sat on a leg it should have ended.
+				if guard.Err() == context.DeadlineExceeded {
+					stuck.Store(true)
+				}
 			}
 			return nil, []byte("error: timed out waiting for the condition\n"), &cliExitError{code: 1}
 		}
 		return answer(cmd)
 	}
-	return heldLeg{started: started, stuck: stuck}
+	return heldLeg{started: started, ended: ended, stuck: stuck}
 }
 
 // TestCacheTrimFailWaitReturnsWhenTheJobFails pins that a Job whose failed
@@ -406,6 +436,31 @@ func TestCacheTrimFailWaitCancelsTheFailedLegWhenTheJobCompletes(t *testing.T) {
 		if leg.Err() == nil {
 			t.Errorf("wait leg %d is live once the wait returned; want it canceled", i)
 		}
+	}
+}
+
+// TestCacheTrimWaitEndsItsHeldLegBeforeItReturns pins that the wait does not
+// return while one of its legs is still inside its call: the sweep saw that
+// straggler answer after the pass returned, and the next pass counted one more
+// cluster call than the first made (gt-q37vlc). The held leg ends on the
+// canceled wait context, so a wait that returns first leaves ended open.
+func TestCacheTrimWaitEndsItsHeldLegBeforeItReturns(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitCompleteVerb: {},
+	})
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitFailedVerb)
+	// The complete leg answers only once the failed leg has begun, so the held
+	// call is running when the decision is made whatever the scheduler does.
+	cacheTrimFailWaitAnswerAfter(f, cacheTrimFailWaitCompleteVerb, held.started)
+	finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if !finished || err != nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want finished with no error", finished, err)
+	}
+	select {
+	case <-held.ended:
+	default:
+		t.Fatal("the held leg was still running when the wait returned; want both legs ended first")
 	}
 }
 

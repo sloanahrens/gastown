@@ -902,7 +902,8 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 // condition, since a Job that fails never completes and a complete wait alone
 // would hold the pass to its bound. The first to succeed decides: complete
 // reports true, and failed returns an error naming the Job's last log line. The
-// other wait is canceled when this returns.
+// losing wait is canceled when the decision is made, and this returns only once
+// both waits have returned, so no cluster call outlives the pass (gt-q37vlc).
 //
 // wait is the bound itself; a wait of zero or less is refused, since kubectl
 // reads --timeout=0s as no limit at all.
@@ -913,20 +914,24 @@ func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jo
 	// Rounded up, so a sub-second wait is 1s rather than the unbounded 0s.
 	timeout := strconv.Itoa(int(math.Ceil(wait.Seconds()))) + "s"
 	legs, cancel := context.WithCancel(ctx)
-	defer cancel()
 	type outcome struct {
 		condition string
 		stderr    []byte
 		err       error
 	}
 	outcomes := make(chan outcome, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	for _, condition := range []string{"complete", "failed"} {
 		go func(condition string) {
+			defer wg.Done()
 			_, stderr, err := d.cacheTrimKubectlRun(legs, kubeconfig, nil, "wait", "--for=condition="+condition, "job/"+jobName, "-n", namespace, "--timeout="+timeout)
 			outcomes <- outcome{condition, stderr, err}
 		}(condition)
 	}
+	// The first successful leg decides; the other's outcome stays buffered.
 	var completeStderr []byte
+	var finished, failed bool
 	for range 2 {
 		o := <-outcomes
 		if o.err != nil {
@@ -936,11 +941,20 @@ func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jo
 			continue
 		}
 		if o.condition == "complete" {
-			return true, nil
+			finished = true
+		} else {
+			failed = true
 		}
-		// The Job failed: the other wait is canceled now. The log is read on ctx,
-		// which is not canceled, so the read runs on its own.
-		cancel()
+		break
+	}
+	// Cancel the leg that lost, then wait for both goroutines to return.
+	cancel()
+	wg.Wait()
+	switch {
+	case finished:
+		return true, nil
+	case failed:
+		// The log is read on ctx, which is not canceled, so the read runs alone.
 		return false, d.cacheTrimFailedJobError(ctx, kubeconfig, namespace, jobName)
 	}
 	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, completeStderr))

@@ -124,8 +124,8 @@ type cacheTrimFixture struct {
 	cli *fakeCLI
 	log *bytes.Buffer
 
-	// mu guards answer and overrides, which a wait leg's goroutine still reads
-	// after its pass returned while the test installs the next pass's reply.
+	// mu guards answer and overrides: the two wait legs read them at once, and a
+	// call's callback can install a reply while a pass runs.
 	mu        sync.Mutex
 	answer    func(c cliCall) cliReply
 	overrides map[string]cliReply
