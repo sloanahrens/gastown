@@ -147,7 +147,7 @@ func (r *Run) importProfile(file, work string) error {
 			}
 		} else {
 			rendered := filepath.Join(work, id+".yaml")
-			if err := r.render(data, rendered, ""); err != nil {
+			if err := r.render(data, rendered, 0); err != nil {
 				return err
 			}
 			file = rendered
@@ -183,9 +183,13 @@ func (r *Run) updateIfStale(id string, data []byte, work string) (bool, error) {
 	if reason == "" {
 		return false, nil
 	}
+	version, err := ResourceVersion(exported)
+	if err != nil {
+		return false, fmt.Errorf("%s: profile %s: %w", Name, id, err)
+	}
 	fmt.Fprintf(r.Out, "%s: profile %s is stale (%s), updating it\n", Name, id, reason)
 	rendered := filepath.Join(work, id+".yaml")
-	if err := r.render(data, rendered, exportFile); err != nil {
+	if err := r.render(data, rendered, version); err != nil {
 		return false, err
 	}
 	if err := r.openshell("profile", "lint", "-f", rendered); err != nil {
@@ -203,9 +207,9 @@ func (r *Run) export(id, name string) error {
 }
 
 // render writes profile, the forgejo-polecat source bytes, bound to the
-// gateway's endpoint, to name; exported names the export whose version it takes.
-func (r *Run) render(profile []byte, name, exported string) error {
-	return r.writeTo(name, func(w io.Writer) error { return r.Gt.Render(w, profile, exported) })
+// gateway's endpoint, to name, stamped with version when it is 1 or more.
+func (r *Run) render(profile []byte, name string, version int) error {
+	return r.writeTo(name, func(w io.Writer) error { return r.Gt.Render(w, profile, version) })
 }
 
 // writeTo creates name, has write fill it and closes it. A failure of either

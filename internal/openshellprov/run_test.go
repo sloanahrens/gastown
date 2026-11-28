@@ -79,8 +79,8 @@ func (g *gateway) Run(name string, args []string, env []string, stdin io.Reader)
 }
 
 // gt answers the endpoint check with nothing, renders every forgejo profile as
-// renderedForgejo (stamped with version 7 when it is rendered from an export), and
-// judges its stdin profile bound when it is renderedForgejo less its versions.
+// renderedForgejo, and judges its stdin profile bound when it is renderedForgejo
+// less its versions.
 func (g *gateway) gt(args []string, stdin []byte) ([]byte, []byte, error) {
 	if g.refuseGt {
 		reason := "Error: sandbox endpoint: no sandbox profile names gateway \"" + flagValue(args, "--gateway") + "\"\n"
@@ -88,11 +88,7 @@ func (g *gateway) gt(args []string, stdin []byte) ([]byte, []byte, error) {
 	}
 	switch {
 	case slices.Contains(args, "--render"):
-		out := renderedForgejo
-		if slices.Contains(args, "--from-export") {
-			out += "resource_version: 7\n"
-		}
-		return []byte(out), nil, nil
+		return []byte(renderedForgejo), nil, nil
 	case slices.Contains(args, "--check"):
 		if g.verdict != "" {
 			return []byte(g.verdict), nil, nil
@@ -501,8 +497,11 @@ func TestRunUpdatesAStaleForgejoProfile(t *testing.T) {
 	}
 	var checked, rendered, updated bool
 	for _, c := range gw.calls {
+		if strings.Contains(c, "--from-export") {
+			t.Errorf("call %q passes --from-export", c)
+		}
 		checked = checked || strings.HasSuffix(c, " --check /dev/stdin")
-		rendered = rendered || (strings.Contains(c, " --render ") && strings.Contains(c, " --from-export "))
+		rendered = rendered || strings.Contains(c, " --render /dev/stdin")
 		if strings.Contains(c, " profile update --global -f ") && strings.HasSuffix(c, " forgejo-polecat") {
 			updated = true
 		}
