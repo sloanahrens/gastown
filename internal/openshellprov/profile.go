@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // gtBinary is the program every endpoint call runs.
@@ -43,6 +46,22 @@ func ProfileID(yaml []byte) string {
 		return rest
 	}
 	return ""
+}
+
+// ResourceVersion returns the resource_version an exported profile declares at
+// its top level. A value missing or below 1 is an error: profile update refuses a
+// profile without one.
+func ResourceVersion(exported []byte) (int, error) {
+	var doc struct {
+		ResourceVersion int `yaml:"resource_version"`
+	}
+	if err := yaml.Unmarshal(exported, &doc); err != nil {
+		return 0, fmt.Errorf("parsing the exported profile: %w", err)
+	}
+	if doc.ResourceVersion < 1 {
+		return 0, fmt.Errorf("the exported profile carries no resource_version, so it cannot be updated")
+	}
+	return doc.ResourceVersion, nil
 }
 
 // Gt makes the `gt sandbox endpoint` calls a run needs for one gateway. Every
@@ -90,16 +109,19 @@ func (g Gt) CheckEndpoint() error {
 }
 
 // Render writes the forgejo-polecat profile, sent to gt on stdin and bound to the
-// gateway's endpoint, to out. A non-empty exportFile stamps it with that export's
-// resource_version, which profile update needs. A failed render writes nothing.
-func (g Gt) Render(out io.Writer, profile []byte, exportFile string) error {
-	extra := []string{"--render", "/dev/stdin"}
-	if exportFile != "" {
-		extra = append(extra, "--from-export", exportFile)
-	}
-	stdout, err := g.endpoint(bytes.NewReader(profile), extra...)
+// gateway's endpoint, to out. A version of 1 or more ends the text with a newline
+// and appends "resource_version: N", which profile update needs. A failed render
+// writes nothing.
+func (g Gt) Render(out io.Writer, profile []byte, version int) error {
+	stdout, err := g.endpoint(bytes.NewReader(profile), "--render", "/dev/stdin")
 	if err != nil {
 		return fmt.Errorf("%s: gt sandbox endpoint --render /dev/stdin failed, so the forgejo-polecat profile cannot be rendered: %w", Name, err)
+	}
+	if version > 0 {
+		if !bytes.HasSuffix(stdout, []byte("\n")) {
+			stdout = append(stdout, '\n')
+		}
+		stdout = append(stdout, "resource_version: "+strconv.Itoa(version)+"\n"...)
 	}
 	if _, err := out.Write(stdout); err != nil {
 		return fmt.Errorf("%s: writing the rendered profile: %w", Name, err)

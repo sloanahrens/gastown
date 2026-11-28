@@ -175,13 +175,11 @@ func lastCall(calls []string) string {
 }
 
 const (
-	listCall   = "openshell profile list --global"
-	exportCall = "openshell profile export --global -- forgejo-polecat"
-	checkCall  = "gt sandbox endpoint --gateway k8s --check /dev/stdin"
-	// renderCall renders the profile gt reads on stdin; the stale path adds
-	// --from-export.
+	listCall       = "openshell profile list --global"
+	exportCall     = "openshell profile export --global -- forgejo-polecat"
+	checkCall      = "gt sandbox endpoint --gateway k8s --check /dev/stdin"
 	renderCall     = "gt sandbox endpoint --gateway k8s --render /dev/stdin"
-	renderFromCall = renderCall + " --from-export " + testWork + "/forgejo-polecat.export.yaml"
+	exported       = "resource_version: 7\nid: forgejo-polecat\n"
 	lintRendered   = "openshell profile lint -f " + testWork + "/forgejo-polecat.yaml"
 	updateCall     = "openshell profile update --global -f " + testWork + "/forgejo-polecat.yaml forgejo-polecat"
 	importRendered = "openshell profile import -f " + testWork + "/forgejo-polecat.yaml --global"
@@ -361,12 +359,12 @@ func TestImportProfilesForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) 
 				listCall,
 				exportCall,
 				checkCall,
-				renderFromCall,
+				renderCall,
 				lintRendered,
 				updateCall,
 			},
 			wantOut:   "openshell-providers: profile forgejo-polecat is stale (endpoint host differs), updating it\n",
-			wantWrite: "rendered\n",
+			wantWrite: "rendered\nresource_version: 7\n",
 		},
 		{
 			name:    "bound",
@@ -380,9 +378,9 @@ func TestImportProfilesForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) 
 			t.Parallel()
 			runner := &scriptRunner{reply: answerWith(
 				answer{match: "profile list", out: "forgejo-polecat\n"},
-				answer{match: "profile export", out: "exported\n"},
+				answer{match: "profile export", out: exported},
 				answer{match: "--check", out: tc.check},
-				answer{match: "--render", out: "rendered\n"},
+				answer{match: "--render", out: "rendered"},
 			)}
 			files := newMemFiles(profileFile{"forgejo-polecat.yaml", "id: forgejo-polecat\n"})
 			run, out := newTestRun(runner, files)
@@ -392,14 +390,19 @@ func TestImportProfilesForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) 
 			if !slices.Equal(runner.calls, tc.want) {
 				t.Errorf("calls = %q, want %q", runner.calls, tc.want)
 			}
-			if len(runner.stdins) != len(tc.want) || runner.stdins[2] != "exported\n" {
-				t.Errorf("stdin = %q, want the check to receive the gateway's export %q", runner.stdins, "exported\n")
+			if len(runner.stdins) != len(tc.want) || runner.stdins[2] != exported {
+				t.Errorf("stdin = %q, want the check to receive the gateway's export %q", runner.stdins, exported)
 			}
 			if out.String() != tc.wantOut {
 				t.Errorf("output = %q, want %q", out.String(), tc.wantOut)
 			}
-			if got := files.written[testWork+"/forgejo-polecat.export.yaml"].String(); got != "exported\n" {
+			if got := files.written[testWork+"/forgejo-polecat.export.yaml"].String(); got != exported {
 				t.Errorf("export = %q, want the gateway's profile", got)
+			}
+			if tc.wantWrite != "" {
+				if got := files.written[testWork+"/forgejo-polecat.yaml"].String(); got != tc.wantWrite {
+					t.Errorf("rendered file = %q, want %q", got, tc.wantWrite)
+				}
 			}
 		})
 	}
@@ -548,14 +551,38 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 			wantRemoved: []string{testWork},
 		},
 		{
-			name:     "the render of a stale forgejo-polecat fails",
+			name:     "the stale export carries no resource_version",
 			profiles: []profileFile{forgejo},
 			answers: []answer{
 				{match: "profile list", out: "forgejo-polecat\n"},
 				{match: "--check", out: "stale: host differs\n"},
+			},
+			wantErr:     "forgejo-polecat",
+			wantLast:    checkCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:     "the stale export carries resource_version 0",
+			profiles: []profileFile{forgejo},
+			answers: []answer{
+				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: "resource_version: 0\nid: forgejo-polecat\n"},
+				{match: "--check", out: "stale: host differs\n"},
+			},
+			wantErr:     "forgejo-polecat",
+			wantLast:    checkCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:     "the render of a stale forgejo-polecat fails",
+			profiles: []profileFile{forgejo},
+			answers: []answer{
+				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: exported},
+				{match: "--check", out: "stale: host differs\n"},
 				{match: "--render", err: errors.New("no Forgejo rule")},
 			},
-			wantLast:    renderFromCall,
+			wantLast:    renderCall,
 			wantRemoved: []string{testWork},
 		},
 		{
@@ -563,6 +590,7 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 			profiles: []profileFile{forgejo},
 			answers: []answer{
 				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: exported},
 				{match: "--check", out: "stale: host differs\n"},
 				{match: "profile lint", err: errors.New("bad profile")},
 			},
@@ -588,6 +616,7 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 			profiles: []profileFile{forgejo},
 			answers: []answer{
 				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: exported},
 				{match: "--check", out: "stale: host differs\n"},
 				{match: "profile update", err: errors.New("refused")},
 			},

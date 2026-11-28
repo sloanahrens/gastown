@@ -39,6 +39,33 @@ func TestProfileIDTable(t *testing.T) {
 	}
 }
 
+func TestResourceVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		export  string
+		want    int
+		wantErr bool
+	}{
+		{"top level", "resource_version: 7\nid: forgejo-polecat\n", 7, false},
+		{"missing", "id: forgejo-polecat\n", 0, true},
+		{"zero", "resource_version: 0\n", 0, true},
+		{"unparseable", "resource_version: [\n", 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResourceVersion([]byte(tc.export))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResourceVersion(%q) error = %v, want error %v", tc.export, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ResourceVersion(%q) = %d, want %d", tc.export, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGtDefaultGatewayIsK8s(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{}
@@ -60,8 +87,7 @@ func TestGtArgs(t *testing.T) {
 		want string
 	}{
 		{"check", func(g Gt) error { return g.CheckEndpoint() }, base},
-		{"render without export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "") }, base + " --render /dev/stdin"},
-		{"render with export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "e.yaml") }, base + " --render /dev/stdin --from-export e.yaml"},
+		{"render", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, 7) }, base + " --render /dev/stdin"},
 		{"stale check", func(g Gt) error { _, err := g.StaleReason("forgejo-polecat", []byte("e")); return err }, base + " --check /dev/stdin"},
 	}
 	for _, tc := range tests {
@@ -97,7 +123,7 @@ func TestRenderRefusalWritesNothing(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	fake := &fakeRunner{stdout: []byte("partial"), err: errors.New("exit status 1")}
-	err := (Gt{Run: fake}).Render(&out, []byte("id: forgejo-polecat\n"), "")
+	err := (Gt{Run: fake}).Render(&out, []byte("id: forgejo-polecat\n"), 0)
 	if err == nil {
 		t.Fatal("Render after a refused call = nil error, want the refusal")
 	}
@@ -112,7 +138,7 @@ func TestRenderRefusalWritesNothing(t *testing.T) {
 func TestRenderWriteFailureIsAnError(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{stdout: []byte("rendered")}
-	if err := (Gt{Run: fake}).Render(failingWriter{}, []byte("id: forgejo-polecat\n"), ""); err == nil {
+	if err := (Gt{Run: fake}).Render(failingWriter{}, []byte("id: forgejo-polecat\n"), 0); err == nil {
 		t.Fatal("Render into a failing writer = nil error, want the write failure")
 	}
 }
