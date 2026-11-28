@@ -5,7 +5,7 @@
 # behind it, or more than 7 days older than its tip.
 # A pin bump moves only the source revision a pin names. No docs/architecture.md
 # section records a pinned revision, so a bump changes no section.
-bd http://forgejo:3000/{owner}/beads.git 9d61b3f6d0e7a5d9d5e19fb18bed6ca458f8390c
+bd http://forgejo:3000/{owner}/beads.git 6f7cc059d5b956dba958553635b323e811f77e65
 om http://forgejo:3000/{owner}/organic-mechanic.git 8396d45ec2bb5c7fc206ab98b1f46971bb968723
 hm http://forgejo:3000/{owner}/history-man.git c94ae1d1f6b08685408c311d1ddf0eacdbb3095c
 devops http://forgejo:3000/{owner}/devops.git 4ff370aa0afd88eaccf1288e965c14deeaae9e96
