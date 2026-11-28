@@ -8,10 +8,13 @@ import (
 )
 
 // fakeStore answers Get from entries and fails every Get with getErr when that
-// is set, so a row can tell a store read from a store read that faulted.
+// is set, so a row can tell a store read from a store read that faulted. Put
+// returns putPath, or putErr when that is set.
 type fakeStore struct {
 	entries map[string]Entry
 	getErr  error
+	putPath string
+	putErr  error
 }
 
 func (f fakeStore) Get(actionID []byte) (Entry, error) {
@@ -26,7 +29,23 @@ func (f fakeStore) Get(actionID []byte) (Entry, error) {
 }
 
 func (f fakeStore) Put(actionID, outputID, body []byte) (string, error) {
-	return "", errors.New("answer does not put")
+	if f.putErr != nil {
+		return "", f.putErr
+	}
+	return f.putPath, nil
+}
+
+// closeCounter is a store with a Close method. It counts its Close calls and
+// fails them with closeErr when that is set.
+type closeCounter struct {
+	fakeStore
+	closeErr error
+	closes   int
+}
+
+func (c *closeCounter) Close() error {
+	c.closes++
+	return c.closeErr
 }
 
 func TestAnswer(t *testing.T) {
@@ -34,12 +53,13 @@ func TestAnswer(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	hit := Entry{OutputID: []byte("out"), Size: 12, Time: now, DiskPath: "/store/out"}
 	tests := []struct {
-		name      string
-		req       Request
-		store     fakeStore
-		want      Response
-		wantStop  bool
-		wantStats Stats
+		name       string
+		req        Request
+		store      Store
+		want       Response
+		wantStop   bool
+		wantStats  Stats
+		wantCloses int
 	}{
 		{
 			name:      "hit returns the entry and counts it",
@@ -63,10 +83,50 @@ func TestAnswer(t *testing.T) {
 			wantStats: Stats{Gets: 1, Misses: 1, Errors: 1},
 		},
 		{
+			name:      "put returns the disk path and counts its bytes",
+			req:       Request{ID: 4, Command: CmdPut, ActionID: []byte("key"), OutputID: []byte("out"), Body: []byte("hello")},
+			store:     fakeStore{putPath: "/store/key"},
+			want:      Response{ID: 4, DiskPath: "/store/key"},
+			wantStats: Stats{Puts: 1, PutBytes: 5},
+		},
+		{
+			name:      "failing put is answered with err and adds no put bytes",
+			req:       Request{ID: 5, Command: CmdPut, ActionID: []byte("key"), OutputID: []byte("out"), Body: []byte("hello")},
+			store:     fakeStore{putErr: errors.New("disk full")},
+			want:      Response{ID: 5, Err: "disk full"},
+			wantStats: Stats{Puts: 1, Errors: 1},
+		},
+		{
+			name:      "close on a store without Close stops serving",
+			req:       Request{ID: 6, Command: CmdClose},
+			store:     fakeStore{},
+			want:      Response{ID: 6},
+			wantStop:  true,
+			wantStats: Stats{},
+		},
+		{
+			name:       "close calls Close once and stops serving",
+			req:        Request{ID: 7, Command: CmdClose},
+			store:      &closeCounter{},
+			want:       Response{ID: 7},
+			wantStop:   true,
+			wantStats:  Stats{},
+			wantCloses: 1,
+		},
+		{
+			name:       "failing close counts an error and changes nothing else",
+			req:        Request{ID: 8, Command: CmdClose},
+			store:      &closeCounter{closeErr: errors.New("flush failed")},
+			want:       Response{ID: 8},
+			wantStop:   true,
+			wantStats:  Stats{Errors: 1},
+			wantCloses: 1,
+		},
+		{
 			name:      "unknown command is answered with err and counted",
-			req:       Request{ID: 4, Command: "get2"},
+			req:       Request{ID: 9, Command: "get2"},
 			store:     fakeStore{getErr: errors.New("store must not be read")},
-			want:      Response{ID: 4, Err: `gocacheprog: unknown command "get2"`},
+			want:      Response{ID: 9, Err: `gocacheprog: unknown command "get2"`},
 			wantStats: Stats{Errors: 1},
 		},
 	}
@@ -83,6 +143,13 @@ func TestAnswer(t *testing.T) {
 			}
 			if stats != tt.wantStats {
 				t.Errorf("stats = %+v, want %+v", stats, tt.wantStats)
+			}
+			closes := 0
+			if c, ok := tt.store.(*closeCounter); ok {
+				closes = c.closes
+			}
+			if closes != tt.wantCloses {
+				t.Errorf("closes = %d, want %d", closes, tt.wantCloses)
 			}
 		})
 	}
