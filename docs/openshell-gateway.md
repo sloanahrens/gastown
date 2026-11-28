@@ -31,7 +31,7 @@ Turn the setting on only after the seat's account and provider exist, in this or
 
 1. Provision the seat's Forgejo account and token with `forgejo-provision --seat <name>`. Before running it, read [the Forgejo runbook](forgejo-runbook.md).
 2. Create the seat's provider on every gateway that runs seats with `openshell-providers --seat <name>`.
-3. Set `forgejo_per_seat: true` on the profile. A sandbox already running keeps the provider it was created with; the setting applies to the next create.
+3. Turn it on with `gt sandbox per-seat <profile> on`, or set `forgejo_per_seat: true` by hand. The command lists every seat name the town's rigs may hand out, asks the profile's `gateway` whether each has its `forgejo-seat-<name>` provider, and writes nothing when one is missing, naming the count and the names. It covers the pool's names only: a numbered overflow name (a base name the pool numbers past its size) is not checked, and editing `settings/config.json` by hand skips the check. `gt sandbox per-seat <profile> off` is the way back and reads no gateway. A sandbox already running keeps the provider it was created with; the setting applies to the next create.
 
 ## What a sandbox polecat cannot do
 
