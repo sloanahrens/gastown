@@ -1480,6 +1480,69 @@ func TestRunnerNameIsRefused(t *testing.T) {
 	}
 }
 
+// TestGoCacheProgRenders drives the Go build cache program switch (gt-8sng1g)
+// through the production path: a values file naming both keys renders the
+// program's volume mount, its valid_volumes row and the exact GOCACHEPROG
+// command; a file naming neither leaves the job environment, the mounts and the
+// valid volumes as today; and true with no positive cap is refused.
+func TestGoCacheProgRenders(t *testing.T) {
+	t.Parallel()
+	const base = `labels:
+  - "gate:docker://gate:1"
+forgejoHostIP: "10.0.0.7"
+dindStorage: 40Gi
+runnerStorage: 1Gi
+runnerResources: {cpu: "1", memory: 1Gi}
+dindResources: {cpu: "8", memory: 12Gi}
+`
+	const (
+		volume    = "ci-gocacheprog"
+		mountPath = "/home/ci/.cache/gt-gocacheprog"
+		wantEnv   = "/usr/local/bin/gt-gocacheprog -dir /home/ci/.cache/gt-gocacheprog -max-bytes 5368709120"
+	)
+	decode := func(t *testing.T, extra string) Values {
+		t.Helper()
+		v, err := decodeValues("values.control.yaml", []byte(base+extra))
+		if err != nil {
+			t.Fatalf("decodeValues: %v", err)
+		}
+		return v
+	}
+	t.Run("both keys render the program", func(t *testing.T) {
+		t.Parallel()
+		doc := decodeConfig(t, mustBuild(t, decode(t, "goCacheProg: true\ngoCacheProgMaxBytes: 5368709120\n")))
+		if got := doc.Runner.Envs["GOCACHEPROG"]; got != wantEnv {
+			t.Errorf("GOCACHEPROG = %q, want %q", got, wantEnv)
+		}
+		if got := optionMounts(t, doc.Container.Options)[volume]; got != mountPath {
+			t.Errorf("the job containers mount %q at %q, want %q", volume, got, mountPath)
+		}
+		if !slices.Contains(doc.Container.ValidVolumes, volume) {
+			t.Errorf("valid_volumes = %q, want it to list %q", doc.Container.ValidVolumes, volume)
+		}
+	})
+	t.Run("no keys leave the manifests as today", func(t *testing.T) {
+		t.Parallel()
+		doc := decodeConfig(t, mustBuild(t, decode(t, "")))
+		if got, ok := doc.Runner.Envs["GOCACHEPROG"]; ok {
+			t.Errorf("GOCACHEPROG is set without the value: %q", got)
+		}
+		if strings.Contains(doc.Container.Options, volume) || slices.Contains(doc.Container.ValidVolumes, volume) {
+			t.Errorf("the volume reaches config.yml without the value")
+		}
+	})
+	t.Run("true without a positive cap is refused", func(t *testing.T) {
+		t.Parallel()
+		for _, max := range []int64{0, -1} {
+			v := goldenValues()
+			v.GoCacheProg, v.GoCacheProgMaxBytes = true, max
+			if _, err := Build(v); err == nil || !strings.Contains(err.Error(), "Values.GoCacheProgMaxBytes") {
+				t.Errorf("with max %d, Build error = %v, want one naming Values.GoCacheProgMaxBytes", max, err)
+			}
+		}
+	})
+}
+
 // TestConfigYAMLQuotesAnyLabel drives the scalar quoting: a label holding a
 // single quote and a YAML comment character must read back as the label it was,
 // not as a document a reader would have to repair.

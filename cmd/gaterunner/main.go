@@ -43,6 +43,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	runnerMemory := fs.String("runner-memory", "", "runner container memory share; the package default when unset")
 	dindCPU := fs.String("dind-cpu", "", "engine sidecar CPU share; the package default when unset")
 	dindMemory := fs.String("dind-memory", "", "engine sidecar memory share; the package default when unset")
+	goCacheProg := fs.Bool("go-cache-prog", false, "switch the job image's Go build cache program on; off when unset")
+	goCacheProgMaxBytes := fs.Int64("go-cache-prog-max-bytes", 0, "the cache program store's cap in bytes; required and positive with -go-cache-prog")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -74,6 +76,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			CPU:    *dindCPU,
 			Memory: *dindMemory,
 		},
+		GoCacheProg:         *goCacheProg,
+		GoCacheProgMaxBytes: *goCacheProgMaxBytes,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gaterunner: %v\n", err)
