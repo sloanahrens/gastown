@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -309,7 +310,12 @@ func TestDrainBoundsEachProbeByTheTimeout(t *testing.T) {
 
 func TestDrainReturnsWhenAProbeBlocksPastTimeout(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, testDrainReturnsWhenAProbeBlocksPastTimeout)
+}
+
+func testDrainReturnsWhenAProbeBlocksPastTimeout(t *testing.T) {
 	release := make(chan struct{})
+	// Runs inside the bubble, before synctest.Test returns, so close ends the probe goroutine.
 	t.Cleanup(func() { close(release) })
 	clock := &fakeDrainClock{now: drainTestStart()}
 	// The probe ignores its context and returns only when the test ends, so
