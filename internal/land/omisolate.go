@@ -15,11 +15,14 @@ type Isolator interface {
 }
 
 // Isolated returns a copy of r whose verdict files go under tmp/out; r is not
-// changed. The copy drops Out and Verdicts: a pool review must not stream om's
-// output into the landing's writer, and VerdictStore.Write prunes the bead's
-// older files, which the landing owns. An empty tmp leaves the copy with no
-// verdict directory, so its review refuses instead of writing into the working
-// directory. Isolated creates and removes nothing; reviewOnce creates tmp/out.
+// changed. The copy drops Out: a pool review must not stream om's output into
+// the landing's writer. It keeps Verdicts: a landing that reuses a pool review
+// reads its verdict back from the store, so the store must hold it (gt-c789n9).
+// Two reviews writing one store are safe without a lock: Write is atomic per
+// head, and prune tolerates a file another review already removed. An empty tmp
+// leaves the copy with no verdict directory, so its review refuses instead of
+// writing into the working directory. Isolated creates and removes nothing;
+// reviewOnce creates tmp/out.
 //
 // The copy's om children also get TMPDIR=tmp: om keeps its raw replies in
 // os.TempDir() when its caller names no directory, so two reviews at once would
@@ -32,7 +35,6 @@ type Isolator interface {
 func (r OMReviewer) Isolated(tmp string) Reviewer {
 	c := r
 	c.Out = nil
-	c.Verdicts = nil
 	c.OutDir = ""
 	if tmp != "" {
 		c.OutDir = filepath.Join(tmp, "out")

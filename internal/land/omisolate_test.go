@@ -184,19 +184,34 @@ func TestIsolatedReviewWritesNoOutputToTheLanding(t *testing.T) {
 	}
 }
 
-// TestIsolatedReviewKeepsTheLandingsVerdictStore: the copy drops the receiver's
-// verdict store, so a pool review of a bead writes no record into the landing's store.
+// isolatedDetail is the finding detail isolatedReject carries, which a row reads
+// back from the store to show the record holds om's whole answer.
+const isolatedDetail = "the retry counter is never reset"
+
+// isolatedReject is a request for changes with one finding that has a detail.
+var isolatedReject = `{"score":0.2,"verdict":"request_changes","findings":[{"id":"f1","severity":"high","path":"retry.go","title":"retry","detail":"` + isolatedDetail + `"}]}`
+
+// TestIsolatedReviewKeepsTheLandingsVerdictStore: the copy keeps the receiver's
+// verdict store, so a pool review of a bead writes a record a landing reusing
+// it reads back with the finding's detail (gt-c789n9).
 func TestIsolatedReviewKeepsTheLandingsVerdictStore(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir(), Verdicts: &VerdictStore{TownRoot: townRoot, Rig: "gastown"}}
-	r.run = fakeOM(t, isolatedApprove, 0, nil, &argv)
+	r.run = fakeOM(t, isolatedReject, 1, nil, &argv)
 	if _, _, err := reviewIsolated(t, r.Isolated(t.TempDir()), &argv, ReviewInput{BeadID: "gt-ozk4zj"}); err != nil {
 		t.Fatal(err)
 	}
-	if files := filesUnder(t, townRoot); len(files) != 0 {
-		t.Fatalf("a pool review wrote %d record(s) into the landing's verdict store: %v", len(files), files)
+	sv, err := ReadStoredVerdict(os.DirFS(VerdictsDir(townRoot)), "gastown", "gt-ozk4zj", "")
+	if err != nil {
+		t.Fatalf("a pool review stored no verdict for its bead: %v", err)
+	}
+	if sv.Record.Head != "bbb" {
+		t.Fatalf("stored record's head = %q, want the reviewed head %q", sv.Record.Head, "bbb")
+	}
+	if len(sv.Verdict.Findings) != 1 || sv.Verdict.Findings[0].Detail != isolatedDetail {
+		t.Fatalf("stored findings = %+v, want one finding with detail %q", sv.Verdict.Findings, isolatedDetail)
 	}
 }
 
