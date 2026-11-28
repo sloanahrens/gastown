@@ -370,7 +370,8 @@ func TestDerivedOMConfigBackendUsesClaudeExec(t *testing.T) {
 	}
 	got := decodeOMConfig(t, content)
 
-	want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "haiku"}
+	want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "haiku",
+		"--tools", "Read,Grep,Glob", "--restricted", "--strict-mcp-config", "--permission-prompts", "none"}
 	if !slices.Equal(got.Backend, want) {
 		t.Errorf("backend = %q, want %q", got.Backend, want)
 	}
@@ -393,7 +394,8 @@ func TestDerivedOMConfigTakesEachSettingFromTheSpec(t *testing.T) {
 			name:   "model",
 			mutate: func(o *templates.OMConfigSettings) { o.Model = "sonnet" },
 			check: func(t *testing.T, got omConfigOnDisk) {
-				want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "sonnet"}
+				want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "sonnet",
+					"--tools", "Read,Grep,Glob", "--restricted", "--strict-mcp-config", "--permission-prompts", "none"}
 				if !slices.Equal(got.Backend, want) {
 					t.Errorf("backend = %q, want %q", got.Backend, want)
 				}

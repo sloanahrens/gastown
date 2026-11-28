@@ -625,6 +625,7 @@ func RenderOMConfig(o OMConfigSettings) ([]byte, error) {
 	// Written by hand, not marshaled, so the render has no encoder error to
 	// refuse: each value is a checked plain name or a finite number.
 	argv := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, LiveOMTokenPath, "--", "-p", "--model", o.Model}
+	argv = append(argv, omReviewerConfinement...)
 	quoted := make([]string, len(argv))
 	for i, arg := range argv {
 		quoted[i] = strconv.Quote(arg)
@@ -632,6 +633,13 @@ func RenderOMConfig(o OMConfigSettings) ([]byte, error) {
 	return []byte(fmt.Sprintf("{\n  \"backend\": [%s],\n  \"threshold\": %s,\n  \"depth\": %s,\n  \"timeout\": %d\n}\n",
 		strings.Join(quoted, ", "), strconv.FormatFloat(o.Threshold, 'f', -1, 64), strconv.Quote(o.Depth), o.Timeout)), nil
 }
+
+// omReviewerConfinement are the claude CLI flags that confine the reviewer to the
+// read-only tools Read, Grep and Glob, with MCP servers only from its own config.
+// om judges argv[0] alone, here gt, so it adds none of them; the backend must
+// carry them itself. Fixed text, not a setting: nothing in OMConfigSettings
+// removes or changes them.
+var omReviewerConfinement = []string{"--tools", "Read,Grep,Glob", "--restricted", "--strict-mcp-config", "--permission-prompts", "none"}
 
 // validateOMConfig pairs the derived om config with the token it reads. A live
 // token file without its config leaves om running a bare claude with no
