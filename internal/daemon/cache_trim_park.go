@@ -67,7 +67,7 @@ func cacheTrimUnparkPath(townRoot, namespace, claim string) string {
 }
 
 // cacheTrimParked reports whether the claim's trim is parked, after first
-// honouring a release request for it. A request for a parked claim is removed,
+// honoring a release request for it. A request for a parked claim is removed,
 // its park and failure item are cleared, one line names the release, and it
 // reports not parked, so the pass that asked goes on to trim. A request for a
 // claim that is not parked is removed and logged, so it cannot release a later
