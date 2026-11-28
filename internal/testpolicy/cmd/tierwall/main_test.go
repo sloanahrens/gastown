@@ -1422,6 +1422,44 @@ func TestCPULineWhenTheQuotaIsUnreadable(t *testing.T) {
 	}
 }
 
+// TestCPUTimeLine pins the cpu time line just before the cpus line, which stays
+// last: readable counters, no line for an absent file, and cpu.stat=unreadable
+// for a read error, a missing counter, or a non-numeric or negative one.
+func TestCPUTimeLine(t *testing.T) {
+	t.Parallel()
+	const bad = "tierwall: cpu time: cpu.stat=unreadable\n"
+	for _, tc := range []struct {
+		name, stat string
+		readErr    error
+		want       string
+	}{
+		{"readable", "user_usec 2500000\nsystem_usec 1250000\nthrottled_usec 3000000\n", nil, "tierwall: cpu time: user_s=2 system_s=1 throttled_s=3\n"},
+		{"absent", "", fs.ErrNotExist, ""},
+		{"missing counter", "user_usec 1000000\nsystem_usec 1000000\n", nil, bad},
+		{"non-numeric", "user_usec 1000000\nsystem_usec lots\nthrottled_usec 0\n", nil, bad},
+		{"negative", "user_usec 1000000\nsystem_usec -1\nthrottled_usec 0\n", nil, bad},
+		{"read error", "", errors.New("permission denied"), bad},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := fixedHost()
+			h.readFile = func(path string) ([]byte, error) {
+				if path != cpuStatPath {
+					return nil, fs.ErrNotExist
+				}
+				return []byte(tc.stat), tc.readErr
+			}
+			code, stdout, stderr := runFileWith(t, "pass.jsonl", h)
+			if code != 0 || stderr != "" {
+				t.Errorf("exit code = %d, stderr = %q, want 0 and nothing", code, stderr)
+			}
+			if !strings.HasSuffix(stdout, tc.want+"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable\n") || tc.want == "" && strings.Contains(stdout, "cpu time:") {
+				t.Errorf("stdout = %q, want it to end with %q then the unchanged cpus line", stdout, tc.want)
+			}
+		})
+	}
+}
+
 // poleStream is a go test -json stream whose tier wall, first event to last,
 // is tier seconds, with one pass event per package at its wall.
 func poleStream(tier float64, walls map[string]float64) string {

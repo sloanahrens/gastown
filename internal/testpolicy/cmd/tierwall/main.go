@@ -64,6 +64,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,7 +223,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 			seriesFailed = true
 		}
 	}
-	if err := r.print(*bar, cpuLine(h), seriesLog); err != nil {
+	if err := r.print(*bar, cpuLine(h), cpuTimeLine(h), seriesLog); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
@@ -436,10 +437,10 @@ func (r *report) verdict(e event) {
 }
 
 // print writes the per-package lines, slowest first, then the tier line, then
-// seriesLog, then cpus, the line cpuLine renders. Ties go by package name, so
-// one stream always prints one report. seriesLog is empty for every run whose
-// series reached its file; the cpus line ends the report either way.
-func (r *report) print(bar time.Duration, cpus, seriesLog string) error {
+// seriesLog, then cpuTime, then cpus, the last line cpuLine renders. Ties go by
+// package name, so one stream always prints one report. seriesLog is empty for
+// every run whose series reached its file; the cpus line ends the report.
+func (r *report) print(bar time.Duration, cpus, cpuTime, seriesLog string) error {
 	pkgs := make([]string, 0, len(r.elapsed))
 	for pkg := range r.elapsed {
 		pkgs = append(pkgs, pkg)
@@ -474,6 +475,7 @@ func (r *report) print(bar time.Duration, cpus, seriesLog string) error {
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
 	r.poleWarnings(pkgs)
 	r.write(seriesLog)
+	r.write(cpuTime)
 	r.write(cpus)
 	return r.err
 }
@@ -512,6 +514,46 @@ const (
 func cpuLine(h host) string {
 	return fmt.Sprintf("tierwall: cpus: NumCPU=%d GOMAXPROCS=%d cgroup=%s\n",
 		h.numCPU(), h.maxProcs(), cgroupCPU(h.readFile))
+}
+
+// cpuStatPath is the job container's cgroup v2 CPU accounting file.
+const cpuStatPath = "/sys/fs/cgroup/cpu.stat"
+
+// cpuTimeUnreadable is the cpu time line when cpu.stat cannot be read.
+const cpuTimeUnreadable = "tierwall: cpu time: cpu.stat=unreadable\n"
+
+// cpuTimeLine is the line immediately before the cpus line: the job container's
+// user, system and throttled CPU seconds, in whole seconds, from cpu.stat's
+// user_usec, system_usec and throttled_usec counters. The counters cover the
+// container since it started, lint and build included; that they count this job
+// only, through a private cgroup namespace, is expected and not verified. An
+// absent cpu.stat prints no line, and one that cannot be read, lacks a counter,
+// or carries a non-numeric or negative one prints cpu.stat=unreadable.
+func cpuTimeLine(h host) string {
+	b, err := h.readFile(cpuStatPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return cpuTimeUnreadable
+	}
+	vals := map[string]int64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) == 2 {
+			switch f[0] {
+			case "user_usec", "system_usec", "throttled_usec":
+				usec, err := strconv.ParseInt(f[1], 10, 64)
+				if err != nil || usec < 0 {
+					return cpuTimeUnreadable
+				}
+				vals[f[0]] = usec
+			}
+		}
+	}
+	if len(vals) != 3 {
+		return cpuTimeUnreadable
+	}
+	return fmt.Sprintf("tierwall: cpu time: user_s=%d system_s=%d throttled_s=%d\n", vals["user_usec"]/1_000_000, vals["system_usec"]/1_000_000, vals["throttled_usec"]/1_000_000)
 }
 
 // cgroupCPU is the CPU quota the cgroup gives, as the file states it: the v2
