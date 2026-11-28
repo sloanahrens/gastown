@@ -23,9 +23,11 @@ func TestTreeRunStartsTheBinWithTheWorkArgsAndEnvUnchanged(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	ts.runBuilt(bin, work, args, env, io.Discard, &stderr)
-	if gotProgram != bin || gotDir != work || !slices.Equal(gotArgs, args) || !slices.Equal(gotEnv, env) {
-		t.Errorf("Run got program %q dir %q args %q env %q, want %q %q %q %q",
-			gotProgram, gotDir, gotArgs, gotEnv, bin, work, args, env)
+	if gotProgram != bin || gotDir != work || !slices.Equal(gotArgs, args) {
+		t.Errorf("Run got program %q dir %q args %q, want %q %q %q", gotProgram, gotDir, gotArgs, bin, work, args)
+	}
+	if !slices.Equal(gotEnv, env) {
+		t.Errorf("Run got %d environment entries, want the %d it was given unchanged", len(gotEnv), len(env))
 	}
 }
 
