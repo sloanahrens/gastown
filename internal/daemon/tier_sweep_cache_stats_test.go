@@ -2,10 +2,15 @@ package daemon
 
 import (
 	"maps"
+	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
@@ -78,4 +83,89 @@ func cacheTrimJobRuns(t *testing.T, townRoot string) []jobledger.Run {
 		t.Fatalf("ledger.Tail(sweep_cache_trim): %v", err)
 	}
 	return runs
+}
+
+// TestTierSweepCacheStatsUnrecorded pins a run whose cache trim figures cannot be
+// recorded (gt-o5z0rv): a refused read or append logs one line, records nothing,
+// and leaves the stage result and attention as a recorded run does.
+func TestTierSweepCacheStatsUnrecorded(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	ledgerFile := filepath.FromSlash(".runtime/jobs/runs.jsonl")
+	logsGroup := regexp.MustCompile(`\(logs [^)]*\)`)
+
+	// fold breaks the run's log directory or town, then folds the stage. The "(logs <dir>)" group names each test's own temporary town, so it is set aside.
+	fold := func(t *testing.T, breakRun func(t *testing.T, town, logDir string)) (string, tierSweepStageResult, []attention.Item, string) {
+		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+		d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+		st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA}
+		spec, ok, err := d.tierSweepRunnerSpec(st)
+		if err != nil || !ok {
+			t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+		}
+		logDir := filepath.Join(spec.OutDir, sweeprunner.LogsDirName)
+		mustMkdirAll(t, logDir)
+		breakRun(t, d.config.TownRoot, logDir)
+		res := d.tierSweepRunnerStageResult(st, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1}, now)
+		res.output = logsGroup.ReplaceAllString(res.output, "(logs)")
+		return d.config.TownRoot, res, d.cacheTrimNoOp.observed(), logs.String()
+	}
+	withStats := func(t *testing.T, _, logDir string) {
+		writeFile(t, filepath.Join(logDir, sweeprunner.CacheTrimStatsFileName), cacheTrimStatsLog)
+	}
+
+	// The recorded run is the baseline every failure row is compared with.
+	_, healthy, healthyItems, healthyLog := fold(t, withStats)
+	if healthyLog != "" || len(healthyItems) != 0 {
+		t.Fatalf("a recorded run logged %q and raised attention items %+v", healthyLog, healthyItems)
+	}
+
+	for _, r := range []struct {
+		name, names string
+		breakRun    func(t *testing.T, town, logDir string)
+		records     func(t *testing.T, town string) int
+	}{
+		{
+			name:  "an unreadable stats file logs one line naming it and records nothing",
+			names: sweeprunner.CacheTrimStatsFileName,
+			// A directory where the stats file belongs is not a regular file, so it is refused unread.
+			breakRun: func(t *testing.T, _, logDir string) {
+				mustMkdirAll(t, filepath.Join(logDir, sweeprunner.CacheTrimStatsFileName))
+			},
+			records: func(t *testing.T, town string) int { return len(cacheTrimJobRuns(t, town)) },
+		},
+		{
+			name:  "a ledger that refuses the append logs one line and records nothing",
+			names: "jobledger",
+			// A directory at the live ledger file makes the append's read of the tail fail.
+			breakRun: func(t *testing.T, town, logDir string) {
+				withStats(t, town, logDir)
+				mustMkdirAll(t, filepath.Join(town, ledgerFile))
+			},
+			records: func(t *testing.T, town string) int {
+				entries, err := os.ReadDir(filepath.Join(town, ledgerFile))
+				if err != nil {
+					t.Fatalf("reading the refused ledger: %v", err)
+				}
+				return len(entries)
+			},
+		},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			town, res, items, logs := fold(t, r.breakRun)
+			if strings.Count(logs, "\n") != 1 || !strings.Contains(logs, "the run's cache trim figures were not recorded") || !strings.Contains(logs, r.names) {
+				t.Errorf("log = %q, want one line that says the figures were not recorded and names %q", logs, r.names)
+			}
+			if n := r.records(t, town); n != 0 {
+				t.Errorf("the ledger holds %d record(s) for the failed figures, want none", n)
+			}
+			if !reflect.DeepEqual(res, healthy) {
+				t.Errorf("stage result = %+v, want the recorded run's %+v", res, healthy)
+			}
+			if len(items) != len(healthyItems) {
+				t.Errorf("attention items = %+v, want the recorded run's %+v", items, healthyItems)
+			}
+		})
+	}
 }
