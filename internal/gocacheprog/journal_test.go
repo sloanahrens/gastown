@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // journalT0 is the time a journal's start line carries.
@@ -138,9 +140,56 @@ func TestJournalMissingStartLineIsError(t *testing.T) {
 	}
 }
 
-func TestJournalReadErrorsOnMissingFile(t *testing.T) {
+// TestJournalProbeFailureNamesPathAndProbe covers a missing file and a directory,
+// which both fail the probe. The error must name the lock probe: a reader that
+// skips the probe fails with a plain read error that lacks that text.
+func TestJournalProbeFailureNamesPathAndProbe(t *testing.T) {
 	t.Parallel()
-	if _, err := ReadJournal(filepath.Join(t.TempDir(), "absent.log")); err == nil {
-		t.Fatal("ReadJournal of a missing file: want error, not an empty journal")
+	missing := filepath.Join(t.TempDir(), "absent.log")
+	for name, path := range map[string]string{"missing_file": missing, "directory": t.TempDir()} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ReadJournal(path)
+			if err == nil {
+				t.Fatal("ReadJournal: want error, not an empty journal")
+			}
+			if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "lock probe") {
+				t.Errorf("error %q does not name %s and the lock probe", err, path)
+			}
+		})
 	}
+}
+
+func TestJournalHeldLockReadsLive(t *testing.T) {
+	t.Parallel()
+	path := journalFile(t, testStartLine+testPutLine)
+	held, took, err := lock.FlockTryAcquire(path)
+	must(t, err)
+	if !took {
+		t.Fatal("holding the journal lock: want it taken")
+	}
+	got, err := ReadJournal(path)
+	must(t, err)
+	if !got.Live {
+		t.Error("journal whose lock is held: Live = false, want true")
+	}
+	held()
+	got, err = ReadJournal(path)
+	must(t, err)
+	if got.Live {
+		t.Error("journal whose lock is released: Live = true, want false")
+	}
+}
+
+func TestJournalReaderLeavesLockFree(t *testing.T) {
+	t.Parallel()
+	path := journalFile(t, testStartLine)
+	_, err := ReadJournal(path)
+	must(t, err)
+	unlock, took, err := lock.FlockTryAcquire(path)
+	must(t, err)
+	if !took {
+		t.Fatal("after ReadJournal: journal lock is held, want it free")
+	}
+	unlock()
 }
