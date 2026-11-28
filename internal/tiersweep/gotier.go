@@ -87,6 +87,10 @@ type Runner struct {
 	Timings *Timings
 	// Now is the clock a package's wall time is read from. Nil means time.Now.
 	Now func() time.Time
+	// Sample reads the container's cgroup counters around each package's command.
+	// Nil, or a read that fails, leaves the package's timing line without a
+	// cgroup key; neither changes whether the package passed.
+	Sample func() (CgroupSample, error)
 	// Jobs is how many packages run at once. Zero or one runs them one at a
 	// time in list order; more runs them on that many workers (gt-0rtgc).
 	Jobs int
@@ -220,6 +224,9 @@ type packageResult struct {
 	// cgroup is what the container spent while the package ran, when the run
 	// could read it; nil leaves the key off the package's timing line.
 	cgroup *CgroupSample
+	// cgroupErr is a failure to read the counters around the command. It leaves
+	// cgroup nil and never changes whether the package passed.
+	cgroupErr error
 }
 
 // tasks resolves each package's fate before anything runs. A skipped package
@@ -393,10 +400,12 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, be
 	}
 	argv = append(argv, t.pkg)
 	start := r.now()
+	end := measureCgroup(r.Sample)
 	beganOnce()
 	code, tests, logErr := r.execLogged(t.json, dir, argv, f)
 	closeErr := f.Close()
-	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr, logErr: logErr, tests: tests}
+	cgroup, cgroupErr := end()
+	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr, logErr: logErr, tests: tests, cgroup: cgroup, cgroupErr: cgroupErr}
 }
 
 // createLog opens one package's log: the injected seam when a test names one, a
