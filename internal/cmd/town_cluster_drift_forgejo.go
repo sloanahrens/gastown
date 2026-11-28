@@ -43,11 +43,12 @@ func forgejoDriftTarget(obj map[string]any) (driftTarget, error) {
 }
 
 // compareForgejoDrift compares each Forgejo manifest object with the live object
-// its kind names, and prints each difference in compareClusterDrift's form. differed
-// reports that a line was printed. A refused target, a failed read, an object the
-// cluster does not hold and a Differences error each end the compare with an error
-// naming the object, until a later change reports absence as drift.
-func compareForgejoDrift(ctx context.Context, d clusterDriftDeps, objects []map[string]any) (differed bool, err error) {
+// its kind names, and prints each difference in compareClusterDrift's form. A line
+// an exception explains prints as explained and does not set differed. An object
+// the cluster does not hold prints one line and sets differed, and the compare goes
+// on. A refused target, a failed read and a Differences error each end the compare
+// with an error naming the object.
+func compareForgejoDrift(ctx context.Context, d clusterDriftDeps, objects []map[string]any, exceptions []driftException) (differed bool, err error) {
 	if d.kubectl == nil {
 		return false, errors.New("no kubectl read runner is wired, so no Forgejo object can be compared; nothing was read")
 	}
@@ -61,16 +62,22 @@ func compareForgejoDrift(ctx context.Context, d clusterDriftDeps, objects []map[
 			return differed, fmt.Errorf("cannot compare the Forgejo object %s: %w", forgejoObjectLabel(obj), err)
 		}
 		if absent {
-			return differed, fmt.Errorf("cannot compare the Forgejo object %s: the cluster does not hold %s, so it was not read", forgejoObjectLabel(obj), t.resource)
+			fmt.Fprintf(d.out, "%s: the object is absent from the cluster\n", t.resource)
+			differed = true
+			continue
 		}
 		lines, err := forgejoserver.Differences(obj, live)
 		if err != nil {
 			return differed, fmt.Errorf("cannot compare the Forgejo object %s: %w", forgejoObjectLabel(obj), err)
 		}
-		for _, line := range lines {
+		unexplained, explained := filterExplained(lines, t.exceptionObject(), exceptions)
+		for _, line := range unexplained {
 			fmt.Fprintf(d.out, "%s: %s\n", t.resource, line)
 		}
-		differed = differed || len(lines) > 0
+		for _, line := range explained {
+			fmt.Fprintf(d.out, "%s: explained: %s\n", t.resource, line)
+		}
+		differed = differed || len(unexplained) > 0
 	}
 	return differed, nil
 }
