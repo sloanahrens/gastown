@@ -25,19 +25,20 @@ func cacheTrimParkKey(namespace, claim string) string {
 
 // cacheTrimFailedKey is the failure's attention item key. It carries its own
 // prefix so the no-op sweeps, which clear by the cache-trim-noop: prefix, leave
-// a parked claim's failure raised until the daemon restarts.
+// a parked claim's failure raised until the park is released or the daemon
+// restarts.
 func cacheTrimFailedKey(namespace, claim string) string {
 	return cacheTrimFailedKeyPrefix + cacheTrimParkKey(namespace, claim)
 }
 
-// cacheTrimPark records that claim's trim failed and parks it for the life of
-// the process: cacheTrimParked then reports true for it and only a daemon
-// restart clears the park. It raises one attention item under the failure key
-// with the cause's first line, and logs one line naming the stage the cause
-// came from, so a failure is announced once instead of retried on a timer
-// (gt-o3jzx7). The item shares the no-op collector's kind, which is what serves
-// it to the queue; its own key keeps it out of the no-op sweeps. Nothing calls
-// it yet (bead 9/10 is the caller).
+// cacheTrimPark records that claim's trim failed and parks it until a daemon
+// restart or a person's release request frees it: cacheTrimParked then reports
+// true for it. It raises one attention item under the failure key with the
+// cause's first line, and logs one line naming the stage the cause came from, so
+// a failure is announced once instead of retried on a timer (gt-o3jzx7). The
+// item shares the no-op collector's kind, which is what serves it to the queue;
+// its own key keeps it out of the no-op sweeps. It is called by the claim's
+// trim pass, at the failure that parks it.
 func (d *Daemon) cacheTrimPark(namespace, claim string, cause error) {
 	d.cacheTrimParksMu.Lock()
 	if d.cacheTrimParks == nil {
@@ -50,18 +51,57 @@ func (d *Daemon) cacheTrimPark(namespace, claim string, cause error) {
 		Key:      cacheTrimFailedKey(namespace, claim),
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityMedium,
-		Summary: fmt.Sprintf("cache trim of %s in %s failed: %s; PARKED until the daemon restarts",
+		Summary: fmt.Sprintf("cache trim of %s in %s failed: %s; PARKED until the daemon restarts or a release request frees it",
 			claim, namespace, line),
 	})
-	d.logger.Printf("disk_maintenance: cache trim %s in %s: %s; PARKED until the daemon restarts", claim, namespace, line)
+	d.logger.Printf("disk_maintenance: cache trim %s in %s: %s; PARKED until the daemon restarts or a release request frees it", claim, namespace, line)
 }
 
-// cacheTrimParked reports whether the claim's trim is parked. Nothing calls it
-// yet (bead 9/10 is the caller, at the top of cacheTrimClaim).
+// cacheTrimUnparkPath is <town>/.runtime/cache-trim-unpark/<namespace>.<claim>:
+// the release request a person's command writes for one parked claim. Names are
+// DNS-1123 labels, so neither component can carry a path separator and the join
+// stays inside the directory. The daemon builds it only from the claim it is
+// judging, never from a listing of the directory.
+func cacheTrimUnparkPath(townRoot, namespace, claim string) string {
+	return filepath.Join(townRoot, ".runtime", "cache-trim-unpark", namespace+"."+claim)
+}
+
+// cacheTrimParked reports whether the claim's trim is parked, after first
+// honoring a release request for it. A request for a parked claim is removed,
+// its park and failure item are cleared, one line names the release, and it
+// reports not parked, so the pass that asked goes on to trim. A request for a
+// claim that is not parked is removed and logged, so it cannot release a later
+// failure. A request that cannot be removed leaves the claim parked, and a stat
+// that fails for another reason than absence leaves the park, each logging why
+// at most once an hour: a town that cannot answer is not read as a release.
+// Nothing in the daemon writes a request, and a claim that fails again parks
+// again.
+//
+// The park map is held across the whole read so a park raised beside a release
+// is never the one the request frees.
 func (d *Daemon) cacheTrimParked(namespace, claim string) bool {
 	d.cacheTrimParksMu.Lock()
 	defer d.cacheTrimParksMu.Unlock()
-	return d.cacheTrimParks[cacheTrimParkKey(namespace, claim)]
+	key := cacheTrimParkKey(namespace, claim)
+	path := cacheTrimUnparkPath(d.config.TownRoot, namespace, claim)
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the release request %s could not be read: %v", claim, namespace, path, err)
+		}
+		return d.cacheTrimParks[key]
+	}
+	if err := os.Remove(path); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the release request %s could not be removed: %v", claim, namespace, path, err)
+		return d.cacheTrimParks[key]
+	}
+	if !d.cacheTrimParks[key] {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: a release request named a claim that is not parked; removed it", claim, namespace)
+		return false
+	}
+	delete(d.cacheTrimParks, key)
+	d.cacheTrimNoOp.clear(cacheTrimFailedKey(namespace, claim))
+	d.logger.Printf("disk_maintenance: cache trim %s in %s: released by a request; the next pass trims it", claim, namespace)
+	return false
 }
 
 // cacheTrimCauseLine is the cause's first line, the stage and reason a failed
