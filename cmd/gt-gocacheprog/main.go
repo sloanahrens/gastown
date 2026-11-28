@@ -24,12 +24,13 @@ func main() {
 // run opens the journaled store under -dir, probes it for writability and
 // serves the requests on stdin. A close request evicts the store down to
 // -max-bytes before its answer is written, and the run's counts are appended to
-// <dir>/stats.jsonl. It returns 0, or names the failing step in one stderr line
-// and returns 1 (gt-6i1x13, gt-dpjby4, gt-n9cohm). A stats line that cannot be
-// written is reported in one stderr line and leaves the exit status to the
-// session (gt-l4bzgs). An eviction that fails adds 1 to the line's errors and
-// one stderr line, and a journal close this run makes that fails adds 1; both
-// leave the responses and exit status alone (gt-n9cohm).
+// <dir>/stats.jsonl with the eviction's figures when one ran. It returns 0, or
+// names the failing step in one stderr line and returns 1 (gt-6i1x13,
+// gt-dpjby4, gt-n9cohm, gt-p9mvuy). A stats line that cannot be written is
+// reported in one stderr line and leaves the exit status to the session
+// (gt-l4bzgs). An eviction that fails adds 1 to the line's errors and one
+// stderr line, and a journal close this run makes that fails adds 1; both leave
+// the responses and exit status alone (gt-n9cohm).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(dir string) error, now func() time.Time) int {
 	fs := flag.NewFlagSet("gt-gocacheprog", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -71,7 +72,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(di
 		fmt.Fprintf(stderr, "gt-gocacheprog: evict: %v\n", store.evictErr)
 		stats.Errors++
 	}
-	if err := appendStats(*dir, stats, start, now, openStats); err != nil {
+	if err := appendStats(*dir, stats, eviction{store.summary, *maxBytes, store.evictRan, store.evictMS}, start, now, openStats); err != nil {
 		fmt.Fprintf(stderr, "gt-gocacheprog: stats: %v\n", err)
 	}
 	if serveErr != nil {
@@ -88,31 +89,51 @@ type session struct {
 	maxBytes int64
 	now      func() time.Time
 	journal  *gocacheprog.Journal
+	summary  gocacheprog.Summary
+	evictRan bool
+	evictMS  int64
 	evictErr error
 }
 
 // Close closes the journal, then evicts the store down to maxBytes. A failed
-// journal close is returned, so Serve counts it. An eviction error is kept for
-// run to report, since the close answer does not carry it (gt-n9cohm).
+// journal close is returned, so Serve counts it. The eviction's summary, that
+// it ran, its error and its duration are kept for run to write and report,
+// since the close answer carries none of them (gt-n9cohm, gt-p9mvuy).
 func (s *session) Close() error {
 	jerr := s.journal.Close()
-	_, _, s.evictErr = gocacheprog.Evict(s.dir, s.maxBytes, s.journal.Path(), s.now())
+	begin := s.now()
+	s.summary, s.evictRan, s.evictErr = gocacheprog.Evict(s.dir, s.maxBytes, s.journal.Path(), begin)
+	s.evictMS = s.now().Sub(begin).Milliseconds()
 	return jerr
+}
+
+// eviction is what the stats line needs: the -max-bytes cap, the summary, and the duration on the injected clock (gt-p9mvuy).
+type eviction struct {
+	summary gocacheprog.Summary
+	cap     int64
+	ran     bool
+	ms      int64
 }
 
 // statsFileName is the file each run appends its counts to (gt-l4bzgs).
 const statsFileName = "stats.jsonl"
 
 // appendStats appends one line of counts to dir/stats.jsonl, timed from start
-// to now. open is a seam, as probeWritable's are, so a test drives an open,
-// write or close failure in process. The line goes to a file opened for append
-// in one write, so processes sharing the directory do not interleave. Its
-// fields are integers and a UTC RFC 3339 time, which %q quotes as JSON does
-// (gt-l4bzgs).
-func appendStats(dir string, stats gocacheprog.Stats, start time.Time, now func() time.Time, open func(string) (io.WriteCloser, error)) error {
-	line := fmt.Sprintf(`{"gets":%d,"hits":%d,"misses":%d,"puts":%d,"put_bytes":%d,"hit_bytes":%d,"errors":%d,"start":%q,"elapsed_ms":%d}`+"\n",
-		stats.Gets, stats.Hits, stats.Misses, stats.Puts, stats.PutBytes, stats.HitBytes,
-		stats.Errors, start.UTC().Format(time.RFC3339), now().Sub(start).Milliseconds())
+// to now, and writes e's eight figures only when e.ran, so a line without an
+// eviction holds none of them (gt-p9mvuy). open is a seam, as probeWritable's
+// are, so a test drives an open, write or close failure in process. The line
+// goes to a file opened for append in one write, so processes sharing the
+// directory do not interleave. Its fields are integers and a UTC RFC 3339 time,
+// which %q quotes as JSON does (gt-l4bzgs).
+func appendStats(dir string, stats gocacheprog.Stats, e eviction, start time.Time, now func() time.Time, open func(string) (io.WriteCloser, error)) error {
+	line := fmt.Sprintf(`{"gets":%d,"hits":%d,"misses":%d,"puts":%d,"put_bytes":%d,"hit_bytes":%d,"errors":%d`,
+		stats.Gets, stats.Hits, stats.Misses, stats.Puts, stats.PutBytes, stats.HitBytes, stats.Errors)
+	if e.ran {
+		line += fmt.Sprintf(`,"entries":%d,"total_bytes":%d,"young_bytes":%d,"cap_bytes":%d,"over_in_use_bytes":%d,"evicted_entries":%d,"evicted_bytes":%d,"evict_ms":%d`,
+			e.summary.Entries, e.summary.TotalBytes, e.summary.YoungBytes, e.cap,
+			e.summary.OverInUseBytes, e.summary.EvictedEntries, e.summary.EvictedBytes, e.ms)
+	}
+	line += fmt.Sprintf(`,"start":%q,"elapsed_ms":%d}`+"\n", start.UTC().Format(time.RFC3339), now().Sub(start).Milliseconds())
 	f, err := open(filepath.Join(dir, statsFileName))
 	if err != nil {
 		return err

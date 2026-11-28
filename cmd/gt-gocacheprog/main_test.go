@@ -269,7 +269,8 @@ func TestProgSession(t *testing.T) {
 	}
 }
 
-// statsLine is one line of dir/stats.jsonl, decoded.
+// statsLine is one line of dir/stats.jsonl, decoded; its eviction figures
+// promote from evictFigures (gt-p9mvuy).
 type statsLine struct {
 	Gets      int    `json:"gets"`
 	Hits      int    `json:"hits"`
@@ -280,7 +281,37 @@ type statsLine struct {
 	Errors    int    `json:"errors"`
 	Start     string `json:"start"`
 	ElapsedMS int64  `json:"elapsed_ms"`
+	evictFigures
 }
+
+// evictFigures holds a line's eight figures as pointers, so absent and zero differ (gt-p9mvuy).
+type evictFigures struct {
+	Entries        *int64 `json:"entries"`
+	TotalBytes     *int64 `json:"total_bytes"`
+	YoungBytes     *int64 `json:"young_bytes"`
+	CapBytes       *int64 `json:"cap_bytes"`
+	OverInUseBytes *int64 `json:"over_in_use_bytes"`
+	EvictedEntries *int64 `json:"evicted_entries"`
+	EvictedBytes   *int64 `json:"evicted_bytes"`
+	EvictMS        *int64 `json:"evict_ms"`
+}
+
+// evictionFigures returns s's eight figures in goal order, and false when the
+// line holds none of them (gt-p9mvuy).
+func evictionFigures(s statsLine) ([8]int64, bool) {
+	ps := [8]*int64{s.Entries, s.TotalBytes, s.YoungBytes, s.CapBytes, s.OverInUseBytes, s.EvictedEntries, s.EvictedBytes, s.EvictMS}
+	var e [8]int64
+	for i, p := range ps {
+		if p == nil {
+			return e, false
+		}
+		e[i] = *p
+	}
+	return e, true
+}
+
+// i64 returns a pointer to n, for a statsLine's eviction figures.
+func i64(n int64) *int64 { return &n }
 
 // readStats decodes every line of the stats file in dir.
 func readStats(t *testing.T, dir string) []statsLine {
@@ -347,7 +378,8 @@ func TestStatsLineSessions(t *testing.T) {
 		t.Errorf("failing session stderr = %q, want one line naming a malformed request", got)
 	}
 	want := []statsLine{
-		{Gets: 2, Hits: 1, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 5, Start: "2026-01-02T03:04:05Z", ElapsedMS: 2000},
+		{Gets: 2, Hits: 1, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 5, Start: "2026-01-02T03:04:05Z", ElapsedMS: 2000,
+			evictFigures: evictFigures{Entries: i64(1), TotalBytes: i64(5), YoungBytes: i64(5), CapBytes: i64(1024), OverInUseBytes: i64(0), EvictedEntries: i64(0), EvictedBytes: i64(0), EvictMS: i64(0)}},
 		{Start: "2026-01-02T03:04:07Z", ElapsedMS: 3000},
 		{Start: "2026-01-02T03:04:10Z", ElapsedMS: 1000},
 	}
@@ -411,7 +443,7 @@ func TestStatsLineRefusals(t *testing.T) {
 		"write refused": func(string) (io.WriteCloser, error) { return fakeStatsFile{writeErr: boom}, nil },
 		"close refused": func(string) (io.WriteCloser, error) { return fakeStatsFile{closeErr: boom}, nil },
 	} {
-		if err := appendStats(t.TempDir(), gocacheprog.Stats{}, start, time.Now, open); !errors.Is(err, boom) {
+		if err := appendStats(t.TempDir(), gocacheprog.Stats{}, eviction{}, start, time.Now, open); !errors.Is(err, boom) {
 			t.Errorf("%s = %v, want %v", name, err, boom)
 		}
 	}
@@ -427,6 +459,35 @@ const (
 // fixedClock returns a clock that always reads t.
 func fixedClock(t time.Time) func() time.Time {
 	return func() time.Time { return t }
+}
+
+// TestProgEvictStatsLine: a session whose close evicts writes the eight figures
+// from the summary, the cap and the eviction's own clock span. The clock steps
+// by a fixed amount per read, so the two reads around the eviction differ by
+// that step and evict_ms is not a constant (gt-p9mvuy).
+func TestProgEvictStatsLine(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var mu sync.Mutex
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now := at
+		at = at.Add(250 * time.Millisecond)
+		return now
+	}
+	log := &answerLog{ready: make(chan struct{})}
+	if code, stderr := putThenClose(dir, clock, log, log); code != 0 || stderr != "" {
+		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr)
+	}
+	got := readStats(t, dir)
+	if len(got) != 1 {
+		t.Fatalf("stats lines = %+v, want one", got)
+	}
+	if e, ok := evictionFigures(got[0]); !ok || e != [8]int64{1, 5, 5, 4, 0, 1, 5, 250} {
+		t.Errorf("figures = %v (all present %v), want entries 1, total 5, young 5, cap 4, over 0, evicted 1/5, 250ms", e, ok)
+	}
 }
 
 // handshakeThen returns the handshake and then one answer carrying id, as a
@@ -521,6 +582,11 @@ func TestProgEvictWithinInterval(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("body at %q after the second session: %v, want it kept", path, err)
 	}
+	if got := readStats(t, dir); len(got) != 2 {
+		t.Errorf("stats lines = %+v, want the two sessions'", got)
+	} else if e, ok := evictionFigures(got[1]); ok {
+		t.Errorf("refused session's figures = %v: want none, since its eviction did not run", e)
+	}
 }
 
 // journalSwap replaces the journal file with a non-empty directory of its name
@@ -597,6 +663,8 @@ func TestProgEvictErrorRanFalse(t *testing.T) {
 	}
 	if got := readStats(t, dir); len(got) != 1 || got[0].Errors != 1 {
 		t.Errorf("stats lines = %+v, want one line with errors 1", got)
+	} else if e, ok := evictionFigures(got[0]); ok {
+		t.Errorf("figures = %v: want none, since the eviction did not run", e)
 	}
 }
 
@@ -625,6 +693,8 @@ func TestProgEvictErrorRanTrue(t *testing.T) {
 	}
 	if got := readStats(t, dir); len(got) != 1 || got[0].Errors != 1 {
 		t.Errorf("stats lines = %+v, want one line with errors 1", got)
+	} else if e, ok := evictionFigures(got[0]); !ok || e != [8]int64{0, 0, 0, 4, 0, 0, 0, 0} {
+		t.Errorf("figures = %v (all present %v), want entries 0, total 0, young 0, cap 4, over 0, evicted 0/0, 0ms", e, ok)
 	}
 }
 
