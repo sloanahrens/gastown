@@ -52,6 +52,10 @@ const (
 	ciCacheContainer  = "dind"
 	ciCachePodLabel   = "app.kubernetes.io/name=" + ciCacheDeployment
 
+	// ciCacheAuxDeployment is the aux runner's Deployment (gt-juwsv6), in the same
+	// namespace and container. No pass runs over it yet.
+	ciCacheAuxDeployment = "forgejo-runner-aux"
+
 	// ciCacheDindMount is where the dind container mounts its data claim: the
 	// Docker data root the named volumes live under.
 	ciCacheDindMount = "/var/lib/docker"
@@ -194,8 +198,31 @@ func ciCacheNoOpKeyOf(v ciCacheVolume) string {
 	return ciCacheNoOpKey + "-" + v.name
 }
 
-// ciCacheExecTarget is the cluster and the runner pod a pass's execs go to.
+// ciCacheRunner is one forgejo runner whose dind container holds the caches: the
+// namespace and Deployment its pods run in, and the container the exec goes into.
+// TestCICacheTrimRunnersMatchTheirRenders holds each entry to its render.
+type ciCacheRunner struct {
+	namespace  string
+	deployment string
+	container  string
+}
+
+// ciCacheGateRunner is the gate runner, the one every pass runs over.
+var ciCacheGateRunner = ciCacheRunner{namespace: ciCacheNamespace, deployment: ciCacheDeployment, container: ciCacheContainer}
+
+// ciCacheAuxRunner is the aux runner (gt-juwsv6). A pass does not run over it yet.
+var ciCacheAuxRunner = ciCacheRunner{namespace: ciCacheNamespace, deployment: ciCacheAuxDeployment, container: ciCacheContainer}
+
+// podLabel selects the runner's pods by the app.kubernetes.io/name label its
+// Deployment stamps on them.
+func (r ciCacheRunner) podLabel() string {
+	return "app.kubernetes.io/name=" + r.deployment
+}
+
+// ciCacheExecTarget is the cluster, the runner and the runner pod a pass's execs
+// go to.
 type ciCacheExecTarget struct {
+	runner      ciCacheRunner
 	kubeconfig  string
 	kubeContext string
 	pod         string
@@ -756,7 +783,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
-	pod, err := d.ciCacheTrimPod(ctx, kubeconfig, kubeContext)
+	pod, err := d.ciCacheTrimPod(ctx, ciCacheGateRunner, kubeconfig, kubeContext)
 	if err != nil {
 		kind := "pod listing"
 		if errors.Is(err, errCICacheTrimNotRunning) {
@@ -767,7 +794,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		return false
 	}
 
-	at := ciCacheExecTarget{kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
+	at := ciCacheExecTarget{runner: ciCacheGateRunner, kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
 	verdict := true
 	for _, v := range due {
 		// The lru volume's cap is the setting, in the same KiB the volume is
@@ -839,7 +866,7 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		d.ciCacheTrimLogf("program refused "+v.name, "disk_maintenance: ci cache trim: %s: the volume's program could not be built: %v; nothing trimmed", v.name, err)
 		return false, fmt.Sprintf("the volume's program could not be built: %v", err)
 	}
-	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--", "sh"}, program...)
+	args := append([]string{"exec", "-n", at.runner.namespace, at.pod, "-c", at.runner.container, "--", "sh"}, program...)
 	started := d.diskMaintenanceSeams().now()
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
 	ended := d.diskMaintenanceSeams().now()
@@ -1010,13 +1037,13 @@ type ciCacheContainerStatus struct {
 	} `json:"state"`
 }
 
-// ciCacheTrimPod names a runner pod whose dind container is running, the one the
-// exec goes into, in either the container statuses or, for a native sidecar, the
+// ciCacheTrimPod names a pod of runner whose container is running, the one the exec
+// goes into, in either the container statuses or, for a native sidecar, the
 // initContainerStatuses. A reply with no item list refuses, because an unreadable
 // reply would read as no runner at all.
-func (d *Daemon) ciCacheTrimPod(ctx context.Context, kubeconfig, kubeContext string) (string, error) {
+func (d *Daemon) ciCacheTrimPod(ctx context.Context, runner ciCacheRunner, kubeconfig, kubeContext string) (string, error) {
 	out, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
-		"get", "pods", "-n", ciCacheNamespace, "-l", ciCachePodLabel, "-o", "json")
+		"get", "pods", "-n", runner.namespace, "-l", runner.podLabel(), "-o", "json")
 	if err != nil {
 		return "", fmt.Errorf("the runner's pods could not be read: %w: %s", err, lastLine(string(stderr)))
 	}
@@ -1043,7 +1070,7 @@ func (d *Daemon) ciCacheTrimPod(ctx context.Context, kubeconfig, kubeContext str
 		}
 		for _, statusList := range [][]ciCacheContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
 			for _, c := range statusList {
-				if c.Name == ciCacheContainer && c.State.Running != nil {
+				if c.Name == runner.container && c.State.Running != nil {
 					return pod.Metadata.Name, nil
 				}
 			}

@@ -1243,7 +1243,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) (verdict bool, 
 		return false, ciEngineReasonLine(err.Error())
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
-	pod, err := d.ciCacheTrimPod(ctx, kubeconfig, kubeContext)
+	pod, err := d.ciCacheTrimPod(ctx, ciCacheGateRunner, kubeconfig, kubeContext)
 	if err != nil {
 		// The lookup's error can carry kubectl's stderr, so only the sentinel's text
 		// or the exit status is logged and carried.
