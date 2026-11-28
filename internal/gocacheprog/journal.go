@@ -2,10 +2,13 @@ package gocacheprog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // Record kinds: the start line opens a journal, put and use follow it.
@@ -27,15 +30,28 @@ type Record struct {
 // JournalContents is what ReadJournal reads from one journal file.
 type JournalContents struct {
 	Start       time.Time
+	Live        bool // a process held the journal's lock when ReadJournal probed it
 	Records     []Record
 	Undecodable int // lines after the start line that are not a well-formed put or use
 }
 
 // ReadJournal reads the journal at path. The first line must be a start line.
+// Before it reads, it probes and releases the journal's lock; Live reports a held lock.
+// A journal locked when it appeared and found unlocked here gets no further writes.
+// A probe failure other than a held lock is an error naming the path and the lock probe.
 // A last line with no newline is skipped, since its writer may still be writing
 // it; other lines that are not a well-formed put or use are counted in Undecodable.
 func ReadJournal(path string) (JournalContents, error) {
 	var out JournalContents
+	unlock, err := lock.FlockTryAcquireExisting(path)
+	switch {
+	case errors.Is(err, lock.ErrFlockHeld):
+		out.Live = true
+	case err != nil:
+		return out, fmt.Errorf("gocacheprog: journal %s: lock probe: %w", path, err)
+	default:
+		unlock()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return out, fmt.Errorf("gocacheprog: journal %s: %w", path, err)
