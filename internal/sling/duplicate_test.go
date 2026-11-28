@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -131,5 +132,56 @@ func TestDuplicateRefusalIsAnAutomaticDispatchersRefusal(t *testing.T) {
 	}
 	if _, ok := dispatch.SlingRefusalLine(err.Error()); !ok {
 		t.Errorf("SlingRefusalLine does not classify the duplicate report as a refusal:\n%s", err)
+	}
+}
+
+// TestDuplicateHandoffNeverBlocks is the gt-587vw6 bar: a handoff note refuses
+// no sling whatever its status, under either label spelling. The same peers
+// without the label refuse as before, and a look-alike label still blocks.
+func TestDuplicateHandoffNeverBlocks(t *testing.T) {
+	t.Parallel()
+	candidate := Duplicate{ID: "gt-new", Status: "open", Priority: 2, CreatedAt: "2026-10-15T12:00:00Z"}
+	for _, tc := range []struct {
+		labels []string
+		want   bool
+	}{
+		{[]string{"handoff"}, false},
+		{[]string{"gt:handoff"}, false},
+		{nil, true},
+		{[]string{"bird-filed"}, true},
+		{[]string{"handoffs"}, true},
+	} {
+		for _, status := range []string{"in_progress", "hooked", "open"} {
+			// Priority 1 and an earlier creation put an open peer ahead of the
+			// candidate, so only the label can clear it.
+			match := DuplicateMatch{
+				Bead: Duplicate{ID: "gt-peer", Status: status, Priority: 1, CreatedAt: "2026-10-15T09:00:00Z",
+					Ready: Readiness{Labels: tc.labels}},
+				SharedTests: []string{"TestCacheTrim"},
+			}
+			if got := match.Blocking(candidate); got != tc.want {
+				t.Errorf("%s peer labelled %v: Blocking = %v, want %v", status, tc.labels, got, tc.want)
+			}
+		}
+	}
+}
+
+// TestDuplicateHandoffIsStillReported: the handoff overlap is admitted, not
+// dropped, so the report still names the bead and the test it shares.
+func TestDuplicateHandoffIsStillReported(t *testing.T) {
+	t.Parallel()
+	candidate := Duplicate{ID: "gt-wc1kin", Status: "open", Priority: 2}
+	matches := []DuplicateMatch{{
+		Bead:        Duplicate{ID: "gt-handoff", Status: "in_progress", Ready: Readiness{Labels: []string{"gt:handoff"}}},
+		SharedTests: []string{"TestCacheTrim"},
+	}}
+	decision := DecideDuplicates(candidate, matches)
+	if decision.Blocked {
+		t.Fatalf("handoff overlap refused the sling:\n%s", decision.Message)
+	}
+	for _, want := range []string{"gt-handoff", "shared test: TestCacheTrim"} {
+		if !strings.Contains(decision.Message, want) {
+			t.Errorf("report does not name the handoff overlap (missing %q):\n%s", want, decision.Message)
+		}
 	}
 }

@@ -60,6 +60,12 @@ func namesPolecatSeat(assignee string) bool {
 	return false
 }
 
+// IsHandoffLabel exports isHandoffLabel to the sling guard, so both read one
+// rule (gt-587vw6).
+func IsHandoffLabel(label string) bool {
+	return isHandoffLabel(label)
+}
+
 // isHandoffLabel reports whether one label marks a bead as a handoff note. The
 // town spells it both ways: a crew session's bead wears "handoff", and the
 // runtime families carry "gt:handoff" (capacity.LabelHandoff in
