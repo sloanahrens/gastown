@@ -1330,6 +1330,32 @@ func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxT
 	return cause
 }
 
+// forgejoPolecatProvider is what a per-seat profile replaces in the create
+// request; forgejoSeatProviderPrefix begins the seat's own forgejo-seat-<polecat> (gt-9x9wv8).
+const (
+	forgejoPolecatProvider    = "forgejo-polecat"
+	forgejoSeatProviderPrefix = "forgejo-seat-"
+)
+
+// createProviders is the create request's provider list: with ForgejoPerSeat
+// on, forgejo-polecat becomes this seat's forgejo-seat-<polecat>, in place and
+// without touching the profile's slice; otherwise it is the profile's list
+// (gt-9x9wv8).
+func (b *openshellBackend) createProviders(polecat string) []string {
+	if !b.profile.ForgejoPerSeat {
+		return b.profile.Providers
+	}
+	seat := forgejoSeatProviderPrefix + strings.ToLower(polecat)
+	providers := make([]string, 0, len(b.profile.Providers))
+	for _, p := range b.profile.Providers {
+		if p == forgejoPolecatProvider {
+			p = seat
+		}
+		providers = append(providers, p)
+	}
+	return providers
+}
+
 // createSpec is the `sandbox create` for spec: the profile's image, policy,
 // providers and sizing, the identity labels, the env contract, and the
 // main process that keeps the tmux server alive.
@@ -1349,7 +1375,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec, tracker sandboxTracker) (s
 		Name:       spec.Session,
 		Image:      b.profile.Image,
 		PolicyPath: policy,
-		Providers:  b.profile.Providers,
+		Providers:  b.createProviders(spec.Polecat),
 		CPU:        b.profile.CPU,
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
