@@ -388,6 +388,50 @@ func TestFinish_DoltCatalogGuardFailsLoud(t *testing.T) {
 	}
 }
 
+// TestHermeticDoltPoolInits: the count reaches the seam before the container
+// starts in either option order; without the option the seam is not called;
+// a seam error is StartHermetic's error and no container starts.
+func TestHermeticDoltPoolInits(t *testing.T) {
+	t.Parallel()
+	errSet := errors.New("fake: pool refused")
+	for _, tc := range []struct {
+		name    string
+		opts    []HermeticOption
+		refuse  error
+		wantErr error
+		want    []int // seam calls when the container starts
+	}{
+		{"dolt first", []HermeticOption{WithDolt(), WithDoltPoolInits(5)}, nil, nil, []int{5}},
+		{"pool inits first", []HermeticOption{WithDoltPoolInits(5), WithDolt()}, nil, nil, []int{5}},
+		{"absent", []HermeticOption{WithDolt()}, nil, nil, nil},
+		{"seam error", []HermeticOption{WithDoltPoolInits(0), WithDolt()}, errSet, errSet, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeHarness(t, goEnvSet...)
+			f.poolInitsErr = tc.refuse
+			started, atStart := false, []int(nil)
+			f.ensureDolt = func() error {
+				started, atStart = true, slices.Clone(f.poolInits)
+				return errors.New("simulated: no container")
+			}
+
+			h, err := f.startHermetic(tc.opts...)
+			if err == nil {
+				defer h.Finish(0)
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("StartHermetic error = %v, want %v", err, tc.wantErr)
+			}
+			if started != (tc.wantErr == nil) {
+				t.Errorf("container started = %v, want %v", started, tc.wantErr == nil)
+			}
+			if !slices.Equal(atStart, tc.want) {
+				t.Errorf("seam calls when the container started = %v, want %v", atStart, tc.want)
+			}
+		})
+	}
+}
+
 // processHost wires the Dolt pool's template-count seam; the fake records each
 // number and returns its set error. 0 is refused without writing the setting.
 func TestHermeticProcessHostSetsPoolInitsSeam(t *testing.T) {

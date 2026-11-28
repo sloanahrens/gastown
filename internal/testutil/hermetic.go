@@ -174,6 +174,9 @@ type hermeticConfig struct {
 	dolt       bool
 	noGit      bool
 	allowTools []string
+	// poolInits is WithDoltPoolInits's count, used only when poolInitsSet.
+	poolInits    int
+	poolInitsSet bool
 }
 
 // HermeticOption configures StartHermetic/HermeticMain.
@@ -187,6 +190,14 @@ type HermeticOption func(*hermeticConfig)
 // not start fails StartHermetic.
 func WithDolt() HermeticOption {
 	return func(c *hermeticConfig) { c.dolt = true }
+}
+
+// WithDoltPoolInits sets how many template databases the shared Dolt test pool
+// lays out, before any container starts (WithDolt's, or a later
+// RequireDoltContainer's). A count SetDoltPoolInits refuses is StartHermetic's
+// error.
+func WithDoltPoolInits(n int) HermeticOption {
+	return func(c *hermeticConfig) { c.poolInits, c.poolInitsSet = n, true }
 }
 
 // WithoutGit puts a git on PATH that refuses to run, ahead of the real one.
@@ -317,6 +328,13 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 	h := &Hermetic{host: host}
 	for _, opt := range opts {
 		opt(&h.cfg)
+	}
+
+	// Before anything that can start the container, whatever the option order.
+	if h.cfg.poolInitsSet {
+		if err := host.setDoltPoolInits(h.cfg.poolInits); err != nil {
+			return nil, err
+		}
 	}
 
 	// Identify the live town BEFORE scrubbing env or redirecting anything.
