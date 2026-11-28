@@ -105,7 +105,7 @@ func main() {
 
 // osSurface is the real process.
 func osSurface() surface {
-	return surface{
+	s := surface{
 		getenv:   os.Getenv,
 		environ:  os.Environ,
 		getwd:    os.Getwd,
@@ -180,12 +180,16 @@ func osSurface() surface {
 		},
 		executable: os.Executable,
 		newCallLog: osCallLog,
-		newDoctor: func(town string) gtwrap.Doctor {
-			return cutoverDoctor{town: town, shell: gtwrap.OSShell{}, read: os.ReadFile, report: os.Stderr}
-		},
-		native: gtwrap.OSProcess{},
-		git:    gtwrap.OSGit,
+		native:     gtwrap.OSProcess{},
+		git:        gtwrap.OSGit,
 	}
+	s.newDoctor = func(town string) gtwrap.Doctor { return installDoctor(s, town) }
+	return s
+}
+
+// installDoctor is install's doctor for a town, built from the surface the run reads.
+func installDoctor(s surface, town string) cutoverDoctor {
+	return cutoverDoctor{surface: s, town: town, shell: gtwrap.OSShell{}, read: s.readFile, report: s.stderr}
 }
 
 // run is main with its process injected. argv[0] is the installed name: the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -353,12 +354,14 @@ func (s *cutoverShell) Capture(ctx context.Context, argv []string) (string, int,
 func TestCLICutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
 	t.Parallel()
 	const compose = "services:\n  daemon:\n    image: \"gt-daemon:7f3e9a1\"\n    container_name: \"gt-daemon\"\n"
+	h := newHarness(t)
 	shell := &cutoverShell{}
 	doctor := cutoverDoctor{
-		town:  "/Users/operator/gt",
-		shell: shell,
+		surface: h.surface,
+		town:    h.town,
+		shell:   shell,
 		read: func(path string) ([]byte, error) {
-			if path != "/Users/operator/gt/daemon/container/compose.yml" {
+			if path != filepath.Join(h.town, "daemon", "container", "compose.yml") {
 				return nil, errors.New("the compose file was read at " + path)
 			}
 			return []byte(compose), nil
@@ -370,6 +373,55 @@ func TestCLICutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
 	want := []string{"docker", "exec", "gt-daemon", "sh", "-c", `command -v "$1"`, "sh", "gt"}
 	if len(shell.captured) != 3 || !slices.Equal(shell.captured[2], want) {
 		t.Fatalf("docker lines = %q, want the probes then %q", shell.captured, want)
+	}
+}
+
+// TestCLICutoverInstallDoctorAsksTheClusterTarget: the production doctor asks
+// the configured target, not Docker, for a kubernetes config.
+func TestCLICutoverInstallDoctorAsksTheClusterTarget(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, kubernetesConfig)
+	h.fake.diag = gtwrap.Diagnosis{Rung: gtwrap.RungExec}
+	composeReads := 0
+	h.surface.readFile = func(path string) ([]byte, error) {
+		if strings.HasSuffix(path, "compose.yml") {
+			composeReads++
+		}
+		return os.ReadFile(path)
+	}
+
+	if err := installDoctor(h.surface, h.town).InImage("gt"); err != nil {
+		t.Fatalf("InImage(gt) = %v, want nil", err)
+	}
+	if !h.fake.doctored {
+		t.Fatal("the doctor never asked the configured target")
+	}
+	if composeReads != 0 {
+		t.Fatalf("the doctor read the compose file %d times, want none", composeReads)
+	}
+}
+
+// TestCLICutoverInstallRefusesADownClusterTarget: install stops on the
+// configured target's refusal before it touches the file.
+func TestCLICutoverInstallRefusesADownClusterTarget(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, kubernetesConfig)
+	h.fake.diag = gtwrap.Diagnosis{Rung: gtwrap.RungDown, Reason: "the daemon pod is not Running"}
+	h.surface.newDoctor = func(town string) gtwrap.Doctor { return installDoctor(h.surface, town) }
+	path := "/tools/gt"
+	h.files.add(path, "old gt", 0o755)
+	h.surface.executable = func() (string, error) { return "/src/gt-wrap", nil }
+
+	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--target", "gt="+path); exit != 1 {
+		t.Fatalf("run = %d, want 1; stderr: %s", exit, h.stderr)
+	}
+	if !strings.Contains(h.stderr.String(), "the daemon pod is not Running") {
+		t.Errorf("stderr %q does not name the target's reason", h.stderr)
+	}
+	if got := h.files.data(path); got != "old gt" {
+		t.Errorf("%s holds %q, want the file it had before the run", path, got)
 	}
 }
 

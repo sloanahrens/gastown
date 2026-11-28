@@ -160,23 +160,28 @@ func parseTarget(value string) (gtwrap.Target, error) {
 	return gtwrap.Target{Name: name, Path: path}, nil
 }
 
-// cutoverDoctor is install's doctor on the host: the docker ladder's answer on
-// whether a tool answers in the image, and the placed file's own --doctor. The
-// placed file's report goes to the operator's stderr, so install's stdout lists
-// only what it changed.
+// cutoverDoctor is install's doctor on the host: the configured target's answer
+// on whether a tool answers in the image, and the placed file's own --doctor.
+// The placed file's report goes to the operator's stderr, so install's stdout
+// lists only what it changed.
 type cutoverDoctor struct {
-	town   string
-	shell  gtwrap.Shell
-	read   func(string) ([]byte, error)
-	report io.Writer
+	// surface is the run's process; town is the host town whose compose file
+	// the docker check reads.
+	surface surface
+	town    string
+	shell   gtwrap.Shell
+	read    func(string) ([]byte, error)
+	report  io.Writer
 	// run runs argv as a process; nil runs it on the host. Tests inject it so
 	// the doctor's invocation is checked without starting a process.
 	run func(argv ...string) error
 }
 
-// InImage runs the wrapper's tool check through the docker ladder.
+// InImage asks the tool's configured target; the default target is docker.
 func (d cutoverDoctor) InImage(name string) error {
-	return gtwrap.Docker{Town: d.town, Shell: d.shell, ReadFile: d.read}.ToolExists(name)
+	return inImageFor(d.surface, name, func(name string) error {
+		return gtwrap.Docker{Town: d.town, Shell: d.shell, ReadFile: d.read}.ToolExists(name)
+	})
 }
 
 // Installed runs the file install placed as the tool it replaced.
