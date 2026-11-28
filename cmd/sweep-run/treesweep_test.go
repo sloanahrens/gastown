@@ -3,11 +3,40 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
+
+// TestTreeSweepIsWiredToTheRealSeams: the process wiring of the tree sweep is the
+// real directory, build and run seams and the process environment, so the sweep
+// the tree ships is built and run for real (gt-j5hpnk).
+func TestTreeSweepIsWiredToTheRealSeams(t *testing.T) {
+	t.Parallel()
+	env := []string{"PATH=/bin", "GT_SWEEP_RIG=gastown"}
+	ts := treeSweepWith(env)
+	for _, seam := range []struct {
+		name      string
+		got, want any
+	}{
+		{"MkdirTemp", ts.MkdirTemp, os.MkdirTemp},
+		{"RemoveAll", ts.RemoveAll, os.RemoveAll},
+		{"Build", ts.Build, tiersweep.ProcessBuildExec},
+		{"Run", ts.Run, runScript},
+	} {
+		if reflect.ValueOf(seam.got).Pointer() != reflect.ValueOf(seam.want).Pointer() {
+			t.Errorf("%s is not the process's seam", seam.name)
+		}
+	}
+	if !slices.Equal(ts.Environ, env) {
+		t.Errorf("Environ = %d entries, want the %d the process environment holds", len(ts.Environ), len(env))
+	}
+}
 
 // treeSweepFake holds what the fakes of one treeSweep were handed, and the
 // order of the calls, so a test can read the sequence the sweep ran in.

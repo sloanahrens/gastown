@@ -1,7 +1,7 @@
 // Command sweep-run is the entrypoint of the container that runs one rig's tier
 // sweep off the host: it clones the rig's bare repository at the commit, runs
-// the sweep the tree ships — internal/tiersweep in this process where the tree
-// has cmd/tier-sweep, else the rig's own tier script — and leaves result.json
+// the sweep the tree ships — the tree's cmd/tier-sweep, built from the tree and
+// run as a child process, else the rig's own tier script — and leaves result.json
 // and the logs in its output directory for the daemon to read (gt-dibnm).
 //
 //	sweep-run --rig R --sha S [--tiers a,b] [--jobs N] [--out DIR] [--repo DIR]
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/sweeprunner"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 func main() {
@@ -31,7 +32,7 @@ func processDeps() Deps { return depsWith(os.Environ()) }
 func depsWith(env []string) Deps {
 	return Deps{
 		Clone:       gitClone,
-		Sweep:       processSweep,
+		Sweep:       treeSweepWith(env).sweep,
 		TreeHas:     treeHas,
 		RunScript:   runScript,
 		WriteResult: sweeprunner.Write,
@@ -42,5 +43,21 @@ func depsWith(env []string) Deps {
 		Environ:     env,
 		Now:         time.Now,
 		Trim:        diskCacheTrim(sweepCacheRoot),
+	}
+}
+
+// treeSweepWith is the real wiring of the tree sweep: the directory and build
+// seams of the process, and the run of the built command. Build is the bounded
+// go build of tiersweep.ProcessBuildExec, so the tree's sweep gets its build
+// bound. Environ is the environment the build and the run start from, with the
+// sweep's overrides added on top (treeSweep.sweep). A test reads the value, as
+// it reads depsWith.
+func treeSweepWith(environ []string) treeSweep {
+	return treeSweep{
+		MkdirTemp: os.MkdirTemp,
+		RemoveAll: os.RemoveAll,
+		Build:     tiersweep.ProcessBuildExec,
+		Run:       runScript,
+		Environ:   environ,
 	}
 }
