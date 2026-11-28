@@ -1342,6 +1342,26 @@ func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxT
 	return cause
 }
 
+// refuseUnclaimed tears down the sandbox this spawn created when its claim was
+// refused before the lock was taken, so another writer may own the seat name.
+// Only the sandbox on this spawn's own gateway is deleted: no record is removed,
+// no seat token is revoked, and the claim and lock files are left to the writer
+// that holds them (om 379aab005f7e).
+//
+// The delete stays. This spawn's create returned success on this gateway
+// immediately before, and a gateway holds one sandbox per name, so the sandbox
+// there is this spawn's: another holder on this gateway could only have one if
+// ours had been removed in that instant. Left alone it would have neither claim
+// nor record and would block the name. Returns cause, naming a failed delete
+// beside it; a nil trace times nothing.
+func (b *openshellBackend) refuseUnclaimed(spec SpawnSpec, cause error, trace *SandboxTrace) error {
+	deleteErr := trace.Phase("teardown", func() error { return b.deleteSandbox(spec.Session) })
+	if deleteErr != nil {
+		return fmt.Errorf("%w (tearing down unclaimed sandbox %s: %v)", cause, spec.Session, deleteErr)
+	}
+	return cause
+}
+
 // forgejoPolecatProvider is what a per-seat profile replaces in the create
 // request; forgejoSeatProviderPrefix begins the seat's own forgejo-seat-<polecat> (gt-9x9wv8).
 const (
