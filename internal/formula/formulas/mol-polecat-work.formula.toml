@@ -21,11 +21,10 @@ state. Done means gone.
 when you run `gt prime` — there are no separate step beads to close. Work through
 the checklist, then run `gt done`.
 
-**Speed principle:** You run the cheap gates (build, typecheck, lint) AFTER
-rebasing onto the target branch (pre-verify step), and you submit with plain
-`gt done`. It rebases, runs the local gate (lint, build, the unit tier of
-the tests) and pushes; no flag skips that gate. The container suite runs once,
-on the merged tree, when the landing worker lands your branch.
+**Speed principle:** You write the code and submit; the gate runs every check.
+You never build, lint, vet, test or run anything, and never run go, make or a
+setup command: you run git, gt, bd and commands that only read files. `gt done`
+submits, and the landing worker gates the merged tree, container suite included.
 
 **Push as you go.** A seat pushes its own branch after every commit, so a stop
 at any point costs nothing and the next seat continues from the pushed branch:
@@ -47,17 +46,17 @@ a rejected ref) is noted and the work continues; `gt done` pushes again.
 |----------|--------|-------------|
 | issue | hook_bead | The issue ID you're assigned to work on |
 | base_branch | sling vars | The base branch to rebase on (default: main) |
-| setup_command | rig config | Setup/install command (e.g., `pnpm install`). Empty = skip. |
-| typecheck_command | rig config | Type check command (e.g., `tsc --noEmit`). Empty = skip. |
-| test_command | rig config | Test command. Empty = skip. Rig must configure for its language. |
-| lint_command | rig config | Lint command (e.g., `eslint .`). Empty = skip. |
-| build_command | rig config | Build command (e.g., `go build ./...`). Empty = skip. |
+| setup_command | rig config | Setup/install command (e.g., `pnpm install`). The landing gate runs the checks; a seat runs none of them. |
+| typecheck_command | rig config | Type check command (e.g., `tsc --noEmit`). The landing gate runs the checks; a seat runs none of them. |
+| test_command | rig config | Test command. Empty = skip. The landing gate runs the checks; a seat runs none of them. |
+| lint_command | rig config | Lint command (e.g., `eslint .`). The landing gate runs the checks; a seat runs none of them. |
+| build_command | rig config | Build command (e.g., `go build ./...`). The landing gate runs the checks; a seat runs none of them. |
 
 ## Failure Modes
 
 | Situation | Action |
 |-----------|--------|
-| Build fails | Fix it. Do not proceed if it won't compile. |
+| The landing gate fails | Fix from the rejection's excerpt (load-context step 3); do not guess. |
 | Blocked on external | `gt escalate`, then `gt done --status ESCALATED` |
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | `gt escalate`, don't guess |"""
@@ -98,10 +97,8 @@ landing worker rejected a previous polecat's work. A `Rejection unchanged`
 section says your branch still sits on the commit that refusal judged, so the
 same content is refused again: change it to answer the findings, or escalate
 if the refusal did not come from this diff.
-Read the failure details carefully:
-- **Failure-Type**: what broke (tests, build, lint, typecheck)
-- **Error**: the actual error output
-- **Branch**: the previous branch may still exist with the original work
+Fix from the excerpt of the failing gate log and the code it names: the seat cannot reproduce it, so a run here proves nothing.
+If the lines do not show the cause, `gt escalate` instead of guessing.
 
 If a prior branch exists, check it out instead of creating a new one:
 ```bash
@@ -225,17 +222,9 @@ alone, which is what you want. The same applies to `git stash` + `git reset` +
 `git stash pop` rituals: there is no sequence that needs a reset onto a
 remote-tracking ref.
 
-**6. Run project setup (if configured):**
+**6. Run no check here:** a setup command, a build, a typecheck, a linter and a test belong to the landing gate.
 
-If setup_command is set, run it to install dependencies:
-```bash
-{{setup_command}}
-```
-
-This ensures dependencies are installed before you start work.
-Empty setup_command means "not configured" — skip this step.
-
-**Exit criteria:** You're on a clean feature branch whose name embeds {{issue}}, rebased on latest {{base_branch}}, dependencies installed."""
+**Exit criteria:** You're on a clean feature branch whose name embeds {{issue}}, rebased on latest {{base_branch}}; you ran no check."""
 
 [[steps]]
 id = "implement"
@@ -259,6 +248,8 @@ implementing it and wait for a decision:
 - **NEVER run `sudo` or install system packages** (apt, dnf, yum, pacman, brew install,
   pip install --system, npm install -g). Use the tools already in your workspace.
   If a dependency is missing, file a bead — do not modify the host OS.
+- **Write each test with the change, so it fails without it**, and say in the
+  commit body what makes it fail: the landing gate runs the tests, you run none.
 
 **Persist findings as you go (CRITICAL for session survival):**
 Your session can die at any time (context limit, crash, SIGKILL). Code changes
@@ -432,16 +423,15 @@ Apply **Push as you go** after each commit.
 1. Requirements (9, 12): extend the plan from "Before you write code" in
    `scratch/plan.md` with the file:line of your diff that meets each Goal
    clause, Constraint, Out-of-scope line and Acceptance box. A line with none
-   is unfinished. If the bead's Gate does not run a package you edited, run
-   that package's tests yourself and say so in the commit body.
+   is unfinished. If the bead's Gate does not run a package you edited, say so
+   in the commit body: the landing gate runs every check, and you run none.
 2. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
    read every added `if err != nil` branch. Each hit returns, wraps or escalates; an unknown or unreadable input denies.
 3. Wiring (12): `D -- '*.go' | grep -E '^[+]func '`, then `grep -rn <name>` for a
    caller outside tests. Compare the Goal and each acceptance box with your plan.
 4. Red without the code (2, 3, 10): each added refusal branch and call has a test
-   row; delete the guard or call, run its `-run` test, see it fail, restore. A
-   guard or policy in YAML, CEL, a regex or a Dockerfile is run as that artifact,
-   never as a Go copy of its logic.
+   row that would fail without it; say in the commit body what makes it fail. A
+   YAML, CEL, regex or Dockerfile guard is run as that artifact, not a Go copy.
 5. Waits (13): `D -- '*_test.go' | grep -nE '^[+].*(<-[a-zA-Z]|[.]Wait[(][)]|time[.]Sleep|time[.]After|Setenv|Getenv|UserHomeDir|/tmp|exec[.]Command)'`
    is empty, or each hit sits in a `select` with a deadline or fake-clock case.
    Name what ends each cache, lock, retry, timeout or reset you added.
@@ -459,11 +449,10 @@ Apply **Push as you go** after each commit.
 git diff --stat origin/{{base_branch}}...HEAD
 # Only files named in your Constraints for {{issue}} should appear
 ```
-   For each `//go:build integration` file your diff reaches (`grep -rl 'go:build integration' --include='*.go' .`),
-   run `go vet -tags integration ./<pkg>/...`, and where the package's integration tests need no container,
-   run `go test -tags integration ./<pkg>/...`. Put the command and its outcome near the top of the commit
-   body (om reads commit bodies, not bead notes); for a tier that did not run, write that tier's real reason
-   as `integration tier not run: <reason>`. Report each package's result; never repeat one canned reason.
+   The landing gate runs the integration tier (`go vet -tags integration`,
+   `go test -tags integration`); name near the top of the commit body (om reads
+   commit bodies, not bead notes) each `//go:build integration` file your diff
+   reaches, and what makes its test fail.
 
 If you accidentally modified unrelated files, remove those changes.
 
@@ -478,80 +467,23 @@ for the build check."""
 
 [[steps]]
 id = "build-check"
-title = "Build and sanity check"
+title = "The landing gate's build check"
 needs = ["self-review"]
 description = """
-Verify your changes compile and pass basic sanity checks. The landing worker
-runs the full gate on the merged tree; your job is to catch obvious problems
-fast so a rejection does not cost a re-dispatch.
+You run no setup command, build, typecheck, lint or test: the landing gate runs
+them all; a rejected bead's failing lines come back in `Earlier rejections`, and
+the rework rule in load-context is how you fix them.
 
-**1. Build (REQUIRED — must pass):**
-
-If build_command is set:
-```bash
-{{build_command}}
-```
-
-If setup_command is set (ensure new deps are installed):
-```bash
-{{setup_command}}
-```
-
-If typecheck_command is set:
-```bash
-{{typecheck_command}}
-```
-
-Empty commands mean "not configured" — skip silently.
-
-**2. If build fails:**
-- Fix it. Return to implement step if needed.
-- Do NOT submit broken code for landing.
-
-**3. Targeted tests (OPTIONAL — run if fast and relevant):**
-
-If you modified or added test files, run THOSE tests with a `-run` filter to
-catch obvious regressions. Never a whole package of internal/cmd, daemon
-or polecat (3-10 minutes each; the guard refuses it) and never the full
-suite — the landing worker runs the suite once per submission and `gt done`
-tests the light packages you changed (gt-pxlg).
-
-```bash
-# Run only the tests you touched, in the package you changed
-go test ./internal/pkg/you/changed/ -run 'TestOne|TestTwo'
-# Or for JS: npx jest --testPathPattern="changed-file"
-```
-
-Container-backed tests (Dolt, testcontainers) are opt-in and skip unless
-`GT_TEST_DOCKER=1` is set, so a filtered run is bare, fast and never touches
-Docker or the container-gate slot. You normally do not need them: the
-landing worker runs them. If you must see one locally, opt in AND take the slot:
-```bash
-gt slot run --role <rig>/<your-name> -- env GT_TEST_DOCKER=1 go test ./internal/pkg/ -run TestThatOne
-```
-
-If you're unsure which tests are relevant, skip this — the landing gate will catch it.
-
-**4. Lint (OPTIONAL — run if configured and fast):**
-
-If lint_command is set:
-```bash
-{{lint_command}}
-```
-
-**Exit criteria:** Code compiles. Obvious regressions caught. Ready to submit."""
+**Exit criteria:** No check was run in this seat; the diff is committed."""
 
 [[steps]]
 id = "pre-verify"
 title = "Pre-merge rebase verification"
 needs = ["build-check"]
 description = """
-Rebase onto the target branch and run the CHEAP gates. Do not run the test
-suite here: `gt done` itself lints and tests the changed packages that spin
-no containers, and the landing worker runs the Docker-backed suite exactly
-once per submission (gt-yihz). A polecat running test_command as well
-duplicates that gate and, on the shared host, slows the landing gate down —
-three concurrent suites tripled a merge gate on 2026-09-17 (gt-d7ir).
+Rebase onto the target branch and read the diff the landing gate will see: you
+run no gate here, and the gate runs the Docker-backed suite once per submission
+(gt-yihz).
 
 **1. Fetch and rebase onto target:**
 ```bash
@@ -560,8 +492,8 @@ git rebase origin/{{base_branch}}
 ```
 
 If rebase conflicts:
-- Resolve them carefully
-- Re-run the build to ensure the resolution is correct
+- Resolve them carefully, reading the resolution against the code it touches
+- commit, and re-run `git rebase --continue` until the rebase finishes
 - If stuck, `gt escalate`
 
 After the rebase, confirm you are on YOUR branch and not a detached HEAD
@@ -570,40 +502,10 @@ After the rebase, confirm you are on YOUR branch and not a detached HEAD
 git switch -C <your-branch>
 ```
 
-**2. Run the cheap gates on the rebased result:**
+**2. Apply Push as you go with its force-with-lease form** after step 1's
+rebase, which replaces commits already pushed.
 
-If build_command is set:
-```bash
-{{build_command}}
-```
-
-If typecheck_command is set:
-```bash
-{{typecheck_command}}
-```
-
-If lint_command is set (gt done runs it again; fixing findings now saves a
-round trip):
-```bash
-{{lint_command}}
-```
-
-**Do NOT run {{test_command}} and do NOT run whole packages.** The landing
-worker runs the full suite once per submission and `gt done` tests the light
-packages you changed. If you want one more signal on the rebased result, run
-only the tests you touched with a `-run` filter, bare (container tests are
-opt-in via GT_TEST_DOCKER=1 and skip otherwise). Never the whole suite.
-
-Empty commands mean "not configured" — skip silently.
-
-**3. If a gate fails after rebase:** fix the issue, commit, and re-run from
-step 1. Apply **Push as you go** after that commit and after step 1's rebase.
-
-**4. Submit with plain `gt done` (next step).** It rebases onto
-{{base_branch}} again, runs the local gate and pushes. No flag skips the gate,
-and the landing worker gates the merged tree again before anything lands.
-
-**5. Confirm the branch contains only YOUR files:**
+**3. Confirm the branch contains only YOUR files:**
 ```bash
 git diff --stat origin/{{base_branch}}...HEAD     # three dots
 ```
@@ -618,8 +520,7 @@ reverting anyone's work. `gt done` prints this same stat and refuses a branch
 that undoes merged work.
 
 **Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, on your
-own branch (not detached), the three-dot stat lists only files you changed,
-build/typecheck/lint pass."""
+own branch (not detached), the three-dot stat lists only files you changed."""
 
 [[steps]]
 id = "submit-and-exit"
@@ -628,10 +529,13 @@ needs = ["pre-verify"]
 description = """
 Submit your work and clean up. You cease to exist after this step.
 
+**Run `gt done` last: it submits without checking your code.** The checks belong
+to the gates, never to the seat.
+
 **Self-Cleaning Model:**
 Once `gt done` succeeds, you're gone. The command:
 1. Rebases your branch onto origin/{{base_branch}} and squashes auto-save commits
-2. Runs the local gate (lint, build, the tests of the packages your branch changed)
+2. Runs its configured local gate
 3. Pushes your branch and marks {{issue}} ready to land
 4. Exits your session
 
@@ -646,6 +550,7 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 `gt done` will reject zero-commit branches for polecats.
 
 **Pre-flight: Tick the acceptance criteria your work satisfies.**
+A box is ticked when the change satisfies it as written; never write that a command passed.
 The landing worker rejects a bead with any `- [ ]` acceptance line left, after
 your session has retired. `gt done` refuses first and lists each unchecked
 line. Your acceptance list is in your seat's source (load-context). Resend the
@@ -681,9 +586,7 @@ and run `gt done` once more. If you believe a gate failure is not caused by
 your change, add a bead comment with the error, then `gt escalate -s medium`
 and wait. No flag skips the gate.
 
-**Do not run container suites yourself. Run the non-container packages, then
-gt done** — the landing worker runs the container suites on the merged tree.
-Before you run `gt slot run`, read the container-gate rule in `docs/reference.md`.
+**Run no container suite yourself:** the landing worker runs them on the merged tree; the container-gate rule is in `docs/reference.md`.
 
 **Run gt done:**
 ```bash

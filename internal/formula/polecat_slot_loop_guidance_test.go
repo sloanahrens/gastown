@@ -42,7 +42,7 @@ func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 					polecatFormulaDoneWaitVerbatim,
 					"gt escalate -s medium",
 					"No flag skips the gate.",
-					"Do not run container suites yourself. Run the non-container packages, then",
+					"Run no container suite yourself",
 				)
 			}
 			for _, want := range wants {
