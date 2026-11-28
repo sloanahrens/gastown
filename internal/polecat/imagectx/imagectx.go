@@ -203,8 +203,8 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 	for _, b := range []struct{ name, pkg string }{
 		{"gt", "./cmd/gt"},
 		{"polecat-image", "./plugins/polecat-image"},
-		{"sweep-run", "./cmd/sweep-run"},
 		{"gt-gocacheprog", "./cmd/gt-gocacheprog"},
+		{"sweep-run", "./cmd/sweep-run"},
 	} {
 		out := filepath.Join(in.Out, "bin", b.name)
 		if _, err := s.Go(in.Src, env, bdbuild.GoBuildArgv(out, b.pkg)...); err != nil {
