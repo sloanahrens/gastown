@@ -5,6 +5,39 @@ import (
 	"testing"
 )
 
+func TestControlPlaneHost(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, hosts, want, wantErr string
+	}{
+		{"the file's host", "control_plane_host: cp.example\n", "cp.example", ""},
+		{"unparsable file", "control_plane_host: [", "", "does not parse"},
+		{"no host", "registry_host: r\n", "", "no control_plane_host"},
+		{"host that is not a host name", "control_plane_host: \"a}\\n---\"\n", "", "not a host name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ControlPlaneHost([]byte(tc.hosts))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %v, want one containing %q", err, tc.wantErr)
+				}
+				if got != "" {
+					t.Errorf("returned the host %q despite the refusal", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("host = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderServicesRefusalsNameTheirCause(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

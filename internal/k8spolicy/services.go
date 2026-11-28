@@ -19,11 +19,10 @@ var ControlPlaneServiceNames = []string{"control-plane", "dolt", "forgejo", "tra
 // start another YAML document gets through.
 var externalNameOK = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-// RenderServices renders the control-plane Services of one environment from its
-// hosts.yaml (deploy/k8s/values/<env>/hosts.yaml): the file's control_plane_host
-// is the only place the host is written, so the checked-in Services cannot
-// drift from it (gt-ht5he).
-func RenderServices(env string, hostsYAML []byte) (string, error) {
+// ControlPlaneHost returns the control_plane_host of an environment's hosts.yaml
+// (deploy/k8s/values/<env>/hosts.yaml), refusing a file that does not parse, one
+// with no host, and a host that is not a host name or placeholder.
+func ControlPlaneHost(hostsYAML []byte) (string, error) {
 	var hosts struct {
 		ControlPlaneHost string `yaml:"control_plane_host"`
 	}
@@ -36,6 +35,18 @@ func RenderServices(env string, hostsYAML []byte) (string, error) {
 	}
 	if len(host) > 253 || !externalNameOK.MatchString(host) {
 		return "", fmt.Errorf("control_plane_host is not a host name or placeholder")
+	}
+	return host, nil
+}
+
+// RenderServices renders the control-plane Services of one environment from its
+// hosts.yaml (deploy/k8s/values/<env>/hosts.yaml): the file's control_plane_host
+// is the only place the host is written, so the checked-in Services cannot
+// drift from it (gt-ht5he).
+func RenderServices(env string, hostsYAML []byte) (string, error) {
+	host, err := ControlPlaneHost(hostsYAML)
+	if err != nil {
+		return "", err
 	}
 	if env == "" || !externalNameOK.MatchString(env) {
 		return "", fmt.Errorf("the environment name is empty or not a plain word")
