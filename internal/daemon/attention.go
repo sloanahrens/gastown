@@ -793,8 +793,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// host read without the field raises nothing (gt-vlzm42).
 		{kind: attention.KindHostGoCacheTrim, collect: s.collectHostGoCacheTrim},
 		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
-		// The daily dump duty, from the field the Mac's probe file carries; a
-		// host read without the field raises nothing (gt-e8mwdq).
+		// The daily dump duty, from the field the Mac's probe file carries. Only
+		// a test fake lacks that read; outside container mode it raises the
+		// probe item, never silence (gt-e8mwdq).
 		{kind: attention.KindHostForgejoBackup, collect: s.collectHostForgejoBackup},
 		// The drift compare's answer, off until the overseer turns the patrol
 		// on after the read grant is applied (gt-b6j1k5).

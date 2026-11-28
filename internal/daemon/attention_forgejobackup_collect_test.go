@@ -92,11 +92,24 @@ func TestHostForgejoBackupCollectRefusedFileKeepsTheItem(t *testing.T) {
 	}
 }
 
-// TestHostForgejoBackupCollectNoSourceRaisesNothing: a host without the read
-// raises nothing, so existing fakes need no new method.
-func TestHostForgejoBackupCollectNoSourceRaisesNothing(t *testing.T) {
+// TestHostForgejoBackupCollectOutsideContainerMode: the host outside container
+// mode cannot read the dump state, so the registered collector raises the probe
+// item naming why and keeps the backup item an earlier tick raised.
+func TestHostForgejoBackupCollectOutsideContainerMode(t *testing.T) {
 	t.Parallel()
-	if items := forgejoBackupCollect(t, &attentionSources{host: healthyHost()}); len(items) != 0 {
-		t.Fatalf("items = %+v, want none from a host with no reading", items)
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	host := attentionHostProbes(t.TempDir(), func(string) string { return "" }, nil, nil)
+	s := &attentionSources{host: host, now: now}
+	s.prev = attention.State{Items: []attention.Item{{Key: attention.RuleHostForgejoBackup, Kind: attention.KindHostForgejoBackup, Summary: "held"}}}
+	st := attention.State{Items: forgejoBackupCollect(t, s)}
+	probe, ok := attention.Find(st, hostProbeFailedPrefix+hostProbeForgejoBackup)
+	if !ok || probe.Kind != attention.KindHostProbe || probe.Severity != attention.SeverityLow {
+		t.Fatalf("probe item = %+v (found %v), want a low host-probe item", probe, ok)
+	}
+	if !strings.Contains(probe.Summary, errForgejoBackupNotPublished.Error()) {
+		t.Errorf("probe summary = %q, want the sentinel named", probe.Summary)
+	}
+	if kept, ok := attention.Find(st, attention.RuleHostForgejoBackup); len(st.Items) != 2 || !ok || kept.Summary != "held" {
+		t.Errorf("items = %+v, want the held rule beside the probe item", st.Items)
 	}
 }
