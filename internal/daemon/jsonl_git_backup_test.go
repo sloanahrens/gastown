@@ -2191,8 +2191,17 @@ func backupTestDaemon(t *testing.T) (*Daemon, *gitfake.Fake) {
 	// that does not look at them never reaches `gt escalate`.
 	// A paged read of the events table stages its pages under the town root.
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), notifier: notifyfake.New()}
-	return d, useGitfake(t, d)
+	f := useGitfake(t, d)
+	open := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return cleanCountsGit{open(dir)} }
+	return d, f
 }
+
+// cleanCountsGit answers CountObjects with a reading under the loose bound, as
+// git always reports counts; a test needing another reading wraps openGitFn.
+type cleanCountsGit struct{ daemonGit }
+
+func (cleanCountsGit) CountObjects() (string, error) { return countObjects("0", "0"), nil }
 
 func initGitRepo(t *testing.T, d *Daemon, dir string) {
 	t.Helper()
@@ -5050,8 +5059,8 @@ func TestJSONLGitBackupPacksAfterEveryCycleAndAlertsUntilItSucceeds(t *testing.T
 }
 
 // TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound: the reading left
-// by the pack judges the repo whether the pack failed or not — raising the
-// plan's reason while due, clearing under the bound, logging an unreadable one.
+// by the pack judges the repo whether the pack failed or not. A failed or
+// unparsable read raises loose-unread and leaves the loose alert as it was.
 func TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound(t *testing.T) {
 	t.Parallel()
 	d, rec, logs := newRemoteBackupDaemon(t, t.TempDir(), remoteDoltHost, &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"}]}`)})
@@ -5059,15 +5068,17 @@ func TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound(t *testing.T) {
 	open := d.openGitFn
 	d.openGitFn = func(dir string) daemonGit { return packPushGit{daemonGit: open(dir), rig: rig} }
 	for i, step := range []struct {
-		out     string
-		err     error
-		packErr error
-		open    bool
+		out       string
+		err       error
+		packErr   error
+		open      bool
+		unread    bool
+		unreadMsg string
 	}{
 		{out: countObjects("2000", "0"), open: true},
-		{out: countObjects("many", "0"), open: true},
+		{out: countObjects("many", "0"), open: true, unread: true, unreadMsg: "is not a number"},
 		{out: countObjects("1999", "0"), packErr: errors.New("repack exited with status 128"), open: false},
-		{err: errors.New("git count-objects: exit status 128"), open: false},
+		{err: errors.New("git count-objects: exit status 128"), open: false, unread: true, unreadMsg: "exit status 128"},
 	} {
 		rig.objectCounts, rig.countErr, rig.packErr = step.out, step.err, step.packErr
 		d.syncJsonlGitBackup()
@@ -5078,6 +5089,18 @@ func TestJSONLGitBackupAlertsWhileTheRepoStaysLoosePastItsBound(t *testing.T) {
 		if i == 0 && !strings.Contains(alerts[0].Reason, "2000 loose objects (threshold 2000)") {
 			t.Errorf("loose alert reason %q does not carry the plan's reason", alerts[0].Reason)
 		}
+		unread := rec.OpenEscalations(alertKeyJSONLLooseUnread)
+		if got := len(unread) > 0; got != step.unread {
+			t.Fatalf("cycle %d: loose-unread alert open = %v, want %v (alerts %+v)", i+1, got, step.unread, unread)
+		}
+		if step.unread && !strings.Contains(unread[0].Reason, step.unreadMsg) {
+			t.Errorf("cycle %d: loose-unread reason %q does not carry the read error %q", i+1, unread[0].Reason, step.unreadMsg)
+		}
+	}
+	if !slices.ContainsFunc(rec.Clears(), func(c notifyfake.Call) bool {
+		return slices.Contains(c.Fingerprints, alertKeyJSONLLoose) && strings.Contains(c.Reason, "under its bound")
+	}) {
+		t.Errorf("the reading under the bound did not clear the loose alert with a reason saying it is under its bound")
 	}
 	if !strings.Contains(logs.String(), "leaving the loose alert as it was") {
 		t.Errorf("an unreadable count was not logged as leaving the alert unchanged; log:\n%s", logs.String())
