@@ -3408,7 +3408,7 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		exitCode = tierSweepRedExit
 	}
 	d.tierSweepCacheAttention(spec.Rig, spec.OutDir)
-	d.recordTierSweepCacheTrimRun(spec.Rig, spec.OutDir)
+	d.recordTierSweepCacheFigures(spec.Rig, spec.OutDir)
 	return tierSweepStageResult{output: tierSweepRunnerOutput(&b, res), exitCode: exitCode, ran: true,
 		timingNote: tierSweepRunnerTimingNote(stageStart, res.Started, res.Finished, d.clk().Now()),
 		cacheNote:  tierSweepCacheNote(spec.OutDir)}
