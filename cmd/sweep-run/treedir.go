@@ -17,6 +17,10 @@ type treeSweep struct {
 	// Build builds the swept tree's sweep command in that directory, as
 	// tiersweep.ProcessBuildExec runs one go build under a wall-clock bound.
 	Build tiersweep.BuildExec
+	// Run starts the built sweep command, as Deps.RunScript runs a program. It
+	// returns the exit status, or a negative value (sweepNoExit) when it produced
+	// none.
+	Run func(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int
 }
 
 // tempDir makes the directory the swept tree's sweep command is built into. It
