@@ -29,6 +29,8 @@ const (
 	// cacheTrimLogName is the file under the run's log directory that records
 	// the trim's failures, beside the tier logs the daemon reads.
 	cacheTrimLogName = "cache-trim.log"
+	// cacheTrimStatsName is the file that records what a trim saw and took.
+	cacheTrimStatsName = "cache-trim-stats.log"
 )
 
 // CacheTrim is the trim a run ends with: the shared cache claim's root, the
@@ -70,7 +72,10 @@ func recordTrim(trim *CacheTrim, logDir string, stderr io.Writer) {
 	// logDir is the output directory's logs subdirectory (options.logDir), so the
 	// record goes in its parent, the directory the result is written into.
 	outDir := filepath.Dir(logDir)
-	err := trimSweepCache(trim)
+	stats, err := trimSweepCache(trim)
+	if stats != nil {
+		writeCacheTrimStats(logDir, stats, stderr)
+	}
 	var over *cacheOverCapError
 	switch {
 	case errors.As(err, &over):
@@ -117,58 +122,78 @@ func clearCacheTrim(dir string) error {
 // files and removes nothing. It lists the two cache trees, plans the removals with
 // cachevol.PlanTrim under its Now clock, and removes what the plan names.
 //
-// A listing that is partial removes nothing: a cache tree the claim lacks, or a
-// directory the walk cannot list, makes the cap unverifiable, so the error names
-// that directory. A trim that is not wired, a cap of zero or less, a removal that
-// fails and a plan that cannot reach the cap are all returned, so a claim the run
-// could not trim is never reported as trimmed.
-func trimSweepCache(trim *CacheTrim) error {
+// It returns what the trim saw, planned, removed and took for the run's one stats
+// line, nil when the claim cannot be listed or planned. A listing that is partial
+// removes nothing: a cache tree the claim lacks, or a directory the walk cannot
+// list, makes the cap unverifiable, so the error names that directory. A trim that
+// is not wired, a cap of zero or less, a removal that fails and a plan that cannot
+// reach the cap are all returned, so a claim the run could not trim is not trimmed.
+func trimSweepCache(trim *CacheTrim) (*cacheTrimStats, error) {
 	switch {
 	case trim == nil:
-		return errors.New("the cache trim is not wired")
+		return nil, errors.New("the cache trim is not wired")
 	case trim.Root == "":
-		return errors.New("the cache trim names no claim root")
+		return nil, errors.New("the cache trim names no claim root")
 	case !filepath.IsAbs(trim.Root):
-		return fmt.Errorf("the cache trim names the claim root %q: want an absolute path", trim.Root)
+		return nil, fmt.Errorf("the cache trim names the claim root %q: want an absolute path", trim.Root)
 	case trim.CapBytes <= 0:
-		return fmt.Errorf("the cache trim's CapBytes is %d: want a cap above zero", trim.CapBytes)
+		return nil, fmt.Errorf("the cache trim's CapBytes is %d: want a cap above zero", trim.CapBytes)
 	case trim.Claim == nil:
-		return errors.New("the cache trim has no claim")
+		return nil, errors.New("the cache trim has no claim")
 	case trim.Remove == nil:
-		return errors.New("the cache trim has no removal")
+		return nil, errors.New("the cache trim has no removal")
 	case trim.Now == nil:
-		return errors.New("the cache trim has no clock")
+		return nil, errors.New("the cache trim has no clock")
 	}
+	// Its duration and its plan's ages are both read from the trim's own clock.
+	start := trim.Now()
 	claim, err := trim.Claim(trim.Root)
 	if err != nil {
-		return fmt.Errorf("opening the cache claim %s: %w", trim.Root, err)
+		return nil, fmt.Errorf("opening the cache claim %s: %w", trim.Root, err)
 	}
 	if claim == nil {
-		// A claim that is not mounted has nothing to trim.
-		return nil
+		// A claim that is not mounted has nothing to trim, and nothing to record.
+		return nil, nil
 	}
 	listing, err := listClaim(claim)
 	if err != nil {
-		return fmt.Errorf("the cap on the cache claim %s is not verified, so nothing was removed: %w", trim.Root, err)
+		return nil, fmt.Errorf("the cap on the cache claim %s is not verified, so nothing was removed: %w", trim.Root, err)
 	}
 	// Another Job on the node may be building against the module cache while
 	// this run ends, so PlanTrim's cautious case leaves that cache alone.
-	plan, err := cachevol.PlanTrim(listing, trim.CapBytes, true, trim.Now())
-	if err != nil {
-		return fmt.Errorf("the cache claim %s is not planned, so nothing was removed: %w", trim.Root, err)
+	now := trim.Now()
+	plan, err := cachevol.PlanTrim(listing, trim.CapBytes, true, now)
+	var young int64
+	if err == nil {
+		// The plan and the young figure share one clock, so PlanTrim's zero-time
+		// refusal covers YoungBuildBytes too and this cannot fail on its own.
+		young, err = cachevol.YoungBuildBytes(listing, now)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("the cache claim %s is not planned, so nothing was removed: %w", trim.Root, err)
+	}
+	stats := &cacheTrimStats{Total: plan.Total, Planned: len(plan.Removals), Young: young, Protected: plan.Protected, Over: plan.OverBytes, Cap: trim.CapBytes}
 	var errs []error
 	for _, removal := range plan.Removals {
+		stats.PlannedBytes += removal.Size
 		// One failed removal does not stop the rest: the claim is still over
 		// its cap, and the ones that succeed bring it closer.
-		if err := trim.Remove(trim.Root, removal.Path); err != nil {
+		switch err := trim.Remove(trim.Root, removal.Path); {
+		case err == nil:
+			stats.Removed++
+			stats.RemovedBytes += removal.Size
+		case errors.Is(err, errSweepCacheFileAbsent):
+			stats.Absent++
+		default:
+			stats.Failed++
 			errs = append(errs, err)
 		}
 	}
 	if plan.Overflow {
 		errs = append(errs, &cacheOverCapError{OverBytes: plan.OverBytes, CapBytes: trim.CapBytes})
 	}
-	return errors.Join(errs...)
+	stats.Elapsed = trim.Now().Sub(start)
+	return stats, errors.Join(errs...)
 }
 
 // recordTrimError writes a trim failure into the run's log directory, where the
@@ -187,6 +212,28 @@ func recordTrimError(logDir string, err error, stderr io.Writer) {
 	}
 	defer file.Close()
 	if _, writeErr := file.WriteString(line); writeErr != nil {
+		fmt.Fprintf(stderr, "%s", line)
+	}
+}
+
+// cacheTrimStats holds the figures of the single line cacheTrimStatsName records.
+type cacheTrimStats struct {
+	Total, PlannedBytes, RemovedBytes, Young, Protected, Over, Cap int64
+	Planned, Removed, Absent, Failed                               int
+	Elapsed                                                        time.Duration
+}
+
+// writeCacheTrimStats writes the trim's one line into the run's log directory. A
+// file that cannot be written puts the line on stderr, since the run's verdict
+// does not depend on it.
+func writeCacheTrimStats(logDir string, stats *cacheTrimStats, stderr io.Writer) {
+	line := fmt.Sprintf("stats total_bytes=%d planned_files=%d planned_bytes=%d removed_files=%d removed_bytes=%d absent_files=%d failed_removals=%d young_bytes=%d protected_bytes=%d over_bytes=%d cap_bytes=%d elapsed_ms=%d\n",
+		stats.Total, stats.Planned, stats.PlannedBytes, stats.Removed, stats.RemovedBytes, stats.Absent, stats.Failed, stats.Young, stats.Protected, stats.Over, stats.Cap, stats.Elapsed.Milliseconds())
+	if err := os.MkdirAll(logDir, 0o755); err != nil { //nolint:gosec // G703: logDir is the run's own output directory
+		fmt.Fprintf(stderr, "%s", line)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(logDir, cacheTrimStatsName), []byte(line), 0o644); err != nil { //nolint:gosec // G304: logDir is the run's own output directory
 		fmt.Fprintf(stderr, "%s", line)
 	}
 }
@@ -302,6 +349,11 @@ func listCacheTree(claim fs.FS, dir string, cache cachevol.Cache) ([]cachevol.En
 	return out, nil
 }
 
+// errSweepCacheFileAbsent is what removeSweepCacheFile returns for a planned file
+// another run removed first: the trim counts it as absent, not as a failed
+// removal.
+var errSweepCacheFileAbsent = errors.New("the cache file another run removed is already gone")
+
 // removeSweepCacheFile deletes name, relative to the claim at root, through an
 // os.Root so the kernel refuses a path that leaves the claim through a symlink.
 // A name that is not a clean path under one of the two cache trees is refused
@@ -326,8 +378,9 @@ func removeSweepCacheFile(root, name string) (err error) {
 	}()
 	err = r.Remove(name)
 	if errors.Is(err, fs.ErrNotExist) {
-		// Another run trimmed the file first; the goal is its absence.
-		return nil
+		// Another run trimmed the file first; the goal is its absence, counted
+		// apart from what this run removed.
+		return errSweepCacheFileAbsent
 	}
 	return err
 }
