@@ -36,16 +36,19 @@ func Strip(obj map[string]any) map[string]any {
 // drop deletes keys from the map at path in parent, or from each element of a
 // slice there; a map it empties is removed from its parent, an empty one stays.
 func drop(parent map[string]any, path, keys []string) {
-	if list, ok := parent[path[0]].([]any); ok {
-		for _, e := range list {
-			if m, ok := e.(map[string]any); ok {
-				dropKeys(m, keys)
-			}
-		}
+	if len(path) == 0 {
 		return
 	}
-	m, ok := parent[path[0]].(map[string]any)
+	key := path[0]
+	m, ok := parent[key].(map[string]any)
 	if !ok {
+		if list, ok := parent[key].([]any); ok {
+			for _, e := range list {
+				if m, ok := e.(map[string]any); ok {
+					dropKeys(m, keys)
+				}
+			}
+		}
 		return
 	}
 	had := len(m)
@@ -55,7 +58,7 @@ func drop(parent map[string]any, path, keys []string) {
 		dropKeys(m, keys)
 	}
 	if had > 0 && len(m) == 0 {
-		delete(parent, path[0])
+		delete(parent, key)
 	}
 }
 
