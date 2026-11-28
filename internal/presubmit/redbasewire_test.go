@@ -32,17 +32,19 @@ func (g *wireGit) run(args []string) ([]byte, error) {
 	return g.planGit.run(args)
 }
 
-// TestRedBaseRunCheck: a changed test that passes in the tree is not ok and names its line, one that fails is ok and names the count, go runs in the tree under dir, the tree is removed, and a go or git error is returned and never ok (gt-o9cxm4).
+// TestRedBaseRunCheck: a changed test that passes in the tree is not ok and names its line, one that fails is ok, a red test lets a passing one in another package pass with the passes line, a failed build counts as its package's red, go runs in the tree under dir, the tree is removed, and a go or git error is returned and never ok (gt-o9cxm4, gt-6marp2).
 func TestRedBaseRunCheck(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "red-base")
 	boom := errors.New("boom")
 	plan := wireGit{planGit: planGit{fakeGit: fakeGit{diff: "M\tpkg/a_test.go\n", mergeBase: "abc", atBase: map[string]string{"pkg/a_test.go": wireBaseSrc}}}}
+	twoPkgs := wireGit{planGit: planGit{fakeGit: fakeGit{diff: "M\tpkg/a/a_test.go\nM\tpkg/b/b_test.go\n", mergeBase: "abc", atBase: map[string]string{"pkg/a/a_test.go": wireBaseSrc, "pkg/b/b_test.go": wireBaseSrc}}}}
 	tests := []struct {
 		name       string
 		git        wireGit
 		goOut      string
+		goByPkg    map[string]string
 		goErr      error
 		wantOK     bool
 		wantErr    string
@@ -66,6 +68,34 @@ func TestRedBaseRunCheck(t *testing.T) {
 			wantOK:     true,
 			wantReport: "redbase: 1 new or changed test(s) in 1 package(s), 0 passing without the change\n",
 			wantRuns:   1,
+			wantRemove: 1,
+		},
+		{
+			name: "one passing and one failing changed test give ok",
+			git:  twoPkgs,
+			goByPkg: map[string]string{
+				"./pkg/a": `{"Action":"pass","Test":"TestChanged"}` + "\n",
+				"./pkg/b": `{"Action":"fail","Test":"TestChanged"}` + "\n",
+			},
+			wantOK: true,
+			wantReport: "pkg/a/a_test.go:5: TestChanged passes without the change\n" +
+				"redbase: 2 new or changed test(s) in 2 package(s), 1 passing without the change\n" +
+				"redbase: passes: 1 new or changed test(s) red without the change\n",
+			wantRuns:   2,
+			wantRemove: 1,
+		},
+		{
+			name: "a build failure beside a passing changed test is ok and writes the passes line",
+			git:  twoPkgs,
+			goByPkg: map[string]string{
+				"./pkg/a": `{"Action":"pass","Test":"TestChanged"}` + "\n",
+				"./pkg/b": `{"Action":"output","Output":"# pkg/b\n"}` + "\n" + `{"Action":"fail"}` + "\n",
+			},
+			wantOK: true,
+			wantReport: "pkg/a/a_test.go:5: TestChanged passes without the change\n" +
+				"redbase: 2 new or changed test(s) in 2 package(s), 1 passing without the change\n" +
+				"redbase: passes: 1 new or changed test(s) red without the change\n",
+			wantRuns:   2,
 			wantRemove: 1,
 		},
 		{
@@ -100,12 +130,16 @@ func TestRedBaseRunCheck(t *testing.T) {
 				Read:  func(string) ([]byte, error) { return []byte(wireHeadSrc), nil },
 				Mkdir: func(string) error { return nil },
 				Write: func(string, []byte) error { return nil },
-				GoTest: func(d string, _ []string) ([]byte, error) {
+				GoTest: func(d string, args []string) ([]byte, error) {
 					runs++
 					if d != tree {
 						t.Errorf("go ran in %q, want the tree %q", d, tree)
 					}
-					return []byte(tt.goOut), tt.goErr
+					out := tt.goOut
+					if byPkg, ok := tt.goByPkg[args[len(args)-1]]; ok {
+						out = byPkg
+					}
+					return []byte(out), tt.goErr
 				},
 			}
 			var buf bytes.Buffer
