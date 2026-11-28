@@ -123,6 +123,29 @@ func eraAt(cuts EraCuts, at time.Time) string {
 	return eraPod
 }
 
+// EraMarks is the trend's two runtime-era marks, oldest first: one for the
+// sandbox cut and one for the pod cut, each dated on the UTC calendar day the
+// town crossed it, so a cut given in another zone keeps the day the move
+// happened. The sandbox move always precedes the pod move, so writing the marks
+// in era order is oldest first. A cut the town never made names no instant and
+// gives no mark.
+func EraMarks(cuts EraCuts) []PanelEvent {
+	var marks []PanelEvent
+	if !cuts.Sandbox.IsZero() {
+		marks = append(marks, PanelEvent{
+			Date: cuts.Sandbox.UTC().Format(regimeEventsDateLayout),
+			What: "runtime era: sandbox",
+		})
+	}
+	if !cuts.Pod.IsZero() {
+		marks = append(marks, PanelEvent{
+			Date: cuts.Pod.UTC().Format(regimeEventsDateLayout),
+			What: "runtime era: pod",
+		})
+	}
+	return marks
+}
+
 // EraSplit is the landings cut by runtime era: train and holdout, the count of
 // landings whose landed_at names no instant (which sit on neither side), and the
 // cuts the split was made under.
