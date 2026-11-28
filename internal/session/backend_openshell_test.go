@@ -270,6 +270,79 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	}
 }
 
+// With forgejo_per_seat on, the create request names the seat's own
+// forgejo-seat-<polecat> in place of forgejo-polecat and keeps every other
+// provider. Each seat on one profile gets its own, the profile's slice is never
+// rewritten, and with the setting off the request is unchanged (gt-9x9wv8).
+func TestCreateSpecPerSeatForgejoProvider(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := openshellTestProfile
+	p.Providers = slices.Clone(openshellTestProfile.Providers)
+	p.ForgejoPerSeat = true
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+	for _, c := range []struct{ polecat, want string }{
+		{"Furiosa", "forgejo-seat-furiosa"},
+		{"nux", "forgejo-seat-nux"},
+	} {
+		spec := openshellSpawn(town, work)
+		spec.Polecat = c.polecat
+		cs, err := b.createSpec(spec, sandboxTracker{})
+		if err != nil {
+			t.Fatalf("createSpec(%s): %v", c.polecat, err)
+		}
+		if want := []string{"deepseek", c.want}; !slices.Equal(cs.Providers, want) {
+			t.Fatalf("%s Providers = %v, want %v", c.polecat, cs.Providers, want)
+		}
+	}
+	if want := []string{"deepseek", "forgejo-polecat"}; !slices.Equal(b.profile.Providers, want) {
+		t.Fatalf("profile Providers = %v, want %v unchanged: a create must not rewrite the profile", b.profile.Providers, want)
+	}
+	off := openshellTestProfile
+	off.Providers = slices.Clone(openshellTestProfile.Providers)
+	bOff, _ := openshellTestBackend(town, off, &sandbox.Fake{})
+	cs, err := bOff.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec with the setting off: %v", err)
+	}
+	if want := []string{"deepseek", "forgejo-polecat"}; !slices.Equal(cs.Providers, want) {
+		t.Fatalf("Providers with the setting off = %v, want %v", cs.Providers, want)
+	}
+}
+
+// A create the gateway refuses because the seat's provider does not exist
+// returns that error and makes no second create: nothing retries with the
+// profile's forgejo-polecat (gt-9x9wv8).
+func TestOpenShellPreparePerSeatForgejoProviderRefusalIsNotRetried(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := openshellTestProfile
+	p.Providers = slices.Clone(openshellTestProfile.Providers)
+	p.ForgejoPerSeat = true
+	refusal := errors.New("exit status 1")
+	fake := openshellPrepareFake(nil)
+	fake.Err = map[string]error{"create": refusal, "get": errors.New("exit status 1")}
+	fake.Stderr = map[string]string{
+		"create": `provider "forgejo-seat-sandbox-ace" not found`,
+		"get":    `message: "sandbox not found"`,
+	}
+	b, _ := openshellTestBackend(town, p, fake)
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if !errors.Is(err, refusal) {
+		t.Fatalf("err = %v, want the gateway's create refusal", err)
+	}
+	creates := 0
+	for _, c := range fake.Calls() {
+		if len(c) >= 3 && c[1] == "sandbox" && c[2] == "create" {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("sandbox create calls = %d, want 1: a refused create is not retried", creates)
+	}
+}
+
 // fakeImageRegistry is the host docker's image store for the pin's tests: the
 // digest each reference resolves to, the gt label each image carries, and the
 // references the label was read for.
