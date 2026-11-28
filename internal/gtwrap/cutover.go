@@ -29,10 +29,11 @@ const (
 // TestCutoverRunbookNamesEveryPrecheck holds the two lists equal, so an edit to
 // one alone fails the test (gt-yjzepk.12).
 var cutoverPrechecks = []string{
-	"the dry run against every Mac caller passed",
-	"the compose environment names the Dolt host, so bd in the container reaches Dolt",
-	"the .beads mount is read-write in the daemon container",
-	"docker-exec load was measured with the monitors running",
+	"the dry run against every Mac caller passed, and each caller of a following command holds its stdin open, since the follow ends when stdin closes",
+	"for the docker target only, the compose environment names the Dolt host, so bd in the container reaches Dolt",
+	"for the docker target only, the .beads mount is read-write in the daemon container",
+	"for the docker target only, docker-exec load was measured with the monitors running",
+	"for the kubernetes target only, the new binary's --doctor reports a rung that holds under every tool name",
 }
 
 // Target is one tool the cutover replaces: the name the wrapper answers as and

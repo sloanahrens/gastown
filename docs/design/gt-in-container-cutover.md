@@ -11,14 +11,17 @@ binaries are replaced and what the wrapper does.
 Every line must hold before `gt-wrap install` runs. The install command prints
 this list, and `TestCutoverRunbookNamesEveryPrecheck` holds the two equal.
 
-- the dry run against every Mac caller passed
-- the compose environment names the Dolt host, so bd in the container reaches Dolt
-- the .beads mount is read-write in the daemon container
-- docker-exec load was measured with the monitors running
+- the dry run against every Mac caller passed, and each caller of a following command holds its stdin open, since the follow ends when stdin closes
+- for the docker target only, the compose environment names the Dolt host, so bd in the container reaches Dolt
+- for the docker target only, the .beads mount is read-write in the daemon container
+- for the docker target only, docker-exec load was measured with the monitors running
+- for the kubernetes target only, the new binary's --doctor reports a rung that holds under every tool name
 
 The dry run is every Mac caller of the wrapper: the scripts under
 `$HOME/.claude/tools`, `gt-watch`, the Claude hooks (`gt prime`) and
-`claude-agent`.
+`claude-agent`. Each caller of a following command (`gt attention -f`) holds its
+stdin open: through the new wrapper the pod-side watchdog (gt-4jshne) ends the
+follow at end of input, so a caller that closes stdin ends the stream at once.
 
 `gt prime` runs from `~/gt`, as the session-start hook does. Through the wrapper it
 refuses from a crew worktree, because the pod has no such directory and so cannot
@@ -36,12 +39,13 @@ gt-wrap install --stamp 20261106-1430 \
   --target hm=/Users/operator/go/bin/hm
 ```
 
-`--dir` names one directory holding all four instead. The command refuses
-before changing anything when Docker, the daemon image or a tool in it does not
-answer, when a file it would replace is not a regular file, or when a file
-dated with the same stamp already exists. It stages a new copy beside every
-tool before it touches any tool, so a failure while staging changes nothing. It
-then replaces each tool by renaming the old file to `<name>.pre-wrap-<stamp>`
+`--dir` names one directory holding all four instead. The command asks the
+configured target whether the daemon image and a tool in it answer, and refuses
+before changing anything when one does not, when a file it would replace is not
+a regular file, or when a file dated with the same stamp already exists. It
+stages a new copy beside every tool before it touches any tool, so a failure
+while staging changes nothing. It then replaces each tool by renaming the old
+file to `<name>.pre-wrap-<stamp>`
 and renaming the staged copy into place, so a running binary is never written
 through. When a tool fails `--doctor`, or a step fails after a tool was placed,
 install puts every tool it changed back from its dated file, in reverse order,
