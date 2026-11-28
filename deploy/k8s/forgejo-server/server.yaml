@@ -1,7 +1,10 @@
-# The control cluster's Forgejo server: the forgejo Namespace, the data claim and the
-# forgejo Service, as the live read of 2026-11-27 recorded them after the cluster-set
-# fields are stripped (testdata/live-2026-11-27). The forgejo Deployment is not in
-# this file yet.
+# The control cluster's Forgejo server: the forgejo Namespace, the data claim, the
+# forgejo Service and the forgejo Deployment, as the live read of 2026-11-27 recorded
+# them after the cluster-set fields are stripped (testdata/live-2026-11-27), except the
+# two Deployment values server_test.go names.
+#
+# The database password comes from Secret pg, key PASSWD, made by hand. Never apply
+# this file as it stands: CONTROL_PLANE_HOST is a placeholder.
 #
 # Applied only by the overseer's adoption step. gt town cluster render never reads
 # this file, so no applied set owns it.
@@ -51,3 +54,94 @@ spec:
     app: forgejo
   sessionAffinity: None
   type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo
+  namespace: forgejo
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: forgejo
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: forgejo
+    spec:
+      containers:
+        - env:
+            - name: FORGEJO__database__DB_TYPE
+              value: postgres
+            - name: FORGEJO__database__HOST
+              value: CONTROL_PLANE_HOST:5442
+            - name: FORGEJO__database__NAME
+              value: forgejo
+            - name: FORGEJO__database__USER
+              value: forgejo
+            - name: FORGEJO__database__PASSWD
+              valueFrom:
+                secretKeyRef:
+                  key: PASSWD
+                  name: pg
+            - name: FORGEJO__server__DOMAIN
+              value: forgejo
+            - name: FORGEJO__server__ROOT_URL
+              value: http://forgejo:3000/
+            - name: FORGEJO__server__SSH_DOMAIN
+              value: forgejo
+            - name: FORGEJO__server__SSH_PORT
+              value: "2222"
+            - name: FORGEJO__security__INSTALL_LOCK
+              value: "true"
+            - name: FORGEJO__service__DISABLE_REGISTRATION
+              value: "true"
+            - name: FORGEJO__actions__ENABLED
+              value: "true"
+            - name: FORGEJO__packages__ENABLED
+              value: "true"
+          image: data.forgejo.org/forgejo/forgejo:16.0.5
+          imagePullPolicy: IfNotPresent
+          name: forgejo
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /api/healthz
+              port: 3000
+              scheme: HTTP
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              cpu: 750m
+              memory: 512Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /data
+              name: data
+      dnsPolicy: ClusterFirst
+      priorityClassName: gt-control-plane
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - effect: NoSchedule
+          key: node.kubernetes.io/disk-pressure
+          operator: Exists
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data
