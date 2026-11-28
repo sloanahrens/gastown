@@ -1,0 +1,1 @@
+{"apiVersion":"v1","kind":"Namespace","metadata":{"creationTimestamp":"2026-11-04T17:27:18Z","labels":{"kubernetes.io/metadata.name":"forgejo"},"name":"forgejo","resourceVersion":"57627","uid":"dcdfb8f9-68e8-4e6c-a9cb-7d76ba8bc949"},"spec":{"finalizers":["kubernetes"]},"status":{"phase":"Active"}}
