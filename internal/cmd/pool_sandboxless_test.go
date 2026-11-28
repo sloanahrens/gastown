@@ -3,9 +3,13 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func TestPoolSandboxlessRunsNothing(t *testing.T) {
@@ -84,6 +88,68 @@ func TestPoolSandboxlessFilter(t *testing.T) {
 			}
 			if !reflect.DeepEqual(in, before) {
 				t.Errorf("input modified: %+v, was %+v", in, before)
+			}
+		})
+	}
+}
+
+func TestPoolSandboxlessRecordRead(t *testing.T) {
+	t.Parallel()
+	const rig, polecat = "gastown", "p0"
+	match := session.SandboxRecord{Session: "gas-p0", Rig: rig, Polecat: polecat}
+	record := func(s session.SandboxRecord) func(t *testing.T, town string) {
+		return func(t *testing.T, town string) {
+			if err := session.WriteSandboxRecord(town, s); err != nil {
+				t.Fatalf("WriteSandboxRecord(%s): %v", s.Session, err)
+			}
+		}
+	}
+	file := func(path, body string) func(t *testing.T, town string) {
+		return func(t *testing.T, town string) {
+			p := filepath.Join(town, path)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", filepath.Dir(p), err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", path, err)
+			}
+		}
+	}
+	registry := func(name, body string) func(t *testing.T, town string) {
+		return file(filepath.Join(".runtime", "sandboxes", name), body)
+	}
+	both := func(a, b func(t *testing.T, town string)) func(t *testing.T, town string) {
+		return func(t *testing.T, town string) { a(t, town); b(t, town) }
+	}
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T, town string)
+		want    bool
+		wantErr bool
+	}{
+		{"no registry directory", nil, false, false},
+		{"no matching record", record(session.SandboxRecord{Session: "gas-p1", Rig: rig, Polecat: "p1"}), false, false},
+		{"matching record, no rigs.json", record(match), true, false},
+		{"matching record beside a corrupt one", both(record(match), registry("zz-corrupt.json", "{not json")), true, false},
+		{"corrupt record, no match", registry("zz-corrupt.json", "{not json"), false, true},
+		{"record with an empty polecat", record(session.SandboxRecord{Session: "gt-empty", Rig: rig}), false, true},
+		{"record with an empty rig", record(session.SandboxRecord{Session: "gt-norig", Polecat: polecat}), false, true},
+		{"listed name that is no session name", registry(".json", "{}"), false, true},
+		{"registry path is a file", file(filepath.Join(".runtime", "sandboxes"), ""), false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tt.setup != nil {
+				tt.setup(t, town)
+			}
+			got, err := poolSandboxRecordRead(town)(rig, polecat)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("hasRecord(%q, %q) error = %v, wantErr %v", rig, polecat, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("hasRecord(%q, %q) = %v, want %v", rig, polecat, got, tt.want)
 			}
 		})
 	}
