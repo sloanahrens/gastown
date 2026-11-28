@@ -67,6 +67,7 @@ type memFiles struct {
 	removed   []string
 	listErr   error
 	readErr   error
+	readFail  string // when set, readErr applies to this name alone
 	createErr error
 	closeErr  error
 	tempErr   error
@@ -101,8 +102,11 @@ func (m *memFiles) ReadDir(string) ([]fs.DirEntry, error) {
 }
 
 func (m *memFiles) ReadFile(name string) ([]byte, error) {
-	if m.readErr != nil {
+	if m.readErr != nil && (m.readFail == "" || m.readFail == name) {
 		return nil, m.readErr
+	}
+	if buf := m.written[name]; buf != nil {
+		return buf.Bytes(), nil
 	}
 	data, ok := m.contents[name]
 	if !ok {
@@ -173,7 +177,7 @@ func lastCall(calls []string) string {
 const (
 	listCall   = "openshell profile list --global"
 	exportCall = "openshell profile export --global -- forgejo-polecat"
-	checkCall  = "gt sandbox endpoint --gateway k8s --check " + testWork + "/forgejo-polecat.export.yaml"
+	checkCall  = "gt sandbox endpoint --gateway k8s --check /dev/stdin"
 	// renderCall renders the profile gt reads on stdin; the stale path adds
 	// --from-export.
 	renderCall     = "gt sandbox endpoint --gateway k8s --render /dev/stdin"
@@ -388,6 +392,9 @@ func TestImportProfilesForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) 
 			if !slices.Equal(runner.calls, tc.want) {
 				t.Errorf("calls = %q, want %q", runner.calls, tc.want)
 			}
+			if len(runner.stdins) != len(tc.want) || runner.stdins[2] != "exported\n" {
+				t.Errorf("stdin = %q, want the check to receive the gateway's export %q", runner.stdins, "exported\n")
+			}
 			if out.String() != tc.wantOut {
 				t.Errorf("output = %q, want %q", out.String(), tc.wantOut)
 			}
@@ -516,6 +523,20 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 				{match: "profile export", out: "exported\n"},
 			},
 			mutate:      func(m *memFiles) { m.closeErr = errors.New("disk full") },
+			wantLast:    exportCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:     "the exported profile cannot be read",
+			profiles: []profileFile{forgejo},
+			answers: []answer{
+				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: "exported\n"},
+			},
+			mutate: func(m *memFiles) {
+				m.readErr, m.readFail = errors.New("unreadable"), testWork+"/forgejo-polecat.export.yaml"
+			},
+			wantErr:     testWork + "/forgejo-polecat.export.yaml",
 			wantLast:    exportCall,
 			wantRemoved: []string{testWork},
 		},

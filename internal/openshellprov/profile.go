@@ -107,13 +107,13 @@ func (g Gt) Render(out io.Writer, profile []byte, exportFile string) error {
 	return nil
 }
 
-// StaleReason returns why the gateway's profile id, exported to exportFile, does
-// not bind the gateway's endpoint: the reason after "stale:" in gt's answer. It
-// returns "" when the profile binds the endpoint. A failed check, or an answer
-// that is neither bound nor stale with a reason, is an error that names the
+// StaleReason returns why the gateway's profile id, exported and sent to gt on
+// stdin, does not bind the gateway's endpoint: the reason after "stale:" in gt's
+// answer. It returns "" when the profile binds the endpoint. A failed check, or an
+// answer that is neither bound nor stale with a reason, is an error that names the
 // profile and gives the answer.
-func (g Gt) StaleReason(id, exportFile string) (string, error) {
-	stdout, err := g.endpoint(nil, "--check", exportFile)
+func (g Gt) StaleReason(id string, exported []byte) (string, error) {
+	stdout, err := g.endpoint(bytes.NewReader(exported), "--check", "/dev/stdin")
 	if err != nil {
 		return "", fmt.Errorf("%s: gt sandbox endpoint --check failed on the exported profile %s: %w", Name, id, err)
 	}

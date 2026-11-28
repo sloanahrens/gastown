@@ -62,7 +62,7 @@ func TestGtArgs(t *testing.T) {
 		{"check", func(g Gt) error { return g.CheckEndpoint() }, base},
 		{"render without export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "") }, base + " --render /dev/stdin"},
 		{"render with export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "e.yaml") }, base + " --render /dev/stdin --from-export e.yaml"},
-		{"stale check", func(g Gt) error { _, err := g.StaleReason("forgejo-polecat", "e.yaml"); return err }, base + " --check e.yaml"},
+		{"stale check", func(g Gt) error { _, err := g.StaleReason("forgejo-polecat", []byte("e")); return err }, base + " --check /dev/stdin"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,7 +120,7 @@ func TestRenderWriteFailureIsAnError(t *testing.T) {
 func TestStaleReasonUnrecognisedAnswerNamesTheVerdict(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{stdout: []byte("maybe\n")}
-	_, err := (Gt{Run: fake}).StaleReason("forgejo-polecat", "e.yaml")
+	_, err := (Gt{Run: fake}).StaleReason("forgejo-polecat", []byte("exported"))
 	if err == nil {
 		t.Fatal("StaleReason(maybe) = nil error, want an error")
 	}
@@ -149,7 +149,7 @@ func TestStaleReasonVerdicts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := &fakeRunner{stdout: []byte(tc.stdout), err: tc.err}
-			reason, err := (Gt{Run: fake}).StaleReason("forgejo-polecat", "e.yaml")
+			reason, err := (Gt{Run: fake}).StaleReason("forgejo-polecat", []byte("exported"))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("StaleReason(%q) = %q, nil error; want an error", tc.stdout, reason)
