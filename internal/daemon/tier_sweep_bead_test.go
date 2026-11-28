@@ -862,7 +862,9 @@ func TestTierSweepBead_FailureExcerptIsCapped(t *testing.T) {
 	if got := strings.Count(desc, "  --- FAIL: "); got != tierSweepFailureLines/2 {
 		t.Errorf("excerpt quotes %d failing tests, want %d (the cap is %d lines):\n%s", got, tierSweepFailureLines/2, tierSweepFailureLines, desc)
 	}
-	if !strings.Contains(desc, "  --- FAIL: TestMany20\n") || strings.Contains(desc, "TestMany21") {
+	// The acceptance command names every failing test (gt-k2lz3g), so the
+	// excerpt is read by its own "--- FAIL:" lines, not by the bare name.
+	if !strings.Contains(desc, "  --- FAIL: TestMany20\n") || strings.Contains(desc, "  --- FAIL: TestMany21") {
 		t.Errorf("excerpt does not stop at the twentieth failing test:\n%s", desc)
 	}
 	if want := "excerpt cut at 40 lines: 20 more lines not shown"; !strings.Contains(desc, want) {
@@ -962,6 +964,10 @@ func TestTierSweepBead_MixedTagsQuotesNoFailure(t *testing.T) {
 		if strings.Contains(opts.Description, name) || strings.Contains(opts.Acceptance, name) {
 			t.Errorf("bead names %s, which no one re-run covers:\ndescription:\n%s\nacceptance: %s", name, opts.Description, opts.Acceptance)
 		}
+	}
+	// No one command re-runs both, so the unit gets no -run command at all.
+	if strings.Contains(opts.Acceptance, "-run '^(") {
+		t.Errorf("mixed unit got a re-run command, want none: %s", opts.Acceptance)
 	}
 }
 
@@ -1078,6 +1084,35 @@ func TestTierSweepLabeledCommand(t *testing.T) {
 		if !strings.Contains(opts.Acceptance, wantCmd) {
 			t.Errorf("%q acceptance = %q, want it to carry %q", opts.Title, opts.Acceptance, wantCmd)
 		}
+	}
+}
+
+// A runner's stage log holds summary lines alone, so a race red's failing tests
+// are named only in the unit's own log. The check command names them from there
+// instead of falling back to a log that holds no test output (gt-k2lz3g).
+func TestTierSweepUnitLogCommand(t *testing.T) {
+	t.Parallel()
+	const unit = "./internal/cmd~integration-walk"
+	dir := t.TempDir()
+	unitLog := "--- FAIL: TestRaceOnly (0.01s)\n    walk_test.go:9: nope\n--- FAIL: TestRaceTwo (0.01s)\n"
+	if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("race", unit)), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: race "+unit+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	d.tierSweepRecordBeads("gastown", "abc1234", map[string]tierSweepTierResult{
+		"race": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{unit}, Log: stageLog, LogDir: dir},
+	})
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	want := "go test -race -tags integration -run '^(TestRaceOnly|TestRaceTwo)$' -count=1 ./internal/cmd` passes"
+	if !strings.Contains(bd.created[0].Acceptance, want) {
+		t.Errorf("acceptance = %q, want it to carry %q", bd.created[0].Acceptance, want)
+	}
+	if strings.Contains(bd.created[0].Acceptance, "Read the tier log") {
+		t.Errorf("acceptance = %q, want the command, not the log fallback", bd.created[0].Acceptance)
 	}
 }
 

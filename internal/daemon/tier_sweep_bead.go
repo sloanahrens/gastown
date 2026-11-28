@@ -543,9 +543,14 @@ func tierSweepCheckCommand(tier, unit, ranCmd string, red tierSweepUnitRed) stri
 	// The command names the package up to the first "~", not the labeled name
 	// the bead keeps (gt-od1bx9).
 	pkg, _ := tierSweepUnitPackage(unit)
-	// A finding names its test in its own line, so the filter it earns is the
-	// one a FAIL line earns. A test with both is named once.
+	// The stage log's names come first, then the unit log's failures: a runner's
+	// stage log holds summary lines alone, so its red names only the unit log
+	// names (gt-k2lz3g). A finding names its test in its own line, so the filter
+	// it earns is the one a FAIL line earns. A test with several is named once.
 	names := append([]string(nil), red.Names...)
+	for _, f := range red.Failures {
+		names = append(names, f.Name)
+	}
 	for _, line := range red.Findings {
 		if name, ok := tierSweepFindingTest(line); ok {
 			names = append(names, name)
