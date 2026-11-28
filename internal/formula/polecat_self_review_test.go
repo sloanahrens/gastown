@@ -104,7 +104,7 @@ func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 	// it, not in bead notes.
 	item9 := collapse(numberedItem(t, step, 9))
 	for _, want := range []string{
-		"go vet -tags integration",
+		"//go:build integration",
 		"near the top of the commit body",
 		"not bead notes",
 	} {

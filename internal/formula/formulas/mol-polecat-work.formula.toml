@@ -454,9 +454,8 @@ git diff --stat origin/{{base_branch}}...HEAD
 # Only files named in your Constraints for {{issue}} should appear
 ```
    Name near the top of the commit body (om reads commit bodies, not bead
-   notes) each `//go:build integration` file your diff reaches and its tier
-   (`go vet -tags integration`, `go test -tags integration`), the test row for
-   each behaviour it adds, and the input or branch that row asserts.
+   notes) each `//go:build integration` file your diff reaches, the test row
+   for each behaviour it adds, and the input or branch that row asserts.
 
 If you accidentally modified unrelated files, remove those changes.
 
@@ -493,7 +492,8 @@ git rebase origin/{{base_branch}}
 
 If rebase conflicts:
 - Resolve them carefully, reading the resolution against the code it touches
-- commit, and re-run `git rebase --continue` until the rebase finishes
+- `git add` the resolved files and run `git rebase --continue`, never `git commit`
+  mid-rebase, until the rebase finishes
 - If stuck, `gt escalate`
 
 After the rebase, confirm you are on YOUR branch and not a detached HEAD

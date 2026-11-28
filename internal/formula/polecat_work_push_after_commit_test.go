@@ -62,7 +62,7 @@ var committingSteps = []struct {
 	{"implement", `git commit -m "<type>:`},
 	{"commit-changes", `git commit -m "<type>:`},
 	{"self-review", "amend or add commits"},
-	{"pre-verify", "commit, and re-run"},
+	{"pre-verify", "`git rebase --continue`"},
 }
 
 // TestPolecatWorkPushesAfterCommit pins gt-6096pf's lever 1: a seat stopped at

@@ -8,11 +8,13 @@ import (
 )
 
 // A seat runs no check and the landing gate runs them all (gt-13dre6 Q44):
-// checkProgram matches a shell-fence check program, checkProse a line that
-// tells the seat to run one, and checkVar a rendered *_command variable.
+// checkProgram matches a shell-fence check program, checkInline a backticked
+// one anywhere in a line outside the variable table, checkProse words that tell
+// the seat to run one, and checkVar a rendered *_command variable.
 var (
 	checkProgram = regexp.MustCompile(`(?m)^[ \t]*((go|make|golangci-lint|gofmt|npm|pnpm|npx|yarn|bats|python3?|tsc|eslint|pytest|cargo|mvn|gradle)\s[^\n]*)`)
-	checkProse   = regexp.MustCompile(`(?im)^[ \t]*[-*]?[ \t]*(run|execute)[ \t]+(the |a )?(go|make|golangci-lint|gofmt|npm|pnpm|npx|yarn|bats|python3?|tsc|eslint|pytest|cargo|mvn|gradle|build|test|tests|lint|linter|typecheck|setup)\b`)
+	checkInline  = regexp.MustCompile("(?m)^[^|\n].*?`((go|make|golangci-lint|gofmt|npm|pnpm|npx|yarn|bats|python3?|tsc|eslint|pytest|cargo|mvn|gradle) [^`\n]*)`")
+	checkProse   = regexp.MustCompile(`(?i)(never |not |command to )?\b(run|re-run|execute)[ \t]+(the |a )?(go|make|golangci-lint|gofmt|npm|pnpm|npx|yarn|bats|python3?|tsc|eslint|pytest|cargo|mvn|gradle|build|test|tests|lint|linter|typecheck|setup)\b`)
 	checkVar     = regexp.MustCompile(`\{\{(setup|build|typecheck|lint|test)_command\}\}`)
 )
 
@@ -27,8 +29,13 @@ func writeOnlyProblems(text string) []string {
 	for _, m := range checkProgram.FindAllStringSubmatch(text, -1) {
 		out = append(out, "a step runs "+strings.TrimSpace(m[1]))
 	}
-	for _, m := range checkProse.FindAllString(text, -1) {
-		out = append(out, "a step says "+strings.TrimSpace(m))
+	for _, m := range checkInline.FindAllStringSubmatch(text, -1) {
+		out = append(out, "a step names the command "+m[1])
+	}
+	for _, m := range checkProse.FindAllStringSubmatch(text, -1) {
+		if m[1] == "" { // "never run go" forbids; "Command to run tests" describes a variable
+			out = append(out, "a step says "+strings.TrimSpace(m[0]))
+		}
 	}
 	for _, m := range checkVar.FindAllString(text, -1) {
 		out = append(out, "a step renders "+m)
@@ -74,6 +81,8 @@ func TestPolecatFormulaSeatRunsNoCheck(t *testing.T) {
 	for _, tc := range []struct{ name, text, want string }{
 		{"a step runs make", text + "\n```bash\nmake build\n```\n", "a step runs make build"},
 		{"a step runs golangci-lint", text + "\n```bash\ngolangci-lint run ./...\n```\n", "a step runs golangci-lint run ./..."},
+		{"a step names a command inline", text + "\nCheck it with `go vet ./...` first.\n", "a step names the command go vet ./..."},
+		{"a step says to run the tests mid-sentence", text + "\nAfter the edit, run the tests.\n", "a step says run the tests"},
 		{"a step renders build_command", text + "\n{{build_command}}\n", "a step renders {{build_command}}"},
 		{"a step says to run the tests", text + "\nRun the tests before submitting.\n", "a step says Run the tests"},
 		{"the submit rule is gone", strings.Replace(text, "the rig's configured pre-submit command, which may check nothing", "", 1), "lacks the rig's configured pre-submit command, which may check nothing"},
