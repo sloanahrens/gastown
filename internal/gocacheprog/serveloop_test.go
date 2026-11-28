@@ -166,7 +166,10 @@ func (s *traceStore) Close() error {
 	return nil
 }
 
-// traceWriter keeps what Serve writes and notes each write in trace.
+// traceWriter keeps what Serve writes and notes each write in trace. It takes
+// no lock on purpose: Serve alone must serialise its writes and call Close after
+// the last answer. An unlocked writer lets the -race run catch a Serve that does
+// not; a lock here would hide that.
 type traceWriter struct {
 	buf   strings.Builder
 	trace *[]string
@@ -233,5 +236,11 @@ func TestServeSession(t *testing.T) {
 	}
 	if store.closes != 1 {
 		t.Errorf("store closed %d times, want 1", store.closes)
+	}
+	// The session does not read the put back, since answers may run at once, so
+	// check the entry the store holds under the put's action ID ("aw==" is "k").
+	wantEntry := gocacheprog.Entry{OutputID: []byte("new"), Size: 5, Time: putTime, DiskPath: "/store/new"}
+	if got := store.entries["k"]; !reflect.DeepEqual(got, wantEntry) {
+		t.Errorf("stored entry = %+v, want %+v", got, wantEntry)
 	}
 }
