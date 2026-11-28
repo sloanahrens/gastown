@@ -276,10 +276,12 @@ var hit = gocacheprog.Entry{OutputID: []byte("x"), Size: 3, DiskPath: "/store/x"
 
 // heldStore holds every get whose action ID is in hold until release, answers the
 // rest at once, counts the gets it received, and counts the held gets it finished.
+// When trace is set, Close notes itself there.
 type heldStore struct {
 	hold    []string
 	started chan struct{}
 	release chan struct{}
+	trace   *[]string
 
 	mu   sync.Mutex
 	gets int
@@ -310,6 +312,9 @@ func (s *heldStore) Put(_, outputID, _ []byte) (string, error) {
 }
 
 func (s *heldStore) Close() error {
+	if s.trace != nil {
+		*s.trace = append(*s.trace, "close")
+	}
 	return nil
 }
 
@@ -348,6 +353,45 @@ func serve(t *testing.T, in io.Reader, out io.Writer, store *heldStore, stop fun
 		}
 	})
 	return done
+}
+
+func TestServeParallelAnswersTogether(t *testing.T) {
+	t.Parallel()
+	var trace []string
+	store := &heldStore{hold: []string{"a"}, started: make(chan struct{}, 2), release: make(chan struct{}), trace: &trace}
+	// Both gets are held, so both must be in flight together before either is
+	// answered. The close follows them on the same input.
+	in := `{"ID":1,"Command":"get","ActionID":"YQ=="}` + "\n" +
+		`{"ID":2,"Command":"get","ActionID":"YQ=="}` + "\n" +
+		`{"ID":3,"Command":"close"}` + "\n"
+	out := &traceWriter{trace: &trace}
+	release := sync.OnceFunc(func() { close(store.release) })
+	done := serve(t, strings.NewReader(in), out, store, release)
+	settle(t, store.started, "the first get must start")
+	settle(t, store.started, "a Serve that answers one request at a time never starts the second get")
+	release()
+	run := settle(t, done, "Serve must return")
+	if run.err != nil {
+		t.Fatalf("Serve = %v, want nil", run.err)
+	}
+	got := decodeResponses(t, out.buf.String())
+	if len(got) != 4 || !reflect.DeepEqual(got[0], handshake) {
+		t.Fatalf("responses = %+v, want the handshake, two hits and the close", got)
+	}
+	// The hits come in either order, so they are sorted by ID before the check.
+	slices.SortFunc(got[1:3], func(a, b gocacheprog.Response) int { return cmp.Compare(a.ID, b.ID) })
+	for i, resp := range got[1:3] {
+		if resp.ID != int64(i+1) || resp.Miss || string(resp.OutputID) != "x" || resp.Size != 3 {
+			t.Errorf("response = %+v, want the whole hit x for ID %d", resp, i+1)
+		}
+	}
+	if got[3].ID != 3 || got[3].Err != "" {
+		t.Errorf("last response = %+v, want the close for ID 3", got[3])
+	}
+	// The store's Close falls after both hits and before the close response.
+	if wantTrace := []string{"response", "response", "response", "close", "response"}; !reflect.DeepEqual(trace, wantTrace) {
+		t.Errorf("trace = %v, want %v", trace, wantTrace)
+	}
 }
 
 func TestServeParallelHeldGetThenBadLine(t *testing.T) {
