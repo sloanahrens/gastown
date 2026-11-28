@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // treeSweep holds the filesystem seams the swept tree's sweep command is built
@@ -12,6 +14,9 @@ type treeSweep struct {
 	MkdirTemp func(dir, pattern string) (string, error)
 	// RemoveAll deletes that directory, as os.RemoveAll.
 	RemoveAll func(path string) error
+	// Build builds the swept tree's sweep command in that directory, as
+	// tiersweep.ProcessBuildExec runs one go build under a wall-clock bound.
+	Build tiersweep.BuildExec
 }
 
 // tempDir makes the directory the swept tree's sweep command is built into. It
