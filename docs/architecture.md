@@ -308,7 +308,7 @@ Agent definitions in `settings/config.json` name a command, a model and an envir
 
 ### How a polecat is isolated
 
-A sandbox is a pod created by the OpenShell gateway from a profile (image, cpu and memory limits, a node selector, a cache claim, a network policy and a list of providers). The policy denies by default. A polecat reaches Dolt, Forgejo and a tracker only through named Services in the sandbox cluster, which point at the Mac, and reaches the model through the provider attached to its seat.
+A sandbox is a pod created by the OpenShell gateway from a profile (image, cpu and memory limits, a node selector, a cache claim, a network policy and a list of providers). The policy denies by default. A polecat reaches Dolt, Forgejo and a tracker only through named Services in the sandbox cluster, which point at the Mac, and reaches the model through the provider attached to its seat. A sandbox's town carries the town's formulas, so a seat cooks its own checklist.
 
 ## Rigs and repositories
 
