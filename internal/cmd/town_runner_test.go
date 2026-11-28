@@ -1474,12 +1474,15 @@ func rollFlagsCmd(missing string) *cobra.Command {
 	if missing != "dry-run" {
 		cmd.Flags().Bool("dry-run", false, "")
 	}
+	if missing != "runner" {
+		cmd.Flags().String("runner", "gate", "")
+	}
 	return cmd
 }
 
 func TestTownRunnerRollRefusesAFlagItCannotRead(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"landing-wait", "runs-wait", "rollout-wait", "dry-run"} {
+	for _, name := range []string{"landing-wait", "runs-wait", "rollout-wait", "dry-run", "runner"} {
 		findTown := func() (string, error) {
 			t.Errorf("the town was looked up although --%s could not be read", name)
 			return "", nil
@@ -1555,5 +1558,99 @@ func TestTownRunnerRollLooksUpTheTownOutsideTheRefusal(t *testing.T) {
 				t.Fatalf("error = %v, want the town lookup to have run and failed", err)
 			}
 		})
+	}
+}
+
+// TestTownRunnerRollRunnerPicksItsValues: without --runner the roll rolls the gate
+// runner, and --runner aux rolls the aux runner, through the constructor the command calls.
+func TestTownRunnerRollRunnerPicksItsValues(t *testing.T) {
+	t.Parallel()
+	if got := townRunnerRollCmd.Flags().Lookup("runner").DefValue; got != "gate" {
+		t.Fatalf("--runner defaults to %q, want gate", got)
+	}
+	for runner, want := range map[string]string{"gate": "forgejo-runner", "aux": "forgejo-runner-aux"} {
+		values, err := rollRunnerValues(runner)
+		if err != nil {
+			t.Fatalf("rollRunnerValues(%q): %v", runner, err)
+		}
+		deps := runnerRollDepsForValues("/town", nil, fixedRunsSeam(), io.Discard, time.Minute, time.Minute, time.Minute, false, values)
+		m, err := deps.apply.(runnerApplier).manifests()
+		if err != nil || m.Deployment.Metadata.Name != want {
+			t.Errorf("--runner %s: Deployment %q (error %v), want %q", runner, m.Deployment.Metadata.Name, err, want)
+		}
+	}
+}
+
+// TestTownRunnerRollAuxNamesOnlyAuxObjects: with --runner aux the apply, the ready
+// wait, the backup and the drift compare name forgejo-runner-aux objects only.
+func TestTownRunnerRollAuxNamesOnlyAuxObjects(t *testing.T) {
+	t.Parallel()
+	k := &recordingKubectl{answer: func(call recordedKubectlCall) (string, int, error) {
+		if len(call.args) > 0 && call.args[0] == "get" {
+			return "True\n", 0, nil
+		}
+		return "", 0, nil
+	}}
+	a := runnerRollDepsForValues("/town", nil, fixedRunsSeam(), io.Discard, time.Minute, time.Minute, time.Minute, false, forgejorunner.AuxValues).apply.(runnerApplier)
+	a.kubectl = k.run
+	if err := a.Apply(context.Background()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := a.WaitReady(context.Background()); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if len(k.calls) != 6 {
+		t.Fatalf("made %d cluster calls, want 6: %v", len(k.calls), k.calls)
+	}
+	// A gate object name is a forgejo-runner name that is not an aux one. The pod's
+	// forgejo-runner binary is no object name, so only name fields and arguments count.
+	gate := func(s string) bool {
+		return strings.Contains(s, "forgejo-runner") && !strings.Contains(s, "forgejo-runner-aux")
+	}
+	for _, call := range k.calls {
+		for _, arg := range call.args {
+			if gate(arg) {
+				t.Errorf("kubectl %v names a gate runner object", call.args)
+			}
+		}
+		for _, line := range strings.Split(call.stdin, "\n") {
+			if field, value, ok := strings.Cut(strings.TrimSpace(line), ": "); ok && (field == "name" || field == "claimName") && gate(value) {
+				t.Errorf("manifest line %q names a gate runner object", line)
+			}
+		}
+	}
+	m, err := a.manifests()
+	if err != nil {
+		t.Fatalf("manifests: %v", err)
+	}
+	for _, object := range runnerBackupObjects(m) {
+		if !strings.HasPrefix(object.name, "forgejo-runner-aux") {
+			t.Errorf("the backup reads %s %q, want a forgejo-runner-aux object", object.noun, object.name)
+		}
+	}
+	for _, target := range runnerDriftTargets(m) {
+		if !strings.Contains(target.resource, "forgejo-runner-aux") {
+			t.Errorf("the drift compare reads %q, want a forgejo-runner-aux object", target.resource)
+		}
+	}
+}
+
+// TestTownRunnerRollRefusesAnUnknownRunnerBeforeTheHold: a --runner that is neither
+// gate nor aux is refused before the town is read, so no hold is taken.
+func TestTownRunnerRollRefusesAnUnknownRunnerBeforeTheHold(t *testing.T) {
+	t.Parallel()
+	for _, runner := range []string{"", "Aux", "control", "gate "} {
+		cmd := rollFlagsCmd("")
+		if err := cmd.Flags().Set("runner", runner); err != nil {
+			t.Fatalf("setting --runner: %v", err)
+		}
+		findTown := func() (string, error) {
+			t.Errorf("--runner %q: the town was looked up before the refusal", runner)
+			return "", nil
+		}
+		err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(nil))
+		if err == nil || !strings.Contains(err.Error(), "--runner") {
+			t.Errorf("--runner %q: error = %v, want a refusal that names --runner", runner, err)
+		}
 	}
 }

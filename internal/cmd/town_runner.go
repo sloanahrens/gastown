@@ -34,6 +34,18 @@ import (
 // rollOwner is the owner the roll writes into the landing hold.
 const rollOwner = "roll"
 
+// rollRunnerValues is the checked-in values --runner names: gate, the default, or
+// aux. Any other value is an error, so the roll refuses before it takes the hold.
+func rollRunnerValues(runner string) (func() (forgejorunner.Values, error), error) {
+	switch runner {
+	case "gate":
+		return forgejorunner.ControlValues, nil
+	case "aux":
+		return forgejorunner.AuxValues, nil
+	}
+	return nil, fmt.Errorf("--runner %q is not gate or aux, so the roll takes no hold", runner)
+}
+
 // rollApplier is what the runner roll's target does: write the runner's
 // manifests, wait for the rollout, and compare the render with the live cluster
 // for --dry-run.
@@ -305,7 +317,7 @@ func liveRollSignals() (context.Context, context.CancelFunc) {
 
 // runnerRollDeps is what a roll runs with: the hold store, the two waits' reads,
 // the clock they poll on, the signal source, the applier, and the flags. The
-// production command builds it with runnerRollDepsFor.
+// production command builds it with runnerRollDepsForValues.
 type runnerRollDeps struct {
 	// err is a production read that could not be built, such as a missing token
 	// file or an empty repo list. A real roll returns it before any step runs or
@@ -367,6 +379,7 @@ Deployment's Recreate strategy rolls the pod; this never deletes it.
 
 Examples:
   gt town runner roll --dry-run
+  gt town runner roll --runner aux --dry-run
   gt town runner roll --landing-wait 5m --runs-wait 30m`,
 	Args: cobra.NoArgs,
 	RunE: runTownRunnerRollCmd,
@@ -381,6 +394,7 @@ func init() {
 	townRunnerRollCmd.Flags().Duration("runs-wait", 20*time.Minute, "longest wait for the gate and post-land runs to finish")
 	townRunnerRollCmd.Flags().Duration("rollout-wait", 10*time.Minute, "longest wait for the Deployment's rollout to complete")
 	townRunnerRollCmd.Flags().Bool("dry-run", false, "print the steps and their bounds, then the drift lines; take no hold and apply nothing")
+	townRunnerRollCmd.Flags().String("runner", "gate", "the runner to roll: gate, the default, or aux")
 	townRunnerResizeCmd.Flags().String(dindCPUFlag, "", "the engine sidecar's CPU: a positive whole number of cores, such as 4, or of millicores, such as 4000m")
 }
 
@@ -409,6 +423,14 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error), ge
 	if err != nil {
 		return fmt.Errorf("reading --dry-run: %w", err)
 	}
+	runner, err := cmd.Flags().GetString("runner")
+	if err != nil {
+		return fmt.Errorf("reading --runner: %w", err)
+	}
+	values, err := rollRunnerValues(runner)
+	if err != nil {
+		return err
+	}
 	if !dryRun && getenv(podEnv) != "" {
 		return fmt.Errorf("gt town runner roll refuses inside a pod, where %s is set: the daemon pod's account may not take the landing hold or write the runner, so build the commit to be applied and run it on the Mac instead: make build, then ./gt town runner roll", podEnv)
 	}
@@ -416,7 +438,7 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error), ge
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return runTownRunnerRoll(runnerRollDepsFor(townRoot, productionPodExec, productionRunsSeam(), cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun))
+	return runTownRunnerRoll(runnerRollDepsForValues(townRoot, productionPodExec, productionRunsSeam(), cmd.OutOrStdout(), landingWait, runsWait, rolloutWait, dryRun, values))
 }
 
 // runnerRollRunsSeam is how the roll's runs read gets its two inputs: client is the
@@ -520,6 +542,12 @@ func runnerRollRunsRead(townRoot string, seam runnerRollRunsSeam) (func(context.
 // be built is carried in err too, so a real roll refuses before the hold instead
 // of taking it for a wait it cannot run.
 func runnerRollDepsFor(townRoot string, exec podExec, seam runnerRollRunsSeam, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) runnerRollDeps {
+	return runnerRollDepsForValues(townRoot, exec, seam, out, landingWait, runsWait, rolloutWait, dryRun, forgejorunner.ControlValues)
+}
+
+// runnerRollDepsForValues is runnerRollDepsFor for the runner whose checked-in
+// values are values, the ones --runner names.
+func runnerRollDepsForValues(townRoot string, exec podExec, seam runnerRollRunsSeam, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool, values func() (forgejorunner.Values, error)) runnerRollDeps {
 	store, storeErr := podHoldStore(townRoot, exec)
 	runs, runsErr := runnerRollRunsRead(townRoot, seam)
 	if runsErr != nil {
@@ -540,7 +568,7 @@ func runnerRollDepsFor(townRoot string, exec podExec, seam runnerRollRunsSeam, o
 		signals:  liveRollSignals,
 		apply: runnerApplier{
 			kubectl:     realRunFunc(),
-			values:      forgejorunner.ControlValues,
+			values:      values,
 			build:       forgejorunner.Build,
 			encode:      forgejorunner.YAML,
 			rolloutWait: rolloutWait,
