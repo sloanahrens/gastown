@@ -340,6 +340,13 @@ func (r *report) read(in io.Reader) error {
 	return sc.Err()
 }
 
+// cachedLine reports whether a package line is go test's cached verdict: the
+// third field is "(cached)", with or without a coverage figure after it.
+func cachedLine(line string) bool {
+	f := strings.Fields(line)
+	return len(f) >= 3 && f[2] == "(cached)"
+}
+
 func (r *report) handle(e event) {
 	if !e.Time.IsZero() {
 		if r.first.IsZero() {
@@ -358,11 +365,10 @@ func (r *report) handle(e event) {
 		case e.Package == "":
 			r.builds[e.ImportPath] = append(r.builds[e.ImportPath], e.Output)
 		case e.Test == "":
-			// A cached package reports its pass with Elapsed 0 and says so on
-			// the package's own "ok  \t<pkg>\t(cached)" line. A test's output
-			// never reaches this branch, so a test that happens to print the
-			// word cannot mark its package.
-			if strings.HasSuffix(strings.TrimSpace(e.Output), "(cached)") {
+			// A cached package says so on its own "ok  \t<pkg>\t(cached)" line,
+			// which may carry a coverage figure. A test's output never reaches
+			// this branch, so a test that prints the word cannot mark its package.
+			if cachedLine(e.Output) {
 				r.cached[e.Package] = true
 			}
 			r.pkgOut[e.Package] = append(r.pkgOut[e.Package], e.Output)
