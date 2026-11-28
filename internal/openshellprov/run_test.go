@@ -196,7 +196,7 @@ func newGatewayRun(gw *gateway, files *memFiles, gatewayName string) (*Run, *byt
 	out, errw := &bytes.Buffer{}, &bytes.Buffer{}
 	return &Run{
 		Client: Client{Run: gw, Gateway: gatewayName},
-		Gt:     Gt{Run: gw, Gateway: gatewayName, Root: testRoot, Err: errw},
+		Gt:     Gt{Run: gw, Gateway: gatewayName, Err: errw},
 		Paths:  Paths{Root: testRoot, Profiles: testProfiles, ConfigDir: testConfig},
 		Files:  files,
 		Env:    []string{"PATH=/usr/bin"},
@@ -217,13 +217,24 @@ func checkNamesGateway(t *testing.T, calls []string, gatewayName string) {
 			if want == "" {
 				want = "k8s"
 			}
-			if !strings.Contains(c, "--gateway "+want+" ") {
+			if flagValue(strings.Fields(c), "--gateway") != want {
 				t.Errorf("gt call %q does not name gateway %s", c, want)
 			}
 		case gatewayName == "" && strings.HasPrefix(c, "openshell -g "):
 			t.Errorf("default-gateway call %q passed -g", c)
 		case gatewayName != "" && !strings.HasPrefix(c, "openshell -g "+gatewayName+" "):
 			t.Errorf("openshell call %q does not name gateway %s", c, gatewayName)
+		}
+	}
+}
+
+// checkNoRoot asserts no gt call names --root: gt reads the gateway's policy
+// from the gt it runs as, not from the caller's checkout.
+func checkNoRoot(t *testing.T, calls []string) {
+	t.Helper()
+	for _, c := range calls {
+		if strings.Contains(c, "--root") {
+			t.Errorf("gt call %q passes --root", c)
 		}
 	}
 }
@@ -312,6 +323,7 @@ func TestRunOrderAndExitCodes(t *testing.T) {
 			t.Errorf("forgejo-polecat profile = %q, want gt's rendering %q", got, renderedForgejo)
 		}
 		checkNamesGateway(t, gw.calls, "")
+		checkNoRoot(t, gw.calls)
 		checkNoSecret(t, out, errw, gw.calls)
 	})
 
@@ -323,6 +335,7 @@ func TestRunOrderAndExitCodes(t *testing.T) {
 			t.Fatalf("Execute: %v", err)
 		}
 		checkNamesGateway(t, gw.calls, "k8s")
+		checkNoRoot(t, gw.calls)
 		checkNoSecret(t, out, errw, gw.calls)
 		if !slices.Equal(gw.providers, []string{"deepseek", "forgejo-polecat"}) {
 			t.Errorf("providers = %q, want both on k8s", gw.providers)

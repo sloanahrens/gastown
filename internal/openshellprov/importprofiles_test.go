@@ -148,7 +148,7 @@ func newTestRun(runner *scriptRunner, files *memFiles) (*Run, *bytes.Buffer) {
 	out := &bytes.Buffer{}
 	return &Run{
 		Client: Client{Run: runner},
-		Gt:     Gt{Run: runner, Root: testRoot},
+		Gt:     Gt{Run: runner},
 		Paths:  Paths{Root: testRoot, Profiles: testProfiles},
 		Files:  files,
 		Out:    out,
@@ -167,9 +167,9 @@ func lastCall(calls []string) string {
 const (
 	listCall   = "openshell profile list --global"
 	exportCall = "openshell profile export --global -- forgejo-polecat"
-	checkCall  = "gt sandbox endpoint --gateway k8s --root /src/gt --check " + testWork + "/forgejo-polecat.export.yaml"
+	checkCall  = "gt sandbox endpoint --gateway k8s --check " + testWork + "/forgejo-polecat.export.yaml"
 	// renderCall renders without an export; the stale path adds --from-export.
-	renderCall     = "gt sandbox endpoint --gateway k8s --root /src/gt --render " + testProfiles + "/forgejo-polecat.yaml"
+	renderCall     = "gt sandbox endpoint --gateway k8s --render " + testProfiles + "/forgejo-polecat.yaml"
 	renderFromCall = renderCall + " --from-export " + testWork + "/forgejo-polecat.export.yaml"
 	lintRendered   = "openshell profile lint -f " + testWork + "/forgejo-polecat.yaml"
 	updateCall     = "openshell profile update --global -f " + testWork + "/forgejo-polecat.yaml forgejo-polecat"

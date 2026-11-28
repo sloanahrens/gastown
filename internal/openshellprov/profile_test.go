@@ -42,10 +42,10 @@ func TestProfileIDTable(t *testing.T) {
 func TestGtDefaultGatewayIsK8s(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{}
-	if err := (Gt{Run: fake, Root: "/src/gt"}).CheckEndpoint(); err != nil {
+	if err := (Gt{Run: fake}).CheckEndpoint(); err != nil {
 		t.Fatalf("CheckEndpoint: %v", err)
 	}
-	want := "gt sandbox endpoint --gateway k8s --root /src/gt"
+	want := "gt sandbox endpoint --gateway k8s"
 	if len(fake.calls) != 1 || fake.calls[0] != want {
 		t.Errorf("calls = %q, want [%q]", fake.calls, want)
 	}
@@ -53,7 +53,7 @@ func TestGtDefaultGatewayIsK8s(t *testing.T) {
 
 func TestGtArgs(t *testing.T) {
 	t.Parallel()
-	const base = "gt sandbox endpoint --gateway k8s --root /src/gt"
+	const base = "gt sandbox endpoint --gateway k8s"
 	tests := []struct {
 		name string
 		run  func(g Gt) error
@@ -68,11 +68,14 @@ func TestGtArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := &fakeRunner{stdout: []byte("bound\n")}
-			if err := tc.run(Gt{Run: fake, Gateway: "k8s", Root: "/src/gt"}); err != nil {
+			if err := tc.run(Gt{Run: fake, Gateway: "k8s"}); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
 			if len(fake.calls) != 1 || fake.calls[0] != tc.want {
 				t.Errorf("calls = %q, want [%q]", fake.calls, tc.want)
+			}
+			if strings.Contains(fake.calls[0], "--root") {
+				t.Errorf("call %q passes --root", fake.calls[0])
 			}
 		})
 	}
