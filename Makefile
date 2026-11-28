@@ -567,7 +567,9 @@ gate-test:
 	@# landing reruns only the packages its change can affect (gt-s1vff).
 	@# -coverprofile is a cacheable test flag, so it keeps that cache, and its
 	@# profile is judged for added error branches (gt-2jcpvh). The unit tier
-	@# carries no flag that turns the cache off.
+	@# carries no flag that turns the cache off. From gt-2jcpvh on it is built
+	@# with coverage instrumentation, so gate-walls.jsonl and tierwall durations
+	@# are not comparable with earlier landings.
 	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
 	@# reran every test on every landing; per-package CPU and wall budgets are
 	@# enforced by make tier-check (the hourly sweep), not the landing path.
