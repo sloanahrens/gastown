@@ -556,7 +556,7 @@ func validateCPUQuota(quota, limit string) error {
 	}
 	cores, err := strconv.Atoi(quota)
 	if err != nil {
-		return fmt.Errorf("Values.CPUQuota %q: want a positive whole number of cores, such as 8", quota)
+		return fmt.Errorf("Values.CPUQuota %q: the whole cores it names do not fit an int: want a positive whole number of cores, such as 8", quota)
 	}
 	if cores > whole {
 		return fmt.Errorf("Values.CPUQuota %q is more than the engine limit %q's %d whole cores: want a quota at most that", quota, limit, whole)

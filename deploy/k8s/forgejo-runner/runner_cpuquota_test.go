@@ -107,3 +107,27 @@ func TestCPUQuotaRefusesAnUnusableValue(t *testing.T) {
 		})
 	}
 }
+
+// TestCPUQuotaRefusesAnOverflowingQuota drives the parse of a quota that matches the
+// digit grammar but does not fit an int: it is refused by name, never clamped.
+func TestCPUQuotaRefusesAnOverflowingQuota(t *testing.T) {
+	t.Parallel()
+	v := goldenValues()
+	v.DindResources.CPU = "12"
+	v.CPUQuota = "99999999999999999999"
+	_, err := Build(v)
+	if err == nil || !strings.Contains(err.Error(), "do not fit an int") || !strings.Contains(err.Error(), "Values.CPUQuota") {
+		t.Errorf("Build with CPUQuota %q = %v, want a refusal naming Values.CPUQuota as not fitting an int", v.CPUQuota, err)
+	}
+}
+
+// TestCPUQuotaRefusesAnUnreadableLimit drives the limit read inside validateCPUQuota.
+// Build's validateShare refuses a limit wholeCPUs cannot read before the quota is
+// checked, so this direct call is the only way the branch is driven.
+func TestCPUQuotaRefusesAnUnreadableLimit(t *testing.T) {
+	t.Parallel()
+	err := validateCPUQuota("8", "ten")
+	if err == nil || !strings.Contains(err.Error(), "Values.DindResources.CPU") {
+		t.Errorf("validateCPUQuota under limit %q = %v, want a refusal naming Values.DindResources.CPU", "ten", err)
+	}
+}
