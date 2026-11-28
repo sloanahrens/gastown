@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/gocacheprog"
 )
@@ -122,5 +123,92 @@ func TestServeEndOfInput(t *testing.T) {
 	}
 	if store.closes != 0 {
 		t.Errorf("store closed %d times, want 0", store.closes)
+	}
+}
+
+// traceStore holds entries in memory, stamps each Put with now, and notes its
+// Close in trace so the test sees where Close falls among the writes.
+type traceStore struct {
+	entries map[string]gocacheprog.Entry
+	now     time.Time
+	trace   *[]string
+	closes  int
+}
+
+func (s *traceStore) Get(actionID []byte) (gocacheprog.Entry, error) {
+	e, ok := s.entries[string(actionID)]
+	if !ok {
+		return gocacheprog.Entry{}, gocacheprog.ErrMiss
+	}
+	return e, nil
+}
+
+func (s *traceStore) Put(actionID, outputID, body []byte) (string, error) {
+	path := "/store/" + string(outputID)
+	s.entries[string(actionID)] = gocacheprog.Entry{OutputID: outputID, Size: int64(len(body)), Time: s.now, DiskPath: path}
+	return path, nil
+}
+
+func (s *traceStore) Close() error {
+	*s.trace = append(*s.trace, "close")
+	s.closes++
+	return nil
+}
+
+// traceWriter keeps what Serve writes and notes each write in trace.
+type traceWriter struct {
+	buf   strings.Builder
+	trace *[]string
+}
+
+func (w *traceWriter) Write(p []byte) (int, error) {
+	*w.trace = append(*w.trace, "response")
+	return w.buf.Write(p)
+}
+
+func TestServeSession(t *testing.T) {
+	t.Parallel()
+	var trace []string
+	putTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	hitTime := putTime.Add(-time.Hour)
+	store := &traceStore{
+		entries: map[string]gocacheprog.Entry{"hit": {OutputID: []byte("old"), Size: 10, Time: hitTime, DiskPath: "/store/old"}},
+		now:     putTime,
+		trace:   &trace,
+	}
+	in := strings.Join([]string{
+		`{"ID":1,"Command":"get","ActionID":"aGl0"}`,
+		`{"ID":2,"Command":"get","ActionID":"bWlzcw=="}`,
+		`{"ID":3,"Command":"put","ActionID":"aw==","OutputID":"bmV3","BodySize":5}`,
+		`"aGVsbG8="`,
+		`{"ID":4,"Command":"get","ActionID":"aw=="}`,
+		`{"ID":5,"Command":"close"}`,
+	}, "\n") + "\n"
+	out := &traceWriter{trace: &trace}
+	stats, err := gocacheprog.Serve(context.Background(), strings.NewReader(in), out, store)
+	if err != nil {
+		t.Fatalf("Serve = %v, want nil", err)
+	}
+	want := []gocacheprog.Response{
+		handshake,
+		{ID: 1, OutputID: []byte("old"), Size: 10, Time: &hitTime, DiskPath: "/store/old"},
+		{ID: 2, Miss: true},
+		{ID: 3, DiskPath: "/store/new"},
+		{ID: 4, OutputID: []byte("new"), Size: 5, Time: &putTime, DiskPath: "/store/new"},
+		{ID: 5},
+	}
+	if got := decodeResponses(t, out.buf.String()); !reflect.DeepEqual(got, want) {
+		t.Errorf("responses = %+v, want %+v", got, want)
+	}
+	if wantStats := (gocacheprog.Stats{Gets: 3, Hits: 2, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 15}); stats != wantStats {
+		t.Errorf("stats = %+v, want %+v", stats, wantStats)
+	}
+	// Five writes (the handshake and IDs 1 to 4) come before close; the close
+	// response is written after the store's Close.
+	if wantTrace := []string{"response", "response", "response", "response", "response", "close", "response"}; !reflect.DeepEqual(trace, wantTrace) {
+		t.Errorf("trace = %v, want %v", trace, wantTrace)
+	}
+	if store.closes != 1 {
+		t.Errorf("store closed %d times, want 1", store.closes)
 	}
 }
