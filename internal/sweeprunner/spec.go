@@ -44,6 +44,17 @@ type Spec struct {
 	// sidecar's share when Dind is on). Zero asks for the whole share, so a
 	// contended cluster may place the run on less CPU and it still runs (gt-13dre6.12).
 	RunnerCPURequest int
+	// RunnerCPURequestMillis is the runner container's CPU request in
+	// millicores: zero asks for the runner's whole share, and a positive value
+	// is at most the runner's share in millicores. A value set together with
+	// RunnerCPURequest is refused, because the two name one request in two
+	// units (gt-9ji7v9).
+	RunnerCPURequestMillis int
+	// DindCPURequestMillis is the dind sidecar's CPU request in millicores:
+	// zero leaves it unset, and a positive value is at most the sidecar's share
+	// in millicores. A value set with Dind off is refused, because no sidecar
+	// would read it (gt-9ji7v9).
+	DindCPURequestMillis int
 	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
 	// tier-sweep command line naming none runs (TiersOrDefault).
 	Tiers []string
@@ -147,6 +158,32 @@ func (s Spec) Validate() error {
 		}
 		if s.RunnerCPURequest > share {
 			return &FieldError{Field: "runnerCPURequest", Rule: fmt.Sprintf("%d is above the runner's share of %d CPUs", s.RunnerCPURequest, share)}
+		}
+	}
+	if s.RunnerCPURequestMillis < 0 {
+		return &FieldError{Field: "runnerCPURequestMillis", Rule: fmt.Sprintf("%d is below 0, and 0 asks for the runner's whole share", s.RunnerCPURequestMillis)}
+	}
+	if s.DindCPURequestMillis < 0 {
+		return &FieldError{Field: "dindCPURequestMillis", Rule: fmt.Sprintf("%d is below 0, and 0 leaves the sidecar's request unset", s.DindCPURequestMillis)}
+	}
+	if s.RunnerCPURequestMillis > 0 && s.RunnerCPURequest > 0 {
+		return &FieldError{Field: "runnerCPURequestMillis", Rule: fmt.Sprintf("%d is set with runnerCPURequest %d, and the two name one request", s.RunnerCPURequestMillis, s.RunnerCPURequest)}
+	}
+	if s.DindCPURequestMillis > 0 {
+		if !s.Dind {
+			return &FieldError{Field: "dindCPURequestMillis", Rule: fmt.Sprintf("%d is set, but the run starts no dind sidecar", s.DindCPURequestMillis)}
+		}
+		if share := s.dindCPUShare() * 1000; s.DindCPURequestMillis > share {
+			return &FieldError{Field: "dindCPURequestMillis", Rule: fmt.Sprintf("%d is above the sidecar's share of %d millicores", s.DindCPURequestMillis, share)}
+		}
+	}
+	if s.RunnerCPURequestMillis > 0 {
+		share := s.CPUs
+		if s.Dind {
+			share -= s.dindCPUShare()
+		}
+		if share *= 1000; s.RunnerCPURequestMillis > share {
+			return &FieldError{Field: "runnerCPURequestMillis", Rule: fmt.Sprintf("%d is above the runner's share of %d millicores", s.RunnerCPURequestMillis, share)}
 		}
 	}
 	if s.MemoryGB < 2 || s.MemoryGB > 48 {
