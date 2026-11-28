@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,4 +137,38 @@ func TestRigSeatNames(t *testing.T) {
 			t.Errorf("rigSeatNames returned names %v with the error, want none", got)
 		}
 	})
+}
+
+func TestJoinSeatNames(t *testing.T) {
+	t.Parallel()
+	lists := map[string][]string{"alpha": {"opus", "nova"}, "beta": {"nova", "aegis"}, "gamma": {}, "delta": {"ember"}}
+	fromLists := func(rigName string) ([]string, error) {
+		if rigName == "broken" {
+			return nil, errors.New("registry unreadable")
+		}
+		return lists[rigName], nil
+	}
+	for _, tc := range []struct {
+		name    string
+		rigs    []string
+		namesOf func(string) ([]string, error)
+		want    []string
+		wantErr bool
+	}{
+		{"shared name yields the union, sorted, once", []string{"alpha", "beta"}, fromLists, []string{"aegis", "nova", "opus"}, false},
+		{"a rig that yields nothing adds nothing", []string{"gamma", "delta"}, fromLists, []string{"ember"}, false},
+		{"failing rig among two is an error, no names", []string{"alpha", "broken"}, fromLists, nil, true},
+		{"empty rig list is an error, no names", nil, fromLists, nil, true},
+		{"rigs yielding nothing are an error, no names", []string{"gamma"}, fromLists, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := joinSeatNames(tc.rigs, tc.namesOf)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("joinSeatNames error = %v, want error %v", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("joinSeatNames = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
