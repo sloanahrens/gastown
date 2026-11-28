@@ -127,6 +127,10 @@ type Runner struct {
 	// TestWalls is the previous run's wall time per listed test, in seconds,
 	// keyed by TestWallKey. A shard partition reads it; nil partitions by count.
 	TestWalls map[string]float64
+	// cgroup is the run's one cgroup sampling note: the first failure to read the
+	// counters is named on Stderr, and later ones are silent. Shared by every
+	// package, so the note is spent once per run (gt-3wb27k).
+	cgroup cgroupNote
 	// stderr keeps the progress lines and the reports whole while a run of more
 	// than one job writes them from the dispatcher and the collector at once.
 	stderrMu sync.Mutex
@@ -490,6 +494,7 @@ func (r *Runner) report(tier string, t *task) {
 	}
 	r.addTiming(tier, t.name, res)
 	r.addSlowTests(tier, t.name, res.tests)
+	r.cgroup.report(r.Stderr, res.cgroupErr)
 	r.reportLog(tier, t)
 }
 
