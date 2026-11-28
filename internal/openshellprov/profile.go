@@ -45,14 +45,14 @@ func ProfileID(yaml []byte) string {
 }
 
 // Gt makes the `gt sandbox endpoint` calls a run needs for one gateway. Every
-// call goes through Run, so a unit test runs no process.
+// call goes through Run, so a unit test runs no process. A call passes no --root:
+// gt reads the gateway's policy from the root of the gt it runs as, and each call
+// names its file by absolute path, so gt needs no root to find it.
 type Gt struct {
 	// Run runs every gt call.
 	Run Runner
 	// Gateway is the --gateway name; empty is the default gateway, k8s.
 	Gateway string
-	// Root is the gt source checkout the policy paths are relative to, passed as --root.
-	Root string
 	// Err receives what gt writes to stderr, which is gt's explanation of a refusal.
 	Err io.Writer
 }
@@ -69,7 +69,7 @@ func (g Gt) gateway() string {
 // it wrote to stdout. Its stderr goes to Err, where gt's refusal reaches the
 // operator, and never into an error built from this call.
 func (g Gt) endpoint(extra ...string) ([]byte, error) {
-	args := append([]string{"sandbox", "endpoint", "--gateway", g.gateway(), "--root", g.Root}, extra...)
+	args := append([]string{"sandbox", "endpoint", "--gateway", g.gateway()}, extra...)
 	stdout, stderr, err := g.Run.Run(gtBinary, args, nil, nil)
 	if g.Err != nil {
 		if _, werr := g.Err.Write(stderr); werr != nil {

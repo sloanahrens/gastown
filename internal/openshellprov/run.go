@@ -10,7 +10,7 @@ import (
 func NewRun(h Host, opts Options, paths Paths, out, errw io.Writer) *Run {
 	return &Run{
 		Client: Client{Run: h.Exec, Gateway: opts.Gateway},
-		Gt:     Gt{Run: h.Exec, Gateway: opts.Gateway, Root: paths.Root, Err: errw},
+		Gt:     Gt{Run: h.Exec, Gateway: opts.Gateway, Err: errw},
 		Paths:  paths,
 		Files:  h.Files,
 		Env:    h.Env(),
