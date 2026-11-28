@@ -9,15 +9,25 @@ import (
 
 func inflightDir(townRoot string) string { return filepath.Join(townRoot, "daemon", "inflight") }
 
+func daemonLockPath(townRoot string) string { return filepath.Join(townRoot, "daemon", "daemon.lock") }
+
 // Register lists label as a command in flight in townRoot/daemon/inflight and
 // returns the function that removes it. The entry is renamed to its .cmd name
-// only while locked and labeled; a failed rename drops it.
+// only while locked and labeled; a failed rename drops it. A town with no
+// daemon.lock has no daemon to drain the entry, so Register lists nothing and
+// returns a release that does nothing.
 func Register(townRoot, label string) (func() error, error) {
 	return register(os.Rename, townRoot, label)
 }
 
 // register is Register with the rename a test can fail.
 func register(rename func(oldpath, newpath string) error, townRoot, label string) (func() error, error) {
+	if _, err := os.Stat(daemonLockPath(townRoot)); err != nil {
+		if os.IsNotExist(err) {
+			return func() error { return nil }, nil
+		}
+		return nil, fmt.Errorf("checking daemon lock: %w", err)
+	}
 	e, err := createEntry(inflightDir(townRoot), label)
 	if err != nil {
 		return nil, err
