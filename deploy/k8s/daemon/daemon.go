@@ -927,6 +927,12 @@ type Values struct {
 	// contention. Empty renders no resources, as the gateway did before the request.
 	// A value cpuRE does not read is refused, with or without BdGatewayImage.
 	BdGatewayCPURequest string
+	// DashboardCPURequest is the dashboard container's CPU request, whole cores or
+	// millicores as cpuRE reads them, such as 2 or 100m. It sets requests.cpu only:
+	// the dashboard carries no CPU limit, so it is Burstable and is not throttled
+	// under contention. Empty renders no resources, as the dashboard did before the
+	// request. A value cpuRE does not read is refused, with or without Dashboard.
+	DashboardCPURequest string
 	// IncludeStatic renders the six static control-cluster manifests
 	// (deploy/k8s/static.go) right after the ServiceAccount: the cluster-scoped
 	// objects first, then the namespaced ones, each as its reviewed bytes. Off by
@@ -1744,6 +1750,7 @@ func dashboardContainer(v Values) Container {
 		WorkingDir:     TownRootPath,
 		Env:            env,
 		VolumeMounts:   dashboardMounts(v),
+		Resources:      dashboardResources(v),
 		ReadinessProbe: dashboardProbe(20, 15, 10, 3),
 		// Liveness is no stricter than readiness: every number is at least the
 		// readiness number, and the longer delay and threshold keep one slow read
@@ -2425,6 +2432,9 @@ func (v Values) validate() error {
 	if err := v.validateDashboard(); err != nil {
 		return err
 	}
+	if err := v.validateDashboardCPURequest(); err != nil {
+		return err
+	}
 	if err := v.validateBdGateway(); err != nil {
 		return err
 	}
@@ -2464,6 +2474,26 @@ func (v Values) validateDashboard() error {
 		return fmt.Errorf("Values.Dashboard is set but Values.Secrets holds no %s entry: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating", ViewerTokenFile)
 	}
 	return nil
+}
+
+// validateDashboardCPURequest refuses a CPU request cpuRE does not read: whole cores or
+// millicores, positive. Empty is no request. It runs with or without Dashboard, as
+// validateBdGatewayCPURequest does, so a value is refused rather than ignored.
+func (v Values) validateDashboardCPURequest() error {
+	if v.DashboardCPURequest == "" || cpuRE.MatchString(v.DashboardCPURequest) {
+		return nil
+	}
+	return fmt.Errorf("Values.DashboardCPURequest %q: want a positive whole number of cores or millicores, such as 2 or 100m, or empty for no request", v.DashboardCPURequest)
+}
+
+// dashboardResources is the dashboard container's share: a CPU request when
+// Values.DashboardCPURequest is set, and no limit, so the container is Burstable. Empty
+// is nil, so the container renders no resources block, as it did before the request.
+func dashboardResources(v Values) *ContainerResources {
+	if v.DashboardCPURequest == "" {
+		return nil
+	}
+	return &ContainerResources{Requests: map[string]string{"cpu": v.DashboardCPURequest}}
 }
 
 // validateTracker refuses the tracker values its pod cannot render: a DSN Secret
