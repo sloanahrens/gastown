@@ -877,10 +877,23 @@ func dindContainer(spec Spec) Container {
 			PeriodSeconds:    probePeriodSeconds,
 			FailureThreshold: probeFailureThreshold,
 		},
-		Resources:       &Resources{Requests: share, Limits: share},
+		Resources:       &Resources{Requests: dindRequests(spec, share), Limits: share},
 		SecurityContext: &SecurityContext{Privileged: true},
 		VolumeMounts:    []VolumeMount{{Name: dindVolume, MountPath: dindDataPath}},
 	}
+}
+
+// dindRequests is the sidecar's resource requests: the share it is limited to,
+// with the CPU request replaced by the Spec's millicore request when one is
+// set. A zero request asks for the whole share, keeping requests equal to
+// limits as before (gt-w38cb5). The list is returned by value, so the caller's
+// limit is never touched.
+func dindRequests(spec Spec, share ResourceList) ResourceList {
+	requests := share
+	if spec.DindCPURequestMillis > 0 {
+		requests.CPU = cpuQuantity(int64(spec.DindCPURequestMillis))
+	}
+	return requests
 }
 
 // JobName is the Job's name, which the run id makes unique to the launch.
