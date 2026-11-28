@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -200,6 +201,9 @@ type containerEntrypoint struct {
 	// repo at the image's commit; it runs after installMango and before the daemon
 	// is exec'd. Its missing-commit error is a warning, not a refusal.
 	deployDirectives func(townRoot string) error
+	// syncFormulas writes the image's formulas into the town before the daemon
+	// is exec'd; a failure refuses the start.
+	syncFormulas func(townRoot string) error
 	// logf writes one line of start-up progress to the container's log.
 	logf    func(format string, args ...any)
 	scratch bool // --scratch-town: the scratch project asked for a scratch town
@@ -256,6 +260,9 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		},
 		deployDirectives: func(townRoot string) error {
 			return deployImageDirectives(config.DeployCentralDirectives, townRoot)
+		},
+		syncFormulas: func(townRoot string) error {
+			return syncDaemonFormulas(formula.UpdateFormulas, townRoot, entrypointLogf)
 		},
 		logf:        entrypointLogf,
 		scratch:     flags.scratch,
@@ -419,6 +426,12 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	}
 	if err := e.deployTownDirectives(townRoot); err != nil {
 		return err
+	}
+	// A pod roll runs no update job, so the start writes the image's formulas
+	// into the town, which the workspace reconcile carries to the bd gateway
+	// (gt-qgh0t4).
+	if err := e.syncFormulas(townRoot); err != nil {
+		return fmt.Errorf("sync the town's formulas under %s: %w; the daemon was not started", townRoot, err)
 	}
 	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)

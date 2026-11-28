@@ -86,8 +86,14 @@ type entrypointRig struct {
 	deployTownRoots []string
 	deployRanAt     int
 	deployErr       error
-	logs            []string
-	calls           [][]string
+	// syncTownRoots is the town root each formula sync was given, syncRanAt is
+	// len(calls) when the last one ran (so a test sees its place in the command
+	// sequence without adding to the recorded commands), and syncErr fails it.
+	syncTownRoots []string
+	syncRanAt     int
+	syncErr       error
+	logs          []string
+	calls         [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -184,6 +190,12 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			r.deployTownRoots = append(r.deployTownRoots, townRoot)
 			r.deployRanAt = len(r.calls)
 			return r.deployErr
+		},
+		syncFormulas: func(townRoot string) error {
+			r.installs = append(r.installs, "formulas")
+			r.syncTownRoots = append(r.syncTownRoots, townRoot)
+			r.syncRanAt = len(r.calls)
+			return r.syncErr
 		},
 		logf: func(format string, args ...any) {
 			r.logs = append(r.logs, fmt.Sprintf(format, args...))
@@ -2512,15 +2524,15 @@ func TestInstalledMango(t *testing.T) {
 }
 
 // The mango install is in place before the daemon starts: it runs for the town
-// root, after the plugin binaries and immediately before the exec.
+// root, after the plugin binaries and before the formula sync and the exec.
 func TestEntrypointMangoInstallsAfterThePluginsBeforeTheDaemonExec(t *testing.T) {
 	t.Parallel()
 	r := townRig()
 	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 		t.Fatalf("runContainerEntrypoint: %v", err)
 	}
-	if !slices.Equal(r.installs, []string{"plugins", "mango"}) {
-		t.Errorf("installers ran in order %v, want the plugins and then mango", r.installs)
+	if !slices.Equal(r.installs, []string{"plugins", "mango", "formulas"}) {
+		t.Errorf("installers ran in order %v, want the plugins, then mango, then formulas", r.installs)
 	}
 	if !slices.Equal(r.mangoTownRoots, []string{entrypointTown}) {
 		t.Errorf("mango installs ran for %v, want the town root once", r.mangoTownRoots)
@@ -2546,7 +2558,7 @@ func TestEntrypointMangoFailureStopsBeforeTheDaemonExec(t *testing.T) {
 
 // The central directives deploy from the gastown bare repo after the mango
 // install and before the daemon is exec'd: the call order is plugins, mango,
-// directives, and the exec is the next command run after the deploy.
+// directives, formulas, and the exec is the next command run after the deploy.
 func TestEntrypointDirectivesDeployAfterTheMangoBeforeTheDaemonExec(t *testing.T) {
 	t.Parallel()
 	r := townRig()
@@ -2554,14 +2566,76 @@ func TestEntrypointDirectivesDeployAfterTheMangoBeforeTheDaemonExec(t *testing.T
 	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 		t.Fatalf("runContainerEntrypoint: %v", err)
 	}
-	if !slices.Equal(r.installs, []string{"plugins", "mango", "directives"}) {
-		t.Errorf("installers ran in order %v, want plugins, mango and then directives", r.installs)
+	if !slices.Equal(r.installs, []string{"plugins", "mango", "directives", "formulas"}) {
+		t.Errorf("installers ran in order %v, want plugins, mango, directives and then formulas", r.installs)
 	}
 	if !slices.Equal(r.deployTownRoots, []string{entrypointTown}) {
 		t.Errorf("directive deploys ran for %v, want the town root once", r.deployTownRoots)
 	}
 	if r.deployRanAt >= len(r.calls) || len(r.calls[r.deployRanAt]) < 2 || r.calls[r.deployRanAt][1] != "daemon" {
 		t.Errorf("the command after the directive deploy is not the daemon exec; calls from %d: %v", r.deployRanAt, r.calls[r.deployRanAt:])
+	}
+	if n := r.execCalls(); n != 1 {
+		t.Errorf("recorded %d daemon exec argv, want one", n)
+	}
+}
+
+// The formula sync is the last thing before the daemon exec: the installers run
+// as plugins, mango, directives and formulas, the sync runs for the town root,
+// and the daemon exec is the next command after it.
+func TestEntrypointFormulasSyncAfterTheDirectivesBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.exists[config.CentralDirectiveRepo(entrypointTown)] = true
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if !slices.Equal(r.installs, []string{"plugins", "mango", "directives", "formulas"}) {
+		t.Errorf("installers ran in order %v, want plugins, mango, directives and then formulas", r.installs)
+	}
+	if !slices.Equal(r.syncTownRoots, []string{entrypointTown}) {
+		t.Errorf("formula syncs ran for %v, want the town root once", r.syncTownRoots)
+	}
+	if r.syncRanAt >= len(r.calls) || len(r.calls[r.syncRanAt]) < 2 || r.calls[r.syncRanAt][1] != "daemon" {
+		t.Errorf("the command after the formula sync is not the daemon exec; calls from %d: %v", r.syncRanAt, r.calls[r.syncRanAt:])
+	}
+	if n := r.execCalls(); n != 1 {
+		t.Errorf("recorded %d daemon exec argv, want one", n)
+	}
+}
+
+// A failed formula sync refuses the start, wrapping the error, and the daemon is
+// never exec'd.
+func TestEntrypointFormulaSyncFailureStopsBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	syncErr := errors.New("write mol-polecat-work.formula.toml: permission denied")
+	r.syncErr = syncErr
+	err := runContainerEntrypoint(r.entrypoint())
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("error = %v, want a refusal wrapping the sync error", err)
+	}
+	if !strings.Contains(err.Error(), "the daemon was not started") {
+		t.Errorf("error = %v, want it to say the daemon was not started", err)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("the daemon was exec'd %d times after a failed formula sync, want none", n)
+	}
+}
+
+// An absent town is installed first and then synced: the formula sync runs on
+// the install path too, before the daemon exec.
+func TestEntrypointFormulasSyncRunsOnTheInstallPath(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if !slices.Equal(r.installs, []string{"plugins", "mango", "formulas"}) {
+		t.Errorf("installers ran in order %v, want the plugins, mango and then formulas", r.installs)
+	}
+	if !slices.Equal(r.syncTownRoots, []string{entrypointTown}) {
+		t.Errorf("formula syncs ran for %v, want the town root once", r.syncTownRoots)
 	}
 	if n := r.execCalls(); n != 1 {
 		t.Errorf("recorded %d daemon exec argv, want one", n)
@@ -2579,18 +2653,22 @@ func TestEntrypointDirectivesDeployFailurePolicy(t *testing.T) {
 		wantErr   bool
 		wantExec  int
 		wantWarn  bool
+		// wantSyncs is how many formula syncs the start ran.
+		wantSyncs int
 	}{
 		{
 			name:      "a commit the repo lacks warns and the daemon starts",
 			deployErr: fmt.Errorf("central directives: commit %s is not in the repo: %w", commit, config.ErrDirectiveCommitMissing),
 			wantExec:  1,
 			wantWarn:  true,
+			wantSyncs: 1,
 		},
 		{
 			name:      "a write failure refuses before the exec",
 			deployErr: errors.New("central directives: writing directives/a.md: permission denied"),
 			wantErr:   true,
 			wantExec:  0,
+			wantSyncs: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -2609,6 +2687,9 @@ func TestEntrypointDirectivesDeployFailurePolicy(t *testing.T) {
 			}
 			if n := r.execCalls(); n != tc.wantExec {
 				t.Errorf("recorded %d daemon exec argv, want %d", n, tc.wantExec)
+			}
+			if len(r.syncTownRoots) != tc.wantSyncs {
+				t.Errorf("formula sync ran for %v, want %d syncs", r.syncTownRoots, tc.wantSyncs)
 			}
 			warned := 0
 			for _, line := range r.logs {
