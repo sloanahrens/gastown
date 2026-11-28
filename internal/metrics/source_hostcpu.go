@@ -49,11 +49,20 @@ import (
 // entry, because a group of nils would read as a host with nothing running.
 // Each read runs under hostCommandTimeout, so the group costs at most four of
 // them and the one-second window, inside SourceTimeout.
-type hostCPUSource struct{}
+type hostCPUSource struct {
+	// blind marks a daemon that does not run on the Mac. Its process table is
+	// the pod's, where none of the Mac's consumers are, so a group of nulls
+	// would read as a Mac with nothing running; it refuses instead and names
+	// where the Mac's own record is. The zero value is the daemon on the Mac.
+	blind bool
+}
 
 func (hostCPUSource) Group() string { return "host_cpu" }
 
-func (hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
+func (s hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
+	if s.blind {
+		return nil, errors.New("the daemon does not run on the Mac, so this group cannot read its CPU; the Mac's record is .runtime/host-load/cpu")
+	}
 	if env.Wait == nil {
 		return nil, errors.New("no wait seam, so the sampling window cannot be taken")
 	}

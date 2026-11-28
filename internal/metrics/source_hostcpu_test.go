@@ -522,6 +522,38 @@ func TestHostCPUWithNoWaitSeamFailsTheGroup(t *testing.T) {
 	}
 }
 
+// A blind source reads nothing and refuses, naming the Mac's record: from the
+// pod every consumer would be null, which reads as a Mac with nothing running.
+func TestHostCPUABlindSourceRefusesWithoutReading(t *testing.T) {
+	t.Parallel()
+	fake := hostCPUFakeEnv(hostCPUSampleOne, hostCPUSampleTwo)
+
+	got, err := hostCPUSource{blind: true}.Collect(context.Background(), fake.env())
+	if err == nil || got != nil {
+		t.Fatalf("Collect = %v, %v, want an error and no columns", got, err)
+	}
+	if !strings.Contains(err.Error(), "does not run on the Mac") ||
+		!strings.Contains(err.Error(), ".runtime/host-load/cpu") {
+		t.Errorf("Collect error %q does not name the Mac's record", err)
+	}
+	if len(fake.ran) != 0 {
+		t.Errorf("the blind source ran %q, want no command", fake.ran)
+	}
+}
+
+// newHostCPUSource is blind everywhere but darwin; the gate on Linux runs both
+// sides through the OS name.
+func TestNewHostCPUSourceIsBlindOffTheMac(t *testing.T) {
+	t.Parallel()
+	for goos, blind := range map[string]bool{"darwin": false, "linux": true} {
+		fake := hostCPUFakeEnv(hostCPUSampleOne, hostCPUSampleTwo)
+		got, err := newHostCPUSource(goos).Collect(context.Background(), fake.env())
+		if (err != nil) != blind {
+			t.Errorf("newHostCPUSource(%q).Collect = %v, %v, want an error: %v", goos, got, err, blind)
+		}
+	}
+}
+
 // Every host source reads cumulative CPU time, never ps's pcpu, which is a
 // decayed average. The check walks the commands the CPU group's Collect ran and
 // the host group's probes, so a read added to either is covered here.
