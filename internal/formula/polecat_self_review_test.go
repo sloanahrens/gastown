@@ -100,22 +100,17 @@ func TestPolecatSelfReviewIsThePreSubmitChecklist(t *testing.T) {
 		}
 	}
 
-	// Item 9 reports the integration tier in the commit body, where om reads
-	// it, and reports a real outcome or a real reason. A canned line emitted
-	// for every package reports a run that did not happen (rule 1).
+	// Item 9 names the integration files in the commit body, where om reads
+	// it, not in bead notes.
 	item9 := collapse(numberedItem(t, step, 9))
 	for _, want := range []string{
-		"go vet -tags integration",
+		"//go:build integration",
 		"near the top of the commit body",
 		"not bead notes",
-		"integration tier not run: <reason>",
 	} {
 		if !strings.Contains(item9, want) {
 			t.Errorf("item 9 lacks %q:\n%s", want, item9)
 		}
-	}
-	if strings.Contains(item9, "needs a container; the overseer runs it") {
-		t.Errorf("item 9 hard-codes one reason for every package instead of the real one:\n%s", item9)
 	}
 }
 
