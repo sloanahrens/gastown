@@ -82,6 +82,7 @@ func TestDecodeObjectsRefuses(t *testing.T) {
 		{"empty document", "~\n"},
 		{"scalar document", "just text\n"},
 		{"list document", "- a\n- b\n"},
+		{"value JSON cannot encode", "a: .nan\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
