@@ -268,6 +268,7 @@ fi
 	// STUB_LINT_MISSING models a PATH with no linter at all.
 	gateStubLint = `#!/bin/sh
 echo "golangci-lint $*" >>"$STUB_LOG"
+[ -n "${GOFLAGS:-}" ] && echo "golangci-lint GOFLAGS=$GOFLAGS" >>"$STUB_LOG"
 [ -n "${STUB_LINT_MISSING:-}" ] && exit 127
 if [ "$1" = version ]; then
 	echo "${STUB_LINT_VERSION:-$STUB_LINT_SHORT}"
