@@ -48,7 +48,11 @@ type CallEntry struct {
 	// A line written before the key existed, or for a call that started no
 	// child, omits it.
 	CPUMS *int64 `json:"cpu_ms,omitempty"`
-	Error string `json:"error,omitempty"`
+	// StdoutBytes is how many bytes of framed stdout bd's child wrote. A line
+	// written before the key existed, or whose bytes the executor could not
+	// count, omits it; nil is unknown, not zero.
+	StdoutBytes *int64 `json:"out_bytes,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// Refusal is the reason code of a call the gateway refused before exec. A
 	// call that ran carries none.
 	Refusal string `json:"refusal,omitempty"`

@@ -352,6 +352,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 			CPUMS:    frames.Result().CPUMS,
 			Error:    internalDetail(err),
 		}
+		rec.StdoutBytes = frames.Result().StdoutBytes
 		switch status {
 		case http.StatusInternalServerError:
 			// The caller reads the fixed message; the operator reads the cause in the
@@ -391,6 +392,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		CPUMS:    frames.Result().CPUMS,
 		Conflict: frames.Conflict(),
 	}
+	rec.StdoutBytes = frames.Result().StdoutBytes
 	if !seen {
 		// Say in the log that the reply was lost, so a reader does not take the
 		// ExitRefused status for a cause bd reported. It is set before
