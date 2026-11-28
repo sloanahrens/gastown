@@ -110,6 +110,49 @@ func TestProvisionSeatRefusesABadName(t *testing.T) {
 	}
 }
 
+// TestProvisionSeatAcceptsOnlyTheSeatNameForm checks a name openshellprov would
+// refuse is refused here before any request or file write, and the names both
+// ends share are provisioned.
+func TestProvisionSeatAcceptsOnlyTheSeatNameForm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"-a", true},
+		{"a-", true},
+		{"a--b", true},
+		{strings.Repeat("a", maxSeatNameLength+1), true},
+		{"bullet-farmer", false},
+		{strings.Repeat("a", maxSeatNameLength), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			f.AddRepo(seatRepos[0])
+			files := newMemFiles()
+			p := tokenProvisioner(f, files, false, false, new([]string))
+			err := p.ProvisionSeat(tc.name, seatRepos[:1])
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("ProvisionSeat(%q): %v", tc.name, masked(errString(err)))
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ProvisionSeat(%q) = nil, want the name refused", tc.name)
+			}
+			if calls := sentCalls(f); len(calls) != 0 {
+				t.Errorf("a request was sent though the name was refused: %v", calls)
+			}
+			if len(files.ops) != 0 {
+				t.Error("a file was written though the name was refused")
+			}
+		})
+	}
+}
+
 // TestSeatRunProvisionsEachSeatOnEveryRepo: two --seat flags and one --repo create
 // both seat bots, their token files and write access, and send no request about a
 // role bot, a branch protection or the viewer.
@@ -176,6 +219,28 @@ func TestEnsureTokenRefusesASeatPrefixedRoleOutsideTheSeatGrammar(t *testing.T) 
 	for _, role := range []string{"seat-Furiosa", "seat-fur_iosa", "seat-fur.iosa", "seat-fur/iosa", "seat-", "seat"} {
 		if err := p.EnsureToken(role); err == nil {
 			t.Errorf("EnsureToken(%q) = nil, want the unknown role refused", role)
+		}
+	}
+	if calls := sentCalls(f); len(calls) != 0 {
+		t.Errorf("a request was sent for a refused role: %v", calls)
+	}
+	if len(files.ops) != 0 {
+		t.Errorf("a file was written for a refused role")
+	}
+}
+
+// TestEnsureTokenRefusesASeatNameProvisionSeatRefuses checks a seat-prefixed role
+// whose name ProvisionSeat refuses is an unknown role for EnsureToken too, so
+// neither check is looser than the other: no token is minted and no file written.
+func TestEnsureTokenRefusesASeatNameProvisionSeatRefuses(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	files := newMemFiles()
+	p := tokenProvisioner(f, files, false, false, new([]string))
+	for _, role := range []string{"seat-a--b", "seat-a-", "seat--a", seatRolePrefix + strings.Repeat("a", maxSeatNameLength+1)} {
+		err := p.EnsureToken(role)
+		if err == nil || !strings.Contains(err.Error(), "unknown role") {
+			t.Errorf("EnsureToken(%q) = %v, want the unknown role error", role, masked(errString(err)))
 		}
 	}
 	if calls := sentCalls(f); len(calls) != 0 {

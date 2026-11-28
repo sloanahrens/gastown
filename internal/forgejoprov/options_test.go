@@ -229,7 +229,8 @@ func TestParseSeat(t *testing.T) {
 		{"without --repo", []string{"--seat", "alpha"}, "--seat needs at least one --repo"},
 		{"with --role", []string{"--seat", "alpha", "--role", "polecat", "--repo", "acme/rig"}, "--seat cannot be combined with --role"},
 		{"with --revoke-token", []string{"--seat", "alpha", "--revoke-token", "gt-old", "--role", "landing", "--repo", "acme/rig"}, "--seat cannot be combined with --revoke-token"},
-		{"with a name outside the seat alphabet", []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, "--seat 'Fur/iosa' must match [a-z0-9-]+"},
+		{"with a name outside the seat alphabet", []string{"--seat", "Fur/iosa", "--repo", "acme/rig"}, "--seat 'Fur/iosa' must be at most 31 characters of lower-case letters and digits in groups joined by single hyphens"},
+		{"with a double hyphen", []string{"--seat", "a--b", "--repo", "acme/rig"}, "--seat 'a--b' must be at most 31 characters of lower-case letters and digits in groups joined by single hyphens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
