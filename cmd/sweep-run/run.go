@@ -243,13 +243,12 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 }
 
 // moveStats moves the cache program's stats from the claim the trim names into
-// the run's log directory. A trim with no absolute claim root is refused, since a
-// relative root would read the stats from the working directory. A move that
-// fails is one line in cache-trim.log, or on stderr when that log cannot be
-// written, and changes neither the result nor the exit status.
+// the run's log directory. A trim with no absolute claim root has no claim to
+// move from, and recordTrim has already recorded why, so it returns without a
+// second line. A move that fails is one line in cache-trim.log, or on stderr when
+// that log cannot be written, and changes neither the result nor the exit status.
 func moveStats(trim *CacheTrim, logDir string, stderr io.Writer) {
 	if trim == nil || !filepath.IsAbs(trim.Root) {
-		recordTrimError(logDir, errors.New("the cache program's stats are not moved: the cache trim names no absolute claim root"), stderr)
 		return
 	}
 	if err := moveCacheProgStats(trim.Root, logDir, os.Remove); err != nil {

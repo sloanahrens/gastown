@@ -496,16 +496,39 @@ func TestCacheProgStatsRunRecordsARefusedMove(t *testing.T) {
 			t.Errorf("stderr = %q; want one line naming %s", h.stderr.String(), src)
 		}
 	})
-	t.Run("a trim with no absolute root is one line naming the root", func(t *testing.T) {
+	t.Run("a trim with no absolute root leaves only the trim's line", func(t *testing.T) {
 		t.Parallel()
-		for _, root := range []*CacheTrim{nil, {}, {Root: "relative/claim"}} {
-			h, _ := statsRun(t)
-			h.deps.Trim = root
-			runStats(t, h)
-			log, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
-			if err != nil || strings.Count(string(log), "no absolute claim root") != 1 {
-				t.Errorf("trim %+v: cache-trim.log = %q, %v; want one line naming the root", root, log, err)
-			}
+		wd, err := os.Getwd()
+		must(t, err)
+		claim := emptyClaimRoot(t)
+		src := statsAt(t, claim, []byte("{\"gets\":3}\n"))
+		rel, err := filepath.Rel(wd, claim)
+		must(t, err)
+		cases := []struct {
+			name string
+			trim *CacheTrim
+		}{
+			{"nil trim", nil},
+			{"empty root", &CacheTrim{}},
+			{"relative root", diskCacheTrim(rel)},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				h, _ := statsRun(t)
+				h.deps.Trim = tc.trim
+				runStats(t, h)
+				log, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+				if err != nil || strings.Count(string(log), "\n") != 1 || !strings.Contains(string(log), "cache trim: ") {
+					t.Errorf("cache-trim.log = %q, %v; want exactly the trim's one line", log, err)
+				}
+				if _, err := os.Lstat(filepath.Join(h.out, "logs", cacheProgStatsCopyName)); !os.IsNotExist(err) {
+					t.Errorf("stats copied to the log directory, Lstat err = %v", err)
+				}
+				if _, err := os.Lstat(src); err != nil {
+					t.Errorf("stats under the claim were removed: %v", err)
+				}
+			})
 		}
 	})
 	t.Run("no stats file writes no line", func(t *testing.T) {
