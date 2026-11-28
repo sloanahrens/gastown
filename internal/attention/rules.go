@@ -57,7 +57,10 @@ const (
 	RuleHostNodeDiskCrit = "host.node_disk_crit"
 	RuleHostMemLow       = "host.mem_low"
 	RuleHostForgejoDown  = "host.forgejo_down"
-	RuleHostProbe        = "host.probe_failed"
+	// RuleHostForgejoBackup is the dump duty's rule: the newest verified backup
+	// failed or is stale, so the freshness arithmetic is the alarm (gt-q8nbzp).
+	RuleHostForgejoBackup = "host.forgejo_backup_stale"
+	RuleHostProbe         = "host.probe_failed"
 	// RuleHostGoCacheTrim is the Go cache duty's rule: the last completed trim
 	// is stale or its newest run failed, so the freshness arithmetic is the
 	// alarm (gt-a0sewj).
@@ -346,6 +349,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A Forgejo that does not answer its health endpoint is every landing
 	// stopped: the candidate gate waits on a CI verdict that cannot come.
 	RuleHostForgejoDown: flagsWake,
+	// A dump that failed or went stale is the town's backup falling behind: the
+	// overseer repairs it before a person is woken (gt-q8nbzp).
+	RuleHostForgejoBackup: flagsAsk,
 	// A cycle the guard holds past its bound blocks every later cycle: the
 	// tiers the sweep alone gates go unmeasured until someone looks.
 	RuleTierSweepStuck: flagsWake,
@@ -624,6 +630,7 @@ var kindRules = map[Kind]string{
 	KindHostMem:                       RuleHostMemLow,
 	KindHostGoCacheTrim:               RuleHostGoCacheTrim,
 	KindHostForgejo:                   RuleHostForgejoDown,
+	KindHostForgejoBackup:             RuleHostForgejoBackup,
 	KindConfigEnvShadowed:             RuleConfigEnvShadowed,
 	KindConfigParseFailed:             RuleConfigParseFailed,
 	KindHostProbe:                     RuleHostProbe,

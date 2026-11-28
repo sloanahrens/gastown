@@ -53,6 +53,9 @@ var ruleOwners = map[string]Owner{
 	// The Go cache trim is the town's own maintenance to restart or repair
 	// before a person is woken (gt-a0sewj).
 	RuleHostGoCacheTrim: OwnerOverseer,
+	// A failed or stale dump is the town's own backup to rerun and verify
+	// before a person is woken (gt-q8nbzp).
+	RuleHostForgejoBackup: OwnerOverseer,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
 	RuleOverseerSilent: OwnerOperator,
