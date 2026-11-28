@@ -58,3 +58,17 @@ func (s *AheadSlot) Start(ctx context.Context, bead, head, base string, run func
 	}()
 	return true
 }
+
+// Pending reports the key of the held car and whether one is held, also after
+// its run returned. A nil or empty slot holds nothing.
+func (s *AheadSlot) Pending() (bead, head, base string, ok bool) {
+	if s == nil {
+		return "", "", "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.car == nil {
+		return "", "", "", false
+	}
+	return s.car.bead, s.car.head, s.car.base, true
+}
