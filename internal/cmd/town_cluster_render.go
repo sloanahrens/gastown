@@ -107,6 +107,7 @@ type clusterRenderFlags struct {
 	namespace          string
 	rehearsal          bool
 	cpu                string
+	cpuRequest         string
 	memory             string
 	hostGateway        string
 	confirmStopped     bool
@@ -291,6 +292,8 @@ func init() {
 		"render the rehearsal pod, which runs beside the live container: no promote key, no sweep binding")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.cpu, "cpu", "",
 		"the container's CPU share, requests equal limits (required)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.cpuRequest, "cpu-request", "",
+		"the daemon container's CPU request, whole cores or millicores such as 1 or 500m, at most --cpu; empty keeps the request equal to --cpu")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.memory, "memory", "",
 		"the container's memory share, requests equal limits (required)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.hostGateway, "host-gateway", "",
@@ -479,6 +482,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"out", &f.out, r.out},
 		{"namespace", &f.namespace, r.namespace},
 		{"cpu", &f.cpu, r.cpu},
+		{"cpu-request", &f.cpuRequest, r.cpuRequest},
 		{"memory", &f.memory, r.memory},
 		{"host-gateway", &f.hostGateway, r.hostGateway},
 		{"proxy-image", &f.proxyImage, r.proxyImage},
@@ -876,6 +880,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		PolecatImage:            f.polecatImage,
 		Env:                     env,
 		CPU:                     f.cpu,
+		CPURequest:              strings.TrimSpace(f.cpuRequest),
 		Memory:                  f.memory,
 		ConfirmContainerStopped: f.confirmStopped,
 		HostGatewayIP:           f.hostGateway,
