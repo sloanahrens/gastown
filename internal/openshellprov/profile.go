@@ -1,6 +1,7 @@
 package openshellprov
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -46,8 +47,8 @@ func ProfileID(yaml []byte) string {
 
 // Gt makes the `gt sandbox endpoint` calls a run needs for one gateway. Every
 // call goes through Run, so a unit test runs no process. A call passes no --root:
-// gt reads the gateway's policy from the root of the gt it runs as, and each call
-// names its file by absolute path, so gt needs no root to find it.
+// gt reads the gateway's policy from the root of the gt it runs as, and a call's
+// profile arrives on stdin, so gt needs no root to find it.
 type Gt struct {
 	// Run runs every gt call.
 	Run Runner
@@ -65,12 +66,12 @@ func (g Gt) gateway() string {
 	return g.Gateway
 }
 
-// endpoint runs one `gt sandbox endpoint` call with extra flags and returns what
-// it wrote to stdout. Its stderr goes to Err, where gt's refusal reaches the
-// operator, and never into an error built from this call.
-func (g Gt) endpoint(extra ...string) ([]byte, error) {
+// endpoint runs one `gt sandbox endpoint` call with extra flags and stdin and
+// returns what it wrote to stdout. Its stderr goes to Err, where gt's refusal
+// reaches the operator, and never into an error built from this call.
+func (g Gt) endpoint(stdin io.Reader, extra ...string) ([]byte, error) {
 	args := append([]string{"sandbox", "endpoint", "--gateway", g.gateway()}, extra...)
-	stdout, stderr, err := g.Run.Run(gtBinary, args, nil, nil)
+	stdout, stderr, err := g.Run.Run(gtBinary, args, nil, stdin)
 	if g.Err != nil {
 		if _, werr := g.Err.Write(stderr); werr != nil {
 			return stdout, fmt.Errorf("%s: writing gt's errors: %w", Name, werr)
@@ -82,26 +83,26 @@ func (g Gt) endpoint(extra ...string) ([]byte, error) {
 // CheckEndpoint asks gt for the endpoint once, before anything is imported, so a
 // gateway gt refuses stops the run with nothing touched. The answer is discarded.
 func (g Gt) CheckEndpoint() error {
-	if _, err := g.endpoint(); err != nil {
+	if _, err := g.endpoint(nil); err != nil {
 		return fmt.Errorf("%s: gt sandbox endpoint --gateway %s failed, so the forgejo-polecat profile cannot be rendered: %w", Name, g.gateway(), err)
 	}
 	return nil
 }
 
-// Render writes the forgejo-polecat profile file, bound to the gateway's endpoint,
-// to out. A non-empty exportFile stamps the profile with the resource_version of
-// that export, which profile update needs. A failed render writes nothing.
-func (g Gt) Render(file string, out io.Writer, exportFile string) error {
-	extra := []string{"--render", file}
+// Render writes the forgejo-polecat profile, sent to gt on stdin and bound to the
+// gateway's endpoint, to out. A non-empty exportFile stamps it with that export's
+// resource_version, which profile update needs. A failed render writes nothing.
+func (g Gt) Render(out io.Writer, profile []byte, exportFile string) error {
+	extra := []string{"--render", "/dev/stdin"}
 	if exportFile != "" {
 		extra = append(extra, "--from-export", exportFile)
 	}
-	stdout, err := g.endpoint(extra...)
+	stdout, err := g.endpoint(bytes.NewReader(profile), extra...)
 	if err != nil {
-		return fmt.Errorf("%s: gt sandbox endpoint --render %s failed, so the forgejo-polecat profile cannot be rendered: %w", Name, file, err)
+		return fmt.Errorf("%s: gt sandbox endpoint --render /dev/stdin failed, so the forgejo-polecat profile cannot be rendered: %w", Name, err)
 	}
 	if _, err := out.Write(stdout); err != nil {
-		return fmt.Errorf("%s: writing the rendered profile %s: %w", Name, file, err)
+		return fmt.Errorf("%s: writing the rendered profile: %w", Name, err)
 	}
 	return nil
 }
@@ -112,7 +113,7 @@ func (g Gt) Render(file string, out io.Writer, exportFile string) error {
 // that is neither bound nor stale with a reason, is an error that names the
 // profile and gives the answer.
 func (g Gt) StaleReason(id, exportFile string) (string, error) {
-	stdout, err := g.endpoint("--check", exportFile)
+	stdout, err := g.endpoint(nil, "--check", exportFile)
 	if err != nil {
 		return "", fmt.Errorf("%s: gt sandbox endpoint --check failed on the exported profile %s: %w", Name, id, err)
 	}
