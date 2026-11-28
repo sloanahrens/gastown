@@ -228,6 +228,9 @@ func trimListing(root string, walk fileWalk) ([]trimListEntry, error) {
 	return out, nil
 }
 
+// claimListingHeaderWorkers is how many build-cache headers claimListing reads at once (gt-fp66p0).
+const claimListingHeaderWorkers = 16
+
 // claimListing is the claim's cache files as PlanTrim's entries: every regular file under GOCACHE and
 // GOMODCACHE, named by the claim-relative path a trim removes. The rest of the claim is not the trim's
 // to size or remove, and the list's own directory sits outside both trees, so a trim never names the
@@ -270,24 +273,19 @@ func claimListing(root string, walk fileWalk) ([]cachevol.Entry, error) {
 			if err != nil {
 				return nil, fmt.Errorf("the claim path %s: %w", f.path, err)
 			}
-			entry := cachevol.Entry{
+			listing = append(listing, cachevol.Entry{
 				Path:  filepath.ToSlash(rel),
 				Cache: c.cache,
 				Size:  f.size,
 				Atime: f.used,
 				Mtime: f.used,
-			}
-			if c.cache == cachevol.BuildCache {
-				output, err := cachevol.BuildActionOutputFrom(entry.Path, func() (io.ReadCloser, error) {
-					return os.Open(f.path)
-				})
-				if err != nil {
-					return nil, fmt.Errorf("reading the build-cache header of %s: %w", entry.Path, err)
-				}
-				entry.Output = output
-			}
-			listing = append(listing, entry)
+			})
 		}
+	}
+	if err := readBuildOutputs(listing, func(entryPath string) (io.ReadCloser, error) {
+		return os.Open(filepath.Join(root, filepath.FromSlash(entryPath)))
+	}, claimListingHeaderWorkers); err != nil {
+		return nil, err
 	}
 	return listing, nil
 }
