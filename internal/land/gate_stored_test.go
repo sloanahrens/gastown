@@ -15,7 +15,7 @@ func landCarStored(t *testing.T, l *Lander, w Work, stored *CandidateResult) (Re
 	if p == nil {
 		return res, err
 	}
-	c, cleanup, res, err := l.mergeCar(ctx, p.g, p.issue, w, p.base, p.storedConflict)
+	c, cleanup, res, err := l.mergeCar(ctx, p.g, p.issue, w, p.base, p.storedConflict, 0)
 	if cleanup != nil {
 		t.Cleanup(cleanup)
 	}
