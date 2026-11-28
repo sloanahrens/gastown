@@ -665,8 +665,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		}
 		d.logger.Printf("landing_worker: %s: om review on (%s)", rigName, omPath)
 		reviewer = land.OMReviewer{Path: omPath, OutDir: omDir,
-			Timeout:  landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout),
-			Verdicts: land.TownVerdicts(townRoot, rigName)}
+			Timeout:     landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout),
+			Verdicts:    land.TownVerdicts(townRoot, rigName),
+			StoreFailed: d.landingVerdictUnstored(rigName)}
 	} else {
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}
@@ -1209,6 +1210,16 @@ func (d *Daemon) landingSlowAlarm(rigName string, cfg *LandingWorkerConfig) *lan
 		EvidenceDir: func(ctx context.Context, dir string) string {
 			return landingLogDir(ctx, d.landingLogRoot(rigName), dir)
 		},
+	}
+}
+
+// landingVerdictUnstored reports a verdict the store could not write as a
+// low-severity escalation naming the rig, the bead, the head and the error.
+func (d *Daemon) landingVerdictUnstored(rigName string) func(bead, head string, err error) {
+	return func(bead, head string, err error) {
+		_ = d.escalateAlertSeverity("low", "landing-verdict-unstored:"+bead, "landing_worker",
+			fmt.Sprintf("rig %s: the verdict for work bead %s at head %s could not be stored; the review stands: %v",
+				rigName, bead, head, err))
 	}
 }
 
