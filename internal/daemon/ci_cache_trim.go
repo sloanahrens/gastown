@@ -283,7 +283,13 @@ fi
 // removes them, passing their names NUL-separated to rm, then removes the empty
 // directories the removal left below the top level (gt-5y4cmu), as the age rule
 // does, and prints only those three lines, removed= counting the files it removed
-// and the size after read again once both steps are done. The top level's 256
+// and the size after read again once both steps are done. Both modes print one
+// line more, young_kib: before_kib less the 4 KiB-rounded sizes of the files the
+// listing holds, never below 0, which is the bytes used inside the floor. Because
+// before_kib is du's whole-volume figure, directory blocks included, young_kib is
+// an upper estimate; on a filesystem whose du reports compressed file blocks as
+// less than the rounding, the subtraction can go negative and the line reads 0.
+// The top level's 256
 // two-hex-digit shard directories stay, empty or not: Go creates them once and
 // does not recreate them, so removing one loses every write that hashes into it
 // (gt-qaqvf4). Go touches a cache file's mtime when it uses it, so the oldest
@@ -296,11 +302,13 @@ fi
 // The program lists once and sorts once. The floor is the one bound of the
 // listing (find -mmin +floor), so a file younger than the floor is not in the
 // list and nothing after it can select one, whatever the cap or the age. The
-// list is sorted once by mtime, oldest first, and read once: a file is selected
-// while it is past the age or the sizes taken so far are below the excess, and
-// the read stops at the first file that is neither, so the order is the sort's
-// and nothing past the file that covers the excess is selected. A size is the
-// file's bytes rounded up to a 4 KiB block, as du counts a cache file. The
+// list is sorted once by mtime, oldest first, and read once to select: a file is
+// selected while it is past the age or the sizes taken so far are below the
+// excess, and the read stops at the first file that is neither, so the order is
+// the sort's and nothing past the file that covers the excess is selected.
+// young_kib sums that same listing once more, in full, walking no path again. A
+// size is the file's bytes rounded up to a 4 KiB block, as du counts a cache
+// file. The
 // mtime and size come from stat in the form the host has (GNU and busybox -c,
 // BSD -f). Every line the program reads is one path, so the listing leaves out
 // any path that holds a newline (find -path with a newline pattern): such a path
@@ -345,6 +353,9 @@ else
 find "$root" -mindepth 2 -type f -mmin +"$floor" ! -path "$nlpath" -exec stat -f '%m %z %N' {} + > "$tmp/files"
 fi
 sort -n "$tmp/files" > "$tmp/sorted"
+old=$(awk 'NF >= 3 { n += int(($2 + 4095) / 4096) * 4 } END { print n + 0 }' "$tmp/files")
+young=$((before - old))
+if [ "$young" -lt 0 ]; then young=0; fi
 awk -v now="$(date +%s)" -v age="$age" -v excess="$((before - cap))" '
 NF >= 3 {
 if (taken >= excess && now - $1 <= age * 60) exit
@@ -372,6 +383,7 @@ fi
 echo "before_kib=$before"
 echo "removed=$removed"
 echo "after_kib=$after"
+echo "young_kib=$young"
 `
 
 // ciCacheRootIsVolumeRoot reports whether root is exactly a volume's data path
@@ -493,22 +505,26 @@ var errCICacheTrimNoContext = errors.New("patrols.tier_sweep.runner.context name
 // container is running: there is no cache to trim in a container that is not up.
 var errCICacheTrimNotRunning = fmt.Errorf("the %s container of %s is not running in %s", ciCacheContainer, ciCacheDeployment, ciCacheNamespace)
 
-// ciCacheTrimReply is the three figures a run's script reports: the volume's size
+// ciCacheTrimReply is the figures a run's script reports: the volume's size
 // before and after in KiB, and the files it removed or, in a dry run, would
-// remove.
+// remove. The LRU program alone also reports youngKiB, the bytes inside its age
+// floor; youngReported tells that figure from the zero an unreported one leaves.
 type ciCacheTrimReply struct {
-	beforeKiB int64
-	removed   int64
-	afterKiB  int64
+	beforeKiB     int64
+	removed       int64
+	afterKiB      int64
+	youngKiB      int64
+	youngReported bool
 }
 
-// parseCICacheTrimReply reads the script's reply, which must be exactly the
-// three key=value lines in order. Any other output is an error: a reply read as
-// zero figures would read as a trim that removed nothing from an empty volume.
+// parseCICacheTrimReply reads the script's reply: the three key=value lines in
+// order, and the young_kib line the LRU program appends after them. Any other
+// output is an error: a reply read as zero figures would read as a trim that
+// removed nothing from an empty volume.
 func parseCICacheTrimReply(out []byte) (ciCacheTrimReply, error) {
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	if len(lines) != 3 {
-		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d line(s), want three", len(lines))
+	if len(lines) != 3 && len(lines) != 4 {
+		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d line(s), want three or four", len(lines))
 	}
 	var values [3]int64
 	for i, key := range []string{"before_kib", "removed", "after_kib"} {
@@ -522,7 +538,19 @@ func parseCICacheTrimReply(out []byte) (ciCacheTrimReply, error) {
 		}
 		values[i] = n
 	}
-	return ciCacheTrimReply{beforeKiB: values[0], removed: values[1], afterKiB: values[2]}, nil
+	reply := ciCacheTrimReply{beforeKiB: values[0], removed: values[1], afterKiB: values[2]}
+	if len(lines) == 4 {
+		k, v, ok := strings.Cut(lines[3], "=")
+		if !ok || k != "young_kib" {
+			return ciCacheTrimReply{}, errors.New("the reply's fourth line is not young_kib=N")
+		}
+		young, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || young < 0 {
+			return ciCacheTrimReply{}, errors.New("the reply's young_kib is not a whole number")
+		}
+		reply.youngKiB, reply.youngReported = young, true
+	}
+	return reply, nil
 }
 
 // The rules a selection reply's line can break. The refusals are typed so the
@@ -550,7 +578,7 @@ func (e *ciCacheSelectionError) Error() string {
 }
 
 // parseCICacheTrimSelection reads the list program's reply: one line per selected
-// file, then the three figures parseCICacheTrimReply reads. A file line must be a
+// file, then the figures parseCICacheTrimReply reads. A file line must be a
 // clean absolute path strictly inside root, never root itself or a sibling whose
 // name merely begins with root's, and there must be one per removed file. An
 // unclean path is refused rather than cleaned, because the remover applies the
@@ -561,16 +589,22 @@ func parseCICacheTrimSelection(out []byte, root string) (ciCacheTrimReply, error
 		return ciCacheTrimReply{}, errors.New("the selection needs a volume root: every file line is checked against it")
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	if len(lines) < 3 {
+	// A file line is an absolute path, so it never begins with the young_kib key:
+	// the last line names how many lines the figures are.
+	figures := 3
+	if strings.HasPrefix(lines[len(lines)-1], "young_kib=") {
+		figures = 4
+	}
+	if len(lines) < figures {
 		return ciCacheTrimReply{}, &ciCacheSelectionError{Line: len(lines) + 1, Rule: ciCacheSelectionRuleShape}
 	}
-	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-3:], "\n")))
+	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-figures:], "\n")))
 	if err != nil {
-		shape := &ciCacheSelectionError{Line: len(lines) - 2, Rule: ciCacheSelectionRuleShape}
+		shape := &ciCacheSelectionError{Line: len(lines) - figures + 1, Rule: ciCacheSelectionRuleShape}
 		return ciCacheTrimReply{}, fmt.Errorf("%w: %v", shape, err)
 	}
 	cleanRoot := filepath.Clean(root)
-	files := lines[:len(lines)-3]
+	files := lines[:len(lines)-figures]
 	for i, line := range files {
 		switch {
 		case line == "":
@@ -817,8 +851,8 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		return false, reason
 	}
 	// A dry run of an lru volume reads the LRU list program's reply: one line per
-	// selected file before the three figures, each checked and counted against the
-	// volume root. An apply, and every other volume, reads the three lines alone.
+	// selected file before the figures, each checked and counted against the
+	// volume root. An apply, and every other volume, reads the figures alone.
 	// A refusal names its rule and line, never a path.
 	var reply ciCacheTrimReply
 	if v.lru && mode != agentconfig.DiskMaintenanceModeApply {

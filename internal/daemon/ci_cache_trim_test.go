@@ -464,7 +464,7 @@ func TestCICacheTrimGocacheDryRunRefusedReply(t *testing.T) {
 		}
 	})
 
-	t.Run("an apply still reads the three-line reply", func(t *testing.T) {
+	t.Run("an apply still refuses a selection reply", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.exec = cliReply{stdout: strings.Join([]string{
@@ -477,7 +477,7 @@ func TestCICacheTrimGocacheDryRunRefusedReply(t *testing.T) {
 		f.drain()
 
 		logs := f.logs.String()
-		if want := "the reply has 4 line(s), want three"; !strings.Contains(logs, want) {
+		if want := "the reply's line 1 is not before_kib=N"; !strings.Contains(logs, want) {
 			t.Errorf("apply does not refuse the file lines (%q):\n%s", want, logs)
 		}
 		if strings.Contains(logs, ciCacheGocacheVolume+": removed ") {
@@ -1180,8 +1180,9 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 	})
 }
 
-// TestCICacheTrimReplyMustBeExact: the reply is exactly the three figures, in
-// order, and a reply that is not is never read as zeros.
+// TestCICacheTrimReplyMustBeExact: the reply is the three figures, in order, and
+// a reply that is not is never read as zeros. The young_kib line a reply may
+// carry after them is TestCICacheYoungReply's.
 func TestCICacheTrimReplyMustBeExact(t *testing.T) {
 	t.Parallel()
 	good, err := parseCICacheTrimReply([]byte("before_kib=5\nremoved=2\nafter_kib=3\n"))
@@ -1205,7 +1206,7 @@ func TestCICacheTrimReplyMustBeExact(t *testing.T) {
 }
 
 // TestCICacheTrimSelection: the list program's reply is one line per selected
-// file and then the three figures. Every file line must be a clean absolute path
+// file and then the figures. Every file line must be a clean absolute path
 // strictly inside the volume root, and there is one for each removed file. A
 // reply that breaks a rule is refused as a *ciCacheSelectionError carrying the
 // rule and the line number, never the file name.
@@ -1335,6 +1336,84 @@ func TestCICacheTrimSelection(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "/") {
 				t.Errorf("refusal %q holds a path", err)
+			}
+		})
+	}
+}
+
+// TestCICacheYoungReply: parseCICacheTrimReply reads the three figures alone,
+// which every volume except ci-gocache prints, and the young_kib line the LRU
+// program appends after after_kib. A fourth line that is not young_kib=N, a
+// young_kib that is not a whole number or is negative, and a fifth line are
+// refused as the three-line reply's bad figures are.
+func TestCICacheYoungReply(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		out  string
+		want *ciCacheTrimReply // nil: the reply is refused
+	}{
+		{"three lines carry no young figure", "before_kib=9\nremoved=2\nafter_kib=5\n",
+			&ciCacheTrimReply{beforeKiB: 9, removed: 2, afterKiB: 5}},
+		{"a fourth young_kib line is read as the young figure", "before_kib=9\nremoved=2\nafter_kib=5\nyoung_kib=4\n",
+			&ciCacheTrimReply{beforeKiB: 9, removed: 2, afterKiB: 5, youngKiB: 4, youngReported: true}},
+		{"a fourth line that is not young_kib is refused", "before_kib=9\nremoved=2\nafter_kib=5\nnoise\n", nil},
+		{"a young that is not a number is refused", "before_kib=9\nremoved=2\nafter_kib=5\nyoung_kib=few\n", nil},
+		{"a negative young is refused", "before_kib=9\nremoved=2\nafter_kib=5\nyoung_kib=-1\n", nil},
+		{"a fifth line is refused", "before_kib=9\nremoved=2\nafter_kib=5\nyoung_kib=4\nnoise\n", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseCICacheTrimReply([]byte(tt.out))
+			if tt.want == nil {
+				if err == nil {
+					t.Errorf("parsed %+v without an error, want a refusal", got)
+				}
+				return
+			}
+			if err != nil || got != *tt.want {
+				t.Errorf("parsed %+v, %v; want %+v", got, err, *tt.want)
+			}
+		})
+	}
+}
+
+// TestCICacheYoungSelection: the selection parser reads the same figures after
+// its file lines, with or without the young_kib line, and counts the file lines
+// that precede them. A bad fourth figure line is a shape refusal at the line the
+// figures begin.
+func TestCICacheYoungSelection(t *testing.T) {
+	t.Parallel()
+	const root = "/vol/ci-gocache/_data"
+	const figures = "before_kib=9\nremoved=2\nafter_kib=5\n"
+	const two = root + "/aa/one\n" + root + "/bb/two\n"
+	for _, tt := range []struct {
+		name          string
+		out           string
+		young         int64
+		youngReported bool
+		rule          string // empty: the reply parses
+		line          int
+	}{
+		{name: "file lines and three figures carry no young figure", out: two + figures},
+		{name: "the young line carries the figure", out: two + figures + "young_kib=4\n", young: 4, youngReported: true},
+		{name: "a count that does not match the file lines is refused", out: root + "/aa/one\n" + figures + "young_kib=4\n",
+			rule: ciCacheSelectionRuleCount, line: 2},
+		{name: "a bad fourth figure is refused", out: two + figures + "young_kib=few\n",
+			rule: ciCacheSelectionRuleShape, line: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseCICacheTrimSelection([]byte(tt.out), root)
+			if tt.rule != "" {
+				var sel *ciCacheSelectionError
+				if !errors.As(err, &sel) || sel.Rule != tt.rule || sel.Line != tt.line {
+					t.Fatalf("refused with %v, want rule %q at line %d", err, tt.rule, tt.line)
+				}
+				return
+			}
+			if err != nil || got.youngKiB != tt.young || got.youngReported != tt.youngReported || got.removed != 2 {
+				t.Errorf("parsed %+v, %v; want removed 2 and young %d (reported %t)", got, err, tt.young, tt.youngReported)
 			}
 		})
 	}
