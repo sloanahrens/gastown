@@ -6,14 +6,12 @@ import (
 )
 
 // polecatFormulaDoneWaitVerbatim is the instruction the polecat workflow
-// carries about a running `gt done` (gt-7dxw): it runs the local gate itself,
-// which takes minutes, and the polecat leaves it alone. A polecat once misread
-// the wait as a hang and bd-closed its bead mid-`gt done` (overseer
-// hq-wisp-6q5ib). Since D2 (ADR 0004) gt done runs only the unit tier and
-// needs no container slot, so there is no slot wait to describe.
-const polecatFormulaDoneWaitVerbatim = "gt done runs the local gate itself (lint, build and the tests of the packages your " +
-	"branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it " +
-	"and do not close the bead."
+// carries about a running `gt done` (gt-7dxw): it runs the rig's pre-submit
+// command itself, which can take minutes when that command checks, and the
+// polecat leaves it alone. A polecat once misread the wait as a hang and
+// bd-closed its bead mid-`gt done` (overseer hq-wisp-6q5ib).
+const polecatFormulaDoneWaitVerbatim = "gt done runs the rig's pre-submit command itself; when that command checks, " +
+	"it can take several minutes. That is normal. Do not interrupt it and do not close the bead."
 
 // TestPolecatFormulasCarryTheSlotLoopRule guards the three polecat workflows
 // that run `gt done`: the default, the monorepo/fork variant, and the doc
@@ -35,15 +33,15 @@ func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 			text := string(raw)
 			wants := []string{
 				"Never script a retry around gt done",
-				"docs/reference.md",
 			}
 			if name == "mol-polecat-work" {
 				wants = append(wants,
 					polecatFormulaDoneWaitVerbatim,
 					"gt escalate -s medium",
 					"No flag skips the gate.",
-					"Run no container suite yourself",
 				)
+			} else {
+				wants = append(wants, "docs/reference.md")
 			}
 			for _, want := range wants {
 				if !strings.Contains(text, want) {
