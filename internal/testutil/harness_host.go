@@ -64,6 +64,9 @@ type harnessHost struct {
 	stderr        io.Writer
 	// tempDir is where StartHermetic makes its sandbox; "" is os.TempDir.
 	tempDir string
+
+	// setDoltPoolInits sets the template databases a Dolt test pool lays out.
+	setDoltPoolInits func(n int) error
 }
 
 // processHost is the harness's real host: the test binary's process.
@@ -86,5 +89,7 @@ func processHost() *harnessHost {
 		resolvers:     liveTownResolvers,
 		forbidden:     workspace.IsForbiddenRoot,
 		stderr:        os.Stderr,
+
+		setDoltPoolInits: SetDoltPoolInits,
 	}
 }
