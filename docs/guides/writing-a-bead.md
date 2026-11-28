@@ -25,6 +25,22 @@ test that observes it. The lint refuses an item that names a container or a
 live town (gt-hgt9j.3); those steps belong in the Gate. More than six items
 route the bead to the planner instead of a seat.
 
+## Boxes when a seat runs nothing
+
+A seat runs nothing: the landing gate runs every build, lint, test and check. A box
+names the behaviour and the test or command that proves it. A seat ticks it when it
+has written the named test and the code as the box states them; the gate is the
+proof, and a red gate unticks it. Where a bead's text or a box asks to see a test
+fail, run a mutation or show a red, the seat writes the test so that it would fail
+in that case and ticks on that: it does not run it and never writes that it did. A
+box may not ask for pasted output, a red line, a dry run or any other record of a
+run. A step only a person or a live system can show is not a box; it belongs in the
+Gate section as owed by the overseer.
+
+A test speed-up bead names the coverage before and after, and for every check it
+keeps names a test row that feeds it the broken case and asserts the refusal; the
+landing gate running that row is the proof, and no seat runs anything.
+
 ## Change budget
 
 The Size section states the budget on one line:
