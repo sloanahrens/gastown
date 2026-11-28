@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -20,6 +22,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
@@ -2315,5 +2318,106 @@ func TestCICacheLRUArgvRefusesAnyRootButAVolumeRoot(t *testing.T) {
 		if !strings.Contains(err.Error(), "volume root") {
 			t.Errorf("%s (%q): error %q does not name the volume-root rule", tc.name, tc.root, err)
 		}
+	}
+}
+
+// ciCacheLedgerExecSpan is how long each fake exec takes on the fixture's clock.
+const ciCacheLedgerExecSpan = 2 * time.Minute
+
+// ciCacheLedgerClockExecs makes each volume's exec take ciCacheLedgerExecSpan on
+// the fixture's clock, and returns the instant each one started, by root.
+func ciCacheLedgerClockExecs(f *ciCacheFixture) map[string]time.Time {
+	starts := map[string]time.Time{}
+	run := f.cli.run
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if strings.HasPrefix(cacheTrimVerb(cmd.Args[1:]), "exec ") {
+			for _, v := range ciCacheVolumes {
+				if slices.Contains(cmd.Args, v.root) {
+					starts[v.root] = f.now
+				}
+			}
+			f.now = f.now.Add(ciCacheLedgerExecSpan)
+		}
+		return run(cmd)
+	}
+	return starts
+}
+
+// ciCacheLedgerRuns reads the job ledger's runs of one volume's trim job.
+func ciCacheLedgerRuns(t *testing.T, f *ciCacheFixture, name string) []jobledger.Run {
+	t.Helper()
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("opening the job ledger: %v", err)
+	}
+	runs, err := ledger.Tail(ciCacheTrimName+":"+name, 10)
+	if err != nil {
+		t.Fatalf("reading the job ledger: %v", err)
+	}
+	return runs
+}
+
+// TestCICacheLedgerRecordsEachApplyRun: an apply appends one run per volume under
+// ci_cache_trim:<volume>, its times bracketing that volume's exec, with the reply's
+// figures in bytes. young_bytes is only in a reply that reports young_kib, cap_bytes
+// is on each capped volume, and a volume that grew records removed_bytes 0.
+func TestCICacheLedgerRecordsEachApplyRun(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.exec = cliReply{stdout: "before_kib=3000\nremoved=3\nafter_kib=1000\nyoung_kib=400\n"}
+	f.npmExec = ciCacheReply(2<<20, 4, 1<<20)
+	f.gomodExec = ciCacheReply(1000, 0, 1500)
+	starts := ciCacheLedgerClockExecs(f)
+	f.tick()
+	f.drain()
+
+	_, _, gocacheCap, err := ciCacheTrimSettings(f.d.patrol())
+	if err != nil {
+		t.Fatalf("reading the trim settings: %v", err)
+	}
+	want := map[string]map[string]int64{
+		ciCacheGocacheVolume: {"claim_bytes_before": 3000 << 10, "claim_bytes_after": 1000 << 10, "removed_files": 3,
+			"removed_bytes": 2000 << 10, "young_bytes": 400 << 10, "cap_bytes": (gocacheCap / 1024) * 1024},
+		ciCacheNpmVolume: {"claim_bytes_before": 2 << 30, "claim_bytes_after": 1 << 30, "removed_files": 4,
+			"removed_bytes": 1 << 30, "cap_bytes": ciCacheNpmCapKiB * 1024},
+		ciCacheGomodVolume: {"claim_bytes_before": 1000 << 10, "claim_bytes_after": 1500 << 10, "removed_files": 0,
+			"removed_bytes": 0, "cap_bytes": ciCacheGomodCapKiB * 1024},
+	}
+	for name, stats := range want {
+		runs := ciCacheLedgerRuns(t, f, name)
+		if len(runs) != 1 {
+			t.Errorf("%s: the ledger holds %d run(s), want one\n%s", name, len(runs), f.logs.String())
+			continue
+		}
+		run, root := runs[0], ciCacheVolumeRoot(name)
+		if run.Outcome != ciCacheTrimOutcomeOK || !run.StartedAt.Equal(starts[root]) ||
+			!run.EndedAt.Equal(starts[root].Add(ciCacheLedgerExecSpan)) || !maps.Equal(run.Stats, stats) {
+			t.Errorf("%s: run %+v, want outcome %q from %v for %v with stats %v",
+				name, run, ciCacheTrimOutcomeOK, starts[root], ciCacheLedgerExecSpan, stats)
+		}
+	}
+}
+
+// TestCICacheLedgerUncappedVolumeHasNoCapBytes: a volume with no cap records its
+// run with no cap_bytes. The trim table has no uncapped volume, so this drives the
+// volume's trim directly, the production call that writes the run.
+func TestCICacheLedgerUncappedVolumeHasNoCapBytes(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	_, maxAge, _, err := ciCacheTrimSettings(f.d.patrol())
+	if err != nil {
+		t.Fatalf("reading the trim settings: %v", err)
+	}
+	v := ciCacheVolume{name: "ci-scratch", root: ciCacheVolumeRoot("ci-scratch")}
+	at := ciCacheExecTarget{kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+	if ok, why := f.d.ciCacheTrimVolume(context.Background(), agentconfig.DiskMaintenanceModeApply, at, v, maxAge); !ok {
+		t.Fatalf("the trim reached no verdict: %s\n%s", why, f.logs.String())
+	}
+	runs := ciCacheLedgerRuns(t, f, v.name)
+	if len(runs) != 1 {
+		t.Fatalf("the ledger holds %d run(s), want one\n%s", len(runs), f.logs.String())
+	}
+	if _, ok := runs[0].Stats["cap_bytes"]; ok {
+		t.Errorf("an uncapped volume recorded cap_bytes, want none: %v", runs[0].Stats)
 	}
 }
