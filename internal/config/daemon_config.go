@@ -4305,6 +4305,10 @@ type LandingWorkerConfig struct {
 	// after the durable writes instead of finishing it inline.
 	// DeferredBookkeepingFor reads it; nil and an empty block are both off.
 	DeferredBookkeeping *DeferredBookkeepingConfig `json:"deferred_bookkeeping,omitempty"`
+
+	// GateAhead is the per-rig switch for the depth-2 train (gt-s47qp4):
+	// GateAheadFor reads it; nil, an empty list and a rig not listed are off.
+	GateAhead *GateAheadConfig `json:"gate_ahead,omitempty"`
 }
 
 // ReviewPoolConfig is the review_pool block of the landing worker. Its Rigs
@@ -4394,6 +4398,37 @@ func (c *LandingWorkerConfig) DeferredBookkeepingFor(rig string) bool {
 		return false
 	}
 	return slices.Contains(c.DeferredBookkeeping.Rigs, rig)
+}
+
+// GateAheadConfig is the gate_ahead block of the landing worker: the depth-2
+// train (gt-s47qp4) is on for listed rigs only, so an empty list means none.
+type GateAheadConfig struct {
+	// Rigs are the rigs allowed to gate a candidate ahead; an unlisted rig
+	// keeps the serial path.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// MinReady is how many candidates must be ready ahead of the one gated
+	// ahead; a value below gateAheadMinReady reads as gateAheadMinReady.
+	MinReady int `json:"min_ready,omitempty"`
+}
+
+// gateAheadMinReady is the smallest min_ready the depth-2 train accepts: a
+// second candidate ahead is only worth starting when two are ready.
+const gateAheadMinReady = 2
+
+// GateAheadFor reports whether rig's landing worker may gate a second
+// candidate ahead of its turn, and the minimum number of ready candidates it
+// needs. A nil config, nil block, empty list and unlisted rig are off; a
+// listed rig is on with min_ready, gateAheadMinReady when unset or below it.
+func (c *LandingWorkerConfig) GateAheadFor(rig string) (on bool, minReady int) {
+	if c == nil || c.GateAhead == nil || !slices.Contains(c.GateAhead.Rigs, rig) {
+		return false, 0
+	}
+	minReady = c.GateAhead.MinReady
+	if minReady < gateAheadMinReady {
+		minReady = gateAheadMinReady
+	}
+	return true, minReady
 }
 
 // ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The
