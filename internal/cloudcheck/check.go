@@ -27,6 +27,8 @@ type Options struct {
 	OffDir string
 	// Timeout bounds each fetch; zero uses DefaultTimeout.
 	Timeout time.Duration
+	// Transport carries every fetch; nil uses http.DefaultTransport.
+	Transport http.RoundTripper
 	// Now stamps the report; nil uses time.Now.
 	Now func() time.Time
 }
@@ -47,7 +49,8 @@ func Check(ctx context.Context, apps []App, problems []Problem, o Options) Repor
 		timeout = DefaultTimeout
 	}
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: o.Transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
