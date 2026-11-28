@@ -12,6 +12,20 @@ type failingWriter struct{ err error }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 
+// scriptedWriter fails the call failOn names and counts every call it gets.
+type scriptedWriter struct {
+	failOn, calls int
+	err           error
+}
+
+func (w *scriptedWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == w.failOn {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
 func TestResponderConcurrentWrites(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder // takes no lock on purpose: the responder must serialize.
@@ -49,7 +63,11 @@ func TestResponderConcurrentWrites(t *testing.T) {
 	if len(seen) != n {
 		t.Errorf("wrote %d responses, want %d", len(seen), n)
 	}
-	if got := r.read(); got != want {
+	got, err := r.read()
+	if err != nil {
+		t.Errorf("read error = %v, want nil", err)
+	}
+	if got != want {
 		t.Errorf("read() = %+v, want %+v", got, want)
 	}
 }
@@ -63,7 +81,25 @@ func TestResponderFailedWriteAddsCounts(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), writeErr.Error()) {
 		t.Fatalf("write = %v, want %v", err, writeErr)
 	}
-	if got := r.read(); got != delta {
-		t.Errorf("read() = %+v, want the failed write's counts %+v", got, delta)
+	if got, readErr := r.read(); !errors.Is(readErr, writeErr) || got != delta {
+		t.Errorf("read() = %+v, %v, want the failed write's counts %+v and its error %v", got, readErr, delta, writeErr)
+	}
+}
+
+func TestResponderFirstWriteErrorSticks(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("pipe closed")
+	out := &scriptedWriter{failOn: 1, err: writeErr}
+	r := &responder{out: out}
+	for i := 0; i < 2; i++ {
+		if err := r.write(&Response{ID: int64(i)}, Stats{Gets: i + 1}); !errors.Is(err, writeErr) {
+			t.Fatalf("write %d = %v, want the first error %v", i+1, err, writeErr)
+		}
+	}
+	if out.calls != 1 {
+		t.Errorf("writer called %d times, want 1: no write follows the first failure", out.calls)
+	}
+	if got, err := r.read(); !errors.Is(err, writeErr) || got != (Stats{Gets: 3}) {
+		t.Errorf("read() = %+v, %v, want 3 gets and the first error %v", got, err, writeErr)
 	}
 }
