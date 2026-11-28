@@ -1925,61 +1925,16 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "push", Err: err}
 	}
 
-	// om passed, so the candidate is pushed and its CI waited on. A red gate
-	// after an om pass is a gate refusal: the om verdict is already recorded
-	// on the bead, and it counts no review round.
-	l.stage(w, StageCI)
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageCI)
-	var (
-		gateRes   GateResult
-		gateErr   error
-		ciContext string
-		// candRes is the candidate gate's run: the branch it pushed is
-		// discarded if the gate ends the landing.
-		candRes *CandidateResult
-	)
-	run, ciVerdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
-	candRes, gateRes, gateErr = &run, ciVerdict, err
-	ciContext = ciGateContext(gateRes)
-	gateDone()
-	if gateErr != nil {
-		// om ran and its time is logged even though the gate never reached a
-		// verdict, as the red path logs it.
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, omTime, omRetried)+reusedSuffix)
-		l.discardCandidate(ctx, w, candRes)
-		return Result{}, gateErr
+	// The candidate gate runs in gateCar; the merge and the record run in
+	// finishCar once it passes.
+	c := &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: merged, patchID: patchID, dir: dir}
+	gr, err := l.gateCar(ctx, c, reviewed{verdict: verdict, omTime: omTime, omRetried: omRetried,
+		waived: waived, reusedSuffix: reusedSuffix})
+	if err != nil {
+		return Result{}, err
 	}
-	res.Gate = gateRes
-	if gateRes.Err != nil {
-		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
-	}
-	stageLine := stageTimes(gateRes, omTime, omRetried)
-	if waived {
-		stageLine += ", om skipped (overseer-reviewed)"
-	}
-	stageLine += reusedSuffix
-	l.logf("%s: %s", w.BeadID, stageLine)
-	if !gateRes.Passed {
-		reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
-		if len(gateRes.Steps) > 0 {
-			reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
-		}
-		l.discardCandidate(ctx, w, candRes)
-		// The refusal carries the verdict it followed, though that verdict
-		// approved: no block records an approval, so the next review reads the
-		// findings here or runs cold on the unchanged diff (gt-g8otg). The
-		// approval is marked too, so a clean approve still answers its round
-		// and the walk does not reach an older review (gt-xal5q). A waived
-		// head and a review that reached no verdict leave both empty.
-		// base is the target tip the merged tree was built on: the gate judged
-		// that tree, so a later target tip is what lifts a resubmission.
-		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog,
-			Findings: verdict.Findings, Approved: verdict.Verdict == VerdictApprove, TargetTip: base}
-		return Result{}, l.reject(ctx, issue, w, rej, nil)
-	}
-
-	c := &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: merged, patchID: patchID}
-	return l.finishCar(ctx, c, res, verdict, ciContext, candRes)
+	res.Gate = gr.res
+	return l.finishCar(ctx, c, res, verdict, gr.ciContext, gr.cand)
 }
 
 const fetchTimeout = 2 * time.Minute
