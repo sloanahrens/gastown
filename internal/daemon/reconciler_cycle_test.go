@@ -83,6 +83,62 @@ func TestReconcilerCycleWanted(t *testing.T) {
 	}
 }
 
+// TestReconcilerCycleList covers the databases a due-duty cycle runs over: a
+// local answer lists through the data-dir lister and returns localDataDir true,
+// an external answer through the server lister and returns false, and a failed
+// or empty list is an error in both cases.
+func TestReconcilerCycleList(t *testing.T) {
+	t.Parallel()
+	listErr := errors.New("the lister failed")
+	tests := []struct {
+		name         string
+		external     bool
+		local        []string
+		localErr     error
+		server       []string
+		serverErr    error
+		want         []string
+		wantLocalDir bool
+		wantErr      bool
+		wantWrap     error
+	}{
+		{name: "a local answer lists the data dir", external: false, local: []string{"hq", "gastown"}, server: []string{"remote"},
+			want: []string{"hq", "gastown"}, wantLocalDir: true},
+		{name: "an external answer lists the server", external: true, local: []string{"local"}, server: []string{"hq"},
+			want: []string{"hq"}, wantLocalDir: false},
+		{name: "a local list failure is wrapped", external: false, localErr: listErr, wantErr: true, wantWrap: listErr, wantLocalDir: true},
+		{name: "a local empty list is an error", external: false, local: nil, wantErr: true, wantLocalDir: true},
+		{name: "an external list failure is wrapped", external: true, serverErr: listErr, wantErr: true, wantWrap: listErr},
+		{name: "an external empty list is an error", external: true, server: nil, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{
+				config: &Config{TownRoot: t.TempDir()},
+				maint: maintenanceSeams{
+					gcExternal:      func(*Daemon) (bool, string) { return tt.external, "stub" },
+					gcDatabases:     func(string) ([]string, error) { return tt.local, tt.localErr },
+					serverDatabases: func(*Daemon) ([]string, error) { return tt.server, tt.serverErr },
+				},
+			}
+			got, localDir, err := d.reconcilerCycleList()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("reconcilerCycleList() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantWrap != nil && !errors.Is(err, tt.wantWrap) {
+				t.Errorf("reconcilerCycleList() error = %v, want it to wrap %v", err, tt.wantWrap)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("reconcilerCycleList() databases = %q, want %q", got, tt.want)
+			}
+			if localDir != tt.wantLocalDir {
+				t.Errorf("reconcilerCycleList() localDataDir = %v, want %v", localDir, tt.wantLocalDir)
+			}
+		})
+	}
+}
+
 func TestReconcilerDueDuties(t *testing.T) {
 	t.Parallel()
 	obs := func(duty string, verdict reconcile.Verdict) reconcile.Observation {
