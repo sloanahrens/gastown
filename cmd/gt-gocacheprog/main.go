@@ -1,7 +1,7 @@
 // Command gt-gocacheprog is the cache program a Go build's -cacheprog runs.
-// It opens the disk store under -dir, answers the go command's requests on
-// stdin and stdout, and appends the serving run's counts to <dir>/stats.jsonl
-// (gt-dpjby4, gt-l4bzgs).
+// It serves the journaled disk store under -dir, bounds the store at -max-bytes
+// when the go command closes it, and appends the serving run's counts to
+// <dir>/stats.jsonl (gt-dpjby4, gt-l4bzgs, gt-n9cohm).
 package main
 
 import (
@@ -21,15 +21,20 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, writableCheck, time.Now))
 }
 
-// run opens the store under -dir, probes it for writability and serves the
-// requests on stdin, then appends the run's counts to <dir>/stats.jsonl. It
-// returns 0, or names the failing step in one stderr line and returns 1
-// (gt-6i1x13, gt-dpjby4). A stats line that cannot be written is reported in
-// one stderr line and leaves the exit status to the session (gt-l4bzgs).
+// run opens the journaled store under -dir, probes it for writability and
+// serves the requests on stdin. A close request evicts the store down to
+// -max-bytes before its answer is written, and the run's counts are appended to
+// <dir>/stats.jsonl. It returns 0, or names the failing step in one stderr line
+// and returns 1 (gt-6i1x13, gt-dpjby4, gt-n9cohm). A stats line that cannot be
+// written is reported in one stderr line and leaves the exit status to the
+// session (gt-l4bzgs). An eviction that fails adds 1 to the line's errors and
+// one stderr line, and a journal close this run makes that fails adds 1; both
+// leave the responses and exit status alone (gt-n9cohm).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(dir string) error, now func() time.Time) int {
 	fs := flag.NewFlagSet("gt-gocacheprog", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("dir", "", "directory of the cache store (required, absolute)")
+	maxBytes := fs.Int64("max-bytes", 0, "store body bytes the eviction leaves at most (required, above 0)")
 	if err := fs.Parse(args); err != nil {
 		return fail(stderr, "flags", err)
 	}
@@ -39,15 +44,33 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(di
 	if !filepath.IsAbs(*dir) {
 		return fail(stderr, "flags", fmt.Errorf("-dir %q is not absolute", *dir))
 	}
-	store, err := gocacheprog.NewDisk(*dir, time.Now)
+	if *maxBytes <= 0 {
+		return fail(stderr, "flags", fmt.Errorf("-max-bytes %d is not above 0", *maxBytes))
+	}
+	disk, err := gocacheprog.NewDisk(*dir, now)
 	if err != nil {
 		return fail(stderr, "store", err)
 	}
 	if err := check(*dir); err != nil {
 		return fail(stderr, "writable", err)
 	}
+	journal, err := gocacheprog.OpenJournal(*dir, now)
+	if err != nil {
+		return fail(stderr, "journal", err)
+	}
+	store := &session{Journaled: gocacheprog.NewJournaled(disk, journal), dir: *dir, maxBytes: *maxBytes, now: now, journal: journal}
 	start := now()
 	stats, serveErr := gocacheprog.Serve(context.Background(), stdin, stdout, store)
+	// Serve closes the journal on a close request, which counts a failed close
+	// once; this closes the journal of a session that ended without one.
+	if err := store.journal.Close(); err != nil {
+		fmt.Fprintf(stderr, "gt-gocacheprog: journal: %v\n", err)
+		stats.Errors++
+	}
+	if store.evictErr != nil {
+		fmt.Fprintf(stderr, "gt-gocacheprog: evict: %v\n", store.evictErr)
+		stats.Errors++
+	}
 	if err := appendStats(*dir, stats, start, now, openStats); err != nil {
 		fmt.Fprintf(stderr, "gt-gocacheprog: stats: %v\n", err)
 	}
@@ -55,6 +78,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, check func(di
 		return fail(stderr, "serve", serveErr)
 	}
 	return 0
+}
+
+// session is the journaled store run serves. Serve calls its Close on a close
+// request before the close answer is written (gt-n9cohm).
+type session struct {
+	*gocacheprog.Journaled
+	dir      string
+	maxBytes int64
+	now      func() time.Time
+	journal  *gocacheprog.Journal
+	evictErr error
+}
+
+// Close closes the journal, then evicts the store down to maxBytes. A failed
+// journal close is returned, so Serve counts it. An eviction error is kept for
+// run to report, since the close answer does not carry it (gt-n9cohm).
+func (s *session) Close() error {
+	jerr := s.journal.Close()
+	_, _, s.evictErr = gocacheprog.Evict(s.dir, s.maxBytes, s.journal.Path(), s.now())
+	return jerr
 }
 
 // statsFileName is the file each run appends its counts to (gt-l4bzgs).
