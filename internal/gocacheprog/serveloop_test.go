@@ -1,12 +1,15 @@
 package gocacheprog_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +118,9 @@ func TestServeEndOfInput(t *testing.T) {
 		t.Fatalf("Serve = %v, want nil", err)
 	}
 	want := []gocacheprog.Response{handshake, {ID: 1, Miss: true}, {ID: 2, DiskPath: "/store/new"}}
-	if got := decodeResponses(t, buf.String()); !reflect.DeepEqual(got, want) {
+	got := decodeResponses(t, buf.String())
+	slices.SortFunc(got, func(a, b gocacheprog.Response) int { return cmp.Compare(a.ID, b.ID) })
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("responses = %+v, want %+v", got, want)
 	}
 	if wantStats := (gocacheprog.Stats{Gets: 1, Misses: 1, Puts: 1, PutBytes: 2}); stats != wantStats {
@@ -127,8 +132,10 @@ func TestServeEndOfInput(t *testing.T) {
 }
 
 // traceStore holds entries in memory, stamps each Put with now, and notes its
-// Close in trace so the test sees where Close falls among the writes.
+// Close in trace so the test sees where Close falls among the writes. It locks
+// the entries so a Serve answering requests at once can share them.
 type traceStore struct {
+	mu      sync.Mutex
 	entries map[string]gocacheprog.Entry
 	now     time.Time
 	trace   *[]string
@@ -136,6 +143,8 @@ type traceStore struct {
 }
 
 func (s *traceStore) Get(actionID []byte) (gocacheprog.Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.entries[string(actionID)]
 	if !ok {
 		return gocacheprog.Entry{}, gocacheprog.ErrMiss
@@ -144,6 +153,8 @@ func (s *traceStore) Get(actionID []byte) (gocacheprog.Entry, error) {
 }
 
 func (s *traceStore) Put(actionID, outputID, body []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	path := "/store/" + string(outputID)
 	s.entries[string(actionID)] = gocacheprog.Entry{OutputID: outputID, Size: int64(len(body)), Time: s.now, DiskPath: path}
 	return path, nil
@@ -176,12 +187,14 @@ func TestServeSession(t *testing.T) {
 		now:     putTime,
 		trace:   &trace,
 	}
+	// No request may depend on an earlier one's effect in the store: a Serve
+	// may answer them at once.
 	in := strings.Join([]string{
 		`{"ID":1,"Command":"get","ActionID":"aGl0"}`,
 		`{"ID":2,"Command":"get","ActionID":"bWlzcw=="}`,
 		`{"ID":3,"Command":"put","ActionID":"aw==","OutputID":"bmV3","BodySize":5}`,
 		`"aGVsbG8="`,
-		`{"ID":4,"Command":"get","ActionID":"aw=="}`,
+		`{"ID":4,"Command":"get","ActionID":"aGl0"}`,
 		`{"ID":5,"Command":"close"}`,
 	}, "\n") + "\n"
 	out := &traceWriter{trace: &trace}
@@ -194,13 +207,23 @@ func TestServeSession(t *testing.T) {
 		{ID: 1, OutputID: []byte("old"), Size: 10, Time: &hitTime, DiskPath: "/store/old"},
 		{ID: 2, Miss: true},
 		{ID: 3, DiskPath: "/store/new"},
-		{ID: 4, OutputID: []byte("new"), Size: 5, Time: &putTime, DiskPath: "/store/new"},
+		{ID: 4, OutputID: []byte("old"), Size: 10, Time: &hitTime, DiskPath: "/store/old"},
 		{ID: 5},
 	}
-	if got := decodeResponses(t, out.buf.String()); !reflect.DeepEqual(got, want) {
+	got := decodeResponses(t, out.buf.String())
+	if len(got) != len(want) || !reflect.DeepEqual(got[0], handshake) {
+		t.Fatalf("responses = %+v, want the handshake and %+v", got, want[1:])
+	}
+	// Answers for requests served at once come in either order, so only the
+	// close is pinned to a position: it follows every earlier answer.
+	if last := got[len(got)-1]; last.ID != 5 || last.Err != "" {
+		t.Errorf("last response = %+v, want the close", last)
+	}
+	slices.SortFunc(got, func(a, b gocacheprog.Response) int { return cmp.Compare(a.ID, b.ID) })
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("responses = %+v, want %+v", got, want)
 	}
-	if wantStats := (gocacheprog.Stats{Gets: 3, Hits: 2, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 15}); stats != wantStats {
+	if wantStats := (gocacheprog.Stats{Gets: 3, Hits: 2, Misses: 1, Puts: 1, PutBytes: 5, HitBytes: 20}); stats != wantStats {
 		t.Errorf("stats = %+v, want %+v", stats, wantStats)
 	}
 	// Five writes (the handshake and IDs 1 to 4) come before close; the close
