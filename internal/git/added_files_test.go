@@ -11,26 +11,36 @@ const (
 	addedDiffKey = "diff --raw -z --no-renames --no-abbrev --diff-filter=A --end-of-options main...HEAD"
 )
 
-// addedRecord is one -z --raw addition record: path at mode holding blob.
+// addedRecord is one -z --raw addition record: path at mode holding blob. git
+// prints records back to back as "<meta>\0<path>\0" with no separator or
+// newline between them and nothing at all for an empty range.
 func addedRecord(mode, blob, path string) string {
 	return ":000000 " + mode + " " + strings.Repeat("0", 40) + " " + blob + " A\x00" + path + "\x00"
 }
 
 // TestAddedFiles: history keeps a file a later commit deletes, the tree adds a
-// merge-only file, a pair both report appears once, and non-file modes are out.
+// merge-only file, a pair both report appears once, a pair the log repeats is
+// listed once, one path with two blobs is listed twice, and non-file modes are out.
 func TestAddedFiles(t *testing.T) {
 	t.Parallel()
 	gone, both, exe, mergeOnly := strings.Repeat("1", 40), strings.Repeat("2", 40), strings.Repeat("3", 40), strings.Repeat("4", 40)
+	first, second := strings.Repeat("e", 40), strings.Repeat("f", 40)
 	s := newScripted(map[string]reply{
 		addedLogKey: ok(addedRecord("100644", gone, "gone.txt") + addedRecord("100644", both, "both.txt") +
-			addedRecord("120000", strings.Repeat("b", 40), "link") + addedRecord("160000", strings.Repeat("c", 40), "sub") + addedRecord("100755", exe, "run.sh")),
+			addedRecord("120000", strings.Repeat("b", 40), "link") + addedRecord("160000", strings.Repeat("c", 40), "sub") +
+			addedRecord("100755", exe, "run.sh") + addedRecord("100644", both, "both.txt") +
+			addedRecord("100644", first, "replaced.txt") + addedRecord("100644", second, "replaced.txt")),
 		addedDiffKey: ok(addedRecord("100644", both, "both.txt") + addedRecord("100644", mergeOnly, "merge-only.txt")),
 	})
 	got, err := newTestGit(t, s).AddedFiles("main", "HEAD")
 	if err != nil {
 		t.Fatalf("AddedFiles: %v", err)
 	}
-	want := []AddedFile{{Path: "gone.txt", Blob: gone}, {Path: "both.txt", Blob: both}, {Path: "run.sh", Blob: exe}, {Path: "merge-only.txt", Blob: mergeOnly}}
+	want := []AddedFile{
+		{Path: "gone.txt", Blob: gone}, {Path: "both.txt", Blob: both}, {Path: "run.sh", Blob: exe},
+		{Path: "replaced.txt", Blob: first}, {Path: "replaced.txt", Blob: second},
+		{Path: "merge-only.txt", Blob: mergeOnly},
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("AddedFiles = %v, want %v", got, want)
 	}
@@ -82,8 +92,10 @@ func TestBlobBytes(t *testing.T) {
 	if string(got) != content {
 		t.Errorf("BlobBytes = %q, want %q", got, content)
 	}
-	if got, err := newTestGit(t, newScripted(map[string]reply{"cat-file blob " + blob: fail(128, "fatal: bad object")})).BlobBytes(blob); err == nil || got != nil {
-		t.Errorf("BlobBytes with a failing cat-file = %q, %v; want an error and no bytes", got, err)
+	broken := newTestGit(t, newScripted(map[string]reply{"cat-file blob " + blob: fail(128, "fatal: bad object")}))
+	failed, err := broken.BlobBytes(blob)
+	if err == nil || failed != nil {
+		t.Errorf("BlobBytes with a failing cat-file = %q, %v; want an error and no bytes", failed, err)
 	}
 	for _, name := range []string{"HEAD", "main", "abc123", strings.Repeat("a", 39) + "g", strings.Repeat("a", 41)} {
 		t.Run(name, func(t *testing.T) {

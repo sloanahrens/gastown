@@ -12,10 +12,11 @@ type AddedFile struct {
 	Blob string
 }
 
-// AddedFiles lists the files base..head adds and the blob each holds: every
-// non-merge commit's addition (a later commit's deletion still counts, since
-// the landing merges the branch's commits) plus what only a merge adds.
-// Regular files only, one entry per path and blob; a bad record is an error.
+// AddedFiles lists the files the commits of base..head add and the blob each
+// holds: every non-merge commit's addition (a later commit's deletion still
+// counts, since the landing merges the branch's commits) unioned with what the
+// base...head tree comparison adds (a merge commit alone). Regular files only,
+// one entry per path and blob; a bad record is an error.
 func (g *Git) AddedFiles(base, head string) ([]AddedFile, error) {
 	logFiles, err := g.addedFiles("log", base+".."+head, "--no-merges", "--format=")
 	if err != nil {
@@ -25,12 +26,15 @@ func (g *Git) AddedFiles(base, head string) ([]AddedFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, f := range treeFiles {
-		if !slices.Contains(logFiles, f) {
-			logFiles = append(logFiles, f)
+	seen := make(map[AddedFile]bool, len(logFiles)+len(treeFiles))
+	files := make([]AddedFile, 0, len(logFiles)+len(treeFiles))
+	for _, f := range slices.Concat(logFiles, treeFiles) {
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
 		}
 	}
-	return logFiles, nil
+	return files, nil
 }
 
 // addedFiles runs one --raw -z --diff-filter=A listing over rev; --end-of-options
@@ -45,7 +49,10 @@ func (g *Git) addedFiles(verb, rev string, prefix ...string) ([]AddedFile, error
 	return parseAddedRaw(out)
 }
 
-// parseAddedRaw reads a --raw -z --diff-filter=A listing: "<meta>\0<path>\0" per file, one leading newline trimmed.
+// parseAddedRaw reads a --raw -z --diff-filter=A listing, whose records git
+// prints back to back as "<meta>\0<path>\0" with no separator or newline
+// between them and nothing at all for an empty range. The trim drops the
+// newline a log record carries before its meta.
 func parseAddedRaw(out string) ([]AddedFile, error) {
 	tokens := strings.Split(out, "\x00")
 	if len(tokens)%2 != 1 || tokens[len(tokens)-1] != "" {
