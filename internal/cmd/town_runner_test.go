@@ -1477,12 +1477,15 @@ func rollFlagsCmd(missing string) *cobra.Command {
 	if missing != "runner" {
 		cmd.Flags().String("runner", "gate", "")
 	}
+	if missing != "render-only" {
+		cmd.Flags().Bool("render-only", false, "")
+	}
 	return cmd
 }
 
 func TestTownRunnerRollRefusesAFlagItCannotRead(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"landing-wait", "runs-wait", "rollout-wait", "dry-run", "runner"} {
+	for _, name := range []string{"landing-wait", "runs-wait", "rollout-wait", "dry-run", "runner", "render-only"} {
 		findTown := func() (string, error) {
 			t.Errorf("the town was looked up although --%s could not be read", name)
 			return "", nil
@@ -1652,5 +1655,146 @@ func TestTownRunnerRollRefusesAnUnknownRunnerBeforeTheHold(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--runner") {
 			t.Errorf("--runner %q: error = %v, want a refusal that names --runner", runner, err)
 		}
+	}
+}
+
+// renderOnlyCmd is the roll command with --render-only set and --runner as given.
+func renderOnlyCmd(t *testing.T, runner string) *cobra.Command {
+	t.Helper()
+	cmd := rollFlagsCmd("")
+	if err := cmd.Flags().Set("runner", runner); err != nil {
+		t.Fatalf("setting --runner: %v", err)
+	}
+	if err := cmd.Flags().Set("render-only", "true"); err != nil {
+		t.Fatalf("setting --render-only: %v", err)
+	}
+	return cmd
+}
+
+// TestTownRunnerRenderOnlyPrintsTheApplyStream: --render-only prints the runner's
+// objects as the stream a real apply sends kubectl, one document each in the
+// apply's order. The town is never looked up, so no hold is taken, and a pod does
+// not refuse the render, since it reads no cluster.
+func TestTownRunnerRenderOnlyPrintsTheApplyStream(t *testing.T) {
+	t.Parallel()
+	for _, runner := range []string{"gate", "aux"} {
+		t.Run(runner, func(t *testing.T) {
+			t.Parallel()
+			cmd := renderOnlyCmd(t, runner)
+			out := &bytes.Buffer{}
+			cmd.SetOut(out)
+			findTown := func() (string, error) {
+				t.Errorf("--render-only looked up the town, so it could take a hold")
+				return "", nil
+			}
+			if err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(map[string]string{podEnv: "10.20.30.40"})); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+
+			values := forgejorunner.ControlValues
+			if runner == "aux" {
+				values = forgejorunner.AuxValues
+			}
+			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "", 0, nil }}
+			a := runnerRollDepsForValues("/town", nil, fixedRunsSeam(), io.Discard, time.Minute, time.Minute, time.Minute, false, values).apply.(runnerApplier)
+			a.kubectl = k.run
+			if err := a.Apply(context.Background()); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			if len(k.calls) != 4 {
+				t.Fatalf("apply made %d cluster calls, want 4 (configmap, two claims, deployment)", len(k.calls))
+			}
+			stdins := make([]string, 0, len(k.calls))
+			for _, call := range k.calls {
+				stdins = append(stdins, call.stdin)
+			}
+			if want := strings.Join(stdins, "---\n"); out.String() != want {
+				t.Errorf("--render-only printed %q, want the apply's stream %q", out.String(), want)
+			}
+		})
+	}
+}
+
+// failOnCall is an encoder that fails on its nth document and encodes the rest.
+func failOnCall(n int) func(io.Writer, any) error {
+	calls := 0
+	return func(w io.Writer, v any) error {
+		calls++
+		if calls == n {
+			return errors.New("encoder broke")
+		}
+		return forgejorunner.YAML(w, v)
+	}
+}
+
+// TestTownRunnerRenderOnlyPrintsNothingOnAFailure: a values, build or encode failure
+// is returned and nothing is printed, so a partial stream never reaches kubectl.
+func TestTownRunnerRenderOnlyPrintsNothingOnAFailure(t *testing.T) {
+	t.Parallel()
+	failValues := func() (forgejorunner.Values, error) { return forgejorunner.Values{}, errors.New("values unreadable") }
+	failBuild := func(forgejorunner.Values) (forgejorunner.Manifests, error) {
+		return forgejorunner.Manifests{}, errors.New("build broke")
+	}
+	for _, tc := range []struct {
+		name    string
+		values  func() (forgejorunner.Values, error)
+		build   func(forgejorunner.Values) (forgejorunner.Manifests, error)
+		encode  func(io.Writer, any) error
+		wantErr string
+	}{
+		{"values unreadable", failValues, forgejorunner.Build, forgejorunner.YAML, "reading the control cluster's runner values"},
+		{"render fails", forgejorunner.ControlValues, failBuild, forgejorunner.YAML, "rendering the runner"},
+		{"second object does not encode", forgejorunner.ControlValues, forgejorunner.Build, failOnCall(2), "building the persistentvolumeclaim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := &bytes.Buffer{}
+			err := renderRunnerManifests(out, tc.values, tc.build, tc.encode)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+			if out.Len() != 0 {
+				t.Errorf("--render-only printed %q before refusing", out.String())
+			}
+		})
+	}
+}
+
+// failingRenderWriter is a stdout that cannot be written to.
+type failingRenderWriter struct{}
+
+func (failingRenderWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// TestTownRunnerRenderOnlyReturnsAWriteFailure: a stdout that cannot take the stream
+// is returned as the render's error, not dropped.
+func TestTownRunnerRenderOnlyReturnsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	err := renderRunnerManifests(failingRenderWriter{}, forgejorunner.ControlValues, forgejorunner.Build, forgejorunner.YAML)
+	if err == nil || !strings.Contains(err.Error(), "printing the runner's manifests") {
+		t.Fatalf("error = %v, want it to name printing the runner's manifests", err)
+	}
+}
+
+// TestTownRunnerRenderOnlyRefusesWithDryRun: --render-only and --dry-run both name a
+// run that takes no hold, so the pair is refused before the town is read or anything
+// is printed.
+func TestTownRunnerRenderOnlyRefusesWithDryRun(t *testing.T) {
+	t.Parallel()
+	cmd := renderOnlyCmd(t, "gate")
+	if err := cmd.Flags().Set("dry-run", "true"); err != nil {
+		t.Fatalf("setting --dry-run: %v", err)
+	}
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	findTown := func() (string, error) {
+		t.Errorf("--render-only with --dry-run looked up the town before refusing")
+		return "", nil
+	}
+	err := runTownRunnerRollIn(cmd, findTown, adminCheckGetenv(nil))
+	if err == nil || !strings.Contains(err.Error(), "pick one") {
+		t.Fatalf("error = %v, want a refusal that says to pick one", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the refusal printed %q", out.String())
 	}
 }

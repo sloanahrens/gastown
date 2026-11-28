@@ -169,6 +169,48 @@ func (a runnerApplier) manifests() (forgejorunner.Manifests, error) {
 	return m, nil
 }
 
+// runnerObject is one manifest a roll writes, named as kubectl and its errors name it.
+type runnerObject struct {
+	kind   string
+	name   string
+	object any
+}
+
+// runnerObjects lists the manifests an apply writes, in its order: the ConfigMap,
+// the two claims, then the Deployment. Apply and --render-only both read it.
+func runnerObjects(m forgejorunner.Manifests) []runnerObject {
+	return []runnerObject{
+		{"configmap", m.ConfigMap.Metadata.Name, m.ConfigMap},
+		{"persistentvolumeclaim", m.DindClaim.Metadata.Name, m.DindClaim},
+		{"persistentvolumeclaim", m.RunnerClaim.Metadata.Name, m.RunnerClaim},
+		{"deployment", m.Deployment.Metadata.Name, m.Deployment},
+	}
+}
+
+// renderRunnerManifests is --render-only's print: the objects in runnerObjects'
+// order as one YAML stream. It encodes all of them before it writes, so a failure
+// prints nothing.
+func renderRunnerManifests(out io.Writer, values func() (forgejorunner.Values, error), build func(forgejorunner.Values) (forgejorunner.Manifests, error), encode func(io.Writer, any) error) error {
+	a := runnerApplier{values: values, build: build}
+	m, err := a.manifests()
+	if err != nil {
+		return err
+	}
+	var stream bytes.Buffer
+	for i, object := range runnerObjects(m) {
+		if i > 0 {
+			stream.WriteString("---\n")
+		}
+		if err := encode(&stream, object.object); err != nil {
+			return fmt.Errorf("building the %s %s: %w", object.kind, object.name, err)
+		}
+	}
+	if _, err := out.Write(stream.Bytes()); err != nil {
+		return fmt.Errorf("printing the runner's manifests: %w", err)
+	}
+	return nil
+}
+
 // Apply writes the ConfigMap, then the two claims, then the Deployment. A build
 // or an apply that fails returns an error, so the roll stops and leaves the
 // caller to release the hold. The Recreate strategy rolls the pod; this never
@@ -178,17 +220,7 @@ func (a runnerApplier) Apply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	objects := []struct {
-		kind   string
-		name   string
-		object any
-	}{
-		{"configmap", m.ConfigMap.Metadata.Name, m.ConfigMap},
-		{"persistentvolumeclaim", m.DindClaim.Metadata.Name, m.DindClaim},
-		{"persistentvolumeclaim", m.RunnerClaim.Metadata.Name, m.RunnerClaim},
-		{"deployment", m.Deployment.Metadata.Name, m.Deployment},
-	}
-	for _, object := range objects {
+	for _, object := range runnerObjects(m) {
 		if err := a.apply(ctx, object.kind, object.name, object.object); err != nil {
 			return err
 		}
@@ -363,6 +395,9 @@ var townRunnerRollCmd = &cobra.Command{
 prints the steps, their bounds and their order, then the runner drift compare's
 lines against the live cluster, and takes no hold and writes nothing.
 
+--render-only prints the runner's manifests to standard output, in the order an
+apply writes them, and touches no cluster and takes no hold.
+
 A real roll refuses inside a pod, where KUBERNETES_SERVICE_HOST is set: the
 pod's account may not take the hold or write the runner, so build the commit to
 be applied and run it on the Mac. --dry-run runs anywhere.
@@ -380,6 +415,7 @@ Deployment's Recreate strategy rolls the pod; this never deletes it.
 Examples:
   gt town runner roll --dry-run
   gt town runner roll --runner aux --dry-run
+  gt town runner roll --render-only > runner.yaml
   gt town runner roll --landing-wait 5m --runs-wait 30m`,
 	Args: cobra.NoArgs,
 	RunE: runTownRunnerRollCmd,
@@ -395,6 +431,7 @@ func init() {
 	townRunnerRollCmd.Flags().Duration("rollout-wait", 10*time.Minute, "longest wait for the Deployment's rollout to complete")
 	townRunnerRollCmd.Flags().Bool("dry-run", false, "print the steps and their bounds, then the drift lines; take no hold and apply nothing")
 	townRunnerRollCmd.Flags().String("runner", "gate", "the runner to roll: gate, the default, or aux")
+	townRunnerRollCmd.Flags().Bool("render-only", false, "print the runner's manifests in apply order; touch no cluster and take no hold")
 	townRunnerResizeCmd.Flags().String(dindCPUFlag, "", "the engine sidecar's CPU: a positive whole number of cores, such as 4, or of millicores, such as 4000m")
 }
 
@@ -427,9 +464,21 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error), ge
 	if err != nil {
 		return fmt.Errorf("reading --runner: %w", err)
 	}
+	renderOnly, err := cmd.Flags().GetBool("render-only")
+	if err != nil {
+		return fmt.Errorf("reading --render-only: %w", err)
+	}
 	values, err := rollRunnerValues(runner)
 	if err != nil {
 		return err
+	}
+	if renderOnly {
+		// A render reads no cluster, so a pod and the town lookup do not matter here.
+		// It cannot combine with --dry-run, which prints a different report.
+		if dryRun {
+			return errors.New("--render-only and --dry-run both name a run that takes no hold, so pick one")
+		}
+		return renderRunnerManifests(cmd.OutOrStdout(), values, forgejorunner.Build, forgejorunner.YAML)
 	}
 	if !dryRun && getenv(podEnv) != "" {
 		return fmt.Errorf("gt town runner roll refuses inside a pod, where %s is set: the daemon pod's account may not take the landing hold or write the runner, so build the commit to be applied and run it on the Mac instead: make build, then ./gt town runner roll", podEnv)
