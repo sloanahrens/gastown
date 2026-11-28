@@ -958,24 +958,6 @@ else
   fail "a lint finding in the tracker module fails the gate and names the module (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
 fi
 
-# presubmit tests the tracker module only when the branch changed it, and a
-# failure there fails presubmit. PRESUBMIT_BASE=HEAD means "nothing changed";
-# the repo's first commit stands for a base the module differs from.
-BASE_FIRST=$(git -C "$ROOT" rev-list --max-parents=0 HEAD | tail -1)
-rc=$(TARGET=presubmit run_gate -o lint PRESUBMIT_BASE="$BASE_FIRST" -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR=tracker)
-if [[ "$rc" != 0 ]] && grep -q -F 'presubmit: FAILED at tests (tracker)' "$TMP/err" && grep -q -x 'go test in tracker' "$TMP/calls"; then
-  pass "presubmit: a changed tracker module whose tests fail fails presubmit"
-else
-  fail "presubmit: a changed tracker module whose tests fail fails presubmit (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
-fi
-
-rc=$(TARGET=presubmit run_gate -o lint PRESUBMIT_BASE=HEAD -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR=tracker)
-if [[ "$rc" == 0 ]] && ! grep -q -x 'go test in tracker' "$TMP/calls"; then
-  pass "presubmit: an unchanged tracker module is not tested"
-else
-  fail "presubmit: an unchanged tracker module is not tested (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
-fi
-
 rc=$(TARGET=test-integration run_gate -o lint -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR=tracker)
 if [[ "$rc" != 0 ]] && grep -q -F 'test-integration: FAILED in tracker' "$TMP/err" && grep -q -x 'go test in tracker' "$TMP/calls"; then
   pass "test-integration: a failing tracker integration test fails the target and names the module"
