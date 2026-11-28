@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
@@ -247,6 +248,76 @@ func volumeExecs(f *ciCacheFixture, name string) int {
 		}
 	}
 	return n
+}
+
+// TestCICacheTrimRunnersMatchTheirRenders holds each runner's entry to the render of its
+// values: the gate runner's to ControlValues, the aux runner's to AuxValues (gt-juwsv6).
+func TestCICacheTrimRunnersMatchTheirRenders(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		runner ciCacheRunner
+		values func() (forgejorunner.Values, error)
+	}{{ciCacheGateRunner, forgejorunner.ControlValues}, {ciCacheAuxRunner, forgejorunner.AuxValues}} {
+		v, err := tc.values()
+		if err != nil {
+			t.Fatalf("reading %s's values: %v", tc.runner.deployment, err)
+		}
+		m, err := forgejorunner.Build(v)
+		if err != nil {
+			t.Fatalf("rendering %s: %v", tc.runner.deployment, err)
+		}
+		pod := m.Deployment.Spec.Template
+		if m.Deployment.Metadata.Name != tc.runner.deployment || m.Deployment.Metadata.Namespace != tc.runner.namespace {
+			t.Errorf("render is %s/%s, the entry names %s/%s", m.Deployment.Metadata.Namespace, m.Deployment.Metadata.Name, tc.runner.namespace, tc.runner.deployment)
+		}
+		if got := pod.Metadata.Labels["app.kubernetes.io/name"]; "app.kubernetes.io/name="+got != tc.runner.podLabel() {
+			t.Errorf("pods carry %q, the entry selects %q", got, tc.runner.podLabel())
+		}
+		containers := append(slices.Clone(pod.Spec.InitContainers), pod.Spec.Containers...)
+		if !slices.ContainsFunc(containers, func(c forgejorunner.Container) bool { return c.Name == tc.runner.container }) {
+			t.Errorf("the render has no %q container; the entry execs into it", tc.runner.container)
+		}
+	}
+}
+
+// TestCICacheTrimCallsNameTheRunner: the pod listing and the exec each take the runner
+// they are given. The fake runner differs from both real ones in namespace.
+func TestCICacheTrimCallsNameTheRunner(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, listing string
+		runner        ciCacheRunner
+	}{
+		{"the gate runner", "get pods -n forgejo -l app.kubernetes.io/name=forgejo-runner -o json", ciCacheGateRunner},
+		{"the aux runner", "get pods -n forgejo -l app.kubernetes.io/name=forgejo-runner-aux -o json", ciCacheAuxRunner},
+		{"a fake runner", "get pods -n fake-ns -l app.kubernetes.io/name=fake-runner -o json", ciCacheRunner{"fake-ns", "fake-runner", ciCacheContainer}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			_, maxAge, _, err := ciCacheTrimSettings(f.d.patrol())
+			if err != nil {
+				t.Fatalf("reading the trim settings: %v", err)
+			}
+			pod, err := f.d.ciCacheTrimPod(context.Background(), tc.runner, "kubeconfig", ciCacheTestContext)
+			if err != nil {
+				t.Fatalf("ciCacheTrimPod: %v", err)
+			}
+			if lists := f.callsWith("get pods "); len(lists) != 1 || cacheTrimVerb(lists[0].args) != tc.listing {
+				t.Errorf("listing = %v, want %q", lists, tc.listing)
+			}
+			v := ciCacheVolume{name: "ci-scratch", root: ciCacheVolumeRoot("ci-scratch")}
+			at := ciCacheExecTarget{runner: tc.runner, kubeContext: ciCacheTestContext, pod: pod}
+			if ok, why := f.d.ciCacheTrimVolume(context.Background(), agentconfig.DiskMaintenanceModeApply, at, v, maxAge); !ok {
+				t.Fatalf("the trim reached no verdict: %s\n%s", why, f.logs.String())
+			}
+			want := []string{"exec", "-n", tc.runner.namespace, pod, "-c", tc.runner.container, "--"}
+			execs := f.execs()
+			if len(execs) != 1 || len(execs[0].args) < 4+len(want) || !slices.Equal(execs[0].args[4:4+len(want)], want) {
+				t.Errorf("execs = %v, want one beginning %q", execs, want)
+			}
+		})
+	}
 }
 
 // TestCICacheTrimArgv: each volume's exec names the runner's dind container, the
@@ -516,7 +587,7 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			t.Parallel()
 			f := newCICacheFixture(t, mode)
 			row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
-			at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+			at := ciCacheExecTarget{runner: ciCacheGateRunner, kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
 
 			ok, why := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour)
 			if ok {
@@ -2409,7 +2480,7 @@ func TestCICacheLedgerUncappedVolumeHasNoCapBytes(t *testing.T) {
 		t.Fatalf("reading the trim settings: %v", err)
 	}
 	v := ciCacheVolume{name: "ci-scratch", root: ciCacheVolumeRoot("ci-scratch")}
-	at := ciCacheExecTarget{kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+	at := ciCacheExecTarget{runner: ciCacheGateRunner, kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
 	if ok, why := f.d.ciCacheTrimVolume(context.Background(), agentconfig.DiskMaintenanceModeApply, at, v, maxAge); !ok {
 		t.Fatalf("the trim reached no verdict: %s\n%s", why, f.logs.String())
 	}
