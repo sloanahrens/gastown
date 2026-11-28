@@ -16,19 +16,42 @@ const (
 	cacheProgStatsName = "stats.jsonl"
 	// cacheProgStatsCopyName is the copy a run leaves in its log directory.
 	cacheProgStatsCopyName = "gocacheprog-stats.jsonl"
+	// cacheProgStatsMaxBytes is the largest stats file that is copied; a larger one is removed uncopied.
+	cacheProgStatsMaxBytes int64 = 8 << 20
 )
 
 // moveCacheProgStats copies the cache program's stats from cacheRoot into logDir and then removes the
 // source, because the two can sit on different filesystems. A source that is not there returns nil and
-// writes no copy; every other failure is an error, and a source that is not copied stays where it is. When
-// the source cannot be removed after the copy, the copy is dropped so a later run cannot count the same
-// lines twice, and a copy that cannot be dropped is reported beside the removal failure. remove does both
-// removals; the caller passes os.Remove.
+// writes no copy; a gtprog or source that is a link or the wrong kind is an error that reads, copies and
+// removes nothing; a source over cacheProgStatsMaxBytes is removed uncopied through remove, and the error
+// names the size. Every other failure is an error, and a source that is not copied stays where it is. When the
+// source cannot be removed after the copy, the copy is dropped so a later run cannot count the same lines
+// twice, and a copy that cannot be dropped is reported beside the removal failure. remove does every removal;
+// the caller passes os.Remove.
 func moveCacheProgStats(cacheRoot, logDir string, remove func(string) error) error {
-	src := filepath.Join(cacheRoot, cacheProgDirName, cacheProgStatsName)
+	dir := filepath.Join(cacheRoot, cacheProgDirName)
+	src := filepath.Join(dir, cacheProgStatsName)
 	dst := filepath.Join(logDir, cacheProgStatsCopyName)
-	if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
+	dirInfo, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
+	}
+	if err != nil || !dirInfo.IsDir() {
+		return errors.Join(err, fmt.Errorf("reading %s: %s is a link or not a directory", src, dir))
+	}
+	info, err := os.Lstat(src)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.Join(err, fmt.Errorf("reading %s: it is a link or not a regular file", src))
+	}
+	if info.Size() > cacheProgStatsMaxBytes {
+		over := fmt.Errorf("%s is %d bytes, over the %d byte limit", src, info.Size(), cacheProgStatsMaxBytes)
+		if rerr := remove(src); rerr != nil {
+			return errors.Join(over, fmt.Errorf("removing %s uncopied: %w", src, rerr))
+		}
+		return fmt.Errorf("%w; removed uncopied", over)
 	}
 	if err := copyCacheProgStats(src, dst, createCopy); err != nil {
 		return err
