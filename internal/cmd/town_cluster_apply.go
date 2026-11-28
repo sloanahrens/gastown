@@ -224,7 +224,7 @@ func checkApplyPlanFiles(planDir string, record planRecord) ([]applyPlanFile, er
 		if hex.EncodeToString(sum[:]) != file.SHA256 {
 			return nil, fmt.Errorf("gt town cluster apply: the plan file %s does not match the sha256 plan.json records for it, so nothing was applied", file.Name)
 		}
-		doc, err := checkApplyDocuments(file, data)
+		doc, err := checkApplyDocuments(file, record.Cluster, data)
 		if err != nil {
 			return nil, err
 		}
@@ -234,13 +234,13 @@ func checkApplyPlanFiles(planDir string, record planRecord) ([]applyPlanFile, er
 }
 
 // checkApplyDocuments refuses a file holding a Secret document, in either phase,
-// and a static policy document (ValidatingAdmissionPolicy, its binding, or a
-// Role) in phase W, which takes none. Every document of the file is decoded, so a
+// and a document phase W refuses for its cluster (phaseWRefuses). Every
+// document of the file is decoded, so a
 // Secret after the first document is refused too. A document that does not decode
 // is refused, since an unread document never passes as allowed. It returns the
 // file's first document that names a kind, so the apply reads a Deployment's name
 // and namespace from the bytes it checked.
-func checkApplyDocuments(file planRecordFile, data []byte) (applyDocument, error) {
+func checkApplyDocuments(file planRecordFile, cluster string, data []byte) (applyDocument, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var first applyDocument
 	var found bool
@@ -256,7 +256,7 @@ func checkApplyDocuments(file planRecordFile, data []byte) (applyDocument, error
 		if !found && doc.Kind != "" {
 			first, found = doc, true
 		}
-		if err := checkApplyDocument(file, doc); err != nil {
+		if err := checkApplyDocument(file, cluster, doc); err != nil {
 			return applyDocument{}, err
 		}
 	}
@@ -275,36 +275,51 @@ type applyDocument struct {
 }
 
 // checkApplyDocument refuses a document that holds a Secret or, in phase W, a
-// static policy document. A List holds documents of its own, so each item is
-// checked: a Secret wrapped in `kind: List` is refused like a bare one. A typed
-// list such as SecretList names its element kind, which its items may omit, so
-// that kind is checked too.
-func checkApplyDocument(file planRecordFile, doc applyDocument) error {
+// document phaseWRefuses names for its cluster. A List holds its own documents, so
+// each item is checked: a Secret wrapped in `kind: List` is refused like a bare one.
+// A typed list such as SecretList names its element kind, which its items may omit,
+// so that kind is checked too.
+func checkApplyDocument(file planRecordFile, cluster string, doc applyDocument) error {
 	kinds := []string{doc.Kind}
 	if elem, ok := strings.CutSuffix(doc.Kind, "List"); ok && elem != "" {
 		kinds = append(kinds, elem)
 	}
 	for _, kind := range kinds {
-		if err := checkApplyKind(file, kind); err != nil {
+		if err := checkApplyKind(file, cluster, kind); err != nil {
 			return err
 		}
 	}
 	for _, item := range doc.Items {
-		if err := checkApplyDocument(file, item); err != nil {
+		if err := checkApplyDocument(file, cluster, item); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// checkApplyKind refuses one kind: a Secret in either phase, and a static policy
-// kind in phase W.
-func checkApplyKind(file planRecordFile, kind string) error {
+const (
+	mutatingPolicyKind     = "MutatingAdmissionPolicy"
+	mutatingPolicyBindKind = "MutatingAdmissionPolicyBinding"
+)
+
+// phaseWRefuses reports whether phase W refuses kind on cluster; only gt-sbx takes Roles.
+func phaseWRefuses(cluster, kind string) bool {
+	switch kind {
+	case validatingPolicyKind, validatingPolicyBindKind, mutatingPolicyKind, mutatingPolicyBindKind, clusterRoleKind, clusterRoleBindingKind:
+		return true
+	case roleKind, roleBindingKind:
+		return cluster != clusterSbx
+	}
+	return false
+}
+
+// checkApplyKind refuses a Secret in either phase, and a kind phase W refuses here.
+func checkApplyKind(file planRecordFile, cluster, kind string) error {
 	switch {
 	case kind == secretKind:
 		return fmt.Errorf("gt town cluster apply: the plan file %s holds a Secret, which apply never applies, so nothing was applied", file.Name)
-	case file.Phase == planPhaseWorkloads && (kind == validatingPolicyKind || kind == validatingPolicyBindKind || kind == roleKind):
-		return fmt.Errorf("gt town cluster apply: the plan file %s holds a %s in phase W, and only phase P applies static documents, so nothing was applied", file.Name, kind)
+	case file.Phase == planPhaseWorkloads && phaseWRefuses(cluster, kind):
+		return fmt.Errorf("gt town cluster apply: the plan file %s holds a %s in phase W, and phase W does not apply that kind on cluster %q, so nothing was applied", file.Name, kind, cluster)
 	}
 	return nil
 }

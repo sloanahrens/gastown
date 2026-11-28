@@ -373,6 +373,40 @@ func TestClusterShapeSbxStatefulSetRefused(t *testing.T) {
 	}
 }
 
+// TestClusterShapeApplySbxPhaseWRBAC: gt-sbx applies phase W Roles and RoleBindings, and refuses a ClusterRoleBinding.
+func TestClusterShapeApplySbxPhaseWRBAC(t *testing.T) {
+	t.Parallel()
+	const rbac = "rbac.authorization.k8s.io/v1"
+	roleDoc := shapeDoc(rbac, roleKind, "openshell-sandbox", "openshell")
+	roleBindingDoc := shapeDoc(rbac, roleBindingKind, "openshell-sandbox", "openshell")
+	crbDoc := shapeDoc(rbac, clusterRoleBindingKind, "gt-sweep-reader", "")
+	t.Run("a Role and a RoleBinding are applied", func(t *testing.T) {
+		t.Parallel()
+		k := newSbxKube()
+		files := []planRecordFile{{Name: "w-role.yaml", Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(roleDoc)}, {Name: "w-rolebinding.yaml", Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(roleBindingDoc)}}
+		if _, err := sbxRun(t, k, files, map[string][]byte{"w-role.yaml": roleDoc, "w-rolebinding.yaml": roleBindingDoc}); err != nil {
+			t.Fatalf("runTownClusterApply returned %v, want the gt-sbx Role and RoleBinding applied", err)
+		}
+		if want := []string{"apply w-role.yaml", "apply w-rolebinding.yaml"}; !slices.Equal(k.labels(), want) {
+			t.Errorf("runTownClusterApply made the calls %q, want %q", k.labels(), want)
+		}
+		for _, call := range k.calls {
+			if call.kubeconfig != sbxFlags.applyKubeconfig {
+				t.Errorf("%q was bound to kubeconfig %q, want the apply kubeconfig", call.label, call.kubeconfig)
+			}
+		}
+	})
+	t.Run("a ClusterRoleBinding refuses", func(t *testing.T) {
+		t.Parallel()
+		k := newSbxKube()
+		files := []planRecordFile{{Name: "w-crb.yaml", Phase: planPhaseWorkloads, SHA256: clusterApplyFileSHA(crbDoc)}}
+		_, err := sbxRun(t, k, files, map[string][]byte{"w-crb.yaml": crbDoc})
+		if err == nil || !strings.Contains(err.Error(), "in phase W") || len(k.calls) != 0 {
+			t.Fatalf("runTownClusterApply returned %v after %d calls, want the ClusterRoleBinding refused in phase W with no call", err, len(k.calls))
+		}
+	})
+}
+
 // TestClusterShapeSbxUnknownPhase: a gt-sbx file whose phase is neither P nor W is
 // refused by the gt-sbx order before any cluster call, rather than dropped.
 func TestClusterShapeSbxUnknownPhase(t *testing.T) {
