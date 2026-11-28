@@ -247,3 +247,72 @@ func TestAheadSlotTakeEmptiesAFailedRun(t *testing.T) {
 		}
 	})
 }
+
+// TestAheadSlotTakeCanceledLeavesTheCarHeld shows a Take whose ctx ends before
+// the held run does returning false with the car still held, so a later
+// matching Take gets the gate once the run ends.
+func TestAheadSlotTakeCanceledLeavesTheCarHeld(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		parent, cancelParent := context.WithCancel(context.Background())
+		defer cancelParent()
+		release := make(chan struct{})
+		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		var s AheadSlot
+		if !s.Start(parent, "gt-a", "h1", "main", func(ctx context.Context, _ func(string)) (AheadGate, error) {
+			select {
+			case <-release:
+				return want, nil
+			case <-ctx.Done():
+				return AheadGate{}, ctx.Err()
+			}
+		}, nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		takeCtx, cancelTake := context.WithCancel(context.Background())
+		defer cancelTake()
+		oks := make(chan bool, 1)
+		go func() {
+			_, ok := s.Take(takeCtx, "gt-a", "h1", "main")
+			oks <- ok
+		}()
+		synctest.Wait()
+		cancelTake()
+		synctest.Wait()
+		select {
+		case ok := <-oks:
+			if ok {
+				t.Fatal("Take with a canceled ctx = true, want false")
+			}
+		default:
+			t.Fatal("Take did not return after its ctx ended")
+		}
+		if bead, head, base, ok := s.Pending(); !ok || bead != "gt-a" || head != "h1" || base != "main" {
+			t.Fatalf("Pending after a canceled Take = (%q, %q, %q, %v), want the car still held", bead, head, base, ok)
+		}
+		close(release)
+		synctest.Wait()
+		if gate, ok := s.Take(context.Background(), "gt-a", "h1", "main"); !ok || gate != want {
+			t.Fatalf("matching Take after the run ended = (%+v, %v), want (%+v, true)", gate, ok, want)
+		}
+	})
+}
+
+// TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun shows a Take whose ctx has
+// already ended still returning the result of a run that has already ended.
+func TestAheadSlotTakeWithEndedCtxReturnsAFinishedRun(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		want := AheadGate{Result: CandidateResult{State: CandidatePassed}}
+		var s AheadSlot
+		if !s.Start(context.Background(), "gt-a", "h1", "main", finished(want, nil), nil) {
+			t.Fatal("Start on an empty slot = false, want true")
+		}
+		synctest.Wait()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if gate, ok := s.Take(ctx, "gt-a", "h1", "main"); !ok || gate != want {
+			t.Fatalf("Take with an ended ctx = (%+v, %v), want (%+v, true)", gate, ok, want)
+		}
+	})
+}
