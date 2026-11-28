@@ -20,8 +20,10 @@ const (
 
 // moveCacheProgStats copies the cache program's stats from cacheRoot into logDir and then removes the
 // source, because the two can sit on different filesystems. A source that is not there returns nil and
-// writes no copy; every other failure is an error, and a source that is not copied stays where it is. The
-// caller passes os.Remove as remove.
+// writes no copy; every other failure is an error, and a source that is not copied stays where it is. When
+// the source cannot be removed after the copy, the copy is dropped so a later run cannot count the same
+// lines twice, and a copy that cannot be dropped is reported beside the removal failure. remove does both
+// removals; the caller passes os.Remove.
 func moveCacheProgStats(cacheRoot, logDir string, remove func(string) error) error {
 	src := filepath.Join(cacheRoot, cacheProgDirName, cacheProgStatsName)
 	dst := filepath.Join(logDir, cacheProgStatsCopyName)
@@ -32,7 +34,7 @@ func moveCacheProgStats(cacheRoot, logDir string, remove func(string) error) err
 		return err
 	}
 	if err := remove(src); err != nil {
-		return fmt.Errorf("removing %s: %w", src, err)
+		return errors.Join(fmt.Errorf("removing %s: %w", src, err), dropCacheProgCopy(dst, remove))
 	}
 	return nil
 }
@@ -63,17 +65,17 @@ func copyCacheProgStats(src, dst string, create copyCreator) error {
 	_, writeErr := out.Write(data)
 	closeErr := out.Close()
 	if writeErr != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", dst, writeErr), closeErr, dropCacheProgCopy(dst))
+		return errors.Join(fmt.Errorf("writing %s: %w", dst, writeErr), closeErr, dropCacheProgCopy(dst, os.Remove))
 	}
 	if closeErr != nil {
-		return errors.Join(fmt.Errorf("closing %s: %w", dst, closeErr), dropCacheProgCopy(dst))
+		return errors.Join(fmt.Errorf("closing %s: %w", dst, closeErr), dropCacheProgCopy(dst, os.Remove))
 	}
 	return nil
 }
 
-// dropCacheProgCopy removes a copy this call made; a copy already gone is not an error.
-func dropCacheProgCopy(dst string) error {
-	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // G703: dst is the copy path this call created
+// dropCacheProgCopy removes a copy this call made with remove; a copy already gone is not an error.
+func dropCacheProgCopy(dst string, remove func(string) error) error {
+	if err := remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("dropping the copy %s: %w", dst, err)
 	}
 	return nil

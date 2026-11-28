@@ -263,10 +263,41 @@ func TestCacheProgStatsMoveFails(t *testing.T) {
 	t.Run("remove fails", func(t *testing.T) {
 		t.Parallel()
 		cacheRoot, logDir := t.TempDir(), t.TempDir()
-		src := statsAt(t, cacheRoot, []byte("kept\n"))
-		err := moveCacheProgStats(cacheRoot, logDir, func(string) error { return errInjected })
+		content := []byte("kept\n")
+		src := statsAt(t, cacheRoot, content)
+		err := moveCacheProgStats(cacheRoot, logDir, func(name string) error {
+			if name == src {
+				return errInjected
+			}
+			return os.Remove(name)
+		})
 		if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), src) {
 			t.Fatalf("err = %v; want it to wrap %v and name %s", err, errInjected, src)
+		}
+		if _, serr := os.Lstat(filepath.Join(logDir, cacheProgStatsCopyName)); !os.IsNotExist(serr) {
+			t.Errorf("copy left behind after a failed source removal, Lstat err = %v", serr)
+		}
+		if got, rerr := os.ReadFile(src); rerr != nil || !bytes.Equal(got, content) {
+			t.Errorf("source = %q, %v; want it kept", got, rerr)
+		}
+	})
+	t.Run("drop fails", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		src := statsAt(t, cacheRoot, []byte("kept\n"))
+		dst := filepath.Join(logDir, cacheProgStatsCopyName)
+		errHeld := errors.New("copy held")
+		err := moveCacheProgStats(cacheRoot, logDir, func(name string) error {
+			if name == src {
+				return errInjected
+			}
+			return errHeld
+		})
+		if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), src) {
+			t.Fatalf("err = %v; want the removal failure wrapping %v and naming %s", err, errInjected, src)
+		}
+		if !errors.Is(err, errHeld) || !strings.Contains(err.Error(), "dropping the copy "+dst) {
+			t.Errorf("err = %v; want the drop failure wrapping %v and naming %s", err, errHeld, dst)
 		}
 	})
 }
