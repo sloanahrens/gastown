@@ -50,6 +50,30 @@ func rigSeatNames(townRoot, rigName string, seatNames map[string][]string) ([]st
 	return names, nil
 }
 
+// joinSeatNames joins the seat names of several rigs: every name once, sorted.
+// A failing rig, an empty rig list and a join with no names are errors, no names.
+func joinSeatNames(rigNames []string, namesOf func(rigName string) ([]string, error)) ([]string, error) {
+	seen := make(map[string]bool)
+	var names []string
+	for _, rigName := range rigNames {
+		rigSeats, err := namesOf(rigName)
+		if err != nil {
+			return nil, fmt.Errorf("rig %s: seat names: %w", rigName, err)
+		}
+		for _, name := range rigSeats {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil, errors.New("the rigs yield no seat names")
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // rigNamePool builds the rig's name pool from its settings, mirroring the
 // branches of newManager (internal/polecat/manager.go), except that an
 // unreadable file is an error here rather than a fallback.
