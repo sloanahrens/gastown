@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,20 +24,50 @@ const sandboxPerSeatSettings = `{
   }
 }`
 
+// sandboxPerSeatOnSettings is one profile off on a non-default gateway, so the
+// question's gateway is pinned.
+const sandboxPerSeatOnSettings = `{"type":"town-settings","version":1,"sandboxes":{"polecat-k8s":{"driver":"kubernetes","gateway":"sandbox-gw","image":"i","policy":"p.yaml","providers":["forgejo-polecat"]}}}`
+
 // sandboxPerSeatTown names root as the town, as the resolver the command takes.
 func sandboxPerSeatTown(root string) setResourcesTownResolver {
 	return func(string) (string, error) { return root, nil }
 }
 
+// seatNamesFrom answers every town with names.
+func seatNamesFrom(names ...string) func(string) ([]string, error) {
+	return func(string) ([]string, error) { return names, nil }
+}
+
+// failingSeatNames and failingSeatProviders fail when called, so a run reaching
+// them fails.
+func failingSeatNames(string) ([]string, error) { return nil, errors.New("seat names were read") }
+
+func failingSeatProviders(string, []string) ([]string, error) {
+	return nil, errors.New("the gateway was asked")
+}
+
+// seatCheck records the gateway question; missing and err answer it.
+type seatCheck struct {
+	gateway        string
+	names, missing []string
+	err            error
+}
+
+func (c *seatCheck) check(g string, n []string) ([]string, error) {
+	c.gateway, c.names = g, n
+	return c.missing, c.err
+}
+
 // Off sets forgejo_per_seat false on the named profile and no other, keeps a .bak-
-// copy of the file as it was, and the saved file loads with the setting off.
+// copy of the file as it was, and the saved file loads with the setting off. It
+// reaches neither the name list nor the gateway, which fail if called.
 func TestSandboxPerSeatOffSetsOnlyThatProfile(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, sandboxPerSeatSettings, "")
 	before := poolTestRawSettings(t, root)
 	var out bytes.Buffer
 
-	if err := runSandboxPerSeatCmd(&out, sandboxPerSeatTown(root), "polecat-k8s", "off"); err != nil {
+	if err := runSandboxPerSeatCmd(&out, sandboxPerSeatTown(root), failingSeatNames, failingSeatProviders, "polecat-k8s", "off"); err != nil {
 		t.Fatalf("per-seat off: %v", err)
 	}
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
@@ -59,8 +90,59 @@ func TestSandboxPerSeatOffSetsOnlyThatProfile(t *testing.T) {
 	}
 }
 
+// on writes true only when the profile's gateway reports every listed seat name
+// has its provider, carrying the listed names and that gateway; a missing name,
+// or a failed list or question, refuses and leaves the file unchanged.
+func TestSandboxPerSeatOn(t *testing.T) {
+	t.Parallel()
+	names := []string{"furiosa", "nux"}
+	for _, tc := range []struct {
+		name    string
+		profile string
+		seat    func(string) ([]string, error)
+		check   *seatCheck
+		want    string
+	}{
+		{"every provider present", "polecat-k8s", seatNamesFrom(names...), &seatCheck{}, ""},
+		{"a provider missing", "polecat-k8s", seatNamesFrom(names...), &seatCheck{missing: []string{"nux", "slit"}}, `2 seat name(s) have no provider on gateway "sandbox-gw": nux, slit`},
+		{"a failing name list", "polecat-k8s", func(string) ([]string, error) { return nil, errors.New("registry unreadable") }, &seatCheck{}, "registry unreadable"},
+		{"a failing question", "polecat-k8s", seatNamesFrom(names...), &seatCheck{err: errors.New("gateway down")}, "gateway down"},
+		{"an unknown profile", "polecat-missing", failingSeatNames, &seatCheck{}, "is not a sandbox profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := poolTestTown(t, sandboxPerSeatOnSettings, "")
+			before := poolTestRawSettings(t, root)
+
+			err := runSandboxPerSeatCmd(&bytes.Buffer{}, sandboxPerSeatTown(root), tc.seat, tc.check.check, tc.profile, "on")
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("per-seat on: %v", err)
+				}
+				if tc.check.gateway != "sandbox-gw" || !slices.Equal(tc.check.names, names) {
+					t.Errorf("question carried gateway %q, names %q; want %q, %q", tc.check.gateway, tc.check.names, "sandbox-gw", names)
+				}
+				ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !ts.Sandboxes["polecat-k8s"].ForgejoPerSeat {
+					t.Error("forgejo_per_seat is false, want true")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("per-seat on = %v, want a refusal containing %q", err, tc.want)
+			}
+			if after := poolTestRawSettings(t, root); after != before {
+				t.Error("a refused on rewrote the settings file")
+			}
+		})
+	}
+}
+
 // Each refusal exits with an error naming its cause and leaves the file byte for
-// byte as it was, with no backup made. on is refused before the town is read.
+// byte as it was, with no backup made.
 func TestSandboxPerSeatRefusals(t *testing.T) {
 	t.Parallel()
 	const corrupt = `{"type": "town-settings", "sandboxes": `
@@ -72,7 +154,6 @@ func TestSandboxPerSeatRefusals(t *testing.T) {
 		want     string
 	}{
 		{"an unknown profile", "", "polecat-missing", "off", `"polecat-missing" is not a sandbox profile`},
-		{"on", "", "polecat-k8s", "on", "per-seat on is not built yet"},
 		{"an unknown state", "", "polecat-k8s", "maybe", `unknown state "maybe"`},
 		{"a profile already off", "", "polecat-plain", "off", "nothing to change"},
 		{"a profile that fails the check", "", "polecat-bad", "off", "image: required"},
@@ -87,7 +168,7 @@ func TestSandboxPerSeatRefusals(t *testing.T) {
 			root := poolTestTown(t, settings, "")
 			before := poolTestRawSettings(t, root)
 
-			err := runSandboxPerSeatCmd(&bytes.Buffer{}, sandboxPerSeatTown(root), tc.profile, tc.state)
+			err := runSandboxPerSeatCmd(&bytes.Buffer{}, sandboxPerSeatTown(root), failingSeatNames, failingSeatProviders, tc.profile, tc.state)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("per-seat = %v, want a refusal containing %q", err, tc.want)
 			}
@@ -126,7 +207,7 @@ func TestSandboxPerSeatUnresolvedTownChangesNothing(t *testing.T) {
 	before := poolTestRawSettings(t, root)
 	noTown := func(string) (string, error) { return "", errors.New("no town here") }
 
-	err := runSandboxPerSeatCmd(&bytes.Buffer{}, noTown, "polecat-k8s", "off")
+	err := runSandboxPerSeatCmd(&bytes.Buffer{}, noTown, failingSeatNames, failingSeatProviders, "polecat-k8s", "off")
 	if err == nil || !strings.Contains(err.Error(), "no town here") {
 		t.Fatalf("per-seat off with no town = %v, want the resolver's error", err)
 	}
