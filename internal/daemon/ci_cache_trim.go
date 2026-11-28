@@ -812,6 +812,11 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		ok, why := d.ciCacheTrimVolume(ctx, mode, at, v, maxAge)
 		if ok {
 			d.diskMaintConclude(ctx, ciCacheVolumeSchedule(v), "CI cache trim of "+v.name, true, s.now(), every, "")
+			// An apply of ci-gocache collects the cache program's counts after its trim
+			// (gt-y6e6ux). The collect returns nothing, so it changes no verdict.
+			if v.name == ciCacheGocacheVolume && mode == agentconfig.DiskMaintenanceModeApply {
+				d.ciGocacheprogStats(ctx, at)
+			}
 			continue
 		}
 		verdict = false
