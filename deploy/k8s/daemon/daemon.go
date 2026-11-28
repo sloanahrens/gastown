@@ -777,8 +777,9 @@ type Values struct {
 	// --forge-token-file, as a live compose spec with ForgeHost does.
 	ForgeHost string
 	// CPU and Memory are the container's share, and both are required: requests
-	// equal limits. The renderer has no default for either, because no source
-	// records a figure. The live compose file's daemon service
+	// equal limits unless CPURequest lowers the request. The renderer has no
+	// default for either, because no source records a figure. The live compose
+	// file's daemon service
 	// (internal/templates/daemon_compose.go, daemonComposeBody) sets no cpus or
 	// mem_limit, so the container may use the whole host and there is no compose
 	// value to copy; and the daemon's resource sampler file
@@ -787,6 +788,10 @@ type Values struct {
 	// either. A default would be a guess: the caller passes the measured share.
 	CPU    string
 	Memory string
+	// CPURequest is the daemon container's CPU request as cpuRE reads it. Empty, it
+	// equals the limit, Values.CPU; below it, the container is Burstable. A value
+	// cpuRE does not read, or one above Values.CPU in millicores, is refused.
+	CPURequest string
 	// TerminationGraceSeconds is the pod's terminationGracePeriodSeconds.
 	// DefaultTerminationGraceSeconds when zero; MinimumTerminationGraceSeconds is
 	// the floor.
@@ -1450,7 +1455,7 @@ func daemonContainer(v Values) Container {
 		WorkingDir: TownRootPath,
 		Env:        daemonEnvironment(v),
 		Resources: &ContainerResources{
-			Requests: resourceList(v),
+			Requests: daemonResourceRequests(v),
 			Limits:   resourceList(v),
 		},
 		VolumeMounts: mounts(v),
@@ -1799,6 +1804,15 @@ func dashboardLabels() map[string]string {
 // resourceList is the container's CPU and memory share.
 func resourceList(v Values) map[string]string {
 	return map[string]string{"cpu": v.CPU, "memory": v.Memory}
+}
+
+// daemonResourceRequests is the daemon container's requests: Values.CPURequest
+// when it is set, with Values.Memory, and otherwise the same pair as the limits.
+func daemonResourceRequests(v Values) map[string]string {
+	if v.CPURequest == "" {
+		return resourceList(v)
+	}
+	return map[string]string{"cpu": v.CPURequest, "memory": v.Memory}
 }
 
 // trackerDeployment is the tracker's pod: trackerd on loopback, with the DSN
@@ -2594,10 +2608,25 @@ func (v Values) validateRehearsalNamespace() error {
 	return nil
 }
 
+// cpuMillis reads a cpuRE-matched share as decimal millicores: "1" is "1000".
+func cpuMillis(s string) string {
+	if digits, ok := strings.CutSuffix(s, "m"); ok {
+		return digits
+	}
+	return s + "000"
+}
+
+// cpuRequestAtMost reports whether a cpuRE-matched request is at most a limit,
+// counted in millicores as text: no share overflows, and longer text is larger.
+func cpuRequestAtMost(request, limit string) bool {
+	r, l := cpuMillis(request), cpuMillis(limit)
+	return len(r) < len(l) || (len(r) == len(l) && r <= l)
+}
+
 // validateDaemon refuses what the Deployment cannot be rendered from: an image
 // that is not a digest, a missing single-owner acknowledgement on the live pod,
-// a credential the Secrets list does not carry, a share or grace outside its
-// grammar, and an environment entry the render cannot write.
+// a credential the Secrets list does not carry, a share, request or grace
+// outside its grammar, and an environment entry the render cannot write.
 func (v Values) validateDaemon() error {
 	if err := v.validateImage(); err != nil {
 		return err
@@ -2609,6 +2638,10 @@ func (v Values) validateDaemon() error {
 		return errors.New("Values.CPU is empty: no source gives the daemon's measured CPU share, so the render carries no default; pass the measured share")
 	case !cpuRE.MatchString(v.CPU):
 		return fmt.Errorf("Values.CPU %q: want a positive whole number of cores or millicores, such as 2 or 500m", v.CPU)
+	case v.CPURequest != "" && !cpuRE.MatchString(v.CPURequest):
+		return fmt.Errorf("Values.CPURequest %q: want a positive whole number of cores or millicores, such as 1 or 500m, or empty to ask for Values.CPU", v.CPURequest)
+	case v.CPURequest != "" && !cpuRequestAtMost(v.CPURequest, v.CPU):
+		return fmt.Errorf("Values.CPURequest %q: want at most Values.CPU %q, counted in millicores, since the API server refuses a request above its limit", v.CPURequest, v.CPU)
 	case v.Memory == "":
 		return errors.New("Values.Memory is empty: no source gives the daemon's measured memory share, so the render carries no default; pass the measured share")
 	case !storageRE.MatchString(v.Memory):
