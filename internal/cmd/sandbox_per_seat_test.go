@@ -141,6 +141,21 @@ func TestSandboxPerSeatOn(t *testing.T) {
 	}
 }
 
+// on with a settings file that does not load refuses and leaves it unchanged.
+func TestSandboxPerSeatOnRefusesUnreadableSettings(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type": "town-settings", "sandboxes": `, "")
+	before := poolTestRawSettings(t, root)
+
+	err := runSandboxPerSeatCmd(&bytes.Buffer{}, sandboxPerSeatTown(root), failingSeatNames, failingSeatProviders, "polecat-k8s", "on")
+	if err == nil || !strings.Contains(err.Error(), "sandbox per-seat:") {
+		t.Fatalf("per-seat on with a corrupt file = %v, want a refusal", err)
+	}
+	if poolTestRawSettings(t, root) != before {
+		t.Error("a refused on rewrote the settings file")
+	}
+}
+
 // Each refusal exits with an error naming its cause and leaves the file byte for
 // byte as it was, with no backup made.
 func TestSandboxPerSeatRefusals(t *testing.T) {
