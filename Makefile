@@ -575,6 +575,11 @@ gate-test:
 	echo "gate: check machinecheck $$(( $$(date +%s) - start ))s" >&2
 	@# The unit tier: every package, through go test's result cache, so a
 	@# landing reruns only the packages its change can affect (gt-s1vff).
+	@# -coverprofile is a cacheable test flag, so it keeps that cache, and its
+	@# profile is judged for added error branches (gt-2jcpvh). The unit tier
+	@# carries no flag that turns the cache off. From gt-2jcpvh on it is built
+	@# with coverage instrumentation, so gate-walls.jsonl and tierwall durations
+	@# are not comparable with earlier landings.
 	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
 	@# reran every test on every landing; per-package CPU and wall budgets are
 	@# enforced by make tier-check (the hourly sweep), not the landing path.
@@ -600,22 +605,27 @@ gate-test:
 	@# keeps the shape the gate-shape tests pin. -ldflags='-s -w' sits there too:
 	@# it drops the symbol table and DWARF from each test link (gt-oorsoj), and
 	@# panics and goroutine dumps keep function names and line numbers, which the
-	@# pclntab carries. The last line is gateverdict's:
+	@# pclntab carries. -coverprofile="$$cover" sits after it, its profile judged
+	@# below. The last line is gateverdict's:
 	@# it names a red stage, exits 1, and keeps the PASSED wording (gt-w3aby).
 	@# -p and each test binary's GOMAXPROCS are the CPU quota, read once here
 	@# (gt-g9fnsa): a job sees NumCPU under a narrower cgroup quota and goes
 	@# throttled, so its wall must track the quota. A failed run stops the gate.
-	@umask 022; trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
+	@umask 022; trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; [ -n "$$cover" ] && rm -f "$$cover"; exit 130' INT TERM; \
 	q=$$(go run ./internal/testpolicy/cmd/cpuquota) || { echo "gate: FAILED at cpuquota" >&2; exit 1; }; \
+	cover=$$(mktemp) || { echo "gate: FAILED at cover profile" >&2; exit 1; }; \
 	stream=$$(mktemp); \
 	go run ./internal/testpolicy/cmd/integrationvet & vet=$$!; \
-	$(CPU_CLASS) GOMAXPROCS=$$q GT_TEST_DOCKER=0 go test -p $$q -timeout 20m ./... -ldflags='-s -w' -json >"$$stream" & gt=$$!; \
+	$(CPU_CLASS) GOMAXPROCS=$$q GT_TEST_DOCKER=0 go test -p $$q -timeout 20m ./... -ldflags='-s -w' -coverprofile="$$cover" -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	go run ./internal/testpolicy/cmd/tierwall -slow-tests $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
 	rm -f "$$stream"; \
 	if [ $$go_rc -eq 0 ] && [ $$tw_rc -ne 0 ]; then echo "gate: tierwall exited $$tw_rc, so the wall series may be incomplete; the Go suite's verdict stands" >&2; fi; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test ./...) || { go_rc=$$?; break; }; done; fi; \
 	wait $$vet; vet_rc=$$?; \
+	eb=0; if [ $$go_rc -eq 0 ] && [ $$vet_rc -eq 0 ]; then t0=$$(date +%s); go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || eb=$$?; echo "gate: check errbranch $$(( $$(date +%s) - t0 ))s" >&2; fi; \
+	rm -f "$$cover"; \
+	if [ $$eb -ne 0 ]; then echo "gate: FAILED at errbranch" >&2; exit 1; fi; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	go run ./internal/testpolicy/cmd/gateverdict -unit $$go_rc -vet $$vet_rc -wall $$wall
 
