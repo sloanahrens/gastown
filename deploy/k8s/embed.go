@@ -33,3 +33,9 @@ var UpdateRBACYAML []byte
 //
 //go:embed drift-exceptions.yaml
 var DriftExceptionsYAML []byte
+
+// ControlHostsYAML is values/kind/hosts.yaml's text at the building commit,
+// which the Forgejo drift compare reads for the control plane host (gt-ccaqkj).
+//
+//go:embed values/kind/hosts.yaml
+var ControlHostsYAML []byte

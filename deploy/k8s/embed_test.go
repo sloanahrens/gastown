@@ -19,6 +19,7 @@ func TestEmbeddedManifestsMatchTheFiles(t *testing.T) {
 		{file: "bd-gateway-service-admission.yaml", got: BdGatewayServiceAdmissionYAML},
 		{file: "update-rbac.yaml", got: UpdateRBACYAML},
 		{file: "drift-exceptions.yaml", got: DriftExceptionsYAML},
+		{file: "values/kind/hosts.yaml", got: ControlHostsYAML},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
