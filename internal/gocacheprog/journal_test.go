@@ -1,6 +1,7 @@
 package gocacheprog
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,4 +193,120 @@ func TestJournalReaderLeavesLockFree(t *testing.T) {
 		t.Fatal("after ReadJournal: journal lock is held, want it free")
 	}
 	unlock()
+}
+
+// journalClock is a clock a test sets by hand.
+type journalClock struct{ now time.Time }
+
+func (c *journalClock) Now() time.Time { return c.now }
+
+// openTestJournal opens a journal under a fresh temp dir and closes it at test end.
+func openTestJournal(t *testing.T, clock *journalClock) *Journal {
+	t.Helper()
+	j, err := openJournalAt(filepath.Join(t.TempDir(), "j.log"), clock.Now)
+	must(t, err)
+	t.Cleanup(func() { must(t, j.Close()) })
+	return j
+}
+
+func TestJournalStartLineCarriesInjectedTime(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if !got.Start.Equal(journalT0) {
+		t.Errorf("start = %v, want %v", got.Start, journalT0)
+	}
+}
+
+func TestJournalOpenIsLiveUntilClose(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	got, err := ReadJournal(j.Path())
+	must(t, err)
+	if !got.Live {
+		t.Error("open journal: Live = false, want true")
+	}
+	must(t, j.Close())
+	got, err = ReadJournal(j.Path())
+	must(t, err)
+	if got.Live {
+		t.Error("closed journal: Live = true, want false")
+	}
+}
+
+func TestJournalSecondCloseReturnsNil(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	must(t, j.Close())
+	if err := j.Close(); err != nil {
+		t.Errorf("second Close = %v, want nil", err)
+	}
+}
+
+func TestJournalOpenMissingDirIsError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "missing", "j.log")
+	if _, err := openJournalAt(path, func() time.Time { return journalT0 }); err == nil {
+		t.Fatal("openJournalAt in a missing dir: want error")
+	}
+}
+
+func TestJournalOpenHeldLockIsError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "held.log")
+	unlock, took, err := lock.FlockTryAcquire(path)
+	must(t, err)
+	if !took {
+		t.Fatal("holding the journal lock: want it taken")
+	}
+	defer unlock()
+	if _, err := openJournalAt(path, func() time.Time { return journalT0 }); !errors.Is(err, lock.ErrFlockHeld) {
+		t.Errorf("openJournalAt under a held lock: err = %v, want ErrFlockHeld", err)
+	}
+}
+
+// TestJournalRefusesUnencodableStart uses a year JSON cannot encode as the start time.
+func TestJournalRefusesUnencodableStart(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "j.log")
+	year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := openJournalAt(path, func() time.Time { return year10000 }); err == nil {
+		t.Fatal("openJournalAt with an unencodable start time: want error")
+	}
+}
+
+// TestJournalFailedOpenReleasesLock: a failure after the file is created must free the lock.
+func TestJournalFailedOpenReleasesLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "j.log")
+	year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := openJournalAt(path, func() time.Time { return year10000 }); err == nil {
+		t.Fatal("openJournalAt with an unencodable start time: want error")
+	}
+	unlock, took, err := lock.FlockTryAcquire(path)
+	must(t, err)
+	if !took {
+		t.Fatal("after failed open: journal lock is held, want it released")
+	}
+	unlock()
+}
+
+func TestJournalCloseReportsFailedClose(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	// Close the descriptor under the journal, so that Close's own close fails.
+	must(t, j.f.Close())
+	if err := j.Close(); err == nil {
+		t.Error("Close with its file already closed: want error")
+	}
+}
+
+func TestJournalWriteAfterCloseIsError(t *testing.T) {
+	t.Parallel()
+	j := openTestJournal(t, &journalClock{now: journalT0})
+	must(t, j.Close())
+	if err := j.write(Record{Op: opUse, ActionID: "aa", Time: journalT0}); err == nil {
+		t.Error("write after Close: want error")
+	}
 }
