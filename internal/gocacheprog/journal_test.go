@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
@@ -444,27 +444,27 @@ func TestJournalRecordsReadBackInOrder(t *testing.T) {
 
 func TestJournalConcurrentUsesAllLand(t *testing.T) {
 	t.Parallel()
-	j := openTestJournal(t, &journalClock{now: journalT0})
-	const workers, uses = 8, 25
-	var wg sync.WaitGroup
-	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range uses {
-				if err := j.Use([]byte(fmt.Sprintf("%02x", w))); err != nil {
-					t.Errorf("Use: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		j := openTestJournal(t, &journalClock{now: journalT0})
+		const workers, uses = 8, 25
+		for w := range workers {
+			go func() {
+				for i := range uses {
+					if err := j.Use([]byte(fmt.Sprintf("%02x%02x", w, i))); err != nil {
+						t.Errorf("Use: %v", err)
+					}
 				}
-			}
-		}()
-	}
-	wg.Wait()
-	must(t, j.Close())
-	got, err := ReadJournal(j.Path())
-	must(t, err)
-	if len(got.Records) != workers*uses || got.Undecodable != 0 {
-		t.Errorf("records = %d undecodable = %d, want %d and 0", len(got.Records), got.Undecodable, workers*uses)
-	}
+			}()
+		}
+		// synctest.Wait returns once every worker has finished its uses.
+		synctest.Wait()
+		must(t, j.Close())
+		got, err := ReadJournal(j.Path())
+		must(t, err)
+		if len(got.Records) != workers*uses || got.Undecodable != 0 {
+			t.Errorf("records = %d undecodable = %d, want %d and 0", len(got.Records), got.Undecodable, workers*uses)
+		}
+	})
 }
 
 func TestJournalRefusesBadCalls(t *testing.T) {
