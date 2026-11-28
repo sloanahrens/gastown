@@ -112,6 +112,8 @@ type clusterRenderFlags struct {
 	confirmStopped     bool
 	withHelper         bool
 	proxyImage         string
+	gatewayProxyCPU    string // the gateway relay's CPU share, requests equal limits; empty renders the deploy default (gt-qebpjj)
+	registryProxyCPU   string // the registry relay's CPU share, requests equal limits; empty renders the deploy default (gt-qebpjj)
 	polecatImage       string
 	configDir          string
 	openShellConfigDir string
@@ -301,6 +303,10 @@ func init() {
 		"also write the seed helper Pod, applied before the Deployment")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.proxyImage, "proxy-image", "",
 		"the socat relay image by digest (repo@sha256:<64 hex>); set, the live pod runs the registry and gateway relays")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.gatewayProxyCPU, "gateway-proxy-cpu", "",
+		"the gateway-proxy relay's CPU share, requests equal limits; empty renders the deploy package's default of 250m, and a value that is not whole cores or millicores is refused")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.registryProxyCPU, "registry-proxy-cpu", "",
+		"the registry-proxy relay's CPU share, requests equal limits; empty renders the deploy package's default of 100m, and a value that is not whole cores or millicores is refused")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.polecatImage, "polecat-image", "",
 		"the polecat image by digest (repo@sha256:<64 hex>); set, the pod template carries it as the gastown.dev/polecat-image annotation and a read-only file")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.configDir, "config-dir", "",
@@ -482,6 +488,8 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"memory", &f.memory, r.memory},
 		{"host-gateway", &f.hostGateway, r.hostGateway},
 		{"proxy-image", &f.proxyImage, r.proxyImage},
+		{"gateway-proxy-cpu", &f.gatewayProxyCPU, r.gatewayProxyCPU},
+		{"registry-proxy-cpu", &f.registryProxyCPU, r.registryProxyCPU},
 		{"polecat-image", &f.polecatImage, r.polecatImage},
 		{"config-dir", &f.configDir, r.configDir},
 		{"openshell-config-dir", &f.openShellConfigDir, r.openShellConfigDir},
@@ -873,6 +881,8 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		HMConfig:                hmConfig,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
+		GatewayProxyCPU:         strings.TrimSpace(f.gatewayProxyCPU),
+		RegistryProxyCPU:        strings.TrimSpace(f.registryProxyCPU),
 		PolecatImage:            f.polecatImage,
 		Env:                     env,
 		CPU:                     f.cpu,

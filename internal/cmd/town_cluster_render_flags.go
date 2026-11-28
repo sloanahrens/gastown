@@ -47,6 +47,8 @@ type renderFlagsRecord struct {
 	ConfirmStopped                bool   `json:"confirm_container_stopped"`
 	WithHelper                    bool   `json:"with_helper"`
 	ProxyImage                    string `json:"proxy_image"`
+	GatewayProxyCPU               string `json:"gateway_proxy_cpu,omitempty"`
+	RegistryProxyCPU              string `json:"registry_proxy_cpu,omitempty"`
 	PolecatImage                  string `json:"polecat_image"`
 	ConfigDir                     string `json:"config_dir"`
 	OpenShellConfigDir            string `json:"openshell_config_dir"`
@@ -107,6 +109,8 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		ConfirmStopped:                f.confirmStopped,
 		WithHelper:                    f.withHelper,
 		ProxyImage:                    f.proxyImage,
+		GatewayProxyCPU:               f.gatewayProxyCPU,
+		RegistryProxyCPU:              f.registryProxyCPU,
 		PolecatImage:                  f.polecatImage,
 		ConfigDir:                     f.configDir,
 		OpenShellConfigDir:            f.openShellConfigDir,
@@ -150,6 +154,8 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		confirmStopped:                r.ConfirmStopped,
 		withHelper:                    r.WithHelper,
 		proxyImage:                    r.ProxyImage,
+		gatewayProxyCPU:               r.GatewayProxyCPU,
+		registryProxyCPU:              r.RegistryProxyCPU,
 		polecatImage:                  r.PolecatImage,
 		configDir:                     r.ConfigDir,
 		openShellConfigDir:            r.OpenShellConfigDir,
