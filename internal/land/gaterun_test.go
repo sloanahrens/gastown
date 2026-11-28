@@ -251,6 +251,34 @@ func TestParseGateRunLogOverAndCached(t *testing.T) {
 	}
 }
 
+// TestParseGateRunLogCountsCachedSeries: a tierwall series package line marked cached counts with
+// the plain "(cached)" ok lines, since the root module's unit tier writes JSON rather than those
+// lines (gt-9crwah).
+func TestParseGateRunLogCountsCachedSeries(t *testing.T) {
+	t.Parallel()
+	line := func(msg string) string { return "2026-11-19T10:02:00Z tierwall-series: " + msg + "\r\n" }
+	log := line(`{"ts":"2026-11-19T10:01:00Z","run":"r1","pkg":"example.test/a","result":"ok","cached":true}`) +
+		line(`{"pkg":"example.test/b","result":"ok"}`) +
+		"2026-11-19T10:02:00Z ok  \texample.test/c\t(cached)\r\n"
+	if got := ParseGateRunLog(log).CachedPkgs; got != 2 {
+		t.Errorf("CachedPkgs = %d, want 2: the cached series line counts with the plain cached line", got)
+	}
+	for _, tc := range []struct{ name, msg string }{
+		{"a test's timing line", `{"kind":"test","tier":"unit","package":"example.test/a","test":"TestA","elapsed_ms":900}`},
+		{"a test line carrying a pkg", `{"pkg":"example.test/b","test":"TestB","cached":true}`},
+		{"an uncached package line", `{"pkg":"example.test/c","result":"ok"}`},
+		{"a line with no pkg", `{"cached":true}`},
+		{"a line that does not parse", `{"cached":true,"pkg":"example.test/d","test":5}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ParseGateRunLog(line(tc.msg)).CachedPkgs; got != 0 {
+				t.Errorf("CachedPkgs = %d, want 0", got)
+			}
+		})
+	}
+}
+
 // TestParseGateRunLogKeepsTheSlowestPackages: a row stores the gateRunPackagesKept slowest
 // packages, slowest first with equal seconds in stream order, and the count of all of them. The
 // pole is read from the full list before the cut, so the 25th package in stream order, outside

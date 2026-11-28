@@ -2,6 +2,7 @@ package land
 
 import (
 	"cmp"
+	"encoding/json"
 	"regexp"
 	"slices"
 	"strconv"
@@ -10,9 +11,9 @@ import (
 	"unicode/utf8"
 )
 
-// GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict, vet and check
-// fields from the run's job log; the other fields are set by whatever records the run, not by
-// the parser.
+// GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict, vet, check and
+// cached-package fields from the run's job log; the other fields are set by whatever records the
+// run, not by the parser.
 type GateRun struct {
 	TS                  time.Time        `json:"ts"`
 	Rig                 string           `json:"rig"`
@@ -37,7 +38,6 @@ type GateRun struct {
 	NumCPU              int              `json:"num_cpu"`
 	GOMAXPROCS          int              `json:"gomaxprocs"`
 	Cgroup              string           `json:"cgroup"`
-	CachedPkgs          int              `json:"cached_pkgs"`
 	Passed              bool             `json:"passed"`
 	RunningRuns         int              `json:"running_runs"`
 	RunnerPeriods       int64            `json:"runner_periods"`
@@ -45,6 +45,10 @@ type GateRun struct {
 	RunnerThrottledUsec int64            `json:"runner_throttled_usec"`
 
 	Checks map[string]float64 `json:"checks,omitempty"`
+
+	// CachedPkgs is how many packages go test served from its result cache: the unit tier's
+	// "(cached)" ok lines plus the tierwall series lines marked cached.
+	CachedPkgs int `json:"cached_pkgs"`
 }
 
 // gateRunPackagesKept is how many packages a row stores: the slowest. The tier lists every
@@ -98,16 +102,29 @@ var gateCheckRE = regexp.MustCompile(`^gate: check ([A-Za-z0-9_-]+) ([0-9]+)s$`)
 // failure and error lines, which share the prefix, are not read as a wall.
 var vetWallRE = regexp.MustCompile(`^integration vet: \d+ packages in \d+ modules type-check with -tags integration in (\S+)$`)
 
+// gateSeriesPrefix marks a tierwall series line printed into the job log for a CI gate, which has
+// no series file: "tierwall-series: <json>".
+const gateSeriesPrefix = "tierwall-series: "
+
+// gateSeriesLine is the part of a series line the record reads: a package wall line carries pkg
+// and no test, and cached marks a package go test served from its result cache.
+type gateSeriesLine struct {
+	Pkg    string `json:"pkg"`
+	Test   string `json:"test"`
+	Cached bool   `json:"cached"`
+}
+
 // ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the runner's task line
 // ("Runner <id> ... received task <n> ...") to the first lint line, lint to the build line and
 // build to the unit tier line; the verdict line gives the unit wall and passed. The integration
 // vet's summary line gives its wall in seconds as VetS, and each "gate: check <name> <seconds>s"
 // line adds one branch check's seconds to Checks. The tierwall report gives the tier,
-// packages, slow tests, CPUs and pole; a "(cached)" ok line counts one cached package. A missing
-// marker, or a stage that does not run forward, leaves its field zero, a tierwall line, a vet
-// duration or a check line it cannot read is skipped rather than read as a value, and a line
-// without a leading RFC3339 timestamp is skipped. Each text field it copies is cut to
-// gateRunTextMax bytes on a rune boundary.
+// packages, slow tests, CPUs and pole; a "(cached)" ok line and a tierwall series line marked
+// cached each count one cached package. A missing marker, or a stage that does not run forward,
+// leaves its field zero, a tierwall line, a vet duration, a check line or a series line it
+// cannot read is skipped rather than read as a value, and a line without a leading RFC3339
+// timestamp is skipped. Each text field it copies is cut to gateRunTextMax bytes on a rune
+// boundary.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
@@ -162,6 +179,15 @@ func ParseGateRunLog(log string) GateRun {
 			run.Checks[name] = s
 		case strings.HasPrefix(msg, "tierwall: "):
 			tw.parse(&run, strings.TrimSuffix(strings.TrimPrefix(msg, "tierwall: "), "\r"))
+		case strings.HasPrefix(msg, gateSeriesPrefix):
+			// A line that is not JSON, or a test's timing line, adds nothing: only a package
+			// line with pkg set and no test says a package's cache was hit.
+			var line gateSeriesLine
+			body := strings.TrimSuffix(strings.TrimPrefix(msg, gateSeriesPrefix), "\r")
+			if err := json.Unmarshal([]byte(body), &line); err == nil &&
+				line.Cached && line.Pkg != "" && line.Test == "" {
+				run.CachedPkgs++
+			}
 		}
 	}
 	run.SetupS = stageSeconds(task, lint)
