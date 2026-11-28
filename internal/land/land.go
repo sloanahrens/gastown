@@ -305,6 +305,9 @@ type Lander struct {
 	// kept in, so the landing can reuse that verdict (gt-vq81d1). Nil means
 	// the feature is off and every landing runs om inline.
 	Ahead *AheadStore
+	// Ahead2 is the slot one candidate is built and gated in ahead of its
+	// turn (train 3c). Nil is the switch off: GateAhead starts nothing.
+	Ahead2 *AheadSlot
 	// ReuseExpiry is how old a stored review-ahead verdict may be and still be
 	// reused. Nothing reads it yet (gt-vq81d1).
 	ReuseExpiry time.Duration
