@@ -397,6 +397,12 @@ type OMReviewer struct {
 	// reaches, where the summary and finding details the bead notes drop
 	// survive a landing (gt-uxqb9). Nil means off.
 	Verdicts *VerdictStore
+	// StoreFailed, when set, is called once for a verdict the store could not
+	// write, with the work bead, the reviewed head and the write's error, so a
+	// wiring can raise it beyond the log line (gt-c789n9). The store never gates
+	// the landing: the review still returns its verdict (gt-uxqb9), and nil
+	// changes nothing.
+	StoreFailed func(bead, head string, err error)
 	// RawDir is where om saves an unparseable reply; nil means omRawDir. A
 	// field, not the package variable, so a test uses a temp dir in parallel.
 	RawDir func() string
@@ -950,8 +956,9 @@ func omHelpListsFlag(help, flag string) bool {
 
 // storeVerdict keeps om's raw JSON for this review, when one is configured and
 // the review names its work bead. The store is a record for a later reader,
-// never a precondition of the landing: a write that fails is a warning line and
-// the verdict stands (gt-uxqb9).
+// never a precondition of the landing: a write that fails is a warning line,
+// reported through StoreFailed when one is set, and the verdict stands
+// (gt-uxqb9, gt-c789n9).
 func (r OMReviewer) storeVerdict(in ReviewInput, raw []byte, argv []string) {
 	if r.Verdicts == nil || in.BeadID == "" {
 		return
@@ -960,6 +967,9 @@ func (r OMReviewer) storeVerdict(in ReviewInput, raw []byte, argv []string) {
 		Flags: flagNames(argv), Verdict: raw}
 	if err := r.Verdicts.Write(rec, in.Logf); err != nil {
 		r.warnf(in, "could not store the verdict (%v); the review stands", err)
+		if r.StoreFailed != nil {
+			r.StoreFailed(in.BeadID, in.Head, err)
+		}
 	}
 }
 
