@@ -20,13 +20,22 @@ type RedBasePackage struct {
 
 // RedBasePlanResult is the plan of what the red-on-base check runs.
 type RedBasePlanResult struct {
-	Packages  []RedBasePackage // sorted by Dir
-	NotJudged []string         // changed test files under a nested module, sorted
+	Packages         []RedBasePackage // sorted by Dir
+	NotJudged        []string         // changed test files under a nested module, sorted
+	OnlyTestsAndDocs bool             // the change touches only tests and docs, so it is not judged
 }
 
-// RedBasePlan names, per package directory, the test files base...HEAD adds or modifies and the tests the branch adds or whose body it changes, with the line of each declaration at HEAD, so the gate can run those tests against the merge base and see them fail (gt-13dre6, gt-v6ay97). The file list and the nested-module not-judged files come from RedBaseFiles, the names from ChangedTests, the build exclusion from RedBaseBuilds (a file the gate's build excludes is not judged, gt-6xw9zr) and the lines from RedBaseTests. A failed file list, merge-base read, file read or show, and a file that does not parse at HEAD or at the merge base are errors, so a branch the check could not read never reads as a branch with no test to run.
+// RedBasePlan names, per package directory, the test files base...HEAD adds or modifies and the tests the branch adds or whose body it changes, with the line of each declaration at HEAD, so the gate can run those tests against the merge base and see them fail (gt-13dre6, gt-v6ay97). A change that touches only tests and docs is not judged: RedBaseOnlyTestsAndDocs answers first, and when true the plan holds OnlyTestsAndDocs, no package and no not-judged file, with no further git or file read. The file list and the nested-module not-judged files come from RedBaseFiles, the names from ChangedTests, the build exclusion from RedBaseBuilds (a file the gate's build excludes is not judged, gt-6xw9zr) and the lines from RedBaseTests. A failed only-tests-and-docs read, file list, merge-base read, file read or show, and a file that does not parse at HEAD or at the merge base are errors, so a branch the check could not read never reads as a branch with no test to run.
 func RedBasePlan(run Runner, read FileReader, base string) (RedBasePlanResult, error) {
 	var res RedBasePlanResult
+	only, err := RedBaseOnlyTestsAndDocs(run, base)
+	if err != nil {
+		return res, err
+	}
+	if only {
+		res.OnlyTestsAndDocs = true
+		return res, nil
+	}
 	files, notJudged, err := RedBaseFiles(run, base)
 	if err != nil {
 		return res, err

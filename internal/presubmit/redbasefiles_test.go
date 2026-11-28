@@ -14,9 +14,17 @@ type planGit struct {
 	fakeGit
 	modules   []string
 	moduleErr error
+	only      string // the answer to the only-tests-and-docs --name-only diff; empty is an empty diff
+	onlyErr   error  // the only-tests-and-docs diff error, returned before any other answer
 }
 
 func (g *planGit) run(args []string) ([]byte, error) {
+	if slices.Contains(args, "--name-only") {
+		if g.onlyErr != nil {
+			return nil, g.onlyErr
+		}
+		return []byte(g.only), nil
+	}
 	if slices.Contains(args, "ls-files") {
 		if g.moduleErr != nil {
 			return nil, g.moduleErr

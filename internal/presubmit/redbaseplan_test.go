@@ -56,6 +56,27 @@ func TestRedBasePlan(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("RedBasePlan() = %+v, want %+v", got, want)
 	}
+
+	// A change that touches only tests and docs is not judged: the plan names no package and reads no file.
+	t.Run("a tests-and-docs change is not judged", func(t *testing.T) {
+		t.Parallel()
+		g := planGit{only: "pkg/a_test.go\x00docs/x.md\x00"}
+		read := false
+		readFile := func(p string) ([]byte, error) {
+			read = true
+			return nil, fmt.Errorf("unexpected read of %s", p)
+		}
+		got, err := RedBasePlan(g.run, readFile, "main")
+		if err != nil {
+			t.Fatalf("RedBasePlan() error = %v", err)
+		}
+		if !got.OnlyTestsAndDocs || len(got.Packages) != 0 || len(got.NotJudged) != 0 {
+			t.Errorf("RedBasePlan() = %+v, want OnlyTestsAndDocs with no package", got)
+		}
+		if read {
+			t.Error("RedBasePlan read a file, want none")
+		}
+	})
 }
 
 // A branch with no changed test file returns no merge-base call: fakeGit's empty answer would reach mergeBase as an error.
@@ -83,6 +104,7 @@ func TestRedBasePlanRefuses(t *testing.T) {
 		want    string
 	}{
 		{"a failed file list is returned", planGit{fakeGit: fakeGit{diffErr: boom}}, nil, nil, "git diff"},
+		{"a failed only-tests-and-docs diff is returned", planGit{onlyErr: boom}, nil, nil, "git diff --name-only"},
 		{"a failed merge-base is returned", planGit{fakeGit: fakeGit{diff: "M\tpkg/a_test.go\n", mergeErr: boom}}, nil, nil, "merge-base"},
 		{"a failed file read is returned", planGit{fakeGit: fakeGit{diff: "A\tpkg/a_test.go\n", mergeBase: "abc"}}, nil, boom, "reading"},
 		{"a HEAD file that does not parse is returned", planGit{fakeGit: fakeGit{diff: "A\tpkg/a_test.go\n", mergeBase: "abc"}}, map[string]string{"pkg/a_test.go": badGo}, nil, "pkg/a_test.go"},
