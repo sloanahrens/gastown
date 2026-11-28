@@ -8,9 +8,9 @@ import (
 	"sync"
 )
 
-// maxInFlight is the most requests Serve answers at once. It is 1, so requests
-// are still answered one at a time.
-const maxInFlight = 1
+// maxInFlight is the most requests Serve answers at once, as the go command
+// sends them.
+const maxInFlight = 32
 
 // Serve answers the go command's requests from store until a close request or
 // the end of in, and reports what it counted. It writes every response through
@@ -45,6 +45,13 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, store Store) (Stats
 			return finish(werr)
 		}
 		req, err := rd.Next()
+		// A response can fail while the read is in progress, so the responder is
+		// asked again before the request is started. A read that is blocked is
+		// not interrupted.
+		if _, werr := r.read(); werr != nil {
+			<-sem
+			return finish(werr)
+		}
 		if err != nil {
 			<-sem
 			if errors.Is(err, io.EOF) {
