@@ -3,6 +3,8 @@ package land
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -23,6 +25,10 @@ func (l *Lander) mergeCar(ctx context.Context, g Repo, issue *beads.Issue, w Wor
 	env, err := l.landingCommitEnv(g, w)
 	if err != nil {
 		return nil, nil, Result{}, &InfraError{Stage: "head author", Err: fmt.Errorf("head %s: %w", shortSHA(w.Head), err)}
+	}
+	// A car gated ahead is settled before this landing cuts its own worktree.
+	if gated, gatedCleanup, gatedErr := l.takeGateAhead(ctx, g, issue, w, base, env); gated != nil || gatedErr != nil {
+		return gated, gatedCleanup, Result{}, gatedErr
 	}
 	// The worktree calls share gitMu with the review pool's git calls, so a
 	// review's ref or worktree lock cannot collide with the add or with the
@@ -133,4 +139,65 @@ func (l *Lander) mergeInWorktree(ctx context.Context, issue *beads.Issue, g Repo
 	// The car carries the worktree and the landing's identity to the later
 	// stages.
 	return &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: merged, patchID: patchID, dir: dir, landingID: id}, Result{}, nil
+}
+
+// takeGateAhead settles the car gated ahead, if one is held (train 4b-2). A car
+// Take returns for this bead, head and target tip, whose stored result carries
+// no error, is adopted: its worktree is the build's slot 1 directory, its merge
+// is the build's, and the car carries the stored result, so no merge or gate
+// runs here. A stored error discards the candidate first. Any other car was
+// discarded by Take or left nothing behind, and the landing goes the normal way
+// (nil, nil). An adopted car whose identity directory or patch-id read fails
+// removes its worktree and returns the error.
+func (l *Lander) takeGateAhead(ctx context.Context, g Repo, issue *beads.Issue, w Work, base string, env []string) (*car, func(), error) {
+	if _, _, _, held := l.Ahead2.Pending(); !held {
+		return nil, nil, nil
+	}
+	gate, ok := l.Ahead2.Take(ctx, w.BeadID, w.Head, base)
+	if !ok {
+		l.logf("%s: gate-ahead: discarded", w.BeadID)
+		return nil, nil, nil
+	}
+	if gate.Result.Err != nil {
+		l.gateAheadRemoval(g, "")()
+		l.Candidate.Discard(context.WithoutCancel(ctx), w, gate.Result)
+		l.logf("%s: gate-ahead: discarded", w.BeadID)
+		return nil, nil, nil
+	}
+	// The build's identity directory is not carried by AheadGate, so it is not
+	// removed here; this landing takes a fresh land-* directory for its logs.
+	parent, err := os.MkdirTemp(l.WorkRoot, landDirPrefix+"*")
+	if err != nil {
+		l.gateAheadRemoval(g, "")()
+		return nil, nil, &InfraError{Stage: "worktree", Err: err}
+	}
+	dir := l.landWorktreePath(gateAheadMergeSlot)
+	cleanup := l.gateAheadRemoval(g, parent)
+	wt := l.openLanding(dir, env)
+	patchID, err := wt.PatchID(base, gate.Merged)
+	if err != nil {
+		cleanup()
+		return nil, nil, &InfraError{Stage: "patch-id", Err: err}
+	}
+	l.logf("%s: gate-ahead: adopted %s on %s", w.BeadID, shortSHA(gate.Merged), shortSHA(base))
+	stored := gate.Result
+	return &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: gate.Merged, patchID: patchID, dir: dir,
+		landingID: filepath.Base(parent), stored: &stored}, cleanup, nil
+}
+
+// gateAheadRemoval is the cleanup of the slot 1 worktree a car gated ahead was
+// built in, and of parent, the landing's identity directory, when set. It takes
+// gitMu for the git work, as addWorktree's cleanup does.
+func (l *Lander) gateAheadRemoval(g Repo, parent string) func() {
+	dir := l.landWorktreePath(gateAheadMergeSlot)
+	return func() {
+		l.gitMu.Lock()
+		defer l.gitMu.Unlock()
+		_ = g.WorktreeRemove(dir, true)
+		_ = os.RemoveAll(dir)
+		_ = g.WorktreePrune()
+		if parent != "" {
+			_ = os.RemoveAll(parent)
+		}
+	}
 }
