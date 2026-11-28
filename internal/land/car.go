@@ -11,13 +11,14 @@ import (
 
 // car is what one landing carries between its stages: the work and its bead,
 // the rig repo, the landing worktree the merge is made in and its dir, the
-// target tip the merge was built on, the merge commit, and that commit's
-// patch-id.
+// landing's identity, the target tip the merge was built on, the merge commit,
+// and that commit's patch-id.
 type car struct {
 	w                     Work
 	issue                 *beads.Issue
 	g, wt                 Repo
 	dir                   string
+	landingID             string
 	base, merged, patchID string
 }
 

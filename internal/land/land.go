@@ -1655,121 +1655,33 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		})}, nil)
 	}
 
-	// The merge commit's identity is read before the worktree is cut, so an
-	// unreadable head author fails the landing with no commit made (gt-vuv2n).
-	env, err := l.landingCommitEnv(g, w)
-	if err != nil {
-		return Result{}, &InfraError{Stage: "head author", Err: fmt.Errorf("head %s: %w", shortSHA(w.Head), err)}
+	c, cleanup, res, err := l.mergeCar(ctx, g, issue, w, base, storedConflict)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	// The worktree calls share gitMu with the review pool's git calls, so a
-	// review's ref or worktree lock cannot collide with the add or with the
-	// cleanup that removes the worktree (gt-havcnw). The lock is held only for
-	// the add here and for the removal at the end, never over the merge, the om
-	// run or the gate wait.
-	var dir, id string
-	var cleanup func()
-	if err := l.withGitMu(func() error {
-		var addErr error
-		dir, id, cleanup, addErr = l.addWorktree(g, base)
-		return addErr
-	}); err != nil {
-		return Result{}, &InfraError{Stage: "worktree", Err: err}
+	if c == nil {
+		return res, err
 	}
-	defer cleanup()
-	ctx = WithLandingID(ctx, id)
-	wt := l.openLanding(dir, env)
+	ctx = WithLandingID(ctx, c.landingID)
 
-	out, err := mergeWork(wt, w, base)
-	if err != nil {
-		// The last shape of a lost record: a squash whose head the target
-		// already carries stages nothing, so mergeWork's commit fails with an
-		// empty index and every pass reports the merge as infra over a landing
-		// that already took (gt-064oh). mergeWork has aborted the merge, so
-		// the worktree is clean whether or not the recovery finds a landing,
-		// and the merge's own error is the one to report when it does not.
-		// A lookup that fails says nothing about whether the landing exists,
-		// so the pass ends as the infra error the worker retries; rejecting
-		// here would send the author to rework work that may have landed
-		// (gt-xqpmc).
-		if res, handled, cerr := l.finishedUnrecordedLanding(g, issue, w); handled {
-			return res, cerr
-		}
-		// No land merge accounts for the head's content on the target, and
-		// merging it changes nothing: the work is already there by a route
-		// that left no record, so there is nothing for the author to land
-		// and nothing for an operator to repair (gt-sq2oe).
-		if out.EmptySquash {
-			return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
-				Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
-				Comparison: fmt.Sprintf("merging %s changes nothing on %s/%s (its changes are already there, and no land merge of this lander's accounts for them)", shortSHA(w.Head), remote, w.Target),
-			})}, nil)
-		}
-		return Result{}, err
-	}
-	merged, rej := out.Commit, out.Rejection
-	if rej != nil {
-		// A conflict with the head's own landed squash is the landing meeting
-		// itself, not the author's to resolve; with no land merge naming this
-		// head on the target the recovery declines and the rejection stands
-		// (gt-01yt6).
-		if rej.Kind == RejectConflict {
-			if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
-				return res, err
-			}
-			// A stored conflict for this head that the merge still finds is
-			// spent: the rejection is its answer, and the record must not
-			// outlive it (gt-1yvte7). A delete that fails is logged and the
-			// rejection stands: the author's note is what the queue needs, and
-			// a later pass deletes the record as a mismatch once a new head is
-			// pushed.
-			if storedConflict {
-				if err := l.Ahead.Delete(w.BeadID); err != nil {
-					l.logf("%s: the rejected conflict record could not be deleted (%v); the rejection stands", w.BeadID, err)
-				}
-			}
-		}
-		return Result{}, l.reject(ctx, issue, w, rej, nil)
-	}
-	// The stored conflict was for this head and the merge no longer conflicts,
-	// so the record is consumed and the pass ends before any review or gate
-	// (gt-1yvte7).
-	if storedConflict {
-		if err := l.Ahead.Delete(w.BeadID); err != nil {
-			return Result{}, &InfraError{Stage: "stored review", Err: err}
-		}
-		l.logf("%s: the stored conflict is gone; the clean merge consumes its record", w.BeadID)
-		return Result{}, ErrNoStoredVerdict
-	}
-	if same, err := wt.TreesIdentical(base, "HEAD"); err != nil {
-		return Result{}, &InfraError{Stage: "compare trees", Err: err}
-	} else if same {
-		return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
-			Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
-			Comparison: fmt.Sprintf("the merge result and %s/%s have identical trees", remote, w.Target),
-		})}, nil)
-	}
-	patchID, err := wt.PatchID(base, merged)
-	if err != nil {
-		return Result{}, &InfraError{Stage: "patch-id", Err: err}
-	}
-
-	l.logf("%s: merged %s onto %s/%s (%s) as %s; reviewing the merge candidate, then pushing it for its CI verdict", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
+	l.logf("%s: merged %s onto %s/%s (%s) as %s; reviewing the merge candidate, then pushing it for its CI verdict", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(c.merged))
 	// om reviews the merge candidate before it is pushed, so a landing om
 	// refuses never spends a gate run. The cost this order accepts: a landing
 	// that fails the gate pays for one om run first (26 to 39 s). om refusals
 	// were the common case — 73 of 257 gate-running attempts on 2026-10-31,
 	// 29% of the CI stage wall, against 9 gate failures — so the rare one is
 	// the one that pays (gt-g0w49).
-	w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
+	// The car's work is the one the later stages read, so its candidate branch
+	// and head name the merge this landing reviews and pushes.
+	c.w.CandidateBranch, c.w.CandidateHead = c.w.Candidate(), c.merged
 
 	// The om review runs in reviewCar; the candidate gate runs in gateCar; the
 	// merge and the record run in finishCar once it passes.
-	c := &car{w: w, issue: issue, g: g, wt: wt, base: base, merged: merged, patchID: patchID, dir: dir}
 	rv, err := l.reviewCar(ctx, c)
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base,
+	res = Result{LandedCommit: c.merged, PatchID: c.patchID, Base: base,
 		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
 	res.Verdict = rv.verdict
 	gr, err := l.gateCar(ctx, c, rv)
