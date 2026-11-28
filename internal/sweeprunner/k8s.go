@@ -750,14 +750,14 @@ func runnerContainer(spec Spec) (Container, error) {
 	// fraction of it, so a contended node places the run on fewer CPUs while a
 	// free one still lets it burst to the share. A zero request asks for the
 	// whole share, keeping requests equal to limits as before (gt-13dre6.13).
+	// The request is whole cores (RunnerCPURequest) or millicores
+	// (RunnerCPURequestMillis), never both: Validate refuses the pair, and the
+	// limit is the share either way (gt-vv43zw).
 	share, err := runnerShare(spec)
 	if err != nil {
 		return Container{}, err
 	}
-	resources := &Resources{Requests: share, Limits: share}
-	if spec.RunnerCPURequest > 0 {
-		resources.Requests.CPU = cpuQuantity(int64(spec.RunnerCPURequest) * 1000)
-	}
+	resources := &Resources{Requests: runnerRequests(spec, share), Limits: share}
 	return Container{
 		Name:            runnerContainerName,
 		Image:           spec.Image,
@@ -892,6 +892,22 @@ func dindRequests(spec Spec, share ResourceList) ResourceList {
 	requests := share
 	if spec.DindCPURequestMillis > 0 {
 		requests.CPU = cpuQuantity(int64(spec.DindCPURequestMillis))
+	}
+	return requests
+}
+
+// runnerRequests is the runner container's resource requests: the share it is
+// limited to, with the CPU request replaced by the Spec's whole-core request or
+// its millicore request when one is set. A zero request asks for the whole
+// share, keeping requests equal to limits as before (gt-vv43zw). The list is
+// returned by value, so the caller's limit is never touched.
+func runnerRequests(spec Spec, share ResourceList) ResourceList {
+	requests := share
+	switch {
+	case spec.RunnerCPURequest > 0:
+		requests.CPU = cpuQuantity(int64(spec.RunnerCPURequest) * 1000)
+	case spec.RunnerCPURequestMillis > 0:
+		requests.CPU = cpuQuantity(int64(spec.RunnerCPURequestMillis))
 	}
 	return requests
 }
