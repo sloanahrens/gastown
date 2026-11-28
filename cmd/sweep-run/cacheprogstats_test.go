@@ -173,3 +173,100 @@ func TestCacheProgStatsDropFails(t *testing.T) {
 		t.Fatalf("copyCacheProgStats with an undroppable copy: err = %v; want the write failure and a drop error naming %s", err, dst)
 	}
 }
+
+// statsAt plants the cache program's stats file under root and returns its path.
+func statsAt(t *testing.T, root string, content []byte) string {
+	t.Helper()
+	dir := filepath.Join(root, cacheProgDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, cacheProgStatsName)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCacheProgStatsMove: the source's bytes land under the log directory's copy name and the source is
+// gone.
+func TestCacheProgStatsMove(t *testing.T) {
+	t.Parallel()
+	cacheRoot, logDir := t.TempDir(), t.TempDir()
+	content := []byte("{\"hits\":1}\n\x00\xff\xfe tail\n")
+	src := statsAt(t, cacheRoot, content)
+
+	if err := moveCacheProgStats(cacheRoot, logDir, os.Remove); err != nil {
+		t.Fatalf("moveCacheProgStats: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(logDir, cacheProgStatsCopyName)); err != nil || !bytes.Equal(got, content) {
+		t.Errorf("copy = %q, %v; want %q", got, err, content)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Errorf("source %s left behind, Lstat err = %v", src, err)
+	}
+}
+
+// TestCacheProgStatsNoSource: no stats file is nil, writes no copy, and removes nothing.
+func TestCacheProgStatsNoSource(t *testing.T) {
+	t.Parallel()
+	cacheRoot, logDir := t.TempDir(), t.TempDir()
+	var removed []string
+	remove := func(name string) error { removed = append(removed, name); return nil }
+
+	if err := moveCacheProgStats(cacheRoot, logDir, remove); err != nil {
+		t.Fatalf("moveCacheProgStats with no stats file: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(logDir, cacheProgStatsCopyName)); !os.IsNotExist(err) {
+		t.Errorf("no source but a copy was written, Lstat err = %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v; want nothing removed", removed)
+	}
+}
+
+// TestCacheProgStatsMoveFails: an unreadable source, an earlier copy where the copy goes, and a removal
+// that fails are each an error naming the path at fault, and a failed copy removes nothing.
+func TestCacheProgStatsMoveFails(t *testing.T) {
+	t.Parallel()
+	t.Run("source unreadable", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		src := filepath.Join(cacheRoot, cacheProgDirName, cacheProgStatsName)
+		if err := os.WriteFile(filepath.Join(cacheRoot, cacheProgDirName), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removed := 0
+		err := moveCacheProgStats(cacheRoot, logDir, func(string) error { removed++; return nil })
+		if err == nil || !strings.Contains(err.Error(), src) || removed != 0 {
+			t.Fatalf("err = %v, removed %d; want an error naming %s and no removal", err, removed, src)
+		}
+	})
+	t.Run("copy exists", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		content := []byte("new\n")
+		src := statsAt(t, cacheRoot, content)
+		dst := filepath.Join(logDir, cacheProgStatsCopyName)
+		if err := os.WriteFile(dst, []byte("earlier\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removed := 0
+		err := moveCacheProgStats(cacheRoot, logDir, func(string) error { removed++; return nil })
+		if !errors.Is(err, fs.ErrExist) || !strings.Contains(err.Error(), dst) || removed != 0 {
+			t.Fatalf("err = %v, removed %d; want an exists error naming %s and no removal", err, removed, dst)
+		}
+		if got, rerr := os.ReadFile(src); rerr != nil || !bytes.Equal(got, content) {
+			t.Errorf("source = %q, %v; want it unchanged", got, rerr)
+		}
+	})
+	t.Run("remove fails", func(t *testing.T) {
+		t.Parallel()
+		cacheRoot, logDir := t.TempDir(), t.TempDir()
+		src := statsAt(t, cacheRoot, []byte("kept\n"))
+		err := moveCacheProgStats(cacheRoot, logDir, func(string) error { return errInjected })
+		if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), src) {
+			t.Fatalf("err = %v; want it to wrap %v and name %s", err, errInjected, src)
+		}
+	})
+}

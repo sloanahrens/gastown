@@ -6,7 +6,36 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
+
+const (
+	// cacheProgDirName is the directory under the cache claim that holds the cache program's stats.
+	cacheProgDirName = "gtprog"
+	// cacheProgStatsName is the stats file the cache program appends to.
+	cacheProgStatsName = "stats.jsonl"
+	// cacheProgStatsCopyName is the copy a run leaves in its log directory.
+	cacheProgStatsCopyName = "gocacheprog-stats.jsonl"
+)
+
+// moveCacheProgStats copies the cache program's stats from cacheRoot into logDir and then removes the
+// source, because the two can sit on different filesystems. A source that is not there returns nil and
+// writes no copy; every other failure is an error, and a source that is not copied stays where it is. The
+// caller passes os.Remove as remove.
+func moveCacheProgStats(cacheRoot, logDir string, remove func(string) error) error {
+	src := filepath.Join(cacheRoot, cacheProgDirName, cacheProgStatsName)
+	dst := filepath.Join(logDir, cacheProgStatsCopyName)
+	if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := copyCacheProgStats(src, dst, createCopy); err != nil {
+		return err
+	}
+	if err := remove(src); err != nil {
+		return fmt.Errorf("removing %s: %w", src, err)
+	}
+	return nil
+}
 
 // copyCreator makes the file a copy is written to. It must fail when name already exists.
 type copyCreator func(name string) (io.WriteCloser, error)
