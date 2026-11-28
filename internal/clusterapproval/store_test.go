@@ -393,11 +393,18 @@ func writeApprovalTree(t *testing.T, base, tree string, fields map[string]any) s
 	if err := os.Chmod(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	// macOS gives a new file its parent directory's group, which is group 0 under /private/tmp.
+	if err := os.Chown(dir, -1, os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(dir, goodID+".json")
 	if err := os.WriteFile(file, []byte(recordText(fields)), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(file, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(file, -1, os.Getgid()); err != nil {
 		t.Fatal(err)
 	}
 	return dir
