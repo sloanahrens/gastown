@@ -2066,3 +2066,57 @@ func TestPoolSandboxlessCount(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolSandboxlessKeeps pins which seats the production count keeps
+// (gt-yoyiio): a finished dead sandbox seat that runs nothing with no record is
+// dropped; held work, a failed state read and a corrupt registry record count.
+func TestPoolSandboxlessKeeps(t *testing.T) {
+	t.Parallel()
+	const settings = `{"type":"town-settings","version":1,"sandboxes":{"p":{"image":"i","policy":"p"}},"polecat_pool":{"seats":{"sandbox":{"cap":1,"backend":"openshell","sandbox":"p"}}}}`
+	now := time.Date(2026, time.November, 27, 17, 30, 0, 0, time.UTC)
+	held := deadSeatRead(false)
+	held.HookHeld = true
+	submitted := func(t *testing.T, town string) { writeLandingSeatOnAgent(t, town, "gastown", "p", "gt-p", "sandbox") }
+	cases := []struct {
+		name    string
+		stage   func(*testing.T, string)
+		lister  sessionLister
+		state   poolSeatState
+		readErr error
+		work    poolSeatWorkFunc
+		want    string
+	}{
+		{"a finished dead sandbox seat with nothing held and no record is not counted",
+			submitted, &fakeLister{}, deadSeatRead(false), nil, nil, ""},
+		{"a crashed sandbox seat with held work and no record is counted",
+			submitted, &fakeLister{}, held, nil, nil, "dead/gastown/p"},
+		{"a seat whose state read fails is counted",
+			submitted, &fakeLister{sessions: map[string]map[string]string{"gt-p": {"GT_ROLE": "gastown/polecats/p"}}},
+			poolSeatState{}, errors.New("state unavailable"), nil, "gt-p"},
+		{"a submitted sandbox seat is counted when the registry holds a corrupt record and none that names it",
+			func(t *testing.T, town string) {
+				submitted(t, town)
+				writeProfileFile(t, filepath.Join(session.SandboxRegistryDir(town), "zz-corrupt.json"), "{not json")
+			}, &fakeLister{}, deadSeatRead(true), nil, submittedWork("gt-p"), "landing/gastown/p"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, _ := writeProfileTown(t, settings)
+			c.stage(t, town)
+			disposition := func(string, string) (poolSeatState, error) { return c.state, c.readErr }
+			got, _, err := poolOccupiedSessionsProbed(c.lister, town, disposition, c.work, seatPool("sandbox", 3),
+				func() time.Time { return now }, func(string, string, string) bool { return false })
+			if err != nil {
+				t.Fatalf("poolOccupiedSessionsProbed: %v", err)
+			}
+			var names []string
+			for _, s := range got {
+				names = append(names, s.name)
+			}
+			if joined := strings.Join(names, ","); joined != c.want {
+				t.Fatalf("occupied seats = %q, want %q", joined, c.want)
+			}
+		})
+	}
+}
