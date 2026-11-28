@@ -12,7 +12,8 @@ import (
 // car is what one landing carries between its stages: the work and its bead,
 // the rig repo, the landing worktree the merge is made in and its dir, the
 // landing's identity, the target tip the merge was built on, the merge commit,
-// and that commit's patch-id.
+// and that commit's patch-id. stored, when set, is a candidate gate run the
+// gate step renders in place of running the gate (gt-kbzz2i); nil runs the gate.
 type car struct {
 	w                     Work
 	issue                 *beads.Issue
@@ -20,6 +21,7 @@ type car struct {
 	dir                   string
 	landingID             string
 	base, merged, patchID string
+	stored                *CandidateResult
 }
 
 // finishCar ends a landing whose candidate gate passed: the merge through
