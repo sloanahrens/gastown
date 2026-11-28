@@ -38,6 +38,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -101,6 +102,10 @@ const (
 	// no file while the volume stayed over its cap. A capped volume's key is this
 	// one with its name after it (ciCacheNoOpKeyOf).
 	ciCacheNoOpKey = "ci-cache-trim-noop"
+
+	// ciCacheTrimOutcomeOK is the job ledger outcome of an apply run that reached
+	// a verdict. Runs that failed are not recorded by this change.
+	ciCacheTrimOutcomeOK = "ok"
 )
 
 // ciCacheVolume is one named volume the trim runs over. root is the one path the
@@ -835,7 +840,9 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		return false, fmt.Sprintf("the volume's program could not be built: %v", err)
 	}
 	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--", "sh"}, program...)
+	started := d.diskMaintenanceSeams().now()
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
+	ended := d.diskMaintenanceSeams().now()
 	if err != nil {
 		var status interface{ ExitCode() int }
 		if errors.As(err, &status) && status.ExitCode() == ciCacheMissingPathExit {
@@ -892,8 +899,38 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s); nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText)
 	}
+	if mode == agentconfig.DiskMaintenanceModeApply {
+		d.recordCICacheTrimRun(v, started, ended, reply)
+	}
 	d.ciCacheTrimMeasure(mode, v, reply)
 	return true, ""
+}
+
+// recordCICacheTrimRun appends one apply run of v to the job ledger, its figures in
+// bytes and removed_bytes never below 0. A ledger error is logged and changes no
+// verdict, as recordCIEnginePruneRun does.
+func (d *Daemon) recordCICacheTrimRun(v ciCacheVolume, started, ended time.Time, reply ciCacheTrimReply) {
+	stats := map[string]int64{
+		"claim_bytes_before": reply.beforeKiB * 1024,
+		"claim_bytes_after":  reply.afterKiB * 1024,
+		"removed_files":      reply.removed,
+		"removed_bytes":      max(reply.beforeKiB-reply.afterKiB, 0) * 1024,
+	}
+	if reply.youngReported {
+		stats["young_bytes"] = reply.youngKiB * 1024
+	}
+	if v.capKiB > 0 {
+		stats["cap_bytes"] = v.capKiB * 1024
+	}
+	run := jobledger.Run{Job: ciCacheTrimName + ":" + v.name, StartedAt: started, EndedAt: ended, Outcome: ciCacheTrimOutcomeOK, Stats: stats}
+	ledger, err := d.diskMaintenanceSeams().jobLedger()
+	if err != nil {
+		d.ciCacheTrimLogf("job ledger "+v.name, "disk_maintenance: ci cache trim: %s: the job ledger could not be opened (%v); the run is not recorded", v.name, err)
+		return
+	}
+	if err := ledger.Append(run); err != nil {
+		d.ciCacheTrimLogf("job ledger "+v.name, "disk_maintenance: ci cache trim: %s: the run could not be recorded (%v)", v.name, err)
+	}
 }
 
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
