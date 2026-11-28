@@ -37,6 +37,10 @@ type Timing struct {
 	Start  string `json:"start"`
 	// Shard is "i/K" on a shard's line, the shard's place in its package (gt-rw118).
 	Shard string `json:"shard,omitempty"`
+	// Cgroup is what the container spent while the package ran, when the run
+	// could read it. With more than one job it covers the whole container,
+	// since the jobs share it.
+	Cgroup *CgroupSample `json:"cgroup,omitempty"`
 }
 
 // kindTest is the kind of a slow test's line in timings.jsonl.
