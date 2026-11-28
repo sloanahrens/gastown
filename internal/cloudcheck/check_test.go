@@ -2,43 +2,27 @@ package cloudcheck
 
 import (
 	"context"
+	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// testGuard bounds each fetch in the tests below. Every case here expects an
-// answer, so no case is meant to hit it: a fetch that outlives the guard fails
-// its test instead of passing on a timeout, and a loaded host that pauses for
-// over a second does not turn a 200 into a false red.
-const testGuard = 10 * time.Second
-
-// serve starts a server answering every request with code and closes it when
-// the test ends.
-func serve(t *testing.T, code int) *httptest.Server {
-	t.Helper()
-	//testpolicy:allow no-network — the check's subject is an HTTP GET, the bead requires httptest servers, and this one answers in-process on loopback
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(code)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
 func TestHealthLevels(t *testing.T) {
 	t.Parallel()
-	ok := serve(t, http.StatusOK)
-	failed := serve(t, http.StatusBadGateway)
-	warned := serve(t, http.StatusNotFound)
-	// A refused connection: the server is closed before the run.
-	gone := serve(t, http.StatusOK)
-	goneURL := gone.URL
-	gone.Close()
+	okURL, failedURL, warnedURL, goneURL :=
+		"http://web.invalid/", "http://api.invalid/", "http://docs.invalid/", "http://dead.invalid/"
+	f := &fakeTransport{replies: map[string]fakeReply{
+		okURL:     {status: http.StatusOK},
+		failedURL: {status: http.StatusBadGateway},
+		warnedURL: {status: http.StatusNotFound},
+		// A refused connection: the fake answers with an error, so no socket
+		// and no deadline decides the verdict.
+		goneURL: {err: errors.New("connection refused")},
+	}}
 
 	offDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(offDir, "legacy.off"), nil, 0o600); err != nil {
@@ -46,14 +30,14 @@ func TestHealthLevels(t *testing.T) {
 	}
 
 	apps := []App{
-		{Name: "web", URL: ok.URL},
-		{Name: "api", URL: failed.URL},
-		{Name: "docs", URL: warned.URL},
+		{Name: "web", URL: okURL},
+		{Name: "api", URL: failedURL},
+		{Name: "docs", URL: warnedURL},
 		{Name: "dead", URL: goneURL},
-		{Section: "legacy", Name: "site", URL: failed.URL},
+		{Section: "legacy", Name: "site", URL: failedURL},
 	}
 	at := time.Unix(1700000000, 0)
-	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: testGuard, Now: func() time.Time { return at }})
+	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: time.Second, Transport: f, Now: func() time.Time { return at }})
 
 	if r.At != at.Unix() {
 		t.Errorf("At = %d, want %d", r.At, at.Unix())
@@ -95,20 +79,15 @@ func TestHealthLevels(t *testing.T) {
 // stands the check down, it does not merely relabel a result.
 func TestOffMarkerSkipsTheFetch(t *testing.T) {
 	t.Parallel()
-	var hits atomic.Int32
-	//testpolicy:allow no-network — the server counts requests, so the test can assert an off app is never fetched; it answers in-process on loopback
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
+	appURL := "http://web.invalid/"
+	f := &fakeTransport{replies: map[string]fakeReply{appURL: {status: http.StatusOK}}}
 
 	offDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(offDir, "gastown.off"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	apps := []App{{Section: "gastown", Name: "web", URL: srv.URL}}
-	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: testGuard})
+	apps := []App{{Section: "gastown", Name: "web", URL: appURL}}
+	r := Check(context.Background(), apps, nil, Options{OffDir: offDir, Timeout: time.Second, Transport: f})
 
 	if r.Failed != 0 {
 		t.Errorf("Failed = %d, want 0 for an app that is off on purpose", r.Failed)
@@ -120,7 +99,7 @@ func TestOffMarkerSkipsTheFetch(t *testing.T) {
 	if got := r.Rows[0].Detail; got != want {
 		t.Errorf("detail = %q, want %q", got, want)
 	}
-	if got := hits.Load(); got != 0 {
+	if got := len(f.asked); got != 0 {
 		t.Errorf("the off app was fetched %d time(s), want 0", got)
 	}
 }
@@ -130,14 +109,15 @@ func TestOffMarkerSkipsTheFetch(t *testing.T) {
 // check down (the devops rig's ops/cloud-check.sh).
 func TestNoAppMarkerIsNotRead(t *testing.T) {
 	t.Parallel()
-	answering := serve(t, http.StatusOK)
+	appURL := "http://web.invalid/"
+	f := &fakeTransport{replies: map[string]fakeReply{appURL: {status: http.StatusOK}}}
 	offDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(offDir, "web.off"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The URL answers 200, so a reader that consults <check>.off reports off
+	// The fake answers 200, so a reader that consults <check>.off reports off
 	// instead of the checked answer.
-	r := Check(context.Background(), []App{{Name: "web", URL: answering.URL}}, nil, Options{OffDir: offDir, Timeout: testGuard})
+	r := Check(context.Background(), []App{{Name: "web", URL: appURL}}, nil, Options{OffDir: offDir, Timeout: time.Second, Transport: f})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelOK {
 		t.Fatalf("rows = %+v, want one ok row: a check with no app= reads no marker", r.Rows)
 	}
@@ -154,11 +134,12 @@ func TestOffMarkerUnreadableFails(t *testing.T) {
 	if err := os.WriteFile(notADir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The URL answers 200, so an implementation that reads the unreadable
+	// The fake answers 200, so an implementation that reads the unreadable
 	// marker as "not off" reports ok instead of the failure it is.
-	answering := serve(t, http.StatusOK)
+	appURL := "http://web.invalid/"
+	f := &fakeTransport{replies: map[string]fakeReply{appURL: {status: http.StatusOK}}}
 
-	r := Check(context.Background(), []App{{Section: "gastown", Name: "web", URL: answering.URL}}, nil, Options{OffDir: notADir, Timeout: testGuard})
+	r := Check(context.Background(), []App{{Section: "gastown", Name: "web", URL: appURL}}, nil, Options{OffDir: notADir, Timeout: time.Second, Transport: f})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
 	}
@@ -174,25 +155,20 @@ func TestOffMarkerUnreadableFails(t *testing.T) {
 // file names: a 3xx is reported, not chased to another host.
 func TestRedirectIsNotFollowed(t *testing.T) {
 	t.Parallel()
-	var hits atomic.Int32
-	//testpolicy:allow no-network — the redirect target counts requests, so the test can assert it is never reached; it answers in-process on loopback
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(target.Close)
-	//testpolicy:allow no-network — the redirecting server is the app URL of the check under test, in-process on loopback
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	}))
-	t.Cleanup(redirect.Close)
+	appURL := "http://app.invalid/health"
+	targetURL := "http://elsewhere.invalid/"
+	// The fake answers the app URL with a redirect and has no reply for the
+	// Location, so following it would fail the row rather than pass.
+	f := &fakeTransport{replies: map[string]fakeReply{
+		appURL: {status: http.StatusFound, location: targetURL},
+	}}
 
-	r := Check(context.Background(), []App{{Name: "web", URL: redirect.URL}}, nil, Options{Timeout: testGuard})
+	r := Check(context.Background(), []App{{Name: "web", URL: appURL}}, nil, Options{Timeout: time.Second, Transport: f})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelWarn {
 		t.Fatalf("rows = %+v, want one warn row", r.Rows)
 	}
-	if got := hits.Load(); got != 0 {
-		t.Errorf("the redirect was followed %d time(s), want 0", got)
+	if len(f.asked) != 1 || f.asked[0] != appURL {
+		t.Errorf("fake was asked %v, want only the app URL %s, never its Location %s", f.asked, appURL, targetURL)
 	}
 }
 
@@ -200,23 +176,30 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 // fetched is a failure, never a skipped check.
 func TestUnbuildableRequestFails(t *testing.T) {
 	t.Parallel()
-	r := Check(context.Background(), []App{{Name: "web", URL: "http://[::1"}}, nil, Options{Timeout: testGuard})
+	r := Check(context.Background(), []App{{Name: "web", URL: "http://[::1"}}, nil, Options{Timeout: time.Second})
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail || r.Failed != 1 {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
 	}
 }
 
 // TestFetchErrorNamesNoURL pins that a URL's credential does not reach the
-// report, which is printed and written to the status file.
+// report, which is printed and written to the status file. The fake refuses the
+// URL carrying the token, so the error the client builds from it carries that
+// URL too; the row's detail must not.
 func TestFetchErrorNamesNoURL(t *testing.T) {
 	t.Parallel()
-	gone := serve(t, http.StatusOK)
-	goneURL := gone.URL
-	gone.Close()
+	appURL := "http://dead.invalid/health?token=verysecret"
+	f := &fakeTransport{replies: map[string]fakeReply{appURL: {err: errors.New("connection refused")}}}
 
-	r := Check(context.Background(), []App{{Name: "web", URL: goneURL + "/health?token=verysecret"}}, nil, Options{Timeout: testGuard})
+	r := Check(context.Background(), []App{{Name: "web", URL: appURL}}, nil, Options{Timeout: time.Second, Transport: f})
+	if len(f.asked) != 1 || f.asked[0] != appURL {
+		t.Fatalf("fake was asked %v, want the URL carrying the token %s", f.asked, appURL)
+	}
 	if len(r.Rows) != 1 || r.Rows[0].Level != LevelFail {
 		t.Fatalf("rows = %+v, want one fail row", r.Rows)
+	}
+	if got := r.Rows[0].Detail; !strings.Contains(got, "connection refused") {
+		t.Errorf("detail = %q, want the fake's error", got)
 	}
 	if strings.Contains(r.Rows[0].Detail, "verysecret") {
 		t.Errorf("the failure detail carries the URL's token: %q", r.Rows[0].Detail)
