@@ -2853,7 +2853,7 @@ func TestCIEnginePruneRecordsNoNextDueWhenSettingsRefused(t *testing.T) {
 	t.Parallel()
 	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
 	f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineUnusedAge = "30m"
-	if verdict, _ := f.d.ciEnginePrune(context.Background(), agentconfig.DiskMaintenanceModeApply); verdict {
+	if verdict, _ := f.d.ciEnginePrune(context.Background(), ciCacheGateRunner, agentconfig.DiskMaintenanceModeApply); verdict {
 		t.Fatalf("a run whose settings cannot be read reported a verdict:\n%s", f.logs.String())
 	}
 
@@ -2873,6 +2873,83 @@ func TestCIEnginePruneRecordsNoNextDueWhenSettingsRefused(t *testing.T) {
 	}
 	if run.NextDue != nil {
 		t.Errorf("recorded next due = %v, want none when the interval could not be read", run.NextDue)
+	}
+}
+
+// TestCIEnginePruneRunnerNamesItsRun: a pass over a runner lists that runner's pods,
+// execs into its namespace and container, and names its run in the job ledger, the
+// schedule and its log line. The other runner's names stay clear.
+func TestCIEnginePruneRunnerNamesItsRun(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		runner ciCacheRunner
+		line   string
+		other  string
+	}{
+		{ciCacheGateRunner, "disk_maintenance: ci engine prune: removed ", ciCacheAuxRunner.pruneName()},
+		{ciCacheAuxRunner, "disk_maintenance: ci engine prune (forgejo-runner-aux): removed ", ciEnginePruneName},
+	} {
+		t.Run(tc.runner.deployment, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
+			f.d.runCIEnginePrunePass(tc.runner, agentconfig.DiskMaintenanceModeApply)
+
+			if lists := f.callsWith("get pods "); len(lists) != 1 || !slices.Contains(lists[0].args, tc.runner.podLabel()) {
+				t.Errorf("pod listings = %v, want one selecting %q", lists, tc.runner.podLabel())
+			}
+			want := []string{"-n", tc.runner.namespace, ciCacheTestPod, "-c", tc.runner.container, "--"}
+			for _, c := range f.execs() {
+				if i := slices.Index(c.args, "exec"); i < 0 || len(c.args) < i+1+len(want) || !slices.Equal(c.args[i+1:i+1+len(want)], want) {
+					t.Errorf("exec %v does not go to %v", c.args, want)
+				}
+			}
+			ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+			if err != nil {
+				t.Fatalf("opening the job ledger: %v", err)
+			}
+			if _, ok, err := ledger.Last(tc.runner.pruneName()); err != nil || !ok {
+				t.Errorf("no run recorded under %q: ok=%v err=%v", tc.runner.pruneName(), ok, err)
+			}
+			if _, ok, err := ledger.Last(tc.other); err != nil || ok {
+				t.Errorf("a run recorded under %q, the other runner's job: ok=%v err=%v", tc.other, ok, err)
+			}
+			if last := f.d.diskMaintSchedule.lastRunAt(tc.other); !last.IsZero() {
+				t.Errorf("the other runner's schedule was recorded at %v", last)
+			}
+			if !strings.Contains(f.logs.String(), tc.line) {
+				t.Errorf("no %q line:\n%s", tc.line, f.logs.String())
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneRunnerNamesItsAttentionItem: a pass over a runner that reaches no
+// verdict raises its attention item under that runner's key and label, and the other
+// runner's key stays clear.
+func TestCIEnginePruneRunnerNamesItsAttentionItem(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		runner ciCacheRunner
+		label  string
+		other  string
+	}{
+		{ciCacheGateRunner, "CI engine prune", ciCacheAuxRunner.pruneName()},
+		{ciCacheAuxRunner, "CI engine prune (forgejo-runner-aux)", ciEnginePruneName},
+	} {
+		t.Run(tc.runner.deployment, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
+			f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
+			f.d.runCIEnginePrunePass(tc.runner, agentconfig.DiskMaintenanceModeApply)
+
+			items := enginePruneItems(f)
+			if len(items) != 1 || !strings.Contains(items[0].Escalation.Description, "disk maintenance "+tc.label+" did not reach a verdict") {
+				t.Errorf("escalations = %+v, want one naming %q", items, tc.label)
+			}
+			if open := engineAlerts(f).OpenEscalations(diskMaintFailedKey(tc.other)); len(open) != 0 {
+				t.Errorf("the other runner's key has %d open item(s), want none", len(open))
+			}
+		})
 	}
 }
 
