@@ -295,6 +295,58 @@ func TestClusterShapeApplyDocumentKinds(t *testing.T) {
 	}
 }
 
+// TestClusterShapeApplyPhaseWKinds: on a control plan, phase W refuses each policy and RBAC kind; phase P applies them.
+func TestClusterShapeApplyPhaseWKinds(t *testing.T) {
+	t.Parallel()
+	const rbac, policy = "rbac.authorization.k8s.io/v1", "admissionregistration.k8s.io/v1"
+	type row struct {
+		name, cluster, phase string
+		doc                  []byte
+	}
+	var rows []row
+	for _, k := range []struct{ api, kind string }{
+		{policy, validatingPolicyKind}, {policy, validatingPolicyBindKind},
+		{policy, mutatingPolicyKind}, {policy, mutatingPolicyBindKind},
+		{rbac, clusterRoleKind}, {rbac, clusterRoleBindingKind}, {rbac, roleKind}, {rbac, roleBindingKind},
+	} {
+		for _, phase := range []string{planPhaseWorkloads, planPhaseStatic} {
+			rows = append(rows, row{k.kind + " in phase " + phase, clusterControl, phase, shapeDoc(k.api, k.kind, "x", "gastown")})
+		}
+	}
+	list := []byte("apiVersion: v1\nkind: List\nitems:\n- apiVersion: " + rbac + "\n  kind: RoleBinding\n  metadata:\n    name: rb\n    namespace: gastown\n")
+	rows = append(rows,
+		row{"a RoleBinding inside a List in phase W", clusterControl, planPhaseWorkloads, list},
+		row{"a Role in phase W with no cluster", "", planPhaseWorkloads, shapeDoc(rbac, roleKind, "x", "gastown")},
+	)
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeReadFile(t, filepath.Join(dir, "doc.yaml"), tc.doc)
+			data, err := json.Marshal(planRecord{Cluster: tc.cluster, ID: readSHA, Files: []planRecordFile{{Name: "doc.yaml", Phase: tc.phase, SHA256: clusterApplyFileSHA(tc.doc)}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeReadFile(t, filepath.Join(dir, planFileName), data)
+			writeReadFile(t, filepath.Join(dir, "approval.json"), readApprovalOK)
+			kube := &shapeLiveKube{out: shapeLiveAt("7")}
+			var verified int
+			err = runTownClusterApply(context.Background(), kube.run, io.Discard, dir, filepath.Join(dir, "approval.json"), shapeFlags, shapeVerifier(&verified, nil))
+			applies, _ := shapeApplyCalls(kube)
+			if tc.phase == planPhaseStatic {
+				want := []string{"--kubeconfig", shapeFlags.policyKubeconfig, "apply", "-f", "-"}
+				if err != nil || len(applies) != 1 || !slices.Equal(applies[0], want) {
+					t.Fatalf("runTownClusterApply returned %v and applied %v, want phase P to apply it once under %v", err, applies, want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "in phase W") || !strings.Contains(err.Error(), "nothing was applied") || verified != 0 || len(kube.calls) != 0 {
+				t.Fatalf("runTownClusterApply returned %v after %d verify calls and calls %v, want a phase W refusal with nothing applied", err, verified, kube.calls)
+			}
+		})
+	}
+}
+
 // TestClusterShapeApplyMissingFlag: applyPlanFiles reads every phase's kubeconfig
 // before its first apply, so a phase without its flag refuses with nothing
 // applied — phase P's file is not applied before phase W's missing flag is found
