@@ -15,7 +15,8 @@ func daemonLockPath(townRoot string) string { return filepath.Join(townRoot, "da
 // returns the function that removes it. The entry is renamed to its .cmd name
 // only while locked and labeled; a failed rename drops it. A town with no
 // daemon.lock has no daemon to drain the entry, so Register lists nothing and
-// returns a release that does nothing.
+// returns a release that does nothing. A draining town drops the entry and
+// returns an error wrapping ErrDraining.
 func Register(townRoot, label string) (func() error, error) {
 	return register(os.Rename, townRoot, label)
 }
@@ -37,5 +38,16 @@ func register(rename func(oldpath, newpath string) error, townRoot, label string
 		return nil, errors.Join(fmt.Errorf("listing inflight entry: %w", err), e.drop())
 	}
 	e.path = path
-	return e.drop, nil
+	// The entry is listed before the marker is read, so a drain that writes
+	// the marker and then lists the entries cannot miss this one (gt-bq2f6l).
+	if _, err := os.Stat(drainMarkerPath(townRoot)); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, errors.Join(fmt.Errorf("reading drain marker: %w", err), e.drop())
+		}
+		return e.drop, nil
+	}
+	return nil, errors.Join(
+		fmt.Errorf("refusing %q: %w; the command did not start, run it again once the daemon is back", label, ErrDraining),
+		e.drop(),
+	)
 }
