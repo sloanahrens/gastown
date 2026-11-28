@@ -93,7 +93,7 @@ func Manifest() []Entry {
 		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text",
 			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
-		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command",
+		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "stub: deploy/k8s/kind/kind_test.sh:350 writes a fake go and gt into the stub bin",
 			Triggers: []string{"scripts/", "Makefile", "deploy/"}},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
 		{Path: "scripts/makefile-gate_test.sh", StubsGo: "go: the shell-test list case runs the real shelltier through go run (gt-chlve)",

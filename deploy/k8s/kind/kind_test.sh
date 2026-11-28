@@ -46,7 +46,8 @@ cp "$SCRIPT_DIR/../priority-classes.yaml" "$TMP/root/deploy/k8s/priority-classes
 UP="$TMP/root/deploy/k8s/kind/up.sh"
 DOWN="$TMP/root/deploy/k8s/kind/down.sh"
 
-mkdir -p "$TMP/bin"
+BIN="$TMP/bin"
+mkdir -p "$BIN"
 cat >"$TMP/bin/_log" <<'STUB'
 #!/usr/bin/env bash
 # _log TOOL ARGS...: one line per call with the env the assertions read.
@@ -346,6 +347,18 @@ n=$(cat "$STATE/curl-calls" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$STATE/curl-calls"
 [ "$n" -ge "${STUB_CURL_FAILS:-0}" ]
 STUB
+cat >"$BIN/go" <<'STUB'
+#!/usr/bin/env bash
+# The fake go: records its arguments, working directory and XDG_CONFIG_HOME; STUB_GO_FAILS=1 fails it.
+"$(dirname "$0")/_log" go "$@"
+printf 'go-cwd=%s\n' "$PWD" >>"$CALLS"
+[ -n "${STUB_GO_FAILS:-}" ] && exit 1
+exit 0
+STUB
+cat >"$BIN/gt" <<'STUB'
+#!/usr/bin/env bash
+"$(dirname "$0")/_log" gt "$@"
+STUB
 chmod +x "$TMP"/bin/*
 
 scenario() {
@@ -465,6 +478,8 @@ check "nothing is written to ~/.kube" test ! -e "$S/home/.kube"
 check "the town's openshell config is untouched" test ! -e "$S/home/.config/openshell"
 check "no openshell call reads or writes the town config" test "$(grep -c "XDG=$S/home/.config " "$S/calls.log")" -eq 0
 check "no docker context change when colima left it alone" lacks "docker context use" "$CALLS_LOG"
+check "a run without --register-town runs no go command" lacks "go run" "$CALLS_LOG"
+check "a run without --register-town prints the providers command from the repository root" contains "(cd $TMP/root && XDG_CONFIG_HOME=$S/home/.config go run ./cmd/openshell-providers -g k8s)" "$OUT_TEXT"
 
 echo "colima flips the docker context"
 scenario flip
@@ -943,6 +958,10 @@ check "the town CA certificate is mode 600" test "$(mode "$town_mtls/ca.crt")" =
 check "the town mtls directory is private" test "$(mode "$town_mtls")" = 700
 check "the town staging directory is gone" no_stage "$town_mtls"
 check "no key material is printed for the town config" lacks "SECRETVALUE" "$OUT_TEXT"
+check "--register-town creates the providers once" test "$(count 'go run ./cmd/openshell-providers -g k8s' "$CALLS_LOG")" -eq 1
+check "the providers run from the repository root" contains "go-cwd=$TMP/root" "$CALLS_LOG"
+check "the providers run under the town config home" contains "XDG=$S/home/.config " "$(grep '^go run' "$S/calls.log")"
+check "the providers run after the town copy is healthy" test "$(grep -n '^go run' "$S/calls.log" | cut -d: -f1)" -gt "$(grep -n 'gateway info' "$S/calls.log" | tail -1 | cut -d: -f1)"
 
 echo "register-town reads the active_gateway file"
 scenario town_file
@@ -992,6 +1011,40 @@ check "the rollback says the entry is back" contains "its previous entry is back
 check "the rollback restores the active gateway" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
 check "the active gateway is not the new one" test "$(cat "$S/state/town-active")" = docker
 check "the other gateway was never removed" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
+
+echo "a failed providers run stops up and leaves the town entry registered"
+scenario town_go_fail
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" STUB_GO_FAILS=1 -- --register-town
+check "a failed providers run exits non-zero" test "$RC" -ne 0
+check "the failure names the command to run again from the repository root" contains "(cd $TMP/root && XDG_CONFIG_HOME=$S/home/.config go run ./cmd/openshell-providers -g k8s)" "$OUT_TEXT"
+check "the failed providers run leaves the k8s entry registered" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the failed providers run leaves the previous gateway active" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+
+echo "--register-town needs go and gt on PATH"
+# missing_tool TOOL: PATH is one directory the test builds, the stubs without
+# TOOL plus a link to dirname, the one external command up.sh runs before the
+# tool check. No host directory is on it, so a go or gt installed on the host
+# cannot be found, and bash is started by its absolute path.
+missing_tool() {
+  local tool=$1 dir="$TMP/path-without-$1"
+  scenario "without_$tool"
+  mkdir -p "$dir"
+  cp "$BIN"/* "$dir/"
+  rm -f "$dir/$tool"
+  ln -s "$(command -v dirname)" "$dir/dirname"
+  set +e
+  OUT_TEXT="$(env HOME="$S/home" CALLS="$S/calls.log" STATE="$S/state" PATH="$dir" "$BASH" "$UP" --register-town 2>&1)"
+  RC=$?
+  set -e
+  check "a run without $tool on PATH is refused" test "$RC" -ne 0
+  check "the refusal names $tool" contains "$tool is not on PATH" "$OUT_TEXT"
+  check "nothing is changed without $tool" test ! -s "$S/calls.log"
+}
+missing_tool go
+missing_tool gt
 
 echo "a run without the flag leaves the town config alone"
 scenario town_untouched
