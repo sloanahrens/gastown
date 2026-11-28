@@ -586,10 +586,10 @@ type Daemon struct {
 	// cap, which the attention queue raises until a later pass reads one under
 	// it or finds the claim gone (gt-gg9hv.46, gt-gg9hv.50).
 	cacheTrimNoOp cacheTrimNoOp
-	// cacheTrimParks is the claims whose trim failed, parked in memory for the
-	// life of the process: a daemon restart clears it and nothing else does
-	// (gt-o3jzx7). The trim pass writes it and a status read may read it, so
-	// cacheTrimParksMu guards every access.
+	// cacheTrimParks is the claims whose trim failed, parked in memory: a daemon
+	// restart clears it, and a person's release request frees one claim
+	// (gt-o3jzx7, gt-5vuqv6). The trim pass writes it and a status read may read
+	// it, so cacheTrimParksMu guards every access.
 	cacheTrimParks   map[string]bool
 	cacheTrimParksMu sync.Mutex
 	// cacheTrimPendingClaims is the claims whose trim Job was still running when a
