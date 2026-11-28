@@ -399,6 +399,7 @@ var staticOwnedDirs = map[string]bool{
 	"daemon":         true,
 	"dolt":           true,
 	"forgejo-runner": true,
+	"forgejo-server": true,
 	"update-job":     true,
 	"testdata":       true,
 }
