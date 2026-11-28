@@ -82,13 +82,18 @@ func TestDifferences(t *testing.T) {
 				", observed " + shortDigest(`"Recreate"`)},
 		},
 		{
-			name:     "list that differs compares as one value at the list's path",
-			rendered: deployment(`"replicas":1`, `"image":"forgejo:1","args":["--a"],`+baseEnv),
-			observed: deployment(`"replicas":1`, `"image":"forgejo:1","args":["--a","--b"],`+baseEnv),
-			want: []string{"spec.template.spec.containers: rendered " +
-				shortDigest(`[{"args":["--a"],"env":[{"name":"A","value":"a"}],"image":"forgejo:1","name":"forgejo"}]`) +
-				", observed " +
-				shortDigest(`[{"args":["--a","--b"],"env":[{"name":"A","value":"a"}],"image":"forgejo:1","name":"forgejo"}]`)},
+			name:     "changed image gives one line with its path",
+			rendered: deployment(`"replicas":1`, baseContainer),
+			observed: deployment(`"replicas":1`, `"image":"forgejo:2",`+baseEnv),
+			want: []string{"spec.template.spec.containers[0].image: rendered " + shortDigest(`"forgejo:1"`) +
+				", observed " + shortDigest(`"forgejo:2"`)},
+		},
+		{
+			name:     "live-only env entry gives one line at its position",
+			rendered: deployment(`"replicas":1`, baseContainer),
+			observed: deployment(`"replicas":1`, `"image":"forgejo:1","env":[{"name":"A","value":"a"},{"name":"B","value":"b"}]`),
+			want: []string{"spec.template.spec.containers[0].env[1]: rendered absent, observed " +
+				shortDigest(`{"name":"B","value":"b"}`)},
 		},
 	}
 	for _, tt := range tests {
@@ -137,6 +142,30 @@ func TestDifferencesRefusesEmptySide(t *testing.T) {
 				t.Errorf("Differences() = %q, %v; want an error containing %q, not no difference", got, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestDifferencesNoValueInLine holds that a differing value is a digest in the
+// line, never the value itself, even at its position inside a list.
+func TestDifferencesNoValueInLine(t *testing.T) {
+	t.Parallel()
+	const secret = "hunter2-secret"
+	rendered := mustObject(t, deployment(`"replicas":1`, baseContainer))
+	observed := mustObject(t, deployment(`"replicas":1`,
+		`"image":"forgejo:1","env":[{"name":"A","value":"`+secret+`"}]`))
+	got, err := Differences(rendered, observed)
+	if err != nil {
+		t.Fatalf("Differences() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Differences() lines = %q, want exactly one", got)
+	}
+	if strings.Contains(got[0], secret) {
+		t.Errorf("line carries a value: %q", got[0])
+	}
+	if want := "spec.template.spec.containers[0].env[0].value: rendered " + shortDigest(`"a"`) +
+		", observed " + shortDigest(`"`+secret+`"`); got[0] != want {
+		t.Errorf("line = %q, want %q", got[0], want)
 	}
 }
 

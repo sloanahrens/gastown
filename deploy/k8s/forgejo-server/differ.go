@@ -11,15 +11,16 @@ import (
 )
 
 // Differences lists every difference between a rendered manifest object and a
-// live one, in both directions: a value that differs, and a key or subtree that
-// only one side holds. Both objects are decoded through JSON and stripped of the
-// fields the cluster sets itself, so a server-set field is never a difference.
-// Each line reads "<path>: rendered <x>, observed <y>", where x and y are
-// "sha256:" and the first 12 hex digits of the value's canonical JSON, or
-// "absent". A path names keys only, never values. A list compares as one value,
-// so a difference inside it reads at the list's path. The lines are sorted. An
-// object that is empty before or after stripping, or that does not encode as
-// JSON, is an error: two empty sides would otherwise read as no difference.
+// live one, in both directions: a value that differs, and a key or list entry
+// that only one side holds. Both objects are decoded through JSON and stripped
+// of the fields the cluster sets itself, so a server-set field is never a
+// difference. Each line reads "<path>: rendered <x>, observed <y>", where x and
+// y are "sha256:" and the first 12 hex digits of the value's canonical JSON, or
+// "absent". A path names keys and list positions, never values. Lists compare by
+// position, so an entry inserted mid-list reads as a difference at every later
+// position. The lines are sorted. An object that is empty before or after
+// stripping, or that does not encode as JSON, is an error: two empty sides would
+// otherwise read as no difference.
 func Differences(manifest, live map[string]any) ([]string, error) {
 	rendered, err := normalizeSide("manifest", manifest)
 	if err != nil {
@@ -68,8 +69,8 @@ func decodeNumbers(raw []byte) (map[string]any, error) {
 
 // walk appends one line for each path at which the two sides differ. A side that
 // does not hold the path has its ok flag false, and the whole subtree on the other
-// side is one line. Maps are walked key by key; anything else, a list included,
-// compares as one value.
+// side is one line. Maps are walked key by key, lists by position, and anything
+// else compares as one value.
 func walk(lines *[]string, path string, rendered any, renderedOK bool, observed any, observedOK bool) {
 	if !renderedOK || !observedOK {
 		report(lines, path, rendered, renderedOK, observed, observedOK)
@@ -81,6 +82,21 @@ func walk(lines *[]string, path string, rendered any, renderedOK bool, observed 
 				rv, rok := r[k]
 				ov, ook := o[k]
 				walk(lines, joinKey(path, k), rv, rok, ov, ook)
+			}
+			return
+		}
+	}
+	if r, ok := rendered.([]any); ok {
+		if o, ok := observed.([]any); ok {
+			for i := range max(len(r), len(o)) {
+				var rv, ov any
+				if i < len(r) {
+					rv = r[i]
+				}
+				if i < len(o) {
+					ov = o[i]
+				}
+				walk(lines, fmt.Sprintf("%s[%d]", path, i), rv, i < len(r), ov, i < len(o))
 			}
 			return
 		}
