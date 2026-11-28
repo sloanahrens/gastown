@@ -387,6 +387,48 @@ func TestSkeletonRejectsADirectivesFile(t *testing.T) {
 	}
 }
 
+// TestSkeletonCarriesTownFormulas: a town formula reaches the seat's town, so
+// the seat's bd cooks the checklist from its own disk.
+func TestSkeletonCarriesTownFormulas(t *testing.T) {
+	t.Parallel()
+
+	files := minimalTown()
+	files[".beads/formulas/mol-polecat-work.formula.toml"] = "formula = \"mol-polecat-work\"\n"
+	spec := SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
+	}
+	data, err := RenderSkeleton(spec)
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	name := "gt/.beads/formulas/mol-polecat-work.formula.toml"
+	if got := untar(t, data)[name]; string(got) != files[".beads/formulas/mol-polecat-work.formula.toml"] {
+		t.Errorf("archive %s = %q, want the town's formula", name, got)
+	}
+}
+
+// TestSkeletonRejectsAFormulasFile: a formulas path that is a regular file is
+// an error, not a silent omission.
+func TestSkeletonRejectsAFormulasFile(t *testing.T) {
+	t.Parallel()
+
+	files := minimalTown()
+	files[".beads/formulas"] = "not a directory\n"
+	spec := SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
+	}
+	_, err := RenderSkeleton(spec)
+	if err == nil || !strings.Contains(err.Error(), ".beads/formulas") || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("RenderSkeleton error = %v, want one naming .beads/formulas as not a directory", err)
+	}
+}
+
 // TestSkeletonRefusesAnEscapingSymlink: a required file swapped for a symlink
 // pointing outside the town fails the read instead of shipping the host file.
 func TestSkeletonRefusesAnEscapingSymlink(t *testing.T) {

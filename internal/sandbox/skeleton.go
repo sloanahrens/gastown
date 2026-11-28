@@ -708,6 +708,15 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		}
 	}
 
+	// The town's formulas ride along so the seat can cook the formula its bead
+	// is hooked to: bd searches $GT_ROOT/.beads/formulas, and a skeleton without
+	// them leaves the seat unable to render its checklist (gt-dz19p9).
+	formulas, err := skeletonFormulas(town)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, formulas...)
+
 	// The bare rig repo is written as files rather than by running git; gt
 	// reads its remotes from it, and the sandbox only ever pushes.
 	repo := s.Rig + "/.repo.git"
