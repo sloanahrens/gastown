@@ -253,6 +253,10 @@ var ruleOwners = map[string]Owner{
 	// what the red-main run could not read before a person is woken
 	// (gt-glc2yh).
 	RuleMainUnknown: OwnerOverseer,
+	// A town formula that differs from the binary's embedded copy is the
+	// town's own file to reconcile with the binary: the overseer moves one
+	// side or re-reads why they diverged before a person is woken (gt-glqv7r).
+	RuleFormulasStale: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
