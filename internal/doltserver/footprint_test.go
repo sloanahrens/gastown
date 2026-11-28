@@ -306,6 +306,26 @@ func TestProductionProbeTimeout(t *testing.T) {
 	}
 }
 
+// TestStdProbeTimeoutIsWired pins that std gives vmmap the footprint deadline
+// and lsof zero (the default). A nil probeTimeout would give vmmap the default.
+func TestStdProbeTimeoutIsWired(t *testing.T) {
+	t.Parallel()
+	if std.probeTimeout == nil {
+		t.Fatal("std.probeTimeout is nil: vmmap gets probeTimeoutDefault, not the footprint deadline")
+	}
+	for _, tc := range []struct {
+		argv []string
+		want time.Duration
+	}{
+		{argv: []string{"vmmap", "-summary", "4711"}, want: footprintProbeTimeout},
+		{argv: []string{"lsof", "-i", ":4600", "-sTCP:LISTEN", "-t"}, want: 0},
+	} {
+		if got := std.probeTimeout(tc.argv); got != tc.want {
+			t.Errorf("std.probeTimeout(%v) = %v, want %v", tc.argv, got, tc.want)
+		}
+	}
+}
+
 // TestHealthMetrics_FootprintJSON shows the status JSON carries both values
 // under their own keys.
 func TestHealthMetrics_FootprintJSON(t *testing.T) {
