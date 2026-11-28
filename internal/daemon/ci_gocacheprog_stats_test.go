@@ -22,13 +22,56 @@ func ciGocacheprogStatsWant(sums map[string]int64, processes, badLines int64) ma
 	return want
 }
 
+// ciGocacheprogCountsPart is the eight counts of an eviction line; the eviction
+// figures follow it in the same object (gt-p9mvuy).
+const ciGocacheprogCountsPart = `"gets":2,"hits":1,"misses":1,"puts":1,"put_bytes":100,"hit_bytes":50,"errors":0,"elapsed_ms":40`
+
+// ciGocacheprogEvictPart is the eight eviction figures of one line.
+const ciGocacheprogEvictPart = `"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":12`
+
+// ciGocacheprogEvictLine is one line that holds the eight counts and the eight
+// eviction figures.
+const ciGocacheprogEvictLine = `{` + ciGocacheprogCountsPart + `,` + ciGocacheprogEvictPart + `}`
+
+// ciGocacheprogEvictOne is the counts ciGocacheprogEvictLine alone sums to.
+var ciGocacheprogEvictOne = map[string]int64{"gets": 2, "hits": 1, "misses": 1, "puts": 1, "put_bytes": 100, "hit_bytes": 50, "errors": 0, "elapsed_ms": 40}
+
+// ciGocacheprogEvictStoreOne is the store ciGocacheprogEvictLine alone gives.
+var ciGocacheprogEvictStoreOne = map[string]int64{"evictions": 1, "evicted_entries": 3, "evicted_bytes": 450, "evict_ms": 12, "entries": 9, "claim_bytes_before": 1000, "young_bytes": 300, "cap_bytes": 800, "over_in_use_bytes": 200}
+
 func TestCIGocacheprogSumAddsGoodLines(t *testing.T) {
 	t.Parallel()
-	second := `{"gets": 5,"hits":5,"misses":0,"puts":0,"put_bytes":0,"hit_bytes":900,"errors":1,"start":"2026-11-28T00:05:00Z","elapsed_ms":250,"evicted_bytes":7}`
+	second := `{"gets": 5,"hits":5,"misses":0,"puts":0,"put_bytes":0,"hit_bytes":900,"errors":1,"start":"2026-11-28T00:05:00Z","elapsed_ms":250,"note":"extra"}`
 	data := []byte(ciGocacheprogStatsLine + "\n" + second + "\n")
 	want := ciGocacheprogStatsWant(map[string]int64{"gets": 8, "hits": 7, "misses": 1, "puts": 4, "put_bytes": 400, "hit_bytes": 1100, "errors": 1, "elapsed_ms": 1750}, 2, 0)
-	if got := sumGocacheprogStats(data); !maps.Equal(got, want) {
+	if got, _ := sumGocacheprogStats(data); !maps.Equal(got, want) {
 		t.Fatalf("two good lines summed to %v; want %v", got, want)
+	}
+}
+
+func TestCIGocacheprogSumNoEvictionLineHasNilStore(t *testing.T) {
+	t.Parallel()
+	_, store := sumGocacheprogStats([]byte(ciGocacheprogStatsLine + "\n"))
+	if store != nil {
+		t.Fatalf("a file with no eviction line gave store %v; want nil", store)
+	}
+}
+
+func TestCIGocacheprogSumReadsEvictionLines(t *testing.T) {
+	t.Parallel()
+	// The second eviction line is the last one, so its entries, total_bytes,
+	// young_bytes, cap_bytes and over_in_use_bytes are the store's figures; the
+	// sums cover both eviction lines and the plain line between them.
+	last := `{"gets":1,"hits":0,"misses":1,"puts":0,"put_bytes":0,"hit_bytes":0,"errors":1,"elapsed_ms":10,"entries":4,"total_bytes":600,"young_bytes":100,"cap_bytes":800,"over_in_use_bytes":0,"evicted_entries":2,"evicted_bytes":150,"evict_ms":5}`
+	data := []byte(ciGocacheprogEvictLine + "\n" + ciGocacheprogStatsLine + "\n" + last + "\n")
+	wantCounts := ciGocacheprogStatsWant(map[string]int64{"gets": 6, "hits": 3, "misses": 3, "puts": 5, "put_bytes": 500, "hit_bytes": 250, "errors": 1, "elapsed_ms": 1550}, 3, 0)
+	wantStore := map[string]int64{"evictions": 2, "evicted_entries": 5, "evicted_bytes": 600, "evict_ms": 17, "entries": 4, "claim_bytes_before": 600, "young_bytes": 100, "cap_bytes": 800, "over_in_use_bytes": 0}
+	got, store := sumGocacheprogStats(data)
+	if !maps.Equal(got, wantCounts) {
+		t.Fatalf("eviction lines summed counts to %v; want %v", got, wantCounts)
+	}
+	if !maps.Equal(store, wantStore) {
+		t.Fatalf("eviction lines gave store %v; want %v", store, wantStore)
 	}
 }
 
@@ -66,8 +109,47 @@ func TestCIGocacheprogSumRefusesBadLines(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
-			if got := sumGocacheprogStats(row.data); !maps.Equal(got, row.want) {
+			got, store := sumGocacheprogStats(row.data)
+			if !maps.Equal(got, row.want) {
 				t.Fatalf("%q summed to %v; want %v", row.data, got, row.want)
+			}
+			if store != nil {
+				t.Fatalf("%q with no eviction line gave store %v; want nil", row.data, store)
+			}
+		})
+	}
+}
+
+func TestCIGocacheprogSumRefusesBadEvictionFigures(t *testing.T) {
+	t.Parallel()
+	// Each row puts one bad eviction line ahead of ciGocacheprogEvictLine. The bad
+	// line must add nothing to the counts or the store, so each row's want is the
+	// good line's alone, with bad_lines 1.
+	withBad := func(bad string) []byte { return []byte(bad + "\n" + ciGocacheprogEvictLine + "\n") }
+	counts := func(bad string) string { return `{` + ciGocacheprogCountsPart + `,` + bad + `}` }
+	rows := []struct {
+		name string
+		data []byte
+	}{
+		{"a partial eviction set", withBad(counts(`"evicted_bytes":7`))},
+		{"no evict_ms of the eight", withBad(counts(`"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450`))},
+		{"no entries of the eight", withBad(counts(`"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":12`))},
+		{"a negative entries", withBad(counts(`"entries":-9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":12`))},
+		{"a negative evict_ms", withBad(counts(`"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":-12`))},
+		{"a fractional evicted_bytes", withBad(counts(`"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450.5,"evict_ms":12`))},
+		{"a quoted total_bytes", withBad(counts(`"entries":9,"total_bytes":"1000","young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":12`))},
+		{"an exponent cap_bytes", withBad(counts(`"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":8e2,"over_in_use_bytes":200,"evicted_entries":3,"evicted_bytes":450,"evict_ms":12`))},
+	}
+	want := ciGocacheprogStatsWant(ciGocacheprogEvictOne, 1, 1)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			got, store := sumGocacheprogStats(row.data)
+			if !maps.Equal(got, want) {
+				t.Fatalf("%q summed to %v; want %v", row.data, got, want)
+			}
+			if !maps.Equal(store, ciGocacheprogEvictStoreOne) {
+				t.Fatalf("%q gave store %v; want %v", row.data, store, ciGocacheprogEvictStoreOne)
 			}
 		})
 	}
@@ -80,7 +162,26 @@ func TestCIGocacheprogSumRefusesOverflow(t *testing.T) {
 	data := []byte(`{"gets":9223372036854775807,"hits":0,"misses":0,"puts":0,"put_bytes":0,"hit_bytes":0,"errors":0,"elapsed_ms":0}` + "\n" +
 		`{"gets":1,"hits":0,"misses":0,"puts":0,"put_bytes":0,"hit_bytes":0,"errors":0,"elapsed_ms":0}` + "\n")
 	want := ciGocacheprogStatsWant(map[string]int64{"gets": 9223372036854775807}, 1, 1)
-	if got := sumGocacheprogStats(data); !maps.Equal(got, want) {
+	if got, _ := sumGocacheprogStats(data); !maps.Equal(got, want) {
 		t.Fatalf("overflowing pair summed to %v; want %v", got, want)
+	}
+}
+
+func TestCIGocacheprogSumRefusesStoreOverflow(t *testing.T) {
+	t.Parallel()
+	// The first eviction line sums evicted_bytes to MaxInt64; the second would
+	// wrap the store, so it is refused whole. The last eviction line is therefore
+	// the first one, whose entries and cache figures the store keeps.
+	first := `{` + ciGocacheprogCountsPart + `,"entries":9,"total_bytes":1000,"young_bytes":300,"cap_bytes":800,"over_in_use_bytes":200,"evicted_entries":0,"evicted_bytes":9223372036854775807,"evict_ms":0}`
+	second := `{"gets":1,"hits":0,"misses":0,"puts":0,"put_bytes":0,"hit_bytes":0,"errors":0,"elapsed_ms":0,"entries":4,"total_bytes":600,"young_bytes":100,"cap_bytes":800,"over_in_use_bytes":0,"evicted_entries":0,"evicted_bytes":1,"evict_ms":0}`
+	data := []byte(first + "\n" + second + "\n")
+	wantCounts := ciGocacheprogStatsWant(ciGocacheprogEvictOne, 1, 1)
+	wantStore := map[string]int64{"evictions": 1, "evicted_entries": 0, "evicted_bytes": 9223372036854775807, "evict_ms": 0, "entries": 9, "claim_bytes_before": 1000, "young_bytes": 300, "cap_bytes": 800, "over_in_use_bytes": 200}
+	got, store := sumGocacheprogStats(data)
+	if !maps.Equal(got, wantCounts) {
+		t.Fatalf("store overflow pair summed counts to %v; want %v", got, wantCounts)
+	}
+	if !maps.Equal(store, wantStore) {
+		t.Fatalf("store overflow pair gave store %v; want %v", store, wantStore)
 	}
 }
