@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -150,6 +151,14 @@ type DuplicateMatch struct {
 func (m DuplicateMatch) Blocking(candidate Duplicate) bool {
 	if len(m.SharedTests) == 0 {
 		return false
+	}
+	// A handoff note refuses nothing, whatever its status: its tests are what
+	// its session read, not work on them (gt-587vw6). A label the pool did not
+	// read reads as none, so an unread peer still refuses.
+	for _, label := range m.Bead.Ready.Labels {
+		if specdispatch.IsHandoffLabel(label) {
+			return false
+		}
 	}
 	if liveOverlapStatuses[m.Bead.Status] {
 		return true
