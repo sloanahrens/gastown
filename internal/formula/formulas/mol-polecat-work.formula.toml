@@ -21,11 +21,13 @@ state. Done means gone.
 when you run `gt prime` — there are no separate step beads to close. Work through
 the checklist, then run `gt done`.
 
-**You run no check.** You write the code and submit:
+**Who runs checks.** A seat whose directive says
+`you write code, the gate runs it` writes the code and submits:
 never build, lint, vet, test or run anything, and never run go, make or a
 setup command; you run git, gt, bd and commands that only read files. The
 landing gate runs every check on the merged tree. Every step below follows
-this.
+this for such a seat. Any other seat runs the checks its directive names, and
+this formula names no command.
 
 **Push as you go.** A seat pushes its own branch after every commit, so a stop
 at any point costs nothing and the next seat continues from the pushed branch:
@@ -53,7 +55,7 @@ a rejected ref) is noted and the work continues; `gt done` pushes again.
 | lint_command | rig config | Lint command (e.g., `eslint .`). Empty = skip. |
 | build_command | rig config | Build command (e.g., `go build ./...`). Empty = skip. |
 
-The *_command values are the gate's (see You run no check).
+The *_command values are the gate's (see Who runs checks).
 
 ## Failure Modes
 
@@ -225,7 +227,7 @@ alone, which is what you want. The same applies to `git stash` + `git reset` +
 `git stash pop` rituals: there is no sequence that needs a reset onto a
 remote-tracking ref.
 
-**6. Nothing to set up** (see You run no check).
+**6. Nothing to set up** (see Who runs checks).
 
 **Exit criteria:** You're on a clean feature branch whose name embeds {{issue}}, rebased on latest {{base_branch}}."""
 
@@ -473,7 +475,7 @@ id = "build-check"
 title = "The landing gate's build check"
 needs = ["self-review"]
 description = """
-Nothing to run (see You run no check). A rejected bead's failing lines come back in `Earlier rejections`.
+Nothing to run (see Who runs checks). A rejected bead's failing lines come back in `Earlier rejections`.
 
 **Exit criteria:** The diff is committed."""
 
@@ -529,7 +531,7 @@ needs = ["pre-verify"]
 description = """
 Submit your work and clean up. You cease to exist after this step.
 
-**Run `gt done` last.** It runs the rig's configured pre-submit command, which may check nothing, then submits (see You run no check). If that command fails, fix what its output names, commit and run `gt done` again.
+**Run `gt done` last.** It runs the rig's configured pre-submit command, which may check nothing, then submits (see Who runs checks). If that command fails, fix what its output names, commit and run `gt done` again.
 
 **Self-Cleaning Model:**
 Once `gt done` succeeds, you're gone. The command:
