@@ -139,6 +139,7 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 		Env:      s.exportEnv(s.Opts.Tested, s.Opts.SkipList),
 		Stderr:   s.Stderr,
 		Timings:  s.Timings,
+		Sample:   s.Sample,
 		Now:      s.Now,
 		Jobs:     s.Opts.Jobs,
 		Walls:    s.Walls,

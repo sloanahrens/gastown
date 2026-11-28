@@ -159,8 +159,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if buildExec != nil && root != DefaultRoot {
 		buildExec = inRootBuild(root, buildExec)
 	}
+	// The container's counters are read through the host's CgroupDir when it
+	// names one; a host that names none samples nothing.
+	sample := cgroupSampler(host)
 	s := &Sweep{Opts: opts, Exec: exec, BuildExec: buildExec, Src: src, Environ: d.Environ, CgoEnv: d.CgoEnv, Stderr: stderr,
-		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume,
+		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume, Sample: sample,
 		Shards: shards, ShardErr: shardErr, TestWalls: testWalls}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
 	if code == UsageExit {
@@ -289,6 +292,19 @@ func splitRoot(args []string) (root string, tiers []string, err error) {
 		}
 	}
 	return root, tiers, nil
+}
+
+// cgroupSampler reads the container's counters through host, from the directory
+// it names. A host that names none gets nil: it samples nothing.
+func cgroupSampler(host Host) func() (CgroupSample, error) {
+	if host.CgroupDir == "" {
+		return nil
+	}
+	read := host.ReadFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	return func() (CgroupSample, error) { return ReadCgroup(read, host.CgroupDir) }
 }
 
 // inRoot runs exec with every directory taken from root, so a run works from the
