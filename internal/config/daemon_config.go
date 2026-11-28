@@ -3909,6 +3909,15 @@ type TierSweepRunnerConfig struct {
 	// landings and still runs. Another backend is refused (gt-13dre6.11).
 	RunnerCPURequest int `json:"runner_cpu_request,omitempty"`
 
+	// RunnerCPURequestMillis is the runner's CPU request in millicores: 0 for
+	// its whole share, else 100 to the share; Kubernetes only, and not with
+	// RunnerCPURequest (gt-svprjl).
+	RunnerCPURequestMillis int `json:"runner_cpu_request_m,omitempty"`
+
+	// DindCPURequestMillis is the dind sidecar's CPU request in millicores, as
+	// DindCPUs is; 100 to the share, and only with dind on (gt-svprjl).
+	DindCPURequestMillis int `json:"dind_cpu_request_m,omitempty"`
+
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
 	// backend the whole Job pod's total, as CPUs is. With dind the minimum is 6
 	// (the sidecar's 4 GB and the runner's 2).
@@ -4009,6 +4018,8 @@ const (
 	runnerMemoryMax = 48
 	runnerJobsMin   = 1
 	runnerJobsMax   = 16
+
+	sweepCPURequestMillisMin = 100
 )
 
 // SweepDindCPUs is the dind sidecar's default CPU share on the Kubernetes
@@ -4117,6 +4128,35 @@ func (c *TierSweepRunnerConfig) validate() error {
 		if c.RunnerCPURequest > share {
 			return fmt.Errorf("runner_cpu_request = %d: want at most %d, the runner's share of cpus = %d", c.RunnerCPURequest, share, c.CPUs)
 		}
+	}
+	// The millicore requests are the whole-core request as a fraction of a core:
+	// 0 for the whole share, else 100 to the share it splits (gt-svprjl).
+	if c.RunnerCPURequest > 0 && c.RunnerCPURequestMillis > 0 {
+		return fmt.Errorf("runner_cpu_request_m = %d: want it without runner_cpu_request = %d", c.RunnerCPURequestMillis, c.RunnerCPURequest)
+	}
+	for _, req := range []struct {
+		key string
+		val int
+	}{{"runner_cpu_request_m", c.RunnerCPURequestMillis}, {"dind_cpu_request_m", c.DindCPURequestMillis}} {
+		if req.val != 0 && req.val < sweepCPURequestMillisMin {
+			return fmt.Errorf("%s = %d: want 0 for the whole share, or at least %d", req.key, req.val, sweepCPURequestMillisMin)
+		}
+		if req.val > 0 && c.Backend != TierSweepRunnerKubernetes {
+			return fmt.Errorf("%s = %d: want it only with backend %s", req.key, req.val, TierSweepRunnerKubernetes)
+		}
+	}
+	if c.DindCPURequestMillis > 0 && !c.Dind {
+		return fmt.Errorf("dind_cpu_request_m = %d: want it only with dind on", c.DindCPURequestMillis)
+	}
+	if share := c.DindCPUShare() * 1000; c.DindCPURequestMillis > share {
+		return fmt.Errorf("dind_cpu_request_m = %d: want at most %d, the sidecar's share of dind_cpus = %d", c.DindCPURequestMillis, share, c.DindCPUShare())
+	}
+	share := c.CPUs
+	if c.Dind {
+		share -= c.DindCPUShare()
+	}
+	if share *= 1000; c.RunnerCPURequestMillis > share {
+		return fmt.Errorf("runner_cpu_request_m = %d: want at most %d, the runner's share of cpus = %d", c.RunnerCPURequestMillis, share, c.CPUs)
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
 		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
