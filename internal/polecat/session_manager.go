@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -235,6 +236,22 @@ func polecatAgentEnvConfig(rig, polecat, townRoot, sessionID string, opts Sessio
 		cfg.AgentGOFLAGS = rc.Env["GOFLAGS"]
 	}
 	return cfg
+}
+
+// sandboxSeatGoFlags adds the image's compile flag to a sandbox seat's go flags
+// unless the agent GOFLAGS or go_flags already names a -gcflags. A sandbox GOFLAGS
+// replaces the image's, so without it the seat compiles under cache keys no other
+// seat or the seed shares (gt-efdlfv). A tmux launch keeps its flags.
+func sandboxSeatGoFlags(b session.Backend, agentGOFLAGS, seatFlags string) string {
+	if b == nil || b.Name() == session.BackendTmux {
+		return seatFlags
+	}
+	for _, f := range strings.Fields(agentGOFLAGS + " " + seatFlags) {
+		if strings.HasPrefix(f, "-gcflags") {
+			return seatFlags
+		}
+	}
+	return strings.TrimSpace(seatFlags + " " + cachevol.GoCompileFlags)
 }
 
 // launchSeatPool returns the pool a launch sizes its seat's go parallelism
@@ -759,6 +776,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	if err != nil {
 		return err
 	}
+	seatGoFlags = sandboxSeatGoFlags(opts.Backend, runtimeConfig.Env["GOFLAGS"], seatGoFlags)
 
 	// Prepare the workspace (settings, folder trust) before the session starts.
 	if err := m.ensureRuntimeWorkspace(polecat, workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
