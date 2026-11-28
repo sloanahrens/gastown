@@ -14,6 +14,7 @@ type redBaseSteps struct {
 	plan                                  RedBasePlanResult
 	planErr, treeErr, removeErr, judgeErr error
 	findings                              []RedBaseFinding
+	red                                   int
 
 	treeCalls, removeCalls int
 	files                  []string
@@ -30,46 +31,55 @@ func (s *redBaseSteps) check(out io.Writer) (bool, error) {
 			}
 			return "tree", func() error { s.removeCalls++; return s.removeErr }, nil
 		},
-		func(RedBasePlanResult, string) ([]RedBaseFinding, error) { return s.findings, s.judgeErr },
+		func(RedBasePlanResult, string) ([]RedBaseFinding, int, error) { return s.findings, s.red, s.judgeErr },
 		out,
 	)
 }
 
-// TestRedBaseCheck: no finding is ok, a finding is not, an empty plan makes no tree, and every failure is returned with the tree removed exactly when it existed (gt-mwq44k).
+// TestRedBaseCheck: no finding is ok whatever red is, a finding is not ok unless red is above zero and then the passes line says so, an empty plan makes no tree, and every failure is returned with the tree removed exactly when it existed (gt-mwq44k, gt-6marp2).
 func TestRedBaseCheck(t *testing.T) {
 	t.Parallel()
 	plan := RedBasePlanResult{Packages: []RedBasePackage{{Dir: "a", Files: []string{"a/a_test.go"}, Tests: []RedBaseTest{{Name: "TestA", File: "a/a_test.go", Line: 1}}}}}
 	finding := RedBaseFinding{Dir: "a", Test: RedBaseTest{Name: "TestA", File: "a/a_test.go", Line: 1}}
 	boom := errors.New("boom")
+	lineFail := errors.New("passes line write failed")
 	for _, tt := range []struct {
 		name       string
 		steps      redBaseSteps
 		writeErr   error
+		failNth    int
 		wantOK     bool
 		wantErr    string
 		wantReport string
 		wantTree   int
 		wantRemove int
 	}{
-		{"no finding is ok", redBaseSteps{plan: plan}, nil, true, "",
+		{"no finding is ok whatever red is", redBaseSteps{plan: plan, red: 3}, nil, 0, true, "",
 			"redbase: 1 new or changed test(s) in 1 package(s), 0 passing without the change\n", 1, 1},
-		{"a finding is not ok", redBaseSteps{plan: plan, findings: []RedBaseFinding{finding}}, nil, false, "",
+		{"a finding is not ok", redBaseSteps{plan: plan, findings: []RedBaseFinding{finding}}, nil, 0, false, "",
 			"a/a_test.go:1: TestA passes without the change\nredbase: 1 new or changed test(s) in 1 package(s), 1 passing without the change\n", 1, 1},
-		{"an empty plan makes no tree and reports zero", redBaseSteps{}, nil, true, "",
+		{"findings with a red test are ok and write the passes line", redBaseSteps{plan: plan, findings: []RedBaseFinding{finding}, red: 2}, nil, 0, true, "",
+			"a/a_test.go:1: TestA passes without the change\nredbase: 1 new or changed test(s) in 1 package(s), 1 passing without the change\nredbase: passes: 2 new or changed test(s) red without the change\n", 1, 1},
+		{"a failed passes line is not ok", redBaseSteps{plan: plan, findings: []RedBaseFinding{finding}, red: 1}, lineFail, 3, false, "passes line write failed", "", 1, 1},
+		{"an empty plan makes no tree and reports zero", redBaseSteps{}, nil, 0, true, "",
 			"redbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", 0, 0},
-		{"a plan with no tests and a not-judged file prints its line and makes no tree", redBaseSteps{plan: RedBasePlanResult{Packages: []RedBasePackage{{Dir: "a", Files: []string{"a/a_test.go"}}}, NotJudged: []string{"plugins/x_test.go"}}}, nil, true, "",
+		{"a plan with no tests and a not-judged file prints its line and makes no tree", redBaseSteps{plan: RedBasePlanResult{Packages: []RedBasePackage{{Dir: "a", Files: []string{"a/a_test.go"}}}, NotJudged: []string{"plugins/x_test.go"}}}, nil, 0, true, "",
 			"redbase: not judged: plugins/x_test.go\nredbase: 0 new or changed test(s) in 0 package(s), 0 passing without the change\n", 0, 0},
-		{"a failed plan is returned and no tree is made", redBaseSteps{planErr: boom}, nil, false, "boom", "", 0, 0},
-		{"a failed tree is returned and nothing is judged", redBaseSteps{plan: plan, treeErr: boom}, nil, false, "boom", "", 1, 0},
-		{"a failed judge is returned with the tree removed", redBaseSteps{plan: plan, judgeErr: boom}, nil, false, "boom", "", 1, 1},
-		{"a failed report is returned with the tree removed", redBaseSteps{plan: plan}, errors.New("device full"), false, "device full", "", 1, 1},
-		{"a failed removal is returned, not ok", redBaseSteps{plan: plan, removeErr: boom}, nil, false, "boom", "", 1, 1},
+		{"a failed plan is returned and no tree is made", redBaseSteps{planErr: boom}, nil, 0, false, "boom", "", 0, 0},
+		{"a failed tree is returned and nothing is judged", redBaseSteps{plan: plan, treeErr: boom}, nil, 0, false, "boom", "", 1, 0},
+		{"a failed judge is returned with the tree removed", redBaseSteps{plan: plan, judgeErr: boom}, nil, 0, false, "boom", "", 1, 1},
+		{"a failed judge is not ok even with a red test", redBaseSteps{plan: plan, findings: []RedBaseFinding{finding}, red: 2, judgeErr: boom}, nil, 0, false, "boom", "", 1, 1},
+		{"a failed report is returned with the tree removed", redBaseSteps{plan: plan}, errors.New("device full"), 0, false, "device full", "", 1, 1},
+		{"a failed removal is returned, not ok", redBaseSteps{plan: plan, removeErr: boom}, nil, 0, false, "boom", "", 1, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
 			var out io.Writer = &buf
-			if tt.writeErr != nil {
+			switch {
+			case tt.failNth > 0:
+				out = &failNth{n: tt.failNth, err: tt.writeErr}
+			case tt.writeErr != nil:
 				out = &failOnce{err: tt.writeErr}
 			}
 			ok, err := tt.steps.check(out)
@@ -94,4 +104,18 @@ func TestRedBaseCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failNth fails its nth write and accepts the rest, so a row can fail the passes line after the report's own lines.
+type failNth struct {
+	n   int
+	err error
+}
+
+func (f *failNth) Write(p []byte) (int, error) {
+	f.n--
+	if f.n == 0 {
+		return 0, f.err
+	}
+	return len(p), nil
 }

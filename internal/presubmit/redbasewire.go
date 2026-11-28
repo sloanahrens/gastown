@@ -14,7 +14,7 @@ type RedBaseAdapters struct {
 	GoTest func(dir string, args []string) ([]byte, error)
 }
 
-// RedBaseRunCheck runs the red-on-base check over the adapters: the plan from RedBasePlan under base, the tree from RedBaseTree under base and dir, the judge from JudgeRedBase, and the report and removal from RedBaseCheck, whose result and error it returns unchanged. A nil adapter field is an error naming the field, returned before any adapter is called, so a check wired with a missing operation never runs half a pass.
+// RedBaseRunCheck runs the red-on-base check over the adapters: the plan from RedBasePlan under base, the tree from RedBaseTree under base and dir, the judge from JudgeRedBaseRuns, and the report and removal from RedBaseCheck, whose result and error it returns unchanged. A nil adapter field is an error naming the field, returned before any adapter is called, so a check wired with a missing operation never runs half a pass.
 func RedBaseRunCheck(a RedBaseAdapters, base, dir string, out io.Writer) (bool, error) {
 	if err := a.checkWired(); err != nil {
 		return false, err
@@ -24,8 +24,8 @@ func RedBaseRunCheck(a RedBaseAdapters, base, dir string, out io.Writer) (bool, 
 		func(files []string) (string, func() error, error) {
 			return RedBaseTree(a.Git, a.Read, a.Mkdir, a.Write, base, dir, files)
 		},
-		func(plan RedBasePlanResult, tree string) ([]RedBaseFinding, error) {
-			return JudgeRedBase(plan, tree, a.GoTest)
+		func(plan RedBasePlanResult, tree string) ([]RedBaseFinding, int, error) {
+			return JudgeRedBaseRuns(plan, tree, a.GoTest)
 		},
 		out,
 	)

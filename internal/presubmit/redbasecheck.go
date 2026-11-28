@@ -2,11 +2,12 @@ package presubmit
 
 import (
 	"errors"
+	"fmt"
 	"io"
 )
 
-// RedBaseCheck runs the red-on-base check end to end: it reads the plan, makes the merge-base tree holding the plan's files, judges the planned tests in that tree, writes the report and removes the tree (gt-mwq44k). A plan with no test makes no tree and reports zero. Once the tree exists it is removed on every path, and a failed removal is joined into any judge or report error rather than read as a clean run. It reports ok only when the report found no finding and no step failed; a plan, tree, judge, report or removal error is returned, never swallowed.
-func RedBaseCheck(plan func() (RedBasePlanResult, error), tree func(files []string) (string, func() error, error), judge func(plan RedBasePlanResult, tree string) ([]RedBaseFinding, error), out io.Writer) (bool, error) {
+// RedBaseCheck runs the red-on-base check end to end: it reads the plan, makes the merge-base tree holding the plan's files, judges the planned tests in that tree, writes the report and removes the tree (gt-mwq44k). A plan with no test makes no tree and reports zero. Once the tree exists it is removed on every path, and a failed removal is joined into any judge or report error rather than read as a clean run. It reports ok when the report found no finding, or when the judge counted at least one planned test red in the tree; a package that does not build on the base counts its planned tests red, even when every test of another package passes. When red lets findings pass it writes after the report one line, "redbase: passes: N new or changed test(s) red without the change", and a failed write of that line is returned, not ok. A plan, tree, judge, report or removal error is returned, never swallowed.
+func RedBaseCheck(plan func() (RedBasePlanResult, error), tree func(files []string) (string, func() error, error), judge func(plan RedBasePlanResult, tree string) ([]RedBaseFinding, int, error), out io.Writer) (bool, error) {
 	p, err := plan()
 	if err != nil {
 		return false, err
@@ -19,10 +20,14 @@ func RedBaseCheck(plan func() (RedBasePlanResult, error), tree func(files []stri
 	if err != nil {
 		return false, err
 	}
-	findings, err := judge(p, dir)
+	findings, red, err := judge(p, dir)
 	var ok bool
 	if err == nil {
 		ok, err = RedBaseReport(out, p, findings)
+		if err == nil && !ok && red > 0 {
+			_, err = fmt.Fprintf(out, "redbase: passes: %d new or changed test(s) red without the change\n", red)
+			ok = err == nil
+		}
 	}
 	if rmErr := remove(); rmErr != nil {
 		err = errors.Join(err, rmErr)
