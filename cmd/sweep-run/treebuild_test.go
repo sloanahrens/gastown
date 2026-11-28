@@ -42,7 +42,7 @@ func TestTreeBuildBuildsTheTreesSweepCommandIntoTheTempDirectory(t *testing.T) {
 		t.Fatalf("build = (%q, ok %v), want (%q, true), stderr %q", bin, ok, want, stderr.String())
 	}
 	if got.dir != work || !slices.Equal(got.env, env) {
-		t.Errorf("Build ran in %q with env %q, want %q with %q", got.dir, got.env, work, env)
+		t.Errorf("Build ran in %q with %d env entries, want %q with %d", got.dir, len(got.env), work, len(env))
 	}
 	if wantArgv := []string{"go", "build", "-o", want, "./cmd/tier-sweep"}; !slices.Equal(got.argv, wantArgv) || got.timeout != 10*time.Minute {
 		t.Errorf("Build ran %q with timeout %v, want %q with 10m", got.argv, got.timeout, wantArgv)
