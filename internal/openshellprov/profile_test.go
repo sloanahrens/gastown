@@ -60,8 +60,8 @@ func TestGtArgs(t *testing.T) {
 		want string
 	}{
 		{"check", func(g Gt) error { return g.CheckEndpoint() }, base},
-		{"render without export", func(g Gt) error { return g.Render("p.yaml", &bytes.Buffer{}, "") }, base + " --render p.yaml"},
-		{"render with export", func(g Gt) error { return g.Render("p.yaml", &bytes.Buffer{}, "e.yaml") }, base + " --render p.yaml --from-export e.yaml"},
+		{"render without export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "") }, base + " --render /dev/stdin"},
+		{"render with export", func(g Gt) error { return g.Render(&bytes.Buffer{}, nil, "e.yaml") }, base + " --render /dev/stdin --from-export e.yaml"},
 		{"stale check", func(g Gt) error { _, err := g.StaleReason("forgejo-polecat", "e.yaml"); return err }, base + " --check e.yaml"},
 	}
 	for _, tc := range tests {
@@ -97,11 +97,11 @@ func TestRenderRefusalWritesNothing(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	fake := &fakeRunner{stdout: []byte("partial"), err: errors.New("exit status 1")}
-	err := (Gt{Run: fake}).Render("p.yaml", &out, "")
+	err := (Gt{Run: fake}).Render(&out, []byte("id: forgejo-polecat\n"), "")
 	if err == nil {
 		t.Fatal("Render after a refused call = nil error, want the refusal")
 	}
-	if !strings.Contains(err.Error(), "gt sandbox endpoint --render p.yaml failed") {
+	if !strings.Contains(err.Error(), "gt sandbox endpoint --render /dev/stdin failed") {
 		t.Errorf("error = %q, want it to name the --render call", err)
 	}
 	if out.Len() != 0 {
@@ -112,7 +112,7 @@ func TestRenderRefusalWritesNothing(t *testing.T) {
 func TestRenderWriteFailureIsAnError(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{stdout: []byte("rendered")}
-	if err := (Gt{Run: fake}).Render("p.yaml", failingWriter{}, ""); err == nil {
+	if err := (Gt{Run: fake}).Render(failingWriter{}, []byte("id: forgejo-polecat\n"), ""); err == nil {
 		t.Fatal("Render into a failing writer = nil error, want the write failure")
 	}
 }

@@ -141,13 +141,13 @@ func (r *Run) importProfile(file, work string) error {
 
 	if id == forgejoPolecat {
 		if exists {
-			updated, err := r.updateIfStale(id, file, work)
+			updated, err := r.updateIfStale(id, data, work)
 			if err != nil || updated {
 				return err
 			}
 		} else {
 			rendered := filepath.Join(work, id+".yaml")
-			if err := r.render(file, rendered, ""); err != nil {
+			if err := r.render(data, rendered, ""); err != nil {
 				return err
 			}
 			file = rendered
@@ -167,7 +167,7 @@ func (r *Run) importProfile(file, work string) error {
 // updateIfStale checks the gateway's copy of forgejo-polecat against the endpoint
 // gt renders for it. When the copy does not bind the endpoint it is updated from
 // the rendered file and updateIfStale reports true; a copy that binds it is kept.
-func (r *Run) updateIfStale(id, file, work string) (bool, error) {
+func (r *Run) updateIfStale(id string, data []byte, work string) (bool, error) {
 	exported := filepath.Join(work, id+".export.yaml")
 	if err := r.export(id, exported); err != nil {
 		return false, err
@@ -181,7 +181,7 @@ func (r *Run) updateIfStale(id, file, work string) (bool, error) {
 	}
 	fmt.Fprintf(r.Out, "%s: profile %s is stale (%s), updating it\n", Name, id, reason)
 	rendered := filepath.Join(work, id+".yaml")
-	if err := r.render(file, rendered, exported); err != nil {
+	if err := r.render(data, rendered, exported); err != nil {
 		return false, err
 	}
 	if err := r.openshell("profile", "lint", "-f", rendered); err != nil {
@@ -198,10 +198,10 @@ func (r *Run) export(id, name string) error {
 	return r.writeTo(name, func(w io.Writer) error { return r.Client.ExportProfile(id, w) })
 }
 
-// render writes the forgejo-polecat profile file, bound to the gateway's endpoint,
-// to name. A non-empty exported names the export whose resource_version it takes.
-func (r *Run) render(file, name, exported string) error {
-	return r.writeTo(name, func(w io.Writer) error { return r.Gt.Render(file, w, exported) })
+// render writes profile, the forgejo-polecat source bytes, bound to the
+// gateway's endpoint, to name; exported names the export whose version it takes.
+func (r *Run) render(profile []byte, name, exported string) error {
+	return r.writeTo(name, func(w io.Writer) error { return r.Gt.Render(w, profile, exported) })
 }
 
 // writeTo creates name, has write fill it and closes it. A failure of either

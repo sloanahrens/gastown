@@ -16,16 +16,22 @@ const (
 	testWork     = "/scratch/run"
 )
 
-// scriptRunner records each command and answers it through reply, so no process
-// starts. A nil reply succeeds on every command with no output.
+// scriptRunner records each command and its stdin and answers it through reply,
+// so no process starts. A nil reply succeeds on every command with no output.
 type scriptRunner struct {
-	calls []string
-	reply func(cmd string) ([]byte, error)
+	calls  []string
+	stdins []string
+	reply  func(cmd string) ([]byte, error)
 }
 
-func (s *scriptRunner) Run(name string, args []string, _ []string, _ io.Reader) ([]byte, []byte, error) {
+func (s *scriptRunner) Run(name string, args []string, _ []string, stdin io.Reader) ([]byte, []byte, error) {
 	cmd := strings.Join(append([]string{name}, args...), " ")
 	s.calls = append(s.calls, cmd)
+	var data []byte
+	if stdin != nil {
+		data, _ = io.ReadAll(stdin)
+	}
+	s.stdins = append(s.stdins, string(data))
 	if s.reply == nil {
 		return nil, nil, nil
 	}
@@ -168,8 +174,9 @@ const (
 	listCall   = "openshell profile list --global"
 	exportCall = "openshell profile export --global -- forgejo-polecat"
 	checkCall  = "gt sandbox endpoint --gateway k8s --check " + testWork + "/forgejo-polecat.export.yaml"
-	// renderCall renders without an export; the stale path adds --from-export.
-	renderCall     = "gt sandbox endpoint --gateway k8s --render " + testProfiles + "/forgejo-polecat.yaml"
+	// renderCall renders the profile gt reads on stdin; the stale path adds
+	// --from-export.
+	renderCall     = "gt sandbox endpoint --gateway k8s --render /dev/stdin"
 	renderFromCall = renderCall + " --from-export " + testWork + "/forgejo-polecat.export.yaml"
 	lintRendered   = "openshell profile lint -f " + testWork + "/forgejo-polecat.yaml"
 	updateCall     = "openshell profile update --global -f " + testWork + "/forgejo-polecat.yaml forgejo-polecat"
@@ -316,7 +323,8 @@ func TestImportProfilesListFailureStopsTheRun(t *testing.T) {
 func TestImportProfilesForgejoPolecatRenderedForTheGateway(t *testing.T) {
 	t.Parallel()
 	runner := &scriptRunner{reply: answerWith(answer{match: "--render", out: "rendered for the gateway\n"})}
-	files := newMemFiles(profileFile{"forgejo-polecat.yaml", "id: forgejo-polecat\nhost: docker-alias\n"})
+	const source = "id: forgejo-polecat\nhost: docker-alias\n"
+	files := newMemFiles(profileFile{"forgejo-polecat.yaml", source})
 	run, _ := newTestRun(runner, files)
 	if err := run.ImportProfiles(); err != nil {
 		t.Fatalf("ImportProfiles: %v", err)
@@ -324,6 +332,9 @@ func TestImportProfilesForgejoPolecatRenderedForTheGateway(t *testing.T) {
 	want := []string{listCall, renderCall, "openshell profile lint -f " + testWork + "/forgejo-polecat.yaml", importRendered}
 	if !slices.Equal(runner.calls, want) {
 		t.Errorf("calls = %q, want %q", runner.calls, want)
+	}
+	if len(runner.stdins) != len(want) || runner.stdins[1] != source {
+		t.Errorf("stdin = %q, want the render to receive the checkout's profile %q", runner.stdins, source)
 	}
 	if got := files.written[testWork+"/forgejo-polecat.yaml"].String(); got != "rendered for the gateway\n" {
 		t.Errorf("imported file = %q, want the rendered profile", got)
@@ -422,6 +433,7 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 		mutate      func(*memFiles)
 		answers     []answer
 		wantLast    string
+		wantErr     string
 		wantRemoved []string
 	}{
 		{
@@ -437,9 +449,10 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 			wantRemoved: nil,
 		},
 		{
-			name:        "a profile cannot be read",
-			profiles:    []profileFile{{"a.yaml", "id: a\n"}},
+			name:        "the profile to render cannot be read",
+			profiles:    []profileFile{forgejo},
 			mutate:      func(m *memFiles) { m.readErr = errors.New("permission denied") },
+			wantErr:     "deploy/polecat/profiles/forgejo-polecat.yaml",
 			wantRemoved: []string{testWork},
 		},
 		{
@@ -570,8 +583,12 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 				tc.mutate(files)
 			}
 			run, _ := newTestRun(runner, files)
-			if err := run.ImportProfiles(); err == nil {
+			err := run.ImportProfiles()
+			if err == nil {
 				t.Fatal("ImportProfiles = nil, want the refusal")
+			}
+			if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %s", err, tc.wantErr)
 			}
 			if got := lastCall(runner.calls); got != tc.wantLast {
 				t.Errorf("last call = %q, want the run to stop at %q", got, tc.wantLast)
