@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,8 +46,8 @@ func TestRunRefusesBadArgs(t *testing.T) {
 		want string
 	}{
 		"missing":      {nil, "-dir is required"},
-		"relative":     {[]string{"-dir", "cache"}, "not absolute"},
-		"unusable":     {[]string{"-dir", filepath.Join(file, "store")}, "store"},
+		"relative":     {[]string{"-dir", "cache", "-max-bytes", "4"}, "not absolute"},
+		"unusable":     {[]string{"-dir", filepath.Join(file, "store"), "-max-bytes", "4"}, "store"},
 		"unknown flag": {[]string{"-bogus"}, "flag provided but not defined"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -56,20 +58,20 @@ func TestRunRefusesBadArgs(t *testing.T) {
 }
 
 // TestRunEmptyStdinIsHandshakeOnly: a usable -dir with no requests exits 0
-// with the handshake on stdout, nothing on stderr and the stats line alone in
-// the directory (gt-6i1x13, gt-dpjby4, gt-l4bzgs).
+// with the handshake on stdout, nothing on stderr, and the session's journal
+// and stats line in the directory (gt-6i1x13, gt-dpjby4, gt-l4bzgs).
 func TestRunEmptyStdinIsHandshakeOnly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"-dir", dir}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"-dir", dir, "-max-bytes", "4"}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr.String())
 	}
 	if got := responses(t, stdout.String()); len(got) != 1 || got[0].ID != 0 {
 		t.Errorf("stdout = %q: want the handshake alone", stdout.String())
 	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != statsFileName {
-		t.Errorf("dir = %v, %v: want %s alone", entries, err, statsFileName)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 || entries[0].Name() != "journal" || entries[1].Name() != statsFileName {
+		t.Errorf("dir = %v, %v: want journal and %s", entries, err, statsFileName)
 	}
 }
 
@@ -78,7 +80,7 @@ func TestRunEmptyStdinIsHandshakeOnly(t *testing.T) {
 func TestRunFailingCheck(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("disk is read-only")
-	checkRefused(t, []string{"-dir", t.TempDir()}, func(string) error { return cause }, cause.Error())
+	checkRefused(t, []string{"-dir", t.TempDir(), "-max-bytes", "4"}, func(string) error { return cause }, cause.Error())
 }
 
 // responses decodes the JSON lines out holds, failing on a line that is not a
@@ -102,7 +104,7 @@ func TestProgServeClose(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	in := strings.NewReader(`{"ID":1,"Command":"close"}` + "\n")
-	if code := run([]string{"-dir", t.TempDir()}, in, &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"-dir", t.TempDir(), "-max-bytes", "1024"}, in, &stdout, &stderr, writableCheck, time.Now); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr.String())
 	}
 	want := []gocacheprog.Response{{ID: 0, KnownCommands: []gocacheprog.Cmd{gocacheprog.CmdGet, gocacheprog.CmdPut, gocacheprog.CmdClose}}, {ID: 1}}
@@ -116,7 +118,7 @@ func TestProgServeClose(t *testing.T) {
 func TestProgServeMalformed(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"-dir", t.TempDir()}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now)
+	code := run([]string{"-dir", t.TempDir(), "-max-bytes", "1024"}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now)
 	if got := stderr.String(); code != 1 || strings.Count(got, "\n") != 1 || !strings.Contains(got, "malformed request") {
 		t.Fatalf("run = %d, stderr %q: want exit 1 and one line naming a malformed request", code, got)
 	}
@@ -213,7 +215,7 @@ func TestProgSession(t *testing.T) {
 	tail := `{"ID":2,"Command":"get","ActionID":"YWE="}` + "\n" + `{"ID":3,"Command":"get","ActionID":"Y2M="}` + "\n" + `{"ID":4,"Command":"close"}` + "\n"
 	in := io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)})
 	var stderr bytes.Buffer
-	if code := run([]string{"-dir", t.TempDir()}, in, log, &stderr, writableCheck, time.Now); code != 0 {
+	if code := run([]string{"-dir", t.TempDir(), "-max-bytes", "1024"}, in, log, &stderr, writableCheck, time.Now); code != 0 {
 		t.Fatalf("run = %d, stderr %q: want exit 0", code, stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -298,15 +300,21 @@ func readStats(t *testing.T, dir string) []statsLine {
 	return got
 }
 
-// tickClock returns a clock yielding times in order, then its last.
-func tickClock(times ...time.Time) func() time.Time {
-	return func() time.Time {
-		t := times[0]
-		if len(times) > 1 {
-			times = times[1:]
-		}
-		return t
+// stepReader moves *at to to on its first Read, so a session's start, records
+// and end are set by its reads and not by how often the clock is read.
+type stepReader struct {
+	in      io.Reader
+	at      *time.Time
+	to      time.Time
+	stepped bool
+}
+
+func (r *stepReader) Read(p []byte) (int, error) {
+	if !r.stepped {
+		r.stepped = true
+		*r.at = r.to
 	}
+	return r.in.Read(p)
 }
 
 // TestStatsLineSessions: each session appends one line to <dir>/stats.jsonl —
@@ -316,20 +324,23 @@ func TestStatsLineSessions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	clock := tickClock(t0, t0.Add(2*time.Second), t0.Add(2*time.Second), t0.Add(5*time.Second), t0.Add(5*time.Second), t0.Add(6*time.Second))
+	at := t0
+	clock := func() time.Time { return at }
 	log := &answerLog{ready: make(chan struct{})}
 	head := `{"ID":1,"Command":"put","ActionID":"YWE=","OutputID":"YmI=","BodySize":5}` + "\n" + `"aGVsbG8="` + "\n"
 	tail := `{"ID":2,"Command":"get","ActionID":"YWE="}` + "\n" + `{"ID":3,"Command":"get","ActionID":"Y2M="}` + "\n" + `{"ID":4,"Command":"close"}` + "\n"
-	in := io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)})
+	in := &stepReader{in: io.MultiReader(strings.NewReader(head), &gateReader{ready: log.ready, inner: strings.NewReader(tail)}), at: &at, to: t0.Add(2 * time.Second)}
 	var stderr bytes.Buffer
-	if code := run([]string{"-dir", dir}, in, log, &stderr, writableCheck, clock); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"-dir", dir, "-max-bytes", "1024"}, in, log, &stderr, writableCheck, clock); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("first session = %d, stderr %q: want 0 and empty", code, stderr.String())
 	}
-	if code := run([]string{"-dir", dir}, strings.NewReader(""), io.Discard, &stderr, writableCheck, clock); code != 0 {
+	in = &stepReader{in: strings.NewReader(""), at: &at, to: t0.Add(5 * time.Second)}
+	if code := run([]string{"-dir", dir, "-max-bytes", "1024"}, in, io.Discard, &stderr, writableCheck, clock); code != 0 {
 		t.Fatalf("second session = %d, want 0", code)
 	}
 	stderr.Reset()
-	if code := run([]string{"-dir", dir}, strings.NewReader("{not json}\n"), io.Discard, &stderr, writableCheck, clock); code != 1 {
+	in = &stepReader{in: strings.NewReader("{not json}\n"), at: &at, to: t0.Add(6 * time.Second)}
+	if code := run([]string{"-dir", dir, "-max-bytes", "1024"}, in, io.Discard, &stderr, writableCheck, clock); code != 1 {
 		t.Fatalf("failing session = %d, want 1", code)
 	}
 	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "malformed request") {
@@ -355,7 +366,7 @@ func TestStatsLineUnwritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"-dir", dir}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 {
+	if code := run([]string{"-dir", dir, "-max-bytes", "1024"}, strings.NewReader(""), &stdout, &stderr, writableCheck, time.Now); code != 0 {
 		t.Fatalf("clean session = %d, stderr %q: want the session's 0", code, stderr.String())
 	}
 	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, statsFileName) {
@@ -366,7 +377,7 @@ func TestStatsLineUnwritable(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"-dir", dir}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now); code != 1 {
+	if code := run([]string{"-dir", dir, "-max-bytes", "1024"}, strings.NewReader("{not json}\n"), &stdout, &stderr, writableCheck, time.Now); code != 1 {
 		t.Fatalf("failing session = %d, want the session's 1", code)
 	}
 	if got := stderr.String(); !strings.Contains(got, statsFileName) || !strings.Contains(got, "malformed request") {
@@ -404,4 +415,238 @@ func TestStatsLineRefusals(t *testing.T) {
 			t.Errorf("%s = %v, want %v", name, err, boom)
 		}
 	}
+}
+
+// Eviction fixtures: a put of "hello" under action "aa", and a close numbered 9
+// so its answer is found by its ID in the bytes a session writes.
+const (
+	putHello = `{"ID":1,"Command":"put","ActionID":"YWE=","OutputID":"YmI=","BodySize":5}` + "\n" + `"aGVsbG8="` + "\n"
+	closeReq = `{"ID":9,"Command":"close"}` + "\n"
+)
+
+// fixedClock returns a clock that always reads t.
+func fixedClock(t time.Time) func() time.Time {
+	return func() time.Time { return t }
+}
+
+// handshakeThen returns the handshake and then one answer carrying id, as a
+// session that answers one request writes them.
+func handshakeThen(id int64) []gocacheprog.Response {
+	return []gocacheprog.Response{{ID: 0, KnownCommands: []gocacheprog.Cmd{gocacheprog.CmdGet, gocacheprog.CmdPut, gocacheprog.CmdClose}}, {ID: id}}
+}
+
+// diskPathOf returns the DiskPath of the answer with id in out, or "" when out
+// holds no such answer yet.
+func diskPathOf(out string, id int64) string {
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var resp gocacheprog.Response
+		if json.Unmarshal([]byte(line), &resp) == nil && resp.ID == id {
+			return resp.DiskPath
+		}
+	}
+	return ""
+}
+
+// closeCheck is a session's answerLog that also records, as the close answer
+// is written, whether the body the put's answer names is already gone.
+type closeCheck struct {
+	*answerLog
+	seen bool
+	gone bool
+}
+
+func (c *closeCheck) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"ID":9`)) {
+		c.seen = true
+		path := diskPathOf(c.String(), 1)
+		_, err := os.Stat(path)
+		c.gone = path != "" && errors.Is(err, fs.ErrNotExist)
+	}
+	return c.answerLog.Write(p)
+}
+
+// putThenClose runs one session over dir at the clock now that puts the body
+// and then closes. The close is read only once the put's answer is written. It
+// returns the exit status and stderr.
+func putThenClose(dir string, now func() time.Time, log *answerLog, out io.Writer) (int, string) {
+	in := io.MultiReader(strings.NewReader(putHello), &gateReader{ready: log.ready, inner: strings.NewReader(closeReq)})
+	var stderr bytes.Buffer
+	code := run([]string{"-dir", dir, "-max-bytes", "4"}, in, out, &stderr, writableCheck, now)
+	return code, stderr.String()
+}
+
+// TestProgEvictAtClose: a put over a -max-bytes of 4 is evicted by the close
+// request, and the body is gone when the close answer is written (gt-n9cohm).
+func TestProgEvictAtClose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	log := &answerLog{ready: make(chan struct{})}
+	out := &closeCheck{answerLog: log}
+	code, stderr := putThenClose(dir, fixedClock(time.Now()), log, out)
+	if code != 0 || stderr != "" {
+		t.Fatalf("run = %d, stderr %q: want 0 and empty", code, stderr)
+	}
+	if !out.seen || !out.gone {
+		t.Errorf("close answer seen = %v, body gone when it was written = %v: want both", out.seen, out.gone)
+	}
+	if path := diskPathOf(log.String(), 1); path == "" {
+		t.Errorf("put answer = %q: want a disk path", log.String())
+	} else if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("body at %q after the session: %v, want it evicted", path, err)
+	}
+}
+
+// TestProgEvictWithinInterval: after an eviction writes the snapshot, a session
+// that closes within ten minutes of it is refused, so the body it put stays
+// (gt-n9cohm).
+func TestProgEvictWithinInterval(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	at := time.Now()
+	first := &answerLog{ready: make(chan struct{})}
+	if code, stderr := putThenClose(dir, fixedClock(at), first, first); code != 0 || stderr != "" {
+		t.Fatalf("first session = %d, stderr %q: want 0 and empty", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.jsonl")); err != nil {
+		t.Fatalf("snapshot after the first session: %v: want it written", err)
+	}
+	second := &answerLog{ready: make(chan struct{})}
+	if code, stderr := putThenClose(dir, fixedClock(at), second, second); code != 0 || stderr != "" {
+		t.Fatalf("second session = %d, stderr %q: want 0 and empty", code, stderr)
+	}
+	path := diskPathOf(second.String(), 1)
+	if path == "" {
+		t.Fatalf("put answer = %q: want a disk path", second.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("body at %q after the second session: %v, want it kept", path, err)
+	}
+}
+
+// journalSwap replaces the journal file with a non-empty directory of its name
+// on its first Read. Eviction then writes the snapshot, and its removal of the
+// journal fails (gt-n9cohm).
+type journalSwap struct {
+	dir     string
+	inner   io.Reader
+	swapped bool
+	err     error
+}
+
+func (s *journalSwap) Read(p []byte) (int, error) {
+	if !s.swapped {
+		s.swapped = true
+		s.err = swapJournal(s.dir)
+	}
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.inner.Read(p)
+}
+
+// swapJournal replaces the one journal file under dir/journal with a directory
+// of the same name that holds a file.
+func swapJournal(dir string) error {
+	jdir := filepath.Join(dir, "journal")
+	entries, err := os.ReadDir(jdir)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 1 {
+		return fmt.Errorf("journal dir holds %d entries, want the one journal", len(entries))
+	}
+	path := filepath.Join(jdir, entries[0].Name())
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, "held"), nil, 0o644)
+}
+
+// TestProgEvictErrorRanFalse: an eviction that fails before it writes the
+// snapshot adds 1 to the stats errors and one stderr line, leaves the snapshot
+// as it was, and keeps the responses and the exit status (gt-n9cohm).
+func TestProgEvictErrorRanFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	at := time.Now()
+	snap := filepath.Join(dir, "index.jsonl")
+	const garbage = "not a snapshot\n"
+	if err := os.WriteFile(snap, []byte(garbage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An hour old, so the gate lets this eviction run and it fails reading the snapshot.
+	old := at.Add(-time.Hour)
+	if err := os.Chtimes(snap, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-dir", dir, "-max-bytes", "4"}, strings.NewReader(closeReq), &stdout, &stderr, writableCheck, fixedClock(at)); code != 0 {
+		t.Fatalf("run = %d, stderr %q: want the session's 0", code, stderr.String())
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "evict:") {
+		t.Errorf("stderr = %q, want one line naming the eviction", got)
+	}
+	if data, err := os.ReadFile(snap); err != nil || string(data) != garbage {
+		t.Errorf("snapshot = %q, %v: want it untouched, since the eviction failed before it wrote one", data, err)
+	}
+	if got := responses(t, stdout.String()); !reflect.DeepEqual(got, handshakeThen(9)) {
+		t.Errorf("responses = %+v, want the handshake then the close answer", got)
+	}
+	if got := readStats(t, dir); len(got) != 1 || got[0].Errors != 1 {
+		t.Errorf("stats lines = %+v, want one line with errors 1", got)
+	}
+}
+
+// TestProgEvictErrorRanTrue: an eviction whose journal removal fails after the
+// snapshot is written adds 1 to the stats errors and one stderr line, keeps the
+// responses and the exit status, and leaves the snapshot written (gt-n9cohm).
+func TestProgEvictErrorRanTrue(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	in := &journalSwap{dir: dir, inner: strings.NewReader(closeReq)}
+	if code := run([]string{"-dir", dir, "-max-bytes", "4"}, in, &stdout, &stderr, writableCheck, fixedClock(time.Now())); code != 0 {
+		t.Fatalf("run = %d, stderr %q: want the session's 0", code, stderr.String())
+	}
+	if in.err != nil {
+		t.Fatalf("swapping the journal for a directory: %v", in.err)
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "remove journal") {
+		t.Errorf("stderr = %q, want one line naming the failed journal removal", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.jsonl")); err != nil {
+		t.Errorf("snapshot: %v, want it written before the removal failed", err)
+	}
+	if got := responses(t, stdout.String()); !reflect.DeepEqual(got, handshakeThen(9)) {
+		t.Errorf("responses = %+v, want the handshake then the close answer", got)
+	}
+	if got := readStats(t, dir); len(got) != 1 || got[0].Errors != 1 {
+		t.Errorf("stats lines = %+v, want one line with errors 1", got)
+	}
+}
+
+// TestProgEvictRefusesBadInput: a missing, non-numeric, zero or negative
+// -max-bytes, or a journal that cannot be opened, exits 1 before the
+// handshake (gt-n9cohm).
+func TestProgEvictRefusesBadInput(t *testing.T) {
+	t.Parallel()
+	for name, limit := range map[string]string{"missing": "", "not a number": "lots", "zero": "0", "negative": "-1"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			args := []string{"-dir", t.TempDir()}
+			if limit != "" {
+				args = append(args, "-max-bytes", limit)
+			}
+			checkRefused(t, args, func(string) error { return nil }, "max-bytes")
+		})
+	}
+	// A regular file named journal stops OpenJournal from creating its directory.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "journal"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checkRefused(t, []string{"-dir", dir, "-max-bytes", "4"}, func(string) error { return nil }, "journal")
 }
