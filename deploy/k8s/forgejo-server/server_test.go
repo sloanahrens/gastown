@@ -1,8 +1,12 @@
 package forgejoserver
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -155,6 +159,80 @@ func TestManifestMatchesRecorded(t *testing.T) {
 				t.Errorf("%s %s differs from its recorded object\nrecord:   %v\nmanifest: %v", want.kind, want.name, w, g)
 			}
 		})
+	}
+}
+
+// readRepoYAML decodes every non-empty document of a file at the deploy/k8s
+// root, the directory above this package.
+func readRepoYAML(t *testing.T, rel string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	var docs []map[string]any
+	var doc map[string]any
+	for err := dec.Decode(&doc); !errors.Is(err, io.EOF); err = dec.Decode(&doc) {
+		if err != nil {
+			t.Fatalf("%s is not valid YAML: %v", rel, err)
+		}
+		if doc != nil {
+			docs = append(docs, doc)
+		}
+		doc = nil
+	}
+	return docs
+}
+
+// TestManifestAgreesWithRecords holds the Forgejo Deployment's priority class
+// and tolerations to the two record files that name them, so a change to
+// either side fails here.
+func TestManifestAgreesWithRecords(t *testing.T) {
+	t.Parallel()
+	deployment := objects(t, kindHost(t))[3]
+
+	priorities := readRepoYAML(t, "control-priorities.yaml")
+	if len(priorities) != 1 {
+		t.Fatalf("control-priorities.yaml has %d documents, want 1", len(priorities))
+	}
+	rows, ok := priorities[0]["rows"].([]any)
+	if !ok {
+		t.Fatalf("control-priorities.yaml rows = %v, want a list", priorities[0]["rows"])
+	}
+	var class any
+	matches := 0
+	for _, row := range rows {
+		r, ok := row.(map[string]any)
+		if !ok {
+			t.Fatalf("control-priorities.yaml row %v is not a map", row)
+		}
+		if r["namespace"] == "forgejo" && r["deployment"] == "forgejo" {
+			class = r["class"]
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("control-priorities.yaml has %d rows for forgejo/forgejo, want 1", matches)
+	}
+	if got := field(t, deployment, "spec", "template", "spec", "priorityClassName"); got != class {
+		t.Errorf("priorityClassName = %v, want %v from control-priorities.yaml", got, class)
+	}
+
+	var tolerations any
+	matchedDocs := 0
+	for _, doc := range readRepoYAML(t, "forgejo-tolerations.yaml") {
+		if field(t, doc, "metadata", "namespace") == "forgejo" {
+			tolerations = field(t, doc, "spec", "template", "spec", "tolerations")
+			matchedDocs++
+		}
+	}
+	if matchedDocs != 1 {
+		t.Fatalf("forgejo-tolerations.yaml has %d documents for namespace forgejo, want 1", matchedDocs)
+	}
+	got := field(t, deployment, "spec", "template", "spec", "tolerations")
+	if w, g := jsonDecoded(t, tolerations), jsonDecoded(t, got); !reflect.DeepEqual(w, g) {
+		t.Errorf("tolerations = %v, want %v from forgejo-tolerations.yaml", g, w)
 	}
 }
 
