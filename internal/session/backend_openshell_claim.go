@@ -40,33 +40,40 @@ type sandboxClaim struct {
 	lock *flock.Flock
 }
 
+// errClaimNotTaken marks a claim refused before its lock was taken, when another
+// writer may own the seat name.
+var errClaimNotTaken = errors.New("sandbox claim lock not taken")
+
 // writeSandboxClaim takes session's claim lock without waiting and writes the
-// claim naming gateway, returning the claim with the lock held. A held lock is
-// an error naming the lock path. A claim that cannot be written is an error too,
-// and the failed write unlocks the lock it took before returning it.
+// claim naming gateway, returning the claim with the lock held. A failure before
+// the lock is taken wraps errClaimNotTaken and returns no claim. A claim that
+// cannot be written under the lock returns the claim still holding the lock,
+// with an error that does not wrap errClaimNotTaken: the caller releases the
+// claim with Unlock or Remove.
 func writeSandboxClaim(townRoot, session, gateway string) (*sandboxClaim, error) {
 	if !validSessionName(session) {
-		return nil, fmt.Errorf("sandbox claim: bad session name %q", session)
+		return nil, fmt.Errorf("%w: bad session name %q", errClaimNotTaken, session)
 	}
 	if err := os.MkdirAll(SandboxRegistryDir(townRoot), 0o755); err != nil {
-		return nil, fmt.Errorf("creating the sandbox registry: %w", err)
+		return nil, fmt.Errorf("%w: creating the sandbox registry: %w", errClaimNotTaken, err)
 	}
 	lockPath := sandboxClaimLockPath(townRoot, session)
 	lock := flock.New(lockPath)
 	ok, err := lock.TryLock()
 	if err != nil {
-		return nil, fmt.Errorf("locking the sandbox claim %s: %w", lockPath, err)
+		return nil, fmt.Errorf("%w: locking the sandbox claim %s: %w", errClaimNotTaken, lockPath, err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("sandbox claim %s is held by another writer", lockPath)
+		return nil, fmt.Errorf("%w: sandbox claim %s is held by another writer", errClaimNotTaken, lockPath)
 	}
 	path := sandboxClaimPath(townRoot, session)
+	claim := &sandboxClaim{path: path, lock: lock}
 	// The claim holds only strings, so its JSON cannot fail to encode.
 	data, _ := json.Marshal(sandboxClaimFile{Session: session, Gateway: gateway})
 	if err := atomicfile.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return nil, errors.Join(fmt.Errorf("writing the sandbox claim %s: %w", path, err), lock.Unlock())
+		return claim, fmt.Errorf("writing the sandbox claim %s: %w", path, err)
 	}
-	return &sandboxClaim{path: path, lock: lock}, nil
+	return claim, nil
 }
 
 // Unlock releases the claim's lock and leaves its file in place.
