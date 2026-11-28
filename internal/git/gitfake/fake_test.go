@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFakeRepoContract(t *testing.T) {
@@ -70,6 +71,22 @@ func TestCountObjectsReportsWhatTheTestSet(t *testing.T) {
 	f.SetObjectCounts(t, dir, "", bad)
 	if got, err := g.CountObjects(); got != "" || !errors.Is(err, bad) {
 		t.Fatalf("CountObjects with a set failure = %q, %v; want empty and %v", got, err, bad)
+	}
+}
+
+// TestRepackWithTimeoutFailsOutsideARepository: the fake's repack fails where
+// git's does, in a directory that is no repository, and succeeds in one.
+func TestRepackWithTimeoutFailsOutsideARepository(t *testing.T) {
+	t.Parallel()
+	f := New()
+	dir := filepath.Join(t.TempDir(), "clone")
+	args := []string{"-c", "gc.auto=0", "gc", "--prune=2.weeks.ago"}
+	if err := f.Open(dir).(WorkTree).RepackWithTimeout(args, time.Minute); err == nil {
+		t.Fatal("RepackWithTimeout outside a repository succeeded, want a failure")
+	}
+	f.InitRepo(t, dir)
+	if err := f.Open(dir).(WorkTree).RepackWithTimeout(args, time.Minute); err != nil {
+		t.Fatalf("RepackWithTimeout in a repository = %v, want success", err)
 	}
 }
 

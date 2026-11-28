@@ -44,6 +44,7 @@ type WorkTree interface {
 	// CountObjects reads count-objects -v, for a caller to judge loose and packed sizes.
 	CountObjects() (string, error)
 	PackSize() (string, error)
+	RepackWithTimeout(args []string, timeout time.Duration) error
 	LogAll(max int) ([]git.LogEntry, error)
 
 	git.RevertReader

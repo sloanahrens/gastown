@@ -48,6 +48,18 @@ func TestCountObjectsReturnsTheCountObjectsOutput(t *testing.T) {
 	}
 }
 
+func TestRepackWithTimeoutRunsItsArgvAndWrapsAFailedRun(t *testing.T) {
+	t.Parallel()
+	const stderr = "fatal: unable to create temporary file"
+	argv := []string{"-c", "pack.threads=1", "-c", "gc.auto=0", "-c", "pack.windowMemory=256m", "gc", "--prune=2.weeks.ago"}
+	s := newScripted(map[string]reply{"-c pack.threads=1 -c gc.auto=0 -c pack.windowMemory=256m gc --prune=2.weeks.ago": fail(128, stderr)})
+	var gitErr *GitError
+	if err := newTestGit(t, s).RepackWithTimeout(argv, time.Minute); !errors.As(err, &gitErr) || gitErr.Stderr != stderr {
+		t.Fatalf("RepackWithTimeout of a failing run = %v; want a *GitError carrying %q", err, stderr)
+	}
+	s.noUnscripted(t)
+}
+
 func TestCountObjectsWrapsAFailedRun(t *testing.T) {
 	t.Parallel()
 	const stderr = "fatal: not a git repository (or any of the parent directories): .git"
